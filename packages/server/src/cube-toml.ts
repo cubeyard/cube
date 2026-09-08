@@ -89,6 +89,8 @@ export function readWakeHooks(workspacePath: string): string[] {
 // ------------------------------------------------------------- [services.*]
 
 const SERVICE_KEYS = new Set(["command", "cwd", "port", "health"]);
+/** What systemd accepts in `--setenv=KEY=…` (a bad key fails the whole start). */
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export function parseServices(toml: string): ServiceSpec[] {
   const sections = allSections(toml);
@@ -117,6 +119,9 @@ export function parseServices(toml: string): ServiceSpec[] {
       for (const [key, value] of pairs) {
         if (value.kind !== "string") {
           throw new Error(`cube.toml: services.${name}.env.${key} must be a string`);
+        }
+        if (!ENV_KEY_RE.test(key)) {
+          throw new Error(`cube.toml: services.${name}.env.${key} is not a valid environment variable name`);
         }
         spec.env[key] = value.value;
       }

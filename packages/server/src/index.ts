@@ -8,6 +8,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import stream from "node:stream";
 
 import { WebSocketServer, type WebSocket } from "ws";
 
@@ -17,7 +18,7 @@ import { IncusBackend, MockBackend, type CubeBackend } from "@cube/sandbox";
 import { GithubAuth } from "./github-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { defaultPortalBase } from "./portal-config.ts";
-import { portalLabel, proxyHttp, proxyUpgrade, respondWaking, sameOriginUpgrade } from "./portal-proxy.ts";
+import { portalLabel, proxyHttp, proxyUpgrade, respondFailed, respondWaking, sameOriginUpgrade } from "./portal-proxy.ts";
 import { PiTerminals } from "./pty.ts";
 import { Registry } from "./registry.ts";
 import { CubeSupervisor, DEFAULT_EGRESS_ALLOW } from "./supervisor.ts";
@@ -105,7 +106,10 @@ await supervisor.boot();
 /** Cube-vocabulary scrub for anything that reaches the product surface —
  * internal cube names and the word "cube" must read as "thread". */
 const sanitizeMessage = (message: string) =>
-  message.replace(/\bcube t-[a-z0-9]{8}\b/g, "thread").replace(/\bcube\b/g, "thread");
+  message
+    .replace(/\bcube t-[a-z0-9]{8}\b/g, "thread")
+    // Unit names (`journalctl -u cube-svc-web`) are literal — leave them.
+    .replace(/\bcube\b(?!-svc-)/g, "thread");
 
 // The pty bridge: one real pi TUI per attached thread (PLAN §13 3d.2).
 const terminals = new PiTerminals(
@@ -165,6 +169,7 @@ function fail(res: http.ServerResponse, error: unknown, sanitize = false): void 
         ? 400
         : 500;
   if (sanitize) message = sanitizeMessage(message);
+  if (status === 500) console.log(`api error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
   json(res, status, { error: message });
 }
 
@@ -177,9 +182,21 @@ function decodeId(raw: string): string {
   }
 }
 
+/** Request bodies are small JSON; anything past this is not a client of
+ * ours and must not become host memory. */
+const BODY_CAP = 1 << 20;
+
 async function readBody(req: http.IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > BODY_CAP) {
+      req.destroy();
+      throw new Error("invalid request: body too large");
+    }
+    chunks.push(chunk as Buffer);
+  }
   return Buffer.concat(chunks).toString("utf8");
 }
 
@@ -287,12 +304,22 @@ const server = http.createServer(async (req, res) => {
   }
 
   // static web UI
-  if (method === "GET") {
+  if (method === "GET" || method === "HEAD") {
     const rel = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
     const file = path.join(WEB_ROOT, rel);
-    if (file.startsWith(WEB_ROOT) && fs.existsSync(file) && fs.statSync(file).isFile()) {
-      res.writeHead(200, { "content-type": MIME[path.extname(file)] ?? "application/octet-stream" });
-      return void fs.createReadStream(file).pipe(res);
+    if (file.startsWith(WEB_ROOT + path.sep) && fs.statSync(file, { throwIfNoEntry: false })?.isFile()) {
+      res.writeHead(200, {
+        "content-type": MIME[path.extname(file)] ?? "application/octet-stream",
+        // Vite hashes everything under assets/, so those may live forever;
+        // the entry files must revalidate, or an in-place app update leaves
+        // a tab pointing at assets that no longer exist.
+        "cache-control": rel.startsWith("assets/") ? "public, max-age=31536000, immutable" : "no-cache",
+      });
+      // A dist swapped mid-read (app upgrade) errors the source stream, and
+      // an unhandled 'error' there would take the whole daemon down.
+      return void stream.pipeline(fs.createReadStream(file), res, () => {
+        if (!res.writableEnded) res.destroy();
+      });
     }
   }
   json(res, 404, { error: "not found" });
@@ -300,75 +327,69 @@ const server = http.createServer(async (req, res) => {
 
 /**
  * One portal request: proxy straight through when the thread's environment
- * is up; otherwise kick wake+ensure (coalesced in the supervisor), hold the
- * request briefly, and fall back to a self-refreshing holding page. A
- * connect-refused on a running cube means the service itself is down
- * (crashed, or slept away) — same medicine, ensure heals it.
+ * is up and the service answers. Otherwise — asleep, still setting up,
+ * service crashed or never started — the same medicine every time: kick the
+ * wake+ensure (coalesced in the supervisor) and hold the request briefly.
  */
 async function portalRequest(
   label: string,
   req: http.IncomingMessage,
   res: http.ServerResponse,
 ): Promise<void> {
-  let target = supervisor.resolvePortal(label);
-  if (!target) {
-    // No portal row yet, but the thread's committed declaration may name
-    // this service — the UI links to declared services before anything has
-    // started them (the pi TUI has no services_ensure tool). Bootstrap:
-    // ensure the cube's services, which creates the row, then re-resolve.
-    const cubeName = supervisor.declaredPortalCube(label);
-    if (!cubeName) {
-      res.writeHead(404, { "content-type": "text/plain" });
-      return void res.end(`no portal at ${label}\n`);
-    }
-    // A cube source must not be able to trigger ensures on a sibling; only
-    // the browser (host side) bootstraps.
-    if (cubeSourceIp(req.socket.remoteAddress)) {
-      res.writeHead(403, { "content-type": "text/plain" });
-      return void res.end("not your portal\n");
-    }
-    const ensured = supervisor.ensureCubeServices(cubeName).then(
-      () => true,
-      (error) => {
-        console.log(`portal bootstrap [${label}]: ${String(error)}`);
-        return false;
-      },
-    );
-    const ready = await Promise.race([ensured, new Promise((r) => setTimeout(() => r(false), 2_000))]);
-    target = ready ? supervisor.resolvePortal(label) : null;
-    if (!target) return respondWaking(req, res, "Starting the service…");
+  const target = supervisor.resolvePortal(label);
+  // No portal row yet, but the thread's committed declaration may name the
+  // service — the UI links declared services before anything has started
+  // them. Ensuring below creates the row.
+  const cubeName = target?.cubeName ?? supervisor.declaredPortalCube(label);
+  if (!cubeName) {
+    res.writeHead(404, { "content-type": "text/plain" });
+    return void res.end(`no portal at ${label}\n`);
   }
   // Hairpin isolation: a cube may reach its OWN portals (OAuth issuer
   // path), never a sibling's — portals must not become a cube-to-cube
-  // bridge through the trusted zone.
+  // bridge through the trusted zone. Nor may a cube bootstrap one.
   const cubeSource = cubeSourceIp(req.socket.remoteAddress);
-  if (cubeSource && cubeSource !== target.ip) {
+  if (cubeSource && cubeSource !== target?.ip) {
     res.writeHead(403, { "content-type": "text/plain" });
     return void res.end("not your portal\n");
   }
-  const heal = () => {
-    supervisor.ensureCubeServices(target.cubeName).catch((error) => {
-      console.log(`portal ensure [${label}]: ${String(error)}`);
-    });
-    respondWaking(req, res, "Starting the service…");
-  };
-  if (target.status === "ready") return proxyHttp(req, res, target, heal);
+  if (target?.status !== "ready") return startAndHold(label, cubeName, req, res);
+  supervisor.touchCube(cubeName); // a browsed portal is activity, like a prompt
+  proxyHttp(req, res, target, () => startAndHold(label, cubeName, req, res));
+}
 
-  // Sleeping (or still setting up): start the wake+ensure, give it 2s to
-  // finish for the common fast case, then hold with the 202 page.
-  const wake = supervisor.ensureCubeServices(target.cubeName).then(
-    () => true,
-    (error) => {
-      console.log(`portal wake [${label}]: ${String(error)}`);
-      return false;
-    },
-  );
-  const woke = await Promise.race([wake, new Promise((r) => setTimeout(() => r(false), 2_000))]);
-  if (woke) {
-    const fresh = supervisor.resolvePortal(label);
-    if (fresh && fresh.status === "ready") return proxyHttp(req, res, fresh, heal);
+/**
+ * The service is not answering. Start the wake+ensure, give the common fast
+ * case 2s, then: proxy if it came up; explain if the last attempt left this
+ * service down (a failure page beats "starting…" forever); else hold with
+ * the self-refreshing page.
+ */
+async function startAndHold(
+  label: string,
+  cubeName: string,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  const serviceName = label.slice(0, label.lastIndexOf("--"));
+  if (supervisor.cubeStatus(cubeName) === "creating") {
+    return respondWaking(req, res, "Setting up the environment…");
   }
-  respondWaking(req, res, "Waking the environment…");
+  const settled = await Promise.race([
+    supervisor.ensureCubeServices(cubeName).then(() => true, () => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2_000)),
+  ]);
+  const failure = supervisor.serviceFailure(cubeName, serviceName);
+  const fresh = settled && !failure ? supervisor.resolvePortal(label) : null;
+  if (fresh?.status === "ready") {
+    supervisor.touchCube(cubeName);
+    return proxyHttp(req, res, fresh, () => respondWaking(req, res, "Starting the service…"));
+  }
+  if (failure) return respondFailed(req, res, `${serviceName}: ${sanitizeMessage(failure)}`);
+  respondWaking(
+    req,
+    res,
+    supervisor.cubeStatus(cubeName) === "ready" ? "Starting the service…" : "Waking the environment…",
+  );
 }
 
 async function api(
@@ -538,10 +559,10 @@ async function api(
     if (userThread[3] !== undefined && action !== "files") return json(res, 404, { error: "not found" });
     if (!action) {
       if (method === "DELETE") {
-        // Reap the thread's pi TUI first — a live terminal must not keep
-        // writing a deleted thread's session file (or hold its cube busy).
-        terminals.kill(id);
+        // Removal can refuse (409 mid-wake/push); only a thread that is
+        // actually gone loses its pi TUI.
         await supervisor.removeUserThread(id);
+        terminals.kill(id);
         return json(res, 200, { ok: true });
       }
       if (method === "PATCH") {
@@ -621,10 +642,11 @@ async function api(
       // Reap any live pi TUIs on this cube's threads first — the user-thread
       // DELETE does this per thread; the cube-scoped route must too, or a
       // credentialed pi process (and its WS) outlives the destroyed cube.
-      for (const thread of supervisor.listThreads(cubeName)) terminals.kill(thread.id);
+      const threadIds = supervisor.listThreads(cubeName).map((thread) => thread.id);
       await supervisor.removeCube(cubeName, {
         deleteVolume: url.searchParams.get("volumes") === "1",
       });
+      for (const id of threadIds) terminals.kill(id);
       return json(res, 200, { ok: true });
     }
   }
@@ -813,6 +835,7 @@ server.on("upgrade", (req, socket, head) => {
   // Same isolation as the request path: own portals only for cube sources.
   const cubeSource = cubeSourceIp(req.socket.remoteAddress);
   if (cubeSource && cubeSource !== target.ip) return void socket.destroy();
+  supervisor.touchCube(target.cubeName);
   proxyUpgrade(req, socket, head, target);
 });
 
@@ -867,5 +890,9 @@ function attachTerminal(threadId: string, ws: WebSocket, cols: number, rows: num
   ws.on("close", detach);
   ws.on("error", detach);
 }
+
+// A stray rejection must not take every thread's terminal down with the
+// daemon; log it and stay up.
+process.on("unhandledRejection", (reason) => console.log(`unhandled rejection: ${String(reason)}`));
 
 server.listen(PORT, () => console.log(`cubed listening on http://localhost:${PORT} (portals on *.${PORTAL_BASE})`));

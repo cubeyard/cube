@@ -8,7 +8,7 @@ import assert from "node:assert";
 import http from "node:http";
 import net from "node:net";
 
-import { portalLabel, proxyHttp, proxyUpgrade, respondWaking } from "../src/portal-proxy.ts";
+import { portalLabel, proxyHttp, proxyUpgrade, respondFailed, respondWaking } from "../src/portal-proxy.ts";
 
 const BASE = "cube.internal";
 
@@ -26,6 +26,13 @@ console.log("1 ok: portalLabel");
 
 // --- HTTP proxying end to end (headers, body, status, x-forwarded-*)
 const upstream = http.createServer((req, res) => {
+  if (req.url === "/dies") {
+    // headers + half a body, then the service drops the socket
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.write("partial");
+    setTimeout(() => req.socket.destroy(), 50);
+    return;
+  }
   if (req.url === "/echo") {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -54,6 +61,9 @@ const front = http.createServer((req, res) => {
   const label = portalLabel(req.headers.host, BASE);
   if (label === "down--x") {
     return proxyHttp(req, res, { ip: "127.0.0.1", port: 1 }, () => respondWaking(req, res, "Starting…"));
+  }
+  if (label === "broken--x") {
+    return respondFailed(req, res, `web: exited before becoming ready <b>${req.url}</b>`);
   }
   if (label !== null) {
     return proxyHttp(req, res, { ip: "127.0.0.1", port: upstreamPort }, () => {
@@ -116,6 +126,36 @@ const downPlain = await request({ path: "/", headers: { host: `down--x.${BASE}` 
 assert.equal(downPlain.status, 503);
 assert.equal(downPlain.headers["retry-after"], "3");
 console.log("4 ok: refused upstream -> waking page (202 html / 503 plain)");
+
+// --- a service that failed to start gets the failure page (escaped, slow
+// refresh), not the eternal "starting…"
+const broken = await request({ path: "/x", headers: { host: `broken--x.${BASE}`, accept: "text/html" } });
+assert.equal(broken.status, 502);
+assert.match(broken.body, /content="10"/);
+assert.match(broken.body, /exited before becoming ready &#60;b&#62;/);
+assert.ok(!broken.body.includes("<b>"), "failure detail must be escaped");
+const brokenPlain = await request({ path: "/x", headers: { host: `broken--x.${BASE}` } });
+assert.equal(brokenPlain.status, 502);
+assert.equal(brokenPlain.headers["retry-after"], "10");
+console.log("4b ok: failed service -> failure page (502, escaped, refresh 10)");
+
+// --- upstream dying mid-body ends the client request instead of hanging it
+await new Promise<void>((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error("client request hung after upstream died")), 3_000);
+  const req = http.request(
+    { host: "127.0.0.1", port: frontPort, path: "/dies", agent: false, headers: { host: `web--t-abc.${BASE}` } },
+    (res) => {
+      res.on("data", () => {});
+      const done = () => (clearTimeout(timer), resolve());
+      res.on("end", done);
+      res.on("error", done);
+      res.on("close", done);
+    },
+  );
+  req.on("error", () => (clearTimeout(timer), resolve()));
+  req.end();
+});
+console.log("4c ok: upstream death mid-body ends the client request");
 
 // --- upgrade pass-through: handshake + echo both ways
 await new Promise<void>((resolve, reject) => {

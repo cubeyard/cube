@@ -225,6 +225,10 @@ export class CubeSupervisor {
       settled: boolean;
     }
   >();
+  // Outcome of each cube's most recent settled ensure: the portal holding
+  // page explains a service that failed to start instead of "starting…"
+  // forever (in-memory — the next ensure overwrites it).
+  private readonly lastEnsure = new Map<string, { statuses: ServiceStatus[]; error: string | null }>();
   // In-flight host-side git ops (diff/push/PR) per cube: removeCube must not
   // tear a cube down while a push/PR is still publishing (PLAN §11).
   private readonly gitOps = new Map<string, number>();
@@ -256,7 +260,18 @@ export class CubeSupervisor {
   async boot(): Promise<void> {
     for (const cube of this.registry.listCubes()) {
       if (cube.status === "creating") {
-        this.registry.setCubeStatus(cube.name, "error", "provisioning interrupted by cubed restart");
+        // Interrupted after the instance came up (typically during a long
+        // .cube/setup — an app upgrade restarts cubed) leaves a usable
+        // environment: wake it on demand and say what may be missing.
+        // Interrupted before that, there is nothing to wake.
+        const exists = await this.backend.getState(instanceName(cube.name)).then(() => true, () => false);
+        this.registry.setCubeStatus(
+          cube.name,
+          exists ? "asleep" : "error",
+          exists
+            ? "provisioning was interrupted by a cubed restart — .cube/setup may not have completed"
+            : "provisioning interrupted by cubed restart",
+        );
         continue;
       }
       if (cube.status === "waking") {
@@ -748,8 +763,8 @@ export class CubeSupervisor {
       if (state.status !== "Running") await this.backend.setState(name, "start");
       await this.backend.waitForNetwork(name, net.ip);
       await this.startProxy(cube); // no-op if it survived the sleep
-      // .cube/resume, then the wake hooks; first complaint wins the error
-      // field, but both always run (repair work must not gate the hooks).
+      // .cube/resume, then the wake hooks — which build on it, so a failed
+      // resume skips them and its complaint takes the error field.
       const resumeError = await this.runLifecycleScript(cube, "resume", 120);
       const hookError = resumeError ?? (await this.runWakeHooks(cube));
       // Touch first: a wake without it would be instantly re-slept by the
@@ -759,7 +774,10 @@ export class CubeSupervisor {
       // error field carries the complaint to the UI.
       this.registry.setCubeStatus(cube.name, "ready", hookError);
     } catch (error) {
-      this.registry.setCubeStatus(cube.name, "error", `wake failed: ${String(error)}`);
+      // A failed retry of an errored cube keeps the original complaint —
+      // that is the root cause; "instance not found" on top of it is not.
+      const detail = cube.status === "error" && cube.error ? cube.error : `wake failed: ${String(error)}`;
+      this.registry.setCubeStatus(cube.name, "error", detail);
       throw error;
     }
   }
@@ -892,29 +910,57 @@ export class CubeSupervisor {
   }
 
   private async doEnsureServices(cubeName: string, signal: AbortSignal): Promise<ServiceStatus[]> {
-    signal.throwIfAborted();
-    await this.wakeCube(cubeName);
-    signal.throwIfAborted();
-    const cube = this.requireCube(cubeName);
-    const config = readCubeConfig(cube.workspacePath); // parse errors -> caller
-    if (config.services.length === 0) return [];
-    this.registry.touchCube(cube.name);
-    const net = networkForCube(cube.name, cube.subnetIndex);
-    return ensureServices(
-      {
-        cubeIp: net.ip,
-        gatewayIp: net.gateway,
-        portalBase: this.config.portalBase,
-        publicUrl: (label) => this.portalUrl(label),
-        execRoot: (cmd, execSignal) => this.backend.execSimple(instanceName(cube.name), cmd, execSignal),
-        upsertPortal: (name, targetPort, hostname) =>
-          this.registry.upsertPortal(cube.id, name, targetPort, hostname),
-        listPortals: () => this.registry.listPortals(cube.id),
-      },
-      cube.name,
-      config.services,
-      { signal },
-    );
+    try {
+      signal.throwIfAborted();
+      await this.wakeCube(cubeName);
+      signal.throwIfAborted();
+      const cube = this.requireCube(cubeName);
+      const config = readCubeConfig(cube.workspacePath); // parse errors -> caller
+      this.registry.touchCube(cube.name);
+      const net = networkForCube(cube.name, cube.subnetIndex);
+      const statuses = await ensureServices(
+        {
+          cubeIp: net.ip,
+          gatewayIp: net.gateway,
+          portalBase: this.config.portalBase,
+          publicUrl: (label) => this.portalUrl(label),
+          execRoot: (cmd, execSignal) => this.backend.execSimple(instanceName(cube.name), cmd, execSignal),
+          upsertPortal: (name, targetPort, hostname) =>
+            this.registry.upsertPortal(cube.id, name, targetPort, hostname),
+          releasePortal: (name) => this.registry.releasePortal(cube.id, name),
+          listPortals: () => this.registry.listPortals(cube.id),
+        },
+        cube.name,
+        config.services,
+        { signal },
+      );
+      this.lastEnsure.set(cubeName, { statuses, error: null });
+      return statuses;
+    } catch (error) {
+      // An abort is the caller leaving, not an outcome.
+      if (!signal.aborted) this.lastEnsure.set(cubeName, { statuses: [], error: String(error) });
+      throw error;
+    }
+  }
+
+  /** Why the most recent ensure left this service down — a start failure's
+   * detail, or the error that stopped the ensure itself (wake, cube.toml).
+   * Null when it is not known to be down. */
+  serviceFailure(cubeName: string, serviceName: string): string | null {
+    const last = this.lastEnsure.get(cubeName);
+    if (!last) return null;
+    if (last.error !== null) return last.error;
+    const status = last.statuses.find((s) => s.name === serviceName);
+    return status?.state === "failed" ? status.detail : null;
+  }
+
+  cubeStatus(cubeName: string): string | null {
+    return this.registry.getCube(cubeName)?.status ?? null;
+  }
+
+  /** Activity the idle sweep must respect — a browsed portal counts like a prompt. */
+  touchCube(cubeName: string): void {
+    this.registry.touchCube(cubeName);
   }
 
   /**
@@ -943,15 +989,14 @@ export class CubeSupervisor {
     }
   }
 
-  /** Host-header label -> live proxy target (null = no such portal).
-   * Touches the cube: a browsed portal is activity the idle sweep must
-   * respect, exactly like a prompt. */
+  /** Host-header label -> live proxy target (null = no such portal). Does
+   * not touch the cube: only a request that actually reaches the service is
+   * activity, or a forgotten holding-page tab would keep it awake forever. */
   resolvePortal(label: string): PortalTargetInfo | null {
     const portal = this.registry.getPortalByHostname(label);
     if (!portal) return null;
     const cube = this.registry.getCubeById(portal.cubeId);
     if (!cube) return null;
-    this.registry.touchCube(cube.name);
     const net = networkForCube(cube.name, cube.subnetIndex);
     return {
       cubeName: cube.name,
@@ -1003,7 +1048,9 @@ export class CubeSupervisor {
         url: repo.url,
         base: repo.base,
         branch: repo.branch,
-        state: fs.existsSync(path.join(repo.workspacePath, ".git"))
+        // null until provisioning has seeded it: a half-written clone
+        // answers git with errors, not state (the UI showed that as a 500).
+        state: cube.status !== "creating" && fs.existsSync(path.join(repo.workspacePath, ".git"))
           ? await this.withGitOp(cube.name, () => this.git.state(repo.workspacePath, repo.baseOid))
           : null,
       })),
@@ -1014,7 +1061,7 @@ export class CubeSupervisor {
    * committed, staged, unstaged, and untracked workspace changes. */
   async diffForUserThread(id: string, repositoryId: number): Promise<RepoDiff> {
     const { cube, repository } = this.repositoryForThread(id, repositoryId);
-    this.requireSeeded(repository);
+    this.requireSeeded(cube, repository);
     return this.withGitOp(cube.name, () => this.git.diff(repository.workspacePath, repository.baseOid));
   }
 
@@ -1023,7 +1070,7 @@ export class CubeSupervisor {
     const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
     await this.config.github?.ensureFresh();
     signal?.throwIfAborted();
-    this.requireSeeded(repository);
+    this.requireSeeded(cube, repository);
     return this.withGitOp(cube.name, () =>
       this.git.push(repository.workspacePath, repository.url, undefined, signal),
     );
@@ -1039,7 +1086,7 @@ export class CubeSupervisor {
     const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
     await this.config.github?.ensureFresh(); // agent-driven Ship runs long after the 8h token dies (sol Medium)
     signal?.throwIfAborted();
-    this.requireSeeded(repository);
+    this.requireSeeded(cube, repository);
     const oid = await this.withGitOp(cube.name, () =>
       this.git.syncBase(repository.workspacePath, repository.url, repository.base, signal),
     );
@@ -1056,7 +1103,7 @@ export class CubeSupervisor {
     const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
     await this.config.github?.ensureFresh(); // agent-driven Ship runs long after the 8h token dies (sol Medium)
     signal?.throwIfAborted();
-    this.requireSeeded(repository);
+    this.requireSeeded(cube, repository);
     const branch = await this.withGitOp(cube.name, () =>
       this.git.push(repository.workspacePath, repository.url, repository.base, signal),
     );
@@ -1074,7 +1121,7 @@ export class CubeSupervisor {
     const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
     await this.config.github?.ensureFresh();
     signal?.throwIfAborted();
-    this.requireSeeded(repository);
+    this.requireSeeded(cube, repository);
     const title =
       opts.title?.trim() ||
       this.registry.getThread(id)?.title ||
@@ -1094,9 +1141,10 @@ export class CubeSupervisor {
     );
   }
 
-  /** Reject review against a half-written clone. */
-  private requireSeeded(repository: CubeRepositoryRow): void {
-    if (!fs.existsSync(path.join(repository.workspacePath, ".git"))) {
+  /** Reject review against a half-written clone: provisioning still
+   * running, or (an errored provision) no clone at all. */
+  private requireSeeded(cube: CubeRow, repository: CubeRepositoryRow): void {
+    if (cube.status === "creating" || !fs.existsSync(path.join(repository.workspacePath, ".git"))) {
       throw new Error("thread environment is still setting up");
     }
   }
@@ -1193,6 +1241,10 @@ export class CubeSupervisor {
     const runtime = this.runtimes.get(name);
     if (runtime && this.cubeBusy(runtime)) throw new Error(`cube ${name} is busy`);
     this.removing.add(name); // sync with the guards above: no await between
+    // A portal-triggered ensure still polling readiness would otherwise keep
+    // exec'ing into the instance being destroyed.
+    this.ensuring.get(name)?.controller.abort(new Error(`cube ${name} is being removed`));
+    this.lastEnsure.delete(name);
     try {
       if (runtime) {
         // closed is set synchronously before any await: a concurrent prompt
@@ -1327,7 +1379,7 @@ export class CubeSupervisor {
           title: thread.title ?? this.autoTitle(thread),
           state: threadState(cube.status),
           busy: cubeRuntime?.threads.get(thread.id)?.busy ?? false,
-          error: cube.status === "error" ? cube.error : null,
+          error: cube.error,
           createdAt: thread.createdAt,
           archived: thread.archivedAt !== null,
           project: { id: project.id, name: project.name },
@@ -1410,9 +1462,11 @@ export class CubeSupervisor {
     let cube = this.requireCube(cubeName);
     if (cube.status === "creating") {
       onStatus("setting up this thread's environment…");
-      // Settles on the provisioning transition (does not start anything).
-      await this.wakeCube(cubeName);
-      cube = this.requireCube(cubeName);
+      // Provisioning runs detached; wait it out (waking would retry a failed
+      // provision against a missing instance and bury its error).
+      while ((cube = this.requireCube(cubeName)).status === "creating") {
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
     }
     if (cube.status === "error") {
       throw new Error(`environment error: ${cube.error ?? "unknown"}`);
