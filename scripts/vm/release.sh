@@ -6,13 +6,13 @@
 #
 # The GitHub workflow (.github/workflows/release.yml) is the primary
 # path — a push to main releases the next patch on its own, a hand-made
-# tag `vm-vX.Y.Z` releases that version — and it
+# tag `vX.Y.Z` releases that version — and it
 # coordinates the two architectures properly; this script is the local
 # escape hatch and shares its build/package/verify steps (build*.sh,
 # inherit-cube-node.sh, package-release.sh, verify-release.sh) so the
 # two cannot drift in what they produce.
 #
-#   bash scripts/vm/release.sh v0.4.0                # tag vm-v0.4.0 (created
+#   bash scripts/vm/release.sh v0.4.0                # tag v0.4.0 (created
 #                                                    # at HEAD if missing),
 #                                                    # build, test, package,
 #                                                    # publish to GH Releases
@@ -25,7 +25,7 @@
 # the exact install path a user runs, including the content-addressed
 # store, the blank-data-disk first boot and an in-place app update.
 #
-# Published assets (tag vm-<version>; per-arch names so release legs
+# Published assets (tag <version>; per-arch names so release legs
 # cannot overwrite each other):
 #   cube-base-<version>-<arch>.qcow2    NixOS OS image (zstd qcow2)
 #   cube-app-<version>-<arch>.qcow2     cubed + node, ext4 LABEL=cubed
@@ -57,7 +57,7 @@ export CUBE_VM_CUBED_PORT="${CUBE_VM_CUBED_PORT:-7977}"
 export CUBE_VM_BIND=""
 . "$(dirname "$0")/lib.sh"
 
-TAG="vm-$VERSION"
+TAG="$VERSION"
 ARCH="$GUEST_ARCH"
 BASE_ART="cube-base-$VERSION-$ARCH.qcow2"
 APP_ART="cube-app-$VERSION-$ARCH.qcow2"

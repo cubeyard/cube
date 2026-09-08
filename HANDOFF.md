@@ -49,10 +49,10 @@ Do not expose cubed publicly: it has no application-level authentication.
 
 ## Last recorded live evidence
 
-- **2026-09-04:** [vm-v0.6.2](https://github.com/dizk/cube/releases/tag/vm-v0.6.2)
-  completed the automatic main-push release path on both architectures, with
-  amd64 boot verification. This is a historical checkpoint, not a claim about
-  today's latest release.
+- **2026-09-04:** private pre-public release v0.6.2 completed the automatic
+  main-push release path on both architectures, with amd64 boot verification.
+  This is a historical checkpoint, not a claim about today's latest release;
+  public releases in this repository start at `v0.1.0`.
 - The user installed v0.6.0 on Apple Silicon and upgraded to v0.6.1 in place
   (`changed: app`, ~32 MB, no reboot). Linux launcher install, app-only/reboot
   upgrades, down/up and destroy passed; the dev VM portfolio passed 19 suites.

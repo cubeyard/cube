@@ -5,21 +5,21 @@
 #
 #   push to main     every push that touches shipped files becomes the
 #                    next PATCH release on its own: `prepare` tags main's
-#                    commit vm-vX.Y.(Z+1), the matrix builds every artifact
+#                    commit vX.Y.(Z+1), the matrix builds every artifact
 #                    for every architecture, the amd64 set is verified by
 #                    installing it with the launcher (blank data disk,
 #                    nested container, in-place app update), and only then
 #                    is the release public. Pushes touching nothing shipped
 #                    (*.md, docs/, .claude/, spikes/) do not release.
-#   push vm-vX.Y.Z   a hand-made tag releases THAT version — the way to
+#   push vX.Y.Z      a hand-made tag releases THAT version — the way to
 #                    bump minor/major; the next automatic release counts
 #                    on from it:
 #
-#                      git tag -a vm-v0.7.0 -m 'cube release v0.7.0'
-#                      git push origin vm-v0.7.0      # then main
+#                      git tag -a v0.7.0 -m 'cube release v0.7.0'
+#                      git push origin v0.7.0         # then main
 #
 #                    Push the tag BEFORE main: a main push whose commit
-#                    already carries a vm-v* tag does nothing, while the
+#                    already carries a vX.Y.Z tag does nothing, while the
 #                    other order builds the same bytes twice.
 #
 # Trunk-based: main is the sign-off point (nothing lands there without
@@ -31,7 +31,7 @@
 #   version     vX.Y.Z of an EXISTING tag: rebuild/heal that release
 #   prerelease  publish as a pre-release — invisible to `cube up`'s
 #               "latest", installable with `cube up vX.Y.Z`; promote
-#               later with `gh release edit vm-vX.Y.Z --prerelease=false`
+#               later with `gh release edit vX.Y.Z --prerelease=false`
 #   dry_run     build + package + boot-verify from the CHOSEN BRANCH and
 #               publish nothing — the way to test this pipeline itself
 #
@@ -47,7 +47,7 @@ name: release
 on:
   push:
     branches: ['main']
-    tags: ['vm-v*']
+    tags: ['v*']
     # Branch pushes only — GitHub does not evaluate path filters for
     # tag pushes. Nothing listed here ends up in an artifact. (GitHub
     # skips the filter for pushes of >1000 commits or >3000 changed
@@ -95,7 +95,7 @@ env:
   # a TAGGED version must build that tag, a tag push builds the tag, and
   # a branch push (main, or a dry run) builds the PUSHED commit — not
   # whatever the branch is by the time the runner starts.
-  CHECKOUT_REF: ${{ (github.event.inputs.version != '' && github.event.inputs.dry_run != 'true') && format('refs/tags/vm-{0}', github.event.inputs.version) || ((startsWith(github.ref, 'refs/tags/') && github.ref) || github.sha) }}
+  CHECKOUT_REF: ${{ (github.event.inputs.version != '' && github.event.inputs.dry_run != 'true') && format('refs/tags/{0}', github.event.inputs.version) || ((startsWith(github.ref, 'refs/tags/') && github.ref) || github.sha) }}
   DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '' }}
   # A push to main: the version and its tag are minted here.
   AUTO: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && '1' || '' }}
@@ -131,23 +131,23 @@ jobs:
           elif [ -n "$AUTO" ]; then
             # Released under a hand-made tag already (pushed before main,
             # as documented)? Then that tag's run is the release.
-            TAGGED="$(git tag --points-at HEAD 'vm-v*' | head -1)"
+            TAGGED="$(git tag --points-at HEAD 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
             if [ -n "$TAGGED" ]; then
               echo "$(git rev-parse --short HEAD) already carries $TAGGED — nothing to release"
               echo "skip=1" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            # The highest vm-v* anywhere, not only on main: a number is
+            # The highest vX.Y.Z anywhere, not only on main: a number is
             # never reused, whichever branch minted it.
-            LAST="$(git tag -l 'vm-v*' | grep -E '^vm-v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
-            [ -n "$LAST" ] || { echo "no vm-v* tag to count on from — make the first release by hand"; exit 1; }
-            IFS=. read -r MAJ MIN PAT <<< "${LAST#vm-v}"
+            LAST="$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+            [ -n "$LAST" ] || { echo "no vX.Y.Z tag to count on from — make the first release by hand"; exit 1; }
+            IFS=. read -r MAJ MIN PAT <<< "${LAST#v}"
             VERSION="v$MAJ.$MIN.$((PAT + 1))"
             echo "next after $LAST: $VERSION"
           else
-            [ -n "$VERSION" ] || VERSION="${GITHUB_REF_NAME#vm-}"
-            [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/vm-$VERSION^{commit}" 2>/dev/null)" ] \
-              || { echo "checked-out commit is not tag vm-$VERSION"; exit 1; }
+            [ -n "$VERSION" ] || VERSION="$GITHUB_REF_NAME"
+            [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$VERSION^{commit}" 2>/dev/null)" ] \
+              || { echo "checked-out commit is not tag $VERSION"; exit 1; }
           fi
           [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
             || { echo "not a version: $VERSION"; exit 1; }
@@ -163,15 +163,15 @@ jobs:
           V="${{ steps.v.outputs.version }}"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git tag -a "vm-$V" -m "cube release $V"
+          git tag -a "$V" -m "cube release $V"
           # The object id lets `cleanup` take back exactly this tag and
           # never a hand-made one that won the same number (git refuses
           # the push below in that case, and this run fails here).
-          echo "object=$(git rev-parse "refs/tags/vm-$V")" >> "$GITHUB_OUTPUT"
+          echo "object=$(git rev-parse "refs/tags/$V")" >> "$GITHUB_OUTPUT"
           # A tag pushed with GITHUB_TOKEN triggers no workflow: this
           # run IS the release, and `cleanup` takes the tag back if the
           # release does not make it.
-          git push origin "refs/tags/vm-$V"
+          git push origin "refs/tags/$V"
 
       - name: create the draft release (once)
         if: env.DRY_RUN == '' && steps.v.outputs.skip == ''
@@ -180,7 +180,7 @@ jobs:
         run: |
           set -euo pipefail
           V="${{ steps.v.outputs.version }}"
-          TAG="vm-$V"
+          TAG="$V"
           if gh release view "$TAG" >/dev/null 2>&1; then
             if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" != true ]; then
               echo "$TAG is already published — bump the version"; exit 1
@@ -190,7 +190,7 @@ jobs:
           fi
           # Notes: what changed since the newest release this commit
           # contains. docs: commits ship nothing and stay out.
-          PREV="$(git tag -l --merged HEAD 'vm-v*' | grep -E '^vm-v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "$TAG" | sort -V | tail -1 || true)"
+          PREV="$(git tag -l --merged HEAD 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "$TAG" | sort -V | tail -1 || true)"
           # The run line is also the ownership marker `cleanup` checks
           # before deleting a draft.
           {
@@ -220,7 +220,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release upload "vm-${{ steps.v.outputs.version }}" --clobber launcher/cube
+          gh release upload "${{ steps.v.outputs.version }}" --clobber launcher/cube
 
   build:
     needs: prepare
@@ -341,7 +341,7 @@ jobs:
         run: |
           set -euo pipefail
           V="${{ needs.prepare.outputs.version }}"
-          TAG="vm-$V"
+          TAG="$V"
           DIST="$HOME/cube/vm/build/dist"
           # SHA256SUMS last: its presence marks a complete arch leg.
           gh release upload "$TAG" --clobber \
@@ -371,7 +371,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="vm-${{ needs.prepare.outputs.version }}"
+          TAG="${{ needs.prepare.outputs.version }}"
           ASSETS="$(gh release view "$TAG" --json assets -q '.assets[].name')"
           for arch in amd64 arm64; do
             printf '%s\n' "$ASSETS" | grep -qx "SHA256SUMS.$arch" \
@@ -406,7 +406,7 @@ jobs:
       - name: take back this run's tag and draft
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: vm-${{ needs.prepare.outputs.version }}
+          TAG: ${{ needs.prepare.outputs.version }}
           OBJECT: ${{ needs.prepare.outputs.tag_object }}
           PUBLISH_RESULT: ${{ needs.publish.result }}
         run: |

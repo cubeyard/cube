@@ -17,7 +17,8 @@ The agent's tools run inside the container; your credentials never do.
 
 The commands below require a published VM release in
 [cubeyard/cube](https://github.com/cubeyard/cube/releases). Until the first
-release is available, use [Building from source](#building-from-source-the-dev-loop).
+release (`v0.1.0`) is available, use
+[Building from source](#building-from-source-the-dev-loop).
 
 Three things on the host: a hypervisor, `ssh`, and `curl`. Nothing else runs
 on the host — no Node, no Docker, no Incus, no Nix; the VM carries all of it.

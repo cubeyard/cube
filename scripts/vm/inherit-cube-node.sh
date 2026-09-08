@@ -24,7 +24,8 @@ WANT_TREE="$(git -C "$REPO_ROOT" rev-parse "$REF:images")"
 
 log "cube-node: looking for a published $ARCH build of images/ tree ${WANT_TREE:0:12}"
 TAGS="$(gh release list -R "$GH_REPO" --limit 20 --json tagName \
-  --exclude-drafts --exclude-pre-releases -q '.[].tagName' 2>/dev/null | grep '^vm-v' || true)"
+  --exclude-drafts --exclude-pre-releases -q '.[].tagName' 2>/dev/null \
+  | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
 [ -n "$TAGS" ] || { echo "no published releases to inherit from"; exit 3; }
 
 TMP="$(mktemp -d /tmp/cube-inherit-XXXXXX)"
