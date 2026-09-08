@@ -12,7 +12,7 @@ import stream from "node:stream";
 
 import { WebSocketServer, type WebSocket } from "ws";
 
-import { checkAuth, type ModelPreference } from "@cube/harness";
+import { checkAuth } from "@cube/harness";
 import { IncusBackend, MockBackend, type CubeBackend } from "@cube/sandbox";
 
 import { GithubAuth } from "./github-auth.ts";
@@ -34,21 +34,6 @@ const PORT = Number(process.env.CUBED_PORT ?? 7777);
 const PORTAL_BASE = (process.env.CUBED_PORTAL_BASE ?? defaultPortalBase()).toLowerCase();
 const AUTH_PROVIDER = process.env.CUBED_AUTH_PROVIDER ?? "openai-codex";
 const HOME = process.env.HOME!;
-
-// CUBED_MODEL="provider/idSubstring" puts that model first in the
-// preference order; the defaults stay as fallbacks.
-const prefer: ModelPreference = [
-  ["openai-codex", "gpt-5.6-luna"],
-  ["deepseek", "deepseek-v4-pro"],
-];
-if (process.env.CUBED_MODEL) {
-  const [prov, ...rest] = process.env.CUBED_MODEL.split("/");
-  const idSubstring = rest.join("/");
-  if (!prov || !idSubstring) {
-    throw new Error(`CUBED_MODEL must be "provider/idSubstring", got: ${process.env.CUBED_MODEL}`);
-  }
-  prefer.unshift([prov, idSubstring]);
-}
 
 const dbPath = process.env.CUBED_DB ?? path.join(HOME, "cube", "cubed.db");
 const registry = new Registry(dbPath);
@@ -82,7 +67,6 @@ const supervisor = new CubeSupervisor(registry, backend, {
     ...DEFAULT_EGRESS_ALLOW,
     ...(process.env.CUBED_EGRESS_ALLOW?.split(",").map((s) => s.trim()).filter(Boolean) ?? []),
   ],
-  prefer,
   // Idle-to-sleep (ms off last activity; 0 disables). PLAN default: 1h.
   idleMs: parseIdleMs(process.env.CUBED_IDLE_MS),
   portalBase: PORTAL_BASE,
@@ -541,14 +525,11 @@ async function api(
     return json(res, 404, { error: "not found" });
   }
 
-  // No history/prompt/events here: the thread's conversation IS its pi TUI
-  // (the /pty WebSocket). An in-process session on these routes would open a
-  // SECOND writer on the same JSONL the TUI owns, and — running on the
-  // credentialed host with the workspace as cwd — would load host-side
-  // AGENTS.md/CLAUDE.md (a symlink to ~/.pi/agent/auth.json would leak creds
-  // into the prompt). The pi spawn passes --no-context-files for the same
-  // reason. Cube-scoped plumbing routes keep history/prompt/events for
-  // debug use.
+  // No history/prompt/events anywhere: the thread's conversation IS its pi
+  // TUI (the /pty WebSocket). A second, in-process pi session would write
+  // the same JSONL the TUI owns and — on the credentialed host with the
+  // workspace as cwd — hand out host-side file tools to whoever can reach
+  // the port. The pi spawn passes --no-context-files for the same reason.
   const userThread = url.pathname.match(
     /^\/api\/threads\/([^/]+)(?:\/(files|services|archive)(?:\/(.+))?)?$/,
   );
@@ -613,18 +594,8 @@ async function api(
 
   // ---- cube-scoped API: plumbing/debug ----
 
-  if (url.pathname === "/api/cubes") {
-    if (method === "GET") return json(res, 200, { cubes: supervisor.listCubes() });
-    if (method === "POST") {
-      let name: string;
-      try {
-        name = String(JSON.parse(await readBody(req)).name ?? "").trim();
-      } catch {
-        return json(res, 400, { error: "invalid JSON body" });
-      }
-      const row = supervisor.createCube(name);
-      return json(res, 202, { name: row.name, status: row.status });
-    }
+  if (url.pathname === "/api/cubes" && method === "GET") {
+    return json(res, 200, { cubes: supervisor.listCubes() });
   }
 
   const cubeMatch = url.pathname.match(/^\/api\/cubes\/([^/]+)(?:\/(.*))?$/);
@@ -662,13 +633,7 @@ async function api(
     return json(res, 200, { ok: true });
   }
 
-  const threadMatch = rest.match(/^threads\/([^/]+)\/(history|prompt|events)$/);
-  if (!threadMatch) return json(res, 404, { error: "not found" });
-  // "latest" resolves to the most recent registered thread.
-  const threadId = decodeId(threadMatch[1]!);
-  const action = threadMatch[2]!;
-  const runtime = await supervisor.thread(cubeName, threadId === "latest" ? undefined : threadId);
-  return threadAction(runtime, action, method, url, req, res);
+  json(res, 404, { error: "not found" });
 }
 
 /** Image types render inline (an <img> never executes scripts); everything
@@ -707,94 +672,6 @@ function serveWorkspaceFile(res: http.ServerResponse, root: string, rel: string)
   // mid-stream must release it too.
   res.on("close", () => stream.destroy());
   stream.pipe(res);
-}
-
-/** history/prompt/events on a resolved thread runtime — shared between the
- * thread-first routes and the cube-scoped plumbing routes. */
-async function threadAction(
-  runtime: Awaited<ReturnType<typeof supervisor.thread>>,
-  action: string,
-  method: string,
-  url: URL,
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-): Promise<void> {
-  // History from pi's session file (survives restarts); seq captured in the
-  // same response so the client attaches SSE strictly after it.
-  if (action === "history" && method === "GET") {
-    return json(res, 200, {
-      threadId: runtime.id,
-      model: runtime.thread.model,
-      busy: runtime.busy,
-      // A prompt still queued on provisioning/wake is not in `messages`
-      // yet — without this a page loaded mid-queue shows no user message.
-      activePrompt: runtime.activePrompt,
-      messages: runtime.thread.messages,
-      seq: runtime.events.length,
-    });
-  }
-
-  if (action === "prompt" && method === "POST") {
-    let text: string;
-    try {
-      text = String(JSON.parse(await readBody(req)).text ?? "").trim();
-    } catch {
-      return json(res, 400, { error: "invalid JSON body" });
-    }
-    if (!text) return json(res, 400, { error: "empty prompt" });
-    // Checked after the body await: prompt() flips busy synchronously, so
-    // with no await between this check and the call, two concurrent POSTs
-    // cannot both pass (single-threaded event loop). `closed` covers a
-    // concurrent DELETE of the cube (set before removeCube's first await).
-    if (runtime.closed) return json(res, 409, { error: "thread is being removed" });
-    if (runtime.busy) return json(res, 409, { error: "thread is busy" });
-    void supervisor.prompt(runtime, text); // progress flows via /events
-    return json(res, 202, { ok: true });
-  }
-
-  if (action === "events" && method === "GET") {
-    res.writeHead(200, {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      connection: "keep-alive",
-    });
-    // `id:` carries "<epoch>.<seq>" so EventSource reconnects resume via
-    // Last-Event-ID instead of replaying from the original ?since=. seq
-    // restarts at 0 when a thread runtime is reopened (cubed restart), so a
-    // Last-Event-ID from another epoch cannot be resumed — the client is
-    // told to re-sync (refetch history) via a stale-stream event.
-    const sseFrame = (envelope: { seq: number }) =>
-      `id: ${runtime.epoch}.${envelope.seq}\ndata: ${JSON.stringify(envelope)}\n\n`;
-    const lastRaw = req.headers["last-event-id"];
-    let since = Number(url.searchParams.get("since") ?? 0);
-    let stale = false;
-    if (typeof lastRaw === "string" && lastRaw !== "") {
-      const [epoch, seqRaw] = lastRaw.split(".");
-      if (epoch === runtime.epoch && Number.isFinite(Number(seqRaw))) {
-        since = Number(seqRaw) + 1;
-      } else {
-        stale = true;
-        since = runtime.events.length; // replaying would be wrong either way
-      }
-    }
-    if (stale) res.write(`data: ${JSON.stringify({ event: { type: "cubed_stale_stream" } })}\n\n`);
-    for (const envelope of runtime.events.slice(since)) res.write(sseFrame(envelope));
-    const subscriber = (envelope: { seq: number }) => res.write(sseFrame(envelope));
-    runtime.subscribers.add(subscriber);
-    // The runtime can end this response (cube removal) — without this, a
-    // deleted cube's SSE connections would stay open forever.
-    const closer = () => res.end();
-    runtime.closers.add(closer);
-    const heartbeat = setInterval(() => res.write(": ping\n\n"), 15_000);
-    req.on("close", () => {
-      clearInterval(heartbeat);
-      runtime.subscribers.delete(subscriber);
-      runtime.closers.delete(closer);
-    });
-    return;
-  }
-
-  json(res, 404, { error: "not found" });
 }
 
 // Upgrades: portal hosts pass straight through to the cube service; on

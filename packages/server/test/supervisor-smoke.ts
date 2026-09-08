@@ -50,10 +50,6 @@ function makeSupervisor(registry: Registry): CubeSupervisor {
     idleMs: 0, // the smoke drives sleep/wake explicitly
     portalBase: "cube.localhost",
     publicPort: 7777,
-    prefer: [
-      ["openai-codex", "gpt-5.6-luna"],
-      ["deepseek", "deepseek-v4-pro"],
-    ],
   });
 }
 
