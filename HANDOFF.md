@@ -49,6 +49,16 @@ Do not expose cubed publicly: it has no application-level authentication.
 
 ## Last recorded live evidence
 
+- **2026-09-09:** bug-hunt branch verified against the public v0.1.3 VM on
+  Linux/KVM, driven from a headless browser: thread creation, the pi TUI,
+  declared services with portals (bootstrap, wake-on-request, heal after a
+  service crash, rename retiring the old unit, a failing service's 502 page,
+  in-cube hairpin), thread deletion. Offline suites: 17/17. Traps found:
+  cubed served `index.html` without cache headers, so an in-place app update
+  left tabs on assets that no longer existed (now `no-cache` + immutable
+  assets); a renamed service inherited the old unit's port and was
+  "confirmed" by the old process (ensure now retires undeclared units and
+  fingerprints declarations in the unit description).
 - **2026-09-04:** private pre-public release v0.6.2 completed the automatic
   main-push release path on both architectures, with amd64 boot verification.
   This is a historical checkpoint, not a claim about today's latest release;
