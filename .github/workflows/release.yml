@@ -385,6 +385,15 @@ jobs:
             --prerelease=${{ github.event.inputs.prerelease == 'true' && 'true' || 'false' }}
           gh release view "$TAG" --json url -q .url
 
+  homebrew:
+    needs: [prepare, publish]
+    if: vars.CUBE_HOMEBREW_ENABLED == 'true' && github.event.inputs.prerelease != 'true'
+    uses: ./.github/workflows/homebrew.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+    secrets:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
   # An automatic release that did not make it leaves nothing behind:
   # the next main push would otherwise count on from a tag that never
   # shipped, and a stray draft would sit in the release list. Only what

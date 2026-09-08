@@ -1,0 +1,73 @@
+name: homebrew
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published stable release (vX.Y.Z), with Homebrew-aware launcher'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-tap
+  cancel-in-progress: false
+
+jobs:
+  formula:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 26
+      - name: download stable launcher and generate formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          gh release view "$VERSION" --json isDraft,isPrerelease \
+            --jq 'if .isDraft or .isPrerelease then error("stable release required") else true end'
+          mkdir -p "$RUNNER_TEMP/launcher" "$RUNNER_TEMP/formula"
+          gh release download "$VERSION" --pattern cube --dir "$RUNNER_TEMP/launcher"
+          node scripts/homebrew-formula.ts "$VERSION" "$RUNNER_TEMP/launcher/cube" > "$RUNNER_TEMP/formula/cube.rb"
+      - name: install and test formula
+        run: |
+          set -euo pipefail
+          brew tap-new --no-git cubeyard/tap
+          cp "$RUNNER_TEMP/formula/cube.rb" "$(brew --repository cubeyard/tap)/Formula/cube.rb"
+          brew install cubeyard/tap/cube
+          brew audit --strict cubeyard/tap/cube
+          brew test cubeyard/tap/cube
+      - name: checkout tap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: cubeyard/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+      - name: update tap
+        working-directory: homebrew-tap
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p Formula
+          cp "$RUNNER_TEMP/formula/cube.rb" Formula/cube.rb
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/cube.rb
+          git diff --cached --quiet && exit 0
+          git commit -m "cube ${VERSION}"
+          git push

@@ -165,6 +165,80 @@ fi
   assert.match(fs.readFileSync(ghLog, "utf8"), /release download v0\.1\.0/);
   console.log("5 ok: cube-node inheritance ignores legacy tags and downloads from v0.1.0");
 
+  // 6. Formula pins the actual bytes, and refuses pre-Homebrew launchers.
+  const formula = run("node", ["scripts/homebrew-formula.ts", "v1.2.3", "launcher/cube"]);
+  const launcherSha = run("sha256sum", ["launcher/cube"]).split(" ")[0];
+  assert.ok(formula.includes(`sha256 "${launcherSha}"`));
+  assert.ok(formula.includes('releases/download/v1.2.3/cube"'));
+  assert.ok(formula.includes('version "1.2.3"'));
+  assert.ok(formula.includes('inreplace "cube", "INSTALL_METHOD=standalone", "INSTALL_METHOD=homebrew"'));
+  assert.throws(() => run("node", ["scripts/homebrew-formula.ts", "latest", "launcher/cube"]));
+  const oldLauncher = path.join(tmp, "old-cube");
+  fs.writeFileSync(oldLauncher, "#!/usr/bin/env bash\necho old\n");
+  assert.throws(() => run("node", ["scripts/homebrew-formula.ts", "v1.2.3", oldLauncher]));
+  console.log("6 ok: formula pins version/checksum and rejects unsupported launchers and tags");
+
+  // 7. A writable Homebrew symlink must survive even when an update is available.
+  // Standalone installs must still update; an unconditional early return is wrong.
+  for (const method of ["homebrew", "standalone"]) {
+    const installed = path.join(tmp, `${method}-cube`);
+    const contents = launcher.replace("INSTALL_METHOD=standalone", `INSTALL_METHOD=${method}`);
+    fs.writeFileSync(installed, contents, { mode: 0o755 });
+    const link = path.join(bin, `${method}-cube`);
+    fs.symlinkSync(installed, link);
+    const fetched = path.join(tmp, `${method}-fetched`);
+    const output = run("bash", ["-c", `
+      . "$INSTALLED"
+      SELF="$LINK"
+      fetch_asset() { touch "$FETCHED"; printf '#!/usr/bin/env bash\\necho updated\\n' > "$3"; }
+      self_update v1.2.3
+    `], { env: {
+      CUBE_LIB_ONLY: "1", CUBE_HOME: launcherHome, CUBE_BIND: "127.0.0.1", CUBE_RELEASE_DIR: "",
+      INSTALLED: installed, LINK: link, FETCHED: fetched,
+    } });
+    if (method === "homebrew") {
+      assert.match(output, /brew upgrade cubeyard\/tap\/cube/);
+      assert.equal(fs.existsSync(fetched), false, "Homebrew must not even fetch a replacement");
+      assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
+      assert.equal(fs.readFileSync(installed, "utf8"), contents);
+    } else {
+      assert.equal(fs.existsSync(fetched), true);
+      assert.equal(fs.readFileSync(link, "utf8"), "#!/usr/bin/env bash\necho updated\n");
+    }
+  }
+  console.log("7 ok: Homebrew preserves symlink and keg bytes; standalone still self-updates");
+
+  // 8. Exercise both sides of the schema boundary and the install-specific hint.
+  for (const method of ["homebrew", "standalone"]) {
+    for (const schema of [2, 3]) {
+      const home = path.join(tmp, `schema-${method}-${schema}`);
+      fs.mkdirSync(home);
+      const fixture = path.join(home, "fixture");
+      fs.mkdirSync(fixture);
+      fs.writeFileSync(path.join(fixture, "manifest-amd64.json"), JSON.stringify({
+        schema: String(schema), version: "v1.2.3", arch: "amd64",
+      }, null, 2));
+      fs.writeFileSync(path.join(fixture, "SHA256SUMS.amd64"),
+        run("sha256sum", ["manifest-amd64.json"], { cwd: fixture }) + "\n");
+      const output = run("bash", ["-c", `
+        . "$INSTALLED"
+        ARCH=amd64
+        fetch_asset() { cp "$FIXTURE/$2" "$3"; }
+        if fetch_manifest v1.2.3; then echo accepted; else echo rejected; fi
+      `], { env: {
+        CUBE_LIB_ONLY: "1", CUBE_HOME: home, CUBE_BIND: "127.0.0.1",
+        INSTALLED: path.join(tmp, `${method}-cube`), FIXTURE: fixture,
+      } });
+      assert.match(output, schema === 2 ? /accepted$/ : /rejected$/);
+      assert.equal(fs.existsSync(path.join(home, "manifests/manifest-v1.2.3-amd64.json")), schema === 2);
+      if (schema === 3) {
+        assert.match(output, method === "homebrew" ? /brew update && brew upgrade/ : /gh release download/);
+        if (method === "homebrew") assert.doesNotMatch(output, /--clobber/);
+      }
+    }
+  }
+  console.log("8 ok: schema compatibility and package-manager-specific upgrade hints");
+
   console.log("release-contract-test: ALL PASS");
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });

@@ -43,6 +43,7 @@
 set -euo pipefail
 
 LAUNCHER_SCHEMA=2            # the manifest schema this file understands
+INSTALL_METHOD=standalone   # the Homebrew formula sets this to homebrew
 
 REPO="${CUBE_REPO:-cubeyard/cube}"
 CUBE_HOME="${CUBE_HOME:-$HOME/.cube}"
@@ -495,7 +496,11 @@ fetch_manifest() {  # fetch_manifest vX.Y.Z
   schema="$(manifest_field "$tmp/manifest-$ARCH.json" schema)"
   [ "${schema:-1}" -le "$LAUNCHER_SCHEMA" ] 2>/dev/null || {
     fail "release $ver uses manifest schema ${schema} — this launcher understands $LAUNCHER_SCHEMA; install the launcher from that release:"
-    note "gh release download -R $REPO $tag -p cube -D $(dirname "$SELF") --clobber"
+    if [ "$INSTALL_METHOD" = homebrew ]; then
+      note "brew update && brew upgrade cubeyard/tap/cube"
+    else
+      note "gh release download -R $REPO $tag -p cube -D $(dirname "$SELF") --clobber"
+    fi
     rm -rf "$tmp"; return 1
   }
   mkdir -p "$MANIFESTS_DIR"
@@ -730,6 +735,10 @@ check_update() {  # prints one line if a newer release exists; silent otherwise
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 self_update() {  # self_update vX.Y.Z — replace this file with the release's launcher
   local tag="$1" tmp
+  if [ "$INSTALL_METHOD" = homebrew ]; then
+    note "launcher managed by Homebrew — update it with: brew upgrade cubeyard/tap/cube"
+    return 0
+  fi
   [ -n "${CUBE_RELEASE_DIR:-}" ] && return 0
   [ -w "$SELF" ] && [ -f "$SELF" ] || return 0
   tmp="$(mktemp "$CUBE_HOME/.launcher-XXXXXX")"
@@ -961,7 +970,8 @@ cube — self-hosted coding-agent box (launcher)
   cube status            release, VM, product, update availability
   cube upgrade [vX.Y.Z]  fetch a release, apply only what changed (an
                          app-only release lands in seconds, no reboot),
-                         KEEP the data disk; refreshes this file too
+                         KEEP the data disk; refresh the launcher unless
+                         managed by Homebrew (brew upgrade cube)
   cube ssh [cmd...]      ssh into the VM as `cube`
   cube logs              follow cubed's journal
   cube version           installed release version
