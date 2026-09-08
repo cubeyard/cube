@@ -90,7 +90,6 @@ const supervisor = new CubeSupervisor(registry, backend, {
   idleMs: 0,
   portalBase: "cube.localhost",
   publicPort: 7777,
-  prefer: [["openai-codex", "unused"]],
 });
 
 const missing = supervisor.createProject({

@@ -26,7 +26,6 @@ export interface ThreadSummary {
   id: string;
   title: string | null;
   state: "setting-up" | "ready" | "sleeping" | "error";
-  busy: boolean;
   error: string | null;
   createdAt: number | null;
   archived: boolean;

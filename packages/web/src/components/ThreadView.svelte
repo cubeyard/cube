@@ -218,11 +218,6 @@
     // live terminal may have changed the worktree while review was open.
     const preflight = await checkShip();
     if (!preflight || shipBlock(preflight)) return;
-    if (summary?.busy) {
-      shipError = "The agent is already working. Wait for the current turn to finish, then retry Ship.";
-      shipPhase = "error";
-      return;
-    }
     const repository = preflight.repository;
     const context = `Work in /workspace. This is the primary repository, id ${repository.id}; use the code tool with cube.git.syncBase(${repository.id}) and cube.git.pushBase(${repository.id}) for authenticated fetch and push. The configured base is origin/${repository.base}. Additional repositories under /repos are read-only references and must not be changed.`;
     shipPhase = "sending";
@@ -305,7 +300,7 @@
         class="key primary ship-key"
         aria-expanded={shipPhase !== "closed"}
         onclick={checkShip}
-        disabled={!primaryRepository || shipBusy || shipPhase === "sent" || summary?.busy || !primaryRepository.state}
+        disabled={!primaryRepository || shipBusy || shipPhase === "sent" || !primaryRepository.state}
       >{shipStatus}</button>
       <span class="key-bank">
         <button class="key icon" title="workspace files" aria-label="workspace files" class:held={filesOpen} aria-expanded={filesOpen} onclick={toggleFiles}>

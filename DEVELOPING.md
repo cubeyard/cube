@@ -392,7 +392,6 @@ a command (what `verify-release.sh` and ad-hoc tests use).
 | `CUBED_REPOS_ROOT` | `~/cube/repos` | bare-mirror root for checked project repositories |
 | `CUBED_ALLOW_LOCAL_REPOS` | off | set `1` to allow `file://` / local-path repos |
 | `CUBED_IDLE_MS` | 1h | idle-to-sleep; `0` disables the sweep |
-| `CUBED_MODEL` | — | `provider/idSubstring` to prefer a model first |
 | `CUBED_AUTH_PROVIDER` | `openai-codex` | provider whose host auth state appears in the UI |
 | `CUBED_SUBNET_MIN` | `10` | first per-cube subnet index; tests reserve higher bands |
 | `CUBED_PORTAL_BASE` | `<tailscale-ip>.sslip.io`, else `127.0.0.1.sslip.io` | portal hostname base (`<svc>--<cube>.<base>`); VM seed supplies the host address |

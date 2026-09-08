@@ -219,7 +219,7 @@
                   <span class="module-project">project / {thread.project.name}</span>
                   {#if thread.createdAt}<span>{relTime(thread.createdAt)}</span>{/if}
                   {#if stateLabel(thread)}
-                    <span class="state-label" class:error={thread.state === "error" && !thread.busy}>{stateLabel(thread)}</span>
+                    <span class="state-label" class:error={thread.state === "error"}>{stateLabel(thread)}</span>
                   {/if}
                   {#if thread.error}<span class="module-error" title={thread.error}>{thread.error}</span>{/if}
                 </span>

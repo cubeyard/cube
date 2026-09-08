@@ -63,10 +63,6 @@ const supervisor = new CubeSupervisor(registry, new IncusBackend(incus), {
   idleMs: 0,
   portalBase: "cube.internal",
   publicPort: 7777,
-  prefer: [
-    ["openai-codex", "gpt-5.6-luna"],
-    ["deepseek", "deepseek-v4-pro"],
-  ],
 });
 
 console.log("== create ready multi-repository project, then start a thread ==");

@@ -112,7 +112,7 @@ inner Docker to 28.x** until cleared; kernel modules the inner docker needs
 
 | Need | Solution | Status |
 |---|---|---|
-| Agent loop, context, compaction, sessions | `@earendil-works/pi-coding-agent` SDK (`createAgentSession`) | done |
+| Agent loop, context, compaction, sessions | the pi TUI itself, spawned per thread on a host pty | done |
 | Provider auth (Claude Pro/Max, ChatGPT, Copilot, 30+ API providers) | pi `/login` → `~/.pi/agent/auth.json`, auto-refresh | done |
 | Isolated exec environment | Incus system containers (unprivileged, userns) | done |
 | Docker-in-docker for full-stack testing | `security.nesting` + syscall intercepts, overlay2 inner storage | done |
@@ -138,9 +138,8 @@ portal proxy, git flow, disk management. Not a new agent and not a new sandbox.
 │   ├── DiskService — quotas, df monitoring, LRU pruning            │
 │   └── CubeSupervisor                                              │
 │        └── Cube (in-process actor, one per cube)                  │
-│             ├── pi AgentSession        ← THE HARNESS, host-side   │
-│             │    ├── read/write/edit → host FS (shifted ws mount) │
-│             │    └── bash            → incus exec (websocket) ↓   │
+│             ├── pi TUI (pty)           ← THE HARNESS, host-side   │
+│             │    └── every tool → the cube (extension-routed)  ↓   │
 │             └── cube handle (Incus REST over unix socket)         │
 │                                                                   │
 │  ~/.pi/agent/auth.json          ← provider creds, NEVER in sandbox│
@@ -255,7 +254,7 @@ packages/
   core/      cube model, state machine, shared event types, typebox schemas
   sandbox/   Sandbox interface + IncusSandbox; micro-VM backend possible
              later behind the same interface
-  harness/   pi integration: createAgentSession + sandbox-routed tools + event bridge
+  harness/   pi's binary (spawned per thread as the TUI) + stored-credential check
   server/    Hono/Fastify: REST + WS + portal proxy + static files
   web/       UI (Svelte 5 + Vite, plain SPA — no SvelteKit). Desktop + mobile.
              Decision 2026-08-26 after a research pass (React/Preact, Svelte/

@@ -10,15 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import type { CubeSpec, EventEnvelope } from "@cube/core";
 import { GitService, describeRepoAuthFailure, normalizeRepoUrl, type RepoDiff, type RepoState } from "@cube/git";
-import {
-  createCubeThread,
-  type AgentSessionEvent,
-  type CubeThread,
-  type ModelPreference,
-  type ThreadSession,
-} from "@cube/harness";
 import {
   type CubeBackend,
   type CubeProvisionSpec,
@@ -82,7 +74,6 @@ export interface SupervisorConfig {
   rootSize: string;
   dockerVolumeSize: string;
   egressAllow: string[];
-  prefer: ModelPreference;
   /** Idle-to-sleep timeout in ms off last_active_at (PLAN: default 1h).
    * <= 0 disables the idle sweep entirely. */
   idleMs: number;
@@ -101,33 +92,9 @@ export interface SupervisorConfig {
   };
 }
 
-export interface ThreadRuntime {
-  id: string;
-  cubeName: string;
-  thread: CubeThread;
-  events: EventEnvelope[];
-  busy: boolean;
-  /** The prompt text queued on provisioning/wake, not yet handed to the pi
-   * session (so absent from `messages`). History includes it so a page
-   * loaded mid-queue still shows what the user asked. */
-  activePrompt: string | null;
-  /** Set when the cube is being removed — reject new prompts (a prompt that
-   * passed the route's busy check must not start against a disposed session). */
-  closed: boolean;
-  /** Distinguishes this runtime's event numbering from earlier incarnations:
-   * seq restarts at 0 on reopen, so an SSE client resuming with a stale
-   * Last-Event-ID must be told to re-sync instead of silently skipping
-   * replay (the id is "<epoch>.<seq>"). */
-  epoch: string;
-  subscribers: Set<(envelope: EventEnvelope) => void>;
-  /** Run on removal: lets the HTTP layer end open SSE responses. */
-  closers: Set<() => void>;
-}
-
 interface CubeRuntime {
   name: string;
   proxy: EgressProxy | null;
-  threads: Map<string, ThreadRuntime>;
 }
 
 export interface CubeSummary {
@@ -135,7 +102,6 @@ export interface CubeSummary {
   status: string;
   error: string | null;
   ip: string | null;
-  busy: boolean;
   threadCount: number;
   createdAt: number | null;
   lastActiveAt: number | null;
@@ -147,7 +113,6 @@ export interface UserThreadSummary {
   id: string;
   title: string | null;
   state: "setting-up" | "ready" | "sleeping" | "error";
-  busy: boolean;
   error: string | null;
   createdAt: number | null;
   archived: boolean;
@@ -202,10 +167,6 @@ export class CubeSupervisor {
   private readonly config: SupervisorConfig;
   private readonly git: GitService;
   private readonly runtimes = new Map<string, CubeRuntime>();
-  // In-flight thread opens, keyed by cube/threadRow. Two concurrent opens of
-  // the same thread would otherwise create two pi sessions appending to the
-  // same JSONL file.
-  private readonly opening = new Map<string, Promise<ThreadRuntime>>();
   // In-flight sleep/wake per cube. Status flips ("asleep"/"waking") happen
   // synchronously before the incus work, so concurrent callers observe the
   // transition and await this promise instead of racing a second stop/start.
@@ -475,24 +436,17 @@ export class CubeSupervisor {
   listCubes(): CubeSummary[] {
     const summaries: CubeSummary[] = [];
     for (const cube of this.registry.listCubes()) {
-      const runtime = this.runtimes.get(cube.name);
       summaries.push({
         name: cube.name,
         status: cube.status,
         error: cube.error,
         ip: networkForCube(cube.name, cube.subnetIndex).ip,
-        busy: runtime ? this.cubeBusy(runtime) : false,
         threadCount: this.registry.listThreads(cube.id).length,
         createdAt: cube.createdAt,
         lastActiveAt: cube.lastActiveAt,
       });
     }
     return summaries;
-  }
-
-  private cubeBusy(runtime: CubeRuntime): boolean {
-    for (const thread of runtime.threads.values()) if (thread.busy) return true;
-    return false;
   }
 
   /**
@@ -676,8 +630,6 @@ export class CubeSupervisor {
     if (cube.status !== "ready") {
       throw new Error(`cube ${name} is not ready (status: ${cube.status}) — cannot sleep`);
     }
-    const runtime = this.runtimes.get(name);
-    if (runtime && this.cubeBusy(runtime)) throw new Error(`cube ${name} is busy`);
     this.registry.setCubeStatus(name, "asleep");
     return this.transition(name, this.doSleep(cube));
   }
@@ -1202,8 +1154,6 @@ export class CubeSupervisor {
       // status and busy, but not idleness — manual sleeps ignore it).
       const fresh = this.registry.getCube(cube.name);
       if (!fresh || fresh.status !== "ready" || fresh.lastActiveAt > cutoff) continue;
-      const runtime = this.runtimes.get(cube.name);
-      if (runtime && this.cubeBusy(runtime)) continue;
       await this.sleepCube(cube.name).catch((error) => {
         console.log(`idle sleep ${cube.name}: ${String(error)}`);
       });
@@ -1226,33 +1176,19 @@ export class CubeSupervisor {
       // resurrect the instance mid-teardown.
       throw new Error(`cube ${name} is busy (sleep/wake/removal in flight) — retry shortly`);
     }
-    for (const key of this.opening.keys()) {
-      // A thread open in flight would finish AFTER the teardown and
-      // register a live runtime into the void (accepting prompts against a
-      // destroyed sandbox). requireCube blocks new opens once `removing`
-      // is set; this blocks the ones already past that check.
-      if (key.startsWith(`${name}/`)) throw new Error(`cube ${name} is busy opening a thread — retry shortly`);
-    }
     // A push/PR mid-flight must finish (or be waited out) before teardown —
     // destroying the workspace under a running push could publish a partial
     // state or orphan the branch. withGitOp also rejects new ops once
     // `removing` is set below.
     if (this.gitOps.has(name)) throw new Error(`cube ${name} is busy pushing — retry shortly`);
-    const runtime = this.runtimes.get(name);
-    if (runtime && this.cubeBusy(runtime)) throw new Error(`cube ${name} is busy`);
     this.removing.add(name); // sync with the guards above: no await between
     // A portal-triggered ensure still polling readiness would otherwise keep
     // exec'ing into the instance being destroyed.
     this.ensuring.get(name)?.controller.abort(new Error(`cube ${name} is being removed`));
     this.lastEnsure.delete(name);
     try {
-      if (runtime) {
-        // closed is set synchronously before any await: a concurrent prompt
-        // that already resolved its runtime sees it and 409s.
-        for (const thread of runtime.threads.values()) this.closeThread(thread);
-        await runtime.proxy?.close();
-        this.runtimes.delete(name);
-      }
+      await this.runtimes.get(name)?.proxy?.close();
+      this.runtimes.delete(name);
       const net = networkForCube(name, cube.subnetIndex);
       try {
         await this.backend.destroy(
@@ -1269,15 +1205,6 @@ export class CubeSupervisor {
     } finally {
       this.removing.delete(name);
     }
-  }
-
-  private closeThread(thread: ThreadRuntime): void {
-    thread.closed = true;
-    this.publish(thread, { type: "cubed_thread_closed" });
-    thread.thread.dispose();
-    for (const close of thread.closers) close();
-    thread.closers.clear();
-    thread.subscribers.clear();
   }
 
   // ---------------------------------------------------------------- threads
@@ -1369,7 +1296,6 @@ export class CubeSupervisor {
   listUserThreads(includeArchived = false): UserThreadSummary[] {
     const threads: UserThreadSummary[] = [];
     for (const cube of this.registry.listCubes()) {
-      const cubeRuntime = this.runtimes.get(cube.name);
       for (const thread of this.registry.listThreads(cube.id)) {
         if (thread.archivedAt !== null && !includeArchived) continue;
         const project = this.registry.getProject(thread.projectId);
@@ -1378,7 +1304,6 @@ export class CubeSupervisor {
           id: thread.id,
           title: thread.title ?? this.autoTitle(thread),
           state: threadState(cube.status),
-          busy: cubeRuntime?.threads.get(thread.id)?.busy ?? false,
           error: cube.error,
           createdAt: thread.createdAt,
           archived: thread.archivedAt !== null,
@@ -1451,14 +1376,6 @@ export class CubeSupervisor {
     onStatus: (text: string) => void,
   ): Promise<{ argv: string[]; cwd: string; env: Record<string, string | undefined> }> {
     const { cubeName, threadId } = this.resolveUserThread(id);
-    // One writer per session file: a live in-process runtime (cube-scoped
-    // debug routes) must not share the JSONL with the TUI process.
-    const live = this.runtimes.get(cubeName)?.threads.get(threadId);
-    if (live?.busy) throw new Error("thread is busy answering an API prompt — try again shortly");
-    if (live) {
-      this.closeThread(live);
-      this.runtimes.get(cubeName)!.threads.delete(threadId);
-    }
     let cube = this.requireCube(cubeName);
     if (cube.status === "creating") {
       onStatus("setting up this thread's environment…");
@@ -1617,148 +1534,20 @@ export class CubeSupervisor {
     return null;
   }
 
-  /**
-   * Get a live runtime for a thread, reopening its pi session if cubed
-   * restarted since it was created. `threadId` omitted = latest thread.
-   */
-  async thread(cubeName: string, threadId?: string): Promise<ThreadRuntime> {
-    const cube = this.requireCube(cubeName);
-    const runtime = this.runtime(cubeName);
-    const rows = this.registry.listThreads(cube.id);
-    const row = threadId ? rows.find((r) => r.id === threadId) : rows.at(-1);
-    if (!row) throw new Error(threadId ? `no such thread: ${threadId}` : `cube ${cubeName} has no threads`);
-
-    const live = runtime.threads.get(row.id);
-    if (live) return live;
-    // "open" tolerates a not-yet-flushed session: pi's SessionManager keeps
-    // the explicit path and starts a fresh session there, under the same
-    // thread id — the registry row never needs rebinding.
-    return this.dedupe(`${cubeName}/${row.id}`, () =>
-      this.instantiate(cube, { mode: "open", path: row.piSessionPath }, row.id),
-    );
-  }
-
-  /** Collapse concurrent opens of the same thread into one instantiation. */
-  private dedupe(key: string, open: () => Promise<ThreadRuntime>): Promise<ThreadRuntime> {
-    const inFlight = this.opening.get(key);
-    if (inFlight) return inFlight;
-    const promise = open().finally(() => this.opening.delete(key));
-    this.opening.set(key, promise);
-    return promise;
-  }
-
-  private async instantiate(
-    cube: CubeRow,
-    session: ThreadSession,
-    threadId?: string,
-  ): Promise<ThreadRuntime> {
-    const runtime = this.runtime(cube.name);
-    const cubeSpec: CubeSpec = {
-      name: instanceName(cube.name),
-      hostWorkspace: cube.workspacePath,
-      guestWorkspace: "/workspace",
-      sessionDir: path.join(this.config.cubesRoot, cube.name, "sessions"),
-    };
-    const thread = await createCubeThread(
-      cubeSpec,
-      this.backend.sandbox(cubeSpec.name),
-      this.config.prefer,
-      // The ensure callback wakes the cube itself; a services_ensure call
-      // therefore works even if the agent's turn started pre-provisioning.
-      { session, ensureServices: () => this.ensureCubeServices(cube.name) },
-    );
-    return this.register(runtime, thread, threadId);
-  }
-
-  /** `threadId` pins the runtime to a stable registry thread id when it
-   * differs from the pi session id (reopen after an empty-thread rebind). */
-  private register(runtime: CubeRuntime, thread: CubeThread, threadId?: string): ThreadRuntime {
-    const threadRuntime: ThreadRuntime = {
-      id: threadId ?? thread.sessionId,
-      cubeName: runtime.name,
-      thread,
-      events: [],
-      busy: false,
-      activePrompt: null,
-      closed: false,
-      epoch: Math.random().toString(36).slice(2, 10),
-      subscribers: new Set(),
-      closers: new Set(),
-    };
-    thread.subscribe((event: AgentSessionEvent) => this.publish(threadRuntime, event));
-    runtime.threads.set(threadRuntime.id, threadRuntime);
-    return threadRuntime;
-  }
-
-  private publish(runtime: ThreadRuntime, event: unknown): void {
-    const envelope: EventEnvelope = {
-      seq: runtime.events.length,
-      ts: Date.now(),
-      threadId: runtime.id,
-      event,
-    };
-    runtime.events.push(envelope);
-    for (const subscriber of runtime.subscribers) subscriber(envelope);
-  }
-
-  /** Run a prompt on a thread, waking the cube first if it sleeps. Caller
-   * checks `busy` first (409 path); busy is set synchronously here, so the
-   * idle sweep cannot stop the cube between wake and prompt. */
-  async prompt(runtime: ThreadRuntime, text: string): Promise<void> {
-    runtime.busy = true;
-    runtime.activePrompt = text;
-    const registered = this.registry.getCube(runtime.cubeName);
-    if (registered) this.registry.touchCube(runtime.cubeName);
-    this.publish(runtime, { type: "cubed_user_prompt", text });
-    // First prompt names the thread (the user never names anything).
-    const row = this.registry.getThread(runtime.id);
-    if (row && row.title === null) {
-      this.registry.setThreadTitle(runtime.id, text.replace(/\s+/g, " ").trim().slice(0, 80));
-    }
-    try {
-      if (registered) {
-        if (registered.status === "creating") {
-          this.publish(runtime, { type: "cubed_provisioning" });
-        } else if (registered.status !== "ready") {
-          this.publish(runtime, { type: "cubed_waking" });
-        }
-        // Always via wakeCube: it settles on the provisioning/sleep/wake
-        // transition and verifies even a "ready" row against the actual
-        // instance state (the agent can stop its own container).
-        await this.wakeCube(runtime.cubeName);
-      }
-      // From here the prompt lives in the pi session's messages — clearing
-      // first would double-render it in a history snapshot, keeping it
-      // would too.
-      runtime.activePrompt = null;
-      await runtime.thread.prompt(text);
-    } catch (error) {
-      this.publish(runtime, { type: "cubed_error", message: String(error) });
-    } finally {
-      runtime.busy = false;
-      runtime.activePrompt = null;
-      this.publish(runtime, { type: "cubed_idle" });
-      if (this.registry.getCube(runtime.cubeName)) this.registry.touchCube(runtime.cubeName);
-    }
-  }
-
   async close(): Promise<void> {
     if (this.sweepTimer) {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
     await Promise.all([...this.projectChecks.values()].map((check) => check.catch(() => {})));
-    for (const runtime of this.runtimes.values()) {
-      for (const thread of runtime.threads.values()) this.closeThread(thread);
-      await runtime.proxy?.close();
-    }
+    for (const runtime of this.runtimes.values()) await runtime.proxy?.close();
     this.runtimes.clear();
   }
 
   private runtime(name: string): CubeRuntime {
     let runtime = this.runtimes.get(name);
     if (!runtime) {
-      runtime = { name, proxy: null, threads: new Map() };
+      runtime = { name, proxy: null };
       this.runtimes.set(name, runtime);
     }
     return runtime;

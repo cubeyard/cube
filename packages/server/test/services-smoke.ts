@@ -38,10 +38,6 @@ const supervisor = new CubeSupervisor(registry, new IncusBackend(incus), {
   dockerVolumeSize: "5GiB",
   egressAllow: DEFAULT_EGRESS_ALLOW,
   idleMs: 0,
-  prefer: [
-    ["openai-codex", "gpt-5.6-luna"],
-    ["deepseek", "deepseek-v4-pro"],
-  ],
   portalBase: "cube.internal",
   publicPort: PUBLIC_PORT,
 });

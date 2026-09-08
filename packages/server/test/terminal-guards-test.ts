@@ -58,7 +58,6 @@ const supervisor = new CubeSupervisor(registry, { kind: "mock" } as never, {
   rootSize: "10GiB",
   dockerVolumeSize: "5GiB",
   egressAllow: [],
-  prefer: [],
   idleMs: 0,
   portalBase: "cube.internal",
   publicPort: 7777,
