@@ -15,13 +15,17 @@ The agent's tools run inside the container; your credentials never do.
 
 ## Install
 
-The commands below require a published VM release in
-[cubeyard/cube](https://github.com/cubeyard/cube/releases). Until the first
-release (`v0.1.0`) is available, use
-[Building from source](#building-from-source-the-dev-loop).
-
 Three things on the host: a hypervisor, `ssh`, and `curl`. Nothing else runs
 on the host — no Node, no Docker, no Incus, no Nix; the VM carries all of it.
+
+**macOS** (Apple Silicon or Intel, uses HVF):
+
+```sh
+brew install cubeyard/tap/cube
+cube up
+```
+
+Homebrew installs both the launcher and QEMU.
 
 **Linux** (x86_64 or arm64) with KVM (`/dev/kvm`):
 
@@ -29,13 +33,7 @@ on the host — no Node, no Docker, no Incus, no Nix; the VM carries all of it.
 sudo apt install qemu-system qemu-utils genisoimage ovmf curl openssh-client
 ```
 
-**macOS** (Apple Silicon or Intel, uses HVF):
-
-```sh
-brew install qemu
-```
-
-Then:
+Then install the launcher manually (also works on macOS after `brew install qemu`):
 
 ```sh
 mkdir -p ~/.local/bin
@@ -71,24 +69,14 @@ installations (Homebrew installations use `brew upgrade cube`).
 Releases carry per-arch artifact SETS (base, app, app tarball,
 cube-node) with a manifest and `SHA256SUMS.<arch>`; artifacts are
 stored content-addressed under `~/.cube/images`, so an upgrade
-downloads only what actually changed. A Homebrew formula is not available yet.
+downloads only what actually changed.
 
-### Homebrew (macOS; pending tap publication)
+### Homebrew updates and uninstall
 
-Once the `cubeyard/homebrew-tap` repository has been published with a
-Homebrew-aware release, installation will be:
-
-```sh
-brew install cubeyard/tap/cube
-cube up
-```
-
-Homebrew installs the launcher and QEMU; `cube up` downloads the VM.
 Use `brew upgrade cube` for the launcher and `cube upgrade` for the VM.
 Stop the VM with `cube down` before uninstalling. `brew uninstall cube`
-leaves `~/.cube` intact. To delete
-the VM and all its data, run `cube destroy --yes` before uninstalling.
-Until the tap is live, use the manual installation above. Maintainers:
+leaves `~/.cube` intact. To delete the VM and all its data, run
+`cube destroy --yes` before uninstalling. Maintainers:
 see [Homebrew publishing](DEVELOPING.md#homebrew-publishing).
 
 ## Using it from other machines
