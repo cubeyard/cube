@@ -16,7 +16,6 @@ process.stdout.write(`class Cube < Formula
   desc "Self-hosted coding-agent sandboxes on a VM you own"
   homepage "https://github.com/cubeyard/cube"
   url "https://github.com/cubeyard/cube/releases/download/${tag}/cube"
-  version "${tag.slice(1)}"
   sha256 "${sha}"
   license "Apache-2.0"
 
