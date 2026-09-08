@@ -66,11 +66,30 @@ cube down       # stop;  cube ssh / cube logs / cube destroy --yes also exist
 ```
 
 The launcher is versioned WITH the artifact set it knows how to read:
-it ships as an asset on every release and `cube upgrade` refreshes it.
+it ships as an asset on every release and `cube upgrade` refreshes manual
+installations (Homebrew installations use `brew upgrade cube`).
 Releases carry per-arch artifact SETS (base, app, app tarball,
 cube-node) with a manifest and `SHA256SUMS.<arch>`; artifacts are
 stored content-addressed under `~/.cube/images`, so an upgrade
 downloads only what actually changed. A Homebrew formula is not available yet.
+
+### Homebrew (macOS; pending tap publication)
+
+Once the `cubeyard/homebrew-tap` repository has been published with a
+Homebrew-aware release, installation will be:
+
+```sh
+brew install cubeyard/tap/cube
+cube up
+```
+
+Homebrew installs the launcher and QEMU; `cube up` downloads the VM.
+Use `brew upgrade cube` for the launcher and `cube upgrade` for the VM.
+Stop the VM with `cube down` before uninstalling. `brew uninstall cube`
+leaves `~/.cube` intact. To delete
+the VM and all its data, run `cube destroy --yes` before uninstalling.
+Until the tap is live, use the manual installation above. Maintainers:
+see [Homebrew publishing](DEVELOPING.md#homebrew-publishing).
 
 ## Using it from other machines
 

@@ -382,3 +382,42 @@ forces local-only use; loopback always kept), `CUBE_VM_MEM` (`8G`),
 `node-version`, `package.json` engines) and pnpm via `packageManager` in
 `package.json` — build-app.sh, CI and the app disk all install exactly
 that version; a different local pnpm still works for the mock loop.
+
+## Homebrew publishing
+
+The macOS tap is `cubeyard/homebrew-tap` (`Formula/cube.rb`), installed
+with `brew install cubeyard/tap/cube`. It packages only the Bash launcher
+and depends on QEMU; VM downloads remain an explicit `cube up` operation.
+The formula sets `INSTALL_METHOD=homebrew` so `cube upgrade` never replaces
+Homebrew's launcher or symlink. `brew upgrade cube` owns launcher updates.
+Uninstalling the formula does not stop or delete the VM: run `cube down`
+first, or `cube destroy --yes` if the user wants to delete their data too.
+
+One-time setup (requires repository-owner authorization):
+
+1. Create the public `cubeyard/homebrew-tap` repository with an initial
+   README commit and a default branch.
+2. Create a fine-grained token restricted to that repository with Contents:
+   read/write. Store it as `HOMEBREW_TAP_TOKEN` in `cubeyard/cube` Actions
+   secrets. The normal `GITHUB_TOKEN` cannot push to the other repository.
+3. Set the `cubeyard/cube` Actions variable `CUBE_HOMEBREW_ENABLED=true`.
+4. Publish a stable release containing the Homebrew-aware launcher. Older
+   releases (including v0.1.1) cannot be used: formula generation rejects
+   launchers without the install-method marker.
+5. After the Homebrew job succeeds, remove the pending-publication notice
+   from README and make Homebrew the primary macOS install instructions.
+
+The release workflow calls `.github/workflows/homebrew.yml` directly after
+publication (not via a `release` event, which `GITHUB_TOKEN` would not
+trigger). It downloads the exact stable release's `cube` asset, generates
+the versioned URL and SHA-256 using `scripts/homebrew-formula.ts`, runs
+`brew install`, `brew audit --strict`, and `brew test` on macOS, then commits
+the formula to the tap. Prereleases and dry runs do not update the tap.
+The job is opt-in; without the variable, existing releases are unaffected.
+
+To retry a failed tap update or publish a promoted stable release, run
+the `homebrew` workflow manually with its `version` input. Choose the
+latest supported stable release; an older input would downgrade the tap.
+The formula tests do not boot a VM. Before announcing support, verify
+`cube up`, `cube upgrade`, and `cube down` on real Apple Silicon and Intel
+Macs, including a Homebrew upgrade with existing VM data.
