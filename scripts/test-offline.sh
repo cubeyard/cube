@@ -22,6 +22,7 @@ OFFLINE_TESTS=(
   packages/git/test/git-service-test.ts
   packages/pi-extension/test/code-mode-test.ts
   packages/pi-extension/test/pi-extension-test.ts
+  packages/pi-extension/test/diagnostics-test.ts
 )
 
 # Executed (not sourced): run the list.

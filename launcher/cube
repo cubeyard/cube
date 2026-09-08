@@ -26,6 +26,7 @@
 #                          KEEP the data disk (also refreshes this file)
 #   cube ssh [cmd...]      ssh into the VM as `cube`
 #   cube logs              follow cubed's journal
+#   cube diagnose          collect diagnostics and ask Pi for a root-cause analysis
 #   cube version           installed release version
 #   cube destroy --yes     stop and delete EVERYTHING in $CUBE_HOME
 #
@@ -877,6 +878,28 @@ cmd_ssh() {
 }
 cmd_logs() { cmd_ssh journalctl -u cubed -n 100 -f; }
 
+cmd_diagnose() {
+  local id
+  [ -f "$SSH_KEY" ] || { fail "no key yet — run: cube up"; return 1; }
+  case "$#:${1:-}" in
+    0:) vm_ssh sh /opt/cube/app/scripts/diagnose.sh </dev/null ;;
+    1:--collect-only|1:--help)
+      vm_ssh sh /opt/cube/app/scripts/diagnose.sh "$1" </dev/null
+      ;;
+    2:--export)
+      id="$2"
+      [[ "$id" =~ ^[a-f0-9-]{36}$ ]] \
+        || { fail "invalid diagnostic ID (expected a 36-character lowercase UUID)"; return 1; }
+      # vm_ssh never allocates a PTY, preserving the tar.gz byte stream.
+      vm_ssh sh /opt/cube/app/scripts/diagnose.sh --export "$id" </dev/null
+      ;;
+    *)
+      fail "usage: cube diagnose [--collect-only | --export <id> | --help]"
+      return 1
+      ;;
+  esac
+}
+
 cmd_upgrade() {
   local want="${1:-}" cur target role changed=() need reboot=0
   check_version_arg "$want"
@@ -974,6 +997,7 @@ cube — self-hosted coding-agent box (launcher)
                          managed by Homebrew (brew upgrade cube)
   cube ssh [cmd...]      ssh into the VM as `cube`
   cube logs              follow cubed's journal
+  cube diagnose [OPTIONS] collect diagnostics and ask Pi for root-cause analysis
   cube version           installed release version
   cube destroy --yes     stop and delete everything in $CUBE_HOME
 
@@ -1003,6 +1027,7 @@ case "$CMD" in
   status)   cmd_status "$@" ;;
   ssh)      cmd_ssh "$@" ;;
   logs)     cmd_logs ;;
+  diagnose) cmd_diagnose "$@" ;;
   upgrade)  cmd_upgrade "$@" ;;
   version)  cmd_version "$@" ;;
   destroy)  cmd_destroy "$@" ;;
