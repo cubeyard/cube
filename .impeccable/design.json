@@ -1,0 +1,646 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-27T13:40:25.509Z",
+  "title": "Design System: cube",
+  "extensions": {
+    "colorMeta": {
+      "signal": {
+        "role": "primary",
+        "displayName": "Signal Orange",
+        "canonical": "oklch(56.8% 0.186 37.9)",
+        "darkValue": "#ff5a14",
+        "tonalRamp": [
+          "oklch(15% 0.186 37.9)",
+          "oklch(26% 0.186 37.9)",
+          "oklch(38% 0.186 37.9)",
+          "oklch(49% 0.186 37.9)",
+          "oklch(61% 0.186 37.9)",
+          "oklch(72% 0.186 37.9)",
+          "oklch(84% 0.186 37.9)",
+          "oklch(95% 0.186 37.9)"
+        ]
+      },
+      "signal-ink": {
+        "role": "primary",
+        "displayName": "Signal Legend Ink",
+        "canonical": "oklch(100% 0 89.9)",
+        "darkValue": "#1c0d03",
+        "tonalRamp": [
+          "oklch(15% 0 89.9)",
+          "oklch(26% 0 89.9)",
+          "oklch(38% 0 89.9)",
+          "oklch(49% 0 89.9)",
+          "oklch(61% 0 89.9)",
+          "oklch(72% 0 89.9)",
+          "oklch(84% 0 89.9)",
+          "oklch(95% 0 89.9)"
+        ]
+      },
+      "lamp-green": {
+        "role": "secondary",
+        "displayName": "Lamp Green",
+        "canonical": "oklch(52.7% 0.111 152.2)",
+        "darkValue": "#57c97e",
+        "tonalRamp": [
+          "oklch(15% 0.111 152.2)",
+          "oklch(26% 0.111 152.2)",
+          "oklch(38% 0.111 152.2)",
+          "oklch(49% 0.111 152.2)",
+          "oklch(61% 0.111 152.2)",
+          "oklch(72% 0.111 152.2)",
+          "oklch(84% 0.111 152.2)",
+          "oklch(95% 0.111 152.2)"
+        ]
+      },
+      "lamp-amber": {
+        "role": "secondary",
+        "displayName": "Lamp Amber",
+        "canonical": "oklch(59.8% 0.125 67.8)",
+        "darkValue": "#e5a33c",
+        "tonalRamp": [
+          "oklch(15% 0.125 67.8)",
+          "oklch(26% 0.125 67.8)",
+          "oklch(38% 0.125 67.8)",
+          "oklch(49% 0.125 67.8)",
+          "oklch(61% 0.125 67.8)",
+          "oklch(72% 0.125 67.8)",
+          "oklch(84% 0.125 67.8)",
+          "oklch(95% 0.125 67.8)"
+        ]
+      },
+      "lamp-red": {
+        "role": "secondary",
+        "displayName": "Lamp Red",
+        "canonical": "oklch(51.1% 0.165 31.5)",
+        "darkValue": "#e5604a",
+        "tonalRamp": [
+          "oklch(15% 0.165 31.5)",
+          "oklch(26% 0.165 31.5)",
+          "oklch(38% 0.165 31.5)",
+          "oklch(49% 0.165 31.5)",
+          "oklch(61% 0.165 31.5)",
+          "oklch(72% 0.165 31.5)",
+          "oklch(84% 0.165 31.5)",
+          "oklch(95% 0.165 31.5)"
+        ]
+      },
+      "lamp-lens": {
+        "role": "secondary",
+        "displayName": "Unlit Lens",
+        "canonical": "oklch(81.8% 0.022 88.7)",
+        "darkValue": "#26262c",
+        "tonalRamp": [
+          "oklch(15% 0.022 88.7)",
+          "oklch(26% 0.022 88.7)",
+          "oklch(38% 0.022 88.7)",
+          "oklch(49% 0.022 88.7)",
+          "oklch(61% 0.022 88.7)",
+          "oklch(72% 0.022 88.7)",
+          "oklch(84% 0.022 88.7)",
+          "oklch(95% 0.022 88.7)"
+        ]
+      },
+      "bad": {
+        "role": "secondary",
+        "displayName": "Error Ink",
+        "canonical": "oklch(48.3% 0.145 32.4)",
+        "darkValue": "#e5604a",
+        "tonalRamp": [
+          "oklch(15% 0.145 32.4)",
+          "oklch(26% 0.145 32.4)",
+          "oklch(38% 0.145 32.4)",
+          "oklch(49% 0.145 32.4)",
+          "oklch(61% 0.145 32.4)",
+          "oklch(72% 0.145 32.4)",
+          "oklch(84% 0.145 32.4)",
+          "oklch(95% 0.145 32.4)"
+        ]
+      },
+      "s0": {
+        "role": "neutral",
+        "displayName": "Deep Recess",
+        "canonical": "oklch(88% 0.018 89.4)",
+        "darkValue": "#08080a",
+        "tonalRamp": [
+          "oklch(15% 0.018 89.4)",
+          "oklch(26% 0.018 89.4)",
+          "oklch(38% 0.018 89.4)",
+          "oklch(49% 0.018 89.4)",
+          "oklch(61% 0.018 89.4)",
+          "oklch(72% 0.018 89.4)",
+          "oklch(84% 0.018 89.4)",
+          "oklch(95% 0.018 89.4)"
+        ]
+      },
+      "s1": {
+        "role": "neutral",
+        "displayName": "Well",
+        "canonical": "oklch(90.7% 0.017 91.6)",
+        "darkValue": "#0f0f12",
+        "tonalRamp": [
+          "oklch(15% 0.017 91.6)",
+          "oklch(26% 0.017 91.6)",
+          "oklch(38% 0.017 91.6)",
+          "oklch(49% 0.017 91.6)",
+          "oklch(61% 0.017 91.6)",
+          "oklch(72% 0.017 91.6)",
+          "oklch(84% 0.017 91.6)",
+          "oklch(95% 0.017 91.6)"
+        ]
+      },
+      "s2": {
+        "role": "neutral",
+        "displayName": "Enclosure Putty",
+        "canonical": "oklch(93.2% 0.013 86.8)",
+        "darkValue": "#17171b",
+        "tonalRamp": [
+          "oklch(15% 0.013 86.8)",
+          "oklch(26% 0.013 86.8)",
+          "oklch(38% 0.013 86.8)",
+          "oklch(49% 0.013 86.8)",
+          "oklch(61% 0.013 86.8)",
+          "oklch(72% 0.013 86.8)",
+          "oklch(84% 0.013 86.8)",
+          "oklch(95% 0.013 86.8)"
+        ]
+      },
+      "s3": {
+        "role": "neutral",
+        "displayName": "Key Face",
+        "canonical": "oklch(95.9% 0.01 87.5)",
+        "darkValue": "#24242b",
+        "tonalRamp": [
+          "oklch(15% 0.01 87.5)",
+          "oklch(26% 0.01 87.5)",
+          "oklch(38% 0.01 87.5)",
+          "oklch(49% 0.01 87.5)",
+          "oklch(61% 0.01 87.5)",
+          "oklch(72% 0.01 87.5)",
+          "oklch(84% 0.01 87.5)",
+          "oklch(95% 0.01 87.5)"
+        ]
+      },
+      "s4": {
+        "role": "neutral",
+        "displayName": "Reading Field",
+        "canonical": "oklch(98.5% 0.005 95.1)",
+        "darkValue": "#101013",
+        "tonalRamp": [
+          "oklch(15% 0.005 95.1)",
+          "oklch(26% 0.005 95.1)",
+          "oklch(38% 0.005 95.1)",
+          "oklch(49% 0.005 95.1)",
+          "oklch(61% 0.005 95.1)",
+          "oklch(72% 0.005 95.1)",
+          "oklch(84% 0.005 95.1)",
+          "oklch(95% 0.005 95.1)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Engraved Ink",
+        "canonical": "oklch(25.7% 0.013 87.6)",
+        "darkValue": "#eae8e2",
+        "tonalRamp": [
+          "oklch(15% 0.013 87.6)",
+          "oklch(26% 0.013 87.6)",
+          "oklch(38% 0.013 87.6)",
+          "oklch(49% 0.013 87.6)",
+          "oklch(61% 0.013 87.6)",
+          "oklch(72% 0.013 87.6)",
+          "oklch(84% 0.013 87.6)",
+          "oklch(95% 0.013 87.6)"
+        ]
+      },
+      "ink-2": {
+        "role": "neutral",
+        "displayName": "Print Ink",
+        "canonical": "oklch(43.1% 0.028 93.6)",
+        "darkValue": "#b0ada6",
+        "tonalRamp": [
+          "oklch(15% 0.028 93.6)",
+          "oklch(26% 0.028 93.6)",
+          "oklch(38% 0.028 93.6)",
+          "oklch(49% 0.028 93.6)",
+          "oklch(61% 0.028 93.6)",
+          "oklch(72% 0.028 93.6)",
+          "oklch(84% 0.028 93.6)",
+          "oklch(95% 0.028 93.6)"
+        ]
+      },
+      "ink-3": {
+        "role": "neutral",
+        "displayName": "Silkscreen Ink",
+        "canonical": "oklch(48.3% 0.021 89.5)",
+        "darkValue": "#8b8880",
+        "tonalRamp": [
+          "oklch(15% 0.021 89.5)",
+          "oklch(26% 0.021 89.5)",
+          "oklch(38% 0.021 89.5)",
+          "oklch(49% 0.021 89.5)",
+          "oklch(61% 0.021 89.5)",
+          "oklch(72% 0.021 89.5)",
+          "oklch(84% 0.021 89.5)",
+          "oklch(95% 0.021 89.5)"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Printed Hairline",
+        "canonical": "oklch(83% 0.022 88.7)",
+        "darkValue": "#2b2b32",
+        "tonalRamp": [
+          "oklch(15% 0.022 88.7)",
+          "oklch(26% 0.022 88.7)",
+          "oklch(38% 0.022 88.7)",
+          "oklch(49% 0.022 88.7)",
+          "oklch(61% 0.022 88.7)",
+          "oklch(72% 0.022 88.7)",
+          "oklch(84% 0.022 88.7)",
+          "oklch(95% 0.022 88.7)"
+        ]
+      },
+      "line-2": {
+        "role": "neutral",
+        "displayName": "Machined Groove",
+        "canonical": "oklch(74.6% 0.024 87.2)",
+        "darkValue": "#3d3d46",
+        "tonalRamp": [
+          "oklch(15% 0.024 87.2)",
+          "oklch(26% 0.024 87.2)",
+          "oklch(38% 0.024 87.2)",
+          "oklch(49% 0.024 87.2)",
+          "oklch(61% 0.024 87.2)",
+          "oklch(72% 0.024 87.2)",
+          "oklch(84% 0.024 87.2)",
+          "oklch(95% 0.024 87.2)"
+        ]
+      },
+      "glass": {
+        "role": "tertiary",
+        "displayName": "Dark Glass",
+        "canonical": "oklch(21% 0.008 274.5)",
+        "darkValue": "#17181c",
+        "tonalRamp": [
+          "oklch(15% 0.008 274.5)",
+          "oklch(26% 0.008 274.5)",
+          "oklch(38% 0.008 274.5)",
+          "oklch(49% 0.008 274.5)",
+          "oklch(61% 0.008 274.5)",
+          "oklch(72% 0.008 274.5)",
+          "oklch(84% 0.008 274.5)",
+          "oklch(95% 0.008 274.5)"
+        ]
+      },
+      "glass-head": {
+        "role": "tertiary",
+        "displayName": "Glass Head",
+        "canonical": "oklch(24.8% 0.01 268.3)",
+        "darkValue": "#1f2126",
+        "tonalRamp": [
+          "oklch(15% 0.01 268.3)",
+          "oklch(26% 0.01 268.3)",
+          "oklch(38% 0.01 268.3)",
+          "oklch(49% 0.01 268.3)",
+          "oklch(61% 0.01 268.3)",
+          "oklch(72% 0.01 268.3)",
+          "oklch(84% 0.01 268.3)",
+          "oklch(95% 0.01 268.3)"
+        ]
+      },
+      "glass-ink": {
+        "role": "tertiary",
+        "displayName": "Glass Ink",
+        "canonical": "oklch(89% 0.011 280.5)",
+        "darkValue": "#d9dae2",
+        "tonalRamp": [
+          "oklch(15% 0.011 280.5)",
+          "oklch(26% 0.011 280.5)",
+          "oklch(38% 0.011 280.5)",
+          "oklch(49% 0.011 280.5)",
+          "oklch(61% 0.011 280.5)",
+          "oklch(72% 0.011 280.5)",
+          "oklch(84% 0.011 280.5)",
+          "oklch(95% 0.011 280.5)"
+        ]
+      },
+      "glass-line": {
+        "role": "tertiary",
+        "displayName": "Glass Ring",
+        "canonical": "oklch(30.2% 0.013 273)",
+        "darkValue": "#2c2e35",
+        "tonalRamp": [
+          "oklch(15% 0.013 273)",
+          "oklch(26% 0.013 273)",
+          "oklch(38% 0.013 273)",
+          "oklch(49% 0.013 273)",
+          "oklch(61% 0.013 273)",
+          "oklch(72% 0.013 273)",
+          "oklch(84% 0.013 273)",
+          "oklch(95% 0.013 273)"
+        ]
+      },
+      "glass-chrome": {
+        "role": "tertiary",
+        "displayName": "Glass Chrome",
+        "canonical": "oklch(70.5% 0.02 265.9)",
+        "darkValue": "#9aa0ad",
+        "tonalRamp": [
+          "oklch(15% 0.02 265.9)",
+          "oklch(26% 0.02 265.9)",
+          "oklch(38% 0.02 265.9)",
+          "oklch(49% 0.02 265.9)",
+          "oklch(61% 0.02 265.9)",
+          "oklch(72% 0.02 265.9)",
+          "oklch(84% 0.02 265.9)",
+          "oklch(95% 0.02 265.9)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "The screen title (\u201cthreads\u201d). One per screen."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Thread module titles and the inline rename input; truncates to one line."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "The transcript \u2014 agent prose, user messages, empty-state copy."
+      },
+      "key": {
+        "displayName": "Key Cap",
+        "purpose": "Key cap labels (\u201cnew thread\u201d, \u201cfiles\u201d)."
+      },
+      "label": {
+        "displayName": "Silkscreen",
+        "purpose": "Lowercase micro-labels printed on the enclosure: state labels, files head, code language. Header lamp-fields drop to 10px / 0.1em."
+      },
+      "code": {
+        "displayName": "Machine Truth",
+        "purpose": "Tool heads and output (12px), code blocks (12.5px), model id (11px). Weight 600 for tool names only."
+      }
+    },
+    "shadows": [
+      {
+        "name": "shadow-key",
+        "value": "0 1px 0 rgba(255, 255, 255, 0.7) inset, 0 1px 2px rgba(38, 32, 18, 0.22)",
+        "purpose": "A raised key standing proud of the panel: top inner highlight plus a short drop. Also on user message strips. Dark: 0 1px 0 rgba(255,255,255,0.07) inset, 0 1px 2px rgba(0,0,0,0.5)."
+      },
+      {
+        "name": "shadow-key-down",
+        "value": "0 1px 0 rgba(255, 255, 255, 0.4) inset, 0 0 1px rgba(38, 32, 18, 0.2)",
+        "purpose": "The pressed key \u2014 applied with translateY(1px) on :active and on held toggles."
+      },
+      {
+        "name": "shadow-well",
+        "value": "inset 0 1px 3px rgba(38, 32, 18, 0.14), inset 0 0 0 1px rgba(38, 32, 18, 0.05)",
+        "purpose": "Recessed surfaces: the thread-list well, the files shelf, the code window. Dark: inset 0 2px 5px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(0,0,0,0.55)."
+      },
+      {
+        "name": "shadow-float",
+        "value": "0 2px 8px rgba(38, 32, 18, 0.18)",
+        "purpose": "Declared but UNUSED. Reserved for a true overlay (menu, dialog) that does not yet exist. Nothing in the flat flow floats."
+      },
+      {
+        "name": "seam-header",
+        "value": "0 1px 0 color-mix(in srgb, var(--s4) 70%, transparent), 0 2px 0 color-mix(in srgb, var(--line) 60%, transparent)",
+        "purpose": "The machined double seam under the header deck (with its 1px --line-2 border): groove, highlight, second groove. Decks only \u2014 never on in-flow components."
+      },
+      {
+        "name": "seam-composer",
+        "value": "0 -1px 0 color-mix(in srgb, var(--s4) 65%, transparent) inset",
+        "purpose": "The composer deck's answering single inset highlight above its 1px --line-2 border-top."
+      }
+    ],
+    "motion": [
+      {
+        "name": "transition-state",
+        "value": "120ms ease",
+        "purpose": "Every hover/focus/reveal state change: background, color, border-color, chevron rotation, the tool collapse grid."
+      },
+      {
+        "name": "press-travel",
+        "value": "80ms ease (transform, box-shadow)",
+        "purpose": "Key press: 1px translateY down plus shadow swap to --shadow-key-down."
+      },
+      {
+        "name": "settle-in",
+        "value": "settle-in 140ms ease-out (from: opacity 0, translateY(2px))",
+        "purpose": "Entrance for messages, tools, banners, modules, shelves, empty states. A quick mechanical settle \u2014 nothing bounces."
+      },
+      {
+        "name": "lamp-on",
+        "value": "lamp-on 300ms ease-out backwards, staggered 60ms per module (capped at 300ms from the 6th)",
+        "purpose": "Lamps warm up once when the thread panel arrives."
+      },
+      {
+        "name": "lamp-blink",
+        "value": "lamp-blink 1.2s ease-in-out infinite (50% { opacity: 0.3 })",
+        "purpose": "The blinking state \u2014 always amber: working, setting up, a running tool."
+      },
+      {
+        "name": "reduced-motion-guard",
+        "value": "@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }",
+        "purpose": "Blanket opt-out; new motion needs no individual guard."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "mobile",
+        "value": "40rem"
+      },
+      {
+        "name": "bubble-margin",
+        "value": "53rem"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Key",
+      "kind": "button",
+      "refersTo": "key",
+      "description": "The default raised key: putty face, real 1px press travel, shadow swap on press.",
+      "html": "<button class=\"ds-key\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M6.5 3.5 H14 l3.5 3.5 V20.5 H6.5 Z M14 3.5 V7 h3.5\"/></svg>files</button>",
+      "css": ".ds-key { display: inline-flex; align-items: center; gap: 0.4rem; background: var(--s3); color: var(--ink-2); border: 1px solid var(--line); border-radius: var(--r-key); padding: 0.34rem 0.85rem; font: 550 13px/1.6 var(--font-ui); letter-spacing: 0.01em; white-space: nowrap; cursor: pointer; box-shadow: var(--shadow-key); transition: background 120ms ease, color 120ms ease, transform 80ms ease, box-shadow 80ms ease; } .ds-key:hover:not(:disabled) { color: var(--ink); background: var(--s4); } .ds-key:active:not(:disabled) { transform: translateY(1px); box-shadow: var(--shadow-key-down); } .ds-key:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; } .ds-key:disabled { opacity: 0.45; cursor: default; } .ds-key svg { display: block; }"
+    },
+    {
+      "name": "Primary Key",
+      "kind": "button",
+      "refersTo": "key-primary",
+      "description": "The one signal-orange key per screen (\u201cnew thread\u201d). Same physics as the default key.",
+      "html": "<button class=\"ds-key-primary\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 5 V19 M5 12 H19\"/></svg>new thread</button>",
+      "css": ".ds-key-primary { display: inline-flex; align-items: center; gap: 0.4rem; background: var(--signal); color: var(--signal-ink); border: 1px solid color-mix(in srgb, var(--signal) 80%, black); border-radius: var(--r-key); padding: 0.34rem 0.85rem; font: 550 13px/1.6 var(--font-ui); letter-spacing: 0.01em; white-space: nowrap; cursor: pointer; box-shadow: var(--shadow-key); transition: background 120ms ease, transform 80ms ease, box-shadow 80ms ease; } .ds-key-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--signal) 92%, white); } .ds-key-primary:active:not(:disabled) { transform: translateY(1px); box-shadow: var(--shadow-key-down); } .ds-key-primary:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; } .ds-key-primary:disabled { opacity: 0.45; cursor: default; } .ds-key-primary svg { display: block; }"
+    },
+    {
+      "name": "Round Send Key",
+      "kind": "button",
+      "refersTo": "key-round",
+      "description": "The circular signal send key in the composer. Carries title and aria-label.",
+      "html": "<button class=\"ds-key-round\" type=\"submit\" title=\"send (Enter)\" aria-label=\"send\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 19 V6 M6 11 l6 -6 6 6\"/></svg></button>",
+      "css": ".ds-key-round { width: 2.4rem; height: 2.4rem; display: inline-flex; align-items: center; justify-content: center; background: var(--signal); color: var(--signal-ink); border: 1px solid color-mix(in srgb, var(--signal) 80%, black); border-radius: 50%; cursor: pointer; box-shadow: var(--shadow-key); transition: background 120ms ease, transform 80ms ease, box-shadow 80ms ease; } .ds-key-round:hover:not(:disabled) { background: color-mix(in srgb, var(--signal) 92%, white); } .ds-key-round:active:not(:disabled) { transform: translateY(1px); box-shadow: var(--shadow-key-down); } .ds-key-round:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; } .ds-key-round:disabled { opacity: 0.45; cursor: default; } .ds-key-round svg { display: block; }"
+    },
+    {
+      "name": "Lamp Field",
+      "kind": "custom",
+      "refersTo": null,
+      "description": "The state vocabulary: lit green, blinking amber, steady red, unlit lens \u2014 structurally distinct, never four tints. Header lamps carry a 10px silkscreen label.",
+      "html": "<span class=\"ds-lamp-field\"><span class=\"ds-lamp ds-on-green\"></span>ready</span> <span class=\"ds-lamp-field\"><span class=\"ds-lamp ds-on-amber ds-blink\"></span>working</span> <span class=\"ds-lamp-field\"><span class=\"ds-lamp ds-on-red\"></span>error</span> <span class=\"ds-lamp-field\"><span class=\"ds-lamp\"></span>sleeping</span>",
+      "css": ".ds-lamp-field { display: inline-flex; align-items: center; gap: 0.4rem; margin-right: 1rem; font: 550 10px/1.6 var(--font-ui); letter-spacing: 0.1em; color: var(--ink-3); white-space: nowrap; } .ds-lamp { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--lamp-lens); box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.35), 0 0 0 1px var(--lamp-ring); } .ds-on-green { background: var(--lamp-green); box-shadow: 0 0 5px 0 color-mix(in srgb, var(--lamp-green) 55%, transparent); } .ds-on-amber { background: var(--lamp-amber); box-shadow: 0 0 5px 0 color-mix(in srgb, var(--lamp-amber) 55%, transparent); } .ds-on-red { background: var(--lamp-red); box-shadow: 0 0 5px 0 color-mix(in srgb, var(--lamp-red) 55%, transparent); } .ds-blink { animation: ds-lamp-blink 1.2s ease-in-out infinite; } @keyframes ds-lamp-blink { 50% { opacity: 0.3; } }"
+    },
+    {
+      "name": "Thread Module Well",
+      "kind": "card",
+      "refersTo": "well",
+      "description": "The recessed well holding one module per thread: lamp, title, tabular meta, and the rename/delete keys inside the module at 0.55 rest opacity.",
+      "html": "<div class=\"ds-well\"><div class=\"ds-module\"><a class=\"ds-module-face\" href=\"#\"><span class=\"ds-lamp ds-on-green\"></span><span class=\"ds-module-text\"><span class=\"ds-module-title\">fix the portal proxy race</span><span class=\"ds-module-meta\"><span>12m ago</span><span class=\"ds-state-label\">ready</span></span></span></a><div class=\"ds-module-actions\"><button class=\"ds-key-icon\" title=\"rename thread\" aria-label=\"rename thread\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4.5 19.5 5.3 16 15.8 5.5 a2.05 2.05 0 0 1 2.9 2.9 L8.2 18.9 4.5 19.5 Z M14.3 7 l2.9 2.9\"/></svg></button><button class=\"ds-key-icon ds-danger\" title=\"delete thread\" aria-label=\"delete thread\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4.5 6.5 h15 M9.5 6.5 V4.2 h5 v2.3 M6.3 6.5 l0.9 13 h9.6 l0.9 -13 M10 10.2 v6 M14 10.2 v6\"/></svg></button></div></div></div>",
+      "css": ".ds-well { background: var(--s1); border-radius: var(--r-well); box-shadow: var(--shadow-well); padding: 0.35rem; } .ds-module { display: flex; align-items: center; position: relative; } .ds-module-face { flex: 1; min-width: 0; display: flex; align-items: center; gap: 0.8rem; padding: 0.8rem 0.75rem; border-radius: calc(var(--r-well) - 5px); background: var(--face-rest); color: inherit; text-decoration: none; transition: background 120ms ease; } .ds-module-face:hover { background: color-mix(in srgb, var(--s3) 55%, transparent); } .ds-lamp { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--lamp-lens); box-shadow: inset 0 1px 2px rgba(0,0,0,0.35), 0 0 0 1px var(--lamp-ring); } .ds-on-green { background: var(--lamp-green); box-shadow: 0 0 5px 0 color-mix(in srgb, var(--lamp-green) 55%, transparent); } .ds-module-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; } .ds-module-title { font: 600 14.5px/1.6 var(--font-ui); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-module-meta { display: flex; gap: 0.7rem; align-items: center; font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; } .ds-state-label { letter-spacing: 0.06em; font-size: 11px; font-weight: 550; } .ds-module-actions { display: flex; gap: 0.3rem; align-items: center; padding-right: 0.6rem; flex: none; } .ds-module-actions button { opacity: 0.55; transition: opacity 120ms ease, background 120ms ease, color 120ms ease, transform 80ms ease, box-shadow 80ms ease; } .ds-module:hover .ds-module-actions button, .ds-module:focus-within .ds-module-actions button { opacity: 1; } @media (hover: none) { .ds-module-actions button { opacity: 1; } } .ds-key-icon { display: inline-flex; align-items: center; background: var(--s3); color: var(--ink-2); border: 1px solid var(--line); border-radius: var(--r-key); padding: 0.34rem 0.45rem; cursor: pointer; box-shadow: var(--shadow-key); } .ds-key-icon:hover { color: var(--ink); background: var(--s4); } .ds-key-icon:active { transform: translateY(1px); box-shadow: var(--shadow-key-down); } .ds-key-icon:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; } .ds-danger:hover { color: var(--bad); background: var(--bad-soft); border-color: var(--bad-line); } .ds-key-icon svg { display: block; }"
+    },
+    {
+      "name": "Composer Input",
+      "kind": "input",
+      "refersTo": "composer-input",
+      "description": "The engraved entry well: reading-field fill, shallow inset, focus swaps the border to signal (the one sanctioned replacement of the global ring).",
+      "html": "<textarea class=\"ds-composer-input\" rows=\"1\" placeholder=\"ask anything\u2026\" aria-label=\"prompt\"></textarea>",
+      "css": ".ds-composer-input { width: 100%; resize: none; background: var(--s4); color: var(--ink); font: 15.5px/1.5 var(--font-ui); border: 1px solid var(--line); border-radius: var(--r-key); box-shadow: inset 0 1px 2px rgba(38, 32, 18, 0.1); padding: 0.55rem 0.85rem; max-height: 11rem; transition: border-color 120ms ease; } .ds-composer-input:focus { outline: none; border-color: var(--signal); } .ds-composer-input::placeholder { color: var(--ink-3); } @media (max-width: 40rem) { .ds-composer-input { font-size: 16px; } }"
+    },
+    {
+      "name": "Code Window",
+      "kind": "custom",
+      "refersTo": "code-window",
+      "description": "Dark glass in BOTH themes: glass body in an inset well, mono language label and copy key in glass chrome, one syntax set.",
+      "html": "<div class=\"ds-code\"><div class=\"ds-code-head\"><span class=\"ds-code-lang\">bash</span><button type=\"button\" class=\"ds-code-copy\" aria-label=\"copy code\"><svg width=\"11\" height=\"11\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M9.5 8.5 h9.5 v11 h-9.5 Z M5.5 15 V4.5 H15\"/></svg>copy</button></div><pre class=\"ds-code-body\"><code><span style=\"color:var(--syn-meta)\">incus</span> exec cube <span style=\"color:var(--syn-string)\">\"docker compose up\"</span></code></pre></div>",
+      "css": ".ds-code { border-radius: var(--r-key); overflow: hidden; background: var(--glass); box-shadow: inset 0 0 0 1px var(--glass-line), var(--shadow-well); } .ds-code-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.3rem 0.4rem 0.3rem 0.9rem; background: var(--glass-head); border-bottom: 1px solid var(--glass-line); } .ds-code-lang { font: 550 11px/1.6 var(--font-mono); letter-spacing: 0.08em; color: #9aa0ad; } .ds-code-copy { display: inline-flex; align-items: center; gap: 0.35rem; background: none; border: 0; color: #9aa0ad; font: 550 11px/1.6 var(--font-ui); padding: 0.2rem 0.5rem; border-radius: 5px; cursor: pointer; transition: color 120ms ease, background 120ms ease; } .ds-code-copy:hover { color: var(--glass-ink); background: rgba(255, 255, 255, 0.07); } .ds-code-copy:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; } .ds-code-copy svg { display: block; } .ds-code-body { margin: 0; padding: 0.65rem 0.9rem; overflow-x: auto; } .ds-code-body code { font: 12.5px/1.55 var(--font-mono); color: var(--glass-ink); }"
+    },
+    {
+      "name": "Tool Strip",
+      "kind": "custom",
+      "refersTo": "tool-strip",
+      "description": "The signature meter strip: mini status lamp, mono tool name, plain primary argument, chevron; recessed output window below, open by default, animated via grid rows.",
+      "html": "<div class=\"ds-tool\"><button class=\"ds-tool-head\" type=\"button\" aria-expanded=\"true\"><span class=\"ds-lamp-mini ds-on-green\"></span><span class=\"ds-tool-name\">bash</span><span class=\"ds-tool-args\">pnpm typecheck</span><span class=\"ds-tool-chevron\"><svg width=\"12\" height=\"12\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M6.5 9.5 l5.5 5.5 5.5 -5.5\"/></svg></span></button><div class=\"ds-tool-body\"><div class=\"ds-tool-clip\"><pre class=\"ds-tool-out\">0 errors</pre></div></div></div>",
+      "css": ".ds-tool { border: 1px solid var(--line); border-radius: var(--r-key); background: var(--s3); font-size: 13px; overflow: hidden; box-shadow: 0 1px 1px rgba(38, 32, 18, 0.06); } .ds-tool-head { display: flex; align-items: center; gap: 0.55rem; width: 100%; text-align: left; background: none; border: 0; padding: 0.45rem 0.75rem; color: var(--ink-2); font: 12px/1.5 var(--font-mono); overflow-wrap: anywhere; cursor: pointer; transition: color 120ms ease; } .ds-tool-head:hover { color: var(--ink); } .ds-tool-head:focus-visible { outline: 2px solid var(--signal); outline-offset: -2px; } .ds-lamp-mini { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--lamp-lens); } .ds-on-green { background: var(--lamp-green); box-shadow: 0 0 5px 0 color-mix(in srgb, var(--lamp-green) 55%, transparent); } .ds-tool-name { flex: none; white-space: nowrap; font-weight: 600; } .ds-tool-args { color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-tool-chevron { flex: none; margin-left: auto; color: var(--ink-3); display: flex; transition: transform 120ms ease; } .ds-tool-body { display: grid; grid-template-rows: 1fr; transition: grid-template-rows 120ms ease; } .ds-tool-clip { overflow: hidden; min-height: 0; } .ds-tool-out { margin: 0; padding: 0.55rem 0.85rem; border-top: 1px solid var(--line); overflow-x: auto; max-height: 16rem; overflow-y: auto; font: 12px/1.55 var(--font-mono); color: var(--ink-2); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--s1); box-shadow: inset 0 1px 2px rgba(38, 32, 18, 0.08); }"
+    },
+    {
+      "name": "Banners",
+      "kind": "custom",
+      "refersTo": "banner-error",
+      "description": "Printed notices, two tones only: info is silkscreen wash, error is red ink. Lifecycle notices are always info.",
+      "html": "<div class=\"ds-banner ds-banner-info\">setting up environment\u2026</div><div class=\"ds-banner\">prompt rejected: thread is busy</div>",
+      "css": ".ds-banner { margin: 0 0 0.6rem; padding: 0.5rem 0.9rem; border-radius: var(--r-key); font-size: 13px; background: var(--bad-soft); border: 1px solid var(--bad-line); color: var(--bad); } .ds-banner-info { background: var(--note-soft); border-color: var(--note-line); color: var(--ink-2); }"
+    },
+    {
+      "name": "Header Panel",
+      "kind": "nav",
+      "refersTo": null,
+      "description": "The instrument's top panel: signal cube glyph and engraved wordmark, mono model id, labeled lamps (working, auth), keys right, machined double seam below.",
+      "html": "<header class=\"ds-header\"><a class=\"ds-header-name\" href=\"#\"><span class=\"ds-header-glyph\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linejoin=\"round\"><path d=\"M12 2 21 7 V17 L12 22 3 17 V7 Z\"/><path d=\"M3 7 L12 12 21 7 M12 12 V22\"/></svg></span>cube</a><span class=\"ds-header-model\">anthropic/claude-opus-5</span><span class=\"ds-header-spacer\"></span><span class=\"ds-header-lampfield\"><span class=\"ds-lamp ds-on-amber ds-blink\"></span>working</span><span class=\"ds-header-lampfield\"><span class=\"ds-lamp ds-on-green\"></span>auth</span></header>",
+      "css": ".ds-header { display: flex; gap: 0.9rem; align-items: center; padding: 0.7rem 1.1rem; background: var(--s2); border-bottom: 1px solid var(--line-2); box-shadow: 0 1px 0 color-mix(in srgb, var(--s4) 70%, transparent), 0 2px 0 color-mix(in srgb, var(--line) 60%, transparent); font: 13px/1.6 var(--font-ui); color: var(--ink-2); } .ds-header-name { display: flex; align-items: center; gap: 0.5rem; color: var(--ink); font-weight: 700; font-size: 15px; text-decoration: none; letter-spacing: 0.01em; } .ds-header-glyph { color: var(--signal); display: flex; } .ds-header-model { font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-header-spacer { margin-left: auto; } .ds-header-lampfield { display: flex; align-items: center; gap: 0.4rem; font-size: 10px; font-weight: 550; letter-spacing: 0.1em; color: var(--ink-3); white-space: nowrap; } .ds-lamp { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--lamp-lens); box-shadow: inset 0 1px 2px rgba(0,0,0,0.35), 0 0 0 1px var(--lamp-ring); } .ds-on-green { background: var(--lamp-green); box-shadow: 0 0 5px 0 color-mix(in srgb, var(--lamp-green) 55%, transparent); } .ds-on-amber { background: var(--lamp-amber); box-shadow: 0 0 5px 0 color-mix(in srgb, var(--lamp-amber) 55%, transparent); } .ds-blink { animation: ds-lamp-blink 1.2s ease-in-out infinite; } @keyframes ds-lamp-blink { 50% { opacity: 0.3; } }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Bench Instrument",
+    "overview": "cube is rendered as a machine you own: a warm silkscreened bench instrument in the Braun / Teenage Engineering panel lineage. The screen is the instrument's front panel \u2014 a putty enclosure carrying recessed display wells, raised keys with real 1px press travel, LED state lamps, lowercase silkscreen micro-labels, and exactly one signal orange for the controls that are yours to touch. It is a deliberate refusal of the category default: this is not a near-black chat app with a neon accent.\n\nDepth here is physical, never atmospheric. Every surface sits on a numbered ramp (--s0 deepest recess through --s4 reading field) and nothing exists outside the ramp; wells are sunk with inset shadows, keys sit proud with a small offset shadow and travel down when pressed. State is never a colored word \u2014 it is a lamp: lit green, blinking amber, steady red, or an unlit dark lens for sleeping. Code lives behind dark glass in both themes, like a display window set into the panel.\n\nDark mode is the black edition of the same instrument, not a second design: the enclosure is anodized (the surface ramp inverts around a reading field that goes darker than the enclosure), the silkscreen goes pale, the lamps glow harder, the signal warms up to #ff5a14, and the glass stays glass. Motion is mechanical and small: 120ms state changes, 80ms key travel, 140ms settle-in entrances, a 300ms staggered lamp warm-up when the panel arrives, and a 1.2s lamp blink \u2014 all silenced under prefers-reduced-motion.",
+    "keyCharacteristics": [
+      "Warm putty enclosure on a numbered five-step surface ramp; no surface outside it",
+      "One signal orange, theme-tuned, reserved for what the user can touch",
+      "LED lamps as the entire state vocabulary \u2014 lit / blinking / steady / unlit lens",
+      "Physical depth: raised keys with real press travel, recessed wells, machined seams",
+      "Dark-glass code windows that stay dark glass in both themes",
+      "Lowercase silkscreen labels (11px, tracked); Archivo for the enclosure, JetBrains Mono for machine truth",
+      "The black edition: dark mode as the same instrument anodized, not redesigned"
+    ],
+    "rules": [
+      {
+        "name": "The Numbered Ramp Rule",
+        "body": "Every background is one of --s0\u2013--s4; nothing exists outside the ramp. Audit: in the light theme OKLCH lightness ascends monotonically s0 \u2192 s4 (88.0% \u2192 98.5%); in the black edition the ramp inverts around the reading field \u2014 s4 (#101013) is darker than the enclosure s2 (#17171b), and the order is s0 < s1 < s4 < s2 < s3. Both orderings must hold.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Signal Rule",
+        "body": "One accent. --signal marks only what the user can act on, and each theme pairs it with its own --signal-ink. Never use the signal for state, and never use a lamp pigment on a clickable affordance.",
+        "section": "colors"
+      },
+      {
+        "name": "The Lamps-Not-Tints Rule",
+        "body": "State is a lamp, and the four states are structurally distinct \u2014 lit green, blinking amber, steady red, unlit lens \u2014 never four tints of one dot. The off state is a physical lens, not absence.",
+        "section": "colors"
+      },
+      {
+        "name": "The One Glass Rule",
+        "body": "Code is one material in both themes. The --glass* and --syn-* tokens are defined once on :root and never overridden. Audit: grep the dark media query for --glass or --syn-; the count must be zero.",
+        "section": "colors"
+      },
+      {
+        "name": "The Mono-Means-Machine Rule",
+        "body": "JetBrains Mono renders only what the machine produced or will consume: tool names, commands, paths, output, code, the model id. The enclosure's own labels are always Archivo.",
+        "section": "typography"
+      },
+      {
+        "name": "The Silkscreen Rule",
+        "body": "Micro-labels are printed, not shouted: 11px, weight 550, 0.08em tracking, --ink-3, lowercase. There is no text-transform anywhere in the system \u2014 the lowercase voice is authored into the copy itself.",
+        "section": "typography"
+      },
+      {
+        "name": "The Tabular Meta Rule",
+        "body": "Metadata that updates in place uses font-variant-numeric: tabular-nums (module meta, files meta, markdown table cells). A timestamp ticking from \u201c2m\u201d to \u201c12m\u201d must not shift the row.",
+        "section": "typography"
+      },
+      {
+        "name": "The One Column Rule",
+        "body": "47rem is the measure. Content that does not fit gets restructured; the column is never widened and never gains a sibling.",
+        "section": "layout"
+      },
+      {
+        "name": "The Sixteen Pixel Rule",
+        "body": "The composer textarea is 16px at mobile width so iOS Safari does not zoom on focus. Any new text input inherits this rule.",
+        "section": "layout"
+      },
+      {
+        "name": "The Real Travel Rule",
+        "body": "A key press is physical: :active translates the key 1px down and swaps --shadow-key for --shadow-key-down at 80ms. Hover brightens the face (--s3 \u2192 --s4) and never moves the key.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Machined Seam Rule",
+        "body": "Seams belong to the full-width decks only \u2014 the header's double seam and the composer's inset highlight. In-flow components get hairlines and ramp steps, never seams.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Actions-In-The-Module Rule",
+        "body": "A module's controls live inside it, on its right edge, at 0.55 opacity at rest \u2014 present, not hidden \u2014 rising to full on module hover or :focus-within, and forced visible at @media (hover: none).",
+        "section": "components"
+      },
+      {
+        "name": "The Primary Argument Rule",
+        "body": "A tool strip shows the one thing that tells the story \u2014 the command or the path \u2014 never raw JSON when a primary argument exists.",
+        "section": "components"
+      }
+    ],
+    "dos": [
+      "Do route every color through a token; the only literal below the two token blocks is the glass chrome #9aa0ad \u2014 promote it to a token if touched.",
+      "Do define both theme values for any new token \u2014 except glass and syntax, which are defined once and never re-themed.",
+      "Do keep the out-of-CSS literals in sync when tokens change: index.html theme-colors (#17171b / #ece8df = s2), the manifest colors (#ece8df), and the raster icons (#cc3f00 on #ece8df, regenerated via packages/web/scripts/make-icons.mjs with icons.provenance.json updated).",
+      "Do author new icons in Icon.svelte's 2px round-cap/round-join 24-box family; every control's icon is drawn there.",
+      "Do give every state a lamp and choose its rendering structurally: lit, blinking (amber only), or unlit lens.",
+      "Do keep transitions at 120ms ease (80ms for press travel) and entrances at 140ms settle-in; the blanket reduced-motion guard covers new motion.",
+      "Do give icon-only keys both title and aria-label, and give any rest-quiet affordance the full triple: hover, :focus-within, hover: none.",
+      "Do set overflow-wrap: anywhere on anything rendering machine output.",
+      "Do write all interface copy lowercase; the silkscreen voice is authored, not transformed."
+    ],
+    "donts": [
+      "Don't paint any background outside --s0\u2013--s4.",
+      "Don't add a second accent, use the signal for state, or put a lamp pigment on a clickable affordance.",
+      "Don't render state as tints of one dot \u2014 sleeping is an unlit lens, and amber never appears without .blink.",
+      "Don't theme the code window; glass is one material in both themes.",
+      "Don't introduce cool grays into the enclosure: light-theme neutrals live at OKLCH hue 87\u201395\u00b0. Audit: a new putty neutral within ~10\u00b0 of hue 90.",
+      "Don't add pills (99px radii) or new circles; circles are lamps and the send key only.",
+      "Don't float anything: no drop-shadow overlays until a true overlay surface exists to claim the reserved --shadow-float.",
+      "Don't light the reserved --lamp-blue without a genuine fifth structurally-distinct state; it ships unused.",
+      "Don't uppercase anything, anywhere.",
+      "Don't add font or icon packages beyond the two self-hosted faces (Archivo Variable + italic, JetBrains Mono 400/600)."
+    ]
+  }
+}

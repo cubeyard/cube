@@ -1,0 +1,1001 @@
+#!/usr/bin/env bash
+# cube — launcher CLI. Fetches a released artifact set, boots it, and
+# manages its lifecycle. Standalone by design: this ONE file is the
+# install (it ships as the `cube` asset on every release) — bash + qemu
+# + ssh + curl are the whole host footprint (`gh` is used when available
+# to raise GitHub's API rate limit). Drift against scripts/vm/ is caught
+# by the release smoke, which drives THIS file against the packaged artifacts.
+#
+# A release is a FOUR-disk set minus the one you own:
+#   base       NixOS OS image (incus, ZFS, firewall, data-init)
+#   app        cubed + its node runtime (ext4, LABEL=cubed)
+#              + the app TARBALL: the app tree alone, ~30 MB
+#   cube-node  inner container image for threads (ext4, LABEL=cube-node)
+#   data disk  created blank here on first run — yours, never replaced
+#
+# Artifacts are stored CONTENT-ADDRESSED ($CUBE_HOME/images/<sha>): an
+# upgrade downloads only what actually changed. When only the app
+# changed (the common case), `cube upgrade` streams the tarball into the
+# RUNNING VM and restarts cubed — seconds, no reboot, no disk download.
+#
+#   cube up [vX.Y.Z]       first run: fetch artifacts + create data disk;
+#                          boot, wait for the product, print the UI URL
+#   cube down              graceful poweroff (hard kill after 60s)
+#   cube status            release, VM, product, update availability
+#   cube upgrade [vX.Y.Z]  fetch a release, apply only what changed,
+#                          KEEP the data disk (also refreshes this file)
+#   cube ssh [cmd...]      ssh into the VM as `cube`
+#   cube logs              follow cubed's journal
+#   cube version           installed release version
+#   cube destroy --yes     stop and delete EVERYTHING in $CUBE_HOME
+#
+# State lives in ~/.cube (CUBE_HOME). Settings persist in
+# $CUBE_HOME/config after the first `up`; environment variables always
+# win over it:
+#   CUBE_REPO         GitHub repo with vm-vX.Y.Z releases (default cubeyard/cube)
+#   CUBE_RELEASE_DIR  local dir with release assets — offline/test installs
+#   CUBE_PORT         product port on the host (default 7777; a busy port
+#                     is skipped to the next free one on first run)
+#   CUBE_SSH_PORT     admin ssh port on the host (default 2222; same rule)
+#   CUBE_BIND         extra PRIVATE address for the product port
+#                     ("tailscale" resolves this node's 100.x address)
+#   CUBE_MEM/CUBE_CPUS/CUBE_DATA_SIZE   VM sizing (8G / 6 / 40G)
+set -euo pipefail
+
+LAUNCHER_SCHEMA=2            # the manifest schema this file understands
+
+REPO="${CUBE_REPO:-cubeyard/cube}"
+CUBE_HOME="${CUBE_HOME:-$HOME/.cube}"
+CONFIG_FILE="$CUBE_HOME/config"
+IMAGES_DIR="$CUBE_HOME/images"          # content-addressed pristine artifacts
+MANIFESTS_DIR="$CUBE_HOME/manifests"
+LIVE_DISK="$CUBE_HOME/live.qcow2"       # base boot overlay; ALL runtime OS state
+APP_LIVE="$CUBE_HOME/app-live.qcow2"    # app overlay: journal, chown, in-place updates
+DATA_DISK="$CUBE_HOME/data.qcow2"       # ZFS pool; survives every upgrade
+RUN_SEED="$CUBE_HOME/seed.iso"
+SSH_KEY="$CUBE_HOME/id_ed25519"
+KNOWN_HOSTS="$CUBE_HOME/known_hosts"
+PID_FILE="$CUBE_HOME/vm.pid"
+RUN_LOG="$CUBE_HOME/console.log"
+VERSION_FILE="$CUBE_HOME/version"       # currently selected release version
+GUEST_BUILD_ID=/opt/cube/app/build-id   # identity the VM reports
+
+# ---- settings: env > config file > default ---------------------------------
+ENV_PORT="${CUBE_PORT:-}"; ENV_SSH_PORT="${CUBE_SSH_PORT:-}"; ENV_BIND="${CUBE_BIND:-}"
+ENV_MEM="${CUBE_MEM:-}"; ENV_CPUS="${CUBE_CPUS:-}"; ENV_DATA="${CUBE_DATA_SIZE:-}"
+CUBE_PORT=""; CUBE_SSH_PORT=""; CUBE_BIND=""; CUBE_MEM=""; CUBE_CPUS=""; CUBE_DATA_SIZE=""
+# shellcheck disable=SC1090
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+CUBE_PORT="${ENV_PORT:-$CUBE_PORT}"; CUBE_SSH_PORT="${ENV_SSH_PORT:-$CUBE_SSH_PORT}"
+CUBE_BIND="${ENV_BIND:-$CUBE_BIND}"; CUBE_MEM="${ENV_MEM:-$CUBE_MEM}"
+CUBE_CPUS="${ENV_CPUS:-$CUBE_CPUS}"; CUBE_DATA_SIZE="${ENV_DATA:-$CUBE_DATA_SIZE}"
+PORT_CHOSEN="${CUBE_PORT:+1}"; SSH_PORT_CHOSEN="${CUBE_SSH_PORT:+1}"   # explicit, or free to move
+CUBE_PORT="${CUBE_PORT:-7777}"
+SSH_PORT="${CUBE_SSH_PORT:-2222}"
+VM_MEM="${CUBE_MEM:-8G}"
+VM_CPUS="${CUBE_CPUS:-6}"
+DATA_DISK_SIZE="${CUBE_DATA_SIZE:-40G}"
+
+save_config() {
+  cat > "$CONFIG_FILE" <<CFG
+# cube launcher settings — written by \`cube up\`; environment variables
+# override any line here.
+CUBE_PORT=$CUBE_PORT
+CUBE_SSH_PORT=$SSH_PORT
+CUBE_BIND=$CUBE_BIND_RAW
+CUBE_MEM=$VM_MEM
+CUBE_CPUS=$VM_CPUS
+CUBE_DATA_SIZE=$DATA_DISK_SIZE
+CFG
+}
+
+HOST_OS="$(uname -s)"                   # Linux | Darwin
+case "$(uname -m)" in
+  arm64|aarch64) ARCH=arm64; QEMU_BIN=qemu-system-aarch64 ;;
+  x86_64|amd64)  ARCH=amd64; QEMU_BIN=qemu-system-x86_64 ;;
+  *) printf 'unsupported arch: %s\n' "$(uname -m)" >&2; exit 1 ;;
+esac
+
+log()  { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
+ok()   { printf '\033[1;32mPASS\033[0m %s\n' "$*"; }
+fail() { printf '\033[1;31mFAIL\033[0m %s\n' "$*" >&2; }
+note() { printf '   %s\n' "$*"; }
+mb()   { awk -v b="${1:-0}" 'BEGIN { if (b < 1000000) printf "%d KB", (b + 500) / 1000; else printf "%d MB", (b + 500000) / 1000000 }'; }
+
+# cubed has NO auth (the Tailnet is the boundary): any extra bind must be
+# a PRIVATE address — an explicit public interface IP would put thread
+# creation and in-cube code execution on the open internet.
+is_private_ip() {
+  case "$1" in
+    127.*|10.*|192.168.*|169.254.*) return 0 ;;
+    172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
+    100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) return 0 ;;
+    fd*:*|fe80:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+CUBE_BIND_RAW="$CUBE_BIND"              # what goes back into config ("tailscale" stays symbolic)
+if [ -z "$CUBE_BIND" ]; then
+  CUBE_BIND="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+fi
+if [ "$CUBE_BIND" = "tailscale" ]; then
+  CUBE_BIND="$(tailscale ip -4 2>/dev/null | head -1)"
+  [ -n "$CUBE_BIND" ] || { fail 'CUBE_BIND=tailscale but `tailscale ip -4` returned nothing'; exit 1; }
+fi
+case "$CUBE_BIND" in
+  ""|127.0.0.1) CUBE_BIND=""; CUBED_HOST="127.0.0.1" ;;
+  *)
+    is_private_ip "$CUBE_BIND" \
+      || { fail "refusing CUBE_BIND=$CUBE_BIND — cubed is unauthenticated; bind a private address (10/8, 172.16/12, 192.168/16, 100.64/10, fd00::/8)"; exit 1; }
+    CUBED_HOST="$CUBE_BIND" ;;
+esac
+CUBED_URL="http://$CUBED_HOST:$CUBE_PORT"
+
+# ---- host shims (Linux tools first, macOS fallbacks) ------------------------
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"
+  else shasum -a 256 "$@"; fi
+}
+sha256_check() {  # sha256_check [FLAGS] SUMSFILE  (run inside the asset dir)
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "$@"
+  else shasum -a 256 -c "$@"; fi
+}
+file_size() { stat -c%s "$@" 2>/dev/null || stat -f%z "$@"; }
+free_kb()   { df -Pk "$1" | awk 'NR==2 {print $4}'; }
+
+lock() {  # one lifecycle command at a time
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$CUBE_HOME/.lock"
+    flock -n 9 || { fail "another cube command is running"; exit 1; }
+  else
+    shlock -f "$CUBE_HOME/.lock.pid" -p $$ \
+      || { fail "another cube command is running"; exit 1; }
+    trap 'rm -f "$CUBE_HOME/.lock.pid"' EXIT
+  fi
+}
+
+make_iso() {  # make_iso OUTPUT DIR — the seed, atomic
+  local out="$1" dir="$2" tool
+  rm -f "$out.tmp" "$out.tmp.iso"
+  for tool in genisoimage xorrisofs mkisofs; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      "$tool" -quiet -output "$out.tmp" -volid CUBESEED -joliet -rock \
+        -input-charset utf-8 "$dir"
+      mv "$out.tmp" "$out"
+      return 0
+    fi
+  done
+  if command -v hdiutil >/dev/null 2>&1; then
+    hdiutil makehybrid -quiet -iso -joliet -default-volume-name CUBESEED \
+      -o "$out.tmp" "$dir"
+    mv "$out.tmp.iso" "$out"
+    return 0
+  fi
+  fail "no ISO tool found (genisoimage/xorrisofs/mkisofs/hdiutil)"
+  return 1
+}
+have_iso_tool() {
+  command -v genisoimage >/dev/null 2>&1 || command -v xorrisofs >/dev/null 2>&1 \
+    || command -v mkisofs >/dev/null 2>&1 || command -v hdiutil >/dev/null 2>&1
+}
+
+qemu_firmware() {  # UEFI code image for THIS arch, wherever the host keeps it
+  local f name qemu_share
+  case "$ARCH" in
+    arm64) set -- edk2-aarch64-code.fd AAVMF_CODE.fd QEMU_EFI.fd ;;
+    *)     set -- edk2-x86_64-code.fd OVMF_CODE_4M.fd OVMF_CODE.fd ;;
+  esac
+  qemu_share="$(cd "$(dirname "$(command -v "$QEMU_BIN")")/.." && pwd)/share/qemu"
+  for name in "$@"; do
+    for f in "$qemu_share/$name" \
+             "/usr/share/qemu/$name" \
+             "/usr/share/OVMF/$name" \
+             "/usr/share/AAVMF/$name" \
+             "/usr/share/edk2/x64/$name" \
+             "/usr/share/edk2/aarch64/$name"; do
+      [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+    done
+  done
+  return 1
+}
+
+# UEFI variable store, paired BY ARCH with the code image: brew's qemu
+# ships edk2-i386-vars.fd (528 KiB, for x86) next to edk2-arm-vars.fd
+# (64 MiB, for aarch64), and an arch-blind search once handed the
+# arm64 `virt` machine the x86 file — "cfi.pflash01 device requires
+# 67108864 bytes, block backend provides 540672" (found on the Mac,
+# 2026-09-03). The image boots the REMOVABLE path, so nothing must
+# survive in NVRAM: a fresh copy per boot is fine.
+qemu_vars_template() {  # qemu_vars_template CODE_FILE
+  local f code_dir
+  code_dir="$(dirname "$1")"
+  case "$ARCH" in
+    arm64) set -- "$code_dir/edk2-arm-vars.fd" "$code_dir/AAVMF_VARS.fd" "/usr/share/AAVMF/AAVMF_VARS.fd" ;;
+    *)     set -- "$code_dir/edk2-i386-vars.fd" "$code_dir/OVMF_VARS_4M.fd" "$code_dir/OVMF_VARS.fd" ;;
+  esac
+  for f in "$@"; do
+    [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+  done
+  return 1
+}
+
+# The arm64 `virt` machine wants BOTH flash devices to be exactly 64 MiB
+# (qemu refuses anything else); distros ship edk2 aarch64 images at
+# 64 MiB or as 2 MiB QEMU_EFI.fd. Pad private copies rather than
+# depend on which one the host has. x86 firmware is sized by the file.
+prepare_uefi() {  # prepare_uefi DIR -> UEFI_CODE, UEFI_VARS
+  local fw
+  fw="$(qemu_firmware)" || return 1
+  UEFI_VARS="$1/uefi-vars.fd"
+  cp -f "$(qemu_vars_template "$fw")" "$UEFI_VARS" 2>/dev/null \
+    || { fail "no UEFI VARS template beside $fw"; return 1; }
+  chmod u+w "$UEFI_VARS"
+  UEFI_CODE="$fw"
+  if [ "$ARCH" = arm64 ]; then
+    UEFI_CODE="$1/uefi-code.fd"
+    cp -f "$fw" "$UEFI_CODE"; chmod u+w "$UEFI_CODE"
+    qemu-img resize -q -f raw "$UEFI_CODE" 64M
+    qemu-img resize -q -f raw "$UEFI_VARS" 64M
+  fi
+}
+
+# Everything the host must have, checked BEFORE the first byte is
+# downloaded: a missing hypervisor after a 1 GB fetch is the wrong order.
+preflight_host() {
+  local rc=0 fw
+  command -v "$QEMU_BIN" >/dev/null 2>&1 \
+    || { fail "$QEMU_BIN not found — Linux: apt install qemu-system qemu-utils genisoimage ovmf; macOS: brew install qemu"; rc=1; }
+  command -v qemu-img >/dev/null 2>&1 \
+    || { fail "qemu-img not found (Linux: apt install qemu-utils; macOS: part of brew's qemu)"; rc=1; }
+  case "$HOST_OS" in
+    Linux)  [ -w /dev/kvm ] \
+      || { fail "/dev/kvm missing or not writable — hardware virtualization is required (enable it in BIOS; add yourself to the kvm group)"; rc=1; } ;;
+    Darwin) ;;
+    *) fail "unsupported host OS: $HOST_OS"; rc=1 ;;
+  esac
+  if [ "$rc" = 0 ]; then
+    fw="$(qemu_firmware)" \
+      || { fail "no UEFI firmware for $ARCH near $QEMU_BIN (Linux: apt install ovmf; macOS: brew install qemu)"; rc=1; }
+    [ -z "$fw" ] || qemu_vars_template "$fw" >/dev/null \
+      || { fail "no UEFI VARS template beside $fw"; rc=1; }
+  fi
+  have_iso_tool || { fail "no ISO tool (Linux: apt install genisoimage; macOS: hdiutil is built in)"; rc=1; }
+  command -v ssh >/dev/null 2>&1 || { fail "ssh not found"; rc=1; }
+  command -v curl >/dev/null 2>&1 || { fail "curl not found"; rc=1; }
+  return "$rc"
+}
+
+vm_boot_args() {
+  local accel
+  case "$HOST_OS" in Linux) accel=kvm ;; *) accel=hvf ;; esac
+  prepare_uefi "$CUBE_HOME" || return 1
+  VM_BOOT_ARGS=(
+    -machine "$([ "$ARCH" = arm64 ] && echo virt || echo q35),accel=$accel"
+    -cpu host -m "$VM_MEM" -smp "$VM_CPUS" -device virtio-rng-pci
+    -drive "if=pflash,format=raw,unit=0,readonly=on,file=$UEFI_CODE"
+    -drive "if=pflash,format=raw,unit=1,file=$UEFI_VARS"
+  )
+}
+
+# Drive list: os+data positions are contractual (the base's data-init
+# expects /dev/vdb), app and cube-node are found by LABEL, the seed rides
+# last as a read-only virtio disk (found by LABEL; the arm64 virt machine
+# has no IDE bus). ipv6=off on slirp: no usable v6 route exists and
+# dual-stack clients in the VM hang on v6-first.
+vm_disk_args() {  # vm_disk_args NODE_PRISTINE SEED_ISO -> VM_DISK_ARGS
+  VM_DISK_ARGS=(
+    -drive "if=virtio,file=$LIVE_DISK,format=qcow2,discard=unmap"
+    -drive "if=virtio,file=$DATA_DISK,format=qcow2,discard=unmap"
+    -drive "if=virtio,file=$APP_LIVE,format=qcow2,discard=unmap"
+    -drive "if=virtio,file=$1,format=qcow2,readonly=on"
+    -drive "if=virtio,format=raw,readonly=on,file=$2"
+  )
+}
+vm_hostfwd() {  # ssh loopback-only; product also on CUBE_BIND if set
+  local fwd="ipv6=off,hostfwd=tcp:127.0.0.1:$SSH_PORT-:22,hostfwd=tcp:127.0.0.1:$CUBE_PORT-:7777"
+  [ -n "$CUBE_BIND" ] && fwd="$fwd,hostfwd=tcp:$CUBE_BIND:$CUBE_PORT-:7777"
+  printf '%s' "$fwd"
+}
+
+# qemu binds the slirp forwards at startup, and its failure names a RULE
+# rather than a fix ("Could not set up host forwarding rule ..."). Catch
+# it here, where we still know what the port is for. Loopback only: a
+# connect to 127.0.0.1 is accepted or refused instantly.
+port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1; }
+port_holder() {  # best-effort "name (pid NNN)"; empty when lsof is absent
+  command -v lsof >/dev/null 2>&1 || return 0
+  lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null \
+    | awk 'NR==2 { printf "%s (pid %s)", $1, $2 }'
+}
+next_free_port() {  # next_free_port FROM — first free port in FROM..FROM+49
+  local p="$1" end=$(( $1 + 49 ))
+  while [ "$p" -le "$end" ]; do port_busy "$p" || { printf '%s' "$p"; return 0; }; p=$((p+1)); done
+  return 1
+}
+# A port nobody chose explicitly moves to the next free one (a dev
+# laptop's 7777 is usually taken by other VM tooling); a chosen port
+# that is busy is an error naming the holder and the knob.
+settle_ports() {
+  local who
+  if port_busy "$CUBE_PORT"; then
+    if [ -n "$PORT_CHOSEN" ]; then
+      who="$(port_holder "$CUBE_PORT")"
+      fail "port $CUBE_PORT (product) is in use on 127.0.0.1${who:+ by $who} — free it, or set CUBE_PORT to another port"
+      return 1
+    fi
+    CUBE_PORT="$(next_free_port "$CUBE_PORT")" || { fail "no free product port in 7777..7826"; return 1; }
+    note "port 7777 is taken — using $CUBE_PORT (kept in $CONFIG_FILE)"
+  fi
+  if port_busy "$SSH_PORT"; then
+    if [ -n "$SSH_PORT_CHOSEN" ]; then
+      who="$(port_holder "$SSH_PORT")"
+      fail "port $SSH_PORT (admin ssh) is in use on 127.0.0.1${who:+ by $who} — free it, or set CUBE_SSH_PORT to another port"
+      return 1
+    fi
+    SSH_PORT="$(next_free_port "$SSH_PORT")" || { fail "no free ssh port in 2222..2271"; return 1; }
+    note "port 2222 is taken — using $SSH_PORT for ssh (kept in $CONFIG_FILE)"
+  fi
+  CUBED_URL="http://$CUBED_HOST:$CUBE_PORT"
+}
+
+vm_ssh() {
+  ssh -p "$SSH_PORT" -i "$SSH_KEY" \
+    -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$KNOWN_HOSTS" \
+    -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=5 \
+    cube@127.0.0.1 "$@"
+}
+vm_build_id() { vm_ssh "cat $GUEST_BUILD_ID 2>/dev/null" 2>/dev/null | tr -d '\r' || true; }
+
+ensure_ssh_key() {
+  [ -f "$SSH_KEY" ] || ssh-keygen -q -t ed25519 -N "" -C cube -f "$SSH_KEY"
+}
+
+# The image carries no trust: this seed (LABEL=CUBESEED) carries
+# authorized_keys for the `cube` user; the base installs it on every
+# boot as an exact replace, so rotating the key revokes the old one.
+make_run_seed() {
+  ensure_ssh_key
+  # Rebuild each boot: the host's address or forwarded port may have changed.
+  local dir
+  dir="$(mktemp -d)"
+  cp "$SSH_KEY.pub" "$dir/authorized_keys"
+  printf 'CUBED_PORTAL_BASE=%s\nCUBED_PUBLIC_PORT=%s\n' \
+    "${CUBED_PORTAL_BASE:-${CUBED_HOST//:/-}.sslip.io}" "$CUBE_PORT" > "$dir/portal.env"
+  make_iso "$RUN_SEED" "$dir"
+  rm -rf "$dir"
+}
+
+# ---- releases ---------------------------------------------------------------
+installed_version() { cat "$VERSION_FILE" 2>/dev/null || true; }
+manifest_path()     { printf '%s' "$MANIFESTS_DIR/manifest-$1-$ARCH.json"; }
+manifest_field()    {  # manifest_field FILE KEY — flat values, quoted or numeric
+  sed -n "s/.*\"$2\": *\"\{0,1\}\([^\",]*\)\"\{0,1\},\{0,1\}.*/\1/p" "$1" 2>/dev/null | head -1
+}
+mf() { manifest_field "$(manifest_path "$1")" "$2"; }   # mf VERSION KEY
+artifact_sha()   { mf "$1" "$2_sha256"; }                # roles: base|app|app_tar|node
+artifact_file()  { mf "$1" "$2_file"; }
+artifact_bytes() { mf "$1" "$2_bytes"; }
+role_ext() { case "$1" in app_tar) printf 'tar.zst' ;; *) printf 'qcow2' ;; esac; }
+pristine_path() { printf '%s' "$IMAGES_DIR/$1.$(role_ext "$2")"; }   # pristine_path SHA ROLE
+
+ver_key() { printf '%s' "${1#v}" | awk -F. '{ printf "%05d%05d%05d", $1, $2, $3 }'; }
+ver_gt()  { [ "$(ver_key "$1")" \> "$(ver_key "$2")" ]; }
+
+have_gh() { command -v gh >/dev/null 2>&1; }
+GH_TOKEN_CACHE=""
+gh_token() {  # empty on a public repo / no gh
+  [ -n "$GH_TOKEN_CACHE" ] && { printf '%s' "$GH_TOKEN_CACHE"; return 0; }
+  have_gh || return 0
+  GH_TOKEN_CACHE="$(gh auth token 2>/dev/null || true)"
+  printf '%s' "$GH_TOKEN_CACHE"
+}
+api_get() {  # api_get URL [MAX_SECONDS] — GitHub API GET, authed when possible
+  local tok
+  tok="$(gh_token)"
+  curl -fsSL --max-time "${2:-30}" \
+    -H "Accept: application/vnd.github+json" \
+    ${tok:+-H "Authorization: Bearer $tok"} "$1"
+}
+
+# GitHub's JSON, flattened to one compact line so sed can walk it
+# without jq: newlines gone, whitespace around keys and braces gone
+# (keys are [A-Za-z_]; no value this launcher reads can contain a
+# `"key":` sequence). Objects then split cleanly on `},{`.
+TAB="$(printf '\t')"
+json_flat() {
+  tr -d '\n' | sed -e 's/[[:space:]]*"\([A-Za-z_]*\)":[[:space:]]*/"\1":/g' \
+                   -e 's/{[[:space:]]*/{/g' -e 's/,[[:space:]]*{/,{/g' -e 's/\[[[:space:]]*{/[{/g' \
+                   -e 's/},{/}\
+{/g'
+}
+
+# Published vm-v* releases, newest version first (drafts and
+# pre-releases excluded: an unapproved build must never reach `latest`).
+list_releases() {  # list_releases [MAX_SECONDS]
+  local json
+  json="$(api_get "https://api.github.com/repos/$REPO/releases?per_page=30" "${1:-30}")" || return 1
+  printf '%s' "$json" | json_flat \
+    | grep '"draft":false' | grep '"prerelease":false' \
+    | sed -n 's/.*"tag_name":"vm-\(v[0-9][0-9.]*\)".*/\1/p' \
+    | while read -r v; do printf '%s %s\n' "$(ver_key "$v")" "$v"; done \
+    | sort -r | awk '{print $2}'
+}
+resolve_latest() {
+  local v
+  if [ -n "${CUBE_RELEASE_DIR:-}" ]; then
+    v="$(manifest_field "$CUBE_RELEASE_DIR/manifest-$ARCH.json" version)"
+    [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+    fail "CUBE_RELEASE_DIR set but no readable manifest-$ARCH.json in it"; return 1
+  fi
+  v="$(list_releases | head -1)" || true
+  [ -n "$v" ] || {
+    fail "could not list vm-* releases for $REPO (offline, inaccessible, or API rate-limited?)"
+    return 1
+  }
+  printf '%s' "$v"
+}
+
+# Asset table for a tag: "name<TAB>api-url<TAB>bytes". Cached per run.
+ASSETS_TAG=""; ASSETS_TABLE=""
+release_assets() {  # release_assets TAG
+  [ "$ASSETS_TAG" = "$1" ] && { printf '%s\n' "$ASSETS_TABLE"; return 0; }
+  local json
+  json="$(api_get "https://api.github.com/repos/$REPO/releases/tags/$1")" \
+    || { fail "release $1 not found or inaccessible in $REPO"; return 1; }
+  ASSETS_TABLE="$(printf '%s' "$json" | json_flat \
+    | sed -n '/"assets":\[/,$p' | sed '1s/^.*"assets":\[//' | sed -n '/^{"url":/p' \
+    | sed -n "s/^{\"url\":\"\([^\"]*\)\".*\"name\":\"\([^\"]*\)\".*\"size\":\([0-9]*\).*/\2$TAB\1$TAB\3/p")"
+  ASSETS_TAG="$1"
+  printf '%s\n' "$ASSETS_TABLE"
+}
+
+# download URL DEST [BYTES] — resumable, with a progress bar. A partial
+# file next to DEST is resumed, so a dropped connection costs nothing.
+download() {
+  local url="$1" dest="$2" tok
+  tok="$(gh_token)"
+  curl -fL --progress-bar -C - --retry 3 --retry-delay 2 \
+    -H "Accept: application/octet-stream" \
+    ${tok:+-H "Authorization: Bearer $tok"} \
+    -o "$dest.part" "$url" \
+    || { fail "download failed: $url"; return 1; }
+  mv "$dest.part" "$dest"
+}
+
+fetch_asset() {  # fetch_asset TAG NAME DEST_FILE — from CUBE_RELEASE_DIR or GitHub
+  local tag="$1" name="$2" dest="$3" row url bytes
+  if [ -n "${CUBE_RELEASE_DIR:-}" ]; then
+    [ -f "$CUBE_RELEASE_DIR/$name" ] || { fail "no $name in $CUBE_RELEASE_DIR"; return 1; }
+    cp "$CUBE_RELEASE_DIR/$name" "$dest"
+    return 0
+  fi
+  row="$(release_assets "$tag" | awk -F'\t' -v n="$name" '$1==n')" || return 1
+  [ -n "$row" ] || { fail "release $tag has no asset named $name"; return 1; }
+  url="$(printf '%s' "$row" | cut -f2)"; bytes="$(printf '%s' "$row" | cut -f3)"
+  printf '   %-40s %s\n' "$name" "$(mb "$bytes")"
+  download "$url" "$dest"
+}
+
+# The manifest is small and authoritative: fetched first, verified
+# against SHA256SUMS (which must cover it), and checked to describe the
+# version/arch/schema we can handle — BEFORE any large download.
+fetch_manifest() {  # fetch_manifest vX.Y.Z
+  local ver="$1" tag="vm-$1" tmp schema
+  [ -f "$(manifest_path "$ver")" ] && return 0
+  tmp="$(mktemp -d "$CUBE_HOME/.fetch-XXXXXX")"
+  fetch_asset "$tag" "manifest-$ARCH.json" "$tmp/manifest-$ARCH.json" || { rm -rf "$tmp"; return 1; }
+  fetch_asset "$tag" "SHA256SUMS.$ARCH" "$tmp/SHA256SUMS.$ARCH" || { rm -rf "$tmp"; return 1; }
+  grep -q "manifest-$ARCH.json" "$tmp/SHA256SUMS.$ARCH" \
+    || { fail "SHA256SUMS.$ARCH carries no entry for the manifest"; rm -rf "$tmp"; return 1; }
+  (cd "$tmp" && sha256_check --ignore-missing "SHA256SUMS.$ARCH" >/dev/null) \
+    || { fail "manifest failed checksum verification"; rm -rf "$tmp"; return 1; }
+  [ "$(manifest_field "$tmp/manifest-$ARCH.json" version)" = "$ver" ] \
+    && [ "$(manifest_field "$tmp/manifest-$ARCH.json" arch)" = "$ARCH" ] \
+    || { fail "manifest in $tag does not describe $ver/$ARCH"; rm -rf "$tmp"; return 1; }
+  schema="$(manifest_field "$tmp/manifest-$ARCH.json" schema)"
+  [ "${schema:-1}" -le "$LAUNCHER_SCHEMA" ] 2>/dev/null || {
+    fail "release $ver uses manifest schema ${schema} — this launcher understands $LAUNCHER_SCHEMA; install the launcher from that release:"
+    note "gh release download -R $REPO $tag -p cube -D $(dirname "$SELF") --clobber"
+    rm -rf "$tmp"; return 1
+  }
+  mkdir -p "$MANIFESTS_DIR"
+  mv "$tmp/manifest-$ARCH.json" "$(manifest_path "$ver")"
+  rm -rf "$tmp"
+}
+
+# fetch_role vX.Y.Z ROLE — the artifact into the content-addressed store,
+# unless its bytes are already there (that IS the "download only what
+# changed" mechanism). Verified against the manifest sha before it is
+# accepted; a mismatch leaves nothing behind.
+fetch_role() {
+  local ver="$1" role="$2" tag="vm-$1" file sha dest
+  file="$(artifact_file "$ver" "$role")"; sha="$(artifact_sha "$ver" "$role")"
+  [ -n "$file" ] && [ -n "$sha" ] || { fail "manifest $ver lacks ${role}_file/${role}_sha256"; return 1; }
+  dest="$(pristine_path "$sha" "$role")"
+  [ -f "$dest" ] && return 0
+  mkdir -p "$IMAGES_DIR"
+  fetch_asset "$tag" "$file" "$dest.tmp" || { rm -f "$dest.tmp"; return 1; }
+  [ "$(sha256 "$dest.tmp" | cut -d' ' -f1)" = "$sha" ] \
+    || { fail "$file does not match its manifest sha256"; rm -f "$dest.tmp"; return 1; }
+  mv "$dest.tmp" "$dest"
+}
+
+# Bytes still to download for the given roles of a version.
+bytes_needed() {  # bytes_needed vX.Y.Z ROLE...
+  local ver="$1" role total=0
+  shift
+  for role in "$@"; do
+    [ -f "$(pristine_path "$(artifact_sha "$ver" "$role")" "$role")" ] \
+      || total=$(( total + $(artifact_bytes "$ver" "$role") ))
+  done
+  printf '%s' "$total"
+}
+preflight_space() {  # preflight_space BYTES_TO_DOWNLOAD
+  local need_kb have_kb
+  need_kb=$(( $1 / 1024 + 2 * 1024 * 1024 ))     # + 2 GB for overlays and the data disk to grow into
+  have_kb="$(free_kb "$CUBE_HOME")"
+  [ "$have_kb" -ge "$need_kb" ] \
+    || { fail "not enough free space in $CUBE_HOME: need ~$(( need_kb / 1024 )) MB, have $(( have_kb / 1024 )) MB"; return 1; }
+}
+
+# Keep what the selected + one previous manifest reference, AND whatever
+# the overlays are backed by: an app overlay created over release N's
+# disk and moved forward by tarballs is still backed by N's bytes long
+# after N's manifest is gone (found live: prune deleted the backing file
+# and the next boot could not open app-live.qcow2).
+prune_store() {
+  local keep="$1" m ver survivors=() referenced=" " prev="" role f sha
+  for f in "$LIVE_DISK.sha" "$APP_LIVE.sha" "$CUBE_HOME/node.sha"; do
+    [ -f "$f" ] && referenced="$referenced$(cat "$f") "
+  done
+  for m in "$MANIFESTS_DIR"/manifest-v*-"$ARCH".json; do
+    [ -f "$m" ] || continue
+    ver="${m##*/manifest-}"; ver="${ver%-$ARCH.json}"
+    [ "$ver" = "$keep" ] || survivors+=("$ver")
+  done
+  if [ "${#survivors[@]}" -gt 0 ]; then
+    prev="$(for ver in "${survivors[@]}"; do printf '%s %s\n' "$(ver_key "$ver")" "$ver"; done | sort -r | head -1 | awk '{print $2}')"
+  fi
+  for ver in "$keep" $prev; do
+    for role in base app app_tar node; do
+      referenced="$referenced$(artifact_sha "$ver" "$role") "
+    done
+  done
+  for m in "$MANIFESTS_DIR"/manifest-v*-"$ARCH".json; do
+    [ -f "$m" ] || continue
+    ver="${m##*/manifest-}"; ver="${ver%-$ARCH.json}"
+    [ "$ver" = "$keep" ] || [ "$ver" = "$prev" ] || { rm -f "$m"; note "pruned manifest $ver"; }
+  done
+  for f in "$IMAGES_DIR"/*; do
+    [ -f "$f" ] || continue
+    sha="${f##*/}"; sha="${sha%%.*}"
+    case "$f" in *.tmp|*.part) rm -f "$f"; continue ;; esac
+    case "$referenced" in
+      *" $sha "*) ;;
+      *) rm -f "$f"; note "pruned unreferenced artifact ${sha:0:12}" ;;
+    esac
+  done
+  rm -rf "$CUBE_HOME"/.fetch-*
+}
+
+# ---- VM state ---------------------------------------------------------------
+vm_pid() {  # the launcher's own VM only — never ps-grepping for others.
+  local pid cmd
+  pid="$(cat "$PID_FILE" 2>/dev/null)" || return 1
+  [ -n "$pid" ] || return 1
+  cmd="$(ps -p "$pid" -o command= 2>/dev/null)" || return 1
+  case "$cmd" in *"$LIVE_DISK"*) ;; *) return 1 ;; esac
+  printf '%s' "$pid"
+}
+
+check_identity() {  # the VM on our ssh port must be OUR installed build
+  local want got
+  want="$(mf "$(installed_version)" build_id)"
+  got="$(vm_build_id)"
+  [ -n "$want" ] && [ "$got" = "$want" ] || {
+    fail "the VM on port $SSH_PORT reports build '$got' (expected '$want') — another VM owns the port? (CUBE_SSH_PORT)"
+    return 1
+  }
+}
+
+# wait_step LABEL SECONDS CMD... — one quiet, updating line.
+wait_step() {
+  local label="$1" max="$2" t=0
+  shift 2
+  while ! "$@" >/dev/null 2>&1; do
+    [ "$t" -ge "$max" ] && { [ -t 1 ] && printf '\r'; return 1; }
+    [ -t 1 ] && printf '\r   %-14s %3ds' "$label" "$t"
+    sleep 2; t=$((t+2))
+  done
+  [ -t 1 ] && printf '\r'
+  printf '   %-14s %3ds\n' "$label" "$t"
+}
+cubed_up() { curl -fsS -o /dev/null "http://127.0.0.1:$CUBE_PORT/api/threads"; }
+wait_ssh()   { wait_step "ssh" 180 vm_ssh true || { fail "VM never became reachable over ssh (console: $RUN_LOG)"; return 1; }; }
+wait_cubed() { wait_step "cubed" 90 cubed_up    || { fail "cubed never answered on :$CUBE_PORT — check: cube logs"; return 1; }; }
+
+print_url() {
+  echo
+  ok "cube is up — open $CUBED_URL"
+  note "first run: the page walks you through setup"
+}
+
+verify_pristine() {  # verify_pristine SHA ROLE — the store is content-addressed, but a filename is not a checksum
+  local sha="$1" role="$2" got
+  got="$(sha256 "$(pristine_path "$sha" "$role")" | cut -d' ' -f1)"
+  [ "$got" = "$sha" ] && return 0
+  fail "cached $role artifact is corrupt (expected $sha, got $got) — removing it; re-run to fetch again"
+  rm -f "$(pristine_path "$sha" "$role")"
+  return 1
+}
+
+# Overlay reconciliation. Each overlay records (sidecar) the sha of the
+# pristine it was created over; a changed backing sha resets it — that IS
+# the upgrade of that disk. The BASE reset also drops known_hosts (fresh
+# OS -> fresh host keys). The APP overlay is different: an in-place
+# update changes its contents without changing its backing file, so it
+# records the build it CARRIES (.build) and the runtime it PROVIDES
+# (.runtime); it is reset only when the runtime must change.
+ensure_overlay() {  # ensure_overlay OVERLAY SHA ROLE
+  local overlay="$1" sha="$2" role="$3"
+  if [ -f "$overlay" ] && [ "$(cat "$overlay.sha" 2>/dev/null)" = "$sha" ]; then
+    return 0
+  fi
+  verify_pristine "$sha" "$role" || return 1
+  rm -f "$overlay" "$overlay.sha"
+  [ "$role" = base ] && rm -f "$KNOWN_HOSTS"
+  qemu-img create -q -f qcow2 -b "$(pristine_path "$sha" "$role")" -F qcow2 "$overlay"
+  printf '%s\n' "$sha" > "$overlay.sha"
+}
+app_overlay_runtime() { cat "$APP_LIVE.runtime" 2>/dev/null || true; }
+app_overlay_build()   { cat "$APP_LIVE.build" 2>/dev/null || true; }
+ensure_app_overlay() {  # ensure_app_overlay vX.Y.Z — reset only if the runtime differs
+  local ver="$1" sha
+  sha="$(artifact_sha "$ver" app)"
+  if [ -f "$APP_LIVE" ] && [ "$(app_overlay_runtime)" = "$(mf "$ver" runtime_id)" ]; then
+    return 0
+  fi
+  fetch_role "$ver" app || return 1
+  verify_pristine "$sha" app || return 1
+  rm -f "$APP_LIVE" "$APP_LIVE.sha" "$APP_LIVE.runtime" "$APP_LIVE.build"
+  qemu-img create -q -f qcow2 -b "$(pristine_path "$sha" app)" -F qcow2 "$APP_LIVE"
+  printf '%s\n' "$sha" > "$APP_LIVE.sha"
+  mf "$ver" runtime_id > "$APP_LIVE.runtime"
+  mf "$ver" build_id > "$APP_LIVE.build"
+}
+
+boot_vm() {  # boot_vm vX.Y.Z — the VM for the installed release, from overlays
+  local ver="$1" base_sha node_sha
+  settle_ports || return 1
+  base_sha="$(artifact_sha "$ver" base)"
+  node_sha="$(artifact_sha "$ver" node)"
+  # A live overlay WITHOUT its data disk is a broken pair: silently
+  # creating a blank data disk would boot an OS whose incus registry
+  # points at instances that no longer exist — looks exactly like data
+  # loss. The reverse (data without overlay) is the normal fresh-OS case.
+  if [ -f "$LIVE_DISK" ] && [ ! -f "$DATA_DISK" ]; then
+    fail "live.qcow2 exists but data.qcow2 is missing in $CUBE_HOME — restore the data disk, or remove live.qcow2 to accept starting over"
+    return 1
+  fi
+  make_run_seed
+  ensure_overlay "$LIVE_DISK" "$base_sha" base || return 1
+  ensure_app_overlay "$ver" || return 1
+  # cube-node is attached read-only straight from the store (no overlay
+  # to hang a sidecar on), so its sidecar lives here.
+  if [ "$(cat "$CUBE_HOME/node.sha" 2>/dev/null)" != "$node_sha" ]; then
+    verify_pristine "$node_sha" node || return 1
+    printf '%s\n' "$node_sha" > "$CUBE_HOME/node.sha"
+  fi
+  [ -f "$DATA_DISK" ] || \
+    qemu-img create -q -f qcow2 "$DATA_DISK" "$DATA_DISK_SIZE"
+  vm_boot_args || return 1
+  vm_disk_args "$(pristine_path "$node_sha" node)" "$RUN_SEED"
+  save_config
+  log "booting cube $ver (console -> $RUN_LOG)"
+  "$QEMU_BIN" "${VM_BOOT_ARGS[@]}" \
+    "${VM_DISK_ARGS[@]}" \
+    -nic "user,model=virtio-net-pci,$(vm_hostfwd)" \
+    -display none -serial "file:$RUN_LOG" -no-reboot \
+    -daemonize -pidfile "$PID_FILE" 9>&-   # never hand qemu the lifecycle lock
+}
+
+# apply_app vX.Y.Z — the in-place path: stream the app tarball into the
+# running VM; cube-app-apply (on the base) swaps the tree around a cubed
+# restart. Seconds, and threads' containers never notice.
+apply_app() {
+  local ver="$1" sha out
+  fetch_role "$ver" app_tar || return 1
+  sha="$(artifact_sha "$ver" app_tar)"
+  verify_pristine "$sha" app_tar || return 1
+  log "applying app $ver in place"
+  out="$(vm_ssh cube-app-apply < "$(pristine_path "$sha" app_tar)" 2>&1 | tr -d '\r')" \
+    || { fail "cube-app-apply failed:"; printf '%s\n' "$out" | sed 's/^/   /' >&2; return 1; }
+  printf '%s\n' "$out" | tail -1 | sed 's/^/   /'
+  mf "$ver" build_id > "$APP_LIVE.build"
+  # Callers wait for cubed (once) — cmd_up and cmd_upgrade both do.
+}
+
+# ---- update hint (quiet, best effort, never blocks for long) ----------------
+check_update() {  # prints one line if a newer release exists; silent otherwise
+  [ -z "${CUBE_NO_UPDATE_CHECK:-}" ] || return 0
+  [ -z "${CUBE_RELEASE_DIR:-}" ] || return 0
+  local cur latest
+  cur="$(installed_version)"; [ -n "$cur" ] || return 0
+  latest="$(list_releases 4 2>/dev/null | head -1)" || return 0
+  [ -n "$latest" ] && ver_gt "$latest" "$cur" || return 0
+  note "update available: $latest (you have $cur) — run: cube upgrade"
+}
+
+# ---- self-update: this file is versioned WITH the artifact set --------------
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+self_update() {  # self_update vX.Y.Z — replace this file with the release's launcher
+  local tag="vm-$1" tmp
+  [ -n "${CUBE_RELEASE_DIR:-}" ] && return 0
+  [ -w "$SELF" ] && [ -f "$SELF" ] || return 0
+  tmp="$(mktemp "$CUBE_HOME/.launcher-XXXXXX")"
+  if fetch_asset "$tag" cube "$tmp" >/dev/null 2>&1 && [ -s "$tmp" ] && head -1 "$tmp" | grep -q bash; then
+    if [ "$(sha256 "$tmp" | cut -d' ' -f1)" != "$(sha256 "$SELF" | cut -d' ' -f1)" ]; then
+      chmod +x "$tmp" && mv "$tmp" "$SELF" && note "launcher updated to the $1 release's copy ($SELF)"
+      return 0
+    fi
+  fi
+  rm -f "$tmp"
+}
+
+# ---- commands ---------------------------------------------------------------
+cmd_up() {
+  local want="${1:-}" ver need
+  check_version_arg "$want"
+  lock
+  ver="$(installed_version)"
+  if vm_ssh true 2>/dev/null; then
+    check_identity || return 1
+    wait_cubed || return 1
+    print_url; check_update
+    return 0
+  fi
+  if vm_pid >/dev/null; then
+    log "VM is already booting — waiting for it"
+    wait_ssh && check_identity && wait_cubed && print_url
+    return
+  fi
+  preflight_host || return 1
+  if [ -z "$ver" ]; then
+    ver="${want:-$(resolve_latest)}" || return 1
+    log "install cube $ver ($ARCH)"
+    fetch_manifest "$ver" || return 1
+    need="$(bytes_needed "$ver" base app node)"
+    preflight_space "$need" || return 1
+    [ "$need" = 0 ] || note "downloading $(mb "$need") to $IMAGES_DIR"
+    fetch_role "$ver" base && fetch_role "$ver" app && fetch_role "$ver" node || return 1
+    printf '%s\n' "$ver" > "$VERSION_FILE"
+    ok "release $ver ready"
+  elif [ -n "$want" ] && [ "$want" != "$ver" ]; then
+    fail "installed release is $ver — use \`cube upgrade $want\` to switch"
+    return 1
+  else
+    # Heal a store missing files (no-op otherwise). The app disk is only
+    # needed when its overlay must be (re)created.
+    fetch_manifest "$ver" && fetch_role "$ver" base && fetch_role "$ver" node || return 1
+    [ -f "$APP_LIVE" ] || fetch_role "$ver" app || return 1
+  fi
+  boot_vm "$ver" || return 1
+  wait_ssh || return 1
+  # The app overlay may carry an older build than the manifest says
+  # (an upgrade interrupted between download and apply): heal in place.
+  if ! check_identity 2>/dev/null; then
+    if [ "$(app_overlay_runtime)" = "$(mf "$ver" runtime_id)" ]; then
+      note "app overlay is behind $ver — applying its tarball"
+      apply_app "$ver" || return 1
+    fi
+    check_identity || return 1
+  fi
+  wait_cubed || return 1
+  print_url; check_update
+}
+
+stop_vm() {  # graceful stop; FAILS (returns 1) while qemu still holds disks
+  local pid
+  if ! pid="$(vm_pid)"; then
+    rm -f "$PID_FILE"
+    return 0
+  fi
+  if vm_ssh true 2>/dev/null && check_identity >/dev/null 2>&1; then
+    log "powering off"
+    vm_ssh 'sudo poweroff' 2>/dev/null || true
+  fi
+  for _ in $(seq 30); do kill -0 "$pid" 2>/dev/null || break; sleep 2; done
+  if kill -0 "$pid" 2>/dev/null; then
+    fail "VM still running after 60s — killing it"
+    kill "$pid" 2>/dev/null || true
+    for _ in $(seq 10); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+    kill -0 "$pid" 2>/dev/null && { fail "qemu (pid $pid) would not die"; return 1; }
+  fi
+  rm -f "$PID_FILE"
+  return 0
+}
+
+cmd_down() {
+  lock
+  if ! vm_pid >/dev/null; then
+    rm -f "$PID_FILE"
+    ok "no VM running"
+    return 0
+  fi
+  stop_vm
+  ok "VM stopped"
+}
+
+cmd_status() {
+  local ver pid role
+  ver="$(installed_version)"
+  if [ -z "$ver" ]; then
+    echo "release: none installed (run: cube up)"
+    return 0
+  fi
+  echo "release: $ver ($ARCH, build $(mf "$ver" build_id))"
+  echo "runtime: $(mf "$ver" runtime_id)"
+  for role in base app node; do
+    printf '  %-5s %s  %s\n' "$role" "$(artifact_sha "$ver" "$role" | cut -c1-12)" "$(mb "$(artifact_bytes "$ver" "$role")")"
+  done
+  echo "ports:   product $CUBE_PORT, ssh $SSH_PORT${CUBE_BIND:+, also bound on $CUBE_BIND}"
+  if pid="$(vm_pid)"; then
+    echo "vm:      running (pid $pid, $VM_MEM, $VM_CPUS cpus)"
+  else
+    echo "vm:      stopped"
+    check_update
+    return 0
+  fi
+  if vm_ssh true 2>/dev/null; then
+    echo "ssh:     up (port $SSH_PORT), VM reports build $(vm_build_id)"
+  else
+    echo "ssh:     not answering (port $SSH_PORT)"
+    return 0
+  fi
+  if cubed_up 2>/dev/null; then
+    echo "product: up — $CUBED_URL"
+  else
+    echo "product: not answering on :$CUBE_PORT (cube logs)"
+  fi
+  check_update
+}
+
+cmd_ssh() {
+  [ -f "$SSH_KEY" ] || { fail "no key yet — run: cube up"; exit 1; }
+  exec ssh -t -p "$SSH_PORT" -i "$SSH_KEY" \
+    -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$KNOWN_HOSTS" \
+    -o LogLevel=ERROR cube@127.0.0.1 "$@"
+}
+cmd_logs() { cmd_ssh journalctl -u cubed -n 100 -f; }
+
+cmd_upgrade() {
+  local want="${1:-}" cur target role changed=() need reboot=0
+  check_version_arg "$want"
+  lock
+  cur="$(installed_version)"
+  [ -n "$cur" ] || { fail "nothing installed yet — run: cube up"; return 1; }
+  target="${want:-$(resolve_latest)}" || return 1
+  if [ "$target" = "$cur" ]; then
+    ok "already on $cur"
+    self_update "$cur"
+    return 0
+  fi
+  fetch_manifest "$target" || return 1
+  for role in base node; do
+    [ "$(artifact_sha "$cur" "$role")" = "$(artifact_sha "$target" "$role")" ] || { changed+=("$role"); reboot=1; }
+  done
+  if [ "$(mf "$cur" runtime_id)" != "$(mf "$target" runtime_id)" ]; then
+    changed+=("runtime"); reboot=1
+  fi
+  [ "$(artifact_sha "$cur" app)" = "$(artifact_sha "$target" app)" ] || changed+=("app")
+  log "upgrade $cur -> $target"
+  note "changed: ${changed[*]:-nothing}; the data disk is kept"
+  # Downloads: base/cube-node when they changed; the app DISK only when
+  # the runtime changed (a fresh overlay is needed then); otherwise the
+  # tarball alone.
+  local roles=()
+  for role in ${changed[@]+"${changed[@]}"}; do   # bash 3.2: empty arrays are "unbound" under set -u
+    case "$role" in base|node) roles+=("$role") ;; runtime) roles+=(app) ;; esac
+  done
+  [ "$reboot" = 1 ] && [[ " ${changed[*]} " != *" runtime "* ]] && roles+=(app_tar)
+  [ "$reboot" = 0 ] && roles+=(app_tar)
+  need="$(bytes_needed "$target" "${roles[@]}")"
+  preflight_space "$need" || return 1
+  [ "$need" = 0 ] || note "downloading $(mb "$need")"
+  for role in "${roles[@]}"; do fetch_role "$target" "$role" || return 1; done
+
+  if [ "$reboot" = 1 ]; then
+    # The old qemu must be PROVABLY gone before overlays it holds are
+    # reset and a second writer boots onto the data disk.
+    stop_vm || { fail "aborting upgrade — the running VM still holds the disks"; return 1; }
+    printf '%s\n' "$target" > "$VERSION_FILE"
+    boot_vm "$target" || return 1     # resets exactly the changed disks
+    wait_ssh || return 1
+    if [ "$(app_overlay_build)" != "$(mf "$target" build_id)" ]; then
+      apply_app "$target" || return 1
+    fi
+  else
+    # App only: no reboot. Make sure the VM is up (on the current
+    # release), then swap the app tree in place.
+    if ! vm_ssh true 2>/dev/null; then
+      boot_vm "$cur" || return 1
+      wait_ssh || return 1
+    fi
+    printf '%s\n' "$target" > "$VERSION_FILE"
+    apply_app "$target" || return 1
+  fi
+  check_identity || return 1
+  wait_cubed || return 1
+  prune_store "$target"
+  ok "upgraded to $target (data disk kept)"
+  self_update "$target"
+  print_url
+}
+
+cmd_version() {
+  local ver
+  ver="$(installed_version)"
+  [ -n "$ver" ] || { echo "none installed"; return 0; }
+  echo "$ver"
+}
+
+cmd_destroy() {
+  [ "${1:-}" = "--yes" ] || {
+    fail "this deletes the VM AND ALL ITS DATA (threads, logins, repositories) in $CUBE_HOME"
+    note "re-run as: cube destroy --yes"
+    return 1
+  }
+  lock
+  stop_vm || { fail "the VM would not stop — not deleting anything"; return 1; }
+  rm -rf "$CUBE_HOME"
+  ok "removed $CUBE_HOME — \`cube up\` starts from nothing"
+}
+
+usage() {
+  cat <<'USAGE'
+cube — self-hosted coding-agent box (launcher)
+
+  cube up [vX.Y.Z]       first run: fetch release artifacts + create the
+                         data disk; boot, wait for the product, print URL
+  cube down              graceful poweroff (hard kill after 60s)
+  cube status            release, VM, product, update availability
+  cube upgrade [vX.Y.Z]  fetch a release, apply only what changed (an
+                         app-only release lands in seconds, no reboot),
+                         KEEP the data disk; refreshes this file too
+  cube ssh [cmd...]      ssh into the VM as `cube`
+  cube logs              follow cubed's journal
+  cube version           installed release version
+  cube destroy --yes     stop and delete everything in $CUBE_HOME
+
+State lives in ~/.cube (CUBE_HOME); settings persist in ~/.cube/config.
+Env knobs (override config): CUBE_REPO, CUBE_RELEASE_DIR, CUBE_PORT,
+CUBE_SSH_PORT, CUBE_BIND, CUBE_MEM, CUBE_CPUS, CUBE_DATA_SIZE.
+USAGE
+  exit "${1:-0}"
+}
+
+check_version_arg() {  # empty (= latest) or strict vX.Y.Z — it lands in
+  [ -z "$1" ] && return 0 # tags, filenames and URLs
+  [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || { fail "not a version: '$1' (expected vX.Y.Z)"; exit 1; }
+}
+
+# Sourced with CUBE_LIB_ONLY=1, this file only defines its functions
+# (tests and scripts/vm/verify-release.sh poke at them directly).
+[ -n "${CUBE_LIB_ONLY:-}" ] && return 0
+
+mkdir -p "$CUBE_HOME"
+CMD="${1:-}"
+[ $# -gt 0 ] && shift
+case "$CMD" in
+  up)       cmd_up "$@" ;;
+  down)     cmd_down "$@" ;;
+  status)   cmd_status "$@" ;;
+  ssh)      cmd_ssh "$@" ;;
+  logs)     cmd_logs ;;
+  upgrade)  cmd_upgrade "$@" ;;
+  version)  cmd_version "$@" ;;
+  destroy)  cmd_destroy "$@" ;;
+  ""|help|-h|--help) usage 0 ;;
+  *) fail "unknown command: $CMD"; usage 1 ;;
+esac

@@ -1,0 +1,12 @@
+{
+  "generator": "packages/web/scripts/make-icons.mjs",
+  "identity": "bench instrument (seed 1a30da04)",
+  "source": "cube wireframe glyph, stroke #cc3f00 on enclosure #ece8df",
+  "files": [
+    "icon-192.png",
+    "icon-512.png",
+    "icon-maskable-512.png",
+    "apple-touch-icon.png"
+  ],
+  "generatedAt": "2026-08-27T13:30:13.870Z"
+}

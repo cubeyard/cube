@@ -1,0 +1,448 @@
+# The release pipeline. Publishing is opt-in: set the repository Actions
+# variable CUBE_RELEASES_ENABLED=true only after release acceptance. Manual
+# dry runs work without it; imported repos and forks cannot publish by default.
+# Two ways in, one build:
+#
+#   push to main     every push that touches shipped files becomes the
+#                    next PATCH release on its own: `prepare` tags main's
+#                    commit vm-vX.Y.(Z+1), the matrix builds every artifact
+#                    for every architecture, the amd64 set is verified by
+#                    installing it with the launcher (blank data disk,
+#                    nested container, in-place app update), and only then
+#                    is the release public. Pushes touching nothing shipped
+#                    (*.md, docs/, .claude/, spikes/) do not release.
+#   push vm-vX.Y.Z   a hand-made tag releases THAT version — the way to
+#                    bump minor/major; the next automatic release counts
+#                    on from it:
+#
+#                      git tag -a vm-v0.7.0 -m 'cube release v0.7.0'
+#                      git push origin vm-v0.7.0      # then main
+#
+#                    Push the tag BEFORE main: a main push whose commit
+#                    already carries a vm-v* tag does nothing, while the
+#                    other order builds the same bytes twice.
+#
+# Trunk-based: main is the sign-off point (nothing lands there without
+# it), so a release is main with a number. The launcher never upgrades
+# by itself — a release is an offer (`cube upgrade`), and
+# `cube upgrade vX.Y.Z` walks back to any earlier one.
+#
+# Manual runs (Actions -> release -> Run workflow):
+#   version     vX.Y.Z of an EXISTING tag: rebuild/heal that release
+#   prerelease  publish as a pre-release — invisible to `cube up`'s
+#               "latest", installable with `cube up vX.Y.Z`; promote
+#               later with `gh release edit vm-vX.Y.Z --prerelease=false`
+#   dry_run     build + package + boot-verify from the CHOSEN BRANCH and
+#               publish nothing — the way to test this pipeline itself
+#
+# Why the coordination lives HERE and not in scripts/vm/release.sh: that
+# script's lock is machine-local, so two architecture legs on two
+# runners would race `gh release create` and each would undraft the
+# moment its own upload finished — publishing a release that is missing
+# an architecture. GitHub jobs give us the ordering for free: one
+# `prepare` creates the draft, the matrix uploads into it, and `publish`
+# undrafts only after everything else passed.
+name: release
+
+on:
+  push:
+    branches: ['main']
+    tags: ['vm-v*']
+    # Branch pushes only — GitHub does not evaluate path filters for
+    # tag pushes. Nothing listed here ends up in an artifact. (GitHub
+    # skips the filter for pushes of >1000 commits or >3000 changed
+    # files: a docs-only push then releases once too many, never too
+    # few.)
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.claude/**'
+      - 'spikes/**'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'vX.Y.Z (must match an existing tag; ignored for dry runs)'
+        required: false
+        default: ''
+      prerelease:
+        description: 'publish as a pre-release (hidden from "latest")'
+        type: boolean
+        default: false
+      dry_run:
+        description: 'build, package and verify from this branch; publish nothing'
+        type: boolean
+        default: true
+
+# One release at a time, and every run waits its turn. Two automatic
+# runs side by side would compute the same next version and collide in
+# one draft; queued, the second counts on from the first's tag.
+# `queue: max` keeps every pending run — the default keeps ONE and
+# replaces it with the newest, which would cancel a hand-made tag push
+# waiting behind a release when the next main push arrived; that main
+# push would then skip its commit as "already tagged", and the tagged
+# release would silently never be built.
+concurrency:
+  group: release
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  contents: read
+
+env:
+  # prepare's OWN starting point; every later job checks out the exact
+  # commit prepare resolved (needs.prepare.outputs.ref). A manual run of
+  # a TAGGED version must build that tag, a tag push builds the tag, and
+  # a branch push (main, or a dry run) builds the PUSHED commit — not
+  # whatever the branch is by the time the runner starts.
+  CHECKOUT_REF: ${{ (github.event.inputs.version != '' && github.event.inputs.dry_run != 'true') && format('refs/tags/vm-{0}', github.event.inputs.version) || ((startsWith(github.ref, 'refs/tags/') && github.ref) || github.sha) }}
+  DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '' }}
+  # A push to main: the version and its tag are minted here.
+  AUTO: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && '1' || '' }}
+
+jobs:
+  prepare:
+    if: vars.CUBE_RELEASES_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == true)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      build_id: ${{ steps.v.outputs.build_id }}
+      ref: ${{ steps.v.outputs.commit }}
+      auto: ${{ steps.v.outputs.auto }}
+      skip: ${{ steps.v.outputs.skip }}
+      tag_object: ${{ steps.tag.outputs.object }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+          # Tags and history: the next version counts on from the
+          # highest tag, and the notes list commits since the last one.
+          fetch-depth: 0
+          fetch-tags: true
+      - id: v
+        run: |
+          set -euo pipefail
+          echo "auto=$AUTO" >> "$GITHUB_OUTPUT"
+          VERSION="${{ github.event.inputs.version }}"
+          if [ -n "$DRY_RUN" ]; then
+            VERSION="${VERSION:-v0.0.0}"
+          elif [ -n "$AUTO" ]; then
+            # Released under a hand-made tag already (pushed before main,
+            # as documented)? Then that tag's run is the release.
+            TAGGED="$(git tag --points-at HEAD 'vm-v*' | head -1)"
+            if [ -n "$TAGGED" ]; then
+              echo "$(git rev-parse --short HEAD) already carries $TAGGED — nothing to release"
+              echo "skip=1" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # The highest vm-v* anywhere, not only on main: a number is
+            # never reused, whichever branch minted it.
+            LAST="$(git tag -l 'vm-v*' | grep -E '^vm-v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+            [ -n "$LAST" ] || { echo "no vm-v* tag to count on from — make the first release by hand"; exit 1; }
+            IFS=. read -r MAJ MIN PAT <<< "${LAST#vm-v}"
+            VERSION="v$MAJ.$MIN.$((PAT + 1))"
+            echo "next after $LAST: $VERSION"
+          else
+            [ -n "$VERSION" ] || VERSION="${GITHUB_REF_NAME#vm-}"
+            [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/vm-$VERSION^{commit}" 2>/dev/null)" ] \
+              || { echo "checked-out commit is not tag vm-$VERSION"; exit 1; }
+          fi
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "not a version: $VERSION"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_id=cube-$VERSION-g$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: tag main (automatic release)
+        id: tag
+        if: env.AUTO != '' && steps.v.outputs.skip == ''
+        run: |
+          set -euo pipefail
+          V="${{ steps.v.outputs.version }}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "vm-$V" -m "cube release $V"
+          # The object id lets `cleanup` take back exactly this tag and
+          # never a hand-made one that won the same number (git refuses
+          # the push below in that case, and this run fails here).
+          echo "object=$(git rev-parse "refs/tags/vm-$V")" >> "$GITHUB_OUTPUT"
+          # A tag pushed with GITHUB_TOKEN triggers no workflow: this
+          # run IS the release, and `cleanup` takes the tag back if the
+          # release does not make it.
+          git push origin "refs/tags/vm-$V"
+
+      - name: create the draft release (once)
+        if: env.DRY_RUN == '' && steps.v.outputs.skip == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V="${{ steps.v.outputs.version }}"
+          TAG="vm-$V"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" != true ]; then
+              echo "$TAG is already published — bump the version"; exit 1
+            fi
+            echo "reusing existing draft $TAG"
+            exit 0
+          fi
+          # Notes: what changed since the newest release this commit
+          # contains. docs: commits ship nothing and stay out.
+          PREV="$(git tag -l --merged HEAD 'vm-v*' | grep -E '^vm-v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "$TAG" | sort -V | tail -1 || true)"
+          # The run line is also the ownership marker `cleanup` checks
+          # before deleting a draft.
+          {
+            printf 'Built by .github/workflows/release.yml from %s' "$(git rev-parse HEAD)"
+            [ -z "$AUTO" ] || printf ' (automatic: push to main)'
+            printf '.\nRun: %s/%s/actions/runs/%s\n\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            if [ -n "$PREV" ]; then
+              printf 'Changes since %s:\n\n' "$PREV"
+              git log --no-merges --format='- %s' "$PREV..HEAD" | grep -v '^- docs:' || true
+              printf '\n'
+            fi
+            printf 'Per-arch artifact sets (base / app / app tarball / cube-node), plus the `cube` launcher itself.\n\n'
+            printf 'Install:\n\n    gh release download -R %s -p cube -D ~/.local/bin --clobber\n    chmod +x ~/.local/bin/cube && cube up\n\n' "$GITHUB_REPOSITORY"
+            printf 'A blank data disk initializes itself on first boot; `cube upgrade` keeps it and downloads only what changed.\nVerify: sha256sum -c SHA256SUMS.<arch>\n'
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" --draft --verify-tag --title "cube $V" --notes-file "$RUNNER_TEMP/notes.md"
+
+      # The launcher rides along as an asset: it is one arch-independent
+      # bash file, it is the FIRST thing a user needs, and shipping it
+      # here pins it to the artifact set it knows how to read (a launcher
+      # from main can otherwise meet an older release, or the reverse).
+      # In `prepare` rather than the matrix so the two arch legs cannot
+      # race each other uploading the same name.
+      - name: ship the launcher itself
+        if: env.DRY_RUN == '' && steps.v.outputs.skip == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "vm-${{ steps.v.outputs.version }}" --clobber launcher/cube
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.skip == ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+
+      # Runners ship tens of GB of toolchains a cube build never touches;
+      # amd64 starts with only ~13 GB free.
+      - name: reclaim disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /usr/local/share/powershell \
+                      /usr/share/swift 2>/dev/null || true
+          df -h / | tail -1
+
+      # systemd-repart needs a user namespace INSIDE the nix build
+      # sandbox, and Ubuntu 24.04 denies unprivileged userns by default.
+      - name: allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d # v16
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 26
+
+      - name: host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-utils e2fsprogs zstd incus incus-client dnsmasq-base btrfs-progs
+          # amd64 also BOOTS the result below (it is the arch with KVM).
+          if [ "${{ matrix.arch }}" = amd64 ]; then
+            sudo apt-get install -y --no-install-recommends \
+              qemu-system-x86 ovmf genisoimage
+            sudo chmod 666 /dev/kvm
+          fi
+
+      - name: base image
+        run: bash scripts/vm/build.sh
+
+      - name: the qemu desktop stack must stay out of the image
+        run: |
+          set -euo pipefail
+          cd scripts/vm/base
+          SYS=$([ "${{ matrix.arch }}" = arm64 ] && echo aarch64 || echo x86_64)-linux
+          TOP=$(nix eval --raw ".#nixosConfigurations.$SYS.config.system.build.toplevel")
+          # Store names, not attribute names: qemu_kvm is "qemu-host-cpu-only-*".
+          for p in -qemu- -spice-gtk- -gtk4- -pipewire- -zenity- -cloud-init- -python3- -lego- -skopeo-; do
+            nix path-info -r "$TOP" | grep -qi -- "$p" \
+              && { echo "REGRESSION: $p is back in the closure"; exit 1; } || true
+          done
+          echo "closure: $(nix path-info -S "$TOP" | awk '{printf "%.0f MB", $2/1e6}')"
+
+      - name: app disk + tarball
+        env:
+          CUBE_VM_BUILD_ID: ${{ needs.prepare.outputs.build_id }}
+        run: bash scripts/vm/build-app.sh
+
+      # cube-node: reuse the published bytes when images/ is unchanged
+      # (its only input) — otherwise ~300 MB would change sha every
+      # release for no reason and every user would download it again.
+      # Else incus builds the inner image directly on the runner: system
+      # containers are namespaces, not nested virt. No VM involved.
+      - name: cube-node disk
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if bash scripts/vm/inherit-cube-node.sh HEAD; then exit 0; fi
+          sudo systemctl start incus || sudo systemctl start incus.socket
+          sudo incus admin init --minimal
+          sudo incus storage create cube btrfs size=10GiB
+          # Docker is preinstalled here and its DOCKER-USER chain drops
+          # forwarding for bridges it does not own.
+          sudo bash scripts/host-firewall.sh || true
+          sudo -E env CUBE_POOL=cube bash images/build.sh cube-node
+          sudo incus image export cube-node /tmp/cube-node
+          sudo chmod a+r /tmp/cube-node.tar.zst
+          bash scripts/vm/pack-cube-node.sh /tmp/cube-node.tar.zst
+
+      - name: package
+        run: |
+          bash scripts/vm/package-release.sh \
+            "${{ needs.prepare.outputs.version }}" \
+            "${{ needs.prepare.outputs.build_id }}" "${{ needs.prepare.outputs.ref }}"
+
+      # Verify HERE rather than in a later job: a draft release cannot
+      # be looked up by tag (GitHub's get-release-by-tag omits drafts),
+      # and this runner already holds both the artifacts and the KVM
+      # needed to boot them. arm64 has no KVM and ships build-verified.
+      - name: install it with the launcher, run a container, apply the app tarball
+        if: matrix.arch == 'amd64'
+        run: |
+          bash scripts/vm/verify-release.sh \
+            "${{ needs.prepare.outputs.version }}" "$HOME/cube/vm/build/dist"
+
+      # Straight into the draft release: Actions artifact storage is
+      # quota-limited and these are gigabytes.
+      - name: upload into the draft
+        if: env.DRY_RUN == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          V="${{ needs.prepare.outputs.version }}"
+          TAG="vm-$V"
+          DIST="$HOME/cube/vm/build/dist"
+          # SHA256SUMS last: its presence marks a complete arch leg.
+          gh release upload "$TAG" --clobber \
+            "$DIST/cube-base-$V-${{ matrix.arch }}.qcow2" \
+            "$DIST/cube-app-$V-${{ matrix.arch }}.qcow2" \
+            "$DIST/cube-app-$V-${{ matrix.arch }}.tar.zst" \
+            "$DIST/cube-node-$V-${{ matrix.arch }}.qcow2"
+          gh release upload "$TAG" --clobber "$DIST/manifest-${{ matrix.arch }}.json"
+          gh release upload "$TAG" --clobber "$DIST/SHA256SUMS.${{ matrix.arch }}"
+
+      - name: sizes
+        run: |
+          ls -l "$HOME/cube/vm/build/dist" | awk 'NR>1 {printf "%7.0f MB  %s\n", $5/1e6, $9}'
+
+  publish:
+    needs: [prepare, build]
+    if: github.event.inputs.dry_run != 'true' && needs.prepare.outputs.skip == ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+      - name: every arch present, then undraft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="vm-${{ needs.prepare.outputs.version }}"
+          ASSETS="$(gh release view "$TAG" --json assets -q '.assets[].name')"
+          for arch in amd64 arm64; do
+            printf '%s\n' "$ASSETS" | grep -qx "SHA256SUMS.$arch" \
+              || { echo "missing $arch leg — refusing to publish"; exit 1; }
+          done
+          # Without this the release is undownloadable by the documented
+          # install line, on both arches.
+          printf '%s\n' "$ASSETS" | grep -qx cube \
+            || { echo "missing the launcher asset — refusing to publish"; exit 1; }
+          gh release edit "$TAG" --draft=false \
+            --prerelease=${{ github.event.inputs.prerelease == 'true' && 'true' || 'false' }}
+          gh release view "$TAG" --json url -q .url
+
+  # An automatic release that did not make it leaves nothing behind:
+  # the next main push would otherwise count on from a tag that never
+  # shipped, and a stray draft would sit in the release list. Only what
+  # THIS run made is taken back — the draft while it is still a draft
+  # carrying this run's marker, the tag while origin still holds the
+  # exact object prepare pushed — so a hand-made tag or release that
+  # collided on the number is never touched. After a cancelled `publish`
+  # the undraft may still be in flight; the job lets it settle before
+  # looking, and a draft that turns out published stays. Anything left
+  # behind fails this job, visibly, with what remains.
+  cleanup:
+    needs: [prepare, build, publish]
+    if: always() && needs.prepare.outputs.auto != '' && needs.prepare.outputs.skip == '' && needs.prepare.outputs.version != '' && (failure() || cancelled())
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: take back this run's tag and draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: vm-${{ needs.prepare.outputs.version }}
+          OBJECT: ${{ needs.prepare.outputs.tag_object }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISH_RESULT" = cancelled ]; then
+            echo "publish was cancelled — letting an undraft that may be in flight settle"
+            sleep 60
+          fi
+          # Drafts are invisible to get-release-by-tag: list instead. An
+          # API failure here is not "absent" — set -e stops the job and
+          # leaves everything for a re-run.
+          REL="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+                   -q "[.[] | select(.tag_name == \"$TAG\")] | first // empty | {id, draft, body}")"
+          if [ -n "$REL" ]; then
+            ID="$(printf '%s' "$REL" | jq -r .id)"
+            DRAFT="$(printf '%s' "$REL" | jq -r .draft)"
+            MINE="$(printf '%s' "$REL" | jq -r '.body // ""' | tr -d '\r' \
+                    | grep -cE "actions/runs/$GITHUB_RUN_ID([^0-9]|$)" || true)"
+            if [ "$DRAFT" = true ] && [ "$MINE" != 0 ]; then
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$ID"
+              echo "removed draft $TAG (release id $ID)"
+            else
+              echo "release $TAG is not this run's draft (draft=$DRAFT, this run's marker: $MINE) — leaving it and the tag alone"
+              exit 1
+            fi
+          else
+            echo "no release for $TAG"
+          fi
+          REMOTE="$(git ls-remote origin "refs/tags/$TAG" | awk -v r="refs/tags/$TAG" '$2 == r {print $1}')"
+          if [ -z "$REMOTE" ]; then
+            echo "no tag $TAG on origin"
+          elif [ -n "$OBJECT" ] && [ "$REMOTE" = "$OBJECT" ]; then
+            git push origin --delete "refs/tags/$TAG"
+            echo "removed tag $TAG ($OBJECT)"
+          else
+            echo "tag $TAG on origin is $REMOTE, not this run's ${OBJECT:-<none>} — leaving it"
+            exit 1
+          fi
+          echo "nothing of $TAG remains; the next push to main mints a new version"

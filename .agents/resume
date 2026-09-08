@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# cube needs no per-wake authentication, service repair, or other resume work.
+exit 0

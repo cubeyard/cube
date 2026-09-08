@@ -1,0 +1,30 @@
+# Two-service full stack run by the INNER dockerd (via `docker compose up`).
+# web publishes 8080 -> the port binds in the orb's netns, so the host reaches
+# it at orbIP:8080 with zero extra plumbing (validates the portals requirement).
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: spike
+      POSTGRES_DB: spike
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+  web:
+    image: node:24-alpine
+    depends_on:
+      db:
+        condition: service_healthy
+    working_dir: /app
+    volumes:
+      - ./web:/app:ro
+    environment:
+      PGHOST: db
+      PGUSER: postgres
+      PGPASSWORD: spike
+      PGDATABASE: spike
+    command: ["node", "server.mjs"]
+    ports:
+      - "8080:8080"

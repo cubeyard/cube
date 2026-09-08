@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step() {
+  local label="$1"
+  shift
+  local started=$SECONDS
+  printf '\n==> %s\n' "$label"
+  "$@"
+  printf '<== %s (%ss)\n' "$label" "$((SECONDS - started))"
+}
+
+missing_packages=()
+command -v curl >/dev/null 2>&1 || missing_packages+=(curl)
+command -v git >/dev/null 2>&1 || missing_packages+=(git)
+command -v xz >/dev/null 2>&1 || missing_packages+=(xz-utils)
+[ -r /etc/ssl/certs/ca-certificates.crt ] || missing_packages+=(ca-certificates)
+
+if ((${#missing_packages[@]})); then
+  step "Refresh apt metadata" sudo apt-get update
+  step "Install system prerequisites" \
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      "${missing_packages[@]}"
+fi
+
+node_major=0
+if command -v node >/dev/null 2>&1; then
+  node_major="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || printf '0')"
+fi
+
+if ((node_major < 26)); then
+  node_version="v26.8.1"
+  case "$(uname -m)" in
+    x86_64) node_arch=x64 ;;
+    aarch64) node_arch=arm64 ;;
+    *) printf 'Unsupported architecture for Node.js: %s\n' "$(uname -m)" >&2; exit 1 ;;
+  esac
+
+  node_archive="$(mktemp)"
+  trap 'rm -f "$node_archive"' EXIT
+  step "Download Node.js $node_version" \
+    curl -fsSL "https://nodejs.org/dist/$node_version/node-$node_version-linux-$node_arch.tar.xz" \
+      -o "$node_archive"
+  step "Install Node.js $node_version" \
+    sudo tar -xJf "$node_archive" -C /usr/local --strip-components=1
+  rm -f "$node_archive"
+  trap - EXIT
+fi
+
+pnpm_version="$(node -p 'require("./package.json").packageManager.replace(/^pnpm@/, "")')"
+installed_pnpm="$(pnpm --version 2>/dev/null || true)"
+if [ "$installed_pnpm" != "$pnpm_version" ]; then
+  step "Install pnpm $pnpm_version" sudo npm install --global "pnpm@$pnpm_version"
+fi
+
+printf '\nToolchain: Node.js %s, pnpm %s\n' "$(node --version)" "$(pnpm --version)"
+step "Install workspace dependencies" env CI=1 pnpm install --frozen-lockfile
+step "Build the web application" pnpm build
+
+printf '\nOrb setup complete.\n'

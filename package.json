@@ -1,0 +1,27 @@
+{
+  "name": "cube",
+  "description": "Self-hosted coding-agent sandboxes on a VM you own",
+  "private": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cubeyard/cube.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "packageManager": "pnpm@10.34.5",
+  "scripts": {
+    "cubed": "node packages/server/src/index.ts",
+    "build": "pnpm --filter @cube/web build",
+    "test": "bash scripts/test-offline.sh",
+    "typecheck": "tsc -p tsconfig.json && pnpm --filter @cube/web check",
+    "vm": "bash scripts/vm/dev.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.0"
+  }
+}

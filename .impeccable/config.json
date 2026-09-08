@@ -1,0 +1,24 @@
+{
+  "hook": {
+    "enabled": true,
+    "limits": {
+      "maxFindings": 5,
+      "maxChars": 8000
+    }
+  },
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "packages/web/src/app.css"
+        ],
+        "createdAt": "2026-08-27T12:17:19.419Z",
+        "reason": "Agent: the only match is the markdown blockquote's 3px left rule using --border-strong (a neutral), a typographic convention, not a colored card accent stripe. Documented as an explicit exception in DESIGN.md's Hairline Rule."
+      }
+    ]
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@cube/server",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@cube/core": "workspace:*",
+    "@cube/git": "workspace:*",
+    "@cube/harness": "workspace:*",
+    "@cube/sandbox": "workspace:*",
+    "@lydell/node-pty": "1.2.0-beta.15",
+    "ws": "^8.21.3"
+  }
+}

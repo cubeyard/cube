@@ -1,0 +1,50 @@
+node_modules/
+*.log
+packages/web/dist/
+
+# Secrets and machine-local env never enter a build (build-app.sh stages
+# git's view of the working tree, which honours this file).
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+id_rsa
+id_ed25519
+github-auth.json
+
+# Runtime state and generated VM artifacts.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.qcow2
+*.img
+*.iso
+coverage/
+
+# OS and editor-local files.
+.DS_Store
+.idea/
+.vscode/
+
+# impeccable: machine-local state and runtime caches.
+# Shared and committed: PRODUCT.md, DESIGN.md, .impeccable/design.json,
+# .impeccable/config.json, */.impeccable/live/config.json, */.impeccable/surfaces/.
+.impeccable/config.local.json
+.impeccable/hook.cache.json
+**/.impeccable/live/app-root.json
+**/.impeccable/live/roots.json
+**/.impeccable/live/sessions/
+.claude/settings.local.json
+
+# Harness-created per-thread worktrees; never part of the tree.
+.claude/worktrees/
+
+# Amp captures and portal metadata are local and may contain private data.
+.amp/in/
+.amp/portals/*
+
+# worktrees for isolated feature work
+.worktrees/

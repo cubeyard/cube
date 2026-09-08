@@ -1,0 +1,40 @@
+# Every push: the app must install, typecheck and pass its offline
+# suites. Nothing here touches a VM — the real-Incus smokes run inside
+# the release pipeline's boot gate (release.yml) and in the dev loop
+# (scripts/vm/test.sh).
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 26
+      - name: pnpm (the version package.json pins)
+        run: |
+          npm i -g "pnpm@$(sed -n 's/.*"packageManager": *"pnpm@\([^"]*\)".*/\1/p' package.json)"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: bash scripts/test-offline.sh
+      - name: shell syntax
+        run: |
+          set -e
+          for f in scripts/*.sh scripts/vm/*.sh scripts/vm/base/*.sh launcher/cube images/build.sh images/cube-node/provision.sh; do
+            bash -n "$f"
+          done
+      - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d # v16
+      - name: the base image must evaluate (both arches)
+        run: |
+          cd scripts/vm/base
+          nix flake check --no-build --no-update-lock-file --all-systems
