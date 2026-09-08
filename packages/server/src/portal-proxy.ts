@@ -7,7 +7,7 @@
  */
 import http from "node:http";
 import net from "node:net";
-import type stream from "node:stream";
+import stream from "node:stream";
 
 /** Hop-by-hop headers never forwarded (RFC 9110 §7.6.1). */
 const HOP_BY_HOP = new Set([
@@ -61,7 +61,11 @@ export function proxyHttp(
         if (!HOP_BY_HOP.has(key)) out[key] = value;
       }
       res.writeHead(upstreamRes.statusCode ?? 502, out);
-      upstreamRes.pipe(res);
+      // pipeline, not pipe: a service dying mid-body must end the client's
+      // request too, or the browser waits on it forever.
+      stream.pipeline(upstreamRes, res, () => {
+        if (!res.writableEnded) res.destroy();
+      });
     },
   );
   upstream.on("error", (error: NodeJS.ErrnoException) => {
@@ -115,17 +119,38 @@ export function proxyUpgrade(
  * (thread vocabulary only — cubes are invisible), everything else a plain
  * 503 with Retry-After so API-ish clients back off politely. */
 export function respondWaking(req: http.IncomingMessage, res: http.ServerResponse, message: string): void {
+  holdingPage(req, res, { html: 202, plain: 503, title: "Starting…", refreshSeconds: 3 }, message);
+}
+
+/** The service is down and its last start attempt said why: show that
+ * instead of "starting…" forever. Still self-refreshing, slowly — a fixed
+ * declaration heals without anyone reloading by hand. */
+export function respondFailed(req: http.IncomingMessage, res: http.ServerResponse, message: string): void {
+  holdingPage(req, res, { html: 502, plain: 502, title: "Not running", refreshSeconds: 10 }, message);
+}
+
+function holdingPage(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  page: { html: number; plain: number; title: string; refreshSeconds: number },
+  message: string,
+): void {
   if ((req.headers.accept ?? "").includes("text/html")) {
-    res.writeHead(202, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    res.end(`<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="3">` +
-      `<title>Starting…</title>` +
+    res.writeHead(page.html, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    res.end(`<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="${page.refreshSeconds}">` +
+      `<title>${page.title}</title>` +
       `<body style="font-family:system-ui;display:grid;place-items:center;min-height:100vh;margin:0">` +
-      `<p>${message}</p></body>`);
+      `<p style="max-width:60ch;white-space:pre-wrap">${escapeHtml(message)}</p></body>`);
     return;
   }
-  res.writeHead(503, { "retry-after": "3", "content-type": "text/plain" });
+  res.writeHead(page.plain, { "retry-after": String(page.refreshSeconds), "content-type": "text/plain" });
   res.end(`${message}\n`);
 }
+
+/** Failure detail can quote the workspace's cube.toml — never raw HTML on a
+ * portal origin. */
+const escapeHtml = (text: string) =>
+  text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 /**
  * Anti-CSWSH gate for cubed's OWN WebSocket (the thread terminal): a

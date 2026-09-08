@@ -167,6 +167,9 @@ export class PiTerminals {
       // Everyone left, or the thread was killed, while the plan settled.
       if (this.sessions.get(session.threadId) !== session) return;
       if (session.clients.size === 0) {
+        // The detach armed a linger reap; it must not outlive this session
+        // and kill the pi a later attach spawns.
+        if (session.linger) clearTimeout(session.linger);
         this.sessions.delete(session.threadId);
         return;
       }
@@ -220,7 +223,9 @@ export class PiTerminals {
     // Last client gone: give pi a linger window (page reloads, sleeping
     // laptops, in-flight agent turns), then reap.
     if (session.linger) clearTimeout(session.linger);
-    session.linger = setTimeout(() => this.kill(session.threadId), this.lingerMs);
+    session.linger = setTimeout(() => {
+      if (this.sessions.get(session.threadId) === session) this.kill(session.threadId);
+    }, this.lingerMs);
     session.linger.unref();
   }
 

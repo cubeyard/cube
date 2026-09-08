@@ -333,7 +333,8 @@ Pattern from `gondolin/host/examples/pi-gondolin.ts`, simplified by shared mount
   token exchange against the issuer). Four pieces make it work:
   (1) ensure pins every portal hostname to the bridge gateway in the
   cube's /etc/hosts; (2) `NO_PROXY=.{PORTAL_BASE}` everywhere the egress
-  proxy env is set (profile, dockerd drop-in, per-service env) so hairpin
+  proxy env is set (login-shell profile — which services inherit via
+  `bash -l` — and the dockerd drop-in) so hairpin
   requests go direct instead of 403ing at the allowlist proxy;
   (3) the host firewall admits cubes to cubed's port (host-firewall.sh —
   cubes are otherwise DNS+proxy only); (4) cubed's cube-source guard keeps
@@ -360,19 +361,31 @@ Pattern from `gondolin/host/examples/pi-gondolin.ts`, simplified by shared mount
 
   cubed assigns/records the port, injects `PORT` and `PUBLIC_URL` (the
   service's own portal origin) plus `CUBE_SERVICE_<NAME>_URL` for every
-  declared sibling (the app finds its mock-OAuth issuer this way), and runs
-  each service as a transient systemd unit in the cube
-  (`cube-svc-<name>`) — status/restart/logs come from systemd, not new
-  plumbing. **Ensure** semantics: start whatever is missing, wait for
-  readiness. Runs from the `services_ensure` tool and automatically when a
-  request hits a declared service's portal that is not up.
+  declared sibling (the app finds its mock-OAuth issuer this way) and
+  `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` (Vite refuses unknown Host
+  headers, and a portal hostname is one), and runs each service as a
+  transient systemd unit in the cube (`cube-svc-<name>`) —
+  status/restart/logs come from systemd, not new plumbing. **Ensure**
+  semantics: start whatever is missing, wait for readiness (a unit whose
+  process exits fails fast), leave an active unit started from the SAME
+  declaration alone however long it takes to come up, replace one started
+  from an edited declaration (the declaration's fingerprint rides in the
+  unit's description), and stop + forget services that are no longer
+  declared (a renamed service must not inherit the old one's port and be
+  "confirmed" by the old process). Runs from the `services_ensure` tool
+  and automatically when a request hits a declared service's portal that
+  is not up.
 - **Bind-address gotcha**: commands must listen on `$PORT` on `0.0.0.0` —
   a `127.0.0.1` bind is unreachable from outside the netns. The health
   probe catches it; the error text tells the agent to rebind (socat
   forwarding stays a documented manual fallback, not automatic).
 - **Wake-on-request**: a request hitting a sleeping cube's portal triggers
   the full wake (resume script + wake hooks) plus ensure of the target
-  service; the proxy holds the request (202 page if >2s).
+  service; the proxy holds the request (self-refreshing 202 page if >2s).
+  A service whose last start attempt failed gets a 502 page with the
+  failure detail instead — never "starting…" forever — that still retries
+  slowly, so a fixed declaration heals without a manual reload. Only a
+  request that reaches the service counts as activity for the idle sweep.
 
 ## 11. Git and PR flow
 

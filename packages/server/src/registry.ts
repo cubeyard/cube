@@ -114,7 +114,9 @@ const SUBNET_MAX = 249;
 
 // Linux IFNAMSIZ is 16 (15 usable): "cbr-" + name must fit, so cube names
 // are capped at 11 chars. Validated at cube creation, before any allocation.
-export const CUBE_NAME_RE = /^[a-z][a-z0-9-]{0,10}$/;
+/** Also half of the portal label `<service>--<cube>`: no `--` inside and
+ * no trailing hyphen, or the label would not split (or be a DNS label). */
+export const CUBE_NAME_RE = /^[a-z](?:-?[a-z0-9]){0,10}$/;
 
 export function networkForCube(name: string, subnetIndex: number): CubeNetworkPlan {
   return {
@@ -209,9 +211,9 @@ export class Registry {
         UNIQUE(cube_id, purpose)
       );
     `);
-    this.migrateThreadArchive();
     this.migratePortalTable();
     this.requireProjectThreads();
+    this.migrateThreadArchive(); // after: the project upgrade recreates `thread` without it
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS thread_cube_id_unique ON thread(cube_id)");
   }
 

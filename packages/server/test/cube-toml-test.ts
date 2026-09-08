@@ -128,6 +128,10 @@ assert.throws(() => parseServices(`[services.a--b]\ncommand = "x"`), /invalid se
 assert.throws(() => parseServices(`[services.a.env]\nX = 1`), /must be a string/);
 assert.throws(() => parseServices(`[services]\nfoo = "x"`), /unsupported section/);
 assert.throws(() => parseServices(`[services.a.env.deep]\nX = "1"`), /unsupported section/);
+assert.throws(
+  () => parseServices('[services.web]\ncommand = "x"\n[services.web.env]\nMY-VAR = "1"'),
+  /not a valid environment variable name/,
+);
 console.log("9 ok: malformed service declarations throw");
 
 // --- non-service sections are untouched; no services -> []
