@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import GithubConnect from "./GithubConnect.svelte";
-  import { completeOnboarding, disconnectGithub } from "../lib/api.ts";
+  import { completeOnboarding, disconnectGithub, errorText } from "../lib/api.ts";
   import type { GithubAuthStatus } from "../lib/types.ts";
 
   let { onComplete, projectLogin = false }: {
@@ -31,7 +31,7 @@
       await tick();
       heading?.focus();
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = errorText(e);
     } finally {
       saving = false;
     }
@@ -51,7 +51,7 @@
       await completeOnboarding();
       onComplete(github.state === "connected");
     } catch (e) {
-      error = `could not save setup — ${e instanceof Error ? e.message : String(e)}`;
+      error = `could not save setup — ${errorText(e)}`;
       saving = false;
     }
   }
@@ -85,7 +85,7 @@
       {#if github.state === "connected"}
         <button class="action primary" onclick={next} disabled={saving || loginBusy}>{projectLogin ? "return to project" : "continue"}</button>
       {:else}
-        <button class="action secondary" onclick={next} disabled={saving || loginBusy}>{saving ? "cancelling login…" : projectLogin ? "back to project" : "not now"}</button>
+        <button class="action secondary" onclick={next} disabled={saving}>{saving ? "cancelling login…" : projectLogin ? "back to project" : "not now"}</button>
       {/if}
     </div>
     <p class="later">{projectLogin ? "Your project stays as you left it. We’ll check repository access when you return after login." : "You can always log in later from a project."}</p>

@@ -28,6 +28,13 @@
 
   function connect(): void {
     if (disposed) return;
+    // One socket at a time: a retry while another attempt is pending or
+    // open must not leave an orphan writing into the same xterm.
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+    const previous = ws;
+    ws = null;
+    previous?.close();
     pane = { kind: "connecting" };
     // The server replays its scrollback tail on attach — start from a
     // clean frame so a reconnect doesn't stack two copies of the screen.
@@ -62,6 +69,7 @@
       // flowing immediately either way. Treat open as live unless a
       // status/error frame says otherwise.
       if (pane.kind === "connecting") pane = { kind: "live" };
+      retryDelay = 1000; // a healthy link earns back the fast retry
       term.focus();
     };
     socket.onclose = () => {

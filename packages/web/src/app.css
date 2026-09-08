@@ -734,7 +734,6 @@ header .spacer { margin-left: auto; }
 }
 .changes-state p { max-width: 30rem; margin: 0; font-size: 13px; overflow-wrap: anywhere; }
 .changes-state.bad { color: var(--bad); }
-.terminal-pending .lamp { margin-bottom: 0.1rem; }
 .changes-notice {
   margin: 0; padding: 0.35rem 0.55rem;
   border-bottom: 1px solid var(--line);

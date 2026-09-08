@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { checkProject, fetchProjects } from "../lib/api.ts";
+  import { checkProject, errorText, fetchProjects } from "../lib/api.ts";
   import { relTime } from "../lib/time.ts";
   import type { Project } from "../lib/types.ts";
   import Header from "./Header.svelte";
@@ -20,7 +20,7 @@
       error = null;
     } catch (e) {
       if (seq !== refreshSeq) return;
-      error = String(e);
+      error = errorText(e);
     }
     loaded = true;
   }
@@ -39,7 +39,7 @@
       error = null;
       await refresh();
     } catch (e) {
-      error = `check: ${e instanceof Error ? e.message : e}`;
+      error = `check: ${errorText(e)}`;
     } finally {
       checking = null;
     }
@@ -69,7 +69,7 @@
     <div class="well">
       {#each projects as project (project.id)}
         <div class="module project-module">
-          <a class="module-face" href="#/projects/{encodeURIComponent(project.id)}">
+          <a class="module-face" href="#/projects/{project.id}">
             <span class="lamp {lampClass(project)}" aria-hidden="true"></span>
             <span class="module-text">
               <span class="module-title">{project.name}</span>

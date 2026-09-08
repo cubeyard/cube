@@ -5,6 +5,7 @@
     createProject,
     createUserThread,
     deleteProject,
+    errorText,
     fetchProject,
     updateProject,
   } from "../lib/api.ts";
@@ -55,7 +56,7 @@
       error = null;
     } catch (e) {
       if (seq !== refreshSeq) return;
-      error = String(e);
+      error = errorText(e);
     }
     loaded = true;
   }
@@ -95,17 +96,18 @@
 
   async function save(): Promise<void> {
     if (saving) return;
+    refreshSeq++; // a poll already in flight must not revert the saved form
     saving = true;
     error = null;
     try {
       if (isNew) {
         const created = await createProject(payload());
-        location.hash = `#/projects/${encodeURIComponent(created.id)}`;
+        location.hash = `#/projects/${created.id}`;
       } else {
         loadForm(await updateProject(projectId, payload()));
       }
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = errorText(e);
     } finally {
       saving = false;
     }
@@ -119,7 +121,7 @@
       project = await checkProject(projectId);
       await refresh();
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = errorText(e);
     } finally {
       checking = false;
     }
@@ -131,9 +133,9 @@
     error = null;
     try {
       const id = await createUserThread(project.id);
-      location.hash = `#/t/${encodeURIComponent(id)}`;
+      location.hash = `#/t/${id}`;
     } catch (e) {
-      error = `new thread: ${e instanceof Error ? e.message : e}`;
+      error = `new thread: ${errorText(e)}`;
       starting = false;
     }
   }
@@ -141,11 +143,12 @@
   async function remove(): Promise<void> {
     if (!project || project.threadCount > 0) return;
     if (!confirm(`Delete project "${project.name}"? Its prepared repository configuration will be removed.`)) return;
+    refreshSeq++;
     try {
       await deleteProject(project.id);
       location.hash = "#/projects";
     } catch (e) {
-      error = `delete: ${e instanceof Error ? e.message : e}`;
+      error = `delete: ${errorText(e)}`;
     }
   }
 
@@ -164,7 +167,7 @@
 
 {#if githubLogin}
   <Onboarding projectLogin onComplete={(connected) => {
-    location.hash = `#/projects/${encodeURIComponent(projectId)}`;
+    location.hash = `#/projects/${projectId}`;
     if (connected) void recheck();
   }} />
 {:else}
@@ -174,6 +177,8 @@
 
   {#if !loaded}
     <p class="loading">loading…</p>
+  {:else if !project && !isNew}
+    <p class="loading">no such project{error ? ` — ${error}` : ""}</p>
   {:else}
     <div class="project-detail-head">
       <div>
@@ -271,7 +276,7 @@
                 <span>checking access and branch…</span>
               {:else if checked?.error?.startsWith("github: not connected")}
                 <span class="error">{checked.error}</span>
-                <div><a class="key github-login-link" href={`#/projects/${encodeURIComponent(projectId)}/github`}>log in to github</a></div>
+                <div><a class="key github-login-link" href={`#/projects/${projectId}/github`}>log in to github</a></div>
               {:else if checked?.error}
                 <span class="error">{checked.error}</span>
               {:else}
