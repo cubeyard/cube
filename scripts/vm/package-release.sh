@@ -73,7 +73,7 @@ cat > "$DIST/manifest-$ARCH.json" <<MANIFEST
 {
   "schema": "2",
   "version": "$VERSION",
-  "tag": "vm-$VERSION",
+  "tag": "$VERSION",
   "build_id": "$BUILD_ID",
   "commit": "$COMMIT",
   "arch": "$ARCH",

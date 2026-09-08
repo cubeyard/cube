@@ -37,7 +37,7 @@ const project = registry.createProject({
   repositories: [
     {
       id: "project-terminal-repo",
-      url: "https://github.com/dizk/cube.git",
+      url: "https://github.com/cubeyard/cube.git",
       base: "main",
       checkoutName: "workspace",
     },

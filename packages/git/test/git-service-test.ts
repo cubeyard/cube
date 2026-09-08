@@ -28,9 +28,9 @@ const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 
 // --- 1. URL normalization: shorthand expands; injection vectors refused
-assert.equal(normalizeRepoUrl("dizk/cube"), "https://github.com/dizk/cube.git");
-assert.equal(normalizeRepoUrl("https://github.com/dizk/cube.git"), "https://github.com/dizk/cube.git");
-assert.equal(normalizeRepoUrl("git@github.com:dizk/cube.git"), "git@github.com:dizk/cube.git");
+assert.equal(normalizeRepoUrl("cubeyard/cube"), "https://github.com/cubeyard/cube.git");
+assert.equal(normalizeRepoUrl("https://github.com/cubeyard/cube.git"), "https://github.com/cubeyard/cube.git");
+assert.equal(normalizeRepoUrl("git@github.com:cubeyard/cube.git"), "git@github.com:cubeyard/cube.git");
 assert.equal(normalizeRepoUrl("ssh://git@host/repo.git"), "ssh://git@host/repo.git");
 assert.equal(normalizeRepoUrl("/srv/repos/thing.git"), "/srv/repos/thing.git");
 for (const bad of [
@@ -52,10 +52,10 @@ assert.equal(normalizeRepoUrl("git@github.com:org/repo.git"), "git@github.com:or
 console.log("1 ok: normalizeRepoUrl — shorthand/https/ssh/scp pass; injections + inline creds refused");
 
 // --- 1b. parseGitHubRepo: github forms -> owner/repo; others -> null
-assert.equal(parseGitHubRepo("https://github.com/dizk/cube.git"), "dizk/cube");
-assert.equal(parseGitHubRepo("git@github.com:dizk/cube.git"), "dizk/cube");
-assert.equal(parseGitHubRepo("ssh://git@github.com/dizk/cube"), "dizk/cube");
-assert.equal(parseGitHubRepo("https://gitlab.com/dizk/cube.git"), null);
+assert.equal(parseGitHubRepo("https://github.com/cubeyard/cube.git"), "cubeyard/cube");
+assert.equal(parseGitHubRepo("git@github.com:cubeyard/cube.git"), "cubeyard/cube");
+assert.equal(parseGitHubRepo("ssh://git@github.com/cubeyard/cube"), "cubeyard/cube");
+assert.equal(parseGitHubRepo("https://gitlab.com/cubeyard/cube.git"), null);
 assert.equal(parseGitHubRepo("/srv/repos/thing.git"), null);
 console.log("1b ok: parseGitHubRepo — github forms parse, non-github is null");
 
@@ -63,16 +63,16 @@ console.log("1b ok: parseGitHubRepo — github forms parse, non-github is null")
 for (const authy of [
   "git clone failed: fatal: could not read Username for 'https://github.com': terminal prompts disabled",
   "fatal: could not read Password for 'https://x-access-token@github.com': terminal prompts disabled",
-  "fatal: Authentication failed for 'https://github.com/dizk/cube.git/'",
+  "fatal: Authentication failed for 'https://github.com/cubeyard/cube.git/'",
   "remote: Invalid username or token. Password authentication is not supported for Git operations.",
   "remote: Support for password authentication was removed on August 13, 2021.",
-  "fatal: unable to access 'https://github.com/dizk/cube.git/': The requested URL returned error: 403",
+  "fatal: unable to access 'https://github.com/cubeyard/cube.git/': The requested URL returned error: 403",
   "git@github.com: Permission denied (publickey).",
 ]) {
   assert.equal(isGitAuthFailure(authy), true, `should classify as auth: ${authy}`);
 }
 for (const other of [
-  "fatal: unable to access 'https://github.com/dizk/cube.git/': Could not resolve host: github.com",
+  "fatal: unable to access 'https://github.com/cubeyard/cube.git/': Could not resolve host: github.com",
   'repository has no branch "main"',
   "fatal: destination path exists",
   "remote: Repository not found.", // deliberately excluded: ambiguous with an absent repo
@@ -83,11 +83,11 @@ for (const other of [
 // Canonical copy only for github.com upstreams; other hosts keep the raw error.
 const rawAuth = "fatal: could not read Username for 'https://github.com': terminal prompts disabled";
 assert.equal(
-  describeRepoAuthFailure(rawAuth, "https://github.com/dizk/cube.git", false),
+  describeRepoAuthFailure(rawAuth, "https://github.com/cubeyard/cube.git", false),
   "github: not connected — connect github to check this repository",
 );
 assert.equal(
-  describeRepoAuthFailure(rawAuth, "https://github.com/dizk/cube.git", true),
+  describeRepoAuthFailure(rawAuth, "https://github.com/cubeyard/cube.git", true),
   "github: access denied — the connected github account may lack access to this repository",
 );
 assert.equal(describeRepoAuthFailure(rawAuth, "https://gitlab.com/x/y.git", false), null);
@@ -151,6 +151,8 @@ assert.equal(git(ws, "rev-parse", "--abbrev-ref", "HEAD"), "cube/test1");
 assert.equal(git(ws, "remote", "get-url", "origin"), upstream);
 assert.equal(git(ws, "config", "--local", "user.name"), "Git Hub User");
 assert.equal(git(ws, "config", "--local", "user.email"), "123+dizk@users.noreply.github.com");
+git(ws, "config", "commit.gpgSign", "false");
+git(ws, "config", "core.hooksPath", ".git/hooks");
 assert.equal(fs.readFileSync(path.join(ws, "src.txt"), "utf8"), "one\ntwo\n");
 const mirror = service.mirrorPathFor(upstream);
 assert.ok(fs.existsSync(path.join(mirror, "HEAD")), "mirror exists");

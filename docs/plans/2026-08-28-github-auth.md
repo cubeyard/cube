@@ -42,16 +42,16 @@ import { isGitAuthFailure, describeRepoAuthFailure } from "../src/index.ts";
 for (const authy of [
   "git clone failed: fatal: could not read Username for 'https://github.com': terminal prompts disabled",
   "fatal: could not read Password for 'https://x-access-token@github.com': terminal prompts disabled",
-  "fatal: Authentication failed for 'https://github.com/dizk/cube.git/'",
+  "fatal: Authentication failed for 'https://github.com/cubeyard/cube.git/'",
   "remote: Invalid username or token. Password authentication is not supported for Git operations.",
   "remote: Support for password authentication was removed on August 13, 2021.",
-  "fatal: unable to access 'https://github.com/dizk/cube.git/': The requested URL returned error: 403",
+  "fatal: unable to access 'https://github.com/cubeyard/cube.git/': The requested URL returned error: 403",
   "git@github.com: Permission denied (publickey).",
 ]) {
   assert.equal(isGitAuthFailure(authy), true, `should classify as auth: ${authy}`);
 }
 for (const other of [
-  "fatal: unable to access 'https://github.com/dizk/cube.git/': Could not resolve host: github.com",
+  "fatal: unable to access 'https://github.com/cubeyard/cube.git/': Could not resolve host: github.com",
   'repository has no branch "main"',
   "fatal: destination path exists",
   "", // empty is not auth
@@ -61,11 +61,11 @@ for (const other of [
 // Canonical copy only for github.com upstreams; other hosts keep the raw error.
 const rawAuth = "fatal: could not read Username for 'https://github.com': terminal prompts disabled";
 assert.equal(
-  describeRepoAuthFailure(rawAuth, "https://github.com/dizk/cube.git", false),
+  describeRepoAuthFailure(rawAuth, "https://github.com/cubeyard/cube.git", false),
   "github: not connected — connect github to check this repository",
 );
 assert.equal(
-  describeRepoAuthFailure(rawAuth, "https://github.com/dizk/cube.git", true),
+  describeRepoAuthFailure(rawAuth, "https://github.com/cubeyard/cube.git", true),
   "github: access denied — the connected github account may lack access to this repository",
 );
 assert.equal(describeRepoAuthFailure(rawAuth, "https://gitlab.com/x/y.git", false), null);
@@ -1003,7 +1003,7 @@ git commit -m "docs: github auth — scope rationale, ops notes"
 Not automatable offline; do this once after the offline portfolio is green:
 
 1. `pnpm vm` — boot the dev VM.
-2. Open the web UI, create a project on a private repo (`dizk/cube`). The check must fail with "github: not connected — connect github to check this repository" and show the connect button, NOT raw git stderr.
+2. Open the web UI, create a project on a private test repository. The check must fail with "github: not connected — connect github to check this repository" and show the connect button, NOT raw git stderr.
 3. Connect: code appears, enter it at github.com/login/device, badge flips to `github: dizk`.
 4. `check again` → project goes ready. Start a thread; seed works.
 5. In a thread with a commit: push + open PR from the review controls.

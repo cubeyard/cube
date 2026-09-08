@@ -680,7 +680,7 @@ backed by a minimized, distributable VM image. Slices, in order:
 LANDED in phase (2026-09-03): 4b, 4c and 4e are DONE — releases are
 built and published entirely by GitHub Actions — since 2026-09-04
 every push to main that touches shipped files auto-tags and releases
-the next patch; a hand-made tag `vm-vX.Y.Z` bumps minor/major — the
+the next patch; a hand-made tag `vX.Y.Z` bumps minor/major — the
 launcher ships as a release asset and upgrades in place (app-only
 releases apply as a ~31 MB tarball without a reboot; base and cube-node
 only when their bytes change, cube-node inherited across releases when

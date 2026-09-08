@@ -32,7 +32,7 @@
 # State lives in ~/.cube (CUBE_HOME). Settings persist in
 # $CUBE_HOME/config after the first `up`; environment variables always
 # win over it:
-#   CUBE_REPO         GitHub repo with vm-vX.Y.Z releases (default cubeyard/cube)
+#   CUBE_REPO         GitHub repo with vX.Y.Z releases (default cubeyard/cube)
 #   CUBE_RELEASE_DIR  local dir with release assets — offline/test installs
 #   CUBE_PORT         product port on the host (default 7777; a busy port
 #                     is skipped to the next free one on first run)
@@ -409,14 +409,14 @@ json_flat() {
 {/g'
 }
 
-# Published vm-v* releases, newest version first (drafts and
+# Published vX.Y.Z releases, newest version first (drafts and
 # pre-releases excluded: an unapproved build must never reach `latest`).
 list_releases() {  # list_releases [MAX_SECONDS]
   local json
   json="$(api_get "https://api.github.com/repos/$REPO/releases?per_page=30" "${1:-30}")" || return 1
   printf '%s' "$json" | json_flat \
     | grep '"draft":false' | grep '"prerelease":false' \
-    | sed -n 's/.*"tag_name":"vm-\(v[0-9][0-9.]*\)".*/\1/p' \
+    | sed -nE 's/.*"tag_name":"(v[0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' \
     | while read -r v; do printf '%s %s\n' "$(ver_key "$v")" "$v"; done \
     | sort -r | awk '{print $2}'
 }
@@ -429,7 +429,7 @@ resolve_latest() {
   fi
   v="$(list_releases | head -1)" || true
   [ -n "$v" ] || {
-    fail "could not list vm-* releases for $REPO (offline, inaccessible, or API rate-limited?)"
+    fail "could not list vX.Y.Z releases for $REPO (offline, inaccessible, or API rate-limited?)"
     return 1
   }
   printf '%s' "$v"
@@ -480,7 +480,7 @@ fetch_asset() {  # fetch_asset TAG NAME DEST_FILE — from CUBE_RELEASE_DIR or G
 # against SHA256SUMS (which must cover it), and checked to describe the
 # version/arch/schema we can handle — BEFORE any large download.
 fetch_manifest() {  # fetch_manifest vX.Y.Z
-  local ver="$1" tag="vm-$1" tmp schema
+  local ver="$1" tag="$1" tmp schema
   [ -f "$(manifest_path "$ver")" ] && return 0
   tmp="$(mktemp -d "$CUBE_HOME/.fetch-XXXXXX")"
   fetch_asset "$tag" "manifest-$ARCH.json" "$tmp/manifest-$ARCH.json" || { rm -rf "$tmp"; return 1; }
@@ -508,7 +508,7 @@ fetch_manifest() {  # fetch_manifest vX.Y.Z
 # changed" mechanism). Verified against the manifest sha before it is
 # accepted; a mismatch leaves nothing behind.
 fetch_role() {
-  local ver="$1" role="$2" tag="vm-$1" file sha dest
+  local ver="$1" role="$2" tag="$1" file sha dest
   file="$(artifact_file "$ver" "$role")"; sha="$(artifact_sha "$ver" "$role")"
   [ -n "$file" ] && [ -n "$sha" ] || { fail "manifest $ver lacks ${role}_file/${role}_sha256"; return 1; }
   dest="$(pristine_path "$sha" "$role")"
@@ -729,7 +729,7 @@ check_update() {  # prints one line if a newer release exists; silent otherwise
 # ---- self-update: this file is versioned WITH the artifact set --------------
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 self_update() {  # self_update vX.Y.Z — replace this file with the release's launcher
-  local tag="vm-$1" tmp
+  local tag="$1" tmp
   [ -n "${CUBE_RELEASE_DIR:-}" ] && return 0
   [ -w "$SELF" ] && [ -f "$SELF" ] || return 0
   tmp="$(mktemp "$CUBE_HOME/.launcher-XXXXXX")"

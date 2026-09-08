@@ -20,7 +20,7 @@ const project = registry.createProject({
   repositories: [
     {
       id: "project-repo-1",
-      url: "https://github.com/dizk/cube.git",
+      url: "https://github.com/cubeyard/cube.git",
       base: null,
       checkoutName: "workspace",
     },
@@ -93,7 +93,7 @@ console.log("5 ok: threads require a project and are one-per-cube");
 // --- immutable per-cube repository snapshots
 registry.addCubeRepositories(c.id, [
   {
-    url: "https://github.com/dizk/cube.git",
+    url: "https://github.com/cubeyard/cube.git",
     base: "main",
     branch: "cube/gamma",
     baseOid: "deadbeef",
@@ -101,7 +101,7 @@ registry.addCubeRepositories(c.id, [
     workspacePath: "/w/gamma",
   },
   {
-    url: "https://github.com/dizk/docs.git",
+    url: "https://github.com/cubeyard/docs.git",
     base: "main",
     branch: "cube/gamma",
     baseOid: "feedface",

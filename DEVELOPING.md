@@ -221,9 +221,17 @@ Publishing is disabled unless the repository Actions variable
 and source-only publication. Manual dry runs remain available and publish
 nothing; `dry_run` defaults to `true`. Enable publishing only after artifact
 license review and VM acceptance. The first release needs a manually chosen
-`vm-vX.Y.Z` tag; a new repository has no prior version to increment.
+`vX.Y.Z` tag; a new repository has no prior version to increment. For this
+repository, start with `v0.1.0`.
 
-Once publishing is enabled:
+Once publishing is enabled, create the first release explicitly:
+
+```sh
+git tag -a v0.1.0 -m 'cube release v0.1.0'
+git push origin v0.1.0
+```
+
+After that, ordinary shipped-file changes release the next patch when pushed:
 
 ```sh
 git push origin HEAD:main
@@ -232,7 +240,7 @@ git push origin HEAD:main
 That is the release. Trunk-based: main is the sign-off point, and every
 push to it that touches shipped files (anything but `*.md`, `docs/`,
 `.claude/`, `spikes/`) becomes the next PATCH release on its own.
-`.github/workflows/release.yml` tags main's commit `vm-vX.Y.(Z+1)`,
+`.github/workflows/release.yml` tags main's commit `vX.Y.(Z+1)`,
 builds every artifact for both architectures natively (amd64 on
 `ubuntu-latest`, arm64 on `ubuntu-24.04-arm`), verifies the amd64 set by
 installing it with the launcher on a blank data disk, running a nested
@@ -248,11 +256,11 @@ next push mints a fresh number; whatever it cannot take back fails the
 previous release (`docs:` excluded).
 
 Minor/major bumps are a hand-made tag, pushed BEFORE main — a main push
-whose commit already carries a `vm-v*` tag does nothing, while the other
+whose commit already carries a `vX.Y.Z` tag does nothing, while the other
 order builds the same bytes twice:
 
 ```sh
-git tag -a vm-v0.7.0 -m 'cube release v0.7.0' && git push origin vm-v0.7.0
+git tag -a v0.7.0 -m 'cube release v0.7.0' && git push origin v0.7.0
 git push origin HEAD:main
 ```
 
@@ -261,7 +269,7 @@ The next automatic release counts on from it.
 Manual runs (Actions → release → Run workflow) take three inputs:
 `version` (an existing tag — the workflow checks out THAT tag, not the
 branch the form shows), `prerelease` (publish hidden from `cube up`'s
-"latest"; promote later with `gh release edit vm-vX.Y.Z
+"latest"; promote later with `gh release edit vX.Y.Z
 --prerelease=false`), and `dry_run` (build + package + verify from the
 chosen branch, publish nothing — how to test the pipeline itself:
 `gh workflow run release.yml --ref <branch> -f dry_run=true`).
