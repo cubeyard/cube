@@ -43,95 +43,50 @@ chmod +x ~/.local/bin/cube                     # anywhere on PATH works
 cube up
 ```
 
-`cube up` checks the host first (hypervisor, firmware, ports, disk
-space), downloads the latest release (~1.1 GB the first time, with
-progress), creates a blank data disk, boots, and prints the URL —
-usually **http://127.0.0.1:7777**. A busy port is skipped to the next
-free one and remembered in `~/.cube/config`. A first-run wizard offers
-GitHub login (or skip) before opening projects. Completion is remembered
-on the VM. Model-provider `/login` is separate.
+`cube up` checks the host, downloads the VM (~1.1 GB the first time),
+boots it, and prints the URL — usually **http://127.0.0.1:7777**.
+The first-run wizard offers GitHub login or a skip. Sign in to your model
+provider separately with `/login` in the agent terminal.
 
-GitHub authentication uses the normal `gh auth login --web` device flow and
-GitHub CLI's credential store. Cube never stores or refreshes OAuth tokens and
-does not request extra scopes such as `workflow`. Credentials remain on the VM
-host and are never mounted into a thread container.
+## Everyday use
 
 ```sh
-cube status     # release, VM, product, and whether an update exists
-cube upgrade    # apply the latest release — app-only releases land in
-                # seconds without a reboot; the data disk is always kept
-cube down       # stop;  cube ssh / cube logs / cube destroy --yes also exist
+cube status     # VM status and available updates
+cube upgrade    # update the VM and app; keep all data
+cube down       # stop the VM
+cube up         # start it again
+cube logs       # follow server logs
+cube ssh        # open a shell on the VM
 ```
 
-The launcher is versioned WITH the artifact set it knows how to read:
-it ships as an asset on every release and `cube upgrade` refreshes manual
-installations (Homebrew installations use `brew upgrade cube`).
-Releases carry per-arch artifact SETS (base, app, app tarball,
-cube-node) with a manifest and `SHA256SUMS.<arch>`; artifacts are
-stored content-addressed under `~/.cube/images`, so an upgrade
-downloads only what actually changed.
+Updates download only what changed. App-only updates apply without a
+reboot. With Homebrew, run `brew upgrade cube` to update the launcher;
+manual installations update it through `cube upgrade`.
 
-### Homebrew updates and uninstall
-
-Use `brew upgrade cube` for the launcher and `cube upgrade` for the VM.
-Stop the VM with `cube down` before uninstalling. `brew uninstall cube`
-leaves `~/.cube` intact. To delete the VM and all its data, run
-`cube destroy --yes` before uninstalling. Maintainers:
-see [Homebrew publishing](DEVELOPING.md#homebrew-publishing).
+State lives in `~/.cube`. Stop the VM before `brew uninstall cube`, which
+keeps that data. **To delete the VM and all its data**, run
+`cube destroy --yes` before uninstalling.
 
 ## Using it from other machines
 
-cubed has no authentication; the Tailnet is the boundary. The launcher and
-dev loop automatically bind to this node's Tailscale IPv4 when available,
-otherwise only loopback. Loopback is always kept. To require Tailscale:
+The web UI has no authentication; your Tailnet is the access boundary.
+Cube binds to the host's Tailscale IPv4 when available, otherwise only
+loopback. To require Tailscale:
 
 ```sh
-CUBE_BIND=tailscale cube up                    # launcher (remembered)
-CUBE_VM_BIND=tailscale bash scripts/vm/up.sh   # dev loop
+CUBE_BIND=tailscale cube up
 ```
 
-Public addresses and `0.0.0.0` are refused.
+Loopback stays available. Public addresses and `0.0.0.0` are refused.
+Set `CUBE_BIND=127.0.0.1` for local-only use. Stop and restart the VM
+after changing the bind setting.
 
-Portal links default to `<service>--<cube>.<host-ip>.sslip.io`: the Tailscale
-address when available, otherwise `127.0.0.1`. The host's forwarded port is
-included automatically. Set `CUBE_BIND=127.0.0.1` (dev: `CUBE_VM_BIND`) to
-force local-only use, or `CUBED_PORTAL_BASE` before boot to override portal
-DNS. Changing these settings requires stopping and starting the VM.
+## Development and contributing
 
-## Building from source (the dev loop)
-
-```sh
-git clone https://github.com/cubeyard/cube.git
-cd cube
-bash scripts/vm/dev.sh      # builds base (nix) + app on first run, boots,
-                            # drops you into a pi terminal on the VM
-```
-
-Additionally needs: node ≥ 26 with npm (pnpm is installed at the version
-`package.json` pins), `nix` with a Linux builder for the base image,
-e2fsprogs (`mke2fs`), and `zstd`. On macOS: `brew install e2fsprogs
-zstd` and put `$(brew --prefix e2fsprogs)/sbin` on PATH; skip the base
-build by pointing `CUBE_BASE_IMAGE` at a base qcow2 from a release.
-
-```sh
-bash scripts/vm/up.sh      # boot (idempotent; builds what's missing)
-bash scripts/vm/down.sh    # stop
-bash scripts/vm/sync.sh    # update cubed in the running VM to latest main
-                           # (threads and logins survive)
-bash scripts/vm/ssh.sh     # shell on the VM
-bash scripts/vm/test.sh    # full test portfolio inside the VM
-```
-
-Disks and state live in `~/cube/vm/`. Threads, repos, and `/login`
-sessions live on the data disk and survive reboots AND rebuilds — no
-build script touches it.
-
-## Contributing / more
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change.
-[DEVELOPING.md](DEVELOPING.md) covers the dev loops (including a mock backend
-that runs without the VM), releases, and environment variables;
-[PLAN.md](PLAN.md) describes the architecture and phase plan.
+See [DEVELOPING.md](DEVELOPING.md) for building from source, the VM and
+mock development loops, configuration, and releases. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) before sending a change;
+[PLAN.md](PLAN.md) covers architecture and the phase plan.
 
 Please report vulnerabilities according to [SECURITY.md](SECURITY.md), not in
 a public issue.
