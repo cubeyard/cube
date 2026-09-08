@@ -297,10 +297,37 @@ the two cannot drift, runs in an isolated build dir
 worktree of the tag. Do not run it AND let the workflow run for the same
 tag — they would race the same draft.
 
+## Diagnostics
+
+The release launcher runs diagnostics inside the VM:
+
+```bash
+cube diagnose                         # collect a bundle, then ask Pi for an RCA
+cube diagnose --collect-only          # collect without calling a model
+cube diagnose --export <bundle-id> > cube-diagnostics.tar.gz
+```
+
+From a VM shell, the equivalent entry point is
+`sh /opt/cube/app/scripts/diagnose.sh`. This entry point ships in app-only
+updates too; it does not require a new base image. Model-assisted diagnosis
+requires existing Pi authentication in the VM and sends collected evidence
+to the configured model provider. Pi runs non-interactively with only a
+`read` tool restricted to the package; it reports likely causes and does not
+attempt repairs. Collection and Pi write only their diagnostic output/session.
+Review every bundle before sharing it; log redaction reduces exposure but
+is not perfect. Host logs can include information from multiple workspaces.
+
+Packages are retained under `~/cube/diagnostics/<id>/` on the VM. The export
+contains `bundle/` and `report.md` (when present), not the Pi session. There
+is no automatic upload or deletion. Collection remains usable without cubed,
+Incus, or model access: unavailable checks are recorded individually. This
+first version covers the VM/control plane, not workspace contents or the
+original tool process's environment. Its HTTP probe uses VM port 7777.
+
 ## The launcher (`launcher/cube`)
 
-The user-facing lifecycle CLI: `up/down/status/upgrade/ssh/logs/version/
-destroy` against a released artifact set — standalone bash, no repo
+The user-facing lifecycle CLI: `up/down/status/upgrade/ssh/logs/diagnose/
+version/destroy` against a released artifact set — standalone bash, no repo
 checkout, state in `~/.cube`. Before the first download it checks the
 host (hypervisor, UEFI firmware, ISO tool, ssh, curl, free space, ports;
 an unclaimed busy port moves to the next free one and is remembered in
