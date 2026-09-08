@@ -92,6 +92,14 @@ directory. Recreate threads after a restart.
 
 ## The VM loop — validate the real sandbox
 
+To build from source, install the host requirements described below, then:
+
+```sh
+git clone https://github.com/cubeyard/cube.git
+cd cube
+bash scripts/vm/dev.sh      # build what's missing, boot, open pi on the VM
+```
+
 A single VM is the Incus host, assembled from three build products plus
 your data disk:
 
@@ -176,6 +184,8 @@ blank slate.
 ```bash
 pnpm vm                                   # up + pi terminal (builds base+app
                                           # on first run)
+bash scripts/vm/up.sh                      # boot without opening pi
+bash scripts/vm/ssh.sh                     # shell on the VM
 CUBE_VM_BIND=tailscale bash scripts/vm/up.sh   # reach cubed from another
                                                # machine (adds a 2nd hostfwd on
                                                # this node's 100.x address)
