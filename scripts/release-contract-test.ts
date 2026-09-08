@@ -170,7 +170,8 @@ fi
   const launcherSha = run("sha256sum", ["launcher/cube"]).split(" ")[0];
   assert.ok(formula.includes(`sha256 "${launcherSha}"`));
   assert.ok(formula.includes('releases/download/v1.2.3/cube"'));
-  assert.ok(formula.includes('version "1.2.3"'));
+  // Homebrew infers the version from the URL; an explicit version fails strict audit.
+  assert.doesNotMatch(formula, /^\s*version\s/m);
   assert.ok(formula.includes('inreplace "cube", "INSTALL_METHOD=standalone", "INSTALL_METHOD=homebrew"'));
   assert.throws(() => run("node", ["scripts/homebrew-formula.ts", "latest", "launcher/cube"]));
   const oldLauncher = path.join(tmp, "old-cube");
