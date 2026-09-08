@@ -103,6 +103,8 @@ export class CubeFs {
    * output into host memory. A hard timeout bounds hangs.
    */
   private async run(command: string, signal?: AbortSignal): Promise<{ exitCode: number | null; output: string }> {
+    // An already-aborted signal never fires its listener — check first.
+    signal?.throwIfAborted();
     const chunks: Buffer[] = [];
     let total = 0;
     let overflow = false;
@@ -172,6 +174,7 @@ export class CubeFs {
         payload = CubeFs.extract((await this.run(command, signal)).output);
       } catch (err) {
         if (err instanceof OutputLimitError) throw err; // not a helper fault
+        if (signal?.aborted) throw err; // the caller left — not a retry, either
         // exec/transport error — fall through to a re-push + retry
       }
       if (payload !== null) {

@@ -376,7 +376,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
     // out of the cube; on the mock it keeps the local approximation aligned
     // with the production command environment.
     exec: async (command, cwd, { onData, signal, timeout }) => {
-      await waker.ensure();
+      await waker.ensure(undefined, signal); // Esc during a wake must cancel it too
       // Cap total forwarded output: pi's bash tool spools everything past
       // its display limit to a host /tmp file, so a cube command like `yes`
       // would otherwise fill the credentialed host's disk. Past the ceiling
@@ -518,7 +518,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
       ...tool,
       description,
       async execute(id: string, params: never, signal: AbortSignal, onUpdate: never, ctx: ExtensionContext) {
-        await waker.ensure(ctx);
+        await waker.ensure(ctx, signal);
         return (tool.execute as (...args: unknown[]) => unknown)(id, params, signal, onUpdate);
       },
     } as unknown as ToolDefinition);
@@ -534,7 +534,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
     ...guestGrep,
     description: noGitignore(guestGrep.description),
     async execute(_id: string, params: GrepToolInput, signal: AbortSignal, _onUpdate: never, ctx: ExtensionContext) {
-      await waker.ensure(ctx);
+      await waker.ensure(ctx, signal);
       const result = await cubeFs.grep(
         {
           pattern: params.pattern,
