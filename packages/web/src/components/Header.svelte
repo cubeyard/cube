@@ -1,13 +1,7 @@
 <script lang="ts">
-  import Icon from "./Icon.svelte";
+  import AuthBadge from "./AuthBadge.svelte";
 
-  let {
-    section,
-    onNewThread,
-  }: {
-    section: "threads" | "projects";
-    onNewThread?: () => void;
-  } = $props();
+  let { section }: { section: "threads" | "projects" } = $props();
 </script>
 
 <header>
@@ -25,7 +19,5 @@
     <a href="#/projects" class:active={section === "projects"}>projects</a>
   </nav>
   <span class="spacer"></span>
-  {#if onNewThread}
-    <button class="key" onclick={onNewThread}><Icon name="plus" size={13} />new thread</button>
-  {/if}
+  <AuthBadge />
 </header>

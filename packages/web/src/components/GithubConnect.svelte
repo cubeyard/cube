@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { connectGithub, disconnectGithub, fetchGithubAuth } from "../lib/api.ts";
+  import { connectGithub, disconnectGithub, errorText, fetchGithubAuth } from "../lib/api.ts";
   import type { GithubAuthStatus } from "../lib/types.ts";
 
   let { onStatusChange, onBusyChange }: {
@@ -65,7 +65,7 @@
       seq++;
       status = next;
     } catch (e) {
-      failure = e instanceof Error ? e.message : String(e);
+      failure = errorText(e);
     } finally {
       busy = false;
     }
@@ -79,7 +79,7 @@
       seq++;
       status = next;
     } catch (e) {
-      failure = e instanceof Error ? e.message : String(e);
+      failure = errorText(e);
     } finally {
       busy = false;
     }

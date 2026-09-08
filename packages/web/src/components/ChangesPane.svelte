@@ -53,7 +53,6 @@
   let diffError = $state<string | null>(null);
   let refreshing = $state(false);
   let openChangeId = $state<string | null>(null);
-  let activeTab = $state<"changes" | "terminal">("changes");
   let untrackedFiles = $state<Record<string, UntrackedContent>>({});
   let diffRequest = 0;
   // Repository polling replaces the repository object even when the selected
@@ -274,38 +273,13 @@
 
 <aside class="workspace-pane changes-pane" aria-label="workspace">
   <div class="workspace-pane-head workspace-tabs">
-    <div class="tab-bank" role="tablist" aria-label="workspace view">
-      <button
-        class="workspace-tab"
-        class:active={activeTab === "changes"}
-        role="tab"
-        aria-selected={activeTab === "changes"}
-        aria-controls="changes-panel"
-        onclick={() => (activeTab = "changes")}
-      >changes</button>
-      <button
-        class="workspace-tab"
-        class:active={activeTab === "terminal"}
-        role="tab"
-        aria-selected={activeTab === "terminal"}
-        aria-controls="terminal-panel"
-        onclick={() => (activeTab = "terminal")}
-      >terminal</button>
+    <div class="tab-bank">
+      <span class="workspace-tab active">changes</span>
     </div>
-    {#if activeTab === "changes"}
-      <span class="pane-meta" title={repository?.url}>workspace</span>
-    {/if}
+    <span class="pane-meta" title={repository?.url}>workspace</span>
   </div>
 
-  {#if activeTab === "terminal"}
-    <div class="changes-body" id="terminal-panel" role="tabpanel">
-      <div class="changes-state terminal-pending">
-        <span class="lamp off" aria-hidden="true"></span>
-        <p>terminal is not connected yet.</p>
-      </div>
-    </div>
-  {:else}
-    <div class="changes-body" id="changes-panel" role="tabpanel" aria-busy={refreshing && !diff}>
+    <div class="changes-body" id="changes-panel" aria-busy={refreshing && !diff}>
       {#if repositoriesError && !repositoriesReady}
         <div class="changes-state bad">
           <p>repositories unavailable: {repositoriesError}</p>
@@ -431,5 +405,4 @@
         {/each}
       {/if}
     </div>
-  {/if}
 </aside>

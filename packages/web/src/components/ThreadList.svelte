@@ -1,30 +1,32 @@
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
-  import {
-    createUserThread,
-    deleteThread,
-    fetchProjects,
-    fetchThreads,
-    renameThread,
-  } from "../lib/api.ts";
+  import { onMount } from "svelte";
+  import { createUserThread, deleteThread, errorText, fetchProjects, renameThread } from "../lib/api.ts";
+  import { lampClass, stateLabel } from "../lib/thread-state.ts";
   import { relTime } from "../lib/time.ts";
   import type { Project, ThreadSummary } from "../lib/types.ts";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
 
   let {
+    threads,
     initialProjectId,
+    onThreadsChanged,
   }: {
+    /** App polls the global list; this view only adds projects to it. */
+    threads: ThreadSummary[];
     initialProjectId: string | null;
+    /** A delete/rename landed — refresh the list now, not on the next poll. */
+    onThreadsChanged: () => Promise<void>;
   } = $props();
 
-  let threads = $state<ThreadSummary[]>([]);
   let projects = $state<Project[]>([]);
   let loaded = $state(false);
   let error = $state<string | null>(null);
   let actionError = $state<string | null>(null);
   let creating = $state(false);
-  let selectedFilter = $state(untrack(() => initialProjectId ?? ""));
+  // The filter IS the URL (#/threads?project=…): back/forward and a
+  // project's "n threads" link then agree with the select.
+  const selectedFilter = $derived(initialProjectId ?? "");
   const filteredThreads = $derived(
     selectedFilter ? threads.filter((thread) => thread.project.id === selectedFilter) : threads,
   );
@@ -34,17 +36,14 @@
   async function refresh(): Promise<void> {
     const seq = ++refreshSeq;
     try {
-      const [freshThreads, freshProjects] = await Promise.all([fetchThreads(), fetchProjects()]);
+      const fresh = await fetchProjects();
       if (seq !== refreshSeq) return;
-      threads = freshThreads;
-      projects = freshProjects;
-      if (selectedFilter && !freshProjects.some((project) => project.id === selectedFilter)) {
-        selectedFilter = "";
-      }
+      projects = fresh;
+      if (selectedFilter && !fresh.some((project) => project.id === selectedFilter)) location.hash = "#/threads";
       error = null;
     } catch (e) {
       if (seq !== refreshSeq) return;
-      error = String(e);
+      error = errorText(e);
     }
     loaded = true;
   }
@@ -56,10 +55,7 @@
   });
 
   function setFilter(projectId: string): void {
-    selectedFilter = projectId;
-    location.hash = projectId
-      ? `#/threads?project=${encodeURIComponent(projectId)}`
-      : "#/threads";
+    location.hash = projectId ? `#/threads?project=${encodeURIComponent(projectId)}` : "#/threads";
   }
 
   let composing = $state(false);
@@ -76,9 +72,9 @@
     creating = true;
     try {
       const id = await createUserThread(selectedProjectId);
-      location.hash = `#/t/${encodeURIComponent(id)}`;
+      location.hash = `#/t/${id}`;
     } catch (e) {
-      actionError = `new thread: ${e instanceof Error ? e.message : e}`;
+      actionError = `new thread: ${errorText(e)}`;
     } finally {
       creating = false;
     }
@@ -90,9 +86,9 @@
       await deleteThread(thread.id);
       actionError = null;
     } catch (e) {
-      actionError = `delete: ${e instanceof Error ? e.message : e}`;
+      actionError = `delete: ${errorText(e)}`;
     }
-    refresh();
+    await onThreadsChanged();
   }
 
   let renaming = $state<string | null>(null);
@@ -108,14 +104,13 @@
     const current = threads.find((thread) => thread.id === id);
     const title = renameText.trim();
     if (!title || title === (current?.title ?? "")) return;
-    if (current) current.title = title;
     try {
       await renameThread(id, title);
       actionError = null;
     } catch (e) {
-      actionError = `rename: ${e instanceof Error ? e.message : e}`;
+      actionError = `rename: ${errorText(e)}`;
     }
-    refresh();
+    await onThreadsChanged();
   }
   function onRenameKey(event: KeyboardEvent): void {
     if (event.key === "Enter") commitRename();
@@ -126,18 +121,6 @@
     element.select();
   };
 
-  const lampClass = (thread: ThreadSummary) =>
-    thread.busy || thread.state === "setting-up" ? "on-amber blink"
-    : thread.state === "error" ? "on-red"
-    : thread.state === "sleeping" ? "off"
-    : "on-green";
-
-  const stateLabel = (thread: ThreadSummary) =>
-    thread.busy ? "working"
-    : thread.state === "setting-up" ? "setting up"
-    : thread.state === "sleeping" ? "sleeping"
-    : thread.state === "error" ? "error"
-    : null;
 </script>
 
 <Header section="threads" />
@@ -227,7 +210,7 @@
               </span>
             </div>
           {:else}
-            <a class="module-face" href="#/t/{encodeURIComponent(thread.id)}">
+            <a class="module-face" href="#/t/{thread.id}">
               <span class="lamp {lampClass(thread)}" aria-hidden="true"></span>
               {#if !stateLabel(thread)}<span class="sr-only">ready</span>{/if}
               <span class="module-text">

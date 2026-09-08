@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import {
     createUserThread,
     deleteThread,
+    errorText,
     fetchDiff,
     fetchFiles,
     fetchRepositories,
@@ -10,6 +11,7 @@
     fileUrl,
   } from "../lib/api.ts";
   import { fmtBytes } from "../lib/bytes.ts";
+  import { lampClass, stateLabel } from "../lib/thread-state.ts";
   import { relTime } from "../lib/time.ts";
   import type {
     RepoDiff,
@@ -86,7 +88,10 @@
   // remounts the PTY without blanking or resizing the persistent chrome.
   const summary = $derived(threads.find((thread) => thread.id === threadId) ?? null);
   let threadSidebarOpen = $state(false);
-  const gone = $derived(summary === null);
+  // The list this view mounted with may predate a thread created a moment
+  // ago; only a list refreshed since can say the thread is gone.
+  const threadsAtMount = untrack(() => threads);
+  const gone = $derived(summary === null && threads !== threadsAtMount);
 
   let repositories = $state<ThreadRepository[]>([]);
   let repositoriesReady = $state(false);
@@ -110,7 +115,8 @@
     try {
       services = await fetchServices(threadId);
     } catch {
-      services = [];
+      // Keep the last good links through a transient error or a cube.toml
+      // caught mid-edit — the strip must not flicker.
     }
   }
 
@@ -192,7 +198,7 @@
       return preflight;
     } catch (e) {
       if (attempt !== shipAttempt) return null;
-      shipError = e instanceof Error ? e.message : String(e);
+      shipError = errorText(e);
       shipPhase = "error";
       return null;
     }
@@ -235,7 +241,7 @@
       filesError = null;
       fetchFiles(threadId).then(
         (fresh) => (files = fresh),
-        (e) => (filesError = String(e)),
+        (e) => (filesError = errorText(e)),
       );
     }
   }
@@ -246,32 +252,23 @@
       await deleteThread(threadId);
       location.hash = "#/threads";
     } catch (e) {
-      note = { text: `delete: ${e instanceof Error ? e.message : e}`, bad: true };
+      note = { text: `delete: ${errorText(e)}`, bad: true };
     }
   }
 
+  let creating = $state(false);
   async function newThread(): Promise<void> {
-    if (!summary) return;
+    if (!summary || creating) return;
+    creating = true;
     try {
       const id = await createUserThread(summary.project.id);
-      location.hash = `#/t/${encodeURIComponent(id)}`;
+      location.hash = `#/t/${id}`;
     } catch (e) {
-      note = { text: `new thread: ${e instanceof Error ? e.message : e}`, bad: true };
+      note = { text: `new thread: ${errorText(e)}`, bad: true };
+    } finally {
+      creating = false;
     }
   }
-
-  const lampClass = (thread: ThreadSummary) =>
-    thread.busy || thread.state === "setting-up" ? "on-amber blink"
-    : thread.state === "error" ? "on-red"
-    : thread.state === "sleeping" ? "off"
-    : "on-green";
-
-  const stateLabel = (thread: ThreadSummary) =>
-    thread.busy ? "working"
-    : thread.state === "setting-up" ? "setting up"
-    : thread.state === "sleeping" ? "sleeping"
-    : thread.state === "error" ? "error"
-    : null;
 </script>
 
 <div class="thread-topbar">
@@ -292,7 +289,7 @@
         <span>{summary.title ?? "untitled"}</span>
         <Icon name="chevron" size={12} />
       </button>
-      <a class="strip-project" href="#/projects/{encodeURIComponent(summary.project.id)}">project / {summary.project.name}</a>
+      <a class="strip-project" href="#/projects/{summary.project.id}">project / {summary.project.name}</a>
       {#if stateLabel(summary)}
         <span class="strip-state" class:error={summary.state === "error"}>{stateLabel(summary)}</span>
       {/if}
@@ -336,7 +333,7 @@
       <a href="#/threads">all threads</a>
       <button class="key sidebar-close" onclick={() => (threadSidebarOpen = false)}>close</button>
     </div>
-    <button class="key sidebar-new" onclick={newThread} disabled={!summary}>
+    <button class="key sidebar-new" onclick={newThread} disabled={!summary || creating}>
       <Icon name="plus" size={13} />new thread
     </button>
 
@@ -346,7 +343,7 @@
           <a
             class="thread-sidebar-row"
             class:current={thread.id === threadId}
-            href="#/t/{encodeURIComponent(thread.id)}"
+            href="#/t/{thread.id}"
             aria-current={thread.id === threadId ? "page" : undefined}
           >
             <span class="lamp {lampClass(thread)}" aria-hidden="true"></span>
