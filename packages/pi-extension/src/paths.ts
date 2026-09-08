@@ -16,7 +16,8 @@ function toPosix(value: string): string {
 
 function isInsideHostPath(root: string, value: string): boolean {
   const rel = path.relative(root, value);
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  // `..` alone or `../x` is outside; `..env` is a file inside.
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
 }
 
 /**
