@@ -1012,11 +1012,14 @@ cmd_logs() {  # cmd_logs [journalctl args] — default -n 100 -f; the console wh
   tail -n 100 "$RUN_LOG" | strip_console
 }
 
-since_ms() {  # since_ms 30m|24h|7d -> epoch milliseconds, that long ago
+since_ms() {  # since_ms 30m|24h|7d -> epoch milliseconds, that long ago (10 years at most)
   local n="${1%?}" unit secs
   unit="${1#"$n"}"
   case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#n}" -le 7 ] || return 1
+  n=$((10#$n))                          # "010m" is ten minutes, not octal; "08h" is not an error
   case "$unit" in m) secs=$((n * 60)) ;; h) secs=$((n * 3600)) ;; d) secs=$((n * 86400)) ;; *) return 1 ;; esac
+  [ "$secs" -le $((3650 * 86400)) ] || return 1
   printf '%s' "$(( ($(date +%s) - secs) * 1000 ))"
 }
 cmd_events() {  # cmd_events [--json] [--limit N] [--kind K] [--since 24h] — cubed formats it
@@ -1028,7 +1031,7 @@ cmd_events() {  # cmd_events [--json] [--limit N] [--kind K] [--since 24h] — c
                limit="$2"; shift ;;
       --kind)  case "${2:-}" in ''|*[!A-Za-z0-9_.-]*) fail "--kind takes a name such as provision or wake"; return 1 ;; esac
                q="$q&kind=$2"; shift ;;
-      --since) ms="$(since_ms "${2:-}")" || { fail "--since takes a duration such as 30m, 24h or 7d"; return 1; }
+      --since) ms="$(since_ms "${2:-}")" || { fail "--since takes a duration such as 30m, 24h or 7d (up to 3650d)"; return 1; }
                q="$q&since=$ms"; shift ;;
       *) fail "unknown option: $1 (cube events [--json] [--limit N] [--kind K] [--since 24h])"; return 1 ;;
     esac
