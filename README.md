@@ -56,7 +56,9 @@ cube upgrade    # update the VM and app; keep all data
 cube down       # stop the VM
 cube up         # start it again
 cube logs       # follow server logs
+cube events     # lifecycle events and timings
 cube ssh        # open a shell on the VM
+cube version    # launcher and installed release
 ```
 
 Updates download only what changed. App-only updates apply without a

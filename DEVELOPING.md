@@ -427,14 +427,26 @@ original tool process's environment. Its HTTP probe uses VM port 7777.
 
 ## The launcher (`launcher/cube`)
 
-The user-facing lifecycle CLI: `up/down/status/upgrade/ssh/logs/diagnose/
-version/destroy` against a released artifact set — standalone bash, no repo
-checkout, state in `~/.cube`. Before the first download it checks the
-host (hypervisor, UEFI firmware, ISO tool, ssh, curl, free space, ports;
-an unclaimed busy port moves to the next free one and is remembered in
-`~/.cube/config`). Downloads go through the GitHub API with `gh`'s token
-(`curl`, progress bar, resumable), are verified against the manifest +
+The user-facing lifecycle CLI: `up/down/status/upgrade/ssh/logs/events/
+diagnose/version/destroy` against a released artifact set — standalone
+bash (3.2 is the floor: macOS), no repo checkout, state in `~/.cube`.
+Before the first download it checks the host (hypervisor: `/dev/kvm` or
+HVF; UEFI firmware, ISO tool, ssh, curl, free space) and the ports; a
+port nobody set in the environment moves to the next free one and is
+remembered in `~/.cube/config`. Downloads go through the GitHub API with
+`gh`'s token (`curl`, progress bar, resumable; a partial file the server
+will not resume is restarted once), are verified against the manifest +
 `SHA256SUMS.<arch>`, and land content-addressed in `~/.cube/images`.
+
+Each boot rotates the serial console to `~/.cube/console.log.1`; a boot
+that does not reach ssh or cubed prints the console's last lines. While
+the VM is down, `cube ssh`/`events`/`diagnose` say so and `cube logs`
+shows the console instead of the journal (`cube logs -n 50` passes
+journalctl arguments through). Changing `CUBE_PORT`/`CUBE_BIND`/`CUBE_MEM`
+while the VM runs is refused until `cube down`. `cube version` (also
+`--version`) prints the launcher version and the installed release; the
+`LAUNCHER_VERSION=dev` line is stamped with the tag by `release.yml`
+when it ships the file, so a checkout always says `dev`.
 
 `cube upgrade` compares the installed and target manifests and does the
 least that is correct:
@@ -449,7 +461,10 @@ least that is correct:
   then apply the tarball if the app also moved. The data disk is never
   touched.
 
-Afterwards it prunes the store to the current + one previous release
+The installed-version file is written only after the new release has
+proved itself (identity check, cubed answering); a failed upgrade names
+the release you are still on and how to get back to it. Afterwards it
+prunes the store to the current + one previous release
 and replaces itself with the release's `cube` asset. `cube up` and
 `cube status` print a one-line hint when a newer release exists
 (4-second budget, silent offline; `CUBE_NO_UPDATE_CHECK=1` disables).
@@ -466,7 +481,9 @@ CUBE_HOME=/tmp/cube-smoke CUBE_RELEASE_DIR=~/cube/vm/release/vX.Y.Z/dist \
 ```
 
 `CUBE_LIB_ONLY=1 . launcher/cube` sources its functions without running
-a command (what `verify-release.sh` and ad-hoc tests use).
+a command (what `verify-release.sh` and ad-hoc tests use). CI runs
+`bash -n` and shellcheck over it (default severity; `scripts/*.sh` at
+warning level) — `npx --yes shellcheck launcher/cube` locally.
 
 ---
 
