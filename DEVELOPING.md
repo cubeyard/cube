@@ -132,6 +132,25 @@ Before projects or threads appear, the first-run wizard offers GitHub login
 or a skip. Finishing writes `onboarding.json` alongside `cubed.db` (normally
 `~/cube/onboarding.json`). This is VM-wide state, not browser storage.
 
+### Working tree → VM → proof
+
+The short loop against a running VM (the launcher's `~/.cube` by default,
+the dev VM with `--dev`), also usable by an agent (see AGENTS.md):
+
+```sh
+bash scripts/vm/deploy-tree.sh            # ship the working tree, build web on the host, restart cubed
+bash scripts/vm/deploy-tree.sh --install  # deps changed (auto-detected from the lockfile too)
+bash scripts/vm/deploy-tree.sh --restore  # put the installed release's app tree back
+node scripts/smoke-live.ts                # create → provision → terminal → sleep → wake → delete, with timings
+node scripts/events-report.ts --since 24h # runs, failures, p50/p95 per operation and version
+node scripts/events-report.ts --failures  # the failures themselves
+curl -s 'localhost:7777/api/events?format=text&limit=40'
+```
+
+`deploy-tree.sh` never touches `/opt/cube/app/build-id`, so `cube status`
+and `cube upgrade` keep working; it records what it shipped in
+`.deployed-tree`, which becomes the version stamped on events.
+
 ### Review fixes on native GitHub PR stacks
 
 The agent's code-mode API supports existing PR updates through
