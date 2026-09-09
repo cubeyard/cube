@@ -20,10 +20,11 @@ import { GithubAuth } from "./github-auth.ts";
 import { createLogger } from "./log.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { defaultPortalBase } from "./portal-config.ts";
-import { portalLabel, proxyHttp, proxyUpgrade, respondFailed, respondWaking, sameOriginUpgrade } from "./portal-proxy.ts";
+import { portalLabel, proxyHttp, proxyUpgrade, respondFailed, respondMissing, respondWaking, sameOriginUpgrade } from "./portal-proxy.ts";
 import { PiTerminals } from "./pty.ts";
 import { Registry } from "./registry.ts";
 import { CubeSupervisor, DEFAULT_EGRESS_ALLOW } from "./supervisor.ts";
+import { sanitizeMessage } from "./user-facing.ts";
 import { APP_VERSION } from "./version.ts";
 import { listWorkspaceFiles, openWorkspaceFile } from "./workspace-files.ts";
 
@@ -92,13 +93,6 @@ if (process.env.CUBED_WORKSPACE) {
 
 await supervisor.boot();
 
-/** Cube-vocabulary scrub for anything that reaches the product surface —
- * internal cube names and the word "cube" must read as "thread". */
-const sanitizeMessage = (message: string) =>
-  message
-    .replace(/\bcube t-[a-z0-9]{8}\b/g, "thread")
-    // Unit names (`journalctl -u cube-svc-web`) are literal — leave them.
-    .replace(/\bcube\b(?!-svc-)/g, "thread");
 
 // The pty bridge: one real pi TUI per attached thread (PLAN §13 3d.2).
 const terminals = new PiTerminals(
@@ -344,8 +338,9 @@ async function portalRequest(
   // them. Ensuring below creates the row.
   const cubeName = target?.cubeName ?? supervisor.declaredPortalCube(label);
   if (!cubeName) {
-    res.writeHead(404, { "content-type": "text/plain" });
-    return void res.end(`no portal at ${label}\n`);
+    // A bookmark to a deleted thread's service, or a typo: a page, not a
+    // bare line naming an internal label.
+    return respondMissing(req, res, "nothing is published at this address — the thread may have been deleted, or the service renamed");
   }
   // Hairpin isolation: a cube may reach its OWN portals (OAuth issuer
   // path), never a sibling's — portals must not become a cube-to-cube

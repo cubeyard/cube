@@ -140,6 +140,11 @@ export function respondWaking(req: http.IncomingMessage, res: http.ServerRespons
 export function respondFailed(req: http.IncomingMessage, res: http.ServerResponse, message: string): void {
   holdingPage(req, res, { html: 502, plain: 502, title: "Not running", refreshSeconds: 10 }, message);
 }
+/** No service behind this address at all: a 404 page in thread vocabulary,
+ * no auto-refresh (nothing is coming). */
+export function respondMissing(req: http.IncomingMessage, res: http.ServerResponse, message: string): void {
+  holdingPage(req, res, { html: 404, plain: 404, title: "Not here", refreshSeconds: 0 }, message);
+}
 
 function holdingPage(
   req: http.IncomingMessage,

@@ -22,6 +22,7 @@ import { readCubeConfig, readWakeHooks } from "./cube-toml.ts";
 import { EnvironmentCache } from "./environment-cache.ts";
 import { Lifecycle, type LifecyclePhase } from "./lifecycle.ts";
 import { Span, describeError, recordPoint } from "./events.ts";
+import { describeThreadError } from "./user-facing.ts";
 import { readGithub } from "./github-read.ts";
 import { ensureServices, portalLabelFor, type ServiceStatus } from "./services.ts";
 import {
@@ -133,7 +134,9 @@ export interface CubeSummary {
 export interface UserThreadSummary {
   id: string;
   title: string | null;
-  state: "setting-up" | "ready" | "sleeping" | "error";
+  /** `waking` is the routine return path (opening a sleeping thread) and
+   * reads as a calm wait, never as green-but-unresponsive. */
+  state: "setting-up" | "ready" | "sleeping" | "waking" | "error";
   error: string | null;
   createdAt: number | null;
   archived: boolean;
@@ -178,6 +181,7 @@ const instanceName = (cube: string) => `cube-${cube}`;
 function threadState(cubeStatus: string): UserThreadSummary["state"] {
   if (cubeStatus === "creating") return "setting-up";
   if (cubeStatus === "asleep") return "sleeping";
+  if (cubeStatus === "waking") return "waking";
   if (cubeStatus === "error") return "error";
   return "ready";
 }
@@ -260,6 +264,21 @@ export class CubeSupervisor {
     const name = typeof cube === "string" ? cube : cube.name;
     // Resolved per record: provisioning starts before the thread row lands.
     return new Span(this.registry, { kind, cube: name, thread: () => this.threadIdFor(name) });
+  }
+
+  /** What a still-provisioning cube is doing right now, from the phases its
+   * provision span has completed so far, with elapsed minutes once it has
+   * been a while (the setup script alone may run for many). */
+  private provisionProgress(cube: CubeRow, since: number): string {
+    const last = this.registry.listEvents({ cube: cube.name, kind: "provision", since, limit: 1 })[0];
+    const phase = last?.op && last.phase ? last.phase : null;
+    const step =
+      phase === null ? "preparing the repositories…"
+      : phase === "seed" ? "creating the environment…"
+      : phase === "instance" || phase === "proxy" ? "running the repository's .cube/setup — this can take a while…"
+      : "finishing up…";
+    const minutes = Math.floor((Date.now() - since) / 60_000);
+    return minutes >= 2 ? `${step} (${minutes} min so far)` : step;
   }
 
   /** The thread behind a cube (one per cube), when it exists. */
@@ -360,7 +379,7 @@ export class CubeSupervisor {
         continue;
       }
       if (cube.status === "waking") {
-        this.registry.setCubeStatus(cube.name, "asleep");
+        this.registry.setCubeStatus(cube.name, "asleep", cube.error);
         span.end(true, "interrupted wake -> asleep");
         continue;
       }
@@ -380,7 +399,7 @@ export class CubeSupervisor {
           await this.startProxy(cube);
           span.end(true, "ready, proxy restarted");
         } else {
-          this.registry.setCubeStatus(cube.name, "asleep");
+          this.registry.setCubeStatus(cube.name, "asleep", cube.error);
           span.end(true, "ready but stopped -> asleep");
         }
       } catch (error) {
@@ -884,7 +903,9 @@ export class CubeSupervisor {
     if (cube.status !== "ready") {
       throw new Error(`cube ${name} is not ready (status: ${cube.status}) — cannot sleep`);
     }
-    this.registry.setCubeStatus(name, "asleep");
+    // Sleep is not a resolution: a setup or hook complaint the user has not
+    // read yet survives the idle sweep instead of vanishing an hour later.
+    this.registry.setCubeStatus(name, "asleep", cube.error);
     return this.transition(name, this.doSleep(cube, reason));
   }
 
@@ -909,13 +930,21 @@ export class CubeSupervisor {
       const cube = this.requireCube(name);
       if (cube.status === "ready") {
         const state = await this.backend.getState(instanceName(name));
-        if (state.status === "Running") return;
-        // Stopped under a ready row (agent-initiated poweroff, out-of-band
-        // `incus stop`). Re-validate after the await, then demote to
-        // asleep and loop into the normal wake path.
+        // Re-validate after the await on BOTH paths: a setup retry or a
+        // sleep may have reserved the cube while the state request was out,
+        // and returning "running" then would let guest tools race it.
         if (this.pendingTransition(name)) continue;
         if (this.requireCube(name).status !== "ready") continue;
-        this.registry.setCubeStatus(name, "asleep");
+        if (state.status === "Running") {
+          // A wake request is activity: the extension asks before every tool
+          // call, and a long quiet tool (docker build) must not be slept
+          // under it by the idle sweep.
+          this.registry.touchCube(name);
+          return;
+        }
+        // Stopped under a ready row (agent-initiated poweroff, out-of-band
+        // `incus stop`): demote to asleep and loop into the normal wake path.
+        this.registry.setCubeStatus(name, "asleep", cube.error);
         continue;
       }
       if (cube.status === "creating") {
@@ -1540,7 +1569,15 @@ export class CubeSupervisor {
       }
       this.registry.deleteCube(name);
       this.lifecycle.forget(name);
-      span.end(true, opts.deleteVolume ? "instance, volume and bridge" : "instance and bridge; volume kept");
+      // Deleting a thread destroys its workspace and history (PRODUCT.md):
+      // the host-side tree — workspace, reference checkouts, pi sessions —
+      // goes with it instead of accumulating under cubesRoot.
+      try {
+        removeStoppedTree(path.dirname(cube.workspacePath));
+      } catch (error) {
+        console.log(`cube ${name}: host tree not fully removed: ${String(error)}`);
+      }
+      span.end(true, opts.deleteVolume ? "instance, volume, bridge and host tree" : "instance, bridge and host tree; volume kept");
     } finally {
       this.removing.delete(name);
     }
@@ -1638,13 +1675,22 @@ export class CubeSupervisor {
       for (const thread of this.registry.listThreads(cube.id)) {
         if (thread.archivedAt !== null && !includeArchived) continue;
         const project = this.registry.getProject(thread.projectId);
-        if (!project) throw new Error(`thread ${thread.id} has no project`);
+        if (!project) {
+          // One orphaned row must not take the whole list (and the UI) down.
+          console.log(`thread ${thread.id} has no project — hidden from the list`);
+          continue;
+        }
+        const failedPhase = (["setup", "resume"] as const)
+          .map((phase) => this.lifecycle.read(cube.name, phase))
+          .find((result) => result?.state === "failed");
         threads.push({
           id: thread.id,
           title: thread.title ?? this.autoTitle(thread),
-          state: (["setup", "resume"] as const).some((phase) => this.lifecycle.read(cube.name, phase)?.state === "failed") && cube.status !== "creating"
-            ? "error" : threadState(cube.status),
-          error: cube.error,
+          state: failedPhase && cube.status !== "creating" ? "error" : threadState(cube.status),
+          // The raw text stays in the registry for diagnosis; the list gets
+          // one sentence with the next step. A failed lifecycle phase is the
+          // diagnostic when the status column carries none (sleep clears it).
+          error: describeThreadError(cube.error ?? failedPhase?.error ?? null),
           createdAt: thread.createdAt,
           archived: thread.archivedAt !== null,
           project: { id: project.id, name: project.name },
@@ -1718,10 +1764,18 @@ export class CubeSupervisor {
     const { cubeName, threadId } = this.resolveUserThread(id);
     let cube = this.requireCube(cubeName);
     if (cube.status === "creating") {
-      onStatus("setting up this thread's environment…");
       // Provisioning runs detached; wait it out (waking would retry a failed
-      // provision against a missing instance and bury its error).
+      // provision against a missing instance and bury its error). The
+      // events it records say which step is running: report each change so
+      // a long .cube/setup reads as progress, not as a stuck spinner.
+      const started = Date.now();
+      let last = "";
       while ((cube = this.requireCube(cubeName)).status === "creating") {
+        const text = this.provisionProgress(cube, started);
+        if (text !== last) {
+          onStatus(text);
+          last = text;
+        }
         await new Promise((resolve) => setTimeout(resolve, 1_000));
       }
     }

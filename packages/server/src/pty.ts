@@ -72,6 +72,8 @@ interface TerminalSession {
   rows: number;
   linger: NodeJS.Timeout | null;
   lastActivity: number;
+  /** Last pty output (ms epoch): the linger reap waits for this much silence. */
+  lastOutput: number;
 }
 
 const SCROLLBACK_CAP = 512 * 1024;
@@ -111,6 +113,7 @@ export class PiTerminals {
         rows: clamp(rows, 2, 500),
         linger: null,
         lastActivity: 0,
+        lastOutput: 0,
       };
       this.sessions.set(threadId, session);
     }
@@ -202,6 +205,7 @@ export class PiTerminals {
           session.scrollbackBytes -= session.scrollback.shift()!.length;
         }
         this.broadcast(session, buf);
+        session.lastOutput = Date.now();
         this.touch(session);
       });
       proc.onExit(({ exitCode }) => {
@@ -241,11 +245,24 @@ export class PiTerminals {
     // Last client gone: give pi a linger window (page reloads, sleeping
     // laptops, in-flight agent turns), then reap.
     if (session.linger) clearTimeout(session.linger);
+    this.armLinger(session);
+  }
+
+  /** (Re)start the reap timer for a session with no clients. Output resets
+   * it (see onData): a closed tab must never kill an agent that is still
+   * working — the product promises "close the tab, come back to the
+   * result". The timer only fires after the linger window of silence. */
+  private armLinger(session: TerminalSession, delay = this.lingerMs): void {
+    if (session.linger) clearTimeout(session.linger);
     session.linger = setTimeout(() => {
       if (this.sessions.get(session.threadId) !== session) return;
-      this.host.event?.({ thread: session.threadId, phase: "reap", ok: true, detail: `no client for ${Math.round(this.lingerMs / 60_000)} min` });
+      // Still producing output (an agent turn in progress): wait out the
+      // remainder of a full linger window of silence before reaping.
+      const quietFor = Date.now() - session.lastOutput;
+      if (quietFor < this.lingerMs) return this.armLinger(session, this.lingerMs - quietFor);
+      this.host.event?.({ thread: session.threadId, phase: "reap", ok: true, detail: `no client and no output for ${Math.round(this.lingerMs / 60_000)} min` });
       this.kill(session.threadId);
-    }, this.lingerMs);
+    }, delay);
     session.linger.unref();
   }
 
