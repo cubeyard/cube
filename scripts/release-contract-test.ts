@@ -240,6 +240,21 @@ fi
   }
   console.log("8 ok: schema compatibility and package-manager-specific upgrade hints");
 
+  // 9. The shipped launcher carries its release number; a checkout says "dev".
+  assert.match(launcher, /^LAUNCHER_VERSION=dev$/m);
+  const shipStep = workflow.match(/- name: ship the launcher itself\n([\s\S]*?)\n\n/)?.[1];
+  assert.ok(shipStep, "prepare/ship-the-launcher step exists");
+  const stampLine = shipStep.split("\n").find((line) => line.includes("sed ") && line.includes("LAUNCHER_VERSION"));
+  assert.ok(stampLine, "the ship step stamps LAUNCHER_VERSION with sed");
+  const stampedHome = path.join(tmp, "stamped-home");
+  fs.mkdirSync(stampedHome);
+  const stamped = path.join(tmp, "stamped-cube");
+  run("bash", ["-c", `V=v1.2.3; ${stampLine.trim().replace(/> .*$/, `> "${stamped}"`)}`]);
+  const version = run("bash", [stamped, "version"], { env: { CUBE_HOME: stampedHome, CUBE_BIND: "127.0.0.1" } });
+  assert.equal(version, "launcher: v1.2.3\nrelease:  none installed (run: cube up)");
+  assert.equal(run("bash", ["launcher/cube", "--version"], { env: { CUBE_HOME: stampedHome, CUBE_BIND: "127.0.0.1" } }).split("\n")[0], "launcher: dev");
+  console.log("9 ok: release packaging stamps the launcher version and `cube version` reports it");
+
   console.log("release-contract-test: ALL PASS");
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });

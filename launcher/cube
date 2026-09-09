@@ -25,9 +25,10 @@
 #   cube upgrade [vX.Y.Z]  fetch a release, apply only what changed,
 #                          KEEP the data disk (also refreshes this file)
 #   cube ssh [cmd...]      ssh into the VM as `cube`
-#   cube logs              follow cubed's journal
+#   cube logs [args...]    follow cubed's journal (console log while down)
+#   cube events            lifecycle events and timings from cubed
 #   cube diagnose          collect diagnostics and ask Pi for a root-cause analysis
-#   cube version           installed release version
+#   cube version           launcher and installed release versions
 #   cube destroy --yes     stop and delete EVERYTHING in $CUBE_HOME
 #
 # State lives in ~/.cube (CUBE_HOME). Settings persist in
@@ -35,14 +36,21 @@
 # win over it:
 #   CUBE_REPO         GitHub repo with vX.Y.Z releases (default cubeyard/cube)
 #   CUBE_RELEASE_DIR  local dir with release assets — offline/test installs
-#   CUBE_PORT         product port on the host (default 7777; a busy port
-#                     is skipped to the next free one on first run)
+#   CUBE_PORT         product port on the host (default 7777; a port nobody
+#                     set explicitly moves to the next free one)
 #   CUBE_SSH_PORT     admin ssh port on the host (default 2222; same rule)
 #   CUBE_BIND         extra PRIVATE address for the product port
 #                     ("tailscale" resolves this node's 100.x address)
 #   CUBE_MEM/CUBE_CPUS/CUBE_DATA_SIZE   VM sizing (8G / 6 / 40G)
+#
+# Portability floor: bash 3.2 (macOS ships it). No mapfile, associative
+# arrays, ${var,,}, `sed -i`, `readlink -f` or `timeout` — check with
+# `shellcheck launcher/cube` (CI runs it).
 set -euo pipefail
 
+# Release packaging stamps the vX.Y.Z tag over the next line (release.yml,
+# "ship the launcher itself"); a checkout stays "dev".
+LAUNCHER_VERSION=dev
 LAUNCHER_SCHEMA=2            # the manifest schema this file understands
 INSTALL_METHOD=standalone   # the Homebrew formula sets this to homebrew
 
@@ -1132,23 +1140,24 @@ activate_release() {
 cmd_version() {
   local ver
   ver="$(installed_version)"
-  [ -n "$ver" ] || { echo "none installed"; return 0; }
-  echo "$ver"
+  echo "launcher: $LAUNCHER_VERSION"
+  echo "release:  ${ver:-none installed (run: cube up)}"
 }
 
 cmd_destroy() {
   [ "${1:-}" = "--yes" ] || {
-    fail "this deletes the VM AND ALL ITS DATA (threads, logins, repositories) in $CUBE_HOME"
-    note "re-run as: cube destroy --yes"
+    printf 'this deletes the VM and all its data (threads, logins, repositories) in %s\n' "$CUBE_HOME" >&2
+    printf 'to confirm, run: cube destroy --yes\n' >&2
     return 1
   }
   lock
-  stop_vm || { fail "the VM would not stop — not deleting anything"; return 1; }
+  stop_vm || { fail "the VM would not stop — nothing was deleted"; return 1; }
   rm -rf "$CUBE_HOME"
   ok "removed $CUBE_HOME — \`cube up\` starts from nothing"
 }
 
-usage() {
+usage() {  # usage [EXIT] — stdout when asked for, stderr on a mistake
+  [ "${1:-0}" = 0 ] || exec >&2
   cat <<'USAGE'
 cube — self-hosted coding-agent box (launcher)
 
@@ -1161,9 +1170,13 @@ cube — self-hosted coding-agent box (launcher)
                          KEEP the data disk; refresh the launcher unless
                          managed by Homebrew (brew upgrade cube)
   cube ssh [cmd...]      ssh into the VM as `cube`
-  cube logs              follow cubed's journal
-  cube diagnose [OPTIONS] collect diagnostics and ask Pi for root-cause analysis
-  cube version           installed release version
+  cube logs [args...]    follow cubed's journal (journalctl args, default
+                         -n 100 -f); the console log while the VM is down
+  cube events [--json] [--limit N] [--kind K] [--since 24h]
+                         lifecycle events and timings from cubed
+  cube diagnose [--collect-only | --export <id>]
+                         collect diagnostics and ask Pi for root-cause analysis
+  cube version           launcher and installed release (also --version)
   cube destroy --yes     stop and delete everything in $CUBE_HOME
 
 State lives in ~/.cube (CUBE_HOME); settings persist in ~/.cube/config.
@@ -1186,15 +1199,17 @@ check_version_arg() {  # empty (= latest) or strict vX.Y.Z — it lands in
 mkdir -p "$CUBE_HOME"
 CMD="${1:-}"
 [ $# -gt 0 ] && shift
+case "${1:-}" in -h|--help) usage 0 ;; esac   # cube <cmd> --help
 case "$CMD" in
   up)       cmd_up "$@" ;;
   down)     cmd_down "$@" ;;
   status)   cmd_status "$@" ;;
   ssh)      cmd_ssh "$@" ;;
-  logs)     cmd_logs ;;
+  logs)     cmd_logs "$@" ;;
+  events)   cmd_events "$@" ;;
   diagnose) cmd_diagnose "$@" ;;
   upgrade)  cmd_upgrade "$@" ;;
-  version)  cmd_version "$@" ;;
+  version|-V|--version) cmd_version ;;
   destroy)  cmd_destroy "$@" ;;
   ""|help|-h|--help) usage 0 ;;
   *) fail "unknown command: $CMD"; usage 1 ;;
