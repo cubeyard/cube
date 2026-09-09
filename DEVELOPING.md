@@ -312,7 +312,7 @@ tag — they would race the same draft.
 The release launcher runs diagnostics inside the VM:
 
 ```bash
-cube diagnose                         # collect a bundle, then ask Pi for an RCA
+cube diagnose                         # collect a bundle, then open interactive Pi RCA
 cube diagnose --collect-only          # collect without calling a model
 cube diagnose --export <bundle-id> > cube-diagnostics.tar.gz
 ```
@@ -321,14 +321,22 @@ From a VM shell, the equivalent entry point is
 `sh /opt/cube/app/scripts/diagnose.sh`. This entry point ships in app-only
 updates too; it does not require a new base image. Model-assisted diagnosis
 requires existing Pi authentication in the VM and sends collected evidence
-to the configured model provider. Pi runs non-interactively with only a
+to the selected model provider when you submit a message. Pi opens with no
+automatic prompt: describe the issue, paste the failing tool output, and ask
+follow-up questions. Use `/model` to choose a model (before or during the
+analysis), and `/quit` to exit. The launcher allocates an SSH terminal for
+this session; direct SSH callers should use `ssh -t`. Collection and export
+remain non-interactive. Pi has only a
 `read` tool restricted to the package; it reports likely causes and does not
 attempt repairs. Collection and Pi write only their diagnostic output/session.
 Review every bundle before sharing it; log redaction reduces exposure but
 is not perfect. Host logs can include information from multiple workspaces.
 
 Packages are retained under `~/cube/diagnostics/<id>/` on the VM. The export
-contains `bundle/` and `report.md` (when present), not the Pi session. There
+contains `bundle/` and `report.md` (the latest successfully completed Pi
+answer, when present), not terminal output or the full Pi session. Ask Pi
+for a consolidated report before exiting if the last answer was a follow-up.
+Interrupted or failed answers do not replace the last completed report. There
 is no automatic upload or deletion. Collection remains usable without cubed,
 Incus, or model access: unavailable checks are recorded individually. This
 first version covers the VM/control plane, not workspace contents or the

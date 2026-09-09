@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -71,10 +72,13 @@ try {
   await fs.rm(path.join(directory, "session.jsonl"));
   await assert.rejects(exec(process.execPath, [cli, "--export", "../escape"], { env: { PATH: process.env.PATH, HOME: tmp } }));
 
-  const launcher = `source launcher/cube; touch "$SSH_KEY"; vm_ssh() { printf '%s\\n' "$@"; }; cmd_diagnose "$@"`;
+  const launcher = `source launcher/cube; touch "$SSH_KEY"; vm_ssh() { printf '%s\\n' "$@"; }; cmd_ssh() { printf 'interactive\\n%s\\n' "$*"; read -r line; printf '%s\\n' "$line"; }; cmd_diagnose "$@"`;
   const shellEnv = { PATH: process.env.PATH, HOME: tmp, CUBE_HOME: tmp, CUBE_LIB_ONLY: "1" };
   const forwarded = (await exec("bash", ["-c", launcher, "test", "--export", id], { cwd: repo, env: shellEnv })).stdout;
   assert.equal(forwarded, `sh\n/opt/cube/app/scripts/diagnose.sh\n--export\n${id}\n`);
+  const interactive = exec("bash", ["-c", launcher, "test"], { cwd: repo, env: shellEnv });
+  interactive.child.stdin?.end("user input\n");
+  assert.equal((await interactive).stdout, "interactive\nsh /opt/cube/app/scripts/diagnose.sh\nuser input\n");
   await assert.rejects(exec("bash", ["-c", launcher, "test", "--export", "x; echo unsafe"], { cwd: repo, env: shellEnv }));
   console.log("3 ok: archive excludes sessions; launcher safely forwards and rejects arguments");
 
@@ -94,7 +98,7 @@ try {
       chunk({ role: "assistant", tool_calls: [{ index: 0, id: "read-1", type: "function", function: { name: "read", arguments: JSON.stringify({ path: evidencePath, offset: 2, limit: 2 }) } }] });
       chunk({}, "tool_calls");
     } else {
-      chunk({ role: "assistant", content: "RCA fixture completed with cited evidence." });
+      chunk({ role: "assistant", content: `RCA fixture completed with ${request.model}.` });
       chunk({}, "stop");
     }
     res.end("data: [DONE]\n\n");
@@ -104,11 +108,13 @@ try {
     const port = (server.address() as { port: number }).port;
     await fs.writeFile(path.join(agentDir, "models.json"), JSON.stringify({ providers: { fixture: {
       baseUrl: `http://127.0.0.1:${port}/v1`, api: "openai-completions", apiKey: "fixture-not-a-secret",
-      models: [{ id: "fixture", name: "Fixture", reasoning: false, input: ["text"], contextWindow: 32000, maxTokens: 1000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+      models: ["fixture", "second"].map((id) => ({ id, name: id, reasoning: false, input: ["text"], contextWindow: 32000, maxTokens: 1000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } })),
     } } }));
     await fs.writeFile(path.join(bundle, "AGENTS.md"), "HOSTILE_CONTEXT_CANARY");
     const args = piArguments(directory);
-    args.unshift("--provider", "fixture", "--model", "fixture", "--thinking", "off");
+    assert.ok(!args.includes("--print") && !args.includes("--mode") && !args.includes("--"), "production launch waits for user input");
+    args.unshift("--print", "--provider", "fixture", "--model", "fixture", "--thinking", "off");
+    args.push("--", "The service cannot connect. Please investigate.");
     const running = exec(path.join(repo, "packages/harness/node_modules/.bin/pi"), args, {
       cwd: bundle, timeout: 30_000,
       env: { PATH: process.env.PATH, HOME: tmp, PI_CODING_AGENT_DIR: agentDir, CUBE_DIAGNOSIS_BUNDLE: bundle, PI_OFFLINE: "1" },
@@ -120,30 +126,68 @@ try {
     assert.deepEqual(requests[0].tools.map((t: any) => t.function.name), ["read"]);
     assert.ok(requests[1].messages.some((m: any) => m.role === "tool" && m.content === "2: second\n3: third"));
     assert.ok(!JSON.stringify(requests).includes("HOSTILE_CONTEXT_CANARY"));
+    assert.equal(await fs.readFile(path.join(directory, "report.md"), "utf8"), "RCA fixture completed with fixture.\n");
     console.log("4 ok: real Pi CLI exposes only custom read, reads bounded evidence, ignores project context, returns report");
 
     await fs.writeFile(path.join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "fixture", defaultModel: "fixture", defaultThinkingLevel: "off" }));
     evidencePath = "index.md";
     const env = { PATH: process.env.PATH, HOME: tmp, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" };
-    const complete = await exec(process.execPath, [cli], { env, timeout: 30_000 });
-    const newId = complete.stderr.match(/Diagnosis: ([a-f0-9-]{36})/)?.[1];
-    assert.ok(newId);
-    assert.match(complete.stdout, /RCA fixture completed/);
-    assert.equal(await fs.readFile(path.join(tmp, "cube/diagnostics", newId, "report.md"), "utf8"), complete.stdout);
-    assert.equal(requests.length, 4);
-    assert.deepEqual(requests[2].tools.map((t: any) => t.function.name), ["read"]);
+    // Reuse the repository's PTY dependency to test the actual interactive CLI.
+    const { spawn } = createRequire(path.join(repo, "packages/server/package.json"))("@lydell/node-pty");
+    const terminal = spawn(process.execPath, [cli], { cwd: repo, env: { ...env, TERM: "xterm-256color" }, cols: 180, rows: 40 });
+    let output = "";
+    let exited = false;
+    terminal.onData((data: string) => { output += data; });
+    terminal.onExit(() => { exited = true; });
+    const until = async (description: string, check: () => boolean | Promise<boolean>) => {
+      const deadline = Date.now() + 20_000;
+      while (!(await check())) {
+        if (Date.now() > deadline || exited) throw new Error(`Waiting for ${description}: ${output.slice(-4000)}`);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+    };
+    try {
+      await until("interactive welcome", () => output.includes("describe the issue to begin"));
+      assert.equal(requests.length, 2, "opening the interactive session does not start inference");
+      const newId = output.match(/Diagnosis: ([a-f0-9-]{36})/)?.[1];
+      assert.ok(newId);
+      const newDirectory = path.join(tmp, "cube/diagnostics", newId);
+      const report = () => fs.readFile(path.join(newDirectory, "report.md"), "utf8").catch(() => "");
+      terminal.write("/model fixture/second\r");
+      await until("model selection", () => output.includes("Model: second"));
+      terminal.write("services.ensure fails with fetch failed after 7ms\r");
+      await until("first report", async () => (await report()) === "RCA fixture completed with second.\n");
+      assert.equal(requests.length, 4);
+      assert.equal(requests[2].model, "second");
+      assert.ok(JSON.stringify(requests[2].messages).includes("services.ensure fails with fetch failed after 7ms"));
+      assert.deepEqual(requests[2].tools.map((t: any) => t.function.name), ["read"]);
+      terminal.write(`!touch ${path.join(tmp, "shell-escape")}\r`);
+      await until("blocked shell", () => output.includes("Shell is disabled in RCA mode"));
+      await assert.rejects(fs.stat(path.join(tmp, "shell-escape")));
+      terminal.write("/model fixture/fixture\r");
+      await until("second model selection", () => output.includes("Model: fixture"));
+      terminal.write("The server has no matching logs. Does that change the diagnosis?\r");
+      await until("updated report", async () => (await report()) === "RCA fixture completed with fixture.\n");
+      assert.equal(requests.length, 6);
+      assert.equal(requests[4].model, "fixture");
+      assert.ok(JSON.stringify(requests[4].messages).includes("The server has no matching logs"));
+      assert.doesNotMatch(await report(), /\x1b/);
+      terminal.write("/quit\r");
+      await until("clean exit", () => exited);
+      const exported = execFileSync(process.execPath, [cli, "--export", newId], { env });
+      assert.equal(execFileSync("tar", ["-xzOf", "-", "report.md"], { input: exported, encoding: "utf8" }), "RCA fixture completed with fixture.\n");
+    } finally { if (!exited) terminal.kill(); }
 
     const noAuth = { PATH: process.env.PATH, HOME: tmp, PI_CODING_AGENT_DIR: path.join(tmp, "no-auth"), PI_OFFLINE: "1" };
     const collected = await exec(process.execPath, [cli, "--collect-only"], { env: noAuth, timeout: 30_000 });
     assert.match(collected.stderr, /Diagnosis: /);
     assert.equal(collected.stdout, "");
-    assert.equal(requests.length, 4, "collect-only never calls the model");
+    assert.equal(requests.length, 6, "collect-only never calls the model");
     await assert.rejects(exec(process.execPath, [cli], { env: noAuth, timeout: 30_000 }), (error: any) => {
-      assert.match(error.stderr, /diagnosis package is still available/);
-      assert.match(error.stderr, /Diagnosis: /);
+      assert.match(error.stderr, /requires a terminal/);
       return true;
     });
-    console.log("5 ok: full CLI saves model report; collection works without auth; model failure preserves evidence");
+    console.log("5 ok: interactive CLI waits for issue, changes models, accepts follow-ups, blocks shell and exports latest report; headless collection still works");
   } finally { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); }
 } finally { await fs.rm(tmp, { recursive: true, force: true }); }
 console.log("ALL PASS: diagnostics");

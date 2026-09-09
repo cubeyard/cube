@@ -882,7 +882,7 @@ cmd_diagnose() {
   local id
   [ -f "$SSH_KEY" ] || { fail "no key yet — run: cube up"; return 1; }
   case "$#:${1:-}" in
-    0:) vm_ssh sh /opt/cube/app/scripts/diagnose.sh </dev/null ;;
+    0:) cmd_ssh sh /opt/cube/app/scripts/diagnose.sh ;;
     1:--collect-only|1:--help)
       vm_ssh sh /opt/cube/app/scripts/diagnose.sh "$1" </dev/null
       ;;
