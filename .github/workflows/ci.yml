@@ -33,6 +33,18 @@ jobs:
           for f in scripts/*.sh scripts/vm/*.sh scripts/vm/base/*.sh launcher/cube images/build.sh images/cube-node/provision.sh; do
             bash -n "$f"
           done
+      # The launcher ships as one file to every user and must stay clean
+      # at shellcheck's default level; the host scripts at warning level.
+      - name: shellcheck launcher/cube
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # v2.0.0
+        with:
+          scandir: ./launcher
+      - name: shellcheck scripts/*.sh
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # v2.0.0
+        with:
+          scandir: ./scripts
+          ignore_paths: scripts/vm
+          severity: warning
       - uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d # v16
       - name: the base image must evaluate (both arches)
         run: |

@@ -31,7 +31,7 @@ OFFLINE_TESTS=(
 # Executed (not sourced): run the list.
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -uo pipefail
-  cd "$(dirname "$0")/.."
+  cd "$(dirname "$0")/.." || exit 1
   # No model credentials anywhere near tests. Some suites read pi's model
   # catalog (never prompt); a placeholder key makes the deepseek models
   # "available" and its value is never sent anywhere.
