@@ -277,9 +277,25 @@ prepare_uefi() {  # prepare_uefi DIR -> UEFI_CODE, UEFI_VARS
   fi
 }
 
-# Everything the host must have, checked BEFORE the first byte is
-# downloaded: a missing hypervisor after a 1 GB fetch is the wrong order.
+# Host checks, in two sets: ssh + curl are needed by everything that talks
+# to GitHub or the VM; the boot set (qemu, accelerator, firmware, ISO
+# tool) only when a VM is about to be started — an app-only upgrade over
+# ssh must not be refused for a missing ISO tool. `cube up` checks both
+# BEFORE the first byte is downloaded: a missing hypervisor after a 1 GB
+# fetch is the wrong order.
+preflight_tools() {
+  local rc=0
+  command -v ssh >/dev/null 2>&1 || { fail "ssh not found"; rc=1; }
+  command -v curl >/dev/null 2>&1 || { fail "curl not found"; rc=1; }
+  return "$rc"
+}
 preflight_host() {
+  local rc=0
+  preflight_boot || rc=1
+  preflight_tools || rc=1
+  return "$rc"
+}
+preflight_boot() {
   local rc=0 fw
   command -v "$QEMU_BIN" >/dev/null 2>&1 \
     || { fail "$QEMU_BIN not found — Linux: apt install qemu-system qemu-utils genisoimage ovmf; macOS: brew install qemu"; rc=1; }
@@ -305,8 +321,6 @@ preflight_host() {
       || { fail "no UEFI VARS template beside $fw"; rc=1; }
   fi
   have_iso_tool || { fail "no ISO tool (Linux: apt install genisoimage; macOS: hdiutil is built in)"; rc=1; }
-  command -v ssh >/dev/null 2>&1 || { fail "ssh not found"; rc=1; }
-  command -v curl >/dev/null 2>&1 || { fail "curl not found"; rc=1; }
   return "$rc"
 }
 
@@ -1049,12 +1063,15 @@ cmd_diagnose() {
 }
 
 cmd_upgrade() {
-  local want="${1:-}" cur target role changed=() need reboot=0
+  local want="${1:-}" cur target role changed=() need reboot=0 running=""
   check_version_arg "$want"
   lock
   cur="$(installed_version)"
   [ -n "$cur" ] || { fail "nothing installed yet — run: cube up"; return 1; }
-  preflight_host || return 1
+  # A changed port or bind would apply the app over the old ssh port and
+  # then look for cubed on the new one — the same guard as cube up.
+  if vm_pid >/dev/null; then running=1; settings_unchanged || return 1; fi
+  preflight_tools || return 1
   if [ -n "$want" ]; then
     target="$want"
   else
@@ -1074,6 +1091,9 @@ cmd_upgrade() {
     changed+=("runtime"); reboot=1
   fi
   [ "$(artifact_sha "$cur" app)" = "$(artifact_sha "$target" app)" ] || changed+=("app")
+  # A VM gets started when a disk changed, or when none is running now;
+  # only then are the boot prerequisites required — before the download.
+  if [ "$reboot" = 1 ] || [ -z "$running" ]; then preflight_boot || return 1; fi
   log "upgrade $cur -> $target"
   note "changed: ${changed[*]:-nothing}; the data disk is kept"
   # Downloads: base/cube-node when they changed; the app DISK only when
