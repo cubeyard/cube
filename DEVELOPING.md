@@ -462,8 +462,13 @@ least that is correct:
   touched.
 
 The installed-version file is written only after the new release has
-proved itself (identity check, cubed answering); a failed upgrade names
-the release you are still on and how to get back to it. Afterwards it
+proved itself (identity check, cubed answering). An app-only upgrade
+first makes sure the installed release's own tarball is in the store
+and re-applies it if cubed never answers after the swap ("rolled back");
+a failed upgrade always names the release you are still on and the
+exact way back (for a rebooted upgrade: which of its artifacts are still
+cached). Boot prerequisites (qemu, accelerator, firmware, ISO tool) are
+required only when the upgrade will start a VM. Afterwards it
 prunes the store to the current + one previous release
 and replaces itself with the release's `cube` asset. `cube up` and
 `cube status` print a one-line hint when a newer release exists
