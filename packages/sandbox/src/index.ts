@@ -18,6 +18,7 @@ export { provisionCube, destroyCube, waitForCubeNetwork } from "./cube-provision
 export type { CubeProvisionSpec, CubeNetworkSpec } from "./cube-provision.ts";
 export { startEgressProxy } from "./egress-proxy.ts";
 export type { EgressPolicy, EgressProxy } from "./egress-proxy.ts";
+export { removeStoppedTree } from "./stopped-tree.ts";
 
 export interface SandboxExecOptions {
   /** Working directory *inside* the sandbox (guest path). */

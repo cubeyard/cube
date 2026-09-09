@@ -24,11 +24,19 @@ export interface IncusResponse<T = unknown> {
 export interface IncusOperation {
   id: string;
   class: string;
+  description?: string;
+  resources?: Record<string, string[]>;
   status: string;
   status_code: number;
   err: string;
   /** Operation-specific payload; for exec: { fds: Record<string,string>, return?: number }. */
   metadata: Record<string, unknown> | null;
+}
+
+export interface IncusImage {
+  fingerprint: string;
+  properties: Record<string, string>;
+  aliases: Array<{ name: string; description?: string }>;
 }
 
 /** Instance as returned by GET /1.0/instances/<name> (subset). */
@@ -425,6 +433,24 @@ export class IncusClient {
 
   // ---- images -------------------------------------------------------------
 
+  async listImages(): Promise<IncusImage[]> {
+    const { metadata } = await this.request<IncusImage[]>("GET", "/1.0/images?recursion=1");
+    return metadata;
+  }
+
+  /** Active operations, flattened from Incus' status-keyed response. */
+  async listOperations(): Promise<IncusOperation[]> {
+    const { metadata } = await this.request<Record<string, IncusOperation[]>>(
+      "GET", "/1.0/operations?recursion=1",
+    );
+    return Object.values(metadata).flat();
+  }
+
+  async getOperation(operationUrl: string): Promise<IncusOperation> {
+    const { metadata } = await this.request<IncusOperation>("GET", operationUrl);
+    return metadata;
+  }
+
   async getImageAlias(alias: string): Promise<{ name: string; target: string }> {
     const { metadata } = await this.request<{ name: string; target: string }>(
       "GET",
@@ -442,6 +468,33 @@ export class IncusClient {
     const fingerprint = op.metadata?.fingerprint;
     if (typeof fingerprint !== "string") throw new Error("incus: publish returned no fingerprint");
     return fingerprint;
+  }
+
+  /** Start publication and expose the operation URL before waiting. */
+  async publishTaggedInstanceAsImage(
+    name: string,
+    alias: string,
+    properties: Record<string, string>,
+    operationAccepted: (operationUrl: string) => void,
+  ): Promise<string> {
+    const envelope = await this.request("POST", "/1.0/images", {
+      source: { type: "instance", name },
+      aliases: [{ name: alias }],
+      properties,
+    });
+    if (envelope.type !== "async") throw new Error(`incus: expected async image publication, got ${envelope.type}`);
+    // Deliberately synchronous: callers durably journal before we issue any
+    // further request or yield back to the event loop.
+    operationAccepted(envelope.operation);
+    const op = await this.waitOperation(envelope.operation);
+    if (op.status_code !== 200) throw new IncusHttpError(op.status_code, op.err || op.status);
+    const fingerprint = op.metadata?.fingerprint;
+    if (typeof fingerprint !== "string") throw new Error("incus: publish returned no fingerprint");
+    return fingerprint;
+  }
+
+  async createImageAlias(alias: string, fingerprint: string): Promise<void> {
+    await this.request("POST", "/1.0/images/aliases", { name: alias, target: fingerprint });
   }
 
   async deleteImage(fingerprint: string): Promise<void> {
