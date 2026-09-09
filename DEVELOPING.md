@@ -150,9 +150,27 @@ See [GitHub's stack reference](https://docs.github.com/en/pull-requests/referenc
 3. Make and test the scoped fix, adding commits without rewriting the PR's
    existing history. Call `cube.git.planPrUpdate(repositoryId, token)`.
    Cube freezes those commits, rebases each descendant onto its updated
-   parent in the host-owned repository, and returns the incremental patches
-   and resulting PR diffs. Review all of them before publishing. A conflict
-   or incomplete/oversized diff produces no publishable plan.
+   parent in the host-owned repository, and returns compact per-PR summaries
+   with before/after SHAs, diffstats, UTF-8 byte counts, and SHA-256 hashes.
+   Repeating this call with the same candidate reuses the saved plan ID and
+   descendant SHAs, including after restart. Planning and inspection are
+   entirely local: they use the prepared snapshot without GitHub calls or
+   credential refresh. A plan may therefore be stale; publication rechecks
+   the complete remote snapshot and rejects it before push if anything changed.
+   Read each PR's diff from the saved commit IDs with
+   `cube.git.inspectPrUpdatePlan(repositoryId, token, plan, { number, section, page })`.
+   Read both `patch` (incremental change) and `prDiff` (resulting PR diff),
+   following `nextPage` until null. Pages contain at most 16000 UTF-16 code
+   units, so even long lines and JSON escaping fit the output limit. Hashes
+   cover the complete UTF-8 diff, not individual pages. Inspection does not
+   replan or check remote freshness. Each call computes only the requested
+   diff from pinned commits in the host repository, even after local or remote
+   changes. Diff text and summaries are not cached or persisted; the stored
+   plan still contains only its ID, candidate SHA, and layer SHAs. A new
+   candidate replaces the plan and invalidates its
+   old ID. Review all pages before publishing; summaries and hashes do not
+   replace content inspection. Conflicts or incomplete diff capture produce
+   no publishable plan. Git's per-command 4 MiB capture limit still applies.
 4. When publication is authorized, call
    `cube.git.publishPrUpdate(repositoryId, token, plan)`. Cube rechecks the
    snapshot, then pushes all changed branches with `--atomic` and explicit

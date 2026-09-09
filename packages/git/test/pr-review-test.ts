@@ -1,5 +1,6 @@
 /** Offline integration test for the native stacked-PR transaction. */
 import assert from "node:assert";
+import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -107,8 +108,52 @@ await assert.rejects(new GitService(root, runner).push(ws, fixtureUrl), /prepare
 await assert.rejects(new GitService(root, runner).push(ws, fixtureUrl, "main"), /prepared review branch directly/);
 fs.writeFileSync(path.join(ws, "review.txt"), "scoped fix\n");
 git(ws, ...cfg, "add", "review.txt"); git(ws, ...cfg, "commit", "-m", "review fix");
-const plan = await service.plan(ws, fixtureUrl, prepared.token);
+const localPlanner = new PrReviewService(root, async (file, args, opts) => {
+  assert.equal(file, "git", "planning must not call GitHub");
+  assert.ok(!args.includes(fixtureUrl) && !args.includes("ls-remote") && !args.includes("push"), "planning must not access remote");
+  return defaultRunner(file, args, opts);
+});
+const plan = await localPlanner.plan(ws, fixtureUrl, prepared.token);
 assert.deepEqual(plan.changes.map((c) => c.number), [845, 846, 847, 848]);
+// Replanning must reuse the saved commits, not merely happen to rebase in
+// the same clock second. A restarted service may not run rebase at all.
+const noRebase = new PrReviewService(root, async (file, args, opts) => {
+  assert.equal(file, "git");
+  assert.ok(!args.includes("ls-remote") && !args.includes(fixtureUrl));
+  assert.ok(!args.includes("rebase"), "unchanged candidate must not be restacked again");
+  assert.ok(!args.includes("bundle") && !args.includes("fetch"), "unchanged candidate is already imported");
+  return runner(file, args, opts);
+});
+assert.deepEqual(await noRebase.plan(ws, fixtureUrl, prepared.token), plan);
+assert.ok(plan.changes.every((change) => !("patch" in change) && !("prDiff" in change)));
+let inspectionDiffs = 0;
+const offlineInspector = new PrReviewService(root, async (file, args, opts) => {
+  assert.equal(file, "git");
+  assert.ok(args.includes("diff"), "inspection may only compute a local diff, never fetch or rebase");
+  inspectionDiffs++;
+  return defaultRunner(file, args, opts);
+});
+for (const change of plan.changes) {
+  assert.equal(change.diffstat.patch, "1 file changed, 1 insertion(+)");
+  for (const section of ["patch", "prDiff"] as const) {
+    const page = await offlineInspector.inspect(ws, fixtureUrl, prepared.token, plan.plan, { number: change.number, section });
+    assert.equal(page.complete, true);
+    assert.equal(page.nextPage, null);
+    assert.equal(page.hash, crypto.createHash("sha256").update(page.text).digest("hex"));
+    assert.equal(page.totalBytes, Buffer.byteLength(page.text));
+    if (section === "patch") assert.match(page.text, /\+scoped fix/);
+    else if (change.number !== 845) {
+      assert.match(page.text, new RegExp(`\\+change ${change.number}`));
+      assert.ok(!page.text.includes("scoped fix"), "descendant PR diff must exclude inherited review changes");
+    }
+  }
+}
+assert.equal(inspectionDiffs, 8, "one diff per requested PR/section, not the whole stack");
+await assert.rejects(service.inspect(ws, fixtureUrl, prepared.token, "0".repeat(32), { number: 845, section: "patch" }), /no matching saved plan/);
+await assert.rejects(service.inspect(ws, fixtureUrl, prepared.token, plan.plan, { number: 842, section: "patch" }), /not updated by this plan/);
+for (const page of [0, -1, 1.5, Number.MAX_SAFE_INTEGER]) {
+  await assert.rejects(service.inspect(ws, fixtureUrl, prepared.token, plan.plan, { number: 845, section: "patch", page }), /invalid PR or stack number|out of range/);
+}
 await assert.rejects(service.verify(ws, fixtureUrl, prepared.token), /publication has not been attempted/);
 for (let i = 4; i < 7; i++) {
   const change = plan.changes[i - 3];
@@ -137,6 +182,30 @@ mode = "wrong-order"; await assert.rejects(service.prepare(ws, fixtureUrl, 845),
 mode = "wrong-sha"; await assert.rejects(service.prepare(ws, fixtureUrl, 845), /fetched branch does not match/);
 mode = "ok"; assert.deepEqual(branches.map(remoteOid), snapshot);
 
+// Parallel discovery must preserve native order despite reordered replies,
+// cap requests at four, and drain outstanding reads before reporting failure.
+let inFlight = 0, peak = 0, rejectMember = false;
+const concurrent = new PrReviewService(root, async (file, args, opts) => {
+  const endpoint = file === "gh" ? args.find((arg) => arg.includes("/pulls/")) : undefined;
+  if (!endpoint) return runner(file, args, opts);
+  const number = Number(endpoint.split("/").at(-1));
+  inFlight++;
+  peak = Math.max(peak, inFlight);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, number === 843 ? 1 : (849 - number) * 3));
+    if (rejectMember && number === 843) throw new Error("member unavailable");
+    return await runner(file, args, opts);
+  } finally { inFlight--; }
+});
+const concurrentPrep = await concurrent.prepare(ws, fixtureUrl, 845);
+assert.deepEqual(concurrentPrep.stack.layers.map((layer) => layer.number), numbers);
+assert.equal(peak, 4);
+assert.equal(inFlight, 0);
+rejectMember = true;
+await assert.rejects(concurrent.prepare(ws, fixtureUrl, 845), /GitHub state is unavailable/);
+assert.equal(inFlight, 0, "failed discovery must not leave requests running");
+assert.deepEqual(branches.map(remoteOid), snapshot);
+
 // Failed fetch cannot fall back to cached refs/objects, even though this
 // workspace now contains every current remote object from the first run.
 const noFetch = new PrReviewService(root, async (file, args, opts) => {
@@ -149,6 +218,7 @@ assert.deepEqual(branches.map(remoteOid), snapshot);
 // A token is checkout-bound.
 const other = path.join(tmp, "other"); git(tmp, "clone", bare, other);
 await assert.rejects(service.verify(other, fixtureUrl, prepared.token), /another checkout/);
+await assert.rejects(service.inspect(other, fixtureUrl, prepared.token, plan.plan, { number: 845, section: "patch" }), /another checkout/);
 
 // A stale candidate cannot be relabelled as the prepared branch.
 const stale = await service.prepare(ws, fixtureUrl, 845);
@@ -174,9 +244,18 @@ const localPlan = await service.plan(ws, fixtureUrl, localChange.token);
 fs.writeFileSync(path.join(ws, "local.txt"), "uninspected\n");
 git(ws, ...cfg, "commit", "-am", "later local change");
 await assert.rejects(service.publish(ws, fixtureUrl, localChange.token, localPlan.plan), /workspace changed after planning/);
+const oldPage = await offlineInspector.inspect(ws, fixtureUrl, localChange.token, localPlan.plan, { number: 845, section: "patch" });
+assert.match(oldPage.text, /\+inspected/);
+assert.ok(!oldPage.text.includes("uninspected"), "inspection must ignore later workspace commits");
+const replacement = await service.plan(ws, fixtureUrl, localChange.token);
+assert.notEqual(replacement.plan, localPlan.plan);
+assert.notEqual(replacement.changes.at(-1)!.after, localPlan.changes.at(-1)!.after);
+await assert.rejects(service.inspect(ws, fixtureUrl, localChange.token, localPlan.plan, { number: 845, section: "patch" }), /no matching saved plan/);
+await assert.rejects(service.publish(ws, fixtureUrl, localChange.token, localPlan.plan), /no matching unconsumed/);
 assert.deepEqual(branches.map(remoteOid), snapshot);
 
-// An upstream advance during editing is rejected before plan and push.
+// Planning remains local after an upstream advance. Publication rejects
+// both a reused plan and a newly generated plan before invoking push.
 const advanced = await service.prepare(ws, fixtureUrl, 845);
 git(ws, "switch", advanced.branch);
 fs.writeFileSync(path.join(ws, "advance-fix.txt"), "fix\n");
@@ -187,8 +266,14 @@ git(seed, "switch", "--detach", snapshot[6]!);
 const remoteAdvance = commit("advance.txt", "another contributor\n", "remote advance");
 git(seed, "push", "origin", `HEAD:${branches[6]}`);
 const beforeAdvanceCalls = pushCalls.length;
-await assert.rejects(service.plan(ws, fixtureUrl, advanced.token), /remote PR head, base, or stack changed/);
+assert.deepEqual(await localPlanner.plan(ws, fixtureUrl, advanced.token), advancePlan);
+assert.match((await offlineInspector.inspect(ws, fixtureUrl, advanced.token, advancePlan.plan, { number: 845, section: "patch" })).text, /\+fix/);
 await assert.rejects(service.publish(ws, fixtureUrl, advanced.token, advancePlan.plan), /remote PR head, base, or stack changed/);
+fs.appendFileSync(path.join(ws, "advance-fix.txt"), "additional local fix\n");
+git(ws, ...cfg, "commit", "-am", "continue locally after remote advance");
+const stalePlan = await localPlanner.plan(ws, fixtureUrl, advanced.token);
+assert.notEqual(stalePlan.plan, advancePlan.plan);
+await assert.rejects(service.publish(ws, fixtureUrl, advanced.token, stalePlan.plan), /remote PR head, base, or stack changed/);
 assert.equal(pushCalls.length, beforeAdvanceCalls);
 assert.deepEqual(branches.map(remoteOid), [...snapshot.slice(0, 6), remoteAdvance]);
 git(bare, "update-ref", `refs/heads/${branches[6]}`, snapshot[6]!); // restore only the test's injected advance
@@ -276,8 +361,44 @@ assert.equal(single.stack.id, null);
 assert.equal(single.stack.layers.length, 1);
 git(ws, "switch", single.branch);
 fs.writeFileSync(path.join(ws, "standalone.txt"), "standalone fix\n");
+// Large, long-line Unicode and binary diffs must fit model output a page
+// at a time, without truncation, newline changes, or lost page boundaries.
+fs.writeFileSync(path.join(ws, "large.txt"), 'æ😀\\"'.repeat(40_000) + "\n");
+fs.writeFileSync(path.join(ws, "binary.bin"), Buffer.from([0, 255, 1, 2, 0, 4]));
 git(ws, ...cfg, "add", "-A"); git(ws, ...cfg, "commit", "-m", "standalone fix");
 const singlePlan = await standalone.plan(ws, fixtureUrl, single.token);
+assert.ok(Buffer.byteLength(JSON.stringify(singlePlan)) < 4096);
+const statePath = path.join(root, "pr-reviews", single.token, "state.json");
+const savedState = fs.readFileSync(statePath, "utf8");
+assert.deepEqual(Object.keys(JSON.parse(savedState).plan).sort(), ["candidate", "heads", "id"]);
+assert.ok(Buffer.byteLength(savedState) < 4096, "large diffs must not increase persisted plan size");
+for (const section of ["patch", "prDiff"] as const) {
+  const parts: string[] = [];
+  let pageNumber: number | null = 1;
+  const change = singlePlan.changes[0]!;
+  while (pageNumber !== null) {
+    const page = await offlineInspector.inspect(ws, fixtureUrl, single.token, singlePlan.plan, { number: 848, section, page: pageNumber });
+    assert.ok(Buffer.byteLength(JSON.stringify(page)) < 128 * 1024, "escaped response must fit the model limit");
+    assert.equal(page.complete, page.nextPage === null);
+    assert.equal(page.hash, section === "patch" ? change.patchHash : change.prDiffHash);
+    parts.push(page.text);
+    pageNumber = page.nextPage;
+  }
+  const text = parts.join("");
+  assert.ok(parts.length > 2);
+  assert.ok(Buffer.byteLength(text) > 256 * 1024);
+  const repo = path.join(root, "pr-reviews", single.token, "repo");
+  const range = section === "patch" ? [change.before, change.after] : [`${single.stack.baseOid}...${change.after}`];
+  const expected = execFileSync("git", ["diff", "--binary", "--no-color", ...range], { cwd: repo, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+  assert.equal(text, expected);
+  assert.equal(crypto.createHash("sha256").update(text).digest("hex"), section === "patch" ? change.patchHash : change.prDiffHash);
+  assert.equal(Buffer.byteLength(text), section === "patch" ? change.patchBytes : change.prDiffBytes);
+  await assert.rejects(offlineInspector.inspect(ws, fixtureUrl, single.token, singlePlan.plan, { number: 848, section, page: parts.length + 1 }), /out of range/);
+}
+// Inspection and repeated planning leave the existing snapshot format and
+// contents untouched, including across service restarts.
+assert.deepEqual(await standalone.plan(ws, fixtureUrl, single.token), singlePlan);
+assert.equal(fs.readFileSync(statePath, "utf8"), savedState);
 assert.equal((await standalone.publish(ws, fixtureUrl, single.token, singlePlan.plan)).verified, true);
 
 console.log("PASS pr-review: restacked 7-layer stale checkout; exact-head preservation; scoped restack; top/bottom; metadata/fetch/conflict/stale guards; atomic race/unsupported transport; restart and lost-ack reconciliation");
