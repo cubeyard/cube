@@ -39,8 +39,10 @@
   let lastStatus: string | null = null;
   // Focus is taken once per mount, on the first healthy connect; a
   // background reconnect must not pull the caret out of whatever the user
-  // is doing elsewhere on the page.
+  // is doing elsewhere on the page. An explicit restart / retry now is
+  // the user's own act on the terminal, so it asks for focus again.
   let focusTaken = false;
+  let focusRequested = false;
   // A socket has been open in this mount: the next open is a reattach to a
   // process whose screen we still hold.
   let attached = false;
@@ -57,8 +59,9 @@
   });
 
   function takeFocusOnce(): void {
-    if (focusTaken) return;
+    if (focusTaken && !focusRequested) return;
     focusTaken = true;
+    focusRequested = false;
     term.focus();
   }
 
@@ -151,8 +154,11 @@
     };
   }
 
-  /** The user asked: retry at once, from the fast delay. */
+  /** The user asked: retry at once, from the fast delay. The key they
+   * pressed is about to disappear with the veil, so the caret goes to the
+   * glass on the next healthy connect rather than to the page. */
   function retryNow(): void {
+    focusRequested = true;
     retryDelay = 1000;
     connect();
   }
