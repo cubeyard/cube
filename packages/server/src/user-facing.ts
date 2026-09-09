@@ -21,25 +21,31 @@ export function sanitizeMessage(message: string): string {
       // Unit names (`journalctl -u cube-svc-web`) are literal — leave them.
       .replace(/\bcube\b(?!-svc-)/g, "thread")
       .replace(/\b(?:incus )?instance\b/gi, "environment")
+      .replace(/\bcontainer\b/gi, "environment")
+      .replace(/\bincus\b:?\s*/gi, "")
   );
 }
 
 /** Raw error text -> one calm sentence with a next step, or null when no
  * rule matches (the caller then falls back to the sanitized raw text). */
+// Next steps name only what exists today: opening the thread (which wakes
+// it), deleting it, starting a new thread, `cube diagnose`. Nothing here
+// promises a control the UI does not have.
 const RULES: Array<[RegExp, string | ((m: RegExpMatchArray) => string)]> = [
-  [/^\.cube\/setup failed \(exit (\d+)\)/, (m) => `the repository's .cube/setup script failed (exit ${m[1]}) — the environment is usable; fix the script, then retry setup from the thread`],
-  [/^\.cube\/setup failed/, "the repository's .cube/setup script could not run — the environment is usable; check the script, then retry setup from the thread"],
-  [/^\.cube\/resume failed \(exit (\d+)\)/, (m) => `the repository's .cube/resume script failed (exit ${m[1]}) — the environment is up; fix the script, then wake the thread again`],
-  [/^wake hook failed/, "a wake hook in .cube/cube.toml failed — the environment is up; fix the hook, then wake the thread again"],
+  [/^\.cube\/setup failed \(exit (\d+)\)/, (m) => `the repository's .cube/setup script failed (exit ${m[1]}) — the environment is usable as it is; fix the script, and start a new thread to run it again`],
+  [/^\.cube\/setup failed/, "the repository's .cube/setup script could not run — the environment is usable as it is; check the script, and start a new thread to run it again"],
+  [/^\.cube\/resume failed \(exit (\d+)\)/, (m) => `the repository's .cube/resume script failed (exit ${m[1]}) — the environment is up; fix the script, and it runs again the next time the thread wakes`],
+  [/^wake hook failed/, "a wake hook in .cube/cube.toml failed — the environment is up; fix the hook, and it runs again the next time the thread wakes"],
+  [/^resume interrupted by (?:a )?cubed restart/, "cube restarted while this thread was waking — open it again; if it does not come up, delete it and start a new thread"],
   [/interrupted by (?:a )?cubed restart/, "cube restarted while this thread was being set up — open it to continue; if it does not come up, delete it and start a new thread"],
   [/^wake failed: .*(?:never came up|network|timed out)/i, "the environment did not come up in time — wait a moment and open the thread again; if it keeps failing, delete it and start a new thread"],
-  [/^wake failed/, "the environment could not be started — try again; if it keeps failing, delete it and start a new thread"],
+  [/^wake failed/, "the environment could not be started — open the thread again; if it keeps failing, delete it and start a new thread"],
   [/^sleep failed/, "the environment could not be stopped cleanly — it may still be running; try again later"],
   [/^destroy failed/, "the environment could not be removed — try deleting the thread again"],
-  [/^boot: /, "the environment was not found after cube restarted — open the thread to start it again; if that fails, delete it and start a new thread"],
+  [/^boot: /, "the environment could not be brought back after cube restarted — open the thread to try again; if that fails, delete it and start a new thread"],
   [/no free (?:cube )?subnets/, "no room for another thread — delete a thread you no longer need, then try again"],
   [/ENOSPC|no space left/i, "the host is out of disk space — free some space, then try again"],
-  [/Failed creating instance|image .* not found|no such image/i, "the environment could not be created on the host — check that cube's base image is installed, then try again"],
+  [/Failed creating instance|image .* not found|no such image/i, "the environment could not be created on the host — try again; if it keeps failing, run cube diagnose"],
   [/seed.*(?:failed|error)|git .*(?:failed|error)/i, "the repository could not be prepared for this thread — re-check the project, then start a new thread"],
 ];
 

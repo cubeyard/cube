@@ -281,12 +281,18 @@ export class CubeSupervisor {
   /** What a still-provisioning cube is doing right now, from the phases its
    * provision span has completed so far, with elapsed minutes once it has
    * been a while (the setup script alone may run for many). */
-  private provisionProgress(cube: CubeRow, since: number): string {
+  private provisionProgress(cube: CubeRow): string {
+    // Anchored on the cube's creation, not on this terminal's attach: a
+    // reattach mid-setup must still name the running step and the real
+    // elapsed time.
+    const since = cube.createdAt;
     const last = this.registry.listEvents({ cube: cube.name, kind: "provision", since, limit: 1 })[0];
     const phase = last?.op && last.phase ? last.phase : null;
+    const restored = phase === "instance" && /restored/.test(last?.detail ?? "");
     const step =
       phase === null ? "preparing the repositories…"
       : phase === "seed" ? "creating the environment…"
+      : restored ? "finishing up…"
       : phase === "instance" || phase === "proxy" ? "running the repository's .cube/setup — this can take a while…"
       : "finishing up…";
     const minutes = Math.floor((Date.now() - since) / 60_000);
@@ -1596,12 +1602,17 @@ export class CubeSupervisor {
       // Deleting a thread destroys its workspace and history (PRODUCT.md):
       // the host-side tree — workspace, reference checkouts, pi sessions —
       // goes with it instead of accumulating under cubesRoot.
+      let treeNote = "host tree";
       try {
         removeStoppedTree(path.dirname(cube.workspacePath));
       } catch (error) {
+        // The row is gone; say so honestly instead of reporting a clean
+        // removal. Boot names the leftover in an event until someone frees it.
         console.log(`cube ${name}: host tree not fully removed: ${String(error)}`);
+        recordPoint(this.registry, { kind: "destroy", phase: "host-tree", cube: name, ok: false, detail: describeError(error) });
+        treeNote = "host tree NOT fully removed (see destroy.host-tree)";
       }
-      span.end(true, opts.deleteVolume ? "instance, volume, bridge and host tree" : "instance, bridge and host tree; volume kept");
+      span.end(true, opts.deleteVolume ? `instance, volume, bridge and ${treeNote}` : `instance, bridge and ${treeNote}; volume kept`);
     } finally {
       this.removing.delete(name);
     }
@@ -1792,10 +1803,9 @@ export class CubeSupervisor {
       // provision against a missing instance and bury its error). The
       // events it records say which step is running: report each change so
       // a long .cube/setup reads as progress, not as a stuck spinner.
-      const started = Date.now();
       let last = "";
       while ((cube = this.requireCube(cubeName)).status === "creating") {
-        const text = this.provisionProgress(cube, started);
+        const text = this.provisionProgress(cube);
         if (text !== last) {
           onStatus(text);
           last = text;

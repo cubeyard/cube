@@ -152,15 +152,19 @@ function holdingPage(
   page: { html: number; plain: number; title: string; refreshSeconds: number },
   message: string,
 ): void {
+  // refreshSeconds 0 means "nothing is coming": no meta refresh (a 0 there
+  // would reload continuously) and no Retry-After.
+  const refresh = page.refreshSeconds > 0;
   if ((req.headers.accept ?? "").includes("text/html")) {
     res.writeHead(page.html, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    res.end(`<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="${page.refreshSeconds}">` +
+    res.end(`<!doctype html><meta charset="utf-8">` +
+      (refresh ? `<meta http-equiv="refresh" content="${page.refreshSeconds}">` : "") +
       `<title>${page.title}</title>` +
       `<body style="font-family:system-ui;display:grid;place-items:center;min-height:100vh;margin:0">` +
       `<p style="max-width:60ch;white-space:pre-wrap">${escapeHtml(message)}</p></body>`);
     return;
   }
-  res.writeHead(page.plain, { "retry-after": String(page.refreshSeconds), "content-type": "text/plain" });
+  res.writeHead(page.plain, { ...(refresh ? { "retry-after": String(page.refreshSeconds) } : {}), "content-type": "text/plain" });
   res.end(`${message}\n`);
 }
 

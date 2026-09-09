@@ -13,12 +13,13 @@ assert.equal(sanitizeMessage("cube t-1a2b3c4d is busy"), "thread is busy");
 assert.equal(sanitizeMessage("Error: cube cube-t-1a2b3c4d: eth0 never came up"), "Error: thread: eth0 never came up");
 assert.equal(sanitizeMessage("journalctl -u cube-svc-web says hi"), "journalctl -u cube-svc-web says hi");
 assert.equal(sanitizeMessage("Incus instance not found"), "environment not found");
-console.log("1 ok: cube names, the word cube and instance are scrubbed; unit names survive");
+assert.equal(sanitizeMessage("incus: container t-1a2b3c4d stopped"), "environment t-1a2b3c4d stopped");
+console.log("1 ok: cube names, the word cube, instance, container and incus are scrubbed; unit names survive");
 
 assert.equal(describeThreadError(null), null);
 assert.equal(describeThreadError("  "), null);
-assert.match(describeThreadError(".cube/setup failed (exit 1): npm ERR! 404")!, /^the repository's \.cube\/setup script failed \(exit 1\) — .*retry setup/);
-assert.match(describeThreadError("wake hook failed (exit 2): docker compose up — no such file")!, /wake hook.*wake the thread again/);
+assert.match(describeThreadError(".cube/setup failed (exit 1): npm ERR! 404")!, /^the repository's \.cube\/setup script failed \(exit 1\) — .*start a new thread/);
+assert.match(describeThreadError("wake hook failed (exit 2): docker compose up — no such file")!, /wake hook.*next time the thread wakes/);
 assert.match(describeThreadError("provisioning was interrupted by a cubed restart — .cube/setup may not have completed")!, /cube restarted while this thread was being set up/);
 assert.match(describeThreadError("wake failed: Error: cube cube-t-ab12cd34: eth0 never came up at 10.90.14.2")!, /did not come up in time/);
 assert.match(describeThreadError("no free cube subnets (10.90.10-249.0/24 all allocated)")!, /no room for another thread/);
