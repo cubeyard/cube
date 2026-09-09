@@ -639,7 +639,6 @@ export class Registry {
   }
 }
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 function cubeRow(r: any): CubeRow {
   return {
     id: Number(r.id),

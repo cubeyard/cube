@@ -53,7 +53,7 @@ function makeSupervisor(registry: Registry): CubeSupervisor {
   });
 }
 
-let registry = new Registry(path.join(tmp, "cubed.db"));
+const registry = new Registry(path.join(tmp, "cubed.db"));
 let supervisor = makeSupervisor(registry);
 const project = supervisor.createProject({
   name: "supervisor smoke",

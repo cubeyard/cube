@@ -389,16 +389,18 @@ export async function runCodeMode(options: RunCodeModeOptions): Promise<CodeMode
     }
     // The normal interrupt signal is now aborted, so cleanup gets a fresh
     // bounded slice to propagate those rejections through the outer race.
+    // A guest error raised in these slices does not change the outcome:
+    // the result (or the original `failure`) stands and shutdown continues.
     try {
       pumpJobs(false);
-    } catch (error) {
-      if (failure === undefined) failure = error;
+    } catch {
+      // see above
     }
     await Promise.allSettled([...activeCalls]);
     try {
       pumpJobs(false);
-    } catch (error) {
-      if (failure === undefined) failure = error;
+    } catch {
+      // see above
     }
     // resolvePromise retains native callbacks into this context. If an
     // abort won the race, settle and release its result before vm.dispose().
