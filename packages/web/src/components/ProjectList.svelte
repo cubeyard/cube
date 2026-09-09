@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { checkProject, errorText, fetchProjects } from "../lib/api.ts";
+  import { checkProject, errorText, fetchProjects, isUnreachable } from "../lib/api.ts";
   import { relTime } from "../lib/time.ts";
+  import { createTransient } from "../lib/transient.svelte.ts";
   import type { Project } from "../lib/types.ts";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
@@ -9,6 +10,8 @@
   let loaded = $state(false);
   let error = $state<string | null>(null);
   let checking = $state<string | null>(null);
+  // "checked" printed in the row whose check just landed, for a moment.
+  const checked = createTransient();
   let refreshSeq = 0;
 
   async function refresh(): Promise<void> {
@@ -20,7 +23,8 @@
       error = null;
     } catch (e) {
       if (seq !== refreshSeq) return;
-      error = errorText(e);
+      // A host that does not answer is the app's strip to report.
+      if (!isUnreachable(e)) error = errorText(e);
     }
     loaded = true;
   }
@@ -38,6 +42,7 @@
       await checkProject(project.id);
       error = null;
       await refresh();
+      checked.set(project.id);
     } catch (e) {
       error = `check: ${errorText(e)}`;
     } finally {
@@ -63,7 +68,14 @@
     <a class="key primary" href="#/projects/new"><Icon name="plus" size={13} />new project</a>
   </div>
 
-  {#if error}<div class="banner">{error}</div>{/if}
+  {#if error}
+    <div class="banner" role="alert">
+      <span class="banner-text">{error}</span>
+      <button class="key icon note-dismiss" title="dismiss" aria-label="dismiss error" onclick={() => (error = null)}>
+        <Icon name="close" size={12} />
+      </button>
+    </div>
+  {/if}
 
   {#if projects.length > 0}
     <div class="well">
@@ -87,10 +99,11 @@
                   <span title={repository.url}>{repoShort(repository.url)}</span>
                 {/each}
               </span>
-              {#if project.error}<span class="module-error" title={project.error}>{project.error}</span>{/if}
+              {#if project.error}<span class="module-error">{project.error}</span>{/if}
             </span>
           </a>
           <div class="module-actions">
+            {#if checked.value === project.id}<span class="bank-note" role="status">checked</span>{/if}
             <button
               class="key icon"
               title="check repositories now"

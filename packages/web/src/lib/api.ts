@@ -13,24 +13,62 @@ import type {
 /** Banner text for a failure: the message itself, never "Error: …". */
 export const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
+/** A failed exchange with cubed. `status` is the HTTP status, or 0 when
+ * the request never reached the host (connection refused, VM booting,
+ * network gone) — callers use it to tell "no such thing" from "can't
+ * reach the host". The message is always a user sentence. */
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+export const isNotFound = (error: unknown) => error instanceof ApiError && error.status === 404;
+export const isUnreachable = (error: unknown) => error instanceof ApiError && error.status === 0;
+
+/** What to say when the server's error body is not JSON — a proxy page, a
+ * crashed handler, a restart mid-request. One human sentence per status
+ * class; the technical line goes to the console for whoever debugs it. */
+function fallbackMessage(status: number): string {
+  if (status === 404) return "that no longer exists";
+  if (status === 502 || status === 503 || status === 504) return "the host is busy or restarting — try again in a moment";
+  if (status >= 500) return "the host had a problem handling that — try again";
+  if (status === 409) return "that can't be done right now — try again in a moment";
+  return "the host did not accept that request — reload and try again";
+}
+
 /** One JSON exchange with cubed. A rejection carries the server's own
  * message for every method — a 409 "still setting up" must read as that,
  * not as a status code. */
 async function request<T>(path: string, method = "GET", body?: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    ...(body === undefined
-      ? {}
-      : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
-  });
-  if (res.ok) return res.json();
-  let message = `${method} ${path} -> ${res.status}`;
+  let res: Response;
   try {
-    message = String((await res.json()).error ?? message);
-  } catch {
-    // non-JSON error body — keep the status line
+    res = await fetch(path, {
+      method,
+      ...(body === undefined
+        ? {}
+        : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+    });
+  } catch (e) {
+    console.debug(`${method} ${path} -> no response`, e);
+    throw new ApiError("can't reach the host — it may be starting or restarting", 0);
   }
-  throw new Error(message);
+  if (res.ok) return res.json();
+  let message: string | null = null;
+  try {
+    const parsed = (await res.json()) as { error?: unknown };
+    if (typeof parsed?.error === "string" && parsed.error) message = parsed.error;
+  } catch {
+    // non-JSON error body — fall through to the status-class sentence
+  }
+  if (message === null) {
+    console.debug(`${method} ${path} -> ${res.status} ${res.statusText} (non-JSON error body)`);
+    message = fallbackMessage(res.status);
+  }
+  throw new ApiError(message, res.status);
 }
 
 export const fetchState = () => request<DaemonState>("/api/state");
