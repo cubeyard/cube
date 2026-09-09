@@ -406,6 +406,15 @@ async function api(
     return json(res, 404, { error: "not found" });
   }
 
+  if (method === "GET" && url.pathname === "/api/github/repositories") {
+    try {
+      const repositories = await githubAuth.repositories();
+      return json(res, 200, { repositories });
+    } catch {
+      return json(res, 502, { error: "Could not load GitHub repositories. Retry, or enter a repository manually." });
+    }
+  }
+
   // ---- thread-first API: the product surface (cubes are invisible) ----
 
   if (url.pathname === "/api/projects") {

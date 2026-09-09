@@ -215,4 +215,41 @@ function runner(initiallyLoggedIn = false) {
   assert.equal(auth.status().state, "disconnected");
 }
 
-console.log("github-auth: gh-owned login, status, cancellation, timeout, and parsing tests passed");
+// Repository discovery includes every page, preserves recency, and scopes the cache to the account.
+{
+  let login = "alice";
+  let now = 0;
+  let calls = 0;
+  let fail = false;
+  const first = Array.from({ length: 100 }, (_, i) => ({ fullName: `org/repo-${i}`, private: i === 0 }));
+  const last = { fullName: "alice/last-page", private: true };
+  const auth = new GithubAuth({ now: () => now, ghRunner: async (args) => {
+    if (args[1] === "logout") { login = ""; return ""; }
+    if (!login) throw new Error("signed out");
+    if (args[1] === "user") return `${login}\tName\t1`;
+    const endpoint = args.find((arg) => arg.startsWith("user/repos?"));
+    if (!endpoint) return "";
+    calls++;
+    assert.ok(endpoint.includes("affiliation=owner,collaborator,organization_member"));
+    assert.ok(endpoint.includes("sort=updated&direction=desc"));
+    if (fail) throw new Error("unavailable");
+    return JSON.stringify(endpoint.endsWith("page=1") ? first : [last]);
+  } });
+  assert.deepEqual(await auth.repositories(), [...first, last]);
+  assert.equal(calls, 2);
+  await auth.repositories();
+  assert.equal(calls, 2, "cache avoids refetching pages");
+  login = "bob";
+  await auth.repositories();
+  assert.equal(calls, 4, "switching accounts invalidates cached repositories");
+  now = 60_001;
+  fail = true;
+  await assert.rejects(auth.repositories(), /unavailable/);
+  fail = false;
+  await auth.repositories();
+  assert.equal(calls, 7, "failed requests do not poison retries");
+  await auth.disconnect();
+  assert.equal(await auth.repositories(), null, "logout never serves private cached names");
+}
+
+console.log("github-auth: login and repository pagination, cache, account isolation, and retry tests passed");

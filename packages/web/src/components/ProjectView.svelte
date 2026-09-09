@@ -15,6 +15,7 @@
   import Onboarding from "./Onboarding.svelte";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
+  import RepositoryInput from "./RepositoryInput.svelte";
 
   let { projectId, githubLogin = false }: { projectId: string; githubLogin?: boolean } = $props();
   const isNew = $derived(projectId === "new");
@@ -233,16 +234,18 @@
               </span>
             </div>
             <div class="repository-fields">
-              <label class="config-field repo-url-field">
+              <div class="config-field repo-url-field">
                 <span class="silk">repository</span>
-                <input
-                  class="compose-input"
-                  aria-label={`repository ${index + 1} URL`}
-                  placeholder="owner/name or git URL"
+                <RepositoryInput
+                  label={`repository ${index + 1} URL`}
                   bind:value={repository.url}
-                  oninput={changed}
+                  loginHref={`#/projects/${encodeURIComponent(projectId)}/github`}
+                  onchange={changed}
+                  onselect={(fullName) => {
+                    if (index === 0 && !name.trim()) name = fullName.split("/").at(-1) ?? "";
+                  }}
                 />
-              </label>
+              </div>
               <label class="config-field">
                 <span class="silk">base</span>
                 <input
@@ -323,5 +326,6 @@
 {/if}
 
 <style>
+  .project-view { overflow: visible; }
   .github-login-link { font-family: var(--font-ui); }
 </style>

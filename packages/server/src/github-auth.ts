@@ -72,6 +72,33 @@ export class GithubAuth {
   gitIdentity(): GitIdentity | null { return this.identity; }
   settled(): Promise<void> { return this.completion.catch(() => {}); }
 
+  private repositoryCache: { login: string; generation: number; expires: number; repositories: { fullName: string; private: boolean }[] } | null = null;
+
+  async repositories(): Promise<{ fullName: string; private: boolean }[] | null> {
+    await this.ensureFresh();
+    if (this.current.state !== "connected" || this.disconnecting) {
+      this.repositoryCache = null;
+      return null;
+    }
+    const { login } = this.current;
+    const generation = this.generation;
+    const cache = this.repositoryCache;
+    if (cache?.login === login && cache.generation === generation && cache.expires > this.now()) return cache.repositories;
+    const repositories: { fullName: string; private: boolean }[] = [];
+    for (let page = 1; ; page++) {
+      const batch = JSON.parse(await this.gh([
+        "api", "--hostname", "github.com",
+        `user/repos?affiliation=owner,collaborator,organization_member&sort=updated&direction=desc&per_page=100&page=${page}`,
+        "--jq", "[.[] | {fullName: .full_name, private: .private}]",
+      ])) as { fullName: string; private: boolean }[];
+      if (generation !== this.generation || this.current.state !== "connected" || this.current.login !== login) return null;
+      repositories.push(...batch);
+      if (batch.length < 100) break;
+    }
+    this.repositoryCache = { login, generation, expires: this.now() + 60_000, repositories };
+    return repositories;
+  }
+
   async ensureFresh(): Promise<void> {
     if (this.child || this.disconnecting) return;
     if (!this.refreshing) {
