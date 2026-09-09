@@ -1,0 +1,2 @@
+Native GitHub stack playground: review-update target.
+Review updates must preserve all existing layer files and restack open descendants.
