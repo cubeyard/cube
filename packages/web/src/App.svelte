@@ -36,7 +36,7 @@
 
   // A note for the list after the app moved the user off a thread — the
   // Ship flow archives the thread under them; a silent redirect would
-  // read as a glitch.
+  // read as a glitch. It says only what is known: archived, not shipped.
   let listNotice = $state<string | null>(null);
 
   // `n` pressed: one command, consumed exactly once by the view it is
@@ -77,7 +77,7 @@
       threadsLoaded = true;
       failedPolls = 0;
       if (threadId && fresh.find((thread) => thread.id === threadId)?.archived) {
-        listNotice = "this thread finished shipping and was archived";
+        listNotice = "this thread was archived";
         location.hash = "#/threads";
       }
     } catch {
