@@ -33,12 +33,18 @@ import {
 
 export const EGRESS_PROXY_PORT = 3128;
 
-/** Events older than this are pruned (at boot and by the idle sweep). */
+/** Events older than this are pruned (at boot and hourly). */
 const EVENT_RETENTION_MS = 30 * 24 * 3_600_000;
+const EVENT_PRUNE_EVERY_MS = 3_600_000;
 /** Egress allow/deny decisions are aggregated per (cube, decision, kind,
  * host) over this window before landing as one event each — an `npm
  * install` must not write a row per CONNECT. */
 const EGRESS_FLUSH_MS = 60_000;
+/** Distinct hosts remembered per cube per window. A cube that sprays
+ * hostnames (it controls its own DNS queries) rolls past this into one
+ * `…and N more` bucket instead of growing host memory or the event table. */
+const EGRESS_HOSTS_PER_CUBE = 200;
+const EGRESS_HOST_MAX_LEN = 253;
 
 // What the pty bridge spawns per attached thread (Phase 3d step 2). The
 // pnpm bin shim is the same one `pnpm vm`'s dev.sh execs; the extension
@@ -212,7 +218,9 @@ export class CubeSupervisor {
   private sweepTimer: NodeJS.Timeout | null = null;
   // Pending egress counters, flushed as aggregated events (see EGRESS_FLUSH_MS).
   private readonly egress = new Map<string, { cube: string; decision: "allow" | "deny"; kind: string; host: string; n: number }>();
+  private readonly egressHostsPerCube = new Map<string, number>();
   private egressTimer: NodeJS.Timeout | null = null;
+  private pruneTimer: NodeJS.Timeout | null = null;
 
   constructor(registry: Registry, backend: CubeBackend, config: SupervisorConfig) {
     this.registry = registry;
@@ -239,8 +247,18 @@ export class CubeSupervisor {
   }
 
   /** Count one egress decision; the batch lands as events on the next flush. */
-  private noteEgress(cube: string, decision: "allow" | "deny", kind: string, host: string): void {
-    const key = `${cube}\0${decision}\0${kind}\0${host}`;
+  private noteEgress(cube: string, decision: "allow" | "deny", kind: string, rawHost: string): void {
+    let host = rawHost.slice(0, EGRESS_HOST_MAX_LEN);
+    let key = `${cube}\0${decision}\0${kind}\0${host}`;
+    if (!this.egress.has(key)) {
+      const distinct = this.egressHostsPerCube.get(cube) ?? 0;
+      if (distinct >= EGRESS_HOSTS_PER_CUBE) {
+        host = "…and more";
+        key = `${cube}\0${decision}\0${kind}\0${host}`;
+      } else {
+        this.egressHostsPerCube.set(cube, distinct + 1);
+      }
+    }
     const entry = this.egress.get(key);
     if (entry) entry.n += 1;
     else this.egress.set(key, { cube, decision, kind, host, n: 1 });
@@ -251,15 +269,20 @@ export class CubeSupervisor {
   }
 
   private flushEgress(): void {
+    if (this.egressTimer) clearTimeout(this.egressTimer);
     this.egressTimer = null;
     const batch = [...this.egress.values()];
     this.egress.clear();
+    this.egressHostsPerCube.clear();
+    // One thread lookup per cube, not per host.
+    const threads = new Map<string, string | null>();
     for (const e of batch) {
+      if (!threads.has(e.cube)) threads.set(e.cube, this.threadIdFor(e.cube));
       recordPoint(this.registry, {
         kind: "egress",
         phase: e.decision,
         cube: e.cube,
-        thread: this.threadIdFor(e.cube),
+        thread: threads.get(e.cube) ?? null,
         ok: e.decision === "allow",
         detail: `${e.kind} ${e.host} ×${e.n}`,
       });
@@ -325,6 +348,12 @@ export class CubeSupervisor {
         this.registry.setCubeStatus(cube.name, "error", `boot: ${String(error)}`);
         span.fail(error);
       }
+    }
+    if (!this.pruneTimer) {
+      // Retention runs on its own clock: it must not depend on idle sleep
+      // being enabled (CUBED_IDLE_MS=0 is supported).
+      this.pruneTimer = setInterval(() => this.registry.pruneEvents(EVENT_RETENTION_MS), EVENT_PRUNE_EVERY_MS);
+      this.pruneTimer.unref();
     }
     if (this.config.idleMs > 0 && !this.sweepTimer) {
       this.sweepTimer = setInterval(() => void this.sweepIdle(), 60_000);
@@ -1302,7 +1331,6 @@ export class CubeSupervisor {
   }
 
   private async sweepIdle(): Promise<void> {
-    this.registry.pruneEvents(EVENT_RETENTION_MS);
     const cutoff = Date.now() - this.config.idleMs;
     for (const cube of this.registry.listCubes()) {
       if (cube.status !== "ready" || cube.lastActiveAt > cutoff) continue;
@@ -1701,9 +1729,16 @@ export class CubeSupervisor {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
+    if (this.pruneTimer) {
+      clearInterval(this.pruneTimer);
+      this.pruneTimer = null;
+    }
     await Promise.all([...this.projectChecks.values()].map((check) => check.catch(() => {})));
     for (const runtime of this.runtimes.values()) await runtime.proxy?.close();
     this.runtimes.clear();
+    // Proxies are closed: no more egress decisions arrive. Land the last
+    // batch while the registry is still open; the timer must not fire later.
+    this.flushEgress();
   }
 
   private runtime(name: string): CubeRuntime {

@@ -21,8 +21,11 @@ function read(name: string): string | null {
 function detect(): string {
   const tree = read(".deployed-tree");
   if (tree) {
-    const [describe, branch] = tree.split(/\s+/);
-    return branch ? `${describe}@${branch}` : describe!;
+    // Two deploys of the same dirty commit are two versions: the deploy
+    // minute keeps their runs in separate buckets for a before/after read.
+    const [describe, branch, stamp] = tree.split(/\s+/);
+    const minute = stamp?.replace(/[-:]/g, "").slice(0, 13) ?? "";
+    return [describe, branch ? `@${branch}` : "", minute ? `#${minute}` : ""].join("");
   }
   return read("build-id") ?? "dev";
 }

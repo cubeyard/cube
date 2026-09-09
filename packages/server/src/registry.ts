@@ -307,10 +307,22 @@ export class Registry {
     return (this.db.prepare(sql).all(...params, limit) as unknown[]).map(eventRow);
   }
 
-  /** Drop events older than the retention window; returns how many. */
-  pruneEvents(olderThanMs: number): number {
-    const result = this.db.prepare("DELETE FROM event WHERE ts < ?").run(Date.now() - olderThanMs);
-    return Number(result.changes);
+  /** Drop events older than the retention window and, beyond `maxRows`,
+   * the oldest of the rest; returns how many went. Best-effort like
+   * recordEvent: telemetry maintenance must never stop a boot or a sweep. */
+  pruneEvents(olderThanMs: number, maxRows = 200_000): number {
+    try {
+      let changes = Number(this.db.prepare("DELETE FROM event WHERE ts < ?").run(Date.now() - olderThanMs).changes);
+      changes += Number(
+        this.db
+          .prepare("DELETE FROM event WHERE id NOT IN (SELECT id FROM event ORDER BY id DESC LIMIT ?)")
+          .run(Math.max(1, Math.floor(maxRows))).changes,
+      );
+      return changes;
+    } catch (error) {
+      console.log(`events not pruned: ${error instanceof Error ? error.message : String(error)}`);
+      return 0;
+    }
   }
 
   private migrateThreadArchive(): void {

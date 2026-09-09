@@ -272,11 +272,23 @@ main()
   .catch(async (error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     if (threadId && !args.keep) {
-      try {
-        await api(`/api/threads/${threadId}`, "DELETE");
-        notes.push(`cleaned up thread ${threadId}`);
-      } catch (cleanup) {
-        notes.push(`could not delete thread ${threadId}: ${cleanup instanceof Error ? cleanup.message : String(cleanup)}`);
+      // A thread mid-provision or mid-transition refuses DELETE (409 busy);
+      // keep trying for a bounded while so a failed run leaves nothing behind.
+      const deadline = Date.now() + 10 * 60_000;
+      for (;;) {
+        try {
+          await api(`/api/threads/${threadId}`, "DELETE");
+          notes.push(`cleaned up thread ${threadId}`);
+          break;
+        } catch (cleanup) {
+          const text = cleanup instanceof Error ? cleanup.message : String(cleanup);
+          if (/busy|setting up|not ready/.test(text) && Date.now() < deadline) {
+            await sleep(5000);
+            continue;
+          }
+          notes.push(`could not delete thread ${threadId}: ${text} — delete it from the UI`);
+          break;
+        }
       }
     }
     report(false, message);

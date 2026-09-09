@@ -45,7 +45,7 @@ const compare = compareAt >= 0 ? [argv[compareAt + 1], argv[compareAt + 2]].filt
 async function load(): Promise<Event[]> {
   const file = opt("--file");
   if (file) return (JSON.parse(fs.readFileSync(file, "utf8")) as { events: Event[] }).events;
-  const res = await fetch(`${url}/api/events?limit=10000&since=${encodeURIComponent(since)}${kindFilter ? `&kind=${encodeURIComponent(kindFilter)}` : ""}`);
+  const res = await fetch(`${url}/api/events?limit=${LIMIT}&since=${encodeURIComponent(since)}${kindFilter ? `&kind=${encodeURIComponent(kindFilter)}` : ""}`);
   if (!res.ok) throw new Error(`GET /api/events -> ${res.status}`);
   return ((await res.json()) as { events: Event[] }).events;
 }
@@ -105,7 +105,11 @@ function printCompare(a: string, b: string, all: Map<string, Map<string, Stat>>)
   }
 }
 
+const LIMIT = 10_000;
 const events = await load();
+if (events.length >= LIMIT) {
+  console.error(`note: the server returned the newest ${LIMIT} events only — the window is truncated; narrow --since or --kind before comparing`);
+}
 if (flag("--json")) {
   const summary: Record<string, Record<string, { n: number; failed: number; p50: number; p95: number; max: number }>> = {};
   for (const [version, byOp] of summarise(events)) {

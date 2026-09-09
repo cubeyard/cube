@@ -103,15 +103,23 @@ fi
 # ---- ship the tree ---------------------------------------------------------
 log "deploy $BRANCH@$DESC -> /opt/cube/app ($TARGET VM, ssh :$SSH_PORT)"
 # Tracked + untracked-not-ignored files under the app paths, as they are on
-# disk right now; dist is git-ignored so it is added explicitly.
+# disk right now (a tracked file deleted from disk is skipped, not fatal);
+# dist is git-ignored so it is added explicitly. The archive is completed on
+# the host before anything is extracted in the VM — a tar error must not
+# leave a half-applied tree.
+ARCHIVE="$(mktemp "${TMPDIR:-/tmp}/cube-deploy.XXXXXX")"
+trap 'rm -f "$ARCHIVE"' EXIT
 {
   git ls-files -z --cached --others --exclude-standard -- \
     packages scripts package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.json tsconfig.base.json
   find packages/web/dist -type f -print0
 } | grep -zv '/node_modules/' \
-  | tar --null -T - -cf - \
-  | vm_ssh 'tar -xf - -C /opt/cube/app'
-vm_ssh "printf '%s %s %s\n' '$DESC' '$BRANCH' '$STAMP' > /opt/cube/app/.deployed-tree"
+  | while IFS= read -r -d '' f; do [ -e "$f" ] && printf '%s\0' "$f"; done \
+  | tar --null -T - -cf "$ARCHIVE"
+vm_ssh 'tar -xf - -C /opt/cube/app' < "$ARCHIVE"
+# Metadata goes over stdin to a fixed command: branch names are user input
+# and must never be interpolated into remote shell source.
+printf '%s %s %s\n' "$DESC" "$BRANCH" "$STAMP" | vm_ssh 'cat > /opt/cube/app/.deployed-tree'
 
 # ---- dependencies ----------------------------------------------------------
 LOCAL_LOCK="$(sha256sum pnpm-lock.yaml 2>/dev/null | cut -c1-16 || shasum -a 256 pnpm-lock.yaml | cut -c1-16)"
@@ -121,7 +129,7 @@ if [ "$INSTALL" = 1 ] || [ "$LOCAL_LOCK" != "$VM_LOCK" ]; then
   # Same incantation as sync.sh: nix-ld's loader env, non-interactive pnpm.
   vm_ssh '. /etc/set-environment 2>/dev/null; cd /opt/cube/app && export CI=true npm_config_update_notifier=false PATH=/opt/cube/node/bin:$PATH && pnpm install --frozen-lockfile --prod' \
     || { fail "pnpm install failed in the VM — the app tree may be inconsistent; re-run with --install after fixing"; exit 1; }
-  vm_ssh "printf '%s' '$LOCAL_LOCK' > /opt/cube/app/.deployed-lock"
+  printf '%s' "$LOCAL_LOCK" | vm_ssh 'cat > /opt/cube/app/.deployed-lock'
 fi
 
 # ---- restart and prove it -------------------------------------------------
