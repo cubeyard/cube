@@ -242,17 +242,19 @@ qemu_vars_template() {  # qemu_vars_template CODE_FILE
 # depend on which one the host has. x86 firmware is sized by the file.
 prepare_uefi() {  # prepare_uefi DIR -> UEFI_CODE, UEFI_VARS
   local fw
-  fw="$(qemu_firmware)" || return 1
+  fw="$(qemu_firmware)" \
+    || { fail "no UEFI firmware for $ARCH near $QEMU_BIN (Linux: apt install ovmf; macOS: brew install qemu)"; return 1; }
   UEFI_VARS="$1/uefi-vars.fd"
   cp -f "$(qemu_vars_template "$fw")" "$UEFI_VARS" 2>/dev/null \
-    || { fail "no UEFI VARS template beside $fw"; return 1; }
+    || { fail "no UEFI VARS template beside $fw, or $1 is not writable"; return 1; }
   chmod u+w "$UEFI_VARS"
   UEFI_CODE="$fw"
   if [ "$ARCH" = arm64 ]; then
     UEFI_CODE="$1/uefi-code.fd"
-    cp -f "$fw" "$UEFI_CODE"; chmod u+w "$UEFI_CODE"
-    qemu-img resize -q -f raw "$UEFI_CODE" 64M
-    qemu-img resize -q -f raw "$UEFI_VARS" 64M
+    { cp -f "$fw" "$UEFI_CODE" && chmod u+w "$UEFI_CODE" \
+      && qemu-img resize -q -f raw "$UEFI_CODE" 64M \
+      && qemu-img resize -q -f raw "$UEFI_VARS" 64M; } \
+      || { fail "could not prepare the 64 MiB UEFI images in $1"; return 1; }
   fi
 }
 
@@ -267,7 +269,14 @@ preflight_host() {
   case "$HOST_OS" in
     Linux)  [ -w /dev/kvm ] \
       || { fail "/dev/kvm missing or not writable — hardware virtualization is required (enable it in BIOS; add yourself to the kvm group)"; rc=1; } ;;
-    Darwin) ;;
+    Darwin)
+      # HVF is Apple's hypervisor: absent inside another VM and on some
+      # managed Macs; brew's qemu is built with it.
+      if [ "$(sysctl -n kern.hv_support 2>/dev/null)" != 1 ]; then
+        fail "this Mac reports no hypervisor support (kern.hv_support) — cube needs Apple's Hypervisor framework, which is unavailable inside another VM"; rc=1
+      elif command -v "$QEMU_BIN" >/dev/null 2>&1 && ! "$QEMU_BIN" -accel help 2>/dev/null | grep -qi hvf; then
+        fail "$QEMU_BIN has no hvf accelerator — reinstall it: brew reinstall qemu"; rc=1
+      fi ;;
     *) fail "unsupported host OS: $HOST_OS"; rc=1 ;;
   esac
   if [ "$rc" = 0 ]; then
@@ -789,10 +798,11 @@ self_update() {  # self_update vX.Y.Z — replace this file with the release's l
 
 # ---- commands ---------------------------------------------------------------
 cmd_up() {
-  local want="${1:-}" ver need
+  local want="${1:-}" ver need first=""
   check_version_arg "$want"
   lock
   ver="$(installed_version)"
+  if vm_pid >/dev/null; then settings_unchanged || return 1; fi
   if vm_ssh true 2>/dev/null; then
     check_identity || return 1
     wait_cubed || return 1
@@ -800,13 +810,21 @@ cmd_up() {
     return 0
   fi
   if vm_pid >/dev/null; then
-    log "VM is already booting — waiting for it"
+    log "the VM is already booting — waiting for it"
     wait_ssh && check_identity && wait_cubed && print_url
     return
   fi
+  # Everything the host must provide, and the ports, BEFORE any download.
+  note "checking host…"
   preflight_host || return 1
+  settle_ports || return 1
   if [ -z "$ver" ]; then
-    ver="${want:-$(resolve_latest)}" || return 1
+    if [ -n "$want" ]; then
+      ver="$want"
+    else
+      [ -n "${CUBE_RELEASE_DIR:-}" ] || note "finding the latest release…"
+      ver="$(resolve_latest)" || return 1
+    fi
     log "install cube $ver ($ARCH)"
     fetch_manifest "$ver" || return 1
     need="$(bytes_needed "$ver" base app node)"
@@ -824,7 +842,9 @@ cmd_up() {
     fetch_manifest "$ver" && fetch_role "$ver" base && fetch_role "$ver" node || return 1
     [ -f "$APP_LIVE" ] || fetch_role "$ver" app || return 1
   fi
+  [ -f "$DATA_DISK" ] || first=1
   boot_vm "$ver" || return 1
+  [ -z "$first" ] || note "first boot usually takes a couple of minutes"
   wait_ssh || return 1
   # The app overlay may carry an older build than the manifest says
   # (an upgrade interrupted between download and apply): heal in place.
@@ -836,7 +856,7 @@ cmd_up() {
     check_identity || return 1
   fi
   wait_cubed || return 1
-  print_url; check_update
+  print_url "$first"; check_update
 }
 
 stop_vm() {  # graceful stop; FAILS (returns 1) while qemu still holds disks
@@ -941,7 +961,13 @@ cmd_upgrade() {
   lock
   cur="$(installed_version)"
   [ -n "$cur" ] || { fail "nothing installed yet — run: cube up"; return 1; }
-  target="${want:-$(resolve_latest)}" || return 1
+  preflight_host || return 1
+  if [ -n "$want" ]; then
+    target="$want"
+  else
+    [ -n "${CUBE_RELEASE_DIR:-}" ] || note "finding the latest release…"
+    target="$(resolve_latest)" || return 1
+  fi
   if [ "$target" = "$cur" ]; then
     ok "already on $cur"
     self_update "$cur"
