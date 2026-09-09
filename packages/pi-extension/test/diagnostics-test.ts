@@ -115,7 +115,7 @@ try {
     assert.ok(!args.includes("--print") && !args.includes("--mode") && !args.includes("--"), "production launch waits for user input");
     args.unshift("--print", "--provider", "fixture", "--model", "fixture", "--thinking", "off");
     args.push("--", "The service cannot connect. Please investigate.");
-    const running = exec(path.join(repo, "packages/harness/node_modules/.bin/pi"), args, {
+    const running = exec(path.join(repo, "packages/pi-extension/node_modules/.bin/pi"), args, {
       cwd: bundle, timeout: 30_000,
       env: { PATH: process.env.PATH, HOME: tmp, PI_CODING_AGENT_DIR: agentDir, CUBE_DIAGNOSIS_BUNDLE: bundle, PI_OFFLINE: "1" },
     });

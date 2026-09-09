@@ -12,9 +12,9 @@ import stream from "node:stream";
 
 import { WebSocketServer, type WebSocket } from "ws";
 
-import { checkAuth } from "@cube/harness";
 import { IncusBackend, MockBackend, type CubeBackend } from "@cube/sandbox";
 
+import { checkAuth } from "./auth.ts";
 import { GithubAuth } from "./github-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { defaultPortalBase } from "./portal-config.ts";

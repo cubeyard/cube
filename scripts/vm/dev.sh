@@ -13,4 +13,4 @@ bash "$(dirname "$0")/up.sh"
 exec ssh -t -p "$SSH_PORT" -i "$SSH_KEY" \
   -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$KNOWN_HOSTS" \
   -o LogLevel=ERROR \
-  cube@127.0.0.1 'cd /opt/cube/app && PATH=/opt/cube/node/bin:$PATH exec packages/harness/node_modules/.bin/pi'
+  cube@127.0.0.1 'cd /opt/cube/app && PATH=/opt/cube/node/bin:$PATH exec packages/server/node_modules/.bin/pi'

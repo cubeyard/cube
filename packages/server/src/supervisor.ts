@@ -40,7 +40,7 @@ export const EGRESS_PROXY_PORT = 3128;
 // extension's `user_bash` handler) from executing on the credentialed host
 // — see packages/pi-extension/src/index.ts. `--no-approve` matches the
 // harness's projectTrusted:false stance for the same reason.
-const PI_BIN = path.resolve(import.meta.dirname, "../../harness/node_modules/.bin/pi");
+const PI_BIN = path.resolve(import.meta.dirname, "../node_modules/.bin/pi");
 const PI_EXTENSION = path.resolve(import.meta.dirname, "../../pi-extension/src/index.ts");
 
 /** How much of a session file's head autoTitle reads looking for the first

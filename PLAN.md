@@ -251,11 +251,11 @@ waking the cube**. Mirrored events: `agent_start/end`, `turn_start/end`,
 
 ```
 packages/
-  core/      cube model, state machine, shared event types, typebox schemas
   sandbox/   Sandbox interface + IncusSandbox; micro-VM backend possible
              later behind the same interface
-  harness/   pi's binary (spawned per thread as the TUI) + stored-credential check
-  server/    Hono/Fastify: REST + WS + portal proxy + static files
+  server/    cubed: REST + WS + portal proxy + static files; also owns pi's
+             binary (spawned per thread as the TUI) + the stored-credential
+             check (src/auth.ts)
   web/       UI (Svelte 5 + Vite, plain SPA — no SvelteKit). Desktop + mobile.
              Decision 2026-08-26 after a research pass (React/Preact, Svelte/
              Solid, Elm): runes' fine-grained updates fit the token-append SSE
@@ -734,7 +734,7 @@ backend (kata/gondolin/boxlite) if container isolation proves insufficient.
 |---|---|---|---|
 | 1 | Container escape reaches host creds (auth.json, git) | Medium | userns + isolated idmap, nosuid workspace, dedicated VM, Tailnet-only; micro-VM backend as plan B |
 | 2 | Incus nesting quirks (AppArmor on 24.04, inner-docker version regressions) | Medium | Spike 1 validates E2E; pin inner Docker 28.x; document host sysctls |
-| 3 | pi is v0.x — breaking changes | Medium | Pin exact version, all usage behind `harness/` facade |
+| 3 | pi is v0.x — breaking changes | Medium | Pin exact version; the daemon touches pi only in `server/src/auth.ts` and the pty spawn |
 | 4 | OAuth refresh fails in long-lived daemon | Medium | Spike 4, explicit re-auth state in UI |
 | 5 | Disk fill from inner images / caches | Medium | ZFS quotas per volume, DiskService monitoring, prune schedules (§6) |
 | 6 | Egress proxy too coarse (non-HTTP protocols blocked) | Low | Acceptable: default deny is the point; add mapped exceptions per cube |
