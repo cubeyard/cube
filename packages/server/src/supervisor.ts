@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { GitService, describeRepoAuthFailure, normalizeRepoUrl, type RepoDiff, type RepoState } from "@cube/git";
+import { GitService, PrReviewService, describeRepoAuthFailure, normalizeRepoUrl, type RepoDiff, type RepoState } from "@cube/git";
 import {
   type CubeBackend,
   type CubeProvisionSpec,
@@ -167,6 +167,7 @@ export class CubeSupervisor {
   private readonly backend: CubeBackend;
   private readonly config: SupervisorConfig;
   private readonly git: GitService;
+  private readonly prReviews: PrReviewService;
   private readonly runtimes = new Map<string, CubeRuntime>();
   // In-flight sleep/wake per cube. Status flips ("asleep"/"waking") happen
   // synchronously before the incus work, so concurrent callers observe the
@@ -207,6 +208,7 @@ export class CubeSupervisor {
     this.backend = backend;
     this.config = config;
     this.git = new GitService(config.reposRoot);
+    this.prReviews = new PrReviewService(config.reposRoot);
   }
 
   /**
@@ -1016,6 +1018,29 @@ export class CubeSupervisor {
     const primary = this.registry.listCubeRepositories(cube.id)[0];
     if (!primary) throw new Error("thread has no primary repository");
     return readGithub(primary.url, input, signal);
+  }
+
+  /** Native stack review operations share the existing primary-repository
+   * authorization and cube lifetime guard. Snapshots stay on the host. */
+  async reviewPrForUserThread(
+    id: string,
+    repositoryId: number,
+    input: { action: "prepare"; number: number } | { action: "plan" | "verify"; token: string } | { action: "publish"; token: string; plan: string },
+    signal?: AbortSignal,
+  ) {
+    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
+    await this.config.github?.ensureFresh();
+    signal?.throwIfAborted();
+    this.requireSeeded(cube, repository);
+    return this.withGitOp(cube.name, async () => {
+      const { workspacePath: ws, url } = repository;
+      switch (input.action) {
+        case "prepare": return this.prReviews.prepare(ws, url, input.number, signal);
+        case "plan": return this.prReviews.plan(ws, url, input.token, signal);
+        case "publish": return this.prReviews.publish(ws, url, input.token, input.plan, signal);
+        case "verify": return this.prReviews.verify(ws, url, input.token, signal);
+      }
+    });
   }
 
   /** Host-side review diff for one repository, separated into

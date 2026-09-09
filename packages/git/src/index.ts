@@ -581,8 +581,36 @@ export class GitService {
     const { branch } = await this.state(ws, undefined, signal);
     if (!branch) throw new Error("cannot push: detached HEAD");
     assertRefName(branch);
+    if (branch.startsWith("cube-review/")) {
+      throw new Error("cannot push a prepared review branch directly; inspect planPrUpdate and use publishPrUpdate");
+    }
     const target = targetBranch ?? branch;
     assertRefName(target);
+    // All publication entry points (including push-to-base and createPr)
+    // converge here. A normal fast-forward check alone cannot establish
+    // that an agent preserved the tree or understood a restacked PR.
+    const slug = parseGitHubRepo(url);
+    if (slug) {
+      fs.mkdirSync(this.reposRoot, { recursive: true });
+      let pulls: unknown;
+      try {
+        const { stdout } = await this.run("gh", [
+          "api", "--hostname", "github.com", "--method", "GET",
+          `repos/${slug}/pulls?state=open&head=${encodeURIComponent(`${slug.split("/")[0]}:${target}`)}&per_page=1`,
+        ], { cwd: this.reposRoot, timeoutMs: NETWORK_TIMEOUT_MS, signal });
+        pulls = JSON.parse(stdout);
+      } catch {
+        throw new Error("cannot push: unable to verify existing pull requests; remote was not changed");
+      }
+      if (!Array.isArray(pulls)) {
+        throw new Error("cannot push: incomplete pull request response; remote was not changed");
+      }
+      // Only existence matters, so one result is sufficient; no truncated
+      // PR list is ever interpreted as a complete stack snapshot.
+      if (pulls.length > 0) {
+        throw new Error("cannot push: target branch belongs to an existing open pull request. Use preparePrUpdate, planPrUpdate, and publishPrUpdate to preserve its authoritative head and native GitHub stack. Do not bypass this check using another branch.");
+      }
+    }
     await this.ensureMirrorExists(url, signal);
     const mirror = this.mirrorPathFor(url);
     // Full-history bundle of the branch: self-contained (no prerequisites
@@ -705,3 +733,5 @@ export class GitService {
     return this.run("git", [...SAFE_CONFIG, ...args], { timeoutMs, maxBuffer, signal });
   }
 }
+
+export { PrReviewService } from "./pr-review.ts";

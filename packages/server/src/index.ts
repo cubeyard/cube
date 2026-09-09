@@ -482,7 +482,7 @@ async function api(
   }
 
   const threadRepository = url.pathname.match(
-    /^\/api\/threads\/([^/]+)\/repositories(?:\/(\d+)\/(diff|push|sync|push-base|pr))?$/,
+    /^\/api\/threads\/([^/]+)\/repositories(?:\/(\d+)\/(diff|push|sync|push-base|pr|pr-review))?$/,
   );
   if (threadRepository) {
     const id = decodeId(threadRepository[1]!);
@@ -495,6 +495,25 @@ async function api(
     const repositoryId = Number(repositoryRaw);
     if (action === "diff" && method === "GET") {
       return json(res, 200, await supervisor.diffForUserThread(id, repositoryId));
+    }
+    if (action === "pr-review" && method === "POST") {
+      let input: Parameters<CubeSupervisor["reviewPrForUserThread"]>[2];
+      try {
+        const body = JSON.parse(await readBody(req));
+        const token = typeof body.token === "string" && /^[0-9a-f]{32}$/.test(body.token);
+        if (body.action === "prepare" && Number.isSafeInteger(body.number) && body.number > 0) {
+          input = { action: "prepare", number: body.number };
+        } else if ((body.action === "plan" || body.action === "verify") && token) {
+          input = { action: body.action, token: body.token };
+        } else if (body.action === "publish" && token && typeof body.plan === "string" && /^[0-9a-f]{32}$/.test(body.plan)) {
+          input = { action: "publish", token: body.token, plan: body.plan };
+        } else {
+          return json(res, 400, { error: "invalid PR review operation" });
+        }
+      } catch {
+        return json(res, 400, { error: "invalid PR review body" });
+      }
+      return json(res, 200, await whileConnected(res, (signal) => supervisor.reviewPrForUserThread(id, repositoryId, input, signal)));
     }
     if (action === "push" && method === "POST") {
       const branch = await whileConnected(res, (signal) =>

@@ -79,6 +79,14 @@ Available API (all methods return promises):
 - cube.git.pushBranch(primaryRepositoryId)
 - cube.git.pushBase(primaryRepositoryId)
 - cube.git.createPr(primaryRepositoryId, { title?, body? })
+- cube.git.preparePrUpdate(primaryRepositoryId, number) -> { token, branch, head, base, stack, instruction }
+  For review fixes on an existing PR, use this BEFORE editing. Reads the authoritative native GitHub stack and imports every exact head and its objects. Creates a fresh local branch without changing your current branch/worktree; switch to the returned branch with cube.exec. Existing local branches are never reset. Read reviews and reviewComments (all pages), make only the requested correction, test, and add commits. Never amend/rebase the existing PR commits or reconstruct an old tree with a newer SHA as parent. syncBase is NOT PR-head/stack synchronization.
+- cube.git.planPrUpdate(primaryRepositoryId, token) -> { token, plan, changes, instruction }
+  Requires committed work on the prepared branch and a clean tree. Freezes the candidate, restacks descendants on the host, and returns complete before/after commit IDs, incremental patches, and resulting PR diffs. Does not publish. Inspect every diff for the requested scope and preservation of existing changes before publishing; conflicts or stale remote state stop the operation. After new edits, request a new plan.
+- cube.git.publishPrUpdate(primaryRepositoryId, token, plan) -> { verified, number, stack, plan }
+  Publishes the exact inspected plan using atomic per-branch expected-SHA leases, then verifies remote heads, bases, membership, and order. Use only when the user authorized publication. No PRs are created or relinked. Never use pushBranch/pushBase/createPr or another branch to bypass review safety checks.
+- cube.git.verifyPrUpdate(primaryRepositoryId, token)
+  Read-only reconciliation after a timeout, disconnect, or uncertain publication; do not blindly retry or roll back. A failure after push can mean remote already changed. Closed/merged/queued layers, forks, missing native metadata, nonlinear descendant history, and conflicts require manual reconciliation. Stack metadata cannot be locked atomically with Git refs; concurrent membership changes are detected by pre/post checks, not prevented.
 - cube.github.read(number, { type: "issue" | "pr", section?, page? }) -> { url, data, section, page, nextPage, complete, notice }
   Authenticated read from this thread's primary repository only (including private repositories); no credentials are exposed. For a user-supplied URL, verify it belongs to the primary repository before extracting its number and type. Other repositories cannot be read.
   Sections: details (default: title, body, state, labels; PR base/head ref and SHA), comments, timeline (linked issues/PRs and events), reviews and reviewComments (PR only, including inline positions and replies).
@@ -114,6 +122,10 @@ const cube = Object.freeze({
   }),
   git: Object.freeze({
     syncBase: (repositoryId) => __call("git.syncBase", { repositoryId }),
+    preparePrUpdate: (repositoryId, number) => __call("git.preparePrUpdate", { repositoryId, number }),
+    planPrUpdate: (repositoryId, token) => __call("git.planPrUpdate", { repositoryId, token }),
+    publishPrUpdate: (repositoryId, token, plan) => __call("git.publishPrUpdate", { repositoryId, token, plan }),
+    verifyPrUpdate: (repositoryId, token) => __call("git.verifyPrUpdate", { repositoryId, token }),
     pushBranch: (repositoryId) => __call("git.pushBranch", { repositoryId }),
     pushBase: (repositoryId) => __call("git.pushBase", { repositoryId }),
     createPr: (repositoryId, options = {}) => __call("git.createPr", { ...options, repositoryId }),
