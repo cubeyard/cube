@@ -33,7 +33,11 @@
   } = $props();
 
   let projects = $state<Project[]>([]);
+  // True once the project list has arrived at least once. A failed poll
+  // is not an empty list: until then the composer and the empty state
+  // say the host has not answered rather than "no projects".
   let loaded = $state(false);
+  let unreachable = $state(false);
   let error = $state<string | null>(null);
   let actionError = $state<string | null>(null);
   let creating = $state(false);
@@ -54,13 +58,15 @@
       projects = fresh;
       if (selectedFilter && !fresh.some((project) => project.id === selectedFilter)) location.hash = "#/threads";
       error = null;
+      unreachable = false;
+      loaded = true;
     } catch (e) {
       if (seq !== refreshSeq) return;
       // A host that does not answer is the app's strip to report — one
       // quiet line, not a red banner on every view polling it.
-      if (!isUnreachable(e)) error = errorText(e);
+      unreachable = isUnreachable(e);
+      if (!unreachable) error = errorText(e);
     }
-    loaded = true;
   }
 
   onMount(() => {
@@ -207,7 +213,15 @@
 
   {#if composing}
     <div class="compose well">
-      {#if readyProjects.length > 0}
+      {#if !loaded}
+        <p class="compose-note" role="status">
+          {unreachable ? "can't reach the host — the project list will follow. retrying…" : error ? `projects unavailable — ${error}` : "reading projects…"}
+        </p>
+        <div class="compose-keys">
+          <button class="key" onclick={refresh}>retry now</button>
+          <button class="key" onclick={() => (composing = false)}>cancel</button>
+        </div>
+      {:else if readyProjects.length > 0}
         <label class="compose-field">
           <span class="silk">project</span>
           <select class="compose-input" bind:value={selectedProjectId} aria-label="project for new thread">
@@ -312,6 +326,12 @@
         <button class="key primary" onclick={openComposer}><Icon name="plus" size={13} />new thread</button>
       {/if}
       <p class="shortcuts"><kbd>n</kbd> new thread · <kbd>g</kbd> <kbd>t</kbd> threads · <kbd>g</kbd> <kbd>p</kbd> projects</p>
+    </div>
+  {:else if !loaded && !composing}
+    <!-- no threads and no answer about projects yet: not an empty box -->
+    <div class="empty-state" role="status">
+      <p class="hint">{unreachable ? "can't reach the host — it may be starting or restarting" : "reading projects…"}{#if unreachable}<br />retrying…{/if}</p>
+      {#if unreachable || error}<button class="key" onclick={refresh}>retry now</button>{/if}
     </div>
   {/if}
 </main>

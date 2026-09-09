@@ -7,7 +7,10 @@
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
   let projects = $state<Project[]>([]);
+  // True once the list has arrived at least once; a failed poll is not
+  // an empty list, and must not read as "configure your first project".
   let loaded = $state(false);
+  let unreachable = $state(false);
   let error = $state<string | null>(null);
   let checking = $state<string | null>(null);
   // "checked" printed in the row whose check just landed, for a moment.
@@ -21,12 +24,14 @@
       if (seq !== refreshSeq) return;
       projects = fresh;
       error = null;
+      unreachable = false;
+      loaded = true;
     } catch (e) {
       if (seq !== refreshSeq) return;
       // A host that does not answer is the app's strip to report.
-      if (!isUnreachable(e)) error = errorText(e);
+      unreachable = isUnreachable(e);
+      if (!unreachable) error = errorText(e);
     }
-    loaded = true;
   }
 
   onMount(() => {
@@ -121,6 +126,11 @@
     <div class="empty-state">
       <p class="hint">A project owns the repositories every thread starts with.<br />Configure one primary checkout to begin.</p>
       <a class="key primary" href="#/projects/new"><Icon name="plus" size={13} />new project</a>
+    </div>
+  {:else if !loaded}
+    <div class="empty-state" role="status">
+      <p class="hint">{unreachable ? "can't reach the host — it may be starting or restarting" : "reading projects…"}{#if unreachable}<br />retrying…{/if}</p>
+      {#if unreachable || error}<button class="key" onclick={refresh}>retry now</button>{/if}
     </div>
   {/if}
 </main>
