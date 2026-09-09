@@ -145,6 +145,10 @@
     }
   }
 
+  // The view is keyed on threadId: a delete or a new thread navigates
+  // away mid-request, and the completion must then touch nothing here.
+  let disposed = false;
+
   onMount(() => {
     const savedSplit = Number(localStorage.getItem(SPLIT_STORAGE_KEY));
     if (Number.isFinite(savedSplit) && savedSplit > 0) setSplit(savedSplit);
@@ -155,7 +159,9 @@
       refreshServices();
     }, 10_000);
     return () => {
+      disposed = true;
       clearInterval(slow);
+      if (noteTimer) clearTimeout(noteTimer);
     };
   });
 
@@ -164,6 +170,7 @@
   let note = $state<{ text: string; href?: string; bad?: boolean } | null>(null);
   let noteTimer: ReturnType<typeof setTimeout> | null = null;
   function setNote(next: { text: string; href?: string; bad?: boolean } | null): void {
+    if (disposed) return;
     if (noteTimer) clearTimeout(noteTimer);
     noteTimer = null;
     note = next;
@@ -305,7 +312,7 @@
     } catch (e) {
       setNote({ text: `delete: ${errorText(e)}`, bad: true });
     } finally {
-      deleting = false;
+      if (!disposed) deleting = false;
     }
   }
 
@@ -319,7 +326,7 @@
     } catch (e) {
       setNote({ text: `new thread: ${errorText(e)}`, bad: true });
     } finally {
-      creating = false;
+      if (!disposed) creating = false;
     }
   }
 
