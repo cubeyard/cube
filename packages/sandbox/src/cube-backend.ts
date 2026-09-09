@@ -111,7 +111,6 @@ export class IncusBackend implements CubeBackend {
     return (await this.client.getImageAlias(image)).target;
   }
   async captureEnvironment(spec: CubeProvisionSpec, alias: string, journalDirectory?: string): Promise<string> {
-    let prepared = false;
     const abort = new AbortController();
     try {
       // Custom volumes are not part of an Incus image. Quiesce Docker and
@@ -148,34 +147,28 @@ export class IncusBackend implements CubeBackend {
       });
       const rc = await Promise.race([staging, timeout]);
       if (rc !== 0) throw new Error(`cube ${spec.name}: environment staging failed (${rc})`);
-      prepared = true;
     } finally {
       const state = await this.client.getInstanceState(spec.name);
       if (state.status !== "Stopped") {
         await this.client.setInstanceState(spec.name, "stop", { force: true });
       }
     }
-    if (!prepared) throw new Error(`cube ${spec.name}: environment staging failed`);
     if (!journalDirectory) return this.client.publishInstanceAsImage(spec.name, alias);
 
     const journal: PublicationJournal = {
       version: 1, alias, instance: spec.name, attempt: randomUUID(), phase: "posting",
     };
     writePublicationJournal(journalDirectory, journal); // before POST
-    try {
-      const fingerprint = await this.client.publishTaggedInstanceAsImage(
-        spec.name,
-        alias,
-        { "cube.environment.attempt": journal.attempt, "cube.environment.alias": alias },
-        (operation) => writePublicationJournal(journalDirectory, { ...journal, phase: "accepted", operation }),
-      );
-      writePublicationJournal(journalDirectory, { ...journal, phase: "complete", fingerprint });
-      return fingerprint;
-    } catch (error) {
-      // Keep the posting/accepted tombstone. In particular, failure of the
-      // POST response is not evidence that Incus did not accept the POST.
-      throw error;
-    }
+    // On failure the posting/accepted tombstone stays: failure of the POST
+    // response is not evidence that Incus did not accept the POST.
+    const fingerprint = await this.client.publishTaggedInstanceAsImage(
+      spec.name,
+      alias,
+      { "cube.environment.attempt": journal.attempt, "cube.environment.alias": alias },
+      (operation) => writePublicationJournal(journalDirectory, { ...journal, phase: "accepted", operation }),
+    );
+    writePublicationJournal(journalDirectory, { ...journal, phase: "complete", fingerprint });
+    return fingerprint;
   }
 
   async reconcileEnvironment(alias: string, journalDirectory: string): Promise<string> {
