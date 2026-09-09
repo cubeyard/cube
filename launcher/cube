@@ -98,11 +98,21 @@ case "$(uname -m)" in
   *) printf 'unsupported arch: %s\n' "$(uname -m)" >&2; exit 1 ;;
 esac
 
-log()  { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
-ok()   { printf '\033[1;32mPASS\033[0m %s\n' "$*"; }
-fail() { printf '\033[1;31mFAIL\033[0m %s\n' "$*" >&2; }
+# Colour only when that stream is a terminal, never with NO_COLOR set.
+if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then C_HEAD=$'\033[1;36m'; C_OK=$'\033[1;32m'; C_OFF=$'\033[0m'
+else C_HEAD=""; C_OK=""; C_OFF=""; fi
+if [ -z "${NO_COLOR:-}" ] && [ -t 2 ]; then C_ERR=$'\033[1;31m'; C_ERR_OFF=$'\033[0m'
+else C_ERR=""; C_ERR_OFF=""; fi
+log()  { printf '\n%s== %s ==%s\n' "$C_HEAD" "$*" "$C_OFF"; }
+ok()   { printf '%s✓%s %s\n' "$C_OK" "$C_OFF" "$*"; }
+fail() { printf '%s✗%s %s\n' "$C_ERR" "$C_ERR_OFF" "$*" >&2; }
 note() { printf '   %s\n' "$*"; }
-mb()   { awk -v b="${1:-0}" 'BEGIN { if (b < 1000000) printf "%d KB", (b + 500) / 1000; else printf "%d MB", (b + 500000) / 1000000 }'; }
+mb()   { awk -v b="${1:-0}" 'BEGIN { if (b < 1000) printf "%d B", b; else if (b < 1000000) printf "%d KB", (b + 500) / 1000; else if (b < 1024000000) printf "%d MB", (b + 500000) / 1000000; else printf "%.1f GB", b / 1000000000 }'; }
+# The serial console carries systemd's colours and cursor moves; strip
+# CSI and OSC sequences before printing it into the user's terminal.
+# LC_ALL=C: the byte ranges below mean bytes, not collation order.
+ESC="$(printf '\033')"; BEL="$(printf '\007')"
+strip_console() { tr -d '\r' | LC_ALL=C sed -E "s/${ESC}\[[ -?]*[@-~]//g; s/${ESC}\][^${BEL}${ESC}]*(${BEL}|${ESC}\\\\)?//g"; }
 
 # cubed has NO auth (the Tailnet is the boundary): any extra bind must be
 # a PRIVATE address — an explicit public interface IP would put thread
@@ -122,7 +132,7 @@ if [ -z "$CUBE_BIND" ]; then
 fi
 if [ "$CUBE_BIND" = "tailscale" ]; then
   CUBE_BIND="$(tailscale ip -4 2>/dev/null | head -1)"
-  [ -n "$CUBE_BIND" ] || { fail 'CUBE_BIND=tailscale but `tailscale ip -4` returned nothing'; exit 1; }
+  [ -n "$CUBE_BIND" ] || { fail "CUBE_BIND=tailscale, but tailscale ip -4 returned nothing — is tailscale up?"; exit 1; }
 fi
 case "$CUBE_BIND" in
   ""|127.0.0.1) CUBE_BIND=""; CUBED_HOST="127.0.0.1" ;;
@@ -556,7 +566,7 @@ prune_store() {
   done
   for m in "$MANIFESTS_DIR"/manifest-v*-"$ARCH".json; do
     [ -f "$m" ] || continue
-    ver="${m##*/manifest-}"; ver="${ver%-$ARCH.json}"
+    ver="${m##*/manifest-}"; ver="${ver%-"$ARCH".json}"
     [ "$ver" = "$keep" ] || survivors+=("$ver")
   done
   if [ "${#survivors[@]}" -gt 0 ]; then
@@ -569,7 +579,7 @@ prune_store() {
   done
   for m in "$MANIFESTS_DIR"/manifest-v*-"$ARCH".json; do
     [ -f "$m" ] || continue
-    ver="${m##*/manifest-}"; ver="${ver%-$ARCH.json}"
+    ver="${m##*/manifest-}"; ver="${ver%-"$ARCH".json}"
     [ "$ver" = "$keep" ] || [ "$ver" = "$prev" ] || { rm -f "$m"; note "pruned manifest $ver"; }
   done
   for f in "$IMAGES_DIR"/*; do
@@ -594,12 +604,13 @@ vm_pid() {  # the launcher's own VM only — never ps-grepping for others.
   printf '%s' "$pid"
 }
 
-check_identity() {  # the VM on our ssh port must be OUR installed build
-  local want got
-  want="$(mf "$(installed_version)" build_id)"
+check_identity() {  # check_identity [vX.Y.Z] — the VM on our ssh port must be OUR build
+  local ver="${1:-$(installed_version)}" want got
+  want="$(mf "$ver" build_id)"
+  [ -n "$want" ] || { fail "no manifest for release '${ver:-none}' in $MANIFESTS_DIR — run: cube up"; return 1; }
   got="$(vm_build_id)"
-  [ -n "$want" ] && [ "$got" = "$want" ] || {
-    fail "the VM on port $SSH_PORT reports build '$got' (expected '$want') — another VM owns the port? (CUBE_SSH_PORT)"
+  [ "$got" = "$want" ] || {
+    fail "the VM on port $SSH_PORT reports build '${got:-unknown}', expected '$want' — another VM on this port (CUBE_SSH_PORT), or an interrupted upgrade (cube down, then cube up)"
     return 1
   }
 }
@@ -829,7 +840,7 @@ cmd_down() {
   lock
   if ! vm_pid >/dev/null; then
     rm -f "$PID_FILE"
-    ok "no VM running"
+    ok "the VM is not running"
     return 0
   fi
   stop_vm
