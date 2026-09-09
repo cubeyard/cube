@@ -17,6 +17,11 @@ import { createLogger } from "./log.ts";
 // journal (and `cube diagnose`) without each of them remembering to log.
 const log = createLogger("registry");
 
+/** The journal gets the head of an error, not the whole script tail: the
+ * full text stays in the registry (same host, same trust), while a
+ * `.cube/setup` that echoed a secret is not copied into logs wholesale. */
+const brief = (error: string): string => (error.length > 200 ? `${error.slice(0, 200)}…` : error);
+
 export interface CubeRow {
   id: number;
   name: string;
@@ -398,7 +403,7 @@ export class Registry {
         result.checkedAt,
         id,
       );
-    if (result.error) log.warn("project repository error", { repository: id, status: result.status, error: result.error });
+    if (result.error) log.warn("project repository error", { repository: id, status: result.status, error: brief(result.error) });
   }
 
   finishProjectCheck(
@@ -414,7 +419,7 @@ export class Registry {
          WHERE id = ? AND revision = ?`,
       )
       .run(status, error, checkedAt, checkedAt, id, revision);
-    if (error) log.warn("project error", { project: id, revision, status, error });
+    if (error) log.warn("project error", { project: id, revision, status, error: brief(error) });
   }
 
   countThreadsForProject(projectId: string): number {
@@ -537,7 +542,7 @@ export class Registry {
     this.db
       .prepare("UPDATE cube SET status = ?, error = ? WHERE name = ?")
       .run(status, error, name);
-    if (error) log.warn("cube error", { cube: name, status, error });
+    if (error) log.warn("cube error", { cube: name, status, error: brief(error) });
   }
 
   touchCube(name: string): void {

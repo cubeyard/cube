@@ -84,4 +84,22 @@ try {
 assert.deepEqual(written, ["info boot listening\n"]);
 console.log("6 ok: the default sink is stdout (journald's)");
 
+{
+  const cyclic: Record<string, unknown> = Object.create(null);
+  cyclic.self = cyclic;
+  const hostile = {
+    get bad(): string {
+      throw new Error("accessor exploded");
+    },
+  };
+  const lines: string[] = [];
+  const guarded = createLogger("api", (line) => lines.push(line));
+  guarded.warn("odd values", { cyclic, hostile, ok: 1 });
+  assert.equal(lines.length, 1);
+  assert.match(lines[0]!, /^warn api odd values cyclic=/);
+  assert.match(lines[0]!, /hostile=/);
+  assert.match(lines[0]!, / ok=1\n$/);
+  console.log("7 ok: cyclic null-prototype values and throwing accessors never throw out of the logger");
+}
+
 console.log("ALL PASS: log");

@@ -13,6 +13,10 @@ import { createLogger } from "./log.ts";
 
 const log = createLogger("portal");
 
+/** The path without its query: OAuth callbacks and websocket tickets carry
+ * codes/tokens in the query string, which must not land in the journal. */
+const pathOnly = (url: string | undefined): string => (url ?? "").split("?", 1)[0] ?? "";
+
 /** Hop-by-hop headers never forwarded (RFC 9110 §7.6.1). */
 const HOP_BY_HOP = new Set([
   "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -73,7 +77,7 @@ export function proxyHttp(
     },
   );
   upstream.on("error", (error: NodeJS.ErrnoException) => {
-    log.warn("upstream error", { target: `${target.ip}:${target.port}`, method: req.method, path: req.url, error: error.code ?? error.message });
+    log.warn("upstream error", { target: `${target.ip}:${target.port}`, method: req.method, path: pathOnly(req.url), error: error.code ?? error.message });
     if (res.headersSent) return void res.destroy();
     if (error.code === "ECONNREFUSED" || error.code === "EHOSTUNREACH" || error.code === "ETIMEDOUT") {
       return onConnectError();
@@ -106,7 +110,7 @@ export function proxyUpgrade(
     socket.pipe(upstream);
   });
   upstream.on("error", (error: NodeJS.ErrnoException) => {
-    log.warn("upstream error", { target: `${target.ip}:${target.port}`, upgrade: req.url, error: error.code ?? error.message });
+    log.warn("upstream error", { target: `${target.ip}:${target.port}`, upgrade: pathOnly(req.url), error: error.code ?? error.message });
   });
   const drop = () => {
     upstream.destroy();

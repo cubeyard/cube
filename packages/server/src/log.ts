@@ -58,11 +58,21 @@ function make(component: string, bound: LogFields, sink: (line: string) => void)
 
 function formatLine(level: LogLevel, component: string, msg: string, fields: LogFields, withStack: boolean): string {
   let line = `${level} ${component} ${msg}`;
-  for (const [key, raw] of Object.entries(fields)) {
+  // A logger that throws while reporting a failure (a cyclic or
+  // null-prototype value, a throwing accessor) would turn one bad field
+  // into a daemon crash; every field is rendered under its own guard.
+  for (const key of Object.keys(fields)) {
+    let raw: unknown;
+    try {
+      raw = fields[key];
+    } catch {
+      line += ` ${key}=${quote("<unreadable>")}`;
+      continue;
+    }
     if (raw === undefined) continue;
     if (raw instanceof Error) {
-      line += ` ${key}=${quote(raw.message)}`;
-      if (withStack && raw.stack) line += ` stack=${quote(raw.stack)}`;
+      line += ` ${key}=${quote(String(raw.message))}`;
+      if (withStack && typeof raw.stack === "string") line += ` stack=${quote(raw.stack)}`;
       continue;
     }
     line += ` ${key}=${quote(stringify(raw))}`;
@@ -72,11 +82,15 @@ function formatLine(level: LogLevel, component: string, msg: string, fields: Log
 
 function stringify(value: unknown): string {
   if (typeof value === "string") return value;
-  if (value === null || typeof value !== "object") return String(value);
   try {
+    if (value === null || typeof value !== "object") return String(value);
     return JSON.stringify(value) ?? String(value);
   } catch {
-    return String(value);
+    try {
+      return String(value);
+    } catch {
+      return "<unserializable>";
+    }
   }
 }
 
