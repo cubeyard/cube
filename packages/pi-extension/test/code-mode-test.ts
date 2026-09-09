@@ -75,6 +75,7 @@ const reviewPlan = "b".repeat(32);
 for (const [source, expected] of [
   ["cube.git.preparePrUpdate(7, 845)", { repositoryId: 7, action: "prepare", number: 845 }],
   [`cube.git.planPrUpdate(7, '${reviewToken}')`, { repositoryId: 7, action: "plan", token: reviewToken }],
+  [`cube.git.inspectPrUpdatePlan(7, '${reviewToken}', '${reviewPlan}', { number: 845, section: 'prDiff', page: 2 })`, { repositoryId: 7, action: "inspect", token: reviewToken, plan: reviewPlan, number: 845, section: "prDiff", page: 2 }],
   [`cube.git.publishPrUpdate(7, '${reviewToken}', '${reviewPlan}')`, { repositoryId: 7, action: "publish", token: reviewToken, plan: reviewPlan }],
   [`cube.git.verifyPrUpdate(7, '${reviewToken}')`, { repositoryId: 7, action: "verify", token: reviewToken }],
 ] as const) {
@@ -83,6 +84,16 @@ for (const [source, expected] of [
 await assert.rejects(capability("git.preparePrUpdate", { repositoryId: 7, number: 0 }, new AbortController().signal), /positive integer/);
 await assert.rejects(capability("git.planPrUpdate", { repositoryId: 7, token: "../state" }, new AbortController().signal), /invalid review token/);
 await assert.rejects(capability("git.publishPrUpdate", { repositoryId: 7, token: reviewToken, plan: "" }, new AbortController().signal), /invalid review plan/);
+await assert.rejects(capability("git.inspectPrUpdatePlan", { repositoryId: 7, token: "A".repeat(32), plan: reviewPlan, number: 1, section: "patch" }, new AbortController().signal), /invalid review token/);
+for (const invalid of [
+  { repositoryId: 7, token: reviewToken, plan: reviewPlan, number: 0, section: "patch" },
+  { repositoryId: 7, token: reviewToken, plan: reviewPlan, number: Number.MAX_SAFE_INTEGER + 1, section: "patch" },
+  { repositoryId: 7, token: reviewToken, plan: reviewPlan, number: 1, section: "summary" },
+  { repositoryId: 7, token: reviewToken, plan: reviewPlan, number: 1, section: "patch", page: 0 },
+]) {
+  await assert.rejects(capability("git.inspectPrUpdatePlan", invalid, new AbortController().signal), /positive integer|section must/);
+}
+await assert.rejects(capability("git.inspectPrUpdatePlan", { repositoryId: 7, token: reviewToken, plan: "A".repeat(32), number: 1, section: "patch" }, new AbortController().signal), /invalid review plan/);
 
 // ---- 1. Plain JavaScript and JSON result ---------------------------------
 

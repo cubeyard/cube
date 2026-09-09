@@ -1025,11 +1025,13 @@ export class CubeSupervisor {
   async reviewPrForUserThread(
     id: string,
     repositoryId: number,
-    input: { action: "prepare"; number: number } | { action: "plan" | "verify"; token: string } | { action: "publish"; token: string; plan: string },
+    input: { action: "prepare"; number: number } | { action: "plan" | "verify"; token: string } | { action: "publish"; token: string; plan: string } | { action: "inspect"; token: string; plan: string; number: number; section: "patch" | "prDiff"; page?: number },
     signal?: AbortSignal,
   ) {
     const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh();
+    // Planning and inspection use the local snapshot and need no GitHub
+    // credentials. Preparation and publication/reconciliation remain online.
+    if (input.action !== "inspect" && input.action !== "plan") await this.config.github?.ensureFresh();
     signal?.throwIfAborted();
     this.requireSeeded(cube, repository);
     return this.withGitOp(cube.name, async () => {
@@ -1037,6 +1039,7 @@ export class CubeSupervisor {
       switch (input.action) {
         case "prepare": return this.prReviews.prepare(ws, url, input.number, signal);
         case "plan": return this.prReviews.plan(ws, url, input.token, signal);
+        case "inspect": return this.prReviews.inspect(ws, url, input.token, input.plan, { number: input.number, section: input.section, page: input.page }, signal);
         case "publish": return this.prReviews.publish(ws, url, input.token, input.plan, signal);
         case "verify": return this.prReviews.verify(ws, url, input.token, signal);
       }

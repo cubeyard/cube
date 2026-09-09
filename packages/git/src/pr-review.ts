@@ -115,16 +115,23 @@ export class PrReviewService {
         || remote.pull_requests.length > 100) return fail("incomplete or changed native stack");
       base = ref(object(remote.base).ref);
       members = [];
-      for (const entry of remote.pull_requests) {
-        const member = object(entry);
-        const pr = await getPr(positive(member.number));
-        const stack = object(pr.stack);
-        if (stack.id !== stackId || stack.number !== stackNumber || stack.size !== remote.pull_requests.length
-          || stack.position !== members.length + 1 || object(stack.base).ref !== base
-          || object(pr.head).sha !== object(member.head).sha || object(pr.head).ref !== object(member.head).ref) {
-          return fail("stack changed during discovery or membership is incomplete");
+      // Bound concurrency and drain the whole batch even on failure. These
+      // independent reads must retain native order, not completion order.
+      for (let start = 0; start < remote.pull_requests.length; start += 4) {
+        const entries = remote.pull_requests.slice(start, start + 4);
+        const results = await Promise.allSettled(entries.map(async (entry) => getPr(positive(object(entry).number))));
+        for (const [i, result] of results.entries()) {
+          if (result.status === "rejected") throw result.reason;
+          const member = object(entries[i]);
+          const pr = result.value;
+          const stack = object(pr.stack);
+          if (stack.id !== stackId || stack.number !== stackNumber || stack.size !== remote.pull_requests.length
+            || stack.position !== members.length + 1 || object(stack.base).ref !== base
+            || object(pr.head).sha !== object(member.head).sha || object(pr.head).ref !== object(member.head).ref) {
+            return fail("stack changed during discovery or membership is incomplete");
+          }
+          members.push(pr);
         }
-        members.push(pr);
       }
     }
     const mergedPrefix: NonNullable<Stack["mergedPrefix"]> = [];
@@ -270,13 +277,16 @@ export class PrReviewService {
     }
   }
 
-  /** Freeze the candidate and restack descendants WITHOUT publishing. */
+  /** Plan locally against the prepared snapshot; publication checks whether
+   * that snapshot is still current before attempting any remote update. */
   async plan(ws: string, url: string, token: string, signal?: AbortSignal) {
     return this.session(ws, url, token, async (dir, review) => {
       if (review.status !== "prepared" && review.status !== "planned") return fail("publication already attempted; do not retry blindly");
       const state = await this.gitService.state(ws, undefined, signal);
       if (state.dirty || state.branch !== review.branch) return fail("commit the review fix on the prepared branch with a clean working tree");
-      await this.unchanged(review, signal);
+      if (review.plan && await this.git(ws, ["rev-parse", "HEAD"], signal) === review.plan.candidate) {
+        return this.planSummary(dir, review, token, signal);
+      }
       const repo = path.join(dir, "repo");
       const bundle = path.join(dir, "candidate.bundle");
       try {
@@ -284,6 +294,9 @@ export class PrReviewService {
         await this.git(repo, ["fetch", "--no-tags", "--", bundle, `+refs/heads/${review.branch}:refs/heads/candidate`], signal);
       } finally { fs.rmSync(bundle, { force: true }); }
       const candidate = oid(await this.git(repo, ["rev-parse", "refs/heads/candidate"], signal));
+      if (review.plan?.candidate === candidate) {
+        return this.planSummary(dir, review, token, signal);
+      }
       const { layers } = review.stack;
       const index = layers.findIndex((layer) => layer.number === review.number);
       const target = layers[index]!;
@@ -319,23 +332,66 @@ export class PrReviewService {
         heads[i] = oid(await this.git(repo, ["rev-parse", "HEAD"], signal));
         await this.git(repo, ["update-ref", `refs/heads/planned-${i}`, heads[i]!], signal);
       }
-      const changes = [];
-      for (let i = index; i < layers.length; i++) {
-        const layer = layers[i]!;
-        const parent = i === 0 ? review.stack.baseOid : heads[i - 1]!;
-        const patch = await this.git(repo, ["diff", "--no-ext-diff", "--no-textconv", "--binary", layer.oid, heads[i]!], signal, false);
-        const prDiff = await this.git(repo, ["diff", "--no-ext-diff", "--no-textconv", "--binary", `${parent}...${heads[i]}`], signal, false);
-        changes.push({ number: layer.number, branch: layer.head, base: layer.base, before: layer.oid, after: heads[i]!, patch, prDiff });
-        // Leave space for the result envelope under code mode's 256 KiB
-        // model-visible result limit. Never return a truncated review.
-        if (Buffer.byteLength(JSON.stringify(changes)) > 192 * 1024) return fail("review diff is too large to return completely; no publication plan was created");
-      }
-      await this.unchanged(review, signal);
       review.plan = { id: crypto.randomBytes(16).toString("hex"), candidate, heads };
+      const summary = await this.planSummary(dir, review, token, signal);
       review.status = "planned";
       this.save(dir, review);
-      return { token, plan: review.plan.id, changes,
-        instruction: "Inspect every complete patch and PR diff. Publish only if the review fix is scoped correctly and descendants preserve their existing changes. publishPrUpdate publishes these exact commits, not a later workspace HEAD." };
+      return summary;
+    });
+  }
+
+  /** Derive diffs from pinned commit IDs, never current refs or workspace
+   * content. Diff text and summaries are not persisted or cached. */
+  private planDiff(dir: string, review: Review, index: number, section: "patch" | "prDiff",
+    format: "binary" | "shortstat", signal?: AbortSignal) {
+    const plan = review.plan!;
+    const parent = index === 0 ? review.stack.baseOid : plan.heads[index - 1]!;
+    const range = section === "patch"
+      ? [review.stack.layers[index]!.oid, plan.heads[index]!]
+      : [`${parent}...${plan.heads[index]}`];
+    return this.git(path.join(dir, "repo"),
+      ["diff", "--no-ext-diff", "--no-textconv", "--no-color", `--${format}`, ...range], signal, format === "shortstat");
+  }
+
+  private async planSummary(dir: string, review: Review, token: string, signal?: AbortSignal) {
+    const plan = review.plan!;
+    const changes = [];
+    const hash = (text: string) => crypto.createHash("sha256").update(text, "utf8").digest("hex");
+    const layers = review.stack.layers;
+    for (let i = layers.findIndex((layer) => layer.number === review.number); i < layers.length; i++) {
+      const layer = layers[i]!;
+      const patch = await this.planDiff(dir, review, i, "patch", "binary", signal);
+      const prDiff = await this.planDiff(dir, review, i, "prDiff", "binary", signal);
+      const diffstat = {
+        patch: await this.planDiff(dir, review, i, "patch", "shortstat", signal),
+        prDiff: await this.planDiff(dir, review, i, "prDiff", "shortstat", signal),
+      };
+      changes.push({ number: layer.number, branch: layer.head, base: layer.base, before: layer.oid, after: plan.heads[i]!,
+        patchHash: hash(patch), prDiffHash: hash(prDiff),
+        patchBytes: Buffer.byteLength(patch), prDiffBytes: Buffer.byteLength(prDiff), diffstat });
+    }
+    return { token, plan: plan.id, changes,
+      instruction: "Use inspectPrUpdatePlan with this plan ID to read every page of patch and prDiff for every PR. Summaries and hashes do not replace review. Publish only if the fix is scoped correctly and existing changes are preserved. Publication uses these exact commits and rechecks remote state." };
+  }
+
+  /** Compute only the requested diff and return one bounded page. */
+  async inspect(ws: string, url: string, token: string, plan: string,
+    input: { number: number; section: "patch" | "prDiff"; page?: number }, signal?: AbortSignal) {
+    return this.session(ws, url, token, async (dir, review) => {
+      if (!/^[0-9a-f]{32}$/.test(plan) || review.plan?.id !== plan) return fail("no matching saved plan");
+      positive(input.number);
+      if (input.section !== "patch" && input.section !== "prDiff") return fail("invalid diff section");
+      const page = positive(input.page ?? 1);
+      const index = review.stack.layers.findIndex((entry) => entry.number === input.number);
+      if (index < review.stack.layers.findIndex((entry) => entry.number === review.number)) return fail("PR is not updated by this plan");
+      const text = await this.planDiff(dir, review, index, input.section, "binary", signal);
+      const pages = Math.max(1, Math.ceil(text.length / 16_000));
+      if (page > pages) return fail("diff page out of range");
+      return { token, plan, number: input.number, section: input.section, page,
+        nextPage: page < pages ? page + 1 : null, complete: page === pages,
+        text: text.slice((page - 1) * 16_000, page * 16_000),
+        hash: crypto.createHash("sha256").update(text, "utf8").digest("hex"),
+        totalBytes: Buffer.byteLength(text) };
     });
   }
 

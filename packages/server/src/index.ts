@@ -505,6 +505,21 @@ async function api(
           input = { action: "prepare", number: body.number };
         } else if ((body.action === "plan" || body.action === "verify") && token) {
           input = { action: body.action, token: body.token };
+        } else if (
+          body.action === "inspect" && token &&
+          typeof body.plan === "string" && /^[0-9a-f]{32}$/.test(body.plan) &&
+          Number.isSafeInteger(body.number) && body.number > 0 &&
+          (body.section === "patch" || body.section === "prDiff") &&
+          (body.page === undefined || (Number.isSafeInteger(body.page) && body.page > 0))
+        ) {
+          input = {
+            action: "inspect",
+            token: body.token,
+            plan: body.plan,
+            number: body.number,
+            section: body.section,
+            page: body.page,
+          };
         } else if (body.action === "publish" && token && typeof body.plan === "string" && /^[0-9a-f]{32}$/.test(body.plan)) {
           input = { action: "publish", token: body.token, plan: body.plan };
         } else {

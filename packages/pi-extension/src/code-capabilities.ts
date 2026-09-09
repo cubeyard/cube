@@ -16,7 +16,7 @@ export interface CodeCapabilityHost {
   writeText(path: string, content: string, signal: AbortSignal): Promise<void>;
   listRepositories(signal: AbortSignal): Promise<unknown[]>;
   readGithub(input: { number: number; type: string; section?: string; page?: number }, signal: AbortSignal): Promise<unknown>;
-  reviewPr(repositoryId: number, input: { action: "prepare"; number: number } | { action: "plan" | "verify"; token: string } | { action: "publish"; token: string; plan: string }, signal: AbortSignal): Promise<unknown>;
+  reviewPr(repositoryId: number, input: { action: "prepare"; number: number } | { action: "plan" | "verify"; token: string } | { action: "publish"; token: string; plan: string } | { action: "inspect"; token: string; plan: string; number: number; section: "patch" | "prDiff"; page?: number }, signal: AbortSignal): Promise<unknown>;
   syncBase(repositoryId: number, signal: AbortSignal): Promise<unknown>;
   pushBranch(repositoryId: number, signal: AbortSignal): Promise<unknown>;
   pushBase(repositoryId: number, signal: AbortSignal): Promise<unknown>;
@@ -110,10 +110,21 @@ export function createCodeCapability(host: CodeCapabilityHost): CodeModeCapabili
         if (!Number.isSafeInteger(args.number) || Number(args.number) < 1) throw new TypeError("number must be a positive integer");
         return host.reviewPr(repositoryId(args), { action: "prepare", number: Number(args.number) }, signal);
       case "git.planPrUpdate":
+      case "git.inspectPrUpdatePlan":
       case "git.publishPrUpdate":
       case "git.verifyPrUpdate": {
         const token = stringField(args, "token", { maxLength: 32 })!;
         if (!/^[0-9a-f]{32}$/.test(token)) throw new TypeError("invalid review token");
+        if (operation === "git.inspectPrUpdatePlan") {
+          const plan = stringField(args, "plan", { maxLength: 32 })!;
+          if (!/^[0-9a-f]{32}$/.test(plan)) throw new TypeError("invalid review plan");
+          if (!Number.isSafeInteger(args.number) || Number(args.number) < 1) throw new TypeError("number must be a positive integer");
+          if (args.section !== "patch" && args.section !== "prDiff") throw new TypeError("section must be patch or prDiff");
+          if (args.page !== undefined && (!Number.isSafeInteger(args.page) || Number(args.page) < 1)) {
+            throw new TypeError("page must be a positive integer");
+          }
+          return host.reviewPr(repositoryId(args), { action: "inspect", token, plan, number: Number(args.number), section: args.section, page: args.page as number | undefined }, signal);
+        }
         if (operation === "git.publishPrUpdate") {
           const plan = stringField(args, "plan", { maxLength: 32 })!;
           if (!/^[0-9a-f]{32}$/.test(plan)) throw new TypeError("invalid review plan");
