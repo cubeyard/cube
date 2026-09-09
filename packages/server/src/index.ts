@@ -15,6 +15,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { IncusBackend, MockBackend, type CubeBackend } from "@cube/sandbox";
 
 import { checkAuth } from "./auth.ts";
+import { formatEventLine, recordPoint } from "./events.ts";
 import { GithubAuth } from "./github-auth.ts";
 import { createLogger } from "./log.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
@@ -23,6 +24,7 @@ import { portalLabel, proxyHttp, proxyUpgrade, respondFailed, respondWaking, sam
 import { PiTerminals } from "./pty.ts";
 import { Registry } from "./registry.ts";
 import { CubeSupervisor, DEFAULT_EGRESS_ALLOW } from "./supervisor.ts";
+import { APP_VERSION } from "./version.ts";
 import { listWorkspaceFiles, openWorkspaceFile } from "./workspace-files.ts";
 
 const log = createLogger("api");
@@ -104,6 +106,15 @@ const terminals = new PiTerminals(
         throw new Error(sanitizeMessage(error instanceof Error ? error.message : String(error)));
       }),
     activity: (id) => supervisor.touchUserThread(id),
+    event: (e) => {
+      let cube: string | null = null;
+      try {
+        cube = supervisor.resolveUserThread(e.thread).cubeName;
+      } catch {
+        // thread already gone (deleted while the pty was still up)
+      }
+      registry.recordEvent({ kind: "terminal", phase: e.phase, cube, thread: e.thread, ok: e.ok, ms: e.ms ?? null, detail: e.detail ?? null });
+    },
   },
   { lingerMs: parseLingerMs(process.env.CUBED_PTY_LINGER_MS) },
 );
@@ -139,7 +150,7 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
 /** Map supervisor/registry errors onto HTTP statuses. `sanitize` rewrites
  * cube vocabulary for the thread-first routes — internal cube names and the
  * word "cube" must not leak through the product surface. */
-function fail(res: http.ServerResponse, error: unknown, sanitize = false): void {
+function fail(res: http.ServerResponse, error: unknown, sanitize = false, route?: string): void {
   if (res.destroyed) return;
   let message = error instanceof Error ? error.message : String(error);
   const status = /no such/.test(message)
@@ -155,6 +166,10 @@ function fail(res: http.ServerResponse, error: unknown, sanitize = false): void 
         : 500;
   if (sanitize) message = sanitizeMessage(message);
   if (status === 500) log.error("api error", { error });
+  if (status === 500) {
+    console.log(`api error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+    recordPoint(registry, { kind: "api", phase: "500", ok: false, detail: `${route ?? ""} ${error instanceof Error ? error.message : String(error)}`.trim() });
+  }
   json(res, status, { error: message });
 }
 
@@ -285,7 +300,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname.startsWith("/api/")) return await api(method, url, req, res);
   } catch (error) {
-    return fail(res, error, url.pathname.startsWith("/api/threads"));
+    return fail(res, error, url.pathname.startsWith("/api/threads"), `${method} ${url.pathname}`);
   }
 
   // static web UI
@@ -369,7 +384,10 @@ async function startAndHold(
     supervisor.touchCube(cubeName);
     return proxyHttp(req, res, fresh, () => respondWaking(req, res, "Starting the service…"));
   }
-  if (failure) return respondFailed(req, res, `${serviceName}: ${sanitizeMessage(failure)}`);
+  if (failure) {
+    recordPoint(registry, { kind: "portal", phase: "failed", cube: cubeName, ok: false, detail: `${serviceName}: ${failure}` });
+    return respondFailed(req, res, `${serviceName}: ${sanitizeMessage(failure)}`);
+  }
   respondWaking(
     req,
     res,
@@ -390,6 +408,39 @@ async function api(
   if (method === "POST" && url.pathname === "/api/onboarding") {
     completeOnboarding(onboardingPath);
     return json(res, 200, { onboardingComplete: true });
+  }
+
+  // Lifecycle events (events.ts): diagnosis and hill-climbing, newest
+  // first. Raw by design — internal names included — so nothing here is
+  // rendered by the product UI verbatim. `since`/`until` take ms epochs or
+  // durations (`24h`, `7d`, `30m`); `format=text` is what `cube events` prints.
+  if (method === "GET" && url.pathname === "/api/events") {
+    const q = url.searchParams;
+    const when = (key: string): number | undefined => {
+      const raw = q.get(key);
+      if (!raw) return undefined;
+      const rel = raw.match(/^(\d+)([smhd])$/);
+      if (rel) {
+        const unit = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[rel[2]!]!;
+        return Date.now() - Number(rel[1]) * unit;
+      }
+      const abs = Number(raw);
+      return Number.isFinite(abs) ? abs : undefined;
+    };
+    const events = registry.listEvents({
+      since: when("since"),
+      until: when("until"),
+      cube: q.get("cube") ?? undefined,
+      thread: q.get("thread") ?? undefined,
+      kind: q.get("kind") ?? undefined,
+      failed: q.get("failed") === "1",
+      limit: q.get("limit") ? Number(q.get("limit")) : undefined,
+    });
+    if (q.get("format") === "text") {
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      return void res.end(`${events.map(formatEventLine).join("\n")}\n`);
+    }
+    return json(res, 200, { version: APP_VERSION, events });
   }
 
   // GitHub CLI owns the VM credential and device flow; no token is handled

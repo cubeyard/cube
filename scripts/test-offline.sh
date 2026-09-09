@@ -12,6 +12,7 @@ OFFLINE_TESTS=(
   packages/server/test/portal-config-test.ts
   packages/server/test/portal-proxy-test.ts
   packages/server/test/registry-test.ts
+  packages/server/test/events-test.ts
   packages/server/test/services-test.ts
   packages/server/test/workspace-files-test.ts
   packages/server/test/github-auth-test.ts

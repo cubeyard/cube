@@ -32,6 +32,10 @@ export interface EgressPolicy {
   allowSource?: string[];
   /** Called on every denied request (surface in the UI / logs). */
   onDeny?: (host: string, kind: "connect" | "http" | "source" | "resolve") => void;
+  /** Called on every request that passed the allowlist and resolved to a
+   * public address — the other half of the egress record (which hosts a
+   * cube actually talked to), for audit and future policy. */
+  onAllow?: (host: string, kind: "connect" | "http") => void;
 }
 
 export interface EgressProxy {
@@ -160,6 +164,7 @@ export function startEgressProxy(
       res.writeHead(403).end(`egress proxy: ${url.hostname} does not resolve to a public address\n`);
       return;
     }
+    opts.onAllow?.(url.hostname, "http");
     const upstream = http.request(
       {
         host: address,
@@ -207,6 +212,7 @@ export function startEgressProxy(
       clientSocket.end("HTTP/1.1 403 Forbidden\r\n\r\n");
       return;
     }
+    opts.onAllow?.(host, "connect");
     const upstream = net.connect(port, address, () => {
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length) upstream.write(head);
