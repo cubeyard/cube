@@ -480,6 +480,8 @@ export default function cubeExtension(pi: ExtensionAPI) {
     },
     syncBase: (repositoryId, signal) =>
       threadRequest(`/repositories/${repositoryId}/sync`, { method: "POST" }, signal),
+    reviewPr: (repositoryId, input, signal) =>
+      threadRequest(`/repositories/${repositoryId}/pr-review`, { method: "POST", body: input }, signal),
     readGithub: (input, signal) => {
       const query = new URLSearchParams({ number: String(input.number), type: input.type });
       if (input.section !== undefined) query.set("section", input.section);

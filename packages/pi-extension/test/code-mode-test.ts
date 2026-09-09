@@ -14,6 +14,10 @@ const host: CodeCapabilityHost = {
   async readGithub(input) {
     return { data: { title: "Private issue" }, ...input };
   },
+  async reviewPr(repositoryId, input, signal) {
+    assert.equal(signal.aborted, false);
+    return { repositoryId, ...input };
+  },
   async exec(input) {
     hostCalls.push({ operation: "exec", value: input });
     return { exitCode: 0, output: `ran: ${input.command}` };
@@ -65,6 +69,20 @@ assert.deepEqual((await runCodeMode({
   call: capability,
 })).value, { data: { title: "Private issue" }, number: 12, type: "issue", section: "comments", page: 2 });
 await assert.rejects(capability("github.read", { number: 12, type: "issue", page: 0 }, new AbortController().signal), /positive integer/);
+
+const reviewToken = "a".repeat(32);
+const reviewPlan = "b".repeat(32);
+for (const [source, expected] of [
+  ["cube.git.preparePrUpdate(7, 845)", { repositoryId: 7, action: "prepare", number: 845 }],
+  [`cube.git.planPrUpdate(7, '${reviewToken}')`, { repositoryId: 7, action: "plan", token: reviewToken }],
+  [`cube.git.publishPrUpdate(7, '${reviewToken}', '${reviewPlan}')`, { repositoryId: 7, action: "publish", token: reviewToken, plan: reviewPlan }],
+  [`cube.git.verifyPrUpdate(7, '${reviewToken}')`, { repositoryId: 7, action: "verify", token: reviewToken }],
+] as const) {
+  assert.deepEqual((await runCodeMode({ source: `return await ${source};`, call: capability })).value, expected);
+}
+await assert.rejects(capability("git.preparePrUpdate", { repositoryId: 7, number: 0 }, new AbortController().signal), /positive integer/);
+await assert.rejects(capability("git.planPrUpdate", { repositoryId: 7, token: "../state" }, new AbortController().signal), /invalid review token/);
+await assert.rejects(capability("git.publishPrUpdate", { repositoryId: 7, token: reviewToken, plan: "" }, new AbortController().signal), /invalid review plan/);
 
 // ---- 1. Plain JavaScript and JSON result ---------------------------------
 

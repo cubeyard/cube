@@ -132,6 +132,59 @@ Before projects or threads appear, the first-run wizard offers GitHub login
 or a skip. Finishing writes `onboarding.json` alongside `cubed.db` (normally
 `~/cube/onboarding.json`). This is VM-wide state, not browser storage.
 
+### Review fixes on native GitHub PR stacks
+
+The agent's code-mode API supports existing PR updates through
+`preparePrUpdate`, `planPrUpdate`, `publishPrUpdate`, and `verifyPrUpdate`.
+These use GitHub's native Stack REST API and GraphQL queue state via the
+host's authenticated `gh api`; installing `gh-stack` is not required.
+See [GitHub's stack reference](https://docs.github.com/en/pull-requests/reference/stacked-prs-cli-commands).
+
+1. Read the PR and all relevant review/comment pages with `cube.github.read`.
+2. Call `cube.git.preparePrUpdate(repositoryId, prNumber)`. Cube reads and
+   validates the entire ordered stack, fetches the actual head objects into
+   a host-owned repository, and imports them through a static bundle. It
+   returns a fresh local branch at the exact remote PR head. Switch to that
+   branch before editing. Existing local branches and worktrees are never
+   reset; a dirty worktree must be dealt with first.
+3. Make and test the scoped fix, adding commits without rewriting the PR's
+   existing history. Call `cube.git.planPrUpdate(repositoryId, token)`.
+   Cube freezes those commits, rebases each descendant onto its updated
+   parent in the host-owned repository, and returns the incremental patches
+   and resulting PR diffs. Review all of them before publishing. A conflict
+   or incomplete/oversized diff produces no publishable plan.
+4. When publication is authorized, call
+   `cube.git.publishPrUpdate(repositoryId, token, plan)`. Cube rechecks the
+   snapshot, then pushes all changed branches with `--atomic` and explicit
+   original-SHA leases. It never uses mutable local tracking refs as leases
+   or falls back to a partial/non-atomic push. It preserves PR numbers,
+   base branches, and stack membership rather than recreating or relinking
+   PRs. Verification requires the planned head SHAs and unchanged stack
+   order/bases, checked through both GitHub and the Git transport.
+5. After a disconnect or uncertain result, call
+   `cube.git.verifyPrUpdate(repositoryId, token)`. The host persists intent
+   before pushing and refuses to repeat a consumed plan, including after a
+   restart. It never automatically rolls back potentially newer remote work.
+
+Direct push/PR creation cannot publish a detected existing PR; use the
+review workflow instead. `syncBase` still refreshes only the configured
+repository base and is not a PR-head or stack synchronization operation.
+Standalone PRs use the same review workflow when GitHub explicitly reports
+no native stack. Closed, merged, queued, forked, inconsistent, or inaccessible
+stack layers stop before publication, as do nonlinear descendant histories.
+Review snapshots and their Git objects live under `reposRoot/pr-reviews/`
+on the host, not in the guest, and survive cubed restarts.
+
+GitHub does not expose a transaction spanning Git refs and stack metadata.
+Atomic leases prevent overwriting concurrent changes to the updated refs;
+pre/post checks detect concurrent membership, base, or predecessor changes,
+but cannot lock those relationships during the push. A post-check failure
+means refs may already have changed and requires reconciliation, not retry
+or rollback. The agent still needs to judge whether the review patch is
+within the user's requested scope; ancestry alone cannot prove that.
+
+### VM host requirements and persistent state
+
 **Hosts:** Linux (KVM) and macOS (HVF). The dev loop needs qemu, UEFI
 firmware for the guest arch (Linux: `apt install ovmf`; macOS: brew's
 qemu ships the edk2 files), node ≥ 26 with npm (pnpm is installed at the

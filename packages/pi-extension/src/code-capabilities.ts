@@ -16,6 +16,7 @@ export interface CodeCapabilityHost {
   writeText(path: string, content: string, signal: AbortSignal): Promise<void>;
   listRepositories(signal: AbortSignal): Promise<unknown[]>;
   readGithub(input: { number: number; type: string; section?: string; page?: number }, signal: AbortSignal): Promise<unknown>;
+  reviewPr(repositoryId: number, input: { action: "prepare"; number: number } | { action: "plan" | "verify"; token: string } | { action: "publish"; token: string; plan: string }, signal: AbortSignal): Promise<unknown>;
   syncBase(repositoryId: number, signal: AbortSignal): Promise<unknown>;
   pushBranch(repositoryId: number, signal: AbortSignal): Promise<unknown>;
   pushBase(repositoryId: number, signal: AbortSignal): Promise<unknown>;
@@ -105,6 +106,21 @@ export function createCodeCapability(host: CodeCapabilityHost): CodeModeCapabili
       }
       case "git.syncBase":
         return host.syncBase(repositoryId(args), signal);
+      case "git.preparePrUpdate":
+        if (!Number.isSafeInteger(args.number) || Number(args.number) < 1) throw new TypeError("number must be a positive integer");
+        return host.reviewPr(repositoryId(args), { action: "prepare", number: Number(args.number) }, signal);
+      case "git.planPrUpdate":
+      case "git.publishPrUpdate":
+      case "git.verifyPrUpdate": {
+        const token = stringField(args, "token", { maxLength: 32 })!;
+        if (!/^[0-9a-f]{32}$/.test(token)) throw new TypeError("invalid review token");
+        if (operation === "git.publishPrUpdate") {
+          const plan = stringField(args, "plan", { maxLength: 32 })!;
+          if (!/^[0-9a-f]{32}$/.test(plan)) throw new TypeError("invalid review plan");
+          return host.reviewPr(repositoryId(args), { action: "publish", token, plan }, signal);
+        }
+        return host.reviewPr(repositoryId(args), { action: operation === "git.planPrUpdate" ? "plan" : "verify", token }, signal);
+      }
       case "git.pushBranch":
         return host.pushBranch(repositoryId(args), signal);
       case "git.pushBase":

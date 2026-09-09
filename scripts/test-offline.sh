@@ -21,6 +21,7 @@ OFFLINE_TESTS=(
   packages/server/test/project-test.ts
   packages/sandbox/test/mock-backend-test.ts
   packages/git/test/git-service-test.ts
+  packages/git/test/pr-review-test.ts
   packages/pi-extension/test/code-mode-test.ts
   packages/pi-extension/test/pi-extension-test.ts
   packages/pi-extension/test/diagnostics-test.ts
