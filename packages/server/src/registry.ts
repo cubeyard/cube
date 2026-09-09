@@ -11,7 +11,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import type { EventInput } from "./events.ts";
 import { createLogger } from "./log.ts";
+import { APP_VERSION } from "./version.ts";
 
 // Every error column is written here, so every caller's failure reaches the
 // journal (and `cube diagnose`) without each of them remembering to log.
@@ -21,8 +23,6 @@ const log = createLogger("registry");
  * full text stays in the registry (same host, same trust), while a
  * `.cube/setup` that echoed a secret is not copied into logs wholesale. */
 const brief = (error: string): string => (error.length > 200 ? `${error.slice(0, 200)}…` : error);
-import type { EventInput } from "./events.ts";
-import { APP_VERSION } from "./version.ts";
 
 /** One recorded lifecycle event (see events.ts). */
 export interface EventRow {
