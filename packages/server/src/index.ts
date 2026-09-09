@@ -469,6 +469,18 @@ async function api(
     return serveWorkspaceFile(res, root, decodeId(repositoryFile[3]!));
   }
 
+  const githubRead = url.pathname.match(/^\/api\/threads\/([^/]+)\/github$/);
+  if (githubRead && method === "GET") {
+    const result = await whileConnected(res, (signal) => supervisor.readGithubForUserThread(
+      decodeId(githubRead[1]!),
+      { number: Number(url.searchParams.get("number")), type: url.searchParams.get("type") ?? "",
+        section: url.searchParams.get("section") ?? undefined,
+        page: url.searchParams.has("page") ? Number(url.searchParams.get("page")) : undefined },
+      signal,
+    ));
+    return json(res, 200, result);
+  }
+
   const threadRepository = url.pathname.match(
     /^\/api\/threads\/([^/]+)\/repositories(?:\/(\d+)\/(diff|push|sync|push-base|pr))?$/,
   );

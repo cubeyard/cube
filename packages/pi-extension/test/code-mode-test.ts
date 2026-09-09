@@ -11,6 +11,9 @@ import { runCodeMode } from "../src/code-mode.ts";
 const files = new Map<string, string>();
 const hostCalls: Array<{ operation: string; value?: unknown }> = [];
 const host: CodeCapabilityHost = {
+  async readGithub(input) {
+    return { data: { title: "Private issue" }, ...input };
+  },
   async exec(input) {
     hostCalls.push({ operation: "exec", value: input });
     return { exitCode: 0, output: `ran: ${input.command}` };
@@ -56,6 +59,12 @@ const host: CodeCapabilityHost = {
   },
 };
 const capability = createCodeCapability(host);
+
+assert.deepEqual((await runCodeMode({
+  source: `return await cube.github.read(12, { type: "issue", section: "comments", page: 2 });`,
+  call: capability,
+})).value, { data: { title: "Private issue" }, number: 12, type: "issue", section: "comments", page: 2 });
+await assert.rejects(capability("github.read", { number: 12, type: "issue", page: 0 }, new AbortController().signal), /positive integer/);
 
 // ---- 1. Plain JavaScript and JSON result ---------------------------------
 

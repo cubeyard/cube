@@ -18,6 +18,7 @@ import {
 } from "@cube/sandbox";
 
 import { readCubeConfig, readWakeHooks } from "./cube-toml.ts";
+import { readGithub } from "./github-read.ts";
 import { ensureServices, portalLabelFor, type ServiceStatus } from "./services.ts";
 import {
   Registry,
@@ -1007,6 +1008,14 @@ export class CubeSupervisor {
           : null,
       })),
     );
+  }
+
+  async readGithubForUserThread(id: string, input: { number: number; type: string; section?: string; page?: number }, signal?: AbortSignal) {
+    const { cubeName } = this.resolveUserThread(id);
+    const cube = this.requireCube(cubeName);
+    const primary = this.registry.listCubeRepositories(cube.id)[0];
+    if (!primary) throw new Error("thread has no primary repository");
+    return readGithub(primary.url, input, signal);
   }
 
   /** Host-side review diff for one repository, separated into
