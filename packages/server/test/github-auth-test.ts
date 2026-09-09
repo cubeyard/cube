@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { GithubAuth, type GhLoginProcess, type GhRunner } from "../src/github-auth.ts";
+import { GithubAuth, GithubUnreachableError, type GhLoginProcess, type GhRunner } from "../src/github-auth.ts";
 
 class FakeProcess extends EventEmitter implements GhLoginProcess {
   stdout = new EventEmitter();
@@ -215,15 +215,18 @@ function runner(initiallyLoggedIn = false) {
   assert.equal(auth.status().state, "disconnected");
 }
 
-// Repository discovery includes every page, preserves recency, and scopes the cache to the account.
+// Repository discovery includes every page, preserves recency, dedupes a repository
+// that moved across a page boundary, and scopes the cache to the account.
 {
   let login = "alice";
   let now = 0;
   let calls = 0;
+  let spawns = 0;
   let fail = false;
   const first = Array.from({ length: 100 }, (_, i) => ({ fullName: `org/repo-${i}`, private: i === 0 }));
   const last = { fullName: "alice/last-page", private: true };
   const auth = new GithubAuth({ now: () => now, ghRunner: async (args) => {
+    spawns++;
     if (args[1] === "logout") { login = ""; return ""; }
     if (!login) throw new Error("signed out");
     if (args[1] === "user") return `${login}\tName\t1`;
@@ -233,16 +236,19 @@ function runner(initiallyLoggedIn = false) {
     assert.ok(endpoint.includes("affiliation=owner,collaborator,organization_member"));
     assert.ok(endpoint.includes("sort=updated&direction=desc"));
     if (fail) throw new Error("unavailable");
-    return JSON.stringify(endpoint.endsWith("page=1") ? first : [last]);
+    // org/repo-99 was pushed to between the two fetches and now leads page 2 as well.
+    return JSON.stringify(endpoint.endsWith("page=1") ? first : [first[99], last]);
   } });
-  assert.deepEqual(await auth.repositories(), [...first, last]);
+  assert.deepEqual(await auth.repositories(), [...first, last], "a moved repository is listed once, in its first position");
   assert.equal(calls, 2);
-  await auth.repositories();
-  assert.equal(calls, 2, "cache avoids refetching pages");
+  const warm = spawns;
+  assert.deepEqual(await auth.repositories(), [...first, last]);
+  assert.equal(spawns, warm, "a warm cache answers without spawning gh at all");
+  now = 60_001;
   login = "bob";
   await auth.repositories();
-  assert.equal(calls, 4, "switching accounts invalidates cached repositories");
-  now = 60_001;
+  assert.equal(calls, 4, "an expired cache re-verifies the account and refetches for the new login");
+  now = 120_002;
   fail = true;
   await assert.rejects(auth.repositories(), /unavailable/);
   fail = false;
@@ -252,4 +258,98 @@ function runner(initiallyLoggedIn = false) {
   assert.equal(await auth.repositories(), null, "logout never serves private cached names");
 }
 
-console.log("github-auth: login and repository pagination, cache, account isolation, and retry tests passed");
+// Two concurrent cache misses share one traversal.
+{
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let pages = 0;
+  const auth = new GithubAuth({ ghRunner: async (args) => {
+    if (args[1] === "user") return "alice\tAlice\t1";
+    if (args.some((arg) => arg.startsWith("user/repos?"))) {
+      pages++;
+      await gate;
+      return JSON.stringify([{ fullName: "alice/one", private: false }]);
+    }
+    return "";
+  } });
+  const a = auth.repositories();
+  const b = auth.repositories();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(pages, 1, "the second caller waits on the first traversal");
+  release();
+  const [x, y] = await Promise.all([a, b]);
+  assert.deepEqual(x, [{ fullName: "alice/one", private: false }]);
+  assert.equal(x, y, "both callers receive the same list");
+  assert.equal(pages, 1);
+}
+
+// A verification failure with a credential still stored is "unreachable", not
+// "disconnected": the last list is served, and without one the caller is told to retry.
+{
+  let now = 0;
+  let offline = false;
+  let stored = true;
+  const list = [{ fullName: "alice/site", private: true }];
+  const auth = new GithubAuth({ now: () => now, ghRunner: async (args) => {
+    if (args[1] === "token") {
+      if (!stored) throw new Error("no oauth token found for github.com");
+      return "gho_secret\n";
+    }
+    // gh reports an offline check as an invalid token; the text cannot tell them apart.
+    if (offline) throw new Error("The token in keyring is invalid.");
+    if (args[1] === "user") return "alice\tAlice\t1";
+    if (args.some((arg) => arg.startsWith("user/repos?"))) return JSON.stringify(list);
+    return "";
+  } });
+  assert.deepEqual(await auth.repositories(), list);
+  now = 60_001;
+  offline = true;
+  assert.deepEqual(await auth.repositories(), list, "an unreachable github serves the last list");
+  assert.deepEqual(auth.status(), { state: "disconnected" }, "the auth state machine is unchanged");
+  offline = false;
+  assert.deepEqual(await auth.repositories(), list, "reachable again: the list is refreshed");
+  assert.equal(auth.status().state, "connected");
+
+  const cold = new GithubAuth({ ghRunner: async (args) => {
+    if (args[1] === "token") { if (!stored) throw new Error("no oauth token found for github.com"); return "gho_secret\n"; }
+    throw new Error("The token in keyring is invalid.");
+  } });
+  await assert.rejects(cold.repositories(), (error: unknown) => {
+    assert.ok(error instanceof GithubUnreachableError);
+    assert.ok(!JSON.stringify({ message: error.message, stack: error.stack }).includes("gho_secret"), "the token never leaves the credential check");
+    return true;
+  });
+  stored = false;
+  assert.equal(await cold.repositories(), null, "no stored credential is genuinely disconnected");
+}
+
+// A successful device-flow login warms the repository list without blocking the login.
+{
+  const gh = runner();
+  const proc = new FakeProcess();
+  let pages = 0;
+  const run: GhRunner = async (args) => {
+    if (args.some((arg) => arg.startsWith("user/repos?"))) {
+      pages++;
+      return JSON.stringify([{ fullName: "octocat/hello", private: false }]);
+    }
+    return gh.run(args);
+  };
+  const auth = new GithubAuth({ ghRunner: run, ghSpawner: () => proc });
+  const pending = auth.connect();
+  await new Promise((r) => setImmediate(r));
+  proc.stderr.emit("data", "First copy your one-time code: ABCD-1234\n");
+  await pending;
+  gh.login();
+  proc.emit("close", 0, null);
+  await auth.settled();
+  assert.equal(auth.status().state, "connected");
+  await new Promise((r) => setImmediate(r));
+  assert.equal(pages, 1, "connecting warms the list once");
+  const spawns = gh.calls.length;
+  assert.deepEqual(await auth.repositories(), [{ fullName: "octocat/hello", private: false }]);
+  assert.equal(gh.calls.length, spawns, "the first request after connecting spawns nothing");
+  assert.equal(pages, 1);
+}
+
+console.log("github-auth: login, repository pagination, dedupe, cache, shared traversal, unreachable-vs-disconnected, warm-up, and retry tests passed");

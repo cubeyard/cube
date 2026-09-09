@@ -15,7 +15,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { checkAuth } from "@cube/harness";
 import { IncusBackend, MockBackend, type CubeBackend } from "@cube/sandbox";
 
-import { GithubAuth } from "./github-auth.ts";
+import { GithubAuth, GithubUnreachableError } from "./github-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { defaultPortalBase } from "./portal-config.ts";
 import { portalLabel, proxyHttp, proxyUpgrade, respondFailed, respondWaking, sameOriginUpgrade } from "./portal-proxy.ts";
@@ -406,12 +406,16 @@ async function api(
     return json(res, 404, { error: "not found" });
   }
 
+  // `repositories: null` means no account is connected; a stored credential
+  // that cannot be verified right now is 503 so the UI offers retry, not login.
   if (method === "GET" && url.pathname === "/api/github/repositories") {
     try {
-      const repositories = await githubAuth.repositories();
-      return json(res, 200, { repositories });
-    } catch {
-      return json(res, 502, { error: "Could not load GitHub repositories. Retry, or enter a repository manually." });
+      return json(res, 200, { repositories: await githubAuth.repositories() });
+    } catch (error) {
+      if (error instanceof GithubUnreachableError) {
+        return json(res, 503, { error: "could not reach github — retry, or enter a repository manually" });
+      }
+      return json(res, 502, { error: "could not load repositories — retry, or enter a repository manually" });
     }
   }
 
