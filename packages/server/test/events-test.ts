@@ -117,12 +117,12 @@ for (const deadline = Date.now() + 10_000; registry.getCube(cubeName)!.status !=
   await new Promise((r) => setTimeout(r, 20));
 }
 const provision = registry.listEvents({ kind: "provision", cube: cubeName }).reverse();
-assert.deepEqual(provision.map((e) => e.phase), ["seed", "instance", "proxy", "setup", null]);
+assert.deepEqual(provision.map((e) => e.phase), ["seed", "instance", "proxy", "setup", "resume", null]);
 assert.ok(provision.every((e) => e.thread === threadId), "provision events name the thread");
 assert.ok(provision.every((e) => e.ok), "a clean provision is all ok");
-assert.equal(provision[4]!.detail, "ready");
+assert.equal(provision[5]!.detail, "ready");
 assert.ok(new Set(provision.map((e) => e.op)).size === 1, "one op id for the whole provision");
-console.log("4 ok: provisioning is a span with seed/instance/proxy/setup phases");
+console.log("4 ok: provisioning is a span with seed/instance/proxy/setup/resume phases");
 
 await supervisor.sleepCube(cubeName, "idle");
 await supervisor.wakeCube(cubeName);

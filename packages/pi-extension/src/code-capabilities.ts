@@ -27,6 +27,8 @@ export interface CodeCapabilityHost {
   ): Promise<unknown>;
   ensureServices(signal: AbortSignal): Promise<unknown[]>;
   archiveThread(signal: AbortSignal): Promise<unknown>;
+  environmentStatus(signal: AbortSignal): Promise<unknown>;
+  retryEnvironmentSetup(signal: AbortSignal): Promise<unknown>;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -149,6 +151,10 @@ export function createCodeCapability(host: CodeCapabilityHost): CodeModeCapabili
         return host.ensureServices(signal);
       case "thread.archive":
         return host.archiveThread(signal);
+      case "environment.status":
+        return host.environmentStatus(signal);
+      case "environment.retrySetup":
+        return host.retryEnvironmentSetup(signal);
       default:
         throw new Error(`unknown code capability: ${operation}`);
     }
