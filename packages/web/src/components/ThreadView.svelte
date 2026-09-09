@@ -242,7 +242,6 @@
   }
 
   async function remove(): Promise<void> {
-    if (!confirm("Delete this thread? Its environment is destroyed and the conversation ends; workspace files remain on the host.")) return;
     try {
       await deleteThread(threadId);
       location.hash = "#/threads";

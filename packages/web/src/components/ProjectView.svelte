@@ -142,7 +142,6 @@
 
   async function remove(): Promise<void> {
     if (!project || project.threadCount > 0) return;
-    if (!confirm(`Delete project "${project.name}"? Its prepared repository configuration will be removed.`)) return;
     refreshSeq++;
     try {
       await deleteProject(project.id);
