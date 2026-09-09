@@ -7,16 +7,25 @@
     deleteProject,
     errorText,
     fetchProject,
+    isNotFound,
+    isUnreachable,
     updateProject,
   } from "../lib/api.ts";
+  import { createArmed } from "../lib/armed.svelte.ts";
   import { relTime } from "../lib/time.ts";
+  import { createTransient } from "../lib/transient.svelte.ts";
   import { uid } from "../lib/uid.ts";
   import type { Project, ProjectRepository } from "../lib/types.ts";
   import Onboarding from "./Onboarding.svelte";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
 
-  let { projectId, githubLogin = false }: { projectId: string; githubLogin?: boolean } = $props();
+  let { projectId, githubLogin = false, composeAt = 0 }: {
+    projectId: string;
+    githubLogin?: boolean;
+    /** App's `n` shortcut: start a thread from this project. */
+    composeAt?: number;
+  } = $props();
   const isNew = $derived(projectId === "new");
   type RepositoryDraft = { key: string; url: string; base: string; checkoutName: string };
 
@@ -28,9 +37,13 @@
   let dirty = $state(untrack(() => projectId === "new"));
   let loaded = $state(untrack(() => projectId === "new"));
   let error = $state<string | null>(null);
+  // The host said this id does not exist — as opposed to not answering.
+  let notFound = $state(false);
   let saving = $state(false);
   let checking = $state(false);
   let starting = $state(false);
+  // "saved" / "checked", printed beside the key that just succeeded.
+  const done = createTransient();
 
   function loadForm(fresh: Project): void {
     project = fresh;
@@ -54,9 +67,13 @@
       if (resetForm || !project || !dirty) loadForm(fresh);
       else project = fresh;
       error = null;
+      notFound = false;
     } catch (e) {
       if (seq !== refreshSeq) return;
-      error = errorText(e);
+      if (isNotFound(e)) notFound = true;
+      // A lost host while the project is on screen is the app's strip to
+      // report; before the first load it is this view's retry block.
+      else if (!isUnreachable(e) || !project) error = errorText(e);
     }
     loaded = true;
   }
@@ -65,6 +82,10 @@
     refresh(true);
     const timer = setInterval(refresh, 2000);
     return () => clearInterval(timer);
+  });
+
+  $effect(() => {
+    document.title = `${isNew ? "new project" : (project?.name ?? "project")} · cube`;
   });
 
   function changed(): void {
@@ -105,6 +126,7 @@
         location.hash = `#/projects/${created.id}`;
       } else {
         loadForm(await updateProject(projectId, payload()));
+        done.set("saved");
       }
     } catch (e) {
       error = errorText(e);
@@ -120,6 +142,7 @@
     try {
       project = await checkProject(projectId);
       await refresh();
+      done.set("checked");
     } catch (e) {
       error = errorText(e);
     } finally {
@@ -140,16 +163,44 @@
     }
   }
 
+  $effect(() => {
+    if (composeAt && Date.now() - composeAt < 2000) void startThread();
+  });
+
+  // ---- delete: two presses on the same key, never a dialog ----
+  const armed = createArmed();
+  let deleting = $state(false);
   async function remove(): Promise<void> {
-    if (!project || project.threadCount > 0) return;
+    if (!project || project.threadCount > 0 || deleting) return;
+    if (!armed.press("project")) return;
+    deleting = true;
     refreshSeq++;
     try {
       await deleteProject(project.id);
       location.hash = "#/projects";
     } catch (e) {
       error = `delete: ${errorText(e)}`;
+      deleting = false;
     }
   }
+
+  // Every disabled key prints its reason; a title alone is invisible on a
+  // phone and to anyone who does not hover.
+  const checkDisabled = $derived(checking || dirty || project?.status === "checking");
+  const startDisabled = $derived(starting || dirty || project?.status !== "ready");
+  const workReason = $derived(
+    !project || (!checkDisabled && !startDisabled) ? null
+    : dirty ? "save your changes first"
+    : checking || project.status === "checking" ? "checking the repositories…"
+    : project.status === "error" ? "new thread waits for a passing check"
+    : null,
+  );
+  const deleteDisabled = $derived(!project || project.threadCount > 0 || project.status === "checking" || deleting);
+  const deleteReason = $derived(
+    !project || !deleteDisabled || deleting ? null
+    : project.threadCount > 0 ? `delete its ${project.threadCount === 1 ? "thread" : `${project.threadCount} threads`} first`
+    : "wait for the check to finish",
+  );
 
   const evidence = (index: number): ProjectRepository | null => project?.repositories[index] ?? null;
   const lampClass = (status: ProjectRepository["status"] | undefined) =>
@@ -177,7 +228,17 @@
   {#if !loaded}
     <p class="loading">loading…</p>
   {:else if !project && !isNew}
-    <p class="loading">no such project{error ? ` — ${error}` : ""}</p>
+    {#if notFound}
+      <div class="empty-state">
+        <p class="hint">No such project — it may have been deleted.</p>
+        <a class="key" href="#/projects">back to projects</a>
+      </div>
+    {:else}
+      <div class="empty-state" role="status">
+        <p class="hint">{error ?? "can't reach the host — it may be starting or restarting"}<br />retrying…</p>
+        <button class="key" onclick={() => refresh(true)}>retry now</button>
+      </div>
+    {/if}
   {:else}
     <div class="project-detail-head">
       <div>
@@ -195,9 +256,16 @@
       {/if}
     </div>
 
-    {#if error}<div class="banner">{error}</div>{/if}
+    {#if error}
+      <div class="banner" role="alert">
+        <span class="banner-text">{error}</span>
+        <button class="key icon note-dismiss" title="dismiss" aria-label="dismiss error" onclick={() => (error = null)}>
+          <Icon name="close" size={12} />
+        </button>
+      </div>
+    {/if}
     {#if project?.error && !dirty && !project.repositories.some((repository) => repository.error && project?.error === `${repository.checkoutName}: ${repository.error}`)}
-      <div class="banner">{project.error}</div>
+      <div class="banner"><span class="banner-text">{project.error}</span></div>
     {/if}
 
     <section class="project-config" aria-label="project configuration">
@@ -299,23 +367,37 @@
       <button class="key primary" onclick={save} disabled={saving || !dirty}>
         {saving ? "saving…" : isNew ? "save & check" : "save changes"}
       </button>
+      {#if done.value === "saved"}<span class="key-reason" role="status">saved</span>{/if}
       {#if project}
-        <button class="key" onclick={recheck} disabled={checking || dirty || project.status === "checking"}>
+        <button class="key" onclick={recheck} disabled={checkDisabled}>
           <Icon name="refresh" size={13} />{checking ? "checking…" : "check now"}
         </button>
-        <button class="key" onclick={startThread} disabled={starting || dirty || project.status !== "ready"}>
+        {#if done.value === "checked"}<span class="key-reason" role="status">checked</span>{/if}
+        <button class="key" onclick={startThread} disabled={startDisabled}>
           <Icon name="plus" size={13} />{starting ? "starting…" : "new thread"}
         </button>
+        {#if workReason}<span class="key-reason">{workReason}</span>{/if}
         <a class="key" href="#/threads?project={encodeURIComponent(project.id)}">
           {project.threadCount} {project.threadCount === 1 ? "thread" : "threads"}
         </a>
         <span class="action-spacer"></span>
-        <button
-          class="key danger-text"
-          onclick={remove}
-          disabled={project.threadCount > 0 || project.status === "checking"}
-          title={project.threadCount > 0 ? "delete the project's threads first" : "delete project"}
-        >delete project</button>
+        <span class="action-group">
+          {#if armed.is("project")}
+            <span class="key-reason bad" role="status">the project and its repository checks are removed; threads must be deleted first</span>
+          {:else if deleteReason}
+            <span class="key-reason">{deleteReason}</span>
+          {/if}
+          <button
+            class="key danger-text"
+            class:armed={armed.is("project")}
+            onclick={remove}
+            onkeydown={armed.onKeydown}
+            onblur={() => armed.disarm()}
+            disabled={deleteDisabled}
+            title={armed.is("project") ? "press again to delete this project" : "delete project"}
+            aria-label={armed.is("project") ? "confirm: delete this project" : "delete project"}
+          >{deleting ? "deleting…" : armed.is("project") ? "delete?" : "delete project"}</button>
+        </span>
       {/if}
     </div>
   {/if}
