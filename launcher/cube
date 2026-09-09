@@ -653,7 +653,7 @@ wait_step() {
   local label="$1" max="$2" t=0
   shift 2
   while ! "$@" >/dev/null 2>&1; do
-    [ "$t" -ge "$max" ] && { [ -t 1 ] && printf '\r'; return 1; }
+    [ "$t" -ge "$max" ] && { [ -t 1 ] && printf '\r\033[K'; return 1; }
     [ -t 1 ] && printf '\r   %-14s %3ds' "$label" "$t"
     sleep 2; t=$((t+2))
   done
@@ -661,13 +661,33 @@ wait_step() {
   printf '   %-14s %3ds\n' "$label" "$t"
 }
 cubed_up() { curl -fsS -o /dev/null "http://127.0.0.1:$CUBE_PORT/api/threads"; }
-wait_ssh()   { wait_step "ssh" 180 vm_ssh true || { fail "VM never became reachable over ssh (console: $RUN_LOG)"; return 1; }; }
-wait_cubed() { wait_step "cubed" 90 cubed_up    || { fail "cubed never answered on :$CUBE_PORT — check: cube logs"; return 1; }; }
+pid_gone() { ! kill -0 "$1" 2>/dev/null; }
+console_tail() {  # the last lines of the serial console, when a boot goes quiet
+  [ -s "$RUN_LOG" ] || return 0
+  {
+    printf '   last lines of the console (%s):\n' "$RUN_LOG"
+    tail -20 "$RUN_LOG" | strip_console | sed 's/^/   | /'
+  } >&2
+}
+wait_ssh() {
+  wait_step "ssh" 180 vm_ssh true && return 0
+  fail "the VM did not answer over ssh within 3 minutes"
+  console_tail
+  note "to start over: cube down, then cube up"
+  return 1
+}
+wait_cubed() {
+  wait_step "cubed" 90 cubed_up && return 0
+  fail "cubed did not answer on :$CUBE_PORT within 90 seconds"
+  console_tail
+  note "next: cube logs, or cube diagnose"
+  return 1
+}
 
-print_url() {
+print_url() {  # print_url [first]
   echo
   ok "cube is up — open $CUBED_URL"
-  note "first run: the page walks you through setup"
+  [ -z "${1:-}" ] || note "first run: the page walks you through setup"
 }
 
 verify_pristine() {  # verify_pristine SHA ROLE — the store is content-addressed, but a filename is not a checksum
@@ -741,6 +761,7 @@ boot_vm() {  # boot_vm vX.Y.Z — the VM for the installed release, from overlay
   vm_boot_args || return 1
   vm_disk_args "$(pristine_path "$node_sha" node)" "$RUN_SEED"
   save_config
+  [ -f "$RUN_LOG" ] && mv -f "$RUN_LOG" "$RUN_LOG.1"   # keep the previous boot's console
   log "booting cube $ver (console -> $RUN_LOG)"
   "$QEMU_BIN" "${VM_BOOT_ARGS[@]}" \
     "${VM_DISK_ARGS[@]}" \
@@ -866,15 +887,12 @@ stop_vm() {  # graceful stop; FAILS (returns 1) while qemu still holds disks
     return 0
   fi
   if vm_ssh true 2>/dev/null && check_identity >/dev/null 2>&1; then
-    log "powering off"
     vm_ssh 'sudo poweroff' 2>/dev/null || true
   fi
-  for _ in $(seq 30); do kill -0 "$pid" 2>/dev/null || break; sleep 2; done
-  if kill -0 "$pid" 2>/dev/null; then
-    fail "VM still running after 60s — killing it"
+  if ! wait_step "powering off" 60 pid_gone "$pid"; then
+    fail "the VM is still running after 60s — killing it"
     kill "$pid" 2>/dev/null || true
-    for _ in $(seq 10); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-    kill -0 "$pid" 2>/dev/null && { fail "qemu (pid $pid) would not die"; return 1; }
+    wait_step "killing" 10 pid_gone "$pid" || { fail "qemu (pid $pid) would not die"; return 1; }
   fi
   rm -f "$PID_FILE"
   return 0
