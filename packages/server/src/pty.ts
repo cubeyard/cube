@@ -43,6 +43,8 @@ export interface TerminalHost {
   /** Activity signal (throttled by the bridge): terminal I/O counts like a
    * prompt for idle-sleep purposes. */
   activity(threadId: string): void;
+  /** Lifecycle record (events.ts): spawn timing, exit code, reaps. */
+  event?(input: { thread: string; phase: "spawn" | "exit" | "reap"; ok: boolean; ms?: number; detail?: string }): void;
 }
 
 export interface TerminalHandle {
@@ -159,6 +161,8 @@ export class PiTerminals {
 
   private async start(session: TerminalSession): Promise<void> {
     session.starting = true;
+    const started = performance.now();
+    const elapsed = () => Math.round(performance.now() - started);
     try {
       const plan = await this.host.plan(session.threadId, (text) => {
         session.lastStatus = text;
@@ -183,6 +187,7 @@ export class PiTerminals {
       });
       session.proc = proc;
       session.lastStatus = null;
+      this.host.event?.({ thread: session.threadId, phase: "spawn", ok: true, ms: elapsed() });
       this.broadcast(session, control({ t: "spawned" }));
       proc.onData((chunk) => {
         const buf = Buffer.from(chunk, "utf8");
@@ -196,14 +201,20 @@ export class PiTerminals {
       });
       proc.onExit(({ exitCode }) => {
         if (this.sessions.get(session.threadId) !== session) return;
+        this.host.event?.({
+          thread: session.threadId,
+          phase: "exit",
+          ok: exitCode === 0,
+          ms: elapsed(),
+          detail: `exit ${exitCode}`,
+        });
         this.teardown(session, { t: "exit", code: exitCode });
       });
     } catch (error) {
       if (this.sessions.get(session.threadId) !== session) return;
-      this.teardown(session, {
-        t: "error",
-        text: error instanceof Error ? error.message : String(error),
-      });
+      const text = error instanceof Error ? error.message : String(error);
+      this.host.event?.({ thread: session.threadId, phase: "spawn", ok: false, ms: elapsed(), detail: text });
+      this.teardown(session, { t: "error", text });
     } finally {
       session.starting = false;
     }
@@ -224,7 +235,9 @@ export class PiTerminals {
     // laptops, in-flight agent turns), then reap.
     if (session.linger) clearTimeout(session.linger);
     session.linger = setTimeout(() => {
-      if (this.sessions.get(session.threadId) === session) this.kill(session.threadId);
+      if (this.sessions.get(session.threadId) !== session) return;
+      this.host.event?.({ thread: session.threadId, phase: "reap", ok: true, detail: `no client for ${Math.round(this.lingerMs / 60_000)} min` });
+      this.kill(session.threadId);
     }, this.lingerMs);
     session.linger.unref();
   }
