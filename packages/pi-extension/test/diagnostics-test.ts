@@ -72,7 +72,7 @@ try {
   await fs.rm(path.join(directory, "session.jsonl"));
   await assert.rejects(exec(process.execPath, [cli, "--export", "../escape"], { env: { PATH: process.env.PATH, HOME: tmp } }));
 
-  const launcher = `source launcher/cube; touch "$SSH_KEY"; vm_ssh() { printf '%s\\n' "$@"; }; cmd_ssh() { printf 'interactive\\n%s\\n' "$*"; read -r line; printf '%s\\n' "$line"; }; cmd_diagnose "$@"`;
+  const launcher = `source launcher/cube; touch "$SSH_KEY"; require_vm() { :; }; vm_ssh() { printf '%s\\n' "$@"; }; cmd_ssh() { printf 'interactive\\n%s\\n' "$*"; read -r line; printf '%s\\n' "$line"; }; cmd_diagnose "$@"`;
   const shellEnv = { PATH: process.env.PATH, HOME: tmp, CUBE_HOME: tmp, CUBE_LIB_ONLY: "1" };
   const forwarded = (await exec("bash", ["-c", launcher, "test", "--export", id], { cwd: repo, env: shellEnv })).stdout;
   assert.equal(forwarded, `sh\n/opt/cube/app/scripts/diagnose.sh\n--export\n${id}\n`);

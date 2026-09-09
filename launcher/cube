@@ -966,20 +966,64 @@ cmd_status() {
   check_update
 }
 
+require_vm() {  # the ssh- and http-backed commands need a running VM
+  vm_pid >/dev/null || { fail "the VM is not running — run: cube up"; return 1; }
+}
 cmd_ssh() {
   [ -f "$SSH_KEY" ] || { fail "no key yet — run: cube up"; exit 1; }
+  require_vm || exit 1
   exec ssh -t -p "$SSH_PORT" -i "$SSH_KEY" \
     -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$KNOWN_HOSTS" \
     -o LogLevel=ERROR cube@127.0.0.1 "$@"
 }
-cmd_logs() { cmd_ssh journalctl -u cubed -n 100 -f; }
+cmd_logs() {  # cmd_logs [journalctl args] — default -n 100 -f; the console while down
+  [ $# -gt 0 ] || set -- -n 100 -f
+  if vm_pid >/dev/null; then
+    if vm_ssh true 2>/dev/null; then cmd_ssh journalctl -u cubed "$@"; fi
+    note "the VM is running but ssh is not answering — showing the console instead"
+  else
+    [ -s "$RUN_LOG" ] || { fail "the VM is not running — run: cube up"; return 1; }
+    note "the VM is not running (run: cube up) — showing the last console log instead"
+  fi
+  [ -s "$RUN_LOG" ] || { fail "no console log yet ($RUN_LOG)"; return 1; }
+  note "$RUN_LOG, last 100 lines:"
+  tail -n 100 "$RUN_LOG" | strip_console
+}
+
+since_ms() {  # since_ms 30m|24h|7d -> epoch milliseconds, that long ago
+  local n="${1%?}" unit secs
+  unit="${1#"$n"}"
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  case "$unit" in m) secs=$((n * 60)) ;; h) secs=$((n * 3600)) ;; d) secs=$((n * 86400)) ;; *) return 1 ;; esac
+  printf '%s' "$(( ($(date +%s) - secs) * 1000 ))"
+}
+cmd_events() {  # cmd_events [--json] [--limit N] [--kind K] [--since 24h] — cubed formats it
+  local fmt=text limit=200 q="" ms
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json)  fmt=json ;;
+      --limit) case "${2:-}" in ''|*[!0-9]*) fail "--limit takes a number"; return 1 ;; esac
+               limit="$2"; shift ;;
+      --kind)  case "${2:-}" in ''|*[!A-Za-z0-9_.-]*) fail "--kind takes a name such as provision or wake"; return 1 ;; esac
+               q="$q&kind=$2"; shift ;;
+      --since) ms="$(since_ms "${2:-}")" || { fail "--since takes a duration such as 30m, 24h or 7d"; return 1; }
+               q="$q&since=$ms"; shift ;;
+      *) fail "unknown option: $1 (cube events [--json] [--limit N] [--kind K] [--since 24h])"; return 1 ;;
+    esac
+    shift
+  done
+  require_vm || return 1
+  curl -fsS "http://127.0.0.1:$CUBE_PORT/api/events?format=$fmt&limit=$limit$q" \
+    || { fail "cubed did not answer on :$CUBE_PORT (a release without /api/events? see: cube status)"; return 1; }
+}
 
 cmd_diagnose() {
   local id
   [ -f "$SSH_KEY" ] || { fail "no key yet — run: cube up"; return 1; }
+  require_vm || return 1
   case "$#:${1:-}" in
     0:) cmd_ssh sh /opt/cube/app/scripts/diagnose.sh ;;
-    1:--collect-only|1:--help)
+    1:--collect-only)
       vm_ssh sh /opt/cube/app/scripts/diagnose.sh "$1" </dev/null
       ;;
     2:--export)
@@ -990,7 +1034,7 @@ cmd_diagnose() {
       vm_ssh sh /opt/cube/app/scripts/diagnose.sh --export "$id" </dev/null
       ;;
     *)
-      fail "usage: cube diagnose [--collect-only | --export <id> | --help]"
+      fail "usage: cube diagnose [--collect-only | --export <id>]"
       return 1
       ;;
   esac
