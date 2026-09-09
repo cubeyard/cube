@@ -505,16 +505,26 @@ release_assets() {  # release_assets TAG
   printf '%s\n' "$ASSETS_TABLE"
 }
 
-# download URL DEST [BYTES] — resumable, with a progress bar. A partial
-# file next to DEST is resumed, so a dropped connection costs nothing.
-download() {
-  local url="$1" dest="$2" tok
-  tok="$(gh_token)"
+# download URL DEST [NAME] — resumable, with a progress bar. A partial
+# file next to DEST is resumed, so a dropped connection costs nothing;
+# when the server will not resume it, the partial is dropped and the
+# download starts over, once.
+curl_asset() {  # curl_asset URL PARTFILE TOKEN
   curl -fL --progress-bar -C - --retry 3 --retry-delay 2 \
     -H "Accept: application/octet-stream" \
-    ${tok:+-H "Authorization: Bearer $tok"} \
-    -o "$dest.part" "$url" \
-    || { fail "download failed: $url"; return 1; }
+    ${3:+-H "Authorization: Bearer $3"} \
+    -o "$2" "$1"
+}
+download() {
+  local url="$1" dest="$2" name="${3:-${2##*/}}" tok resumed=""
+  tok="$(gh_token)"
+  [ -f "$dest.part" ] && resumed=1
+  if ! curl_asset "$url" "$dest.part" "$tok"; then
+    [ -n "$resumed" ] || { fail "download failed: $name"; return 1; }
+    note "could not resume $name — starting it over"
+    rm -f "$dest.part"
+    curl_asset "$url" "$dest.part" "$tok" || { fail "download failed: $name"; return 1; }
+  fi
   mv "$dest.part" "$dest"
 }
 
@@ -529,7 +539,7 @@ fetch_asset() {  # fetch_asset TAG NAME DEST_FILE — from CUBE_RELEASE_DIR or G
   [ -n "$row" ] || { fail "release $tag has no asset named $name"; return 1; }
   url="$(printf '%s' "$row" | cut -f2)"; bytes="$(printf '%s' "$row" | cut -f3)"
   printf '   %-40s %s\n' "$name" "$(mb "$bytes")"
-  download "$url" "$dest"
+  download "$url" "$dest" "$name"
 }
 
 # The manifest is small and authoritative: fetched first, verified
