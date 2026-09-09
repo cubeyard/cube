@@ -121,6 +121,13 @@ vm_ssh 'tar -xf - -C /opt/cube/app' < "$ARCHIVE"
 # and must never be interpolated into remote shell source.
 printf '%s %s %s\n' "$DESC" "$BRANCH" "$STAMP" | vm_ssh 'cat > /opt/cube/app/.deployed-tree'
 
+# ---- workspace packages that no longer exist -------------------------------
+# Deleted files linger (documented), but a lingering PACKAGE breaks pnpm's
+# frozen install (a stale package.json disagrees with the lockfile), so
+# workspace packages removed from the tree are removed in the VM too.
+LOCAL_PACKAGES="$(ls -1 packages | tr '\n' ' ')"
+printf '%s\n' "$LOCAL_PACKAGES" | vm_ssh 'read -r keep; cd /opt/cube/app/packages && for p in *; do case " $keep " in *" $p "*) ;; *) echo "   removing stale package: $p"; rm -rf -- "$p" ;; esac; done'
+
 # ---- dependencies ----------------------------------------------------------
 LOCAL_LOCK="$(sha256sum pnpm-lock.yaml 2>/dev/null | cut -c1-16 || shasum -a 256 pnpm-lock.yaml | cut -c1-16)"
 VM_LOCK="$(vm_ssh 'cat /opt/cube/app/.deployed-lock 2>/dev/null' || true)"
