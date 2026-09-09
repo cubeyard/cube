@@ -161,13 +161,24 @@ file_size() { stat -c%s "$@" 2>/dev/null || stat -f%z "$@"; }
 free_kb()   { df -Pk "$1" | awk 'NR==2 {print $4}'; }
 
 lock() {  # one lifecycle command at a time
+  local holder
   if command -v flock >/dev/null 2>&1; then
-    exec 9>"$CUBE_HOME/.lock"
+    { exec 9>"$CUBE_HOME/.lock"; } 2>/dev/null \
+      || { fail "cannot write $CUBE_HOME/.lock — is $CUBE_HOME writable?"; exit 1; }
     flock -n 9 || { fail "another cube command is running"; exit 1; }
-  else
-    shlock -f "$CUBE_HOME/.lock.pid" -p $$ \
-      || { fail "another cube command is running"; exit 1; }
+  elif command -v shlock >/dev/null 2>&1; then   # macOS
+    if ! shlock -f "$CUBE_HOME/.lock.pid" -p $$; then
+      holder="$(cat "$CUBE_HOME/.lock.pid" 2>/dev/null || true)"
+      if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+        fail "another cube command is running (pid $holder)"
+      else
+        fail "cannot write $CUBE_HOME/.lock.pid — is $CUBE_HOME writable?"
+      fi
+      exit 1
+    fi
     trap 'rm -f "$CUBE_HOME/.lock.pid"' EXIT
+  else
+    fail "neither flock nor shlock found — cannot take the lifecycle lock"; exit 1
   fi
 }
 
@@ -571,18 +582,20 @@ fetch_role() {
 
 # Bytes still to download for the given roles of a version.
 bytes_needed() {  # bytes_needed vX.Y.Z ROLE...
-  local ver="$1" role total=0
+  local ver="$1" role b total=0
   shift
   for role in "$@"; do
-    [ -f "$(pristine_path "$(artifact_sha "$ver" "$role")" "$role")" ] \
-      || total=$(( total + $(artifact_bytes "$ver" "$role") ))
+    [ -f "$(pristine_path "$(artifact_sha "$ver" "$role")" "$role")" ] && continue
+    b="$(artifact_bytes "$ver" "$role")"
+    case "$b" in ''|*[!0-9]*) b=0 ;; esac   # a manifest without *_bytes is not a syntax error
+    total=$(( total + b ))
   done
   printf '%s' "$total"
 }
 preflight_space() {  # preflight_space BYTES_TO_DOWNLOAD
   local need_kb have_kb
-  need_kb=$(( $1 / 1024 + 2 * 1024 * 1024 ))     # + 2 GB for overlays and the data disk to grow into
-  have_kb="$(free_kb "$CUBE_HOME")"
+  need_kb=$(( ${1:-0} / 1024 + 2 * 1024 * 1024 ))     # + 2 GB for overlays and the data disk to grow into
+  have_kb="$(free_kb "$CUBE_HOME")"; have_kb="${have_kb:-0}"
   [ "$have_kb" -ge "$need_kb" ] \
     || { fail "not enough free space in $CUBE_HOME: need ~$(( need_kb / 1024 )) MB, have $(( have_kb / 1024 )) MB"; return 1; }
 }
