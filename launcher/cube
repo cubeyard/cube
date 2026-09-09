@@ -68,10 +68,15 @@ ENV_MEM="${CUBE_MEM:-}"; ENV_CPUS="${CUBE_CPUS:-}"; ENV_DATA="${CUBE_DATA_SIZE:-
 CUBE_PORT=""; CUBE_SSH_PORT=""; CUBE_BIND=""; CUBE_MEM=""; CUBE_CPUS=""; CUBE_DATA_SIZE=""
 # shellcheck disable=SC1090
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+# What the VM was last booted with — the drift check compares against it.
+SAVED_PORT="$CUBE_PORT"; SAVED_SSH_PORT="$CUBE_SSH_PORT"; SAVED_BIND="$CUBE_BIND"
+SAVED_MEM="$CUBE_MEM"; SAVED_CPUS="$CUBE_CPUS"
 CUBE_PORT="${ENV_PORT:-$CUBE_PORT}"; CUBE_SSH_PORT="${ENV_SSH_PORT:-$CUBE_SSH_PORT}"
 CUBE_BIND="${ENV_BIND:-$CUBE_BIND}"; CUBE_MEM="${ENV_MEM:-$CUBE_MEM}"
 CUBE_CPUS="${ENV_CPUS:-$CUBE_CPUS}"; CUBE_DATA_SIZE="${ENV_DATA:-$CUBE_DATA_SIZE}"
-PORT_CHOSEN="${CUBE_PORT:+1}"; SSH_PORT_CHOSEN="${CUBE_SSH_PORT:+1}"   # explicit, or free to move
+# Only a port set in the environment is "chosen"; one read back from the
+# config was picked by an earlier run and is free to move again if taken.
+PORT_CHOSEN="${ENV_PORT:+1}"; SSH_PORT_CHOSEN="${ENV_SSH_PORT:+1}"
 CUBE_PORT="${CUBE_PORT:-7777}"
 SSH_PORT="${CUBE_SSH_PORT:-2222}"
 VM_MEM="${CUBE_MEM:-8G}"
@@ -326,17 +331,20 @@ next_free_port() {  # next_free_port FROM — first free port in FROM..FROM+49
 }
 # A port nobody chose explicitly moves to the next free one (a dev
 # laptop's 7777 is usually taken by other VM tooling); a chosen port
-# that is busy is an error naming the holder and the knob.
+# that is busy is an error naming the holder and the knob. Cheap and
+# idempotent: cmd_up runs it before the first download, boot_vm again
+# right before qemu binds.
 settle_ports() {
-  local who
+  local who from
   if port_busy "$CUBE_PORT"; then
     if [ -n "$PORT_CHOSEN" ]; then
       who="$(port_holder "$CUBE_PORT")"
       fail "port $CUBE_PORT (product) is in use on 127.0.0.1${who:+ by $who} — free it, or set CUBE_PORT to another port"
       return 1
     fi
-    CUBE_PORT="$(next_free_port "$CUBE_PORT")" || { fail "no free product port in 7777..7826"; return 1; }
-    note "port 7777 is taken — using $CUBE_PORT (kept in $CONFIG_FILE)"
+    from="$CUBE_PORT"
+    CUBE_PORT="$(next_free_port "$from")" || { fail "no free product port in $from..$((from + 49))"; return 1; }
+    note "port $from is taken — using $CUBE_PORT (kept in $CONFIG_FILE)"
   fi
   if port_busy "$SSH_PORT"; then
     if [ -n "$SSH_PORT_CHOSEN" ]; then
@@ -344,10 +352,26 @@ settle_ports() {
       fail "port $SSH_PORT (admin ssh) is in use on 127.0.0.1${who:+ by $who} — free it, or set CUBE_SSH_PORT to another port"
       return 1
     fi
-    SSH_PORT="$(next_free_port "$SSH_PORT")" || { fail "no free ssh port in 2222..2271"; return 1; }
-    note "port 2222 is taken — using $SSH_PORT for ssh (kept in $CONFIG_FILE)"
+    from="$SSH_PORT"
+    SSH_PORT="$(next_free_port "$from")" || { fail "no free ssh port in $from..$((from + 49))"; return 1; }
+    note "port $from is taken — using $SSH_PORT for ssh (kept in $CONFIG_FILE)"
   fi
   CUBED_URL="http://$CUBED_HOST:$CUBE_PORT"
+}
+
+# The VM runs with the settings it was booted with (saved in the config);
+# an environment override asking for something else needs a restart —
+# printing a URL that does not answer would be worse.
+settings_unchanged() {
+  local changed=""
+  [ -n "$ENV_PORT" ]     && [ "$ENV_PORT" != "$SAVED_PORT" ]         && changed="$changed CUBE_PORT"
+  [ -n "$ENV_SSH_PORT" ] && [ "$ENV_SSH_PORT" != "$SAVED_SSH_PORT" ] && changed="$changed CUBE_SSH_PORT"
+  [ -n "$ENV_BIND" ]     && [ "$ENV_BIND" != "$SAVED_BIND" ]         && changed="$changed CUBE_BIND"
+  [ -n "$ENV_MEM" ]      && [ "$ENV_MEM" != "$SAVED_MEM" ]           && changed="$changed CUBE_MEM"
+  [ -n "$ENV_CPUS" ]     && [ "$ENV_CPUS" != "$SAVED_CPUS" ]         && changed="$changed CUBE_CPUS"
+  [ -z "$changed" ] && return 0
+  fail "${changed# } changed while the VM is running — run: cube down, then cube up"
+  return 1
 }
 
 vm_ssh() {
