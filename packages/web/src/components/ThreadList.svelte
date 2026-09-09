@@ -81,7 +81,6 @@
   }
 
   async function remove(thread: ThreadSummary): Promise<void> {
-    if (!confirm(`Delete thread "${thread.title ?? "untitled"}"? Its environment is destroyed and the thread disappears; workspace files remain on the host.`)) return;
     try {
       await deleteThread(thread.id);
       actionError = null;
