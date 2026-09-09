@@ -8,11 +8,14 @@
     repository,
     repositoriesReady,
     repositoriesError,
+    onRetryRepositories = () => {},
   }: {
     threadId: string;
     repository: ThreadRepository | null;
     repositoriesReady: boolean;
     repositoriesError: string | null;
+    /** The repository bank could not be read — ask the thread view again. */
+    onRetryRepositories?: () => void;
   } = $props();
 
   type ChangeLayer = "committed" | "staged" | "unstaged";
@@ -54,12 +57,18 @@
   let refreshing = $state(false);
   let openChangeId = $state<string | null>(null);
   let untrackedFiles = $state<Record<string, UntrackedContent>>({});
+  // On a phone the pane is a sheet under the terminal, folded until asked
+  // for; on a desktop the fold has no effect (the bay is always open).
+  let collapsed = $state(true);
   let diffRequest = 0;
   // Repository polling replaces the repository object even when the selected
   // repository is unchanged. Keep effects keyed to its stable ID so each
   // metadata poll does not clear and reload the visible diff.
   const repositoryId = $derived(repository?.id);
   const UNTRACKED_PREVIEW_MAX_BYTES = 1_000_000;
+
+  /** "owner/name" for the pane head — the full URL lives in the project. */
+  const repoShort = (url: string) => url.replace(/\.git$/, "").split("/").filter(Boolean).slice(-2).join("/");
 
   /** Git emits one `diff --git` section per numstat row, in the same order. */
   function splitPatch(patch: string): string[] {
@@ -158,6 +167,8 @@
     return groups.filter((group) => group.changes.length > 0);
   });
 
+  const changeCount = $derived(changeGroups.reduce((sum, group) => sum + group.changes.length, 0));
+
   const anyTruncated = $derived(
     Boolean(diff?.committed.truncated || diff?.staged.truncated || diff?.unstaged.truncated),
   );
@@ -172,8 +183,19 @@
       return true;
     };
     try {
-      const response = await fetch(repositoryFileUrl(threadId, requestedRepositoryId, path));
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      let response: Response;
+      try {
+        response = await fetch(repositoryFileUrl(threadId, requestedRepositoryId, path));
+      } catch {
+        throw new Error("can't reach the host — try again in a moment");
+      }
+      if (!response.ok) {
+        throw new Error(
+          response.status === 404
+            ? "the file is no longer in the workspace — reopen it after the next refresh"
+            : "the host could not read the file — try again in a moment",
+        );
+      }
 
       const size = Number(response.headers.get("content-length"));
       if (Number.isFinite(size) && size > UNTRACKED_PREVIEW_MAX_BYTES) {
@@ -207,7 +229,7 @@
     } catch (error) {
       update({
         kind: "message",
-        text: `new file unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        text: `new file unavailable — ${error instanceof Error ? error.message : String(error)}`,
       });
     }
   }
@@ -271,32 +293,37 @@
   }
 </script>
 
-<aside class="workspace-pane changes-pane" aria-label="workspace">
-  <div class="workspace-pane-head workspace-tabs">
-    <div class="tab-bank">
-      <span class="workspace-tab active">changes</span>
-    </div>
-    <span class="pane-meta" title={repository?.url}>workspace</span>
+<aside class="workspace-pane changes-pane" class:collapsed aria-label="workspace changes">
+  <div class="workspace-pane-head">
+    <h2>changes{#if diff && changeCount > 0}<span class="pane-count"> · {changeCount}</span>{/if}</h2>
+    {#if repository}<span class="pane-meta">{repoShort(repository.url)}</span>{/if}
+    <button
+      class="key sheet-toggle"
+      aria-expanded={!collapsed}
+      aria-controls="changes-panel"
+      onclick={() => (collapsed = !collapsed)}
+    >{collapsed ? "show" : "hide"}</button>
   </div>
 
     <div class="changes-body" id="changes-panel" aria-busy={refreshing && !diff}>
       {#if repositoriesError && !repositoriesReady}
         <div class="changes-state bad">
-          <p>repositories unavailable: {repositoriesError}</p>
+          <p>repositories unavailable — {repositoriesError}</p>
+          <button class="key" onclick={onRetryRepositories}>retry</button>
         </div>
       {:else if !repositoriesReady}
         <div class="changes-state"><p>reading repositories…</p></div>
       {:else if !repository}
-        <div class="changes-state"><p>this thread has no repository.</p></div>
+        <div class="changes-state"><p>This thread has no repository.</p></div>
       {:else if diffError && !diff}
         <div class="changes-state bad">
-          <p>changes unavailable: {diffError}</p>
+          <p>changes unavailable — {diffError}</p>
           <button class="key" onclick={refresh}>retry</button>
         </div>
       {:else if !diff}
         <div class="changes-state"><p>reading changes…</p></div>
       {:else if changeGroups.length === 0}
-        <div class="changes-state"><p>no changes yet — the working tree matches its base.</p></div>
+        <div class="changes-state"><p>No changes yet — the working tree matches its base.</p></div>
       {:else}
         {#if diffError}
           <p class="changes-notice bad">refresh failed — showing the last result</p>
