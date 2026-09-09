@@ -266,6 +266,18 @@ export class CubeSupervisor {
     return new Span(this.registry, { kind, cube: name, thread: () => this.threadIdFor(name) });
   }
 
+  /** Directories under cubesRoot that no cube row claims. */
+  private orphanHostTrees(): string[] {
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(this.config.cubesRoot);
+    } catch {
+      return [];
+    }
+    const live = new Set(this.registry.listCubes().map((cube) => cube.name));
+    return entries.filter((entry) => !live.has(entry) && !entry.startsWith(".")).sort();
+  }
+
   /** What a still-provisioning cube is doing right now, from the phases its
    * provision span has completed so far, with elapsed minutes once it has
    * been a while (the setup script alone may run for many). */
@@ -352,6 +364,18 @@ export class CubeSupervisor {
     await this.environments?.prune().catch((error) => console.warn(`environment eviction: ${String(error)}`));
     const pruned = this.registry.pruneEvents(EVENT_RETENTION_MS);
     recordPoint(this.registry, { kind: "boot", detail: `cubed start; pruned ${pruned} old events` });
+    // Host trees with no registry row are disk that nothing will ever free.
+    // Named, never deleted here: a registry moved aside must not turn boot
+    // into a wipe of every workspace.
+    const orphans = this.orphanHostTrees();
+    if (orphans.length > 0) {
+      recordPoint(this.registry, {
+        kind: "boot",
+        phase: "orphans",
+        ok: false,
+        detail: `${orphans.length} host tree(s) under ${this.config.cubesRoot} belong to no thread: ${orphans.slice(0, 8).join(" ")}${orphans.length > 8 ? " …" : ""}`,
+      });
+    }
     for (const cube of this.registry.listCubes()) {
       if (cube.status === "building-environment") continue; // quarantined cleanup remains retryable
       for (const phase of ["setup", "resume"] as const) {
