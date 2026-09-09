@@ -123,9 +123,13 @@ note() { printf '   %s\n' "$*"; }
 mb()   { awk -v b="${1:-0}" 'BEGIN { if (b < 1000) printf "%d B", b; else if (b < 1000000) printf "%d KB", (b + 500) / 1000; else if (b < 1024000000) printf "%d MB", (b + 500000) / 1000000; else printf "%.1f GB", b / 1000000000 }'; }
 # The serial console carries systemd's colours and cursor moves; strip
 # CSI and OSC sequences before printing it into the user's terminal.
-# LC_ALL=C: the byte ranges below mean bytes, not collation order.
+# LC_ALL=C: the byte ranges below mean bytes, not collation order. awk
+# ends the last line with a newline (a login prompt has none).
 ESC="$(printf '\033')"; BEL="$(printf '\007')"
-strip_console() { tr -d '\r' | LC_ALL=C sed -E "s/${ESC}\[[ -?]*[@-~]//g; s/${ESC}\][^${BEL}${ESC}]*(${BEL}|${ESC}\\\\)?//g"; }
+strip_console() {
+  tr -d '\r' | LC_ALL=C sed -E "s/${ESC}\[[ -?]*[@-~]//g; s/${ESC}\][^${BEL}${ESC}]*(${BEL}|${ESC}\\\\)?//g" \
+    | awk '{ print }'
+}
 
 # cubed has NO auth (the Tailnet is the boundary): any extra bind must be
 # a PRIVATE address — an explicit public interface IP would put thread
@@ -1113,9 +1117,10 @@ cmd_upgrade() {
   [ "$need" = 0 ] || note "downloading $(mb "$need")"
   for role in "${roles[@]}"; do fetch_role "$target" "$role" || return 1; done
 
+  UPGRADE_HINT=""
   if ! activate_release "$cur" "$target" "$reboot"; then
     fail "the upgrade to $target did not complete — $cur stays the installed release"
-    note "to get back on $cur: cube down, then cube up"
+    [ -z "$UPGRADE_HINT" ] || note "$UPGRADE_HINT"
     note "to try again: cube upgrade $target"
     return 1
   fi
@@ -1129,35 +1134,84 @@ cmd_upgrade() {
 # activate_release CUR TARGET REBOOT — bring the downloaded TARGET up and
 # prove it (identity, then cubed answering). The caller records TARGET as
 # installed only after this returns 0, so a release that does not come
-# up leaves CUR as what `cube up` boots.
+# up leaves CUR as what `cube up` boots. On failure UPGRADE_HINT says
+# what state the VM is in and how to get CUR back.
+UPGRADE_HINT=""
 activate_release() {
   local cur="$1" target="$2" reboot="$3"
   if [ "$reboot" = 1 ]; then
     vm_pid >/dev/null || note "the VM is not running — starting it on $target"
     # The old qemu must be PROVABLY gone before overlays it holds are
     # reset and a second writer boots onto the data disk.
-    stop_vm || { fail "aborting upgrade — the running VM still holds the disks"; return 1; }
+    stop_vm || { fail "aborting upgrade — the running VM still holds the disks"; UPGRADE_HINT="nothing was changed; the VM still runs $cur"; return 1; }
+    # From here on the overlays may carry TARGET; `cube up` resets them
+    # to CUR from the store (its sidecar sha no longer matches).
+    UPGRADE_HINT="to get back on $cur: cube down, then cube up — $(cached_summary "$cur")"
     boot_vm "$target" || return 1     # resets exactly the changed disks
     wait_ssh || return 1
     if [ "$(app_overlay_build)" != "$(mf "$target" build_id)" ]; then
       apply_app "$target" || return 1
     fi
-  else
-    # App only: no reboot. Make sure the VM is up (on the current
-    # release), then swap the app tree in place.
-    if ! vm_ssh true 2>/dev/null; then
-      if vm_pid >/dev/null; then
-        wait_ssh || return 1
-      else
-        note "the VM is not running — starting it first"
-        boot_vm "$cur" || return 1
-        wait_ssh || return 1
-      fi
-    fi
-    apply_app "$target" || return 1
+    check_identity "$target" || return 1
+    wait_cubed || return 1
+    return 0
   fi
-  check_identity "$target" || return 1
-  wait_cubed || return 1
+  # App only: no reboot. Make sure the VM is up (on the current
+  # release), then swap the app tree in place.
+  UPGRADE_HINT="$cur's app was not touched — cube down, then cube up"
+  if ! vm_ssh true 2>/dev/null; then
+    if vm_pid >/dev/null; then
+      wait_ssh || return 1
+    else
+      note "the VM is not running — starting it first"
+      boot_vm "$cur" || return 1
+      wait_ssh || return 1
+    fi
+  fi
+  # The way back, fetched while the network is known to work: a first
+  # install never downloaded the installed release's tarball.
+  if [ ! -f "$(pristine_path "$(artifact_sha "$cur" app_tar)" app_tar)" ]; then
+    note "fetching $cur's app tarball first — the way back if $target does not come up"
+    fetch_role "$cur" app_tar || note "no automatic rollback if $target does not come up"
+  fi
+  apply_app "$target" \
+    || { UPGRADE_HINT="cube-app-apply failed; the VM should still run $cur — check: cube status"; return 1; }
+  if check_identity "$target" && wait_cubed; then return 0; fi
+  rollback_app "$cur" "$target"
+  return 1
+}
+
+# rollback_app CUR TARGET — TARGET's app is in place but cubed never
+# answered: put CUR's tarball back, and say exactly where things stand.
+rollback_app() {
+  local cur="$1" target="$2"
+  if [ ! -f "$(pristine_path "$(artifact_sha "$cur" app_tar)" app_tar)" ]; then
+    UPGRADE_HINT="the VM runs $target's app and cubed is not answering; $cur's tarball is not cached — cube down, then cube up puts $cur back (fetching it)"
+    return 1
+  fi
+  note "rolling back to $cur's app"
+  if apply_app "$cur" && wait_cubed; then
+    UPGRADE_HINT="rolled back: the VM runs $cur's app again"
+    return 0
+  fi
+  UPGRADE_HINT="the rollback to $cur did not complete either — the VM is up, cubed is not answering on :$CUBE_PORT; look: cube logs, cube diagnose; start over: cube down, then cube up (boots $cur)"
+  return 1
+}
+
+cached_summary() {  # cached_summary vX — which of vX's artifacts the store still holds
+  local ver="$1" role name have="" need="" b
+  for role in base app node app_tar; do
+    case "$role" in base) name=base ;; app) name="app disk" ;; node) name=cube-node ;; *) name="app tarball" ;; esac
+    if [ -f "$(pristine_path "$(artifact_sha "$ver" "$role")" "$role")" ]; then
+      have="$have, $name"
+    else
+      b="$(artifact_bytes "$ver" "$role")"
+      need="$need, $name ($(mb "${b:-0}"))"
+    fi
+  done
+  if [ -n "$have" ]; then have="${have#, }"; else have=nothing; fi
+  printf 'still cached for %s: %s' "$ver" "$have"
+  [ -z "$need" ] || printf '; not cached: %s (cube up fetches what it needs)' "${need#, }"
 }
 
 cmd_version() {
