@@ -305,7 +305,9 @@ minute); after that the store is warm.
 
 Tests: run offline suites directly with `node packages/**/test/*.ts` on any
 host; the real-Incus smokes (`*-smoke.ts`) need the VM and run via
-`scripts/vm/test.sh` (guest `run-tests.sh`).
+`scripts/vm/test.sh` (guest `run-tests.sh`). `pnpm lint` (ESLint,
+correctness rules only — `eslint.config.js`) runs in CI between
+`pnpm typecheck` and the offline suites.
 
 ## Releasing
 
@@ -424,6 +426,9 @@ is no automatic upload or deletion. Collection remains usable without cubed,
 Incus, or model access: unavailable checks are recorded individually. This
 first version covers the VM/control plane, not workspace contents or the
 original tool process's environment. Its HTTP probe uses VM port 7777.
+The cubed journal check covers the last 24 hours (at most 2000 entries);
+cubed's own lines are `level component msg key=value …`, so
+`grep thread=<id>` in `cubed-journal.txt` follows one thread.
 
 ## The launcher (`launcher/cube`)
 
@@ -513,6 +518,7 @@ warning level) — `npx --yes shellcheck launcher/cube` locally.
 | `CUBED_IMAGE` / `CUBED_POOL` | `cube-node` / `cube` | Incus image + storage pool |
 | `CUBED_ROOT_SIZE` / `CUBED_DOCKER_VOLUME_SIZE` | `10GiB` / `5GiB` | per-cube disk |
 | `CUBED_EGRESS_ALLOW` | — | extra allowed egress hosts (extends the defaults) |
+| `CUBED_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error`; one `level component msg key=value` line per event on stdout (`journalctl -u cubed`); `debug` adds stacks to every error field |
 
 **VM scripts** (`scripts/vm/lib.sh`): `CUBE_VM_BIND` (`tailscale` or an explicit
 private IP; defaults to detected Tailscale IPv4, else loopback; `127.0.0.1`

@@ -44,7 +44,7 @@ interface Options {
 
 const CODE = /(?:^|\n)\s*!?\s*First copy your one-time code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})\s*(?:\n|$)/i;
 const URL = /https:\/\/github\.com\/(?:login\/device|cli-auth)\b/i;
-const stripAnsi = (value: string) => value.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "");
+const stripAnsi = (value: string) => value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
 
 export class GithubAuth {
   private readonly gh: GhRunner;

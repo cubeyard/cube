@@ -192,13 +192,55 @@ creating → ready ⇄ running → idle → asleep → waking → ready
   hooks from `.cube/cube.toml`. Declared services are NOT bulk-restarted on
   wake — each restarts on demand when its portal is hit or on
   `services_ensure` (processes die on stop; ensure is the self-healing).
-- **Lifecycle scripts** (Amp-convention, decided 2026-08-27): presence-based
-  executables in the workspace. `.cube/setup` runs once after provisioning
-  (deps/software every cube needs; idempotent; generous timeout);
-  `.cube/resume` runs on every wake before the wake hooks (quick repair /
-  reconnect work, short timeout). A failed script surfaces on the cube's
-  error field but never bricks the cube. Project snapshots for setup reuse:
-  Later.
+- **Lifecycle scripts:** `.cube/setup` installs project tools, dependencies,
+  and development fixtures noninteractively and idempotently (1200-second
+  execution limit). `.cube/resume` runs after successful initial setup or
+  snapshot restoration, and on every wake (10-second execution limit; no
+  dependency installation). Timeout cancellation includes process cleanup,
+  which can take several more seconds. Services remain in `.cube/cube.toml`.
+  Failed setup is shown as a thread error without blocking its repair shell;
+  wake does not erase that failure. Non-executable scripts fail explicitly.
+- **Prepared environments:** a dedicated builder with no user thread runs
+  setup, stops Docker/containerd, stages Docker data in rootfs, stops the
+  instance and publishes an Incus image. The workspace is archived and
+  restored inside the guest with GNU tar numeric owners, ACLs and xattrs, so
+  metadata is never translated through a host-side workspace copy.
+  Only successful builds publish. Working threads, including explicit setup
+  retries, never populate this cache. Fresh thread Git metadata is retained;
+  builder `.git` is excluded, symlinks are not dereferenced and writable
+  hardlinks are not shared. Git/model credentials and arbitrary host
+  environment variables never enter builders, threads or snapshots.
+- **Reuse identity:** project, ordered repository URLs/bases/checkout names
+  and exact OIDs, base image fingerprint, architecture, disk quotas, egress
+  policy and portal base. Exact hits skip setup; changed revisions can reuse
+  a compatible rootfs/Docker image with a fresh checkout and rerun setup.
+  Dependencies stored in the old workspace are not carried across revisions.
+  Concurrent requests for the same identity share one build. Cache failures
+  fall back to normal fresh setup, so a failed setup build may run again in
+  the repairable thread. No resume or user-session work runs in the builder.
+- **Retention:** `CUBED_ENVIRONMENT_CACHE_BYTES` defaults to 0 (disabled) and
+  is opt-in until the real-VM acceptance suite passes. A positive value enables
+  reuse. LRU eviction counts two rootfs quotas (compressed + unpacked image)
+  plus archived workspace bytes, and respects in-flight consumers. This is a
+  retained cache budget, not a peak host-disk quota: active builds and copies require
+  additional space. Docker staging must fit in the builder rootfs; failures
+  do not publish partial images. Raw Docker snapshots require compatible
+  Incus/overlay2 storage semantics; `environment-smoke.ts` tests whiteouts,
+  opaque directories, capabilities/xattrs, numeric volume ownership, rootfs,
+  workspace and fresh instance identity. Publication attempts are journaled
+  durably before the Incus POST; startup reconciliation recovers uniquely
+  tagged images after an uncertain response, while ambiguous or conflicting
+  results remain quarantined for operator recovery rather than being reused.
+- **Diagnostics and repair:** host-owned `.lifecycle/<cube>/` under the cubes
+  root keeps status, timestamps and duration, up to 1 MiB of output per
+  phase, and the previous attempt. GET `/api/threads/:id/environment` returns
+  setup/resume evidence. POST returns 202 and reruns setup then resume in
+  place; failures remain inspectable after client disconnects and restarts.
+  Agents use `cube.environment.status()` (64 KiB log tails) and
+  `cube.environment.retrySetup()`. The bundled `setting-up-cube` skill
+  describes repository discovery, cold/warm validation, login-shell and
+  supervised-service checks. It is packaged with the trusted extension, not
+  dependent on repository-local skill files.
 - **recreate** = delete + `incus init` from the cube image on image update or
   explicit `cube rebuild`. Workspace and cache volumes persist across
   recreates. This is the reproducibility boundary: anything not in the image,
@@ -251,11 +293,11 @@ waking the cube**. Mirrored events: `agent_start/end`, `turn_start/end`,
 
 ```
 packages/
-  core/      cube model, state machine, shared event types, typebox schemas
   sandbox/   Sandbox interface + IncusSandbox; micro-VM backend possible
              later behind the same interface
-  harness/   pi's binary (spawned per thread as the TUI) + stored-credential check
-  server/    Hono/Fastify: REST + WS + portal proxy + static files
+  server/    cubed: REST + WS + portal proxy + static files; also owns pi's
+             binary (spawned per thread as the TUI) + the stored-credential
+             check (src/auth.ts)
   web/       UI (Svelte 5 + Vite, plain SPA — no SvelteKit). Desktop + mobile.
              Decision 2026-08-26 after a research pass (React/Preact, Svelte/
              Solid, Elm): runes' fine-grained updates fit the token-append SSE
@@ -734,7 +776,7 @@ backend (kata/gondolin/boxlite) if container isolation proves insufficient.
 |---|---|---|---|
 | 1 | Container escape reaches host creds (auth.json, git) | Medium | userns + isolated idmap, nosuid workspace, dedicated VM, Tailnet-only; micro-VM backend as plan B |
 | 2 | Incus nesting quirks (AppArmor on 24.04, inner-docker version regressions) | Medium | Spike 1 validates E2E; pin inner Docker 28.x; document host sysctls |
-| 3 | pi is v0.x — breaking changes | Medium | Pin exact version, all usage behind `harness/` facade |
+| 3 | pi is v0.x — breaking changes | Medium | Pin exact version; the daemon touches pi only in `server/src/auth.ts` and the pty spawn |
 | 4 | OAuth refresh fails in long-lived daemon | Medium | Spike 4, explicit re-auth state in UI |
 | 5 | Disk fill from inner images / caches | Medium | ZFS quotas per volume, DiskService monitoring, prune schedules (§6) |
 | 6 | Egress proxy too coarse (non-HTTP protocols blocked) | Low | Acceptable: default deny is the point; add mapped exceptions per cube |

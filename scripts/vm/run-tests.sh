@@ -45,6 +45,7 @@ trap 'sudo systemctl reload nftables 2>/dev/null || sudo systemctl restart nftab
 TESTS=(
   "${OFFLINE_TESTS[@]}"
   packages/sandbox/test/crud-smoke.ts
+  packages/sandbox/test/environment-smoke.ts
   packages/pi-extension/test/ext-smoke.ts
   packages/sandbox/test/egress-smoke.ts
   packages/server/test/supervisor-smoke.ts

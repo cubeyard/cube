@@ -12,18 +12,22 @@ import stream from "node:stream";
 
 import { WebSocketServer, type WebSocket } from "ws";
 
-import { checkAuth } from "@cube/harness";
 import { IncusBackend, MockBackend, type CubeBackend } from "@cube/sandbox";
 
+import { checkAuth } from "./auth.ts";
+import { formatEventLine, recordPoint } from "./events.ts";
 import { GithubAuth } from "./github-auth.ts";
+import { createLogger } from "./log.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { defaultPortalBase } from "./portal-config.ts";
 import { portalLabel, proxyHttp, proxyUpgrade, respondFailed, respondWaking, sameOriginUpgrade } from "./portal-proxy.ts";
 import { PiTerminals } from "./pty.ts";
 import { Registry } from "./registry.ts";
 import { CubeSupervisor, DEFAULT_EGRESS_ALLOW } from "./supervisor.ts";
+import { APP_VERSION } from "./version.ts";
 import { listWorkspaceFiles, openWorkspaceFile } from "./workspace-files.ts";
 
+const log = createLogger("api");
 const PORT = Number(process.env.CUBED_PORT ?? 7777);
 // Host-header portal routing (PLAN §10). The base must resolve to this
 // machine for every device that should reach portals: a wildcard record /
@@ -48,11 +52,10 @@ if (BACKEND !== "incus" && BACKEND !== "mock") {
 }
 const backend: CubeBackend = BACKEND === "mock" ? new MockBackend() : new IncusBackend();
 if (BACKEND === "mock") {
-  console.log(
-    "cubed: MOCK backend — cube ops are simulated (no Incus). Cube commands\n" +
-      "  (repo .cube/setup, hooks, services, pi tools and ! commands) run\n" +
-      "  LOCALLY with NO nested isolation, as cubed's own user. Run this ONLY\n" +
-      "  inside a cube; never point it at an untrusted repo on a host you care about.",
+  log.warn(
+    "MOCK backend — cube ops are simulated (no Incus). Cube commands (repo .cube/setup, hooks, services, " +
+      "pi tools and ! commands) run LOCALLY with NO nested isolation, as cubed's own user. Run this ONLY " +
+      "inside a cube; never point it at an untrusted repo on a host you care about.",
   );
 }
 const supervisor = new CubeSupervisor(registry, backend, {
@@ -62,6 +65,8 @@ const supervisor = new CubeSupervisor(registry, backend, {
   image: process.env.CUBED_IMAGE ?? "cube-node",
   rootSize: process.env.CUBED_ROOT_SIZE ?? "10GiB",
   dockerVolumeSize: process.env.CUBED_DOCKER_VOLUME_SIZE ?? "5GiB",
+  environmentCacheBytes: process.env.CUBED_ENVIRONMENT_CACHE_BYTES === undefined
+    ? undefined : Number(process.env.CUBED_ENVIRONMENT_CACHE_BYTES),
   // CUBED_EGRESS_ALLOW extends (not replaces) the package-manager defaults.
   egressAllow: [
     ...DEFAULT_EGRESS_ALLOW,
@@ -103,6 +108,15 @@ const terminals = new PiTerminals(
         throw new Error(sanitizeMessage(error instanceof Error ? error.message : String(error)));
       }),
     activity: (id) => supervisor.touchUserThread(id),
+    event: (e) => {
+      let cube: string | null = null;
+      try {
+        cube = supervisor.resolveUserThread(e.thread).cubeName;
+      } catch {
+        // thread already gone (deleted while the pty was still up)
+      }
+      registry.recordEvent({ kind: "terminal", phase: e.phase, cube, thread: e.thread, ok: e.ok, ms: e.ms ?? null, detail: e.detail ?? null });
+    },
   },
   { lingerMs: parseLingerMs(process.env.CUBED_PTY_LINGER_MS) },
 );
@@ -119,7 +133,7 @@ function parseLingerMs(raw: string | undefined): number | undefined {
 // Built Svelte SPA (pnpm build). The daemon itself stays build-free.
 const WEB_ROOT = path.resolve(import.meta.dirname, "../../web/dist");
 if (!fs.existsSync(path.join(WEB_ROOT, "index.html"))) {
-  console.warn("web UI not built — run `pnpm build` (serving API only)");
+  log.warn("web UI not built — run `pnpm build` (serving API only)");
 }
 
 // ------------------------------------------------------------------- http
@@ -138,7 +152,7 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
 /** Map supervisor/registry errors onto HTTP statuses. `sanitize` rewrites
  * cube vocabulary for the thread-first routes — internal cube names and the
  * word "cube" must not leak through the product surface. */
-function fail(res: http.ServerResponse, error: unknown, sanitize = false): void {
+function fail(res: http.ServerResponse, error: unknown, sanitize = false, route?: string): void {
   if (res.destroyed) return;
   let message = error instanceof Error ? error.message : String(error);
   const status = /no such/.test(message)
@@ -153,7 +167,11 @@ function fail(res: http.ServerResponse, error: unknown, sanitize = false): void 
         ? 400
         : 500;
   if (sanitize) message = sanitizeMessage(message);
-  if (status === 500) console.log(`api error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+  if (status === 500) log.error("api error", { error });
+  if (status === 500) {
+    console.log(`api error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+    recordPoint(registry, { kind: "api", phase: "500", ok: false, detail: `${route ?? ""} ${error instanceof Error ? error.message : String(error)}`.trim() });
+  }
   json(res, status, { error: message });
 }
 
@@ -284,7 +302,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname.startsWith("/api/")) return await api(method, url, req, res);
   } catch (error) {
-    return fail(res, error, url.pathname.startsWith("/api/threads"));
+    return fail(res, error, url.pathname.startsWith("/api/threads"), `${method} ${url.pathname}`);
   }
 
   // static web UI
@@ -368,7 +386,10 @@ async function startAndHold(
     supervisor.touchCube(cubeName);
     return proxyHttp(req, res, fresh, () => respondWaking(req, res, "Starting the service…"));
   }
-  if (failure) return respondFailed(req, res, `${serviceName}: ${sanitizeMessage(failure)}`);
+  if (failure) {
+    recordPoint(registry, { kind: "portal", phase: "failed", cube: cubeName, ok: false, detail: `${serviceName}: ${failure}` });
+    return respondFailed(req, res, `${serviceName}: ${sanitizeMessage(failure)}`);
+  }
   respondWaking(
     req,
     res,
@@ -389,6 +410,39 @@ async function api(
   if (method === "POST" && url.pathname === "/api/onboarding") {
     completeOnboarding(onboardingPath);
     return json(res, 200, { onboardingComplete: true });
+  }
+
+  // Lifecycle events (events.ts): diagnosis and hill-climbing, newest
+  // first. Raw by design — internal names included — so nothing here is
+  // rendered by the product UI verbatim. `since`/`until` take ms epochs or
+  // durations (`24h`, `7d`, `30m`); `format=text` is what `cube events` prints.
+  if (method === "GET" && url.pathname === "/api/events") {
+    const q = url.searchParams;
+    const when = (key: string): number | undefined => {
+      const raw = q.get(key);
+      if (!raw) return undefined;
+      const rel = raw.match(/^(\d+)([smhd])$/);
+      if (rel) {
+        const unit = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[rel[2]!]!;
+        return Date.now() - Number(rel[1]) * unit;
+      }
+      const abs = Number(raw);
+      return Number.isFinite(abs) ? abs : undefined;
+    };
+    const events = registry.listEvents({
+      since: when("since"),
+      until: when("until"),
+      cube: q.get("cube") ?? undefined,
+      thread: q.get("thread") ?? undefined,
+      kind: q.get("kind") ?? undefined,
+      failed: q.get("failed") === "1",
+      limit: q.get("limit") ? Number(q.get("limit")) : undefined,
+    });
+    if (q.get("format") === "text") {
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      return void res.end(`${events.map(formatEventLine).join("\n")}\n`);
+    }
+    return json(res, 200, { version: APP_VERSION, events });
   }
 
   // GitHub CLI owns the VM credential and device flow; no token is handled
@@ -577,7 +631,7 @@ async function api(
   // workspace as cwd — hand out host-side file tools to whoever can reach
   // the port. The pi spawn passes --no-context-files for the same reason.
   const userThread = url.pathname.match(
-    /^\/api\/threads\/([^/]+)(?:\/(files|services|archive)(?:\/(.+))?)?$/,
+    /^\/api\/threads\/([^/]+)(?:\/(files|services|archive|environment)(?:\/(.+))?)?$/,
   );
   if (userThread) {
     const id = decodeId(userThread[1]!);
@@ -603,6 +657,16 @@ async function api(
         if (!title) return json(res, 400, { error: "empty title" });
         supervisor.renameUserThread(id, title.slice(0, 200));
         return json(res, 200, { ok: true });
+      }
+      return json(res, 404, { error: "not found" });
+    }
+    if (action === "environment") {
+      if (method === "GET") return json(res, 200, supervisor.environmentForUserThread(id));
+      if (method === "POST") {
+        // Intentionally independent of request disconnect: an accepted
+        // explicit repair completes, just like initial provisioning.
+        void supervisor.retrySetupForUserThread(id).catch((error) => console.warn(`setup retry: ${String(error)}`));
+        return json(res, 202, { accepted: true });
       }
       return json(res, 404, { error: "not found" });
     }
@@ -816,6 +880,6 @@ function attachTerminal(threadId: string, ws: WebSocket, cols: number, rows: num
 
 // A stray rejection must not take every thread's terminal down with the
 // daemon; log it and stay up.
-process.on("unhandledRejection", (reason) => console.log(`unhandled rejection: ${String(reason)}`));
+process.on("unhandledRejection", (reason) => log.error("unhandled rejection", { error: reason }));
 
-server.listen(PORT, () => console.log(`cubed listening on http://localhost:${PORT} (portals on *.${PORTAL_BASE})`));
+server.listen(PORT, () => log.info("listening", { url: `http://localhost:${PORT}`, portals: `*.${PORTAL_BASE}` }));
