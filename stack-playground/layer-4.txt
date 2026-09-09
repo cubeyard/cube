@@ -1,0 +1,2 @@
+Native GitHub stack playground: second descendant.
+This existing change must survive updates and restacking below it.
