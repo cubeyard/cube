@@ -7,6 +7,7 @@
   import Onboarding from "./components/Onboarding.svelte";
   import Wordmark from "./components/Wordmark.svelte";
   import { errorText, fetchState, fetchThreads, isUnreachable } from "./lib/api.ts";
+  import { COMMAND_TTL_MS, type Command } from "./lib/command.ts";
   import type { DaemonState, ThreadSummary } from "./lib/types.ts";
 
   // Global threads, project setup, and one thread's terminal. Cubes never
@@ -38,8 +39,23 @@
   // read as a glitch.
   let listNotice = $state<string | null>(null);
 
-  // `n` pressed: the mounted view opens its composer / starts a thread.
-  let composeAt = $state(0);
+  // `n` pressed: one command, consumed exactly once by the view it is
+  // meant for (see lib/command.ts). The view clears it through
+  // `consume` before doing anything async; anything left unconsumed
+  // (no view to take it) expires on its own.
+  let command = $state<Command | null>(null);
+  let commandSeq = 0;
+  let commandTimer: ReturnType<typeof setTimeout> | null = null;
+  function issue(kind: Command["kind"]): void {
+    commandSeq += 1;
+    const id = commandSeq;
+    command = { kind, id, at: Date.now() };
+    if (commandTimer) clearTimeout(commandTimer);
+    commandTimer = setTimeout(() => consume(id), COMMAND_TTL_MS);
+  }
+  function consume(id: number): void {
+    if (command?.id === id) command = null;
+  }
 
   /** One poll: cubed's state until it answers (a tab opened while the VM
    * boots recovers by itself), then the thread list. */
@@ -126,7 +142,7 @@
       location.hash = "#/projects";
     } else if (!chord && event.key === "n") {
       event.preventDefault();
-      composeAt = now;
+      issue("new-thread");
       if (!threadId && !(projectId && projectId !== "new")) location.hash = "#/threads";
     }
   }
@@ -167,13 +183,13 @@
   {/if}
   {#if threadId && threadsLoaded}
     {#key threadId}
-      <ThreadView {threadId} threads={activeThreads} {composeAt} />
+      <ThreadView {threadId} threads={activeThreads} {command} onConsume={consume} />
     {/key}
   {:else if threadId}
     <p class="loading">loading threads…</p>
   {:else if projectId}
     {#key projectId}
-      <ProjectView {projectId} githubLogin={/^#\/projects\/[^/?]+\/github(?:[?]|$)/.test(hash)} {composeAt} />
+      <ProjectView {projectId} githubLogin={/^#\/projects\/[^/?]+\/github(?:[?]|$)/.test(hash)} {command} onConsume={consume} />
     {/key}
   {:else if projectsRoute}
     <ProjectList />
@@ -184,7 +200,8 @@
       onThreadsChanged={refresh}
       notice={listNotice}
       onDismissNotice={() => (listNotice = null)}
-      {composeAt}
+      {command}
+      onConsume={consume}
     />
   {:else}
     <p class="loading">loading threads…</p>

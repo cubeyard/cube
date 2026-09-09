@@ -12,6 +12,7 @@
   } from "../lib/api.ts";
   import { createArmed } from "../lib/armed.svelte.ts";
   import { fmtBytes } from "../lib/bytes.ts";
+  import type { Command } from "../lib/command.ts";
   import { isWaiting, lampClass, stateLabel, waitingText } from "../lib/thread-state.ts";
   import { relTime } from "../lib/time.ts";
   import type {
@@ -26,11 +27,12 @@
   import Icon from "./Icon.svelte";
   import Terminal from "./Terminal.svelte";
 
-  let { threadId, threads, composeAt = 0 }: {
+  let { threadId, threads, command = null, onConsume = () => {} }: {
     threadId: string;
     threads: ThreadSummary[];
     /** App's `n` shortcut: start a new thread in this thread's project. */
-    composeAt?: number;
+    command?: Command | null;
+    onConsume?: (id: number) => void;
   } = $props();
   let terminalPane = $state<{ submitPrompt: (text: string) => boolean } | null>(null);
 
@@ -321,8 +323,14 @@
     }
   }
 
+  // Take the shell's command once: consume it before the action runs, and
+  // run the action untracked so its own state (creating, the note) can
+  // never re-arm this effect.
   $effect(() => {
-    if (composeAt && Date.now() - composeAt < 2000) void newThread();
+    const pending = command;
+    if (!pending || pending.kind !== "new-thread") return;
+    onConsume(pending.id);
+    untrack(() => void newThread());
   });
 
   // Escape closes the topmost overlay — drawer, then ship panel, then files

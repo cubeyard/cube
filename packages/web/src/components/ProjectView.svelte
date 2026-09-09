@@ -12,6 +12,7 @@
     updateProject,
   } from "../lib/api.ts";
   import { createArmed } from "../lib/armed.svelte.ts";
+  import type { Command } from "../lib/command.ts";
   import { relTime } from "../lib/time.ts";
   import { createTransient } from "../lib/transient.svelte.ts";
   import { uid } from "../lib/uid.ts";
@@ -20,11 +21,12 @@
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
 
-  let { projectId, githubLogin = false, composeAt = 0 }: {
+  let { projectId, githubLogin = false, command = null, onConsume = () => {} }: {
     projectId: string;
     githubLogin?: boolean;
     /** App's `n` shortcut: start a thread from this project. */
-    composeAt?: number;
+    command?: Command | null;
+    onConsume?: (id: number) => void;
   } = $props();
   const isNew = $derived(projectId === "new");
   type RepositoryDraft = { key: string; url: string; base: string; checkoutName: string };
@@ -163,8 +165,12 @@
     }
   }
 
+  // Take the shell's command once (see lib/command.ts).
   $effect(() => {
-    if (composeAt && Date.now() - composeAt < 2000) void startThread();
+    const pending = command;
+    if (!pending || pending.kind !== "new-thread") return;
+    onConsume(pending.id);
+    untrack(() => void startThread());
   });
 
   // ---- delete: two presses on the same key, never a dialog ----

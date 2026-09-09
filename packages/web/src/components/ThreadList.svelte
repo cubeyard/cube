@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { createUserThread, deleteThread, errorText, fetchProjects, isUnreachable, renameThread } from "../lib/api.ts";
   import { createArmed } from "../lib/armed.svelte.ts";
+  import type { Command } from "../lib/command.ts";
   import { lampClass, stateLabel } from "../lib/thread-state.ts";
   import { relTime } from "../lib/time.ts";
   import { createTransient } from "../lib/transient.svelte.ts";
@@ -15,7 +16,8 @@
     onThreadsChanged,
     notice = null,
     onDismissNotice = () => {},
-    composeAt = 0,
+    command = null,
+    onConsume = () => {},
   }: {
     /** App polls the global list; this view only adds projects to it. */
     threads: ThreadSummary[];
@@ -26,7 +28,8 @@
     notice?: string | null;
     onDismissNotice?: () => void;
     /** App's `n` shortcut: open the composer. */
-    composeAt?: number;
+    command?: Command | null;
+    onConsume?: (id: number) => void;
   } = $props();
 
   let projects = $state<Project[]>([]);
@@ -79,8 +82,12 @@
     actionError = null;
   }
 
+  // Take the shell's command once (see lib/command.ts).
   $effect(() => {
-    if (composeAt && Date.now() - composeAt < 2000) openComposer();
+    const pending = command;
+    if (!pending || pending.kind !== "new-thread") return;
+    onConsume(pending.id);
+    untrack(openComposer);
   });
 
   async function newThread(): Promise<void> {
