@@ -62,6 +62,8 @@ const supervisor = new CubeSupervisor(registry, backend, {
   image: process.env.CUBED_IMAGE ?? "cube-node",
   rootSize: process.env.CUBED_ROOT_SIZE ?? "10GiB",
   dockerVolumeSize: process.env.CUBED_DOCKER_VOLUME_SIZE ?? "5GiB",
+  environmentCacheBytes: process.env.CUBED_ENVIRONMENT_CACHE_BYTES === undefined
+    ? undefined : Number(process.env.CUBED_ENVIRONMENT_CACHE_BYTES),
   // CUBED_EGRESS_ALLOW extends (not replaces) the package-manager defaults.
   egressAllow: [
     ...DEFAULT_EGRESS_ALLOW,
@@ -562,7 +564,7 @@ async function api(
   // workspace as cwd — hand out host-side file tools to whoever can reach
   // the port. The pi spawn passes --no-context-files for the same reason.
   const userThread = url.pathname.match(
-    /^\/api\/threads\/([^/]+)(?:\/(files|services|archive)(?:\/(.+))?)?$/,
+    /^\/api\/threads\/([^/]+)(?:\/(files|services|archive|environment)(?:\/(.+))?)?$/,
   );
   if (userThread) {
     const id = decodeId(userThread[1]!);
@@ -588,6 +590,16 @@ async function api(
         if (!title) return json(res, 400, { error: "empty title" });
         supervisor.renameUserThread(id, title.slice(0, 200));
         return json(res, 200, { ok: true });
+      }
+      return json(res, 404, { error: "not found" });
+    }
+    if (action === "environment") {
+      if (method === "GET") return json(res, 200, supervisor.environmentForUserThread(id));
+      if (method === "POST") {
+        // Intentionally independent of request disconnect: an accepted
+        // explicit repair completes, just like initial provisioning.
+        void supervisor.retrySetupForUserThread(id).catch((error) => console.warn(`setup retry: ${String(error)}`));
+        return json(res, 202, { accepted: true });
       }
       return json(res, 404, { error: "not found" });
     }

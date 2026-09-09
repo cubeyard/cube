@@ -15,19 +15,20 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 
-import type { Sandbox, SandboxExecOptions } from "@cube/sandbox";
+import type { IncusClient, Sandbox, SandboxExecOptions } from "@cube/sandbox";
 import {
   createEditTool,
   createFindTool,
   createLsTool,
   createReadTool,
   createWriteTool,
+  loadSkillsFromDir,
 } from "@earendil-works/pi-coding-agent";
 
 import { CubeFs, type GuestFiles } from "../src/cube-fs.ts";
 import { formatGrepResult } from "../src/grep-format.ts";
 import { auditTools } from "../src/guard.ts";
-import { mockFiles, resolveConfig, Waker } from "../src/index.ts";
+import { BUILTIN_SKILL_PATHS, createThreadRequest, mockFiles, resolveConfig, Waker, withBuiltinSkillReads } from "../src/index.ts";
 import { createGuestOperations } from "../src/ops.ts";
 import { toGuestPath } from "../src/paths.ts";
 
@@ -71,6 +72,25 @@ const cubeFs = new CubeFs(new LocalExec(), localFiles, {
 const ops = createGuestOperations(cubeFs, hostWs, guestWs);
 const signal = new AbortController().signal;
 const noUpdate = () => {};
+
+// Cube's setup guidance is extension-owned and parseable by pi's real skill
+// loader; it does not depend on the opened repository containing .pi skills.
+const builtinSkills = loadSkillsFromDir({ dir: BUILTIN_SKILL_PATHS[0]!, source: "cube-builtin" });
+assert.deepEqual(builtinSkills.diagnostics, []);
+assert.deepEqual(builtinSkills.skills.map((skill) => skill.name), ["setting-up-cube"]);
+assert.match(builtinSkills.skills[0]!.description, /\.cube\/setup/);
+const skillRead = withBuiltinSkillReads({
+  readFile: async () => { throw new Error("guest-only"); },
+  access: async () => { throw new Error("guest-only"); },
+  detectImageMimeType: async () => null,
+});
+const packagedSkill = path.join(BUILTIN_SKILL_PATHS[0]!, "SKILL.md");
+await skillRead.access(packagedSkill);
+assert.match((await skillRead.readFile(packagedSkill)).toString(), /Never copy, mount, print/);
+await assert.rejects(skillRead.readFile(path.join(BUILTIN_SKILL_PATHS[0]!, "..", "private")), /guest-only/);
+const readSkillTool = createReadTool(guestWs, { operations: skillRead });
+assert.match(JSON.stringify(await readSkillTool.execute("skill", { path: packagedSkill }, signal)), /Setting Up Cube/);
+console.log("0 ok: Cube built-in setup skill is discoverable and loadable");
 
 function text(result: { content: Array<{ type: string; text?: string }> }): string {
   return result.content
@@ -391,9 +411,110 @@ console.log("6 ok: config resolution");
   assert.equal(state, "ready", "sleeping mock environment wakes through cubed");
   assert.equal(wakes, 1);
   await waker.ensure();
-  assert.equal(wakes, 1, "ready mock environment is not woken twice");
+  assert.equal(wakes, 2, "every tool checks the supervisor readiness barrier even for a ready row");
   await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   console.log("7 ok: mock sleep/wake goes through cubed");
+}
+
+// Managed Incus threads use cubed's wake endpoint as the readiness gate.
+// Raw Incus may already say Running while a setup retry is still active, and
+// supervisor failures must never be bypassed with a direct Incus start.
+{
+  const requests: string[] = [];
+  let physicalState = "Stopped";
+  const server = http.createServer((req, res) => {
+    requests.push(`${req.method} ${req.url}`);
+    if (req.method === "GET" && req.url === "/api/cubes/t-managed") {
+      res.writeHead(200, { "content-type": "application/json" });
+      return void res.end('{"status":"ready"}');
+    }
+    if (req.method === "POST" && req.url === "/api/cubes/t-managed/wake") {
+      physicalState = "Running";
+      res.writeHead(200, { "content-type": "application/json" });
+      return void res.end('{"ok":true}');
+    }
+    if (req.method === "GET" && req.url === "/api/cubes/t-wake-404") {
+      res.writeHead(200, { "content-type": "application/json" });
+      return void res.end('{"status":"asleep"}');
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  let directStarts = 0;
+  let rawStateReads = 0;
+  const client = {
+    getInstanceState: async () => { rawStateReads++; return { status: "Running" }; },
+    setInstanceState: async () => { directStarts++; },
+    execSimple: async () => 0,
+  } as unknown as IncusClient;
+  const managedConfig = (name: string) => resolveConfig({
+    CUBE_NAME: name,
+    CUBE_THREAD_ID: `thread-${name}`,
+    CUBED_URL: `http://127.0.0.1:${address.port}`,
+  }, "/workspace")!;
+
+  await new Waker(managedConfig("t-managed"), client).ensure();
+  assert.deepEqual(requests, [
+    "POST /api/cubes/t-managed/wake",
+  ], "even a stale ready row gates tools through the supervisor wake route");
+  assert.equal(physicalState, "Running");
+  assert.equal(rawStateReads, 0, "raw Incus Running does not bypass managed readiness");
+
+  await assert.rejects(
+    new Waker(managedConfig("t-state-404"), client).state(),
+    /could not read managed environment t-state-404 \(404\)/,
+  );
+  await assert.rejects(
+    new Waker(managedConfig("t-wake-404"), client).ensure(),
+    /refused to wake t-wake-404 \(404\)/,
+  );
+  assert.equal(directStarts, 0, "managed supervisor errors never fall back to direct Incus");
+
+  const malformed = resolveConfig({ CUBE_THREAD_ID: "thread-123", CUBE_INSTANCE: "custom-instance" }, "/workspace")!;
+  await assert.rejects(new Waker(malformed, client).ensure(), /managed environment requires CUBE_NAME/);
+  assert.equal(directStarts, 0, "incomplete managed configuration cannot start Incus directly");
+  assert.equal(rawStateReads, 0, "incomplete managed configuration fails before Incus access");
+
+  let standaloneStarts = 0;
+  const standaloneClient = {
+    getInstanceState: async () => ({ status: "Stopped" }),
+    setInstanceState: async () => { standaloneStarts++; },
+    execSimple: async () => 0,
+  } as unknown as IncusClient;
+  const standalone = resolveConfig({ CUBE_INSTANCE: "standalone-incus" }, "/workspace")!;
+  await new Waker(standalone, standaloneClient).ensure();
+  assert.equal(standaloneStarts, 1, "non-thread Incus still uses the direct lifecycle path");
+
+  await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  console.log("7a ok: managed Incus readiness and wake remain supervisor-owned");
+}
+
+// The environment capability bridge uses only the thread-scoped endpoint and
+// maps status/retry to GET/POST without forwarding credentials or a body.
+{
+  const requests: Array<{ method?: string; url?: string; authorization?: string }> = [];
+  const server = http.createServer((req, res) => {
+    requests.push({ method: req.method, url: req.url, authorization: req.headers.authorization });
+    res.writeHead(req.method === "POST" ? 202 : 200, { "content-type": "application/json" });
+    res.end(JSON.stringify(req.method === "POST"
+      ? { accepted: true }
+      : { setup: { state: "failed" }, resume: null }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const request = createThreadRequest({ cubedUrl: `http://127.0.0.1:${address.port}`, threadId: "thread /1" });
+  assert.equal(((await request("/environment")).setup as { state: string }).state, "failed");
+  assert.equal((await request("/environment", { method: "POST" })).accepted, true);
+  assert.deepEqual(requests, [
+    { method: "GET", url: "/api/threads/thread%20%2F1/environment", authorization: undefined },
+    { method: "POST", url: "/api/threads/thread%20%2F1/environment", authorization: undefined },
+  ]);
+  await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  console.log("7b ok: environment GET/POST thread HTTP bridge");
 }
 
 // A cancelled capability must tear down an in-flight wake fetch instead of
@@ -431,7 +552,7 @@ console.log("6 ok: config resolution");
   await assert.rejects(pending, /wake cancelled/);
   await wakeClosed;
   await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
-  console.log("7b ok: cancellation closes an in-flight wake request");
+  console.log("7c ok: cancellation closes an in-flight wake request");
 }
 
 console.log("ALL PASS");

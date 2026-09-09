@@ -14,7 +14,7 @@ import { DatabaseSync } from "node:sqlite";
 export interface CubeRow {
   id: number;
   name: string;
-  /** creating | ready | asleep | waking | error. */
+  /** creating | ready | asleep | waking | error | building-environment (internal). */
   status: string;
   error: string | null;
   image: string;

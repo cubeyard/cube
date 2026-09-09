@@ -38,6 +38,12 @@ export interface CubeProvisionSpec {
   name: string;
   /** Image alias to init from (e.g. "cube-node"). */
   image: string;
+  /** Immutable Incus image fingerprint. When present, this is used instead
+   * of resolving `image` again. */
+  imageFingerprint?: string;
+  /** Restore the workspace staged in an environment image. Defaults false so
+   * revision builders keep their freshly seeded checkout. */
+  restoreWorkspace?: boolean;
   /** Storage pool (ZFS) for rootfs + volumes. */
   pool: string;
   /** Rootfs quota, e.g. "10GiB". */
@@ -72,7 +78,11 @@ async function exists(probe: () => Promise<unknown>): Promise<boolean> {
  * are reused if present (they survive rebuilds by design); the instance
  * itself must not exist.
  */
-export async function provisionCube(client: IncusClient, spec: CubeProvisionSpec): Promise<void> {
+export async function provisionCube(
+  client: IncusClient,
+  spec: CubeProvisionSpec,
+  restoreTimeoutMs = 10 * 60_000,
+): Promise<void> {
   const net = spec.network;
 
   const bridgeConfig = {
@@ -117,7 +127,9 @@ export async function provisionCube(client: IncusClient, spec: CubeProvisionSpec
 
   await client.createInstance({
     name: spec.name,
-    source: { type: "image", alias: spec.image },
+    source: spec.imageFingerprint
+      ? { type: "image", fingerprint: spec.imageFingerprint }
+      : { type: "image", alias: spec.image },
     profiles: ["default"],
     config: {
       "security.nesting": "true",
@@ -166,7 +178,7 @@ export async function provisionCube(client: IncusClient, spec: CubeProvisionSpec
   // next provisionCube. Roll the instance back on failure — bridge and
   // volume are kept (they are reconciled on reuse, see above).
   try {
-    await configureAndStart(client, spec);
+    await configureAndStart(client, spec, restoreTimeoutMs);
   } catch (error) {
     try {
       const state = await client.getInstanceState(spec.name);
@@ -179,8 +191,13 @@ export async function provisionCube(client: IncusClient, spec: CubeProvisionSpec
   }
 }
 
-async function configureAndStart(client: IncusClient, spec: CubeProvisionSpec): Promise<void> {
+async function configureAndStart(
+  client: IncusClient,
+  spec: CubeProvisionSpec,
+  restoreTimeoutMs: number,
+): Promise<void> {
   const net = spec.network;
+  await client.pushInstanceFile(spec.name, "/etc/hostname", `${spec.name}\n`);
 
   // Pushed while stopped so the cube boots with its static IP from the first
   // second. "05-" sorts before the image's 10-netplan-eth0.network and wins.
@@ -229,6 +246,38 @@ async function configureAndStart(client: IncusClient, spec: CubeProvisionSpec): 
   }
 
   await client.setInstanceState(spec.name, "start");
+
+  // Environment images carry Docker and workspace snapshots in rootfs because
+  // neither attached custom volumes nor host mounts are included in an image.
+  // This runs as root in the guest, where the image's idmap is authoritative.
+  const abort = new AbortController();
+  const restoreEnvironment = client.execSimple(spec.name, [
+    "sh",
+    "-c",
+    "set -eu; if [ -d /var/lib/cube-environment ]; then " +
+      (spec.restoreWorkspace
+        ? `if [ -f /var/lib/cube-environment/workspace.tar ]; then ` +
+          `find /workspace -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} +; ` +
+          `tar --numeric-owner --same-owner --acls --xattrs --xattrs-include='*' --exclude='./.git' ` +
+          `-C /workspace -xpf /var/lib/cube-environment/workspace.tar; fi; `
+        : "") +
+      "if [ -d /var/lib/cube-environment/docker ]; then " +
+      "rm -rf /var/lib/docker/* /var/lib/docker/.[!.]* /var/lib/docker/..?*; " +
+      "cp -a --preserve=mode,ownership,timestamps,links,xattr /var/lib/cube-environment/docker/. /var/lib/docker/; fi; " +
+      "rm -rf /var/lib/cube-environment; systemctl unmask docker.service docker.socket; " +
+      "systemctl start docker.service; fi",
+  ], abort.signal);
+  const timeout = new Promise<never>((_, reject) => {
+    const timer = setTimeout(() => {
+      abort.abort();
+      reject(new Error(`cube ${spec.name}: environment restore deadline exceeded`));
+    }, restoreTimeoutMs);
+    restoreEnvironment.finally(() => clearTimeout(timer)).catch(() => {});
+  });
+  const restoreResult = await Promise.race([restoreEnvironment, timeout]);
+  if (restoreResult !== 0) {
+    throw new Error(`cube ${spec.name}: failed to restore captured environment (${restoreResult})`);
+  }
 
   // glibc reads /etc/resolv.conf directly (nsswitch is files,dns) and images
   // may ship it as a dangling symlink to the systemd-resolved stub — replace
