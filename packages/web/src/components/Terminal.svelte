@@ -44,6 +44,8 @@
   // A socket has been open in this mount: the next open is a reattach to a
   // process whose screen we still hold.
   let attached = false;
+  /** This open follows an earlier one on the same mount (a transport drop). */
+  let reattach = false;
   // Consecutive closes without a healthy open in between.
   let drops = 0;
 
@@ -95,6 +97,16 @@
         pane = { kind: "live" };
         retryDelay = 1000;
         takeFocusOnce();
+      } else if (frame.t === "attached") {
+        // Joined a live process. When the server replays its tail, the
+        // glass is cleared first so nothing is drawn twice; when it has
+        // nothing to replay, the seam marks where the link came back.
+        if (frame.replay) term.reset();
+        else if (reattach) term.write("\r\n\x1b[2m— reconnected —\x1b[0m\r\n");
+        lastStatus = null;
+        pane = { kind: "live" };
+        retryDelay = 1000;
+        takeFocusOnce();
       } else if (frame.t === "exit") {
         final = true;
         lastStatus = null;
@@ -114,11 +126,9 @@
     socket.onopen = () => {
       drops = 0;
       retryDelay = 1000; // a healthy link earns back the fast retry
-      if (attached) {
-        // A plain reattach: the server replays its tail over the screen
-        // we kept. Mark the seam instead of wiping the scrollback.
-        term.write("\r\n\x1b[2m— reconnected —\x1b[0m\r\n");
-      }
+      // The seam (or a clean frame) is written when the server says how it
+      // is attaching — see the `attached` frame — not on open.
+      reattach = attached;
       attached = true;
       // A process may already be live server-side; the replay starts
       // flowing immediately either way. Treat open as live unless a

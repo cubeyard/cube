@@ -127,5 +127,7 @@ export interface WorkspaceListing {
 export type TerminalControlFrame =
   | { t: "status"; text: string }
   | { t: "spawned" }
+  /** Joined a live process; `replay` says a scrollback tail follows. */
+  | { t: "attached"; replay: boolean }
   | { t: "exit"; code: number | null }
   | { t: "error"; text: string };

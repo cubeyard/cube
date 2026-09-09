@@ -14,7 +14,8 @@
  * This module is transport- and supervisor-agnostic: the WS layer adapts
  * sockets to TerminalClient, the supervisor side provides TerminalHost.
  * Protocol to clients: binary frames = raw pty output; text frames = JSON
- * control ({t:"status"|"spawned"|"exit"|"error", ...}).
+ * control ({t:"status"|"spawned"|"attached"|"exit"|"error", ...}); an
+ * `attached` frame precedes the scrollback replay to a late attacher.
  */
 import { spawn, type IPty } from "@lydell/node-pty";
 
@@ -123,8 +124,11 @@ export class PiTerminals {
       session.linger = null;
     }
     if (session.proc) {
-      // Late attacher: replay the tail, then adopt this client's size (the
-      // TUI redraws on the resize, squaring the replayed frame with it).
+      // Late attacher: say so first — the client keeps its own buffer across
+      // a transport drop and must clear it before a replay lands, or the
+      // tail would be drawn twice — then replay the tail and adopt this
+      // client's size (the TUI redraws on the resize, squaring the frame).
+      client.send(control({ t: "attached", replay: session.scrollback.length > 0 }));
       for (const chunk of session.scrollback) client.send(chunk);
       this.resize(session, clamp(cols, 2, 500), clamp(rows, 2, 500));
     } else if (session.starting) {
