@@ -118,7 +118,7 @@
   }
 
   async function save(): Promise<void> {
-    if (saving) return;
+    if (saving || notFound) return;
     refreshSeq++; // a poll already in flight must not revert the saved form
     saving = true;
     error = null;
@@ -138,7 +138,7 @@
   }
 
   async function recheck(): Promise<void> {
-    if (checking || isNew || dirty) return;
+    if (checking || isNew || dirty || notFound) return;
     checking = true;
     error = null;
     try {
@@ -153,7 +153,7 @@
   }
 
   async function startThread(): Promise<void> {
-    if (starting || !project || project.status !== "ready" || dirty) return;
+    if (starting || !project || project.status !== "ready" || dirty || notFound) return;
     starting = true;
     error = null;
     try {
@@ -177,7 +177,7 @@
   const armed = createArmed();
   let deleting = $state(false);
   async function remove(): Promise<void> {
-    if (!project || project.threadCount > 0 || deleting) return;
+    if (!project || project.threadCount > 0 || deleting || notFound) return;
     if (!armed.press("project")) return;
     deleting = true;
     refreshSeq++;
@@ -233,18 +233,26 @@
 
   {#if !loaded}
     <p class="loading">loading…</p>
+  {:else if notFound}
+    <!-- gone is gone, whether it vanished before or after the first load:
+         nothing here may be saved, checked, started or deleted any more -->
+    <div class="empty-state" role="status">
+      <p class="hint">No such project — it may have been deleted.</p>
+      {#if dirty && (name.trim() || repositories.some((repository) => repository.url.trim()))}
+        <p class="draft">
+          unsaved draft, kept here as text: <code>{name.trim() || "(no name)"}</code>
+          {#each repositories.filter((repository) => repository.url.trim()) as repository (repository.key)}
+            · <code>{repository.url.trim()}</code>
+          {/each}
+        </p>
+      {/if}
+      <a class="key" href="#/projects">back to projects</a>
+    </div>
   {:else if !project && !isNew}
-    {#if notFound}
-      <div class="empty-state">
-        <p class="hint">No such project — it may have been deleted.</p>
-        <a class="key" href="#/projects">back to projects</a>
-      </div>
-    {:else}
-      <div class="empty-state" role="status">
-        <p class="hint">{error ?? "can't reach the host — it may be starting or restarting"}<br />retrying…</p>
-        <button class="key" onclick={() => refresh(true)}>retry now</button>
-      </div>
-    {/if}
+    <div class="empty-state" role="status">
+      <p class="hint">{error ?? "can't reach the host — it may be starting or restarting"}<br />retrying…</p>
+      <button class="key" onclick={() => refresh(true)}>retry now</button>
+    </div>
   {:else}
     <div class="project-detail-head">
       <div>
@@ -412,4 +420,6 @@
 
 <style>
   .github-login-link { font-family: var(--font-ui); }
+  .draft { margin: -0.6rem 0 1.3rem; font-size: 12px; color: var(--ink-3); overflow-wrap: anywhere; }
+  .draft code { font-family: var(--font-mono); color: var(--ink-2); }
 </style>
