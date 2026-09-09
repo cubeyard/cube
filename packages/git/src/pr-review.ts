@@ -19,6 +19,10 @@ interface Stack {
   number: number | null;
   base: string;
   baseOid: string;
+  /** Historical native-stack members, not live branch refs. Optional to
+   * keep already-persisted all-open snapshots compatible. */
+  mergedPrefix?: Array<{ number: number; head: string; oid: string; mergeOid: string }>;
+  /** Only the contiguous open suffix participates in Git operations. */
   layers: Layer[];
 }
 
@@ -123,19 +127,31 @@ export class PrReviewService {
         members.push(pr);
       }
     }
-    const layers: Layer[] = members.map((pr) => {
+    const mergedPrefix: NonNullable<Stack["mergedPrefix"]> = [];
+    const layers: Layer[] = [];
+    for (const pr of members) {
       const head = object(pr.head);
       const parent = object(pr.base);
-      if (pr.state !== "open" || pr.merged !== false
-        || String(object(head.repo).full_name).toLowerCase() !== slug.toLowerCase()
+      if (String(object(head.repo).full_name).toLowerCase() !== slug.toLowerCase()
         || String(object(parent.repo).full_name).toLowerCase() !== slug.toLowerCase()) {
-        return fail("closed, merged, forked, or inaccessible stack layers require manual reconciliation");
+        return fail("forked or inaccessible stack layers require manual reconciliation");
       }
-      return { number: positive(pr.number), head: ref(head.ref), oid: oid(head.sha), base: ref(parent.ref), baseOid: oid(parent.sha) };
-    });
-    if (new Set(layers.map((layer) => layer.number)).size !== layers.length
-      || new Set([base, ...layers.map((layer) => layer.head)]).size !== layers.length + 1
-      || !layers.some((layer) => layer.number === number)) return fail("ambiguous stack membership");
+      const entry = { number: positive(pr.number), head: ref(head.ref), oid: oid(head.sha) };
+      if (pr.state === "closed" && pr.merged === true) {
+        if (layers.length) return fail("merged layers must form a contiguous prefix of the stack");
+        mergedPrefix.push({ ...entry, mergeOid: oid(pr.merge_commit_sha) });
+      } else {
+        if (pr.state !== "open" || pr.merged !== false) return fail("closed but unmerged stack layers require manual reconciliation");
+        layers.push({ ...entry, base: ref(parent.ref), baseOid: oid(parent.sha) });
+      }
+    }
+    const allLayers = [...mergedPrefix, ...layers];
+    if (new Set(allLayers.map((layer) => layer.number)).size !== allLayers.length
+      || new Set([base, ...allLayers.map((layer) => layer.head)]).size !== allLayers.length + 1) return fail("ambiguous stack membership");
+    if (!layers.some((layer) => layer.number === number)) return fail("the requested PR must still be open");
+    if (mergedPrefix.length && layers[0]!.base !== base) {
+      return fail("GitHub has not retargeted the first open PR to the stack base after merging its prefix; wait for native stack reconciliation");
+    }
     for (const [i, layer] of layers.entries()) {
       if (layer.base !== (i === 0 ? base : layers[i - 1]!.head)
         || (i > 0 && layer.baseOid !== layers[i - 1]!.oid)) return fail("inconsistent PR bases or head SHAs");
@@ -154,7 +170,8 @@ export class PrReviewService {
         return fail("stack is queued, changed, or its queue state is unavailable");
       }
     }
-    return { id: stackId, number: stackNumber, base, baseOid: layers[0]!.baseOid, layers };
+    return { id: stackId, number: stackNumber, base, baseOid: layers[0]!.baseOid, layers,
+      ...(mergedPrefix.length ? { mergedPrefix } : {}) };
   }
 
   private dir(token: string): string {
@@ -213,6 +230,17 @@ export class PrReviewService {
         await this.git(repo, ["cat-file", "-e", `${expected}^{tree}`], signal);
       }
       await this.git(repo, ["fsck", "--connectivity-only", "--no-reflogs"], signal);
+      // GitHub's landed SHA, not the old branch head, proves inclusion
+      // after squash/rebase merges too. Several PRs in a native group
+      // merge may legitimately share one merge result. Deleted historical
+      // branch refs are neither fetched nor recreated.
+      for (const merged of stack.mergedPrefix ?? []) {
+        try {
+          await this.git(repo, ["merge-base", "--is-ancestor", merged.mergeOid, stack.baseOid], signal);
+        } catch {
+          return fail(`merged PR #${merged.number} is not verifiably contained in the current stack base`);
+        }
+      }
       for (let i = 1; i < stack.layers.length; i++) {
         try {
           await this.git(repo, ["merge-base", "--is-ancestor", stack.layers[i - 1]!.oid, stack.layers[i]!.oid], signal);
