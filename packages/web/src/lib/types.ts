@@ -20,12 +20,17 @@ export interface DaemonState {
   onboardingComplete: boolean;
 }
 
+/** Thread states as the user sees them. `waking` sits between sleeping
+ * and ready: the environment is being started for a returning user — a
+ * calm waiting state like `setting-up`, never an error. */
+export type ThreadState = "setting-up" | "waking" | "ready" | "sleeping" | "error";
+
 /** One entry of GET /api/threads — the user-facing unit. The backing cube
  * never appears; states are thread states. */
 export interface ThreadSummary {
   id: string;
   title: string | null;
-  state: "setting-up" | "ready" | "sleeping" | "error";
+  state: ThreadState;
   error: string | null;
   createdAt: number | null;
   archived: boolean;
