@@ -480,6 +480,12 @@ export default function cubeExtension(pi: ExtensionAPI) {
     },
     syncBase: (repositoryId, signal) =>
       threadRequest(`/repositories/${repositoryId}/sync`, { method: "POST" }, signal),
+    readGithub: (input, signal) => {
+      const query = new URLSearchParams({ number: String(input.number), type: input.type });
+      if (input.section !== undefined) query.set("section", input.section);
+      if (input.page !== undefined) query.set("page", String(input.page));
+      return threadRequest(`/github?${query}`, { timeoutMs: 40_000 }, signal);
+    },
     pushBranch: (repositoryId, signal) =>
       threadRequest(`/repositories/${repositoryId}/push`, { method: "POST" }, signal),
     pushBase: (repositoryId, signal) =>

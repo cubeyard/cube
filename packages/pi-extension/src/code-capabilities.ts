@@ -15,6 +15,7 @@ export interface CodeCapabilityHost {
   readText(path: string, signal: AbortSignal): Promise<string>;
   writeText(path: string, content: string, signal: AbortSignal): Promise<void>;
   listRepositories(signal: AbortSignal): Promise<unknown[]>;
+  readGithub(input: { number: number; type: string; section?: string; page?: number }, signal: AbortSignal): Promise<unknown>;
   syncBase(repositoryId: number, signal: AbortSignal): Promise<unknown>;
   pushBranch(repositoryId: number, signal: AbortSignal): Promise<unknown>;
   pushBase(repositoryId: number, signal: AbortSignal): Promise<unknown>;
@@ -89,6 +90,19 @@ export function createCodeCapability(host: CodeCapabilityHost): CodeModeCapabili
       }
       case "repositories.list":
         return host.listRepositories(signal);
+      case "github.read": {
+        if (!Number.isSafeInteger(args.number) || Number(args.number) < 1) throw new TypeError("number must be a positive integer");
+        if (args.type !== "issue" && args.type !== "pr") throw new TypeError("type must be issue or pr");
+        if (args.page !== undefined && (!Number.isSafeInteger(args.page) || Number(args.page) < 1)) {
+          throw new TypeError("page must be a positive integer");
+        }
+        return host.readGithub({
+          number: args.number as number,
+          type: args.type,
+          section: stringField(args, "section", { optional: true, maxLength: 32 }),
+          page: args.page as number | undefined,
+        }, signal);
+      }
       case "git.syncBase":
         return host.syncBase(repositoryId(args), signal);
       case "git.pushBranch":

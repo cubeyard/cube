@@ -14,6 +14,7 @@ OFFLINE_TESTS=(
   packages/server/test/services-test.ts
   packages/server/test/workspace-files-test.ts
   packages/server/test/github-auth-test.ts
+  packages/server/test/github-read-test.ts
   packages/server/test/onboarding-test.ts
   packages/server/test/pty-test.ts
   packages/server/test/terminal-guards-test.ts
