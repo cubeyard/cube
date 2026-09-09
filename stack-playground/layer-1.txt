@@ -1,0 +1,2 @@
+Native GitHub stack playground: merged-prefix candidate.
+This fixture belongs only on the isolated test/stack-review-base branch.
