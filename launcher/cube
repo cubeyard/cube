@@ -1082,11 +1082,30 @@ cmd_upgrade() {
   [ "$need" = 0 ] || note "downloading $(mb "$need")"
   for role in "${roles[@]}"; do fetch_role "$target" "$role" || return 1; done
 
+  if ! activate_release "$cur" "$target" "$reboot"; then
+    fail "the upgrade to $target did not complete — $cur stays the installed release"
+    note "to get back on $cur: cube down, then cube up"
+    note "to try again: cube upgrade $target"
+    return 1
+  fi
+  printf '%s\n' "$target" > "$VERSION_FILE"
+  prune_store "$target"
+  ok "upgraded to $target (data disk kept)"
+  self_update "$target"
+  print_url
+}
+
+# activate_release CUR TARGET REBOOT — bring the downloaded TARGET up and
+# prove it (identity, then cubed answering). The caller records TARGET as
+# installed only after this returns 0, so a release that does not come
+# up leaves CUR as what `cube up` boots.
+activate_release() {
+  local cur="$1" target="$2" reboot="$3"
   if [ "$reboot" = 1 ]; then
+    vm_pid >/dev/null || note "the VM is not running — starting it on $target"
     # The old qemu must be PROVABLY gone before overlays it holds are
     # reset and a second writer boots onto the data disk.
     stop_vm || { fail "aborting upgrade — the running VM still holds the disks"; return 1; }
-    printf '%s\n' "$target" > "$VERSION_FILE"
     boot_vm "$target" || return 1     # resets exactly the changed disks
     wait_ssh || return 1
     if [ "$(app_overlay_build)" != "$(mf "$target" build_id)" ]; then
@@ -1096,18 +1115,18 @@ cmd_upgrade() {
     # App only: no reboot. Make sure the VM is up (on the current
     # release), then swap the app tree in place.
     if ! vm_ssh true 2>/dev/null; then
-      boot_vm "$cur" || return 1
-      wait_ssh || return 1
+      if vm_pid >/dev/null; then
+        wait_ssh || return 1
+      else
+        note "the VM is not running — starting it first"
+        boot_vm "$cur" || return 1
+        wait_ssh || return 1
+      fi
     fi
-    printf '%s\n' "$target" > "$VERSION_FILE"
     apply_app "$target" || return 1
   fi
-  check_identity || return 1
+  check_identity "$target" || return 1
   wait_cubed || return 1
-  prune_store "$target"
-  ok "upgraded to $target (data disk kept)"
-  self_update "$target"
-  print_url
 }
 
 cmd_version() {
