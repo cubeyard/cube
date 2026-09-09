@@ -170,8 +170,20 @@ Direct push/PR creation cannot publish a detected existing PR; use the
 review workflow instead. `syncBase` still refreshes only the configured
 repository base and is not a PR-head or stack synchronization operation.
 Standalone PRs use the same review workflow when GitHub explicitly reports
-no native stack. Closed, merged, queued, forked, inconsistent, or inaccessible
-stack layers stop before publication, as do nonlinear descendant histories.
+no native stack. A contiguous merged prefix is retained in
+`stack.mergedPrefix` as historical membership; `stack.layers` contains only
+the open suffix. Cube verifies each prefix PR's `merge_commit_sha` is an
+ancestor of the fetched trunk, including squash/rebase results and shared
+native group-merge commits. Old PR head SHAs need not be ancestors of trunk,
+and merged branch refs need not exist. Only active heads are fetched,
+restacked, leased, and published; merged branch refs are never recreated.
+GitHub owns partial-merge retargeting: the first open PR must already target
+the native stack's trunk. Retained merged members need no unstacking or
+metadata cleanup. If retargeting has not completed, preparation stops with
+an explicit native-reconciliation message rather than guessing a base.
+Closed-but-unmerged, queued, forked, inconsistent, or inaccessible layers,
+non-prefix merges, unverified merge results, and nonlinear descendant
+histories still stop before publication.
 Review snapshots and their Git objects live under `reposRoot/pr-reviews/`
 on the host, not in the guest, and survive cubed restarts.
 
