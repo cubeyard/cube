@@ -7,6 +7,7 @@
 #   bash scripts/test-offline.sh        # run them all, from any host
 OFFLINE_TESTS=(
   scripts/release-contract-test.ts
+  packages/server/test/log-test.ts
   packages/server/test/cube-toml-test.ts
   packages/server/test/portal-config-test.ts
   packages/server/test/portal-proxy-test.ts

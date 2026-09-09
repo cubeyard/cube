@@ -9,6 +9,10 @@ import http from "node:http";
 import net from "node:net";
 import stream from "node:stream";
 
+import { createLogger } from "./log.ts";
+
+const log = createLogger("portal");
+
 /** Hop-by-hop headers never forwarded (RFC 9110 §7.6.1). */
 const HOP_BY_HOP = new Set([
   "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -69,6 +73,7 @@ export function proxyHttp(
     },
   );
   upstream.on("error", (error: NodeJS.ErrnoException) => {
+    log.warn("upstream error", { target: `${target.ip}:${target.port}`, method: req.method, path: req.url, error: error.code ?? error.message });
     if (res.headersSent) return void res.destroy();
     if (error.code === "ECONNREFUSED" || error.code === "EHOSTUNREACH" || error.code === "ETIMEDOUT") {
       return onConnectError();
@@ -99,6 +104,9 @@ export function proxyUpgrade(
     if (head.length > 0) upstream.write(head);
     upstream.pipe(socket);
     socket.pipe(upstream);
+  });
+  upstream.on("error", (error: NodeJS.ErrnoException) => {
+    log.warn("upstream error", { target: `${target.ip}:${target.port}`, upgrade: req.url, error: error.code ?? error.message });
   });
   const drop = () => {
     upstream.destroy();

@@ -16,6 +16,7 @@ import { IncusBackend, MockBackend, type CubeBackend } from "@cube/sandbox";
 
 import { checkAuth } from "./auth.ts";
 import { GithubAuth } from "./github-auth.ts";
+import { createLogger } from "./log.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { defaultPortalBase } from "./portal-config.ts";
 import { portalLabel, proxyHttp, proxyUpgrade, respondFailed, respondWaking, sameOriginUpgrade } from "./portal-proxy.ts";
@@ -24,6 +25,7 @@ import { Registry } from "./registry.ts";
 import { CubeSupervisor, DEFAULT_EGRESS_ALLOW } from "./supervisor.ts";
 import { listWorkspaceFiles, openWorkspaceFile } from "./workspace-files.ts";
 
+const log = createLogger("api");
 const PORT = Number(process.env.CUBED_PORT ?? 7777);
 // Host-header portal routing (PLAN §10). The base must resolve to this
 // machine for every device that should reach portals: a wildcard record /
@@ -48,11 +50,10 @@ if (BACKEND !== "incus" && BACKEND !== "mock") {
 }
 const backend: CubeBackend = BACKEND === "mock" ? new MockBackend() : new IncusBackend();
 if (BACKEND === "mock") {
-  console.log(
-    "cubed: MOCK backend — cube ops are simulated (no Incus). Cube commands\n" +
-      "  (repo .cube/setup, hooks, services, pi tools and ! commands) run\n" +
-      "  LOCALLY with NO nested isolation, as cubed's own user. Run this ONLY\n" +
-      "  inside a cube; never point it at an untrusted repo on a host you care about.",
+  log.warn(
+    "MOCK backend — cube ops are simulated (no Incus). Cube commands (repo .cube/setup, hooks, services, " +
+      "pi tools and ! commands) run LOCALLY with NO nested isolation, as cubed's own user. Run this ONLY " +
+      "inside a cube; never point it at an untrusted repo on a host you care about.",
   );
 }
 const supervisor = new CubeSupervisor(registry, backend, {
@@ -119,7 +120,7 @@ function parseLingerMs(raw: string | undefined): number | undefined {
 // Built Svelte SPA (pnpm build). The daemon itself stays build-free.
 const WEB_ROOT = path.resolve(import.meta.dirname, "../../web/dist");
 if (!fs.existsSync(path.join(WEB_ROOT, "index.html"))) {
-  console.warn("web UI not built — run `pnpm build` (serving API only)");
+  log.warn("web UI not built — run `pnpm build` (serving API only)");
 }
 
 // ------------------------------------------------------------------- http
@@ -153,7 +154,7 @@ function fail(res: http.ServerResponse, error: unknown, sanitize = false): void 
         ? 400
         : 500;
   if (sanitize) message = sanitizeMessage(message);
-  if (status === 500) console.log(`api error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+  if (status === 500) log.error("api error", { error });
   json(res, status, { error: message });
 }
 
@@ -816,6 +817,6 @@ function attachTerminal(threadId: string, ws: WebSocket, cols: number, rows: num
 
 // A stray rejection must not take every thread's terminal down with the
 // daemon; log it and stay up.
-process.on("unhandledRejection", (reason) => console.log(`unhandled rejection: ${String(reason)}`));
+process.on("unhandledRejection", (reason) => log.error("unhandled rejection", { error: reason }));
 
-server.listen(PORT, () => console.log(`cubed listening on http://localhost:${PORT} (portals on *.${PORTAL_BASE})`));
+server.listen(PORT, () => log.info("listening", { url: `http://localhost:${PORT}`, portals: `*.${PORTAL_BASE}` }));

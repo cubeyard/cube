@@ -11,6 +11,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import { createLogger } from "./log.ts";
+
+// Every error column is written here, so every caller's failure reaches the
+// journal (and `cube diagnose`) without each of them remembering to log.
+const log = createLogger("registry");
+
 export interface CubeRow {
   id: number;
   name: string;
@@ -392,6 +398,7 @@ export class Registry {
         result.checkedAt,
         id,
       );
+    if (result.error) log.warn("project repository error", { repository: id, status: result.status, error: result.error });
   }
 
   finishProjectCheck(
@@ -407,6 +414,7 @@ export class Registry {
          WHERE id = ? AND revision = ?`,
       )
       .run(status, error, checkedAt, checkedAt, id, revision);
+    if (error) log.warn("project error", { project: id, revision, status, error });
   }
 
   countThreadsForProject(projectId: string): number {
@@ -529,6 +537,7 @@ export class Registry {
     this.db
       .prepare("UPDATE cube SET status = ?, error = ? WHERE name = ?")
       .run(status, error, name);
+    if (error) log.warn("cube error", { cube: name, status, error });
   }
 
   touchCube(name: string): void {

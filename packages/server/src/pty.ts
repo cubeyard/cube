@@ -18,6 +18,10 @@
  */
 import { spawn, type IPty } from "@lydell/node-pty";
 
+import { createLogger } from "./log.ts";
+
+const log = createLogger("pty");
+
 /** What the bridge needs from a connected socket. */
 export interface TerminalClient {
   /** string = JSON control frame, Buffer = raw terminal output. */
@@ -183,6 +187,7 @@ export class PiTerminals {
       });
       session.proc = proc;
       session.lastStatus = null;
+      log.info("pi spawned", { thread: session.threadId, pid: proc.pid });
       this.broadcast(session, control({ t: "spawned" }));
       proc.onData((chunk) => {
         const buf = Buffer.from(chunk, "utf8");
@@ -195,10 +200,12 @@ export class PiTerminals {
         this.touch(session);
       });
       proc.onExit(({ exitCode }) => {
+        log.warn("pi exited", { thread: session.threadId, pid: proc.pid, code: exitCode });
         if (this.sessions.get(session.threadId) !== session) return;
         this.teardown(session, { t: "exit", code: exitCode });
       });
     } catch (error) {
+      log.warn("pi spawn failed", { thread: session.threadId, error });
       if (this.sessions.get(session.threadId) !== session) return;
       this.teardown(session, {
         t: "error",

@@ -14,7 +14,10 @@ import net from "node:net";
 import path from "node:path";
 
 import type { ServiceSpec } from "./cube-toml.ts";
+import { createLogger } from "./log.ts";
 import type { PortalRow } from "./registry.ts";
+
+const log = createLogger("services");
 
 /** Auto-assigned in-cube ports for `port`-less declarations. Per cube (its
  * own netns), so the range never collides across cubes. */
@@ -84,7 +87,11 @@ export async function ensureServices(
 
   const statuses: ServiceStatus[] = [];
   for (const plan of plans) {
-    statuses.push(await ensureOne(host, plan, plans, readyTimeoutMs, signal));
+    const status = await ensureOne(host, plan, plans, readyTimeoutMs, signal);
+    if (status.state === "failed") {
+      log.warn("service failed", { cube: cubeName, service: status.name, port: status.port, error: status.detail });
+    }
+    statuses.push(status);
   }
   return statuses;
 }
