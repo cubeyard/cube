@@ -35,6 +35,8 @@ OFFLINE_TESTS=(
   packages/git/test/pr-review-test.ts
   packages/git/test/merged-pr-review-test.ts
   packages/pi-extension/test/code-mode-test.ts
+  packages/pi-extension/test/code-boundaries-test.ts
+  packages/pi-extension/test/code-io-test.ts
   packages/pi-extension/test/pi-extension-test.ts
   packages/pi-extension/test/diagnostics-test.ts
 )

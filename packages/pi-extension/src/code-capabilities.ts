@@ -4,7 +4,7 @@
  * access to the host process. */
 import type { CodeModeCapability } from "./code-mode.ts";
 
-interface ExecInput {
+export interface ExecInput {
   command: string;
   cwd: string | undefined;
   timeoutMs: number;
@@ -54,7 +54,7 @@ function stringField(
 
 function repositoryId(args: Record<string, unknown>): number {
   const value = args.repositoryId;
-  if (!Number.isInteger(value) || Number(value) < 1) {
+  if (!Number.isSafeInteger(value) || Number(value) < 1) {
     throw new TypeError("repositoryId must be a positive integer");
   }
   return Number(value);
@@ -62,7 +62,7 @@ function repositoryId(args: Record<string, unknown>): number {
 
 function timeoutMs(args: Record<string, unknown>): number {
   const value = args.timeoutMs ?? 120_000;
-  if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > 600_000) {
+  if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > 600_000) {
     throw new TypeError("timeoutMs must be an integer from 1 to 600000");
   }
   return Number(value);
@@ -73,6 +73,26 @@ function timeoutMs(args: Record<string, unknown>): number {
 export function createCodeCapability(host: CodeCapabilityHost): CodeModeCapability {
   return async (operation, rawArgs, signal) => {
     const args = record(rawArgs);
+    const fields: Record<string, readonly string[]> = {
+      exec: ["command", "cwd", "timeoutMs"],
+      "github.read": ["number", "type", "section", "page"],
+      "git.preparePrUpdate": ["repositoryId", "number"],
+      "git.planPrUpdate": ["repositoryId", "token"],
+      "git.verifyPrUpdate": ["repositoryId", "token"],
+      "git.publishPrUpdate": ["repositoryId", "token", "plan"],
+      "git.inspectPrUpdatePlan": ["repositoryId", "token", "plan", "number", "section", "page"],
+      "environment.status": [], "environment.retrySetup": [],
+      "fs.readText": ["path"], "fs.writeText": ["path", "content"],
+      "repositories.list": [], "services.ensure": [], "thread.archive": [],
+      "git.syncBase": ["repositoryId"], "git.pushBranch": ["repositoryId"],
+      "git.pushBase": ["repositoryId"], "git.createPr": ["repositoryId", "title", "body"],
+    };
+    const allowed = Object.hasOwn(fields, operation) ? fields[operation] : undefined;
+    if (!allowed) throw new Error(`unknown code capability: ${operation}`);
+    for (const key of Object.keys(args)) {
+      if (!allowed.includes(key)) throw new TypeError(`unknown ${operation} option: ${key}`);
+    }
+    signal.throwIfAborted();
     switch (operation) {
       case "exec":
         return host.exec(

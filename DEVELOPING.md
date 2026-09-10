@@ -5,6 +5,8 @@ logic and UI from inside an ordinary cube (fast, no Incus). The **VM loop**
 validates the real sandbox and the live pi TUI (slow, real Incus).
 
 See `ARCHITECTURE.md` for the architecture and `HANDOFF.md` for current state.
+For codemode limits, structured errors, and isolated regression tests, see
+[`docs/codemode.md`](docs/codemode.md).
 
 ---
 
