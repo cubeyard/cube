@@ -202,7 +202,7 @@ try {
   console.log("6 ok: the environment is snapshotted per thread");
 
   for (const id of [thread.id, plain.id]) await supervisor.removeUserThread(id);
-  supervisor.deleteProject(project.id);
+  await supervisor.deleteProject(project.id);
   console.log("project-environment-test: all ok");
 } finally {
   await supervisor.close();

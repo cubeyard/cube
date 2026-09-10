@@ -22,8 +22,6 @@ import { CubeSupervisor, type ProjectInfo, type SupervisorConfig } from "../src/
 class RecordingBackend extends MockBackend {
   destroyed: string[] = [];
   builders = 0;
-  /** While set, publication reconciliation (cache maintenance) blocks on it. */
-  reconcileGate: Promise<void> | null = null;
   override async provision(spec: CubeProvisionSpec): Promise<void> {
     if (spec.name.startsWith("cube-s-")) this.builders++;
     await super.provision(spec);
@@ -31,10 +29,6 @@ class RecordingBackend extends MockBackend {
   override async destroy(spec: DestroySpec): Promise<void> {
     this.destroyed.push(spec.name);
     await super.destroy(spec);
-  }
-  async reconcileEnvironment(alias: string): Promise<string> {
-    if (this.reconcileGate) await this.reconcileGate;
-    return `mock-environment:${alias}:reconciled`;
   }
 }
 
@@ -82,7 +76,7 @@ const alive = (pid: number): boolean => {
   }
 };
 
-const config = (cubesRoot: string, environmentCacheBytes = 0): SupervisorConfig => ({
+const config = (cubesRoot: string, environmentCache = false): SupervisorConfig => ({
   cubesRoot,
   reposRoot: path.join(tmp, "mirrors"),
   pool: "mock",
@@ -93,7 +87,7 @@ const config = (cubesRoot: string, environmentCacheBytes = 0): SupervisorConfig 
   idleMs: 0,
   portalBase: "cube.localhost",
   publicPort: 7777,
-  environmentCacheBytes,
+  environmentCache,
 });
 
 // The script records its pid so the test can prove the guest process died
@@ -174,7 +168,7 @@ try {
   {
     const registry = new Registry(path.join(tmp, "two.db"));
     const backend = new RecordingBackend();
-    const supervisor = new CubeSupervisor(registry, backend, config(path.join(tmp, "two-cubes"), 100 * 1024 * 1024));
+    const supervisor = new CubeSupervisor(registry, backend, config(path.join(tmp, "two-cubes"), true));
     const bare = repository("shared", "#!/bin/sh\nsleep 1\necho built > generated\n");
     const project = supervisor.createProject({ name: "shared", repositories: [{ url: bare }] });
     await readyProject(supervisor, project.id);
@@ -189,52 +183,17 @@ try {
     assert.ok(Date.now() - started < 2_000, "delete while waiting on a shared build returns promptly");
     assert.equal(registry.getCube(cubeName), null);
     assert.ok(!backend.destroyed.includes(`cube-${builder.name}`), "the builder was not torn down by the thread's delete");
-    // The build runs on and publishes: the next thread restores it.
+    // The build runs on and becomes the template: the next thread clones it.
     await until("the builder to finish", () => registry.getCube(builder.name) === null, 10_000);
-    const cached = await supervisor.createUserThread(project.id);
-    const cachedCube = supervisor.resolveUserThread(cached.id).cubeName;
-    await until("cached thread ready", () => registry.getCube(cachedCube)?.status === "ready");
+    assert.equal(backend.templates.size, 1, "the abandoned wait's build became the project's template");
+    const cloned = await supervisor.createUserThread(project.id);
+    const clonedCube = supervisor.resolveUserThread(cloned.id).cubeName;
+    await until("cloned thread ready", () => registry.getCube(clonedCube)?.status === "ready");
     assert.equal(backend.builders, 1, "no second build");
-    assert.equal(fs.readFileSync(path.join(registry.getCube(cachedCube)!.workspacePath, "generated"), "utf8"), "built\n");
-    assert.equal(supervisor.environmentForUserThread(cached.id).setup.cached, true);
-    await supervisor.removeUserThread(cached.id);
+    assert.equal(backend.clones.at(-1)?.name, `cube-${clonedCube}`);
+    assert.equal(fs.readFileSync(path.join(registry.getCube(clonedCube)!.workspacePath, "generated"), "utf8"), "built\n", "setup ran warm in the clone");
+    await supervisor.removeUserThread(cloned.id);
     console.log("3 ok: a thread deleted while waiting on a shared build leaves the build to finish");
-
-    // ---- 4. a delete while the cache still waits on maintenance cannot
-    // poison the build: the abandoned wait later runs the build with the
-    // repository snapshot taken before, not with the deleted thread's rows.
-    const second = repository("second", "#!/bin/sh\nsleep 1\necho built-late > generated\n");
-    const late = supervisor.createProject({ name: "second", repositories: [{ url: second }] });
-    await readyProject(supervisor, late.id);
-    // Maintenance holds the cache: a quarantined publication whose
-    // reconciliation blocks until the test releases it.
-    const stuck = "9".repeat(64);
-    fs.mkdirSync(path.join(tmp, "two-cubes", ".environments", stuck), { recursive: true });
-    fs.writeFileSync(path.join(tmp, "two-cubes", ".environments", stuck, "publication.json"), "{}");
-    let release!: () => void;
-    backend.reconcileGate = new Promise<void>((resolve) => { release = resolve; });
-    const pass = supervisor.maintainEnvironments();
-    const waiting = await supervisor.createUserThread(late.id);
-    const waitingCube = supervisor.resolveUserThread(waiting.id).cubeName;
-    // Seeded, and now inside use() waiting for maintenance — no builder yet.
-    await until("the provision to reach the cache", () =>
-      registry.listEvents({ kind: "provision", cube: waitingCube }).some((e) => e.phase === "seed"));
-    await sleep(50);
-    assert.equal(backend.builders, 1, "no build has started while maintenance holds the cache");
-    await supervisor.removeUserThread(waiting.id);
-    assert.equal(registry.getCube(waitingCube), null);
-    release();
-    await pass;
-    await until("the build to finish", () => registry.listCubes().every((c) => c.status !== "building-environment") && backend.builders === 2, 15_000);
-    const restored = await supervisor.createUserThread(late.id);
-    const restoredCube = supervisor.resolveUserThread(restored.id).cubeName;
-    await until("restored thread ready", () => registry.getCube(restoredCube)?.status === "ready");
-    assert.equal(backend.builders, 2, "the abandoned wait's build was published; no rebuild");
-    assert.equal(supervisor.environmentForUserThread(restored.id).setup.cached, true);
-    assert.equal(fs.readFileSync(path.join(registry.getCube(restoredCube)!.workspacePath, "generated"), "utf8"), "built-late\n",
-      "the snapshot carries the deleted thread's repositories, not an empty workspace");
-    await supervisor.removeUserThread(restored.id);
-    console.log("4 ok: a build queued behind maintenance uses the repository snapshot, not the deleted thread's rows");
 
     await supervisor.close();
     registry.close();

@@ -23,9 +23,8 @@ OFFLINE_TESTS=(
   packages/server/test/terminal-guards-test.ts
   packages/server/test/project-test.ts
   packages/server/test/project-environment-test.ts
-  packages/server/test/environment-cache-test.ts
+  packages/server/test/environment-templates-test.ts
   packages/server/test/environment-lifecycle-test.ts
-  packages/server/test/environment-maintenance-test.ts
   packages/server/test/lifecycle-test.ts
   packages/server/test/provision-cancel-test.ts
   packages/server/test/provision-failure-test.ts

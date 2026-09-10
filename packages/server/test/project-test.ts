@@ -101,7 +101,7 @@ const missingDone = await settledProject(supervisor, missing.id);
 assert.equal(missingDone.status, "error");
 assert.match(missingDone.repositories[0]!.error ?? "", /does-not-exist|remote ref|revision/i);
 await assert.rejects(supervisor.createUserThread(missing.id), /not ready \(status: error\)/);
-supervisor.deleteProject(missing.id);
+await supervisor.deleteProject(missing.id);
 console.log("1 ok: checking and failed projects cannot start threads; exact repository error retained");
 
 assert.throws(
@@ -164,7 +164,7 @@ for (const thread of [firstAttempt, another, elsewhere]) {
 }
 assert.equal((await supervisor.createUserThread(project.id, "action-1")).created, true, "a deleted thread is not replayed");
 await supervisor.removeUserThread(supervisor.resolveUserThread((await supervisor.createUserThread(project.id, "action-1")).id).threadId);
-supervisor.deleteProject(otherProject.id);
+await supervisor.deleteProject(otherProject.id);
 assert.equal(registry.listCubes().length, 0);
 console.log("3b ok: thread creation is idempotent per request key and project");
 
@@ -291,11 +291,11 @@ fs.rmSync(path.join(cube.workspacePath, ".cube"), { recursive: true, force: true
 supervisor.archiveUserThread(thread.id);
 assert.equal(supervisor.listUserThreads().length, 0);
 assert.equal(supervisor.listUserThreads(true)[0]!.archived, true);
-assert.throws(() => supervisor.deleteProject(project.id), /still has threads/);
+await assert.rejects(supervisor.deleteProject(project.id), /still has threads/);
 console.log("4 ok: project snapshot scopes repos/services, coalesces cancellation, labels threads, and preserves archived work");
 
 await supervisor.removeUserThread(thread.id);
-supervisor.deleteProject(project.id);
+await supervisor.deleteProject(project.id);
 assert.equal(supervisor.listProjects().length, 0);
 await supervisor.close();
 registry.close();

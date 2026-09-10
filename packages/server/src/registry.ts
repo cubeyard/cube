@@ -125,6 +125,23 @@ export interface CubeRepositoryRow {
   workspacePath: string;
 }
 
+/** A prepared environment: a stopped builder instance plus snapshots of
+ * its rootfs and docker volume, cloned into every thread of the project
+ * whose environment declaration hashes to `key`. `building` rows mark a
+ * capture in flight (boot cleans them up); only `ready` rows are cloned. */
+export interface EnvironmentTemplateRow {
+  id: string;
+  projectId: string;
+  key: string;
+  status: "building" | "ready";
+  instance: string;
+  snapshot: string;
+  volume: string;
+  volumeSnapshot: string;
+  createdAt: number;
+  usedAt: number;
+}
+
 export interface PortalRow {
   id: number;
   cubeId: number;
@@ -261,6 +278,19 @@ export class Registry {
         pool_volume TEXT NOT NULL,
         cap_bytes   INTEGER NOT NULL,
         UNIQUE(cube_id, purpose)
+      );
+      CREATE TABLE IF NOT EXISTS environment_template (
+        id              TEXT PRIMARY KEY,
+        project_id      TEXT NOT NULL REFERENCES project(id) ON DELETE RESTRICT,
+        key             TEXT NOT NULL,
+        status          TEXT NOT NULL,
+        instance        TEXT NOT NULL UNIQUE,
+        snapshot        TEXT NOT NULL,
+        volume          TEXT NOT NULL,
+        volume_snapshot TEXT NOT NULL,
+        created_at      INTEGER NOT NULL,
+        used_at         INTEGER NOT NULL,
+        UNIQUE(project_id, key)
       );
       CREATE TABLE IF NOT EXISTS event (
         id      INTEGER PRIMARY KEY,
@@ -582,6 +612,46 @@ export class Registry {
     }
   }
 
+  // --------------------------------------------------- environment templates
+
+  createEnvironmentTemplate(input: Omit<EnvironmentTemplateRow, "createdAt" | "usedAt">): EnvironmentTemplateRow {
+    const now = Date.now();
+    this.db.prepare(
+      `INSERT INTO environment_template (id, project_id, key, status, instance, snapshot, volume, volume_snapshot, created_at, used_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(input.id, input.projectId, input.key, input.status, input.instance, input.snapshot, input.volume, input.volumeSnapshot, now, now);
+    return this.getEnvironmentTemplate(input.id)!;
+  }
+
+  getEnvironmentTemplate(id: string): EnvironmentTemplateRow | null {
+    const row = this.db.prepare("SELECT * FROM environment_template WHERE id = ?").get(id);
+    return row ? environmentTemplateRow(row) : null;
+  }
+
+  findEnvironmentTemplate(projectId: string, key: string): EnvironmentTemplateRow | null {
+    const row = this.db.prepare("SELECT * FROM environment_template WHERE project_id = ? AND key = ?").get(projectId, key);
+    return row ? environmentTemplateRow(row) : null;
+  }
+
+  listEnvironmentTemplates(projectId?: string): EnvironmentTemplateRow[] {
+    const rows = projectId === undefined
+      ? this.db.prepare("SELECT * FROM environment_template ORDER BY created_at").all()
+      : this.db.prepare("SELECT * FROM environment_template WHERE project_id = ? ORDER BY created_at").all(projectId);
+    return (rows as unknown[]).map(environmentTemplateRow);
+  }
+
+  setEnvironmentTemplateStatus(id: string, status: EnvironmentTemplateRow["status"]): void {
+    this.db.prepare("UPDATE environment_template SET status = ?, used_at = ? WHERE id = ?").run(status, Date.now(), id);
+  }
+
+  touchEnvironmentTemplate(id: string): void {
+    this.db.prepare("UPDATE environment_template SET used_at = ? WHERE id = ?").run(Date.now(), id);
+  }
+
+  deleteEnvironmentTemplate(id: string): void {
+    this.db.prepare("DELETE FROM environment_template WHERE id = ?").run(id);
+  }
+
   // ------------------------------------------------------------------ cube
 
   createCube(input: {
@@ -871,6 +941,21 @@ function cubeRepositoryRow(r: any): CubeRepositoryRow {
     baseOid: String(r.base_oid),
     checkoutName: String(r.checkout_name),
     workspacePath: String(r.workspace_path),
+  };
+}
+
+function environmentTemplateRow(r: any): EnvironmentTemplateRow {
+  return {
+    id: String(r.id),
+    projectId: String(r.project_id),
+    key: String(r.key),
+    status: String(r.status) as EnvironmentTemplateRow["status"],
+    instance: String(r.instance),
+    snapshot: String(r.snapshot),
+    volume: String(r.volume),
+    volumeSnapshot: String(r.volume_snapshot),
+    createdAt: Number(r.created_at),
+    usedAt: Number(r.used_at),
   };
 }
 

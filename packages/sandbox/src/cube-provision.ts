@@ -33,17 +33,28 @@ export interface CubeNetworkSpec {
   portalBase?: string;
 }
 
+/** A prepared environment to clone threads from: a stopped instance with a
+ * snapshot, and its docker volume with a snapshot of the same name. */
+export interface CubeTemplateSource {
+  instance: string;
+  snapshot: string;
+  volume: string;
+  volumeSnapshot: string;
+}
+
 export interface CubeProvisionSpec {
   /** Incus instance name. */
   name: string;
   /** Image alias to init from (e.g. "cube-node"). */
   image: string;
-  /** Immutable Incus image fingerprint. When present, this is used instead
-   * of resolving `image` again. */
-  imageFingerprint?: string;
-  /** Restore the workspace staged in an environment image. Defaults false so
-   * revision builders keep their freshly seeded checkout. */
-  restoreWorkspace?: boolean;
+  /** Clone from an environment template instead of initialising from
+   * `image`: the rootfs from the template instance's snapshot, /var/lib/docker
+   * from the template volume's snapshot. On ZFS both are clones — instant,
+   * and sharing blocks with the template until either side writes. */
+  template?: CubeTemplateSource;
+  /** Memory cap for the instance (Incus `limits.memory`, e.g. "4GiB"); the
+   * cgroup OOM killer, not the host, then ends a runaway build. */
+  memoryLimit?: string;
   /** Storage pool (ZFS) for rootfs + volumes. */
   pool: string;
   /** Rootfs quota, e.g. "10GiB". */
@@ -121,7 +132,6 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 export async function provisionCube(
   client: IncusClient,
   spec: CubeProvisionSpec,
-  restoreTimeoutMs = 10 * 60_000,
   opts: ProvisionOptions = {},
 ): Promise<void> {
   const net = spec.network;
@@ -153,7 +163,9 @@ export async function provisionCube(
   }
 
   const volume = dockerVolumeName(spec.name);
-  if (await exists(() => client.getCustomVolume(spec.pool, volume, signal))) {
+  // Reused and cloned volumes are reconciled to the configured quota; a
+  // freshly created one is born with it.
+  const reconcileVolume = async () => {
     const current = await client.getCustomVolume(spec.pool, volume, signal);
     if (current.config.size !== spec.dockerVolumeSize) {
       await client.updateCustomVolume(spec.pool, volume, {
@@ -161,6 +173,14 @@ export async function provisionCube(
         description: current.description,
       }, signal);
     }
+  };
+  if (await exists(() => client.getCustomVolume(spec.pool, volume, signal))) {
+    await reconcileVolume();
+  } else if (spec.template) {
+    // Images and instance copies never carry attached volumes: the
+    // template's docker state comes along only by cloning its volume.
+    await client.copyCustomVolume(spec.pool, volume, `${spec.template.volume}/${spec.template.volumeSnapshot}`, { signal });
+    await reconcileVolume();
   } else {
     await client.createCustomVolume(spec.pool, volume, { size: spec.dockerVolumeSize }, signal);
   }
@@ -176,8 +196,10 @@ export async function provisionCube(
   try {
     await client.createInstance({
       name: spec.name,
-      source: spec.imageFingerprint
-        ? { type: "image", fingerprint: spec.imageFingerprint }
+      // A template snapshot carries only its root device (captureTemplate
+      // strips the rest), so the devices below are the clone's whole set.
+      source: spec.template
+        ? { type: "copy", source: `${spec.template.instance}/${spec.template.snapshot}` }
         : { type: "image", alias: spec.image },
       profiles: ["default"],
       config: {
@@ -185,6 +207,7 @@ export async function provisionCube(
         "security.syscalls.intercept.mknod": "true",
         "security.syscalls.intercept.setxattr": "true",
         "security.idmap.isolated": "true",
+        ...(spec.memoryLimit ? { "limits.memory": spec.memoryLimit } : {}),
       },
       devices: {
         root: { type: "disk", path: "/", pool: spec.pool, size: spec.rootSize },
@@ -222,7 +245,7 @@ export async function provisionCube(
       },
     }, { signal });
     created = true;
-    await configureAndStart(client, spec, restoreTimeoutMs, signal);
+    await configureAndStart(client, spec, signal);
   } catch (error) {
     // A create that failed outright (Incus said no) left nothing behind;
     // one we stopped waiting for may still be completing.
@@ -258,7 +281,6 @@ async function rollBackInstance(client: IncusClient, name: string, timeoutMs: nu
 async function configureAndStart(
   client: IncusClient,
   spec: CubeProvisionSpec,
-  restoreTimeoutMs: number,
   signal?: AbortSignal,
 ): Promise<void> {
   const net = spec.network;
@@ -287,13 +309,25 @@ async function configureAndStart(
     // fetch (and therefore Corepack) only honors these proxy variables when
     // NODE_USE_ENV_PROXY is enabled; keep it on so package-manager bootstrap
     // does not try the deliberately unavailable direct route.
+    // JVMs ignore HTTP(S)_PROXY entirely: the Gradle wrapper, its daemon,
+    // the Kotlin daemon, test workers, Maven and `java -jar` all read the
+    // http(s).proxy* system properties instead. JAVA_TOOL_OPTIONS is the
+    // one hook every JVM honours (at the price of a "Picked up
+    // JAVA_TOOL_OPTIONS" line on stderr per JVM start).
+    const jvmNoProxy =
+      `localhost|127.*|${net.gateway}` + (net.portalBase ? `|*.${net.portalBase}` : "");
+    const jvmOptions =
+      `-Dhttp.proxyHost=${net.gateway} -Dhttp.proxyPort=${net.proxyPort} ` +
+      `-Dhttps.proxyHost=${net.gateway} -Dhttps.proxyPort=${net.proxyPort} ` +
+      `-Dhttp.nonProxyHosts=${jvmNoProxy}`;
     await client.pushInstanceFile(
       spec.name,
       "/etc/profile.d/50-cube-proxy.sh",
       ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]
         .map((k) => `export ${k}=${proxyUrl}\n`)
         .join("") +
-        `export NO_PROXY=${noProxy}\nexport no_proxy=${noProxy}\nexport NODE_USE_ENV_PROXY=1\n`,
+        `export NO_PROXY=${noProxy}\nexport no_proxy=${noProxy}\nexport NODE_USE_ENV_PROXY=1\n` +
+        `export JAVA_TOOL_OPTIONS="${jvmOptions}"\n`,
       { signal },
     );
     await client.pushInstanceFile(
@@ -315,48 +349,6 @@ async function configureAndStart(
   }
 
   await client.setInstanceState(spec.name, "start", {}, signal);
-
-  // Environment images carry Docker and workspace snapshots in rootfs because
-  // neither attached custom volumes nor host mounts are included in an image.
-  // This runs as root in the guest, where the image's idmap is authoritative.
-  const abort = new AbortController();
-  const onAbort = () => abort.abort(signal?.reason);
-  if (signal?.aborted) onAbort();
-  else signal?.addEventListener("abort", onAbort, { once: true });
-  // The host-side race below is the deadline; the exec carries only the
-  // client's liveness bound so two clocks never race each other.
-  const restoreEnvironment = client.execSimple(spec.name, [
-    "sh",
-    "-c",
-    "set -eu; if [ -d /var/lib/cube-environment ]; then " +
-      (spec.restoreWorkspace
-        ? `if [ -f /var/lib/cube-environment/workspace.tar ]; then ` +
-          `find /workspace -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} +; ` +
-          `tar --numeric-owner --same-owner --acls --xattrs --xattrs-include='*' --exclude='./.git' ` +
-          `-C /workspace -xpf /var/lib/cube-environment/workspace.tar; fi; `
-        : "") +
-      "if [ -d /var/lib/cube-environment/docker ]; then " +
-      "rm -rf /var/lib/docker/* /var/lib/docker/.[!.]* /var/lib/docker/..?*; " +
-      "cp -a --preserve=mode,ownership,timestamps,links,xattr /var/lib/cube-environment/docker/. /var/lib/docker/; fi; " +
-      "rm -rf /var/lib/cube-environment; systemctl unmask docker.service docker.socket; " +
-      "systemctl start docker.service; fi",
-  ], abort.signal, { timeoutMs: Infinity });
-  const timeout = new Promise<never>((_, reject) => {
-    const timer = setTimeout(() => {
-      abort.abort();
-      reject(new Error(`cube ${spec.name}: environment restore deadline exceeded`));
-    }, restoreTimeoutMs);
-    restoreEnvironment.finally(() => clearTimeout(timer)).catch(() => {});
-  });
-  let restoreResult: number | null;
-  try {
-    restoreResult = await Promise.race([restoreEnvironment, timeout]);
-  } finally {
-    signal?.removeEventListener("abort", onAbort);
-  }
-  if (restoreResult !== 0) {
-    throw new Error(`cube ${spec.name}: failed to restore captured environment (${restoreResult})`);
-  }
 
   // glibc reads /etc/resolv.conf directly (nsswitch is files,dns) and images
   // may ship it as a dangling symlink to the systemd-resolved stub — replace

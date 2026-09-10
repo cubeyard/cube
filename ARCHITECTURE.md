@@ -173,37 +173,26 @@ creating → ready ⇄ running → idle → asleep → waking → ready
   which can take several more seconds. Services remain in `.cube/cube.toml`.
   Failed setup is shown as a thread error without blocking its repair shell;
   wake does not erase that failure. Non-executable scripts fail explicitly.
-- **Prepared environments:** a dedicated builder with no user thread runs
-  setup, stops Docker/containerd, stages Docker data in rootfs, stops the
-  instance and publishes an Incus image. The workspace is archived and
-  restored inside the guest with GNU tar numeric owners, ACLs and xattrs, so
-  metadata is never translated through a host-side workspace copy.
-  Only successful builds publish. Working threads, including explicit setup
-  retries, never populate this cache. Fresh thread Git metadata is retained;
-  builder `.git` is excluded, symlinks are not dereferenced and writable
-  hardlinks are not shared. Git/model credentials and arbitrary host
-  environment variables never enter builders, threads or snapshots.
-- **Reuse identity:** project, ordered repository URLs/bases/checkout names
-  and exact OIDs, base image fingerprint, architecture, disk quotas, egress
-  policy and portal base. Exact hits skip setup; changed revisions can reuse
-  a compatible rootfs/Docker image with a fresh checkout and rerun setup.
-  Dependencies stored in the old workspace are not carried across revisions.
-  Concurrent requests for the same identity share one build. Cache failures
-  fall back to normal fresh setup, so a failed setup build may run again in
-  the repairable thread. No resume or user-session work runs in the builder.
-- **Retention:** `CUBED_ENVIRONMENT_CACHE_BYTES` defaults to 0 (disabled) and
-  is opt-in until the real-VM acceptance suite passes. A positive value enables
-  reuse. LRU eviction counts two rootfs quotas (compressed + unpacked image)
-  plus archived workspace bytes, and respects in-flight consumers. This is a
-  retained cache budget, not a peak host-disk quota: active builds and copies require
-  additional space. Docker staging must fit in the builder rootfs; failures
-  do not publish partial images. Raw Docker snapshots require compatible
-  Incus/overlay2 storage semantics; `environment-smoke.ts` tests whiteouts,
-  opaque directories, capabilities/xattrs, numeric volume ownership, rootfs,
-  workspace and fresh instance identity. Publication attempts are journaled
-  durably before the Incus POST; startup reconciliation recovers uniquely
-  tagged images after an uncertain response, while ambiguous or conflicting
-  results remain quarantined for operator recovery rather than being reused.
+- **Prepared environments (templates):** a dedicated builder with no user
+  thread runs setup once per *environment key*, is stopped, stripped of
+  every device but root, and snapshotted together with its docker volume.
+  It stays as a stopped instance — the project's template — and every
+  thread is created as a copy of that snapshot with a copy of the volume
+  snapshot: on ZFS both are clones, instant and block-sharing. No image is
+  built or published. The workspace is never part of a template: each
+  thread gets a fresh checkout and runs setup itself, warm (an idempotent
+  script makes that seconds), then resume. Working threads and explicit
+  setup retries never become templates; a failed build is torn down and the
+  thread sets up fresh. Git/model credentials and host environment never
+  enter builders, templates or threads.
+- **Environment key:** the contents of `setup`, `resume` and `cube.toml`,
+  the base image fingerprint, architecture, disk quotas, the memory cap and
+  the operator's egress list. Repository commits are deliberately absent.
+  One template per project: a new key builds a new template and deletes the
+  previous one once no clone is in progress (Incus keeps a deleted
+  template's datasets alive while clones depend on them). Concurrent first
+  threads share one build. `CUBED_ENVIRONMENT_CACHE=0` turns templates off.
+  Builders, captures and clones are lifecycle events (`kind=environment`).
 - **Diagnostics and repair:** host-owned `.lifecycle/<cube>/` under the cubes
   root keeps status, timestamps and duration, up to 1 MiB of output per
   phase, and the previous attempt. GET `/api/threads/:id/environment` returns

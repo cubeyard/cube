@@ -545,6 +545,8 @@ warning level) — `npx --yes shellcheck launcher/cube` locally.
 | `CUBED_PTY_LINGER_MS` | 30m | keep a pi TUI alive this long after the last detach |
 | `CUBED_IMAGE` / `CUBED_POOL` | `cube-node` / `cube` | Incus image + storage pool |
 | `CUBED_ROOT_SIZE` / `CUBED_DOCKER_VOLUME_SIZE` | `10GiB` / `5GiB` | per-cube disk |
+| `CUBED_CUBE_MEMORY` | half the host's RAM (min 1 GiB) | per-thread memory cap (Incus `limits.memory`); a build that hits it is killed inside the thread |
+| `CUBED_ENVIRONMENT_CACHE` | on | `0` disables prepared environments (the per-project template threads are cloned from) |
 | `CUBED_EGRESS_ALLOW` | — | extra allowed egress hosts, comma-separated, `*.suffix` allowed (extends the defaults; a cube's `[network] allow` extends both) |
 | `CUBED_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error`; one `level component msg key=value` line per event on stdout (`journalctl -u cubed`); `debug` adds stacks to every error field |
 

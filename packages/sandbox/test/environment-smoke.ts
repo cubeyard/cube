@@ -1,5 +1,6 @@
-/** Real Incus/ZFS acceptance: rootfs, workspace metadata, Docker volume
- * ownership, whiteouts and opaque directories survive an image round trip. Run in the VM:
+/** Real Incus/ZFS acceptance for templates: a builder's rootfs and docker
+ * volume survive capture and cloning, the clone boots with its own identity
+ * and network, and it outlives the template. Run in the VM:
  * node packages/sandbox/test/environment-smoke.ts */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -12,90 +13,42 @@ const client = new IncusClient();
 const backend = new IncusBackend(client);
 const spec = (name: string, subnet: number): CubeProvisionSpec => ({
   name: `cube-${name}`, image: process.env.CUBE_IMAGE ?? "cube-node", pool: "cube",
-  rootSize: "10GiB", dockerVolumeSize: "5GiB", hostWorkspace: path.join(root, name), guestWorkspace: "/workspace",
+  rootSize: "10GiB", dockerVolumeSize: "5GiB", memoryLimit: "2GiB",
+  hostWorkspace: path.join(root, name), guestWorkspace: "/workspace",
   network: { bridge: `cbr-${name}`, subnet: `10.90.${subnet}.1/24`,
     gateway: `10.90.${subnet}.1`, ip: `10.90.${subnet}.10`, nat: false, proxyPort: 3128 },
 });
-const builder = spec("envbuild", 6), target = spec("envclone", 7);
-const alias = "cube-environment-smoke";
-const journal = path.join(root, "publication");
-let fingerprint: string | undefined;
-let proxy: Awaited<ReturnType<IncusBackend["startEgressProxy"]>> | undefined;
-async function run(name: string, command: string): Promise<string> {
-  let output = "";
-  const result = await backend.sandbox(name).exec(command, {
-    cwd: "/workspace", timeout: 180, onData: (chunk) => { output = (output + chunk.toString()).slice(-65536); },
-  });
-  assert.equal(result.exitCode, 0, output);
-  return output;
-}
+const builder = spec("envbuild", 6), clone = spec("envclone", 7);
+const exec = (name: string, command: string) => client.execSimple(name, ["sh", "-c", command]);
+const started = Date.now();
+const lap = (what: string) => console.log(`${String(Date.now() - started).padStart(6)} ms  ${what}`);
 
 try {
-  for (const item of [builder, target]) await backend.destroy(item, { deleteVolume: true, deleteBridge: true });
-  const old = await client.getImageAlias(alias).catch(() => null);
-  if (old) await backend.deleteEnvironment(old.target);
   await backend.provision(builder);
-  proxy = await backend.startEgressProxy({
-    listenHost: builder.network.gateway,
-    port: builder.network.proxyPort!,
-    allowSource: [builder.network.ip],
-    // Docker Hub's auth, registry, and blob redirect endpoints. Everything
-    // else remains denied and the cube has no direct default route.
-    allow: [
-      "auth.docker.io", "registry-1.docker.io", "production.cloudflare.docker.com",
-      "archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com",
-    ],
-  });
-  await run(builder.name, `set -eu
-for n in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
-if ! command -v setfattr >/dev/null || ! command -v setcap >/dev/null; then
-  sudo apt-get update
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends attr libcap2-bin
-fi
-printf 'workspace-data' > prepared
-sudo chown 123:456 prepared
-sudo chmod 0555 prepared
-sudo touch -d '2020-01-02 03:04:05 UTC' prepared
-sudo setfattr -n user.cube -v fidelity prepared
-sudo cp /bin/true capability
-sudo setcap cap_net_bind_service=ep capability
-mkdir -p .git && printf 'builder-secret' > .git/config
-printf 'root-data' | sudo tee /opt/prepared >/dev/null
-docker run --name whiteout alpine:3.22 sh -c 'rm /etc/alpine-release; rm -rf /etc/ssl; mkdir /etc/ssl; echo opaque > /etc/ssl/replacement; mkdir -p /sample; echo payload > /sample/file'
-docker commit whiteout cube-whiteout >/dev/null
-docker volume create fixture >/dev/null
-docker run --rm -v fixture:/data alpine:3.22 sh -c 'echo volume-data > /data/file; chown 123:456 /data/file'
-`);
-  fs.mkdirSync(journal, { recursive: true });
-  fingerprint = await backend.captureEnvironment(builder, alias, journal);
-  assert.equal((await backend.getState(builder.name)).status, "Stopped");
-  fs.mkdirSync(path.join(target.hostWorkspace, ".git"), { recursive: true });
-  fs.writeFileSync(path.join(target.hostWorkspace, ".git", "config"), "fresh-target");
-  fs.writeFileSync(path.join(target.hostWorkspace, "stale"), "remove");
-  await backend.provision({ ...target, imageFingerprint: fingerprint, restoreWorkspace: true });
-  assert.match(await run(target.name, `set -eu
-test "$(cat prepared)" = workspace-data
-test "$(stat -c %u:%g prepared)" = 123:456
-test "$(stat -c %a prepared)" = 555
-test "$(stat -c %Y prepared)" = 1577934245
-test ! -e stale
-test "$(cat .git/config)" = fresh-target
-test "$(getfattr --only-values -n user.cube prepared 2>/dev/null)" = fidelity
-getcap capability | grep -F 'cap_net_bind_service=ep'
-test "$(cat /opt/prepared)" = root-data
-test ! -d /var/lib/cube-environment
-docker run --rm cube-whiteout sh -c 'test ! -e /etc/alpine-release; test ! -e /etc/ssl/certs; test "$(cat /etc/ssl/replacement)" = opaque; test "$(cat /sample/file)" = payload'
-docker run --rm -v fixture:/data alpine:3.22 sh -c 'test "$(cat /data/file)" = volume-data; test "$(stat -c %u:%g /data/file)" = 123:456'
-echo restored
-`), /restored/);
-  const sourceConfig = (await client.getInstance(builder.name)).config;
-  const targetConfig = (await client.getInstance(target.name)).config;
-  assert.notEqual(sourceConfig["volatile.idmap.current"], targetConfig["volatile.idmap.current"]);
-  assert.equal((await client.getInstanceState(target.name)).network?.eth0?.addresses.some((address) => address.address === target.network.ip), true);
-  console.log("PASS: real Incus environment round trip, Docker whiteouts/opaque dirs, volume ownership, workspace metadata and fresh identity");
+  lap("builder provisioned");
+  assert.equal(await exec(builder.name, "echo template-marker > /opt/marker && echo docker-marker > /var/lib/docker/cube-smoke-marker && cat /etc/machine-id > /opt/builder-machine-id"), 0);
+  const template = await backend.captureTemplate(builder, "env");
+  lap("captured");
+  assert.deepEqual(template, { instance: builder.name, snapshot: "env", volume: `${builder.name}-docker`, volumeSnapshot: "env" });
+
+  await backend.provision({ ...clone, template });
+  lap("clone provisioned and up");
+  assert.equal(await exec(clone.name, "test \"$(cat /opt/marker)\" = template-marker"), 0, "rootfs came from the template");
+  assert.equal(await exec(clone.name, "test \"$(cat /var/lib/docker/cube-smoke-marker)\" = docker-marker"), 0, "docker volume came from the template");
+  assert.equal(await exec(clone.name, "test \"$(cat /etc/machine-id)\" != \"$(cat /opt/builder-machine-id)\" && test -s /etc/machine-id"), 0, "the clone has its own machine-id");
+  // Docker starts with the clone (nothing waits for it on the fresh path
+  // either); a setup that needs it waits, and so does this check.
+  assert.equal(await exec(clone.name, "for i in $(seq 1 60); do systemctl is-active --quiet docker && exit 0; sleep 1; done; exit 3"), 0, "docker comes up in the clone");
+  assert.equal(await exec(clone.name, `grep -q 'JAVA_TOOL_OPTIONS="-Dhttp.proxyHost=10.90.7.1' /etc/profile.d/50-cube-proxy.sh`), 0, "the clone got its own proxy profile");
+  assert.equal((await client.getInstance(clone.name)).expanded_config?.["limits.memory"] ?? (await client.getInstance(clone.name)).config["limits.memory"], "2GiB");
+
+  await backend.deleteTemplate("cube", template);
+  lap("template deleted");
+  assert.equal(await exec(clone.name, "test \"$(cat /opt/marker)\" = template-marker"), 0, "the clone outlives the template");
+  await client.getInstance(builder.name).then(() => assert.fail("template instance still exists"), () => {});
+  console.log("PASS: template round trip on real Incus");
 } finally {
-  await proxy?.close();
-  for (const item of [builder, target]) await backend.destroy(item, { deleteVolume: true, deleteBridge: true });
-  if (fingerprint) await backend.deleteEnvironment(fingerprint);
+  await backend.destroy(clone, { deleteVolume: true, deleteBridge: true }).catch(() => {});
+  await backend.destroy(builder, { deleteVolume: true, deleteBridge: true }).catch(() => {});
   removeStoppedTree(root);
 }
