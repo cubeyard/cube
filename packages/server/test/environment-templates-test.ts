@@ -119,6 +119,28 @@ try {
   assert.deepEqual(registry.listEnvironmentTemplates(project.id).map((row) => row.id), [next.id]);
   console.log("6 ok: cleanup failures are retried by prune, never leaked silently");
 
+  // --- 7. two keys building at once (the declaration changed mid-build) never
+  // evict each other; the older one goes at the next prune
+  {
+    let finishA!: (v: CubeTemplateSource) => void;
+    const slowA = (instance: string) => new Promise<CubeTemplateSource>((resolve) => { finishA = (v) => resolve({ ...v, instance }); });
+    const before = deleted.length;
+    const a = templates.acquire(project.id, environmentKey({ declaration: "A" }), slowA);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const b = await templates.acquire(project.id, environmentKey({ declaration: "B" }), async (instance) => capture(instance));
+    assert.equal(registry.listEnvironmentTemplates(project.id).filter((row) => row.status === "building").length, 1, "A is still building");
+    assert.equal(deleted.length - before, 1, "B evicted only the finished template from step 6, not the build in flight");
+    finishA(capture("x"));
+    const ra = await a;
+    assert.equal(ra.status, "ready");
+    assert.equal(registry.getEnvironmentTemplate(b.id)?.status, "ready", "A finishing later does not evict the newer B");
+    templates.release(ra.id); templates.release(b.id);
+    await templates.prune();
+    assert.deepEqual(registry.listEnvironmentTemplates(project.id).map((row) => row.id), [b.id], "prune keeps the newest");
+    assert.ok(deleted.includes(ra.instance));
+    console.log("7 ok: concurrent builds of different keys leave each other alone; prune settles them");
+  }
+
   console.log("environment-templates-test: all ok");
 } finally {
   registry.close();

@@ -109,13 +109,17 @@ export class EnvironmentTemplates {
     }
     if (captured.instance !== instance) throw new Error(`template build returned instance ${captured.instance}, expected ${instance}`);
     this.registry.setEnvironmentTemplateStatus(id, "ready");
-    const ready = this.registry.getEnvironmentTemplate(id)!;
-    // One template per project: the previous key's template goes now, or
-    // at the next prune if a thread is still being cloned from it.
+    const ready = this.registry.getEnvironmentTemplate(id);
+    if (!ready) throw new Error(`template ${instance} was removed while it was being built`);
+    // One template per project: older templates go now, or at the next
+    // prune if a thread is still being cloned from them. A build still in
+    // flight for another key is left alone, and so is anything newer — the
+    // two keys of a project whose declaration changed mid-build settle at
+    // the next prune, which keeps the newest (Codex review).
     for (const other of this.registry.listEnvironmentTemplates(projectId)) {
-      if (other.id !== id && !this.leases.has(other.id)) {
-        await this.remove(other).catch((error) => this.onError(`evict template ${other.instance}`, error));
-      }
+      if (other.id === id || other.status !== "ready" || this.leases.has(other.id)) continue;
+      if (other.createdAt > ready.createdAt) continue;
+      await this.remove(other).catch((error) => this.onError(`evict template ${other.instance}`, error));
     }
     return ready;
   }
@@ -170,7 +174,7 @@ export class EnvironmentTemplates {
       const keep = ready[0]?.id;
       for (const row of rows) {
         if (row.id === keep || this.leases.has(row.id)) continue;
-        if (row.status === "building" && this.flights.size > 0) continue; // a capture may be in flight
+        if (row.status === "building" && this.flights.size > 0) continue; // a build may be in flight
         await this.remove(row).catch((error) => this.onError(`prune template ${row.instance}`, error));
       }
     }
