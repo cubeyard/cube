@@ -1,8 +1,12 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { createUserThread, deleteThread, errorText, fetchProjects, renameThread } from "../lib/api.ts";
+  import { onMount, untrack } from "svelte";
+  import { createUserThread, deleteThread, errorText, fetchProjects, isUnreachable, renameThread } from "../lib/api.ts";
+  import { uid } from "../lib/uid.ts";
+  import { createArmed } from "../lib/armed.svelte.ts";
+  import type { Command } from "../lib/command.ts";
   import { lampClass, stateLabel } from "../lib/thread-state.ts";
   import { relTime } from "../lib/time.ts";
+  import { createTransient } from "../lib/transient.svelte.ts";
   import type { Project, ThreadSummary } from "../lib/types.ts";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
@@ -11,16 +15,30 @@
     threads,
     initialProjectId,
     onThreadsChanged,
+    notice = null,
+    onDismissNotice = () => {},
+    command = null,
+    onConsume = () => {},
   }: {
     /** App polls the global list; this view only adds projects to it. */
     threads: ThreadSummary[];
     initialProjectId: string | null;
     /** A delete/rename landed — refresh the list now, not on the next poll. */
     onThreadsChanged: () => Promise<void>;
+    /** Something the app did on the user's behalf on the way here. */
+    notice?: string | null;
+    onDismissNotice?: () => void;
+    /** App's `n` shortcut: open the composer. */
+    command?: Command | null;
+    onConsume?: (id: number) => void;
   } = $props();
 
   let projects = $state<Project[]>([]);
+  // True once the project list has arrived at least once. A failed poll
+  // is not an empty list: until then the composer and the empty state
+  // say the host has not answered rather than "no projects".
   let loaded = $state(false);
+  let unreachable = $state(false);
   let error = $state<string | null>(null);
   let actionError = $state<string | null>(null);
   let creating = $state(false);
@@ -41,11 +59,15 @@
       projects = fresh;
       if (selectedFilter && !fresh.some((project) => project.id === selectedFilter)) location.hash = "#/threads";
       error = null;
+      unreachable = false;
+      loaded = true;
     } catch (e) {
       if (seq !== refreshSeq) return;
-      error = errorText(e);
+      // A host that does not answer is the app's strip to report — one
+      // quiet line, not a red banner on every view polling it.
+      unreachable = isUnreachable(e);
+      if (!unreachable) error = errorText(e);
     }
-    loaded = true;
   }
 
   onMount(() => {
@@ -67,11 +89,25 @@
     actionError = null;
   }
 
+  // Take the shell's command once (see lib/command.ts).
+  $effect(() => {
+    const pending = command;
+    if (!pending || pending.kind !== "new-thread") return;
+    onConsume(pending.id);
+    untrack(openComposer);
+  });
+
+  // One id per user action: a press that fails (host unreachable, a 5xx)
+  // is retried by the next press with the same id, so a request the host
+  // did complete is not repeated as a second thread.
+  let newThreadRequest: string | null = null;
   async function newThread(): Promise<void> {
     if (creating || !selectedProjectId) return;
     creating = true;
     try {
-      const id = await createUserThread(selectedProjectId);
+      newThreadRequest ??= uid();
+      const id = await createUserThread(selectedProjectId, newThreadRequest);
+      newThreadRequest = null;
       location.hash = `#/t/${id}`;
     } catch (e) {
       actionError = `new thread: ${errorText(e)}`;
@@ -80,18 +116,28 @@
     }
   }
 
+  // ---- delete: two presses on the row's own key, never a dialog. One row
+  // is armed at a time; the request in flight disables its key ----
+  const armed = createArmed();
+  let deleting = $state<string | null>(null);
   async function remove(thread: ThreadSummary): Promise<void> {
+    if (deleting || !armed.press(thread.id)) return;
+    deleting = thread.id;
     try {
       await deleteThread(thread.id);
       actionError = null;
     } catch (e) {
       actionError = `delete: ${errorText(e)}`;
+    } finally {
+      deleting = null;
     }
     await onThreadsChanged();
   }
 
   let renaming = $state<string | null>(null);
   let renameText = $state("");
+  // "renamed" printed in the row that just was, for a moment.
+  const renamed = createTransient();
   function startRename(thread: ThreadSummary): void {
     renaming = thread.id;
     renameText = thread.title ?? "";
@@ -106,6 +152,7 @@
     try {
       await renameThread(id, title);
       actionError = null;
+      renamed.set(id);
     } catch (e) {
       actionError = `rename: ${errorText(e)}`;
     }
@@ -130,7 +177,7 @@
       <p class="list-intro">all work, across every project</p>
     </div>
     {#if !composing}
-      <button class="key primary" onclick={openComposer}>
+      <button class="key primary" onclick={openComposer} title="new thread · press n">
         <Icon name="plus" size={13} />new thread
       </button>
     {/if}
@@ -153,12 +200,35 @@
     <span class="result-count">{filteredThreads.length} {filteredThreads.length === 1 ? "thread" : "threads"}</span>
   </div>
 
-  {#if error}<div class="banner">{error}</div>{/if}
-  {#if actionError}<div class="banner">{actionError}</div>{/if}
+  {#if notice}
+    <div class="banner info" role="status">
+      <span class="banner-text">{notice}</span>
+      <button class="key icon note-dismiss" title="dismiss" aria-label="dismiss note" onclick={onDismissNotice}>
+        <Icon name="close" size={12} />
+      </button>
+    </div>
+  {/if}
+  {#if error}<div class="banner" role="alert"><span class="banner-text">{error}</span></div>{/if}
+  {#if actionError}
+    <div class="banner" role="alert">
+      <span class="banner-text">{actionError}</span>
+      <button class="key icon note-dismiss" title="dismiss" aria-label="dismiss error" onclick={() => (actionError = null)}>
+        <Icon name="close" size={12} />
+      </button>
+    </div>
+  {/if}
 
   {#if composing}
     <div class="compose well">
-      {#if readyProjects.length > 0}
+      {#if !loaded}
+        <p class="compose-note" role="status">
+          {unreachable ? "can't reach the host — the project list will follow. retrying…" : error ? `projects unavailable — ${error}` : "reading projects…"}
+        </p>
+        <div class="compose-keys">
+          <button class="key" onclick={refresh}>retry now</button>
+          <button class="key" onclick={() => (composing = false)}>cancel</button>
+        </div>
+      {:else if readyProjects.length > 0}
         <label class="compose-field">
           <span class="silk">project</span>
           <select class="compose-input" bind:value={selectedProjectId} aria-label="project for new thread">
@@ -172,7 +242,7 @@
         <p class="compose-note">The checked repository snapshot is mounted before the thread starts.</p>
         <div class="compose-keys">
           <button class="key primary" onclick={newThread} disabled={creating || !selectedProjectId}>
-            {creating ? "starting…" : "start"}
+            {creating ? "starting…" : "new thread"}
           </button>
           <button class="key" onclick={() => (composing = false)} disabled={creating}>cancel</button>
         </div>
@@ -220,8 +290,9 @@
                   {#if stateLabel(thread)}
                     <span class="state-label" class:error={thread.state === "error"}>{stateLabel(thread)}</span>
                   {/if}
-                  {#if thread.error}<span class="module-error" title={thread.error}>{thread.error}</span>{/if}
+                  {#if renamed.value === thread.id}<span class="state-label" role="status">renamed</span>{/if}
                 </span>
+                {#if thread.error}<span class="module-error">{thread.error}</span>{/if}
               </span>
             </a>
           {/if}
@@ -229,10 +300,25 @@
             <button class="key icon" title="rename thread" aria-label="rename thread" onclick={() => startRename(thread)}>
               <Icon name="pencil" size={13} />
             </button>
-            <button class="key icon danger" title="delete thread" aria-label="delete thread" onclick={() => remove(thread)}>
-              <Icon name="trash" size={13} />
+            <button
+              class="key danger"
+              class:icon={!armed.is(thread.id) && deleting !== thread.id}
+              class:armed={armed.is(thread.id)}
+              title={armed.is(thread.id) ? "press again to delete this thread" : "delete thread"}
+              aria-label={armed.is(thread.id) ? "confirm: delete this thread" : "delete thread"}
+              disabled={deleting === thread.id}
+              onclick={() => remove(thread)}
+              onkeydown={armed.onKeydown}
+              onblur={() => armed.disarm()}
+            >
+              {#if deleting === thread.id}deleting…{:else if armed.is(thread.id)}delete?{:else}<Icon name="trash" size={13} />{/if}
             </button>
           </div>
+          {#if armed.is(thread.id)}
+            <!-- a sibling of the face and the bank: beside them on a wide
+                 panel, beneath the row on a phone, never over the title -->
+            <span class="module-note bank-note" role="status">{thread.state === "setting-up" ? "setup is cancelled; workspace and history are destroyed; the project is kept" : "workspace and history are destroyed; the project is kept"}</span>
+          {/if}
         </div>
       {/each}
     </div>
@@ -248,6 +334,13 @@
         <p class="hint">Every thread starts from a checked project snapshot.<br />Start one and just ask.</p>
         <button class="key primary" onclick={openComposer}><Icon name="plus" size={13} />new thread</button>
       {/if}
+      <p class="shortcuts"><kbd>n</kbd> new thread · <kbd>g</kbd> <kbd>t</kbd> threads · <kbd>g</kbd> <kbd>p</kbd> projects</p>
+    </div>
+  {:else if !loaded && !composing}
+    <!-- no threads and no answer about projects yet: not an empty box -->
+    <div class="empty-state" role="status">
+      <p class="hint">{unreachable ? "can't reach the host — it may be starting or restarting" : "reading projects…"}{#if unreachable}<br />retrying…{/if}</p>
+      {#if unreachable || error}<button class="key" onclick={refresh}>retry now</button>{/if}
     </div>
   {/if}
 </main>

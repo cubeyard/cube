@@ -1,7 +1,7 @@
 /**
  * Spike 2 — pi SDK headless with sandbox-routed bash + host-FS file tools.
  *
- * Architecture under test (PLAN §4): the harness (pi AgentSession) runs on the
+ * Architecture under test (ARCHITECTURE §4): the harness (pi AgentSession) runs on the
  * host. read/write/edit operate directly on the host workspace dir, which is
  * mounted shift=true at /workspace inside the orb. Only bash crosses the
  * boundary, via `incus exec` into orb-spike01.

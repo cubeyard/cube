@@ -56,7 +56,9 @@ cube upgrade    # update the VM and app; keep all data
 cube down       # stop the VM
 cube up         # start it again
 cube logs       # follow server logs
+cube events     # lifecycle events and timings
 cube ssh        # open a shell on the VM
+cube version    # launcher and installed release
 ```
 
 Updates download only what changed. App-only updates apply without a
@@ -86,7 +88,8 @@ after changing the bind setting.
 See [DEVELOPING.md](DEVELOPING.md) for building from source, the VM and
 mock development loops, configuration, and releases. Read
 [CONTRIBUTING.md](CONTRIBUTING.md) before sending a change;
-[PLAN.md](PLAN.md) covers architecture and the phase plan.
+[ARCHITECTURE.md](ARCHITECTURE.md) covers the architecture and
+[docs/history.md](docs/history.md) how it got here.
 
 Please report vulnerabilities according to [SECURITY.md](SECURITY.md), not in
 a public issue.

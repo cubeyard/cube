@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # First-boot init of the DATA disk (4c prerequisite + persistence slice,
-# PLAN §13). Two jobs, both BEFORE incus.socket/incus.service/cubed:
+# ARCHITECTURE §13). Two jobs, both BEFORE incus.socket/incus.service/cubed:
 #
 # 1. Pool: the image's incus references zpool `cube` on /dev/vdb, but that
 #    pool was created on the BAKE's data disk — which is never shipped. A

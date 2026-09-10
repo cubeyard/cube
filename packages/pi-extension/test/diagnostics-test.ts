@@ -22,9 +22,11 @@ try {
     calls.push(`${command} ${args.join(" ")}`);
     if (command === "systemctl") throw new Error("system bus unavailable");
     if (command === "uname") return { status: "ok", output: "ø".repeat(40_000) };
-    return { status: "ok", output: command === "journalctl" ? sensitive : "snapshot" };
+    // A day of journal is bigger than the 64 KiB every other check gets.
+    return { status: "ok", output: command === "journalctl" ? `${sensitive}\n${"j".repeat(100_000)}` : "snapshot" };
   }, async () => ({ status: "error", output: "ECONNREFUSED 127.0.0.1:7777" }));
   assert.equal(calls.length, CHECKS.length);
+  assert.ok(calls.includes("journalctl -u cubed --since=-24h -n 2000 --no-pager -o short-iso-precise"), "a day of cubed, not 30 minutes");
   const bundle = path.join(directory, "bundle");
   const index = await fs.readFile(path.join(bundle, "index.md"), "utf8");
   assert.match(index, /units.txt: error/);
@@ -33,6 +35,9 @@ try {
   assert.match(await fs.readFile(path.join(bundle, "units.txt"), "utf8"), /system bus unavailable/);
   assert.match(await readDiagnosticFile(bundle, "host.txt"), /\[TRUNCATED\]/);
   assert.ok((await fs.stat(path.join(bundle, "host.txt"))).size < 68_000, "UTF-8 bounded by bytes, not characters");
+  const journal = await fs.readFile(path.join(bundle, "cubed-journal.txt"), "utf8");
+  assert.ok(journal.length > 100_000 && !journal.includes("[TRUNCATED]"), "journals keep their larger bound");
+  assert.match(await readDiagnosticFile(bundle, "cubed-journal.txt", 7, 1), /^7: password=\[REDACTED\]/);
   assert.equal((await fs.stat(path.join(bundle, "index.md"))).mode & 0o777, 0o600);
   assert.equal((await fs.stat(bundle)).mode & 0o777, 0o700);
   console.log("1 ok: partial collection, bounded commands, redaction and private files");
@@ -49,7 +54,7 @@ try {
   await assert.rejects(readDiagnosticFile(bundle, "hardlink.txt"));
   await fs.mkdir(path.join(bundle, "directory.txt"));
   await assert.rejects(readDiagnosticFile(bundle, "directory.txt"));
-  await fs.writeFile(path.join(bundle, "large.txt"), "x".repeat(70_000));
+  await fs.writeFile(path.join(bundle, "large.txt"), "x".repeat(1024 * 1024 + 5_000));
   await assert.rejects(readDiagnosticFile(bundle, "large.txt"));
   await assert.rejects(readDiagnosticFile(bundle, "sample.txt", 0));
   await assert.rejects(readDiagnosticFile(bundle, "sample.txt", 1, 501));
@@ -59,6 +64,8 @@ try {
   assert.match(missing.output, /ENOENT/);
   const overflow = await runCheck(process.execPath, ["-e", "process.stdout.write('x'.repeat(100000))"]);
   assert.equal(overflow.status, "error");
+  const roomy = await runCheck(process.execPath, ["-e", "process.stdout.write('x'.repeat(100000))"], 1024 * 1024);
+  assert.equal(roomy.status, "ok", "a check's own bound is honoured");
   console.log("2 ok: numbered reads, traversal/link/special-file rejection and output limits");
 
   await fs.writeFile(path.join(directory, "session.jsonl"), "never export session");
@@ -72,7 +79,7 @@ try {
   await fs.rm(path.join(directory, "session.jsonl"));
   await assert.rejects(exec(process.execPath, [cli, "--export", "../escape"], { env: { PATH: process.env.PATH, HOME: tmp } }));
 
-  const launcher = `source launcher/cube; touch "$SSH_KEY"; vm_ssh() { printf '%s\\n' "$@"; }; cmd_ssh() { printf 'interactive\\n%s\\n' "$*"; read -r line; printf '%s\\n' "$line"; }; cmd_diagnose "$@"`;
+  const launcher = `source launcher/cube; touch "$SSH_KEY"; require_vm() { :; }; vm_ssh() { printf '%s\\n' "$@"; }; cmd_ssh() { printf 'interactive\\n%s\\n' "$*"; read -r line; printf '%s\\n' "$line"; }; cmd_diagnose "$@"`;
   const shellEnv = { PATH: process.env.PATH, HOME: tmp, CUBE_HOME: tmp, CUBE_LIB_ONLY: "1" };
   const forwarded = (await exec("bash", ["-c", launcher, "test", "--export", id], { cwd: repo, env: shellEnv })).stdout;
   assert.equal(forwarded, `sh\n/opt/cube/app/scripts/diagnose.sh\n--export\n${id}\n`);
@@ -115,7 +122,7 @@ try {
     assert.ok(!args.includes("--print") && !args.includes("--mode") && !args.includes("--"), "production launch waits for user input");
     args.unshift("--print", "--provider", "fixture", "--model", "fixture", "--thinking", "off");
     args.push("--", "The service cannot connect. Please investigate.");
-    const running = exec(path.join(repo, "packages/harness/node_modules/.bin/pi"), args, {
+    const running = exec(path.join(repo, "packages/pi-extension/node_modules/.bin/pi"), args, {
       cwd: bundle, timeout: 30_000,
       env: { PATH: process.env.PATH, HOME: tmp, PI_CODING_AGENT_DIR: agentDir, CUBE_DIAGNOSIS_BUNDLE: bundle, PI_OFFLINE: "1" },
     });

@@ -9,7 +9,7 @@
  */
 import fs from "node:fs";
 
-import { IncusClient, IncusHttpError } from "./incus-client.ts";
+import { IncusClient, IncusHttpError, IncusTimeoutError } from "./incus-client.ts";
 
 export interface CubeNetworkSpec {
   /** Per-cube bridge name. MUST use the `cbr` prefix: the host firewall rule
@@ -27,7 +27,7 @@ export interface CubeNetworkSpec {
   /** Egress proxy port on the gateway; when set, HTTP(S)_PROXY is configured
    * inside the cube (login shells, apt, inner dockerd). */
   proxyPort?: number;
-  /** Portal hostname base (PLAN §10). Hairpin requests to portal origins
+  /** Portal hostname base (ARCHITECTURE §10). Hairpin requests to portal origins
    * must go DIRECT to the gateway, not through the egress proxy — the
    * suffix is added to NO_PROXY everywhere the proxy env is set. */
   portalBase?: string;
@@ -38,6 +38,12 @@ export interface CubeProvisionSpec {
   name: string;
   /** Image alias to init from (e.g. "cube-node"). */
   image: string;
+  /** Immutable Incus image fingerprint. When present, this is used instead
+   * of resolving `image` again. */
+  imageFingerprint?: string;
+  /** Restore the workspace staged in an environment image. Defaults false so
+   * revision builders keep their freshly seeded checkout. */
+  restoreWorkspace?: boolean;
   /** Storage pool (ZFS) for rootfs + volumes. */
   pool: string;
   /** Rootfs quota, e.g. "10GiB". */
@@ -55,6 +61,23 @@ export interface CubeProvisionSpec {
   network: CubeNetworkSpec;
 }
 
+export interface ProvisionOptions {
+  /** Cancels the provision: every Incus wait rejects with the signal's
+   * reason, then the instance is rolled back (bounded, signal-free). */
+  signal?: AbortSignal;
+  /** Deadline per rollback step (force stop, delete) after a failed
+   * provision. Default 60 s: a hung daemon must not add its full create
+   * and delete deadlines on top of the failure. */
+  rollbackTimeoutMs?: number;
+}
+
+export interface DestroyOptions {
+  deleteVolume?: boolean;
+  deleteBridge?: boolean;
+  /** Cancels the destroy between steps; a step already in flight in Incus completes on its side. */
+  signal?: AbortSignal;
+}
+
 const dockerVolumeName = (cube: string) => `${cube}-docker`;
 
 async function exists(probe: () => Promise<unknown>): Promise<boolean> {
@@ -67,13 +90,43 @@ async function exists(probe: () => Promise<unknown>): Promise<boolean> {
   }
 }
 
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    if (signal?.aborted) return onAbort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /**
  * Create and start a cube. Idempotent per resource: bridge and docker volume
  * are reused if present (they survive rebuilds by design); the instance
  * itself must not exist.
+ *
+ * Failure contract: whatever fails after the create was issued, the
+ * instance is rolled back (force stop + delete, each bounded by
+ * `rollbackTimeoutMs`, never cancelled by the caller's signal) so the next
+ * provision of the same name is not blocked. A create cut short by its
+ * deadline or an abort is rolled back too, because Incus may finish it
+ * behind our back. When the rollback cannot confirm the instance is gone,
+ * the thrown error says so and names the instance.
  */
-export async function provisionCube(client: IncusClient, spec: CubeProvisionSpec): Promise<void> {
+export async function provisionCube(
+  client: IncusClient,
+  spec: CubeProvisionSpec,
+  restoreTimeoutMs = 10 * 60_000,
+  opts: ProvisionOptions = {},
+): Promise<void> {
   const net = spec.network;
+  const { signal } = opts;
+  const rollbackTimeoutMs = opts.rollbackTimeoutMs ?? 60_000;
 
   const bridgeConfig = {
     "ipv4.address": net.subnet,
@@ -84,103 +137,132 @@ export async function provisionCube(client: IncusClient, spec: CubeProvisionSpec
     "ipv4.dhcp": "false",
     "ipv6.address": "none",
   };
-  if (await exists(() => client.getNetwork(net.bridge))) {
+  if (await exists(() => client.getNetwork(net.bridge, signal))) {
     // Reused resources MUST be reconciled, not trusted: a bridge left over
     // with ipv4.nat=true would silently void the default-deny egress policy
     // of a nat:false cube (sol review finding, 2026-08-26).
-    const current = await client.getNetwork(net.bridge);
+    const current = await client.getNetwork(net.bridge, signal);
     if (Object.entries(bridgeConfig).some(([k, v]) => current.config[k] !== v)) {
       await client.updateNetwork(net.bridge, {
         config: { ...current.config, ...bridgeConfig },
         description: current.description,
-      });
+      }, signal);
     }
   } else {
-    await client.createNetwork(net.bridge, bridgeConfig);
+    await client.createNetwork(net.bridge, bridgeConfig, signal);
   }
 
   const volume = dockerVolumeName(spec.name);
-  if (await exists(() => client.getCustomVolume(spec.pool, volume))) {
-    const current = await client.getCustomVolume(spec.pool, volume);
+  if (await exists(() => client.getCustomVolume(spec.pool, volume, signal))) {
+    const current = await client.getCustomVolume(spec.pool, volume, signal);
     if (current.config.size !== spec.dockerVolumeSize) {
       await client.updateCustomVolume(spec.pool, volume, {
         config: { ...current.config, size: spec.dockerVolumeSize },
         description: current.description,
-      });
+      }, signal);
     }
   } else {
-    await client.createCustomVolume(spec.pool, volume, { size: spec.dockerVolumeSize });
+    await client.createCustomVolume(spec.pool, volume, { size: spec.dockerVolumeSize }, signal);
   }
 
   fs.mkdirSync(spec.hostWorkspace, { recursive: true });
   if (spec.hostRepositories) fs.mkdirSync(spec.hostRepositories, { recursive: true });
 
-  await client.createInstance({
-    name: spec.name,
-    source: { type: "image", alias: spec.image },
-    profiles: ["default"],
-    config: {
-      "security.nesting": "true",
-      "security.syscalls.intercept.mknod": "true",
-      "security.syscalls.intercept.setxattr": "true",
-      "security.idmap.isolated": "true",
-    },
-    devices: {
-      root: { type: "disk", path: "/", pool: spec.pool, size: spec.rootSize },
-      // ipv4_filtering pins the cube to its assigned IP at the veth (Incus
-      // installs anti-spoof nft/ebtables rules): a rooted agent cannot add
-      // another cube's IP and borrow its proxy/policy (sol verify finding).
-      // DHCP is off, so the static ipv4.address must be declared here or
-      // Incus has no lease to derive the allowed address from.
-      eth0: {
-        type: "nic",
-        network: net.bridge,
-        name: "eth0",
-        "ipv4.address": net.ip,
-        "security.ipv4_filtering": "true",
-        "security.mac_filtering": "true",
-      },
-      workspace: {
-        type: "disk",
-        source: spec.hostWorkspace,
-        path: spec.guestWorkspace,
-        shift: "true",
-      },
-      ...(spec.hostRepositories
-        ? {
-            repositories: {
-              type: "disk",
-              source: spec.hostRepositories,
-              path: spec.guestRepositories ?? "/repos",
-              shift: "true",
-              readonly: "true",
-            },
-          }
-        : {}),
-      dockerlib: { type: "disk", pool: spec.pool, source: volume, path: "/var/lib/docker" },
-    },
-  });
-
-  // Everything below can fail halfway (bad push, start failure, readiness
-  // timeout); without cleanup that leaves a partial instance that blocks the
-  // next provisionCube. Roll the instance back on failure — bridge and
-  // volume are kept (they are reconciled on reuse, see above).
+  // Everything from the create on can fail halfway (deadline, bad push,
+  // start failure, readiness timeout); without cleanup that leaves a partial
+  // instance that blocks the next provisionCube. Roll the instance back on
+  // failure — bridge and volume are kept (they are reconciled on reuse).
+  let created = false;
   try {
-    await configureAndStart(client, spec);
+    await client.createInstance({
+      name: spec.name,
+      source: spec.imageFingerprint
+        ? { type: "image", fingerprint: spec.imageFingerprint }
+        : { type: "image", alias: spec.image },
+      profiles: ["default"],
+      config: {
+        "security.nesting": "true",
+        "security.syscalls.intercept.mknod": "true",
+        "security.syscalls.intercept.setxattr": "true",
+        "security.idmap.isolated": "true",
+      },
+      devices: {
+        root: { type: "disk", path: "/", pool: spec.pool, size: spec.rootSize },
+        // ipv4_filtering pins the cube to its assigned IP at the veth (Incus
+        // installs anti-spoof nft/ebtables rules): a rooted agent cannot add
+        // another cube's IP and borrow its proxy/policy (sol verify finding).
+        // DHCP is off, so the static ipv4.address must be declared here or
+        // Incus has no lease to derive the allowed address from.
+        eth0: {
+          type: "nic",
+          network: net.bridge,
+          name: "eth0",
+          "ipv4.address": net.ip,
+          "security.ipv4_filtering": "true",
+          "security.mac_filtering": "true",
+        },
+        workspace: {
+          type: "disk",
+          source: spec.hostWorkspace,
+          path: spec.guestWorkspace,
+          shift: "true",
+        },
+        ...(spec.hostRepositories
+          ? {
+              repositories: {
+                type: "disk",
+                source: spec.hostRepositories,
+                path: spec.guestRepositories ?? "/repos",
+                shift: "true",
+                readonly: "true",
+              },
+            }
+          : {}),
+        dockerlib: { type: "disk", pool: spec.pool, source: volume, path: "/var/lib/docker" },
+      },
+    }, { signal });
+    created = true;
+    await configureAndStart(client, spec, restoreTimeoutMs, signal);
   } catch (error) {
-    try {
-      const state = await client.getInstanceState(spec.name);
-      if (state.status !== "Stopped") await client.setInstanceState(spec.name, "stop", { force: true });
-      await client.deleteInstance(spec.name);
-    } catch {
-      // best-effort: surface the original failure, not the cleanup's
+    // A create that failed outright (Incus said no) left nothing behind;
+    // one we stopped waiting for may still be completing.
+    const uncertain = error instanceof IncusTimeoutError || signal?.aborted === true;
+    if (created || uncertain) {
+      const leftover = await rollBackInstance(client, spec.name, rollbackTimeoutMs);
+      if (leftover !== undefined && error instanceof Error) {
+        error.message += `; instance ${spec.name} may still exist (rollback failed: ${String(leftover)})`;
+      }
     }
     throw error;
   }
 }
 
-async function configureAndStart(client: IncusClient, spec: CubeProvisionSpec): Promise<void> {
+/**
+ * Best-effort, bounded, signal-free removal of a partial instance. Resolves
+ * `undefined` when the instance is confirmed gone (deleted, or never
+ * materialised), else the cleanup's own failure — the caller surfaces the
+ * original error and names the leftover.
+ */
+async function rollBackInstance(client: IncusClient, name: string, timeoutMs: number): Promise<unknown> {
+  try {
+    const state = await client.getInstanceState(name);
+    if (state.status !== "Stopped") await client.setInstanceState(name, "stop", { force: true, timeoutMs });
+    await client.deleteInstance(name, { timeoutMs });
+    return undefined;
+  } catch (error) {
+    if (error instanceof IncusHttpError && error.errorCode === 404) return undefined;
+    return error;
+  }
+}
+
+async function configureAndStart(
+  client: IncusClient,
+  spec: CubeProvisionSpec,
+  restoreTimeoutMs: number,
+  signal?: AbortSignal,
+): Promise<void> {
   const net = spec.network;
+  await client.pushInstanceFile(spec.name, "/etc/hostname", `${spec.name}\n`, { signal });
 
   // Pushed while stopped so the cube boots with its static IP from the first
   // second. "05-" sorts before the image's 10-netplan-eth0.network and wins.
@@ -194,6 +276,7 @@ async function configureAndStart(client: IncusClient, spec: CubeProvisionSpec): 
     `[Match]\nName=eth0\n[Network]\nAddress=${net.ip}/${net.subnet.split("/")[1]}\n` +
       (net.nat ? `Gateway=${net.gateway}\n` : "") +
       `DNS=${net.gateway}\n`,
+    { signal },
   );
 
   if (net.proxyPort !== undefined) {
@@ -211,24 +294,69 @@ async function configureAndStart(client: IncusClient, spec: CubeProvisionSpec): 
         .map((k) => `export ${k}=${proxyUrl}\n`)
         .join("") +
         `export NO_PROXY=${noProxy}\nexport no_proxy=${noProxy}\nexport NODE_USE_ENV_PROXY=1\n`,
+      { signal },
     );
     await client.pushInstanceFile(
       spec.name,
       "/etc/apt/apt.conf.d/50cube-proxy",
       `Acquire::http::Proxy "${proxyUrl}";\nAcquire::https::Proxy "${proxyUrl}";\n`,
+      { signal },
     );
     // Inner dockerd pulls images itself; systemd reads the drop-in at boot.
     // File push does not create parent directories — make the drop-in dir
     // first (docker CE does not ship it).
-    await client.makeInstanceDirectory(spec.name, "/etc/systemd/system/docker.service.d");
+    await client.makeInstanceDirectory(spec.name, "/etc/systemd/system/docker.service.d", undefined, signal);
     await client.pushInstanceFile(
       spec.name,
       "/etc/systemd/system/docker.service.d/http-proxy.conf",
       `[Service]\nEnvironment=HTTP_PROXY=${proxyUrl}\nEnvironment=HTTPS_PROXY=${proxyUrl}\nEnvironment=NO_PROXY=${noProxy}\n`,
+      { signal },
     );
   }
 
-  await client.setInstanceState(spec.name, "start");
+  await client.setInstanceState(spec.name, "start", {}, signal);
+
+  // Environment images carry Docker and workspace snapshots in rootfs because
+  // neither attached custom volumes nor host mounts are included in an image.
+  // This runs as root in the guest, where the image's idmap is authoritative.
+  const abort = new AbortController();
+  const onAbort = () => abort.abort(signal?.reason);
+  if (signal?.aborted) onAbort();
+  else signal?.addEventListener("abort", onAbort, { once: true });
+  // The host-side race below is the deadline; the exec carries only the
+  // client's liveness bound so two clocks never race each other.
+  const restoreEnvironment = client.execSimple(spec.name, [
+    "sh",
+    "-c",
+    "set -eu; if [ -d /var/lib/cube-environment ]; then " +
+      (spec.restoreWorkspace
+        ? `if [ -f /var/lib/cube-environment/workspace.tar ]; then ` +
+          `find /workspace -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} +; ` +
+          `tar --numeric-owner --same-owner --acls --xattrs --xattrs-include='*' --exclude='./.git' ` +
+          `-C /workspace -xpf /var/lib/cube-environment/workspace.tar; fi; `
+        : "") +
+      "if [ -d /var/lib/cube-environment/docker ]; then " +
+      "rm -rf /var/lib/docker/* /var/lib/docker/.[!.]* /var/lib/docker/..?*; " +
+      "cp -a --preserve=mode,ownership,timestamps,links,xattr /var/lib/cube-environment/docker/. /var/lib/docker/; fi; " +
+      "rm -rf /var/lib/cube-environment; systemctl unmask docker.service docker.socket; " +
+      "systemctl start docker.service; fi",
+  ], abort.signal, { timeoutMs: Infinity });
+  const timeout = new Promise<never>((_, reject) => {
+    const timer = setTimeout(() => {
+      abort.abort();
+      reject(new Error(`cube ${spec.name}: environment restore deadline exceeded`));
+    }, restoreTimeoutMs);
+    restoreEnvironment.finally(() => clearTimeout(timer)).catch(() => {});
+  });
+  let restoreResult: number | null;
+  try {
+    restoreResult = await Promise.race([restoreEnvironment, timeout]);
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
+  if (restoreResult !== 0) {
+    throw new Error(`cube ${spec.name}: failed to restore captured environment (${restoreResult})`);
+  }
 
   // glibc reads /etc/resolv.conf directly (nsswitch is files,dns) and images
   // may ship it as a dangling symlink to the systemd-resolved stub — replace
@@ -238,10 +366,10 @@ async function configureAndStart(client: IncusClient, spec: CubeProvisionSpec): 
     "sh",
     "-c",
     `rm -f /etc/resolv.conf && printf 'nameserver %s\\n' '${net.gateway}' > /etc/resolv.conf`,
-  ]);
+  ], signal);
   if (rc !== 0) throw new Error(`cube ${spec.name}: resolv.conf setup failed (exit ${rc})`);
 
-  await waitForCubeNetwork(client, spec.name, net.ip);
+  await waitForCubeNetwork(client, spec.name, net.ip, undefined, signal);
 }
 
 /**
@@ -256,40 +384,45 @@ export async function waitForCubeNetwork(
   name: string,
   ip: string,
   timeoutMs = 30_000,
+  signal?: AbortSignal,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const state = await client.getInstanceState(name);
+    if (signal?.aborted) throw signal.reason;
+    const state = await client.getInstanceState(name, signal);
     const addresses = state.network?.eth0?.addresses ?? [];
     if (addresses.some((a) => a.family === "inet" && a.address === ip)) return;
     if (Date.now() > deadline) throw new Error(`cube ${name}: eth0 never came up at ${ip}`);
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await sleep(500, signal);
   }
 }
 
 /**
  * Tear a cube down. The bridge and docker volume are kept unless asked —
  * volume persistence across recreate is the point of the cattle model.
+ * Each Incus step is bounded (force stop `timeouts.state`, delete
+ * `timeouts.delete`).
  */
 export async function destroyCube(
   client: IncusClient,
   spec: Pick<CubeProvisionSpec, "name" | "pool"> & { network: Pick<CubeNetworkSpec, "bridge"> },
-  opts: { deleteVolume?: boolean; deleteBridge?: boolean } = {},
+  opts: DestroyOptions = {},
 ): Promise<void> {
-  if (await exists(() => client.getInstance(spec.name))) {
-    const state = await client.getInstanceState(spec.name);
+  const { signal } = opts;
+  if (await exists(() => client.getInstance(spec.name, signal))) {
+    const state = await client.getInstanceState(spec.name, signal);
     if (state.status !== "Stopped") {
-      await client.setInstanceState(spec.name, "stop", { force: true });
+      await client.setInstanceState(spec.name, "stop", { force: true }, signal);
     }
-    await client.deleteInstance(spec.name);
+    await client.deleteInstance(spec.name, { signal });
   }
   if (opts.deleteVolume) {
     const volume = dockerVolumeName(spec.name);
-    if (await exists(() => client.getCustomVolume(spec.pool, volume))) {
-      await client.deleteCustomVolume(spec.pool, volume);
+    if (await exists(() => client.getCustomVolume(spec.pool, volume, signal))) {
+      await client.deleteCustomVolume(spec.pool, volume, signal);
     }
   }
-  if (opts.deleteBridge && (await exists(() => client.getNetwork(spec.network.bridge)))) {
-    await client.deleteNetwork(spec.network.bridge);
+  if (opts.deleteBridge && (await exists(() => client.getNetwork(spec.network.bridge, signal)))) {
+    await client.deleteNetwork(spec.network.bridge, signal);
   }
 }

@@ -61,6 +61,14 @@ const host: CodeCapabilityHost = {
     hostCalls.push({ operation: "archiveThread" });
     return { ok: true };
   },
+  async environmentStatus() {
+    hostCalls.push({ operation: "environmentStatus" });
+    return { setup: { state: "failed", log: "setup failed" }, resume: { state: "succeeded", log: "ok" } };
+  },
+  async retryEnvironmentSetup() {
+    hostCalls.push({ operation: "retryEnvironmentSetup" });
+    return { accepted: true };
+  },
 };
 const capability = createCodeCapability(host);
 
@@ -182,6 +190,18 @@ const capabilities = await runCodeMode({
 assert.equal((capabilities.value as { text: string }).text, "hello");
 assert.deepEqual(hostCalls.map((call) => call.operation), ["writeText", "readText", "ensureServices", "createPr"]);
 console.log("4 ok: file/service/PR capabilities dispatch");
+
+hostCalls.length = 0;
+const environment = await runCodeMode({
+  source: `return { status: await cube.environment.status(), retry: await cube.environment.retrySetup() };`,
+  call: capability,
+});
+assert.deepEqual(environment.value, {
+  status: { setup: { state: "failed", log: "setup failed" }, resume: { state: "succeeded", log: "ok" } },
+  retry: { accepted: true },
+});
+assert.deepEqual(hostCalls.map((call) => call.operation), ["environmentStatus", "retryEnvironmentSetup"]);
+console.log("4b ok: environment SDK and capability dispatch");
 
 // ---- 5. Dispatcher validation is fail-closed -----------------------------
 

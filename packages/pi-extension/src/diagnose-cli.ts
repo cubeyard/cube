@@ -47,7 +47,7 @@ export async function main(args: string[]): Promise<number> {
   if (args[0] === "--collect-only") return 0;
   console.error("Opening read-only Pi RCA. Describe the issue; /model changes model, /quit exits. Evidence is sent to the selected model provider only when you submit a message.");
   const code = await new Promise<number>((resolve, reject) => {
-    const child = spawn(path.resolve(import.meta.dirname, "../../harness/node_modules/.bin/pi"), piArguments(directory), {
+    const child = spawn(path.resolve(import.meta.dirname, "../node_modules/.bin/pi"), piArguments(directory), {
       cwd: path.join(directory, "bundle"),
       env: { ...process.env, CUBE_DIAGNOSIS_BUNDLE: path.join(directory, "bundle") },
       stdio: "inherit",

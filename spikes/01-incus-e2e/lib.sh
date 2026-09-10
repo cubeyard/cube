@@ -3,7 +3,7 @@ set -euo pipefail
 
 ORB_IMAGE="cube-orb-spike01"          # incus image alias (built by 01-image.sh)
 ORB_NAME="orb-spike01"
-ORB_NET="cbr-spike01"                 # per-orb bridge (PLAN §10/§12). The
+ORB_NET="cbr-spike01"                 # per-orb bridge (ARCHITECTURE §10/§12). The
                                       # "cbr" prefix lets ONE host firewall rule
                                       # (iptables -i cbr+ -j ACCEPT) cover every
                                       # orb bridge under host Docker's FORWARD

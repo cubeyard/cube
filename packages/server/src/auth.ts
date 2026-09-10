@@ -1,12 +1,19 @@
 /**
  * The one piece of pi the daemon itself calls: stored-credential state for
  * the header lamp. Everything else pi does happens in the pi TUI process
- * cubed spawns per thread (packages/server/src/pty.ts) — this package is
- * also where that binary lives (node_modules/.bin/pi is what the pty bridge
- * execs).
+ * cubed spawns per thread (pty.ts) — this package is also where that binary
+ * lives (node_modules/.bin/pi is what the pty bridge execs).
  */
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
-import type { AuthState } from "@cube/core";
+
+/**
+ * Typed re-auth state, classified via pi's readStoredCredential — never by
+ * string-matching error messages (the "oauth" error code is flattened to a
+ * message string in session events).
+ */
+export type AuthState =
+  | { state: "ok"; provider: string; credentialType: "oauth" | "api_key"; expiresAt?: number }
+  | { state: "missing"; provider: string };
 
 /**
  * Typed re-auth check. Never classify auth failures by string-matching event

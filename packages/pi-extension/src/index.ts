@@ -1,5 +1,5 @@
 /**
- * The cube pi-extension (PLAN §13 Phase 3d, step 1): pi runs on the
+ * The cube pi-extension (ARCHITECTURE §13 Phase 3d, step 1): pi runs on the
  * credentialed host (the VM), but every built-in tool and user `!` command
  * executes inside one thread's cube. The workspace is the shared truth —
  * bind-mounted host↔cube — so file tools go through the cube's namespace
@@ -92,6 +92,27 @@ interface CodeToolDetails {
   truncation?: ReturnType<typeof truncateHead>;
 }
 
+/** Cube-owned skills ship with the extension rather than relying on a
+ * workspace's (untrusted and optional) project-skill directory. */
+export const BUILTIN_SKILL_PATHS = [
+  path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "skills", "setting-up-cube"),
+];
+
+// Only these packaged, public instruction bytes may bypass guest reads.
+// Cache them at extension load; never resolve model-supplied host paths.
+const BUILTIN_SKILLS = new Map(BUILTIN_SKILL_PATHS.map((directory) => {
+  const file = path.join(directory, "SKILL.md");
+  return [file, fs.readFileSync(file)] as const;
+}));
+
+export function withBuiltinSkillReads(operations: import("@earendil-works/pi-coding-agent").ReadOperations) {
+  return {
+    ...operations,
+    access: async (file: string) => { if (!BUILTIN_SKILLS.has(file)) await operations.access(file); },
+    readFile: async (file: string) => BUILTIN_SKILLS.get(file) ?? operations.readFile(file),
+  };
+}
+
 function codeTraceText(traces: CodeModeTrace[]): string {
   return traces
     .map((trace) => {
@@ -135,9 +156,10 @@ export function resolveConfig(env: NodeJS.ProcessEnv, cwd: string): CubeConfig |
   };
 }
 
-/** Wake-on-first-tool-use. Prefers cubed's wake route (runs `.cube/resume`
- * + wake hooks); falls back to a bare Incus start when cubed is not
- * reachable (manual/standalone use). Exported for the Incus smoke. */
+/** Wake-on-first-tool-use. Managed threads gate on cubed's readiness and
+ * wake route (which runs `.cube/resume` + wake hooks); standalone Incus use
+ * falls back to a bare start when cubed is unavailable. Exported for the
+ * Incus smoke. */
 export class Waker {
   private inflight:
     | { promise: Promise<void>; controller: AbortController; waiters: number; settled: boolean }
@@ -196,8 +218,11 @@ export class Waker {
   };
 
   private async check(ctx: ExtensionContext | undefined, signal: AbortSignal): Promise<void> {
-    const state = await this.state(signal);
-    if (this.cfg.backend === "incus" ? state === "Running" : state === "ready") return;
+    const supervisorManaged = this.cfg.backend === "mock" || !!this.cfg.threadId;
+    if (supervisorManaged && !this.cfg.name) throw new Error("cube extension: managed environment requires CUBE_NAME");
+    // A registry row can be stale after an out-of-band guest shutdown. The
+    // supervisor wake barrier checks both physical state and setup readiness.
+    if (!supervisorManaged && await this.state(signal) === "Running") return;
     ctx?.ui.setStatus("cube", "setting up environment…");
     try {
       await this.wake(signal);
@@ -207,19 +232,22 @@ export class Waker {
   }
 
   async state(signal?: AbortSignal): Promise<string> {
-    if (this.cfg.backend === "incus") {
+    // A managed Incus instance may already be Running while cubed is still
+    // retrying setup. Its registry status, not raw Incus state, is the tool
+    // readiness authority. Standalone Incus has no such supervisor contract.
+    if (this.cfg.backend === "incus" && !this.cfg.threadId) {
       if (!this.client) throw new Error("cube extension: Incus client is unavailable");
       return (await this.client.getInstanceState(this.cfg.instance, signal)).status;
     }
-    if (!this.cfg.name) throw new Error("cube extension: mock backend requires CUBE_NAME");
+    if (!this.cfg.name) throw new Error("cube extension: managed environment requires CUBE_NAME");
     const res = await fetch(`${this.cfg.cubedUrl}/api/cubes/${encodeURIComponent(this.cfg.name)}`, {
       signal: signal
         ? AbortSignal.any([signal, AbortSignal.timeout(10_000)])
         : AbortSignal.timeout(10_000),
     });
-    if (!res.ok) throw new Error(`cubed could not read mock environment ${this.cfg.name} (${res.status})`);
+    if (!res.ok) throw new Error(`cubed could not read managed environment ${this.cfg.name} (${res.status})`);
     const body = (await res.json()) as { status?: unknown };
-    if (typeof body.status !== "string") throw new Error("cubed returned an invalid mock environment status");
+    if (typeof body.status !== "string") throw new Error("cubed returned an invalid managed environment status");
     return body.status;
   }
 
@@ -233,6 +261,7 @@ export class Waker {
         });
       } catch (error) {
         if (signal.aborted) throw error;
+        if (this.cfg.threadId) throw error;
         // cubed unreachable (standalone/dogfood use) — a bare Incus start
         // is the only option; fall through.
         res = undefined as unknown as Response;
@@ -242,10 +271,11 @@ export class Waker {
         // instance behind its back: a bare start would bypass its resume
         // hooks and activity tracking, letting the idle sweep sleep the
         // cube mid-tool. Exceptions: 404 means cubed does not manage this
-        // cube (standalone/dogfood — provisioned outside cubed), so fall
-        // through to a direct start; any other error is surfaced.
+        // cube (standalone/dogfood — provisioned outside cubed), so an
+        // unmanaged instance may fall through to a direct start. Managed
+        // threads never bypass the supervisor, including on 404.
         if (res.ok) return;
-        if (res.status !== 404) {
+        if (res.status !== 404 || this.cfg.threadId) {
           throw new Error(`cubed refused to wake ${this.cfg.name} (${res.status})`);
         }
       }
@@ -320,7 +350,52 @@ export function mockFiles(): GuestFiles {
   };
 }
 
+/** Build the fixed thread HTTP bridge. QuickJS never receives this generic
+ * function, the cubed URL, request headers, or host credentials. */
+export function createThreadRequest(cfg: { threadId?: string; cubedUrl: string }) {
+  return async (
+    requestPath: string,
+    options: { method?: "GET" | "POST"; body?: unknown; timeoutMs?: number } = {},
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> => {
+    if (!cfg.threadId) throw new Error("cube extension: CUBE_THREAD_ID is not set");
+    const requestSignal = signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(options.timeoutMs ?? 600_000)])
+      : AbortSignal.timeout(options.timeoutMs ?? 600_000);
+    const response = await fetch(
+      `${cfg.cubedUrl}/api/threads/${encodeURIComponent(cfg.threadId)}${requestPath}`,
+      {
+        method: options.method ?? "GET",
+        ...(options.body === undefined
+          ? {}
+          : { headers: { "content-type": "application/json" }, body: JSON.stringify(options.body) }),
+        signal: requestSignal,
+      },
+    );
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (!response.ok) throw new Error(String(body.error ?? `cubed request failed (${response.status})`));
+    return body;
+  };
+}
+
+function boundedEnvironmentStatus(body: Record<string, unknown>): Record<string, unknown> {
+  const bounded = { ...body };
+  for (const phase of ["setup", "resume"] as const) {
+    const value = bounded[phase];
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const result = { ...(value as Record<string, unknown>) };
+    if (typeof result.log === "string") {
+      const log = Buffer.from(result.log, "utf8");
+      result.log = log.subarray(Math.max(0, log.length - 64 * 1024)).toString("utf8");
+    }
+    bounded[phase] = result;
+  }
+  return bounded;
+}
+
 export default function cubeExtension(pi: ExtensionAPI) {
+  pi.on("resources_discover", async () => ({ skillPaths: BUILTIN_SKILL_PATHS }));
+
   const cfg = resolveConfig(process.env, process.cwd());
 
   if (!cfg) {
@@ -408,29 +483,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
 
   /** Thread-scoped cubed RPC. QuickJS receives only the parsed response,
    * never this URL, fetch, headers, credentials, or a generic request API. */
-  const threadRequest = async (
-    path: string,
-    options: { method?: "GET" | "POST"; body?: unknown; timeoutMs?: number } = {},
-    signal?: AbortSignal,
-  ): Promise<Record<string, unknown>> => {
-    if (!cfg.threadId) throw new Error("cube extension: CUBE_THREAD_ID is not set");
-    const requestSignal = signal
-      ? AbortSignal.any([signal, AbortSignal.timeout(options.timeoutMs ?? 600_000)])
-      : AbortSignal.timeout(options.timeoutMs ?? 600_000);
-    const response = await fetch(
-      `${cfg.cubedUrl}/api/threads/${encodeURIComponent(cfg.threadId)}${path}`,
-      {
-        method: options.method ?? "GET",
-        ...(options.body === undefined
-          ? {}
-          : { headers: { "content-type": "application/json" }, body: JSON.stringify(options.body) }),
-        signal: requestSignal,
-      },
-    );
-    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-    if (!response.ok) throw new Error(String(body.error ?? `cubed request failed (${response.status})`));
-    return body;
-  };
+  const threadRequest = createThreadRequest(cfg);
 
   const codeCapability = createCodeCapability({
     async exec(input, signal) {
@@ -500,11 +553,17 @@ export default function cubeExtension(pi: ExtensionAPI) {
       return body.services;
     },
     archiveThread: (signal) => threadRequest("/archive", { method: "POST", timeoutMs: 10_000 }, signal),
+    environmentStatus: async (signal) => boundedEnvironmentStatus(await threadRequest("/environment", {}, signal)),
+    retryEnvironmentSetup: async (signal) => boundedEnvironmentStatus(await threadRequest(
+      "/environment",
+      { method: "POST", timeoutMs: 20 * 60_000 },
+      signal,
+    )),
   });
 
   // ---- shadow the complete model-facing tool surface ----
 
-  const guestRead = createReadTool(cfg.guestWorkspace, { operations: readOps });
+  const guestRead = createReadTool(cfg.guestWorkspace, { operations: withBuiltinSkillReads(readOps) });
   const guestWrite = createWriteTool(cfg.guestWorkspace, { operations: writeOps });
   const guestEdit = createEditTool(cfg.guestWorkspace, { operations: editOps });
   const guestBash = createBashTool(cfg.guestWorkspace, { operations: bashOps });

@@ -1,5 +1,5 @@
 /**
- * Manual smoke test for the NAT-less egress design (PLAN §12, the folded-in
+ * Manual smoke test for the NAT-less egress design (ARCHITECTURE §12, the folded-in
  * Phase 0 spike 3): per-cube bridge with NAT off + no default route, host
  * egress proxy on the gateway with a hostname allowlist.
  *

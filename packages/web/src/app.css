@@ -160,6 +160,46 @@ textarea, input { caret-color: var(--signal); }
 
 .loading { text-align: center; color: var(--ink-3); padding: 3rem 1rem; }
 
+/* before the first answer: the wordmark stays, the wait is named calmly */
+.plain-header { justify-content: flex-start; }
+.unreachable {
+  max-width: var(--col); margin: 0 auto; padding: 4rem 1rem 3rem;
+  display: flex; flex-direction: column; align-items: center; gap: 0.9rem;
+  text-align: center; color: var(--ink-2);
+}
+.unreachable p { margin: 0; }
+.unreachable-line { font-size: 15px; }
+.unreachable-detail { font-size: 12px; color: var(--ink-3); overflow-wrap: anywhere; }
+
+/* after the first load: two missed polls in a row earn one quiet line */
+.conn-strip {
+  flex: none; padding: 0.3rem 1rem; text-align: center;
+  font-size: 12px; font-weight: 550; letter-spacing: 0.04em;
+  color: var(--ink-2); background: var(--note-soft);
+  border-bottom: 1px solid var(--line);
+  animation: settle-in 140ms ease-out;
+}
+
+/* a disabled key says why, in print, beside it */
+.key-reason {
+  min-width: 0; font-size: 11px; font-weight: 550; letter-spacing: 0.04em;
+  line-height: 1.35; color: var(--ink-3); overflow-wrap: anywhere;
+}
+.key-reason.bad { color: var(--bad); }
+
+/* silkscreen printed inside a control bank: the delete hint, "checked" */
+.bank-note {
+  align-self: center; min-width: 0; max-width: 15rem;
+  padding: 0 0.7rem; font-size: 11px; font-weight: 550; letter-spacing: 0.04em;
+  line-height: 1.35; color: var(--ink-3); text-align: right; overflow-wrap: anywhere;
+}
+
+kbd {
+  font: 550 11px/1.4 var(--font-mono); padding: 0 0.3rem;
+  border: 1px solid var(--line); border-radius: var(--r-xs);
+  background: var(--s3); color: var(--ink-2); box-shadow: var(--shadow-key);
+}
+
 /* silkscreen: the printed micro-label voice of the enclosure */
 .silk {
   font-size: 11px; font-weight: 550; letter-spacing: 0.08em;
@@ -228,7 +268,13 @@ textarea, input { caret-color: var(--signal); }
   align-items: center; justify-content: center;
 }
 .key.held { background: var(--s1); color: var(--ink); box-shadow: var(--shadow-key-down); }
+/* an armed delete key: red ink on the red wash until the second press */
+.key.danger.armed, .key.danger-text.armed { color: var(--bad); background: var(--bad-soft); border-color: var(--bad-line); }
 .key svg { display: block; }
+/* a fingertip needs more key than a pointer does */
+@media (pointer: coarse) {
+  .key.icon { width: 2.75rem; height: 2.75rem; }
+}
 
 /* ============================================================ header
    The instrument's top panel: wordmark engraving left, lamps and keys
@@ -259,10 +305,6 @@ header nav a {
 }
 header nav a:hover { color: var(--ink); }
 header nav a.active { color: var(--ink); border-bottom-color: var(--signal); }
-header .model {
-  font-family: var(--font-mono); font-size: 11px; color: var(--ink-3);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
 header .spacer { margin-left: auto; }
 
 /* lamp field: every header lamp carries its silkscreen label */
@@ -321,8 +363,13 @@ header .spacer { margin-left: auto; }
   padding: 0.35rem;
 }
 
-.module { display: flex; align-items: center; position: relative; }
+.module { display: flex; flex-wrap: wrap; align-items: center; position: relative; }
 .module + .module { border-top: 1px solid var(--line); }
+/* row order: face, then the delete note, then the bank — the note sits
+   between them on a wide panel and drops beneath the row on a phone */
+.module-face { order: 1; }
+.module-note { order: 2; }
+.module-actions { order: 3; }
 
 .module-face {
   flex: 1; min-width: 0;
@@ -360,11 +407,8 @@ header .spacer { margin-left: auto; }
 .module-meta .state-label { letter-spacing: 0.06em; font-size: 11px; font-weight: 550; }
 .module-meta .state-label.error { color: var(--bad); }
 .module-project { color: var(--ink-2); font-weight: 550; }
-.module-error {
-  color: var(--bad); font-size: 12px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.project-module .module-error { white-space: normal; overflow-wrap: anywhere; }
+/* the full failure, wrapped — never an ellipsis hiding the next step */
+.module-error { color: var(--bad); font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
 
 .project-repo-line {
   display: flex; gap: 0.45rem; color: var(--ink-3);
@@ -382,17 +426,20 @@ header .spacer { margin-left: auto; }
   flex: none;
   border-left: 1px solid var(--line);
 }
-.module-actions .key.icon {
-  width: 2.7rem; height: auto; align-self: stretch;
+.module-actions .key {
+  height: auto; align-self: stretch;
   border: 0; border-radius: 0; box-shadow: none;
   background: var(--s3); color: var(--ink-3);
   transition: background 120ms ease, color 120ms ease;
 }
-.module-actions .key.icon + .key.icon { border-left: 1px solid var(--line); }
-.module-actions .key.icon:last-child { border-radius: 0 var(--r-key) var(--r-key) 0; }
-.module-actions .key.icon:hover:not(:disabled) { background: var(--s4); color: var(--ink); transform: none; }
-.module-actions .key.icon:active:not(:disabled) { background: var(--s1); transform: none; box-shadow: none; }
-.module-actions .key.icon.danger:hover:not(:disabled) { color: var(--bad); background: var(--bad-soft); }
+.module-actions .key.icon { width: 2.7rem; }
+.module-actions .key + .key { border-left: 1px solid var(--line); }
+.module-actions .key:last-child { border-radius: 0 var(--r-key) var(--r-key) 0; }
+.module-actions .key:hover:not(:disabled) { background: var(--s4); color: var(--ink); transform: none; }
+.module-actions .key:active:not(:disabled) { background: var(--s1); transform: none; box-shadow: none; }
+.module-actions .key.danger:hover:not(:disabled),
+.module-actions .key.danger.armed { color: var(--bad); background: var(--bad-soft); }
+.module-note { flex: 0 1 auto; padding-right: 0.7rem; }
 /* the face gives up its right rounding where the bank docks */
 .module:has(.module-actions) .module-face { border-radius: var(--r-key) 0 0 var(--r-key); }
 
@@ -403,13 +450,16 @@ header .spacer { margin-left: auto; }
   border: 0; border-bottom: 2px solid var(--signal);
   padding: 0; margin: 0 0 -2px;
 }
-.rename-input:focus { outline: none; }
+/* the signal underline is the mouse-focus cue; the ring stays for keyboards */
+.rename-input:focus:not(:focus-visible) { outline: none; }
+.rename-input:focus-visible { outline-offset: 3px; }
 
 .empty-state {
   text-align: center; padding: 4rem 1rem;
   color: var(--ink-3);
 }
 .empty-state .hint { margin: 0 0 1.3rem; font-size: 14.5px; }
+.empty-state .shortcuts { margin: 1.8rem 0 0; font-size: 11px; letter-spacing: 0.04em; color: var(--ink-3); }
 
 /* ============================================================ display
    The reading field: everything the agent produces, at full contrast. */
@@ -479,8 +529,9 @@ header .spacer { margin-left: auto; }
 .key-bank .key:hover:not(:disabled) { background: var(--s4); transform: none; }
 .key-bank .key:active:not(:disabled) { background: var(--s1); transform: none; box-shadow: none; }
 .key-bank .key.held { background: var(--s1); box-shadow: var(--shadow-key-down); }
-.key-bank .key.danger:hover:not(:disabled) { color: var(--bad); background: var(--bad-soft); }
-.key-bank .key.icon-text { padding: 0.3rem 0.7rem; }
+.key-bank .key.danger:hover:not(:disabled),
+.key-bank .key.danger.armed { color: var(--bad); background: var(--bad-soft); }
+.thread-strip .bank-note { flex: 0 1 auto; padding-inline: 0; }
 
 /* ============================================================ thread sidebar
    A permanent channel bank beside the working surface. Every live thread is
@@ -551,13 +602,18 @@ header .spacer { margin-left: auto; }
 
 /* transient action results (pushed, PR link, rejections): printed notice */
 .strip-note {
-  flex: none; padding: 0.35rem 1.1rem; font-size: 13px;
+  flex: none; display: flex; align-items: center; gap: 0.6rem;
+  padding: 0.35rem 1.1rem; font-size: 13px;
   color: var(--ink-2); background: var(--note-soft);
   border-bottom: 1px solid var(--line);
   overflow-wrap: anywhere;
 }
+.strip-note-text { flex: 1; min-width: 0; }
 .strip-note.bad { color: var(--bad); background: var(--bad-soft); border-bottom-color: var(--bad-line); }
 .strip-note a { color: var(--signal); text-underline-offset: 3px; }
+/* a lifecycle notice — setting up, waking — is a lamp and a line, never red */
+.strip-note.wait .lamp { flex: none; }
+.note-dismiss.key.icon { width: 1.6rem; height: 1.6rem; flex: none; margin-left: auto; }
 
 /* ============================================================ ship panel
    A pulled-down publication control surface: machine readout first, then
@@ -694,25 +750,9 @@ header .spacer { margin-left: auto; }
   font: 11px/1.5 var(--font-mono); color: var(--ink-3);
   font-variant-numeric: tabular-nums;
 }
-.workspace-tabs { padding-block: 0.32rem; }
-.tab-bank {
-  display: flex; align-self: stretch;
-  border: 1px solid var(--line); border-radius: var(--r-key);
-  background: var(--s3); box-shadow: var(--shadow-key);
-  overflow: hidden;
-}
-.workspace-tab {
-  min-width: 5rem; padding: 0.12rem 0.7rem;
-  border: 0; background: transparent; color: var(--ink-3);
-  font-size: 12px; font-weight: 550; letter-spacing: 0.01em;
-  transition: background 120ms ease, color 120ms ease;
-}
-.workspace-tab + .workspace-tab { border-left: 1px solid var(--line); }
-.workspace-tab:hover { background: var(--s4); color: var(--ink); }
-.workspace-tab.active {
-  background: var(--s1); color: var(--ink);
-  box-shadow: var(--shadow-key-down);
-}
+.workspace-pane-head .pane-count { font-variant-numeric: tabular-nums; }
+/* the fold key exists only where the pane is a sheet (≤52rem) */
+.sheet-toggle { display: none; flex: none; padding-block: 0.2rem; }
 
 /* the git bank is always present and refreshes in place while the agent
    works. A file is the control; its diff opens directly beneath it. */
@@ -848,13 +888,26 @@ header .spacer { margin-left: auto; }
 .term-host { width: 100%; height: 100%; }
 .term-pane .xterm .xterm-viewport { background: transparent; }
 
-/* transport states, silkscreened over the glass */
+/* transport states, silkscreened over the glass. A translucent veil keeps
+   the last frame readable while the link is re-made; an opaque one covers
+   a screen that belongs to no process. */
 .term-veil {
   position: absolute; inset: 0;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 0.8rem; text-align: center; padding: 1rem;
+  background: color-mix(in srgb, var(--glass) 72%, transparent);
 }
 .term-veil.opaque { background: var(--glass); }
+
+/* touch devices: the keys a soft keyboard lacks, on the enclosure above the glass */
+.term-keys {
+  display: none; flex: none; gap: 0.4rem;
+  padding: 0.4rem 0.65rem; background: var(--s2); border-bottom: 1px solid var(--line);
+}
+.term-keys .key { font-family: var(--font-mono); font-size: 11px; min-height: 2.2rem; padding-inline: 0.85rem; }
+@media (pointer: coarse) {
+  .term-keys { display: flex; }
+}
 .term-note {
   font: 550 12px/1.6 var(--font-mono); letter-spacing: 0.06em;
   color: var(--glass-chrome);
@@ -874,9 +927,11 @@ header .spacer { margin-left: auto; }
    Printed notices. Info is silkscreen; error is red ink. */
 .banner {
   max-width: var(--col); margin: 0 auto 1rem; padding: 0.5rem 0.9rem;
+  display: flex; align-items: center; gap: 0.6rem;
   border-radius: var(--r-key); font-size: 13px;
   background: var(--bad-soft); border: 1px solid var(--bad-line); color: var(--bad);
 }
+.banner-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .banner.info {
   background: var(--note-soft); border-color: var(--note-line); color: var(--ink-2);
 }
@@ -892,6 +947,7 @@ header .spacer { margin-left: auto; }
 }
 .files-shelf > * { max-width: var(--col); margin: 0 auto; }
 .files-note { font-size: 13px; color: var(--ink-3); }
+.files-note.bad { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; color: var(--bad); overflow-wrap: anywhere; }
 .files-head {
   margin-bottom: 0.4rem; font-size: 11px; font-weight: 550;
   letter-spacing: 0.08em; color: var(--ink-3);
@@ -923,8 +979,24 @@ header .spacer { margin-left: auto; }
   padding: 0.55rem 0.85rem;
   transition: border-color 120ms ease;
 }
-.compose-input:focus { outline: none; border-color: var(--signal); }
+/* focus is one signal frame hugging the field — the border swap plus a
+   1px ring, so it reads at a glance and never loses the keyboard user */
+.compose-input:focus { border-color: var(--signal); }
+.compose-input:focus:not(:focus-visible) { outline: none; }
+.compose-input:focus-visible {
+  outline: none; border-radius: var(--r-key);
+  box-shadow: 0 0 0 1px var(--signal), inset 0 1px 2px rgba(38, 32, 18, 0.1);
+}
 .compose-input::placeholder { color: var(--ink-3); }
+/* a select on the panel wears the same face as the filter: no native chrome */
+select.compose-input {
+  appearance: none; padding-right: 2.1rem; cursor: pointer;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--ink-3) 50%),
+    linear-gradient(135deg, var(--ink-3) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50%;
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+}
 .compose-keys { display: flex; gap: 0.45rem; padding-top: 0.1rem; }
 .compose-field { display: flex; flex-direction: column; gap: 0.25rem; }
 .compose-note { margin: 0.15rem 0; color: var(--ink-3); font-size: 12px; }
@@ -983,6 +1055,8 @@ header .spacer { margin-left: auto; }
   margin-top: 1.2rem; padding-top: 1rem; border-top: 1px solid var(--line-2);
 }
 .project-actions .action-spacer { flex: 1; }
+/* a key and its printed reason wrap together, never apart */
+.action-group { display: inline-flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; }
 
 @media (max-width: 52rem) {
   .thread-topbar { display: block; }
@@ -991,6 +1065,10 @@ header .spacer { margin-left: auto; }
   }
   .thread-topbar > header nav a.active { display: block; }
   .thread-topbar > header .spacer { display: inline; margin-left: auto; }
+  .thread-strip { flex-wrap: wrap; }
+  /* the delete note takes its own line under the strip; the title and
+     the keys keep their places */
+  .thread-strip .bank-note { flex: 1 1 100%; order: 10; text-align: left; max-width: none; }
   .strip-title { display: none; }
   .mobile-thread-switch {
     min-width: 0; max-width: calc(100% - 1.2rem); flex: 1 1 15rem;
@@ -1021,17 +1099,28 @@ header .spacer { margin-left: auto; }
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 3fr) minmax(11rem, 2fr);
   }
+  /* the changes pane is a sheet under the terminal: folded to its head
+     until asked for, so the conversation keeps the screen */
+  .thread-workspace:has(.changes-pane.collapsed) { grid-template-rows: minmax(0, 1fr) auto; }
+  /* the list's delete note drops beneath the row, full width, so the
+     thread's title never shrinks to make room for it */
+  .module-note { order: 4; flex: 1 1 100%; max-width: none; padding: 0 0.75rem 0.55rem; text-align: left; }
+  .changes-pane.collapsed .changes-body { display: none; }
+  .sheet-toggle { display: inline-flex; }
   .workspace-splitter { display: none; }
   .thread-pane { border-right: 0; border-bottom: 1px solid var(--line-2); }
+  /* no 50ch floor on a narrow screen — the row scrolls, the pane does not */
+  .diff-line { grid-template-columns: 3.2rem 1.2rem minmax(0, 1fr); }
+  .diff-collapsed { grid-template-columns: 3.2rem minmax(0, 1fr); }
 }
 
 /* ============================================================ mobile */
 @media (max-width: 40rem) {
   header { gap: 0.6rem; padding: 0.5rem 0.8rem; }
   header nav { gap: 0.55rem; margin-left: 0; }
-  header .auth-ok { font-size: 0; gap: 0; }
-  header .gh { font-size: 0; gap: 0; }
-  header .gh .key { display: none; }
+  /* the lamp keeps a two-letter label rather than going mute */
+  header .auth-ok .auth-full { display: none; }
+  header .auth-ok .auth-short { display: inline; }
   header .auth-missing { padding-inline: 0.45rem; }
   header .auth-missing .auth-full { display: none; }
   header .auth-missing .auth-short { display: inline; }

@@ -1,5 +1,5 @@
 /**
- * @cube/git — host-side git and PR flow (PLAN §11). Credentials never leave
+ * @cube/git — host-side git and PR flow (ARCHITECTURE §11). Credentials never leave
  * the host: a cube's workspace is a plain local clone (seeded from a bare
  * mirror under reposRoot, so repeat cube creation needs no network) whose
  * `origin` points at the real upstream. The agent commits locally over bash;

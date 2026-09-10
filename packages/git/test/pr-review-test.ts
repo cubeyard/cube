@@ -25,7 +25,7 @@ const commit = (file: string, text: string, message: string) => {
 
 git(tmp, "init", "--bare", "-b", "main", bare);
 git(tmp, "clone", bare, seed);
-const oldBase = commit("base.txt", "old\n", "old base");
+commit("base.txt", "old\n", "old base");
 git(seed, "push", "origin", "HEAD:main");
 const numbers = [842, 843, 844, 845, 846, 847, 848];
 const branches = numbers.map((n) => `stack/pr-${n}`);

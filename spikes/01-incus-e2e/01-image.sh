@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the base orb image: provision a throwaway Ubuntu 24.04 container, then
-# `incus publish` it under the $ORB_IMAGE alias (PLAN §5 image strategy).
+# `incus publish` it under the $ORB_IMAGE alias (ARCHITECTURE §5 image strategy).
 . "$(dirname "$0")/lib.sh"
 BUILDER="cube-orb-builder"
 

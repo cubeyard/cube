@@ -2,7 +2,7 @@
  * Manual smoke test for the Phase 3c git/PR flow against real Incus: a cube
  * provisioned WITH a repo gets its workspace seeded from the host-side
  * mirror; the agent-side clone looks normal (origin = upstream) but cannot
- * push (that is the boundary, PLAN §11); host-side diff shows in-cube
+ * push (that is the boundary, ARCHITECTURE §11); host-side diff shows in-cube
  * commits AND uncommitted work; host-side push lands the branch on the
  * upstream. Does not prompt a model; `gh` is not exercised (no auth in the
  * VM) — createPr's argv handling is covered offline in git-service-test.

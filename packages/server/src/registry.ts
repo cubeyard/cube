@@ -1,5 +1,5 @@
 /**
- * cubed's SQLite registry (PLAN §7) — metadata only, for what pi cannot
+ * cubed's SQLite registry (ARCHITECTURE §7) — metadata only, for what pi cannot
  * know: which cubes exist (with their allocated subnet), which pi session
  * file backs each thread, service portals (stable hostnames), and volumes. Conversation
  * content stays in pi's JSONL session files; the SSE buffer stays in-memory.
@@ -11,10 +11,51 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import type { EventInput } from "./events.ts";
+import { createLogger } from "./log.ts";
+import { APP_VERSION } from "./version.ts";
+
+// Every error column is written here, so every caller's failure reaches the
+// journal (and `cube diagnose`) without each of them remembering to log.
+const log = createLogger("registry");
+
+/** The journal gets the head of an error, not the whole script tail: the
+ * full text stays in the registry (same host, same trust), while a
+ * `.cube/setup` that echoed a secret is not copied into logs wholesale. */
+const brief = (error: string): string => (error.length > 200 ? `${error.slice(0, 200)}…` : error);
+
+/** One recorded lifecycle event (see events.ts). */
+export interface EventRow {
+  id: number;
+  /** ms epoch when the event was recorded (the end of a timed phase). */
+  ts: number;
+  kind: string;
+  phase: string | null;
+  /** Groups the phases of one operation; null for point events. */
+  op: string | null;
+  cube: string | null;
+  thread: string | null;
+  ok: boolean;
+  ms: number | null;
+  detail: string | null;
+  version: string;
+}
+
+export interface EventFilter {
+  since?: number;
+  until?: number;
+  cube?: string;
+  thread?: string;
+  kind?: string;
+  /** Failures only. */
+  failed?: boolean;
+  limit?: number;
+}
+
 export interface CubeRow {
   id: number;
   name: string;
-  /** creating | ready | asleep | waking | error. */
+  /** creating | ready | asleep | waking | error | building-environment (internal). */
   status: string;
   error: string | null;
   image: string;
@@ -210,11 +251,88 @@ export class Registry {
         cap_bytes   INTEGER NOT NULL,
         UNIQUE(cube_id, purpose)
       );
+      CREATE TABLE IF NOT EXISTS event (
+        id      INTEGER PRIMARY KEY,
+        ts      INTEGER NOT NULL,
+        kind    TEXT NOT NULL,
+        phase   TEXT,
+        op      TEXT,
+        cube    TEXT,
+        thread  TEXT,
+        ok      INTEGER NOT NULL,
+        ms      INTEGER,
+        detail  TEXT,
+        version TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS event_ts ON event(ts);
+      CREATE INDEX IF NOT EXISTS event_cube_ts ON event(cube, ts);
     `);
     this.migratePortalTable();
     this.requireProjectThreads();
     this.migrateThreadArchive(); // after: the project upgrade recreates `thread` without it
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS thread_cube_id_unique ON thread(cube_id)");
+  }
+
+  // ---------------------------------------------------------------- events
+
+  /** Append one lifecycle event (events.ts). Never throws into the caller:
+   * a full disk must not turn a successful wake into a failure. Events are
+   * not part of any cube/thread cascade — history outlives deletion. */
+  recordEvent(input: EventInput): void {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO event (ts, kind, phase, op, cube, thread, ok, ms, detail, version)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          Date.now(),
+          input.kind,
+          input.phase ?? null,
+          input.op ?? null,
+          input.cube ?? null,
+          input.thread ?? null,
+          input.ok ? 1 : 0,
+          input.ms ?? null,
+          input.detail ?? null,
+          APP_VERSION,
+        );
+    } catch (error) {
+      console.log(`event not recorded (${input.kind}): ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** Newest first. */
+  listEvents(filter: EventFilter = {}): EventRow[] {
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (filter.since !== undefined) { where.push("ts >= ?"); params.push(filter.since); }
+    if (filter.until !== undefined) { where.push("ts <= ?"); params.push(filter.until); }
+    if (filter.cube) { where.push("cube = ?"); params.push(filter.cube); }
+    if (filter.thread) { where.push("thread = ?"); params.push(filter.thread); }
+    if (filter.kind) { where.push("kind = ?"); params.push(filter.kind); }
+    if (filter.failed) where.push("ok = 0");
+    const limit = Math.min(Math.max(Math.floor(filter.limit ?? 200), 1), 10_000);
+    const sql = `SELECT * FROM event${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY ts DESC, id DESC LIMIT ?`;
+    return (this.db.prepare(sql).all(...params, limit) as unknown[]).map(eventRow);
+  }
+
+  /** Drop events older than the retention window and, beyond `maxRows`,
+   * the oldest of the rest; returns how many went. Best-effort like
+   * recordEvent: telemetry maintenance must never stop a boot or a sweep. */
+  pruneEvents(olderThanMs: number, maxRows = 200_000): number {
+    try {
+      let changes = Number(this.db.prepare("DELETE FROM event WHERE ts < ?").run(Date.now() - olderThanMs).changes);
+      changes += Number(
+        this.db
+          .prepare("DELETE FROM event WHERE id NOT IN (SELECT id FROM event ORDER BY id DESC LIMIT ?)")
+          .run(Math.max(1, Math.floor(maxRows))).changes,
+      );
+      return changes;
+    } catch (error) {
+      console.log(`events not pruned: ${error instanceof Error ? error.message : String(error)}`);
+      return 0;
+    }
   }
 
   private migrateThreadArchive(): void {
@@ -392,6 +510,7 @@ export class Registry {
         result.checkedAt,
         id,
       );
+    if (result.error) log.warn("project repository error", { repository: id, status: result.status, error: brief(result.error) });
   }
 
   finishProjectCheck(
@@ -407,6 +526,7 @@ export class Registry {
          WHERE id = ? AND revision = ?`,
       )
       .run(status, error, checkedAt, checkedAt, id, revision);
+    if (error) log.warn("project error", { project: id, revision, status, error: brief(error) });
   }
 
   countThreadsForProject(projectId: string): number {
@@ -529,6 +649,7 @@ export class Registry {
     this.db
       .prepare("UPDATE cube SET status = ?, error = ? WHERE name = ?")
       .run(status, error, name);
+    if (error) log.warn("cube error", { cube: name, status, error: brief(error) });
   }
 
   touchCube(name: string): void {
@@ -639,7 +760,6 @@ export class Registry {
   }
 }
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 function cubeRow(r: any): CubeRow {
   return {
     id: Number(r.id),
@@ -651,6 +771,22 @@ function cubeRow(r: any): CubeRow {
     subnetIndex: Number(r.subnet_index),
     createdAt: Number(r.created_at),
     lastActiveAt: Number(r.last_active_at),
+  };
+}
+
+function eventRow(r: any): EventRow {
+  return {
+    id: Number(r.id),
+    ts: Number(r.ts),
+    kind: String(r.kind),
+    phase: r.phase === null ? null : String(r.phase),
+    op: r.op === null ? null : String(r.op),
+    cube: r.cube === null ? null : String(r.cube),
+    thread: r.thread === null ? null : String(r.thread),
+    ok: Number(r.ok) === 1,
+    ms: r.ms === null ? null : Number(r.ms),
+    detail: r.detail === null ? null : String(r.detail),
+    version: String(r.version),
   };
 }
 

@@ -1013,6 +1013,6 @@ Not automatable offline; do this once after the offline portfolio is green:
 
 ## Deferred (explicitly not in this plan)
 
-- `~/.config/gh` + state file on the DATA disk across upgrades — tracked in PLAN §13 "Still in phase" with `~/.pi`.
+- `~/.config/gh` + state file on the DATA disk across upgrades — tracked in ARCHITECTURE §13 "Still in phase" with `~/.pi`.
 - Non-GitHub hosts (they keep raw git errors — honest, just not pretty).
 - The "access denied while connected" flow beyond honest copy (SSO orgs etc.).

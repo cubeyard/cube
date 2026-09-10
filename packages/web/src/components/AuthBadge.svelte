@@ -16,9 +16,12 @@
 </script>
 
 {#if auth?.state === "ok"}
-  <!-- Healthy auth is a steady green lamp, not information to shout. -->
+  <!-- Healthy auth is a steady green lamp, not information to shout. On a
+       phone the label shrinks to two letters rather than vanishing. -->
   <span class="auth-ok lamp-field" title="signed in: {auth.provider} ({auth.credentialType})">
-    <span class="lamp on-green"></span>auth
+    <span class="lamp on-green"></span>
+    <span class="auth-full">auth</span>
+    <span class="auth-short" aria-hidden="true">ok</span>
   </span>
 {:else if auth}
   <span
