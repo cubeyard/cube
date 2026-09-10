@@ -60,6 +60,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import { encodeError, type CodeErrorData } from "./code-errors.ts";
+import { execCode, codeFile } from "./code-io.ts";
 import { createCodeCapability } from "./code-capabilities.ts";
 import { CODE_MODE_API, runCodeMode, type CodeModeTrace } from "./code-mode.ts";
 import { CubeFs, type GuestFiles } from "./cube-fs.ts";
@@ -83,12 +85,9 @@ export interface CubeConfig {
 /** Ceiling on bash output forwarded to pi (which spools the overflow to a
  * host /tmp file) — bounds host disk against a runaway cube command. */
 const MAX_BASH_OUTPUT = 32 * 1024 * 1024;
-/** Code-mode results cross into QuickJS instead of pi's bash spool, so use a
- * much tighter ceiling. Large command output belongs in a workspace file. */
-const MAX_CODE_EXEC_OUTPUT = 1024 * 1024;
-
 interface CodeToolDetails {
   operations: CodeModeTrace[];
+  error?: CodeErrorData;
   truncation?: ReturnType<typeof truncateHead>;
 }
 
@@ -362,19 +361,30 @@ export function createThreadRequest(cfg: { threadId?: string; cubedUrl: string }
     const requestSignal = signal
       ? AbortSignal.any([signal, AbortSignal.timeout(options.timeoutMs ?? 600_000)])
       : AbortSignal.timeout(options.timeoutMs ?? 600_000);
-    const response = await fetch(
-      `${cfg.cubedUrl}/api/threads/${encodeURIComponent(cfg.threadId)}${requestPath}`,
-      {
-        method: options.method ?? "GET",
-        ...(options.body === undefined
-          ? {}
-          : { headers: { "content-type": "application/json" }, body: JSON.stringify(options.body) }),
-        signal: requestSignal,
-      },
-    );
-    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-    if (!response.ok) throw new Error(String(body.error ?? `cubed request failed (${response.status})`));
-    return body;
+    requestSignal.throwIfAborted();
+    try {
+      const response = await fetch(
+        `${cfg.cubedUrl}/api/threads/${encodeURIComponent(cfg.threadId)}${requestPath}`,
+        {
+          method: options.method ?? "GET",
+          ...(options.body === undefined
+            ? {}
+            : { headers: { "content-type": "application/json" }, body: JSON.stringify(options.body) }),
+          signal: requestSignal,
+        },
+      );
+      const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+      requestSignal.throwIfAborted();
+      if (!response.ok) throw new Error(String(body.error ?? `cubed request failed (${response.status})`));
+      return body;
+    } catch (error) {
+      if (requestSignal.aborted && options.method && options.method !== "GET") {
+        throw Object.assign(new Error(`request cancelled; ${options.method} ${requestPath} may have completed remotely; reconcile before retrying`), {
+          code: "ECODE_UNCERTAIN", completionUnknown: true,
+        });
+      }
+      throw error;
+    }
   };
 }
 
@@ -486,46 +496,22 @@ export default function cubeExtension(pi: ExtensionAPI) {
   const threadRequest = createThreadRequest(cfg);
 
   const codeCapability = createCodeCapability({
-    async exec(input, signal) {
-      throwIfCodeAborted(signal);
-      const chunks: Buffer[] = [];
-      let total = 0;
-      let overflow = false;
-      const limiter = new AbortController();
-      const combined = AbortSignal.any([signal, limiter.signal]);
-      const result = await bashOps.exec(input.command, input.cwd ?? cfg.guestWorkspace, {
-        signal: combined,
-        timeout: Math.ceil(input.timeoutMs / 1000),
-        onData: (chunk) => {
-          if (overflow) return;
-          total += chunk.length;
-          if (total > MAX_CODE_EXEC_OUTPUT) {
-            overflow = true;
-            limiter.abort();
-            return;
-          }
-          chunks.push(chunk);
-        },
-      });
-      if (overflow) {
-        throw new Error(
-          `command output exceeded ${formatSize(MAX_CODE_EXEC_OUTPUT)}; redirect large output to a workspace file`,
-        );
-      }
-      throwIfCodeAborted(signal);
-      return { exitCode: result.exitCode, output: Buffer.concat(chunks).toString("utf8") };
-    },
-    async readText(inputPath, signal) {
+    exec: (input, signal) => execCode(async (command, cwd, options) => {
+      await waker.ensure(undefined, options.signal);
+      options.signal.throwIfAborted();
+      return sandbox.exec(command, { cwd: guest(cwd), ...options });
+    }, input, cfg.guestWorkspace, signal),
+    readText: (inputPath, signal) => codeFile("fs.readText", inputPath, async () => {
       throwIfCodeAborted(signal);
       const content = await cubeFs.readFile(guest(inputPath), signal);
       throwIfCodeAborted(signal);
       return content.toString("utf8");
-    },
-    async writeText(inputPath, content, signal) {
+    }),
+    writeText: (inputPath, content, signal) => codeFile("fs.writeText", inputPath, async () => {
       throwIfCodeAborted(signal);
       await cubeFs.writeFile(guest(inputPath), content, signal);
       throwIfCodeAborted(signal);
-    },
+    }),
     async listRepositories(signal) {
       const body = await threadRequest("/repositories", { timeoutMs: 30_000 }, signal);
       if (!Array.isArray(body.repositories)) throw new Error("cubed returned invalid repositories");
@@ -645,18 +631,30 @@ export default function cubeExtension(pi: ExtensionAPI) {
       onUpdate: ((result: { content: Array<{ type: "text"; text: string }>; details: CodeToolDetails }) => void) | undefined,
     ) {
       const operationEvents: CodeModeTrace[] = [];
-      const result = await runCodeMode({
-        source: params.source,
-        call: codeCapability,
-        signal,
-        onTrace: (trace) => {
-          operationEvents.push(trace);
-          onUpdate?.({
-            content: [{ type: "text", text: codeTraceText(operationEvents) }],
-            details: { operations: [...operationEvents] },
-          });
-        },
-      });
+      let result;
+      try {
+        result = await runCodeMode({
+          source: params.source,
+          call: codeCapability,
+          signal,
+          onTrace: (trace) => {
+            operationEvents.push(trace);
+            onUpdate?.({
+              content: [{ type: "text", text: codeTraceText(operationEvents) }],
+              details: { operations: [...operationEvents] },
+            });
+          },
+        });
+      } catch (error) {
+        const data = encodeError(error);
+        const truncation = truncateHead(JSON.stringify(data, null, 2));
+        return {
+          isError: true,
+          content: [{ type: "text", text: truncation.content + (truncation.truncated
+            ? "\n[error output truncated for display; catch the error in code to inspect its bounded output]" : "") }],
+          details: { operations: operationEvents, error: data, ...(truncation.truncated ? { truncation } : {}) },
+        };
+      }
       const completed = result.traces.filter((trace) => trace.status !== "running");
       const prefix = completed.length > 0 ? `${codeTraceText(completed)}\n\n` : "";
       const truncation = truncateHead(prefix + codeValueText(result.value));

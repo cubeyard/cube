@@ -349,10 +349,12 @@ let callerAbortCallCancelled = false;
 const caller = new AbortController();
 const callerRun = runCodeMode({
   source: `return await cube.services.ensure();`,
-  call: waitsForAbort(() => (callerAbortCallCancelled = true)),
+  call: async (operation, args, signal) => {
+    setTimeout(() => caller.abort(new Error("caller stopped")), 20);
+    return waitsForAbort(() => (callerAbortCallCancelled = true))(operation, args, signal);
+  },
   signal: caller.signal,
 });
-setTimeout(() => caller.abort(new Error("caller stopped")), 20);
 await assert.rejects(callerRun, /caller stopped/);
 assert.equal(callerAbortCallCancelled, true);
 
