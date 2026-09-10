@@ -16,7 +16,7 @@ export interface CodeCapabilityHost {
   writeText(path: string, content: string, signal: AbortSignal): Promise<void>;
   listRepositories(signal: AbortSignal): Promise<unknown[]>;
   readGithub(input: { number: number; type: string; section?: string; page?: number }, signal: AbortSignal): Promise<unknown>;
-  reviewPr(repositoryId: number, input: { action: "prepare"; number: number } | { action: "plan" | "verify"; token: string } | { action: "publish"; token: string; plan: string } | { action: "inspect"; token: string; plan: string; number: number; section: "patch" | "prDiff"; page?: number }, signal: AbortSignal): Promise<unknown>;
+  reviewPr(repositoryId: number, input: { action: "prepare" | "prepare-rebase"; number: number } | { action: "plan" | "verify"; token: string } | { action: "publish"; token: string; plan: string } | { action: "inspect"; token: string; plan: string; number: number; section: "patch" | "prDiff"; page?: number }, signal: AbortSignal): Promise<unknown>;
   syncBase(repositoryId: number, signal: AbortSignal): Promise<unknown>;
   pushBranch(repositoryId: number, signal: AbortSignal): Promise<unknown>;
   pushBase(repositoryId: number, signal: AbortSignal): Promise<unknown>;
@@ -109,8 +109,9 @@ export function createCodeCapability(host: CodeCapabilityHost): CodeModeCapabili
       case "git.syncBase":
         return host.syncBase(repositoryId(args), signal);
       case "git.preparePrUpdate":
+      case "git.preparePrRebase":
         if (!Number.isSafeInteger(args.number) || Number(args.number) < 1) throw new TypeError("number must be a positive integer");
-        return host.reviewPr(repositoryId(args), { action: "prepare", number: Number(args.number) }, signal);
+        return host.reviewPr(repositoryId(args), { action: operation === "git.preparePrRebase" ? "prepare-rebase" : "prepare", number: Number(args.number) }, signal);
       case "git.planPrUpdate":
       case "git.inspectPrUpdatePlan":
       case "git.publishPrUpdate":

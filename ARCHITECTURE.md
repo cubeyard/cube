@@ -158,6 +158,12 @@ creating → ready ⇄ running → idle → asleep → waking → ready
 - **The truth lives on the host.** Workspace is a plain host directory,
   attached as a shifted disk device. Caches are capped custom volumes. The
   container is cattle.
+- **Fresh thread snapshots:** project checks establish access/configuration;
+  each new thread refreshes every configured base branch before allocation and
+  pins the returned OIDs. Fetch failures stop creation rather than falling back
+  to the last checked commits. Existing threads and idempotent replays retain
+  their pins. Concurrent duplicate creates share their refresh and allocation;
+  a project revision change during the await invalidates the attempt.
 - **sleep** = `incus stop` after idle timeout (default **1h**, decided
   2026-08-26). Container rootfs survives (a mid-task `apt install` is not
   lost), costs nothing while stopped.

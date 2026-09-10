@@ -329,6 +329,10 @@ export class CubeSupervisor {
   // replayed within minutes. Bounded by CREATE_REQUEST_CAP; expiry and
   // deleted threads are swept once a minute, not scanned per request.
   private readonly createRequests = new Map<string, { threadId: string; at: number }>();
+  // Reserve keyed creates across the network preflight, not just allocation.
+  private readonly pendingCreates = new Map<string, Promise<{ id: string; created: boolean }>>();
+  private readonly threadPreparations = new Set<Promise<ProjectRepositoryRow[]>>();
+  private closing = false;
 
   constructor(registry: Registry, backend: CubeBackend, config: SupervisorConfig) {
     this.registry = registry;
@@ -773,24 +777,11 @@ export class CubeSupervisor {
         }
       }),
     );
-    // The declared environment folder must exist at the exact commit the
-    // threads will seed from; a cube.toml there must parse. Both are
-    // project errors now, not a thread that fails minutes into setup.
+    // Validate the declared environment at the checked snapshot. Creation
+    // repeats this validation against the refreshed reference commit.
     const environment = this.registry.getProject(projectId)?.environment ?? null;
-    if (failures.length === 0 && environment) {
-      const [checkoutName, ...folders] = environment.split("/");
-      const repo = this.registry.listProjectRepositories(projectId).find((r) => r.checkoutName === checkoutName);
-      const folder = [...folders, ".cube"].join("/");
-      if (!repo?.baseOid) failures.push(`environment: ${environment} names no checked reference repository`);
-      else if (!(await this.git.pathExistsAtCommit(repo.url, repo.baseOid, folder))) {
-        failures.push(`environment: no ${folder} in ${repo.checkoutName} at ${repo.resolvedBase} @ ${repo.baseOid.slice(0, 8)}`);
-      } else {
-        const toml = await this.git.readFileAtCommit(repo.url, repo.baseOid, `${folder}/cube.toml`);
-        if (toml !== null) {
-          try { parseCubeToml(toml); }
-          catch (error) { failures.push(`environment: ${repo.checkoutName}/${folder}/${error instanceof Error ? error.message : String(error)}`); }
-        }
-      }
+    if (failures.length === 0) {
+      failures.push(...await this.environmentSnapshotErrors(this.registry.listProjectRepositories(projectId), environment));
     }
     const checkedAt = Date.now();
     this.registry.finishProjectCheck(
@@ -805,6 +796,67 @@ export class CubeSupervisor {
       failures.length === 0,
       failures.length === 0 ? `${name}: ${repositories.length} repositor${repositories.length === 1 ? "y" : "ies"} ready` : `${name}: ${failures.join("; ")}`,
     );
+  }
+
+  /** Validate the declaration against the exact reference commit we will use,
+   * both on project check and when a new thread refreshes its repositories. */
+  private async environmentSnapshotErrors(repositories: ProjectRepositoryRow[], environment: string | null): Promise<string[]> {
+    const failures: string[] = [];
+    if (environment) {
+      const [checkoutName, ...folders] = environment.split("/");
+      const repo = repositories.find((r) => r.checkoutName === checkoutName);
+      const folder = [...folders, ".cube"].join("/");
+      if (!repo?.baseOid) failures.push(`environment: ${environment} names no checked reference repository`);
+      else if (!(await this.git.pathExistsAtCommit(repo.url, repo.baseOid, folder))) {
+        failures.push(`environment: no ${folder} in ${repo.checkoutName} at ${repo.resolvedBase} @ ${repo.baseOid.slice(0, 8)}`);
+      } else {
+        const toml = await this.git.readFileAtCommit(repo.url, repo.baseOid, `${folder}/cube.toml`);
+        if (toml !== null) {
+          try { parseCubeToml(toml); }
+          catch (error) { failures.push(`environment: ${repo.checkoutName}/${folder}/${error instanceof Error ? error.message : String(error)}`); }
+        }
+      }
+    }
+    return failures;
+  }
+
+  /** A project check verifies configuration/access, not freshness forever.
+   * Fetch before allocating anything, pin the results locally, and never use
+   * the older checked OIDs as a fallback. Existing threads keep their pins. */
+  private async prepareThreadRepositories(project: ProjectRow): Promise<ProjectRepositoryRow[]> {
+    const configured = this.registry.listProjectRepositories(project.id);
+    const span = new Span(this.registry, { kind: "thread-prepare" });
+    try {
+      await this.config.github?.ensureFresh();
+      // Drain every fetch even if one fails: shutdown must not leave work
+      // attached to a registry that has already been closed.
+      const results = await Promise.allSettled(configured.map(async (repo) => {
+        try {
+          const prepared = await this.git.prepareRepository(repo.url, repo.base);
+          return { ...repo, resolvedBase: prepared.base, baseOid: prepared.baseOid };
+        } catch (error) {
+          const raw = error instanceof Error ? error.message : String(error);
+          const message = describeRepoAuthFailure(raw, repo.url, this.config.github?.status().state === "connected") ?? raw;
+          throw new Error(`could not refresh ${repo.checkoutName}: ${message}`);
+        }
+      }));
+      const repositories = results.map(result => {
+        if (result.status === "rejected") throw result.reason;
+        return result.value;
+      });
+      if (this.closing) throw new Error("server is stopping — start the thread again after restart");
+      const failures = await this.environmentSnapshotErrors(repositories, project.environment);
+      if (failures.length) throw new Error(failures.join("; "));
+      // Detect edits/re-checks/deletion during fetch. The caller rechecks
+      // after its await too, immediately before synchronous allocation.
+      const current = this.requireReadyProject(project.id);
+      if (current.revision !== project.revision) throw new Error("project changed while refreshing repositories — start the thread again");
+      span.end(true, `${project.id}: ${repositories.map(repo => `${repo.checkoutName}@${repo.baseOid}`).join(", ")}`);
+      return repositories;
+    } catch (error) {
+      span.fail(error);
+      throw error;
+    }
   }
 
   // ------------------------------------------------------------------ cubes
@@ -972,9 +1024,8 @@ export class CubeSupervisor {
       // full or read-only disk fails here as an error the thread can be
       // deleted from, not as an escaped rejection that strands `creating`.
       this.lifecycle.save(cube.name, "setup", { state: "running", startedAt: Date.now(), durationMs: null, error: null });
-      // Seed every workspace from the exact snapshots Project readiness
-      // prepared. This path is deliberately local-only: auth/network failures
-      // belong to the Project switchboard, not thread creation.
+      // Seed from the exact snapshots refreshed before thread allocation.
+      // Provisioning itself stays local-only; never fetch a second tip here.
       await this.seedCube(cube, signal);
       signal.throwIfAborted();
       span.phase("seed");
@@ -1719,7 +1770,7 @@ export class CubeSupervisor {
   async reviewPrForUserThread(
     id: string,
     repositoryId: number,
-    input: { action: "prepare"; number: number } | { action: "plan" | "verify"; token: string } | { action: "publish"; token: string; plan: string } | { action: "inspect"; token: string; plan: string; number: number; section: "patch" | "prDiff"; page?: number },
+    input: { action: "prepare" | "prepare-rebase"; number: number } | { action: "plan" | "verify"; token: string } | { action: "publish"; token: string; plan: string } | { action: "inspect"; token: string; plan: string; number: number; section: "patch" | "prDiff"; page?: number },
     signal?: AbortSignal,
   ) {
     const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
@@ -1732,6 +1783,7 @@ export class CubeSupervisor {
       const { workspacePath: ws, url } = repository;
       switch (input.action) {
         case "prepare": return this.prReviews.prepare(ws, url, input.number, signal);
+        case "prepare-rebase": return this.prReviews.prepareRebase(ws, url, input.number, signal);
         case "plan": return this.prReviews.plan(ws, url, input.token, signal);
         case "inspect": return this.prReviews.inspect(ws, url, input.token, input.plan, { number: input.number, section: input.section, page: input.page }, signal);
         case "publish": return this.prReviews.publish(ws, url, input.token, input.plan, signal);
@@ -1995,9 +2047,9 @@ export class CubeSupervisor {
 
   /**
    * The Orbs-style "new thread": silently allocates a backing cube
-   * (generated name the user never sees), starts provisioning, and returns
-   * the thread id immediately. No pi session object is created here — the
-   * thread's conversation lives in the pi TUI the pty bridge spawns on
+   * (generated name the user never sees) after refreshing its repository
+   * tips, starts provisioning, and returns the thread id. No pi session object
+   * is created here — the thread's conversation lives in the pi TUI the pty bridge spawns on
    * first attach, against a session file path chosen NOW (pi creates the
    * file at that exact path on its first flush), so creating a thread
    * needs neither model credentials nor a sandbox.
@@ -2011,10 +2063,9 @@ export class CubeSupervisor {
    * false on a replay.
    */
   async createUserThread(projectId: string, requestKey?: string): Promise<{ id: string; created: boolean }> {
+    if (this.closing) throw new Error("server is stopping — start the thread again after restart");
     const key = requestKey === undefined ? null : `${projectId}\0${requestKey}`;
     if (key !== null) {
-      // Check-and-record is atomic: nothing below awaits, so two replays
-      // of one key cannot both pass this point before the first records.
       // O(1) per request: the hit itself is checked for expiry and for a
       // thread that no longer exists; the sweep does the full scan.
       const prior = this.createRequests.get(key);
@@ -2023,8 +2074,29 @@ export class CubeSupervisor {
       }
       if (prior) this.createRequests.delete(key);
     }
+    if (key === null) return this.createFreshUserThread(projectId, null);
+    const pending = this.pendingCreates.get(key);
+    if (pending) return { id: (await pending).id, created: false };
+    if (this.pendingCreates.size >= CREATE_REQUEST_CAP) throw new Error("too many thread creations in progress — try again shortly");
+    const creation = this.createFreshUserThread(projectId, key);
+    this.pendingCreates.set(key, creation);
+    try { return await creation; }
+    finally { this.pendingCreates.delete(key); }
+  }
+
+  private async createFreshUserThread(projectId: string, key: string | null): Promise<{ id: string; created: boolean }> {
     const project = this.requireReadyProject(projectId);
-    const repositories = this.registry.listProjectRepositories(project.id);
+    const preparation = this.prepareThreadRepositories(project);
+    this.threadPreparations.add(preparation);
+    let repositories: ProjectRepositoryRow[];
+    try { repositories = await preparation; }
+    finally { this.threadPreparations.delete(preparation); }
+    if (this.closing) throw new Error("server is stopping — start the thread again after restart");
+    // Recheck after the await as well: a project mutation may have run between
+    // preparation's resolution and this continuation. Allocation is synchronous.
+    if (this.requireReadyProject(projectId).revision !== project.revision) {
+      throw new Error("project changed while refreshing repositories — start the thread again");
+    }
     const cube = this.createProjectCube(this.freshCubeName(), repositories, project.environment);
     try {
       const sessionDir = path.join(this.config.cubesRoot, cube.name, "sessions");
@@ -2368,6 +2440,8 @@ export class CubeSupervisor {
   }
 
   async close(): Promise<void> {
+    this.closing = true;
+    await Promise.allSettled([...this.threadPreparations]);
     if (this.sweepTimer) {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;

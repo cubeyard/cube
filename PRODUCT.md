@@ -81,9 +81,12 @@ Confirmed today:
 - Project list and project switchboard: create, edit, delete, and re-check a
   project before work starts. A project owns one primary repository and any
   number of additional repositories.
-- Repository checks resolve host access and the exact base OID up front. A
-  thread can start only from a ready project, and provisioning seeds the
-  prepared OIDs without hidden network or auth work.
+- Repository checks verify host access and base configuration up front. A
+  thread can start only from a ready project. Each new creation refreshes all
+  configured base branches (including references), then pins their exact OIDs
+  before allocating an environment. Fetch failures stop creation, never fall
+  back to the checked snapshot. Existing threads and idempotent replays retain
+  their original pins; provisioning itself does not fetch.
 - The thread list is global across all projects, defaults to `all projects`,
   prints project attribution on every row, and supports a URL-backed project
   filter.

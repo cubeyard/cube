@@ -82,6 +82,7 @@ const reviewToken = "a".repeat(32);
 const reviewPlan = "b".repeat(32);
 for (const [source, expected] of [
   ["cube.git.preparePrUpdate(7, 845)", { repositoryId: 7, action: "prepare", number: 845 }],
+  ["cube.git.preparePrRebase(7, 845)", { repositoryId: 7, action: "prepare-rebase", number: 845 }],
   [`cube.git.planPrUpdate(7, '${reviewToken}')`, { repositoryId: 7, action: "plan", token: reviewToken }],
   [`cube.git.inspectPrUpdatePlan(7, '${reviewToken}', '${reviewPlan}', { number: 845, section: 'prDiff', page: 2 })`, { repositoryId: 7, action: "inspect", token: reviewToken, plan: reviewPlan, number: 845, section: "prDiff", page: 2 }],
   [`cube.git.publishPrUpdate(7, '${reviewToken}', '${reviewPlan}')`, { repositoryId: 7, action: "publish", token: reviewToken, plan: reviewPlan }],
@@ -89,6 +90,7 @@ for (const [source, expected] of [
 ] as const) {
   assert.deepEqual((await runCodeMode({ source: `return await ${source};`, call: capability })).value, expected);
 }
+await assert.rejects(capability("git.preparePrRebase", { repositoryId: 7, number: 0 }, new AbortController().signal), /positive integer/);
 await assert.rejects(capability("git.preparePrUpdate", { repositoryId: 7, number: 0 }, new AbortController().signal), /positive integer/);
 await assert.rejects(capability("git.planPrUpdate", { repositoryId: 7, token: "../state" }, new AbortController().signal), /invalid review token/);
 await assert.rejects(capability("git.publishPrUpdate", { repositoryId: 7, token: reviewToken, plan: "" }, new AbortController().signal), /invalid review plan/);

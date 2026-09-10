@@ -33,6 +33,7 @@ OFFLINE_TESTS=(
   packages/sandbox/test/mock-backend-test.ts
   packages/git/test/git-service-test.ts
   packages/git/test/pr-review-test.ts
+  packages/git/test/pr-rebase-test.ts
   packages/git/test/merged-pr-review-test.ts
   packages/pi-extension/test/code-mode-test.ts
   packages/pi-extension/test/pi-extension-test.ts
