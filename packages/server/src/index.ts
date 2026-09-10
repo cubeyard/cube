@@ -222,6 +222,7 @@ async function readProjectInput(
   | {
       name: string;
       repositories: Array<{ url: string; base?: string | null; checkoutName?: string }>;
+      environment?: string | null;
     }
   | null
 > {
@@ -236,9 +237,13 @@ async function readProjectInput(
     json(res, 400, { error: "invalid project: object body required" });
     return null;
   }
-  const body = parsed as { name?: unknown; repositories?: unknown };
+  const body = parsed as { name?: unknown; repositories?: unknown; environment?: unknown };
   if (typeof body.name !== "string" || !Array.isArray(body.repositories)) {
     json(res, 400, { error: "invalid project: name and repositories are required" });
+    return null;
+  }
+  if (body.environment !== undefined && body.environment !== null && typeof body.environment !== "string") {
+    json(res, 400, { error: "invalid project: environment must be a string like \"<checkout>/<folder>\"" });
     return null;
   }
   const repositories: Array<{ url: string; base?: string | null; checkoutName?: string }> = [];
@@ -266,7 +271,7 @@ async function readProjectInput(
       checkoutName: repo.checkoutName as string | undefined,
     });
   }
-  return { name: body.name, repositories };
+  return { name: body.name, repositories, environment: body.environment as string | null | undefined };
 }
 
 /** Cube-subnet source address (the firewall admits cubes to this port for

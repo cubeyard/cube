@@ -305,6 +305,31 @@ export class GitService {
     });
   }
 
+  /** `<oid>:<relPath>` from the host mirror of `url`: the blob's text, or
+   * null when the path is absent (or a tree). Read-only against objects
+   * the mirror already holds — the project check validates a declared
+   * environment folder at the exact pinned commit, so a later push can
+   * never point new threads at a folder that is not there. */
+  async readFileAtCommit(url: string, oid: string, relPath: string): Promise<string | null> {
+    if (!/^[0-9a-f]{7,64}$/.test(oid)) throw new Error(`invalid commit: ${oid}`);
+    try {
+      return (await this.git(["--git-dir", this.mirrorPathFor(url), "cat-file", "blob", `${oid}:${relPath}`], LOCAL_TIMEOUT_MS)).stdout;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Whether `<oid>:<relPath>` exists (file or tree) in the host mirror of `url`. */
+  async pathExistsAtCommit(url: string, oid: string, relPath: string): Promise<boolean> {
+    if (!/^[0-9a-f]{7,64}$/.test(oid)) throw new Error(`invalid commit: ${oid}`);
+    try {
+      await this.git(["--git-dir", this.mirrorPathFor(url), "cat-file", "-e", `${oid}:${relPath}`], LOCAL_TIMEOUT_MS);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Refresh a host-owned mirror and resolve the exact branch tip a later
    * thread should seed from. This is the Project readiness boundary: all
    * network/auth work happens here, before the user starts a thread. */

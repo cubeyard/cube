@@ -60,6 +60,11 @@ export interface CubeRow {
   error: string | null;
   image: string;
   workspacePath: string;
+  /** "<checkout>/<path>" of a reference repository whose folder carries
+   * this cube's .cube (setup, resume, cube.toml); null = the primary
+   * checkout's own .cube. Snapshotted from the project at creation, like
+   * the repositories. */
+  environment: string | null;
   subnetIndex: number;
   createdAt: number;
   lastActiveAt: number;
@@ -82,6 +87,10 @@ export interface ProjectRow {
   name: string;
   status: ProjectStatus;
   error: string | null;
+  /** "<checkout>/<path>": a folder of a reference repository that carries
+   * the .cube directory, for a primary repository that does not ship one.
+   * null = the primary's own .cube. */
+  environment: string | null;
   revision: number;
   checkedAt: number | null;
   createdAt: number;
@@ -178,11 +187,12 @@ export class Registry {
     this.db.exec("PRAGMA foreign_keys = ON");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS project (
-        id         TEXT PRIMARY KEY,
-        name       TEXT NOT NULL COLLATE NOCASE UNIQUE,
-        status     TEXT NOT NULL,
-        error      TEXT,
-        revision   INTEGER NOT NULL,
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        status      TEXT NOT NULL,
+        error       TEXT,
+        environment TEXT,
+        revision    INTEGER NOT NULL,
         checked_at INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
@@ -209,6 +219,7 @@ export class Registry {
         error          TEXT,
         image          TEXT NOT NULL,
         workspace_path TEXT NOT NULL,
+        environment    TEXT,
         subnet_index   INTEGER NOT NULL UNIQUE,
         created_at     INTEGER NOT NULL,
         last_active_at INTEGER NOT NULL
@@ -270,6 +281,7 @@ export class Registry {
     this.migratePortalTable();
     this.requireProjectThreads();
     this.migrateThreadArchive(); // after: the project upgrade recreates `thread` without it
+    this.migrateEnvironmentColumns();
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS thread_cube_id_unique ON thread(cube_id)");
   }
 
@@ -342,6 +354,18 @@ export class Registry {
     }
   }
 
+  /** A project may keep its environment (.cube) in a reference repository
+   * (2026-09-10); a cube snapshots that choice as it snapshots repositories.
+   * Nullable and additive: older rows keep the primary's own .cube. */
+  private migrateEnvironmentColumns(): void {
+    for (const table of ["project", "cube"]) {
+      const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === "environment")) {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN environment TEXT`);
+      }
+    }
+  }
+
   /** Projects are a hard model boundary, not a nullable compatibility
    * column. An empty pre-project registry can be upgraded safely; a registry
    * with old threads is left untouched and fails with an explicit recovery
@@ -394,15 +418,16 @@ export class Registry {
     id: string;
     name: string;
     repositories: Array<{ id: string; url: string; base: string | null; checkoutName: string }>;
+    environment?: string | null;
   }): ProjectRow {
     const now = Date.now();
     this.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO project (id, name, status, error, revision, checked_at, created_at, updated_at)
-           VALUES (?, ?, 'checking', NULL, 1, NULL, ?, ?)`,
+          `INSERT INTO project (id, name, status, error, environment, revision, checked_at, created_at, updated_at)
+           VALUES (?, ?, 'checking', NULL, ?, 1, NULL, ?, ?)`,
         )
-        .run(input.id, input.name, now, now);
+        .run(input.id, input.name, input.environment ?? null, now, now);
       this.insertProjectRepositories(input.id, input.repositories);
     });
     return this.getProject(input.id)!;
@@ -413,6 +438,7 @@ export class Registry {
     input: {
       name: string;
       repositories: Array<{ id: string; url: string; base: string | null; checkoutName: string }>;
+      environment?: string | null;
     },
   ): ProjectRow {
     const now = Date.now();
@@ -420,11 +446,11 @@ export class Registry {
       const result = this.db
         .prepare(
           `UPDATE project
-           SET name = ?, status = 'checking', error = NULL, checked_at = NULL,
+           SET name = ?, status = 'checking', error = NULL, environment = ?, checked_at = NULL,
                revision = revision + 1, updated_at = ?
            WHERE id = ?`,
         )
-        .run(input.name, now, id);
+        .run(input.name, input.environment ?? null, now, id);
       if (result.changes === 0) throw new Error(`no such project: ${id}`);
       this.db.prepare("DELETE FROM project_repository WHERE project_id = ?").run(id);
       this.insertProjectRepositories(id, input.repositories);
@@ -562,6 +588,7 @@ export class Registry {
     name: string;
     image: string;
     workspacePath: string;
+    environment?: string | null;
   }): CubeRow {
     if (!CUBE_NAME_RE.test(input.name)) {
       throw new Error(
@@ -572,10 +599,10 @@ export class Registry {
     const now = Date.now();
     this.db
       .prepare(
-        `INSERT INTO cube (name, status, image, workspace_path, subnet_index, created_at, last_active_at)
-         VALUES (?, 'creating', ?, ?, ?, ?, ?)`,
+        `INSERT INTO cube (name, status, image, workspace_path, environment, subnet_index, created_at, last_active_at)
+         VALUES (?, 'creating', ?, ?, ?, ?, ?, ?)`,
       )
-      .run(input.name, input.image, input.workspacePath, subnetIndex, now, now);
+      .run(input.name, input.image, input.workspacePath, input.environment ?? null, subnetIndex, now, now);
     return this.getCube(input.name)!;
   }
 
@@ -768,6 +795,7 @@ function cubeRow(r: any): CubeRow {
     error: r.error === null ? null : String(r.error),
     image: String(r.image),
     workspacePath: String(r.workspace_path),
+    environment: r.environment === null || r.environment === undefined ? null : String(r.environment),
     subnetIndex: Number(r.subnet_index),
     createdAt: Number(r.created_at),
     lastActiveAt: Number(r.last_active_at),
@@ -808,6 +836,7 @@ function projectRow(r: any): ProjectRow {
     name: String(r.name),
     status: String(r.status) as ProjectStatus,
     error: r.error === null ? null : String(r.error),
+    environment: r.environment === null || r.environment === undefined ? null : String(r.environment),
     revision: Number(r.revision),
     checkedAt: r.checked_at === null ? null : Number(r.checked_at),
     createdAt: Number(r.created_at),

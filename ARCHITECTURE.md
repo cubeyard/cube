@@ -450,12 +450,29 @@ enforces:
 - An egress proxy (allowlist by hostname) is attached to both the cube's
   bridge and the outside; `HTTP(S)_PROXY` set in the cube. Package managers
   honor it.
-- Per-cube allowlist in `.cube/cube.toml`:
+- Per-cube allowlist in `.cube/cube.toml` (implemented 2026-09-10). It
+  extends the built-in package hosts (`DEFAULT_EGRESS_ALLOW`) and the
+  operator's `CUBED_EGRESS_ALLOW`; cubed reads it host-side at every proxy
+  start (provision, wake, setup retry, boot), so an edited declaration
+  applies on the next wake, and a parse error fails that transition naming
+  the entry. Names only — exact or `*.suffix` — ports 80/443, public
+  addresses: the proxy vets every entry no matter who wrote it.
 
 ```toml
 [network]
-allow = ["registry.npmjs.org", "pypi.org", "crates.io"]
+allow = ["repo.maven.apache.org", "*.gradle.org"]
 ```
+
+- The environment directory (`.cube`: setup, resume, cube.toml) may live
+  outside the primary repository. A project's
+  `environment = "<checkout>/<folder>"` points at a folder of one of its
+  reference repositories, mounted read-only at `/repos/<checkout>`:
+  setup/resume run from there with `/workspace` as cwd, `cube.toml` (hooks,
+  services, network) is read from there, and the project check verifies
+  the folder and parses its `cube.toml` at the pinned commit. This is how a
+  repository that does not (yet) carry cube files gets an environment,
+  versioned in a repository of the user's own; each thread snapshots the
+  choice with its repositories.
 
 - Default: no secrets enter the cube. (Host-side secret *injection* à la
   gondolin is out of scope for now; revisit if the need appears.)
