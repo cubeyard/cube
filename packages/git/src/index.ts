@@ -307,9 +307,8 @@ export class GitService {
 
   /** `<oid>:<relPath>` from the host mirror of `url`: the blob's text, or
    * null when the path is absent (or a tree). Read-only against objects
-   * the mirror already holds — the project check validates a declared
-   * environment folder at the exact pinned commit, so a later push can
-   * never point new threads at a folder that is not there. */
+   * the mirror already holds. Project checks and fresh thread preparation
+   * validate declared environment folders against their exact pinned commit. */
   async readFileAtCommit(url: string, oid: string, relPath: string): Promise<string | null> {
     if (!/^[0-9a-f]{7,64}$/.test(oid)) throw new Error(`invalid commit: ${oid}`);
     try {
@@ -331,8 +330,8 @@ export class GitService {
   }
 
   /** Refresh a host-owned mirror and resolve the exact branch tip a later
-   * thread should seed from. This is the Project readiness boundary: all
-   * network/auth work happens here, before the user starts a thread. */
+   * thread should seed from. Used by project checks and again before new
+   * thread allocation; provisioning consumes the resulting pinned snapshot. */
   async prepareRepository(url: string, requestedBase?: string | null): Promise<PreparedRepository> {
     const mirror = await this.ensureMirror(url);
     const base =
@@ -397,9 +396,9 @@ export class GitService {
     });
   }
 
-  /** Seed strictly from a Project's prepared mirror snapshot. No remote
-   * access occurs here: thread creation must not rediscover an auth/branch
-   * failure the Project screen was created to settle ahead of time. */
+  /** Seed strictly from a prepared mirror snapshot. No remote access occurs
+   * here: thread allocation has already refreshed and pinned its repositories,
+   * so provisioning must not move them again or silently fall back to old tips. */
   async seedPreparedWorkspace(opts: {
     url: string;
     workspacePath: string;
@@ -633,7 +632,7 @@ export class GitService {
       // Only existence matters, so one result is sufficient; no truncated
       // PR list is ever interpreted as a complete stack snapshot.
       if (pulls.length > 0) {
-        throw new Error("cannot push: target branch belongs to an existing open pull request. Use preparePrUpdate, planPrUpdate, and publishPrUpdate to preserve its authoritative head and native GitHub stack. Do not bypass this check using another branch.");
+        throw new Error("cannot push: target branch belongs to an existing open pull request. Use preparePrUpdate for additive review fixes, or preparePrRebase for an explicitly requested standalone rewrite, then planPrUpdate and publishPrUpdate. Do not bypass this check using another branch.");
       }
     }
     await this.ensureMirrorExists(url, signal);
