@@ -68,9 +68,18 @@ curl -sX POST localhost:7777/api/threads \
   -d "{\"projectId\":\"$PROJECT_ID\"}"
 ```
 
-The project check prepares an exact repository snapshot. The thread provisions
-instantly (mock), seeds that snapshot under
-`$CUBED_CUBES_ROOT/<name>/workspace`, and runs the repo's `.cube/setup` there.
+The project check verifies repository access and base configuration. Creating
+a new thread refreshes all configured base branches, including reference
+repositories, and pins the fetched commits before allocation. The request may
+wait for network/auth checks; a failed refresh reports an error and creates no
+thread rather than using stale code. Provisioning then seeds those exact
+snapshots under `$CUBED_CUBES_ROOT/<name>/workspace` and runs `.cube/setup`.
+Existing threads and replays of a successful request ID keep their original
+commits. Concurrent submissions with the same ID share one refresh/allocation;
+a failed attempt can be retried. Editing/deleting/rechecking the project during
+refresh rejects the obsolete creation. Prepared environments are reused only
+when the fresh checkout's environment declaration and runtime key still match;
+a normal code commit does not unnecessarily rebuild the template.
 
 A repository that carries no `.cube` can borrow one: add a reference
 repository to the project and set `"environment": "<checkout>/<folder>"`
@@ -78,7 +87,8 @@ repository to the project and set `"environment": "<checkout>/<folder>"`
 setup, resume and `cube.toml`; it runs from `/repos/<checkout>/…` with
 `/workspace` as cwd and is read-only in the thread. The check verifies the
 folder and parses its `cube.toml` at the pinned commit, so a typo is a project
-error, not a thread that fails minutes into setup. `[network] allow` in any
+error, not a thread that fails minutes into setup. Creation revalidates the
+folder and TOML against the newly fetched reference commit too. `[network] allow` in any
 `cube.toml` extends the egress allowlist (see `CUBED_EGRESS_ALLOW` below).
 
 **What works under the mock:** the HTTP API, the registry (SQLite), thread
@@ -242,6 +252,20 @@ but cannot lock those relationships during the push. A post-check failure
 means refs may already have changed and requires reconciliation, not retry
 or rollback. The agent still needs to judge whether the review patch is
 within the user's requested scope; ancestry alone cannot prove that.
+
+### Explicitly rebasing a published PR
+
+See [the Git workflow guide](docs/git-workflows.md) for a shorter decision table.
+For a user-authorized standalone PR rewrite, `cube.git.preparePrRebase` prepares
+an explicitly different kind of session; it does not relax additive review
+sessions. It returns a fresh branch, pinned head/base/upstream SHAs, and local
+`rebaseCommand`/`rangeDiffCommand`. Switch to that branch, rebase (resolve or
+abort conflicts), preserve the original work including merge resolutions, and
+test. Then use the **same** plan/inspect/publish/verify operations as above.
+The planner requires linear history above the pinned base, and publication
+uses the original head's exact SHA lease. Stacks, forks, queued PRs, and missing
+native membership metadata are rejected. There is no unconditional force flag,
+no user-supplied lease, and no automatic retry after an uncertain push.
 
 ### VM host requirements and persistent state
 

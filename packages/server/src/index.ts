@@ -590,8 +590,8 @@ async function api(
       try {
         const body = JSON.parse(await readBody(req));
         const token = typeof body.token === "string" && /^[0-9a-f]{32}$/.test(body.token);
-        if (body.action === "prepare" && Number.isSafeInteger(body.number) && body.number > 0) {
-          input = { action: "prepare", number: body.number };
+        if ((body.action === "prepare" || body.action === "prepare-rebase") && Number.isSafeInteger(body.number) && body.number > 0) {
+          input = { action: body.action, number: body.number };
         } else if ((body.action === "plan" || body.action === "verify") && token) {
           input = { action: body.action, token: body.token };
         } else if (

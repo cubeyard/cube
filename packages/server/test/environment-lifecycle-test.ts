@@ -120,8 +120,7 @@ try {
   // A commit is not a new environment: the template stays, the clone gets the new checkout.
   fs.writeFileSync(path.join(repo.seed, "tracked"), "revision-2\n");
   git(repo.seed, ...author, "commit", "-am", "revision two"); git(repo.seed, "push", "origin", "main");
-  supervisor.updateProject(project.id, { name: "good", repositories: [{ url: repo.bare }] });
-  assert.equal((await settled(supervisor, project.id)).status, "ready");
+  // No project re-check: creation must see the freshly pushed revision.
   const d = await supervisor.createUserThread(project.id), dn = supervisor.resolveUserThread(d.id).cubeName;
   await cubeSettled(registry, dn);
   assert.equal(backend.builders, 1); assert.equal(backend.captures, 1);
@@ -130,8 +129,7 @@ try {
   // A changed declaration is: a new builder, a new template, the old one evicted.
   fs.writeFileSync(path.join(repo.seed, ".cube", "setup"), "#!/bin/sh\necho setup >> lifecycle\necho prepared-v2 > generated\necho setup-output\n", { mode: 0o755 });
   git(repo.seed, ...author, "commit", "-am", "new setup"); git(repo.seed, "push", "origin", "main");
-  supervisor.updateProject(project.id, { name: "good", repositories: [{ url: repo.bare }] });
-  assert.equal((await settled(supervisor, project.id)).status, "ready");
+  // No project re-check: creation must see the freshly pushed revision.
   const e = await supervisor.createUserThread(project.id), en = supervisor.resolveUserThread(e.id).cubeName;
   await cubeSettled(registry, en);
   assert.equal(backend.builders, 2); assert.equal(backend.captures, 2);

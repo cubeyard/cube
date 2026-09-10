@@ -138,6 +138,26 @@ try {
   assert.equal(checked.status, "ready", checked.error ?? "");
   assert.equal(checked.environment, "envs/gradle-app");
 
+  // A once-valid declaration can disappear or become invalid upstream.
+  // Refresh must revalidate the newly fetched reference before allocation.
+  const envSeed = path.join(tmp, "envs-seed");
+  const tomlPath = path.join(envSeed, "gradle-app/.cube/cube.toml");
+  const originalToml = fs.readFileSync(tomlPath, "utf8");
+  fs.writeFileSync(tomlPath, '[network]\nallow = ["https://invalid.example"]\n');
+  git(envSeed, ...author, "commit", "-am", "break environment declaration");
+  git(envSeed, "push", "origin", "main");
+  await assert.rejects(supervisor.createUserThread(project.id), /environment:.*must be a hostname/);
+  assert.equal(registry.listCubes().length, 0);
+  git(envSeed, "rm", "-r", "gradle-app/.cube");
+  git(envSeed, ...author, "commit", "-m", "remove environment");
+  git(envSeed, "push", "origin", "main");
+  await assert.rejects(supervisor.createUserThread(project.id), /environment: no gradle-app\/\.cube/);
+  assert.equal(registry.listCubes().length, 0);
+  git(envSeed, "checkout", "HEAD~2", "--", "gradle-app/.cube");
+  fs.writeFileSync(tomlPath, originalToml);
+  git(envSeed, ...author, "commit", "-m", "restore environment");
+  git(envSeed, "push", "origin", "main");
+
   const thread = await supervisor.createUserThread(project.id);
   const cubeName = supervisor.resolveUserThread(thread.id).cubeName;
   await cubeSettled(registry, cubeName);

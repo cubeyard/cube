@@ -107,16 +107,19 @@ Do not expose cubed publicly: it has no application-level authentication.
 
 ### Projects and threads
 
-Projects prepare access, branch and exact base OIDs before work starts. New
-threads require `ready` and seed only those OIDs: no provisioning-time
-network/auth lookup. The primary checkout is `/workspace`; optional reference
+Projects check access and branch configuration before work starts. New
+threads require `ready`, refresh every configured base branch before allocation,
+and pin the fetched OIDs. A failed refresh creates no thread and never falls
+back to stale checked code. Existing threads and idempotent replays keep their
+original snapshots; provisioning remains local-only. The primary checkout is `/workspace`; optional reference
 repositories mount at `/repos/<checkout-name>` and are read-only. Review and
 ship operate on the immutable primary repository snapshot.
 
 A project may declare `environment = "<checkout>/<folder>"`: its `.cube`
 (setup, resume, cube.toml) then comes from that folder of a reference
 repository instead of the primary checkout — read-only in the thread, verified
-and parsed at the pinned commit by the project check, snapshotted per cube
+and parsed by the project check and again at the refreshed reference commit
+before thread creation, snapshotted per cube
 (`cube.environment`). `supervisor.ts` `environmentDirs` is the one place that
 maps it to host and guest paths. `[network] allow` in `cube.toml` extends the
 egress allowlist and is re-read at every proxy start (`startProxy`).

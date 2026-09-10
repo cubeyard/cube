@@ -1,7 +1,7 @@
 /**
  * Offline project integration test: repository preflight happens before a
- * thread starts, every thread snapshots one required project, and thread
- * provisioning consumes only the prepared local mirrors. No Incus or model.
+ * thread starts, new threads refresh tips and pin them, and provisioning
+ * consumes only those prepared local snapshots. No Incus or model.
  *
  *   node packages/server/test/project-test.ts
  */
@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { MockBackend } from "@cube/sandbox";
+import type { GitService } from "@cube/git";
 
 import { Registry } from "../src/registry.ts";
 import { CubeSupervisor, type ProjectInfo } from "../src/supervisor.ts";
@@ -209,8 +210,62 @@ console.log("3b ok: thread creation is idempotent per request key and project");
   console.log("3c ok: the idempotency store is capped, swept on the timer, and never replays an expired key");
 }
 
-// Advance both upstreams after the readiness snapshot. Thread setup must use
-// the checked OIDs, not silently fetch these newer commits.
+// The new await must not let an edit/re-check/delete race allocate from an
+// obsolete project revision. Hold the real fetch before letting it finish.
+for (const change of ["edit", "delete"] as const) {
+  const candidate = supervisor.createProject({ name: `racing-${change}`, repositories: [{ url: primary.bare }] });
+  await settledProject(supervisor, candidate.id);
+  await new Promise(resolve => setImmediate(resolve));
+  const service = (supervisor as unknown as { git: GitService }).git;
+  const original = service.prepareRepository.bind(service);
+  let release!: () => void;
+  let entered!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  service.prepareRepository = async (...args) => { entered(); await gate; return original(...args); };
+  try {
+    const attempt = supervisor.createUserThread(candidate.id, "racing");
+    const rejected = assert.rejects(attempt, /project changed|not ready|no such project/);
+    await started;
+    if (change === "edit") supervisor.updateProject(candidate.id, { name: "edited", repositories: [{ url: docs.bare }] });
+    else await supervisor.deleteProject(candidate.id);
+    release();
+    await rejected;
+    assert.equal(registry.listCubes().length, 0, "no allocation from obsolete configuration");
+    if (change === "edit") {
+      await settledProject(supervisor, candidate.id);
+      await supervisor.deleteProject(candidate.id);
+    }
+  } finally { release(); service.prepareRepository = original; }
+}
+console.log("3d ok: project edits and deletion during refresh cannot allocate stale threads");
+
+// Respect an explicitly configured base, not a hard-coded main.
+git(primary.seed, "checkout", "-b", "release");
+git(primary.seed, "push", "origin", "release");
+const releaseProject = supervisor.createProject({ name: "release branch", repositories: [{ url: primary.bare, base: "release" }] });
+await settledProject(supervisor, releaseProject.id);
+fs.writeFileSync(path.join(primary.seed, "README.md"), "fresh release tip\n");
+git(primary.seed, ...author, "commit", "-am", "advance release");
+git(primary.seed, "push", "origin", "release");
+const releaseThread = await supervisor.createUserThread(releaseProject.id);
+const releaseName = supervisor.resolveUserThread(releaseThread.id).cubeName;
+await readyCube(registry, releaseName);
+const releaseCube = registry.getCube(releaseName)!;
+assert.equal(fs.readFileSync(path.join(releaseCube.workspacePath, "README.md"), "utf8"), "fresh release tip\n");
+assert.equal(registry.listCubeRepositories(releaseCube.id)[0]!.base, "release");
+await supervisor.removeUserThread(releaseThread.id);
+await supervisor.deleteProject(releaseProject.id);
+git(primary.seed, "checkout", "main");
+console.log("3e ok: configured non-main base is refreshed");
+
+// Existing threads stay pinned. New threads refresh both upstreams rather
+// than reusing the old project-check snapshot.
+const oldThread = await supervisor.createUserThread(project.id);
+const oldName = supervisor.resolveUserThread(oldThread.id).cubeName;
+await readyCube(registry, oldName);
+const oldCube = registry.getCube(oldName)!;
+const checkedOids = ready.repositories.map(repo => repo.baseOid);
 fs.writeFileSync(path.join(primary.seed, "README.md"), "new upstream revision\n");
 git(primary.seed, ...author, "commit", "-am", "advance primary");
 git(primary.seed, "push", "origin", "main");
@@ -218,19 +273,44 @@ fs.writeFileSync(path.join(docs.seed, "DOCS.md"), "new upstream docs\n");
 git(docs.seed, ...author, "commit", "-am", "advance docs");
 git(docs.seed, "push", "origin", "main");
 
-// Make the configured upstreams unavailable altogether. Seeding should
-// still succeed from the prepared mirrors without hidden network/path I/O.
+// An offline primary OR reference is a creation failure, not permission to
+// use stale mirrors. Concurrent replays share a failure and allocate nothing.
 fs.renameSync(primary.bare, `${primary.bare}.offline`);
+const attempts = await Promise.allSettled([
+  supervisor.createUserThread(project.id, "refresh-retry"),
+  supervisor.createUserThread(project.id, "refresh-retry"),
+]);
+for (const attempt of attempts) {
+  assert.equal(attempt.status, "rejected");
+  if (attempt.status === "rejected") assert.match(attempt.reason.message, /could not refresh workspace/);
+}
+assert.equal(registry.listCubes().length, 1, "no allocation when primary refresh fails");
+fs.renameSync(`${primary.bare}.offline`, primary.bare);
 fs.renameSync(docs.bare, `${docs.bare}.offline`);
+await assert.rejects(supervisor.createUserThread(project.id, "refresh-retry"), /could not refresh docs/);
+assert.equal(registry.listCubes().length, 1, "no allocation when reference refresh fails");
+fs.renameSync(`${docs.bare}.offline`, docs.bare);
 
-const thread = await supervisor.createUserThread(project.id);
+const [thread, concurrentReplay] = await Promise.all([
+  supervisor.createUserThread(project.id, "refresh-retry"),
+  supervisor.createUserThread(project.id, "refresh-retry"),
+]);
+assert.equal(thread.created, true);
+assert.equal(concurrentReplay.created, false);
+assert.equal(thread.id, concurrentReplay.id);
+assert.equal(registry.listCubes().length, 2, "one allocation after a successful shared refresh");
 const cubeName = supervisor.resolveUserThread(thread.id).cubeName;
 await readyCube(registry, cubeName);
 const cube = registry.getCube(cubeName)!;
-assert.equal(fs.readFileSync(path.join(cube.workspacePath, "README.md"), "utf8"), "prepared revision\n");
+assert.equal(fs.readFileSync(path.join(cube.workspacePath, "README.md"), "utf8"), "new upstream revision\n");
+assert.equal(fs.readFileSync(path.join(oldCube.workspacePath, "README.md"), "utf8"), "prepared revision\n");
+assert.deepEqual(registry.listCubeRepositories(oldCube.id).map(repo => repo.baseOid), checkedOids);
+assert.deepEqual(registry.listCubeRepositories(cube.id).map(repo => repo.baseOid), [git(primary.seed, "rev-parse", "HEAD"), git(docs.seed, "rev-parse", "HEAD")]);
+assert.deepEqual(supervisor.getProject(project.id).repositories.map(repo => repo.baseOid), checkedOids, "refresh does not rewrite project-check evidence");
+await supervisor.removeUserThread(oldThread.id);
 assert.equal(
   fs.readFileSync(path.join(path.dirname(cube.workspacePath), "repos", "docs", "DOCS.md"), "utf8"),
-  "prepared docs\n",
+  "new upstream docs\n",
 );
 const repositories = await supervisor.repositoriesForUserThread(thread.id);
 assert.deepEqual(repositories.map((repo) => repo.path), ["/workspace", "../repos/docs"]);
@@ -249,6 +329,10 @@ await assert.rejects(
 );
 await assert.rejects(
   () => supervisor.reviewPrForUserThread(thread.id, repositories[1]!.id, { action: "prepare", number: 845 }),
+  /read-only references/,
+);
+await assert.rejects(
+  () => supervisor.reviewPrForUserThread(thread.id, repositories[1]!.id, { action: "prepare-rebase", number: 845 }),
   /read-only references/,
 );
 await assert.rejects(
@@ -297,7 +381,28 @@ console.log("4 ok: project snapshot scopes repos/services, coalesces cancellatio
 await supervisor.removeUserThread(thread.id);
 await supervisor.deleteProject(project.id);
 assert.equal(supervisor.listProjects().length, 0);
-await supervisor.close();
+// Shutdown drains a creation's refresh and prevents its later allocation.
+const shutdownProject = supervisor.createProject({ name: "shutdown", repositories: [{ url: primary.bare }] });
+await settledProject(supervisor, shutdownProject.id);
+const service = (supervisor as unknown as { git: GitService }).git;
+const prepare = service.prepareRepository.bind(service);
+let releaseShutdown!: () => void;
+let enterShutdown!: () => void;
+const shutdownEntered = new Promise<void>(resolve => { enterShutdown = resolve; });
+const shutdownGate = new Promise<void>(resolve => { releaseShutdown = resolve; });
+service.prepareRepository = async (...args) => { enterShutdown(); await shutdownGate; return prepare(...args); };
+const creatingAtShutdown = supervisor.createUserThread(shutdownProject.id);
+const refusedAtShutdown = assert.rejects(creatingAtShutdown, /server is stopping/);
+await shutdownEntered;
+let closed = false;
+const closing = supervisor.close().then(() => { closed = true; });
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(closed, false, "close waits for the in-flight refresh");
+releaseShutdown();
+await refusedAtShutdown;
+await closing;
+assert.equal(registry.listCubes().length, 0, "shutdown cannot allocate a late thread");
+await assert.rejects(supervisor.createUserThread(shutdownProject.id), /server is stopping/);
 registry.close();
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("5 ok: project deletion is blocked by threads, then succeeds after teardown");

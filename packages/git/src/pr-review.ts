@@ -32,6 +32,8 @@ interface Review {
   number: number;
   branch: string;
   stack: Stack;
+  /** Omitted in legacy sessions: additive review remains the default. */
+  intent?: "rebase";
   status: "prepared" | "planned" | "publishing" | "verified" | "uncertain";
   plan?: { id: string; candidate: string; heads: string[] };
 }
@@ -222,8 +224,22 @@ export class PrReviewService {
   /** Import every exact remote head, but never reset or check out a guest
    * branch. A fresh local review branch leaves all existing work intact. */
   async prepare(ws: string, url: string, number: number, signal?: AbortSignal) {
+    return this.prepareSnapshot(ws, url, number, false, signal);
+  }
+
+  /** Explicit, standalone history rewrite. This creates only a fresh local
+   * branch; rebase/conflict resolution stay in the guest, publication stays
+   * behind the same pinned plans and expected-SHA leases as ordinary reviews. */
+  async prepareRebase(ws: string, url: string, number: number, signal?: AbortSignal) {
+    return this.prepareSnapshot(ws, url, number, true, signal);
+  }
+
+  private async prepareSnapshot(ws: string, url: string, number: number, rebase: boolean, signal?: AbortSignal) {
     if ((await this.gitService.state(ws, undefined, signal)).dirty) return fail("working tree must be clean; preserve local work first");
     const stack = await this.readStack(url, number, signal);
+    if (rebase && (stack.id !== null || stack.layers.length !== 1 || stack.mergedPrefix?.length)) {
+      return fail("rebase currently supports standalone PRs only; native stacks require a coordinated rewrite");
+    }
     const token = crypto.randomBytes(16).toString("hex");
     const dir = this.dir(token);
     const repo = path.join(dir, "repo");
@@ -257,7 +273,9 @@ export class PrReviewService {
       }
       const layer = stack.layers.find((entry) => entry.number === number)!;
       const branch = `cube-review/${token}`;
-      const review: Review = { ws, url, number, branch, stack, status: "prepared" };
+      const review: Review = { ws, url, number, branch, stack, status: "prepared", ...(rebase ? { intent: "rebase" as const } : {}) };
+      // Use the full common-ancestor SHA, not a mutable origin/<base> ref.
+      const upstream = rebase ? oid(await this.git(repo, ["merge-base", stack.baseOid, layer.oid], signal)) : undefined;
       await this.unchanged(review, signal);
       await this.git(repo, ["branch", branch, layer.oid], signal);
       const bundle = path.join(dir, "snapshot.bundle");
@@ -269,6 +287,12 @@ export class PrReviewService {
           `refs/heads/trunk:refs/cube/reviews/${token}/base`], signal);
       } finally { fs.rmSync(bundle, { force: true }); }
       this.save(dir, review);
+      if (rebase) {
+        return { token, branch, head: layer.oid, base: layer.base, baseOid: stack.baseOid, upstream, stack,
+          rebaseCommand: `git -c core.hooksPath=/dev/null rebase --no-update-refs --no-autostash --no-rebase-merges --force-rebase --onto ${stack.baseOid} ${upstream}`,
+          rangeDiffCommand: `git range-diff ${upstream}..${layer.oid} ${stack.baseOid}..HEAD`,
+          instruction: `Switch to ${branch}, then run rebaseCommand. It rewrites only this fresh local branch, flattening merge commits onto the pinned base. Resolve conflicts and continue, or abort; existing branches and remote refs are untouched. Preserve all intended PR changes (including merge-conflict resolutions), review rangeDiffCommand and the resulting diff, and run tests. Then use planPrUpdate, inspectPrUpdatePlan (all patch/prDiff pages), and publishPrUpdate. Publish only with explicit authorization to rewrite this PR's history; the host supplies the exact original-SHA lease.` };
+      }
       return { token, branch, head: layer.oid, base: layer.base, stack,
         instruction: `Switch to ${branch} before editing. It starts at the exact remote head; existing local branches are untouched. Read all review sections and pages, make only the requested fix, commit, then call planPrUpdate.` };
     } catch (error) {
@@ -300,13 +324,26 @@ export class PrReviewService {
       const { layers } = review.stack;
       const index = layers.findIndex((layer) => layer.number === review.number);
       const target = layers[index]!;
-      try {
-        await this.git(repo, ["merge-base", "--is-ancestor", target.oid, candidate], signal);
-      } catch {
-        return fail("candidate is older than or diverges from the prepared remote head; existing commits must be preserved");
-      }
-      if (candidate === target.oid || await this.git(repo, ["rev-list", "--merges", `${target.oid}..${candidate}`], signal)) {
-        return fail("review must add linear commits to the prepared remote head, not amend, rebase, or merge it");
+      if (review.intent === "rebase") {
+        // Never weaken additive-review sessions. A rewrite requires a token
+        // created by prepareRebase and a single unstacked original snapshot.
+        if (review.stack.id !== null || layers.length !== 1 || review.stack.mergedPrefix?.length) return fail("invalid standalone rebase session");
+        try {
+          await this.git(repo, ["merge-base", "--is-ancestor", review.stack.baseOid, candidate], signal);
+        } catch { return fail("rebased candidate must contain the exact prepared base commit"); }
+        if (candidate === target.oid || candidate === review.stack.baseOid) return fail("rebase must produce a changed, nonempty PR branch");
+        if (await this.git(repo, ["rev-list", "--merges", `${review.stack.baseOid}..${candidate}`], signal)) {
+          return fail("rebased PR history must be linear above the prepared base");
+        }
+      } else {
+        try {
+          await this.git(repo, ["merge-base", "--is-ancestor", target.oid, candidate], signal);
+        } catch {
+          return fail("candidate is older than or diverges from the prepared remote head; existing commits must be preserved");
+        }
+        if (candidate === target.oid || await this.git(repo, ["rev-list", "--merges", `${target.oid}..${candidate}`], signal)) {
+          return fail("review must add linear commits to the prepared remote head, not amend, rebase, or merge it");
+        }
       }
       // An old plan must not survive a failed attempt to replace it.
       review.status = "prepared";
@@ -370,8 +407,9 @@ export class PrReviewService {
         patchHash: hash(patch), prDiffHash: hash(prDiff),
         patchBytes: Buffer.byteLength(patch), prDiffBytes: Buffer.byteLength(prDiff), diffstat });
     }
-    return { token, plan: plan.id, changes,
-      instruction: "Use inspectPrUpdatePlan with this plan ID to read every page of patch and prDiff for every PR. Summaries and hashes do not replace review. Publish only if the fix is scoped correctly and existing changes are preserved. Publication uses these exact commits and rechecks remote state." };
+    return { token, plan: plan.id, changes, rewritesHistory: review.intent === "rebase",
+      instruction: (review.intent === "rebase"
+        ? "This plan rewrites published history. Only publish when that rewrite was explicitly authorized. The patch compares old/new heads (including base updates); also compare the final PR diff and local range-diff to preserve the original work. " : "") + "Use inspectPrUpdatePlan with this plan ID to read every page of patch and prDiff for every PR. Summaries and hashes do not replace review. Publish only if the fix is scoped correctly and existing changes are preserved. Publication uses these exact commits and rechecks remote state." };
   }
 
   /** Compute only the requested diff and return one bounded page. */
