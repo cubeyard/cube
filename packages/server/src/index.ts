@@ -7,24 +7,31 @@
  */
 import http from "node:http";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import stream from "node:stream";
 
 import { WebSocketServer, type WebSocket } from "ws";
 
-import { checkAuth, type ModelPreference } from "@cube/harness";
 import { IncusBackend, MockBackend, type CubeBackend } from "@cube/sandbox";
 
-import { GithubAuth } from "./github-auth.ts";
+import { checkAuth } from "./auth.ts";
+import { formatEventLine, recordPoint } from "./events.ts";
+import { GithubAuth, GithubUnreachableError } from "./github-auth.ts";
+import { createLogger } from "./log.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { defaultPortalBase } from "./portal-config.ts";
-import { portalLabel, proxyHttp, proxyUpgrade, respondWaking, sameOriginUpgrade } from "./portal-proxy.ts";
+import { guardUpgradeSocket, portalLabel, proxyHttp, proxyUpgrade, refuseUpgrade, respondFailed, respondMissing, respondWaking, sameOriginUpgrade, upgradeAfterWake } from "./portal-proxy.ts";
 import { PiTerminals } from "./pty.ts";
 import { Registry } from "./registry.ts";
 import { CubeSupervisor, DEFAULT_EGRESS_ALLOW } from "./supervisor.ts";
+import { sanitizeMessage } from "./user-facing.ts";
+import { APP_VERSION } from "./version.ts";
 import { listWorkspaceFiles, openWorkspaceFile } from "./workspace-files.ts";
 
+const log = createLogger("api");
 const PORT = Number(process.env.CUBED_PORT ?? 7777);
-// Host-header portal routing (PLAN §10). The base must resolve to this
+// Host-header portal routing (ARCHITECTURE §10). The base must resolve to this
 // machine for every device that should reach portals: a wildcard record /
 // split-DNS / sslip.io for LAN+Tailnet, dnsmasq for same-machine dev. Do
 // NOT use a *.localhost base: resolvers special-case the localhost TLD to
@@ -34,27 +41,12 @@ const PORTAL_BASE = (process.env.CUBED_PORTAL_BASE ?? defaultPortalBase()).toLow
 const AUTH_PROVIDER = process.env.CUBED_AUTH_PROVIDER ?? "openai-codex";
 const HOME = process.env.HOME!;
 
-// CUBED_MODEL="provider/idSubstring" puts that model first in the
-// preference order; the defaults stay as fallbacks.
-const prefer: ModelPreference = [
-  ["openai-codex", "gpt-5.6-luna"],
-  ["deepseek", "deepseek-v4-pro"],
-];
-if (process.env.CUBED_MODEL) {
-  const [prov, ...rest] = process.env.CUBED_MODEL.split("/");
-  const idSubstring = rest.join("/");
-  if (!prov || !idSubstring) {
-    throw new Error(`CUBED_MODEL must be "provider/idSubstring", got: ${process.env.CUBED_MODEL}`);
-  }
-  prefer.unshift([prov, idSubstring]);
-}
-
 const dbPath = process.env.CUBED_DB ?? path.join(HOME, "cube", "cubed.db");
 const registry = new Registry(dbPath);
 const onboardingPath = path.join(path.dirname(dbPath), "onboarding.json");
 const githubAuth = new GithubAuth();
 // CUBED_BACKEND=mock runs cubed with cube ops simulated (no Incus daemon):
-// the tier-1 loop for developing cube inside a cube (PLAN §13 3d.3). Default
+// the tier-1 loop for developing cube inside a cube (ARCHITECTURE §13 3d.3). Default
 // is the real Incus backend.
 const BACKEND = (process.env.CUBED_BACKEND ?? "incus").toLowerCase();
 if (BACKEND !== "incus" && BACKEND !== "mock") {
@@ -62,11 +54,10 @@ if (BACKEND !== "incus" && BACKEND !== "mock") {
 }
 const backend: CubeBackend = BACKEND === "mock" ? new MockBackend() : new IncusBackend();
 if (BACKEND === "mock") {
-  console.log(
-    "cubed: MOCK backend — cube ops are simulated (no Incus). Cube commands\n" +
-      "  (repo .cube/setup, hooks, services, pi tools and ! commands) run\n" +
-      "  LOCALLY with NO nested isolation, as cubed's own user. Run this ONLY\n" +
-      "  inside a cube; never point it at an untrusted repo on a host you care about.",
+  log.warn(
+    "MOCK backend — cube ops are simulated (no Incus). Cube commands (repo .cube/setup, hooks, services, " +
+      "pi tools and ! commands) run LOCALLY with NO nested isolation, as cubed's own user. Run this ONLY " +
+      "inside a cube; never point it at an untrusted repo on a host you care about.",
   );
 }
 const supervisor = new CubeSupervisor(registry, backend, {
@@ -76,18 +67,29 @@ const supervisor = new CubeSupervisor(registry, backend, {
   image: process.env.CUBED_IMAGE ?? "cube-node",
   rootSize: process.env.CUBED_ROOT_SIZE ?? "10GiB",
   dockerVolumeSize: process.env.CUBED_DOCKER_VOLUME_SIZE ?? "5GiB",
+  // Prepared environments (templates threads are cloned from) are on unless
+  // switched off; CUBED_CUBE_MEMORY caps each thread (default: half the host).
+  environmentCache: process.env.CUBED_ENVIRONMENT_CACHE !== "0",
+  cubeMemory: process.env.CUBED_CUBE_MEMORY ?? defaultCubeMemory(),
   // CUBED_EGRESS_ALLOW extends (not replaces) the package-manager defaults.
   egressAllow: [
     ...DEFAULT_EGRESS_ALLOW,
     ...(process.env.CUBED_EGRESS_ALLOW?.split(",").map((s) => s.trim()).filter(Boolean) ?? []),
   ],
-  prefer,
   // Idle-to-sleep (ms off last activity; 0 disables). PLAN default: 1h.
   idleMs: parseIdleMs(process.env.CUBED_IDLE_MS),
   portalBase: PORTAL_BASE,
   publicPort: Number(process.env.CUBED_PUBLIC_PORT ?? PORT),
   github: githubAuth,
 });
+
+/** Half the host's RAM in MiB, never under 1 GiB: one runaway build (a
+ * Gradle daemon and its test workers) then ends inside its own cgroup
+ * instead of taking cubed and every other thread with it. */
+function defaultCubeMemory(): string {
+  const half = Math.floor(os.totalmem() / 2 / (1024 * 1024));
+  return `${Math.max(1024, half)}MiB`;
+}
 
 function parseIdleMs(raw: string | undefined): number {
   if (raw === undefined) return 3_600_000;
@@ -102,12 +104,8 @@ if (process.env.CUBED_WORKSPACE) {
 
 await supervisor.boot();
 
-/** Cube-vocabulary scrub for anything that reaches the product surface —
- * internal cube names and the word "cube" must read as "thread". */
-const sanitizeMessage = (message: string) =>
-  message.replace(/\bcube t-[a-z0-9]{8}\b/g, "thread").replace(/\bcube\b/g, "thread");
 
-// The pty bridge: one real pi TUI per attached thread (PLAN §13 3d.2).
+// The pty bridge: one real pi TUI per attached thread (ARCHITECTURE §13 3d.2).
 const terminals = new PiTerminals(
   {
     plan: (id, onStatus) =>
@@ -115,6 +113,15 @@ const terminals = new PiTerminals(
         throw new Error(sanitizeMessage(error instanceof Error ? error.message : String(error)));
       }),
     activity: (id) => supervisor.touchUserThread(id),
+    event: (e) => {
+      let cube: string | null = null;
+      try {
+        cube = supervisor.resolveUserThread(e.thread).cubeName;
+      } catch {
+        // thread already gone (deleted while the pty was still up)
+      }
+      registry.recordEvent({ kind: "terminal", phase: e.phase, cube, thread: e.thread, ok: e.ok, ms: e.ms ?? null, detail: e.detail ?? null });
+    },
   },
   { lingerMs: parseLingerMs(process.env.CUBED_PTY_LINGER_MS) },
 );
@@ -131,7 +138,7 @@ function parseLingerMs(raw: string | undefined): number | undefined {
 // Built Svelte SPA (pnpm build). The daemon itself stays build-free.
 const WEB_ROOT = path.resolve(import.meta.dirname, "../../web/dist");
 if (!fs.existsSync(path.join(WEB_ROOT, "index.html"))) {
-  console.warn("web UI not built — run `pnpm build` (serving API only)");
+  log.warn("web UI not built — run `pnpm build` (serving API only)");
 }
 
 // ------------------------------------------------------------------- http
@@ -150,7 +157,7 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
 /** Map supervisor/registry errors onto HTTP statuses. `sanitize` rewrites
  * cube vocabulary for the thread-first routes — internal cube names and the
  * word "cube" must not leak through the product surface. */
-function fail(res: http.ServerResponse, error: unknown, sanitize = false): void {
+function fail(res: http.ServerResponse, error: unknown, sanitize = false, route?: string): void {
   if (res.destroyed) return;
   let message = error instanceof Error ? error.message : String(error);
   const status = /no such/.test(message)
@@ -165,6 +172,11 @@ function fail(res: http.ServerResponse, error: unknown, sanitize = false): void 
         ? 400
         : 500;
   if (sanitize) message = sanitizeMessage(message);
+  if (status === 500) log.error("api error", { error });
+  if (status === 500) {
+    console.log(`api error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+    recordPoint(registry, { kind: "api", phase: "500", ok: false, detail: `${route ?? ""} ${error instanceof Error ? error.message : String(error)}`.trim() });
+  }
   json(res, status, { error: message });
 }
 
@@ -177,9 +189,21 @@ function decodeId(raw: string): string {
   }
 }
 
+/** Request bodies are small JSON; anything past this is not a client of
+ * ours and must not become host memory. */
+const BODY_CAP = 1 << 20;
+
 async function readBody(req: http.IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > BODY_CAP) {
+      req.destroy();
+      throw new Error("invalid request: body too large");
+    }
+    chunks.push(chunk as Buffer);
+  }
   return Buffer.concat(chunks).toString("utf8");
 }
 
@@ -209,6 +233,7 @@ async function readProjectInput(
   | {
       name: string;
       repositories: Array<{ url: string; base?: string | null; checkoutName?: string }>;
+      environment?: string | null;
     }
   | null
 > {
@@ -223,9 +248,13 @@ async function readProjectInput(
     json(res, 400, { error: "invalid project: object body required" });
     return null;
   }
-  const body = parsed as { name?: unknown; repositories?: unknown };
+  const body = parsed as { name?: unknown; repositories?: unknown; environment?: unknown };
   if (typeof body.name !== "string" || !Array.isArray(body.repositories)) {
     json(res, 400, { error: "invalid project: name and repositories are required" });
+    return null;
+  }
+  if (body.environment !== undefined && body.environment !== null && typeof body.environment !== "string") {
+    json(res, 400, { error: "invalid project: environment must be a string like \"<checkout>/<folder>\"" });
     return null;
   }
   const repositories: Array<{ url: string; base?: string | null; checkoutName?: string }> = [];
@@ -253,7 +282,7 @@ async function readProjectInput(
       checkoutName: repo.checkoutName as string | undefined,
     });
   }
-  return { name: body.name, repositories };
+  return { name: body.name, repositories, environment: body.environment as string | null | undefined };
 }
 
 /** Cube-subnet source address (the firewall admits cubes to this port for
@@ -283,16 +312,26 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname.startsWith("/api/")) return await api(method, url, req, res);
   } catch (error) {
-    return fail(res, error, url.pathname.startsWith("/api/threads"));
+    return fail(res, error, url.pathname.startsWith("/api/threads"), `${method} ${url.pathname}`);
   }
 
   // static web UI
-  if (method === "GET") {
+  if (method === "GET" || method === "HEAD") {
     const rel = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
     const file = path.join(WEB_ROOT, rel);
-    if (file.startsWith(WEB_ROOT) && fs.existsSync(file) && fs.statSync(file).isFile()) {
-      res.writeHead(200, { "content-type": MIME[path.extname(file)] ?? "application/octet-stream" });
-      return void fs.createReadStream(file).pipe(res);
+    if (file.startsWith(WEB_ROOT + path.sep) && fs.statSync(file, { throwIfNoEntry: false })?.isFile()) {
+      res.writeHead(200, {
+        "content-type": MIME[path.extname(file)] ?? "application/octet-stream",
+        // Vite hashes everything under assets/, so those may live forever;
+        // the entry files must revalidate, or an in-place app update leaves
+        // a tab pointing at assets that no longer exist.
+        "cache-control": rel.startsWith("assets/") ? "public, max-age=31536000, immutable" : "no-cache",
+      });
+      // A dist swapped mid-read (app upgrade) errors the source stream, and
+      // an unhandled 'error' there would take the whole daemon down.
+      return void stream.pipeline(fs.createReadStream(file), res, () => {
+        if (!res.writableEnded) res.destroy();
+      });
     }
   }
   json(res, 404, { error: "not found" });
@@ -300,75 +339,73 @@ const server = http.createServer(async (req, res) => {
 
 /**
  * One portal request: proxy straight through when the thread's environment
- * is up; otherwise kick wake+ensure (coalesced in the supervisor), hold the
- * request briefly, and fall back to a self-refreshing holding page. A
- * connect-refused on a running cube means the service itself is down
- * (crashed, or slept away) — same medicine, ensure heals it.
+ * is up and the service answers. Otherwise — asleep, still setting up,
+ * service crashed or never started — the same medicine every time: kick the
+ * wake+ensure (coalesced in the supervisor) and hold the request briefly.
  */
 async function portalRequest(
   label: string,
   req: http.IncomingMessage,
   res: http.ServerResponse,
 ): Promise<void> {
-  let target = supervisor.resolvePortal(label);
-  if (!target) {
-    // No portal row yet, but the thread's committed declaration may name
-    // this service — the UI links to declared services before anything has
-    // started them (the pi TUI has no services_ensure tool). Bootstrap:
-    // ensure the cube's services, which creates the row, then re-resolve.
-    const cubeName = supervisor.declaredPortalCube(label);
-    if (!cubeName) {
-      res.writeHead(404, { "content-type": "text/plain" });
-      return void res.end(`no portal at ${label}\n`);
-    }
-    // A cube source must not be able to trigger ensures on a sibling; only
-    // the browser (host side) bootstraps.
-    if (cubeSourceIp(req.socket.remoteAddress)) {
-      res.writeHead(403, { "content-type": "text/plain" });
-      return void res.end("not your portal\n");
-    }
-    const ensured = supervisor.ensureCubeServices(cubeName).then(
-      () => true,
-      (error) => {
-        console.log(`portal bootstrap [${label}]: ${String(error)}`);
-        return false;
-      },
-    );
-    const ready = await Promise.race([ensured, new Promise((r) => setTimeout(() => r(false), 2_000))]);
-    target = ready ? supervisor.resolvePortal(label) : null;
-    if (!target) return respondWaking(req, res, "Starting the service…");
+  const target = supervisor.resolvePortal(label);
+  // No portal row yet, but the thread's committed declaration may name the
+  // service — the UI links declared services before anything has started
+  // them. Ensuring below creates the row.
+  const cubeName = target?.cubeName ?? supervisor.declaredPortalCube(label);
+  if (!cubeName) {
+    // A bookmark to a deleted thread's service, or a typo: a page, not a
+    // bare line naming an internal label.
+    return respondMissing(req, res, "nothing is published at this address — the thread may have been deleted, or the service renamed");
   }
   // Hairpin isolation: a cube may reach its OWN portals (OAuth issuer
   // path), never a sibling's — portals must not become a cube-to-cube
-  // bridge through the trusted zone.
+  // bridge through the trusted zone. Nor may a cube bootstrap one.
   const cubeSource = cubeSourceIp(req.socket.remoteAddress);
-  if (cubeSource && cubeSource !== target.ip) {
+  if (cubeSource && cubeSource !== target?.ip) {
     res.writeHead(403, { "content-type": "text/plain" });
     return void res.end("not your portal\n");
   }
-  const heal = () => {
-    supervisor.ensureCubeServices(target.cubeName).catch((error) => {
-      console.log(`portal ensure [${label}]: ${String(error)}`);
-    });
-    respondWaking(req, res, "Starting the service…");
-  };
-  if (target.status === "ready") return proxyHttp(req, res, target, heal);
+  if (target?.status !== "ready") return startAndHold(label, cubeName, req, res);
+  supervisor.touchCube(cubeName); // a browsed portal is activity, like a prompt
+  proxyHttp(req, res, target, () => startAndHold(label, cubeName, req, res));
+}
 
-  // Sleeping (or still setting up): start the wake+ensure, give it 2s to
-  // finish for the common fast case, then hold with the 202 page.
-  const wake = supervisor.ensureCubeServices(target.cubeName).then(
-    () => true,
-    (error) => {
-      console.log(`portal wake [${label}]: ${String(error)}`);
-      return false;
-    },
-  );
-  const woke = await Promise.race([wake, new Promise((r) => setTimeout(() => r(false), 2_000))]);
-  if (woke) {
-    const fresh = supervisor.resolvePortal(label);
-    if (fresh && fresh.status === "ready") return proxyHttp(req, res, fresh, heal);
+/**
+ * The service is not answering. Start the wake+ensure, give the common fast
+ * case 2s, then: proxy if it came up; explain if the last attempt left this
+ * service down (a failure page beats "starting…" forever); else hold with
+ * the self-refreshing page.
+ */
+async function startAndHold(
+  label: string,
+  cubeName: string,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  const serviceName = label.slice(0, label.lastIndexOf("--"));
+  if (supervisor.cubeStatus(cubeName) === "creating") {
+    return respondWaking(req, res, "Setting up the environment…");
   }
-  respondWaking(req, res, "Waking the environment…");
+  const settled = await Promise.race([
+    supervisor.ensureCubeServices(cubeName).then(() => true, () => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2_000)),
+  ]);
+  const failure = supervisor.serviceFailure(cubeName, serviceName);
+  const fresh = settled && !failure ? supervisor.resolvePortal(label) : null;
+  if (fresh?.status === "ready") {
+    supervisor.touchCube(cubeName);
+    return proxyHttp(req, res, fresh, () => respondWaking(req, res, "Starting the service…"));
+  }
+  if (failure) {
+    recordPoint(registry, { kind: "portal", phase: "failed", cube: cubeName, ok: false, detail: `${serviceName}: ${failure}` });
+    return respondFailed(req, res, `${serviceName}: ${sanitizeMessage(failure)}`);
+  }
+  respondWaking(
+    req,
+    res,
+    supervisor.cubeStatus(cubeName) === "ready" ? "Starting the service…" : "Waking the environment…",
+  );
 }
 
 async function api(
@@ -386,6 +423,39 @@ async function api(
     return json(res, 200, { onboardingComplete: true });
   }
 
+  // Lifecycle events (events.ts): diagnosis and hill-climbing, newest
+  // first. Raw by design — internal names included — so nothing here is
+  // rendered by the product UI verbatim. `since`/`until` take ms epochs or
+  // durations (`24h`, `7d`, `30m`); `format=text` is what `cube events` prints.
+  if (method === "GET" && url.pathname === "/api/events") {
+    const q = url.searchParams;
+    const when = (key: string): number | undefined => {
+      const raw = q.get(key);
+      if (!raw) return undefined;
+      const rel = raw.match(/^(\d+)([smhd])$/);
+      if (rel) {
+        const unit = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[rel[2]!]!;
+        return Date.now() - Number(rel[1]) * unit;
+      }
+      const abs = Number(raw);
+      return Number.isFinite(abs) ? abs : undefined;
+    };
+    const events = registry.listEvents({
+      since: when("since"),
+      until: when("until"),
+      cube: q.get("cube") ?? undefined,
+      thread: q.get("thread") ?? undefined,
+      kind: q.get("kind") ?? undefined,
+      failed: q.get("failed") === "1",
+      limit: q.get("limit") ? Number(q.get("limit")) : undefined,
+    });
+    if (q.get("format") === "text") {
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      return void res.end(`${events.map(formatEventLine).join("\n")}\n`);
+    }
+    return json(res, 200, { version: APP_VERSION, events });
+  }
+
   // GitHub CLI owns the VM credential and device flow; no token is handled
   // by cubed or returned here. GET is also the UI's pending poll.
   if (url.pathname === "/api/github/auth") {
@@ -399,6 +469,19 @@ async function api(
       return json(res, 200, { github: githubAuth.status() });
     }
     return json(res, 404, { error: "not found" });
+  }
+
+  // `repositories: null` means no account is connected; a stored credential
+  // that cannot be verified right now is 503 so the UI offers retry, not login.
+  if (method === "GET" && url.pathname === "/api/github/repositories") {
+    try {
+      return json(res, 200, { repositories: await githubAuth.repositories() });
+    } catch (error) {
+      if (error instanceof GithubUnreachableError) {
+        return json(res, 503, { error: "could not reach github — retry, or enter a repository manually" });
+      }
+      return json(res, 502, { error: "could not load repositories — retry, or enter a repository manually" });
+    }
   }
 
   // ---- thread-first API: the product surface (cubes are invisible) ----
@@ -423,7 +506,7 @@ async function api(
       return json(res, 200, { project: supervisor.updateProject(id, input) });
     }
     if (!action && method === "DELETE") {
-      supervisor.deleteProject(id);
+      await supervisor.deleteProject(id);
       return json(res, 200, { ok: true });
     }
     if (action === "check" && method === "POST") {
@@ -439,7 +522,7 @@ async function api(
       });
     }
     if (method === "POST") {
-      let parsed: { projectId?: unknown };
+      let parsed: { projectId?: unknown; requestId?: unknown };
       try {
         parsed = JSON.parse(await readBody(req));
       } catch {
@@ -448,8 +531,19 @@ async function api(
       if (typeof parsed.projectId !== "string" || !parsed.projectId.trim()) {
         return json(res, 400, { error: "projectId is required" });
       }
-      const created = await supervisor.createUserThread(parsed.projectId);
-      return json(res, 201, { id: created.id });
+      // Idempotency: `Idempotency-Key` header or body `requestId`, a
+      // client id for one user action. A replay answers 200 with the
+      // thread the first attempt made; a first creation answers 201.
+      const rawKey = req.headers["idempotency-key"] ?? parsed.requestId;
+      let requestKey: string | undefined;
+      if (rawKey !== undefined) {
+        if (typeof rawKey !== "string" || !/^[A-Za-z0-9._-]{1,64}$/.test(rawKey)) {
+          return json(res, 400, { error: "requestId must be 1–64 characters of letters, digits, dot, dash or underscore" });
+        }
+        requestKey = rawKey;
+      }
+      const created = await supervisor.createUserThread(parsed.projectId, requestKey);
+      return json(res, created.created ? 201 : 200, { id: created.id });
     }
   }
 
@@ -464,8 +558,20 @@ async function api(
     return serveWorkspaceFile(res, root, decodeId(repositoryFile[3]!));
   }
 
+  const githubRead = url.pathname.match(/^\/api\/threads\/([^/]+)\/github$/);
+  if (githubRead && method === "GET") {
+    const result = await whileConnected(res, (signal) => supervisor.readGithubForUserThread(
+      decodeId(githubRead[1]!),
+      { number: Number(url.searchParams.get("number")), type: url.searchParams.get("type") ?? "",
+        section: url.searchParams.get("section") ?? undefined,
+        page: url.searchParams.has("page") ? Number(url.searchParams.get("page")) : undefined },
+      signal,
+    ));
+    return json(res, 200, result);
+  }
+
   const threadRepository = url.pathname.match(
-    /^\/api\/threads\/([^/]+)\/repositories(?:\/(\d+)\/(diff|push|sync|push-base|pr))?$/,
+    /^\/api\/threads\/([^/]+)\/repositories(?:\/(\d+)\/(diff|push|sync|push-base|pr|pr-review))?$/,
   );
   if (threadRepository) {
     const id = decodeId(threadRepository[1]!);
@@ -478,6 +584,40 @@ async function api(
     const repositoryId = Number(repositoryRaw);
     if (action === "diff" && method === "GET") {
       return json(res, 200, await supervisor.diffForUserThread(id, repositoryId));
+    }
+    if (action === "pr-review" && method === "POST") {
+      let input: Parameters<CubeSupervisor["reviewPrForUserThread"]>[2];
+      try {
+        const body = JSON.parse(await readBody(req));
+        const token = typeof body.token === "string" && /^[0-9a-f]{32}$/.test(body.token);
+        if (body.action === "prepare" && Number.isSafeInteger(body.number) && body.number > 0) {
+          input = { action: "prepare", number: body.number };
+        } else if ((body.action === "plan" || body.action === "verify") && token) {
+          input = { action: body.action, token: body.token };
+        } else if (
+          body.action === "inspect" && token &&
+          typeof body.plan === "string" && /^[0-9a-f]{32}$/.test(body.plan) &&
+          Number.isSafeInteger(body.number) && body.number > 0 &&
+          (body.section === "patch" || body.section === "prDiff") &&
+          (body.page === undefined || (Number.isSafeInteger(body.page) && body.page > 0))
+        ) {
+          input = {
+            action: "inspect",
+            token: body.token,
+            plan: body.plan,
+            number: body.number,
+            section: body.section,
+            page: body.page,
+          };
+        } else if (body.action === "publish" && token && typeof body.plan === "string" && /^[0-9a-f]{32}$/.test(body.plan)) {
+          input = { action: "publish", token: body.token, plan: body.plan };
+        } else {
+          return json(res, 400, { error: "invalid PR review operation" });
+        }
+      } catch {
+        return json(res, 400, { error: "invalid PR review body" });
+      }
+      return json(res, 200, await whileConnected(res, (signal) => supervisor.reviewPrForUserThread(id, repositoryId, input, signal)));
     }
     if (action === "push" && method === "POST") {
       const branch = await whileConnected(res, (signal) =>
@@ -520,16 +660,13 @@ async function api(
     return json(res, 404, { error: "not found" });
   }
 
-  // No history/prompt/events here: the thread's conversation IS its pi TUI
-  // (the /pty WebSocket). An in-process session on these routes would open a
-  // SECOND writer on the same JSONL the TUI owns, and — running on the
-  // credentialed host with the workspace as cwd — would load host-side
-  // AGENTS.md/CLAUDE.md (a symlink to ~/.pi/agent/auth.json would leak creds
-  // into the prompt). The pi spawn passes --no-context-files for the same
-  // reason. Cube-scoped plumbing routes keep history/prompt/events for
-  // debug use.
+  // No history/prompt/events anywhere: the thread's conversation IS its pi
+  // TUI (the /pty WebSocket). A second, in-process pi session would write
+  // the same JSONL the TUI owns and — on the credentialed host with the
+  // workspace as cwd — hand out host-side file tools to whoever can reach
+  // the port. The pi spawn passes --no-context-files for the same reason.
   const userThread = url.pathname.match(
-    /^\/api\/threads\/([^/]+)(?:\/(files|services|archive)(?:\/(.+))?)?$/,
+    /^\/api\/threads\/([^/]+)(?:\/(files|services|archive|environment)(?:\/(.+))?)?$/,
   );
   if (userThread) {
     const id = decodeId(userThread[1]!);
@@ -538,10 +675,10 @@ async function api(
     if (userThread[3] !== undefined && action !== "files") return json(res, 404, { error: "not found" });
     if (!action) {
       if (method === "DELETE") {
-        // Reap the thread's pi TUI first — a live terminal must not keep
-        // writing a deleted thread's session file (or hold its cube busy).
-        terminals.kill(id);
+        // Removal can refuse (409 mid-wake/push); only a thread that is
+        // actually gone loses its pi TUI.
         await supervisor.removeUserThread(id);
+        terminals.kill(id);
         return json(res, 200, { ok: true });
       }
       if (method === "PATCH") {
@@ -555,6 +692,16 @@ async function api(
         if (!title) return json(res, 400, { error: "empty title" });
         supervisor.renameUserThread(id, title.slice(0, 200));
         return json(res, 200, { ok: true });
+      }
+      return json(res, 404, { error: "not found" });
+    }
+    if (action === "environment") {
+      if (method === "GET") return json(res, 200, supervisor.environmentForUserThread(id));
+      if (method === "POST") {
+        // Intentionally independent of request disconnect: an accepted
+        // explicit repair completes, just like initial provisioning.
+        void supervisor.retrySetupForUserThread(id).catch((error) => console.warn(`setup retry: ${String(error)}`));
+        return json(res, 202, { accepted: true });
       }
       return json(res, 404, { error: "not found" });
     }
@@ -592,18 +739,8 @@ async function api(
 
   // ---- cube-scoped API: plumbing/debug ----
 
-  if (url.pathname === "/api/cubes") {
-    if (method === "GET") return json(res, 200, { cubes: supervisor.listCubes() });
-    if (method === "POST") {
-      let name: string;
-      try {
-        name = String(JSON.parse(await readBody(req)).name ?? "").trim();
-      } catch {
-        return json(res, 400, { error: "invalid JSON body" });
-      }
-      const row = supervisor.createCube(name);
-      return json(res, 202, { name: row.name, status: row.status });
-    }
+  if (url.pathname === "/api/cubes" && method === "GET") {
+    return json(res, 200, { cubes: supervisor.listCubes() });
   }
 
   const cubeMatch = url.pathname.match(/^\/api\/cubes\/([^/]+)(?:\/(.*))?$/);
@@ -621,10 +758,11 @@ async function api(
       // Reap any live pi TUIs on this cube's threads first — the user-thread
       // DELETE does this per thread; the cube-scoped route must too, or a
       // credentialed pi process (and its WS) outlives the destroyed cube.
-      for (const thread of supervisor.listThreads(cubeName)) terminals.kill(thread.id);
+      const threadIds = supervisor.listThreads(cubeName).map((thread) => thread.id);
       await supervisor.removeCube(cubeName, {
         deleteVolume: url.searchParams.get("volumes") === "1",
       });
+      for (const id of threadIds) terminals.kill(id);
       return json(res, 200, { ok: true });
     }
   }
@@ -640,13 +778,7 @@ async function api(
     return json(res, 200, { ok: true });
   }
 
-  const threadMatch = rest.match(/^threads\/([^/]+)\/(history|prompt|events)$/);
-  if (!threadMatch) return json(res, 404, { error: "not found" });
-  // "latest" resolves to the most recent registered thread.
-  const threadId = decodeId(threadMatch[1]!);
-  const action = threadMatch[2]!;
-  const runtime = await supervisor.thread(cubeName, threadId === "latest" ? undefined : threadId);
-  return threadAction(runtime, action, method, url, req, res);
+  json(res, 404, { error: "not found" });
 }
 
 /** Image types render inline (an <img> never executes scripts); everything
@@ -687,99 +819,15 @@ function serveWorkspaceFile(res: http.ServerResponse, root: string, rel: string)
   stream.pipe(res);
 }
 
-/** history/prompt/events on a resolved thread runtime — shared between the
- * thread-first routes and the cube-scoped plumbing routes. */
-async function threadAction(
-  runtime: Awaited<ReturnType<typeof supervisor.thread>>,
-  action: string,
-  method: string,
-  url: URL,
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-): Promise<void> {
-  // History from pi's session file (survives restarts); seq captured in the
-  // same response so the client attaches SSE strictly after it.
-  if (action === "history" && method === "GET") {
-    return json(res, 200, {
-      threadId: runtime.id,
-      model: runtime.thread.model,
-      busy: runtime.busy,
-      // A prompt still queued on provisioning/wake is not in `messages`
-      // yet — without this a page loaded mid-queue shows no user message.
-      activePrompt: runtime.activePrompt,
-      messages: runtime.thread.messages,
-      seq: runtime.events.length,
-    });
-  }
-
-  if (action === "prompt" && method === "POST") {
-    let text: string;
-    try {
-      text = String(JSON.parse(await readBody(req)).text ?? "").trim();
-    } catch {
-      return json(res, 400, { error: "invalid JSON body" });
-    }
-    if (!text) return json(res, 400, { error: "empty prompt" });
-    // Checked after the body await: prompt() flips busy synchronously, so
-    // with no await between this check and the call, two concurrent POSTs
-    // cannot both pass (single-threaded event loop). `closed` covers a
-    // concurrent DELETE of the cube (set before removeCube's first await).
-    if (runtime.closed) return json(res, 409, { error: "thread is being removed" });
-    if (runtime.busy) return json(res, 409, { error: "thread is busy" });
-    void supervisor.prompt(runtime, text); // progress flows via /events
-    return json(res, 202, { ok: true });
-  }
-
-  if (action === "events" && method === "GET") {
-    res.writeHead(200, {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      connection: "keep-alive",
-    });
-    // `id:` carries "<epoch>.<seq>" so EventSource reconnects resume via
-    // Last-Event-ID instead of replaying from the original ?since=. seq
-    // restarts at 0 when a thread runtime is reopened (cubed restart), so a
-    // Last-Event-ID from another epoch cannot be resumed — the client is
-    // told to re-sync (refetch history) via a stale-stream event.
-    const sseFrame = (envelope: { seq: number }) =>
-      `id: ${runtime.epoch}.${envelope.seq}\ndata: ${JSON.stringify(envelope)}\n\n`;
-    const lastRaw = req.headers["last-event-id"];
-    let since = Number(url.searchParams.get("since") ?? 0);
-    let stale = false;
-    if (typeof lastRaw === "string" && lastRaw !== "") {
-      const [epoch, seqRaw] = lastRaw.split(".");
-      if (epoch === runtime.epoch && Number.isFinite(Number(seqRaw))) {
-        since = Number(seqRaw) + 1;
-      } else {
-        stale = true;
-        since = runtime.events.length; // replaying would be wrong either way
-      }
-    }
-    if (stale) res.write(`data: ${JSON.stringify({ event: { type: "cubed_stale_stream" } })}\n\n`);
-    for (const envelope of runtime.events.slice(since)) res.write(sseFrame(envelope));
-    const subscriber = (envelope: { seq: number }) => res.write(sseFrame(envelope));
-    runtime.subscribers.add(subscriber);
-    // The runtime can end this response (cube removal) — without this, a
-    // deleted cube's SSE connections would stay open forever.
-    const closer = () => res.end();
-    runtime.closers.add(closer);
-    const heartbeat = setInterval(() => res.write(": ping\n\n"), 15_000);
-    req.on("close", () => {
-      clearInterval(heartbeat);
-      runtime.subscribers.delete(subscriber);
-      runtime.closers.delete(closer);
-    });
-    return;
-  }
-
-  json(res, 404, { error: "not found" });
-}
-
 // Upgrades: portal hosts pass straight through to the cube service; on
 // cubed's own host, the only WebSocket is the thread terminal.
 const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
+  // From here the socket is ours: node has already dropped its own error
+  // listener, so a reset before we destroy, refuse or proxy it would be
+  // an unhandled 'error' — a crash. One listener for the socket's life.
+  guardUpgradeSocket(socket);
   const label = portalLabel(req.headers.host, PORTAL_BASE);
   if (label === null) {
     // Same boundary as the request path: the firewall admits cubes here
@@ -807,13 +855,44 @@ server.on("upgrade", (req, socket, head) => {
     );
   }
   const target = supervisor.resolvePortal(label);
-  // No holding page on a raw socket — a sleeping thread's WS drops and the
-  // page's HTTP reloads (which do wake it) re-establish it.
-  if (!target || target.status !== "ready") return void socket.destroy();
-  // Same isolation as the request path: own portals only for cube sources.
+  // Same isolation as the request path: own portals only for cube sources
+  // (a cube may not bootstrap a portal that has no row yet, either).
   const cubeSource = cubeSourceIp(req.socket.remoteAddress);
-  if (cubeSource && cubeSource !== target.ip) return void socket.destroy();
-  proxyUpgrade(req, socket, head, target);
+  if (cubeSource && cubeSource !== target?.ip) return void socket.destroy();
+  // No portal row yet, but the thread's committed declaration may name
+  // the service — the HTTP path bootstraps the same way.
+  const cubeName = target?.cubeName ?? supervisor.declaredPortalCube(label);
+  if (!cubeName) return void socket.destroy();
+  if (target?.status === "ready") {
+    supervisor.touchCube(cubeName);
+    return void proxyUpgrade(req, socket, head, target);
+  }
+  // Not up (asleep, waking, service down): a WebSocket-only page — Vite
+  // HMR, a WS app — used to die here until a full HTTP reload woke the
+  // thread. Wake it the same way the HTTP path does, hold the upgrade
+  // briefly, then proxy; otherwise refuse with a 503 the client can retry.
+  // Setup is minutes, not seconds: refused outright.
+  const serviceName = label.slice(0, label.lastIndexOf("--"));
+  const record = (outcome: { ok: boolean; ms: number; detail: string }) =>
+    recordPoint(registry, { kind: "portal", phase: "ws-wake", cube: cubeName, ok: outcome.ok, ms: outcome.ms, detail: `${serviceName}: ${outcome.detail}` });
+  if (supervisor.cubeStatus(cubeName) === "creating") {
+    refuseUpgrade(socket);
+    return record({ ok: false, ms: 0, detail: "still setting up; refused with 503" });
+  }
+  void upgradeAfterWake(req, socket, head, async (signal) => {
+    // The thread being up is not the service being up: the ensure's own
+    // outcome for this service decides, never the retained portal row —
+    // which reads "ready" (thread state) as soon as the wake lands.
+    const statuses = await supervisor.ensureCubeServices(cubeName, signal);
+    const service = statuses.find((s) => s.name === serviceName);
+    if (!service) throw new Error(`${serviceName} is not declared in .cube/cube.toml`);
+    if (service.state !== "running") throw new Error(service.detail ?? `${serviceName} did not start`);
+    const fresh = supervisor.resolvePortal(label);
+    return fresh?.status === "ready" ? fresh : null;
+  }).then((outcome) => {
+    if (outcome.ok) supervisor.touchCube(cubeName);
+    record(outcome);
+  });
 });
 
 /** A client that stops reading must not become a host-memory leak: the pty
@@ -868,4 +947,8 @@ function attachTerminal(threadId: string, ws: WebSocket, cols: number, rows: num
   ws.on("error", detach);
 }
 
-server.listen(PORT, () => console.log(`cubed listening on http://localhost:${PORT} (portals on *.${PORTAL_BASE})`));
+// A stray rejection must not take every thread's terminal down with the
+// daemon; log it and stay up.
+process.on("unhandledRejection", (reason) => log.error("unhandled rejection", { error: reason }));
+
+server.listen(PORT, () => log.info("listening", { url: `http://localhost:${PORT}`, portals: `*.${PORTAL_BASE}` }));

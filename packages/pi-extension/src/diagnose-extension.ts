@@ -26,7 +26,24 @@ export default function diagnosisExtension(pi: ExtensionAPI): void {
     },
   });
   pi.on("session_start", async (_event, ctx) => {
-    if (!allowed()) { ctx.ui.notify("RCA refused: only its own read tool is permitted", "error"); ctx.shutdown(); }
+    if (!allowed()) {
+      ctx.ui.notify("RCA refused: only its own read tool is permitted", "error");
+      ctx.shutdown();
+      return;
+    }
+    ctx.ui.notify("Read-only diagnosis: describe the issue to begin. Use /model to change model and /quit to exit. The latest completed answer is saved as report.md.", "info");
+  });
+  pi.on("message_end", async (event, ctx) => {
+    const message = event.message;
+    if (message.role !== "assistant" || message.stopReason !== "stop") return;
+    const text = message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+    if (!text.trim()) return;
+    // Host-owned persistence, not a model-facing write capability. Never save TUI escape sequences.
+    try {
+      await fs.promises.writeFile(path.join(bundle, "..", "report.md"), `${text}\n`, { mode: 0o600 });
+    } catch {
+      ctx.ui.notify("Could not save report.md; the answer is still in the Pi conversation.", "error");
+    }
   });
   pi.on("tool_call", async (event) => {
     if (event.toolName !== "read" || !allowed()) return { block: true, reason: "RCA permits only bounded diagnostic reads", terminate: true };

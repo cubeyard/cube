@@ -5,17 +5,30 @@
     createProject,
     createUserThread,
     deleteProject,
+    errorText,
     fetchProject,
+    isNotFound,
+    isUnreachable,
     updateProject,
   } from "../lib/api.ts";
+  import { createArmed } from "../lib/armed.svelte.ts";
+  import type { Command } from "../lib/command.ts";
   import { relTime } from "../lib/time.ts";
+  import { createTransient } from "../lib/transient.svelte.ts";
   import { uid } from "../lib/uid.ts";
   import type { Project, ProjectRepository } from "../lib/types.ts";
   import Onboarding from "./Onboarding.svelte";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
+  import RepositoryInput from "./RepositoryInput.svelte";
 
-  let { projectId, githubLogin = false }: { projectId: string; githubLogin?: boolean } = $props();
+  let { projectId, githubLogin = false, command = null, onConsume = () => {} }: {
+    projectId: string;
+    githubLogin?: boolean;
+    /** App's `n` shortcut: start a thread from this project. */
+    command?: Command | null;
+    onConsume?: (id: number) => void;
+  } = $props();
   const isNew = $derived(projectId === "new");
   type RepositoryDraft = { key: string; url: string; base: string; checkoutName: string };
 
@@ -24,12 +37,19 @@
   let repositories = $state<RepositoryDraft[]>([
     { key: uid(), url: "", base: "", checkoutName: "workspace" },
   ]);
+  // "<checkout>/<folder>" of a reference that carries .cube; "" = the
+  // primary's own .cube. Only meaningful once there is a reference.
+  let environment = $state("");
   let dirty = $state(untrack(() => projectId === "new"));
   let loaded = $state(untrack(() => projectId === "new"));
   let error = $state<string | null>(null);
+  // The host said this id does not exist — as opposed to not answering.
+  let notFound = $state(false);
   let saving = $state(false);
   let checking = $state(false);
   let starting = $state(false);
+  // "saved" / "checked", printed beside the key that just succeeded.
+  const done = createTransient();
 
   function loadForm(fresh: Project): void {
     project = fresh;
@@ -40,6 +60,7 @@
       base: repository.base ?? "",
       checkoutName: repository.checkoutName,
     }));
+    environment = fresh.environment ?? "";
     dirty = false;
   }
 
@@ -53,9 +74,13 @@
       if (resetForm || !project || !dirty) loadForm(fresh);
       else project = fresh;
       error = null;
+      notFound = false;
     } catch (e) {
       if (seq !== refreshSeq) return;
-      error = String(e);
+      if (isNotFound(e)) notFound = true;
+      // A lost host while the project is on screen is the app's strip to
+      // report; before the first load it is this view's retry block.
+      else if (!isUnreachable(e) || !project) error = errorText(e);
     }
     loaded = true;
   }
@@ -64,6 +89,10 @@
     refresh(true);
     const timer = setInterval(refresh, 2000);
     return () => clearInterval(timer);
+  });
+
+  $effect(() => {
+    document.title = `${isNew ? "new project" : (project?.name ?? "project")} · cube`;
   });
 
   function changed(): void {
@@ -90,64 +119,105 @@
         base: repository.base.trim() || null,
         ...(index === 0 ? {} : { checkoutName: repository.checkoutName }),
       })),
+      environment: environment.trim() || null,
     };
   }
 
   async function save(): Promise<void> {
-    if (saving) return;
+    if (saving || notFound) return;
+    refreshSeq++; // a poll already in flight must not revert the saved form
     saving = true;
     error = null;
     try {
       if (isNew) {
         const created = await createProject(payload());
-        location.hash = `#/projects/${encodeURIComponent(created.id)}`;
+        location.hash = `#/projects/${created.id}`;
       } else {
         loadForm(await updateProject(projectId, payload()));
+        done.set("saved");
       }
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = errorText(e);
     } finally {
       saving = false;
     }
   }
 
   async function recheck(): Promise<void> {
-    if (checking || isNew || dirty) return;
+    if (checking || isNew || dirty || notFound) return;
     checking = true;
     error = null;
     try {
       project = await checkProject(projectId);
       await refresh();
+      done.set("checked");
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = errorText(e);
     } finally {
       checking = false;
     }
   }
 
+  // One id per user action (see ThreadList): a failed press is retried
+  // with the same id, never as a second thread.
+  let startRequest: string | null = null;
   async function startThread(): Promise<void> {
-    if (starting || !project || project.status !== "ready" || dirty) return;
+    if (starting || !project || project.status !== "ready" || dirty || notFound) return;
     starting = true;
     error = null;
     try {
-      const id = await createUserThread(project.id);
-      location.hash = `#/t/${encodeURIComponent(id)}`;
+      startRequest ??= uid();
+      const id = await createUserThread(project.id, startRequest);
+      startRequest = null;
+      location.hash = `#/t/${id}`;
     } catch (e) {
-      error = `new thread: ${e instanceof Error ? e.message : e}`;
+      error = `new thread: ${errorText(e)}`;
       starting = false;
     }
   }
 
+  // Take the shell's command once (see lib/command.ts).
+  $effect(() => {
+    const pending = command;
+    if (!pending || pending.kind !== "new-thread") return;
+    onConsume(pending.id);
+    untrack(() => void startThread());
+  });
+
+  // ---- delete: two presses on the same key, never a dialog ----
+  const armed = createArmed();
+  let deleting = $state(false);
   async function remove(): Promise<void> {
-    if (!project || project.threadCount > 0) return;
-    if (!confirm(`Delete project "${project.name}"? Its prepared repository configuration will be removed.`)) return;
+    if (!project || project.threadCount > 0 || deleting || notFound) return;
+    if (!armed.press("project")) return;
+    deleting = true;
+    refreshSeq++;
     try {
       await deleteProject(project.id);
       location.hash = "#/projects";
     } catch (e) {
-      error = `delete: ${e instanceof Error ? e.message : e}`;
+      error = `delete: ${errorText(e)}`;
+      deleting = false;
     }
   }
+
+  // Every disabled key prints its reason; a title alone is invisible on a
+  // phone and to anyone who does not hover.
+  const checkDisabled = $derived(checking || dirty || project?.status === "checking");
+  const startDisabled = $derived(starting || dirty || project?.status !== "ready");
+  const workReason = $derived(
+    !project || (!checkDisabled && !startDisabled) ? null
+    : dirty ? "save your changes first"
+    : checking || project.status === "checking" ? "checking the repositories…"
+    : project.status === "error" ? "new thread waits for a passing check"
+    : null,
+  );
+  const deleteDisabled = $derived(!project || project.threadCount > 0 || project.status === "checking" || deleting);
+  const deleteReason = $derived(
+    !project || !deleteDisabled || deleting ? null
+    : project.threadCount > 0 ? `delete its ${project.threadCount === 1 ? "thread" : `${project.threadCount} threads`} first`
+    : "wait for the check to finish",
+  );
 
   const evidence = (index: number): ProjectRepository | null => project?.repositories[index] ?? null;
   const lampClass = (status: ProjectRepository["status"] | undefined) =>
@@ -164,7 +234,7 @@
 
 {#if githubLogin}
   <Onboarding projectLogin onComplete={(connected) => {
-    location.hash = `#/projects/${encodeURIComponent(projectId)}`;
+    location.hash = `#/projects/${projectId}`;
     if (connected) void recheck();
   }} />
 {:else}
@@ -174,6 +244,26 @@
 
   {#if !loaded}
     <p class="loading">loading…</p>
+  {:else if notFound}
+    <!-- gone is gone, whether it vanished before or after the first load:
+         nothing here may be saved, checked, started or deleted any more -->
+    <div class="empty-state" role="status">
+      <p class="hint">No such project — it may have been deleted.</p>
+      {#if dirty && (name.trim() || repositories.some((repository) => repository.url.trim()))}
+        <p class="draft">
+          unsaved draft, kept here as text: <code>{name.trim() || "(no name)"}</code>
+          {#each repositories.filter((repository) => repository.url.trim()) as repository (repository.key)}
+            · <code>{repository.url.trim()}</code>
+          {/each}
+        </p>
+      {/if}
+      <a class="key" href="#/projects">back to projects</a>
+    </div>
+  {:else if !project && !isNew}
+    <div class="empty-state" role="status">
+      <p class="hint">{error ?? "can't reach the host — it may be starting or restarting"}<br />retrying…</p>
+      <button class="key" onclick={() => refresh(true)}>retry now</button>
+    </div>
   {:else}
     <div class="project-detail-head">
       <div>
@@ -191,9 +281,16 @@
       {/if}
     </div>
 
-    {#if error}<div class="banner">{error}</div>{/if}
+    {#if error}
+      <div class="banner" role="alert">
+        <span class="banner-text">{error}</span>
+        <button class="key icon note-dismiss" title="dismiss" aria-label="dismiss error" onclick={() => (error = null)}>
+          <Icon name="close" size={12} />
+        </button>
+      </div>
+    {/if}
     {#if project?.error && !dirty && !project.repositories.some((repository) => repository.error && project?.error === `${repository.checkoutName}: ${repository.error}`)}
-      <div class="banner">{project.error}</div>
+      <div class="banner"><span class="banner-text">{project.error}</span></div>
     {/if}
 
     <section class="project-config" aria-label="project configuration">
@@ -229,16 +326,18 @@
               </span>
             </div>
             <div class="repository-fields">
-              <label class="config-field repo-url-field">
+              <div class="config-field repo-url-field">
                 <span class="silk">repository</span>
-                <input
-                  class="compose-input"
-                  aria-label={`repository ${index + 1} URL`}
-                  placeholder="owner/name or git URL"
+                <RepositoryInput
+                  label={`repository ${index + 1} URL`}
                   bind:value={repository.url}
-                  oninput={changed}
+                  loginHref={`#/projects/${encodeURIComponent(projectId)}/github`}
+                  onchange={changed}
+                  onselect={(fullName) => {
+                    if (index === 0 && !name.trim()) name = fullName.split("/").at(-1) ?? "";
+                  }}
                 />
-              </label>
+              </div>
               <label class="config-field">
                 <span class="silk">base</span>
                 <input
@@ -271,7 +370,7 @@
                 <span>checking access and branch…</span>
               {:else if checked?.error?.startsWith("github: not connected")}
                 <span class="error">{checked.error}</span>
-                <div><a class="key github-login-link" href={`#/projects/${encodeURIComponent(projectId)}/github`}>log in to github</a></div>
+                <div><a class="key github-login-link" href={`#/projects/${projectId}/github`}>log in to github</a></div>
               {:else if checked?.error}
                 <span class="error">{checked.error}</span>
               {:else}
@@ -289,29 +388,59 @@
           </div>
         {/each}
       </div>
+
+      {#if repositories.length > 1 || environment}
+        <label class="config-field project-environment-field">
+          <span class="silk">environment</span>
+          <input
+            class="compose-input"
+            aria-label="environment folder"
+            placeholder={`${repositories[1]?.checkoutName || "reference"}/folder`}
+            bind:value={environment}
+            oninput={changed}
+          />
+          <span class="field-hint">
+            a folder in a reference that carries .cube (setup, resume, cube.toml) — for a primary that does not ship its own · empty: /workspace/.cube
+          </span>
+        </label>
+      {/if}
     </section>
 
     <div class="project-actions">
       <button class="key primary" onclick={save} disabled={saving || !dirty}>
         {saving ? "saving…" : isNew ? "save & check" : "save changes"}
       </button>
+      {#if done.value === "saved"}<span class="key-reason" role="status">saved</span>{/if}
       {#if project}
-        <button class="key" onclick={recheck} disabled={checking || dirty || project.status === "checking"}>
+        <button class="key" onclick={recheck} disabled={checkDisabled}>
           <Icon name="refresh" size={13} />{checking ? "checking…" : "check now"}
         </button>
-        <button class="key" onclick={startThread} disabled={starting || dirty || project.status !== "ready"}>
+        {#if done.value === "checked"}<span class="key-reason" role="status">checked</span>{/if}
+        <button class="key" onclick={startThread} disabled={startDisabled}>
           <Icon name="plus" size={13} />{starting ? "starting…" : "new thread"}
         </button>
+        {#if workReason}<span class="key-reason">{workReason}</span>{/if}
         <a class="key" href="#/threads?project={encodeURIComponent(project.id)}">
           {project.threadCount} {project.threadCount === 1 ? "thread" : "threads"}
         </a>
         <span class="action-spacer"></span>
-        <button
-          class="key danger-text"
-          onclick={remove}
-          disabled={project.threadCount > 0 || project.status === "checking"}
-          title={project.threadCount > 0 ? "delete the project's threads first" : "delete project"}
-        >delete project</button>
+        <span class="action-group">
+          {#if armed.is("project")}
+            <span class="key-reason bad" role="status">the project and its repository checks are removed; threads must be deleted first</span>
+          {:else if deleteReason}
+            <span class="key-reason">{deleteReason}</span>
+          {/if}
+          <button
+            class="key danger-text"
+            class:armed={armed.is("project")}
+            onclick={remove}
+            onkeydown={armed.onKeydown}
+            onblur={() => armed.disarm()}
+            disabled={deleteDisabled}
+            title={armed.is("project") ? "press again to delete this project" : "delete project"}
+            aria-label={armed.is("project") ? "confirm: delete this project" : "delete project"}
+          >{deleting ? "deleting…" : armed.is("project") ? "delete?" : "delete project"}</button>
+        </span>
       {/if}
     </div>
   {/if}
@@ -319,5 +448,10 @@
 {/if}
 
 <style>
+  .project-view { overflow: visible; }
+  .project-environment-field { margin-top: 0.9rem; }
+  .field-hint { display: block; margin-top: 0.35rem; font-size: 12px; color: var(--ink-3); }
   .github-login-link { font-family: var(--font-ui); }
+  .draft { margin: -0.6rem 0 1.3rem; font-size: 12px; color: var(--ink-3); overflow-wrap: anywhere; }
+  .draft code { font-family: var(--font-mono); color: var(--ink-2); }
 </style>

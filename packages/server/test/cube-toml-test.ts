@@ -55,13 +55,14 @@ assert.throws(() => parseWakeHooks(`[wake]\nhooks = "echo hi"`), /must be an arr
 assert.throws(() => parseWakeHooks(`[wake]\nhooks = ["bad \\q escape"]`), /unsupported escape/);
 console.log("5 ok: malformed arrays throw (never silently wrong hooks)");
 
-// --- readWakeHooks reads <workspace>/.cube/cube.toml
+// --- readWakeHooks reads <environment directory>/cube.toml
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cube-toml-test-"));
 fs.mkdirSync(path.join(tmp, ".cube"));
 fs.writeFileSync(path.join(tmp, ".cube", "cube.toml"), `[wake]\nhooks = ["echo hi"]\n`);
-assert.deepEqual(readWakeHooks(tmp), ["echo hi"]);
+assert.deepEqual(readWakeHooks(path.join(tmp, ".cube")), ["echo hi"]);
+assert.deepEqual(readWakeHooks(tmp), [], "the workspace root itself holds no cube.toml");
 fs.rmSync(tmp, { recursive: true, force: true });
-console.log("6 ok: readWakeHooks reads the workspace file");
+console.log("6 ok: readWakeHooks reads the environment directory's file");
 
 console.log("cube-toml-test: all ok");
 
@@ -128,6 +129,10 @@ assert.throws(() => parseServices(`[services.a--b]\ncommand = "x"`), /invalid se
 assert.throws(() => parseServices(`[services.a.env]\nX = 1`), /must be a string/);
 assert.throws(() => parseServices(`[services]\nfoo = "x"`), /unsupported section/);
 assert.throws(() => parseServices(`[services.a.env.deep]\nX = "1"`), /unsupported section/);
+assert.throws(
+  () => parseServices('[services.web]\ncommand = "x"\n[services.web.env]\nMY-VAR = "1"'),
+  /not a valid environment variable name/,
+);
 console.log("9 ok: malformed service declarations throw");
 
 // --- non-service sections are untouched; no services -> []
@@ -135,3 +140,37 @@ assert.deepEqual(parseServices(`[env]\nfoo = "bar"\n[wake]\nhooks = []`), []);
 console.log("10 ok: unrelated sections ignored");
 
 console.log("cube-toml-test (services): all ok");
+
+// ================================================================= network
+
+import { parseNetworkAllow } from "../src/cube-toml.ts";
+
+// --- absent file/section/key -> []; entries are case-folded, trailing dot dropped
+assert.deepEqual(parseNetworkAllow(""), []);
+assert.deepEqual(parseNetworkAllow("[network]\nother = 1"), []);
+assert.deepEqual(
+  parseNetworkAllow(`
+[network]
+allow = [
+  "Repo.Maven.Apache.org.",   # case and trailing dot are not policy
+  "*.gradle.org",             # wildcard suffix, as the proxy matcher reads it
+]
+`),
+  ["repo.maven.apache.org", "*.gradle.org"],
+);
+assert.deepEqual(parseCubeToml(`[network]\nallow = ["services.gradle.org"]`).networkAllow, ["services.gradle.org"]);
+assert.deepEqual(parseCubeToml(`[wake]\nhooks = []`).networkAllow, []);
+console.log("11 ok: network.allow parsed, normalised, absent -> []");
+
+// --- anything that is not a hostname is a loud error, never a silently
+// narrower or wider policy
+assert.throws(() => parseNetworkAllow(`[network]\nallow = "github.com"`), /network\.allow must be an array/);
+assert.throws(() => parseNetworkAllow(`[network]\nallow = ["a.com" "b.com"]`), /network\.allow must be a comma-separated array/);
+assert.throws(() => parseNetworkAllow(`[network]\nallow = ["a.com"`), /unterminated network\.allow array/);
+for (const bad of ["https://github.com", "github.com:443", "github.com/org", "10.0.0.1", "::1", "localhost", "*", "*.com", "a b.com", "-a.com", ""]) {
+  assert.throws(() => parseNetworkAllow(`[network]\nallow = [${JSON.stringify(bad)}]`), /must be a hostname/, bad);
+}
+assert.throws(() => parseNetworkAllow(`[network]\nallow = [${Array.from({ length: 201 }, (_, i) => `"h${i}.example.com"`).join(",")}]`), /more than 200 hosts/);
+console.log("12 ok: malformed network.allow entries throw with the offending entry");
+
+console.log("cube-toml-test (network): all ok");

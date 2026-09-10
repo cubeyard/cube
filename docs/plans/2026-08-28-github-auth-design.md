@@ -6,7 +6,7 @@ Status: superseded — GitHub CLI now owns login and credentials; this is a hist
 ## Problem
 
 The VM host is where GitService and `gh` run, and it is deliberately
-credential-bearing (PLAN §11) — but a fresh install has no git credentials
+credential-bearing (ARCHITECTURE §11) — but a fresh install has no git credentials
 at all. Mirror-cloning a private repo fails with raw git stderr surfaced to
 the user:
 
@@ -93,7 +93,7 @@ is near expiry, exchange the refresh token for a new pair, persist the new
 refresh token, and rewrite the access token into gh's store.
 
 `~/.config/gh` joins `~/.pi` on the data-disk persistence path (survives
-OS-disk upgrades) — that work is already planned in PLAN §13 "Still in
+OS-disk upgrades) — that work is already planned in ARCHITECTURE §13 "Still in
 phase".
 
 ### 4. Failure honesty

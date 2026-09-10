@@ -182,6 +182,31 @@ registry.close();
   console.log("10 ok: empty pre-project thread schema upgraded");
 }
 
+// --- an EXISTING empty pre-project thread table: the project upgrade
+// recreates it, and the archive column must survive that (it used to be
+// added first and dropped with the table — archiving then failed until the
+// next restart)
+{
+  const dbFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "cube-registry-test-")), "cubed.db");
+  const old = new DatabaseSync(dbFile);
+  old.exec(`
+    CREATE TABLE cube (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
+      error TEXT, image TEXT NOT NULL, workspace_path TEXT NOT NULL,
+      subnet_index INTEGER NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_active_at INTEGER NOT NULL);
+    CREATE TABLE thread (id TEXT PRIMARY KEY, cube_id INTEGER NOT NULL, pi_session_path TEXT NOT NULL,
+      title TEXT, created_at INTEGER NOT NULL);
+  `);
+  old.close();
+  const migrated = new Registry(dbFile);
+  const inspected = new DatabaseSync(dbFile);
+  const columns = inspected.prepare("PRAGMA table_info(thread)").all() as { name: string }[];
+  inspected.close();
+  assert.ok(columns.some((column) => column.name === "project_id"));
+  assert.ok(columns.some((column) => column.name === "archived_at"));
+  migrated.close();
+  console.log("10b ok: archive column survives the pre-project thread upgrade");
+}
+
 // A populated pre-project registry is never silently assigned to invented
 // projects. Startup fails without modifying the old thread row.
 {

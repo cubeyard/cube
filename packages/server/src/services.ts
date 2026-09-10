@@ -1,5 +1,5 @@
 /**
- * Declared services (PLAN §10, Amp's services.yaml model in cube.toml):
+ * Declared services (ARCHITECTURE §10, Amp's services.yaml model in cube.toml):
  * ensure = start whatever is missing as a transient systemd unit inside the
  * cube, wait for readiness, keep the portal registry in sync. Runs from the
  * agent's `services_ensure` tool and on demand when a portal is hit.
@@ -8,11 +8,16 @@
  * on the host side); readiness is probed from the host against the cube's
  * static IP, which is exactly the path the portal proxy will take.
  */
+import crypto from "node:crypto";
 import http from "node:http";
 import net from "node:net";
+import path from "node:path";
 
 import type { ServiceSpec } from "./cube-toml.ts";
+import { createLogger } from "./log.ts";
 import type { PortalRow } from "./registry.ts";
+
+const log = createLogger("services");
 
 /** Auto-assigned in-cube ports for `port`-less declarations. Per cube (its
  * own netns), so the range never collides across cubes. */
@@ -21,6 +26,8 @@ const AUTO_PORT_MAX = 4199;
 
 const READY_TIMEOUT_MS = 60_000;
 const READY_POLL_MS = 500;
+/** Readiness polls between `systemctl is-active` checks (~2s). */
+const UNIT_CHECK_EVERY = 4;
 
 export const serviceUnit = (name: string) => `cube-svc-${name}`;
 
@@ -44,6 +51,7 @@ export interface ServicesHost {
   /** argv exec inside the cube as root; returns the exit code. */
   execRoot(cmd: string[], signal?: AbortSignal): Promise<number | null>;
   upsertPortal(name: string, targetPort: number, hostname: string): PortalRow;
+  releasePortal(name: string): void;
   listPortals(): PortalRow[];
 }
 
@@ -65,9 +73,12 @@ export async function ensureServices(
   const readyTimeoutMs = options.readyTimeoutMs ?? READY_TIMEOUT_MS;
   const signal = options.signal;
   signal?.throwIfAborted();
+  const retired = await retireUndeclared(host, specs, signal);
+  // Nothing declared and nothing left over: leave the cube alone.
+  if (specs.length === 0 && retired === 0) return [];
   const ports = assignPorts(specs, host.listPortals());
   // Hairpin + sibling URLs need every service's (hostname, port) up front.
-  const plans = specs.map((spec) => {
+  const plans: ServicePlan[] = specs.map((spec) => {
     const label = portalLabelFor(cubeName, spec.name);
     return { spec, label, port: ports.get(spec.name)!, url: host.publicUrl(label) };
   });
@@ -76,7 +87,11 @@ export async function ensureServices(
 
   const statuses: ServiceStatus[] = [];
   for (const plan of plans) {
-    statuses.push(await ensureOne(host, plan, plans, readyTimeoutMs, signal));
+    const status = await ensureOne(host, plan, plans, readyTimeoutMs, signal);
+    if (status.state === "failed") {
+      log.warn("service failed", { cube: cubeName, service: status.name, port: status.port, error: status.detail });
+    }
+    statuses.push(status);
   }
   return statuses;
 }
@@ -86,6 +101,26 @@ interface ServicePlan {
   label: string;
   port: number;
   url: string;
+}
+
+/**
+ * A service that was declared once but is not any more (renamed, removed)
+ * must not linger: its unit keeps the port — which the auto-assigner then
+ * hands to the new name, so the readiness probe "confirms" the old process
+ * — and its hostname keeps routing. Stop the unit, drop the row.
+ */
+async function retireUndeclared(host: ServicesHost, specs: ServiceSpec[], signal?: AbortSignal): Promise<number> {
+  const declared = new Set(specs.map((spec) => spec.name));
+  let retired = 0;
+  for (const row of host.listPortals()) {
+    if (declared.has(row.name)) continue;
+    const unit = serviceUnit(row.name);
+    await host.execRoot(["systemctl", "stop", unit], signal);
+    await host.execRoot(["systemctl", "reset-failed", unit], signal);
+    host.releasePortal(row.name);
+    retired++;
+  }
+  return retired;
 }
 
 async function ensureOne(
@@ -99,50 +134,75 @@ async function ensureOne(
   const unit = serviceUnit(spec.name);
   const base: Omit<ServiceStatus, "state" | "detail"> = { name: spec.name, url, port };
 
-  signal?.throwIfAborted();
-  const active = (await host.execRoot(["systemctl", "is-active", "--quiet", unit], signal)) === 0;
-  if (active && (await waitReady(host, port, spec.health, 2_000, signal))) {
-    return { ...base, state: "running", detail: null };
-  }
-  if (active) {
-    // Active but unreachable: stale port/bind from an edited declaration —
-    // restart under the current one rather than reporting a dead URL.
-    await host.execRoot(["systemctl", "stop", unit], signal);
-  }
-  // A crashed transient unit lingers in "failed" and blocks its name.
-  await host.execRoot(["systemctl", "reset-failed", unit], signal);
-
-  for (const [key] of Object.entries(spec.env)) {
+  for (const key of Object.keys(spec.env)) {
     if (key === "PORT" || key === "PUBLIC_URL" || key.startsWith("CUBE_SERVICE_")) {
       return { ...base, state: "failed", detail: `env.${key} is managed by cubed — remove it from cube.toml` };
     }
   }
+  // Proxy variables (incl. NO_PROXY for the portal hairpin) come from the
+  // cube's login-shell profile, which `bash -l` sources after these.
   const env: Record<string, string> = {
     PORT: String(port),
     PUBLIC_URL: url,
-    // Server-to-server calls to portal origins (OAuth token endpoints) must
-    // go direct to the gateway, not through the egress proxy. Declared env
-    // may override NO_PROXY (it is not a managed key).
-    NO_PROXY: `localhost,127.0.0.1,${host.gatewayIp},.${host.portalBase}`,
-    no_proxy: `localhost,127.0.0.1,${host.gatewayIp},.${host.portalBase}`,
+    // Vite refuses Host headers it does not know, and a portal hostname is
+    // exactly that; this is its escape hatch, so `vite --host 0.0.0.0`
+    // works through the portal unconfigured.
+    __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: `.${host.portalBase}`,
     ...Object.fromEntries(all.map((p) => [siblingEnvName(p.spec.name), p.url])),
     ...spec.env,
   };
-  const cmd = [
+  const run = [
     "systemd-run", "--collect", "--quiet", `--unit=${unit}`,
     "--uid=1000", "--gid=1000",
-    `--working-directory=/workspace/${spec.cwd}`.replace(/\/\.$/, ""),
+    `--working-directory=${path.posix.join("/workspace", spec.cwd)}`,
     ...Object.entries(env).map(([k, v]) => `--setenv=${k}=${v}`),
     "/bin/bash", "-lc", spec.command,
   ];
-  const started = await host.execRoot(cmd, signal);
-  if (started !== 0) {
-    return { ...base, state: "failed", detail: `systemd-run failed (exit ${started}) — is the cube healthy?` };
+  // The declaration rides along as the unit's description: an active unit
+  // started from the same declaration is left to come up in its own time
+  // (a dev server compiling for minutes must not be restarted from scratch
+  // on every portal hit); one from an edited declaration is replaced.
+  const fingerprint = `cube:${crypto.createHash("sha256").update(JSON.stringify(run)).digest("hex").slice(0, 16)}`;
+  run.splice(1, 0, `--description=${fingerprint}`);
+
+  signal?.throwIfAborted();
+  if (await unitActive(host, unit, signal)) {
+    const same =
+      (await host.execRoot(
+        ["sh", "-c", `[ "$(systemctl show -p Description --value ${unit})" = "${fingerprint}" ]`],
+        signal,
+      )) === 0;
+    if (same) return settle(host, base, unit, spec.health, readyTimeoutMs, signal);
+    await host.execRoot(["systemctl", "stop", unit], signal);
   }
-  if (await waitReady(host, port, spec.health, readyTimeoutMs, signal)) {
+  // A crashed transient unit lingers in "failed" and blocks its name.
+  await host.execRoot(["systemctl", "reset-failed", unit], signal);
+  // Something else already answering on the port (a docker container, a
+  // stray server from bash) would make the unit fail to bind while the
+  // probe happily confirms the squatter — say so instead of starting it.
+  if (await probeOnce(host.cubeIp, port, null, signal)) {
+    return { ...base, state: "failed", detail: `port ${port} is already in use by another process in the environment` };
+  }
+  const started = await host.execRoot(run, signal);
+  if (started !== 0) {
+    return { ...base, state: "failed", detail: `systemd-run failed (exit ${started}) — is the environment healthy?` };
+  }
+  return settle(host, base, unit, spec.health, readyTimeoutMs, signal);
+}
+
+/** Wait for a started unit to answer on its port; explain when it does not. */
+async function settle(
+  host: ServicesHost,
+  base: Omit<ServiceStatus, "state" | "detail">,
+  unit: string,
+  health: string | null,
+  readyTimeoutMs: number,
+  signal?: AbortSignal,
+): Promise<ServiceStatus> {
+  if (await waitReady(host, base.port, health, readyTimeoutMs, signal, unit)) {
     return { ...base, state: "running", detail: null };
   }
-  return { ...base, state: "failed", detail: await failureDetail(host, port, unit, readyTimeoutMs, signal) };
+  return { ...base, state: "failed", detail: await failureDetail(host, base.port, unit, readyTimeoutMs, signal) };
 }
 
 export const siblingEnvName = (serviceName: string) =>
@@ -184,37 +244,47 @@ function assignPorts(specs: ServiceSpec[], rows: PortalRow[]): Map<string, numbe
 }
 
 /**
- * The hairpin requirement (PLAN §10): OAuth-style flows resolve the portal
+ * The hairpin requirement (ARCHITECTURE §10): OAuth-style flows resolve the portal
  * origin from INSIDE the cube too (issuer/token endpoints), so every portal
  * hostname is pinned to the bridge gateway in the cube's /etc/hosts —
- * cubed's listener is reachable there. Managed block, rewritten whole.
+ * cubed's listener is reachable there. Managed block, rewritten whole; the
+ * block travels as an argument, never through the script text.
  */
 async function writeHairpinHosts(host: ServicesHost, labels: string[], signal?: AbortSignal): Promise<void> {
-  const lines = labels.map((label) => `${host.gatewayIp} ${label}.${host.portalBase}`).join("\\n");
+  const block = [
+    "# cube-portals start",
+    ...labels.map((label) => `${host.gatewayIp} ${label}.${host.portalBase}`),
+    "# cube-portals end",
+  ].join("\n");
   const script =
-    `sed -i '/# cube-portals start/,/# cube-portals end/d' /etc/hosts && ` +
-    `printf '# cube-portals start\\n${lines}\\n# cube-portals end\\n' >> /etc/hosts`;
-  const exit = await host.execRoot(["sh", "-c", script], signal);
+    `sed -i '/# cube-portals start/,/# cube-portals end/d' /etc/hosts && printf '%s\\n' "$1" >> /etc/hosts`;
+  const exit = await host.execRoot(["sh", "-c", script, "sh", block], signal);
   if (exit !== 0) throw new Error("services: could not write portal hostnames to the cube's /etc/hosts");
 }
 
 /** Poll host->cubeIP readiness: HTTP GET 2xx/3xx when a health path is
- * declared, plain TCP accept otherwise. */
+ * declared, plain TCP accept otherwise. A unit whose process exits fails
+ * fast instead of running out the whole deadline. */
 async function waitReady(
   host: ServicesHost,
   port: number,
   health: string | null,
   timeoutMs: number,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  unit: string,
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
-  for (;;) {
+  for (let attempt = 0; ; attempt++) {
     signal?.throwIfAborted();
     if (await probeOnce(host.cubeIp, port, health, signal)) return true;
     if (Date.now() >= deadline) return false;
+    if (attempt % UNIT_CHECK_EVERY === 0 && !(await unitActive(host, unit, signal))) return false;
     await abortableDelay(READY_POLL_MS, signal);
   }
 }
+
+const unitActive = async (host: ServicesHost, unit: string, signal?: AbortSignal): Promise<boolean> =>
+  (await host.execRoot(["systemctl", "is-active", "--quiet", unit], signal)) === 0;
 
 function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new Error("service ensure aborted");
@@ -274,7 +344,9 @@ function probeOnce(ip: string, port: number, health: string | null, signal?: Abo
       signal?.removeEventListener("abort", onAbort);
       resolve(result);
     };
-    const request = http.get({ host: ip, port, path: health, timeout: 2_000 }, (res) => {
+    // agent:false — a pooled socket to a service that then restarts would
+    // error on reuse and read as one spurious failed probe.
+    const request = http.get({ host: ip, port, path: health, timeout: 2_000, agent: false }, (res) => {
       res.resume();
       finish((res.statusCode ?? 500) < 400);
     });
@@ -290,7 +362,7 @@ function probeOnce(ip: string, port: number, health: string | null, signal?: Abo
   });
 }
 
-/** Why is it not ready? The classic is binding 127.0.0.1 (PLAN §10 risk 7):
+/** Why is it not ready? The classic is binding 127.0.0.1 (ARCHITECTURE §10 risk 7):
  * reachable from inside the netns but not from the host — say so. */
 async function failureDetail(
   host: ServicesHost,
@@ -307,8 +379,7 @@ async function failureDetail(
       `(e.g. --host 0.0.0.0) to be reachable through the portal`
     );
   }
-  const active = (await host.execRoot(["systemctl", "is-active", "--quiet", unit], signal)) === 0;
-  return active
+  return (await unitActive(host, unit, signal))
     ? `did not become ready on port ${port} within ${readyTimeoutMs / 1000}s — check \`journalctl -u ${unit}\``
     : `exited before becoming ready — check \`journalctl -u ${unit}\``;
 }

@@ -1,5 +1,5 @@
 /**
- * @cube/git — host-side git and PR flow (PLAN §11). Credentials never leave
+ * @cube/git — host-side git and PR flow (ARCHITECTURE §11). Credentials never leave
  * the host: a cube's workspace is a plain local clone (seeded from a bare
  * mirror under reposRoot, so repeat cube creation needs no network) whose
  * `origin` points at the real upstream. The agent commits locally over bash;
@@ -305,6 +305,31 @@ export class GitService {
     });
   }
 
+  /** `<oid>:<relPath>` from the host mirror of `url`: the blob's text, or
+   * null when the path is absent (or a tree). Read-only against objects
+   * the mirror already holds — the project check validates a declared
+   * environment folder at the exact pinned commit, so a later push can
+   * never point new threads at a folder that is not there. */
+  async readFileAtCommit(url: string, oid: string, relPath: string): Promise<string | null> {
+    if (!/^[0-9a-f]{7,64}$/.test(oid)) throw new Error(`invalid commit: ${oid}`);
+    try {
+      return (await this.git(["--git-dir", this.mirrorPathFor(url), "cat-file", "blob", `${oid}:${relPath}`], LOCAL_TIMEOUT_MS)).stdout;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Whether `<oid>:<relPath>` exists (file or tree) in the host mirror of `url`. */
+  async pathExistsAtCommit(url: string, oid: string, relPath: string): Promise<boolean> {
+    if (!/^[0-9a-f]{7,64}$/.test(oid)) throw new Error(`invalid commit: ${oid}`);
+    try {
+      await this.git(["--git-dir", this.mirrorPathFor(url), "cat-file", "-e", `${oid}:${relPath}`], LOCAL_TIMEOUT_MS);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Refresh a host-owned mirror and resolve the exact branch tip a later
    * thread should seed from. This is the Project readiness boundary: all
    * network/auth work happens here, before the user starts a thread. */
@@ -581,8 +606,36 @@ export class GitService {
     const { branch } = await this.state(ws, undefined, signal);
     if (!branch) throw new Error("cannot push: detached HEAD");
     assertRefName(branch);
+    if (branch.startsWith("cube-review/")) {
+      throw new Error("cannot push a prepared review branch directly; inspect planPrUpdate and use publishPrUpdate");
+    }
     const target = targetBranch ?? branch;
     assertRefName(target);
+    // All publication entry points (including push-to-base and createPr)
+    // converge here. A normal fast-forward check alone cannot establish
+    // that an agent preserved the tree or understood a restacked PR.
+    const slug = parseGitHubRepo(url);
+    if (slug) {
+      fs.mkdirSync(this.reposRoot, { recursive: true });
+      let pulls: unknown;
+      try {
+        const { stdout } = await this.run("gh", [
+          "api", "--hostname", "github.com", "--method", "GET",
+          `repos/${slug}/pulls?state=open&head=${encodeURIComponent(`${slug.split("/")[0]}:${target}`)}&per_page=1`,
+        ], { cwd: this.reposRoot, timeoutMs: NETWORK_TIMEOUT_MS, signal });
+        pulls = JSON.parse(stdout);
+      } catch {
+        throw new Error("cannot push: unable to verify existing pull requests; remote was not changed");
+      }
+      if (!Array.isArray(pulls)) {
+        throw new Error("cannot push: incomplete pull request response; remote was not changed");
+      }
+      // Only existence matters, so one result is sufficient; no truncated
+      // PR list is ever interpreted as a complete stack snapshot.
+      if (pulls.length > 0) {
+        throw new Error("cannot push: target branch belongs to an existing open pull request. Use preparePrUpdate, planPrUpdate, and publishPrUpdate to preserve its authoritative head and native GitHub stack. Do not bypass this check using another branch.");
+      }
+    }
     await this.ensureMirrorExists(url, signal);
     const mirror = this.mirrorPathFor(url);
     // Full-history bundle of the branch: self-contained (no prerequisites
@@ -705,3 +758,5 @@ export class GitService {
     return this.run("git", [...SAFE_CONFIG, ...args], { timeoutMs, maxBuffer, signal });
   }
 }
+
+export { PrReviewService } from "./pr-review.ts";

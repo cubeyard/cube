@@ -17,11 +17,18 @@
     "build": "pnpm --filter @cube/web build",
     "test": "bash scripts/test-offline.sh",
     "typecheck": "tsc -p tsconfig.json && pnpm --filter @cube/web check",
+    "lint": "eslint .",
     "vm": "bash scripts/vm/dev.sh"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^26.3.0",
     "@types/ws": "^8.18.1",
-    "typescript": "^5.9.0"
+    "eslint": "^10.10.0",
+    "eslint-plugin-svelte": "^3.23.0",
+    "globals": "^17.12.0",
+    "svelte-eslint-parser": "^1.8.1",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.70.0"
   }
 }

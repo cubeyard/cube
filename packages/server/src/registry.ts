@@ -1,5 +1,5 @@
 /**
- * cubed's SQLite registry (PLAN §7) — metadata only, for what pi cannot
+ * cubed's SQLite registry (ARCHITECTURE §7) — metadata only, for what pi cannot
  * know: which cubes exist (with their allocated subnet), which pi session
  * file backs each thread, service portals (stable hostnames), and volumes. Conversation
  * content stays in pi's JSONL session files; the SSE buffer stays in-memory.
@@ -11,14 +11,60 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import type { EventInput } from "./events.ts";
+import { createLogger } from "./log.ts";
+import { APP_VERSION } from "./version.ts";
+
+// Every error column is written here, so every caller's failure reaches the
+// journal (and `cube diagnose`) without each of them remembering to log.
+const log = createLogger("registry");
+
+/** The journal gets the head of an error, not the whole script tail: the
+ * full text stays in the registry (same host, same trust), while a
+ * `.cube/setup` that echoed a secret is not copied into logs wholesale. */
+const brief = (error: string): string => (error.length > 200 ? `${error.slice(0, 200)}…` : error);
+
+/** One recorded lifecycle event (see events.ts). */
+export interface EventRow {
+  id: number;
+  /** ms epoch when the event was recorded (the end of a timed phase). */
+  ts: number;
+  kind: string;
+  phase: string | null;
+  /** Groups the phases of one operation; null for point events. */
+  op: string | null;
+  cube: string | null;
+  thread: string | null;
+  ok: boolean;
+  ms: number | null;
+  detail: string | null;
+  version: string;
+}
+
+export interface EventFilter {
+  since?: number;
+  until?: number;
+  cube?: string;
+  thread?: string;
+  kind?: string;
+  /** Failures only. */
+  failed?: boolean;
+  limit?: number;
+}
+
 export interface CubeRow {
   id: number;
   name: string;
-  /** creating | ready | asleep | waking | error. */
+  /** creating | ready | asleep | waking | error | building-environment (internal). */
   status: string;
   error: string | null;
   image: string;
   workspacePath: string;
+  /** "<checkout>/<path>" of a reference repository whose folder carries
+   * this cube's .cube (setup, resume, cube.toml); null = the primary
+   * checkout's own .cube. Snapshotted from the project at creation, like
+   * the repositories. */
+  environment: string | null;
   subnetIndex: number;
   createdAt: number;
   lastActiveAt: number;
@@ -41,6 +87,10 @@ export interface ProjectRow {
   name: string;
   status: ProjectStatus;
   error: string | null;
+  /** "<checkout>/<path>": a folder of a reference repository that carries
+   * the .cube directory, for a primary repository that does not ship one.
+   * null = the primary's own .cube. */
+  environment: string | null;
   revision: number;
   checkedAt: number | null;
   createdAt: number;
@@ -73,6 +123,23 @@ export interface CubeRepositoryRow {
   baseOid: string;
   checkoutName: string;
   workspacePath: string;
+}
+
+/** A prepared environment: a stopped builder instance plus snapshots of
+ * its rootfs and docker volume, cloned into every thread of the project
+ * whose environment declaration hashes to `key`. `building` rows mark a
+ * capture in flight (boot cleans them up); only `ready` rows are cloned. */
+export interface EnvironmentTemplateRow {
+  id: string;
+  projectId: string;
+  key: string;
+  status: "building" | "ready";
+  instance: string;
+  snapshot: string;
+  volume: string;
+  volumeSnapshot: string;
+  createdAt: number;
+  usedAt: number;
 }
 
 export interface PortalRow {
@@ -114,7 +181,9 @@ const SUBNET_MAX = 249;
 
 // Linux IFNAMSIZ is 16 (15 usable): "cbr-" + name must fit, so cube names
 // are capped at 11 chars. Validated at cube creation, before any allocation.
-export const CUBE_NAME_RE = /^[a-z][a-z0-9-]{0,10}$/;
+/** Also half of the portal label `<service>--<cube>`: no `--` inside and
+ * no trailing hyphen, or the label would not split (or be a DNS label). */
+export const CUBE_NAME_RE = /^[a-z](?:-?[a-z0-9]){0,10}$/;
 
 export function networkForCube(name: string, subnetIndex: number): CubeNetworkPlan {
   return {
@@ -135,11 +204,12 @@ export class Registry {
     this.db.exec("PRAGMA foreign_keys = ON");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS project (
-        id         TEXT PRIMARY KEY,
-        name       TEXT NOT NULL COLLATE NOCASE UNIQUE,
-        status     TEXT NOT NULL,
-        error      TEXT,
-        revision   INTEGER NOT NULL,
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        status      TEXT NOT NULL,
+        error       TEXT,
+        environment TEXT,
+        revision    INTEGER NOT NULL,
         checked_at INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
@@ -166,6 +236,7 @@ export class Registry {
         error          TEXT,
         image          TEXT NOT NULL,
         workspace_path TEXT NOT NULL,
+        environment    TEXT,
         subnet_index   INTEGER NOT NULL UNIQUE,
         created_at     INTEGER NOT NULL,
         last_active_at INTEGER NOT NULL
@@ -208,17 +279,120 @@ export class Registry {
         cap_bytes   INTEGER NOT NULL,
         UNIQUE(cube_id, purpose)
       );
+      CREATE TABLE IF NOT EXISTS environment_template (
+        id              TEXT PRIMARY KEY,
+        project_id      TEXT NOT NULL REFERENCES project(id) ON DELETE RESTRICT,
+        key             TEXT NOT NULL,
+        status          TEXT NOT NULL,
+        instance        TEXT NOT NULL UNIQUE,
+        snapshot        TEXT NOT NULL,
+        volume          TEXT NOT NULL,
+        volume_snapshot TEXT NOT NULL,
+        created_at      INTEGER NOT NULL,
+        used_at         INTEGER NOT NULL,
+        UNIQUE(project_id, key)
+      );
+      CREATE TABLE IF NOT EXISTS event (
+        id      INTEGER PRIMARY KEY,
+        ts      INTEGER NOT NULL,
+        kind    TEXT NOT NULL,
+        phase   TEXT,
+        op      TEXT,
+        cube    TEXT,
+        thread  TEXT,
+        ok      INTEGER NOT NULL,
+        ms      INTEGER,
+        detail  TEXT,
+        version TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS event_ts ON event(ts);
+      CREATE INDEX IF NOT EXISTS event_cube_ts ON event(cube, ts);
     `);
-    this.migrateThreadArchive();
     this.migratePortalTable();
     this.requireProjectThreads();
+    this.migrateThreadArchive(); // after: the project upgrade recreates `thread` without it
+    this.migrateEnvironmentColumns();
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS thread_cube_id_unique ON thread(cube_id)");
+  }
+
+  // ---------------------------------------------------------------- events
+
+  /** Append one lifecycle event (events.ts). Never throws into the caller:
+   * a full disk must not turn a successful wake into a failure. Events are
+   * not part of any cube/thread cascade — history outlives deletion. */
+  recordEvent(input: EventInput): void {
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO event (ts, kind, phase, op, cube, thread, ok, ms, detail, version)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          Date.now(),
+          input.kind,
+          input.phase ?? null,
+          input.op ?? null,
+          input.cube ?? null,
+          input.thread ?? null,
+          input.ok ? 1 : 0,
+          input.ms ?? null,
+          input.detail ?? null,
+          APP_VERSION,
+        );
+    } catch (error) {
+      console.log(`event not recorded (${input.kind}): ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** Newest first. */
+  listEvents(filter: EventFilter = {}): EventRow[] {
+    const where: string[] = [];
+    const params: Array<string | number> = [];
+    if (filter.since !== undefined) { where.push("ts >= ?"); params.push(filter.since); }
+    if (filter.until !== undefined) { where.push("ts <= ?"); params.push(filter.until); }
+    if (filter.cube) { where.push("cube = ?"); params.push(filter.cube); }
+    if (filter.thread) { where.push("thread = ?"); params.push(filter.thread); }
+    if (filter.kind) { where.push("kind = ?"); params.push(filter.kind); }
+    if (filter.failed) where.push("ok = 0");
+    const limit = Math.min(Math.max(Math.floor(filter.limit ?? 200), 1), 10_000);
+    const sql = `SELECT * FROM event${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY ts DESC, id DESC LIMIT ?`;
+    return (this.db.prepare(sql).all(...params, limit) as unknown[]).map(eventRow);
+  }
+
+  /** Drop events older than the retention window and, beyond `maxRows`,
+   * the oldest of the rest; returns how many went. Best-effort like
+   * recordEvent: telemetry maintenance must never stop a boot or a sweep. */
+  pruneEvents(olderThanMs: number, maxRows = 200_000): number {
+    try {
+      let changes = Number(this.db.prepare("DELETE FROM event WHERE ts < ?").run(Date.now() - olderThanMs).changes);
+      changes += Number(
+        this.db
+          .prepare("DELETE FROM event WHERE id NOT IN (SELECT id FROM event ORDER BY id DESC LIMIT ?)")
+          .run(Math.max(1, Math.floor(maxRows))).changes,
+      );
+      return changes;
+    } catch (error) {
+      console.log(`events not pruned: ${error instanceof Error ? error.message : String(error)}`);
+      return 0;
+    }
   }
 
   private migrateThreadArchive(): void {
     const columns = this.db.prepare("PRAGMA table_info(thread)").all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === "archived_at")) {
       this.db.exec("ALTER TABLE thread ADD COLUMN archived_at INTEGER");
+    }
+  }
+
+  /** A project may keep its environment (.cube) in a reference repository
+   * (2026-09-10); a cube snapshots that choice as it snapshots repositories.
+   * Nullable and additive: older rows keep the primary's own .cube. */
+  private migrateEnvironmentColumns(): void {
+    for (const table of ["project", "cube"]) {
+      const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === "environment")) {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN environment TEXT`);
+      }
     }
   }
 
@@ -274,15 +448,16 @@ export class Registry {
     id: string;
     name: string;
     repositories: Array<{ id: string; url: string; base: string | null; checkoutName: string }>;
+    environment?: string | null;
   }): ProjectRow {
     const now = Date.now();
     this.transaction(() => {
       this.db
         .prepare(
-          `INSERT INTO project (id, name, status, error, revision, checked_at, created_at, updated_at)
-           VALUES (?, ?, 'checking', NULL, 1, NULL, ?, ?)`,
+          `INSERT INTO project (id, name, status, error, environment, revision, checked_at, created_at, updated_at)
+           VALUES (?, ?, 'checking', NULL, ?, 1, NULL, ?, ?)`,
         )
-        .run(input.id, input.name, now, now);
+        .run(input.id, input.name, input.environment ?? null, now, now);
       this.insertProjectRepositories(input.id, input.repositories);
     });
     return this.getProject(input.id)!;
@@ -293,6 +468,7 @@ export class Registry {
     input: {
       name: string;
       repositories: Array<{ id: string; url: string; base: string | null; checkoutName: string }>;
+      environment?: string | null;
     },
   ): ProjectRow {
     const now = Date.now();
@@ -300,11 +476,11 @@ export class Registry {
       const result = this.db
         .prepare(
           `UPDATE project
-           SET name = ?, status = 'checking', error = NULL, checked_at = NULL,
+           SET name = ?, status = 'checking', error = NULL, environment = ?, checked_at = NULL,
                revision = revision + 1, updated_at = ?
            WHERE id = ?`,
         )
-        .run(input.name, now, id);
+        .run(input.name, input.environment ?? null, now, id);
       if (result.changes === 0) throw new Error(`no such project: ${id}`);
       this.db.prepare("DELETE FROM project_repository WHERE project_id = ?").run(id);
       this.insertProjectRepositories(id, input.repositories);
@@ -390,6 +566,7 @@ export class Registry {
         result.checkedAt,
         id,
       );
+    if (result.error) log.warn("project repository error", { repository: id, status: result.status, error: brief(result.error) });
   }
 
   finishProjectCheck(
@@ -405,6 +582,7 @@ export class Registry {
          WHERE id = ? AND revision = ?`,
       )
       .run(status, error, checkedAt, checkedAt, id, revision);
+    if (error) log.warn("project error", { project: id, revision, status, error: brief(error) });
   }
 
   countThreadsForProject(projectId: string): number {
@@ -434,12 +612,53 @@ export class Registry {
     }
   }
 
+  // --------------------------------------------------- environment templates
+
+  createEnvironmentTemplate(input: Omit<EnvironmentTemplateRow, "createdAt" | "usedAt">): EnvironmentTemplateRow {
+    const now = Date.now();
+    this.db.prepare(
+      `INSERT INTO environment_template (id, project_id, key, status, instance, snapshot, volume, volume_snapshot, created_at, used_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(input.id, input.projectId, input.key, input.status, input.instance, input.snapshot, input.volume, input.volumeSnapshot, now, now);
+    return this.getEnvironmentTemplate(input.id)!;
+  }
+
+  getEnvironmentTemplate(id: string): EnvironmentTemplateRow | null {
+    const row = this.db.prepare("SELECT * FROM environment_template WHERE id = ?").get(id);
+    return row ? environmentTemplateRow(row) : null;
+  }
+
+  findEnvironmentTemplate(projectId: string, key: string): EnvironmentTemplateRow | null {
+    const row = this.db.prepare("SELECT * FROM environment_template WHERE project_id = ? AND key = ?").get(projectId, key);
+    return row ? environmentTemplateRow(row) : null;
+  }
+
+  listEnvironmentTemplates(projectId?: string): EnvironmentTemplateRow[] {
+    const rows = projectId === undefined
+      ? this.db.prepare("SELECT * FROM environment_template ORDER BY created_at").all()
+      : this.db.prepare("SELECT * FROM environment_template WHERE project_id = ? ORDER BY created_at").all(projectId);
+    return (rows as unknown[]).map(environmentTemplateRow);
+  }
+
+  setEnvironmentTemplateStatus(id: string, status: EnvironmentTemplateRow["status"]): void {
+    this.db.prepare("UPDATE environment_template SET status = ?, used_at = ? WHERE id = ?").run(status, Date.now(), id);
+  }
+
+  touchEnvironmentTemplate(id: string): void {
+    this.db.prepare("UPDATE environment_template SET used_at = ? WHERE id = ?").run(Date.now(), id);
+  }
+
+  deleteEnvironmentTemplate(id: string): void {
+    this.db.prepare("DELETE FROM environment_template WHERE id = ?").run(id);
+  }
+
   // ------------------------------------------------------------------ cube
 
   createCube(input: {
     name: string;
     image: string;
     workspacePath: string;
+    environment?: string | null;
   }): CubeRow {
     if (!CUBE_NAME_RE.test(input.name)) {
       throw new Error(
@@ -450,10 +669,10 @@ export class Registry {
     const now = Date.now();
     this.db
       .prepare(
-        `INSERT INTO cube (name, status, image, workspace_path, subnet_index, created_at, last_active_at)
-         VALUES (?, 'creating', ?, ?, ?, ?, ?)`,
+        `INSERT INTO cube (name, status, image, workspace_path, environment, subnet_index, created_at, last_active_at)
+         VALUES (?, 'creating', ?, ?, ?, ?, ?, ?)`,
       )
-      .run(input.name, input.image, input.workspacePath, subnetIndex, now, now);
+      .run(input.name, input.image, input.workspacePath, input.environment ?? null, subnetIndex, now, now);
     return this.getCube(input.name)!;
   }
 
@@ -527,6 +746,7 @@ export class Registry {
     this.db
       .prepare("UPDATE cube SET status = ?, error = ? WHERE name = ?")
       .run(status, error, name);
+    if (error) log.warn("cube error", { cube: name, status, error: brief(error) });
   }
 
   touchCube(name: string): void {
@@ -637,7 +857,6 @@ export class Registry {
   }
 }
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 function cubeRow(r: any): CubeRow {
   return {
     id: Number(r.id),
@@ -646,9 +865,26 @@ function cubeRow(r: any): CubeRow {
     error: r.error === null ? null : String(r.error),
     image: String(r.image),
     workspacePath: String(r.workspace_path),
+    environment: r.environment === null || r.environment === undefined ? null : String(r.environment),
     subnetIndex: Number(r.subnet_index),
     createdAt: Number(r.created_at),
     lastActiveAt: Number(r.last_active_at),
+  };
+}
+
+function eventRow(r: any): EventRow {
+  return {
+    id: Number(r.id),
+    ts: Number(r.ts),
+    kind: String(r.kind),
+    phase: r.phase === null ? null : String(r.phase),
+    op: r.op === null ? null : String(r.op),
+    cube: r.cube === null ? null : String(r.cube),
+    thread: r.thread === null ? null : String(r.thread),
+    ok: Number(r.ok) === 1,
+    ms: r.ms === null ? null : Number(r.ms),
+    detail: r.detail === null ? null : String(r.detail),
+    version: String(r.version),
   };
 }
 
@@ -670,6 +906,7 @@ function projectRow(r: any): ProjectRow {
     name: String(r.name),
     status: String(r.status) as ProjectStatus,
     error: r.error === null ? null : String(r.error),
+    environment: r.environment === null || r.environment === undefined ? null : String(r.environment),
     revision: Number(r.revision),
     checkedAt: r.checked_at === null ? null : Number(r.checked_at),
     createdAt: Number(r.created_at),
@@ -704,6 +941,21 @@ function cubeRepositoryRow(r: any): CubeRepositoryRow {
     baseOid: String(r.base_oid),
     checkoutName: String(r.checkout_name),
     workspacePath: String(r.workspace_path),
+  };
+}
+
+function environmentTemplateRow(r: any): EnvironmentTemplateRow {
+  return {
+    id: String(r.id),
+    projectId: String(r.project_id),
+    key: String(r.key),
+    status: String(r.status) as EnvironmentTemplateRow["status"],
+    instance: String(r.instance),
+    snapshot: String(r.snapshot),
+    volume: String(r.volume),
+    volumeSnapshot: String(r.volume_snapshot),
+    createdAt: Number(r.created_at),
+    usedAt: Number(r.used_at),
   };
 }
 

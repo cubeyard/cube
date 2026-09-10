@@ -1,18 +1,22 @@
 # Handoff
 
 Short operational context for the next session, not a release log. Updated
-2026-09-08; live verification below is the last recorded evidence, not a fresh
+2026-09-10; live verification below is the last recorded evidence, not a fresh
 launch sign-off. Completed phase reports and review histories remain in Git.
 
 ## Start here
 
+- [AGENTS.md](AGENTS.md): how an agent builds, deploys a working tree into
+  the VM, drives the browser, reads state and events, and what not to cross.
 - [README.md](README.md): product, installation and everyday commands.
 - [DEVELOPING.md](DEVELOPING.md): mock/VM loops, releases, launcher and env vars.
 - [PRODUCT.md](PRODUCT.md), [DESIGN.md](DESIGN.md), [.impeccable/](.impeccable/):
   product and design contracts. The quieter, more machined rendition wins.
 - [SECURITY.md](SECURITY.md): deployment boundary and vulnerability reporting.
-- [PLAN.md](PLAN.md): architecture decisions and roadmap; dated phase statuses
-  are historical, not a current completion checklist.
+- [ARCHITECTURE.md](ARCHITECTURE.md): the evergreen decisions (cited as
+  `ARCHITECTURE §N`); [docs/history.md](docs/history.md): rejected
+  alternatives, the phase plan and the decision log — historical, not a
+  checklist.
 
 Leverage pi rather than rebuilding it: pi owns the agent loop, JSONL session
 history, compaction, provider auth/refresh, model catalog and tool definitions.
@@ -40,6 +44,19 @@ evidence; do not infer acceptance from a successful build.
    checklist (connect GitHub → create project → open thread and `/login`), an
    actionable GitHub badge and a repository picker. Confirm current completion;
    GitHub is needed for push/PR even when anonymous public-repo reads work.
+   The repository picker exists on the `feat/repo-autocomplete` branch (#20);
+   its cold path is slow and its failure states conflate "signed out" with
+   "GitHub unreachable" — see the review on the PR and the fix branch.
+6. **The 2026-09-10 release (#27)**: the overnight stack plus #20, #21 and
+   the fixes to every review finding, assembled on one branch. The
+   assembled tree was deployed to the amd64 launcher VM and passed
+   `scripts/smoke-live.ts`, a delete during setup (cancel in 130 ms, nothing
+   left behind), an idempotent replay, and the browser checks; the launcher
+   rollback was exercised in an isolated `CUBE_HOME`; the bounded Incus
+   waits are proven against a fake daemon only. Not verified: arm64, the
+   release build after the package fold (`build-app.sh` stages the whole
+   tree; unchanged by inspection), the macOS HVF preflight, and the
+   `?timeout=` wait slices against a live Incus (needs the VM portfolio).
 
 Pushes, PRs, releases and destructive acceptance steps require explicit
 authorization. A shipped-file push to main triggers a release only when the
@@ -49,6 +66,28 @@ Do not expose cubed publicly: it has no application-level authentication.
 
 ## Last recorded live evidence
 
+- **2026-09-10:** the overnight stack on the v0.1.11 launcher VM (amd64):
+  `deploy-tree.sh` + `smoke-live` passed five times across the branches
+  (provision ≈ 3–4 s with a cached image, wake ≈ 1 s, terminal first byte
+  ≈ 0.6–0.9 s); `/api/events` recorded every phase; a thread driven through
+  provision → sleep → wake showed `setting-up` with staged status lines and
+  `sleeping → waking → ready`; the deleted thread's host tree was gone.
+  #21 merged with the events work resolved eight `supervisor.ts` hunks; the
+  combined tree passed the same smoke. Eight orphaned host trees from earlier
+  test threads were found under `~/cube/cubes` and removed by hand; boot now
+  names such trees in an event. PR #20 (repository autocomplete) tested in
+  the browser: list, filter, keyboard select and name autofill work; cold
+  load 6 s, warm 0.8 s.
+- **2026-09-09:** bug-hunt branch verified against the public v0.1.3 VM on
+  Linux/KVM, driven from a headless browser: thread creation, the pi TUI,
+  declared services with portals (bootstrap, wake-on-request, heal after a
+  service crash, rename retiring the old unit, a failing service's 502 page,
+  in-cube hairpin), thread deletion. Offline suites: 17/17. Traps found:
+  cubed served `index.html` without cache headers, so an in-place app update
+  left tabs on assets that no longer existed (now `no-cache` + immutable
+  assets); a renamed service inherited the old unit's port and was
+  "confirmed" by the old process (ensure now retires undeclared units and
+  fingerprints declarations in the unit description).
 - **2026-09-04:** private pre-public release v0.6.2 completed the automatic
   main-push release path on both architectures, with amd64 boot verification.
   This is a historical checkpoint, not a claim about today's latest release;
@@ -73,6 +112,14 @@ threads require `ready` and seed only those OIDs: no provisioning-time
 network/auth lookup. The primary checkout is `/workspace`; optional reference
 repositories mount at `/repos/<checkout-name>` and are read-only. Review and
 ship operate on the immutable primary repository snapshot.
+
+A project may declare `environment = "<checkout>/<folder>"`: its `.cube`
+(setup, resume, cube.toml) then comes from that folder of a reference
+repository instead of the primary checkout — read-only in the thread, verified
+and parsed at the pinned commit by the project check, snapshotted per cube
+(`cube.environment`). `supervisor.ts` `environmentDirs` is the one place that
+maps it to host and guest paths. `[network] allow` in `cube.toml` extends the
+egress allowlist and is re-read at every proxy start (`startProxy`).
 
 Threads are the home, newest-first across projects, with a URL-backed project
 filter and explicit project/name attribution. Do not use a pre-project populated
@@ -106,9 +153,30 @@ Overlay `.runtime`/`.build` sidecars support recovery; pruning must retain each
 overlay's backing file, even after tarball updates.
 
 `launcher/cube` owns install, upgrade and host preflight. State is in `~/.cube`;
-downloads are content-addressed and verified. Unclaimed busy ports move to the
-next free port and are remembered. `scripts/vm/sync.sh` deploys `origin/main`,
-not the working tree; image-level changes need a rebuild.
+downloads are content-addressed and verified. Preflight (tools, accelerator,
+firmware, ports) runs before the first download; boot prerequisites apply to
+`upgrade` only when it will boot. An app-only upgrade fetches the previous
+release's tarball first and rolls back when cubed never answers; the version
+file is written only after the new release proved itself. Unclaimed busy
+ports move to the next free port and are remembered. `scripts/vm/sync.sh`
+deploys `origin/main`; `scripts/vm/deploy-tree.sh` deploys the working tree
+into the launcher VM (or `--dev`) without touching `build-id`; image-level
+changes need a rebuild.
+
+### Observability
+
+cubed records every lifecycle transition as an event in the registry
+(`packages/server/src/events.ts`): provision/wake/sleep/destroy spans with
+phases, boot reconciliation, project checks, service ensures, git ops,
+terminal spawn/exit/reap, setup retries, environment maintenance (builder
+cleanups, quarantined cache entries, a suspended cache), portal failures and
+WebSocket wakes, API 500s, and egress allow/deny per host aggregated per
+minute (bounded per cube). Events are raw and stamped
+with the running version; `GET /api/events`, `cube events` and
+`scripts/events-report.ts` read them; retention 30 days / 200k rows. The
+journal (`packages/server/src/log.ts`, `CUBED_LOG_LEVEL`) carries every error
+column write with the thread/cube id; `cube diagnose` bundles 24 h of it.
+Firewall-level (nftables) drops are not recorded yet.
 
 ### Release and validation
 
@@ -141,6 +209,22 @@ changes; mock success is not sandbox acceptance. See DEVELOPING.md for commands.
   wake and guard deletion against in-flight transitions.
 - Thread row IDs remain stable across session changes. Hook failures report an
   error without bricking the cube; hooks must tolerate re-runs.
+- Internals speak in `String(error)`; the product surface never renders it.
+  `packages/server/src/user-facing.ts` is the one translation point (thread
+  vocabulary, one sentence, a next step); the raw text stays in the registry,
+  journal and events for diagnosis. `waking` is a thread state of its own.
+- Sleep and boot demotions keep the cube's error text. A wake request is
+  activity (the extension asks before every tool call), so the idle sweep
+  cannot sleep a long quiet tool. The pty linger waits for a full window of
+  output silence, not merely of no clients.
+- Deleting a thread removes its host tree (`removeStoppedTree` on the cube
+  directory) after the instance is destroyed; boot only names orphan trees.
+  A delete mid-setup cancels the provision (abort, await the transition,
+  then tear down) — the removal is reserved before the abort, and a
+  builder (`building-environment`) is never cancelled through a thread.
+- `POST /api/threads` is idempotent per project and request key
+  (`Idempotency-Key` / body `requestId`, ten minutes, in memory); the web
+  client sends one key per user action.
 - Plain HTTP over the Tailnet is an insecure browser context. Feature-detect
   clipboard/crypto APIs; use the existing UID fallback, not `crypto.randomUUID`
   unconditionally. UI is Svelte 5 + Vite, not SvelteKit; freeze completed
@@ -166,6 +250,20 @@ changes; mock success is not sandbox acceptance. See DEVELOPING.md for commands.
 
 ## Follow-ups, not recorded launch blockers
 
+- The interrupted-provision instance that can never wake (missing static
+  network config) must be re-audited on top of #21's recovery path.
+- A thread deleted while waiting on a shared environment build leaves the
+  build running for the next thread — by design, a builder has no thread.
+  Prepared environments are templates (a stopped builder instance plus
+  snapshots), cloned per thread; the ten-minute maintenance cadence is a
+  constant, not configuration. Threads always run setup themselves (warm on
+  a clone), so `.cube/setup` must be idempotent and cheap when nothing is
+  missing.
+- Every Incus wait is bounded and cancellable (`IncusTimeoutError`), but a
+  streaming exec without a caller timeout still has only the liveness bound;
+  every current caller passes one.
+- Launcher: reboot-path upgrades get recovery instructions, not a rollback;
+  the macOS HVF preflight is by inspection.
 - Add an arm64 boot gate; distribute UEFI firmware (requires manifest schema 3).
 - Pin cube-node inputs (Ubuntu alias, Docker apt key, Node checksums).
 - Further base-size reduction and a Homebrew formula.

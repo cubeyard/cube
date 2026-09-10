@@ -14,6 +14,9 @@
  *   [services.web.env]
  *   API_MODE = "development"
  *
+ *   [network]
+ *   allow = ["repo.maven.apache.org", "*.gradle.org"]  # extra egress hosts (ARCHITECTURE §12)
+ *
  * This is deliberately NOT a TOML parser (no dep, no scope creep): only
  * double-quoted basic strings (`\\`, `\"`, `\n`, `\t` escapes), bare
  * integers, `#` comments, and the sections above are supported. Anything
@@ -21,9 +24,17 @@
  * wake/ensure, never a bricked cube. The file lives in the workspace, i.e.
  * it is agent-writable by design: hooks and services run INSIDE the cube,
  * so a malicious entry gains nothing the agent's bash tool did not already
- * have.
+ * have. `network.allow` is the one entry that reaches the host: it extends
+ * the egress proxy's allowlist, which vets every name (public addresses,
+ * ports 80/443 only — packages/sandbox/src/egress-proxy.ts), so the worst
+ * an agent-written entry buys is reaching one more public web host.
+ *
+ * The directory that holds cube.toml is the cube's *environment directory*:
+ * `<workspace>/.cube` by default, or a `.cube` folder inside a reference
+ * repository when the project declares one (supervisor `environmentDirs`).
  */
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 
 /** One `[services.<name>]` declaration. */
@@ -42,6 +53,8 @@ export interface ServiceSpec {
 export interface CubeConfig {
   wakeHooks: string[];
   services: ServiceSpec[];
+  /** Extra egress hosts, exact ("repo.maven.apache.org") or wildcard ("*.gradle.org"). */
+  networkAllow: string[];
 }
 
 /** Also the portal hostname label piece: `<service>--<cube>` must be a
@@ -50,45 +63,78 @@ export const SERVICE_NAME_RE = /^[a-z](?:-?[a-z0-9])*$/;
 const SERVICE_NAME_MAX = 20;
 
 export function parseCubeToml(toml: string): CubeConfig {
-  return { wakeHooks: parseWakeHooks(toml), services: parseServices(toml) };
+  return { wakeHooks: parseWakeHooks(toml), services: parseServices(toml), networkAllow: parseNetworkAllow(toml) };
 }
 
-/** Config for a cube, read host-side from `<workspace>/.cube/cube.toml`. */
-export function readCubeConfig(workspacePath: string): CubeConfig {
-  const file = path.join(workspacePath, ".cube", "cube.toml");
-  if (!fs.existsSync(file)) return { wakeHooks: [], services: [] };
+/** Config for a cube, read host-side from `<environmentDir>/cube.toml`. */
+export function readCubeConfig(environmentDir: string): CubeConfig {
+  const file = path.join(environmentDir, "cube.toml");
+  if (!fs.existsSync(file)) return { wakeHooks: [], services: [], networkAllow: [] };
   return parseCubeToml(fs.readFileSync(file, "utf8"));
 }
 
 export function parseWakeHooks(toml: string): string[] {
   const body = sectionBody(toml, "wake");
   if (body === null) return [];
-  const array = extractHooksArray(body);
-  if (array === null) return [];
-  const hooks: string[] = [];
+  return parseStringArray(body, "hooks", "wake.hooks") ?? [];
+}
+
+/** Hooks for a cube, read host-side from `<environmentDir>/cube.toml`. */
+export function readWakeHooks(environmentDir: string): string[] {
+  const file = path.join(environmentDir, "cube.toml");
+  if (!fs.existsSync(file)) return [];
+  return parseWakeHooks(fs.readFileSync(file, "utf8"));
+}
+
+// --------------------------------------------------------------- [network]
+
+/** A hostname with at least one dot, optionally `*.`-prefixed; matches what
+ * the egress proxy's matcher understands. No ports, schemes, paths or IP
+ * literals: an entry that is not a name is a typo worth naming. */
+const NETWORK_HOST_RE = /^(\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const NETWORK_ALLOW_MAX = 200;
+
+export function parseNetworkAllow(toml: string): string[] {
+  const body = sectionBody(toml, "network");
+  if (body === null) return [];
+  const entries = parseStringArray(body, "allow", "network.allow") ?? [];
+  if (entries.length > NETWORK_ALLOW_MAX) {
+    throw new Error(`cube.toml: network.allow lists more than ${NETWORK_ALLOW_MAX} hosts`);
+  }
+  return entries.map((raw) => {
+    const host = raw.trim().toLowerCase().replace(/\.$/, "");
+    if (host.length > 253 || !NETWORK_HOST_RE.test(host) || net.isIP(host)) {
+      throw new Error(
+        `cube.toml: network.allow entry ${JSON.stringify(raw)} must be a hostname like "repo.maven.apache.org" or "*.gradle.org"`,
+      );
+    }
+    return host;
+  });
+}
+
+/** `key = [ "a", "b" ]` inside one section body (null = no such key). */
+function parseStringArray(body: string, key: string, label: string): string[] | null {
+  const array = extractArray(body, key, label);
+  if (array === null) return null;
+  const values: string[] = [];
   // Strings out (marked \x00), then the remaining shape must be exactly
   // comma-separated markers with an optional trailing comma — `["a" "b"]`
   // and stray tokens are errors, not silently-accepted variants.
   const marked = array.replace(/"((?:[^"\\\n]|\\.)*)"/g, (_, raw: string) => {
-    hooks.push(unescapeBasic(raw));
+    values.push(unescapeBasic(raw));
     return "\x00";
   });
   if (!/^(\x00(,\x00)*,?)?$/.test(marked.replace(/\s+/g, ""))) {
-    throw new Error("cube.toml: wake.hooks must be a comma-separated array of double-quoted strings");
+    throw new Error(`cube.toml: ${label} must be a comma-separated array of double-quoted strings`);
   }
-  return hooks;
-}
-
-/** Hooks for a cube, read host-side from `<workspace>/.cube/cube.toml`. */
-export function readWakeHooks(workspacePath: string): string[] {
-  const file = path.join(workspacePath, ".cube", "cube.toml");
-  if (!fs.existsSync(file)) return [];
-  return parseWakeHooks(fs.readFileSync(file, "utf8"));
+  return values;
 }
 
 // ------------------------------------------------------------- [services.*]
 
 const SERVICE_KEYS = new Set(["command", "cwd", "port", "health"]);
+/** What systemd accepts in `--setenv=KEY=…` (a bad key fails the whole start). */
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export function parseServices(toml: string): ServiceSpec[] {
   const sections = allSections(toml);
@@ -117,6 +163,9 @@ export function parseServices(toml: string): ServiceSpec[] {
       for (const [key, value] of pairs) {
         if (value.kind !== "string") {
           throw new Error(`cube.toml: services.${name}.env.${key} must be a string`);
+        }
+        if (!ENV_KEY_RE.test(key)) {
+          throw new Error(`cube.toml: services.${name}.env.${key} is not a valid environment variable name`);
         }
         spec.env[key] = value.value;
       }
@@ -223,15 +272,15 @@ function sectionBody(toml: string, name: string): string | null {
   return null;
 }
 
-/** Contents of `hooks = [ ... ]`, comments stripped (null = no key). */
-function extractHooksArray(body: string): string | null {
-  const key = /(?:^|\n)[ \t]*hooks[ \t]*=[ \t]*/.exec(body);
+/** Contents of `<key> = [ ... ]`, comments stripped (null = no key). */
+function extractArray(body: string, keyName: string, label: string): string | null {
+  const key = new RegExp(`(?:^|\\n)[ \\t]*${keyName}[ \\t]*=[ \\t]*`).exec(body);
   if (!key) return null;
   const start = key.index + key[0].length;
   if (body[start] !== "[") {
     // A configured-but-wrong key must complain, not report a clean wake
     // with zero hooks (sol review).
-    throw new Error("cube.toml: wake.hooks must be an array ([...])");
+    throw new Error(`cube.toml: ${label} must be an array ([...])`);
   }
   let out = "";
   let inString = false;
@@ -253,7 +302,7 @@ function extractHooksArray(body: string): string | null {
       out += c;
     }
   }
-  throw new Error("cube.toml: unterminated wake.hooks array");
+  throw new Error(`cube.toml: unterminated ${label} array`);
 }
 
 function unescapeBasic(raw: string): string {

@@ -1,12 +1,12 @@
 /**
- * The swappable cube backend (PLAN §8: "backends must stay swappable").
+ * The swappable cube backend (ARCHITECTURE §8: "backends must stay swappable").
  *
  * The supervisor needs a small, fixed set of operations from the sandbox
  * layer — provision/destroy a cube, read/flip its run state, wait for its
  * network, stand up its egress proxy, and exec inside it. This interface is
  * exactly that surface, so the whole of cubed (server, registry, portals,
  * UI) can run against a simulated backend with no Incus daemon in reach —
- * the tier-1 loop of developing cube inside a cube (PLAN §13 3d.3).
+ * the tier-1 loop of developing cube inside a cube (ARCHITECTURE §13 3d.3).
  *
  * `IncusBackend` is the production path: a thin adapter over the existing
  * IncusClient + provision/destroy/proxy functions. `MockBackend` keeps its
@@ -22,9 +22,12 @@ import {
   waitForCubeNetwork,
   type CubeProvisionSpec,
   type CubeNetworkSpec,
+  type CubeTemplateSource,
+  type DestroyOptions,
+  type ProvisionOptions,
 } from "./cube-provision.ts";
 import { startEgressProxy, type EgressPolicy, type EgressProxy } from "./egress-proxy.ts";
-import { IncusClient, type IncusStateAction } from "./incus-client.ts";
+import { IncusClient, IncusHttpError, type IncusStateAction } from "./incus-client.ts";
 import { IncusSandbox, type Sandbox, type SandboxExecOptions } from "./index.ts";
 
 export type DestroySpec = Pick<CubeProvisionSpec, "name" | "pool"> & {
@@ -36,49 +39,89 @@ export interface EgressProxyOptions extends EgressPolicy {
   port: number;
 }
 
-/** The complete sandbox surface the supervisor depends on. */
+/** Options of `CubeBackend.setState`: Incus's graceful `timeout` (seconds,
+ * default 30) plus the client deadline `timeoutMs` and a cancel signal. */
+export interface SetStateOptions {
+  force?: boolean;
+  timeout?: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export interface WaitForNetworkOptions {
+  signal?: AbortSignal;
+  /** Default 30 s. */
+  timeoutMs?: number;
+}
+
+/** Cancel/deadline options of the template calls. */
+export interface TemplateOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+/** The complete sandbox surface the supervisor depends on. Every method
+ * that waits on Incus is bounded by a deadline and accepts an optional
+ * AbortSignal; a rejected wait carries the signal's reason or an
+ * `IncusTimeoutError`. */
 export interface CubeBackend {
   readonly kind: "incus" | "mock";
   /** Create and start a cube (idempotent per resource). */
-  provision(spec: CubeProvisionSpec): Promise<void>;
+  provision(spec: CubeProvisionSpec, opts?: ProvisionOptions): Promise<void>;
   /** Tear a cube down; keeps the docker volume/bridge unless asked. */
-  destroy(spec: DestroySpec, opts?: { deleteVolume?: boolean; deleteBridge?: boolean }): Promise<void>;
+  destroy(spec: DestroySpec, opts?: DestroyOptions): Promise<void>;
   /** Current run state — only `.status` ("Running"/"Stopped") is read. */
   getState(name: string): Promise<{ status: string }>;
   /** Start/stop/etc. */
-  setState(name: string, action: IncusStateAction, opts?: { force?: boolean; timeout?: number }): Promise<void>;
+  setState(name: string, action: IncusStateAction, opts?: SetStateOptions): Promise<void>;
   /** Resolve once the cube's eth0 holds `ip` (instant on the mock). */
-  waitForNetwork(name: string, ip: string): Promise<void>;
+  waitForNetwork(name: string, ip: string, opts?: WaitForNetworkOptions): Promise<void>;
   /** Stand up the per-cube egress proxy (a no-op stub on the mock). */
   startEgressProxy(opts: EgressProxyOptions): Promise<EgressProxy>;
   /** A streaming-exec handle for one cube. */
   sandbox(name: string): Sandbox;
   /** One-shot argv exec as root (systemd/service control). */
-  execSimple(name: string, command: string[], signal?: AbortSignal): Promise<number | null>;
+  execSimple(name: string, command: string[], signal?: AbortSignal, opts?: { timeoutMs?: number }): Promise<number | null>;
+  /** Resolve a mutable image name to its immutable Incus fingerprint. */
+  resolveImage(image: string): Promise<string>;
+  /** Turn a builder into an environment template: stop it, strip every
+   * device but root, and snapshot its rootfs and docker volume so threads
+   * can be cloned from them. The builder's bridge is released. */
+  captureTemplate(spec: CubeProvisionSpec, snapshot: string, opts?: TemplateOptions): Promise<CubeTemplateSource>;
+  /** Delete a template's instance and docker volume; clones live on. */
+  deleteTemplate(pool: string, template: CubeTemplateSource, opts?: TemplateOptions): Promise<void>;
+}
+
+export interface IncusBackendOptions {
+  /** Deadline per rollback step after a failed provision. Default 60 s. */
+  rollbackTimeoutMs?: number;
 }
 
 /** Production backend: real Incus over the local unix socket. */
 export class IncusBackend implements CubeBackend {
   readonly kind = "incus" as const;
   private readonly client: IncusClient;
-  constructor(client: IncusClient = new IncusClient()) {
+  private readonly rollbackTimeoutMs?: number;
+  constructor(client: IncusClient = new IncusClient(), opts: IncusBackendOptions = {}) {
     this.client = client;
+    this.rollbackTimeoutMs = opts.rollbackTimeoutMs;
   }
 
-  provision(spec: CubeProvisionSpec) {
-    return provisionCube(this.client, spec);
+  provision(spec: CubeProvisionSpec, opts: ProvisionOptions = {}) {
+    return provisionCube(this.client, spec, { rollbackTimeoutMs: this.rollbackTimeoutMs, ...opts });
   }
-  destroy(spec: DestroySpec, opts?: { deleteVolume?: boolean; deleteBridge?: boolean }) {
+  destroy(spec: DestroySpec, opts?: DestroyOptions) {
     return destroyCube(this.client, spec, opts);
   }
   getState(name: string) {
     return this.client.getInstanceState(name);
   }
-  setState(name: string, action: IncusStateAction, opts?: { force?: boolean; timeout?: number }) {
-    return this.client.setInstanceState(name, action, opts);
+  setState(name: string, action: IncusStateAction, opts: SetStateOptions = {}) {
+    const { signal, ...rest } = opts;
+    return this.client.setInstanceState(name, action, rest, signal);
   }
-  waitForNetwork(name: string, ip: string) {
-    return waitForCubeNetwork(this.client, name, ip);
+  waitForNetwork(name: string, ip: string, opts: WaitForNetworkOptions = {}) {
+    return waitForCubeNetwork(this.client, name, ip, opts.timeoutMs, opts.signal);
   }
   startEgressProxy(opts: EgressProxyOptions) {
     return startEgressProxy(opts);
@@ -86,8 +129,72 @@ export class IncusBackend implements CubeBackend {
   sandbox(name: string): Sandbox {
     return new IncusSandbox(name, this.client);
   }
-  execSimple(name: string, command: string[], signal?: AbortSignal) {
-    return this.client.execSimple(name, command, signal);
+  execSimple(name: string, command: string[], signal?: AbortSignal, opts?: { timeoutMs?: number }) {
+    return this.client.execSimple(name, command, signal, opts);
+  }
+  async resolveImage(image: string): Promise<string> {
+    return (await this.client.getImageAlias(image)).target;
+  }
+  /**
+   * Stage, stop and publish. The staging exec is bounded by
+   * `stagingTimeoutMs` on the host; the publication by `publishTimeoutMs`.
+   * A publication that runs past its deadline (or is aborted) is NOT
+   * cancelled — Incus cannot — and nothing ambiguous is deleted: the
+   * journal keeps the accepted operation URL and `reconcileEnvironment`
+   * settles it later. The error is an `IncusTimeoutError` of kind
+   * "publish" (or the signal's reason).
+   */
+  async captureTemplate(spec: CubeProvisionSpec, snapshot: string, opts: TemplateOptions = {}): Promise<CubeTemplateSource> {
+    const { signal } = opts;
+    const state = await this.client.getInstanceState(spec.name, signal);
+    if (state.status !== "Stopped") {
+      await this.client.setInstanceState(spec.name, "stop", { force: true, timeoutMs: opts.timeoutMs }, signal);
+    }
+    // A copy inherits the snapshot's devices under the request's own: the
+    // builder's nic, workspace, repositories and volume must not ride into
+    // clones (their sources are about to disappear). Root stays, and every
+    // clone request re-declares it anyway.
+    await this.client.updateInstance(spec.name, (instance) => {
+      for (const device of Object.keys(instance.devices)) {
+        if (device !== "root") delete instance.devices[device];
+      }
+    }, { signal, timeoutMs: opts.timeoutMs });
+    // Every clone gets a machine identity of its own on first boot.
+    await this.client.pushInstanceFile(spec.name, "/etc/machine-id", "", { signal });
+    await this.client.createInstanceSnapshot(spec.name, snapshot, { signal, timeoutMs: opts.timeoutMs });
+    const volume = dockerVolumeName(spec.name);
+    await this.client.createCustomVolumeSnapshot(spec.pool, volume, snapshot, { signal, timeoutMs: opts.timeoutMs });
+    // The nic is gone, so the bridge (and its dnsmasq) can go too.
+    if (await exists(() => this.client.getNetwork(spec.network.bridge, signal))) {
+      await this.client.deleteNetwork(spec.network.bridge, signal);
+    }
+    return { instance: spec.name, snapshot, volume, volumeSnapshot: snapshot };
+  }
+
+  async deleteTemplate(pool: string, template: CubeTemplateSource, opts: TemplateOptions = {}): Promise<void> {
+    const { signal } = opts;
+    if (await exists(() => this.client.getInstance(template.instance, signal))) {
+      const state = await this.client.getInstanceState(template.instance, signal);
+      if (state.status !== "Stopped") {
+        await this.client.setInstanceState(template.instance, "stop", { force: true, timeoutMs: opts.timeoutMs }, signal);
+      }
+      await this.client.deleteInstance(template.instance, { signal, timeoutMs: opts.timeoutMs });
+    }
+    if (await exists(() => this.client.getCustomVolume(pool, template.volume, signal))) {
+      await this.client.deleteCustomVolume(pool, template.volume, signal);
+    }
+  }
+}
+
+const dockerVolumeName = (cube: string) => `${cube}-docker`;
+
+async function exists(probe: () => Promise<unknown>): Promise<boolean> {
+  try {
+    await probe();
+    return true;
+  } catch (error) {
+    if (error instanceof IncusHttpError && error.errorCode === 404) return false;
+    throw error;
   }
 }
 
@@ -123,10 +230,22 @@ interface MockInstance {
 export class MockBackend implements CubeBackend {
   readonly kind = "mock" as const;
   private readonly instances = new Map<string, MockInstance>();
+  /** Captured templates by instance name. The mock has no rootfs to clone;
+   * a template is bookkeeping, and a clone is an ordinary instance. */
+  readonly templates = new Map<string, CubeTemplateSource>();
+  /** Every provision that cloned from a template, for tests. */
+  readonly clones: Array<{ name: string; template: string }> = [];
 
-  async provision(spec: CubeProvisionSpec): Promise<void> {
+  async provision(spec: CubeProvisionSpec, opts: ProvisionOptions = {}): Promise<void> {
+    opts.signal?.throwIfAborted();
     fs.mkdirSync(spec.hostWorkspace, { recursive: true });
     if (spec.hostRepositories) fs.mkdirSync(spec.hostRepositories, { recursive: true });
+    if (spec.template) {
+      if (!this.templates.has(spec.template.instance)) {
+        throw new Error(`mock backend: template ${spec.template.instance} does not exist`);
+      }
+      this.clones.push({ name: spec.name, template: spec.template.instance });
+    }
     this.instances.set(spec.name, {
       status: "Running",
       hostWorkspace: spec.hostWorkspace,
@@ -136,7 +255,8 @@ export class MockBackend implements CubeBackend {
     });
   }
 
-  async destroy(spec: DestroySpec): Promise<void> {
+  async destroy(spec: DestroySpec, opts: DestroyOptions = {}): Promise<void> {
+    opts.signal?.throwIfAborted();
     // Parity with Incus: the workspace is host-side and outlives the cube.
     this.instances.delete(spec.name);
   }
@@ -145,13 +265,15 @@ export class MockBackend implements CubeBackend {
     return { status: this.instances.get(name)?.status ?? "Stopped" };
   }
 
-  async setState(name: string, action: IncusStateAction): Promise<void> {
+  async setState(name: string, action: IncusStateAction, opts: SetStateOptions = {}): Promise<void> {
+    opts.signal?.throwIfAborted();
     const inst: MockInstance = this.instances.get(name) ?? { status: "Stopped" };
     inst.status = action === "stop" ? "Stopped" : "Running";
     this.instances.set(name, inst);
   }
 
-  async waitForNetwork(_name: string, _ip: string): Promise<void> {
+  async waitForNetwork(_name: string, _ip: string, opts: WaitForNetworkOptions = {}): Promise<void> {
+    opts.signal?.throwIfAborted();
     // The mock network is up the instant the instance is.
   }
 
@@ -177,6 +299,26 @@ export class MockBackend implements CubeBackend {
     // repo, which `process.cwd()` would be.
     const inst = this.instances.get(name);
     return runLocal(command[0], command.slice(1), inst?.hostWorkspace ?? os.tmpdir(), { signal });
+  }
+
+  async resolveImage(image: string): Promise<string> {
+    return `mock-image:${image}`;
+  }
+
+  async captureTemplate(spec: CubeProvisionSpec, snapshot: string, opts: TemplateOptions = {}): Promise<CubeTemplateSource> {
+    opts.signal?.throwIfAborted();
+    const instance = this.instances.get(spec.name);
+    if (!instance) throw new Error(`mock backend: cube ${spec.name} does not exist`);
+    instance.status = "Stopped";
+    const template = { instance: spec.name, snapshot, volume: `${spec.name}-docker`, volumeSnapshot: snapshot };
+    this.templates.set(spec.name, template);
+    return template;
+  }
+
+  async deleteTemplate(_pool: string, template: CubeTemplateSource, opts: TemplateOptions = {}): Promise<void> {
+    opts.signal?.throwIfAborted();
+    this.templates.delete(template.instance);
+    this.instances.delete(template.instance);
   }
 }
 

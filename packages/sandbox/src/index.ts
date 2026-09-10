@@ -1,5 +1,5 @@
 /**
- * Narrow sandbox interface (PLAN §8): backends must stay swappable.
+ * Narrow sandbox interface (ARCHITECTURE §8): backends must stay swappable.
  * File I/O is deliberately NOT part of it — read/write/edit run on the
  * host-side workspace path.
  */
@@ -7,17 +7,28 @@ import type WebSocket from "ws";
 
 import { IncusClient, type IncusOperation } from "./incus-client.ts";
 
-export { IncusClient, IncusHttpError, DEFAULT_INCUS_SOCKET } from "./incus-client.ts";
+export {
+  IncusClient,
+  IncusHttpError,
+  IncusTimeoutError,
+  DEFAULT_INCUS_SOCKET,
+  DEFAULT_INCUS_OPERATION_TIMEOUTS,
+} from "./incus-client.ts";
 export type {
   IncusInstance,
   IncusInstanceState,
   IncusInstanceCreate,
   IncusStateAction,
+  IncusOperationTimeouts,
+  IncusClientOptions,
+  IncusWaitOptions,
+  IncusCallOptions,
 } from "./incus-client.ts";
 export { provisionCube, destroyCube, waitForCubeNetwork } from "./cube-provision.ts";
-export type { CubeProvisionSpec, CubeNetworkSpec } from "./cube-provision.ts";
+export type { CubeProvisionSpec, CubeNetworkSpec, CubeTemplateSource, ProvisionOptions, DestroyOptions } from "./cube-provision.ts";
 export { startEgressProxy } from "./egress-proxy.ts";
 export type { EgressPolicy, EgressProxy } from "./egress-proxy.ts";
+export { removeStoppedTree } from "./stopped-tree.ts";
 
 export interface SandboxExecOptions {
   /** Working directory *inside* the sandbox (guest path). */
@@ -74,6 +85,10 @@ interface ExecFds {
   "2": string;
   control: string;
 }
+
+/** How long past its own timeout an exec may take to report exit: the
+ * guest supervisor's TERM→KILL escalation is 5 s; the rest is slack. */
+const EXEC_EXIT_GRACE_MS = 30_000;
 
 /**
  * Incus backend via the REST API on the local unix socket. Exec streams
@@ -185,8 +200,18 @@ export class IncusSandbox implements Sandbox {
       // Wait for the process AND the io streams, so trailing output isn't
       // dropped. The guest supervisor guarantees the operation ends after a
       // signal (KILL escalation), so this cannot hang on an ignored TERM.
+      // The caller's timeout therefore bounds the operation too, with a
+      // grace for the escalation; without one, only the client's liveness
+      // bound applies (a command may legitimately run for hours). The abort
+      // signal is honoured through the control channel, not by dropping the
+      // wait: the promise settles once the tree has actually exited.
+      const wait = {
+        kind: "exec",
+        instance: this.name,
+        timeoutMs: timeout && timeout > 0 ? timeout * 1000 + EXEC_EXIT_GRACE_MS : Infinity,
+      };
       const [operation] = (await Promise.race([
-        Promise.all([this.client.waitOperation(operationUrl), closed(stdout), closed(stderr)]),
+        Promise.all([this.client.waitOperation(operationUrl, undefined, wait), closed(stdout), closed(stderr)]),
         connectFailed,
       ])) as [IncusOperation, void, void];
       if (signal?.aborted) throw new Error("aborted");
@@ -219,4 +244,8 @@ export {
   type CubeBackend,
   type DestroySpec,
   type EgressProxyOptions,
+  type TemplateOptions,
+  type IncusBackendOptions,
+  type SetStateOptions,
+  type WaitForNetworkOptions,
 } from "./cube-backend.ts";

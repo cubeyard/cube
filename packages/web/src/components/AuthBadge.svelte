@@ -1,15 +1,29 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { fetchState } from "../lib/api.ts";
   import type { AuthState } from "../lib/types.ts";
 
-  let { auth }: { auth: AuthState } = $props();
+  // Provider auth belongs to pi (`/login` in a thread); cubed only reports
+  // it. Polled slowly so a login shows up in the header without a reload.
+  let auth = $state<AuthState | null>(null);
+
+  onMount(() => {
+    const refresh = () => fetchState().then((state) => (auth = state.auth), () => {});
+    refresh();
+    const timer = setInterval(refresh, 30_000);
+    return () => clearInterval(timer);
+  });
 </script>
 
-{#if auth.state === "ok"}
-  <!-- Healthy auth is a steady green lamp, not information to shout. -->
+{#if auth?.state === "ok"}
+  <!-- Healthy auth is a steady green lamp, not information to shout. On a
+       phone the label shrinks to two letters rather than vanishing. -->
   <span class="auth-ok lamp-field" title="signed in: {auth.provider} ({auth.credentialType})">
-    <span class="lamp on-green"></span>auth
+    <span class="lamp on-green"></span>
+    <span class="auth-full">auth</span>
+    <span class="auth-short" aria-hidden="true">ok</span>
   </span>
-{:else}
+{:else if auth}
   <span
     class="auth-missing"
     aria-label="not signed in — run /login in a thread"

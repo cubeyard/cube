@@ -7,6 +7,7 @@
  */
 import assert from "node:assert";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -170,7 +171,8 @@ fi
   const launcherSha = run("sha256sum", ["launcher/cube"]).split(" ")[0];
   assert.ok(formula.includes(`sha256 "${launcherSha}"`));
   assert.ok(formula.includes('releases/download/v1.2.3/cube"'));
-  assert.ok(formula.includes('version "1.2.3"'));
+  // Homebrew infers the version from the URL; an explicit version fails strict audit.
+  assert.doesNotMatch(formula, /^\s*version\s/m);
   assert.ok(formula.includes('inreplace "cube", "INSTALL_METHOD=standalone", "INSTALL_METHOD=homebrew"'));
   assert.throws(() => run("node", ["scripts/homebrew-formula.ts", "latest", "launcher/cube"]));
   const oldLauncher = path.join(tmp, "old-cube");
@@ -238,6 +240,119 @@ fi
     }
   }
   console.log("8 ok: schema compatibility and package-manager-specific upgrade hints");
+
+  // 9. The shipped launcher carries its release number; a checkout says "dev".
+  assert.match(launcher, /^LAUNCHER_VERSION=dev$/m);
+  const shipStep = workflow.match(/- name: ship the launcher itself\n([\s\S]*?)\n\n/)?.[1];
+  assert.ok(shipStep, "prepare/ship-the-launcher step exists");
+  const stampLine = shipStep.split("\n").find((line) => line.includes("sed ") && line.includes("LAUNCHER_VERSION"));
+  assert.ok(stampLine, "the ship step stamps LAUNCHER_VERSION with sed");
+  const stampedHome = path.join(tmp, "stamped-home");
+  fs.mkdirSync(stampedHome);
+  const stamped = path.join(tmp, "stamped-cube");
+  run("bash", ["-c", `V=v1.2.3; ${stampLine.trim().replace(/> .*$/, `> "${stamped}"`)}`]);
+  const version = run("bash", [stamped, "version"], { env: { CUBE_HOME: stampedHome, CUBE_BIND: "127.0.0.1" } });
+  assert.equal(version, "launcher: v1.2.3\nrelease:  none installed (run: cube up)");
+  assert.equal(run("bash", ["launcher/cube", "--version"], { env: { CUBE_HOME: stampedHome, CUBE_BIND: "127.0.0.1" } }).split("\n")[0], "launcher: dev");
+  console.log("9 ok: release packaging stamps the launcher version and `cube version` reports it");
+
+  // 10. Drive the real cmd_upgrade (app-only path) with the VM and GitHub
+  // stubbed at their boundaries: the previous tarball is fetched before the
+  // new one is applied, a cubed that never answers rolls the app back, and
+  // the version file names the previous release until the new one proved
+  // itself. Stand-in tarballs carry the build id the "VM" then reports.
+  const rbHome = path.join(tmp, "rollback-home");
+  const rbFixture = path.join(tmp, "rollback-fixture");
+  fs.mkdirSync(path.join(rbHome, "manifests"), { recursive: true });
+  fs.mkdirSync(rbFixture);
+  for (const v of ["v1.0.0", "v1.0.1"]) {
+    const name = `cube-app-${v}-amd64.tar.zst`;
+    const bytes = Buffer.from(`cube-${v}-gtest\n`);
+    fs.writeFileSync(path.join(rbFixture, name), bytes);
+    fs.writeFileSync(path.join(rbHome, "manifests", `manifest-${v}-amd64.json`), JSON.stringify({
+      schema: "2", version: v, arch: "amd64", build_id: `cube-${v}-gtest`, runtime_id: "runtime-test",
+      base_file: "base.qcow2", base_sha256: "b".repeat(64), base_bytes: 1,
+      app_file: `app-${v}.qcow2`, app_sha256: v.replace(/\D/g, "").padEnd(64, "a"), app_bytes: 1,
+      app_tar_file: name, app_tar_sha256: createHash("sha256").update(bytes).digest("hex"), app_tar_bytes: bytes.length,
+      node_file: "node.qcow2", node_sha256: "c".repeat(64), node_bytes: 1,
+    }, null, 2));
+  }
+  fs.writeFileSync(path.join(rbHome, "config"), "CUBE_BIND=127.0.0.1\n");
+  const upgradeWith = (env: NodeJS.ProcessEnv) => {
+    // A VM on v1.0.0 whose store never held a tarball (a first install).
+    fs.rmSync(path.join(rbHome, "images"), { recursive: true, force: true });
+    fs.rmSync(path.join(rbHome, "trace"), { force: true });
+    fs.writeFileSync(path.join(rbHome, "version"), "v1.0.0\n");
+    fs.writeFileSync(path.join(rbHome, "vm-app"), "cube-v1.0.0-gtest\n");
+    fs.writeFileSync(path.join(rbHome, "app-live.qcow2.build"), "cube-v1.0.0-gtest\n");
+    return run("bash", ["-c", `
+      . launcher/cube
+      sleep() { :; }
+      vm_pid() { echo 4242; }
+      self_update() { :; }
+      vm_ssh() {
+        case "$1" in
+          true) return 0 ;;
+          cube-app-apply) cat > "$CUBE_HOME/vm-app"; echo "applied $(cat "$CUBE_HOME/vm-app")" >> "$CUBE_HOME/trace"; echo "cube-app-apply: ok" ;;
+          *) cat "$CUBE_HOME/vm-app" ;;
+        esac
+      }
+      cubed_up() { [ "$(cat "$CUBE_HOME/vm-app")" = "$GOOD_BUILD" ]; }
+      fetch_asset() {
+        echo "fetched $2" >> "$CUBE_HOME/trace"
+        [ -z "\${FAIL_OLD:-}" ] || [ "$2" != cube-app-v1.0.0-amd64.tar.zst ] || return 1
+        cp "$FIXTURE/$2" "$3"
+      }
+      if cmd_upgrade v1.0.1 2>&1; then echo "exit=0"; else echo "exit=$?"; fi
+      echo "version=$(cat "$CUBE_HOME/version")"
+      echo "overlay-build=$(cat "$APP_LIVE.build")"
+      echo "summary=$(cached_summary v1.0.0)"
+      echo "trace:"; cat "$CUBE_HOME/trace"
+    `], { env: {
+      CUBE_LIB_ONLY: "1", CUBE_HOME: rbHome, CUBE_BIND: "127.0.0.1", CUBE_NO_UPDATE_CHECK: "1",
+      FIXTURE: rbFixture, GOOD_BUILD: "cube-v1.0.0-gtest", ...env,
+    } });
+  };
+  const trace = (output: string) => output.split("trace:\n")[1];
+
+  const rolledBack = upgradeWith({});
+  assert.match(rolledBack, /^exit=1$/m);
+  assert.match(rolledBack, /fetching v1\.0\.0's app tarball first/);
+  assert.match(rolledBack, /rolling back to v1\.0\.0's app/);
+  assert.match(rolledBack, /v1\.0\.0 stays the installed release/);
+  assert.match(rolledBack, /rolled back: the VM runs v1\.0\.0's app again/);
+  assert.match(rolledBack, /^version=v1\.0\.0$/m);
+  assert.match(rolledBack, /^overlay-build=cube-v1\.0\.0-gtest$/m);
+  assert.match(rolledBack, /^summary=still cached for v1\.0\.0: app tarball; not cached: base \(1 B\), app disk \(1 B\), cube-node \(1 B\)/m);
+  assert.equal(trace(rolledBack), [
+    "fetched cube-app-v1.0.1-amd64.tar.zst",
+    "fetched cube-app-v1.0.0-amd64.tar.zst",
+    "applied cube-v1.0.1-gtest",
+    "applied cube-v1.0.0-gtest",
+  ].join("\n"));
+
+  const noWayBack = upgradeWith({ FAIL_OLD: "1" });
+  assert.match(noWayBack, /^exit=1$/m);
+  assert.match(noWayBack, /no automatic rollback if v1\.0\.1 does not come up/);
+  assert.match(noWayBack, /v1\.0\.0's tarball is not cached — cube down, then cube up puts v1\.0\.0 back/);
+  assert.match(noWayBack, /^version=v1\.0\.0$/m);
+  assert.equal(trace(noWayBack), [
+    "fetched cube-app-v1.0.1-amd64.tar.zst",
+    "fetched cube-app-v1.0.0-amd64.tar.zst",
+    "applied cube-v1.0.1-gtest",
+  ].join("\n"));
+
+  const upgraded = upgradeWith({ GOOD_BUILD: "cube-v1.0.1-gtest" });
+  assert.match(upgraded, /^exit=0$/m);
+  assert.match(upgraded, /upgraded to v1\.0\.1 \(data disk kept\)/);
+  assert.match(upgraded, /^version=v1\.0\.1$/m);
+  assert.match(upgraded, /^overlay-build=cube-v1\.0\.1-gtest$/m);
+  assert.equal(trace(upgraded), [
+    "fetched cube-app-v1.0.1-amd64.tar.zst",
+    "fetched cube-app-v1.0.0-amd64.tar.zst",
+    "applied cube-v1.0.1-gtest",
+  ].join("\n"));
+  console.log("10 ok: an app-only upgrade keeps the way back and rolls back when cubed never answers");
 
   console.log("release-contract-test: ALL PASS");
 } finally {

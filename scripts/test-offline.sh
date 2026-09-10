@@ -7,19 +7,33 @@
 #   bash scripts/test-offline.sh        # run them all, from any host
 OFFLINE_TESTS=(
   scripts/release-contract-test.ts
+  packages/server/test/log-test.ts
   packages/server/test/cube-toml-test.ts
   packages/server/test/portal-config-test.ts
   packages/server/test/portal-proxy-test.ts
   packages/server/test/registry-test.ts
+  packages/server/test/events-test.ts
+  packages/server/test/user-facing-test.ts
   packages/server/test/services-test.ts
   packages/server/test/workspace-files-test.ts
   packages/server/test/github-auth-test.ts
+  packages/server/test/github-read-test.ts
   packages/server/test/onboarding-test.ts
   packages/server/test/pty-test.ts
   packages/server/test/terminal-guards-test.ts
   packages/server/test/project-test.ts
+  packages/server/test/project-environment-test.ts
+  packages/server/test/environment-templates-test.ts
+  packages/server/test/environment-lifecycle-test.ts
+  packages/server/test/lifecycle-test.ts
+  packages/server/test/provision-cancel-test.ts
+  packages/server/test/provision-failure-test.ts
+  packages/sandbox/test/environment-backend-test.ts
+  packages/sandbox/test/incus-client-test.ts
   packages/sandbox/test/mock-backend-test.ts
   packages/git/test/git-service-test.ts
+  packages/git/test/pr-review-test.ts
+  packages/git/test/merged-pr-review-test.ts
   packages/pi-extension/test/code-mode-test.ts
   packages/pi-extension/test/code-boundaries-test.ts
   packages/pi-extension/test/code-io-test.ts
@@ -30,7 +44,7 @@ OFFLINE_TESTS=(
 # Executed (not sourced): run the list.
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -uo pipefail
-  cd "$(dirname "$0")/.."
+  cd "$(dirname "$0")/.." || exit 1
   # No model credentials anywhere near tests. Some suites read pi's model
   # catalog (never prompt); a placeholder key makes the deepseek models
   # "available" and its value is never sent anywhere.

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Live-smoke environment: what a project points at with
+#   environment = "<checkout>/scripts/smoke/environment/example"
+# where <checkout> is this repository added as a reference. Proves that a
+# .cube kept outside the primary repository runs from /repos with /workspace
+# as cwd, and that its [network] allow reached the egress proxy.
+set -eu
+echo "[cube-setup] running $0 in $(pwd)"
+printf '%s\n%s\n' "$(pwd)" "$0" > environment-marker
+curl -fsSI --max-time 30 https://services.gradle.org/ > /dev/null
+echo "[cube-setup] services.gradle.org reachable through the allowlist"

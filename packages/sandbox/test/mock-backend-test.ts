@@ -1,5 +1,5 @@
 /**
- * Offline units for the mock cube backend (CUBED_BACKEND=mock, PLAN §13
+ * Offline units for the mock cube backend (CUBED_BACKEND=mock, ARCHITECTURE §13
  * 3d.3): the in-memory instance table, the no-op egress proxy, and local
  * exec with the guest workspace path rebased onto the real host workspace.
  * No Incus, no daemon.
@@ -188,6 +188,25 @@ const spec: CubeProvisionSpec = {
   assert.equal((await backend.getState(NAME)).status, "Stopped", "destroyed cube reads Stopped");
   assert.ok(fs.existsSync(hostWorkspace), "destroy leaves the host workspace (parity with Incus)");
   console.log("6 ok: destroy drops the instance, keeps the workspace");
+}
+
+// --------------------------------------- 7. templates
+{
+  const backend = new MockBackend();
+  assert.equal(await backend.resolveImage("cube-node"), "mock-image:cube-node");
+  const template = { instance: NAME, snapshot: "env", volume: `${NAME}-docker`, volumeSnapshot: "env" };
+  await assert.rejects(backend.provision({ ...spec, name: "clone", template }), /template .* does not exist/);
+  await backend.provision(spec);
+  assert.deepEqual(await backend.captureTemplate(spec, "env"), template);
+  assert.equal((await backend.getState(NAME)).status, "Stopped", "capture stops the builder");
+  await backend.provision({ ...spec, name: "clone", hostWorkspace: path.join(base, "clone"), template });
+  assert.deepEqual(backend.clones, [{ name: "clone", template: NAME }]);
+  assert.equal((await backend.getState("clone")).status, "Running");
+  await backend.deleteTemplate("mock", template);
+  assert.equal(backend.templates.size, 0);
+  assert.equal((await backend.getState(NAME)).status, "Stopped", "the template instance is gone; the clone lives on");
+  assert.equal((await backend.getState("clone")).status, "Running");
+  console.log("7 ok: template capture, clone bookkeeping and deletion");
 }
 
 fs.rmSync(base, { recursive: true, force: true });

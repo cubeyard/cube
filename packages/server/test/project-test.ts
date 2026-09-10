@@ -90,7 +90,6 @@ const supervisor = new CubeSupervisor(registry, backend, {
   idleMs: 0,
   portalBase: "cube.localhost",
   publicPort: 7777,
-  prefer: [["openai-codex", "unused"]],
 });
 
 const missing = supervisor.createProject({
@@ -102,7 +101,7 @@ const missingDone = await settledProject(supervisor, missing.id);
 assert.equal(missingDone.status, "error");
 assert.match(missingDone.repositories[0]!.error ?? "", /does-not-exist|remote ref|revision/i);
 await assert.rejects(supervisor.createUserThread(missing.id), /not ready \(status: error\)/);
-supervisor.deleteProject(missing.id);
+await supervisor.deleteProject(missing.id);
 console.log("1 ok: checking and failed projects cannot start threads; exact repository error retained");
 
 assert.throws(
@@ -140,6 +139,75 @@ await assert.rejects(supervisor.createUserThread(project.id), /not ready \(statu
 ready = await settledProject(supervisor, project.id);
 assert.equal(ready.status, "ready");
 console.log("3 ok: ready state has per-repository evidence; re-check gates thread creation");
+
+// A request key names one user action: replaying it returns the thread the
+// first attempt made (no second cube); a different key is a different action.
+const firstAttempt = await supervisor.createUserThread(project.id, "action-1");
+const replay = await supervisor.createUserThread(project.id, "action-1");
+assert.equal(firstAttempt.created, true);
+assert.equal(replay.created, false);
+assert.equal(replay.id, firstAttempt.id);
+const another = await supervisor.createUserThread(project.id, "action-2");
+assert.equal(another.created, true);
+assert.notEqual(another.id, firstAttempt.id);
+assert.equal(registry.listCubes().length, 2, "two keys, two cubes; the replay allocated none");
+// The key is scoped to the project it was used with, and a thread that no
+// longer exists is not replayed.
+const otherProject = supervisor.createProject({ name: "other", repositories: [{ url: primary.bare }] });
+await settledProject(supervisor, otherProject.id);
+const elsewhere = await supervisor.createUserThread(otherProject.id, "action-1");
+assert.equal(elsewhere.created, true);
+assert.notEqual(elsewhere.id, firstAttempt.id);
+for (const thread of [firstAttempt, another, elsewhere]) {
+  await readyCube(registry, supervisor.resolveUserThread(thread.id).cubeName);
+  await supervisor.removeUserThread(thread.id);
+}
+assert.equal((await supervisor.createUserThread(project.id, "action-1")).created, true, "a deleted thread is not replayed");
+await supervisor.removeUserThread(supervisor.resolveUserThread((await supervisor.createUserThread(project.id, "action-1")).id).threadId);
+await supervisor.deleteProject(otherProject.id);
+assert.equal(registry.listCubes().length, 0);
+console.log("3b ok: thread creation is idempotent per request key and project");
+
+// The key store is bounded and swept: past the cap the oldest key goes
+// first (no scan); the minute sweep drops expired keys and keys whose
+// thread was deleted; an expired hit on the request path is not replayed.
+{
+  const internals = supervisor as unknown as {
+    createRequests: Map<string, { threadId: string; at: number }>;
+    sweepCreateRequests: () => void;
+  };
+  const requests = internals.createRequests;
+  const scoped = (key: string) => `${project.id}\0${key}`;
+  internals.sweepCreateRequests();
+  assert.equal(requests.size, 0, "3b's keys all point at deleted threads: swept");
+  const kept = await supervisor.createUserThread(project.id, "kept");
+  for (let i = 1; i < 1000; i++) requests.set(scoped(`filler-${i}`), { threadId: "no-such-thread", at: Date.now() });
+  assert.equal(requests.size, 1000);
+  const newest = await supervisor.createUserThread(project.id, "newest");
+  assert.equal(requests.size, 1000, "capped at 1000 entries");
+  assert.equal(requests.has(scoped("kept")), false, "the oldest key was evicted first");
+  assert.equal(requests.has(scoped("newest")), true);
+  requests.set(scoped("expired"), { threadId: newest.id, at: Date.now() - 11 * 60_000 });
+  await readyCube(registry, supervisor.resolveUserThread(newest.id).cubeName);
+  await supervisor.removeUserThread(newest.id);
+  internals.sweepCreateRequests();
+  assert.equal(requests.has(scoped("expired")), false, "expired keys are swept");
+  assert.equal(requests.has(scoped("newest")), false, "a deleted thread's key is swept");
+  assert.equal(requests.size, 0, "keys whose thread never existed are swept too");
+  await readyCube(registry, supervisor.resolveUserThread(kept.id).cubeName);
+  await supervisor.removeUserThread(kept.id);
+  const fresh = await supervisor.createUserThread(project.id, "fresh");
+  requests.get(scoped("fresh"))!.at = Date.now() - 11 * 60_000;
+  const later = await supervisor.createUserThread(project.id, "fresh");
+  assert.equal(later.created, true, "an expired key is a new action");
+  assert.notEqual(later.id, fresh.id);
+  for (const thread of [fresh, later]) {
+    await readyCube(registry, supervisor.resolveUserThread(thread.id).cubeName);
+    await supervisor.removeUserThread(thread.id);
+  }
+  assert.equal(registry.listCubes().length, 0);
+  console.log("3c ok: the idempotency store is capped, swept on the timer, and never replays an expired key");
+}
 
 // Advance both upstreams after the readiness snapshot. Thread setup must use
 // the checked OIDs, not silently fetch these newer commits.
@@ -179,6 +247,14 @@ await assert.rejects(
   () => supervisor.pushBaseForUserThread(thread.id, repositories[1]!.id),
   /read-only references/,
 );
+await assert.rejects(
+  () => supervisor.reviewPrForUserThread(thread.id, repositories[1]!.id, { action: "prepare", number: 845 }),
+  /read-only references/,
+);
+await assert.rejects(
+  () => supervisor.reviewPrForUserThread(thread.id, Number.MAX_SAFE_INTEGER, { action: "prepare", number: 845 }),
+  /no such repository/,
+);
 assert.equal(supervisor.listUserThreads()[0]!.project.id, project.id);
 assert.equal(supervisor.listUserThreads()[0]!.project.name, "workbench");
 assert.deepEqual(await supervisor.ensureServicesForUserThread(thread.id), []);
@@ -215,11 +291,11 @@ fs.rmSync(path.join(cube.workspacePath, ".cube"), { recursive: true, force: true
 supervisor.archiveUserThread(thread.id);
 assert.equal(supervisor.listUserThreads().length, 0);
 assert.equal(supervisor.listUserThreads(true)[0]!.archived, true);
-assert.throws(() => supervisor.deleteProject(project.id), /still has threads/);
+await assert.rejects(supervisor.deleteProject(project.id), /still has threads/);
 console.log("4 ok: project snapshot scopes repos/services, coalesces cancellation, labels threads, and preserves archived work");
 
 await supervisor.removeUserThread(thread.id);
-supervisor.deleteProject(project.id);
+await supervisor.deleteProject(project.id);
 assert.equal(supervisor.listProjects().length, 0);
 await supervisor.close();
 registry.close();

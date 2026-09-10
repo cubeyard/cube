@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { connectGithub, disconnectGithub, fetchGithubAuth } from "../lib/api.ts";
+  import { connectGithub, disconnectGithub, errorText, fetchGithubAuth } from "../lib/api.ts";
   import type { GithubAuthStatus } from "../lib/types.ts";
 
   let { onStatusChange, onBusyChange }: {
@@ -65,7 +65,7 @@
       seq++;
       status = next;
     } catch (e) {
-      failure = e instanceof Error ? e.message : String(e);
+      failure = errorText(e);
     } finally {
       busy = false;
     }
@@ -79,7 +79,7 @@
       seq++;
       status = next;
     } catch (e) {
-      failure = e instanceof Error ? e.message : String(e);
+      failure = errorText(e);
     } finally {
       busy = false;
     }
@@ -91,17 +91,17 @@
       <p class="plain-status" role="status">checking github login…</p>
     {:else if status.state === "connected"}
       <p class="plain-status" role="status">signed in as <strong>{status.login}</strong></p>
-      <button class="plain-secondary" onclick={disconnect} disabled={busy}>disconnect</button>
+      <button class="key" onclick={disconnect} disabled={busy}>disconnect</button>
     {:else if status.state === "pending"}
       <div class="plain-device" role="status">
         <span class="code">{status.userCode}</span>
         <p>Enter this code at <a href={status.verificationUri} target="_blank" rel="noreferrer">github.com/login/device</a> and authorize GitHub CLI.</p>
         <p class="hint">Waiting for you to finish in your browser.</p>
       </div>
-      <button class="plain-secondary" onclick={disconnect} disabled={busy}>cancel login</button>
+      <button class="key" onclick={disconnect} disabled={busy}>cancel login</button>
     {:else}
       {#if status.error}<p class="error" role="alert">{status.error}</p>{/if}
-      <button class="plain-primary" onclick={connect} disabled={busy}>{busy ? "starting github login…" : "log in to github"}</button>
+      <button class="key primary" onclick={connect} disabled={busy}>{busy ? "starting github login…" : "log in to github"}</button>
     {/if}
   </div>
 {#if failure}<p class="error" role="alert">{failure}</p>{/if}
@@ -114,11 +114,6 @@
   .plain-device .code { display: block; font-size: 30px; letter-spacing: 0.12em; margin-bottom: 1rem; }
   .plain-device p { margin: 0.5rem 0; max-width: 35rem; }
   .plain-device a { color: var(--ink); text-underline-offset: 3px; }
-  .plain-primary, .plain-secondary { padding: 0.7rem 1.1rem; border-radius: var(--r-key); font-size: 14px; font-weight: 550; border: 1px solid transparent; }
-  .plain-primary { background: var(--signal); color: var(--signal-ink); }
-  .plain-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--signal) 92%, white); }
-  .plain-secondary { background: transparent; color: var(--ink-2); padding-inline: 0; text-decoration: underline; text-underline-offset: 4px; text-decoration-color: var(--line-2); }
-  .plain-secondary:hover:not(:disabled) { color: var(--ink); text-decoration-color: currentColor; }
   .code {
     font-family: var(--font-mono);
     font-size: 1.4em;

@@ -11,6 +11,13 @@ import { runCodeMode } from "../src/code-mode.ts";
 const files = new Map<string, string>();
 const hostCalls: Array<{ operation: string; value?: unknown }> = [];
 const host: CodeCapabilityHost = {
+  async readGithub(input) {
+    return { data: { title: "Private issue" }, ...input };
+  },
+  async reviewPr(repositoryId, input, signal) {
+    assert.equal(signal.aborted, false);
+    return { repositoryId, ...input };
+  },
   async exec(input) {
     hostCalls.push({ operation: "exec", value: input });
     return { exitCode: 0, output: `ran: ${input.command}` };
@@ -54,8 +61,47 @@ const host: CodeCapabilityHost = {
     hostCalls.push({ operation: "archiveThread" });
     return { ok: true };
   },
+  async environmentStatus() {
+    hostCalls.push({ operation: "environmentStatus" });
+    return { setup: { state: "failed", log: "setup failed" }, resume: { state: "succeeded", log: "ok" } };
+  },
+  async retryEnvironmentSetup() {
+    hostCalls.push({ operation: "retryEnvironmentSetup" });
+    return { accepted: true };
+  },
 };
 const capability = createCodeCapability(host);
+
+assert.deepEqual((await runCodeMode({
+  source: `return await cube.github.read(12, { type: "issue", section: "comments", page: 2 });`,
+  call: capability,
+})).value, { data: { title: "Private issue" }, number: 12, type: "issue", section: "comments", page: 2 });
+await assert.rejects(capability("github.read", { number: 12, type: "issue", page: 0 }, new AbortController().signal), /positive integer/);
+
+const reviewToken = "a".repeat(32);
+const reviewPlan = "b".repeat(32);
+for (const [source, expected] of [
+  ["cube.git.preparePrUpdate(7, 845)", { repositoryId: 7, action: "prepare", number: 845 }],
+  [`cube.git.planPrUpdate(7, '${reviewToken}')`, { repositoryId: 7, action: "plan", token: reviewToken }],
+  [`cube.git.inspectPrUpdatePlan(7, '${reviewToken}', '${reviewPlan}', { number: 845, section: 'prDiff', page: 2 })`, { repositoryId: 7, action: "inspect", token: reviewToken, plan: reviewPlan, number: 845, section: "prDiff", page: 2 }],
+  [`cube.git.publishPrUpdate(7, '${reviewToken}', '${reviewPlan}')`, { repositoryId: 7, action: "publish", token: reviewToken, plan: reviewPlan }],
+  [`cube.git.verifyPrUpdate(7, '${reviewToken}')`, { repositoryId: 7, action: "verify", token: reviewToken }],
+] as const) {
+  assert.deepEqual((await runCodeMode({ source: `return await ${source};`, call: capability })).value, expected);
+}
+await assert.rejects(capability("git.preparePrUpdate", { repositoryId: 7, number: 0 }, new AbortController().signal), /positive integer/);
+await assert.rejects(capability("git.planPrUpdate", { repositoryId: 7, token: "../state" }, new AbortController().signal), /invalid review token/);
+await assert.rejects(capability("git.publishPrUpdate", { repositoryId: 7, token: reviewToken, plan: "" }, new AbortController().signal), /invalid review plan/);
+await assert.rejects(capability("git.inspectPrUpdatePlan", { repositoryId: 7, token: "A".repeat(32), plan: reviewPlan, number: 1, section: "patch" }, new AbortController().signal), /invalid review token/);
+for (const invalid of [
+  { repositoryId: 7, token: reviewToken, plan: reviewPlan, number: 0, section: "patch" },
+  { repositoryId: 7, token: reviewToken, plan: reviewPlan, number: Number.MAX_SAFE_INTEGER + 1, section: "patch" },
+  { repositoryId: 7, token: reviewToken, plan: reviewPlan, number: 1, section: "summary" },
+  { repositoryId: 7, token: reviewToken, plan: reviewPlan, number: 1, section: "patch", page: 0 },
+]) {
+  await assert.rejects(capability("git.inspectPrUpdatePlan", invalid, new AbortController().signal), /positive integer|section must/);
+}
+await assert.rejects(capability("git.inspectPrUpdatePlan", { repositoryId: 7, token: reviewToken, plan: "A".repeat(32), number: 1, section: "patch" }, new AbortController().signal), /invalid review plan/);
 
 // ---- 1. Plain JavaScript and JSON result ---------------------------------
 
@@ -144,6 +190,18 @@ const capabilities = await runCodeMode({
 assert.equal((capabilities.value as { text: string }).text, "hello");
 assert.deepEqual(hostCalls.map((call) => call.operation), ["writeText", "readText", "ensureServices", "createPr"]);
 console.log("4 ok: file/service/PR capabilities dispatch");
+
+hostCalls.length = 0;
+const environment = await runCodeMode({
+  source: `return { status: await cube.environment.status(), retry: await cube.environment.retrySetup() };`,
+  call: capability,
+});
+assert.deepEqual(environment.value, {
+  status: { setup: { state: "failed", log: "setup failed" }, resume: { state: "succeeded", log: "ok" } },
+  retry: { accepted: true },
+});
+assert.deepEqual(hostCalls.map((call) => call.operation), ["environmentStatus", "retryEnvironmentSetup"]);
+console.log("4b ok: environment SDK and capability dispatch");
 
 // ---- 5. Dispatcher validation is fail-closed -----------------------------
 

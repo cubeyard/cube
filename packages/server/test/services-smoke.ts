@@ -21,7 +21,7 @@ import path from "node:path";
 import { IncusBackend, IncusClient, IncusSandbox, destroyCube } from "@cube/sandbox";
 
 import { portalLabel, proxyHttp } from "../src/portal-proxy.ts";
-import { Registry, networkForCube } from "../src/registry.ts";
+import { Registry } from "../src/registry.ts";
 import { CubeSupervisor, DEFAULT_EGRESS_ALLOW } from "../src/supervisor.ts";
 
 const NAME = "svctest";
@@ -38,10 +38,6 @@ const supervisor = new CubeSupervisor(registry, new IncusBackend(incus), {
   dockerVolumeSize: "5GiB",
   egressAllow: DEFAULT_EGRESS_ALLOW,
   idleMs: 0,
-  prefer: [
-    ["openai-codex", "gpt-5.6-luna"],
-    ["deepseek", "deepseek-v4-pro"],
-  ],
   portalBase: "cube.internal",
   publicPort: PUBLIC_PORT,
 });

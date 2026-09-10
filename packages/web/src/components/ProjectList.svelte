@@ -1,14 +1,20 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { checkProject, fetchProjects } from "../lib/api.ts";
+  import { checkProject, errorText, fetchProjects, isUnreachable } from "../lib/api.ts";
   import { relTime } from "../lib/time.ts";
+  import { createTransient } from "../lib/transient.svelte.ts";
   import type { Project } from "../lib/types.ts";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
   let projects = $state<Project[]>([]);
+  // True once the list has arrived at least once; a failed poll is not
+  // an empty list, and must not read as "configure your first project".
   let loaded = $state(false);
+  let unreachable = $state(false);
   let error = $state<string | null>(null);
   let checking = $state<string | null>(null);
+  // "checked" printed in the row whose check just landed, for a moment.
+  const checked = createTransient();
   let refreshSeq = 0;
 
   async function refresh(): Promise<void> {
@@ -18,11 +24,14 @@
       if (seq !== refreshSeq) return;
       projects = fresh;
       error = null;
+      unreachable = false;
+      loaded = true;
     } catch (e) {
       if (seq !== refreshSeq) return;
-      error = String(e);
+      // A host that does not answer is the app's strip to report.
+      unreachable = isUnreachable(e);
+      if (!unreachable) error = errorText(e);
     }
-    loaded = true;
   }
 
   onMount(() => {
@@ -38,8 +47,9 @@
       await checkProject(project.id);
       error = null;
       await refresh();
+      checked.set(project.id);
     } catch (e) {
-      error = `check: ${e instanceof Error ? e.message : e}`;
+      error = `check: ${errorText(e)}`;
     } finally {
       checking = null;
     }
@@ -63,13 +73,20 @@
     <a class="key primary" href="#/projects/new"><Icon name="plus" size={13} />new project</a>
   </div>
 
-  {#if error}<div class="banner">{error}</div>{/if}
+  {#if error}
+    <div class="banner" role="alert">
+      <span class="banner-text">{error}</span>
+      <button class="key icon note-dismiss" title="dismiss" aria-label="dismiss error" onclick={() => (error = null)}>
+        <Icon name="close" size={12} />
+      </button>
+    </div>
+  {/if}
 
   {#if projects.length > 0}
     <div class="well">
       {#each projects as project (project.id)}
         <div class="module project-module">
-          <a class="module-face" href="#/projects/{encodeURIComponent(project.id)}">
+          <a class="module-face" href="#/projects/{project.id}">
             <span class="lamp {lampClass(project)}" aria-hidden="true"></span>
             <span class="module-text">
               <span class="module-title">{project.name}</span>
@@ -87,10 +104,11 @@
                   <span title={repository.url}>{repoShort(repository.url)}</span>
                 {/each}
               </span>
-              {#if project.error}<span class="module-error" title={project.error}>{project.error}</span>{/if}
+              {#if project.error}<span class="module-error">{project.error}</span>{/if}
             </span>
           </a>
           <div class="module-actions">
+            {#if checked.value === project.id}<span class="bank-note" role="status">checked</span>{/if}
             <button
               class="key icon"
               title="check repositories now"
@@ -108,6 +126,11 @@
     <div class="empty-state">
       <p class="hint">A project owns the repositories every thread starts with.<br />Configure one primary checkout to begin.</p>
       <a class="key primary" href="#/projects/new"><Icon name="plus" size={13} />new project</a>
+    </div>
+  {:else if !loaded}
+    <div class="empty-state" role="status">
+      <p class="hint">{unreachable ? "can't reach the host — it may be starting or restarting" : "reading projects…"}{#if unreachable}<br />retrying…{/if}</p>
+      {#if unreachable || error}<button class="key" onclick={refresh}>retry now</button>{/if}
     </div>
   {/if}
 </main>

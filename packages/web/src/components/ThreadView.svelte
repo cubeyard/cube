@@ -1,15 +1,20 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import {
     createUserThread,
     deleteThread,
+    errorText,
     fetchDiff,
     fetchFiles,
     fetchRepositories,
     fetchServices,
     fileUrl,
   } from "../lib/api.ts";
+  import { uid } from "../lib/uid.ts";
+  import { createArmed } from "../lib/armed.svelte.ts";
   import { fmtBytes } from "../lib/bytes.ts";
+  import type { Command } from "../lib/command.ts";
+  import { isWaiting, lampClass, stateLabel, waitingText } from "../lib/thread-state.ts";
   import { relTime } from "../lib/time.ts";
   import type {
     RepoDiff,
@@ -23,7 +28,13 @@
   import Icon from "./Icon.svelte";
   import Terminal from "./Terminal.svelte";
 
-  let { threadId, threads }: { threadId: string; threads: ThreadSummary[] } = $props();
+  let { threadId, threads, command = null, onConsume = () => {} }: {
+    threadId: string;
+    threads: ThreadSummary[];
+    /** App's `n` shortcut: start a new thread in this thread's project. */
+    command?: Command | null;
+    onConsume?: (id: number) => void;
+  } = $props();
   let terminalPane = $state<{ submitPrompt: (text: string) => boolean } | null>(null);
 
   // ---- workspace split: draggable on desktop, remembered per browser ----
@@ -85,8 +96,28 @@
   // Navigation data lives above App.svelte's keyed thread view, so switching
   // remounts the PTY without blanking or resizing the persistent chrome.
   const summary = $derived(threads.find((thread) => thread.id === threadId) ?? null);
+  // The list this view mounted with may predate a thread created a moment
+  // ago; only a list refreshed since can say the thread is gone.
+  const threadsAtMount = untrack(() => threads);
+  const gone = $derived(summary === null && threads !== threadsAtMount);
+
+  // ---- the mobile thread drawer: opened from the strip, closed by its key,
+  // the scrim, or Escape; focus goes in with it and back to the opener ----
   let threadSidebarOpen = $state(false);
-  const gone = $derived(summary === null);
+  let sidebarOpener: HTMLElement | null = null;
+  let sidebarClose = $state<HTMLButtonElement>();
+  async function openSidebar(event: MouseEvent): Promise<void> {
+    sidebarOpener = event.currentTarget as HTMLElement;
+    threadSidebarOpen = true;
+    await tick();
+    sidebarClose?.focus();
+  }
+  function closeSidebar(): void {
+    if (!threadSidebarOpen) return;
+    threadSidebarOpen = false;
+    sidebarOpener?.focus();
+    sidebarOpener = null;
+  }
 
   let repositories = $state<ThreadRepository[]>([]);
   let repositoriesReady = $state(false);
@@ -101,7 +132,7 @@
       repositoriesError = null;
     } catch (error) {
       // Mid-delete or setup — retain the last known repository bank.
-      if (!repositoriesReady) repositoriesError = error instanceof Error ? error.message : String(error);
+      if (!repositoriesReady) repositoriesError = errorText(error);
     }
   }
 
@@ -110,9 +141,14 @@
     try {
       services = await fetchServices(threadId);
     } catch {
-      services = [];
+      // Keep the last good links through a transient error or a cube.toml
+      // caught mid-edit — the strip must not flicker.
     }
   }
+
+  // The view is keyed on threadId: a delete or a new thread navigates
+  // away mid-request, and the completion must then touch nothing here.
+  let disposed = false;
 
   onMount(() => {
     const savedSplit = Number(localStorage.getItem(SPLIT_STORAGE_KEY));
@@ -124,14 +160,27 @@
       refreshServices();
     }, 10_000);
     return () => {
+      disposed = true;
       clearInterval(slow);
+      if (noteTimer) clearTimeout(noteTimer);
     };
   });
 
+  // ---- notes: a printed notice under the strip. Errors stay until
+  // dismissed; anything else clears itself after a few seconds ----
   let note = $state<{ text: string; href?: string; bad?: boolean } | null>(null);
+  let noteTimer: ReturnType<typeof setTimeout> | null = null;
+  function setNote(next: { text: string; href?: string; bad?: boolean } | null): void {
+    if (disposed) return;
+    if (noteTimer) clearTimeout(noteTimer);
+    noteTimer = null;
+    note = next;
+    if (next && !next.bad) noteTimer = setTimeout(() => (note = null), 8000);
+  }
 
   // ---- workspace manifest shelf; git changes have their own fixed pane ----
   let filesOpen = $state(false);
+  let filesKey = $state<HTMLButtonElement>();
   let files = $state<WorkspaceListing | null>(null);
   let filesError = $state<string | null>(null);
 
@@ -141,6 +190,7 @@
   let shipPreflight = $state<ShipPreflight | null>(null);
   let shipError = $state<string | null>(null);
   let shipAttempt = 0;
+  let shipKey = $state<HTMLButtonElement>();
 
   const shipBusy = $derived(shipPhase === "checking" || shipPhase === "sending");
   const shipStatus = $derived(
@@ -151,6 +201,19 @@
     : shipPhase === "sent" ? "agent shipping"
     : shipPhase === "error" ? "ship failed"
     : "ship",
+  );
+  const shipDisabled = $derived(!primaryRepository || shipBusy || shipPhase === "sent" || !primaryRepository.state);
+  // A disabled key says why, in print — a title alone is invisible on a
+  // phone and to anyone who does not hover.
+  const shipReason = $derived(
+    !shipDisabled || shipBusy ? null
+    : summary?.state === "waking" ? "still waking"
+    : isWaiting(summary) ? "still setting up"
+    : !repositoriesReady ? (repositoriesError ? "repositories unavailable" : "reading repositories…")
+    : !primaryRepository ? "no repository"
+    : !primaryRepository.state ? "still setting up"
+    : shipPhase === "sent" ? "shipping in the terminal"
+    : null,
   );
 
   const SHIP_PROMPT = `Ship all committed and uncommitted changes to origin/main. Commit any uncommitted changes before pushing. If push fails because origin/main is ahead, rebase and resolve merge conflicts, checking with me before proceeding if there are any substantive conflicts, then push again. If rebasing floods add/add conflicts in unrelated files, run \`git rebase --abort\`, \`git fetch --unshallow origin\`, then rebase again. Fetch origin and rebase onto latest origin/main, then run the full test suite before pushing. Do not repeat it after a later fetch, rebase, or rejected push unless conflict resolution or other local edits changed files after the successful test run. Ignore a failing check from the test suite only after verifying that the same check also fails on origin/main without this thread's changes. When done, archive the current thread and any threads you created that are neither needed nor running. This archive step applies only to this Ship request: if I send new instructions afterward, drop it and do not archive unless I ask again.`;
@@ -192,7 +255,7 @@
       return preflight;
     } catch (e) {
       if (attempt !== shipAttempt) return null;
-      shipError = e instanceof Error ? e.message : String(e);
+      shipError = errorText(e);
       shipPhase = "error";
       return null;
     }
@@ -204,6 +267,7 @@
     shipPhase = "closed";
     shipPreflight = null;
     shipError = null;
+    shipKey?.focus();
   }
 
   async function ship(): Promise<void> {
@@ -212,11 +276,6 @@
     // live terminal may have changed the worktree while review was open.
     const preflight = await checkShip();
     if (!preflight || shipBlock(preflight)) return;
-    if (summary?.busy) {
-      shipError = "The agent is already working. Wait for the current turn to finish, then retry Ship.";
-      shipPhase = "error";
-      return;
-    }
     const repository = preflight.repository;
     const context = `Work in /workspace. This is the primary repository, id ${repository.id}; use the code tool with cube.git.syncBase(${repository.id}) and cube.git.pushBase(${repository.id}) for authenticated fetch and push. The configured base is origin/${repository.base}. Additional repositories under /repos are read-only references and must not be changed.`;
     shipPhase = "sending";
@@ -228,51 +287,87 @@
     shipPhase = "sent";
   }
 
-  function toggleFiles(): void {
-    filesOpen = !filesOpen;
-    if (filesOpen) {
-      files = null;
-      filesError = null;
-      fetchFiles(threadId).then(
-        (fresh) => (files = fresh),
-        (e) => (filesError = String(e)),
-      );
-    }
+  function loadFiles(): void {
+    files = null;
+    filesError = null;
+    fetchFiles(threadId).then(
+      (fresh) => (files = fresh),
+      (e) => (filesError = errorText(e)),
+    );
   }
 
+  function toggleFiles(): void {
+    filesOpen = !filesOpen;
+    if (filesOpen) loadFiles();
+  }
+
+  // ---- delete: two presses on the same key, never a dialog ----
+  const armed = createArmed();
+  let deleting = $state(false);
   async function remove(): Promise<void> {
-    if (!confirm("Delete this thread? Its environment is destroyed and the conversation ends; workspace files remain on the host.")) return;
+    if (deleting || !armed.press("thread")) return;
+    deleting = true;
     try {
       await deleteThread(threadId);
       location.hash = "#/threads";
     } catch (e) {
-      note = { text: `delete: ${e instanceof Error ? e.message : e}`, bad: true };
+      setNote({ text: `delete: ${errorText(e)}`, bad: true });
+    } finally {
+      if (!disposed) deleting = false;
     }
   }
 
+  let creating = $state(false);
+  // One id per user action (see ThreadList): a failed press is retried
+  // with the same id, never as a second thread.
+  let newThreadRequest: string | null = null;
   async function newThread(): Promise<void> {
-    if (!summary) return;
+    if (!summary || creating) return;
+    creating = true;
     try {
-      const id = await createUserThread(summary.project.id);
-      location.hash = `#/t/${encodeURIComponent(id)}`;
+      newThreadRequest ??= uid();
+      const id = await createUserThread(summary.project.id, newThreadRequest);
+      newThreadRequest = null;
+      location.hash = `#/t/${id}`;
     } catch (e) {
-      note = { text: `new thread: ${e instanceof Error ? e.message : e}`, bad: true };
+      setNote({ text: `new thread: ${errorText(e)}`, bad: true });
+    } finally {
+      if (!disposed) creating = false;
     }
   }
 
-  const lampClass = (thread: ThreadSummary) =>
-    thread.busy || thread.state === "setting-up" ? "on-amber blink"
-    : thread.state === "error" ? "on-red"
-    : thread.state === "sleeping" ? "off"
-    : "on-green";
+  // Take the shell's command once: consume it before the action runs, and
+  // run the action untracked so its own state (creating, the note) can
+  // never re-arm this effect.
+  $effect(() => {
+    const pending = command;
+    if (!pending || pending.kind !== "new-thread") return;
+    onConsume(pending.id);
+    untrack(() => void newThread());
+  });
 
-  const stateLabel = (thread: ThreadSummary) =>
-    thread.busy ? "working"
-    : thread.state === "setting-up" ? "setting up"
-    : thread.state === "sleeping" ? "sleeping"
-    : thread.state === "error" ? "error"
-    : null;
+  // Escape closes the topmost overlay — drawer, then ship panel, then files
+  // shelf — and hands focus back to the key that opened it. Never inside
+  // the terminal or a field: pi and the browser own Escape there.
+  function onWindowKeydown(event: KeyboardEvent): void {
+    if (event.key !== "Escape" || event.defaultPrevented) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest?.(".term-pane, input, textarea, select")) return;
+    if (threadSidebarOpen) {
+      event.preventDefault();
+      closeSidebar();
+    } else if (shipPhase !== "closed") {
+      event.preventDefault();
+      closeShip();
+    } else if (filesOpen) {
+      event.preventDefault();
+      filesOpen = false;
+      filesKey?.focus();
+    }
+  }
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 <div class="thread-topbar">
   <Header section="threads" />
@@ -287,12 +382,12 @@
         aria-label="open threads"
         aria-expanded={threadSidebarOpen}
         aria-controls="thread-sidebar"
-        onclick={() => (threadSidebarOpen = true)}
+        onclick={openSidebar}
       >
         <span>{summary.title ?? "untitled"}</span>
         <Icon name="chevron" size={12} />
       </button>
-      <a class="strip-project" href="#/projects/{encodeURIComponent(summary.project.id)}">project / {summary.project.name}</a>
+      <a class="strip-project" href="#/projects/{summary.project.id}">project / {summary.project.name}</a>
       {#if stateLabel(summary)}
         <span class="strip-state" class:error={summary.state === "error"}>{stateLabel(summary)}</span>
       {/if}
@@ -304,18 +399,43 @@
           {/each}
         </span>
       {/if}
+      {#if shipReason}<span class="key-reason">{shipReason}</span>{/if}
       <button
         class="key primary ship-key"
+        bind:this={shipKey}
         aria-expanded={shipPhase !== "closed"}
         onclick={checkShip}
-        disabled={!primaryRepository || shipBusy || shipPhase === "sent" || summary?.busy || !primaryRepository.state}
+        disabled={shipDisabled}
       >{shipStatus}</button>
+      {#if armed.is("thread")}
+        <!-- honest about what a delete does right now: mid-setup it also
+             cancels the setup that is running -->
+        <span class="bank-note" role="status">{summary?.state === "setting-up" ? "setup is cancelled; workspace and history are destroyed; the project is kept" : "workspace and history are destroyed; the project is kept"}</span>
+      {/if}
       <span class="key-bank">
-        <button class="key icon" title="workspace files" aria-label="workspace files" class:held={filesOpen} aria-expanded={filesOpen} onclick={toggleFiles}>
+        <button
+          class="key icon"
+          bind:this={filesKey}
+          title="workspace files"
+          aria-label="workspace files"
+          class:held={filesOpen}
+          aria-expanded={filesOpen}
+          onclick={toggleFiles}
+        >
           <Icon name="file" size={13} />
         </button>
-        <button class="key icon danger" title="delete thread" aria-label="delete thread" onclick={remove}>
-          <Icon name="trash" size={13} />
+        <button
+          class="key danger"
+          class:icon={!armed.is("thread") && !deleting}
+          class:armed={armed.is("thread")}
+          title={armed.is("thread") ? "press again to delete this thread" : "delete thread"}
+          aria-label={armed.is("thread") ? "confirm: delete this thread" : "delete thread"}
+          disabled={deleting}
+          onclick={remove}
+          onkeydown={armed.onKeydown}
+          onblur={() => armed.disarm()}
+        >
+          {#if deleting}deleting…{:else if armed.is("thread")}delete?{:else}<Icon name="trash" size={13} />{/if}
         </button>
       </span>
     {/if}
@@ -327,17 +447,17 @@
     <button
       class="thread-sidebar-scrim"
       aria-label="close threads"
-      onclick={() => (threadSidebarOpen = false)}
+      onclick={closeSidebar}
     ></button>
   {/if}
 
   <aside id="thread-sidebar" class="thread-sidebar" class:open={threadSidebarOpen} aria-label="threads">
     <div class="thread-sidebar-head">
       <a href="#/threads">all threads</a>
-      <button class="key sidebar-close" onclick={() => (threadSidebarOpen = false)}>close</button>
+      <button class="key sidebar-close" bind:this={sidebarClose} onclick={closeSidebar}>close</button>
     </div>
-    <button class="key sidebar-new" onclick={newThread} disabled={!summary}>
-      <Icon name="plus" size={13} />new thread
+    <button class="key sidebar-new" onclick={newThread} disabled={!summary || creating}>
+      <Icon name="plus" size={13} />{creating ? "starting…" : "new thread"}
     </button>
 
     {#if threads.length > 0}
@@ -346,7 +466,7 @@
           <a
             class="thread-sidebar-row"
             class:current={thread.id === threadId}
-            href="#/t/{encodeURIComponent(thread.id)}"
+            href="#/t/{thread.id}"
             aria-current={thread.id === threadId ? "page" : undefined}
           >
             <span class="lamp {lampClass(thread)}" aria-hidden="true"></span>
@@ -367,13 +487,24 @@
   </aside>
 
   <div class="thread-stage">
+{#if waitingText(summary)}
+  <div class="strip-note wait" role="status">
+    <span class="lamp on-amber blink" aria-hidden="true"></span>
+    <span class="strip-note-text">{waitingText(summary)}</span>
+  </div>
+{/if}
 {#if summary?.error}
-  <div class="strip-note bad">{summary.error}</div>
+  <div class="strip-note bad"><span class="strip-note-text">{summary.error}</span></div>
 {/if}
 {#if note}
-  <div class="strip-note" class:bad={note.bad}>
-    {note.text}
-    {#if note.href}<a href={note.href} target="_blank" rel="noopener noreferrer">{note.href}</a>{/if}
+  <div class="strip-note" class:bad={note.bad} role={note.bad ? "alert" : "status"}>
+    <span class="strip-note-text">
+      {note.text}
+      {#if note.href}<a href={note.href} target="_blank" rel="noopener noreferrer">{note.href}</a>{/if}
+    </span>
+    <button class="key icon note-dismiss" title="dismiss" aria-label="dismiss note" onclick={() => setNote(null)}>
+      <Icon name="close" size={12} />
+    </button>
   </div>
 {/if}
 
@@ -402,7 +533,7 @@
       <p class="sr-only" aria-live="polite">{shipStatus}</p>
 
       {#if shipPhase === "checking" && !shipPreflight}
-        <p class="ship-wait">Reading branch, committed diff, and local working-copy status…</p>
+        <p class="ship-wait">reading branch, committed diff, and local working-copy status…</p>
       {:else if shipPreflight}
         <dl class="ship-readout">
           <div><dt>branch</dt><dd>{shipPreflight.repository.state?.branch ?? "detached"}</dd></div>
@@ -473,9 +604,12 @@
 {#if filesOpen}
   <aside class="files-shelf" aria-label="workspace files">
     {#if filesError}
-      <p class="files-note">files unavailable: {filesError}</p>
+      <div class="files-note bad">
+        <span>files unavailable — {filesError}</span>
+        <button class="key" onclick={loadFiles}>retry</button>
+      </div>
     {:else if !files}
-      <p class="files-note">reading…</p>
+      <p class="files-note">reading files…</p>
     {:else if files.files.length === 0}
       <p class="files-note">No files yet — this thread's primary workspace is empty.</p>
     {:else}
@@ -508,7 +642,7 @@
     {#if gone}
       <div class="term-gone"><p>This thread was deleted.</p><a class="key" href="#/threads">back to threads</a></div>
     {:else}
-      <Terminal {threadId} bind:this={terminalPane} />
+      <Terminal {threadId} waitingText={waitingText(summary)} bind:this={terminalPane} />
     {/if}
   </section>
 
@@ -535,6 +669,7 @@
     repository={primaryRepository}
     {repositoriesReady}
     {repositoriesError}
+    onRetryRepositories={refreshRepositories}
   />
 </main>
   </div>
