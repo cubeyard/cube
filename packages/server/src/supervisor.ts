@@ -90,6 +90,7 @@ export const DEFAULT_EGRESS_ALLOW = [
   "archive.ubuntu.com",
   "security.ubuntu.com",
   "ports.ubuntu.com", // the arm64 mirror (apt on an arm64 VM goes nowhere else)
+  "download.docker.com", // the image's own docker-ce apt source: every apt-get update asks it
   // inner docker pulls (dockerd honors the proxy drop-in): manifests from
   // the registry, blobs via a 307 to the CDN — cloudfront as of 2026-09,
   // cloudflare kept for the period Hub used it.
