@@ -32,9 +32,9 @@ export function sanitizeMessage(message: string): string {
 // it), deleting it, starting a new thread, `cube diagnose`. Nothing here
 // promises a control the UI does not have.
 const RULES: Array<[RegExp, string | ((m: RegExpMatchArray) => string)]> = [
-  [/^\.cube\/setup failed \(exit (\d+)\)/, (m) => `the repository's .cube/setup script failed (exit ${m[1]}) — the environment is usable as it is; fix the script, and start a new thread to run it again`],
-  [/^\.cube\/setup failed/, "the repository's .cube/setup script could not run — the environment is usable as it is; check the script, and start a new thread to run it again"],
-  [/^\.cube\/resume failed \(exit (\d+)\)/, (m) => `the repository's .cube/resume script failed (exit ${m[1]}) — the environment is up; fix the script, and it runs again the next time the thread wakes`],
+  [/^\.cube\/setup failed \(exit (\d+)\)/, (m) => `the environment's .cube/setup script failed (exit ${m[1]}) — the environment is usable as it is; fix the script, and start a new thread to run it again`],
+  [/^\.cube\/setup failed/, "the environment's .cube/setup script could not run — the environment is usable as it is; check the script, and start a new thread to run it again"],
+  [/^\.cube\/resume failed \(exit (\d+)\)/, (m) => `the environment's .cube/resume script failed (exit ${m[1]}) — the environment is up; fix the script, and it runs again the next time the thread wakes`],
   [/^wake hook failed/, "a wake hook in .cube/cube.toml failed — the environment is up; fix the hook, and it runs again the next time the thread wakes"],
   [/^resume interrupted by (?:a )?cubed restart/, "cube restarted while this thread was waking — open it again; if it does not come up, delete it and start a new thread"],
   [/interrupted by (?:a )?cubed restart/, "cube restarted while this thread was being set up — open it to continue; if it does not come up, delete it and start a new thread"],

@@ -22,6 +22,7 @@ OFFLINE_TESTS=(
   packages/server/test/pty-test.ts
   packages/server/test/terminal-guards-test.ts
   packages/server/test/project-test.ts
+  packages/server/test/project-environment-test.ts
   packages/server/test/environment-cache-test.ts
   packages/server/test/environment-lifecycle-test.ts
   packages/server/test/environment-maintenance-test.ts

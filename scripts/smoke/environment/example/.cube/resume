@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "[cube-resume] ok from $0"

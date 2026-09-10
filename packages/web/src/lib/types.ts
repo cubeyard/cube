@@ -58,6 +58,8 @@ export interface Project {
   name: string;
   status: ProjectStatus;
   error: string | null;
+  /** "<checkout>/<folder>" in a reference that carries .cube; null = the primary's own. */
+  environment: string | null;
   revision: number;
   checkedAt: number | null;
   createdAt: number;
@@ -69,6 +71,7 @@ export interface Project {
 export interface ProjectInput {
   name: string;
   repositories: Array<{ url: string; base?: string | null; checkoutName?: string }>;
+  environment?: string | null;
 }
 
 /** One checkout from GET /api/threads/:id/repositories. */

@@ -49,8 +49,25 @@ export class Lifecycle {
   }
 
   /** `signal` cancels the guest script (the thread is being deleted under
-   * it); the result then records the cancellation, not a script failure. */
-  async run(name: string, sandbox: Sandbox, phase: LifecyclePhase, signal?: AbortSignal): Promise<string | null> {
+   * it); the result then records the cancellation, not a script failure.
+   * `directory` is the environment directory relative to /workspace:
+   * ".cube" (default) or "../repos/<checkout>/<path>/.cube" when the
+   * project keeps its environment in a reference repository. */
+  async run(
+    name: string,
+    sandbox: Sandbox,
+    phase: LifecyclePhase,
+    opts: { signal?: AbortSignal; directory?: string } = {},
+  ): Promise<string | null> {
+    const { signal } = opts;
+    const directory = opts.directory ?? ".cube";
+    // The path is host-composed from validated project input and lands
+    // inside a shell command: a stray character is a bug worth a loud
+    // failure, never a mis-run script.
+    if (!/^[A-Za-z0-9._/-]+$/.test(directory)) {
+      throw new Error(`lifecycle: invalid environment directory ${JSON.stringify(directory)}`);
+    }
+    const script = `./${directory}/${phase}`;
     const startedAt = Date.now();
     this.save(name, phase, { state: "running", startedAt, durationMs: null, error: null });
     const file = path.join(this.root, name, `${phase}.log`);
@@ -85,7 +102,7 @@ export class Lifecycle {
       // Check executable/presence INSIDE the guest. Host-side access checks
       // would follow an agent-controlled .cube symlink on the host.
       const { exitCode } = await sandbox.exec(
-        `if [ -e .cube/${phase} ]; then [ -x .cube/${phase} ] || { echo '.cube/${phase} must be executable'; exit 126; }; ./.cube/${phase}; fi`,
+        `if [ -e '${script}' ]; then [ -x '${script}' ] || { echo '${script} must be executable'; exit 126; }; '${script}'; fi`,
         {
           cwd: "/workspace", timeout: phase === "setup" ? 1200 : 10,
           signal: signal ? AbortSignal.any([abort.signal, signal]) : abort.signal,
