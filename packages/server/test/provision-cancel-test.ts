@@ -193,7 +193,11 @@ try {
     assert.equal(backend.clones.at(-1)?.name, `cube-${clonedCube}`);
     assert.equal(fs.readFileSync(path.join(registry.getCube(clonedCube)!.workspacePath, "generated"), "utf8"), "built\n", "setup ran warm in the clone");
     await supervisor.removeUserThread(cloned.id);
-    console.log("3 ok: a thread deleted while waiting on a shared build leaves the build to finish");
+    // The abandoned wait's lease was given back when the build landed:
+    // nothing holds the template, so the project can go (Codex review).
+    await supervisor.deleteProject(project.id);
+    assert.equal(backend.templates.size, 0, "deleting the project deleted its template");
+    console.log("3 ok: a thread deleted while waiting on a shared build leaves the build to finish and holds no lease");
 
     await supervisor.close();
     registry.close();

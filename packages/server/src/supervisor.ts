@@ -995,14 +995,19 @@ export class CubeSupervisor {
       let template: { id: string; source: CubeTemplateSource } | null = null;
       if (projectId && this.templates && hasSetup) {
         const repos = this.registry.listCubeRepositories(cube.id);
+        const pending = this.templates.acquire(
+          projectId,
+          await this.environmentKeyFor(cube, spec),
+          (instance) => this.buildTemplate(cube, repos, instance),
+        );
         try {
-          const row = await abortable(signal, this.templates.acquire(
-            projectId,
-            await this.environmentKeyFor(cube, spec),
-            (instance) => this.buildTemplate(cube, repos, instance),
-          ));
+          const row = await abortable(signal, pending);
           template = { id: row.id, source: { instance: row.instance, snapshot: row.snapshot, volume: row.volume, volumeSnapshot: row.volumeSnapshot } };
         } catch (error) {
+          // An abandoned wait still ends in a lease when the build lands:
+          // give it back then, or the template can never be evicted and the
+          // project never deleted (Codex review).
+          void pending.then((row) => this.templates!.release(row.id), () => {});
           signal.throwIfAborted();
           // Reuse is an optimization; fresh setup remains the path.
           recordPoint(this.registry, {
