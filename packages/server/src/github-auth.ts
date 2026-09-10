@@ -7,7 +7,14 @@ export type GithubAuthStatus =
   | { state: "connected"; login: string };
 
 export interface GitIdentity { name: string; email: string }
+export interface Repository { fullName: string; private: boolean }
 export type GhRunner = (args: string[]) => Promise<string>;
+
+/** gh holds a credential, but GitHub could not be verified right now
+ * (network, rate limit, outage). The answer is "retry", not "connect". */
+export class GithubUnreachableError extends Error {
+  constructor() { super("could not reach github"); this.name = "GithubUnreachableError"; }
+}
 
 export interface GhLoginProcess {
   stdout: { on(event: "data", listener: (chunk: Buffer | string) => void): void };
@@ -44,7 +51,7 @@ interface Options {
 
 const CODE = /(?:^|\n)\s*!?\s*First copy your one-time code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})\s*(?:\n|$)/i;
 const URL = /https:\/\/github\.com\/(?:login\/device|cli-auth)\b/i;
-const stripAnsi = (value: string) => value.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "");
+const stripAnsi = (value: string) => value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
 
 export class GithubAuth {
   private readonly gh: GhRunner;
@@ -60,6 +67,10 @@ export class GithubAuth {
   private disconnecting = false;
   private generation = 0;
   private gitSetupFailed = false;
+  /** The last refreshFromGh() could not verify the account (cleared by a successful refresh). */
+  private refreshFailed = false;
+  private repositoryCache: { login: string; generation: number; expires: number; repositories: Repository[] } | null = null;
+  private repositoryLoad: { login: string; generation: number; promise: Promise<Repository[] | null> } | null = null;
 
   constructor(opts: Options = {}) {
     this.gh = opts.ghRunner ?? defaultGhRunner;
@@ -71,6 +82,86 @@ export class GithubAuth {
   status(): GithubAuthStatus { return this.current; }
   gitIdentity(): GitIdentity | null { return this.identity; }
   settled(): Promise<void> { return this.completion.catch(() => {}); }
+
+  /** Repositories the connected account can reach, most recently updated
+   * first. `null` means no account is connected. Throws
+   * GithubUnreachableError when a credential is stored but GitHub could not
+   * be verified and nothing is cached. */
+  async repositories(): Promise<Repository[] | null> {
+    if (this.disconnecting) return null;
+    // A warm cache answers without spawning gh. connect/disconnect bump the
+    // generation, so it never outlives the account it was fetched for.
+    const warm = this.cachedRepositories();
+    if (warm) return warm;
+    await this.ensureFresh();
+    if (this.disconnecting) return null;
+    if (this.current.state === "connected") return this.loadRepositories(this.current.login, this.generation);
+    if (this.current.state === "disconnected" && this.refreshFailed && await this.credentialStored()) {
+      // Verification failed with a credential still present: GitHub was
+      // unreachable, the account is not gone. Serve the last list if any.
+      const stale = this.repositoryCache;
+      if (stale && stale.generation === this.generation) return stale.repositories;
+      throw new GithubUnreachableError();
+    }
+    this.repositoryCache = null;
+    return null;
+  }
+
+  private cachedRepositories(): Repository[] | null {
+    const cache = this.repositoryCache;
+    if (!cache || this.current.state !== "connected") return null;
+    const live = cache.login === this.current.login && cache.generation === this.generation && cache.expires > this.now();
+    return live ? cache.repositories : null;
+  }
+
+  /** One traversal per (login, generation): concurrent misses share it. */
+  private loadRepositories(login: string, generation: number): Promise<Repository[] | null> {
+    const cached = this.cachedRepositories();
+    if (cached) return Promise.resolve(cached);
+    const inflight = this.repositoryLoad;
+    if (inflight?.login === login && inflight.generation === generation) return inflight.promise;
+    const promise = this.fetchRepositories(login, generation).finally(() => {
+      if (this.repositoryLoad?.promise === promise) this.repositoryLoad = null;
+    });
+    this.repositoryLoad = { login, generation, promise };
+    return promise;
+  }
+
+  private async fetchRepositories(login: string, generation: number): Promise<Repository[] | null> {
+    const repositories: Repository[] = [];
+    const seen = new Set<string>();
+    for (let page = 1; ; page++) {
+      const batch = JSON.parse(await this.gh([
+        "api", "--hostname", "github.com",
+        `user/repos?affiliation=owner,collaborator,organization_member&sort=updated&direction=desc&per_page=100&page=${page}`,
+        "--jq", "[.[] | {fullName: .full_name, private: .private}]",
+      ])) as Repository[];
+      if (generation !== this.generation || this.current.state !== "connected" || this.current.login !== login) return null;
+      // Pages are ordered by activity, so a repository updated between two
+      // fetches can appear on both; its first (newest) position wins.
+      for (const repository of batch) {
+        if (seen.has(repository.fullName)) continue;
+        seen.add(repository.fullName);
+        repositories.push(repository);
+      }
+      if (batch.length < 100) break;
+    }
+    this.repositoryCache = { login, generation, expires: this.now() + 60_000, repositories };
+    return repositories;
+  }
+
+  /** Whether gh stores a github.com credential — a local check that does not
+   * touch the network. gh itself reports an offline check as an invalid
+   * token, so its status text cannot make this distinction. The token in
+   * the output is discarded. */
+  private async credentialStored(): Promise<boolean> {
+    try {
+      await this.gh(["auth", "token", "--hostname", "github.com"]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   async ensureFresh(): Promise<void> {
     if (this.child || this.disconnecting) return;
@@ -159,6 +250,8 @@ export class GithubAuth {
         if (this.child === child) this.child = null;
         finishReveal(this.current);
         resolve();
+        // Warm the repository list so the first project-setup focus is fast.
+        if (this.current.state === "connected") void this.loadRepositories(this.current.login, generation).catch(() => {});
       };
       child.on("error", (error) => void done(`couldn't start GitHub CLI (${error.message})`));
       child.on("exit", () => clearTimeout(timer));
@@ -171,6 +264,7 @@ export class GithubAuth {
     if (this.disconnecting) return;
     this.disconnecting = true;
     ++this.generation;
+    this.repositoryCache = null;
     try {
       const child = this.child;
       if (child) {
@@ -228,8 +322,10 @@ export class GithubAuth {
       if (!login) throw new Error("missing login");
       this.current = { state: "connected", login };
       this.identity = { name: name?.trim() || login, email: /^\d+$/.test(id ?? "") ? `${id}+${login}@users.noreply.github.com` : `${login}@users.noreply.github.com` };
+      this.refreshFailed = false;
     } catch {
       if (generation !== this.generation) return;
+      this.refreshFailed = true;
       this.identity = null;
       if (this.current.state === "connected") this.current = { state: "disconnected" };
     }

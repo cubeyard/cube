@@ -1,5 +1,5 @@
 /**
- * Offline units for the mock cube backend (CUBED_BACKEND=mock, PLAN §13
+ * Offline units for the mock cube backend (CUBED_BACKEND=mock, ARCHITECTURE §13
  * 3d.3): the in-memory instance table, the no-op egress proxy, and local
  * exec with the guest workspace path rebased onto the real host workspace.
  * No Incus, no daemon.
@@ -188,6 +188,43 @@ const spec: CubeProvisionSpec = {
   assert.equal((await backend.getState(NAME)).status, "Stopped", "destroyed cube reads Stopped");
   assert.ok(fs.existsSync(hostWorkspace), "destroy leaves the host workspace (parity with Incus)");
   console.log("6 ok: destroy drops the instance, keeps the workspace");
+}
+
+// --------------------------------------- 7. reusable environment primitives
+{
+  const backend = new MockBackend();
+  assert.equal(await backend.resolveImage("cube-node"), "mock-image:cube-node");
+  await backend.provision(spec);
+  fs.writeFileSync(path.join(hostWorkspace, "snapshot.txt"), "captured");
+  fs.chmodSync(path.join(hostWorkspace, "snapshot.txt"), 0o555);
+  fs.symlinkSync("snapshot.txt", path.join(hostWorkspace, "snapshot-link"));
+  fs.mkdirSync(path.join(hostWorkspace, ".git"), { recursive: true });
+  fs.writeFileSync(path.join(hostWorkspace, ".git", "config"), "fresh-builder-git");
+  fs.writeFileSync(path.join(hostRepositories, "not-captured"), "repos");
+  const journal = path.join(base, "journal");
+  const fingerprint = await backend.captureEnvironment(spec, "prepared-node", journal);
+  assert.match(fingerprint, /^mock-environment:prepared-node:/);
+  assert.equal(fs.readFileSync(path.join(journal, "workspace", "snapshot.txt"), "utf8"), "captured");
+  assert.ok(!fs.existsSync(path.join(journal, "workspace", ".git")), "root .git is excluded");
+  assert.equal((await backend.getState(NAME)).status, "Stopped", "capture stops the builder");
+
+  fs.chmodSync(path.join(hostWorkspace, "snapshot.txt"), 0o644);
+  fs.writeFileSync(path.join(hostWorkspace, "snapshot.txt"), "changed");
+  fs.writeFileSync(path.join(hostWorkspace, "stale"), "remove me");
+  fs.writeFileSync(path.join(hostWorkspace, ".git", "config"), "fresh-target-git");
+  await backend.provision({ ...spec, imageFingerprint: fingerprint, restoreWorkspace: false });
+  assert.equal(fs.readFileSync(path.join(hostWorkspace, "snapshot.txt"), "utf8"), "changed", "builder does not restore");
+  await backend.provision({ ...spec, imageFingerprint: fingerprint, restoreWorkspace: true });
+  assert.equal(fs.readFileSync(path.join(hostWorkspace, "snapshot.txt"), "utf8"), "captured");
+  assert.equal(fs.statSync(path.join(hostWorkspace, "snapshot.txt")).mode & 0o777, 0o555);
+  assert.equal(fs.readlinkSync(path.join(hostWorkspace, "snapshot-link")), "snapshot.txt");
+  assert.ok(!fs.existsSync(path.join(hostWorkspace, "stale")));
+  assert.equal(fs.readFileSync(path.join(hostWorkspace, ".git", "config"), "utf8"), "fresh-target-git");
+  assert.equal(fs.readFileSync(path.join(hostRepositories, "not-captured"), "utf8"), "repos");
+  await backend.deleteEnvironment(fingerprint);
+  assert.ok(!fs.existsSync(path.join(journal, "workspace")), "delete removes only the owned snapshot");
+  assert.ok(fs.existsSync(journal), "delete preserves caller-owned journal directory");
+  console.log("7 ok: image resolution and stopped environment capture");
 }
 
 fs.rmSync(base, { recursive: true, force: true });

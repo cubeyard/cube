@@ -12,12 +12,17 @@ import path from "node:path";
 
 import { GitService, PrReviewService, describeRepoAuthFailure, normalizeRepoUrl, type RepoDiff, type RepoState } from "@cube/git";
 import {
+  removeStoppedTree,
   type CubeBackend,
   type CubeProvisionSpec,
   type EgressProxy,
 } from "@cube/sandbox";
 
 import { readCubeConfig, readWakeHooks } from "./cube-toml.ts";
+import { EnvironmentCache, EnvironmentCacheBusyError, EnvironmentCacheSuspendedError } from "./environment-cache.ts";
+import { Lifecycle, type LifecyclePhase } from "./lifecycle.ts";
+import { Span, describeError, recordPoint } from "./events.ts";
+import { describeThreadError } from "./user-facing.ts";
 import { readGithub } from "./github-read.ts";
 import { ensureServices, portalLabelFor, type ServiceStatus } from "./services.ts";
 import {
@@ -32,6 +37,30 @@ import {
 
 export const EGRESS_PROXY_PORT = 3128;
 
+/** Events older than this are pruned (at boot and hourly). */
+const EVENT_RETENTION_MS = 30 * 24 * 3_600_000;
+const EVENT_PRUNE_EVERY_MS = 3_600_000;
+/** How often the sweep retries environment cleanups boot left pending. */
+const ENVIRONMENT_MAINTENANCE_MS = 10 * 60_000;
+/** Builder cleanups attempted per maintenance pass, and the deadline of
+ * each Incus call a cleanup makes — one stalled request costs one
+ * deadline, never the pass or a thread's provisioning. */
+const MAINTENANCE_BATCH = 5;
+const MAINTENANCE_CALL_TIMEOUT_MS = 60_000;
+/** How long a thread-creation idempotency key answers with the same thread,
+ * and how many keys are remembered at most (oldest evicted first). */
+const CREATE_REQUEST_TTL_MS = 10 * 60_000;
+const CREATE_REQUEST_CAP = 1000;
+/** Egress allow/deny decisions are aggregated per (cube, decision, kind,
+ * host) over this window before landing as one event each — an `npm
+ * install` must not write a row per CONNECT. */
+const EGRESS_FLUSH_MS = 60_000;
+/** Distinct hosts remembered per cube per window. A cube that sprays
+ * hostnames (it controls its own DNS queries) rolls past this into one
+ * `…and N more` bucket instead of growing host memory or the event table. */
+const EGRESS_HOSTS_PER_CUBE = 200;
+const EGRESS_HOST_MAX_LEN = 253;
+
 // What the pty bridge spawns per attached thread (Phase 3d step 2). The
 // pnpm bin shim is the same one `pnpm vm`'s dev.sh execs; the extension
 // entry must be a path (its guard compares tool sourceInfo paths against
@@ -40,7 +69,7 @@ export const EGRESS_PROXY_PORT = 3128;
 // extension's `user_bash` handler) from executing on the credentialed host
 // — see packages/pi-extension/src/index.ts. `--no-approve` matches the
 // harness's projectTrusted:false stance for the same reason.
-const PI_BIN = path.resolve(import.meta.dirname, "../../harness/node_modules/.bin/pi");
+const PI_BIN = path.resolve(import.meta.dirname, "../node_modules/.bin/pi");
 const PI_EXTENSION = path.resolve(import.meta.dirname, "../../pi-extension/src/index.ts");
 
 /** How much of a session file's head autoTitle reads looking for the first
@@ -67,7 +96,7 @@ export const DEFAULT_EGRESS_ALLOW = [
 export interface SupervisorConfig {
   /** Per-cube host state root: <cubesRoot>/<name>/{workspace,sessions}. */
   cubesRoot: string;
-  /** Bare-mirror root for checked project repositories (PLAN §11):
+  /** Bare-mirror root for checked project repositories (ARCHITECTURE §11):
    * <reposRoot>/<repo>-<hash>.git. */
   reposRoot: string;
   pool: string;
@@ -75,10 +104,13 @@ export interface SupervisorConfig {
   rootSize: string;
   dockerVolumeSize: string;
   egressAllow: string[];
+  /** Maximum retained prepared environments (conservative byte accounting).
+   * Zero disables reuse (default until the real Incus acceptance test passes). */
+  environmentCacheBytes?: number;
   /** Idle-to-sleep timeout in ms off last_active_at (PLAN: default 1h).
    * <= 0 disables the idle sweep entirely. */
   idleMs: number;
-  /** Portal hostname base (PLAN §10): portals live at
+  /** Portal hostname base (ARCHITECTURE §10): portals live at
    * `<service>--<cube>.<portalBase>`, routed on the Host header. */
   portalBase: string;
   /** Port portal URLs carry (cubed's public listener; 80 = portless). */
@@ -113,7 +145,9 @@ export interface CubeSummary {
 export interface UserThreadSummary {
   id: string;
   title: string | null;
-  state: "setting-up" | "ready" | "sleeping" | "error";
+  /** `waking` is the routine return path (opening a sleeping thread) and
+   * reads as a calm wait, never as green-but-unresponsive. */
+  state: "setting-up" | "ready" | "sleeping" | "waking" | "error";
   error: string | null;
   createdAt: number | null;
   archived: boolean;
@@ -153,11 +187,35 @@ export interface PortalTargetInfo {
 
 const instanceName = (cube: string) => `cube-${cube}`;
 
+/** Recorded on the provision span and the lifecycle result when a thread
+ * is deleted while still setting up. */
+const PROVISION_CANCELLED = "cancelled: thread deleted";
+
+/** Settle `work`, or reject with the signal's reason the moment it fires.
+ * For awaiting shared work (an environment build another thread may also
+ * be waiting on) that one caller leaving must not cancel: the work runs
+ * on and its eventual outcome is discarded. */
+function abortable<T>(signal: AbortSignal, work: Promise<T>): Promise<T> {
+  if (signal.aborted) {
+    work.catch(() => {});
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      work.catch(() => {});
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 /** Cube status -> user-visible thread state. "waking" reads as ready — the
  * wake is transparent (a prompt just takes a moment longer). */
 function threadState(cubeStatus: string): UserThreadSummary["state"] {
   if (cubeStatus === "creating") return "setting-up";
   if (cubeStatus === "asleep") return "sleeping";
+  if (cubeStatus === "waking") return "waking";
   if (cubeStatus === "error") return "error";
   return "ready";
 }
@@ -168,11 +226,18 @@ export class CubeSupervisor {
   private readonly config: SupervisorConfig;
   private readonly git: GitService;
   private readonly prReviews: PrReviewService;
+  private readonly lifecycle: Lifecycle;
+  private readonly environments: EnvironmentCache | null;
   private readonly runtimes = new Map<string, CubeRuntime>();
   // In-flight sleep/wake per cube. Status flips ("asleep"/"waking") happen
   // synchronously before the incus work, so concurrent callers observe the
   // transition and await this promise instead of racing a second stop/start.
   private readonly transitions = new Map<string, Promise<void>>();
+  // The provisioning (or setup-retry) transition per cube, cancellable: a
+  // thread deleted while its .cube/setup runs aborts the guest script and
+  // the remaining stages instead of refusing until they finish. Builders
+  // (`buildEnvironment`) are never registered here — they have no thread.
+  private readonly provisioning = new Map<string, AbortController>();
   // Cubes mid-removeCube: sleep/wake/second-DELETE must not race the
   // teardown's awaits (destroy would pull the instance out from under a
   // concurrent `incus start`).
@@ -193,7 +258,7 @@ export class CubeSupervisor {
   // forever (in-memory — the next ensure overwrites it).
   private readonly lastEnsure = new Map<string, { statuses: ServiceStatus[]; error: string | null }>();
   // In-flight host-side git ops (diff/push/PR) per cube: removeCube must not
-  // tear a cube down while a push/PR is still publishing (PLAN §11).
+  // tear a cube down while a push/PR is still publishing (ARCHITECTURE §11).
   private readonly gitOps = new Map<string, number>();
   // Project checks are serialized per project. A manual re-check or edit
   // queues behind the current network operation instead of racing status.
@@ -202,6 +267,21 @@ export class CubeSupervisor {
   // — remembered so the thread-list poll stops re-reading them.
   private readonly untitlable = new Set<string>();
   private sweepTimer: NodeJS.Timeout | null = null;
+  // Pending egress counters, flushed as aggregated events (see EGRESS_FLUSH_MS).
+  private readonly egress = new Map<string, { cube: string; decision: "allow" | "deny"; kind: string; host: string; n: number }>();
+  private readonly egressHostsPerCube = new Map<string, number>();
+  private egressTimer: NodeJS.Timeout | null = null;
+  private pruneTimer: NodeJS.Timeout | null = null;
+  // Environment maintenance (see maintainEnvironments): at most one pass
+  // at a time, at most one per ENVIRONMENT_MAINTENANCE_MS from the sweep.
+  private environmentMaintenance: Promise<void> | null = null;
+  private lastEnvironmentMaintenance = 0;
+  // Idempotency keys of recent thread creations (see createUserThread):
+  // `<project>\0<key>` -> the thread it made, in insertion (= time) order.
+  // In memory by design — a restart forgets them, and a key is only ever
+  // replayed within minutes. Bounded by CREATE_REQUEST_CAP; expiry and
+  // deleted threads are swept once a minute, not scanned per request.
+  private readonly createRequests = new Map<string, { threadId: string; at: number }>();
 
   constructor(registry: Registry, backend: CubeBackend, config: SupervisorConfig) {
     this.registry = registry;
@@ -209,6 +289,126 @@ export class CubeSupervisor {
     this.config = config;
     this.git = new GitService(config.reposRoot);
     this.prReviews = new PrReviewService(config.reposRoot);
+    this.lifecycle = new Lifecycle(path.join(config.cubesRoot, ".lifecycle"));
+    const budget = config.environmentCacheBytes ?? 0;
+    if (!Number.isSafeInteger(budget) || budget < 0) throw new Error("environmentCacheBytes must be a non-negative safe integer");
+    this.environments = budget > 0 && backend.resolveImage && backend.captureEnvironment && backend.deleteEnvironment
+      ? new EnvironmentCache(path.join(config.cubesRoot, ".environments"), budget,
+        // Every call the cache makes into Incus carries its deadline.
+        (fingerprint, opts) => backend.deleteEnvironment!(fingerprint, opts),
+        async (key, opts) => {
+          const directory = path.join(config.cubesRoot, ".environments", key);
+          // No journal means capture never reached POST. Once posting was
+          // journaled, absence of an alias is NOT evidence of failure.
+          if (!fs.existsSync(path.join(directory, "publication.json"))) return;
+          if (!backend.reconcileEnvironment) throw new Error("backend cannot reconcile environment publication");
+          await backend.deleteEnvironment!(await backend.reconcileEnvironment(`cube-env-${key}`, directory, opts), opts);
+        },
+        {
+          // An unresolved entry of unknown size is assumed to occupy what
+          // a build is admitted with (see the reservation passed to `use`).
+          unknownEntryBytes: 2 * parseSize(config.rootSize),
+          // A builder whose teardown failed still holds its instance and
+          // docker volume: unresolved for admission, occupied for the
+          // budget, until a retry frees it.
+          retained: () => {
+            const count = this.pendingBuilders().length;
+            return { count, bytes: count * (parseSize(config.rootSize) + parseSize(config.dockerVolumeSize)) };
+          },
+        })
+      : null;
+  }
+
+  // ---------------------------------------------------------------- events
+
+  /** Start a timed, phased record of one operation on a cube. */
+  private span(kind: string, cube: CubeRow | string): Span {
+    const name = typeof cube === "string" ? cube : cube.name;
+    // Resolved per record: provisioning starts before the thread row lands.
+    return new Span(this.registry, { kind, cube: name, thread: () => this.threadIdFor(name) });
+  }
+
+  /** Directories under cubesRoot that no cube row claims. */
+  private orphanHostTrees(): string[] {
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(this.config.cubesRoot);
+    } catch {
+      return [];
+    }
+    const live = new Set(this.registry.listCubes().map((cube) => cube.name));
+    return entries.filter((entry) => !live.has(entry) && !entry.startsWith(".")).sort();
+  }
+
+  /** What a still-provisioning cube is doing right now, from the phases its
+   * provision span has completed so far, with elapsed minutes once it has
+   * been a while (the setup script alone may run for many). */
+  private provisionProgress(cube: CubeRow): string {
+    // Anchored on the cube's creation, not on this terminal's attach: a
+    // reattach mid-setup must still name the running step and the real
+    // elapsed time.
+    const since = cube.createdAt;
+    const last = this.registry.listEvents({ cube: cube.name, kind: "provision", since, limit: 1 })[0];
+    const phase = last?.op && last.phase ? last.phase : null;
+    const restored = phase === "instance" && /restored/.test(last?.detail ?? "");
+    const step =
+      phase === null ? "preparing the repositories…"
+      : phase === "seed" ? "creating the environment…"
+      : restored ? "finishing up…"
+      : phase === "instance" || phase === "proxy" ? "running the repository's .cube/setup — this can take a while…"
+      : "finishing up…";
+    const minutes = Math.floor((Date.now() - since) / 60_000);
+    return minutes >= 2 ? `${step} (${minutes} min so far)` : step;
+  }
+
+  /** The thread behind a cube (one per cube), when it exists. */
+  private threadIdFor(cube: CubeRow | string): string | null {
+    const row = typeof cube === "string" ? this.registry.getCube(cube) : cube;
+    if (!row) return null;
+    return this.registry.listThreads(row.id)[0]?.id ?? null;
+  }
+
+  /** Count one egress decision; the batch lands as events on the next flush. */
+  private noteEgress(cube: string, decision: "allow" | "deny", kind: string, rawHost: string): void {
+    let host = rawHost.slice(0, EGRESS_HOST_MAX_LEN);
+    let key = `${cube}\0${decision}\0${kind}\0${host}`;
+    if (!this.egress.has(key)) {
+      const distinct = this.egressHostsPerCube.get(cube) ?? 0;
+      if (distinct >= EGRESS_HOSTS_PER_CUBE) {
+        host = "…and more";
+        key = `${cube}\0${decision}\0${kind}\0${host}`;
+      } else {
+        this.egressHostsPerCube.set(cube, distinct + 1);
+      }
+    }
+    const entry = this.egress.get(key);
+    if (entry) entry.n += 1;
+    else this.egress.set(key, { cube, decision, kind, host, n: 1 });
+    if (!this.egressTimer) {
+      this.egressTimer = setTimeout(() => this.flushEgress(), EGRESS_FLUSH_MS);
+      this.egressTimer.unref();
+    }
+  }
+
+  private flushEgress(): void {
+    if (this.egressTimer) clearTimeout(this.egressTimer);
+    this.egressTimer = null;
+    const batch = [...this.egress.values()];
+    this.egress.clear();
+    this.egressHostsPerCube.clear();
+    // One thread lookup per cube, not per host.
+    const threads = new Map<string, string | null>();
+    for (const e of batch) {
+      if (!threads.has(e.cube)) threads.set(e.cube, this.threadIdFor(e.cube));
+      recordPoint(this.registry, {
+        kind: "egress",
+        phase: e.decision,
+        cube: e.cube,
+        thread: threads.get(e.cube) ?? null,
+        ok: e.decision === "allow",
+        detail: `${e.kind} ${e.host} ×${e.n}`,
+      });
+    }
   }
 
   /**
@@ -222,7 +422,40 @@ export class CubeSupervisor {
    * "asleep" — it wakes on demand. Threads reopen lazily on first use.
    */
   async boot(): Promise<void> {
+    // Builders have no thread. Reap interrupted builders before reusing any
+    // snapshots; never resume setup as though it were a user's environment.
     for (const cube of this.registry.listCubes()) {
+      if (cube.status !== "building-environment" || this.registry.listThreads(cube.id).length) continue;
+      await this.cleanupEnvironmentBuilder(cube);
+    }
+    await this.environments?.recover().catch((error) => console.warn(`environment recovery: ${String(error)}`));
+    await this.environments?.prune().catch((error) => console.warn(`environment eviction: ${String(error)}`));
+    this.recordEnvironmentDiagnostics();
+    this.lastEnvironmentMaintenance = Date.now(); // the periodic pass continues from here
+    const pruned = this.registry.pruneEvents(EVENT_RETENTION_MS);
+    recordPoint(this.registry, { kind: "boot", detail: `cubed start; pruned ${pruned} old events` });
+    // Host trees with no registry row are disk that nothing will ever free.
+    // Named, never deleted here: a registry moved aside must not turn boot
+    // into a wipe of every workspace.
+    const orphans = this.orphanHostTrees();
+    if (orphans.length > 0) {
+      recordPoint(this.registry, {
+        kind: "boot",
+        phase: "orphans",
+        ok: false,
+        detail: `${orphans.length} host tree(s) under ${this.config.cubesRoot} belong to no thread: ${orphans.slice(0, 8).join(" ")}${orphans.length > 8 ? " …" : ""}`,
+      });
+    }
+    for (const cube of this.registry.listCubes()) {
+      if (cube.status === "building-environment") continue; // quarantined cleanup remains retryable
+      for (const phase of ["setup", "resume"] as const) {
+        const result = this.lifecycle.read(cube.name, phase);
+        if (result?.state === "running") this.lifecycle.save(cube.name, phase, {
+          ...result, state: "failed", durationMs: Date.now() - result.startedAt,
+          error: `${phase} interrupted by cubed restart — retry setup or wake`,
+        });
+      }
+      const span = this.span("boot", cube);
       if (cube.status === "creating") {
         // Interrupted after the instance came up (typically during a long
         // .cube/setup — an app upgrade restarts cubed) leaves a usable
@@ -236,13 +469,18 @@ export class CubeSupervisor {
             ? "provisioning was interrupted by a cubed restart — .cube/setup may not have completed"
             : "provisioning interrupted by cubed restart",
         );
+        span.end(exists, `interrupted provision -> ${exists ? "asleep" : "error"}`);
         continue;
       }
       if (cube.status === "waking") {
-        this.registry.setCubeStatus(cube.name, "asleep");
+        this.registry.setCubeStatus(cube.name, "asleep", cube.error);
+        span.end(true, "interrupted wake -> asleep");
         continue;
       }
-      if (cube.status !== "ready") continue;
+      if (cube.status !== "ready") {
+        span.end(true, `${cube.status} left as is`);
+        continue;
+      }
       try {
         const state = await this.backend.getState(instanceName(cube.name));
         if (state.status === "Running") {
@@ -253,16 +491,83 @@ export class CubeSupervisor {
           const net = networkForCube(cube.name, cube.subnetIndex);
           await this.backend.waitForNetwork(instanceName(cube.name), net.ip);
           await this.startProxy(cube);
+          span.end(true, "ready, proxy restarted");
         } else {
-          this.registry.setCubeStatus(cube.name, "asleep");
+          this.registry.setCubeStatus(cube.name, "asleep", cube.error);
+          span.end(true, "ready but stopped -> asleep");
         }
       } catch (error) {
         this.registry.setCubeStatus(cube.name, "error", `boot: ${String(error)}`);
+        span.fail(error);
       }
     }
-    if (this.config.idleMs > 0 && !this.sweepTimer) {
-      this.sweepTimer = setInterval(() => void this.sweepIdle(), 60_000);
+    if (!this.pruneTimer) {
+      // Retention runs on its own clock: it must not depend on idle sleep
+      // being enabled (CUBED_IDLE_MS=0 is supported).
+      this.pruneTimer = setInterval(() => this.registry.pruneEvents(EVENT_RETENTION_MS), EVENT_PRUNE_EVERY_MS);
+      this.pruneTimer.unref();
+    }
+    if (!this.sweepTimer) {
+      // One minute tick: the idle sleep (when enabled) and, every ten
+      // minutes, the environment maintenance boot could not finish.
+      this.sweepTimer = setInterval(() => this.sweep(), 60_000);
       this.sweepTimer.unref();
+    }
+  }
+
+  private sweep(): void {
+    if (this.config.idleMs > 0) void this.sweepIdle();
+    this.sweepCreateRequests();
+    if (Date.now() - this.lastEnvironmentMaintenance >= ENVIRONMENT_MAINTENANCE_MS) void this.maintainEnvironments();
+  }
+
+  /**
+   * Retry what boot could not finish: builders whose cleanup failed
+   * (`building-environment` rows marked "cleanup pending") and cache
+   * entries whose publication or eviction never resolved — each one holds
+   * an image, a workspace tree or a subnet outside the configured budget
+   * until it is gone. Bounded: a batch per pass, a deadline per Incus
+   * call, so one stalled request costs one deadline and the pass ends.
+   * Best effort: every failure is an event, never a rejection. Concurrent
+   * calls share one pass.
+   */
+  maintainEnvironments(): Promise<void> {
+    if (this.environmentMaintenance) return this.environmentMaintenance;
+    this.lastEnvironmentMaintenance = Date.now();
+    this.environmentMaintenance = (async () => {
+      const span = new Span(this.registry, { kind: "environment" });
+      let retried = 0;
+      for (const cube of this.pendingBuilders().slice(0, MAINTENANCE_BATCH)) {
+        retried += 1;
+        await this.cleanupEnvironmentBuilder(cube);
+      }
+      let unresolved = 0;
+      if (this.environments) {
+        try {
+          await this.environments.maintain();
+        } catch (error) {
+          recordPoint(this.registry, { kind: "environment", phase: "maintenance", ok: false, detail: describeError(error) });
+        }
+        this.recordEnvironmentDiagnostics();
+        unresolved = this.environments.quarantined().length; // builders are counted separately below
+      }
+      const pending = this.pendingBuilders().length;
+      span.end(unresolved === 0 && pending === 0, `maintenance: ${retried} builder cleanup(s) retried, ${pending} still pending; ${unresolved} cache entr${unresolved === 1 ? "y" : "ies"} unresolved`);
+    })().finally(() => { this.environmentMaintenance = null; });
+    return this.environmentMaintenance;
+  }
+
+  /** Builders whose teardown failed: still an instance, a volume, a host
+   * tree and a subnet each, until a retry succeeds. Never a user's thread. */
+  private pendingBuilders(): CubeRow[] {
+    return this.registry.listCubes().filter((cube) =>
+      cube.status === "building-environment" && !!cube.error?.startsWith("cleanup pending") && this.registry.listThreads(cube.id).length === 0);
+  }
+
+  /** Cache maintenance failures land as events, not as console noise. */
+  private recordEnvironmentDiagnostics(): void {
+    for (const error of this.environments?.takeDiagnostics() ?? []) {
+      recordPoint(this.registry, { kind: "environment", phase: "maintenance", ok: false, detail: describeError(error) });
     }
   }
 
@@ -398,6 +703,7 @@ export class CubeSupervisor {
   }
 
   private async runProjectCheck(projectId: string, revision: number): Promise<void> {
+    const span = new Span(this.registry, { kind: "project-check" });
     await this.config.github?.ensureFresh();
     const repositories = this.registry.listProjectRepositories(projectId);
     const failures: string[] = [];
@@ -432,6 +738,11 @@ export class CubeSupervisor {
       failures.length === 0 ? null : failures.join("; "),
       checkedAt,
     );
+    const name = this.registry.getProject(projectId)?.name ?? projectId;
+    span.end(
+      failures.length === 0,
+      failures.length === 0 ? `${name}: ${repositories.length} repositor${repositories.length === 1 ? "y" : "ies"} ready` : `${name}: ${failures.join("; ")}`,
+    );
   }
 
   // ------------------------------------------------------------------ cubes
@@ -439,6 +750,7 @@ export class CubeSupervisor {
   listCubes(): CubeSummary[] {
     const summaries: CubeSummary[] = [];
     for (const cube of this.registry.listCubes()) {
+      if (cube.status === "building-environment") continue;
       summaries.push({
         name: cube.name,
         status: cube.status,
@@ -508,7 +820,7 @@ export class CubeSupervisor {
       this.registry.deleteCube(row.name);
       throw error;
     }
-    this.transition(row.name, this.provision(row)).catch(() => {});
+    this.transition(row.name, this.provision(row, repositories[0]?.projectId)).catch(() => {});
     return row;
   }
 
@@ -560,38 +872,226 @@ export class CubeSupervisor {
     };
   }
 
-  private async provision(cube: CubeRow): Promise<void> {
+  /** The git service takes no signal (one local clone per repository is
+   * bounded work); a cancellation lands between repositories instead. */
+  private async seedCube(cube: CubeRow, signal?: AbortSignal): Promise<void> {
+    for (const repo of this.registry.listCubeRepositories(cube.id)) {
+      signal?.throwIfAborted();
+      await this.git.seedPreparedWorkspace({
+        url: repo.url, workspacePath: repo.workspacePath, base: repo.base,
+        baseOid: repo.baseOid, branch: repo.branch,
+        identity: this.config.github?.gitIdentity?.(),
+      });
+    }
+  }
+
+  /**
+   * Provision one cube end to end. Cancellable through `this.provisioning`
+   * (a thread deleted mid-setup): the signal reaches the guest scripts, is
+   * checked between stages, and goes into the backend's instance create /
+   * restore, which rolls a half-made instance back on abort (bounded,
+   * signal-free) — so the teardown that follows always finds the instance
+   * either absent or fully created.
+   */
+  private async provision(cube: CubeRow, projectId?: string): Promise<void> {
+    const span = this.span("provision", cube);
+    const controller = new AbortController();
+    const signal = controller.signal;
+    this.provisioning.set(cube.name, controller);
+    // The transition and the controller are reserved (above, synchronously);
+    // the work itself starts one tick later so the caller's thread row is
+    // in place before the first record — an immediate failure must still
+    // name its thread.
+    await null;
     try {
+      // The first host write of a provision belongs inside the guard: a
+      // full or read-only disk fails here as an error the thread can be
+      // deleted from, not as an escaped rejection that strands `creating`.
+      this.lifecycle.save(cube.name, "setup", { state: "running", startedAt: Date.now(), durationMs: null, error: null });
       // Seed every workspace from the exact snapshots Project readiness
       // prepared. This path is deliberately local-only: auth/network failures
       // belong to the Project switchboard, not thread creation.
-      for (const repo of this.registry.listCubeRepositories(cube.id)) {
-        await this.git.seedPreparedWorkspace({
-          url: repo.url,
-          workspacePath: repo.workspacePath,
-          base: repo.base,
-          baseOid: repo.baseOid,
-          branch: repo.branch,
-          identity: this.config.github?.gitIdentity?.(),
-        });
-      }
+      await this.seedCube(cube, signal);
+      signal.throwIfAborted();
+      span.phase("seed");
       const spec = this.provisionSpec(cube);
-      await this.backend.provision(spec);
+      let cached = false;
+      // The checkout is still fresh and not mounted in any guest. Inspect
+      // only directory entries, never follow a repo symlink on the host.
+      // No setup script means the base image is already the best snapshot.
+      let hasSetup = false;
+      try {
+        const dir = fs.lstatSync(path.join(cube.workspacePath, ".cube"));
+        hasSetup = dir.isSymbolicLink() || (dir.isDirectory() && !!fs.lstatSync(path.join(cube.workspacePath, ".cube", "setup")));
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      if (projectId && this.environments && hasSetup) {
+        const repos = this.registry.listCubeRepositories(cube.id);
+        const fingerprint = await this.backend.resolveImage!(cube.image);
+        spec.imageFingerprint = fingerprint;
+        // Set once the restore has started: only then is there an instance
+        // (whole or rolled back) and a touched workspace to reset below.
+        const restore = { pending: null as Promise<void> | null };
+        try {
+          // A shared build is not this thread's to cancel: on deletion the
+          // wait is abandoned (the builder finishes and publishes for the
+          // next thread) and the consume step below refuses to create the
+          // instance under a teardown.
+          await abortable(signal, this.environments.use(
+            { version: 2, projectId, fingerprint, arch: process.arch,
+              rootSize: spec.rootSize, dockerVolumeSize: spec.dockerVolumeSize,
+              egress: this.config.egressAllow, portalBase: this.config.portalBase,
+              repositories: repos.map((r) => [r.url, r.base, r.checkoutName]) },
+            repos.map((r) => r.baseOid),
+            // Incus may retain both compressed image and unpacked rootfs.
+            // Docker staging is already inside the captured rootfs quota.
+            2 * parseSize(spec.rootSize),
+            // The build gets this thread's repository snapshot as read
+            // above, never the registry: the build may start after this
+            // thread was deleted and its rows cascaded away.
+            (directory, warm) => this.buildEnvironment(cube, repos, directory, warm ?? fingerprint),
+            async (imageFingerprint, workspace) => {
+              signal.throwIfAborted();
+              // Ownership/xattrs/timestamps are restored INSIDE the target
+              // namespace. Fresh host-created .git is excluded and retained.
+              restore.pending = (async () => {
+                await this.backend.provision({ ...spec, imageFingerprint, restoreWorkspace: true }, { signal });
+                this.lifecycle.adopt(cube.name, path.dirname(workspace));
+                cached = true;
+              })();
+              await restore.pending;
+            },
+          ));
+        } catch (error) {
+          // A restore already under way is never abandoned: the teardown
+          // that follows a cancellation must find the instance whole or
+          // absent, not half-made.
+          if (restore.pending) await restore.pending.catch(() => {});
+          signal.throwIfAborted();
+          // Reuse is an optimization. A failed build/capture is never
+          // published; fresh setup remains the repair path — and while the
+          // host cannot clean up after its own cache, that is the only path.
+          const declined =
+            error instanceof EnvironmentCacheSuspendedError ? "suspended"
+            : error instanceof EnvironmentCacheBusyError ? "busy"
+            : null;
+          recordPoint(this.registry, {
+            kind: "environment", phase: declined ?? "reuse-failed", cube: cube.name,
+            thread: this.threadIdFor(cube), ok: false,
+            detail: `fresh setup instead: ${describeError(error)}`,
+          });
+          console.warn(`environment reuse [${cube.name}]: ${String(error)}`);
+          if (restore.pending) {
+            await this.backend.destroy(spec, { deleteVolume: true, deleteBridge: true });
+            removeStoppedTree(cube.workspacePath);
+            await this.seedCube(cube, signal);
+          }
+        }
+      }
+      signal.throwIfAborted();
+      if (!cached) await this.backend.provision(spec, { signal });
+      span.phase("instance", cached ? "restored a prepared environment" : null);
       this.registry.addVolume({
         cubeId: cube.id,
         purpose: "docker",
         poolVolume: `${this.config.pool}/${spec.name}-docker`,
         capBytes: parseSize(this.config.dockerVolumeSize),
       });
+      signal.throwIfAborted();
       await this.startProxy(cube);
-      // .cube/setup (Amp convention): once, right after provisioning, for
-      // the deps every cube of this repo needs. A failure surfaces on the
-      // error field but the cube stays usable.
-      const setupError = await this.runLifecycleScript(cube, "setup", 1200);
-      this.registry.setCubeStatus(cube.name, "ready", setupError);
+      span.phase("proxy");
+      signal.throwIfAborted();
+      const setupError = cached ? null : await this.runLifecycleScript(cube, "setup", signal);
+      span.phase("setup", cached ? "skipped: prepared environment" : setupError, setupError === null);
+      signal.throwIfAborted();
+      const activationError = setupError ?? await this.runLifecycleScript(cube, "resume", signal);
+      if (setupError === null) span.phase("resume", activationError, activationError === null);
+      signal.throwIfAborted();
+      this.registry.setCubeStatus(cube.name, "ready", activationError);
+      this.recordEnvironmentDiagnostics();
+      span.end(true, activationError ? "ready with setup complaint" : "ready");
     } catch (error) {
       // provisionCube rolled the instance back; bridge/volume are reusable.
-      this.registry.setCubeStatus(cube.name, "error", String(error));
+      const cancelled = signal.aborted;
+      this.failLifecycle(cube.name, "setup", cancelled ? PROVISION_CANCELLED : String(error));
+      // A cancelled provision is torn down by the deletion that cancelled
+      // it; the status is only for a teardown that then fails half-way.
+      this.registry.setCubeStatus(cube.name, "error", cancelled ? PROVISION_CANCELLED : String(error));
+      if (cancelled) span.end(false, PROVISION_CANCELLED);
+      else span.fail(error);
+    } finally {
+      if (this.provisioning.get(cube.name) === controller) this.provisioning.delete(cube.name);
+    }
+  }
+
+  /**
+   * Build one shared snapshot in a dedicated builder cube. `repositories`
+   * is the source thread's immutable snapshot, captured by the caller
+   * before the shared work was queued: the build may run after that
+   * thread was deleted (its wait abandoned, its rows cascaded away), and
+   * rereading the registry then would publish an empty workspace under
+   * the revision key every later thread restores from.
+   */
+  private async buildEnvironment(
+    source: Pick<CubeRow, "image">,
+    repositories: CubeRepositoryRow[],
+    directory: string,
+    imageFingerprint: string,
+  ): Promise<string> {
+    if (repositories.length === 0) throw new Error("environment build refused: the source thread has no repositories");
+    const name = `s-${crypto.randomBytes(4).toString("hex")}`;
+    const builder = this.registry.createCube({
+      name, image: source.image,
+      workspacePath: path.join(this.config.cubesRoot, name, "workspace"),
+    });
+    this.registry.setCubeStatus(name, "building-environment");
+    this.registry.addCubeRepositories(builder.id, repositories.map((repo, position) => ({
+      url: repo.url, base: repo.base, baseOid: repo.baseOid, branch: "cube/setup",
+      checkoutName: repo.checkoutName,
+      workspacePath: position === 0 ? builder.workspacePath : path.join(path.dirname(builder.workspacePath), "repos", repo.checkoutName),
+    })));
+    const spec = { ...this.provisionSpec(builder), imageFingerprint };
+    let captured: string | undefined;
+    try {
+      await this.seedCube(builder);
+      await this.backend.provision(spec);
+      await this.startProxy(builder);
+      const error = await this.runLifecycleScript(builder, "setup");
+      // Preserve build evidence outside the snapshot's agent-visible files.
+      fs.writeFileSync(path.join(directory, "setup.log"), this.lifecycle.log(name, "setup"), { mode: 0o600 });
+      fs.writeFileSync(path.join(directory, "setup.json"), JSON.stringify(this.lifecycle.read(name, "setup")), { mode: 0o600 });
+      if (error) throw new Error(error);
+      captured = await this.backend.captureEnvironment!(spec, `cube-env-${path.basename(directory)}`, directory);
+      // Production workspace data is inside the image; the mock keeps a
+      // separate payload here. The cache owns only host-readable metadata.
+      fs.mkdirSync(path.join(directory, "workspace"), { recursive: true });
+      return captured;
+    } catch (error) {
+      if (captured) await this.backend.deleteEnvironment!(captured, { signal: AbortSignal.timeout(MAINTENANCE_CALL_TIMEOUT_MS) });
+      throw error;
+    } finally {
+      await this.cleanupEnvironmentBuilder(builder);
+    }
+  }
+
+  /** Tear a builder down under a deadline. A failure keeps the row as a
+   * "cleanup pending" quarantine that boot and maintenance retry. */
+  private async cleanupEnvironmentBuilder(builder: CubeRow): Promise<void> {
+    try {
+      await this.runtimes.get(builder.name)?.proxy?.close();
+      this.runtimes.delete(builder.name);
+      await this.backend.destroy(this.provisionSpec(builder), {
+        deleteVolume: true, deleteBridge: true, signal: AbortSignal.timeout(MAINTENANCE_CALL_TIMEOUT_MS),
+      });
+      removeStoppedTree(path.dirname(builder.workspacePath));
+      this.lifecycle.forget(builder.name);
+      this.registry.deleteCube(builder.name);
+    } catch (error) {
+      // Never turn one unremovable guest directory into a daemon outage.
+      // Keep the internal row/path as a durable quarantine: boot and the
+      // periodic maintenance retry it.
+      this.registry.setCubeStatus(builder.name, "building-environment", `cleanup pending: ${String(error)}`);
+      recordPoint(this.registry, { kind: "environment", phase: "builder-cleanup", cube: builder.name, ok: false, detail: describeError(error) });
+      console.warn(`environment builder cleanup [${builder.name}]: ${String(error)}`);
     }
   }
 
@@ -604,7 +1104,11 @@ export class CubeSupervisor {
       port: EGRESS_PROXY_PORT,
       allow: this.config.egressAllow,
       allowSource: [net.ip],
-      onDeny: (host, kind) => console.log(`egress deny [${cube.name}] ${kind}: ${host}`),
+      onDeny: (host, kind) => {
+        console.log(`egress deny [${cube.name}] ${kind}: ${host}`);
+        this.noteEgress(cube.name, "deny", kind, host);
+      },
+      onAllow: (host, kind) => this.noteEgress(cube.name, "allow", kind, host),
     });
   }
 
@@ -618,7 +1122,7 @@ export class CubeSupervisor {
    * cube is off. Status flips to "asleep" before the stop so a concurrent
    * prompt takes the wake path (which awaits the in-flight stop).
    */
-  async sleepCube(name: string): Promise<void> {
+  async sleepCube(name: string, reason: "manual" | "idle" = "manual"): Promise<void> {
     for (;;) {
       const inflight = this.pendingTransition(name);
       if (!inflight) break;
@@ -633,8 +1137,10 @@ export class CubeSupervisor {
     if (cube.status !== "ready") {
       throw new Error(`cube ${name} is not ready (status: ${cube.status}) — cannot sleep`);
     }
-    this.registry.setCubeStatus(name, "asleep");
-    return this.transition(name, this.doSleep(cube));
+    // Sleep is not a resolution: a setup or hook complaint the user has not
+    // read yet survives the idle sweep instead of vanishing an hour later.
+    this.registry.setCubeStatus(name, "asleep", cube.error);
+    return this.transition(name, this.doSleep(cube, reason));
   }
 
   /**
@@ -658,13 +1164,21 @@ export class CubeSupervisor {
       const cube = this.requireCube(name);
       if (cube.status === "ready") {
         const state = await this.backend.getState(instanceName(name));
-        if (state.status === "Running") return;
-        // Stopped under a ready row (agent-initiated poweroff, out-of-band
-        // `incus stop`). Re-validate after the await, then demote to
-        // asleep and loop into the normal wake path.
+        // Re-validate after the await on BOTH paths: a setup retry or a
+        // sleep may have reserved the cube while the state request was out,
+        // and returning "running" then would let guest tools race it.
         if (this.pendingTransition(name)) continue;
         if (this.requireCube(name).status !== "ready") continue;
-        this.registry.setCubeStatus(name, "asleep");
+        if (state.status === "Running") {
+          // A wake request is activity: the extension asks before every tool
+          // call, and a long quiet tool (docker build) must not be slept
+          // under it by the idle sweep.
+          this.registry.touchCube(name);
+          return;
+        }
+        // Stopped under a ready row (agent-initiated poweroff, out-of-band
+        // `incus stop`): demote to asleep and loop into the normal wake path.
+        this.registry.setCubeStatus(name, "asleep", cube.error);
         continue;
       }
       if (cube.status === "creating") {
@@ -692,20 +1206,26 @@ export class CubeSupervisor {
     return tracked;
   }
 
-  private async doSleep(cube: CubeRow): Promise<void> {
+  private async doSleep(cube: CubeRow, reason: "manual" | "idle"): Promise<void> {
     const name = instanceName(cube.name);
+    const span = this.span("sleep", cube);
     try {
       const state = await this.backend.getState(name);
+      let how = "already stopped";
       if (state.status !== "Stopped") {
         try {
           await this.backend.setState(name, "stop", { timeout: 30 });
+          how = "stopped";
         } catch {
           // graceful stop timed out (a wedged inner dockerd can do this)
           await this.backend.setState(name, "stop", { force: true });
+          how = "force-stopped after a 30s graceful timeout";
         }
       }
+      span.end(true, `${reason}: ${how}`);
     } catch (error) {
       this.registry.setCubeStatus(cube.name, "error", `sleep failed: ${String(error)}`);
+      span.fail(error);
       throw error;
     }
   }
@@ -713,26 +1233,33 @@ export class CubeSupervisor {
   private async doWake(cube: CubeRow): Promise<void> {
     const name = instanceName(cube.name);
     const net = networkForCube(cube.name, cube.subnetIndex);
+    const span = this.span("wake", cube);
     try {
       const state = await this.backend.getState(name);
       if (state.status !== "Running") await this.backend.setState(name, "start");
+      span.phase("start", state.status === "Running" ? "already running" : null);
       await this.backend.waitForNetwork(name, net.ip);
+      span.phase("network");
       await this.startProxy(cube); // no-op if it survived the sleep
       // .cube/resume, then the wake hooks — which build on it, so a failed
       // resume skips them and its complaint takes the error field.
-      const resumeError = await this.runLifecycleScript(cube, "resume", 120);
+      const resumeError = await this.runLifecycleScript(cube, "resume");
+      span.phase("resume", resumeError, resumeError === null);
       const hookError = resumeError ?? (await this.runWakeHooks(cube));
+      if (resumeError === null) span.phase("hooks", hookError, hookError === null);
       // Touch first: a wake without it would be instantly re-slept by the
       // sweep (last_active_at still predates the idle cutoff).
       this.registry.touchCube(cube.name);
       // A failed hook does not brick the cube — it is up and usable; the
       // error field carries the complaint to the UI.
-      this.registry.setCubeStatus(cube.name, "ready", hookError);
+      this.registry.setCubeStatus(cube.name, "ready", this.lifecycle.read(cube.name, "setup")?.error ?? hookError);
+      span.end(true, hookError ? "ready with hook complaint" : "ready");
     } catch (error) {
       // A failed retry of an errored cube keeps the original complaint —
       // that is the root cause; "instance not found" on top of it is not.
       const detail = cube.status === "error" && cube.error ? cube.error : `wake failed: ${String(error)}`;
       this.registry.setCubeStatus(cube.name, "error", detail);
+      span.fail(error);
       throw error;
     }
   }
@@ -768,36 +1295,82 @@ export class CubeSupervisor {
     return null;
   }
 
-  /** Presence-based lifecycle script (`.cube/setup` / `.cube/resume`):
-   * checked host-side (must be executable), run inside the cube as dev.
-   * Returns a complaint string, or null (absent scripts are fine). */
-  private async runLifecycleScript(
-    cube: CubeRow,
-    script: "setup" | "resume",
-    timeoutSeconds: number,
-  ): Promise<string | null> {
-    try {
-      fs.accessSync(path.join(cube.workspacePath, ".cube", script), fs.constants.X_OK);
-    } catch {
-      return null;
+  private runLifecycleScript(cube: CubeRow, script: LifecyclePhase, signal?: AbortSignal): Promise<string | null> {
+    return this.lifecycle.run(cube.name, this.backend.sandbox(instanceName(cube.name)), script, signal);
+  }
+
+  environmentForUserThread(id: string) {
+    const { cubeName } = this.resolveUserThread(id);
+    return Object.fromEntries((["setup", "resume"] as const).map((phase) => [phase, {
+      ...this.lifecycle.read(cubeName, phase), log: this.lifecycle.log(cubeName, phase),
+    }]));
+  }
+
+  /** Explicit in-place repair. Never publishes a working thread as a cache.
+   * Reserve the same transition as provision/wake/remove before any await. */
+  retrySetupForUserThread(id: string): Promise<void> {
+    const { cubeName } = this.resolveUserThread(id);
+    if (this.pendingTransition(cubeName) || this.gitOps.has(cubeName) || this.ensuring.has(cubeName)) {
+      throw new Error("environment is busy — retry setup shortly");
     }
-    const sandbox = this.backend.sandbox(instanceName(cube.name));
-    let out = "";
-    try {
-      const { exitCode } = await sandbox.exec(`./.cube/${script}`, {
-        cwd: "/workspace",
-        // Tail only — the script is agent-writable (same rationale as the
-        // wake-hook buffer cap).
-        onData: (chunk) => (out = (out + chunk.toString("utf8")).slice(-4096)),
-        timeout: timeoutSeconds,
-      });
-      if (exitCode !== 0) {
-        return `.cube/${script} failed (exit ${exitCode}): ${out.slice(-500).trim()}`;
+    const cube = this.requireCube(cubeName);
+    this.registry.setCubeStatus(cubeName, "creating");
+    // Cancellable like the first provision: a thread deleted mid-retry
+    // aborts the guest script instead of waiting for it.
+    const controller = new AbortController();
+    const signal = controller.signal;
+    this.provisioning.set(cubeName, controller);
+    // The transition is registered synchronously with this promise; the
+    // body's first host write already runs inside its guard.
+    return this.transition(cubeName, (async () => {
+      const span = this.span("retry-setup", cube);
+      try {
+        this.lifecycle.save(cubeName, "setup", { state: "running", startedAt: Date.now(), durationMs: null, error: null });
+        const name = instanceName(cubeName);
+        const state = await this.backend.getState(name);
+        if (state.status !== "Running") await this.backend.setState(name, "start");
+        await this.backend.waitForNetwork(name, networkForCube(cubeName, cube.subnetIndex).ip);
+        signal.throwIfAborted();
+        await this.startProxy(cube);
+        span.phase("start");
+        const setupError = await this.runLifecycleScript(cube, "setup", signal);
+        span.phase("setup", setupError, setupError === null);
+        signal.throwIfAborted();
+        const error = setupError ?? await this.runLifecycleScript(cube, "resume", signal);
+        if (setupError === null) span.phase("resume", error, error === null);
+        signal.throwIfAborted();
+        this.registry.touchCube(cubeName);
+        this.registry.setCubeStatus(cubeName, "ready", error);
+        span.end(true, error ? "ready with setup complaint" : "ready");
+      } catch (error) {
+        const cancelled = signal.aborted;
+        this.failLifecycle(cubeName, "setup", cancelled ? PROVISION_CANCELLED : String(error));
+        this.registry.setCubeStatus(cubeName, "error", cancelled ? PROVISION_CANCELLED : String(error));
+        if (cancelled) span.end(false, PROVISION_CANCELLED);
+        else span.fail(error);
+        throw error;
+      } finally {
+        if (this.provisioning.get(cubeName) === controller) this.provisioning.delete(cubeName);
       }
-    } catch (error) {
-      return `.cube/${script} failed: ${String(error)}`;
+    })());
+  }
+
+  /** Close a still-running lifecycle record as failed. Best effort: the
+   * host write that failed the operation may fail again here, and it is
+   * the registry status, not this file, that keeps the thread deletable —
+   * so a second failure is recorded as an event, never thrown. */
+  private failLifecycle(name: string, phase: LifecyclePhase, error: string): void {
+    try {
+      const result = this.lifecycle.read(name, phase);
+      if (result?.state === "running") this.lifecycle.save(name, phase, {
+        ...result, state: "failed", durationMs: Date.now() - result.startedAt, error,
+      });
+    } catch (cause) {
+      recordPoint(this.registry, {
+        kind: "lifecycle", phase, cube: name, thread: this.threadIdFor(name), ok: false,
+        detail: `the ${phase} result could not be recorded: ${describeError(cause)}`,
+      });
     }
-    return null;
   }
 
   // --------------------------------------------------------------- services
@@ -865,6 +1438,7 @@ export class CubeSupervisor {
   }
 
   private async doEnsureServices(cubeName: string, signal: AbortSignal): Promise<ServiceStatus[]> {
+    const span = this.span("service", cubeName);
     try {
       signal.throwIfAborted();
       await this.wakeCube(cubeName);
@@ -890,10 +1464,24 @@ export class CubeSupervisor {
         { signal },
       );
       this.lastEnsure.set(cubeName, { statuses, error: null });
+      const failed = statuses.filter((s) => s.state === "failed");
+      span.end(
+        failed.length === 0,
+        statuses.length === 0
+          ? "no services declared"
+          : failed.length === 0
+            ? statuses.map((s) => `${s.name}:${s.state}`).join(" ")
+            : failed.map((s) => `${s.name}: ${s.detail ?? s.state}`).join("; "),
+      );
       return statuses;
     } catch (error) {
       // An abort is the caller leaving, not an outcome.
-      if (!signal.aborted) this.lastEnsure.set(cubeName, { statuses: [], error: String(error) });
+      if (!signal.aborted) {
+        this.lastEnsure.set(cubeName, { statuses: [], error: String(error) });
+        span.fail(error);
+      } else {
+        span.end(true, "caller left before the ensure settled");
+      }
       throw error;
     }
   }
@@ -984,7 +1572,7 @@ export class CubeSupervisor {
 
   // ------------------------------------------------------------- git flow
   //
-  // PLAN §11: the workspace .git is host-side (bind-mounted), so review
+  // ARCHITECTURE §11: the workspace .git is host-side (bind-mounted), so review
   // works while the thread sleeps, and push/PR run with host credentials —
   // the agent's own `git push` dies on the egress boundary by design.
 
@@ -1006,7 +1594,7 @@ export class CubeSupervisor {
         // null until provisioning has seeded it: a half-written clone
         // answers git with errors, not state (the UI showed that as a 500).
         state: cube.status !== "creating" && fs.existsSync(path.join(repo.workspacePath, ".git"))
-          ? await this.withGitOp(cube.name, () => this.git.state(repo.workspacePath, repo.baseOid))
+          ? await this.withGitOp(cube.name, null, () => this.git.state(repo.workspacePath, repo.baseOid))
           : null,
       })),
     );
@@ -1034,7 +1622,7 @@ export class CubeSupervisor {
     if (input.action !== "inspect" && input.action !== "plan") await this.config.github?.ensureFresh();
     signal?.throwIfAborted();
     this.requireSeeded(cube, repository);
-    return this.withGitOp(cube.name, async () => {
+    return this.withGitOp(cube.name, `pr-review ${input.action}`, async () => {
       const { workspacePath: ws, url } = repository;
       switch (input.action) {
         case "prepare": return this.prReviews.prepare(ws, url, input.number, signal);
@@ -1051,7 +1639,7 @@ export class CubeSupervisor {
   async diffForUserThread(id: string, repositoryId: number): Promise<RepoDiff> {
     const { cube, repository } = this.repositoryForThread(id, repositoryId);
     this.requireSeeded(cube, repository);
-    return this.withGitOp(cube.name, () => this.git.diff(repository.workspacePath, repository.baseOid));
+    return this.withGitOp(cube.name, null, () => this.git.diff(repository.workspacePath, repository.baseOid));
   }
 
   /** Push the primary repository's current branch to its upstream (host creds). */
@@ -1060,7 +1648,7 @@ export class CubeSupervisor {
     await this.config.github?.ensureFresh();
     signal?.throwIfAborted();
     this.requireSeeded(cube, repository);
-    return this.withGitOp(cube.name, () =>
+    return this.withGitOp(cube.name, "push", () =>
       this.git.push(repository.workspacePath, repository.url, undefined, signal),
     );
   }
@@ -1076,7 +1664,7 @@ export class CubeSupervisor {
     await this.config.github?.ensureFresh(); // agent-driven Ship runs long after the 8h token dies (sol Medium)
     signal?.throwIfAborted();
     this.requireSeeded(cube, repository);
-    const oid = await this.withGitOp(cube.name, () =>
+    const oid = await this.withGitOp(cube.name, "sync", () =>
       this.git.syncBase(repository.workspacePath, repository.url, repository.base, signal),
     );
     return { base: repository.base, oid };
@@ -1093,7 +1681,7 @@ export class CubeSupervisor {
     await this.config.github?.ensureFresh(); // agent-driven Ship runs long after the 8h token dies (sol Medium)
     signal?.throwIfAborted();
     this.requireSeeded(cube, repository);
-    const branch = await this.withGitOp(cube.name, () =>
+    const branch = await this.withGitOp(cube.name, "push-base", () =>
       this.git.push(repository.workspacePath, repository.url, repository.base, signal),
     );
     return { branch, base: repository.base };
@@ -1116,7 +1704,7 @@ export class CubeSupervisor {
       this.registry.getThread(id)?.title ||
       repository.branch ||
       "cube changes";
-    return this.withGitOp(cube.name, () =>
+    return this.withGitOp(cube.name, "pr", () =>
       this.git.createPr(
         repository.workspacePath,
         {
@@ -1140,12 +1728,20 @@ export class CubeSupervisor {
 
   /** Run a git operation registered against the cube so removeCube blocks
    * while a push/PR is mid-flight (a DELETE must not race a publish). */
-  private async withGitOp<T>(cubeName: string, work: () => Promise<T>): Promise<T> {
+  /** `label` names the operation in the event record; null for the
+   * read-only reads the UI polls (state, diff), which are not recorded. */
+  private async withGitOp<T>(cubeName: string, label: string | null, work: () => Promise<T>): Promise<T> {
     if (this.removing.has(cubeName)) throw new Error(`cube ${cubeName} is busy being removed`);
     const count = this.gitOps.get(cubeName) ?? 0;
     this.gitOps.set(cubeName, count + 1);
+    const span = label === null ? null : this.span("git", cubeName);
     try {
-      return await work();
+      const result = await work();
+      span?.end(true, label);
+      return result;
+    } catch (error) {
+      span?.end(false, `${label}: ${describeError(error)}`);
+      throw error;
     } finally {
       const now = (this.gitOps.get(cubeName) ?? 1) - 1;
       if (now <= 0) this.gitOps.delete(cubeName);
@@ -1191,26 +1787,34 @@ export class CubeSupervisor {
       // status and busy, but not idleness — manual sleeps ignore it).
       const fresh = this.registry.getCube(cube.name);
       if (!fresh || fresh.status !== "ready" || fresh.lastActiveAt > cutoff) continue;
-      await this.sleepCube(cube.name).catch((error) => {
+      await this.sleepCube(cube.name, "idle").catch((error) => {
         console.log(`idle sleep ${cube.name}: ${String(error)}`);
       });
     }
   }
 
-  /** Destroy the instance (and optionally volume+bridge) and forget the cube. */
+  /** Destroy the instance (and optionally volume+bridge) and forget the cube.
+   * A cube still provisioning is cancelled first: the in-flight transition
+   * is aborted and awaited, then the teardown runs against whatever the
+   * provision left (an instance, or nothing yet). */
   async removeCube(name: string, opts: { deleteVolume?: boolean } = {}): Promise<void> {
     const cube = this.registry.getCube(name);
     if (!cube) throw new Error(`no such cube: ${name}`);
-    if (cube.status === "creating") {
-      // Destroying mid-provision would race the in-flight provisionCube
-      // (its instance create/start could land after our delete, orphaning
-      // the instance). Interrupted "creating" rows become "error" on the
-      // next cubed boot and are deletable then.
-      throw new Error(`cube ${name} is busy provisioning — retry once it is ready or errored`);
-    }
-    if (this.removing.has(name) || this.transitions.has(name) || cube.status === "waking") {
-      // A destroy racing a stop/start (or a second DELETE) would orphan or
-      // resurrect the instance mid-teardown.
+    if (this.removing.has(name)) throw new Error(`cube ${name} is busy (removal in flight) — retry shortly`);
+    let cancelling: Promise<void> | null = null;
+    if (cube.status === "creating" || cube.status === "building-environment") {
+      // A builder has no thread and its own cleanup; a provision without a
+      // controller is not ours to interrupt (none exist after boot, which
+      // flips interrupted rows to asleep/error).
+      const controller = this.provisioning.get(name);
+      const inflight = this.transitions.get(name);
+      if (cube.status === "building-environment" || (inflight && !controller)) {
+        throw new Error(`cube ${name} is busy provisioning — retry once it is ready or errored`);
+      }
+      cancelling = inflight ?? null;
+    } else if (this.transitions.has(name) || cube.status === "waking") {
+      // A destroy racing a stop/start would orphan or resurrect the
+      // instance mid-teardown.
       throw new Error(`cube ${name} is busy (sleep/wake/removal in flight) — retry shortly`);
     }
     // A push/PR mid-flight must finish (or be waited out) before teardown —
@@ -1219,11 +1823,19 @@ export class CubeSupervisor {
     // `removing` is set below.
     if (this.gitOps.has(name)) throw new Error(`cube ${name} is busy pushing — retry shortly`);
     this.removing.add(name); // sync with the guards above: no await between
+    // Cancel the provision only once the removal is reserved: nothing else
+    // can now take the cube between the abort and the teardown.
+    this.provisioning.get(name)?.abort(new Error("thread deleted"));
     // A portal-triggered ensure still polling readiness would otherwise keep
     // exec'ing into the instance being destroyed.
     this.ensuring.get(name)?.controller.abort(new Error(`cube ${name} is being removed`));
     this.lastEnsure.delete(name);
+    // Thread id pinned now: deleteCube below cascades the thread row away.
+    const span = new Span(this.registry, { kind: "destroy", cube: name, thread: this.threadIdFor(cube) });
     try {
+      // The provision settles its own status and lifecycle record (as
+      // cancelled); its failure is not this teardown's.
+      if (cancelling) await cancelling.catch(() => {});
       await this.runtimes.get(name)?.proxy?.close();
       this.runtimes.delete(name);
       const net = networkForCube(name, cube.subnetIndex);
@@ -1236,9 +1848,25 @@ export class CubeSupervisor {
         // The runtime side is already torn down; a "ready" row would invite
         // new threads with no proxy. Park it as error — DELETE can be retried.
         this.registry.setCubeStatus(name, "error", `destroy failed (retry DELETE): ${String(error)}`);
+        span.fail(error);
         throw error;
       }
       this.registry.deleteCube(name);
+      this.lifecycle.forget(name);
+      // Deleting a thread destroys its workspace and history (PRODUCT.md):
+      // the host-side tree — workspace, reference checkouts, pi sessions —
+      // goes with it instead of accumulating under cubesRoot.
+      let treeNote = "host tree";
+      try {
+        removeStoppedTree(path.dirname(cube.workspacePath));
+      } catch (error) {
+        // The row is gone; say so honestly instead of reporting a clean
+        // removal. Boot names the leftover in an event until someone frees it.
+        console.log(`cube ${name}: host tree not fully removed: ${String(error)}`);
+        recordPoint(this.registry, { kind: "destroy", phase: "host-tree", cube: name, ok: false, detail: describeError(error) });
+        treeNote = "host tree NOT fully removed (see destroy.host-tree)";
+      }
+      span.end(true, opts.deleteVolume ? `instance, volume, bridge and ${treeNote}` : `instance, bridge and ${treeNote}; volume kept`);
     } finally {
       this.removing.delete(name);
     }
@@ -1268,7 +1896,27 @@ export class CubeSupervisor {
    * file at that exact path on its first flush), so creating a thread
    * needs neither model credentials nor a sandbox.
    */
-  async createUserThread(projectId: string): Promise<{ id: string }> {
+  /**
+   * `requestKey` makes creation idempotent: a client-generated id for one
+   * user action (a retried POST after a dropped connection, a double
+   * submit, two tabs replaying one form) returns the thread the first
+   * attempt created instead of allocating a second cube. Keys are scoped
+   * to the project and remembered for CREATE_REQUEST_TTL_MS; `created` is
+   * false on a replay.
+   */
+  async createUserThread(projectId: string, requestKey?: string): Promise<{ id: string; created: boolean }> {
+    const key = requestKey === undefined ? null : `${projectId}\0${requestKey}`;
+    if (key !== null) {
+      // Check-and-record is atomic: nothing below awaits, so two replays
+      // of one key cannot both pass this point before the first records.
+      // O(1) per request: the hit itself is checked for expiry and for a
+      // thread that no longer exists; the sweep does the full scan.
+      const prior = this.createRequests.get(key);
+      if (prior && Date.now() - prior.at <= CREATE_REQUEST_TTL_MS && this.registry.getThread(prior.threadId)) {
+        return { id: prior.threadId, created: false };
+      }
+      if (prior) this.createRequests.delete(key);
+    }
     const project = this.requireReadyProject(projectId);
     const repositories = this.registry.listProjectRepositories(project.id);
     const cube = this.createProjectCube(this.freshCubeName(), repositories);
@@ -1284,7 +1932,17 @@ export class CubeSupervisor {
         projectId: project.id,
         piSessionPath: path.join(sessionDir, `${id}.jsonl`),
       });
-      return { id };
+      if (key !== null) {
+        // Bounded: past the cap the oldest key goes. A Map iterates in
+        // insertion order and keys are inserted in time order, so the
+        // front is the oldest — no scan.
+        if (this.createRequests.size >= CREATE_REQUEST_CAP) {
+          const oldest = this.createRequests.keys().next().value;
+          if (oldest !== undefined) this.createRequests.delete(oldest);
+        }
+        this.createRequests.set(key, { threadId: id, at: Date.now() });
+      }
+      return { id, created: true };
     } catch (error) {
       // No thread row means no way for the user to see or delete the cube —
       // reap it once its (already started) provisioning settles.
@@ -1292,6 +1950,21 @@ export class CubeSupervisor {
         console.log(`orphan cube ${cube.name} not reaped: ${String(reapError)}`);
       });
       throw error;
+    }
+  }
+
+  /** Forget creation keys past their window and keys whose thread has
+   * since been deleted. From the minute sweep: expiry must not depend on
+   * another request happening to arrive. Entries are in time order, so
+   * the expiry scan stops at the first key still inside the window. */
+  private sweepCreateRequests(): void {
+    const cutoff = Date.now() - CREATE_REQUEST_TTL_MS;
+    for (const [key, entry] of this.createRequests) {
+      if (entry.at >= cutoff) break;
+      this.createRequests.delete(key);
+    }
+    for (const [key, entry] of this.createRequests) {
+      if (!this.registry.getThread(entry.threadId)) this.createRequests.delete(key);
     }
   }
 
@@ -1336,12 +2009,22 @@ export class CubeSupervisor {
       for (const thread of this.registry.listThreads(cube.id)) {
         if (thread.archivedAt !== null && !includeArchived) continue;
         const project = this.registry.getProject(thread.projectId);
-        if (!project) throw new Error(`thread ${thread.id} has no project`);
+        if (!project) {
+          // One orphaned row must not take the whole list (and the UI) down.
+          console.log(`thread ${thread.id} has no project — hidden from the list`);
+          continue;
+        }
+        const failedPhase = (["setup", "resume"] as const)
+          .map((phase) => this.lifecycle.read(cube.name, phase))
+          .find((result) => result?.state === "failed");
         threads.push({
           id: thread.id,
           title: thread.title ?? this.autoTitle(thread),
-          state: threadState(cube.status),
-          error: cube.error,
+          state: failedPhase && cube.status !== "creating" ? "error" : threadState(cube.status),
+          // The raw text stays in the registry for diagnosis; the list gets
+          // one sentence with the next step. A failed lifecycle phase is the
+          // diagnostic when the status column carries none (sleep clears it).
+          error: describeThreadError(cube.error ?? failedPhase?.error ?? null),
           createdAt: thread.createdAt,
           archived: thread.archivedAt !== null,
           project: { id: project.id, name: project.name },
@@ -1415,10 +2098,17 @@ export class CubeSupervisor {
     const { cubeName, threadId } = this.resolveUserThread(id);
     let cube = this.requireCube(cubeName);
     if (cube.status === "creating") {
-      onStatus("setting up this thread's environment…");
       // Provisioning runs detached; wait it out (waking would retry a failed
-      // provision against a missing instance and bury its error).
+      // provision against a missing instance and bury its error). The
+      // events it records say which step is running: report each change so
+      // a long .cube/setup reads as progress, not as a stuck spinner.
+      let last = "";
       while ((cube = this.requireCube(cubeName)).status === "creating") {
+        const text = this.provisionProgress(cube);
+        if (text !== last) {
+          onStatus(text);
+          last = text;
+        }
         await new Promise((resolve) => setTimeout(resolve, 1_000));
       }
     }
@@ -1576,9 +2266,16 @@ export class CubeSupervisor {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
+    if (this.pruneTimer) {
+      clearInterval(this.pruneTimer);
+      this.pruneTimer = null;
+    }
     await Promise.all([...this.projectChecks.values()].map((check) => check.catch(() => {})));
     for (const runtime of this.runtimes.values()) await runtime.proxy?.close();
     this.runtimes.clear();
+    // Proxies are closed: no more egress decisions arrive. Land the last
+    // batch while the registry is still open; the timer must not fire later.
+    this.flushEgress();
   }
 
   private runtime(name: string): CubeRuntime {
@@ -1595,7 +2292,7 @@ export class CubeSupervisor {
     // teardown is between its awaits (the registry row still exists then).
     if (this.removing.has(name)) throw new Error(`cube ${name} is busy being removed`);
     const cube = this.registry.getCube(name);
-    if (!cube) throw new Error(`no such cube: ${name}`);
+    if (!cube || cube.status === "building-environment") throw new Error(`no such cube: ${name}`);
     return cube;
   }
 

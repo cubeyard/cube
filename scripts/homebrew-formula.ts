@@ -40,7 +40,7 @@ process.stdout.write(`class Cube < Formula
     ENV["CUBE_HOME"] = testpath/"state"
     ENV["CUBE_BIND"] = "127.0.0.1"
     assert_match "cube up", shell_output("#{bin}/cube help")
-    assert_equal "none installed\\n", shell_output("#{bin}/cube version")
+    assert_match "none installed", shell_output("#{bin}/cube version")
     assert_predicate testpath/"state", :directory?
   end
 end

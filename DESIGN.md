@@ -371,7 +371,9 @@ Onboarding is a quiet welcome, not an instrument panel. This surface explicitly
 omits cards, recessed wells, lamps, glows, raised keys, and the header seam.
 Use the existing warm palette and Archivo type on an open, centered reading
 column: one question, adjacent login/skip choices, and plain text status. The
-orange primary button is flat; secondary actions are underlined text. A small
+primary action is the app's own orange key and secondary actions are plain
+keys — the same `.key` system as the rest of the product, so the first run
+looks like the app it hands over to. A small
 step count lives in the header, while access details sit below a single hairline.
 Pending codes, connected accounts, and errors use text rather than status lamps.
 GitHub login from a project uses this same full-screen treatment at the project's

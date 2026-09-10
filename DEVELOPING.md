@@ -4,7 +4,7 @@ Two loops, by what you're changing. The **mock loop** develops cubed's own
 logic and UI from inside an ordinary cube (fast, no Incus). The **VM loop**
 validates the real sandbox and the live pi TUI (slow, real Incus).
 
-See `PLAN.md` for the architecture and `HANDOFF.md` for current state.
+See `ARCHITECTURE.md` for the architecture and `HANDOFF.md` for current state.
 
 ---
 
@@ -26,7 +26,7 @@ cubed talks to a swappable `CubeBackend` (`packages/sandbox/src/cube-backend.ts`
 
 ## The mock loop — develop cube with cube
 
-The tier-1 loop (PLAN §13 3d.3). You're inside a cube (or any trusted box),
+The tier-1 loop (ARCHITECTURE §13 3d.3). You're inside a cube (or any trusted box),
 running cubed against the cube repo with the backend mocked, iterating on the
 server / registry / portals / web UI with real git, real files, and fast
 feedback.
@@ -119,7 +119,7 @@ with its overlay and touch nothing else.
 `pnpm vm` builds what's missing on first run, brings the VM up, and drops
 you into a pi terminal on the VM as the user cubed runs as (so `/login`
 there writes the `~/.pi/agent/auth.json` cubed reads). The VM is the
-Tailnet node; cubed has no auth, so the Tailnet is the boundary (PLAN §15) —
+Tailnet node; cubed has no auth, so the Tailnet is the boundary (ARCHITECTURE §15) —
 `0.0.0.0`/public binds are refused.
 
 GitHub auth for the VM is connected from the web UI by relaying the normal
@@ -131,6 +131,25 @@ refresh tokens. Disconnect runs `gh auth logout` on the VM.
 Before projects or threads appear, the first-run wizard offers GitHub login
 or a skip. Finishing writes `onboarding.json` alongside `cubed.db` (normally
 `~/cube/onboarding.json`). This is VM-wide state, not browser storage.
+
+### Working tree → VM → proof
+
+The short loop against a running VM (the launcher's `~/.cube` by default,
+the dev VM with `--dev`), also usable by an agent (see AGENTS.md):
+
+```sh
+bash scripts/vm/deploy-tree.sh            # ship the working tree, build web on the host, restart cubed
+bash scripts/vm/deploy-tree.sh --install  # deps changed (auto-detected from the lockfile too)
+bash scripts/vm/deploy-tree.sh --restore  # put the installed release's app tree back
+node scripts/smoke-live.ts                # create → provision → terminal → sleep → wake → delete, with timings
+node scripts/events-report.ts --since 24h # runs, failures, p50/p95 per operation and version
+node scripts/events-report.ts --failures  # the failures themselves
+curl -s 'localhost:7777/api/events?format=text&limit=40'
+```
+
+`deploy-tree.sh` never touches `/opt/cube/app/build-id`, so `cube status`
+and `cube upgrade` keep working; it records what it shipped in
+`.deployed-tree`, which becomes the version stamped on events.
 
 ### Review fixes on native GitHub PR stacks
 
@@ -305,7 +324,9 @@ minute); after that the store is warm.
 
 Tests: run offline suites directly with `node packages/**/test/*.ts` on any
 host; the real-Incus smokes (`*-smoke.ts`) need the VM and run via
-`scripts/vm/test.sh` (guest `run-tests.sh`).
+`scripts/vm/test.sh` (guest `run-tests.sh`). `pnpm lint` (ESLint,
+correctness rules only — `eslint.config.js`) runs in CI between
+`pnpm typecheck` and the offline suites.
 
 ## Releasing
 
@@ -424,17 +445,32 @@ is no automatic upload or deletion. Collection remains usable without cubed,
 Incus, or model access: unavailable checks are recorded individually. This
 first version covers the VM/control plane, not workspace contents or the
 original tool process's environment. Its HTTP probe uses VM port 7777.
+The cubed journal check covers the last 24 hours (at most 2000 entries);
+cubed's own lines are `level component msg key=value …`, so
+`grep thread=<id>` in `cubed-journal.txt` follows one thread.
 
 ## The launcher (`launcher/cube`)
 
-The user-facing lifecycle CLI: `up/down/status/upgrade/ssh/logs/diagnose/
-version/destroy` against a released artifact set — standalone bash, no repo
-checkout, state in `~/.cube`. Before the first download it checks the
-host (hypervisor, UEFI firmware, ISO tool, ssh, curl, free space, ports;
-an unclaimed busy port moves to the next free one and is remembered in
-`~/.cube/config`). Downloads go through the GitHub API with `gh`'s token
-(`curl`, progress bar, resumable), are verified against the manifest +
+The user-facing lifecycle CLI: `up/down/status/upgrade/ssh/logs/events/
+diagnose/version/destroy` against a released artifact set — standalone
+bash (3.2 is the floor: macOS), no repo checkout, state in `~/.cube`.
+Before the first download it checks the host (hypervisor: `/dev/kvm` or
+HVF; UEFI firmware, ISO tool, ssh, curl, free space) and the ports; a
+port nobody set in the environment moves to the next free one and is
+remembered in `~/.cube/config`. Downloads go through the GitHub API with
+`gh`'s token (`curl`, progress bar, resumable; a partial file the server
+will not resume is restarted once), are verified against the manifest +
 `SHA256SUMS.<arch>`, and land content-addressed in `~/.cube/images`.
+
+Each boot rotates the serial console to `~/.cube/console.log.1`; a boot
+that does not reach ssh or cubed prints the console's last lines. While
+the VM is down, `cube ssh`/`events`/`diagnose` say so and `cube logs`
+shows the console instead of the journal (`cube logs -n 50` passes
+journalctl arguments through). Changing `CUBE_PORT`/`CUBE_BIND`/`CUBE_MEM`
+while the VM runs is refused until `cube down`. `cube version` (also
+`--version`) prints the launcher version and the installed release; the
+`LAUNCHER_VERSION=dev` line is stamped with the tag by `release.yml`
+when it ships the file, so a checkout always says `dev`.
 
 `cube upgrade` compares the installed and target manifests and does the
 least that is correct:
@@ -449,7 +485,15 @@ least that is correct:
   then apply the tarball if the app also moved. The data disk is never
   touched.
 
-Afterwards it prunes the store to the current + one previous release
+The installed-version file is written only after the new release has
+proved itself (identity check, cubed answering). An app-only upgrade
+first makes sure the installed release's own tarball is in the store
+and re-applies it if cubed never answers after the swap ("rolled back");
+a failed upgrade always names the release you are still on and the
+exact way back (for a rebooted upgrade: which of its artifacts are still
+cached). Boot prerequisites (qemu, accelerator, firmware, ISO tool) are
+required only when the upgrade will start a VM. Afterwards it
+prunes the store to the current + one previous release
 and replaces itself with the release's `cube` asset. `cube up` and
 `cube status` print a one-line hint when a newer release exists
 (4-second budget, silent offline; `CUBE_NO_UPDATE_CHECK=1` disables).
@@ -466,7 +510,9 @@ CUBE_HOME=/tmp/cube-smoke CUBE_RELEASE_DIR=~/cube/vm/release/vX.Y.Z/dist \
 ```
 
 `CUBE_LIB_ONLY=1 . launcher/cube` sources its functions without running
-a command (what `verify-release.sh` and ad-hoc tests use).
+a command (what `verify-release.sh` and ad-hoc tests use). CI runs
+`bash -n` and shellcheck over it (default severity; `scripts/*.sh` at
+warning level) — `npx --yes shellcheck launcher/cube` locally.
 
 ---
 
@@ -491,6 +537,7 @@ a command (what `verify-release.sh` and ad-hoc tests use).
 | `CUBED_IMAGE` / `CUBED_POOL` | `cube-node` / `cube` | Incus image + storage pool |
 | `CUBED_ROOT_SIZE` / `CUBED_DOCKER_VOLUME_SIZE` | `10GiB` / `5GiB` | per-cube disk |
 | `CUBED_EGRESS_ALLOW` | — | extra allowed egress hosts (extends the defaults) |
+| `CUBED_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error`; one `level component msg key=value` line per event on stdout (`journalctl -u cubed`); `debug` adds stacks to every error field |
 
 **VM scripts** (`scripts/vm/lib.sh`): `CUBE_VM_BIND` (`tailscale` or an explicit
 private IP; defaults to detected Tailscale IPv4, else loopback; `127.0.0.1`

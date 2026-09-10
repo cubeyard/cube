@@ -213,14 +213,20 @@ jobs:
       # here pins it to the artifact set it knows how to read (a launcher
       # from main can otherwise meet an older release, or the reverse).
       # In `prepare` rather than the matrix so the two arch legs cannot
-      # race each other uploading the same name.
+      # race each other uploading the same name. The shipped copy carries
+      # its release number (`cube version`); a checkout says "dev".
       - name: ship the launcher itself
         if: env.DRY_RUN == '' && steps.v.outputs.skip == ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release upload "${{ steps.v.outputs.version }}" --clobber launcher/cube
+          V="${{ steps.v.outputs.version }}"
+          mkdir -p "$RUNNER_TEMP/launcher"
+          sed "s/^LAUNCHER_VERSION=dev$/LAUNCHER_VERSION=$V/" launcher/cube > "$RUNNER_TEMP/launcher/cube"
+          grep -q "^LAUNCHER_VERSION=$V$" "$RUNNER_TEMP/launcher/cube" \
+            || { echo "launcher/cube has no LAUNCHER_VERSION=dev line to stamp"; exit 1; }
+          gh release upload "$V" --clobber "$RUNNER_TEMP/launcher/cube"
 
   build:
     needs: prepare

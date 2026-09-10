@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provisions the `cube-node` image profile (PLAN §5). Runs INSIDE the builder
+# Provisions the `cube-node` image profile (ARCHITECTURE §5). Runs INSIDE the builder
 # container — images/build.sh pipes it in. Ubuntu 24.04 + inner Docker
 # (PINNED 28.x — Docker 29 has a nesting regression, incus#2757; KEPT by
 # user decision 2026-08-28 — `docker compose up postgres` in a cube is a

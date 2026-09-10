@@ -1,5 +1,5 @@
 /**
- * PiTerminals — the pty bridge (PLAN §13 Phase 3d, step 2). The chat pane
+ * PiTerminals — the pty bridge (ARCHITECTURE §13 Phase 3d, step 2). The chat pane
  * IS the real pi TUI: per thread, cubed spawns one `pi` process on a pty
  * (host-side, with the cube tool-routing extension) and streams it to the
  * browser's xterm.js pane over WebSocket. pi supplies the entire
@@ -14,9 +14,14 @@
  * This module is transport- and supervisor-agnostic: the WS layer adapts
  * sockets to TerminalClient, the supervisor side provides TerminalHost.
  * Protocol to clients: binary frames = raw pty output; text frames = JSON
- * control ({t:"status"|"spawned"|"exit"|"error", ...}).
+ * control ({t:"status"|"spawned"|"attached"|"exit"|"error", ...}); an
+ * `attached` frame precedes the scrollback replay to a late attacher.
  */
 import { spawn, type IPty } from "@lydell/node-pty";
+
+import { createLogger } from "./log.ts";
+
+const log = createLogger("pty");
 
 /** What the bridge needs from a connected socket. */
 export interface TerminalClient {
@@ -43,6 +48,8 @@ export interface TerminalHost {
   /** Activity signal (throttled by the bridge): terminal I/O counts like a
    * prompt for idle-sleep purposes. */
   activity(threadId: string): void;
+  /** Lifecycle record (events.ts): spawn timing, exit code, reaps. */
+  event?(input: { thread: string; phase: "spawn" | "exit" | "reap"; ok: boolean; ms?: number; detail?: string }): void;
 }
 
 export interface TerminalHandle {
@@ -66,6 +73,8 @@ interface TerminalSession {
   rows: number;
   linger: NodeJS.Timeout | null;
   lastActivity: number;
+  /** Last pty output (ms epoch): the linger reap waits for this much silence. */
+  lastOutput: number;
 }
 
 const SCROLLBACK_CAP = 512 * 1024;
@@ -105,6 +114,7 @@ export class PiTerminals {
         rows: clamp(rows, 2, 500),
         linger: null,
         lastActivity: 0,
+        lastOutput: 0,
       };
       this.sessions.set(threadId, session);
     }
@@ -114,8 +124,11 @@ export class PiTerminals {
       session.linger = null;
     }
     if (session.proc) {
-      // Late attacher: replay the tail, then adopt this client's size (the
-      // TUI redraws on the resize, squaring the replayed frame with it).
+      // Late attacher: say so first — the client keeps its own buffer across
+      // a transport drop and must clear it before a replay lands, or the
+      // tail would be drawn twice — then replay the tail and adopt this
+      // client's size (the TUI redraws on the resize, squaring the frame).
+      client.send(control({ t: "attached", replay: session.scrollback.length > 0 }));
       for (const chunk of session.scrollback) client.send(chunk);
       this.resize(session, clamp(cols, 2, 500), clamp(rows, 2, 500));
     } else if (session.starting) {
@@ -159,6 +172,8 @@ export class PiTerminals {
 
   private async start(session: TerminalSession): Promise<void> {
     session.starting = true;
+    const started = performance.now();
+    const elapsed = () => Math.round(performance.now() - started);
     try {
       const plan = await this.host.plan(session.threadId, (text) => {
         session.lastStatus = text;
@@ -183,6 +198,8 @@ export class PiTerminals {
       });
       session.proc = proc;
       session.lastStatus = null;
+      log.info("pi spawned", { thread: session.threadId, pid: proc.pid });
+      this.host.event?.({ thread: session.threadId, phase: "spawn", ok: true, ms: elapsed() });
       this.broadcast(session, control({ t: "spawned" }));
       proc.onData((chunk) => {
         const buf = Buffer.from(chunk, "utf8");
@@ -192,18 +209,27 @@ export class PiTerminals {
           session.scrollbackBytes -= session.scrollback.shift()!.length;
         }
         this.broadcast(session, buf);
+        session.lastOutput = Date.now();
         this.touch(session);
       });
       proc.onExit(({ exitCode }) => {
+        log.warn("pi exited", { thread: session.threadId, pid: proc.pid, code: exitCode });
         if (this.sessions.get(session.threadId) !== session) return;
+        this.host.event?.({
+          thread: session.threadId,
+          phase: "exit",
+          ok: exitCode === 0,
+          ms: elapsed(),
+          detail: `exit ${exitCode}`,
+        });
         this.teardown(session, { t: "exit", code: exitCode });
       });
     } catch (error) {
+      log.warn("pi spawn failed", { thread: session.threadId, error });
       if (this.sessions.get(session.threadId) !== session) return;
-      this.teardown(session, {
-        t: "error",
-        text: error instanceof Error ? error.message : String(error),
-      });
+      const text = error instanceof Error ? error.message : String(error);
+      this.host.event?.({ thread: session.threadId, phase: "spawn", ok: false, ms: elapsed(), detail: text });
+      this.teardown(session, { t: "error", text });
     } finally {
       session.starting = false;
     }
@@ -223,9 +249,24 @@ export class PiTerminals {
     // Last client gone: give pi a linger window (page reloads, sleeping
     // laptops, in-flight agent turns), then reap.
     if (session.linger) clearTimeout(session.linger);
+    this.armLinger(session);
+  }
+
+  /** (Re)start the reap timer for a session with no clients. Output resets
+   * it (see onData): a closed tab must never kill an agent that is still
+   * working — the product promises "close the tab, come back to the
+   * result". The timer only fires after the linger window of silence. */
+  private armLinger(session: TerminalSession, delay = this.lingerMs): void {
+    if (session.linger) clearTimeout(session.linger);
     session.linger = setTimeout(() => {
-      if (this.sessions.get(session.threadId) === session) this.kill(session.threadId);
-    }, this.lingerMs);
+      if (this.sessions.get(session.threadId) !== session) return;
+      // Still producing output (an agent turn in progress): wait out the
+      // remainder of a full linger window of silence before reaping.
+      const quietFor = Date.now() - session.lastOutput;
+      if (quietFor < this.lingerMs) return this.armLinger(session, this.lingerMs - quietFor);
+      this.host.event?.({ thread: session.threadId, phase: "reap", ok: true, detail: `no client and no output for ${Math.round(this.lingerMs / 60_000)} min` });
+      this.kill(session.threadId);
+    }, delay);
     session.linger.unref();
   }
 

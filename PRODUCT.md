@@ -149,7 +149,7 @@ There is no docs site, hosted demo, documented adoption, benchmark, or press
 coverage yet.
 
 Future work must not fabricate testimonials, customer names, usage statistics,
-pricing, or performance claims. `PLAN.md` and `HANDOFF.md` are the internal
+pricing, or performance claims. `ARCHITECTURE.md` and `HANDOFF.md` are the internal
 record of what is real; screenshots of the running daemon are the only product
 imagery that exists.
 

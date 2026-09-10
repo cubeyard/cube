@@ -46,7 +46,7 @@ SSH_PORT="${CUBE_VM_SSH_PORT:-2222}"    # host 127.0.0.1:2222 -> VM :22 (loopbac
 CUBED_PORT="${CUBE_VM_CUBED_PORT:-7777}" # host 127.0.0.1:7777 -> VM :7777
 
 # Reaching the product from another machine. cubed has NO authentication
-# (PLAN §15: the Tailnet is the boundary), so this extra forward must land
+# (ARCHITECTURE §15: the Tailnet is the boundary), so this extra forward must land
 # on a PRIVATE interface: pass CUBE_VM_BIND=tailscale (this node's 100.x
 # address) or an explicit IP. Never a public address.
 CUBE_VM_BIND="${CUBE_VM_BIND:-}"

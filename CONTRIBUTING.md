@@ -24,10 +24,12 @@ npm install --global pnpm@10.34.5
 pnpm install --frozen-lockfile
 pnpm build
 pnpm typecheck
+pnpm lint
 pnpm test
 ```
 
-`pnpm test` runs the offline suites and does not require Incus, a VM, or model
+`pnpm lint` is ESLint with correctness rules only (no formatting). `pnpm test`
+runs the offline suites and does not require Incus, a VM, or model
 credentials. Changes to VM provisioning, isolation, or networking should also
 run the relevant VM checks described in [DEVELOPING.md](DEVELOPING.md).
 
@@ -37,7 +39,7 @@ run the relevant VM checks described in [DEVELOPING.md](DEVELOPING.md).
 - Add or update tests when behavior changes.
 - Keep documentation accurate when commands, requirements, or configuration
   change.
-- Confirm the build, typecheck, and offline tests pass.
+- Confirm the build, typecheck, lint, and offline tests pass.
 
 The root package is intentionally marked `private` to prevent accidental npm
 publication; this does not restrict contributions or the repository's

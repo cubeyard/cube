@@ -6,6 +6,10 @@ import path from "node:path";
 
 export const DIAGNOSIS_ID = /^[a-f0-9-]{36}$/;
 const MAX_OUTPUT = 64 * 1024;
+/** Journals get more room: a day of cubed does not fit 64 KiB, and execFile's
+ * maxBuffer keeps the OLDEST bytes — it would drop exactly the lines an
+ * incident needs. Reads stay bounded per call (500 lines) regardless. */
+const MAX_JOURNAL_OUTPUT = 1024 * 1024;
 
 /** Best-effort redaction, not a guarantee that arbitrary application logs are safe to publish. */
 export function redact(text: string): string {
@@ -23,10 +27,10 @@ export interface CheckResult {
   output: string;
 }
 
-export function runCheck(command: string, args: string[]): Promise<CheckResult> {
+export function runCheck(command: string, args: string[], maxOutput = MAX_OUTPUT): Promise<CheckResult> {
   return new Promise((resolve) => {
     execFile(command, args, {
-      timeout: 5_000, maxBuffer: MAX_OUTPUT, encoding: "utf8",
+      timeout: 5_000, maxBuffer: maxOutput, encoding: "utf8",
       env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: "C", SYSTEMD_COLORS: "0" },
     }, (error, stdout, stderr) => {
       resolve({
@@ -37,14 +41,14 @@ export function runCheck(command: string, args: string[]): Promise<CheckResult> 
   });
 }
 
-export const CHECKS: { name: string; command: string; args: string[] }[] = [
+export const CHECKS: { name: string; command: string; args: string[]; maxOutput?: number }[] = [
   { name: "host", command: "uname", args: ["-srmo"] },
   { name: "uptime", command: "uptime", args: [] },
   { name: "disk", command: "df", args: ["-h", "/", "/opt/cube", "/home/cube"] },
   { name: "memory", command: "free", args: ["-m"] },
   { name: "units", command: "systemctl", args: ["show", "cubed", "incus", "incus-preseed", "cube-data-init", "--property=Id,LoadState,ActiveState,SubState,Result,ExecMainStatus,ActiveEnterTimestamp", "--no-pager"] },
-  { name: "cubed-journal", command: "journalctl", args: ["-u", "cubed", "--since=-30min", "-n", "200", "--no-pager", "-o", "short-iso-precise"] },
-  { name: "incus-journal", command: "journalctl", args: ["-u", "incus", "-u", "incus-preseed", "--since=-30min", "-n", "100", "--no-pager", "-o", "short-iso-precise"] },
+  { name: "cubed-journal", command: "journalctl", args: ["-u", "cubed", "--since=-24h", "-n", "2000", "--no-pager", "-o", "short-iso-precise"], maxOutput: MAX_JOURNAL_OUTPUT },
+  { name: "incus-journal", command: "journalctl", args: ["-u", "incus", "-u", "incus-preseed", "--since=-24h", "-n", "500", "--no-pager", "-o", "short-iso-precise"], maxOutput: MAX_JOURNAL_OUTPUT },
   { name: "incus-version", command: "incus", args: ["version"] },
   { name: "listeners", command: "ss", args: ["-ltn"] },
 ];
@@ -74,17 +78,17 @@ export async function collectDiagnostics(
   const directory = path.join(root, id);
   await fs.mkdir(path.join(directory, "bundle"), { recursive: true, mode: 0o700 });
   const entries: string[] = [];
-  const save = async (name: string, operation: () => Promise<CheckResult>) => {
+  const save = async (name: string, operation: () => Promise<CheckResult>, maxOutput = MAX_OUTPUT) => {
     const started = Date.now();
     let result: CheckResult;
     try { result = await operation(); }
     catch (error) { result = { status: "error", output: error instanceof Error ? error.message : String(error) }; }
     const header = `Check: ${name}\nLocation: VM host\nStarted: ${new Date(started).toISOString()}\nDuration: ${Date.now() - started} ms\nStatus: ${result.status}\n\n`;
     const output = Buffer.from(redact(result.output));
-    await fs.writeFile(path.join(directory, "bundle", `${name}.txt`), header + output.subarray(0, MAX_OUTPUT).toString("utf8") + (output.length > MAX_OUTPUT ? "\n[TRUNCATED]" : ""), { mode: 0o600 });
+    await fs.writeFile(path.join(directory, "bundle", `${name}.txt`), header + output.subarray(0, maxOutput).toString("utf8") + (output.length > maxOutput ? "\n[TRUNCATED]" : ""), { mode: 0o600 });
     entries.push(`- ${name}.txt: ${result.status}`);
   };
-  for (const check of CHECKS) await save(check.name, () => run(check.command, check.args));
+  for (const check of CHECKS) await save(check.name, () => run(check.command, check.args, check.maxOutput), check.maxOutput);
   await save("control-plane", probe);
   await save("versions", async () => {
     const build = await fs.readFile(path.resolve(import.meta.dirname, "../../../build-id"), "utf8").catch(() => "unknown (not a packaged VM build)");
@@ -112,7 +116,7 @@ export async function readDiagnosticFile(bundle: string, name: string, offset = 
   const handle = await fs.open(path.join(bundle, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_OUTPUT + 4096) throw new Error("Not a bounded diagnostic text file");
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_JOURNAL_OUTPUT + 4096) throw new Error("Not a bounded diagnostic text file");
     const lines = (await handle.readFile("utf8")).split("\n");
     return lines.slice(offset - 1, offset - 1 + limit).map((line, i) => `${offset + i}: ${line}`).join("\n");
   } finally { await handle.close(); }
