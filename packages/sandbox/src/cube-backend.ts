@@ -15,7 +15,6 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
-import path from "node:path";
 
 import {
   provisionCube,
@@ -30,7 +29,6 @@ import {
 import { startEgressProxy, type EgressPolicy, type EgressProxy } from "./egress-proxy.ts";
 import { IncusClient, IncusHttpError, type IncusStateAction } from "./incus-client.ts";
 import { IncusSandbox, type Sandbox, type SandboxExecOptions } from "./index.ts";
-import { removeStoppedTree } from "./stopped-tree.ts";
 
 export type DestroySpec = Pick<CubeProvisionSpec, "name" | "pool"> & {
   network: Pick<CubeNetworkSpec, "bridge">;

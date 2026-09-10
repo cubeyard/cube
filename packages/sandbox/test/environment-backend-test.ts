@@ -99,7 +99,7 @@ const running = async () => ({ status: "Running", network: { eth0: { addresses: 
 // snapshot rootfs and volume, release the bridge.
 {
   const calls: string[] = [];
-  let instance: IncusInstance = {
+  const instance: IncusInstance = {
     name: "builder", description: "", status: "Stopped", architecture: "x86_64", ephemeral: false, profiles: ["default"],
     config: {}, devices: {
       root: { type: "disk", path: "/", pool: "cube" },
