@@ -290,9 +290,6 @@
             </a>
           {/if}
           <div class="module-actions">
-            {#if armed.is(thread.id)}
-              <span class="bank-note" role="status">workspace and history are destroyed; the project is kept</span>
-            {/if}
             <button class="key icon" title="rename thread" aria-label="rename thread" onclick={() => startRename(thread)}>
               <Icon name="pencil" size={13} />
             </button>
@@ -310,6 +307,11 @@
               {#if deleting === thread.id}deleting…{:else if armed.is(thread.id)}delete?{:else}<Icon name="trash" size={13} />{/if}
             </button>
           </div>
+          {#if armed.is(thread.id)}
+            <!-- a sibling of the face and the bank: beside them on a wide
+                 panel, beneath the row on a phone, never over the title -->
+            <span class="module-note bank-note" role="status">workspace and history are destroyed; the project is kept</span>
+          {/if}
         </div>
       {/each}
     </div>

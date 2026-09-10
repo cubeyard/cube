@@ -363,8 +363,13 @@ header .spacer { margin-left: auto; }
   padding: 0.35rem;
 }
 
-.module { display: flex; align-items: center; position: relative; }
+.module { display: flex; flex-wrap: wrap; align-items: center; position: relative; }
 .module + .module { border-top: 1px solid var(--line); }
+/* row order: face, then the delete note, then the bank — the note sits
+   between them on a wide panel and drops beneath the row on a phone */
+.module-face { order: 1; }
+.module-note { order: 2; }
+.module-actions { order: 3; }
 
 .module-face {
   flex: 1; min-width: 0;
@@ -434,7 +439,7 @@ header .spacer { margin-left: auto; }
 .module-actions .key:active:not(:disabled) { background: var(--s1); transform: none; box-shadow: none; }
 .module-actions .key.danger:hover:not(:disabled),
 .module-actions .key.danger.armed { color: var(--bad); background: var(--bad-soft); }
-.module-actions .bank-note { background: var(--s3); }
+.module-note { flex: 0 1 auto; padding-right: 0.7rem; }
 /* the face gives up its right rounding where the bank docks */
 .module:has(.module-actions) .module-face { border-radius: var(--r-key) 0 0 var(--r-key); }
 
@@ -1060,6 +1065,10 @@ select.compose-input {
   }
   .thread-topbar > header nav a.active { display: block; }
   .thread-topbar > header .spacer { display: inline; margin-left: auto; }
+  .thread-strip { flex-wrap: wrap; }
+  /* the delete note takes its own line under the strip; the title and
+     the keys keep their places */
+  .thread-strip .bank-note { flex: 1 1 100%; order: 10; text-align: left; max-width: none; }
   .strip-title { display: none; }
   .mobile-thread-switch {
     min-width: 0; max-width: calc(100% - 1.2rem); flex: 1 1 15rem;
@@ -1093,6 +1102,9 @@ select.compose-input {
   /* the changes pane is a sheet under the terminal: folded to its head
      until asked for, so the conversation keeps the screen */
   .thread-workspace:has(.changes-pane.collapsed) { grid-template-rows: minmax(0, 1fr) auto; }
+  /* the list's delete note drops beneath the row, full width, so the
+     thread's title never shrinks to make room for it */
+  .module-note { order: 4; flex: 1 1 100%; max-width: none; padding: 0 0.75rem 0.55rem; text-align: left; }
   .changes-pane.collapsed .changes-body { display: none; }
   .sheet-toggle { display: inline-flex; }
   .workspace-splitter { display: none; }
