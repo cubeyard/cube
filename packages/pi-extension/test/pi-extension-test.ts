@@ -27,7 +27,7 @@ import {
 import { CubeFs, type GuestFiles } from "../src/cube-fs.ts";
 import { formatGrepResult } from "../src/grep-format.ts";
 import { auditTools } from "../src/guard.ts";
-import { mockFiles, resolveConfig, Waker } from "../src/index.ts";
+import cubeExtension, { mockFiles, resolveConfig, Waker } from "../src/index.ts";
 import { createGuestOperations } from "../src/ops.ts";
 import { toGuestPath } from "../src/paths.ts";
 
@@ -432,6 +432,69 @@ console.log("6 ok: config resolution");
   await wakeClosed;
   await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   console.log("7b ok: cancellation closes an in-flight wake request");
+}
+
+// Exercise the registered code tool as well as the independent I/O helpers:
+// errors must remain structured when pi formats them, and cancelled mutation
+// requests must not claim that the remote side effect was rolled back.
+{
+  let mutationStarted!: () => void;
+  const started = new Promise<void>(resolve => { mutationStarted = resolve; });
+  const server = http.createServer((req, res) => {
+    if (req.url?.endsWith("/services")) {
+      mutationStarted();
+      return; // simulate a remote mutation whose completion is unknown
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end('{"status":"ready"}');
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const settings = {
+    CUBE_NAME: "t-code-contract", CUBE_BACKEND: "mock", CUBE_HOST_WORKSPACE: guestWs,
+    CUBE_THREAD_ID: "t-code-contract", CUBED_URL: `http://127.0.0.1:${address.port}`,
+  };
+  const saved = Object.fromEntries(Object.keys(settings).map(key => [key, process.env[key]]));
+  try {
+    Object.assign(process.env, settings);
+    const tools = new Map<string, any>();
+    cubeExtension({ registerTool: (tool: any) => tools.set(tool.name, tool), on() {}, registerCommand() {} } as any);
+    const code = tools.get("code");
+    assert.ok(code);
+    const timed = await code.execute("test", {
+      source: 'return await cube.exec("printf partial; sleep 1", {timeoutMs: 200});',
+    });
+    assert.equal(timed.isError, true);
+    assert.equal(timed.details.error.code, "ETIMEDOUT");
+    assert.equal(timed.details.error.output, "partial");
+    assert.match(text(timed), /ETIMEDOUT/);
+    const overflow = await code.execute("test", {
+      source: `return await cube.exec("head -c 1048577 /dev/zero");`,
+    });
+    assert.equal(overflow.isError, true);
+    assert.equal(overflow.details.error.code, "EOUTPUTLIMIT");
+    assert.ok(overflow.details.error.output.length > 0, "JSON escaping must not discard all partial output");
+    assert.equal(overflow.details.error.truncated, true);
+    const missing = await code.execute("test", { source: 'return await cube.fs.readText("does-not-exist");' });
+    assert.equal(missing.details.error.code, "ENOENT");
+    assert.equal(missing.details.error.path, "does-not-exist");
+    const controller = new AbortController();
+    const mutation = code.execute("test", { source: "return await cube.services.ensure();" }, controller.signal);
+    await started;
+    controller.abort(new Error("test stopped"));
+    const cancelled = await mutation;
+    assert.equal(cancelled.isError, true);
+    assert.equal(cancelled.details.error.code, "ECODE_UNCERTAIN");
+    assert.equal(cancelled.details.error.completionUnknown, true);
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+  console.log("8 ok: registered code tool preserves structured errors and reports uncertain remote completion");
 }
 
 console.log("ALL PASS");
