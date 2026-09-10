@@ -95,7 +95,7 @@ export class EnvironmentTemplates {
     if (stale) await this.remove(stale);
     const id = crypto.randomUUID();
     const instance = `cube-s-${crypto.randomBytes(4).toString("hex")}`;
-    const row = this.registry.createEnvironmentTemplate({
+    this.registry.createEnvironmentTemplate({
       id, projectId, key, status: "building", instance, snapshot: "env", volume: `${instance}-docker`, volumeSnapshot: "env",
     });
     let captured: CubeTemplateSource;
