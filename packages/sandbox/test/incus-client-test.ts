@@ -142,7 +142,7 @@ process.on("exit", () => fs.rmSync(workspace, { recursive: true, force: true }))
 const spec: CubeProvisionSpec = {
   name: "builder",
   image: "cube-node",
-  imageFingerprint: "abc123",
+
   pool: "cube",
   rootSize: "10GiB",
   dockerVolumeSize: "5GiB",
@@ -305,7 +305,7 @@ const provisionRoutes = (fake: FakeIncus) => fake
     .route("GET", "/1.0/operations/op-create/wait", fake.hold())
     .route("GET", "/1.0/operations/op-delete/wait", fake.hold())
     .route("DELETE", "/1.0/operations/op-delete", sync({}));
-  const [ms, result] = await elapsed(provisionCube(fastClient(fake), spec, undefined, { rollbackTimeoutMs: 5000 }));
+  const [ms, result] = await elapsed(provisionCube(fastClient(fake), spec, { rollbackTimeoutMs: 5000 }));
   const error = rejection(result);
   assert.ok(error instanceof IncusTimeoutError, "the original failure is what surfaces");
   assert.equal(error.kind, "create");
@@ -325,7 +325,7 @@ const provisionRoutes = (fake: FakeIncus) => fake
   const controller = new AbortController();
   const reason = new Error("thread deleted while setting up");
   setTimeout(() => controller.abort(reason), 100);
-  const [ms, result] = await elapsed(provisionCube(fastClient(fake), spec, undefined, { signal: controller.signal }));
+  const [ms, result] = await elapsed(provisionCube(fastClient(fake), spec, { signal: controller.signal }));
   assert.strictEqual(rejection(result), reason);
   assert.equal(fake.seen("DELETE", "/1.0/instances/builder").length, 1, "rollback runs after an abort, signal-free");
   assert.ok(ms < 1500, `cancel took ${ms}ms`);
@@ -333,68 +333,54 @@ const provisionRoutes = (fake: FakeIncus) => fake
   console.log("9 ok: aborted provision -> rejects with the reason, instance rolled back");
 }
 
-// ------------------------------- 10. publication deadline leaves the journal in `accepted`
+// ------------------------------- 10. a template capture is bounded by the snapshot deadline
 const captureRoutes = (fake: FakeIncus) => fake
-  .route("POST", "/1.0/instances/builder/exec", accepted("/1.0/operations/op-stage"))
-  .route("GET", "/1.0/operations/op-stage/wait", finished("op-stage", { return: 0 }))
   .route("GET", "/1.0/instances/builder/state", sync({ status: "Stopped", network: null }))
-  .route("POST", "/1.0/images", accepted("/1.0/operations/op-publish"))
-  .route("DELETE", "/1.0/operations/op-publish", (_req, res) => {
-    assert.fail("a publication must never be cancelled: Incus cannot, and the journal owns the outcome");
-    res.end();
-  });
+  .route("GET", "/1.0/instances/builder", sync({
+    name: "builder", architecture: "x86_64", description: "", ephemeral: false, profiles: ["default"],
+    config: { "security.nesting": "true" },
+    devices: {
+      root: { type: "disk", path: "/", pool: "cube" },
+      eth0: { type: "nic", network: "cbr-test" },
+      workspace: { type: "disk", source: "/x", path: "/workspace" },
+      dockerlib: { type: "disk", pool: "cube", source: "builder-docker", path: "/var/lib/docker" },
+    },
+  }))
+  .route("PUT", "/1.0/instances/builder", accepted("/1.0/operations/op-update"))
+  .route("GET", "/1.0/operations/op-update/wait", finished("op-update"))
+  .route("POST", "/1.0/instances/builder/files", sync({}))
+  .route("POST", "/1.0/instances/builder/snapshots", accepted("/1.0/operations/op-snap"))
+  .route("DELETE", "/1.0/operations/op-snap", sync({}));
 {
   const fake = await FakeIncus.listen();
-  captureRoutes(fake).route("GET", "/1.0/operations/op-publish/wait", stillRunning("op-publish"));
-  const journal = fs.mkdtempSync(path.join(os.tmpdir(), "cube-publication-journal-"));
-  const backend = new IncusBackend(fastClient(fake), { publishTimeoutMs: 500 });
-  const [ms, result] = await elapsed(backend.captureEnvironment(spec, "cube-env-k", journal));
+  captureRoutes(fake).route("GET", "/1.0/operations/op-snap/wait", stillRunning("op-snap"));
+  const backend = new IncusBackend(fastClient(fake));
+  const [ms, result] = await elapsed(backend.captureTemplate(spec, "env", { timeoutMs: 500 }));
   const error = rejection(result);
   assert.ok(error instanceof IncusTimeoutError, `expected IncusTimeoutError, got ${String(error)}`);
-  assert.equal(error.kind, "publish");
+  assert.equal(error.kind, "snapshot");
   assert.equal(error.instance, "builder");
-  assert.equal(error.operation, "/1.0/operations/op-publish");
-  assert.equal(error.seconds, 0.5);
+  assert.equal(error.operation, "/1.0/operations/op-snap");
   assert.ok(ms < 3000, `capture gave up at ${ms}ms`);
-  const record = JSON.parse(fs.readFileSync(path.join(journal, "publication.json"), "utf8"));
-  assert.equal(record.phase, "accepted", "the uncertain publication stays journalled");
-  assert.equal(record.operation, "/1.0/operations/op-publish");
-  assert.equal(record.alias, "cube-env-k");
-  assert.equal(fake.seen("DELETE", "/1.0/images").length, 0, "nothing ambiguous is deleted");
-  const body = JSON.parse(fake.seen("POST", "/1.0/images")[0]!.body);
-  assert.equal(body.properties["cube.environment.attempt"], record.attempt);
-
-  // Later reconciliation (PR #21's path) resolves the same journal: pending
-  // while the operation runs, then the tagged image once it landed.
-  fake.route("GET", "/1.0/operations/op-publish", sync(operationBody("op-publish", 103)));
-  await assert.rejects(backend.reconcileEnvironment("cube-env-k", journal), /publication pending/);
-  fake.route("GET", "/1.0/operations/op-publish", failure(404, "gone"))
-    .route("GET", "/1.0/images", sync([{ fingerprint: "landed", properties: { "cube.environment.attempt": record.attempt }, aliases: [] }]))
-    .route("GET", "/1.0/images/aliases/cube-env-k", sync({ name: "cube-env-k", target: "landed" }));
-  assert.equal(await backend.reconcileEnvironment("cube-env-k", journal), "landed");
-  assert.equal(JSON.parse(fs.readFileSync(path.join(journal, "publication.json"), "utf8")).phase, "complete");
-  fs.rmSync(journal, { recursive: true, force: true });
+  const put = JSON.parse(fake.seen("PUT", "/1.0/instances/builder")[0]!.body);
+  assert.deepEqual(Object.keys(put.devices), ["root"], "every device but root is stripped before the snapshot");
+  assert.equal(fake.seen("POST", "/1.0/instances/builder/files").length, 1, "machine-id is reset before the snapshot");
   await fake.close();
-  console.log("10 ok: publish deadline -> IncusTimeoutError(publish), journal accepted, reconciled later");
+  console.log("10 ok: snapshot deadline -> IncusTimeoutError(snapshot), devices stripped first");
 }
 
-// ------------------------------- 11. a cancelled capture releases the waiter, keeps the journal
+// ------------------------------- 11. a cancelled capture releases the waiter
 {
   const fake = await FakeIncus.listen();
-  captureRoutes(fake).route("GET", "/1.0/operations/op-publish/wait", fake.hold());
-  const journal = fs.mkdtempSync(path.join(os.tmpdir(), "cube-publication-journal-"));
+  captureRoutes(fake).route("GET", "/1.0/operations/op-snap/wait", fake.hold());
   const controller = new AbortController();
   const reason = new Error("environment build abandoned");
   setTimeout(() => controller.abort(reason), 100);
-  const [ms, result] = await elapsed(
-    new IncusBackend(fastClient(fake)).captureEnvironment(spec, "cube-env-k", journal, { signal: controller.signal }),
-  );
+  const [ms, result] = await elapsed(new IncusBackend(fastClient(fake)).captureTemplate(spec, "env", { signal: controller.signal }));
   assert.strictEqual(rejection(result), reason);
   assert.ok(ms < 1000, `cancel took ${ms}ms`);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(journal, "publication.json"), "utf8")).phase, "accepted");
-  fs.rmSync(journal, { recursive: true, force: true });
   await fake.close();
-  console.log("11 ok: aborted publish wait -> rejects with the reason, journal accepted");
+  console.log("11 ok: aborted snapshot wait -> rejects with the reason");
 }
 
 console.log("incus-client: all ok");

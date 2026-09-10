@@ -32,6 +32,7 @@ export function sanitizeMessage(message: string): string {
 // it), deleting it, starting a new thread, `cube diagnose`. Nothing here
 // promises a control the UI does not have.
 const RULES: Array<[RegExp, string | ((m: RegExpMatchArray) => string)]> = [
+  [/^\.cube\/setup failed \(exit 137\)/, "the environment's .cube/setup script was killed (exit 137) — most likely it hit the thread's memory limit; make the setup lighter, or raise CUBED_CUBE_MEMORY on the host, and start a new thread"],
   [/^\.cube\/setup failed \(exit (\d+)\)/, (m) => `the environment's .cube/setup script failed (exit ${m[1]}) — the environment is usable as it is; fix the script, and start a new thread to run it again`],
   [/^\.cube\/setup failed/, "the environment's .cube/setup script could not run — the environment is usable as it is; check the script, and start a new thread to run it again"],
   [/^\.cube\/resume failed \(exit (\d+)\)/, (m) => `the environment's .cube/resume script failed (exit ${m[1]}) — the environment is up; fix the script, and it runs again the next time the thread wakes`],

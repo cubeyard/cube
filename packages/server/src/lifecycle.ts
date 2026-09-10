@@ -8,7 +8,6 @@ export interface LifecycleResult {
   startedAt: number;
   durationMs: number | null;
   error: string | null;
-  cached?: boolean;
 }
 
 /** Host-owned, bounded diagnostics. Never put these beside agent-writable
@@ -40,13 +39,6 @@ export class Lifecycle {
   }
 
   forget(name: string): void { fs.rmSync(path.join(this.root, name), { recursive: true, force: true }); }
-
-  adopt(name: string, directory: string): void {
-    const result = JSON.parse(fs.readFileSync(path.join(directory, "setup.json"), "utf8")) as LifecycleResult;
-    this.save(name, "setup", { ...result, cached: true });
-    fs.rmSync(path.join(this.root, name, "setup.log.head"), { force: true });
-    fs.copyFileSync(path.join(directory, "setup.log"), path.join(this.root, name, "setup.log"));
-  }
 
   /** `signal` cancels the guest script (the thread is being deleted under
    * it); the result then records the cancellation, not a script failure.

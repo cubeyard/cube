@@ -25,7 +25,7 @@ export type {
   IncusCallOptions,
 } from "./incus-client.ts";
 export { provisionCube, destroyCube, waitForCubeNetwork } from "./cube-provision.ts";
-export type { CubeProvisionSpec, CubeNetworkSpec, ProvisionOptions, DestroyOptions } from "./cube-provision.ts";
+export type { CubeProvisionSpec, CubeNetworkSpec, CubeTemplateSource, ProvisionOptions, DestroyOptions } from "./cube-provision.ts";
 export { startEgressProxy } from "./egress-proxy.ts";
 export type { EgressPolicy, EgressProxy } from "./egress-proxy.ts";
 export { removeStoppedTree } from "./stopped-tree.ts";
@@ -244,7 +244,7 @@ export {
   type CubeBackend,
   type DestroySpec,
   type EgressProxyOptions,
-  type EnvironmentOptions,
+  type TemplateOptions,
   type IncusBackendOptions,
   type SetStateOptions,
   type WaitForNetworkOptions,

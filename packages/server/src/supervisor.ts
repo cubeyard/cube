@@ -16,10 +16,11 @@ import {
   type CubeBackend,
   type CubeProvisionSpec,
   type EgressProxy,
+  type CubeTemplateSource,
 } from "@cube/sandbox";
 
 import { parseCubeToml, readCubeConfig, readWakeHooks } from "./cube-toml.ts";
-import { EnvironmentCache, EnvironmentCacheBusyError, EnvironmentCacheSuspendedError } from "./environment-cache.ts";
+import { EnvironmentTemplates, environmentKey } from "./environment-templates.ts";
 import { Lifecycle, type LifecyclePhase, type LifecycleResult } from "./lifecycle.ts";
 import { Span, describeError, recordPoint } from "./events.ts";
 import { describeThreadError } from "./user-facing.ts";
@@ -111,9 +112,11 @@ export interface SupervisorConfig {
   rootSize: string;
   dockerVolumeSize: string;
   egressAllow: string[];
-  /** Maximum retained prepared environments (conservative byte accounting).
-   * Zero disables reuse (default until the real Incus acceptance test passes). */
-  environmentCacheBytes?: number;
+  /** Prepared environments: threads are cloned from a per-project template
+   * that ran setup once (default on; false = every thread sets up fresh). */
+  environmentCache?: boolean;
+  /** Memory cap per thread (Incus `limits.memory`, e.g. "4GiB"); unset = none. */
+  cubeMemory?: string;
   /** Idle-to-sleep timeout in ms off last_active_at (PLAN: default 1h).
    * <= 0 disables the idle sweep entirely. */
   idleMs: number;
@@ -271,7 +274,7 @@ export class CubeSupervisor {
   private readonly git: GitService;
   private readonly prReviews: PrReviewService;
   private readonly lifecycle: Lifecycle;
-  private readonly environments: EnvironmentCache | null;
+  private readonly templates: EnvironmentTemplates | null;
   private readonly runtimes = new Map<string, CubeRuntime>();
   // In-flight sleep/wake per cube. Status flips ("asleep"/"waking") happen
   // synchronously before the incus work, so concurrent callers observe the
@@ -334,33 +337,14 @@ export class CubeSupervisor {
     this.git = new GitService(config.reposRoot);
     this.prReviews = new PrReviewService(config.reposRoot);
     this.lifecycle = new Lifecycle(path.join(config.cubesRoot, ".lifecycle"));
-    const budget = config.environmentCacheBytes ?? 0;
-    if (!Number.isSafeInteger(budget) || budget < 0) throw new Error("environmentCacheBytes must be a non-negative safe integer");
-    this.environments = budget > 0 && backend.resolveImage && backend.captureEnvironment && backend.deleteEnvironment
-      ? new EnvironmentCache(path.join(config.cubesRoot, ".environments"), budget,
-        // Every call the cache makes into Incus carries its deadline.
-        (fingerprint, opts) => backend.deleteEnvironment!(fingerprint, opts),
-        async (key, opts) => {
-          const directory = path.join(config.cubesRoot, ".environments", key);
-          // No journal means capture never reached POST. Once posting was
-          // journaled, absence of an alias is NOT evidence of failure.
-          if (!fs.existsSync(path.join(directory, "publication.json"))) return;
-          if (!backend.reconcileEnvironment) throw new Error("backend cannot reconcile environment publication");
-          await backend.deleteEnvironment!(await backend.reconcileEnvironment(`cube-env-${key}`, directory, opts), opts);
-        },
-        {
-          // An unresolved entry of unknown size is assumed to occupy what
-          // a build is admitted with (see the reservation passed to `use`).
-          unknownEntryBytes: 2 * parseSize(config.rootSize),
-          // A builder whose teardown failed still holds its instance and
-          // docker volume: unresolved for admission, occupied for the
-          // budget, until a retry frees it.
-          retained: () => {
-            const count = this.pendingBuilders().length;
-            return { count, bytes: count * (parseSize(config.rootSize) + parseSize(config.dockerVolumeSize)) };
-          },
-        })
-      : null;
+    this.templates = config.environmentCache === false
+      ? null
+      : new EnvironmentTemplates(registry, backend, config.pool, {
+        callTimeoutMs: MAINTENANCE_CALL_TIMEOUT_MS,
+        onError: (context, error) => recordPoint(registry, {
+          kind: "environment", phase: "maintenance", ok: false, detail: `${context}: ${describeError(error)}`,
+        }),
+      });
   }
 
   // ---------------------------------------------------------------- events
@@ -472,9 +456,7 @@ export class CubeSupervisor {
       if (cube.status !== "building-environment" || this.registry.listThreads(cube.id).length) continue;
       await this.cleanupEnvironmentBuilder(cube);
     }
-    await this.environments?.recover().catch((error) => console.warn(`environment recovery: ${String(error)}`));
-    await this.environments?.prune().catch((error) => console.warn(`environment eviction: ${String(error)}`));
-    this.recordEnvironmentDiagnostics();
+    await this.templates?.recover();
     this.lastEnvironmentMaintenance = Date.now(); // the periodic pass continues from here
     const pruned = this.registry.pruneEvents(EVENT_RETENTION_MS);
     recordPoint(this.registry, { kind: "boot", detail: `cubed start; pruned ${pruned} old events` });
@@ -585,34 +567,19 @@ export class CubeSupervisor {
         retried += 1;
         await this.cleanupEnvironmentBuilder(cube);
       }
-      let unresolved = 0;
-      if (this.environments) {
-        try {
-          await this.environments.maintain();
-        } catch (error) {
-          recordPoint(this.registry, { kind: "environment", phase: "maintenance", ok: false, detail: describeError(error) });
-        }
-        this.recordEnvironmentDiagnostics();
-        unresolved = this.environments.quarantined().length; // builders are counted separately below
-      }
+      await this.templates?.prune();
       const pending = this.pendingBuilders().length;
-      span.end(unresolved === 0 && pending === 0, `maintenance: ${retried} builder cleanup(s) retried, ${pending} still pending; ${unresolved} cache entr${unresolved === 1 ? "y" : "ies"} unresolved`);
+      const templates = this.templates?.list().length ?? 0;
+      span.end(pending === 0, `maintenance: ${retried} builder cleanup(s) retried, ${pending} still pending; ${templates} template(s) kept`);
     })().finally(() => { this.environmentMaintenance = null; });
     return this.environmentMaintenance;
   }
 
   /** Builders whose teardown failed: still an instance, a volume, a host
-   * tree and a subnet each, until a retry succeeds. Never a user's thread. */
+   * tree, and a subnet held by a row nobody can see. */
   private pendingBuilders(): CubeRow[] {
     return this.registry.listCubes().filter((cube) =>
       cube.status === "building-environment" && !!cube.error?.startsWith("cleanup pending") && this.registry.listThreads(cube.id).length === 0);
-  }
-
-  /** Cache maintenance failures land as events, not as console noise. */
-  private recordEnvironmentDiagnostics(): void {
-    for (const error of this.environments?.takeDiagnostics() ?? []) {
-      recordPoint(this.registry, { kind: "environment", phase: "maintenance", ok: false, detail: describeError(error) });
-    }
   }
 
   // --------------------------------------------------------------- projects
@@ -672,8 +639,12 @@ export class CubeSupervisor {
     return this.projectInfo(project);
   }
 
-  deleteProject(id: string): void {
+  async deleteProject(id: string): Promise<void> {
     if (this.projectChecks.has(id)) throw new Error(`project ${id} is still checking`);
+    if (this.registry.countThreadsForProject(id) > 0) throw new Error(`project ${id} still has threads`);
+    // The project's template (a stopped instance and a volume) goes first;
+    // a failure there keeps the project, never leaks the instance.
+    await this.templates?.forgetProject(id);
     this.registry.deleteProject(id);
   }
 
@@ -949,6 +920,7 @@ export class CubeSupervisor {
       dockerVolumeSize: this.config.dockerVolumeSize,
       hostWorkspace: cube.workspacePath,
       guestWorkspace: "/workspace",
+      ...(this.config.cubeMemory ? { memoryLimit: this.config.cubeMemory } : {}),
       ...(repositories.length > 1
         ? {
             hostRepositories: path.join(path.dirname(cube.workspacePath), "repos"),
@@ -1007,84 +979,59 @@ export class CubeSupervisor {
       signal.throwIfAborted();
       span.phase("seed");
       const spec = this.provisionSpec(cube);
-      let cached = false;
       // The checkout is still fresh and not mounted in any guest. Inspect
       // only directory entries, never follow a repo symlink on the host.
-      // No setup script means the base image is already the best snapshot.
+      // No setup script means the base image is already the best rootfs.
       let hasSetup = false;
       try {
         const environmentDir = environmentDirs(cube).host;
         const dir = fs.lstatSync(environmentDir);
         hasSetup = dir.isSymbolicLink() || (dir.isDirectory() && !!fs.lstatSync(path.join(environmentDir, "setup")));
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-      if (projectId && this.environments && hasSetup) {
+      // A prepared environment: the project's template for this exact
+      // declaration, built now if it does not exist yet. Threads that start
+      // together share one build; a thread deleted meanwhile abandons its
+      // wait (the builder finishes for the next one).
+      let template: { id: string; source: CubeTemplateSource } | null = null;
+      if (projectId && this.templates && hasSetup) {
         const repos = this.registry.listCubeRepositories(cube.id);
-        const fingerprint = await this.backend.resolveImage!(cube.image);
-        spec.imageFingerprint = fingerprint;
-        // Set once the restore has started: only then is there an instance
-        // (whole or rolled back) and a touched workspace to reset below.
-        const restore = { pending: null as Promise<void> | null };
         try {
-          // A shared build is not this thread's to cancel: on deletion the
-          // wait is abandoned (the builder finishes and publishes for the
-          // next thread) and the consume step below refuses to create the
-          // instance under a teardown.
-          await abortable(signal, this.environments.use(
-            { version: 2, projectId, fingerprint, arch: process.arch,
-              rootSize: spec.rootSize, dockerVolumeSize: spec.dockerVolumeSize,
-              egress: this.config.egressAllow, portalBase: this.config.portalBase,
-              repositories: repos.map((r) => [r.url, r.base, r.checkoutName]),
-              // Only when declared, so existing families keep their keys.
-              ...(cube.environment ? { environment: cube.environment } : {}) },
-            repos.map((r) => r.baseOid),
-            // Incus may retain both compressed image and unpacked rootfs.
-            // Docker staging is already inside the captured rootfs quota.
-            2 * parseSize(spec.rootSize),
-            // The build gets this thread's repository snapshot as read
-            // above, never the registry: the build may start after this
-            // thread was deleted and its rows cascaded away.
-            (directory, warm) => this.buildEnvironment(cube, repos, directory, warm ?? fingerprint),
-            async (imageFingerprint, workspace) => {
-              signal.throwIfAborted();
-              // Ownership/xattrs/timestamps are restored INSIDE the target
-              // namespace. Fresh host-created .git is excluded and retained.
-              restore.pending = (async () => {
-                await this.backend.provision({ ...spec, imageFingerprint, restoreWorkspace: true }, { signal });
-                this.lifecycle.adopt(cube.name, path.dirname(workspace));
-                cached = true;
-              })();
-              await restore.pending;
-            },
+          const row = await abortable(signal, this.templates.acquire(
+            projectId,
+            await this.environmentKeyFor(cube, spec),
+            (instance) => this.buildTemplate(cube, repos, instance),
           ));
+          template = { id: row.id, source: { instance: row.instance, snapshot: row.snapshot, volume: row.volume, volumeSnapshot: row.volumeSnapshot } };
         } catch (error) {
-          // A restore already under way is never abandoned: the teardown
-          // that follows a cancellation must find the instance whole or
-          // absent, not half-made.
-          if (restore.pending) await restore.pending.catch(() => {});
           signal.throwIfAborted();
-          // Reuse is an optimization. A failed build/capture is never
-          // published; fresh setup remains the repair path — and while the
-          // host cannot clean up after its own cache, that is the only path.
-          const declined =
-            error instanceof EnvironmentCacheSuspendedError ? "suspended"
-            : error instanceof EnvironmentCacheBusyError ? "busy"
-            : null;
+          // Reuse is an optimization; fresh setup remains the path.
           recordPoint(this.registry, {
-            kind: "environment", phase: declined ?? "reuse-failed", cube: cube.name,
-            thread: this.threadIdFor(cube), ok: false,
-            detail: `fresh setup instead: ${describeError(error)}`,
+            kind: "environment", phase: "template-unavailable", cube: cube.name,
+            thread: this.threadIdFor(cube), ok: false, detail: `fresh setup instead: ${describeError(error)}`,
           });
-          console.warn(`environment reuse [${cube.name}]: ${String(error)}`);
-          if (restore.pending) {
-            await this.backend.destroy(spec, { deleteVolume: true, deleteBridge: true });
-            removeStoppedTree(cube.workspacePath);
-            await this.seedCube(cube, signal);
-          }
+          console.warn(`environment template [${cube.name}]: ${String(error)}`);
         }
       }
       signal.throwIfAborted();
-      if (!cached) await this.backend.provision(spec, { signal });
-      span.phase("instance", cached ? "restored a prepared environment" : null);
+      let cloned = false;
+      if (template) {
+        try {
+          await this.backend.provision({ ...spec, template: template.source }, { signal });
+          cloned = true;
+        } catch (error) {
+          signal.throwIfAborted();
+          // provisionCube rolled the instance back; the base image still works.
+          recordPoint(this.registry, {
+            kind: "environment", phase: "clone-failed", cube: cube.name,
+            thread: this.threadIdFor(cube), ok: false, detail: `fresh setup instead: ${describeError(error)}`,
+          });
+          console.warn(`environment clone [${cube.name}]: ${String(error)}`);
+        } finally {
+          this.templates!.release(template.id);
+        }
+      }
+      if (!cloned) await this.backend.provision(spec, { signal });
+      span.phase("instance", cloned ? "cloned from a prepared environment" : null);
       this.registry.addVolume({
         cubeId: cube.id,
         purpose: "docker",
@@ -1095,14 +1042,16 @@ export class CubeSupervisor {
       await this.startProxy(cube);
       span.phase("proxy");
       signal.throwIfAborted();
-      const setupError = cached ? null : await this.runLifecycleScript(cube, "setup", signal);
-      span.phase("setup", cached ? "skipped: prepared environment" : setupError, setupError === null);
+      // Setup runs in every thread: on a clone it is the warm rerun that
+      // brings the fresh checkout up to date (dependencies, generated files);
+      // an idempotent script makes that seconds, never a second cold build.
+      const setupError = await this.runLifecycleScript(cube, "setup", signal);
+      span.phase("setup", cloned && setupError === null ? "warm rerun on a prepared environment" : setupError, setupError === null);
       signal.throwIfAborted();
       const activationError = setupError ?? await this.runLifecycleScript(cube, "resume", signal);
       if (setupError === null) span.phase("resume", activationError, activationError === null);
       signal.throwIfAborted();
       this.registry.setCubeStatus(cube.name, "ready", activationError);
-      this.recordEnvironmentDiagnostics();
       span.end(true, activationError ? "ready with setup complaint" : "ready");
     } catch (error) {
       // provisionCube rolled the instance back; bridge/volume are reusable.
@@ -1118,22 +1067,43 @@ export class CubeSupervisor {
     }
   }
 
+  /** What a template is made of: the environment declaration and what the
+   * rootfs is built from. Repository commits are deliberately absent — the
+   * workspace is never part of a template. */
+  private async environmentKeyFor(cube: CubeRow, spec: CubeProvisionSpec): Promise<string> {
+    const dir = environmentDirs(cube).host;
+    const read = (file: string): string | null => {
+      try { return fs.readFileSync(path.join(dir, file), "utf8"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+    };
+    return environmentKey({
+      version: 1,
+      declaration: { setup: read("setup"), resume: read("resume"), toml: read("cube.toml") },
+      image: await this.backend.resolveImage(cube.image),
+      arch: process.arch,
+      rootSize: spec.rootSize,
+      dockerVolumeSize: spec.dockerVolumeSize,
+      memory: spec.memoryLimit ?? null,
+      egress: this.config.egressAllow,
+    });
+  }
+
   /**
-   * Build one shared snapshot in a dedicated builder cube. `repositories`
-   * is the source thread's immutable snapshot, captured by the caller
-   * before the shared work was queued: the build may run after that
-   * thread was deleted (its wait abandoned, its rows cascaded away), and
-   * rereading the registry then would publish an empty workspace under
-   * the revision key every later thread restores from.
+   * Build one template in a dedicated builder cube: seed, provision from
+   * the base image, run setup once, then hand the stopped instance and its
+   * docker volume to the backend to snapshot. `repositories` is the source
+   * thread's immutable snapshot, read by the caller before the shared work
+   * was queued: the build may run after that thread was deleted. On success
+   * the builder's cube row, subnet and host tree are released — the
+   * instance lives on as the template. On failure everything is torn down.
    */
-  private async buildEnvironment(
+  private async buildTemplate(
     source: Pick<CubeRow, "image" | "environment">,
     repositories: CubeRepositoryRow[],
-    directory: string,
-    imageFingerprint: string,
-  ): Promise<string> {
+    instance: string,
+  ): Promise<CubeTemplateSource> {
     if (repositories.length === 0) throw new Error("environment build refused: the source thread has no repositories");
-    const name = `s-${crypto.randomBytes(4).toString("hex")}`;
+    const name = instance.replace(/^cube-/, "");
     const builder = this.registry.createCube({
       name, image: source.image,
       workspacePath: path.join(this.config.cubesRoot, name, "workspace"),
@@ -1145,27 +1115,32 @@ export class CubeSupervisor {
       checkoutName: repo.checkoutName,
       workspacePath: position === 0 ? builder.workspacePath : path.join(path.dirname(builder.workspacePath), "repos", repo.checkoutName),
     })));
-    const spec = { ...this.provisionSpec(builder), imageFingerprint };
-    let captured: string | undefined;
+    const spec = this.provisionSpec(builder);
+    const span = this.span("environment", builder);
     try {
       await this.seedCube(builder);
+      span.phase("seed");
       await this.backend.provision(spec);
+      span.phase("instance");
       await this.startProxy(builder);
       const error = await this.runLifecycleScript(builder, "setup");
-      // Preserve build evidence outside the snapshot's agent-visible files.
-      fs.writeFileSync(path.join(directory, "setup.log"), this.lifecycle.log(name, "setup"), { mode: 0o600 });
-      fs.writeFileSync(path.join(directory, "setup.json"), JSON.stringify(this.lifecycle.read(name, "setup")), { mode: 0o600 });
+      span.phase("setup", error, error === null);
       if (error) throw new Error(error);
-      captured = await this.backend.captureEnvironment!(spec, `cube-env-${path.basename(directory)}`, directory);
-      // Production workspace data is inside the image; the mock keeps a
-      // separate payload here. The cache owns only host-readable metadata.
-      fs.mkdirSync(path.join(directory, "workspace"), { recursive: true });
-      return captured;
+      await this.runtimes.get(builder.name)?.proxy?.close();
+      this.runtimes.delete(builder.name);
+      const template = await this.backend.captureTemplate(spec, "env", { timeoutMs: MAINTENANCE_CALL_TIMEOUT_MS });
+      span.phase("capture");
+      // From here the instance is the template, not a cube: its bridge is
+      // gone (captureTemplate), its row, subnet and host tree go now.
+      removeStoppedTree(path.dirname(builder.workspacePath));
+      this.lifecycle.forget(builder.name);
+      this.registry.deleteCube(builder.name);
+      span.end(true, "template ready");
+      return template;
     } catch (error) {
-      if (captured) await this.backend.deleteEnvironment!(captured, { signal: AbortSignal.timeout(MAINTENANCE_CALL_TIMEOUT_MS) });
-      throw error;
-    } finally {
+      span.fail(error);
       await this.cleanupEnvironmentBuilder(builder);
+      throw error;
     }
   }
 
@@ -1421,11 +1396,15 @@ export class CubeSupervisor {
     setup: Partial<LifecycleResult> & { log: string };
     resume: Partial<LifecycleResult> & { log: string };
     directory: string;
+    limits: { memory: string | null };
   } {
     const { cubeName } = this.resolveUserThread(id);
     const cube = this.requireCube(cubeName);
     const phase = (name: LifecyclePhase) => ({ ...this.lifecycle.read(cubeName, name), log: this.lifecycle.log(cubeName, name) });
-    return { setup: phase("setup"), resume: phase("resume"), directory: environmentDirs(cube).guestAbsolute };
+    return {
+      setup: phase("setup"), resume: phase("resume"), directory: environmentDirs(cube).guestAbsolute,
+      limits: { memory: this.config.cubeMemory ?? null },
+    };
   }
 
   /** Explicit in-place repair. Never publishes a working thread as a cache.

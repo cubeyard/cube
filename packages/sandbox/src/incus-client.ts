@@ -78,7 +78,12 @@ export interface IncusInstanceState {
 
 export interface IncusInstanceCreate {
   name: string;
-  source: { type: "image"; alias: string } | { type: "image"; fingerprint: string };
+  /** An image, or a copy of another instance's snapshot ("template/env"): on
+   * ZFS a clone, so the copy is instant and shares blocks with the source. */
+  source:
+    | { type: "image"; alias: string }
+    | { type: "image"; fingerprint: string }
+    | { type: "copy"; source: string };
   config?: Record<string, string>;
   devices?: Record<string, Record<string, string>>;
   profiles?: string[];
@@ -101,8 +106,10 @@ export interface IncusOperationTimeouts {
   state: number;
   delete: number;
   exec: number;
-  publish: number;
-  imageDelete: number;
+  /** Instance and volume snapshots. */
+  snapshot: number;
+  /** Instance and volume copies (clones on ZFS). */
+  copy: number;
   request: number;
   operation: number;
   cancel: number;
@@ -114,8 +121,8 @@ export const DEFAULT_INCUS_OPERATION_TIMEOUTS: Readonly<IncusOperationTimeouts> 
   state: 2 * 60_000,
   delete: 5 * 60_000,
   exec: 10 * 60_000,
-  publish: 15 * 60_000,
-  imageDelete: 5 * 60_000,
+  snapshot: 2 * 60_000,
+  copy: 5 * 60_000,
   request: 60_000,
   operation: 10 * 60_000,
   cancel: 10_000,
@@ -690,19 +697,6 @@ export class IncusClient {
     return metadata;
   }
 
-  /** Active operations, flattened from Incus' status-keyed response. */
-  async listOperations(signal?: AbortSignal): Promise<IncusOperation[]> {
-    const { metadata } = await this.request<Record<string, IncusOperation[]>>(
-      "GET", "/1.0/operations?recursion=1", undefined, undefined, signal,
-    );
-    return Object.values(metadata).flat();
-  }
-
-  async getOperation(operationUrl: string, signal?: AbortSignal): Promise<IncusOperation> {
-    const { metadata } = await this.request<IncusOperation>("GET", operationUrl, undefined, undefined, signal);
-    return metadata;
-  }
-
   async getImageAlias(alias: string, signal?: AbortSignal): Promise<{ name: string; target: string }> {
     const { metadata } = await this.request<{ name: string; target: string }>(
       "GET",
@@ -714,61 +708,35 @@ export class IncusClient {
     return metadata;
   }
 
-  /**
-   * Publish a stopped instance as an image under `alias` (the alias must be
-   * free). Deadline `timeouts.publish`. Incus cannot cancel a publication,
-   * so a deadline or abort only releases the waiter: the image may still
-   * appear later.
-   */
-  async publishInstanceAsImage(name: string, alias: string, opts: IncusCallOptions = {}): Promise<string> {
-    const op = await this.requestWait("POST", "/1.0/images", {
-      source: { type: "instance", name },
-      aliases: [{ name: alias }],
-    }, opts.signal, { kind: "publish", instance: name, timeoutMs: opts.timeoutMs ?? this.timeouts.publish });
-    const fingerprint = op.metadata?.fingerprint;
-    if (typeof fingerprint !== "string") throw new Error("incus: publish returned no fingerprint");
-    return fingerprint;
+  // ---- snapshots and copies -------------------------------------------------
+
+  /** Snapshot a (stopped) instance. Deadline `timeouts.snapshot`. */
+  async createInstanceSnapshot(name: string, snapshot: string, opts: IncusCallOptions = {}): Promise<void> {
+    await this.requestWait("POST", `/1.0/instances/${encodeURIComponent(name)}/snapshots`, {
+      name: snapshot, stateful: false,
+    }, opts.signal, { kind: "snapshot", instance: name, timeoutMs: opts.timeoutMs ?? this.timeouts.snapshot });
   }
 
-  /**
-   * Start publication and expose the operation URL before waiting. Deadline
-   * `timeouts.publish`; on deadline or abort the operation is left running
-   * (Incus cannot cancel it) and the caller's journal of `operationUrl` is
-   * the record that decides its outcome later.
-   */
-  async publishTaggedInstanceAsImage(
-    name: string,
-    alias: string,
-    properties: Record<string, string>,
-    operationAccepted: (operationUrl: string) => void,
-    opts: IncusCallOptions = {},
-  ): Promise<string> {
-    const envelope = await this.request("POST", "/1.0/images", {
-      source: { type: "instance", name },
-      aliases: [{ name: alias }],
-      properties,
-    }, undefined, opts.signal);
-    if (envelope.type !== "async") throw new Error(`incus: expected async image publication, got ${envelope.type}`);
-    // Deliberately synchronous: callers durably journal before we issue any
-    // further request or yield back to the event loop.
-    operationAccepted(envelope.operation);
-    const op = await this.waitOperation(envelope.operation, opts.signal, {
-      kind: "publish", instance: name, timeoutMs: opts.timeoutMs ?? this.timeouts.publish,
-    });
-    if (op.status_code !== 200) throw new IncusHttpError(op.status_code, op.err || op.status);
-    const fingerprint = op.metadata?.fingerprint;
-    if (typeof fingerprint !== "string") throw new Error("incus: publish returned no fingerprint");
-    return fingerprint;
+  /** Snapshot a custom volume. Deadline `timeouts.snapshot`. */
+  async createCustomVolumeSnapshot(pool: string, volume: string, snapshot: string, opts: IncusCallOptions = {}): Promise<void> {
+    await this.requestWait(
+      "POST",
+      `/1.0/storage-pools/${encodeURIComponent(pool)}/volumes/custom/${encodeURIComponent(volume)}/snapshots`,
+      { name: snapshot },
+      opts.signal,
+      { kind: "snapshot", timeoutMs: opts.timeoutMs ?? this.timeouts.snapshot },
+    );
   }
 
-  async createImageAlias(alias: string, fingerprint: string, signal?: AbortSignal): Promise<void> {
-    await this.request("POST", "/1.0/images/aliases", { name: alias, target: fingerprint }, undefined, signal);
-  }
-
-  /** Deadline `timeouts.imageDelete`. */
-  async deleteImage(fingerprint: string, opts: IncusCallOptions = {}): Promise<void> {
-    await this.requestWait("DELETE", `/1.0/images/${encodeURIComponent(fingerprint)}`, undefined, opts.signal, {
-      kind: "image-delete", timeoutMs: opts.timeoutMs ?? this.timeouts.imageDelete,
-    });
+  /** Create a custom volume as a copy of `source` ("volume/snapshot" or a
+   * volume) in the same pool — a clone on ZFS. Deadline `timeouts.copy`. */
+  async copyCustomVolume(pool: string, name: string, source: string, opts: IncusCallOptions = {}): Promise<void> {
+    await this.requestWait(
+      "POST",
+      `/1.0/storage-pools/${encodeURIComponent(pool)}/volumes/custom`,
+      { name, source: { type: "copy", pool, name: source } },
+      opts.signal,
+      { kind: "copy", timeoutMs: opts.timeoutMs ?? this.timeouts.copy },
+    );
   }
 }

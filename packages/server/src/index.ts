@@ -7,6 +7,7 @@
  */
 import http from "node:http";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import stream from "node:stream";
 
@@ -66,8 +67,10 @@ const supervisor = new CubeSupervisor(registry, backend, {
   image: process.env.CUBED_IMAGE ?? "cube-node",
   rootSize: process.env.CUBED_ROOT_SIZE ?? "10GiB",
   dockerVolumeSize: process.env.CUBED_DOCKER_VOLUME_SIZE ?? "5GiB",
-  environmentCacheBytes: process.env.CUBED_ENVIRONMENT_CACHE_BYTES === undefined
-    ? undefined : Number(process.env.CUBED_ENVIRONMENT_CACHE_BYTES),
+  // Prepared environments (templates threads are cloned from) are on unless
+  // switched off; CUBED_CUBE_MEMORY caps each thread (default: half the host).
+  environmentCache: process.env.CUBED_ENVIRONMENT_CACHE !== "0",
+  cubeMemory: process.env.CUBED_CUBE_MEMORY ?? defaultCubeMemory(),
   // CUBED_EGRESS_ALLOW extends (not replaces) the package-manager defaults.
   egressAllow: [
     ...DEFAULT_EGRESS_ALLOW,
@@ -79,6 +82,14 @@ const supervisor = new CubeSupervisor(registry, backend, {
   publicPort: Number(process.env.CUBED_PUBLIC_PORT ?? PORT),
   github: githubAuth,
 });
+
+/** Half the host's RAM in MiB, never under 1 GiB: one runaway build (a
+ * Gradle daemon and its test workers) then ends inside its own cgroup
+ * instead of taking cubed and every other thread with it. */
+function defaultCubeMemory(): string {
+  const half = Math.floor(os.totalmem() / 2 / (1024 * 1024));
+  return `${Math.max(1024, half)}MiB`;
+}
 
 function parseIdleMs(raw: string | undefined): number {
   if (raw === undefined) return 3_600_000;
@@ -495,7 +506,7 @@ async function api(
       return json(res, 200, { project: supervisor.updateProject(id, input) });
     }
     if (!action && method === "DELETE") {
-      supervisor.deleteProject(id);
+      await supervisor.deleteProject(id);
       return json(res, 200, { ok: true });
     }
     if (action === "check" && method === "POST") {

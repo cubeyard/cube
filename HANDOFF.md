@@ -254,8 +254,11 @@ changes; mock success is not sandbox acceptance. See DEVELOPING.md for commands.
   network config) must be re-audited on top of #21's recovery path.
 - A thread deleted while waiting on a shared environment build leaves the
   build running for the next thread — by design, a builder has no thread.
-  The environment cache's unresolved-entry limit (3) and the ten-minute
-  maintenance cadence are constants, not configuration.
+  Prepared environments are templates (a stopped builder instance plus
+  snapshots), cloned per thread; the ten-minute maintenance cadence is a
+  constant, not configuration. Threads always run setup themselves (warm on
+  a clone), so `.cube/setup` must be idempotent and cheap when nothing is
+  missing.
 - Every Incus wait is bounded and cancellable (`IncusTimeoutError`), but a
   streaming exec without a caller timeout still has only the liveness bound;
   every current caller passes one.

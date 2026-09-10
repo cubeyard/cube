@@ -13,7 +13,6 @@
  * instances in memory and runs exec locally against the host workspace.
  */
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -24,6 +23,7 @@ import {
   waitForCubeNetwork,
   type CubeProvisionSpec,
   type CubeNetworkSpec,
+  type CubeTemplateSource,
   type DestroyOptions,
   type ProvisionOptions,
 } from "./cube-provision.ts";
@@ -56,9 +56,10 @@ export interface WaitForNetworkOptions {
   timeoutMs?: number;
 }
 
-/** Cancel/deadline options accepted by the environment-image calls. */
-export interface EnvironmentOptions {
+/** Cancel/deadline options of the template calls. */
+export interface TemplateOptions {
   signal?: AbortSignal;
+  timeoutMs?: number;
 }
 
 /** The complete sandbox surface the supervisor depends on. Every method
@@ -84,27 +85,16 @@ export interface CubeBackend {
   /** One-shot argv exec as root (systemd/service control). */
   execSimple(name: string, command: string[], signal?: AbortSignal, opts?: { timeoutMs?: number }): Promise<number | null>;
   /** Resolve a mutable image name to its immutable Incus fingerprint. */
-  resolveImage?(image: string): Promise<string>;
-  /** Stop and capture a dedicated setup instance as an immutable image. */
-  captureEnvironment?(
-    spec: CubeProvisionSpec,
-    alias: string,
-    journalDirectory?: string,
-    opts?: EnvironmentOptions,
-  ): Promise<string>;
-  /** Finish/identify a publication left uncertain by a process crash. */
-  reconcileEnvironment?(alias: string, journalDirectory: string, opts?: EnvironmentOptions): Promise<string>;
-  /** Delete an environment image by immutable fingerprint. */
-  deleteEnvironment?(fingerprint: string, opts?: EnvironmentOptions): Promise<void>;
+  resolveImage(image: string): Promise<string>;
+  /** Turn a builder into an environment template: stop it, strip every
+   * device but root, and snapshot its rootfs and docker volume so threads
+   * can be cloned from them. The builder's bridge is released. */
+  captureTemplate(spec: CubeProvisionSpec, snapshot: string, opts?: TemplateOptions): Promise<CubeTemplateSource>;
+  /** Delete a template's instance and docker volume; clones live on. */
+  deleteTemplate(pool: string, template: CubeTemplateSource, opts?: TemplateOptions): Promise<void>;
 }
 
 export interface IncusBackendOptions {
-  /** Host deadline for the guest-side environment staging command. Default 10 min. */
-  stagingTimeoutMs?: number;
-  /** Host deadline for the guest-side environment restore command. Default 10 min. */
-  restoreTimeoutMs?: number;
-  /** Deadline for an image publication; default the client's `timeouts.publish` (15 min). */
-  publishTimeoutMs?: number;
   /** Deadline per rollback step after a failed provision. Default 60 s. */
   rollbackTimeoutMs?: number;
 }
@@ -113,22 +103,14 @@ export interface IncusBackendOptions {
 export class IncusBackend implements CubeBackend {
   readonly kind = "incus" as const;
   private readonly client: IncusClient;
-  private readonly stagingTimeoutMs: number;
-  private readonly restoreTimeoutMs: number;
-  private readonly publishTimeoutMs?: number;
   private readonly rollbackTimeoutMs?: number;
   constructor(client: IncusClient = new IncusClient(), opts: IncusBackendOptions = {}) {
     this.client = client;
-    this.stagingTimeoutMs = opts.stagingTimeoutMs ?? 10 * 60_000;
-    this.restoreTimeoutMs = opts.restoreTimeoutMs ?? 10 * 60_000;
-    this.publishTimeoutMs = opts.publishTimeoutMs;
     this.rollbackTimeoutMs = opts.rollbackTimeoutMs;
   }
 
   provision(spec: CubeProvisionSpec, opts: ProvisionOptions = {}) {
-    return provisionCube(this.client, spec, this.restoreTimeoutMs, {
-      rollbackTimeoutMs: this.rollbackTimeoutMs, ...opts,
-    });
+    return provisionCube(this.client, spec, { rollbackTimeoutMs: this.rollbackTimeoutMs, ...opts });
   }
   destroy(spec: DestroySpec, opts?: DestroyOptions) {
     return destroyCube(this.client, spec, opts);
@@ -164,159 +146,58 @@ export class IncusBackend implements CubeBackend {
    * settles it later. The error is an `IncusTimeoutError` of kind
    * "publish" (or the signal's reason).
    */
-  async captureEnvironment(
-    spec: CubeProvisionSpec,
-    alias: string,
-    journalDirectory?: string,
-    opts: EnvironmentOptions = {},
-  ): Promise<string> {
-    const abort = new AbortController();
-    const onAbort = () => abort.abort(opts.signal?.reason);
-    if (opts.signal?.aborted) onAbort();
-    else opts.signal?.addEventListener("abort", onAbort, { once: true });
-    try {
-      // Custom volumes are not part of an Incus image. Quiesce Docker and
-      // stage an exact filesystem copy in rootfs; masking guarantees Docker
-      // cannot start before provisionCube restores it into the new volume.
-      const staging = this.client.execSimple(spec.name, [
-        "sh",
-        "-c",
-        "set -eu; if systemctl is-active --quiet docker.service; then " +
-          "docker ps -q | xargs -r docker stop --time 30; fi; " +
-          "systemctl stop docker.service docker.socket containerd.service; " +
-          "rm -rf /var/lib/cube-environment; mkdir -p /var/lib/cube-environment/docker; " +
-          "cp -a --preserve=mode,ownership,timestamps,links,xattr /var/lib/docker/. /var/lib/cube-environment/docker/; " +
-          // Numeric IDs in this archive belong to the guest namespace, not
-          // the host's current isolated idmap. Extraction stays guest-side.
-          "tar --numeric-owner --acls --xattrs --xattrs-include='*' --exclude='./.git' " +
-          "-C /workspace -cpf /var/lib/cube-environment/workspace.tar .; " +
-          "systemctl mask docker.service docker.socket; " +
-          "truncate -s 0 /etc/machine-id; " +
-          // Never bake the builder's network identity or proxy policy.
-          "rm -f /etc/systemd/network/05-eth0-static.network " +
-          "/etc/profile.d/50-cube-proxy.sh /etc/apt/apt.conf.d/50cube-proxy " +
-          "/etc/systemd/system/docker.service.d/http-proxy.conf",
-      ], abort.signal, { timeoutMs: Infinity });
-      // An HTTP/guest timeout is not a containment boundary. At the host
-      // deadline stop the whole instance; this also kills commands which
-      // ignore signals or whose exec HTTP request never settles. The exec
-      // itself carries only the client's liveness bound, so the two clocks
-      // never race.
-      const timeout = new Promise<never>((_, reject) => {
-        const timer = setTimeout(() => {
-          abort.abort();
-          reject(new Error(`cube ${spec.name}: environment staging deadline exceeded`));
-        }, this.stagingTimeoutMs);
-        staging.finally(() => clearTimeout(timer)).catch(() => {});
-      });
-      const rc = await Promise.race([staging, timeout]);
-      if (rc !== 0) throw new Error(`cube ${spec.name}: environment staging failed (${rc})`);
-    } finally {
-      opts.signal?.removeEventListener("abort", onAbort);
-      // Quiescing the builder is owed even to a cancelled capture; bounded
-      // by the client's state deadline, never by the caller's signal.
-      const state = await this.client.getInstanceState(spec.name);
-      if (state.status !== "Stopped") {
-        await this.client.setInstanceState(spec.name, "stop", { force: true });
-      }
-    }
-    const publish = { signal: opts.signal, timeoutMs: this.publishTimeoutMs };
-    if (!journalDirectory) return this.client.publishInstanceAsImage(spec.name, alias, publish);
-
-    const journal: PublicationJournal = {
-      version: 1, alias, instance: spec.name, attempt: randomUUID(), phase: "posting",
-    };
-    writePublicationJournal(journalDirectory, journal); // before POST
-    // On failure the posting/accepted tombstone stays: failure of the POST
-    // response is not evidence that Incus did not accept the POST, and a
-    // deadline or abort while waiting is not evidence that it failed.
-    const fingerprint = await this.client.publishTaggedInstanceAsImage(
-      spec.name,
-      alias,
-      { "cube.environment.attempt": journal.attempt, "cube.environment.alias": alias },
-      (operation) => writePublicationJournal(journalDirectory, { ...journal, phase: "accepted", operation }),
-      publish,
-    );
-    writePublicationJournal(journalDirectory, { ...journal, phase: "complete", fingerprint });
-    return fingerprint;
-  }
-
-  /** Every request here is a bounded sync read/write (`timeouts.request`); nothing waits on an operation. */
-  async reconcileEnvironment(alias: string, journalDirectory: string, opts: EnvironmentOptions = {}): Promise<string> {
+  async captureTemplate(spec: CubeProvisionSpec, snapshot: string, opts: TemplateOptions = {}): Promise<CubeTemplateSource> {
     const { signal } = opts;
-    const journal = readPublicationJournal(journalDirectory);
-    if (journal.alias !== alias) throw new Error(`environment journal alias mismatch: ${journal.alias}`);
-    if (journal.fingerprint) return journal.fingerprint;
-
-    if (journal.operation) {
-      const operation = await this.client.getOperation(journal.operation, signal).catch((error) => {
-        if (error instanceof IncusHttpError && error.errorCode === 404) return undefined;
-        throw error;
-      });
-      if (operation && operation.status_code < 200) throw new Error(`environment publication pending for ${alias}`);
-    } else {
-      // Never wait for image creation during daemon startup. Keep the marker
-      // and retry reconciliation on the next use/boot after work settles.
-      const operations = await this.client.listOperations(signal);
-      const relevant = operations.filter((op) =>
-        op.status_code < 200 &&
-        (op.description?.toLowerCase().includes("image") || (op.resources?.images?.length ?? 0) > 0),
-      );
-      if (relevant.length) throw new Error(`environment publication pending for ${alias}`);
+    const state = await this.client.getInstanceState(spec.name, signal);
+    if (state.status !== "Stopped") {
+      await this.client.setInstanceState(spec.name, "stop", { force: true, timeoutMs: opts.timeoutMs }, signal);
     }
-    const matches = (await this.client.listImages(signal)).filter(
-      (image) => image.properties?.["cube.environment.attempt"] === journal.attempt,
-    );
-    if (matches.length !== 1) {
-      throw new Error(`environment publication unresolved for ${alias} (${matches.length} tagged images)`);
+    // A copy inherits the snapshot's devices under the request's own: the
+    // builder's nic, workspace, repositories and volume must not ride into
+    // clones (their sources are about to disappear). Root stays, and every
+    // clone request re-declares it anyway.
+    await this.client.updateInstance(spec.name, (instance) => {
+      for (const device of Object.keys(instance.devices)) {
+        if (device !== "root") delete instance.devices[device];
+      }
+    }, { signal, timeoutMs: opts.timeoutMs });
+    // Every clone gets a machine identity of its own on first boot.
+    await this.client.pushInstanceFile(spec.name, "/etc/machine-id", "", { signal });
+    await this.client.createInstanceSnapshot(spec.name, snapshot, { signal, timeoutMs: opts.timeoutMs });
+    const volume = dockerVolumeName(spec.name);
+    await this.client.createCustomVolumeSnapshot(spec.pool, volume, snapshot, { signal, timeoutMs: opts.timeoutMs });
+    // The nic is gone, so the bridge (and its dnsmasq) can go too.
+    if (await exists(() => this.client.getNetwork(spec.network.bridge, signal))) {
+      await this.client.deleteNetwork(spec.network.bridge, signal);
     }
-    const image = matches[0]!;
-    const current = await this.client.getImageAlias(alias, signal).catch((error) => {
-      if (error instanceof IncusHttpError && error.errorCode === 404) return undefined;
-      throw error;
-    });
-    if (current && current.target !== image.fingerprint) {
-      throw new Error(`environment alias ${alias} points at a different image`);
-    }
-    if (!current) await this.client.createImageAlias(alias, image.fingerprint, signal);
-    writePublicationJournal(journalDirectory, { ...journal, phase: "complete", fingerprint: image.fingerprint });
-    return image.fingerprint;
+    return { instance: spec.name, snapshot, volume, volumeSnapshot: snapshot };
   }
-  /** Deadline `timeouts.imageDelete`. */
-  async deleteEnvironment(fingerprint: string, opts: EnvironmentOptions = {}): Promise<void> {
-    try { await this.client.deleteImage(fingerprint, { signal: opts.signal }); }
-    catch (error) { if (!(error instanceof IncusHttpError && error.errorCode === 404)) throw error; }
+
+  async deleteTemplate(pool: string, template: CubeTemplateSource, opts: TemplateOptions = {}): Promise<void> {
+    const { signal } = opts;
+    if (await exists(() => this.client.getInstance(template.instance, signal))) {
+      const state = await this.client.getInstanceState(template.instance, signal);
+      if (state.status !== "Stopped") {
+        await this.client.setInstanceState(template.instance, "stop", { force: true, timeoutMs: opts.timeoutMs }, signal);
+      }
+      await this.client.deleteInstance(template.instance, { signal, timeoutMs: opts.timeoutMs });
+    }
+    if (await exists(() => this.client.getCustomVolume(pool, template.volume, signal))) {
+      await this.client.deleteCustomVolume(pool, template.volume, signal);
+    }
   }
 }
 
-interface PublicationJournal {
-  version: 1;
-  alias: string;
-  instance: string;
-  attempt: string;
-  phase: "posting" | "accepted" | "complete";
-  operation?: string;
-  fingerprint?: string;
-}
+const dockerVolumeName = (cube: string) => `${cube}-docker`;
 
-const publicationJournalPath = (directory: string) => `${directory}/publication.json`;
-
-function writePublicationJournal(directory: string, journal: PublicationJournal): void {
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const target = publicationJournalPath(directory);
-  const temporary = `${target}.tmp`;
-  const fd = fs.openSync(temporary, "w", 0o600);
+async function exists(probe: () => Promise<unknown>): Promise<boolean> {
   try {
-    fs.writeFileSync(fd, JSON.stringify(journal) + "\n");
-    fs.fsyncSync(fd);
-  } finally { fs.closeSync(fd); }
-  fs.renameSync(temporary, target);
-  const dir = fs.openSync(directory, "r");
-  try { fs.fsyncSync(dir); } finally { fs.closeSync(dir); }
-}
-
-function readPublicationJournal(directory: string): PublicationJournal {
-  return JSON.parse(fs.readFileSync(publicationJournalPath(directory), "utf8")) as PublicationJournal;
+    await probe();
+    return true;
+  } catch (error) {
+    if (error instanceof IncusHttpError && error.errorCode === 404) return false;
+    throw error;
+  }
 }
 
 interface MockInstance {
@@ -351,17 +232,21 @@ interface MockInstance {
 export class MockBackend implements CubeBackend {
   readonly kind = "mock" as const;
   private readonly instances = new Map<string, MockInstance>();
-  private readonly environments = new Map<string, { workspace: string; ownedRoot?: string }>();
+  /** Captured templates by instance name. The mock has no rootfs to clone;
+   * a template is bookkeeping, and a clone is an ordinary instance. */
+  readonly templates = new Map<string, CubeTemplateSource>();
+  /** Every provision that cloned from a template, for tests. */
+  readonly clones: Array<{ name: string; template: string }> = [];
 
   async provision(spec: CubeProvisionSpec, opts: ProvisionOptions = {}): Promise<void> {
     opts.signal?.throwIfAborted();
     fs.mkdirSync(spec.hostWorkspace, { recursive: true });
     if (spec.hostRepositories) fs.mkdirSync(spec.hostRepositories, { recursive: true });
-    if (spec.restoreWorkspace && spec.imageFingerprint) {
-      const environment = this.environments.get(spec.imageFingerprint);
-      if (!environment) throw new Error(`mock backend: environment ${spec.imageFingerprint} does not exist`);
-      clearWorkspaceExceptGit(spec.hostWorkspace);
-      copyWorkspaceExceptGit(environment.workspace, spec.hostWorkspace);
+    if (spec.template) {
+      if (!this.templates.has(spec.template.instance)) {
+        throw new Error(`mock backend: template ${spec.template.instance} does not exist`);
+      }
+      this.clones.push({ name: spec.name, template: spec.template.instance });
     }
     this.instances.set(spec.name, {
       status: "Running",
@@ -422,68 +307,20 @@ export class MockBackend implements CubeBackend {
     return `mock-image:${image}`;
   }
 
-  async captureEnvironment(
-    spec: CubeProvisionSpec,
-    alias: string,
-    journalDirectory?: string,
-    opts: EnvironmentOptions = {},
-  ): Promise<string> {
+  async captureTemplate(spec: CubeProvisionSpec, snapshot: string, opts: TemplateOptions = {}): Promise<CubeTemplateSource> {
     opts.signal?.throwIfAborted();
     const instance = this.instances.get(spec.name);
     if (!instance) throw new Error(`mock backend: cube ${spec.name} does not exist`);
     instance.status = "Stopped";
-    const ownedRoot = journalDirectory ? undefined : fs.mkdtempSync(path.join(os.tmpdir(), "cube-mock-environment-"));
-    const workspace = path.join(journalDirectory ?? ownedRoot!, "workspace");
-    removeStoppedTree(workspace);
-    fs.mkdirSync(workspace, { recursive: true });
-    copyWorkspaceExceptGit(spec.hostWorkspace, workspace);
-    const fingerprint = `mock-environment:${alias}:${randomUUID()}`;
-    this.environments.set(fingerprint, { workspace, ownedRoot });
-    return fingerprint;
+    const template = { instance: spec.name, snapshot, volume: `${spec.name}-docker`, volumeSnapshot: snapshot };
+    this.templates.set(spec.name, template);
+    return template;
   }
 
-  async deleteEnvironment(fingerprint: string, opts: EnvironmentOptions = {}): Promise<void> {
+  async deleteTemplate(_pool: string, template: CubeTemplateSource, opts: TemplateOptions = {}): Promise<void> {
     opts.signal?.throwIfAborted();
-    const environment = this.environments.get(fingerprint);
-    if (!environment) return;
-    // Never remove a caller-owned journal directory, only the snapshot entry.
-    removeStoppedTree(environment.ownedRoot ?? environment.workspace);
-    this.environments.delete(fingerprint);
-  }
-}
-
-function clearWorkspaceExceptGit(workspace: string): void {
-  for (const entry of fs.readdirSync(workspace)) {
-    if (entry !== ".git") removeStoppedTree(path.join(workspace, entry));
-  }
-}
-
-/** Mock fidelity is intentionally limited to mode/timestamps/link shape; it
- * runs unisolated as the current uid and does not claim ownership/xattr parity. */
-function copyWorkspaceExceptGit(source: string, destination: string): void {
-  for (const entry of fs.readdirSync(source)) {
-    if (entry === ".git") continue;
-    copyMockEntry(path.join(source, entry), path.join(destination, entry));
-  }
-}
-
-function copyMockEntry(source: string, destination: string): void {
-  const stat = fs.lstatSync(source);
-  if (stat.isSymbolicLink()) {
-    fs.symlinkSync(fs.readlinkSync(source), destination);
-  } else if (stat.isDirectory()) {
-    fs.mkdirSync(destination, { mode: 0o700 });
-    for (const entry of fs.readdirSync(source)) {
-      copyMockEntry(path.join(source, entry), path.join(destination, entry));
-    }
-    fs.chmodSync(destination, stat.mode);
-    fs.utimesSync(destination, stat.atime, stat.mtime);
-  } else if (stat.isFile()) {
-    fs.copyFileSync(source, destination);
-    fs.chmodSync(destination, stat.mode);
-    fs.utimesSync(destination, stat.atime, stat.mtime);
-  } else {
-    throw new Error(`mock environment: unsupported special file ${source}`);
+    this.templates.delete(template.instance);
+    this.instances.delete(template.instance);
   }
 }
 
