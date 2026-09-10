@@ -37,6 +37,9 @@
   let repositories = $state<RepositoryDraft[]>([
     { key: uid(), url: "", base: "", checkoutName: "workspace" },
   ]);
+  // "<checkout>/<folder>" of a reference that carries .cube; "" = the
+  // primary's own .cube. Only meaningful once there is a reference.
+  let environment = $state("");
   let dirty = $state(untrack(() => projectId === "new"));
   let loaded = $state(untrack(() => projectId === "new"));
   let error = $state<string | null>(null);
@@ -57,6 +60,7 @@
       base: repository.base ?? "",
       checkoutName: repository.checkoutName,
     }));
+    environment = fresh.environment ?? "";
     dirty = false;
   }
 
@@ -115,6 +119,7 @@
         base: repository.base.trim() || null,
         ...(index === 0 ? {} : { checkoutName: repository.checkoutName }),
       })),
+      environment: environment.trim() || null,
     };
   }
 
@@ -383,6 +388,22 @@
           </div>
         {/each}
       </div>
+
+      {#if repositories.length > 1 || environment}
+        <label class="config-field project-environment-field">
+          <span class="silk">environment</span>
+          <input
+            class="compose-input"
+            aria-label="environment folder"
+            placeholder={`${repositories[1]?.checkoutName || "reference"}/folder`}
+            bind:value={environment}
+            oninput={changed}
+          />
+          <span class="field-hint">
+            a folder in a reference that carries .cube (setup, resume, cube.toml) — for a primary that does not ship its own · empty: /workspace/.cube
+          </span>
+        </label>
+      {/if}
     </section>
 
     <div class="project-actions">
@@ -428,6 +449,8 @@
 
 <style>
   .project-view { overflow: visible; }
+  .project-environment-field { margin-top: 0.9rem; }
+  .field-hint { display: block; margin-top: 0.35rem; font-size: 12px; color: var(--ink-3); }
   .github-login-link { font-family: var(--font-ui); }
   .draft { margin: -0.6rem 0 1.3rem; font-size: 12px; color: var(--ink-3); overflow-wrap: anywhere; }
   .draft code { font-family: var(--font-mono); color: var(--ink-2); }

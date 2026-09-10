@@ -18,9 +18,9 @@ import {
   type EgressProxy,
 } from "@cube/sandbox";
 
-import { readCubeConfig, readWakeHooks } from "./cube-toml.ts";
+import { parseCubeToml, readCubeConfig, readWakeHooks } from "./cube-toml.ts";
 import { EnvironmentCache, EnvironmentCacheBusyError, EnvironmentCacheSuspendedError } from "./environment-cache.ts";
-import { Lifecycle, type LifecyclePhase } from "./lifecycle.ts";
+import { Lifecycle, type LifecyclePhase, type LifecycleResult } from "./lifecycle.ts";
 import { Span, describeError, recordPoint } from "./events.ts";
 import { describeThreadError } from "./user-facing.ts";
 import { readGithub } from "./github-read.ts";
@@ -77,7 +77,9 @@ const PI_EXTENSION = path.resolve(import.meta.dirname, "../../pi-extension/src/i
  * multi-megabyte pasted image. */
 const AUTO_TITLE_SCAN_BYTES = 256 * 1024;
 
-/** Built-in package-manager allowlist; per-cube .cube/cube.toml comes later. */
+/** Built-in package-manager allowlist. Extended by CUBED_EGRESS_ALLOW
+ * (index.ts) and, per cube, by `[network] allow` in the environment's
+ * cube.toml (startProxy). */
 export const DEFAULT_EGRESS_ALLOW = [
   "registry.npmjs.org",
   "pypi.org",
@@ -87,9 +89,13 @@ export const DEFAULT_EGRESS_ALLOW = [
   "index.crates.io",
   "archive.ubuntu.com",
   "security.ubuntu.com",
-  // inner docker pulls (dockerd honors the proxy drop-in)
+  "ports.ubuntu.com", // the arm64 mirror (apt on an arm64 VM goes nowhere else)
+  // inner docker pulls (dockerd honors the proxy drop-in): manifests from
+  // the registry, blobs via a 307 to the CDN — cloudfront as of 2026-09,
+  // cloudflare kept for the period Hub used it.
   "registry-1.docker.io",
   "auth.docker.io",
+  "production.cloudfront.docker.com",
   "production.cloudflare.docker.com",
 ];
 
@@ -128,6 +134,9 @@ export interface SupervisorConfig {
 interface CubeRuntime {
   name: string;
   proxy: EgressProxy | null;
+  /** The allowlist `proxy` was started with; a changed declaration
+   * (`[network] allow` edited between wakes) replaces the proxy. */
+  egressAllow: string[] | null;
 }
 
 export interface CubeSummary {
@@ -160,6 +169,15 @@ export interface ProjectRepositoryInput {
   checkoutName?: string;
 }
 
+export interface ProjectInput {
+  name: string;
+  repositories: ProjectRepositoryInput[];
+  /** "<checkout>/<folder>" of a reference repository whose folder carries
+   * the .cube directory (setup, resume, cube.toml) — for a primary
+   * repository that does not ship one. Empty/null: the primary's own. */
+  environment?: string | null;
+}
+
 export interface ProjectInfo extends ProjectRow {
   repositories: ProjectRepositoryRow[];
   threadCount: number;
@@ -186,6 +204,31 @@ export interface PortalTargetInfo {
 }
 
 const instanceName = (cube: string) => `cube-${cube}`;
+
+/**
+ * Where a cube's environment directory (.cube: setup, resume, cube.toml)
+ * lives. Default: inside the primary checkout. With a project environment
+ * of "<checkout>/<folder>" it is that folder of a reference repository — a
+ * way to keep the environment for a repository that does not ship one,
+ * outside that repository. The guest path is relative to /workspace:
+ * /workspace and /repos are siblings in a cube exactly as <cube>/workspace
+ * and <cube>/repos are on the host, so one string resolves in Incus and in
+ * the mock alike. References are mounted read-only, so a declared
+ * environment is the user's, not the agent's, to change.
+ */
+function environmentDirs(cube: Pick<CubeRow, "workspacePath" | "environment">): {
+  host: string; guest: string; guestAbsolute: string;
+} {
+  if (!cube.environment) {
+    return { host: path.join(cube.workspacePath, ".cube"), guest: ".cube", guestAbsolute: "/workspace/.cube" };
+  }
+  const segments = cube.environment.split("/");
+  return {
+    host: path.join(path.dirname(cube.workspacePath), "repos", ...segments, ".cube"),
+    guest: path.posix.join("..", "repos", ...segments, ".cube"),
+    guestAbsolute: path.posix.join("/repos", ...segments, ".cube"),
+  };
+}
 
 /** Recorded on the provision span and the lifecycle result when a thread
  * is deleted while still setting up. */
@@ -583,7 +626,7 @@ export class CubeSupervisor {
     return this.projectInfo(project);
   }
 
-  createProject(input: { name: string; repositories: ProjectRepositoryInput[] }): ProjectInfo {
+  createProject(input: ProjectInput): ProjectInfo {
     const normalized = this.validateProjectInput(input);
     let project: ProjectRow;
     try {
@@ -591,6 +634,7 @@ export class CubeSupervisor {
         id: crypto.randomUUID(),
         name: normalized.name,
         repositories: normalized.repositories.map((repo) => ({ id: crypto.randomUUID(), ...repo })),
+        environment: normalized.environment,
       });
     } catch (error) {
       if (String(error).includes("UNIQUE constraint failed: project.name")) {
@@ -602,16 +646,14 @@ export class CubeSupervisor {
     return this.projectInfo(project);
   }
 
-  updateProject(
-    id: string,
-    input: { name: string; repositories: ProjectRepositoryInput[] },
-  ): ProjectInfo {
+  updateProject(id: string, input: ProjectInput): ProjectInfo {
     const normalized = this.validateProjectInput(input);
     let project: ProjectRow;
     try {
       project = this.registry.updateProject(id, {
         name: normalized.name,
         repositories: normalized.repositories.map((repo) => ({ id: crypto.randomUUID(), ...repo })),
+        environment: normalized.environment,
       });
     } catch (error) {
       if (String(error).includes("UNIQUE constraint failed: project.name")) {
@@ -642,12 +684,10 @@ export class CubeSupervisor {
     };
   }
 
-  private validateProjectInput(input: {
-    name: string;
-    repositories: ProjectRepositoryInput[];
-  }): {
+  private validateProjectInput(input: ProjectInput): {
     name: string;
     repositories: Array<{ url: string; base: string | null; checkoutName: string }>;
+    environment: string | null;
   } {
     const name = input.name.replace(/\s+/g, " ").trim();
     if (!name) throw new Error("invalid project: name is required");
@@ -675,7 +715,38 @@ export class CubeSupervisor {
       checkoutNames.add(identity);
       return { url, base, checkoutName };
     });
-    return { name, repositories };
+    return { name, repositories, environment: this.validateEnvironmentInput(input.environment, repositories) };
+  }
+
+  /** "<checkout>/<folder>" -> canonical form, or null for none. The first
+   * segment must name a reference repository (never the primary: that is
+   * the agent-writable checkout, and its own .cube is the default anyway);
+   * the rest are plain folder names — no dotfiles, no `..`, no `.git`. */
+  private validateEnvironmentInput(
+    raw: string | null | undefined,
+    repositories: Array<{ checkoutName: string }>,
+  ): string | null {
+    const value = (raw ?? "").trim().replace(/^\/+|\/+$/g, "");
+    if (!value) return null;
+    if (value.length > 200) throw new Error("invalid project: environment folder is too long (200 characters max)");
+    const [checkoutName, ...folders] = value.split("/");
+    const references = repositories.slice(1);
+    const reference = references.find((repo) => repo.checkoutName.toLowerCase() === checkoutName!.toLowerCase());
+    if (!reference) {
+      throw new Error(
+        references.length === 0
+          ? `invalid project: environment ${JSON.stringify(value)} needs a reference repository to live in — add one first`
+          : `invalid project: environment ${JSON.stringify(value)} must start with a reference checkout name (${references.map((repo) => repo.checkoutName).join(", ")})`,
+      );
+    }
+    for (const folder of folders) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(folder)) {
+        throw new Error(
+          `invalid project: environment folder ${JSON.stringify(value)} must use letters, numbers, dot, dash, or underscore per folder`,
+        );
+      }
+    }
+    return [reference.checkoutName, ...folders].join("/");
   }
 
   private checkoutNameFor(url: string): string {
@@ -730,6 +801,25 @@ export class CubeSupervisor {
         }
       }),
     );
+    // The declared environment folder must exist at the exact commit the
+    // threads will seed from; a cube.toml there must parse. Both are
+    // project errors now, not a thread that fails minutes into setup.
+    const environment = this.registry.getProject(projectId)?.environment ?? null;
+    if (failures.length === 0 && environment) {
+      const [checkoutName, ...folders] = environment.split("/");
+      const repo = this.registry.listProjectRepositories(projectId).find((r) => r.checkoutName === checkoutName);
+      const folder = [...folders, ".cube"].join("/");
+      if (!repo?.baseOid) failures.push(`environment: ${environment} names no checked reference repository`);
+      else if (!(await this.git.pathExistsAtCommit(repo.url, repo.baseOid, folder))) {
+        failures.push(`environment: no ${folder} in ${repo.checkoutName} at ${repo.resolvedBase} @ ${repo.baseOid.slice(0, 8)}`);
+      } else {
+        const toml = await this.git.readFileAtCommit(repo.url, repo.baseOid, `${folder}/cube.toml`);
+        if (toml !== null) {
+          try { parseCubeToml(toml); }
+          catch (error) { failures.push(`environment: ${repo.checkoutName}/${folder}/${error instanceof Error ? error.message : String(error)}`); }
+        }
+      }
+    }
     const checkedAt = Date.now();
     this.registry.finishProjectCheck(
       projectId,
@@ -786,12 +876,13 @@ export class CubeSupervisor {
   /** Allocate a cube from one immutable, already-checked Project snapshot.
    * Repository rows land before provisioning is queued, so the async seed
    * cannot observe a half-attached project. */
-  private createProjectCube(name: string, repositories: ProjectRepositoryRow[]): CubeRow {
+  private createProjectCube(name: string, repositories: ProjectRepositoryRow[], environment: string | null): CubeRow {
     if (this.registry.getCube(name)) throw new Error(`cube ${name} already exists`);
     const row = this.registry.createCube({
       name,
       image: this.config.image,
       workspacePath: path.join(this.config.cubesRoot, name, "workspace"),
+      environment,
     });
     const root = path.dirname(row.workspacePath);
     const branch = `cube/${name.replace(/^t-/, "")}`;
@@ -921,8 +1012,9 @@ export class CubeSupervisor {
       // No setup script means the base image is already the best snapshot.
       let hasSetup = false;
       try {
-        const dir = fs.lstatSync(path.join(cube.workspacePath, ".cube"));
-        hasSetup = dir.isSymbolicLink() || (dir.isDirectory() && !!fs.lstatSync(path.join(cube.workspacePath, ".cube", "setup")));
+        const environmentDir = environmentDirs(cube).host;
+        const dir = fs.lstatSync(environmentDir);
+        hasSetup = dir.isSymbolicLink() || (dir.isDirectory() && !!fs.lstatSync(path.join(environmentDir, "setup")));
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
       if (projectId && this.environments && hasSetup) {
         const repos = this.registry.listCubeRepositories(cube.id);
@@ -940,7 +1032,9 @@ export class CubeSupervisor {
             { version: 2, projectId, fingerprint, arch: process.arch,
               rootSize: spec.rootSize, dockerVolumeSize: spec.dockerVolumeSize,
               egress: this.config.egressAllow, portalBase: this.config.portalBase,
-              repositories: repos.map((r) => [r.url, r.base, r.checkoutName]) },
+              repositories: repos.map((r) => [r.url, r.base, r.checkoutName]),
+              // Only when declared, so existing families keep their keys.
+              ...(cube.environment ? { environment: cube.environment } : {}) },
             repos.map((r) => r.baseOid),
             // Incus may retain both compressed image and unpacked rootfs.
             // Docker staging is already inside the captured rootfs quota.
@@ -1032,7 +1126,7 @@ export class CubeSupervisor {
    * the revision key every later thread restores from.
    */
   private async buildEnvironment(
-    source: Pick<CubeRow, "image">,
+    source: Pick<CubeRow, "image" | "environment">,
     repositories: CubeRepositoryRow[],
     directory: string,
     imageFingerprint: string,
@@ -1042,6 +1136,7 @@ export class CubeSupervisor {
     const builder = this.registry.createCube({
       name, image: source.image,
       workspacePath: path.join(this.config.cubesRoot, name, "workspace"),
+      environment: source.environment,
     });
     this.registry.setCubeStatus(name, "building-environment");
     this.registry.addCubeRepositories(builder.id, repositories.map((repo, position) => ({
@@ -1095,14 +1190,31 @@ export class CubeSupervisor {
     }
   }
 
+  /** Start this cube's egress proxy, or replace it when the declared policy
+   * changed. The allowlist is the built-in package hosts plus the
+   * operator's CUBED_EGRESS_ALLOW plus `[network] allow` from the cube's
+   * environment directory, read host-side on every start — so a wake or a
+   * setup retry picks up an edited declaration. A parse error fails that
+   * transition with the offending line rather than silently narrowing
+   * egress; the proxy itself still vets every name (ARCHITECTURE §12). */
   private async startProxy(cube: CubeRow): Promise<void> {
     const runtime = this.runtime(cube.name);
-    if (runtime.proxy) return;
+    const declared = readCubeConfig(environmentDirs(cube).host).networkAllow;
+    const allow = [...new Set([...this.config.egressAllow, ...declared])];
+    if (runtime.proxy) {
+      const current = runtime.egressAllow ?? [];
+      if (current.length === allow.length && current.every((host, i) => host === allow[i])) return;
+      // In-flight tunnels of this cube end here; every caller is a wake,
+      // retry or provision boundary where the cube is not mid-download.
+      await runtime.proxy.close();
+      runtime.proxy = null;
+      runtime.egressAllow = null;
+    }
     const net = networkForCube(cube.name, cube.subnetIndex);
     runtime.proxy = await this.backend.startEgressProxy({
       listenHost: net.gateway,
       port: EGRESS_PROXY_PORT,
-      allow: this.config.egressAllow,
+      allow,
       allowSource: [net.ip],
       onDeny: (host, kind) => {
         console.log(`egress deny [${cube.name}] ${kind}: ${host}`);
@@ -1110,6 +1222,7 @@ export class CubeSupervisor {
       },
       onAllow: (host, kind) => this.noteEgress(cube.name, "allow", kind, host),
     });
+    runtime.egressAllow = allow;
   }
 
   // ------------------------------------------------------------ sleep/wake
@@ -1269,7 +1382,7 @@ export class CubeSupervisor {
   private async runWakeHooks(cube: CubeRow): Promise<string | null> {
     let hooks: string[];
     try {
-      hooks = readWakeHooks(cube.workspacePath);
+      hooks = readWakeHooks(environmentDirs(cube).host);
     } catch (error) {
       return String(error);
     }
@@ -1296,14 +1409,22 @@ export class CubeSupervisor {
   }
 
   private runLifecycleScript(cube: CubeRow, script: LifecyclePhase, signal?: AbortSignal): Promise<string | null> {
-    return this.lifecycle.run(cube.name, this.backend.sandbox(instanceName(cube.name)), script, signal);
+    return this.lifecycle.run(cube.name, this.backend.sandbox(instanceName(cube.name)), script, {
+      signal, directory: environmentDirs(cube).guest,
+    });
   }
 
-  environmentForUserThread(id: string) {
+  /** Lifecycle state + bounded logs per phase, and the environment directory
+   * (guest path) the scripts came from. */
+  environmentForUserThread(id: string): {
+    setup: Partial<LifecycleResult> & { log: string };
+    resume: Partial<LifecycleResult> & { log: string };
+    directory: string;
+  } {
     const { cubeName } = this.resolveUserThread(id);
-    return Object.fromEntries((["setup", "resume"] as const).map((phase) => [phase, {
-      ...this.lifecycle.read(cubeName, phase), log: this.lifecycle.log(cubeName, phase),
-    }]));
+    const cube = this.requireCube(cubeName);
+    const phase = (name: LifecyclePhase) => ({ ...this.lifecycle.read(cubeName, name), log: this.lifecycle.log(cubeName, name) });
+    return { setup: phase("setup"), resume: phase("resume"), directory: environmentDirs(cube).guestAbsolute };
   }
 
   /** Explicit in-place repair. Never publishes a working thread as a cache.
@@ -1444,7 +1565,7 @@ export class CubeSupervisor {
       await this.wakeCube(cubeName);
       signal.throwIfAborted();
       const cube = this.requireCube(cubeName);
-      const config = readCubeConfig(cube.workspacePath); // parse errors -> caller
+      const config = readCubeConfig(environmentDirs(cube).host); // parse errors -> caller
       this.registry.touchCube(cube.name);
       const net = networkForCube(cube.name, cube.subnetIndex);
       const statuses = await ensureServices(
@@ -1524,7 +1645,7 @@ export class CubeSupervisor {
     const cube = this.registry.getCube(cubeName);
     if (!cube) return null;
     try {
-      return readCubeConfig(cube.workspacePath).services.some((s) => s.name === serviceName)
+      return readCubeConfig(environmentDirs(cube).host).services.some((s) => s.name === serviceName)
         ? cube.name
         : null;
     } catch {
@@ -1556,7 +1677,7 @@ export class CubeSupervisor {
   listServicesForUserThread(id: string): Array<{ name: string; url: string }> {
     const { cubeName } = this.resolveUserThread(id);
     const cube = this.requireCube(cubeName);
-    return readCubeConfig(cube.workspacePath).services.map((service) => ({
+    return readCubeConfig(environmentDirs(cube).host).services.map((service) => ({
       name: service.name,
       url: this.portalUrl(portalLabelFor(cube.name, service.name)),
     }));
@@ -1919,7 +2040,7 @@ export class CubeSupervisor {
     }
     const project = this.requireReadyProject(projectId);
     const repositories = this.registry.listProjectRepositories(project.id);
-    const cube = this.createProjectCube(this.freshCubeName(), repositories);
+    const cube = this.createProjectCube(this.freshCubeName(), repositories, project.environment);
     try {
       const sessionDir = path.join(this.config.cubesRoot, cube.name, "sessions");
       // The pty bridge (and provisioning) need these before either runs.
@@ -2281,7 +2402,7 @@ export class CubeSupervisor {
   private runtime(name: string): CubeRuntime {
     let runtime = this.runtimes.get(name);
     if (!runtime) {
-      runtime = { name, proxy: null };
+      runtime = { name, proxy: null, egressAllow: null };
       this.runtimes.set(name, runtime);
     }
     return runtime;

@@ -58,6 +58,27 @@ try {
   assert.match((await lifecycle.run("disk-error", asynchronous, "setup"))!, /log write failed.*EISDIR/);
   assert.equal(aborted, true);
   assert.equal(lifecycle.read("disk-error", "setup")!.state, "failed");
+
+  // The environment directory is host-composed and lands in a shell
+  // command: the script path appears quoted and relative to /workspace
+  // (so /repos resolves as ../repos in the guest and in the mock alike);
+  // anything outside the validated alphabet is refused before any exec.
+  const seen: string[] = [];
+  const elsewhere: Sandbox = { name: "elsewhere", exec: async (command, options) => {
+    seen.push(command);
+    assert.equal(options.cwd, "/workspace");
+    return { exitCode: 0 };
+  } };
+  assert.equal(await lifecycle.run("elsewhere", elsewhere, "setup", { directory: "../repos/envs/app/.cube" }), null);
+  assert.match(seen[0]!, /\[ -e '\.\/\.\.\/repos\/envs\/app\/\.cube\/setup' \]/);
+  assert.match(seen[0]!, /'\.\/\.\.\/repos\/envs\/app\/\.cube\/setup'; fi$/);
+  assert.equal(await lifecycle.run("elsewhere", elsewhere, "resume"), null);
+  assert.match(seen[1]!, /'\.\/\.cube\/resume'/);
+  await assert.rejects(
+    lifecycle.run("elsewhere", elsewhere, "setup", { directory: "../repos/x'; id; '/.cube" }),
+    /invalid environment directory/,
+  );
+  assert.equal(seen.length, 2, "no exec for a refused directory");
   lifecycle.forget("test");
   assert.equal(restarted.read("test", "setup"), null);
   console.log("PASS: lifecycle durable bounded logs, failure evidence, rotation and timeout contracts");

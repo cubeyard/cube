@@ -18,7 +18,7 @@ console.log("1 ok: cube names, the word cube, instance, container and incus are 
 
 assert.equal(describeThreadError(null), null);
 assert.equal(describeThreadError("  "), null);
-assert.match(describeThreadError(".cube/setup failed (exit 1): npm ERR! 404")!, /^the repository's \.cube\/setup script failed \(exit 1\) — .*start a new thread/);
+assert.match(describeThreadError(".cube/setup failed (exit 1): npm ERR! 404")!, /^the environment's \.cube\/setup script failed \(exit 1\) — .*start a new thread/);
 assert.match(describeThreadError("wake hook failed (exit 2): docker compose up — no such file")!, /wake hook.*next time the thread wakes/);
 assert.match(describeThreadError("provisioning was interrupted by a cubed restart — .cube/setup may not have completed")!, /cube restarted while this thread was being set up/);
 assert.match(describeThreadError("wake failed: Error: cube cube-t-ab12cd34: eth0 never came up at 10.90.14.2")!, /did not come up in time/);

@@ -113,6 +113,14 @@ network/auth lookup. The primary checkout is `/workspace`; optional reference
 repositories mount at `/repos/<checkout-name>` and are read-only. Review and
 ship operate on the immutable primary repository snapshot.
 
+A project may declare `environment = "<checkout>/<folder>"`: its `.cube`
+(setup, resume, cube.toml) then comes from that folder of a reference
+repository instead of the primary checkout — read-only in the thread, verified
+and parsed at the pinned commit by the project check, snapshotted per cube
+(`cube.environment`). `supervisor.ts` `environmentDirs` is the one place that
+maps it to host and guest paths. `[network] allow` in `cube.toml` extends the
+egress allowlist and is re-read at every proxy start (`startProxy`).
+
 Threads are the home, newest-first across projects, with a URL-backed project
 filter and explicit project/name attribution. Do not use a pre-project populated
 database: startup refuses to invent project ownership.

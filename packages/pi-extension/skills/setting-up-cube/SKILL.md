@@ -15,6 +15,13 @@ Create a reproducible development environment without weakening Cube's host/gues
 - Do not start daemons in `.cube/setup` or `.cube/resume`. Declare supervised services in `.cube/cube.toml`, then start/check them with the existing code tool by calling `cube.services.ensure()`.
 - Log each setup/resume phase and actionable failures, but never log secrets or a full environment dump.
 
+## Where the environment lives
+
+Call `cube.environment.status()` first and read `directory`.
+
+- `/workspace/.cube`: the primary repository carries its own environment. Edit it in place.
+- A folder under `/repos/<checkout>/…/.cube`: the project keeps its environment in a reference repository, for a primary that does not ship one. That folder is read-only in this thread. Do not create `/workspace/.cube` beside it (the declared folder wins wholesale). Propose changes as a diff for that repository; they take effect after they are pushed and the project is checked again, in a new thread.
+
 ## Discover the repository contract
 
 Before editing, inspect only the relevant repository-owned sources:
@@ -23,7 +30,7 @@ Before editing, inspect only the relevant repository-owned sources:
 2. Inspect CI workflows and their exact build, lint, typecheck, and test commands.
 3. Determine tool versions from lockfiles, version files, package-manager metadata, containers, and CI. Pin or honor those versions rather than guessing current releases.
 4. Identify development services and readiness checks from compose files, existing service configs, scripts, and docs.
-5. Identify the minimum package/artifact domains required during setup. Do not broaden egress merely for convenience.
+5. Identify the minimum package/artifact domains required during setup and declare them in `.cube/cube.toml` under `[network]` as `allow = ["host", "*.suffix"]`; they extend the built-in package-manager allowlist (HTTPS/HTTP, ports 80 and 443 only). Do not broaden egress merely for convenience. JVM tools ignore `HTTP(S)_PROXY`: pass the proxy from `$HTTPS_PROXY` into `~/.gradle/gradle.properties` (`systemProp.https.proxyHost`/`proxyPort`) or Maven `settings.xml` from setup.
 6. Check existing `.cube/setup`, `.cube/resume`, and `.cube/cube.toml`; preserve intentional repository behavior and make the smallest safe change.
 
 ## Implement setup

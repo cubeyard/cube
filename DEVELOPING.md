@@ -70,6 +70,15 @@ The project check prepares an exact repository snapshot. The thread provisions
 instantly (mock), seeds that snapshot under
 `$CUBED_CUBES_ROOT/<name>/workspace`, and runs the repo's `.cube/setup` there.
 
+A repository that carries no `.cube` can borrow one: add a reference
+repository to the project and set `"environment": "<checkout>/<folder>"`
+(also a field on the project page). The `.cube` in that folder then supplies
+setup, resume and `cube.toml`; it runs from `/repos/<checkout>/…` with
+`/workspace` as cwd and is read-only in the thread. The check verifies the
+folder and parses its `cube.toml` at the pinned commit, so a typo is a project
+error, not a thread that fails minutes into setup. `[network] allow` in any
+`cube.toml` extends the egress allowlist (see `CUBED_EGRESS_ALLOW` below).
+
 **What works under the mock:** the HTTP API, the registry (SQLite), thread
 lifecycle + statuses, git seeding / diff / Push / PR, the files shelf, portal
 registry + proxy routing, the whole web shell, and the real pi TUI. The cube
@@ -536,7 +545,7 @@ warning level) — `npx --yes shellcheck launcher/cube` locally.
 | `CUBED_PTY_LINGER_MS` | 30m | keep a pi TUI alive this long after the last detach |
 | `CUBED_IMAGE` / `CUBED_POOL` | `cube-node` / `cube` | Incus image + storage pool |
 | `CUBED_ROOT_SIZE` / `CUBED_DOCKER_VOLUME_SIZE` | `10GiB` / `5GiB` | per-cube disk |
-| `CUBED_EGRESS_ALLOW` | — | extra allowed egress hosts (extends the defaults) |
+| `CUBED_EGRESS_ALLOW` | — | extra allowed egress hosts, comma-separated, `*.suffix` allowed (extends the defaults; a cube's `[network] allow` extends both) |
 | `CUBED_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error`; one `level component msg key=value` line per event on stdout (`journalctl -u cubed`); `debug` adds stacks to every error field |
 
 **VM scripts** (`scripts/vm/lib.sh`): `CUBE_VM_BIND` (`tailscale` or an explicit
