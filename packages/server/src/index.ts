@@ -114,6 +114,7 @@ const terminals = new PiTerminals(
       supervisor.terminalPlan(id, onStatus).catch((error) => {
         throw new Error(sanitizeMessage(error instanceof Error ? error.message : String(error)));
       }),
+    progress: (id) => supervisor.terminalProgressForUserThread(id),
     activity: (id) => supervisor.touchUserThread(id),
     event: (e) => {
       let cube: string | null = null;
