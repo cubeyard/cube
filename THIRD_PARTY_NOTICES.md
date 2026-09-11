@@ -3,6 +3,29 @@
 The following source is vendored in this repository and retains its own
 copyright and license terms.
 
+## Effect source reference and runtime dependency
+
+`repos/effect/` is an unmodified source snapshot of
+[Effect](https://github.com/Effect-TS/effect), pinned in `repos/README.md`.
+The reference is excluded from app artifacts; the server uses the published
+`effect` npm package at the same version.
+
+Copyright (c) 2023 Effectful Technologies Inc
+
+Licensed under the MIT License in `repos/effect/LICENSE`. Bundled third-party
+files retain their upstream notices and licenses.
+
+## pi source reference
+
+`repos/pi/` is an unmodified source snapshot of
+[pi](https://github.com/earendil-works/pi), pinned in `repos/README.md`.
+It is development reference material and is excluded from cube's app artifacts.
+
+Copyright (c) 2025 Mario Zechner
+
+Licensed under the MIT License in `repos/pi/LICENSE`. Any bundled third-party
+files retain their upstream notices and licenses.
+
 ## Nixpkgs / NixOS Incus module
 
 `scripts/vm/base/incus-container-only.nix` is a modified copy of

@@ -34,7 +34,8 @@ SHA="$(git -C "$REPO_ROOT" rev-parse --short origin/main)"
 log "push origin/main@$SHA -> /opt/cube/app"
 # Tracked files at that commit, extracted over the existing tree (deleted
 # files may linger until the next bake — acceptable for a dev sync).
-git -C "$REPO_ROOT" archive --format=tar.gz origin/main \
+# Dependency source references are not part of the running app.
+git -C "$REPO_ROOT" archive --format=tar.gz origin/main -- . ':!repos' \
   | vm_ssh 'tar -xzf - -C /opt/cube/app'
 
 log "install + web build (in the VM)"

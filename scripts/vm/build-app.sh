@@ -98,7 +98,8 @@ export CI=true npm_config_update_notifier=false
 
 log "app tree from $SRC"
 mkdir -p "$STAGE/app"
-git -C "$SRC" ls-files -z -co --exclude-standard \
+# Dependency source references are for development, not the shipped app.
+git -C "$SRC" ls-files -z -co --exclude-standard -- . ':!repos' \
   | tar -C "$SRC" --null -T - -cf - | tar -xf - -C "$STAGE/app"
 
 log "dependencies for linux/$NODE_ARCH: install, web build, prune to prod"

@@ -11,6 +11,7 @@
     "@cube/sandbox": "workspace:*",
     "@earendil-works/pi-coding-agent": "0.85.1",
     "@lydell/node-pty": "1.2.0-beta.15",
+    "effect": "4.0.0-rc.113",
     "ws": "^8.21.3"
   }
 }

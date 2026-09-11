@@ -12,6 +12,7 @@ export default defineConfig([
     "**/node_modules/",
     "**/dist/",
     "spikes/",
+    "repos/",
     ".claude/",
     ".agents/",
     "images/",

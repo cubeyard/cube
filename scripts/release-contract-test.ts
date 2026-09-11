@@ -60,9 +60,33 @@ try {
   run("git", ["config", "commit.gpgsign", "false"], { cwd: repo });
   run("git", ["config", "tag.gpgsign", "false"], { cwd: repo });
   fs.writeFileSync(path.join(repo, "file"), "first\n");
-  run("git", ["add", "file"], { cwd: repo });
+  fs.mkdirSync(path.join(repo, "repos/pi"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "repos/pi/reference.ts"), "upstream\n");
+  run("git", ["add", "file", "repos/pi/reference.ts"], { cwd: repo });
   run("git", ["commit", "-qm", "first"], { cwd: repo });
   run("git", ["tag", "-a", "v0.1.0", "-m", "first public release"], { cwd: repo });
+
+  // Execute the real staging selectors: neither tracked nor untracked reference
+  // source may ship, but ordinary tracked and in-progress app files must remain.
+  fs.writeFileSync(path.join(repo, "repos/pi/untracked.ts"), "reference\n");
+  fs.writeFileSync(path.join(repo, "local.ts"), "app\n");
+  const buildApp = fs.readFileSync(path.join(root, "scripts/vm/build-app.sh"), "utf8");
+  const staging = buildApp.match(/^git -C "\$SRC" ls-files .*?(?= \\$)/m)?.[0];
+  assert.ok(staging, "app staging selector exists");
+  assert.deepEqual(
+    run("bash", ["-c", staging], { env: { SRC: repo } }).split("\0").filter(Boolean).sort(),
+    ["file", "local.ts"],
+  );
+  const sync = fs.readFileSync(path.join(root, "scripts/vm/sync.sh"), "utf8");
+  const archive = sync.match(/^git -C "\$REPO_ROOT" archive .*?(?= \\$)/m)?.[0];
+  assert.ok(archive, "VM sync archive selector exists");
+  run("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], { cwd: repo });
+  assert.equal(
+    run("bash", ["-o", "pipefail", "-c", `${archive} | tar -tzf -`], { env: { REPO_ROOT: repo } }),
+    "file",
+  );
+  assert.match(workflow, /^      - 'repos\/\*\*'$/m);
+  console.log("ok: reference sources excluded from app staging, VM sync and release paths");
 
   const prepare = (env: NodeJS.ProcessEnv) => {
     const output = path.join(tmp, `output-${Math.random()}`);
