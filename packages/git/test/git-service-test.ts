@@ -7,6 +7,7 @@
  *   node packages/git/test/git-service-test.ts
  */
 import assert from "node:assert";
+import { Effect } from "effect";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -369,6 +370,27 @@ await assert.rejects(
   /non-GitHub/,
 );
 console.log("9 ok: PR on a non-GitHub upstream refused");
+
+// A bare mirror retains its old HEAD after fetch. New default discovery must
+// follow remote HEAD, including a name change and deletion of the old default.
+await Effect.runPromise(Effect.gen(function*() {
+  git(upstream, "update-ref", "refs/heads/new-default", "refs/heads/main");
+  git(upstream, "symbolic-ref", "HEAD", "refs/heads/new-default");
+  git(upstream, "update-ref", "-d", "refs/heads/main");
+  const snapshots = yield* Effect.all([
+    Effect.tryPromise(() => service.prepareRepository(upstream)),
+    Effect.tryPromise(() => service.prepareRepository(upstream)),
+  ], { concurrency: 2 });
+  assert.ok(snapshots.every((s) => s.base === "new-default"));
+  assert.equal(snapshots[0]!.baseOid, git(upstream, "rev-parse", "HEAD"));
+  assert.deepEqual(snapshots[0], snapshots[1], "same-repository refreshes serialize safely");
+  const fresh = path.join(tmp, "new-default-workspace");
+  yield* Effect.tryPromise(() => service.seedPreparedWorkspace({ url: upstream, workspacePath: fresh, branch: "cube/default", ...snapshots[0]! }));
+  assert.equal(git(fresh, "rev-parse", "HEAD"), snapshots[0]!.baseOid);
+  git(upstream, "symbolic-ref", "HEAD", "refs/heads/missing-default");
+  yield* Effect.tryPromise(() => assert.rejects(service.prepareRepository(upstream), /no resolvable default branch/));
+}));
+console.log("10 ok: remote default rename, concurrent refresh, exact seed and missing default");
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("git-service-test: all ok");

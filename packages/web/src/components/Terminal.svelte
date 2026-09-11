@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { Effect } from "effect";
+  import EnvironmentProgressView from "./EnvironmentProgress.svelte";
+  import type { EnvironmentProgress } from "../lib/types.ts";
   import { onMount } from "svelte";
   import { Terminal } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
@@ -23,6 +26,7 @@
     | { kind: "lost"; retryAt: number } // transport gone twice in a row
     | { kind: "ended"; text: string } // pi exited — restart respawns it
     | { kind: "error"; text: string };
+  let progress = $state<EnvironmentProgress | null>(null);
   let pane = $state<Pane>({ kind: "connecting", text: null });
   let now = $state(Date.now());
 
@@ -90,6 +94,7 @@
       if (frame.t === "status") {
         // Several arrive in sequence while the environment is prepared;
         // the latest is the truth.
+        Effect.runSync(Effect.sync(() => { if (frame.progress) progress = frame.progress; }));
         lastStatus = frame.text;
         pane = { kind: "status", text: frame.text };
       } else if (frame.t === "spawned") {
@@ -247,10 +252,10 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions: xterm owns the keyboard inside -->
 <div class="term-pane" role="application" aria-label="agent terminal">
   <div class="term-host" bind:this={host}></div>
-  {#if pane.kind !== "live"}
+  {#if pane.kind !== "live" || progress?.failed}
     <!-- an exit keeps the last frame readable behind the note: what the
          process printed before it stopped is the first clue -->
-    <div class="term-veil" class:opaque={pane.kind === "status" || pane.kind === "error"}>
+    <div class="term-veil" class:opaque={pane.kind === "status" || pane.kind === "error" || !!progress?.failed}>
       {#if pane.kind === "connecting"}
         {#if pane.text}
           <span class="lamp on-amber blink" aria-hidden="true"></span>
@@ -267,9 +272,15 @@
       {:else if pane.kind === "ended"}
         <span class="term-note">{pane.text}</span>
         <button class="key" onclick={restart}>restart</button>
+      {:else if pane.kind === "live"}
+        <span class="term-note bad" role="alert">{progress?.phase}</span>
+        <button class="key" onclick={() => Effect.runSync(Effect.sync(() => { progress = null; term.focus(); }))}>continue to thread</button>
       {:else}
-        <span class="term-note bad">{pane.text}</span>
+        <span class="term-note bad" role="alert">{pane.text}</span>
         <button class="key" onclick={restart}>retry</button>
+      {/if}
+      {#if progress}
+        <EnvironmentProgressView {progress} waiting={pane.kind === "status"} />
       {/if}
     </div>
   {/if}

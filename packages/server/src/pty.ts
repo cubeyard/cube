@@ -17,6 +17,7 @@
  * control ({t:"status"|"spawned"|"attached"|"exit"|"error", ...}); an
  * `attached` frame precedes the scrollback replay to a late attacher.
  */
+import type { EnvironmentProgress } from "./environment-progress.ts";
 import { spawn, type IPty } from "@lydell/node-pty";
 
 import { createLogger } from "./log.ts";
@@ -44,7 +45,7 @@ export interface TerminalHost {
    * report progress via `onStatus`. Throwing refuses the terminal — the
    * message is shown to the user, so it must speak thread vocabulary.
    */
-  plan(threadId: string, onStatus: (text: string) => void): Promise<TerminalSpawnPlan>;
+  plan(threadId: string, onStatus: (text: string, progress?: EnvironmentProgress) => void): Promise<TerminalSpawnPlan>;
   /** Activity signal (throttled by the bridge): terminal I/O counts like a
    * prompt for idle-sleep purposes. */
   activity(threadId: string): void;
@@ -68,7 +69,7 @@ interface TerminalSession {
   scrollback: Buffer[];
   scrollbackBytes: number;
   /** Last pre-spawn status line, replayed to late attachers. */
-  lastStatus: string | null;
+  lastStatus: { text: string; progress?: EnvironmentProgress } | null;
   cols: number;
   rows: number;
   linger: NodeJS.Timeout | null;
@@ -128,11 +129,12 @@ export class PiTerminals {
       // a transport drop and must clear it before a replay lands, or the
       // tail would be drawn twice — then replay the tail and adopt this
       // client's size (the TUI redraws on the resize, squaring the frame).
+      if (session.lastStatus?.progress?.failed) client.send(control({ t: "status", ...session.lastStatus }));
       client.send(control({ t: "attached", replay: session.scrollback.length > 0 }));
       for (const chunk of session.scrollback) client.send(chunk);
       this.resize(session, clamp(cols, 2, 500), clamp(rows, 2, 500));
     } else if (session.starting) {
-      if (session.lastStatus) client.send(control({ t: "status", text: session.lastStatus }));
+      if (session.lastStatus) client.send(control({ t: "status", ...session.lastStatus }));
     } else {
       void this.start(session);
     }
@@ -175,9 +177,9 @@ export class PiTerminals {
     const started = performance.now();
     const elapsed = () => Math.round(performance.now() - started);
     try {
-      const plan = await this.host.plan(session.threadId, (text) => {
-        session.lastStatus = text;
-        this.broadcast(session, control({ t: "status", text }));
+      const plan = await this.host.plan(session.threadId, (text, progress) => {
+        session.lastStatus = { text, progress };
+        this.broadcast(session, control({ t: "status", text, progress }));
       });
       // Everyone left, or the thread was killed, while the plan settled.
       if (this.sessions.get(session.threadId) !== session) return;
@@ -197,7 +199,7 @@ export class PiTerminals {
         rows: session.rows,
       });
       session.proc = proc;
-      session.lastStatus = null;
+      if (!session.lastStatus?.progress?.failed) session.lastStatus = null;
       log.info("pi spawned", { thread: session.threadId, pid: proc.pid });
       this.host.event?.({ thread: session.threadId, phase: "spawn", ok: true, ms: elapsed() });
       this.broadcast(session, control({ t: "spawned" }));

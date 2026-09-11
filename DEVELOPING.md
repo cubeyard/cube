@@ -69,7 +69,7 @@ curl -sX POST localhost:7777/api/threads \
 ```
 
 The project check verifies repository access and base configuration. Creating
-a new thread refreshes all configured base branches, including reference
+a new thread refreshes all repository default branches, including reference
 repositories, and pins the fetched commits before allocation. The request may
 wait for network/auth checks; a failed refresh reports an error and creates no
 thread rather than using stale code. Provisioning then seeds those exact
@@ -77,7 +77,10 @@ snapshots under `$CUBED_CUBES_ROOT/<name>/workspace` and runs `.cube/setup`.
 Existing threads and replays of a successful request ID keep their original
 commits. Concurrent submissions with the same ID share one refresh/allocation;
 a failed attempt can be retried. Editing/deleting/rechecking the project during
-refresh rejects the obsolete creation. Prepared environments are reused only
+refresh rejects the obsolete creation. The remote default branch is rediscovered each time, including after a rename;
+legacy project base overrides no longer select the starting branch. Refreshes run
+as Effect jobs, at most four at once, and drain before any failure is returned.
+Prepared environments are reused only
 when the fresh checkout's environment declaration and runtime key still match;
 a normal code commit does not unnecessarily rebuild the template.
 
@@ -698,3 +701,15 @@ latest supported stable release; an older input would downgrade the tap.
 The formula tests do not boot a VM. Before announcing support, verify
 `cube up`, `cube upgrade`, and `cube down` on real Apple Silicon and Intel
 Macs, including a Homebrew upgrade with existing VM data.
+
+### Startup progress
+
+The waiting terminal shows actual provisioning steps and a bounded, plain-text
+setup/resume tail (32,768 characters), including shared environment builders.
+It shows elapsed time and silence without treating missing output as failure.
+Expand the captured tail for detail. Failed setup remains inspectable before
+continuing to the repair-capable thread, and reconnect replays the latest status.
+Fuller, durable lifecycle evidence remains in the environment endpoint (up to
+1 MiB per phase); the live progress buffer is in-memory, not another log store.
+Effect 4 models progress state, UI timers and repository batches; Promise-based
+supervisor/backend boundaries retain their existing cancellation and rollback.

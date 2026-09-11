@@ -10,6 +10,8 @@
 process.env.CUBED_ALLOW_LOCAL_REPOS = "1";
 
 import assert from "node:assert/strict";
+import { Effect } from "effect";
+import type { EnvironmentProgress } from "../src/environment-progress.ts";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -91,7 +93,7 @@ const config: SupervisorConfig = {
 const supervisor = new CubeSupervisor(registry, backend, config);
 
 try {
-  const repo = repository("good", "#!/bin/sh\necho setup >> lifecycle\necho prepared > generated\necho setup-output\n");
+  const repo = repository("good", "#!/bin/sh\necho setup >> lifecycle\necho prepared > generated\necho setup-output\necho setup-stderr >&2\nsleep 0.7\n");
   const project = supervisor.createProject({ name: "good", repositories: [{ url: repo.bare }] });
   assert.equal((await settled(supervisor, project.id)).status, "ready");
 
@@ -99,6 +101,16 @@ try {
   // clones, and each still runs setup (warm) and resume in its own workspace.
   const [a, b] = await Promise.all([supervisor.createUserThread(project.id), supervisor.createUserThread(project.id)]);
   const an = supervisor.resolveUserThread(a.id).cubeName, bn = supervisor.resolveUserThread(b.id).cubeName;
+  const streams = [[], []] as EnvironmentProgress[][];
+  await Effect.runPromise(Effect.all([a, b].map((thread, index) => Effect.tryPromise(() =>
+    supervisor.terminalPlan(thread.id, (_text, progress) => { if (progress) streams[index]!.push(progress); }),
+  )), { concurrency: 2 }));
+  for (const snapshots of streams) {
+    assert.ok(snapshots.some((p) => p.phase.includes("/setup") && p.log.includes("setup-stderr")), "live output before setup finishes");
+    assert.ok(snapshots.some((p) => p.phase.startsWith("preparing a reusable environment:") && p.log.includes("setup-stderr")), "each waiter sees the shared builder's output");
+    assert.equal(snapshots.at(-1)?.phase, "environment ready");
+    assert.ok(snapshots.at(-1)?.log.includes("resume-output"));
+  }
   await Promise.all([cubeSettled(registry, an), cubeSettled(registry, bn)]);
   assert.equal(backend.builders, 1); assert.equal(backend.captures, 1);
   assert.equal(backend.templates.size, 1, "the builder lives on as the template");
@@ -203,6 +215,10 @@ try {
   assert.equal(registry.getCube(badName)!.status, "ready");
   assert.equal(supervisor.listUserThreads().find((t) => t.id === bad.id)!.state, "error");
   assert.match(supervisor.environmentForUserThread(bad.id).setup.log, /broken-output/);
+  let failedProgress: EnvironmentProgress | undefined;
+  await supervisor.terminalPlan(bad.id, (_text, progress) => { failedProgress = progress; });
+  assert.equal(failedProgress?.failed, true);
+  assert.match(failedProgress!.log, /broken-output/);
   assert.ok(registry.listEvents({ kind: "environment", cube: badName }).some((e) => e.phase === "template-unavailable"));
   await supervisor.sleepCube(badName); await supervisor.wakeCube(badName);
   assert.equal(supervisor.listUserThreads().find((t) => t.id === bad.id)!.state, "error");
@@ -210,6 +226,9 @@ try {
   fs.writeFileSync(path.join(badWorkspace, ".cube", "setup"), "#!/bin/sh\necho repaired >> lifecycle\n", { mode: 0o755 });
   await supervisor.retrySetupForUserThread(bad.id);
   assert.equal(supervisor.listUserThreads().find((t) => t.id === bad.id)!.state, "ready");
+  let repairedProgress: EnvironmentProgress | undefined;
+  await supervisor.terminalPlan(bad.id, (_text, progress) => { repairedProgress = progress; });
+  assert.equal(repairedProgress?.failed, false, "repair clears obsolete failure snapshots");
   assert.equal(backend.captures, captures); assert.match(fs.readFileSync(path.join(badWorkspace, "lifecycle"), "utf8"), /repaired\nresume/);
 
   // Deleting the project deletes its template.

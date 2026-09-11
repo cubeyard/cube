@@ -8,6 +8,7 @@
  *   node packages/server/test/pty-test.ts
  */
 import assert from "node:assert";
+import { Effect } from "effect";
 
 import { PiTerminals, type TerminalClient, type TerminalSpawnPlan } from "../src/pty.ts";
 
@@ -91,10 +92,11 @@ const shellPlan = (script: string): TerminalSpawnPlan => ({
 {
   let release!: () => void;
   const gate = new Promise<void>((r) => (release = r));
+  const progress = { phase: "running .cube/setup…", log: "installing dependencies\n", startedAt: 1, updatedAt: 2, truncated: false, failed: false };
   const terminals = new PiTerminals(
     {
       plan: async (_id, onStatus) => {
-        onStatus("setting up this thread's environment…");
+        onStatus(progress.phase, progress);
         await gate;
         throw new Error("environment error: boom");
       },
@@ -107,7 +109,8 @@ const shellPlan = (script: string): TerminalSpawnPlan => ({
   await until("status frame", () => !!a.frame("status"));
   const late = new FakeClient();
   terminals.attach("t3", late, 80, 24);
-  assert.ok(late.frame("status"), "late attacher gets the last status replayed");
+  assert.deepEqual(a.frame("status")?.progress, progress);
+  assert.deepEqual(late.frame("status")?.progress, progress, "late attach replays the bounded log");
   release();
   await until("error frame", () => !!a.frame("error") && !!late.frame("error"));
   assert.match(String(a.frame("error")!.text), /environment error: boom/);
@@ -153,3 +156,25 @@ const shellPlan = (script: string): TerminalSpawnPlan => ({
 }
 
 console.log("pty-test: ALL PASS");
+
+// A setup failure remains inspectable when reconnecting to an already-live PTY.
+await Effect.runPromise(Effect.gen(function* () {
+  const progress = { phase: "Setup failed", log: "dependency failed\n", startedAt: 1, updatedAt: 2, truncated: false, failed: true };
+  const terminals = new PiTerminals({
+    plan: (_id, onStatus) => Effect.runPromise(Effect.sync(() => {
+      onStatus(progress.phase, progress);
+      return { argv: ["sh", "-c", "cat"], cwd: "/tmp", env: process.env };
+    })),
+    activity: () => {},
+  });
+  yield* Effect.gen(function* () {
+    const first = new FakeClient();
+    terminals.attach("setup-failed", first, 80, 24);
+    yield* Effect.tryPromise(() => until("spawn", () => !!first.frame("spawned")));
+    const late = new FakeClient();
+    terminals.attach("setup-failed", late, 80, 24);
+    assert.deepEqual(late.frame("status")?.progress, progress);
+    assert.ok(late.frame("attached"), "reconnected client can continue into the usable thread");
+  }).pipe(Effect.ensuring(Effect.sync(() => terminals.close())));
+}));
+console.log("8 ok: failed startup log replays even after PTY spawn");

@@ -108,7 +108,7 @@ Do not expose cubed publicly: it has no application-level authentication.
 ### Projects and threads
 
 Projects check access and branch configuration before work starts. New
-threads require `ready`, refresh every configured base branch before allocation,
+threads require `ready`, refresh every repository’s default branch before allocation,
 and pin the fetched OIDs. A failed refresh creates no thread and never falls
 back to stale checked code. Existing threads and idempotent replays keep their
 original snapshots; provisioning remains local-only. The primary checkout is `/workspace`; optional reference

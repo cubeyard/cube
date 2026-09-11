@@ -1,3 +1,5 @@
+import type { EnvironmentProgress } from "../../../server/src/environment-progress.ts";
+export type { EnvironmentProgress };
 /**
  * UI-side shapes, mirroring cubed's thread-first API responses. The
  * conversation itself has no shapes here: it is the pi TUI streaming over
@@ -128,7 +130,7 @@ export interface WorkspaceListing {
 /** Text control frames on the terminal WebSocket (binary frames are raw
  * pty output). */
 export type TerminalControlFrame =
-  | { t: "status"; text: string }
+  | { t: "status"; text: string; progress?: EnvironmentProgress }
   | { t: "spawned" }
   /** Joined a live process; `replay` says a scrollback tail follows. */
   | { t: "attached"; replay: boolean }

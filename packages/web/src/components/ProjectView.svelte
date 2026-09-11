@@ -30,12 +30,12 @@
     onConsume?: (id: number) => void;
   } = $props();
   const isNew = $derived(projectId === "new");
-  type RepositoryDraft = { key: string; url: string; base: string; checkoutName: string };
+  type RepositoryDraft = { key: string; url: string; checkoutName: string };
 
   let project = $state<Project | null>(null);
   let name = $state("");
   let repositories = $state<RepositoryDraft[]>([
-    { key: uid(), url: "", base: "", checkoutName: "workspace" },
+    { key: uid(), url: "", checkoutName: "workspace" },
   ]);
   // "<checkout>/<folder>" of a reference that carries .cube; "" = the
   // primary's own .cube. Only meaningful once there is a reference.
@@ -57,7 +57,6 @@
     repositories = fresh.repositories.map((repository) => ({
       key: repository.id,
       url: repository.url,
-      base: repository.base ?? "",
       checkoutName: repository.checkoutName,
     }));
     environment = fresh.environment ?? "";
@@ -101,7 +100,7 @@
   }
 
   function addRepository(): void {
-    repositories.push({ key: uid(), url: "", base: "", checkoutName: "" });
+    repositories.push({ key: uid(), url: "", checkoutName: "" });
     changed();
   }
 
@@ -116,7 +115,7 @@
       name,
       repositories: repositories.map((repository, index) => ({
         url: repository.url,
-        base: repository.base.trim() || null,
+        base: null,
         ...(index === 0 ? {} : { checkoutName: repository.checkoutName }),
       })),
       environment: environment.trim() || null,
@@ -338,16 +337,6 @@
                   }}
                 />
               </div>
-              <label class="config-field">
-                <span class="silk">base</span>
-                <input
-                  class="compose-input"
-                  aria-label={`repository ${index + 1} base branch`}
-                  placeholder="default"
-                  bind:value={repository.base}
-                  oninput={changed}
-                />
-              </label>
               {#if index > 0}
                 <label class="config-field">
                   <span class="silk">checkout</span>
@@ -405,6 +394,8 @@
         </label>
       {/if}
     </section>
+
+    <p class="config-note">Each new thread fetches the latest commit on every repository’s default branch.</p>
 
     <div class="project-actions">
       <button class="key primary" onclick={save} disabled={saving || !dirty}>

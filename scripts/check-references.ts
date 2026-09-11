@@ -6,7 +6,7 @@ import path from "node:path";
 const root = path.resolve(import.meta.dirname, "..");
 const references = [
   { name: "@earendil-works/pi-coding-agent", source: "pi/packages/coding-agent", consumers: ["server", "pi-extension"] },
-  { name: "effect", source: "effect/packages/effect", consumers: ["server"] },
+  { name: "effect", source: "effect/packages/effect", consumers: ["server", "git", "sandbox", "web"] },
 ];
 
 for (const { name, source, consumers } of references) {

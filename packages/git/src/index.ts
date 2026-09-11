@@ -27,6 +27,7 @@
  * (ext::), and GIT_ALLOW_PROTOCOL pins the transport set for everything
  * spawned here (clones can otherwise follow redirects to other protocols).
  */
+import { Effect } from "effect";
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -329,28 +330,49 @@ export class GitService {
     }
   }
 
-  /** Refresh a host-owned mirror and resolve the exact branch tip a later
-   * thread should seed from. Used by project checks and again before new
-   * thread allocation; provisioning consumes the resulting pinned snapshot. */
-  async prepareRepository(url: string, requestedBase?: string | null): Promise<PreparedRepository> {
-    const mirror = await this.ensureMirror(url);
-    const base =
-      requestedBase ??
-      (await this.git(["--git-dir", mirror, "symbolic-ref", "--short", "HEAD"], LOCAL_TIMEOUT_MS))
-        .stdout.trim();
-    assertRefName(base);
-    try {
-      const baseOid = (
-        await this.git(
-          ["--git-dir", mirror, "rev-parse", "--verify", `refs/heads/${base}`],
-          LOCAL_TIMEOUT_MS,
-        )
-      ).stdout.trim();
-      return { base, baseOid };
-    } catch {
-      throw new Error(`repository has no branch ${JSON.stringify(base)}`);
-    }
+  /** Capture a fresh remote branch tip, then import its objects. Default-branch
+   * discovery must query the remote: fetching does not update a bare mirror's HEAD.
+   * The mirror lock covers refresh and resolution, including concurrent threads. */
+  prepareRepository(url: string, requestedBase?: string | null): Promise<PreparedRepository> {
+    const mirror = this.mirrorPathFor(url);
+    return this.withMirrorLock(mirror, () => Effect.runPromise(this.prepareRepositoryLocked(url, mirror, requestedBase)));
   }
+
+  private readonly prepareRepositoryLocked = Effect.fn("GitService.prepareRepository")(
+    function*(this: GitService, url: string, mirror: string, requestedBase?: string | null) {
+      let base = requestedBase;
+      let advertisedOid: string | undefined;
+      if (base == null) {
+        const remote = yield* Effect.tryPromise({
+          try: (signal) => this.git(["ls-remote", "--symref", "--", url, "HEAD"], NETWORK_TIMEOUT_MS, undefined, signal),
+          catch: (cause) => cause instanceof Error ? cause : new Error(String(cause)),
+        });
+        base = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(remote.stdout)?.[1];
+        advertisedOid = /^([0-9a-f]{40,64})\tHEAD$/m.exec(remote.stdout)?.[1];
+        if (!base || !advertisedOid) {
+          return yield* Effect.fail(new Error("repository has no resolvable default branch"));
+        }
+      }
+      yield* Effect.try(() => assertRefName(base!));
+      if (yield* Effect.sync(() => fs.existsSync(mirror))) {
+        yield* Effect.tryPromise({
+          try: (signal) => this.git(["--git-dir", mirror, "remote", "update", "--prune"], NETWORK_TIMEOUT_MS, undefined, signal),
+          catch: (cause) => cause instanceof Error ? cause : new Error(String(cause)),
+        });
+      } else {
+        yield* Effect.tryPromise({
+          try: (signal) => this.cloneMirrorAtomic(url, mirror, signal),
+          catch: (cause) => cause instanceof Error ? cause : new Error(String(cause)),
+        });
+      }
+      // Pin the exact advertised HEAD, not a ref another thread could later move.
+      const resolved = yield* Effect.tryPromise((signal) => this.git(
+        ["--git-dir", mirror, "rev-parse", "--verify", `${advertisedOid ?? `refs/heads/${base}`}^{commit}`],
+        LOCAL_TIMEOUT_MS, undefined, signal,
+      )).pipe(Effect.mapError(() => new Error(`repository has no branch ${JSON.stringify(base)} at the advertised commit`)));
+      return { base: base!, baseOid: resolved.stdout.trim() };
+    },
+  );
 
   /** Bare mirror without the network refresh — for push, which brings its
    * own objects via bundle. Same lock + atomic clone. */
