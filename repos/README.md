@@ -8,7 +8,7 @@ Licenses and upstream notices remain in each subtree.
 | Directory | Upstream | Tag | Commit | Used by cube |
 | --- | --- | --- | --- | --- |
 | `pi/` | https://github.com/earendil-works/pi | `v0.85.1` | `d981de1229ef899957bbe968bc8dcda02a21f477` | `@earendil-works/pi-coding-agent` in server and pi-extension |
-| `effect/` | https://github.com/Effect-TS/effect | `effect@4.0.0-rc.113` | `d3b837aee836f35d625d55205f7d6e61305fc198` | `effect` in server |
+| `effect/` | https://github.com/Effect-TS/effect | `effect@4.0.0-rc.113` | `d3b837aee836f35d625d55205f7d6e61305fc198` | `effect` in server, git, sandbox and web |
 
 Cube delegates its agent loop, sessions and terminal UI to pi. Effect 4 is an
 explicitly pinned release candidate, initially used for onboarding-state schema

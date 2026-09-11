@@ -159,7 +159,7 @@ creating → ready ⇄ running → idle → asleep → waking → ready
   attached as a shifted disk device. Caches are capped custom volumes. The
   container is cattle.
 - **Fresh thread snapshots:** project checks establish access/configuration;
-  each new thread refreshes every configured base branch before allocation and
+  each new thread refreshes every repository’s default branch before allocation and
   pins the returned OIDs. Fetch failures stop creation rather than falling back
   to the last checked commits. Existing threads and idempotent replays retain
   their pins. Concurrent duplicate creates share their refresh and allocation;

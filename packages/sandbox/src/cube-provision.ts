@@ -8,6 +8,7 @@
  * IP/port allocation, lifecycle policy) is Phase 2 slice 2 (CubeSupervisor).
  */
 import fs from "node:fs";
+import { Effect } from "effect";
 
 import { IncusClient, IncusHttpError, IncusTimeoutError } from "./incus-client.ts";
 
@@ -43,6 +44,8 @@ export interface CubeTemplateSource {
 }
 
 export interface CubeProvisionSpec {
+  /** Optional effectful observer at actual provisioning boundaries. */
+  onProgress?: (phase: string) => Effect.Effect<void>;
   /** Incus instance name. */
   name: string;
   /** Image alias to init from (e.g. "cube-node"). */
@@ -138,6 +141,7 @@ export async function provisionCube(
   const { signal } = opts;
   const rollbackTimeoutMs = opts.rollbackTimeoutMs ?? 60_000;
 
+  await Effect.runPromise(spec.onProgress?.("preparing network…") ?? Effect.void);
   const bridgeConfig = {
     "ipv4.address": net.subnet,
     "ipv4.nat": net.nat ? "true" : "false",
@@ -162,6 +166,7 @@ export async function provisionCube(
     await client.createNetwork(net.bridge, bridgeConfig, signal);
   }
 
+  await Effect.runPromise(spec.onProgress?.("preparing storage…") ?? Effect.void);
   const volume = dockerVolumeName(spec.name);
   // Reused and cloned volumes are reconciled to the configured quota; a
   // freshly created one is born with it.
@@ -194,6 +199,7 @@ export async function provisionCube(
   // failure — bridge and volume are kept (they are reconciled on reuse).
   let created = false;
   try {
+    await Effect.runPromise(spec.onProgress?.(spec.template ? "copying the prepared environment…" : "creating the environment from the base image…") ?? Effect.void);
     await client.createInstance({
       name: spec.name,
       // A template snapshot carries only its root device (captureTemplate
@@ -284,6 +290,7 @@ async function configureAndStart(
   signal?: AbortSignal,
 ): Promise<void> {
   const net = spec.network;
+  await Effect.runPromise(spec.onProgress?.("configuring the environment…") ?? Effect.void);
   await client.pushInstanceFile(spec.name, "/etc/hostname", `${spec.name}\n`, { signal });
 
   // Pushed while stopped so the cube boots with its static IP from the first
@@ -348,6 +355,7 @@ async function configureAndStart(
     );
   }
 
+  await Effect.runPromise(spec.onProgress?.("starting the environment…") ?? Effect.void);
   await client.setInstanceState(spec.name, "start", {}, signal);
 
   // glibc reads /etc/resolv.conf directly (nsswitch is files,dns) and images
@@ -361,6 +369,7 @@ async function configureAndStart(
   ], signal);
   if (rc !== 0) throw new Error(`cube ${spec.name}: resolv.conf setup failed (exit ${rc})`);
 
+  await Effect.runPromise(spec.onProgress?.("waiting for network readiness…") ?? Effect.void);
   await waitForCubeNetwork(client, spec.name, net.ip, undefined, signal);
 }
 
