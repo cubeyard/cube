@@ -354,7 +354,7 @@ export function mockFiles(): GuestFiles {
 export function createThreadRequest(cfg: { threadId?: string; cubedUrl: string }) {
   return async (
     requestPath: string,
-    options: { method?: "GET" | "POST"; body?: unknown; timeoutMs?: number } = {},
+    options: { method?: "GET" | "POST" | "DELETE"; body?: unknown; timeoutMs?: number } = {},
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> => {
     if (!cfg.threadId) throw new Error("cube extension: CUBE_THREAD_ID is not set");
@@ -538,6 +538,15 @@ export default function cubeExtension(pi: ExtensionAPI) {
       if (!Array.isArray(body.services)) throw new Error("cubed returned invalid services");
       return body.services;
     },
+    exposePortal: (input, signal) =>
+      threadRequest("/portals", { method: "POST", body: input }, signal),
+    async listPortals(signal) {
+      const body = await threadRequest("/portals", {}, signal);
+      if (!Array.isArray(body.portals)) throw new Error("cubed returned invalid portals");
+      return body.portals;
+    },
+    removePortal: (port, signal) =>
+      threadRequest(`/portals/${port}`, { method: "DELETE" }, signal),
     archiveThread: (signal) => threadRequest("/archive", { method: "POST", timeoutMs: 10_000 }, signal),
     environmentStatus: async (signal) => boundedEnvironmentStatus(await threadRequest("/environment", {}, signal)),
     retryEnvironmentSetup: async (signal) => boundedEnvironmentStatus(await threadRequest(

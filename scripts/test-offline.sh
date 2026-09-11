@@ -12,6 +12,7 @@ OFFLINE_TESTS=(
   packages/server/test/cube-toml-test.ts
   packages/server/test/portal-config-test.ts
   packages/server/test/portal-proxy-test.ts
+  packages/server/test/temporary-portals-test.ts
   packages/server/test/registry-test.ts
   packages/server/test/events-test.ts
   packages/server/test/user-facing-test.ts

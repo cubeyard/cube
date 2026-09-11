@@ -152,6 +152,13 @@ export interface PortalRow {
   createdAt: number;
 }
 
+export interface TemporaryPortalRow {
+  threadId: string;
+  name: string;
+  port: number;
+  hostname: string;
+}
+
 export interface VolumeRow {
   id: number;
   cubeId: number;
@@ -270,6 +277,13 @@ export class Registry {
         hostname    TEXT NOT NULL UNIQUE,
         created_at  INTEGER NOT NULL,
         UNIQUE(cube_id, name)
+      );
+      CREATE TABLE IF NOT EXISTS temporary_portal (
+        thread_id TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+        port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),
+        name TEXT NOT NULL,
+        hostname TEXT NOT NULL UNIQUE,
+        PRIMARY KEY(thread_id, port)
       );
       CREATE TABLE IF NOT EXISTS volume (
         id          INTEGER PRIMARY KEY,
@@ -794,9 +808,30 @@ export class Registry {
 
   archiveThread(id: string): void {
     this.db.prepare("UPDATE thread SET archived_at = ? WHERE id = ?").run(Date.now(), id);
+    this.db.prepare("DELETE FROM temporary_portal WHERE thread_id = ?").run(id);
   }
 
   // ---------------------------------------------------------------- portal
+
+  upsertTemporaryPortal(threadId: string, port: number, name: string, hostname: string): void {
+    this.db.prepare(`INSERT INTO temporary_portal (thread_id, port, name, hostname) VALUES (?, ?, ?, ?)
+      ON CONFLICT(thread_id, port) DO UPDATE SET name = excluded.name`).run(threadId, port, name, hostname);
+  }
+
+  listTemporaryPortals(threadId: string): TemporaryPortalRow[] {
+    return this.db.prepare(`SELECT thread_id AS threadId, port, name, hostname FROM temporary_portal
+      WHERE thread_id = ? ORDER BY port`).all(threadId) as unknown as TemporaryPortalRow[];
+  }
+
+  getTemporaryPortal(hostname: string): TemporaryPortalRow | null {
+    return (this.db.prepare(`SELECT p.thread_id AS threadId, p.port, p.name, p.hostname
+      FROM temporary_portal p JOIN thread t ON t.id = p.thread_id
+      WHERE p.hostname = ? AND t.archived_at IS NULL`).get(hostname) as unknown as TemporaryPortalRow) ?? null;
+  }
+
+  removeTemporaryPortal(threadId: string, port: number): void {
+    this.db.prepare("DELETE FROM temporary_portal WHERE thread_id = ? AND port = ?").run(threadId, port);
+  }
 
   /**
    * Register (or update) the portal behind a declared service. Idempotent

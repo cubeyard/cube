@@ -207,6 +207,7 @@ export interface PortalTargetInfo {
   status: string;
   ip: string;
   port: number;
+  supervised: boolean;
 }
 
 const instanceName = (cube: string) => `cube-${cube}`;
@@ -1700,6 +1701,22 @@ export class CubeSupervisor {
    * not touch the cube: only a request that actually reaches the service is
    * activity, or a forgotten holding-page tab would keep it awake forever. */
   resolvePortal(label: string): PortalTargetInfo | null {
+    const temporary = this.registry.getTemporaryPortal(label);
+    if (temporary) {
+      const { cubeName } = this.resolveUserThread(temporary.threadId);
+      // Teardown keeps the route row until backend destruction finishes.
+      // Treat it as missing rather than letting requireCube throw in routing.
+      if (this.removing.has(cubeName)) return null;
+      const cube = this.requireCube(cubeName);
+      return {
+        cubeName,
+        serviceName: temporary.name,
+        status: cube.status,
+        ip: networkForCube(cube.name, cube.subnetIndex).ip,
+        port: temporary.port,
+        supervised: false,
+      };
+    }
     const portal = this.registry.getPortalByHostname(label);
     if (!portal) return null;
     const cube = this.registry.getCubeById(portal.cubeId);
@@ -1711,7 +1728,54 @@ export class CubeSupervisor {
       status: cube.status,
       ip: net.ip,
       port: portal.targetPort,
+      supervised: true,
     };
+  }
+
+  /** Register routing only: no config reads, exec, wake or process ownership. */
+  exposePortalForUserThread(id: string, input: unknown) {
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("invalid portal options");
+    const args = input as Record<string, unknown>;
+    if (Object.keys(args).some((key) => !["port", "name", "lifetime"].includes(key))) {
+      throw new Error("unknown portal option");
+    }
+    const port = this.portalPort(args.port);
+    if (typeof args.name !== "string" || !args.name.trim() || args.name.length > 80) {
+      throw new Error("portal name must be nonblank and at most 80 characters");
+    }
+    if (args.lifetime !== undefined && args.lifetime !== "thread") throw new Error("portal lifetime must be thread");
+    const { cubeName } = this.resolveUserThread(id);
+    if (this.registry.getThread(id)!.archivedAt !== null) throw new Error("thread is archived");
+    const cube = this.requireCube(cubeName);
+    if (cube.status !== "ready" || this.removing.has(cubeName)) throw new Error("thread must be ready to expose a portal");
+    // Double hyphens cannot occur in declared service names, keeping the
+    // namespaces disjoint even after a temporary route has been removed.
+    const label = `temporary--${port}--${cubeName}`;
+    this.registry.upsertTemporaryPortal(id, port, args.name.trim(), label);
+    return this.listPortalsForUserThread(id).find((portal) => portal.port === port)!;
+  }
+
+  listPortalsForUserThread(id: string) {
+    this.resolveUserThread(id);
+    return this.registry.listTemporaryPortals(id).map((portal) => ({
+      name: portal.name,
+      port: portal.port,
+      url: this.portalUrl(portal.hostname),
+      lifetime: "thread" as const,
+      supervised: false as const,
+    }));
+  }
+
+  removePortalForUserThread(id: string, port: unknown): void {
+    this.resolveUserThread(id);
+    this.registry.removeTemporaryPortal(id, this.portalPort(port));
+  }
+
+  private portalPort(value: unknown): number {
+    if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > 65535) {
+      throw new Error("portal port must be an integer from 1 to 65535");
+    }
+    return Number(value);
   }
 
   /** Declared services + their stable URLs for a thread (reads only the

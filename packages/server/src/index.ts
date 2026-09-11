@@ -164,11 +164,11 @@ function fail(res: http.ServerResponse, error: unknown, sanitize = false, route?
   let message = error instanceof Error ? error.message : String(error);
   const status = /no such/.test(message)
     ? 404
-    : /already exists|busy|not ready|has no threads|not deletable|has no project repositories|still has threads|still checking|detached HEAD|still setting up/.test(
+    : /already exists|busy|not ready|thread is archived|thread must be ready|has no threads|not deletable|has no project repositories|still has threads|still checking|detached HEAD|still setting up/.test(
           message,
         )
       ? 409
-      : /invalid cube name|invalid id encoding|invalid project|invalid repository|empty repository|unsupported repository|non-GitHub/.test(
+      : /invalid portal options|unknown portal option|portal (name|port|lifetime) must|invalid cube name|invalid id encoding|invalid project|invalid repository|empty repository|unsupported repository|non-GitHub/.test(
             message,
           )
         ? 400
@@ -367,6 +367,13 @@ async function portalRequest(
   if (cubeSource && cubeSource !== target?.ip) {
     res.writeHead(403, { "content-type": "text/plain" });
     return void res.end("not your portal\n");
+  }
+  if (target && !target.supervised) {
+    const unavailable = () => respondFailed(req, res,
+      "this temporary portal is not supervised — start the server in the thread and try again");
+    if (target.status !== "ready") return unavailable();
+    supervisor.touchCube(cubeName);
+    return proxyHttp(req, res, target, unavailable);
   }
   if (target?.status !== "ready") return startAndHold(label, cubeName, req, res);
   supervisor.touchCube(cubeName); // a browsed portal is activity, like a prompt
@@ -668,13 +675,13 @@ async function api(
   // workspace as cwd — hand out host-side file tools to whoever can reach
   // the port. The pi spawn passes --no-context-files for the same reason.
   const userThread = url.pathname.match(
-    /^\/api\/threads\/([^/]+)(?:\/(files|services|archive|environment)(?:\/(.+))?)?$/,
+    /^\/api\/threads\/([^/]+)(?:\/(files|services|portals|archive|environment)(?:\/(.+))?)?$/,
   );
   if (userThread) {
     const id = decodeId(userThread[1]!);
     const action = userThread[2];
-    // Only files takes a subpath — /history/junk etc. must stay 404s.
-    if (userThread[3] !== undefined && action !== "files") return json(res, 404, { error: "not found" });
+    // Only files and portal removal take a subpath.
+    if (userThread[3] !== undefined && action !== "files" && action !== "portals") return json(res, 404, { error: "not found" });
     if (!action) {
       if (method === "DELETE") {
         // Removal can refuse (409 mid-wake/push); only a thread that is
@@ -704,6 +711,24 @@ async function api(
         // explicit repair completes, just like initial provisioning.
         void supervisor.retrySetupForUserThread(id).catch((error) => console.warn(`setup retry: ${String(error)}`));
         return json(res, 202, { accepted: true });
+      }
+      return json(res, 404, { error: "not found" });
+    }
+    if (action === "portals") {
+      const port = userThread[3];
+      if (port !== undefined) {
+        if (method !== "DELETE" || !/^[1-9][0-9]{0,4}$/.test(port) || Number(port) > 65535) {
+          return json(res, 404, { error: "not found" });
+        }
+        supervisor.removePortalForUserThread(id, Number(port));
+        return json(res, 200, { ok: true });
+      }
+      if (method === "GET") return json(res, 200, { portals: supervisor.listPortalsForUserThread(id) });
+      if (method === "POST") {
+        let input: unknown;
+        try { input = JSON.parse(await readBody(req)); }
+        catch { return json(res, 400, { error: "invalid JSON body" }); }
+        return json(res, 200, supervisor.exposePortalForUserThread(id, input));
       }
       return json(res, 404, { error: "not found" });
     }
@@ -869,6 +894,8 @@ server.on("upgrade", (req, socket, head) => {
     supervisor.touchCube(cubeName);
     return void proxyUpgrade(req, socket, head, target);
   }
+  // An ad hoc process has no start command to replay, on HTTP or WS.
+  if (target && !target.supervised) return void refuseUpgrade(socket);
   // Not up (asleep, waking, service down): a WebSocket-only page — Vite
   // HMR, a WS app — used to die here until a full HTTP reload woke the
   // thread. Wake it the same way the HTTP path does, hold the upgrade
