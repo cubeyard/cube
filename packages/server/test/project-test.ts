@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { MockBackend } from "@cube/sandbox";
-import type { GitService } from "@cube/git";
+import type { PrReviewService, GitService } from "@cube/git";
 
 import { Registry } from "../src/registry.ts";
 import { CubeSupervisor, type ProjectInfo } from "../src/supervisor.ts";
@@ -323,18 +323,36 @@ assert.throws(
   () => supervisor.workspaceForUserRepository(thread.id, Number.MAX_SAFE_INTEGER),
   /no such repository/,
 );
-await assert.rejects(
-  () => supervisor.pushBaseForUserThread(thread.id, repositories[1]!.id),
-  /read-only references/,
-);
-await assert.rejects(
-  () => supervisor.reviewPrForUserThread(thread.id, repositories[1]!.id, { action: "prepare", number: 845 }),
-  /read-only references/,
-);
-await assert.rejects(
-  () => supervisor.reviewPrForUserThread(thread.id, repositories[1]!.id, { action: "prepare-rebase", number: 845 }),
-  /read-only references/,
-);
+// Reference edits and publication target its own remote, never the primary.
+const referencePath = supervisor.workspaceForUserRepository(thread.id, repositories[1]!.id);
+const primaryHead = git(cube.workspacePath, "rev-parse", "HEAD");
+const primaryRemote = git(primary.bare, "rev-parse", "main");
+fs.writeFileSync(path.join(referencePath, "DOCS.md"), "edited in the same thread\n");
+git(referencePath, ...author, "add", "DOCS.md");
+git(referencePath, ...author, "commit", "-m", "update reference");
+assert.equal((await supervisor.syncBaseForUserThread(thread.id, repositories[1]!.id)).base, "main");
+await supervisor.pushUserThread(thread.id, repositories[1]!.id);
+assert.equal(git(docs.bare, "rev-parse", repositories[1]!.branch), git(referencePath, "rev-parse", "HEAD"));
+await supervisor.pushBaseForUserThread(thread.id, repositories[1]!.id);
+assert.equal(git(docs.bare, "rev-parse", "main"), git(referencePath, "rev-parse", "HEAD"));
+assert.equal(git(cube.workspacePath, "rev-parse", "HEAD"), primaryHead);
+assert.equal(git(primary.bare, "rev-parse", "main"), primaryRemote);
+// Review preparation keeps the same safe workflow, scoped to this checkout.
+const reviews = (supervisor as unknown as { prReviews: PrReviewService }).prReviews;
+for (const [action, method] of [["prepare", "prepare"], ["prepare-rebase", "prepareRebase"]] as const) {
+  const original = reviews[method];
+  const reached = new Error("reference review adapter reached");
+  reviews[method] = async (workspace, url, number) => {
+    assert.equal(workspace, referencePath);
+    assert.equal(url, docs.bare);
+    assert.equal(number, 845);
+    throw reached;
+  };
+  try {
+    await assert.rejects(supervisor.reviewPrForUserThread(thread.id, repositories[1]!.id, { action, number: 845 }), error => error === reached);
+  } finally { reviews[method] = original; }
+}
+await assert.rejects(supervisor.readGithubForUserThread(thread.id, { number: 1, type: "issue", repositoryId: Number.MAX_SAFE_INTEGER }), /no such repository/);
 await assert.rejects(
   () => supervisor.reviewPrForUserThread(thread.id, Number.MAX_SAFE_INTEGER, { action: "prepare", number: 845 }),
   /no such repository/,

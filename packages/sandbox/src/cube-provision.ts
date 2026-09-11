@@ -237,7 +237,6 @@ export async function provisionCube(
                 source: spec.hostRepositories,
                 path: spec.guestRepositories ?? "/repos",
                 shift: "true",
-                readonly: "true",
               },
             }
           : {}),

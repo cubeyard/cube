@@ -305,8 +305,11 @@ const provisionRoutes = (fake: FakeIncus) => fake
     .route("GET", "/1.0/operations/op-create/wait", fake.hold())
     .route("GET", "/1.0/operations/op-delete/wait", fake.hold())
     .route("DELETE", "/1.0/operations/op-delete", sync({}));
-  const [ms, result] = await elapsed(provisionCube(fastClient(fake), spec, { rollbackTimeoutMs: 5000 }));
+  const [ms, result] = await elapsed(provisionCube(fastClient(fake), { ...spec, hostRepositories: path.join(workspace, "repos") }, { rollbackTimeoutMs: 5000 }));
   const error = rejection(result);
+  const createdDevices = JSON.parse(fake.seen("POST", "/1.0/instances")[0]!.body).devices;
+  assert.equal(createdDevices.repositories.source, path.join(workspace, "repos"));
+  assert.equal(createdDevices.repositories.readonly, undefined, "new references are writable");
   assert.ok(error instanceof IncusTimeoutError, "the original failure is what surfaces");
   assert.equal(error.kind, "create");
   assert.match(error.message, /create of builder: the daemon did not answer/);
@@ -381,6 +384,32 @@ const captureRoutes = (fake: FakeIncus) => fake
   assert.ok(ms < 1000, `cancel took ${ms}ms`);
   await fake.close();
   console.log("11 ok: aborted snapshot wait -> rejects with the reason");
+}
+
+
+// Existing thread mounts are upgraded in place, never rebound to another tree.
+{
+  const fake = await FakeIncus.listen();
+  const device = { type: "disk", source: "/thread/repos", path: "/repos", shift: "true", readonly: "true" };
+  let instance = { name: "builder", architecture: "x86_64", description: "", ephemeral: false,
+    profiles: [], config: {}, devices: { repositories: device, root: { type: "disk", path: "/" } } };
+  fake.route("GET", "/1.0/instances/builder", (_req, res) => envelope(res, { metadata: instance }))
+    .route("PUT", "/1.0/instances/builder", (req, res) => {
+      instance = JSON.parse(req.body);
+      accepted("/1.0/operations/op-upgrade")(req, res);
+    })
+    .route("GET", "/1.0/operations/op-upgrade/wait", finished("op-upgrade"));
+  const backend = new IncusBackend(fastClient(fake));
+  await backend.makeRepositoriesWritable("builder", "/thread/repos");
+  assert.equal(instance.devices.repositories.readonly, undefined);
+  assert.equal(instance.devices.repositories.source, "/thread/repos");
+  assert.deepEqual(instance.devices.root, { type: "disk", path: "/" });
+  await backend.makeRepositoriesWritable("builder", "/thread/repos");
+  assert.equal(fake.seen("PUT", "/1.0/instances/builder").length, 1, "already writable is a no-op");
+  await assert.rejects(backend.makeRepositoriesWritable("builder", "/other-thread/repos"), /does not match/);
+  assert.equal(fake.seen("PUT", "/1.0/instances/builder").length, 1, "wrong mount fails closed");
+  await fake.close();
+  console.log("reference mount upgrade is scoped and idempotent");
 }
 
 console.log("incus-client: all ok");
