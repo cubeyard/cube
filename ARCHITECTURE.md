@@ -159,7 +159,7 @@ creating → ready ⇄ running → idle → asleep → waking → ready
   attached as a shifted disk device. Caches are capped custom volumes. The
   container is cattle.
 - **Fresh thread snapshots:** project checks establish access/configuration;
-  each new thread refreshes every configured base branch before allocation and
+  each new thread refreshes every repository’s default branch before allocation and
   pins the returned OIDs. Fetch failures stop creation rather than falling back
   to the last checked commits. Existing threads and idempotent replays retain
   their pins. Concurrent duplicate creates share their refresh and allocation;
@@ -461,13 +461,14 @@ allow = ["repo.maven.apache.org", "*.gradle.org"]
 - The environment directory (`.cube`: setup, resume, cube.toml) may live
   outside the primary repository. A project's
   `environment = "<checkout>/<folder>"` points at a folder of one of its
-  reference repositories, mounted read-only at `/repos/<checkout>`:
+  thread-local reference repositories, mounted writable at `/repos/<checkout>`:
   setup/resume run from there with `/workspace` as cwd, `cube.toml` (hooks,
   services, network) is read from there, and the project check verifies
   the folder and parses its `cube.toml` at the pinned commit. This is how a
   repository that does not (yet) carry cube files gets an environment,
   versioned in a repository of the user's own; each thread snapshots the
-  choice with its repositories.
+  choice with its repositories. Local environment edits can be tested with
+  setup retry; publication targets the reference repository explicitly.
 
 - Default: no secrets enter the cube. (Host-side secret *injection* à la
   gondolin is out of scope for now; revisit if the need appears.)

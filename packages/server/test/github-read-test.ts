@@ -35,7 +35,7 @@ for (const input of [
   { number: 42, type: "pr", section: "constructor" },
   { number: 42, type: "pr", page: -1 },
 ]) await assert.rejects(read(input));
-await assert.rejects(readGithub("https://other.example/repo.git", { number: 1, type: "issue" }, undefined, run), /primary repository/);
+await assert.rejects(readGithub("https://other.example/repo.git", { number: 1, type: "issue" }, undefined, run), /selected thread repository/);
 assert.equal(calls.length, before);
 await assert.rejects(readGithub(repo, { number: 1, type: "issue" }, undefined, async () => "{broken"), /truncated JSON/);
 response = null;

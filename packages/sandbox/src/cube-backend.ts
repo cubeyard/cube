@@ -78,6 +78,8 @@ export interface CubeBackend {
   setState(name: string, action: IncusStateAction, opts?: SetStateOptions): Promise<void>;
   /** Resolve once the cube's eth0 holds `ip` (instant on the mock). */
   waitForNetwork(name: string, ip: string, opts?: WaitForNetworkOptions): Promise<void>;
+  /** Upgrade the thread-owned reference mount without replacing any checkout. */
+  makeRepositoriesWritable(name: string, hostRepositories: string): Promise<void>;
   /** Reconcile administrator CA roots before enabling egress or running hooks. */
   configureCaTrust(name: string, pem: string, signal?: AbortSignal): Promise<void>;
   /** Stand up the per-cube egress proxy (a no-op stub on the mock). */
@@ -126,6 +128,20 @@ export class IncusBackend implements CubeBackend {
   }
   waitForNetwork(name: string, ip: string, opts: WaitForNetworkOptions = {}) {
     return waitForCubeNetwork(this.client, name, ip, opts.timeoutMs, opts.signal);
+  }
+  async makeRepositoriesWritable(name: string, hostRepositories: string): Promise<void> {
+    const check = (devices: Record<string, Record<string, string>>) => {
+      const device = devices.repositories;
+      if (!device || device.type !== "disk" || device.source !== hostRepositories || device.path !== "/repos" || device.shift !== "true") {
+        throw new Error("reference mount does not match the thread checkout directory");
+      }
+      return device;
+    };
+    const instance = await this.client.getInstance(name);
+    if (check(instance.devices).readonly !== "true") return;
+    await this.client.updateInstance(name, (current) => {
+      delete check(current.devices).readonly;
+    });
   }
   configureCaTrust(name: string, pem: string, signal?: AbortSignal) {
     return configureCaTrust(this.client, name, pem, signal);
@@ -284,6 +300,9 @@ export class MockBackend implements CubeBackend {
     // The mock network is up the instant the instance is.
   }
 
+  async makeRepositoriesWritable(_name: string, _hostRepositories: string): Promise<void> {
+    // Mock checkouts are ordinary thread-local directories, already writable.
+  }
   async configureCaTrust(_name: string, pem: string, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
     validateCaBundle(pem);

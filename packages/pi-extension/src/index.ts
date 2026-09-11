@@ -525,6 +525,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
       const query = new URLSearchParams({ number: String(input.number), type: input.type });
       if (input.section !== undefined) query.set("section", input.section);
       if (input.page !== undefined) query.set("page", String(input.page));
+      if (input.repositoryId !== undefined) query.set("repositoryId", String(input.repositoryId));
       return threadRequest(`/github?${query}`, { timeoutMs: 40_000 }, signal);
     },
     pushBranch: (repositoryId, signal) =>

@@ -425,7 +425,7 @@ wrap to their full text inside the row; they are not reduced to a generic
 status or clipped preview.
 
 Detail is a vertical repository control board. The first row is permanently
-the writable primary checkout at `/workspace`; read-only reference rows print
+the writable primary checkout at `/workspace`; reference rows print
 `../repos/<checkout-name>`. Each row combines a state lamp, URL/base/checkout
 fields, and exact evidence: not checked, checking access and branch, resolved
 base plus abbreviated OID, or the complete repository error. Saving makes the
@@ -437,9 +437,9 @@ important-looking secondary control.
 
 ### Thread Repository Control Bank
 Every thread names its project and links back to that switchboard. Repository
-review is always scoped to the thread's pinned primary checkout. There is no
-repository selector: reference checkouts exist for agent context, not as
-publish targets. One signal-orange `ship` key pulls down an in-flow preflight
+review in the web panel is scoped to the thread's pinned primary checkout.
+There is no repository selector in that panel. The agent can edit, review and
+publish reference checkouts separately using explicit repository IDs. One signal-orange `ship` key pulls down an in-flow preflight
 panel with branch/base/ahead/working-copy readouts, committed paths on one side,
 and tracked/untracked local paths on the other. The distinction is load-bearing:
 the live diff is committed truth now; local paths cannot be pushed until the

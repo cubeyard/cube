@@ -49,7 +49,7 @@ export class Lifecycle {
     name: string,
     sandbox: Sandbox,
     phase: LifecyclePhase,
-    opts: { signal?: AbortSignal; directory?: string } = {},
+    opts: { signal?: AbortSignal; directory?: string; onOutput?: (chunk: Buffer) => void } = {},
   ): Promise<string | null> {
     const { signal } = opts;
     const directory = opts.directory ?? ".cube";
@@ -103,6 +103,7 @@ export class Lifecycle {
             tail = (tail + chunk.toString("utf8")).slice(-4096);
             try {
               append(chunk);
+              opts.onOutput?.(chunk);
               bytes += chunk.length;
             } catch (cause) {
               // Output arrives on a WebSocket event stack, outside the await

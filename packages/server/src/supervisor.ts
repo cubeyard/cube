@@ -6,6 +6,10 @@
  * sleep/wake lifecycle (idle cubes are `incus stop`ped; a prompt wakes them —
  * gated on waitForCubeNetwork, never on status:Running alone).
  */
+import { Effect } from "effect";
+import { makeEnvironmentProgress, type EnvironmentProgress } from "./environment-progress.ts";
+import { prepareRepositories, RepositoryRefreshError } from "./thread-preparation.ts";
+import { RepositoryOperations, RepositoryOperationError, runRepositoryEffect } from "./repository-operations.ts";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -220,8 +224,8 @@ const instanceName = (cube: string) => `cube-${cube}`;
  * outside that repository. The guest path is relative to /workspace:
  * /workspace and /repos are siblings in a cube exactly as <cube>/workspace
  * and <cube>/repos are on the host, so one string resolves in Incus and in
- * the mock alike. References are mounted read-only, so a declared
- * environment is the user's, not the agent's, to change.
+ * the mock alike. Each thread owns its writable reference checkouts; edits
+ * can be tested in place without changing the project or other threads.
  */
 function environmentDirs(cube: Pick<CubeRow, "workspacePath" | "environment">): {
   host: string; guest: string; guestAbsolute: string;
@@ -271,10 +275,13 @@ function threadState(cubeStatus: string): UserThreadSummary["state"] {
 }
 
 export class CubeSupervisor {
+  private readonly startup = Effect.runSync(makeEnvironmentProgress());
+  private readonly waitingTemplates = new Map<string, { projectId: string; key: string }>();
   private readonly registry: Registry;
   private readonly backend: CubeBackend;
   private readonly config: SupervisorConfig;
   private readonly git: GitService;
+  private readonly repositoryOperations: RepositoryOperations["Service"];
   private readonly prReviews: PrReviewService;
   private readonly lifecycle: Lifecycle;
   private readonly templates: EnvironmentTemplates | null;
@@ -343,6 +350,12 @@ export class CubeSupervisor {
     this.config = config;
     this.git = new GitService(config.reposRoot);
     this.prReviews = new PrReviewService(config.reposRoot);
+    this.repositoryOperations = RepositoryOperations.make({
+      resolve: (id, repositoryId) => this.repositoryForThread(id, repositoryId),
+      requireSeeded: ({ cube, repository }) => this.requireSeeded(cube, repository),
+      authenticate: async () => { await this.config.github?.ensureFresh(); },
+      reserve: (name, label) => this.reserveGitOp(name, label),
+    });
     this.lifecycle = new Lifecycle(path.join(config.cubesRoot, ".lifecycle"));
     this.templates = config.environmentCache === false
       ? null
@@ -522,6 +535,7 @@ export class CubeSupervisor {
           // boot would hit the wake-readiness race (tenth update). Normally
           // the IP is long up and this returns on the first poll.
           const net = networkForCube(cube.name, cube.subnetIndex);
+          await this.makeRepositoriesWritable(cube);
           await this.backend.waitForNetwork(instanceName(cube.name), net.ip);
           await this.startProxy(cube);
           span.end(true, "ready, proxy restarted");
@@ -760,7 +774,7 @@ export class CubeSupervisor {
     await Promise.all(
       repositories.map(async (repo) => {
         try {
-          const prepared = await this.git.prepareRepository(repo.url, repo.base);
+          const prepared = await this.git.prepareRepository(repo.url);
           this.registry.setProjectRepositoryCheck(repo.id, {
             status: "ready",
             resolvedBase: prepared.base,
@@ -826,41 +840,37 @@ export class CubeSupervisor {
   /** A project check verifies configuration/access, not freshness forever.
    * Fetch before allocating anything, pin the results locally, and never use
    * the older checked OIDs as a fallback. Existing threads keep their pins. */
-  private async prepareThreadRepositories(project: ProjectRow): Promise<ProjectRepositoryRow[]> {
-    const configured = this.registry.listProjectRepositories(project.id);
-    const span = new Span(this.registry, { kind: "thread-prepare" });
-    try {
-      await this.config.github?.ensureFresh();
-      // Drain every fetch even if one fails: shutdown must not leave work
-      // attached to a registry that has already been closed.
-      const results = await Promise.allSettled(configured.map(async (repo) => {
-        try {
-          const prepared = await this.git.prepareRepository(repo.url, repo.base);
-          return { ...repo, resolvedBase: prepared.base, baseOid: prepared.baseOid };
-        } catch (error) {
-          const raw = error instanceof Error ? error.message : String(error);
-          const message = describeRepoAuthFailure(raw, repo.url, this.config.github?.status().state === "connected") ?? raw;
-          throw new Error(`could not refresh ${repo.checkoutName}: ${message}`);
-        }
-      }));
-      const repositories = results.map(result => {
-        if (result.status === "rejected") throw result.reason;
-        return result.value;
-      });
-      if (this.closing) throw new Error("server is stopping — start the thread again after restart");
-      const failures = await this.environmentSnapshotErrors(repositories, project.environment);
-      if (failures.length) throw new Error(failures.join("; "));
-      // Detect edits/re-checks/deletion during fetch. The caller rechecks
-      // after its await too, immediately before synchronous allocation.
-      const current = this.requireReadyProject(project.id);
-      if (current.revision !== project.revision) throw new Error("project changed while refreshing repositories — start the thread again");
-      span.end(true, `${project.id}: ${repositories.map(repo => `${repo.checkoutName}@${repo.baseOid}`).join(", ")}`);
-      return repositories;
-    } catch (error) {
-      span.fail(error);
-      throw error;
-    }
-  }
+  private readonly prepareThreadRepositories = Effect.fn("CubeSupervisor.prepareThreadRepositories")(
+    function*(this: CubeSupervisor, project: ProjectRow) {
+      const configured = this.registry.listProjectRepositories(project.id);
+      const span = new Span(this.registry, { kind: "thread-prepare" });
+      return yield* Effect.gen({ self: this }, function* () {
+        yield* Effect.tryPromise({
+          try: () => this.config.github?.ensureFresh() ?? Promise.resolve(),
+          catch: (cause) => new RepositoryRefreshError({ message: `could not refresh repository access: ${describeError(cause)}`, cause }),
+        });
+        const tasks = configured.map((repo) => Effect.tryPromise({
+          try: () => this.git.prepareRepository(repo.url),
+          catch: (cause) => {
+            const raw = cause instanceof Error ? cause.message : String(cause);
+            const message = describeRepoAuthFailure(raw, repo.url, this.config.github?.status().state === "connected") ?? raw;
+            return new RepositoryRefreshError({ message: `could not refresh ${repo.checkoutName}: ${message}`, cause });
+          },
+        }).pipe(Effect.map((prepared) => ({ ...repo, resolvedBase: prepared.base, baseOid: prepared.baseOid }))));
+        const repositories = yield* prepareRepositories(tasks);
+        if (this.closing) return yield* Effect.fail(new Error("server is stopping — start the thread again after restart"));
+        const failures = yield* Effect.tryPromise({
+          try: () => this.environmentSnapshotErrors(repositories, project.environment),
+          catch: (cause) => new RepositoryRefreshError({ message: `could not validate the environment: ${describeError(cause)}`, cause }),
+        });
+        if (failures.length) return yield* Effect.fail(new Error(failures.join("; ")));
+        const current = yield* Effect.try({ try: () => this.requireReadyProject(project.id), catch: (cause) => cause instanceof Error ? cause : new Error(String(cause)) });
+        if (current.revision !== project.revision) return yield* Effect.fail(new Error("project changed while refreshing repositories — start the thread again"));
+        span.end(true, `${project.id}: ${repositories.map(repo => `${repo.checkoutName}@${repo.baseOid}`).join(", ")}`);
+        return repositories;
+      }).pipe(Effect.tapError((error) => Effect.sync(() => span.fail(error))));
+    },
+  );
 
   // ------------------------------------------------------------------ cubes
 
@@ -968,6 +978,7 @@ export class CubeSupervisor {
   private provisionSpec(cube: CubeRow): CubeProvisionSpec {
     const repositories = this.registry.listCubeRepositories(cube.id);
     return {
+      onProgress: (phase) => this.startup.update(cube.name, phase),
       name: instanceName(cube.name),
       image: cube.image,
       pool: this.config.pool,
@@ -1029,6 +1040,7 @@ export class CubeSupervisor {
       this.lifecycle.save(cube.name, "setup", { state: "running", startedAt: Date.now(), durationMs: null, error: null });
       // Seed from the exact snapshots refreshed before thread allocation.
       // Provisioning itself stays local-only; never fetch a second tip here.
+      Effect.runSync(this.startup.update(cube.name, "preparing repository checkouts…"));
       await this.seedCube(cube, signal);
       signal.throwIfAborted();
       span.phase("seed");
@@ -1049,9 +1061,13 @@ export class CubeSupervisor {
       let template: { id: string; source: CubeTemplateSource } | null = null;
       if (projectId && this.templates && hasSetup) {
         const repos = this.registry.listCubeRepositories(cube.id);
+        const key = await this.environmentKeyFor(cube, spec);
+        Effect.runSync(Effect.sync(() => this.waitingTemplates.set(cube.name, { projectId, key })).pipe(
+          Effect.andThen(this.startup.update(cube.name, "preparing a reusable environment…")),
+        ));
         const pending = this.templates.acquire(
           projectId,
-          await this.environmentKeyFor(cube, spec),
+          key,
           (instance) => this.buildTemplate(cube, repos, instance),
         );
         try {
@@ -1069,6 +1085,8 @@ export class CubeSupervisor {
             thread: this.threadIdFor(cube), ok: false, detail: `fresh setup instead: ${describeError(error)}`,
           });
           console.warn(`environment template [${cube.name}]: ${String(error)}`);
+        } finally {
+          Effect.runSync(Effect.sync(() => this.waitingTemplates.delete(cube.name)));
         }
       }
       signal.throwIfAborted();
@@ -1110,11 +1128,13 @@ export class CubeSupervisor {
       const activationError = setupError ?? await this.runLifecycleScript(cube, "resume", signal);
       if (setupError === null) span.phase("resume", activationError, activationError === null);
       signal.throwIfAborted();
+      Effect.runSync(this.startup.update(cube.name, activationError ?? "environment ready", "", activationError !== null));
       this.registry.setCubeStatus(cube.name, "ready", activationError);
       span.end(true, activationError ? "ready with setup complaint" : "ready");
     } catch (error) {
       // provisionCube rolled the instance back; bridge/volume are reusable.
       const cancelled = signal.aborted;
+      Effect.runSync(this.startup.update(cube.name, cancelled ? PROVISION_CANCELLED : "environment creation failed", String(error), true));
       this.failLifecycle(cube.name, "setup", cancelled ? PROVISION_CANCELLED : String(error));
       // A cancelled provision is torn down by the deletion that cancelled
       // it; the status is only for a teardown that then fails half-way.
@@ -1188,12 +1208,14 @@ export class CubeSupervisor {
       if (error) throw new Error(error);
       await this.runtimes.get(builder.name)?.proxy?.close();
       this.runtimes.delete(builder.name);
+      Effect.runSync(this.startup.update(builder.name, "saving the prepared environment…"));
       const template = await this.backend.captureTemplate(spec, "env", { timeoutMs: MAINTENANCE_CALL_TIMEOUT_MS });
       span.phase("capture");
       // From here the instance is the template, not a cube: its bridge is
       // gone (captureTemplate), its row, subnet and host tree go now.
       removeStoppedTree(path.dirname(builder.workspacePath));
       this.lifecycle.forget(builder.name);
+      Effect.runSync(this.startup.forget(builder.name));
       this.registry.deleteCube(builder.name);
       span.end(true, "template ready");
       return template;
@@ -1215,6 +1237,7 @@ export class CubeSupervisor {
       });
       removeStoppedTree(path.dirname(builder.workspacePath));
       this.lifecycle.forget(builder.name);
+      Effect.runSync(this.startup.forget(builder.name));
       this.registry.deleteCube(builder.name);
     } catch (error) {
       // Never turn one unremovable guest directory into a daemon outage.
@@ -1359,6 +1382,12 @@ export class CubeSupervisor {
     return tracked;
   }
 
+  private async makeRepositoriesWritable(cube: CubeRow): Promise<void> {
+    if (this.registry.listCubeRepositories(cube.id).length > 1) {
+      await this.backend.makeRepositoriesWritable(instanceName(cube.name), path.join(path.dirname(cube.workspacePath), "repos"));
+    }
+  }
+
   private async doSleep(cube: CubeRow, reason: "manual" | "idle"): Promise<void> {
     const name = instanceName(cube.name);
     const span = this.span("sleep", cube);
@@ -1389,6 +1418,7 @@ export class CubeSupervisor {
     const span = this.span("wake", cube);
     try {
       const state = await this.backend.getState(name);
+      await this.makeRepositoriesWritable(cube);
       if (state.status !== "Running") await this.backend.setState(name, "start");
       span.phase("start", state.status === "Running" ? "already running" : null);
       await this.backend.waitForNetwork(name, net.ip);
@@ -1449,10 +1479,21 @@ export class CubeSupervisor {
   }
 
   private runLifecycleScript(cube: CubeRow, script: LifecyclePhase, signal?: AbortSignal): Promise<string | null> {
-    return this.lifecycle.run(cube.name, this.backend.sandbox(instanceName(cube.name)), script, {
-      signal, directory: environmentDirs(cube).guest,
-    });
+    return Effect.runPromise(this.runLifecycle(cube, script, signal));
   }
+
+  private readonly runLifecycle = Effect.fn("CubeSupervisor.runLifecycle")(
+    function*(this: CubeSupervisor, cube: CubeRow, script: LifecyclePhase, signal?: AbortSignal) {
+      yield* this.startup.update(cube.name, `running ${environmentDirs(cube).guestAbsolute}/${script}…`);
+      return yield* Effect.tryPromise({
+        try: () => this.lifecycle.run(cube.name, this.backend.sandbox(instanceName(cube.name)), script, {
+          signal, directory: environmentDirs(cube).guest,
+          onOutput: (chunk) => Effect.runSync(this.startup.update(cube.name, undefined, chunk.toString("utf8"))),
+        }),
+        catch: (cause) => cause instanceof Error ? cause : new Error(String(cause)),
+      });
+    },
+  );
 
   /** Lifecycle state + bounded logs per phase, and the environment directory
    * (guest path) the scripts came from. */
@@ -1490,9 +1531,11 @@ export class CubeSupervisor {
     return this.transition(cubeName, (async () => {
       const span = this.span("retry-setup", cube);
       try {
+        Effect.runSync(this.startup.forget(cubeName));
         this.lifecycle.save(cubeName, "setup", { state: "running", startedAt: Date.now(), durationMs: null, error: null });
         const name = instanceName(cubeName);
         const state = await this.backend.getState(name);
+        await this.makeRepositoriesWritable(cube);
         if (state.status !== "Running") await this.backend.setState(name, "start");
         await this.backend.waitForNetwork(name, networkForCube(cubeName, cube.subnetIndex).ip);
         signal.throwIfAborted();
@@ -1505,6 +1548,7 @@ export class CubeSupervisor {
         if (setupError === null) span.phase("resume", error, error === null);
         signal.throwIfAborted();
         this.registry.touchCube(cubeName);
+        Effect.runSync(this.startup.update(cubeName, error ?? "environment ready", "", error !== null));
         this.registry.setCubeStatus(cubeName, "ready", error);
         span.end(true, error ? "ready with setup complaint" : "ready");
       } catch (error) {
@@ -1828,15 +1872,16 @@ export class CubeSupervisor {
     );
   }
 
-  async readGithubForUserThread(id: string, input: { number: number; type: string; section?: string; page?: number }, signal?: AbortSignal) {
+  async readGithubForUserThread(id: string, input: { number: number; type: string; section?: string; page?: number; repositoryId?: number }, signal?: AbortSignal) {
     const { cubeName } = this.resolveUserThread(id);
     const cube = this.requireCube(cubeName);
     const primary = this.registry.listCubeRepositories(cube.id)[0];
     if (!primary) throw new Error("thread has no primary repository");
-    return readGithub(primary.url, input, signal);
+    const repository = input.repositoryId === undefined ? primary : this.repositoryForThread(id, input.repositoryId).repository;
+    return readGithub(repository.url, input, signal);
   }
 
-  /** Native stack review operations share the existing primary-repository
+  /** Native stack review operations share thread-scoped repository
    * authorization and cube lifetime guard. Snapshots stay on the host. */
   async reviewPrForUserThread(
     id: string,
@@ -1844,13 +1889,7 @@ export class CubeSupervisor {
     input: { action: "prepare" | "prepare-rebase"; number: number } | { action: "plan" | "verify"; token: string } | { action: "publish"; token: string; plan: string } | { action: "inspect"; token: string; plan: string; number: number; section: "patch" | "prDiff"; page?: number },
     signal?: AbortSignal,
   ) {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    // Planning and inspection use the local snapshot and need no GitHub
-    // credentials. Preparation and publication/reconciliation remain online.
-    if (input.action !== "inspect" && input.action !== "plan") await this.config.github?.ensureFresh();
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    return this.withGitOp(cube.name, `pr-review ${input.action}`, async () => {
+    return this.runRepositoryOperation(id, repositoryId, `pr-review ${input.action}`, async (repository) => {
       const { workspacePath: ws, url } = repository;
       switch (input.action) {
         case "prepare": return this.prReviews.prepare(ws, url, input.number, signal);
@@ -1860,7 +1899,7 @@ export class CubeSupervisor {
         case "publish": return this.prReviews.publish(ws, url, input.token, input.plan, signal);
         case "verify": return this.prReviews.verify(ws, url, input.token, signal);
       }
-    });
+    }, signal, input.action !== "inspect" && input.action !== "plan");
   }
 
   /** Host-side review diff for one repository, separated into
@@ -1871,80 +1910,35 @@ export class CubeSupervisor {
     return this.withGitOp(cube.name, null, () => this.git.diff(repository.workspacePath, repository.baseOid));
   }
 
-  /** Push the primary repository's current branch to its upstream (host creds). */
-  async pushUserThread(id: string, repositoryId: number, signal?: AbortSignal): Promise<string> {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh();
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    return this.withGitOp(cube.name, "push", () =>
-      this.git.push(repository.workspacePath, repository.url, undefined, signal),
-    );
+  /** Push the selected checkout's current branch using host credentials. */
+  pushUserThread(id: string, repositoryId: number, signal?: AbortSignal): Promise<string> {
+    return this.runRepositoryOperation(id, repositoryId, "push", (repository) =>
+      this.git.push(repository.workspacePath, repository.url, undefined, signal), signal);
   }
 
-  /** Refresh origin/<base> through the host-owned mirror so the sandboxed
-   * agent can rebase without receiving host network credentials. */
-  async syncBaseForUserThread(
-    id: string,
-    repositoryId: number,
-    signal?: AbortSignal,
-  ): Promise<{ base: string; oid: string }> {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh(); // agent-driven Ship runs long after the 8h token dies (sol Medium)
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    const oid = await this.withGitOp(cube.name, "sync", () =>
-      this.git.syncBase(repository.workspacePath, repository.url, repository.base, signal),
-    );
-    return { base: repository.base, oid };
+  /** Refresh only the selected repository's configured base, without merging. */
+  syncBaseForUserThread(id: string, repositoryId: number, signal?: AbortSignal): Promise<{ base: string; oid: string }> {
+    return this.runRepositoryOperation(id, repositoryId, "sync", async (repository) => {
+      const oid = await this.git.syncBase(repository.workspacePath, repository.url, repository.base, signal);
+      return { base: repository.base, oid };
+    }, signal);
   }
 
-  /** Publish HEAD to the repository's configured base. This is deliberately
-   * non-forced; an upstream advance is returned to the agent as a rejection. */
-  async pushBaseForUserThread(
-    id: string,
-    repositoryId: number,
-    signal?: AbortSignal,
-  ): Promise<{ branch: string; base: string }> {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh(); // agent-driven Ship runs long after the 8h token dies (sol Medium)
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    const branch = await this.withGitOp(cube.name, "push-base", () =>
-      this.git.push(repository.workspacePath, repository.url, repository.base, signal),
-    );
-    return { branch, base: repository.base };
+  /** Non-forced publication; upstream advances remain rejections. */
+  pushBaseForUserThread(id: string, repositoryId: number, signal?: AbortSignal): Promise<{ branch: string; base: string }> {
+    return this.runRepositoryOperation(id, repositoryId, "push-base", async (repository) => {
+      const branch = await this.git.push(repository.workspacePath, repository.url, repository.base, signal);
+      return { branch, base: repository.base };
+    }, signal);
   }
 
-  /** Push, then open a PR via gh (host-side auth). Defaults the title to
-   * the thread's own title — the user never has to invent one. */
-  async createPrForUserThread(
-    id: string,
-    repositoryId: number,
-    opts: { title?: string; body?: string },
-    signal?: AbortSignal,
-  ): Promise<{ url: string; branch: string }> {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh();
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    const title =
-      opts.title?.trim() ||
-      this.registry.getThread(id)?.title ||
-      repository.branch ||
-      "cube changes";
-    return this.withGitOp(cube.name, "pr", () =>
-      this.git.createPr(
-        repository.workspacePath,
-        {
-          url: repository.url,
-          base: repository.base,
-          title,
-          body: opts.body,
-        },
-        signal,
-      ),
-    );
+  createPrForUserThread(id: string, repositoryId: number, opts: { title?: string; body?: string }, signal?: AbortSignal): Promise<{ url: string; branch: string }> {
+    return this.runRepositoryOperation(id, repositoryId, "pr", (repository) => this.git.createPr(
+      repository.workspacePath,
+      { url: repository.url, base: repository.base,
+        title: opts.title?.trim() || this.registry.getThread(id)?.title || repository.branch || "cube changes",
+        body: opts.body }, signal,
+    ), signal);
   }
 
   /** Reject review against a half-written clone: provisioning still
@@ -1959,23 +1953,33 @@ export class CubeSupervisor {
    * while a push/PR is mid-flight (a DELETE must not race a publish). */
   /** `label` names the operation in the event record; null for the
    * read-only reads the UI polls (state, diff), which are not recorded. */
-  private async withGitOp<T>(cubeName: string, label: string | null, work: () => Promise<T>): Promise<T> {
+  private withGitOp<T>(cubeName: string, label: string | null, work: () => Promise<T>): Promise<T> {
+    return runRepositoryEffect(this.repositoryOperations.guard(cubeName, label,
+      Effect.tryPromise({ try: work, catch: (cause) => new RepositoryOperationError({ cause }) }),
+    ));
+  }
+
+  private reserveGitOp(cubeName: string, label: string | null) {
     if (this.removing.has(cubeName)) throw new Error(`cube ${cubeName} is busy being removed`);
     const count = this.gitOps.get(cubeName) ?? 0;
     this.gitOps.set(cubeName, count + 1);
     const span = label === null ? null : this.span("git", cubeName);
-    try {
-      const result = await work();
-      span?.end(true, label);
-      return result;
-    } catch (error) {
-      span?.end(false, `${label}: ${describeError(error)}`);
-      throw error;
-    } finally {
-      const now = (this.gitOps.get(cubeName) ?? 1) - 1;
-      if (now <= 0) this.gitOps.delete(cubeName);
-      else this.gitOps.set(cubeName, now);
-    }
+    return {
+      success: () => { span?.end(true, label); },
+      failure: (error: unknown) => { span?.end(false, `${label}: ${describeError(error)}`); },
+      release: () => {
+        const now = (this.gitOps.get(cubeName) ?? 1) - 1;
+        if (now <= 0) this.gitOps.delete(cubeName);
+        else this.gitOps.set(cubeName, now);
+      },
+    };
+  }
+
+  private runRepositoryOperation<T>(
+    id: string, repositoryId: number, label: string,
+    work: (repository: CubeRepositoryRow) => Promise<T>, signal?: AbortSignal, online = true,
+  ): Promise<T> {
+    return runRepositoryEffect(this.repositoryOperations.run(id, repositoryId, label, work, { signal, online }));
   }
 
   /** Resolve a repository id only inside the thread's own cube. */
@@ -1990,20 +1994,6 @@ export class CubeSupervisor {
       .find((candidate) => candidate.id === repositoryId);
     if (!repository) throw new Error(`no such repository ${repositoryId} for thread ${id}`);
     return { cube, repository };
-  }
-
-  /** Additional checkouts are immutable references inside the sandbox and
-   * never receive host credentials or publishing operations. */
-  private primaryRepositoryForThread(
-    id: string,
-    repositoryId: number,
-  ): { cube: CubeRow; repository: CubeRepositoryRow } {
-    const result = this.repositoryForThread(id, repositoryId);
-    const primary = this.registry.listCubeRepositories(result.cube.id)[0];
-    if (result.repository.id !== primary?.id) {
-      throw new Error("additional repositories are read-only references; only the primary repository can be published");
-    }
-    return result;
   }
 
   private async sweepIdle(): Promise<void> {
@@ -2082,6 +2072,7 @@ export class CubeSupervisor {
       }
       this.registry.deleteCube(name);
       this.lifecycle.forget(name);
+      Effect.runSync(this.startup.forget(name));
       // Deleting a thread destroys its workspace and history (PRODUCT.md):
       // the host-side tree — workspace, reference checkouts, pi sessions —
       // goes with it instead of accumulating under cubesRoot.
@@ -2157,7 +2148,7 @@ export class CubeSupervisor {
 
   private async createFreshUserThread(projectId: string, key: string | null): Promise<{ id: string; created: boolean }> {
     const project = this.requireReadyProject(projectId);
-    const preparation = this.prepareThreadRepositories(project);
+    const preparation = Effect.runPromise(this.prepareThreadRepositories(project));
     this.threadPreparations.add(preparation);
     let repositories: ProjectRepositoryRow[];
     try { repositories = await preparation; }
@@ -2332,6 +2323,22 @@ export class CubeSupervisor {
 
   // ------------------------------------------------------------ pty bridge
 
+  terminalProgressForUserThread(id: string): EnvironmentProgress | undefined {
+    const { cubeName } = this.resolveUserThread(id);
+    const cube = this.requireCube(cubeName);
+    let progress = Effect.runSync(this.startup.get(cubeName));
+    if (cube.error && !progress?.failed) {
+      // In-memory snapshots disappear on restart. Restore evidence from the
+      // failed phase, not a successful setup that preceded a resume failure.
+      const phase = (["setup", "resume"] as const).find((phase) =>
+        this.lifecycle.read(cubeName, phase)?.error === cube.error);
+      const log = phase ? this.lifecycle.log(cubeName, phase).slice(-32768) : "";
+      Effect.runSync(this.startup.update(cubeName, cube.error, log, true));
+      progress = Effect.runSync(this.startup.get(cubeName));
+    }
+    return progress;
+  }
+
   /**
    * Spawn plan for a thread's pi TUI (Phase 3d step 2): the real `pi`
    * binary with ONLY the cube extension, this thread's session file, and
@@ -2342,25 +2349,30 @@ export class CubeSupervisor {
    */
   async terminalPlan(
     id: string,
-    onStatus: (text: string) => void,
+    onStatus: (text: string, progress?: EnvironmentProgress) => void,
   ): Promise<{ argv: string[]; cwd: string; env: Record<string, string | undefined> }> {
     const { cubeName, threadId } = this.resolveUserThread(id);
     let cube = this.requireCube(cubeName);
     if (cube.status === "creating") {
-      // Provisioning runs detached; wait it out (waking would retry a failed
-      // provision against a missing instance and bury its error). The
-      // events it records say which step is running: report each change so
-      // a long .cube/setup reads as progress, not as a stuck spinner.
-      let last = "";
-      while ((cube = this.requireCube(cubeName)).status === "creating") {
-        const text = this.provisionProgress(cube);
-        if (text !== last) {
-          onStatus(text);
-          last = text;
+      cube = await Effect.runPromise(Effect.gen({ self: this }, function* () {
+        let last: EnvironmentProgress | undefined;
+        for (;;) {
+          const current = this.requireCube(cubeName);
+          const waiting = this.waitingTemplates.get(cubeName);
+          const template = waiting && this.registry.findEnvironmentTemplate(waiting.projectId, waiting.key);
+          if (template?.status === "building") yield* this.startup.copy(template.instance.replace(/^cube-/, ""), cubeName);
+          const progress = yield* this.startup.get(cubeName);
+          if (progress && progress !== last) {
+            onStatus(progress.phase, progress);
+            last = progress;
+          } else if (!progress && !last) onStatus(this.provisionProgress(current));
+          if (current.status !== "creating") return current;
+          yield* Effect.sleep("500 millis");
         }
-        await new Promise((resolve) => setTimeout(resolve, 1_000));
-      }
+      }));
     }
+    const progress = this.terminalProgressForUserThread(id);
+    if (progress) onStatus(progress.phase, progress);
     if (cube.status === "error") {
       throw new Error(`environment error: ${cube.error ?? "unknown"}`);
     }
