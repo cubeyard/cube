@@ -57,6 +57,18 @@ const host: CodeCapabilityHost = {
     hostCalls.push({ operation: "ensureServices" });
     return [{ name: "web", state: "running", url: "https://web.example" }];
   },
+  async exposePortal(input) {
+    hostCalls.push({ operation: "exposePortal", value: input });
+    return { ...input, url: "https://preview.example", supervised: false };
+  },
+  async listPortals() {
+    hostCalls.push({ operation: "listPortals" });
+    return [{ name: "preview", port: 4173, url: "https://preview.example", lifetime: "thread", supervised: false }];
+  },
+  async removePortal(port) {
+    hostCalls.push({ operation: "removePortal", value: port });
+    return { ok: true };
+  },
   async archiveThread() {
     hostCalls.push({ operation: "archiveThread" });
     return { ok: true };
@@ -205,9 +217,45 @@ assert.deepEqual(environment.value, {
 assert.deepEqual(hostCalls.map((call) => call.operation), ["environmentStatus", "retryEnvironmentSetup"]);
 console.log("4b ok: environment SDK and capability dispatch");
 
+hostCalls.length = 0;
+const never = new AbortController().signal;
+const portals = await runCodeMode({
+  source: `return {
+    exposed: await cube.portals.expose({ port: 4173, name: "preview" }),
+    listed: await cube.portals.list(),
+    removed: await cube.portals.remove(4173),
+  };`,
+  call: capability,
+});
+assert.deepEqual((portals.value as any).exposed, {
+  port: 4173, name: "preview", lifetime: "thread", url: "https://preview.example", supervised: false,
+});
+assert.deepEqual(hostCalls.map((call) => call.operation), ["exposePortal", "listPortals", "removePortal"]);
+assert.deepEqual(hostCalls[0]?.value, { port: 4173, name: "preview", lifetime: "thread" });
+assert.equal(hostCalls[2]?.value, 4173);
+assert.deepEqual((portals.value as any).removed, { ok: true });
+for (const source of [
+  `cube.portals.expose({ port: 4173, name: "preview", host: "evil.example" })`,
+  `cube.portals.expose({ port: 4173, name: "preview", thread: "other" })`,
+]) {
+  await assert.rejects(runCodeMode({ source: `return await ${source};`, call: capability }), /unknown capability option/);
+}
+for (const input of [
+  { port: 0, name: "preview" },
+  { port: 65_536, name: "preview" },
+  { port: 1.5, name: "preview" },
+  { port: 4173, name: "   " },
+  { port: 4173, name: "x".repeat(81) },
+  { port: 4173, name: "preview", lifetime: "session" },
+  { port: 4173, name: "preview", lifetime: null },
+]) {
+  await assert.rejects(capability("portals.expose", input, never), /port must|name must|exceeds 80|lifetime must/);
+}
+await assert.rejects(capability("portals.remove", { port: -1 }, never), /port must/);
+console.log("4c ok: temporary portal SDK dispatch and validation");
+
 // ---- 5. Dispatcher validation is fail-closed -----------------------------
 
-const never = new AbortController().signal;
 await assert.rejects(() => capability("host.fetch", {}, never), /unknown code capability/);
 await assert.rejects(() => capability("git.pushBase", { repositoryId: "7" }, never), /positive integer/);
 await assert.rejects(

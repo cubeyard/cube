@@ -10,6 +10,12 @@ export interface ExecInput {
   timeoutMs: number;
 }
 
+export interface ExposePortalInput {
+  port: number;
+  name: string;
+  lifetime: "thread";
+}
+
 export interface CodeCapabilityHost {
   exec(input: ExecInput, signal: AbortSignal): Promise<unknown>;
   readText(path: string, signal: AbortSignal): Promise<string>;
@@ -26,6 +32,9 @@ export interface CodeCapabilityHost {
     signal: AbortSignal,
   ): Promise<unknown>;
   ensureServices(signal: AbortSignal): Promise<unknown[]>;
+  exposePortal(input: ExposePortalInput, signal: AbortSignal): Promise<unknown>;
+  listPortals(signal: AbortSignal): Promise<unknown[]>;
+  removePortal(port: number, signal: AbortSignal): Promise<unknown>;
   archiveThread(signal: AbortSignal): Promise<unknown>;
   environmentStatus(signal: AbortSignal): Promise<unknown>;
   retryEnvironmentSetup(signal: AbortSignal): Promise<unknown>;
@@ -68,6 +77,13 @@ function timeoutMs(args: Record<string, unknown>): number {
   return Number(value);
 }
 
+function portalPort(value: unknown): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 1 || Number(value) > 65_535) {
+    throw new TypeError("port must be an integer from 1 to 65535");
+  }
+  return Number(value);
+}
+
 /** Construct the closed capability dispatcher used by QuickJS. New SDK
  * methods must be added explicitly here and to CODE_MODE_API. */
 export function createCodeCapability(host: CodeCapabilityHost): CodeModeCapability {
@@ -85,6 +101,8 @@ export function createCodeCapability(host: CodeCapabilityHost): CodeModeCapabili
       "environment.status": [], "environment.retrySetup": [],
       "fs.readText": ["path"], "fs.writeText": ["path", "content"],
       "repositories.list": [], "services.ensure": [], "thread.archive": [],
+      "portals.expose": ["port", "name", "lifetime"],
+      "portals.list": [], "portals.remove": ["port"],
       "git.syncBase": ["repositoryId"], "git.pushBranch": ["repositoryId"],
       "git.pushBase": ["repositoryId"], "git.createPr": ["repositoryId", "title", "body"],
     };
@@ -171,6 +189,17 @@ export function createCodeCapability(host: CodeCapabilityHost): CodeModeCapabili
         );
       case "services.ensure":
         return host.ensureServices(signal);
+      case "portals.expose": {
+        const name = stringField(args, "name", { maxLength: 80 })!;
+        if (!name.trim()) throw new TypeError("name must not be blank");
+        const lifetime = args.lifetime === undefined ? "thread" : args.lifetime;
+        if (lifetime !== "thread") throw new TypeError("lifetime must be thread");
+        return host.exposePortal({ port: portalPort(args.port), name, lifetime }, signal);
+      }
+      case "portals.list":
+        return host.listPortals(signal);
+      case "portals.remove":
+        return host.removePortal(portalPort(args.port), signal);
       case "thread.archive":
         return host.archiveThread(signal);
       case "environment.status":

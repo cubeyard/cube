@@ -87,6 +87,34 @@ await cube.exec("mkdir -p notes");
 await cube.fs.writeText("notes/result.txt", "hello");
 ```
 
+## Temporary portals
+
+`cube.portals.expose({ port, name, lifetime? })` exposes a temporary route to
+a server that is **already listening on `0.0.0.0`**. `port` is an integer from
+1 through 65535, `name` is nonblank and at most 80 characters, and `lifetime`
+defaults to (and can only be) `"thread"`. Use `cube.portals.list()` to inspect
+routes and `cube.portals.remove(port)` to remove one.
+
+This API does not start, kill, or restart the server process and does not edit
+service configuration. The thread must be ready when exposing a port. The
+returned record includes `supervised: false`; exposure registers a route, not
+a successful readiness check. Start the server separately, then share `url`.
+Repeating exposure for the same port updates its name and keeps its URL.
+
+Routes survive daemon restarts and expire when the thread is archived or
+deleted, or on explicit removal; there is no separate clock-based timeout.
+Removing or archiving revokes routing for new requests, not established streams
+or the process. Deleting the thread destroys its environment and processes.
+Sleeping stops an unsupervised process; restart it yourself after waking.
+Portal requests do not wake the thread or restart that process. Keep declared
+services for persistent development servers that need automatic supervision.
+Temporary portals retain Cube's existing trusted loopback/Tailnet access model;
+they do not add per-user authentication or public sharing.
+
+```js
+return await cube.portals.expose({ port: 3000, name: "Testportal", lifetime: "thread" });
+```
+
 ## Regression coverage
 
 Run with the repository's supported Node version (26+):
