@@ -250,6 +250,26 @@ function assertRefName(name: string): void {
   }
 }
 
+interface RepositoryTarget {
+  base: string;
+  /** Advertised commit for a remote default, or a ref for an explicit base. */
+  ref: string;
+}
+
+function parseRemoteHead(stdout: string): RepositoryTarget | null {
+  const base = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(stdout)?.[1];
+  const ref = /^([0-9a-f]{40,64})\tHEAD$/m.exec(stdout)?.[1];
+  return base && ref ? { base, ref } : null;
+}
+
+/** Adapt the existing Promise-based Git boundary once, including cancellation
+ * and normalization of non-Error rejections. The callback stays lazy. */
+const gitOperation = <A>(run: (signal: AbortSignal) => Promise<A>): Effect.Effect<A, Error> =>
+  Effect.tryPromise({
+    try: run,
+    catch: (cause) => cause instanceof Error ? cause : new Error(String(cause)),
+  });
+
 export class GitService {
   private readonly reposRoot: string;
   private readonly run: ProcessRunner;
@@ -340,39 +360,56 @@ export class GitService {
 
   private readonly prepareRepositoryLocked = Effect.fn("GitService.prepareRepository")(
     function*(this: GitService, url: string, mirror: string, requestedBase?: string | null) {
-      let base = requestedBase;
-      let advertisedOid: string | undefined;
-      if (base == null) {
-        const remote = yield* Effect.tryPromise({
-          try: (signal) => this.git(["ls-remote", "--symref", "--", url, "HEAD"], NETWORK_TIMEOUT_MS, undefined, signal),
-          catch: (cause) => cause instanceof Error ? cause : new Error(String(cause)),
-        });
-        base = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(remote.stdout)?.[1];
-        advertisedOid = /^([0-9a-f]{40,64})\tHEAD$/m.exec(remote.stdout)?.[1];
-        if (!base || !advertisedOid) {
-          return yield* Effect.fail(new Error("repository has no resolvable default branch"));
-        }
-      }
-      yield* Effect.try(() => assertRefName(base!));
-      if (yield* Effect.sync(() => fs.existsSync(mirror))) {
-        yield* Effect.tryPromise({
-          try: (signal) => this.git(["--git-dir", mirror, "remote", "update", "--prune"], NETWORK_TIMEOUT_MS, undefined, signal),
-          catch: (cause) => cause instanceof Error ? cause : new Error(String(cause)),
-        });
-      } else {
-        yield* Effect.tryPromise({
-          try: (signal) => this.cloneMirrorAtomic(url, mirror, signal),
-          catch: (cause) => cause instanceof Error ? cause : new Error(String(cause)),
-        });
-      }
-      // Pin the exact advertised HEAD, not a ref another thread could later move.
-      const resolved = yield* Effect.tryPromise((signal) => this.git(
-        ["--git-dir", mirror, "rev-parse", "--verify", `${advertisedOid ?? `refs/heads/${base}`}^{commit}`],
-        LOCAL_TIMEOUT_MS, undefined, signal,
-      )).pipe(Effect.mapError(() => new Error(`repository has no branch ${JSON.stringify(base)} at the advertised commit`)));
-      return { base: base!, baseOid: resolved.stdout.trim() };
+      const target = yield* this.discoverTarget(url, requestedBase);
+      yield* this.refreshMirror(url, mirror);
+      const baseOid = yield* this.resolveCommit(mirror, target);
+      return { base: target.base, baseOid };
     },
   );
+
+  private readonly discoverTarget = Effect.fnUntraced(
+    function*(this: GitService, url: string, requestedBase?: string | null) {
+      let target: RepositoryTarget;
+      if (requestedBase != null) {
+        target = { base: requestedBase, ref: `refs/heads/${requestedBase}` };
+      } else {
+        const remote = yield* this.gitEffect(["ls-remote", "--symref", "--", url, "HEAD"], NETWORK_TIMEOUT_MS);
+        const advertised = parseRemoteHead(remote.stdout);
+        if (!advertised) {
+          return yield* Effect.fail(new Error("repository has no resolvable default branch"));
+        }
+        target = advertised;
+      }
+      yield* Effect.try(() => assertRefName(target.base));
+      return target;
+    },
+  );
+
+  /** Caller holds the mirror lock; do not call the locking ensureMirror here. */
+  private readonly refreshMirror = Effect.fnUntraced(
+    function*(this: GitService, url: string, mirror: string) {
+      if (yield* Effect.sync(() => fs.existsSync(mirror))) {
+        yield* this.gitEffect(["--git-dir", mirror, "remote", "update", "--prune"], NETWORK_TIMEOUT_MS);
+      } else {
+        yield* gitOperation((signal) => this.cloneMirrorAtomic(url, mirror, signal));
+      }
+    },
+  );
+
+  private resolveCommit(mirror: string, target: RepositoryTarget): Effect.Effect<string, Error> {
+    // Pin the exact advertised HEAD, not a ref another thread could later move.
+    return this.gitEffect(
+      ["--git-dir", mirror, "rev-parse", "--verify", `${target.ref}^{commit}`],
+      LOCAL_TIMEOUT_MS,
+    ).pipe(
+      Effect.map((resolved) => resolved.stdout.trim()),
+      Effect.mapError(() => new Error(`repository has no branch ${JSON.stringify(target.base)} at the advertised commit`)),
+    );
+  }
+
+  private gitEffect(args: string[], timeoutMs: number): Effect.Effect<RunResult, Error> {
+    return gitOperation((signal) => this.git(args, timeoutMs, undefined, signal));
+  }
 
   /** Bare mirror without the network refresh — for push, which brings its
    * own objects via bundle. Same lock + atomic clone. */
