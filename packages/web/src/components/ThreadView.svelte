@@ -277,7 +277,7 @@
     const preflight = await checkShip();
     if (!preflight || shipBlock(preflight)) return;
     const repository = preflight.repository;
-    const context = `Work in /workspace. This is the primary repository, id ${repository.id}; use the code tool with cube.git.syncBase(${repository.id}) and cube.git.pushBase(${repository.id}) for authenticated fetch and push. The configured base is origin/${repository.base}. Additional repositories under /repos are read-only references and must not be changed.`;
+    const context = `Work in /workspace. This is the primary repository, id ${repository.id}; use the code tool with cube.git.syncBase(${repository.id}) and cube.git.pushBase(${repository.id}) for authenticated fetch and push. The configured base is origin/${repository.base}. This Ship action covers only the primary repository. Do not include or publish changes in additional repositories under /repos.`;
     shipPhase = "sending";
     if (!terminalPane?.submitPrompt(`${context}\n\n${SHIP_PROMPT}`)) {
       shipError = "The agent terminal is not connected. Reconnect it, then retry Ship.";

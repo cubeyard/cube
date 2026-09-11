@@ -572,6 +572,7 @@ async function api(
     const result = await whileConnected(res, (signal) => supervisor.readGithubForUserThread(
       decodeId(githubRead[1]!),
       { number: Number(url.searchParams.get("number")), type: url.searchParams.get("type") ?? "",
+        repositoryId: url.searchParams.has("repositoryId") ? Number(url.searchParams.get("repositoryId")) : undefined,
         section: url.searchParams.get("section") ?? undefined,
         page: url.searchParams.has("page") ? Number(url.searchParams.get("page")) : undefined },
       signal,

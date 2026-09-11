@@ -18,8 +18,25 @@ must not become a second command language for everything Git already does.
 A normal review adds commits and preserves the published head as an ancestor.
 A user-requested rebase intentionally rewrites history. These are distinct
 session intents, not a global `force: true` option. Only the new rebase session
-permits replacing existing commits. Primary repository only; reference
-repositories stay read-only.
+permits replacing existing commits.
+
+## Reference repositories and borrowed environments
+
+Every attached repository is a writable, thread-local checkout. Select its ID
+with `cube.repositories.list()` and run local Git in `/workspace` (primary) or
+`/repos/<checkoutName>` (reference). All `cube.git` operations use that explicit
+ID, including the full prepare/plan/inspect/publish/verify PR workflow.
+`cube.github.read(number, { type, repositoryId })` reads issues and reviews in
+the same repository; omitting the ID preserves the primary default. Unattached
+repositories are rejected before credential refresh or publication.
+
+For borrowed `.cube` files, edit the directory returned by
+`cube.environment.status()` and test with `cube.environment.retrySetup()`.
+Neither testing nor base refresh publishes changes or resets local work. Publish
+reference changes separately when authorized; there is no atomic multi-repository
+publication. The UI Ship action still covers only the primary repository.
+Existing threads retain their code snapshots; boot recovery/wake upgrades only
+the old read-only mount flag without re-cloning or resetting checkouts.
 
 ## Ordinary PRs and native stacks
 

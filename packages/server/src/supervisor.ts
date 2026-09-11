@@ -6,6 +6,8 @@
  * sleep/wake lifecycle (idle cubes are `incus stop`ped; a prompt wakes them —
  * gated on waitForCubeNetwork, never on status:Running alone).
  */
+import { Effect } from "effect";
+import { RepositoryOperations, RepositoryOperationError, runRepositoryEffect } from "./repository-operations.ts";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -220,8 +222,8 @@ const instanceName = (cube: string) => `cube-${cube}`;
  * outside that repository. The guest path is relative to /workspace:
  * /workspace and /repos are siblings in a cube exactly as <cube>/workspace
  * and <cube>/repos are on the host, so one string resolves in Incus and in
- * the mock alike. References are mounted read-only, so a declared
- * environment is the user's, not the agent's, to change.
+ * the mock alike. Each thread owns its writable reference checkouts; edits
+ * can be tested in place without changing the project or other threads.
  */
 function environmentDirs(cube: Pick<CubeRow, "workspacePath" | "environment">): {
   host: string; guest: string; guestAbsolute: string;
@@ -275,6 +277,7 @@ export class CubeSupervisor {
   private readonly backend: CubeBackend;
   private readonly config: SupervisorConfig;
   private readonly git: GitService;
+  private readonly repositoryOperations: RepositoryOperations["Service"];
   private readonly prReviews: PrReviewService;
   private readonly lifecycle: Lifecycle;
   private readonly templates: EnvironmentTemplates | null;
@@ -343,6 +346,12 @@ export class CubeSupervisor {
     this.config = config;
     this.git = new GitService(config.reposRoot);
     this.prReviews = new PrReviewService(config.reposRoot);
+    this.repositoryOperations = RepositoryOperations.make({
+      resolve: (id, repositoryId) => this.repositoryForThread(id, repositoryId),
+      requireSeeded: ({ cube, repository }) => this.requireSeeded(cube, repository),
+      authenticate: async () => { await this.config.github?.ensureFresh(); },
+      reserve: (name, label) => this.reserveGitOp(name, label),
+    });
     this.lifecycle = new Lifecycle(path.join(config.cubesRoot, ".lifecycle"));
     this.templates = config.environmentCache === false
       ? null
@@ -522,6 +531,7 @@ export class CubeSupervisor {
           // boot would hit the wake-readiness race (tenth update). Normally
           // the IP is long up and this returns on the first poll.
           const net = networkForCube(cube.name, cube.subnetIndex);
+          await this.makeRepositoriesWritable(cube);
           await this.backend.waitForNetwork(instanceName(cube.name), net.ip);
           await this.startProxy(cube);
           span.end(true, "ready, proxy restarted");
@@ -1359,6 +1369,12 @@ export class CubeSupervisor {
     return tracked;
   }
 
+  private async makeRepositoriesWritable(cube: CubeRow): Promise<void> {
+    if (this.registry.listCubeRepositories(cube.id).length > 1) {
+      await this.backend.makeRepositoriesWritable(instanceName(cube.name), path.join(path.dirname(cube.workspacePath), "repos"));
+    }
+  }
+
   private async doSleep(cube: CubeRow, reason: "manual" | "idle"): Promise<void> {
     const name = instanceName(cube.name);
     const span = this.span("sleep", cube);
@@ -1389,6 +1405,7 @@ export class CubeSupervisor {
     const span = this.span("wake", cube);
     try {
       const state = await this.backend.getState(name);
+      await this.makeRepositoriesWritable(cube);
       if (state.status !== "Running") await this.backend.setState(name, "start");
       span.phase("start", state.status === "Running" ? "already running" : null);
       await this.backend.waitForNetwork(name, net.ip);
@@ -1493,6 +1510,7 @@ export class CubeSupervisor {
         this.lifecycle.save(cubeName, "setup", { state: "running", startedAt: Date.now(), durationMs: null, error: null });
         const name = instanceName(cubeName);
         const state = await this.backend.getState(name);
+        await this.makeRepositoriesWritable(cube);
         if (state.status !== "Running") await this.backend.setState(name, "start");
         await this.backend.waitForNetwork(name, networkForCube(cubeName, cube.subnetIndex).ip);
         signal.throwIfAborted();
@@ -1828,15 +1846,16 @@ export class CubeSupervisor {
     );
   }
 
-  async readGithubForUserThread(id: string, input: { number: number; type: string; section?: string; page?: number }, signal?: AbortSignal) {
+  async readGithubForUserThread(id: string, input: { number: number; type: string; section?: string; page?: number; repositoryId?: number }, signal?: AbortSignal) {
     const { cubeName } = this.resolveUserThread(id);
     const cube = this.requireCube(cubeName);
     const primary = this.registry.listCubeRepositories(cube.id)[0];
     if (!primary) throw new Error("thread has no primary repository");
-    return readGithub(primary.url, input, signal);
+    const repository = input.repositoryId === undefined ? primary : this.repositoryForThread(id, input.repositoryId).repository;
+    return readGithub(repository.url, input, signal);
   }
 
-  /** Native stack review operations share the existing primary-repository
+  /** Native stack review operations share thread-scoped repository
    * authorization and cube lifetime guard. Snapshots stay on the host. */
   async reviewPrForUserThread(
     id: string,
@@ -1844,13 +1863,7 @@ export class CubeSupervisor {
     input: { action: "prepare" | "prepare-rebase"; number: number } | { action: "plan" | "verify"; token: string } | { action: "publish"; token: string; plan: string } | { action: "inspect"; token: string; plan: string; number: number; section: "patch" | "prDiff"; page?: number },
     signal?: AbortSignal,
   ) {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    // Planning and inspection use the local snapshot and need no GitHub
-    // credentials. Preparation and publication/reconciliation remain online.
-    if (input.action !== "inspect" && input.action !== "plan") await this.config.github?.ensureFresh();
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    return this.withGitOp(cube.name, `pr-review ${input.action}`, async () => {
+    return this.runRepositoryOperation(id, repositoryId, `pr-review ${input.action}`, async (repository) => {
       const { workspacePath: ws, url } = repository;
       switch (input.action) {
         case "prepare": return this.prReviews.prepare(ws, url, input.number, signal);
@@ -1860,7 +1873,7 @@ export class CubeSupervisor {
         case "publish": return this.prReviews.publish(ws, url, input.token, input.plan, signal);
         case "verify": return this.prReviews.verify(ws, url, input.token, signal);
       }
-    });
+    }, signal, input.action !== "inspect" && input.action !== "plan");
   }
 
   /** Host-side review diff for one repository, separated into
@@ -1871,80 +1884,35 @@ export class CubeSupervisor {
     return this.withGitOp(cube.name, null, () => this.git.diff(repository.workspacePath, repository.baseOid));
   }
 
-  /** Push the primary repository's current branch to its upstream (host creds). */
-  async pushUserThread(id: string, repositoryId: number, signal?: AbortSignal): Promise<string> {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh();
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    return this.withGitOp(cube.name, "push", () =>
-      this.git.push(repository.workspacePath, repository.url, undefined, signal),
-    );
+  /** Push the selected checkout's current branch using host credentials. */
+  pushUserThread(id: string, repositoryId: number, signal?: AbortSignal): Promise<string> {
+    return this.runRepositoryOperation(id, repositoryId, "push", (repository) =>
+      this.git.push(repository.workspacePath, repository.url, undefined, signal), signal);
   }
 
-  /** Refresh origin/<base> through the host-owned mirror so the sandboxed
-   * agent can rebase without receiving host network credentials. */
-  async syncBaseForUserThread(
-    id: string,
-    repositoryId: number,
-    signal?: AbortSignal,
-  ): Promise<{ base: string; oid: string }> {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh(); // agent-driven Ship runs long after the 8h token dies (sol Medium)
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    const oid = await this.withGitOp(cube.name, "sync", () =>
-      this.git.syncBase(repository.workspacePath, repository.url, repository.base, signal),
-    );
-    return { base: repository.base, oid };
+  /** Refresh only the selected repository's configured base, without merging. */
+  syncBaseForUserThread(id: string, repositoryId: number, signal?: AbortSignal): Promise<{ base: string; oid: string }> {
+    return this.runRepositoryOperation(id, repositoryId, "sync", async (repository) => {
+      const oid = await this.git.syncBase(repository.workspacePath, repository.url, repository.base, signal);
+      return { base: repository.base, oid };
+    }, signal);
   }
 
-  /** Publish HEAD to the repository's configured base. This is deliberately
-   * non-forced; an upstream advance is returned to the agent as a rejection. */
-  async pushBaseForUserThread(
-    id: string,
-    repositoryId: number,
-    signal?: AbortSignal,
-  ): Promise<{ branch: string; base: string }> {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh(); // agent-driven Ship runs long after the 8h token dies (sol Medium)
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    const branch = await this.withGitOp(cube.name, "push-base", () =>
-      this.git.push(repository.workspacePath, repository.url, repository.base, signal),
-    );
-    return { branch, base: repository.base };
+  /** Non-forced publication; upstream advances remain rejections. */
+  pushBaseForUserThread(id: string, repositoryId: number, signal?: AbortSignal): Promise<{ branch: string; base: string }> {
+    return this.runRepositoryOperation(id, repositoryId, "push-base", async (repository) => {
+      const branch = await this.git.push(repository.workspacePath, repository.url, repository.base, signal);
+      return { branch, base: repository.base };
+    }, signal);
   }
 
-  /** Push, then open a PR via gh (host-side auth). Defaults the title to
-   * the thread's own title — the user never has to invent one. */
-  async createPrForUserThread(
-    id: string,
-    repositoryId: number,
-    opts: { title?: string; body?: string },
-    signal?: AbortSignal,
-  ): Promise<{ url: string; branch: string }> {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh();
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    const title =
-      opts.title?.trim() ||
-      this.registry.getThread(id)?.title ||
-      repository.branch ||
-      "cube changes";
-    return this.withGitOp(cube.name, "pr", () =>
-      this.git.createPr(
-        repository.workspacePath,
-        {
-          url: repository.url,
-          base: repository.base,
-          title,
-          body: opts.body,
-        },
-        signal,
-      ),
-    );
+  createPrForUserThread(id: string, repositoryId: number, opts: { title?: string; body?: string }, signal?: AbortSignal): Promise<{ url: string; branch: string }> {
+    return this.runRepositoryOperation(id, repositoryId, "pr", (repository) => this.git.createPr(
+      repository.workspacePath,
+      { url: repository.url, base: repository.base,
+        title: opts.title?.trim() || this.registry.getThread(id)?.title || repository.branch || "cube changes",
+        body: opts.body }, signal,
+    ), signal);
   }
 
   /** Reject review against a half-written clone: provisioning still
@@ -1959,23 +1927,33 @@ export class CubeSupervisor {
    * while a push/PR is mid-flight (a DELETE must not race a publish). */
   /** `label` names the operation in the event record; null for the
    * read-only reads the UI polls (state, diff), which are not recorded. */
-  private async withGitOp<T>(cubeName: string, label: string | null, work: () => Promise<T>): Promise<T> {
+  private withGitOp<T>(cubeName: string, label: string | null, work: () => Promise<T>): Promise<T> {
+    return runRepositoryEffect(this.repositoryOperations.guard(cubeName, label,
+      Effect.tryPromise({ try: work, catch: (cause) => new RepositoryOperationError({ cause }) }),
+    ));
+  }
+
+  private reserveGitOp(cubeName: string, label: string | null) {
     if (this.removing.has(cubeName)) throw new Error(`cube ${cubeName} is busy being removed`);
     const count = this.gitOps.get(cubeName) ?? 0;
     this.gitOps.set(cubeName, count + 1);
     const span = label === null ? null : this.span("git", cubeName);
-    try {
-      const result = await work();
-      span?.end(true, label);
-      return result;
-    } catch (error) {
-      span?.end(false, `${label}: ${describeError(error)}`);
-      throw error;
-    } finally {
-      const now = (this.gitOps.get(cubeName) ?? 1) - 1;
-      if (now <= 0) this.gitOps.delete(cubeName);
-      else this.gitOps.set(cubeName, now);
-    }
+    return {
+      success: () => { span?.end(true, label); },
+      failure: (error: unknown) => { span?.end(false, `${label}: ${describeError(error)}`); },
+      release: () => {
+        const now = (this.gitOps.get(cubeName) ?? 1) - 1;
+        if (now <= 0) this.gitOps.delete(cubeName);
+        else this.gitOps.set(cubeName, now);
+      },
+    };
+  }
+
+  private runRepositoryOperation<T>(
+    id: string, repositoryId: number, label: string,
+    work: (repository: CubeRepositoryRow) => Promise<T>, signal?: AbortSignal, online = true,
+  ): Promise<T> {
+    return runRepositoryEffect(this.repositoryOperations.run(id, repositoryId, label, work, { signal, online }));
   }
 
   /** Resolve a repository id only inside the thread's own cube. */
@@ -1990,20 +1968,6 @@ export class CubeSupervisor {
       .find((candidate) => candidate.id === repositoryId);
     if (!repository) throw new Error(`no such repository ${repositoryId} for thread ${id}`);
     return { cube, repository };
-  }
-
-  /** Additional checkouts are immutable references inside the sandbox and
-   * never receive host credentials or publishing operations. */
-  private primaryRepositoryForThread(
-    id: string,
-    repositoryId: number,
-  ): { cube: CubeRow; repository: CubeRepositoryRow } {
-    const result = this.repositoryForThread(id, repositoryId);
-    const primary = this.registry.listCubeRepositories(result.cube.id)[0];
-    if (result.repository.id !== primary?.id) {
-      throw new Error("additional repositories are read-only references; only the primary repository can be published");
-    }
-    return result;
   }
 
   private async sweepIdle(): Promise<void> {
