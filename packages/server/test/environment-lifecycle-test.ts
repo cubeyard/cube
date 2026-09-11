@@ -219,6 +219,14 @@ try {
   await supervisor.terminalPlan(bad.id, (_text, progress) => { failedProgress = progress; });
   assert.equal(failedProgress?.failed, true);
   assert.match(failedProgress!.log, /broken-output/);
+  const restoredSetup = new CubeSupervisor(registry, backend, config);
+  try {
+    const snapshot = restoredSetup.terminalProgressForUserThread(bad.id);
+    assert.equal(snapshot?.failed, true);
+    assert.match(snapshot!.log, /broken-output/);
+  } finally {
+    await restoredSetup.close();
+  }
   assert.ok(registry.listEvents({ kind: "environment", cube: badName }).some((e) => e.phase === "template-unavailable"));
   await supervisor.sleepCube(badName); await supervisor.wakeCube(badName);
   assert.equal(supervisor.listUserThreads().find((t) => t.id === bad.id)!.state, "error");
@@ -230,6 +238,27 @@ try {
   await supervisor.terminalPlan(bad.id, (_text, progress) => { repairedProgress = progress; });
   assert.equal(repairedProgress?.failed, false, "repair clears obsolete failure snapshots");
   assert.equal(backend.captures, captures); assert.match(fs.readFileSync(path.join(badWorkspace, "lifecycle"), "utf8"), /repaired\nresume/);
+
+  // Reconstruct the supervisor to discard in-memory progress, as on restart.
+  // Each failed phase must restore its own durable output tail.
+  const resumeRepo = repository("bad-resume", "#!/bin/sh\necho setup-success-only\n", "#!/bin/sh\necho resume-failure-evidence\nexit 9\n");
+  const resumeProject = supervisor.createProject({ name: "bad resume", repositories: [{ url: resumeRepo.bare }] });
+  await settled(supervisor, resumeProject.id);
+  const resumeThread = await supervisor.createUserThread(resumeProject.id);
+  await cubeSettled(registry, supervisor.resolveUserThread(resumeThread.id).cubeName);
+  const restored = new CubeSupervisor(registry, backend, config);
+  try {
+    let progress: EnvironmentProgress | undefined;
+    await restored.terminalPlan(resumeThread.id, (_text, snapshot) => { progress = snapshot; });
+    assert.equal(progress?.failed, true);
+    assert.match(progress!.log, /resume-failure-evidence/);
+    assert.doesNotMatch(progress!.log, /setup-success-only/);
+    assert.deepEqual(restored.terminalProgressForUserThread(resumeThread.id), progress);
+  } finally {
+    await restored.close();
+  }
+  await supervisor.removeUserThread(resumeThread.id);
+  await supervisor.deleteProject(resumeProject.id);
 
   // Deleting the project deletes its template.
   for (const id of [a.id, b.id, c.id, d.id, e.id]) await supervisor.removeUserThread(id);

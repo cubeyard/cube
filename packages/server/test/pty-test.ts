@@ -159,8 +159,9 @@ console.log("pty-test: ALL PASS");
 
 // A setup failure remains inspectable when reconnecting to an already-live PTY.
 await Effect.runPromise(Effect.gen(function* () {
-  const progress = { phase: "Setup failed", log: "dependency failed\n", startedAt: 1, updatedAt: 2, truncated: false, failed: true };
+  let progress = { phase: "Setup failed", log: "dependency failed\n", startedAt: 1, updatedAt: 2, truncated: false, failed: true };
   const terminals = new PiTerminals({
+    progress: () => progress,
     plan: (_id, onStatus) => Effect.runPromise(Effect.sync(() => {
       onStatus(progress.phase, progress);
       return { argv: ["sh", "-c", "cat"], cwd: "/tmp", env: process.env };
@@ -175,6 +176,12 @@ await Effect.runPromise(Effect.gen(function* () {
     terminals.attach("setup-failed", late, 80, 24);
     assert.deepEqual(late.frame("status")?.progress, progress);
     assert.ok(late.frame("attached"), "reconnected client can continue into the usable thread");
+    progress = { ...progress, phase: "environment ready", log: "repaired\n", failed: false };
+    const repaired = new FakeClient();
+    terminals.attach("setup-failed", repaired, 80, 24);
+    assert.deepEqual(repaired.frame("status")?.progress, progress, "reconnect uses repaired state, not the cached failure");
+    assert.ok(repaired.frame("attached"));
+    assert.equal(repaired.frame("spawned"), undefined, "repair does not respawn the live PTY");
   }).pipe(Effect.ensuring(Effect.sync(() => terminals.close())));
 }));
 console.log("8 ok: failed startup log replays even after PTY spawn");
