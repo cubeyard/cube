@@ -332,6 +332,14 @@ export class PrReviewService {
           await this.git(repo, ["merge-base", "--is-ancestor", review.stack.baseOid, candidate], signal);
         } catch { return fail("rebased candidate must contain the exact prepared base commit"); }
         if (candidate === target.oid || candidate === review.stack.baseOid) return fail("rebase must produce a changed, nonempty PR branch");
+        // An empty commit has its own SHA, so comparing commits is not enough:
+        // a rebase driven through its conflicts with `--skip` can arrive at a
+        // branch that carries none of the PR's work, and publishing that would
+        // replace the PR with its own base. Compare content, not identity.
+        if (await this.git(repo, ["rev-parse", `${candidate}^{tree}`], signal)
+          === await this.git(repo, ["rev-parse", `${review.stack.baseOid}^{tree}`], signal)) {
+          return fail("the rebased branch changes nothing against its base; if the base already contains this work, close the PR instead of replacing it with an empty branch");
+        }
         if (await this.git(repo, ["rev-list", "--merges", `${review.stack.baseOid}..${candidate}`], signal)) {
           return fail("rebased PR history must be linear above the prepared base");
         }
