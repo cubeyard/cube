@@ -20,7 +20,7 @@ Create a reproducible development environment without weakening Cube's host/gues
 Call `cube.environment.status()` first and read `directory`.
 
 - `/workspace/.cube`: the primary repository carries its own environment. Edit it in place.
-- A folder under `/repos/<checkout>/…/.cube`: the project keeps its environment in a reference repository, for a primary that does not ship one. That folder is read-only in this thread. Do not create `/workspace/.cube` beside it (the declared folder wins wholesale). Propose changes as a diff for that repository; they take effect after they are pushed and the project is checked again, in a new thread.
+- A folder under `/repos/<checkout>/…/.cube`: the project keeps its environment in a reference repository, for a primary that does not ship one. Edit that thread-local checkout in place. Do not create `/workspace/.cube` beside it (the declared folder wins wholesale). Test local repairs with `cube.environment.retrySetup()` and check status. For authorized publication, find the reference repository ID with `cube.repositories.list()` and use its own git/PR workflow from `/repos/<checkout>`. Publication is separate from the primary repository and is not needed to test a repair.
 
 ## Discover the repository contract
 

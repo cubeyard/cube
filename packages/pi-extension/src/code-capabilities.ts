@@ -21,7 +21,7 @@ export interface CodeCapabilityHost {
   readText(path: string, signal: AbortSignal): Promise<string>;
   writeText(path: string, content: string, signal: AbortSignal): Promise<void>;
   listRepositories(signal: AbortSignal): Promise<unknown[]>;
-  readGithub(input: { number: number; type: string; section?: string; page?: number }, signal: AbortSignal): Promise<unknown>;
+  readGithub(input: { number: number; type: string; section?: string; page?: number; repositoryId?: number }, signal: AbortSignal): Promise<unknown>;
   reviewPr(repositoryId: number, input: { action: "prepare" | "prepare-rebase"; number: number } | { action: "plan" | "verify"; token: string } | { action: "publish"; token: string; plan: string } | { action: "inspect"; token: string; plan: string; number: number; section: "patch" | "prDiff"; page?: number }, signal: AbortSignal): Promise<unknown>;
   syncBase(repositoryId: number, signal: AbortSignal): Promise<unknown>;
   pushBranch(repositoryId: number, signal: AbortSignal): Promise<unknown>;
@@ -91,7 +91,7 @@ export function createCodeCapability(host: CodeCapabilityHost): CodeModeCapabili
     const args = record(rawArgs);
     const fields: Record<string, readonly string[]> = {
       exec: ["command", "cwd", "timeoutMs"],
-      "github.read": ["number", "type", "section", "page"],
+      "github.read": ["number", "type", "section", "page", "repositoryId"],
       "git.preparePrUpdate": ["repositoryId", "number"],
       "git.preparePrRebase": ["repositoryId", "number"],
       "git.planPrUpdate": ["repositoryId", "token"],
@@ -139,6 +139,7 @@ export function createCodeCapability(host: CodeCapabilityHost): CodeModeCapabili
           throw new TypeError("page must be a positive integer");
         }
         return host.readGithub({
+          repositoryId: args.repositoryId === undefined ? undefined : repositoryId(args),
           number: args.number as number,
           type: args.type,
           section: stringField(args, "section", { optional: true, maxLength: 32 }),

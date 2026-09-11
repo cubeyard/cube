@@ -88,7 +88,9 @@ A repository that carries no `.cube` can borrow one: add a reference
 repository to the project and set `"environment": "<checkout>/<folder>"`
 (also a field on the project page). The `.cube` in that folder then supplies
 setup, resume and `cube.toml`; it runs from `/repos/<checkout>/…` with
-`/workspace` as cwd and is read-only in the thread. The check verifies the
+`/workspace` as cwd. The reference checkout is writable: edit the declared
+folder, then retry setup to test it locally without publication. Publish
+through the reference repository ID, separately from the primary. The check verifies the
 folder and parses its `cube.toml` at the pinned commit, so a typo is a project
 error, not a thread that fails minutes into setup. Creation revalidates the
 folder and TOML against the newly fetched reference commit too. `[network] allow` in any

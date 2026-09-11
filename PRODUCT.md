@@ -91,7 +91,7 @@ Confirmed today:
   prints project attribution on every row, and supports a URL-backed project
   filter.
 - Thread create, open, rename, and delete. Creation chooses a ready project;
-  the writable primary checkout is `/workspace`, with read-only reference
+  the writable primary checkout is `/workspace`, with writable reference
   checkouts at `../repos/<checkout-name>` (guest paths
   `/repos/<checkout-name>`).
 - The thread view embeds the real pi TUI over a terminal WebSocket. Cube does
@@ -99,9 +99,9 @@ Confirmed today:
 - Primary-repository review controls in the thread view: inspect its committed
   diff and run Ship. Ship preflights committed versus local work, then hands the
   full commit/fetch/rebase/test/push runbook to the live agent. Host-scoped tools
-  provide authenticated, non-forced fetch/push for the primary only, without
-  exposing credentials to the sandbox. Reference repositories cannot be
-  changed or published.
+  provide authenticated, non-forced fetch/push for every attached repository,
+  without exposing credentials to the sandbox. Reference changes and PRs are
+  published separately by repository ID; the UI Ship action remains primary-only.
 - Primary-workspace file listing and disk usage, plus links to declared
   services.
 - Provider auth state surfaced from the host (`pi` owns login; cube only

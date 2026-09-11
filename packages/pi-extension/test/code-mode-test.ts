@@ -90,6 +90,12 @@ assert.deepEqual((await runCodeMode({
 })).value, { data: { title: "Private issue" }, number: 12, type: "issue", section: "comments", page: 2 });
 await assert.rejects(capability("github.read", { number: 12, type: "issue", page: 0 }, new AbortController().signal), /positive integer/);
 
+assert.deepEqual((await runCodeMode({
+  source: `return await cube.github.read(12, { type: "pr", repositoryId: 8 });`,
+  call: capability,
+})).value, { data: { title: "Private issue" }, number: 12, type: "pr", repositoryId: 8 });
+await assert.rejects(capability("github.read", { number: 12, type: "pr", repositoryId: -1 }, new AbortController().signal), /repositoryId/);
+
 const reviewToken = "a".repeat(32);
 const reviewPlan = "b".repeat(32);
 for (const [source, expected] of [

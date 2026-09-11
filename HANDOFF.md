@@ -33,7 +33,8 @@ evidence; do not infer acceptance from a successful build.
    Install and app-only upgrade were user-tested; this path was not recorded.
 2. **Real-Incus UI acceptance:** use a fresh disposable registry to create a
    two-repository project, start a thread, prove both guest mounts, the additional
-   repository's read-only access and the primary repository diff. Automated
+   repository's writable access, in-place upgrade of an old read-only mount,
+   and the primary repository diff. Automated
    multi-repo smokes passed; the complete UI path remained a follow-up.
 3. **macOS launcher edge paths:** destroy, base-changing reboot upgrade and a
    collision on SSH port 2222 were not recorded as verified.
@@ -112,12 +113,17 @@ threads require `ready`, refresh every repository’s default branch before allo
 and pin the fetched OIDs. A failed refresh creates no thread and never falls
 back to stale checked code. Existing threads and idempotent replays keep their
 original snapshots; provisioning remains local-only. The primary checkout is `/workspace`; optional reference
-repositories mount at `/repos/<checkout-name>` and are read-only. Review and
-ship operate on the immutable primary repository snapshot.
+repositories mount writable at `/repos/<checkout-name>`. Agent git/PR operations
+are scoped to any attached repository ID; UI Ship remains primary-only.
+The Effect `RepositoryOperations` service owns validation, authentication and
+lifetime reservations. Request cancellation drains host git before release;
+publication is never retried automatically or atomic across repositories.
+Existing reference mounts are upgraded in place at boot recovery/wake; real
+Incus acceptance of this upgrade remains required.
 
 A project may declare `environment = "<checkout>/<folder>"`: its `.cube`
 (setup, resume, cube.toml) then comes from that folder of a reference
-repository instead of the primary checkout — read-only in the thread, verified
+repository instead of the primary checkout — editable in the thread, verified
 and parsed by the project check and again at the refreshed reference commit
 before thread creation, snapshotted per cube
 (`cube.environment`). `supervisor.ts` `environmentDirs` is the one place that
