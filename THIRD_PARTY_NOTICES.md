@@ -3,6 +3,18 @@
 The following source is vendored in this repository and retains its own
 copyright and license terms.
 
+## Effect source reference and runtime dependency
+
+`repos/effect/` is an unmodified source snapshot of
+[Effect](https://github.com/Effect-TS/effect), pinned in `repos/README.md`.
+The reference is excluded from app artifacts; the server uses the published
+`effect` npm package at the same version.
+
+Copyright (c) 2023 Effectful Technologies Inc
+
+Licensed under the MIT License in `repos/effect/LICENSE`. Bundled third-party
+files retain their upstream notices and licenses.
+
 ## pi source reference
 
 `repos/pi/` is an unmodified source snapshot of

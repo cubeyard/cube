@@ -40,8 +40,14 @@ lives alongside them in `src/core/`; the agent loop, providers and TUI live in
 `repos/pi/packages/{agent,ai,tui}/`. Keep cube's isolation contracts even when
 upstream examples assume a trusted host. See `repos/README.md` for pins and updates.
 
-When upgrading pi, update both cube package pins, `pnpm-lock.yaml`, and the
-`repos/pi` subtree to the matching release tag in the same change. An upgrade
+For Effect 4, read `repos/effect/LLMS.md` before writing Effect code, then inspect
+the relevant module and tests under `repos/effect/packages/effect/`. Use the
+pinned v4 APIs, not v3 examples. The initial usage is schema validation in
+`packages/server/src/onboarding.ts`; broader rewrites remain separate work.
+
+When upgrading pi or Effect, update all consuming cube package pins,
+`pnpm-lock.yaml`, and the corresponding `repos/` subtree to the matching release
+tag in the same change. An upgrade
 request includes updating its reference subtree; never just edit the vendored
 version field. Update `repos/README.md` and run `pnpm check:references` after
 installing dependencies. This check also runs before `pnpm test`.

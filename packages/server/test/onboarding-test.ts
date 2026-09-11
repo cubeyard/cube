@@ -15,8 +15,15 @@ try {
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { completed: true });
   fs.writeFileSync(file, "{");
   assert.equal(isOnboardingComplete(file), false, "incomplete state does not skip onboarding");
+  for (const state of [null, true, [], {}, { completed: false }, { completed: "true" }, { completed: 1 }]) {
+    fs.writeFileSync(file, JSON.stringify(state));
+    assert.equal(isOnboardingComplete(file), false, `invalid completion state: ${JSON.stringify(state)}`);
+  }
+  fs.writeFileSync(file, JSON.stringify({ completed: true, extra: "preserved compatibility" }));
+  assert.equal(isOnboardingComplete(file), true, "extra fields must not invalidate completed state");
+  assert.throws(() => isOnboardingComplete(dir), { code: "EISDIR" }, "read errors must not become incomplete state");
   assert.throws(() => completeOnboarding(dir), "failed persistence must not report success");
-  console.log("onboarding: first run, persisted completion, repeat, corrupt state, write failure passed");
+  console.log("onboarding: first run, persistence, schema validation, extra fields, read/write failures passed");
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });
 }

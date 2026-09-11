@@ -73,6 +73,9 @@ importers:
       '@lydell/node-pty':
         specifier: 1.2.0-beta.15
         version: 1.2.0-beta.15
+      effect:
+        specifier: 4.0.0-rc.113
+        version: 4.0.0-rc.113
       ws:
         specifier: ^8.21.3
         version: 8.21.3
@@ -1002,6 +1005,9 @@ packages:
 
   ecdsa-sig-formatter@1.0.11:
     resolution: {integrity: sha512-nagl3RYrbNv6kQkeJIpt6NJZy8twLB/2vtz6yN9Z4vRKHN4/QZJIEbqohALSgwKdnksuY3k5Addp5lg8sVoVcQ==}
+
+  effect@4.0.0-rc.113:
+    resolution: {integrity: sha512-uZ4Bh7KSlw2sdVdNDHPLSNjLGH+MWap7cheIHZoB/1T/ZJ3pvI4KiN3kUp50MpFKXhygOMmReJJOwWMQPwpPAg==}
 
   esbuild@0.28.1:
     resolution: {integrity: sha512-HrJrvZv5ayxBzPfwphOoNzkzOIIlifzk0KJrGK2c8R4+LKpMtpYLQeUdjnwjWv/LZlkH2laZk+4w78pi99D4Vw==}
@@ -2609,6 +2615,8 @@ snapshots:
   ecdsa-sig-formatter@1.0.11:
     dependencies:
       safe-buffer: 5.2.1
+
+  effect@4.0.0-rc.113: {}
 
   esbuild@0.28.1:
     optionalDependencies:
