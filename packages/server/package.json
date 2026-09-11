@@ -9,7 +9,7 @@
   "dependencies": {
     "@cube/git": "workspace:*",
     "@cube/sandbox": "workspace:*",
-    "@earendil-works/pi-coding-agent": "0.85.0",
+    "@earendil-works/pi-coding-agent": "0.85.1",
     "@lydell/node-pty": "1.2.0-beta.15",
     "ws": "^8.21.3"
   }
