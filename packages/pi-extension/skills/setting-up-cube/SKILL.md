@@ -47,6 +47,24 @@ Create `.cube/resume` only for cheap reconciliation required after initial setup
 
 Declare long-running development processes in `.cube/cube.toml`. Give each service a stable command, working directory, readiness signal, and only non-secret development environment values supported by the existing schema. Use `cube.services.ensure()` through the code tool to exercise the existing supervisor; never emulate supervision with `&`, `nohup`, `tmux`, or a daemon launched by setup.
 
+### Cross-service portal URLs (for example, OAuth)
+
+Before starting supervised services, Cube registers their portals and injects `PORT`, `PUBLIC_URL` (the service's own portal origin), and `CUBE_SERVICE_<NAME>_URL` for every declared service. Names become uppercase with hyphens replaced by underscores. These variables belong to supervised service processes, not ordinary agent shell calls or setup/resume.
+
+For a browser-facing OAuth mock and application:
+
+```toml
+[services.local-auth-mock]
+command = "./gradlew services:local-auth-mock:run"
+port = 18089
+
+[services.web]
+command = "export OAUTH_AUTHORIZATION_URI=\"${CUBE_SERVICE_LOCAL_AUTH_MOCK_URL}/oauth2/authorize\"; export OAUTH_REDIRECT_URI=\"${PUBLIC_URL}/login/oauth2/code/local-auth\"; exec ./gradlew services:web:bootRun"
+port = 18082
+```
+
+Adapt the commands and application-specific OAuth settings to the repository; configure both servers to bind `0.0.0.0` on their declared ports. Use portal URLs for browser redirects, not `localhost`. All declared services get portals automatically; do not add `portal = true`. Expand variables in `command` (as above) or a service startup script: `[services.<name>.env]` values are literal, not interpolated. Portal URLs are available before startup, but that does not mean the referenced service is ready.
+
 ## Validate
 
 1. Inspect lifecycle state and bounded tail logs with `cube.environment.status()`.
