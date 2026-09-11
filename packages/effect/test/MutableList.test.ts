@@ -1,128 +1,121 @@
 import { describe, it } from "@effect/vitest"
-import { assertFalse, assertTrue, deepStrictEqual, strictEqual } from "@effect/vitest/utils"
-import { MutableList, pipe } from "effect"
+import { deepStrictEqual, strictEqual } from "@effect/vitest/utils"
+import { MutableList } from "effect"
 
 describe("MutableList", () => {
-  it("toString", () => {
-    strictEqual(
-      String(MutableList.make(0, 1, 2)),
-      `{
-  "_id": "MutableList",
-  "values": [
-    0,
-    1,
-    2
-  ]
-}`
-    )
+  it("preserves a prepended element when appending to the list", () => {
+    const list = MutableList.make<number>()
+    MutableList.prepend(list, 1)
+    MutableList.append(list, 2)
+
+    strictEqual(MutableList.toArray(list).join(","), "1,2")
+    strictEqual(list.length, 2)
   })
 
-  it("toJSON", () => {
-    deepStrictEqual(MutableList.make(0, 1, 2).toJSON(), { _id: "MutableList", values: [0, 1, 2] })
+  it("preserves bulk-prepended values when appending to the list", () => {
+    const list = MutableList.make<number>()
+    MutableList.prependAll(list, [1, 2])
+    MutableList.append(list, 3)
+
+    deepStrictEqual(MutableList.toArray(list), [1, 2, 3], "bulk-prepended values should be preserved")
   })
 
-  it("inspect", () => {
-    if (typeof window !== "undefined") {
-      return
-    }
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { inspect } = require("node:util")
-    deepStrictEqual(inspect(MutableList.make(0, 1, 2)), inspect({ _id: "MutableList", values: [0, 1, 2] }))
+  it("returns an empty snapshot for a negative bound", () => {
+    const list = MutableList.make<number>()
+    MutableList.append(list, 1)
+
+    deepStrictEqual(MutableList.toArrayN(list, -1), [])
   })
 
-  it("pipe()", () => {
-    deepStrictEqual(MutableList.empty<string>().pipe(MutableList.prepend("a")), MutableList.make("a"))
+  it("normalizes bounded operation counts", () => {
+    const takeNaN = MutableList.make<number>()
+    MutableList.appendAll(takeNaN, [1, 2, 3])
+    deepStrictEqual(MutableList.takeN(takeNaN, Number.NaN), [])
+    deepStrictEqual(MutableList.toArray(takeNaN), [1, 2, 3])
+
+    const takeFraction = MutableList.make<number>()
+    MutableList.appendAll(takeFraction, [1, 2, 3])
+    deepStrictEqual(MutableList.takeN(takeFraction, 1.9), [1])
+    deepStrictEqual(MutableList.toArray(takeFraction), [2, 3])
+
+    const discardNaN = MutableList.make<number>()
+    MutableList.appendAll(discardNaN, [1, 2, 3])
+    MutableList.takeNVoid(discardNaN, Number.NaN)
+    deepStrictEqual(MutableList.toArray(discardNaN), [1, 2, 3])
+
+    const discardFraction = MutableList.make<number>()
+    MutableList.appendAll(discardFraction, [1, 2, 3])
+    MutableList.takeNVoid(discardFraction, 1.9)
+    deepStrictEqual(MutableList.toArray(discardFraction), [2, 3])
+
+    const snapshot = MutableList.make<number>()
+    MutableList.appendAll(snapshot, [1, 2, 3])
+    deepStrictEqual(MutableList.toArrayN(snapshot, Number.NaN), [])
+    deepStrictEqual(MutableList.toArrayN(snapshot, 1.9), [1])
   })
 
-  it("empty", () => {
-    deepStrictEqual(Array.from(MutableList.empty<number>()), [])
+  it("appendAll returns 0 and leaves an empty list empty", () => {
+    const list = MutableList.make<number>()
+
+    strictEqual(MutableList.appendAll(list, []), 0)
+    strictEqual(list.length, 0)
+    strictEqual(list.head, undefined)
+    strictEqual(list.tail, undefined)
+    strictEqual(MutableList.take(list), MutableList.Empty)
   })
 
-  it("fromIterable", () => {
-    deepStrictEqual(Array.from(MutableList.fromIterable([])), [])
-    deepStrictEqual(Array.from(MutableList.fromIterable([1, 2, 3])), [1, 2, 3])
+  it("appendAll with empty iterables preserves later append order", () => {
+    const list = MutableList.make<number>()
+
+    MutableList.appendAll(list, [])
+    MutableList.append(list, 1)
+    MutableList.appendAll(list, [])
+    MutableList.append(list, 2)
+
+    deepStrictEqual(MutableList.takeAll(list), [1, 2])
+    strictEqual(MutableList.take(list), MutableList.Empty)
   })
 
-  it("make", () => {
-    deepStrictEqual(Array.from(MutableList.make()), [])
-    deepStrictEqual(Array.from(MutableList.make(1, 2, 3)), [1, 2, 3])
+  it("appendAllUnsafe with an empty array is a no-op", () => {
+    const list = MutableList.make<number>()
+
+    MutableList.appendAll(list, [1])
+    strictEqual(MutableList.appendAllUnsafe(list, []), 0)
+    MutableList.append(list, 2)
+
+    deepStrictEqual(MutableList.takeAll(list), [1, 2])
+    strictEqual(MutableList.take(list), MutableList.Empty)
   })
 
-  it("isEmpty", () => {
-    assertTrue(MutableList.isEmpty(MutableList.empty<number>()))
-    assertFalse(MutableList.isEmpty(MutableList.make(1, 2, 3)))
+  it("filter keeps matching values in place and updates length", () => {
+    const list = MutableList.make<number>()
+    MutableList.appendAll(list, [1, 2, 3, 4, 5])
+
+    MutableList.filter(list, (n) => n % 2 === 0)
+
+    deepStrictEqual(MutableList.toArrayN(list, 2), [2, 4])
+    strictEqual(list.length, 2)
   })
 
-  it("length", () => {
-    strictEqual(MutableList.length(MutableList.empty<number>()), 0)
-    strictEqual(MutableList.length(MutableList.make(1, 2, 3)), 3)
+  it("filter restores the empty list state when no values match", () => {
+    const list = MutableList.make<number>()
+    MutableList.append(list, 1)
+
+    MutableList.filter(list, () => false)
+
+    strictEqual(list.length, 0)
+    strictEqual(list.head, undefined)
+    strictEqual(list.tail, undefined)
+    strictEqual(MutableList.take(list), MutableList.Empty)
   })
 
-  it("tail", () => {
-    strictEqual(MutableList.tail(MutableList.make()), undefined)
-    deepStrictEqual(MutableList.tail(MutableList.make(1, 2, 3)), 3)
-  })
+  it("remove deletes all strictly equal values and updates length", () => {
+    const list = MutableList.make<string>()
+    MutableList.appendAll(list, ["apple", "banana", "apple", "cherry", "apple"])
 
-  it("head", () => {
-    strictEqual(MutableList.head(MutableList.make()), undefined)
-    deepStrictEqual(MutableList.head(MutableList.make(1, 2, 3)), 1)
-  })
+    MutableList.remove(list, "apple")
 
-  it("forEach", () => {
-    const accumulator: Array<number> = []
-    const list = MutableList.make(1, 2, 3)
-    pipe(
-      list,
-      MutableList.forEach((n) => {
-        accumulator.push(n * 2)
-      })
-    )
-
-    deepStrictEqual(Array.from(list), [1, 2, 3])
-    deepStrictEqual(accumulator, [2, 4, 6])
-  })
-
-  it("reset", () => {
-    const list = MutableList.make(1, 2, 3)
-    deepStrictEqual(Array.from(list), [1, 2, 3])
-    deepStrictEqual(Array.from(MutableList.reset(list)), [])
-  })
-
-  it("append", () => {
-    const list = pipe(
-      MutableList.empty<number>(),
-      MutableList.append(1),
-      MutableList.append(2),
-      MutableList.append(3)
-    )
-
-    deepStrictEqual(Array.from(list), [1, 2, 3])
-  })
-
-  it("shift", () => {
-    const list = MutableList.make(1, 2, 3)
-    strictEqual(MutableList.shift(list), 1)
-    strictEqual(MutableList.shift(list), 2)
-    strictEqual(MutableList.shift(list), 3)
-    strictEqual(MutableList.shift(list), undefined)
-  })
-
-  it("pop", () => {
-    const list = MutableList.make(1, 2, 3)
-    strictEqual(MutableList.pop(list), 3)
-    strictEqual(MutableList.pop(list), 2)
-    strictEqual(MutableList.pop(list), 1)
-    strictEqual(MutableList.pop(list), undefined)
-  })
-
-  it("prepend", () => {
-    const list = pipe(
-      MutableList.empty<number>(),
-      MutableList.prepend(1),
-      MutableList.prepend(2),
-      MutableList.prepend(3),
-      MutableList.append(4)
-    )
-    deepStrictEqual(Array.from(list), [3, 2, 1, 4])
+    deepStrictEqual(MutableList.toArrayN(list, 2), ["banana", "cherry"])
+    strictEqual(list.length, 2)
   })
 })
