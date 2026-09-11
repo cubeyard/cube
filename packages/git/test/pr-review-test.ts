@@ -49,7 +49,7 @@ for (let i = 0; i < numbers.length; i++) {
   git(seed, "push", "--force", "origin", `HEAD:${branches[i]}`);
 }
 
-let mode: "ok" | "missing" | "truncated" | "queued" | "wrong-sha" | "wrong-order" = "ok";
+let mode: "ok" | "malformed" | "member-missing" | "truncated" | "queued" | "wrong-sha" | "wrong-order" = "ok";
 let raceAtPush = false;
 const pushCalls: string[][] = [];
 const remoteOid = (ref: string) => git(bare, "rev-parse", `refs/heads/${ref}`);
@@ -59,7 +59,7 @@ function pr(n: number) {
   const baseRef = i ? branches[i - 1]! : "main";
   const baseSha = apiOid(baseRef);
   return { number: n, state: "open", merged: false,
-    stack: mode === "missing" ? undefined : { id: 71, number: 9, size: 7, position: mode === "wrong-order" ? 7 - i : i + 1, base: { ref: "main", sha: latestBase } },
+    stack: mode === "member-missing" && n === 846 ? undefined : mode === "malformed" ? {} : { id: 71, number: 9, size: 7, position: mode === "wrong-order" ? 7 - i : i + 1, base: { ref: "main", sha: latestBase } },
     head: { ref: branches[i], sha: headSha, repo: { full_name: slug } },
     base: { ref: baseRef, sha: baseSha, repo: { full_name: slug } } };
 }
@@ -175,7 +175,8 @@ assert.equal((await new PrReviewService(root, runner).verify(ws, fixtureUrl, pre
 
 // Native metadata must be complete, and failures must not mutate refs.
 const snapshot = branches.map(remoteOid);
-mode = "missing"; await assert.rejects(service.prepare(ws, fixtureUrl, 845), /native stack membership/);
+mode = "malformed"; await assert.rejects(service.prepare(ws, fixtureUrl, 845), /invalid PR or stack number/);
+mode = "member-missing"; await assert.rejects(service.prepare(ws, fixtureUrl, 845), /incomplete GitHub response/);
 mode = "truncated"; await assert.rejects(service.prepare(ws, fixtureUrl, 845), /incomplete or changed native stack/);
 mode = "queued"; await assert.rejects(service.prepare(ws, fixtureUrl, 845), /stack is queued/);
 mode = "wrong-order"; await assert.rejects(service.prepare(ws, fixtureUrl, 845), /stack changed during discovery/);
@@ -345,20 +346,29 @@ for (const number of [842, 848]) {
   assert.equal((await service.publish(ws, fixtureUrl, prep.token, planned.plan)).verified, true);
 }
 
-// Explicitly unstacked PRs still use pinned heads and the same publication
-// checks; missing membership is not interpreted as this explicit null.
+// Ordinary REST PRs omit stack; explicit null uses exactly the same snapshot.
+// Both keep pinned heads and all publication checks.
+let standaloneStack: "omitted" | "null" | "native" = "omitted";
 const standalone = new PrReviewService(root, async (file, args, opts) => {
   if (file !== "gh") return runner(file, args, opts);
-  const data = { ...pr(848), stack: null };
+  const { stack: _stack, ...ordinary } = pr(848);
+  const data = { ...ordinary, ...(standaloneStack === "omitted" ? {} : { stack: standaloneStack === "null" ? null : { id: 99, number: 12, size: 1, position: 1, base: ordinary.base } }) };
   if (args.includes("graphql")) return { stdout: JSON.stringify({ data: { repository: { p0: {
     headRefOid: data.head.sha, baseRefOid: data.base.sha, state: "OPEN", mergeQueueEntry: null,
   } } } }), stderr: "" };
+  if (args.includes(`repos/${slug}/stacks/12`)) return { stdout: JSON.stringify({
+    id: 99, number: 12, open: true, base: ordinary.base,
+    pull_requests: [{ number: 848, head: ordinary.head }],
+  }), stderr: "" };
   assert.ok(args.includes(`repos/${slug}/pulls/848`));
   return { stdout: JSON.stringify(data), stderr: "" };
 });
 const single = await standalone.prepare(ws, fixtureUrl, 848);
 assert.equal(single.stack.id, null);
 assert.equal(single.stack.layers.length, 1);
+standaloneStack = "null";
+assert.deepEqual((await standalone.prepare(ws, fixtureUrl, 848)).stack, single.stack);
+standaloneStack = "omitted";
 git(ws, "switch", single.branch);
 fs.writeFileSync(path.join(ws, "standalone.txt"), "standalone fix\n");
 // Large, long-line Unicode and binary diffs must fit model output a page
@@ -399,6 +409,12 @@ for (const section of ["patch", "prDiff"] as const) {
 // contents untouched, including across service restarts.
 assert.deepEqual(await standalone.plan(ws, fixtureUrl, single.token), singlePlan);
 assert.equal(fs.readFileSync(statePath, "utf8"), savedState);
+// Joining a native stack after planning must never publish as standalone.
+standaloneStack = "native";
+const beforeStandalonePushes = pushCalls.length;
+await assert.rejects(standalone.publish(ws, fixtureUrl, single.token, singlePlan.plan), /remote PR head, base, or stack changed/);
+assert.equal(pushCalls.length, beforeStandalonePushes);
+standaloneStack = "null";
 assert.equal((await standalone.publish(ws, fixtureUrl, single.token, singlePlan.plan)).verified, true);
 
 console.log("PASS pr-review: restacked 7-layer stale checkout; exact-head preservation; scoped restack; top/bottom; metadata/fetch/conflict/stale guards; atomic race/unsupported transport; restart and lost-ack reconciliation");

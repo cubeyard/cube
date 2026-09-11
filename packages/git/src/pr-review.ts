@@ -1,5 +1,5 @@
-/** Native GitHub PR review transactions. Remote discovery and publication
- * run only in host-owned repositories. The guest receives objects, never
+/** GitHub PR review transactions (standalone and native stacks).
+ * Remote discovery and publication run only in host-owned repositories. The guest receives objects, never
  * credentials, and cannot supply its own expected remote SHAs or stack. */
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -102,12 +102,16 @@ export class PrReviewService {
       return pr;
     };
     const target = await getPr(number);
-    if (!Object.hasOwn(target, "stack")) return fail("GitHub did not report native stack membership");
+    // Ordinary REST pull-request responses can omit the optional stack field.
+    // Only a supplied non-null membership opts into native-stack discovery.
+    // Do not catch discovery errors and retry as standalone: malformed stack
+    // objects, failed reads, and incomplete member responses must still stop.
+    const hasStack = Object.hasOwn(target, "stack") && target.stack !== null;
     let members = [target];
     let stackId: number | null = null;
     let stackNumber: number | null = null;
     let base = ref(object(target.base).ref);
-    if (target.stack !== null) {
+    if (hasStack) {
       const membership = object(target.stack);
       stackId = positive(membership.id);
       stackNumber = positive(membership.number);

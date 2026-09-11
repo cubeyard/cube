@@ -18,13 +18,13 @@ const commit = (file: string, content: string, message: string) => {
   git(seed, "add", file); git(seed, "commit", "-m", message);
   return git(seed, "rev-parse", "HEAD");
 };
-let mode: "ok" | "missing" | "stack" | "queued" | "fork" = "ok";
+let mode: "ok" | "missing" | "malformed" | "stack" | "queued" | "fork" = "missing";
 let raceAtPush = false;
 let raceOid = "";
 const pushes: string[][] = [];
 const remoteOid = (branch: string) => git(bare, "rev-parse", `refs/heads/${branch}`);
 const pr = () => ({ number: 30, state: "open", merged: false,
-  ...(mode === "missing" ? {} : { stack: mode === "stack" ? { id: 1, number: 7, size: 1, position: 1, base: { ref: "main" } } : null }),
+  ...(mode === "missing" ? {} : { stack: mode === "malformed" ? {} : mode === "stack" ? { id: 1, number: 7, size: 1, position: 1, base: { ref: "main" } } : null }),
   head: { ref: "feature", sha: remoteOid("feature"), repo: { full_name: mode === "fork" ? "other/repo" : slug } },
   base: { ref: "main", sha: remoteOid("main"), repo: { full_name: slug } },
 });
@@ -163,7 +163,7 @@ try {
   console.log("2 ok: invalid candidates, base drift, and stale leases rejected without overwriting concurrent work");
 
   const expected = remoteOid("feature");
-  for (const [value, pattern] of [["missing", /native stack membership/], ["stack", /standalone PRs only/],
+  for (const [value, pattern] of [["malformed", /invalid PR or stack number/], ["stack", /standalone PRs only/],
     ["queued", /queued/], ["fork", /forked/]] as const) {
     mode = value;
     await assert.rejects(service.prepareRebase(ws, url, 30), pattern);
@@ -172,6 +172,6 @@ try {
   assert.equal(remoteOid("feature"), expected);
   fs.writeFileSync(path.join(ws, "dirty.txt"), "unsaved work\n");
   await assert.rejects(service.prepareRebase(ws, url, 30), /working tree must be clean/);
-  console.log("3 ok: missing metadata, native stacks, queues, forks and dirty workspaces stop safely");
+  console.log("3 ok: malformed metadata, native stacks, queues, forks and dirty workspaces stop safely");
   console.log("ALL PASS");
 } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

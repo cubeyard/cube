@@ -21,6 +21,27 @@ session intents, not a global `force: true` option. Only the new rebase session
 permits replacing existing commits. Primary repository only; reference
 repositories stay read-only.
 
+## Ordinary PRs and native stacks
+
+The REST pull-request `stack` field is optional. Omitted or `null` membership
+uses the single-PR transaction; a non-null object selects native-stack discovery.
+No stack CLI, stack creation, or manual metadata repair is needed for an ordinary
+PR. A failed GitHub request, malformed JSON, malformed membership object, or
+incomplete native-stack member is **not** a standalone fallback.
+
+Both shapes use the same pinned head/base, queue checks, plan inspection, exact
+SHA leases, and post-push verification. Discovery runs again before publication
+and during verification: joining/leaving a native stack invalidates the snapshot.
+Absent and null membership normalize to the same snapshot. This relies on GitHub
+including membership for native-stack PRs; Cube cannot discover a relationship
+that the API withholds. It does not infer stacks from branch names, PR prose,
+or local tracking refs, or automatically restack manually chained ordinary PRs.
+
+Choose operations by intent, not by whether a PR has a stack: `preparePrUpdate`
+adds review commits to either shape; `preparePrRebase` explicitly rewrites a
+standalone PR. New branches without a PR keep the ordinary non-forced push/create
+flow. No separate unguarded "plain Git" force-push tool is needed.
+
 ## Rebase: one new entry point, existing publication flow
 
 1. Obtain explicit user authorization to rewrite the PR's published history.
@@ -63,7 +84,7 @@ a post-push discrepancy is reported as uncertain completion, not rolled back.
 ## Scope and limitations
 
 Initial rewrite support is deliberately **standalone PRs only**. Native stacks
-(including a one-member native stack), forks, queued PRs, and missing/inconsistent
+(including a one-member native stack), forks, queued PRs, and malformed/inconsistent
 native membership metadata stop with an explanation. Additive stacked-PR reviews
 keep their existing restack workflow. Whole-stack history rewriting needs a
 separate coordinated design; it must not silently rewrite descendants.
