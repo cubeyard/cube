@@ -7,7 +7,7 @@ Licenses and upstream notices remain in each subtree.
 
 | Directory | Upstream | Tag | Commit | Used by cube |
 | --- | --- | --- | --- | --- |
-| `pi/` | https://github.com/earendil-works/pi | `v0.85.0` | `107d79f11072bbc8a3a757ed7fd69596bee7d68c` | `@earendil-works/pi-coding-agent` in server and pi-extension |
+| `pi/` | https://github.com/earendil-works/pi | `v0.85.1` | `d981de1229ef899957bbe968bc8dcda02a21f477` | `@earendil-works/pi-coding-agent` in server and pi-extension |
 
 Start with pi because cube delegates its agent loop, sessions and terminal UI
 to it. Add other references only when their source will help a concrete task;
@@ -19,7 +19,7 @@ Use Git with the `subtree` command installed. From a clean working tree on a
 branch, update to the release tag matching cube's dependency version:
 
 ```sh
-git subtree pull --prefix=repos/pi https://github.com/earendil-works/pi.git v0.85.0 --squash
+git subtree pull --prefix=repos/pi https://github.com/earendil-works/pi.git v0.85.1 --squash
 ```
 
 Replace the tag when upgrading pi; update the table after verifying the upstream
