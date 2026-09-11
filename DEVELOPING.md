@@ -227,8 +227,8 @@ See [GitHub's stack reference](https://docs.github.com/en/pull-requests/referenc
 Direct push/PR creation cannot publish a detected existing PR; use the
 review workflow instead. `syncBase` still refreshes only the configured
 repository base and is not a PR-head or stack synchronization operation.
-Standalone PRs use the same review workflow when GitHub explicitly reports
-no native stack. A contiguous merged prefix is retained in
+Standalone PRs use the same review workflow when the REST PR response omits
+`stack` or returns `stack: null`. A contiguous merged prefix is retained in
 `stack.mergedPrefix` as historical membership; `stack.layers` contains only
 the open suffix. Cube verifies each prefix PR's `merge_commit_sha` is an
 ancestor of the fetched trunk, including squash/rebase results and shared
@@ -263,7 +263,7 @@ sessions. It returns a fresh branch, pinned head/base/upstream SHAs, and local
 abort conflicts), preserve the original work including merge resolutions, and
 test. Then use the **same** plan/inspect/publish/verify operations as above.
 The planner requires linear history above the pinned base, and publication
-uses the original head's exact SHA lease. Stacks, forks, queued PRs, and missing
+uses the original head's exact SHA lease. Stacks, forks, queued PRs, and malformed
 native membership metadata are rejected. There is no unconditional force flag,
 no user-supplied lease, and no automatic retry after an uncertain push.
 
