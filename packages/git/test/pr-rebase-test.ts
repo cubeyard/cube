@@ -133,6 +133,14 @@ try {
   fs.writeFileSync(path.join(ws, "side.txt"), "side\n"); git(ws, "add", "side.txt"); git(ws, "commit", "-m", "side");
   git(ws, "switch", invalid.branch); git(ws, "merge", "--no-ff", "side", "-m", "nonlinear candidate");
   await assert.rejects(service.plan(ws, url, invalid.token), /must be linear/);
+  // A rebase skipped through every conflict keeps a commit but none of the
+  // work: the SHA differs from both head and base, the content does not.
+  const pinnedBase = invalid.baseOid!;
+  git(ws, "reset", "--hard", pinnedBase);
+  git(ws, "commit", "--allow-empty", "-m", "chore: nothing left");
+  assert.equal(git(ws, "rev-parse", "HEAD^{tree}"), git(ws, "rev-parse", `${pinnedBase}^{tree}`));
+  await assert.rejects(service.plan(ws, url, invalid.token), /changes nothing against its base/);
+  assert.equal(remoteOid("feature"), git(ws, "rev-parse", invalid.head), "the published PR is untouched");
 
   let rebaseCount = 1;
   async function rewrite() {
