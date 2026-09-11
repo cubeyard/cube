@@ -2360,6 +2360,22 @@ export class CubeSupervisor {
 
   // ------------------------------------------------------------ pty bridge
 
+  terminalProgressForUserThread(id: string): EnvironmentProgress | undefined {
+    const { cubeName } = this.resolveUserThread(id);
+    const cube = this.requireCube(cubeName);
+    let progress = Effect.runSync(this.startup.get(cubeName));
+    if (cube.error && !progress?.failed) {
+      // In-memory snapshots disappear on restart. Restore evidence from the
+      // failed phase, not a successful setup that preceded a resume failure.
+      const phase = (["setup", "resume"] as const).find((phase) =>
+        this.lifecycle.read(cubeName, phase)?.error === cube.error);
+      const log = phase ? this.lifecycle.log(cubeName, phase).slice(-32768) : "";
+      Effect.runSync(this.startup.update(cubeName, cube.error, log, true));
+      progress = Effect.runSync(this.startup.get(cubeName));
+    }
+    return progress;
+  }
+
   /**
    * Spawn plan for a thread's pi TUI (Phase 3d step 2): the real `pi`
    * binary with ONLY the cube extension, this thread's session file, and
@@ -2392,11 +2408,7 @@ export class CubeSupervisor {
         }
       }));
     }
-    let progress = Effect.runSync(this.startup.get(cubeName));
-    if (cube.error && !progress?.failed) {
-      Effect.runSync(this.startup.update(cubeName, cube.error, this.lifecycle.log(cubeName, "setup").slice(-32768), true));
-      progress = Effect.runSync(this.startup.get(cubeName));
-    }
+    const progress = this.terminalProgressForUserThread(id);
     if (progress) onStatus(progress.phase, progress);
     if (cube.status === "error") {
       throw new Error(`environment error: ${cube.error ?? "unknown"}`);
