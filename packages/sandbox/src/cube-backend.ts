@@ -15,6 +15,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 
 import {
   provisionCube,
@@ -298,7 +299,7 @@ export class MockBackend implements CubeBackend {
     // in the workspace when known, else a neutral tmp dir — never the server
     // repo, which `process.cwd()` would be.
     const inst = this.instances.get(name);
-    return runLocal(command[0], command.slice(1), inst?.hostWorkspace ?? os.tmpdir(), { signal });
+    return runLocal(command[0], command.slice(1), inst?.hostWorkspace ?? os.tmpdir(), { signal, env: mockEnv(name) });
   }
 
   async resolveImage(image: string): Promise<string> {
@@ -394,16 +395,30 @@ export class MockSandbox implements Sandbox {
     // `bash -lc`, not `sh -c`: the Incus path runs `su - dev -c` (a bash login
     // shell), so a hook using `[[ … ]]`, `source`, or `set -o pipefail` must
     // behave the same here — otherwise the mock gives a false dev signal.
-    const exitCode = await runLocal("bash", ["-lc", command], dir, { onData, signal, timeout });
+    const exitCode = await runLocal("bash", ["-lc", command], dir, { onData, signal, timeout, env: mockEnv(this.name) });
     return { exitCode };
   }
+}
+
+/**
+ * The command environment of a mock cube. A real cube runs `su - dev`, so the
+ * login shell reads /home/dev's profile. With HOME unset bash falls back to
+ * the host passwd entry and a `bash -lc` here would source the DEVELOPER's
+ * ~/.profile: its output lands in the cube's command output and anything it
+ * exports leaks into the "cube" — the false dev signal the login shell was
+ * chosen to avoid. Give every mock cube its own empty home instead.
+ */
+function mockEnv(name: string): NodeJS.ProcessEnv {
+  const home = path.join(os.tmpdir(), "cube-mock-home", name.replace(/[^A-Za-z0-9_.-]/g, "_"));
+  fs.mkdirSync(home, { recursive: true });
+  return { PATH: process.env.PATH, TERM: "dumb", HOME: home };
 }
 
 function runLocal(
   file: string,
   args: string[],
   cwd: string,
-  opts: { onData?: (c: Buffer) => void; signal?: AbortSignal; timeout?: number } = {},
+  opts: { onData?: (c: Buffer) => void; signal?: AbortSignal; timeout?: number; env?: NodeJS.ProcessEnv } = {},
 ): Promise<number | null> {
   return new Promise((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
@@ -411,7 +426,7 @@ function runLocal(
       // `detached` makes the child its own process-group leader, so a timeout
       // or abort can signal the WHOLE tree (`process.kill(-pid, …)`), not just
       // the immediate shell — a `sleep` a hook backgrounded must die too.
-      child = spawn(file, args, { cwd, env: { PATH: process.env.PATH, TERM: "dumb" }, detached: true });
+      child = spawn(file, args, { cwd, env: opts.env ?? { PATH: process.env.PATH, TERM: "dumb" }, detached: true });
     } catch (error) {
       return reject(error);
     }

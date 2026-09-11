@@ -38,6 +38,7 @@ OFFLINE_TESTS=(
   packages/pi-extension/test/code-mode-test.ts
   packages/pi-extension/test/code-boundaries-test.ts
   packages/pi-extension/test/code-io-test.ts
+  packages/pi-extension/test/code-worker-jiti-test.ts
   packages/pi-extension/test/pi-extension-test.ts
   packages/pi-extension/test/diagnostics-test.ts
 )
