@@ -46,6 +46,8 @@ export interface TerminalHost {
    * message is shown to the user, so it must speak thread vocabulary.
    */
   plan(threadId: string, onStatus: (text: string, progress?: EnvironmentProgress) => void): Promise<TerminalSpawnPlan>;
+  /** Current startup snapshot; a repair can supersede the spawn-time status. */
+  progress?(threadId: string): EnvironmentProgress | undefined;
   /** Activity signal (throttled by the bridge): terminal I/O counts like a
    * prompt for idle-sleep purposes. */
   activity(threadId: string): void;
@@ -129,7 +131,15 @@ export class PiTerminals {
       // a transport drop and must clear it before a replay lands, or the
       // tail would be drawn twice — then replay the tail and adopt this
       // client's size (the TUI redraws on the resize, squaring the frame).
-      if (session.lastStatus?.progress?.failed) client.send(control({ t: "status", ...session.lastStatus }));
+      if (this.host.progress) {
+        const progress = this.host.progress(threadId);
+        session.lastStatus = progress ? { text: progress.phase, progress } : null;
+        // Send successful snapshots too, clearing a reconnecting client's old
+        // failure overlay before the attached frame restores the live terminal.
+        if (session.lastStatus) client.send(control({ t: "status", ...session.lastStatus }));
+      } else if (session.lastStatus?.progress?.failed) {
+        client.send(control({ t: "status", ...session.lastStatus }));
+      }
       client.send(control({ t: "attached", replay: session.scrollback.length > 0 }));
       for (const chunk of session.scrollback) client.send(chunk);
       this.resize(session, clamp(cols, 2, 500), clamp(rows, 2, 500));
