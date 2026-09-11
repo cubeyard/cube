@@ -209,5 +209,31 @@ const spec: CubeProvisionSpec = {
   console.log("7 ok: template capture, clone bookkeeping and deletion");
 }
 
+// ------------------------------------ 8. the cube's own home
+{
+  // `bash -lc` mirrors the real cube's `su - dev`. With HOME unset bash falls
+  // back to the host passwd entry and sources the DEVELOPER's ~/.profile:
+  // its output would appear in the cube's command output (breaking every
+  // exact-output assertion) and its exports would leak into the cube.
+  const backend = new MockBackend();
+  await backend.provision(spec);
+  let output = "";
+  const { exitCode } = await backend.sandbox(NAME).exec('printf "%s" "$HOME"', {
+    cwd: "/workspace",
+    onData: (chunk) => { output += chunk.toString(); },
+  });
+  assert.equal(exitCode, 0);
+  assert.notEqual(output, os.homedir(), "a mock cube must not run in the host developer's home");
+  assert.ok(output.startsWith(os.tmpdir()), `cube home under the temp dir, got ${output}`);
+  assert.ok(!fs.existsSync(path.join(output, ".profile")), "the cube's home holds no host login profile");
+  let quiet = "";
+  await backend.sandbox(NAME).exec("printf alive", {
+    cwd: "/workspace",
+    onData: (chunk) => { quiet += chunk.toString(); },
+  });
+  assert.equal(quiet, "alive", "no host profile noise in combined output");
+  console.log("8 ok: mock cubes get their own empty home, not the host developer's");
+}
+
 fs.rmSync(base, { recursive: true, force: true });
 console.log("mock-backend: all ok");
