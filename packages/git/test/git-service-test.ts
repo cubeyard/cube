@@ -392,5 +392,39 @@ await Effect.runPromise(Effect.gen(function*() {
 }));
 console.log("10 ok: remote default rename, concurrent refresh, exact seed and missing default");
 
+// The Effect helpers retain the public Promise API, command ordering and the
+// existing safety/cancellation boundary on both clone and refresh paths.
+const calls: string[] = [];
+const observed = new GitService(path.join(tmp, "effect-boundary"), (file, args, opts) => {
+  assert.equal(file, "git");
+  assert.deepEqual(args.slice(0, 4), ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor="]);
+  assert.ok(opts.signal instanceof AbortSignal, "Effect interruption reaches the process runner");
+  const command = args[4] === "--git-dir" ? args[6]! : args[4]!;
+  calls.push(command);
+  return defaultRunner(file, args, opts);
+});
+// HEAD is deliberately unresolved above: an explicit base must not discover it.
+const explicit = await observed.prepareRepository(upstream, "new-default");
+assert.equal(explicit.base, "new-default");
+assert.deepEqual(calls, ["clone", "rev-parse"]);
+const explicitOid = git(upstream, "rev-parse", "refs/heads/new-default");
+assert.equal(explicit.baseOid, explicitOid);
+calls.length = 0;
+git(upstream, "symbolic-ref", "HEAD", "refs/heads/new-default");
+assert.deepEqual(await observed.prepareRepository(upstream), explicit);
+assert.deepEqual(calls, ["ls-remote", "remote", "rev-parse"], "discover, refresh, then verify");
+calls.length = 0;
+await assert.rejects(observed.prepareRepository(upstream, "--invalid"), (error: unknown) =>
+  error instanceof Error && error.cause instanceof Error && /invalid ref name/.test(error.cause.message));
+assert.deepEqual(calls, [], "validation precedes mirror mutation");
+await assert.rejects(observed.prepareRepository(upstream, "absent-branch"), /no branch "absent-branch" at the advertised commit/);
+
+const failedRoot = path.join(tmp, "effect-failed-boundary");
+const failed = new GitService(failedRoot, () => Promise.reject("network unavailable"));
+await assert.rejects(failed.prepareRepository(upstream), (error: unknown) =>
+  error instanceof Error && error.message.includes("network unavailable"));
+assert.equal(fs.existsSync(failedRoot), false, "discovery failure never starts cloning");
+console.log("11 ok: Effect boundaries retain ordering, explicit bases, signals and failures");
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("git-service-test: all ok");
