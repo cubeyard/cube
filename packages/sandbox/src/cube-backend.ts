@@ -28,6 +28,7 @@ import {
   type ProvisionOptions,
 } from "./cube-provision.ts";
 import { startEgressProxy, type EgressPolicy, type EgressProxy } from "./egress-proxy.ts";
+import { configureCaTrust, validateCaBundle } from "./ca-trust.ts";
 import { IncusClient, IncusHttpError, type IncusStateAction } from "./incus-client.ts";
 import { IncusSandbox, type Sandbox, type SandboxExecOptions } from "./index.ts";
 
@@ -77,6 +78,8 @@ export interface CubeBackend {
   setState(name: string, action: IncusStateAction, opts?: SetStateOptions): Promise<void>;
   /** Resolve once the cube's eth0 holds `ip` (instant on the mock). */
   waitForNetwork(name: string, ip: string, opts?: WaitForNetworkOptions): Promise<void>;
+  /** Reconcile administrator CA roots before enabling egress or running hooks. */
+  configureCaTrust(name: string, pem: string, signal?: AbortSignal): Promise<void>;
   /** Stand up the per-cube egress proxy (a no-op stub on the mock). */
   startEgressProxy(opts: EgressProxyOptions): Promise<EgressProxy>;
   /** A streaming-exec handle for one cube. */
@@ -123,6 +126,9 @@ export class IncusBackend implements CubeBackend {
   }
   waitForNetwork(name: string, ip: string, opts: WaitForNetworkOptions = {}) {
     return waitForCubeNetwork(this.client, name, ip, opts.timeoutMs, opts.signal);
+  }
+  configureCaTrust(name: string, pem: string, signal?: AbortSignal) {
+    return configureCaTrust(this.client, name, pem, signal);
   }
   startEgressProxy(opts: EgressProxyOptions) {
     return startEgressProxy(opts);
@@ -276,6 +282,12 @@ export class MockBackend implements CubeBackend {
   async waitForNetwork(_name: string, _ip: string, opts: WaitForNetworkOptions = {}): Promise<void> {
     opts.signal?.throwIfAborted();
     // The mock network is up the instant the instance is.
+  }
+
+  async configureCaTrust(_name: string, pem: string, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    validateCaBundle(pem);
+    // Never change the development host's trust store in mock mode.
   }
 
   async startEgressProxy(opts: EgressProxyOptions): Promise<EgressProxy> {

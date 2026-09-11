@@ -249,3 +249,4 @@ export {
   type SetStateOptions,
   type WaitForNetworkOptions,
 } from "./cube-backend.ts";
+export { validateCaBundle } from "./ca-trust.ts";

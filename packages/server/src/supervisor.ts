@@ -112,6 +112,8 @@ export interface SupervisorConfig {
   rootSize: string;
   dockerVolumeSize: string;
   egressAllow: string[];
+  /** Administrator-selected PEM roots, fixed for the daemon's lifetime. */
+  caCertificates?: string;
   /** Prepared environments: threads are cloned from a per-project template
    * that ran setup once (default on; false = every thread sets up fresh). */
   environmentCache?: boolean;
@@ -1095,7 +1097,7 @@ export class CubeSupervisor {
         capBytes: parseSize(this.config.dockerVolumeSize),
       });
       signal.throwIfAborted();
-      await this.startProxy(cube);
+      await this.startProxy(cube, signal);
       span.phase("proxy");
       signal.throwIfAborted();
       // Setup runs in every thread: on a clone it is the warm rerun that
@@ -1141,6 +1143,7 @@ export class CubeSupervisor {
       dockerVolumeSize: spec.dockerVolumeSize,
       memory: spec.memoryLimit ?? null,
       egress: this.config.egressAllow,
+      caCertificates: this.config.caCertificates ?? "",
     });
   }
 
@@ -1229,7 +1232,11 @@ export class CubeSupervisor {
    * setup retry picks up an edited declaration. A parse error fails that
    * transition with the offending line rather than silently narrowing
    * egress; the proxy itself still vets every name (ARCHITECTURE §12). */
-  private async startProxy(cube: CubeRow): Promise<void> {
+  private async startProxy(cube: CubeRow, signal?: AbortSignal): Promise<void> {
+    // Every provision, builder, boot recovery, wake and setup retry passes
+    // this boundary before network-dependent work. This also revokes roots
+    // inherited from an older template or persisted across a VM reboot.
+    await this.backend.configureCaTrust(instanceName(cube.name), this.config.caCertificates ?? "", signal);
     const runtime = this.runtime(cube.name);
     const declared = readCubeConfig(environmentDirs(cube).host).networkAllow;
     const allow = [...new Set([...this.config.egressAllow, ...declared])];
@@ -1488,7 +1495,7 @@ export class CubeSupervisor {
         if (state.status !== "Running") await this.backend.setState(name, "start");
         await this.backend.waitForNetwork(name, networkForCube(cubeName, cube.subnetIndex).ip);
         signal.throwIfAborted();
-        await this.startProxy(cube);
+        await this.startProxy(cube, signal);
         span.phase("start");
         const setupError = await this.runLifecycleScript(cube, "setup", signal);
         span.phase("setup", setupError, setupError === null);

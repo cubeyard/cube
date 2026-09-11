@@ -57,6 +57,7 @@ cube down       # stop the VM
 cube up         # start it again
 cube logs       # follow server logs
 cube events     # lifecycle events and timings
+cube doctor     # check host and VM HTTPS, certificate trust, and control plane
 cube ssh        # open a shell on the VM
 cube version    # launcher and installed release
 ```
@@ -68,6 +69,37 @@ manual installations update it through `cube upgrade`.
 State lives in `~/.cube`. Stop the VM before `brew uninstall cube`, which
 keeps that data. **To delete the VM and all its data**, run
 `cube destroy --yes` before uninstalling.
+
+## Corporate certificate authorities
+
+For a network that inspects HTTPS, obtain the approved **CA certificates**
+from your IT administrator, in PEM format. Do not export private keys or
+trust a certificate just because it appeared in a failed connection.
+
+```sh
+cube down                         # omit on a fresh installation
+cube ca set /path/to/company-ca.pem
+cube up
+cube doctor
+```
+
+`cube ca set` replaces the additional roots; it does not replace public
+trust. `cube ca status` shows whether roots are configured. To remove them,
+run `cube down`, `cube ca clear`, then `cube up`. Changes require a stopped
+VM and survive upgrades. Both the launcher and VM release must include CA
+support; installing a newer launcher alone cannot update an older VM's trust.
+
+The roots apply to launcher downloads, VM services, and thread environments
+before setup/resume. Existing threads keep their files. Retry a failed setup
+after restarting; changing trust does not itself rerun setup. OpenSSL is
+required on the host to validate certificates. Launcher downloads combine
+them with a system or Homebrew public-root bundle.
+
+This supports **certificate trust, not explicit corporate proxy routing**.
+The outbound allowlist still applies, including download redirect hosts.
+Downloaded JDKs and Docker build/run images have their own trust stores:
+configure those in your environment setup where needed. See
+[the CA support details](DEVELOPING.md#corporate-ca-trust) for coverage and checks.
 
 ## Using it from other machines
 
