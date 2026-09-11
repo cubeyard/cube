@@ -189,7 +189,7 @@ in
   systemd.services.cube-seed = {
     description = "cube - install the deploy's ssh key from the seed disk";
     wantedBy = [ "multi-user.target" ];
-    before = [ "sshd.service" ];
+    before = [ "sshd.service" "incus.service" "cubed.service" ];
     after = [ "local-fs.target" ];
     path = with pkgs; [ coreutils util-linux ];
     serviceConfig = { Type = "oneshot"; RemainAfterExit = true; };
@@ -215,6 +215,15 @@ in
       if [ -f "$mnt/portal.env" ]; then
         install -m 644 "$mnt/portal.env" /run/cube-portal.env
       fi
+      # Never modify the immutable Nix store. Rebuild from public roots on
+      # EVERY boot, so removing ca.pem revokes the previously selected roots.
+      : > /run/cube-ca.pem
+      if [ -f "$mnt/ca.pem" ]; then
+        install -m 644 "$mnt/ca.pem" /run/cube-ca.pem
+      fi
+      cat ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt > /run/cube-ca-bundle.pem
+      printf '\n' >> /run/cube-ca-bundle.pem
+      cat /run/cube-ca.pem >> /run/cube-ca-bundle.pem
       umount "$mnt"
       rmdir "$mnt"
       echo "cube-seed: authorized_keys installed from $dev"
@@ -236,6 +245,20 @@ in
   security.sudo.wheelNeedsPassword = false;
 
   # ---- incus --------------------------------------------------------
+  systemd.services.incus = {
+    requires = [ "cube-seed.service" ];
+    after = [ "cube-seed.service" ];
+    environment.SSL_CERT_FILE = "/run/cube-ca-bundle.pem";
+  };
+  # Login shells (ssh, gh, git and manually started pi) use the same roots
+  # as the services. Node adds these to its own public roots.
+  environment.variables = {
+    SSL_CERT_FILE = lib.mkForce "/run/cube-ca-bundle.pem";
+    NIX_SSL_CERT_FILE = lib.mkForce "/run/cube-ca-bundle.pem";
+    CURL_CA_BUNDLE = "/run/cube-ca-bundle.pem";
+    GIT_SSL_CAINFO = "/run/cube-ca-bundle.pem";
+    NODE_EXTRA_CA_CERTS = "/run/cube-ca-bundle.pem";
+  };
   virtualisation.incus = {
     enable = true;
     package = pkgs.incus-lts;
@@ -378,7 +401,7 @@ in
     # exists — or after preseed failed (sol #2). Gated, not merely
     # ordered: a product that accepts threads it cannot provision is
     # worse than one that refuses to start.
-    requires = [ "cube-data-init.service" "incus-preseed.service" ];
+    requires = [ "cube-data-init.service" "incus-preseed.service" "cube-seed.service" ];
     after = [
       "network-online.target" "incus.service" "incus-preseed.service"
       "cube-seed.service"
@@ -400,6 +423,11 @@ in
     environment = {
       NIX_LD = config.environment.variables.NIX_LD or null;
       NIX_LD_LIBRARY_PATH = config.environment.variables.NIX_LD_LIBRARY_PATH or null;
+      CUBED_CA_FILE = "/run/cube-ca.pem";
+      SSL_CERT_FILE = "/run/cube-ca-bundle.pem";
+      CURL_CA_BUNDLE = "/run/cube-ca-bundle.pem";
+      GIT_SSL_CAINFO = "/run/cube-ca-bundle.pem";
+      NODE_EXTRA_CA_CERTS = "/run/cube-ca-bundle.pem";
     };
     serviceConfig = {
       User = "cube";
@@ -504,7 +532,7 @@ in
   # gh: cubed installs the device-flow token into gh's store; fd/ripgrep:
   # pi probes PATH before downloading its own copies; zstd for the
   # cube-node export path (build-cube-node.sh runs it in-VM).
-  environment.systemPackages = with pkgs; [ gitMinimal gh curl fd ripgrep zstd cube-app-apply ];
+  environment.systemPackages = with pkgs; [ gitMinimal gh curl openssl fd ripgrep zstd cube-app-apply ];
 
   # Marker only — build identity lives on the app disk (/opt/cube/
   # build-id): a nix image is a pure function of this config, so a

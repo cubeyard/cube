@@ -7,6 +7,7 @@
 #   bash scripts/test-offline.sh        # run them all, from any host
 OFFLINE_TESTS=(
   scripts/release-contract-test.ts
+  scripts/launcher-network-test.ts
   packages/server/test/log-test.ts
   packages/server/test/cube-toml-test.ts
   packages/server/test/portal-config-test.ts
@@ -28,6 +29,7 @@ OFFLINE_TESTS=(
   packages/server/test/lifecycle-test.ts
   packages/server/test/provision-cancel-test.ts
   packages/server/test/provision-failure-test.ts
+  packages/sandbox/test/ca-trust-test.ts
   packages/sandbox/test/environment-backend-test.ts
   packages/sandbox/test/incus-client-test.ts
   packages/sandbox/test/mock-backend-test.ts

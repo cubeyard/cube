@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { rootCertificates } from "node:tls";
 import { MockBackend, type CubeProvisionSpec, type CubeTemplateSource } from "@cube/sandbox";
 import { Registry } from "../src/registry.ts";
 import { Lifecycle } from "../src/lifecycle.ts";
@@ -22,6 +23,20 @@ import { CubeSupervisor, type ProjectInfo, type SupervisorConfig } from "../src/
 class CountingBackend extends MockBackend {
   builders = 0;
   captures = 0;
+  trust = new Map<string, string>();
+  override async configureCaTrust(name: string, pem: string, signal?: AbortSignal): Promise<void> {
+    await super.configureCaTrust(name, pem, signal);
+    this.trust.set(name, pem);
+  }
+  override sandbox(name: string) {
+    const sandbox = super.sandbox(name);
+    const exec = sandbox.exec.bind(sandbox);
+    sandbox.exec = (command, options) => {
+      assert.ok(this.trust.has(name), "trust must be reconciled before setup/resume executes");
+      return exec(command, options);
+    };
+    return sandbox;
+  }
   override async provision(spec: CubeProvisionSpec): Promise<void> {
     if (spec.name.startsWith("cube-s-")) this.builders++;
     await super.provision(spec);
@@ -138,6 +153,32 @@ try {
   assert.equal(fs.readFileSync(path.join(registry.getCube(en)!.workspacePath, "generated"), "utf8"), "prepared-v2\n");
   assert.equal(registry.getCube(an)!.status, "ready", "threads cloned from the old template live on");
 
+  // An administrator trust change invalidates templates, reaches builders
+  // and clones, and is reconciled on an existing thread's wake/retry.
+  const caCertificates = rootCertificates[0]!;
+  const withCa = new CubeSupervisor(registry, backend, { ...config, caCertificates });
+  try {
+    await withCa.boot();
+    assert.equal(backend.trust.get(`cube-${dn}`), caCertificates, "boot reconciles running environments");
+    const before = backend.builders;
+    const added = await withCa.createUserThread(project.id);
+    const name = withCa.resolveUserThread(added.id).cubeName;
+    await cubeSettled(registry, name);
+    assert.equal(backend.builders, before + 1, "CA content is part of the environment cache key");
+    assert.equal(backend.trust.get(`cube-${name}`), caCertificates);
+    const fresh = registry.listEnvironmentTemplates(project.id)[0]!;
+    assert.equal(backend.trust.get(fresh.instance), caCertificates, "builder receives trust before setup");
+    await withCa.sleepCube(dn);
+    backend.trust.delete(`cube-${dn}`);
+    await withCa.wakeCube(dn);
+    assert.equal(backend.trust.get(`cube-${dn}`), caCertificates, "existing environments acquire the new roots");
+    await withCa.removeUserThread(added.id);
+  } finally {
+    await withCa.close();
+  }
+  await supervisor.retrySetupForUserThread(d.id);
+  assert.equal(backend.trust.get(`cube-${dn}`), "", "removing the profile revokes managed trust on retry");
+
   // Lifecycle evidence is host-owned and readable after reconstruction.
   const reconstructed = new CubeSupervisor(registry, backend, config);
   assert.match(reconstructed.environmentForUserThread(d.id).resume.log, /resume-output/);
@@ -145,7 +186,7 @@ try {
 
   // Sleep/wake invokes resume and preserves setup evidence.
   await supervisor.sleepCube(dn); await supervisor.wakeCube(dn);
-  assert.equal(fs.readFileSync(path.join(registry.getCube(dn)!.workspacePath, "lifecycle"), "utf8"), "setup\nresume\nresume\n");
+  assert.equal(fs.readFileSync(path.join(registry.getCube(dn)!.workspacePath, "lifecycle"), "utf8"), "setup\nresume\nresume\nsetup\nresume\nresume\n");
 
   // A failed setup never becomes a template: the builder is torn down, the
   // thread sets up fresh and carries the error; explicit retry repairs in

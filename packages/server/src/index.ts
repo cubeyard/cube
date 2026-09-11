@@ -13,7 +13,7 @@ import stream from "node:stream";
 
 import { WebSocketServer, type WebSocket } from "ws";
 
-import { IncusBackend, MockBackend, type CubeBackend } from "@cube/sandbox";
+import { IncusBackend, MockBackend, validateCaBundle, type CubeBackend } from "@cube/sandbox";
 
 import { checkAuth } from "./auth.ts";
 import { formatEventLine, recordPoint } from "./events.ts";
@@ -67,6 +67,8 @@ const supervisor = new CubeSupervisor(registry, backend, {
   image: process.env.CUBED_IMAGE ?? "cube-node",
   rootSize: process.env.CUBED_ROOT_SIZE ?? "10GiB",
   dockerVolumeSize: process.env.CUBED_DOCKER_VOLUME_SIZE ?? "5GiB",
+  caCertificates: process.env.CUBED_CA_FILE
+    ? validateCaBundle(fs.readFileSync(process.env.CUBED_CA_FILE, "utf8")) : "",
   // Prepared environments (templates threads are cloned from) are on unless
   // switched off; CUBED_CUBE_MEMORY caps each thread (default: half the host).
   environmentCache: process.env.CUBED_ENVIRONMENT_CACHE !== "0",

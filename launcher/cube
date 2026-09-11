@@ -27,6 +27,8 @@
 #   cube ssh [cmd...]      ssh into the VM as `cube`
 #   cube logs [args...]    follow cubed's journal (console log while down)
 #   cube events            lifecycle events and timings from cubed
+#   cube doctor            check host and VM HTTPS connectivity and trust
+#   cube ca set|clear|status  manage an additional certificate authority bundle
 #   cube diagnose          collect diagnostics and ask Pi for a root-cause analysis
 #   cube version           launcher and installed release versions
 #   cube destroy --yes     stop and delete EVERYTHING in $CUBE_HOME
@@ -68,6 +70,8 @@ KNOWN_HOSTS="$CUBE_HOME/known_hosts"
 PID_FILE="$CUBE_HOME/vm.pid"
 RUN_LOG="$CUBE_HOME/console.log"
 VERSION_FILE="$CUBE_HOME/version"       # currently selected release version
+CUSTOM_CA="$CUBE_HOME/ca.pem"           # administrator-selected additional roots
+HOST_CA_BUNDLE="$CUBE_HOME/host-ca-bundle.pem"
 GUEST_BUILD_ID=/opt/cube/app/build-id   # identity the VM reports
 
 # ---- settings: env > config file > default ---------------------------------
@@ -172,6 +176,44 @@ sha256_check() {  # sha256_check [FLAGS] SUMSFILE  (run inside the asset dir)
 file_size() { stat -c%s "$@" 2>/dev/null || stat -f%z "$@"; }
 free_kb()   { df -Pk "$1" | awk 'NR==2 {print $4}'; }
 
+# curl accepts only one --cacert file. When an additional CA is configured,
+# combine it with a known host public-root bundle rather than replacing public
+# trust. The generated file contains public certificates only and is atomic.
+prepare_host_ca_bundle() {
+  [ -f "$CUSTOM_CA" ] || return 0
+  local public="" candidate tmp
+  for candidate in \
+    /etc/ssl/certs/ca-certificates.crt \
+    /etc/pki/tls/certs/ca-bundle.crt \
+    /etc/ssl/ca-bundle.pem \
+    /etc/ssl/cert.pem \
+    /usr/local/etc/ca-certificates/cert.pem \
+    /opt/homebrew/etc/ca-certificates/cert.pem \
+    /usr/local/etc/openssl@3/cert.pem \
+    /opt/homebrew/etc/openssl@3/cert.pem; do
+    [ -s "$candidate" ] && { public="$candidate"; break; }
+  done
+  [ -n "$public" ] || {
+    fail "an additional CA is configured, but no supported host public-root bundle was found"
+    note "supported bundles include /etc/ssl/certs/ca-certificates.crt and Homebrew ca-certificates"
+    return 1
+  }
+  tmp="$HOST_CA_BUNDLE.tmp.$$"
+  if ! { { cat "$public"; printf '\n'; cat "$CUSTOM_CA"; } > "$tmp" \
+    && chmod 600 "$tmp" && mv -f "$tmp" "$HOST_CA_BUNDLE"; }; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+cube_curl() {
+  if [ -f "$CUSTOM_CA" ]; then
+    prepare_host_ca_bundle || return 1
+    curl --cacert "$HOST_CA_BUNDLE" "$@"
+  else
+    curl "$@"
+  fi
+}
+
 lock() {  # one lifecycle command at a time
   local holder
   if command -v flock >/dev/null 2>&1; then
@@ -196,19 +238,23 @@ lock() {  # one lifecycle command at a time
 
 make_iso() {  # make_iso OUTPUT DIR — the seed, atomic
   local out="$1" dir="$2" tool
-  rm -f "$out.tmp" "$out.tmp.iso"
+  rm -f "$out.tmp" "$out.tmp.iso" || return 1
   for tool in genisoimage xorrisofs mkisofs; do
     if command -v "$tool" >/dev/null 2>&1; then
-      "$tool" -quiet -output "$out.tmp" -volid CUBESEED -joliet -rock \
-        -input-charset utf-8 "$dir"
-      mv "$out.tmp" "$out"
+      if ! { "$tool" -quiet -output "$out.tmp" -volid CUBESEED -joliet -rock \
+        -input-charset utf-8 "$dir" && mv "$out.tmp" "$out"; }; then
+        rm -f "$out.tmp"
+        return 1
+      fi
       return 0
     fi
   done
   if command -v hdiutil >/dev/null 2>&1; then
-    hdiutil makehybrid -quiet -iso -joliet -default-volume-name CUBESEED \
-      -o "$out.tmp" "$dir"
-    mv "$out.tmp.iso" "$out"
+    if ! { hdiutil makehybrid -quiet -iso -joliet -default-volume-name CUBESEED \
+      -o "$out.tmp" "$dir" && mv "$out.tmp.iso" "$out"; }; then
+      rm -f "$out.tmp" "$out.tmp.iso"
+      return 1
+    fi
     return 0
   fi
   fail "no ISO tool found (genisoimage/xorrisofs/mkisofs/hdiutil)"
@@ -436,15 +482,21 @@ ensure_ssh_key() {
 # authorized_keys for the `cube` user; the base installs it on every
 # boot as an exact replace, so rotating the key revokes the old one.
 make_run_seed() {
-  ensure_ssh_key
+  ensure_ssh_key || return 1
   # Rebuild each boot: the host's address or forwarded port may have changed.
-  local dir
-  dir="$(mktemp -d)"
-  cp "$SSH_KEY.pub" "$dir/authorized_keys"
-  printf 'CUBED_PORTAL_BASE=%s\nCUBED_PUBLIC_PORT=%s\n' \
-    "${CUBED_PORTAL_BASE:-${CUBED_HOST//:/-}.sslip.io}" "$CUBE_PORT" > "$dir/portal.env"
-  make_iso "$RUN_SEED" "$dir"
+  local dir rc=0
+  dir="$(mktemp -d)" || return 1
+  # Explicit statuses: callers use boot_vm in conditionals, where Bash
+  # disables errexit even inside nested function calls.
+  if ! { cp "$SSH_KEY.pub" "$dir/authorized_keys" \
+    && { [ ! -f "$CUSTOM_CA" ] || cp "$CUSTOM_CA" "$dir/ca.pem"; } \
+    && printf 'CUBED_PORTAL_BASE=%s\nCUBED_PUBLIC_PORT=%s\n' \
+      "${CUBED_PORTAL_BASE:-${CUBED_HOST//:/-}.sslip.io}" "$CUBE_PORT" > "$dir/portal.env" \
+    && make_iso "$RUN_SEED" "$dir"; }; then
+    rc=1
+  fi
   rm -rf "$dir"
+  return "$rc"
 }
 
 # ---- releases ---------------------------------------------------------------
@@ -474,7 +526,7 @@ gh_token() {  # empty on a public repo / no gh
 api_get() {  # api_get URL [MAX_SECONDS] — GitHub API GET, authed when possible
   local tok
   tok="$(gh_token)"
-  curl -fsSL --max-time "${2:-30}" \
+  cube_curl -fsSL --max-time "${2:-30}" \
     -H "Accept: application/vnd.github+json" \
     ${tok:+-H "Authorization: Bearer $tok"} "$1"
 }
@@ -536,7 +588,7 @@ release_assets() {  # release_assets TAG
 # when the server will not resume it, the partial is dropped and the
 # download starts over, once.
 curl_asset() {  # curl_asset URL PARTFILE TOKEN
-  curl -fL --progress-bar -C - --retry 3 --retry-delay 2 \
+  cube_curl -fL --progress-bar -C - --retry 3 --retry-delay 2 \
     -H "Accept: application/octet-stream" \
     ${3:+-H "Authorization: Bearer $3"} \
     -o "$2" "$1"
@@ -796,7 +848,7 @@ boot_vm() {  # boot_vm vX.Y.Z — the VM for the installed release, from overlay
     fail "live.qcow2 exists but data.qcow2 is missing in $CUBE_HOME — restore the data disk, or remove live.qcow2 to accept starting over"
     return 1
   fi
-  make_run_seed
+  make_run_seed || { fail "could not prepare the current boot seed — refusing to boot with stale settings"; return 1; }
   ensure_overlay "$LIVE_DISK" "$base_sha" base || return 1
   ensure_app_overlay "$ver" || return 1
   # cube-node is attached read-only straight from the store (no overlay
@@ -1069,6 +1121,174 @@ cmd_diagnose() {
   esac
 }
 
+validate_ca_file() {  # validate_ca_file INPUT WORKDIR
+  local input="$1" dir="$2" cert count=0
+  command -v openssl >/dev/null 2>&1 \
+    || { fail "openssl is required to validate CA certificates"; return 1; }
+  grep -q -- 'PRIVATE KEY' "$input" 2>/dev/null \
+    && { fail "the CA file contains a private key; provide public CA certificates only"; return 1; }
+  # Permit blank lines between certificates, but nothing except complete
+  # CERTIFICATE PEM blocks. openssl then validates DER and CA constraints.
+  awk -v d="$dir" '
+    BEGIN { inside=0; n=0; bad=0 }
+    { sub(/\r$/, "") }
+    /^-----BEGIN CERTIFICATE-----$/ {
+      if (inside) bad=1; inside=1; n++; file=sprintf("%s/cert-%06d.pem", d, n)
+    }
+    { if (inside) print > file; else if ($0 !~ /^[[:space:]]*$/) bad=1 }
+    /^-----END CERTIFICATE-----$/ { if (!inside) bad=1; inside=0 }
+    END { if (inside || n == 0 || bad) exit 1 }
+  ' "$input" || { fail "the CA file is malformed; provide one or more PEM X509 certificates"; return 1; }
+  for cert in "$dir"/cert-*.pem; do
+    openssl x509 -in "$cert" -noout >/dev/null 2>&1 \
+      || { fail "the CA file contains a malformed X509 certificate"; return 1; }
+    openssl x509 -in "$cert" -noout -text 2>/dev/null | awk '
+      /X509v3 Basic Constraints:/ { getline; if ($0 ~ /^[[:space:]]*CA:TRUE([,[:space:]]|$)/) ca=1 }
+      END { exit !ca }
+    ' \
+      || { fail "the CA file contains a certificate that is not a CA"; return 1; }
+    count=$((count + 1))
+  done
+  [ "$count" -gt 0 ]
+}
+
+cmd_ca() {
+  local action="${1:-}" source="${2:-}" dir tmp
+  case "$action:$#" in
+    status:1)
+      if [ -s "$CUSTOM_CA" ]; then
+        ok "an additional CA bundle is configured at $CUSTOM_CA"
+        note "it is applied to launcher downloads now and to the VM at its next boot"
+      else
+        note "no additional CA bundle is configured"
+      fi
+      ;;
+    set:2)
+      [ -r "$source" ] || { fail "cannot read CA file: $source"; return 1; }
+      lock
+      vm_pid >/dev/null && { fail "the VM is running — run: cube down, change the CA, then cube up"; return 1; }
+      dir="$(mktemp -d "$CUBE_HOME/.ca-check-XXXXXX")"
+      validate_ca_file "$source" "$dir" || { rm -rf "$dir"; return 1; }
+      tmp="$CUBE_HOME/.ca.pem.$$"
+      if ! { cat "$dir"/cert-*.pem > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$CUSTOM_CA"; }; then
+        rm -rf "$dir" "$tmp"
+        fail "could not install CA bundle"
+        return 1
+      fi
+      rm -rf "$dir" "$HOST_CA_BUNDLE"
+      ok "additional CA bundle set; run: cube up"
+      ;;
+    clear:1)
+      lock
+      vm_pid >/dev/null && { fail "the VM is running — run: cube down, clear the CA, then cube up"; return 1; }
+      rm -f "$CUSTOM_CA" "$HOST_CA_BUNDLE"
+      ok "additional CA bundle cleared; run: cube up"
+      ;;
+    *) fail "usage: cube ca set <pem-file> | cube ca clear | cube ca status"; return 1 ;;
+  esac
+}
+
+doctor_https() {  # doctor_https LABEL CURL_COMMAND...
+  local label="$1" err code rc=0
+  shift
+  err="$(mktemp "$CUBE_HOME/.doctor-XXXXXX")"
+  code="$("$@" -sS --connect-timeout 5 --max-time 12 -o /dev/null -w '%{http_code}' \
+    https://api.github.com 2>"$err")" || rc=$?
+  rm -f "$err"
+  if [ "$rc" = 0 ] && case "$code" in 2??) true ;; *) false ;; esac; then
+    ok "$label HTTPS trust and request succeeded (HTTP $code)"
+    return 0
+  fi
+  case "$rc" in
+    60) fail "$label HTTPS certificate verification failed (curl 60)" ;;
+    5|6) fail "$label DNS lookup failed (curl $rc)" ;;
+    7|28) fail "$label could not connect before the timeout (curl $rc)" ;;
+    124) fail "$label HTTPS check exceeded the ssh deadline" ;;
+    0) fail "$label reached an HTTP endpoint but received HTTP ${code:-unknown}; check proxy or service policy" ;;
+    *) fail "$label HTTPS request failed (curl $rc); check network or proxy settings" ;;
+  esac
+  return 1
+}
+
+cmd_doctor() {
+  local rc=0
+  [ "$#" = 0 ] || { fail "usage: cube doctor"; return 1; }
+  log "network doctor"
+  if ! command -v curl >/dev/null 2>&1; then
+    fail "curl not found"
+    rc=1
+  elif ! doctor_https host host_doctor_curl; then
+    rc=1
+  fi
+  if ! vm_pid >/dev/null; then
+    note "skip: VM checks (the VM is not running — run: cube up)"
+  elif ! doctor_ssh true >/dev/null 2>&1; then
+    fail "VM control connection failed over ssh (20s deadline)"
+    rc=1
+    note "skip: VM HTTPS checks (ssh is unavailable)"
+  else
+    ok "VM control connection succeeded"
+    if curl -q --noproxy '*' -fsS --connect-timeout 5 --max-time 12 \
+      -o /dev/null "http://127.0.0.1:$CUBE_PORT/api/state"; then ok "VM control plane is answering"
+    else fail "VM control plane is not answering on :$CUBE_PORT"; rc=1; fi
+    if [ -s "$CUSTOM_CA" ] && ! doctor_ssh 'test -s /run/cube-ca.pem' >/dev/null 2>&1; then
+      fail "could not verify the VM's additional CA; check ssh, upgrade to a CA-capable release and reboot"
+      rc=1
+    fi
+    if ! doctor_https "VM curl" vm_doctor_curl; then rc=1; fi
+    if doctor_ssh ". /etc/profile; NODE_TLS_REJECT_UNAUTHORIZED=1 NODE_OPTIONS= node -e \"fetch('https://api.github.com',{signal:AbortSignal.timeout(12000)}).then(r=>{if(!r.ok)throw Error(r.status)}).catch(()=>process.exit(1))\"" >/dev/null 2>&1; then
+      ok "VM Node HTTPS trust succeeded"
+    else fail "VM Node HTTPS trust failed"; rc=1; fi
+  fi
+  if [ "$rc" = 0 ]; then ok "completed network checks passed (skips are not verified)"
+  else fail "one or more network checks failed"; fi
+  return "$rc"
+}
+
+host_doctor_curl() {
+  # -q MUST be curl's first argument: even --cacert does not override an
+  # `insecure` setting in .curlrc. Leave normal download configuration alone.
+  if [ -f "$CUSTOM_CA" ]; then
+    prepare_host_ca_bundle || return 1
+    curl -q --cacert "$HOST_CA_BUNDLE" "$@"
+  else
+    curl -q "$@"
+  fi
+}
+
+vm_doctor_curl() {
+  # Only doctor_https's fixed arguments, never user-supplied shell text.
+  doctor_ssh ". /etc/profile; curl -q $*"
+}
+
+doctor_ssh() (
+  # ConnectTimeout alone cannot bound a responsive sshd with a stuck remote
+  # command. Own the actual ssh PID and enforce a local wall-clock deadline;
+  # use a subshell so cleanup traps cannot replace the launcher's lock trap.
+  local pid deadline rc=0
+  ssh -p "$SSH_PORT" -i "$SSH_KEY" \
+    -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$KNOWN_HOSTS" \
+    -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=5 \
+    cube@127.0.0.1 "$@" &
+  pid=$!
+  trap 'kill -KILL "$pid" 2>/dev/null || true' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  deadline=$((SECONDS + 20))
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      trap - EXIT
+      return 124
+    fi
+    sleep 0.1
+  done
+  wait "$pid" || rc=$?
+  trap - EXIT
+  return "$rc"
+)
+
 cmd_upgrade() {
   local want="${1:-}" cur target role changed=() need reboot=0 running=""
   check_version_arg "$want"
@@ -1251,6 +1471,10 @@ cube — self-hosted coding-agent box (launcher)
                          -n 100 -f); the console log while the VM is down
   cube events [--json] [--limit N] [--kind K] [--since 24h]
                          lifecycle events and timings from cubed
+  cube doctor            check host HTTPS, VM control, curl and Node trust
+  cube ca set <pem-file> install an additional CA bundle (VM must be down)
+  cube ca clear          remove the additional CA bundle (VM must be down)
+  cube ca status         show whether an additional CA bundle is configured
   cube diagnose [--collect-only | --export <id>]
                          collect diagnostics and ask Pi for root-cause analysis
   cube version           launcher and installed release (also --version)
@@ -1284,6 +1508,8 @@ case "$CMD" in
   ssh)      cmd_ssh "$@" ;;
   logs)     cmd_logs "$@" ;;
   events)   cmd_events "$@" ;;
+  doctor)   cmd_doctor "$@" ;;
+  ca)       cmd_ca "$@" ;;
   diagnose) cmd_diagnose "$@" ;;
   upgrade)  cmd_upgrade "$@" ;;
   version|-V|--version) cmd_version ;;

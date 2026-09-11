@@ -448,6 +448,72 @@ tag — they would race the same draft.
 
 ## Diagnostics
 
+### Corporate CA trust
+
+`cube ca set <pem-file>` validates and copies an administrator-selected CA
+bundle to `~/.cube/ca.pem`. It rejects keys, leaf certificates and malformed
+input. `clear` removes it; `status` reports configuration, not connectivity.
+Set/clear require the VM to be stopped. On each boot, the launcher includes
+the current bundle in `CUBESEED`; the base regenerates `/run/cube-ca.pem`
+and `/run/cube-ca-bundle.pem` (public roots plus the selected roots), before
+Incus and cubed start. Nothing writes to the Nix store, release images, or
+the physical host's system trust store. This needs a base-image release,
+not only `deploy-tree.sh` or an app-only update.
+Boot refuses to proceed if the current seed cannot be generated; it never
+falls back to an older seed containing possibly revoked roots.
+
+VM curl, Git/gh, Incus and Node/pi use the managed bundle. cubed reads the
+additional roots through `CUBED_CA_FILE` once at startup. For non-launcher
+development, supply that variable explicitly and configure the daemon's own
+TLS clients separately (`SSL_CERT_FILE`, `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS`).
+Never source CA configuration from a repository or pass host environment
+variables wholesale into a thread.
+
+Before enabling thread egress, cubed replaces only its managed certificates
+under `/usr/local/share/ca-certificates/cube/`, runs `update-ca-certificates`,
+and refreshes an active Docker daemon when the bundle changed. The same path
+covers builders, clones, boot recovery, wake and setup retry. CA contents
+participate in prepared-environment cache keys. Empty configuration revokes
+managed roots without deleting workspaces or separately installed roots.
+An incomplete installation is marked before trust changes, so clear or
+rotation repairs partial updates rather than treating them as unchanged.
+Login shells receive `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` and
+`REQUESTS_CA_BUNDLE`; curl/apt/Git use the OS store. Software with custom TLS
+settings can still override these defaults.
+
+**Separate stores remain separate.** A downloaded Temurin JDK normally uses
+its own `lib/security/cacerts`. After installing the JDK, setup must import
+the approved roots with that JDK's `keytool`, or configure a separate managed
+Java truststore retaining public roots. Those roots are available as individual
+PEMs in the managed directory above. Setup also owns removal of such imports
+and restarting Java daemons. Docker daemon trust covers pulls, not TLS inside
+Docker build/run images; install certificates into those images separately.
+CA support does not add proxy routing, bypass the egress allowlist, or disable
+TLS verification.
+
+`cube doctor` makes bounded, unauthenticated HTTPS requests to
+`https://api.github.com` from the physical host and VM (curl and Node), and
+checks SSH and the control plane. Curl failures distinguish certificate
+verification, DNS/connectivity, and HTTP policy failures. No threads are opened,
+no setup scripts run, and no diagnostic bundle is collected or uploaded.
+The control-plane probe uses `/api/state`, not the thread listing. Curl
+probes ignore `.curlrc` (including `insecure`) and have a 12-second deadline;
+each SSH invocation has a local 20-second deadline, even if its remote
+command stops responding. The Node probe also forces TLS verification on.
+Failures return nonzero; unavailable VM checks are explicitly skipped when it
+is stopped. Success proves only these probes, not Incus downloads, model
+providers, thread allowlists, Java, or a complete JDK redirect chain.
+
+Offline regression: `node scripts/launcher-network-test.ts` and
+`node packages/sandbox/test/ca-trust-test.ts`. The latter exercises real curl
+and Node TLS against a local test CA, including rejection before installation
+and after revocation; the Debian trust-store portion skips on non-Debian hosts.
+Before release, run the VM portfolio and a disposable install on both host
+architectures: no CA → TLS failure, set CA → VM and thread download success,
+rotate/clear → old issuer rejected, reboot/upgrade → configuration retained.
+Verify a Temurin download through all redirects with the project's allowlist,
+then retry setup in an existing thread. Offline stubs are not VM acceptance.
+
 The release launcher runs diagnostics inside the VM:
 
 ```bash
