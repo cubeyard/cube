@@ -15,7 +15,8 @@
   "scripts": {
     "cubed": "node packages/server/src/index.ts",
     "build": "pnpm --filter @cube/web build",
-    "test": "bash scripts/test-offline.sh",
+    "check:references": "node scripts/check-references.ts",
+    "test": "pnpm check:references && bash scripts/test-offline.sh",
     "typecheck": "tsc -p tsconfig.json && pnpm --filter @cube/web check",
     "lint": "eslint .",
     "vm": "bash scripts/vm/dev.sh"

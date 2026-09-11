@@ -24,6 +24,28 @@ The user-facing unit is the **thread**; a thread's backing **cube** is
 invisible in the product. `/api/threads/*` is the product API; `/api/cubes/*`
 is plumbing you may use for diagnosis and explicit sleep/wake.
 
+## Vendored dependency references
+
+`repos/` contains upstream source snapshots for agent reference, not application
+code. Use their implementations, tests and examples when working with those
+dependencies; check that the snapshot matches the installed version. Do not
+edit them unless explicitly asked, install or run their development tooling,
+or import application code from them. Keep imports on normal package dependencies.
+Upstream agent instructions describe upstream development, not cube's workflow.
+
+For pi integration, start with `repos/pi/packages/coding-agent/examples/extensions/`,
+`repos/pi/packages/coding-agent/docs/extensions.md`, and
+`repos/pi/packages/coding-agent/src/core/extensions/`. Session and SDK behavior
+lives alongside them in `src/core/`; the agent loop, providers and TUI live in
+`repos/pi/packages/{agent,ai,tui}/`. Keep cube's isolation contracts even when
+upstream examples assume a trusted host. See `repos/README.md` for pins and updates.
+
+When upgrading pi, update both cube package pins, `pnpm-lock.yaml`, and the
+`repos/pi` subtree to the matching release tag in the same change. An upgrade
+request includes updating its reference subtree; never just edit the vendored
+version field. Update `repos/README.md` and run `pnpm check:references` after
+installing dependencies. This check also runs before `pnpm test`.
+
 ## Host toolchain
 
 Node ≥ 26 and the pnpm pinned in `package.json`. On this development host:

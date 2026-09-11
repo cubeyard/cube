@@ -58,6 +58,7 @@ on:
       - 'docs/**'
       - '.claude/**'
       - 'spikes/**'
+      - 'repos/**'
   workflow_dispatch:
     inputs:
       version:

@@ -28,7 +28,8 @@ coverage/
 # OS and editor-local files.
 .DS_Store
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 
 # impeccable: machine-local state and runtime caches.
 # Shared and committed: PRODUCT.md, DESIGN.md, .impeccable/design.json,

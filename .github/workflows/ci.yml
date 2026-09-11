@@ -27,7 +27,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm lint
-      - run: bash scripts/test-offline.sh
+      - run: pnpm test
       - name: shell syntax
         run: |
           set -e
