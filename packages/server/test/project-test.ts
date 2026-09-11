@@ -94,8 +94,8 @@ const supervisor = new CubeSupervisor(registry, backend, {
 });
 
 const missing = supervisor.createProject({
-  name: "missing branch",
-  repositories: [{ url: primary.bare, base: "does-not-exist" }],
+  name: "missing repository",
+  repositories: [{ url: path.join(tmp, "does-not-exist.git") }],
 });
 await assert.rejects(supervisor.createUserThread(missing.id), /not ready \(status: checking\)/);
 const missingDone = await settledProject(supervisor, missing.id);
@@ -240,14 +240,15 @@ for (const change of ["edit", "delete"] as const) {
 }
 console.log("3d ok: project edits and deletion during refresh cannot allocate stale threads");
 
-// Respect an explicitly configured base, not a hard-coded main.
+// Discover default branch changes remotely, even with a legacy base override.
 git(primary.seed, "checkout", "-b", "release");
 git(primary.seed, "push", "origin", "release");
-const releaseProject = supervisor.createProject({ name: "release branch", repositories: [{ url: primary.bare, base: "release" }] });
+const releaseProject = supervisor.createProject({ name: "release branch", repositories: [{ url: primary.bare, base: "main" }] });
 await settledProject(supervisor, releaseProject.id);
 fs.writeFileSync(path.join(primary.seed, "README.md"), "fresh release tip\n");
 git(primary.seed, ...author, "commit", "-am", "advance release");
 git(primary.seed, "push", "origin", "release");
+git(primary.bare, "symbolic-ref", "HEAD", "refs/heads/release");
 const releaseThread = await supervisor.createUserThread(releaseProject.id);
 const releaseName = supervisor.resolveUserThread(releaseThread.id).cubeName;
 await readyCube(registry, releaseName);
@@ -257,7 +258,8 @@ assert.equal(registry.listCubeRepositories(releaseCube.id)[0]!.base, "release");
 await supervisor.removeUserThread(releaseThread.id);
 await supervisor.deleteProject(releaseProject.id);
 git(primary.seed, "checkout", "main");
-console.log("3e ok: configured non-main base is refreshed");
+git(primary.bare, "symbolic-ref", "HEAD", "refs/heads/main");
+console.log("3e ok: changed remote default overrides legacy base configuration");
 
 // Existing threads stay pinned. New threads refresh both upstreams rather
 // than reusing the old project-check snapshot.

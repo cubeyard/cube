@@ -83,7 +83,7 @@ Confirmed today:
   number of additional repositories.
 - Repository checks verify host access and base configuration up front. A
   thread can start only from a ready project. Each new creation refreshes all
-  configured base branches (including references), then pins their exact OIDs
+  repository default branches (including references), then pins their exact OIDs
   before allocating an environment. Fetch failures stop creation, never fall
   back to the checked snapshot. Existing threads and idempotent replays retain
   their original pins; provisioning itself does not fetch.
@@ -126,8 +126,8 @@ Undecided:
 
 - Search, sort, and pagination remain deferred until the global list grows past
   the scale where project filtering is enough.
-- Project mirror freshness is represented by the visible checked time; no
-  automatic refresh policy has been chosen.
+- The visible checked time describes project preflight, not the revisions of
+  later threads. Each new thread independently fetches the current remote defaults.
 
 ## Brand Commitments
 
