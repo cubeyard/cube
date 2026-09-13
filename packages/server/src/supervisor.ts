@@ -1,3 +1,5 @@
+import { AdmittedHostNode } from "./admitted-host-node.ts";
+import type { HostExecSpec } from "./iroh-node.ts";
 import { fileURLToPath } from "node:url";
 import { ExecutionNodes, LocalExecutionNodeClient, ExecutionNodeError, isNodeTransportFailure, type ExecutionNodeClient } from "./execution-node.ts";
 /**
@@ -349,7 +351,7 @@ export class CubeSupervisor {
   private closing = false;
 
   constructor(registry: Registry, backend: CubeBackend, config: SupervisorConfig, nodes?: ExecutionNodeClient[]) {
-    this.nodes = new ExecutionNodes(registry, nodes ?? [new LocalExecutionNodeClient(registry, backend)]);
+    this.nodes = new ExecutionNodes(registry, nodes ?? [new LocalExecutionNodeClient(registry, backend), ...registry.hostNodeAdmissions().map(row => new AdmittedHostNode(registry, row))]);
     this.registry = registry;
     this.backend = backend;
     this.config = config;
@@ -394,6 +396,31 @@ export class CubeSupervisor {
       name: instanceName(cube.name),
       exec: (command, options) => this.localEnvironmentOperation(cube, true, () => this.backend.sandbox(instanceName(cube.name)).exec(command, options)),
     };
+  }
+
+  /** Fixed thread-scoped RPC; requests cannot select a node, key, path or env.
+   * Preparation returns the durable operation ID before any dispatch. */
+  async hostExecForUserThread(id: string, value: unknown, signal?: AbortSignal): Promise<unknown> {
+    const { cubeName, threadId } = this.resolveUserThread(id);
+    const cube = this.requireCube(cubeName);
+    const client = this.nodes.forEnvironment(cube.id);
+    if (!(client instanceof AdmittedHostNode)) throw new ExecutionNodeError("OPERATION_UNSUPPORTED");
+    if (client.binding.threadId !== threadId || client.binding.environmentId !== cube.id) throw new ExecutionNodeError("WRONG_NODE");
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new ExecutionNodeError("INVALID_REQUEST");
+    const row = value as Record<string, unknown>;
+    if (["prepare", "submit"].includes(String(row.action)) && this.registry.getThread(threadId)?.archivedAt !== null) throw new ExecutionNodeError("OPERATION_UNSUPPORTED");
+    const keys = row.action === "prepare" ? ["action", "spec"] : row.action === "status" ? ["action"] : ["action", "operationId"];
+    if (Object.keys(row).length !== keys.length || Object.keys(row).some(key => !keys.includes(key))) throw new ExecutionNodeError("INVALID_REQUEST");
+    signal?.throwIfAborted();
+    this.registry.touchCube(cubeName);
+    switch (row.action) {
+      case "status": return client.status(cube.id);
+      case "prepare": return client.prepareExec(cube.id, row.spec as HostExecSpec, signal);
+      case "submit": case "operation":
+        if (typeof row.operationId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(row.operationId)) throw new ExecutionNodeError("INVALID_REQUEST");
+        return row.action === "submit" ? client.submitExec(cube.id, row.operationId, signal) : client.operation(cube.id, row.operationId, signal);
+      default: throw new ExecutionNodeError("INVALID_REQUEST");
+    }
   }
 
   async accessForUserThread(id: string): Promise<{ nodeId: string; local: true }> {
@@ -535,6 +562,7 @@ export class CubeSupervisor {
     }
     for (const cube of this.registry.listCubes()) {
       if (cube.status === "building-environment") continue; // quarantined cleanup remains retryable
+      if (this.registry.nodeForCube(cube.id) !== this.registry.localNodeId) continue; // no remote lifecycle/recovery side effects
       try { await this.requireLocalEnvironment(cube.name, true); }
       catch (error) {
         recordPoint(this.registry, { kind: "boot", cube: cube.name, ok: false, detail: String(error) });
@@ -2056,6 +2084,7 @@ export class CubeSupervisor {
     const cutoff = Date.now() - this.config.idleMs;
     for (const cube of this.registry.listCubes()) {
       if (cube.status !== "ready" || cube.lastActiveAt > cutoff) continue;
+      if (this.registry.nodeForCube(cube.id) !== this.registry.localNodeId) continue; // host sleep is unsupported
       // Re-read next to the sleep call: the list is a snapshot, and a prompt
       // that completed while this loop awaited earlier cubes must not get
       // its cube slept right after being active (sleepCube itself rechecks
@@ -2404,7 +2433,7 @@ export class CubeSupervisor {
         // The extension is a separate process and cannot infer/share cubed's
         // in-memory MockBackend. Tell it which execution adapter to create;
         // real Incus remains the default and fail-closed path.
-        CUBE_BACKEND: this.backend.kind,
+        CUBE_BACKEND: this.registry.nodeForCube(cube.id) === this.registry.localNodeId ? this.backend.kind : "host",
         CUBE_NAME: cube.name,
         CUBE_THREAD_ID: id,
         CUBE_NODE_ID: this.registry.nodeForCube(cube.id),

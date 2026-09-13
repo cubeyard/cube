@@ -7,9 +7,10 @@ permanent local binding, durable operation journal, bounded exec and result
 retrieval, tested across response loss and process restart. The control-plane
 adapter now uses `@number0/iroh` directly in Node, not a Rust subprocess bridge.
 Loopback and explicit direct modes interoperate with the Rust host on loopback
-addresses. Production enrollment/tool routing, external acceptance, file/repository
-transfer and thread communication remain outstanding. The npm binding's missing
-portmapper controls need an operator/upstream decision before external deployment;
+addresses. Explicit operator enrollment and pi bash/code/! routing through cubed
+are now implemented and tested on disposable resources. External acceptance,
+file/repository transfer and thread communication remain outstanding. The maintainer
+accepted the npm binding's missing portmapper controls for this development loop;
 see the host documentation. No network-policy exceptions are added by this slice.
 
 ## Outcome

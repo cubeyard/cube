@@ -1,3 +1,4 @@
+import { smokeHostRouting } from "./smoke-host-routing.ts";
 /** Real TypeScript -> @number0/iroh (in process) -> Rust host acceptance.
  * Disposable keys, journals, workspaces and processes only. No cubed/Incus/model
  * instance is contacted; both network modes use loopback targets in this test. */
@@ -142,6 +143,10 @@ try {
     assert.equal((await client.operation(17, result.operationId)).state, "Succeeded");
     assert.equal((await client.status(17)).status, "Running");
     assert.equal(fs.readFileSync(path.join(workspace, "count"), "utf8"), "once");
+    await smokeHostRouting(directory, configPath, workspace, {
+      disconnect: () => stop(daemon.child),
+      reconnect: async () => { daemon = await start(key, state, network, daemon.address); },
+    });
     await stop(daemon.child);
     console.log(`ok: ${network} mode, real TS/native/iroh/exec, exact binding, durable intent, rejection, config pinning, offline observations and restart`);
   }

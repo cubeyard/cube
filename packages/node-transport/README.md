@@ -1,12 +1,13 @@
 # Node transport bootstrap
 
-**Development-only; not wired into cubed or agent tools. No Rust binary is built
-into release artifacts.**
+**Opt-in development host profile. No Rust host binary is built into release
+artifacts; ordinary threads still use the local backend.**
 Real iroh 1.2.0, pinned in Cargo.lock, using Rust 1.91.0. The `serve` command
 remains a hello-only probe and advertises no execution profiles. The separate,
 explicitly opted-in [trusted host profile](HOST.md) now adds a permanent local
 binding, durable operation journal, bounded host exec and result retrieval.
-Neither mode is enrolled into cubed yet. The control-plane adapter in
+Operator-created host threads now route pi exec through cubed; see
+[enrollment](HOST.md#operator-enrollment-and-thread-tools). The control-plane adapter in
 `packages/server/src/iroh-node.ts` now calls pinned `@number0/iroh` 1.1.0 **inside
 Node**, directly over this protocol. There is no Rust subprocess/stdio bridge
 between TypeScript and the host node; the CLI remains independent diagnostic
@@ -97,7 +98,7 @@ auth rejection before any application message, and idle-connection expiry.
 
 The [host tests](HOST.md) additionally exercise the durable operation/binding
 boundary and bounded real shell execution, including crashes and response loss.
-Next: explicit remote registry enrollment/tool routing and external connectivity
+Next: file/repository transfer and external connectivity
 acceptance. Thread communication, remote cancellation, file/repository transfer
 and portal streams remain follow-ups. No real remote machine, macOS or Incus
 acceptance has been performed.

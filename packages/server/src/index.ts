@@ -25,7 +25,7 @@ import { defaultPortalBase } from "./portal-config.ts";
 import { guardUpgradeSocket, portalLabel, proxyHttp, proxyUpgrade, refuseUpgrade, respondFailed, respondMissing, respondWaking, upgradeAfterWake } from "./portal-proxy.ts";
 import { Registry } from "./registry.ts";
 import { CubeSupervisor, DEFAULT_EGRESS_ALLOW } from "./supervisor.ts";
-import { describeThreadError, sanitizeMessage } from "./user-facing.ts";
+import { sanitizeMessage } from "./user-facing.ts";
 import { APP_VERSION } from "./version.ts";
 import { listWorkspaceFiles, openWorkspaceFile } from "./workspace-files.ts";
 
@@ -145,9 +145,11 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
 function fail(res: http.ServerResponse, error: unknown, sanitize = false, route?: string): void {
   if (res.destroyed) return;
   if (error instanceof ExecutionNodeError) {
-    return json(res, error.code === "OPERATION_UNSUPPORTED" ? 501 : error.code === "ENVIRONMENT_MISSING" ? 409 : 503, {
+    return json(res, error.code === "OPERATION_UNSUPPORTED" ? 501 : error.code === "INVALID_REQUEST" ? 400
+      : ["ENVIRONMENT_MISSING", "WRONG_NODE", "CONFLICT"].includes(error.code) ? 409 : error.code === "CAPACITY_EXCEEDED" ? 429 : 503, {
       code: error.code, completionUnknown: error.completionUnknown,
-      error: describeThreadError(error.code),
+      error: error.message,
+      ...("operationId" in error && typeof error.operationId === "string" ? { operationId: error.operationId } : {}),
     });
   }
   let message = error instanceof Error ? error.message : String(error);
@@ -573,6 +575,13 @@ async function api(
       signal,
     ));
     return json(res, 200, result);
+  }
+
+  const hostExec = url.pathname.match(/^\/api\/threads\/([^/]+)\/host-exec$/);
+  if (hostExec && method === "POST") {
+    const id = decodeId(hostExec[1]!);
+    const input: unknown = JSON.parse(await readBody(req));
+    return json(res, 200, await whileConnected(res, signal => supervisor.hostExecForUserThread(id, input, signal)));
   }
 
   const threadRepository = url.pathname.match(

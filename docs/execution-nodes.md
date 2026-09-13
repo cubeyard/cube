@@ -21,8 +21,10 @@ still the local adapter. The separate development implementation in
 [`packages/node-transport`](../packages/node-transport/README.md) now includes real
 QUIC and opt-in trusted host execution with a permanent binding/durable journal.
 `packages/server/src/iroh-node.ts` connects directly through `@number0/iroh` in the
-Node process, without a Rust/stdio intermediary. It is not yet enrolled/routed into
-cubed's agent tools or acceptance-tested on an external machine. The protocol
+Node process, without a Rust/stdio intermediary. Explicit operator admission now
+creates fresh host-bound threads and routes pi bash/code/! exec through cubed.
+File/repository transfer and external-machine acceptance remain outstanding.
+See [host enrollment](../packages/node-transport/HOST.md#operator-enrollment-and-thread-tools). The protocol
 must not require Tailscale, WireGuard, SSH, or another VPN. Browser traffic stays
 HTTP(S)/WebSocket to the control plane. The existing restrictive loopback/trusted
 Tailnet browser access boundary is unchanged; there is no new public gateway.

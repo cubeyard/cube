@@ -207,12 +207,13 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
   contact: NodeContact = "unobserved";
   private readonly config: IrohConfig;
   private readonly configPath: string;
-  private readonly configHash: string;
+  readonly configHash: string;
   private readonly observe?: (environmentId: number, observation: EnvironmentObservation) => void;
 
-  constructor(options: { configPath: string; observe?: (environmentId: number, observation: EnvironmentObservation) => void }) {
-    shape(options, ["configPath"], ["observe"]);
+  constructor(options: { configPath: string; configHash?: string; observe?: (environmentId: number, observation: EnvironmentObservation) => void }) {
+    shape(options, ["configPath"], ["configHash", "observe"]);
     const { config, hash } = loadConfig(options.configPath);
+    if (options.configHash !== undefined && options.configHash !== hash) throw new IrohNodeError("CONFLICT");
     this.binding = Object.freeze({ ...config.binding });
     this.nodeId = config.binding.nodeId;
     this.config = config;

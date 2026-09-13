@@ -1,3 +1,4 @@
+import { HostExecSandbox, unsupportedHostFiles } from "./host-exec.ts";
 import { createLocalEnvironmentAccess } from "./environment-access.ts";
 /**
  * The cube pi-extension (ARCHITECTURE §13 Phase 3d, step 1): pi runs on the
@@ -71,7 +72,7 @@ import { SHADOWED_TOOLS, auditTools } from "./guard.ts";
 import { createGuestOperations } from "./ops.ts";
 
 export interface CubeConfig {
-  backend: "incus" | "mock";
+  backend: "incus" | "mock" | "host";
   nodeId?: string;
   agentCwd?: string;
   /** Registry name — enables wake through cubed. */
@@ -139,7 +140,8 @@ function throwIfCodeAborted(signal: AbortSignal): void {
 
 export function resolveConfig(env: NodeJS.ProcessEnv, cwd: string): CubeConfig | null {
   const backend = env.CUBE_BACKEND?.trim() || "incus";
-  if (backend !== "incus" && backend !== "mock") return null;
+  if (backend !== "incus" && backend !== "mock" && backend !== "host") return null;
+  if (backend === "host" && !env.CUBE_THREAD_ID) return null;
   const name = env.CUBE_NAME?.trim() || undefined;
   const instance = env.CUBE_INSTANCE?.trim() || (name ? `cube-${name}` : undefined);
   if (!instance) return null;
@@ -178,6 +180,9 @@ export class Waker {
   }
 
   ensure = (ctx?: ExtensionContext, signal?: AbortSignal): Promise<void> => {
+    if (this.cfg.backend === "host") {
+      return new HostExecSandbox((body, signal) => createThreadRequest(this.cfg)("/host-exec", { method: "POST", body, timeoutMs: 10000 }, signal)).status(signal);
+    }
     // Every new action is admitted independently before joining a wake barrier.
     // An in-flight wake is not an offline queue for newly submitted work.
     if (this.cfg.threadId) {
@@ -248,6 +253,7 @@ export class Waker {
   }
 
   async state(signal?: AbortSignal): Promise<string> {
+    if (this.cfg.backend === "host") { await this.ensure(undefined, signal); return "Running"; }
     // A managed Incus instance may already be Running while cubed is still
     // retrying setup. Its registry status, not raw Incus state, is the tool
     // readiness authority. Standalone Incus has no such supervisor contract.
@@ -399,7 +405,7 @@ export function createThreadRequest(cfg: { threadId?: string; cubedUrl: string }
       const body = await response.json().catch(() => ({})) as Record<string, unknown>;
       requestSignal.throwIfAborted();
       if (!response.ok) throw Object.assign(new Error(String(body.error ?? `cubed request failed (${response.status})`)), {
-        ...(typeof body.code === "string" ? { code: body.code } : {}),
+        ...(typeof body.operationId === "string" ? { operationId: body.operationId } : {}),        ...(typeof body.code === "string" ? { code: body.code } : {}),
         ...(body.completionUnknown === true ? { completionUnknown: true } : {}),
       });
       return body;
@@ -456,14 +462,16 @@ export default function cubeExtension(pi: ExtensionAPI) {
   }
 
   const client = cfg.backend === "incus" ? new IncusClient() : undefined;
-  const localSandbox = client
+  const hostSandbox = cfg.backend === "host" ? new HostExecSandbox((body, signal) =>
+    createThreadRequest(cfg)("/host-exec", { method: "POST", body, timeoutMs: 10000 }, signal)) : undefined;
+  const localSandbox = hostSandbox ?? (client
     ? new IncusSandbox(cfg.instance, client)
-    : new MockSandbox(cfg.instance, cfg.guestWorkspace, cfg.hostWorkspace);
+    : new MockSandbox(cfg.instance, cfg.guestWorkspace, cfg.hostWorkspace));
   const waker = new Waker(cfg, client);
-  const localFiles = client ? incusFiles(client, cfg.instance) : mockFiles();
-  const access = cfg.threadId
+  const localFiles = hostSandbox ? { push: unsupportedHostFiles, pull: unsupportedHostFiles } : client ? incusFiles(client, cfg.instance) : mockFiles();
+  const access = cfg.threadId && !hostSandbox
     ? createLocalEnvironmentAccess({ threadId: cfg.threadId, nodeId: cfg.nodeId!, cubedUrl: cfg.cubedUrl })
-    : null; // standalone disposable Incus smoke; not a managed thread
+    : null; // host uses its scoped RPC; standalone disposable Incus has no registry gate
   const sandbox: import("@cube/sandbox").Sandbox = access ? {
     name: localSandbox.name,
     exec: (command, options) => access.run(true, () => localSandbox.exec(command, options), options.signal),
@@ -499,6 +507,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
     // with the production command environment.
     exec: async (command, cwd, { onData, signal, timeout }) => {
       await waker.ensure(undefined, signal); // Esc during a wake must cancel it too
+      signal?.throwIfAborted();
       // Cap total forwarded output: pi's bash tool spools everything past
       // its display limit to a host /tmp file, so a cube command like `yes`
       // would otherwise fill the credentialed host's disk. Past the ceiling
@@ -533,10 +542,14 @@ export default function cubeExtension(pi: ExtensionAPI) {
   const threadRequest = createThreadRequest(cfg);
 
   const codeCapabilityHost: CodeCapabilityHost = {
+    operation: (operationId, signal) => {
+      if (!hostSandbox) return unsupportedHostFiles();
+      return hostSandbox.operation(operationId, signal);
+    },
     exec: (input, signal) => execCode(async (command, cwd, options) => {
       await waker.ensure(undefined, options.signal);
       options.signal.throwIfAborted();
-      return sandbox.exec(command, { cwd: guest(cwd), ...options });
+      return sandbox.exec(command, { cwd: guest(cwd), ...options, ...(hostSandbox ? { timeout: Math.min(input.timeoutMs, 60000) / 1000 } : {}) });
     }, input, cfg.guestWorkspace, signal),
     readText: (inputPath, signal) => codeFile("fs.readText", inputPath, async () => {
       throwIfCodeAborted(signal);
@@ -784,6 +797,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
     let systemPrompt = event.systemPrompt.includes(hostLine)
       ? event.systemPrompt.replace(hostLine, guestLine)
       : `${event.systemPrompt}\n\n${guestLine}`;
+    if (cfg.backend === "host") systemPrompt += "\nThis is trusted bare-metal host execution over iroh, NOT a sandbox. /workspace is a logical tool cwd mapped to the enrolled host workspace, not a mount guaranteed inside shell commands. Exec is limited to 60 seconds and 8192 retained output bytes. Aborting does not cancel remote work. Inspect uncertain operations with cube.operations.get(operationId); never automatically resubmit. File/repository transfer, services and portals are unsupported in this slice.";
     systemPrompt += "\nEnvironment access is checked per action. If unavailable, continue the conversation using existing context only; do not claim fresh observations or queue/replay rejected work. Unknown operation outcomes must be inspected before another execution.";
     if (cfg.threadId) {
       systemPrompt += "\n\nUse the code tool's cube.git capabilities for authenticated repository network operations; ordinary git fetch/push in bash intentionally has no host credentials. Call cube.thread.archive() only when the user's current instruction explicitly requires archival after all other work is done.";

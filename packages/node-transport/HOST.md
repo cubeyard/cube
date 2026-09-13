@@ -143,8 +143,8 @@ control-plane filesystem/Git/Incus adapters even if a local node ID is supplied.
   Node process, so aborting its connect/read does not close a sibling's endpoint.
   IO has a five-second deadline; awaited QUIC drain can add roughly three seconds
   for an unreachable peer. Late native completions are closed, never dispatched.
-- Wake/sleep/portals remain unsupported. No remote registry enrollment or production
-  agent-tool routing is installed by this module.
+- Wake/sleep/portals remain unsupported. Operator admission and thread exec routing
+  are opt-in, described below; this transport module cannot enroll itself.
 
 **Dependency constraints before external deployment:** 1.1.0 publishes its entry
 files at package root but points `main`/`types` at a missing `iroh-js/` directory.
@@ -158,7 +158,8 @@ binding cannot clear one family's default transport.
 the addon's built-in NAT portmapper**. The published API exposes no portmapper
 switch; the upstream implementation can probe/map a LAN gateway even with an empty
 relay map. Therefore this is not a packet-level loopback-only guarantee. External
-deployment requires an explicit operator decision or upstream portmapper controls;
+deployment requires an explicit operator decision or upstream portmapper controls
+(the maintainer accepted this limitation for the development loop);
 do not silently treat the old Rust build's disabled-portmapper guarantee as applying
 to this npm addon. No network policy/firewall rules are changed here. No server
 application ALPN is registered on the caller endpoint, and browser HTTP remains
@@ -230,7 +231,77 @@ cancellation/result recovery, wrong thread denial, immutable config/intents, mis
 workspace, restart and no resubmission. Only test-owned keys/state/workspaces and
 host processes are fixtures. The npm NAT limitation above still applies.
 
-Next are explicit registry enrollment/tool routing and external connectivity
-acceptance, then file/repository transfer and thread communication. No real remote
-machine or shared live thread was used as an execution target. This is not full
-thread-to-host or external-network sign-off.
+The same smoke now invokes operator enrollment against a disposable registry,
+starts real cubed HTTP with local backend execution disabled, and exercises the
+registered pi bash/code/! operations through it. It proves operation IDs survive
+HTTP/codemode cancellation, cubed restart allows read-only inspection without
+resubmission, and config changes remain refused across restart. Native protocol
+fixtures and registry migration/HTTP cutpoint tests are in the offline portfolio.
+
+Next are file/repository transfer and separate-machine connectivity acceptance,
+then thread communication. No shared live thread/node was used as an execution
+target. Registered tools are exercised without model calls; full interactive,
+external-machine development-loop acceptance is still outstanding.
+
+
+## Operator enrollment and thread tools
+
+This is **trusted, unprivileged bare-metal Linux execution, not a sandbox**.
+Enrollment is deliberately absent from agent capabilities, project configuration,
+and browser creation requests. Normal thread creation remains local. There is no
+migration, replacement, fallback, queue or automatic replay.
+
+1. Choose a **new disposable** host/workspace and fresh node/thread identifiers
+   plus an unused positive environment ID in the control-plane registry. The
+   Rust host currently supports one immutable thread/environment per node.
+2. Initialize the host using `host-init` above with precisely those IDs and the
+   authorized control-plane public peer, then run `host-serve`. Keep the host
+   account unprivileged and separate from control-plane credentials/sessions.
+3. On the control plane, create the owner-only adapter JSON shown above, a private
+   intent directory and private control key. Choose `network: "direct"` explicitly
+   for a non-loopback target. Keep these files outside all agent workspaces.
+4. Stop cubed and run as its operator (not from a managed thread):
+
+   ```sh
+   node scripts/enroll-host-node.ts \
+     --database /absolute/cubed.db \
+     --project EXISTING_PROJECT_ID \
+     --config /absolute/private-host.json \
+     --cubes-root /absolute/cubes \
+     --trusted-host --server-stopped
+   ```
+
+   The database must already exist. `--cubes-root` must match cubed's configuration.
+   The CLI checks the authenticated host binding with a read-only status request,
+   then atomically creates **new** node/environment/thread metadata and pins the
+   exact configuration hash. It does not seed a repository or run remote commands.
+   Existing identities are rejected, never adopted. If the CLI loses its response,
+   inspect the registry for the chosen IDs rather than choose replacement IDs.
+5. Start cubed and open the returned thread. Pi remains on the control plane;
+   `bash`, user `!` and `cube.exec` use the enrolled node. No host key/address is
+   passed to pi. A missing config/key/node does not prevent conversation startup.
+
+The fixed `/api/threads/:id/host-exec` RPC accepts only `status`, `prepare {spec}`,
+`submit {operationId}` and `operation {operationId}` actions. It derives the full
+binding from the authorized thread, never request-supplied destinations. Pi obtains
+a durable operation ID from `prepare` before sending **one** submit request, then
+polls read-only. `cube.operations.get(operationId)` inspects the saved operation,
+including after cubed restarts. An absent record is not permission to resubmit.
+Errors retain `operationId` through HTTP and QuickJS. Aborting a caller does not
+cancel host work. After a pi process crash before its tool result is saved, the
+operator can inspect private intents using the standalone CLI; automatic recovery
+or a pending-operation listing is not implemented.
+
+Exec retains at most 8192 output bytes and runs at most 60 seconds. Codemode's
+larger timeout is an outer budget, not an extension of the host limit. `/workspace`
+is a **logical tool cwd** translated to the enrolled directory; it is not a mount
+inside arbitrary shell commands. Relative commands work there; do not assume
+`cd /workspace` names that directory on the real host.
+
+File-shaped tools and host Git publishing, repository transfer, setup/resume,
+services, portals, machine sleep and removal remain unsupported. There is no
+control-plane shadow checkout: the enrollment's workspace path is metadata only.
+Use archive rather than delete for these threads; admission and bindings are
+retained permanently, and archived threads cannot prepare/submit new operations.
+Read-only operation inspection remains available after archive. No filesystem or
+journal is automatically deleted, recreated, repaired or moved.

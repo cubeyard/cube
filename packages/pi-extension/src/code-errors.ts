@@ -3,6 +3,7 @@ export interface CodeErrorData {
   message: string;
   code?: string;
   operation?: string;
+  operationId?: string;
   path?: string;
   timeoutMs?: number;
   durationMs?: number;
@@ -17,7 +18,7 @@ export function encodeError(error: unknown): CodeErrorData {
   const data: CodeErrorData = { message: (error instanceof Error ? error.message : String(error)).slice(0, 2000) };
   if (!error || typeof error !== "object") return data;
   const fields = error as Record<string, unknown>;
-  for (const key of ["code", "operation", "path", "output"] as const) {
+  for (const key of ["code", "operation", "operationId", "path", "output"] as const) {
     if (typeof fields[key] === "string") data[key] = fields[key].slice(0, key === "output" ? 1024 * 1024 : 4096);
   }
   for (const key of ["timeoutMs", "durationMs", "outputBytes", "outputLimitBytes"] as const) {

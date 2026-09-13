@@ -6,7 +6,7 @@ export const MAX_CODE_EXEC_OUTPUT = 1024 * 1024;
 export type CodeExec = (command: string, cwd: string, options: {
   onData: (chunk: Buffer) => void;
   signal: AbortSignal;
-}) => Promise<{ exitCode: number | null }>;
+}) => Promise<{ exitCode: number | null; operationId?: string }>;
 
 export async function execCode(exec: CodeExec, input: ExecInput, defaultCwd: string, signal: AbortSignal) {
   signal.throwIfAborted();
@@ -27,7 +27,7 @@ export async function execCode(exec: CodeExec, input: ExecInput, defaultCwd: str
   // Millisecond precision, including wake/setup. Backend cancellation still
   // waits for the process tree and trailing streams; that latency is reported.
   const timer = setTimeout(() => stop("ETIMEDOUT"), input.timeoutMs);
-  let result: { exitCode: number | null } | undefined;
+  let result: { exitCode: number | null; operationId?: string } | undefined;
   let failure: unknown;
   try {
     result = await exec(input.command, input.cwd ?? defaultCwd, {
@@ -59,12 +59,13 @@ export async function execCode(exec: CodeExec, input: ExecInput, defaultCwd: str
         : code === "ABORT_ERR" ? `command aborted after ${durationMs}ms` : encodeError(failure).message;
     throw Object.assign(new Error(message), {
       ...(failureData.completionUnknown ? { completionUnknown: true } : {}),
+      ...((failureData.operationId ?? result?.operationId) ? { operationId: failureData.operationId ?? result?.operationId } : {}),
       code, operation: "exec", timeoutMs: input.timeoutMs, durationMs,
       output, outputBytes: retained, outputLimitBytes: MAX_CODE_EXEC_OUTPUT,
       truncated: observed > retained,
     });
   }
-  return { exitCode: result!.exitCode, output, durationMs };
+  return { exitCode: result!.exitCode, output, durationMs, ...(result!.operationId ? { operationId: result!.operationId } : {}) };
 }
 
 /** Normalize file-operation errors without hiding cancellation or inventing

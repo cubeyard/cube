@@ -16,6 +16,7 @@ OFFLINE_TESTS=(
   packages/server/test/registry-test.ts
   packages/server/test/conversation-test.ts
   packages/server/test/execution-node-test.ts
+  packages/server/test/host-enrollment-test.ts
   packages/server/test/iroh-node-test.ts
   packages/server/test/events-test.ts
   packages/server/test/user-facing-test.ts
@@ -44,6 +45,7 @@ OFFLINE_TESTS=(
   packages/pi-extension/test/code-io-test.ts
   packages/pi-extension/test/code-worker-jiti-test.ts
   packages/pi-extension/test/pi-extension-test.ts
+  packages/pi-extension/test/host-exec-test.ts
   packages/pi-extension/test/environment-access-test.ts
   packages/pi-extension/test/diagnostics-test.ts
 )
