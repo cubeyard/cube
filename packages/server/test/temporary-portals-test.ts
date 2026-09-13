@@ -52,7 +52,9 @@ try {
   });
   assert.equal(expose({ port: 3000, name: "renamed" }).url, portal.url);
   const label = "temporary--3000--alpha";
-  assert.deepEqual(supervisor.resolvePortal(label), {
+  const { connect, ...resolved } = supervisor.resolvePortal(label)!;
+  assert.equal(typeof connect, "function");
+  assert.deepEqual(resolved, {
     cubeName: "alpha", serviceName: "renamed", status: "ready",
     ip: "10.90.10.10", port: 3000, supervised: false,
   });
@@ -85,6 +87,9 @@ try {
   await new Promise<void>((resolve) => reserve.close(() => resolve()));
   daemon = spawn(process.execPath, ["--input-type=module", "-e", `
     import { MockBackend } from "@cube/sandbox";
+    // This routing fixture explicitly supplies observed guest state; it is
+    // not evidence that MockBackend instances survive a daemon restart.
+    MockBackend.prototype.getState = async () => ({ status: "Stopped" });
     const destroy = MockBackend.prototype.destroy;
     MockBackend.prototype.destroy = async function (...args) {
       if (args[0].name === "cube-beta") {
@@ -143,7 +148,7 @@ try {
   assert.equal(registry.getCube("alpha")!.status, "asleep", "portal must not wake an unsupervised process");
   assert.equal((await fetch(`${base}/api/threads/alpha/portals/3000`, { method: "DELETE" })).status, 200);
   assert.equal(supervisor.resolvePortal(label), null);
-  assert.equal(supervisor.declaredPortalCube(label), null, "removed route cannot bootstrap as a service");
+  await assert.rejects(supervisor.declaredPortalCube(label), /ENVIRONMENT_MISSING/, "missing environment cannot bootstrap a service");
   registry.setCubeStatus("alpha", "ready");
   await post({ port: 3000, name: "archive me" });
   assert.equal((await fetch(`${base}/api/threads/alpha/archive`, { method: "POST" })).status, 200);

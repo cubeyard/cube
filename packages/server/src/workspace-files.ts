@@ -54,15 +54,17 @@ const DEFAULT_CAPS: WalkCaps = { maxListed: 2000, maxVisited: 50_000 };
 export function listWorkspaceFiles(root: string, caps: WalkCaps = DEFAULT_CAPS): WorkspaceListing {
   const rootAbs = path.resolve(root);
   const listing: WorkspaceListing = { files: [], totalBytes: 0, truncated: false };
-  if (!fs.existsSync(rootAbs)) return listing; // pre-provision: no dir yet
+  if (!fs.statSync(rootAbs).isDirectory()) throw new Error("workspace is not a directory");
   let visited = 0;
 
   const walk = (dirPath: string, rel: string, listed: boolean): void => {
     let dir: fs.Dir;
     try {
       dir = fs.opendirSync(dirPath);
-    } catch {
-      return; // unreadable (or just-swapped) directory — skip, not fail
+    } catch (error) {
+      if (!rel) throw error;
+      listing.truncated = true;
+      return; // unreadable child: explicitly partial, never silently complete
     }
     try {
       let entry: fs.Dirent | null;

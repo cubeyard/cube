@@ -7,9 +7,18 @@ the phase plan, the decision log — is in [docs/history.md](docs/history.md).
 ## 1. Goal and scope
 
 Build a self-hosted equivalent of [Amp Orbs](https://ampcode.com/what-are-orbs) that
-runs entirely on **one VM per user**. No clustering, no shared team platform, no
-multi-tenancy. Provider login is handled by [pi](https://pi.dev). The architecture
+currently ships on **one VM per user**. The product direction separates a control
+plane from permanently bound execution nodes; no failover or environment moves.
+No shared team platform or multi-tenancy. Provider login is handled by [pi](https://pi.dev). The architecture
 is **harness outside sandbox**.
+
+### Control ↔ node boundary (current authoritative contract)
+
+See [execution-nodes.md](docs/execution-nodes.md) for the implemented local
+boundary, permanent SQLite binding, independent pi startup, offline failures and
+remaining host couplings. **iroh** is selected for future node transport; it is
+not implemented here. Browser exposure remains restrictive HTTP/WS. Historical
+single-host details below describe the local deployment, not a remote protocol.
 
 ### Terminology
 
@@ -160,7 +169,8 @@ creating → ready ⇄ running → idle → asleep → waking → ready
 
 - **The truth lives on the host.** Workspace is a plain host directory,
   attached as a shifted disk device. Caches are capped custom volumes. The
-  container is cattle.
+  environment is permanently bound to its original node; confirmed absence is
+  an error, never permission to replace it.
 - **Fresh thread snapshots:** project checks establish access/configuration;
   each new thread refreshes every repository’s default branch before allocation and
   pins the returned OIDs. Fetch failures stop creation rather than falling back
@@ -212,10 +222,9 @@ creating → ready ⇄ running → idle → asleep → waking → ready
   describes repository discovery, cold/warm validation, login-shell and
   supervised-service checks. It is packaged with the trusted extension, not
   dependent on repository-local skill files.
-- **recreate** = delete + `incus init` from the cube image on image update or
-  explicit `cube rebuild`. Workspace and cache volumes persist across
-  recreates. This is the reproducibility boundary: anything not in the image,
-  `.cube/cube.toml`, or a persistent volume is expected to vanish on rebuild.
+- **No automatic replacement:** a missing environment remains attached to its
+  thread as an error. To work elsewhere, create a new thread. Copying snapshots
+  into a new thread is future explicit functionality, not relocation.
 - **Cube images** are Incus images per profile. **One profile for now:
   `cube-node` (decided 2026-08-26)**; more (e.g. `cube-jvm`) when needed.
   Provision: a base `ubuntu/24.04` container with a script
@@ -296,15 +305,14 @@ need is small: instance CRUD, state changes, exec, storage volumes, networks.
 
 ## 9. Tool routing (the core)
 
-Pattern from `gondolin/host/examples/pi-gondolin.ts`, simplified by shared mounts:
+Pi tool factories use guest operations. Read/write/edit resolve symlinks in
+that guest, not through host workspace paths. Bash and user `!` use the same
+gated local execution adapter; QuickJS delegates to these bounded capabilities.
+Managed adapters validate the thread's registered local-node binding through the
+control bridge before access. Pi's own cwd is a trusted runtime directory,
+independent of the guest workspace or its contact state. See
+[execution-nodes.md](docs/execution-nodes.md) for the remaining local couplings.
 
-- **`read`/`write`/`edit`** operate **directly on the host path** of the
-  workspace. No exec roundtrip, native speed, and diffs/reads work even while
-  the cube sleeps. The shifted (idmapped) mount maps the host uid to the cube's
-  `dev` user, so ownership stays clean on both sides.
-- **`bash`** routes through Incus exec into the cube (websocket streams,
-  timeout, abort, pty when needed). The system prompt is patched so the model
-  sees `/workspace`.
 - **`services_ensure()`** — custom tool (the only portal-facing one,
   decided 2026-08-27): reads `[services.*]` from `.cube/cube.toml`, starts
   anything missing as a systemd unit inside the cube, waits for readiness,
@@ -319,8 +327,9 @@ Pattern from `gondolin/host/examples/pi-gondolin.ts`, simplified by shared mount
 - Cubes **never publish ports on the host** (no proxy devices, no `-p`
   anywhere); cubed's proxy is the only way in.
 - Each cube gets its own Incus bridge network with a static `ipv4.address`.
-  cubed proxies to `cubeIP:targetPort` directly — the bridge is a host
-  interface, no NAT hop.
+  the local node adapter opens a stream to `cubeIP:targetPort` internally.
+  The portal proxy consumes that stream; a future remote connector does not
+  require guest-IP routing from the control plane.
 - **No port allocator** (removed 2026-08-27). The main cubed listener routes
   on the Host header: portal hostnames → the cube service, everything else →
   UI/API. Each portal gets a **stable, deterministic hostname** derived from

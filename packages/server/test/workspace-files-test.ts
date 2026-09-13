@@ -45,9 +45,9 @@ const visitCapped = listWorkspaceFiles(root, { maxListed: 2000, maxVisited: 2 })
 assert.equal(visitCapped.truncated, true);
 console.log("2 ok: caps mark the listing truncated, newest files win the cap");
 
-// --- missing root: empty listing, no throw
-assert.deepEqual(listWorkspaceFiles(path.join(base, "nope")), { files: [], totalBytes: 0, truncated: false });
-console.log("3 ok: missing workspace lists empty");
+// --- missing root: an error, never a false empty observation
+assert.throws(() => listWorkspaceFiles(path.join(base, "nope")), /ENOENT/);
+console.log("3 ok: missing workspace is not an empty listing");
 
 // --- serving: plain file opens (and the fd reads); escapes and non-files do not
 const opened = openWorkspaceFile(root, "src/main.ts");

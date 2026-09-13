@@ -42,7 +42,7 @@ const spec: CubeProvisionSpec = {
 {
   const backend = new MockBackend();
   assert.equal(backend.kind, "mock");
-  assert.equal((await backend.getState(NAME)).status, "Stopped", "unknown instance reads Stopped");
+  await assert.rejects(backend.getState(NAME), /does not exist/, "missing is not stopped");
 
   await backend.provision(spec);
   assert.ok(fs.existsSync(hostWorkspace), "provision creates the host workspace");
@@ -185,7 +185,7 @@ const spec: CubeProvisionSpec = {
   const backend = new MockBackend();
   await backend.provision(spec);
   await backend.destroy({ name: NAME, pool: "cube", network: { bridge: "cbr-mocktest" } });
-  assert.equal((await backend.getState(NAME)).status, "Stopped", "destroyed cube reads Stopped");
+  await assert.rejects(backend.getState(NAME), /does not exist/, "missing is not stopped");
   assert.ok(fs.existsSync(hostWorkspace), "destroy leaves the host workspace (parity with Incus)");
   console.log("6 ok: destroy drops the instance, keeps the workspace");
 }
@@ -204,7 +204,7 @@ const spec: CubeProvisionSpec = {
   assert.equal((await backend.getState("clone")).status, "Running");
   await backend.deleteTemplate("mock", template);
   assert.equal(backend.templates.size, 0);
-  assert.equal((await backend.getState(NAME)).status, "Stopped", "the template instance is gone; the clone lives on");
+  await assert.rejects(backend.getState(NAME), /does not exist/, "missing is not stopped");
   assert.equal((await backend.getState("clone")).status, "Running");
   console.log("7 ok: template capture, clone bookkeeping and deletion");
 }

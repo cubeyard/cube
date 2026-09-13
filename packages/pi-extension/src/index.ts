@@ -1,3 +1,4 @@
+import { createLocalEnvironmentAccess } from "./environment-access.ts";
 /**
  * The cube pi-extension (ARCHITECTURE §13 Phase 3d, step 1): pi runs on the
  * credentialed host (the VM), but every built-in tool and user `!` command
@@ -71,6 +72,8 @@ import { createGuestOperations } from "./ops.ts";
 
 export interface CubeConfig {
   backend: "incus" | "mock";
+  nodeId?: string;
+  agentCwd?: string;
   /** Registry name — enables wake through cubed. */
   name: string | undefined;
   /** User-facing thread id — authorizes repository-scoped host git tools. */
@@ -141,8 +144,11 @@ export function resolveConfig(env: NodeJS.ProcessEnv, cwd: string): CubeConfig |
   const instance = env.CUBE_INSTANCE?.trim() || (name ? `cube-${name}` : undefined);
   if (!instance) return null;
   const hostWorkspace = env.CUBE_HOST_WORKSPACE?.trim() || cwd;
+  if (env.CUBE_THREAD_ID && (!env.CUBE_NODE_ID || !env.CUBE_HOST_WORKSPACE)) return null;
   return {
     backend,
+    nodeId: env.CUBE_NODE_ID,
+    agentCwd: env.CUBE_AGENT_CWD,
     name: name ?? (instance.startsWith("cube-") ? instance.slice("cube-".length) : undefined),
     threadId: env.CUBE_THREAD_ID?.trim() || undefined,
     instance,
@@ -172,6 +178,17 @@ export class Waker {
   }
 
   ensure = (ctx?: ExtensionContext, signal?: AbortSignal): Promise<void> => {
+    // Every new action is admitted independently before joining a wake barrier.
+    // An in-flight wake is not an offline queue for newly submitted work.
+    if (this.cfg.threadId) {
+      if (!this.cfg.name) return Promise.reject(new Error("cube extension: managed environment requires CUBE_NAME"));
+      return createLocalEnvironmentAccess({ threadId: this.cfg.threadId, nodeId: this.cfg.nodeId!, cubedUrl: this.cfg.cubedUrl })
+        .check(signal).then(() => this.ensureReady(ctx, signal));
+    }
+    return this.ensureReady(ctx, signal);
+  };
+
+  private ensureReady = (ctx?: ExtensionContext, signal?: AbortSignal): Promise<void> => {
     if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("wake aborted"));
     if (!this.inflight) {
       const controller = new AbortController();
@@ -260,7 +277,9 @@ export class Waker {
         });
       } catch (error) {
         if (signal.aborted) throw error;
-        if (this.cfg.threadId) throw error;
+        if (this.cfg.threadId) throw Object.assign(new Error("COMPLETION_UNKNOWN: wake may have completed; inspect environment status before another request", { cause: error }), {
+          code: "COMPLETION_UNKNOWN", completionUnknown: true,
+        });
         // cubed unreachable (standalone/dogfood use) — a bare Incus start
         // is the only option; fall through.
         res = undefined as unknown as Response;
@@ -275,7 +294,11 @@ export class Waker {
         // threads never bypass the supervisor, including on 404.
         if (res.ok) return;
         if (res.status !== 404 || this.cfg.threadId) {
-          throw new Error(`cubed refused to wake ${this.cfg.name} (${res.status})`);
+          const body = await res.json().catch(() => ({})) as Record<string, unknown>;
+          throw Object.assign(new Error(typeof body.error === "string" ? body.error : `cubed refused to wake ${this.cfg.name} (${res.status})`), {
+            ...(typeof body.code === "string" ? { code: body.code } : {}),
+            ...(body.completionUnknown === true ? { completionUnknown: true } : {}),
+          });
         }
       }
     }
@@ -375,10 +398,13 @@ export function createThreadRequest(cfg: { threadId?: string; cubedUrl: string }
       );
       const body = await response.json().catch(() => ({})) as Record<string, unknown>;
       requestSignal.throwIfAborted();
-      if (!response.ok) throw new Error(String(body.error ?? `cubed request failed (${response.status})`));
+      if (!response.ok) throw Object.assign(new Error(String(body.error ?? `cubed request failed (${response.status})`)), {
+        ...(typeof body.code === "string" ? { code: body.code } : {}),
+        ...(body.completionUnknown === true ? { completionUnknown: true } : {}),
+      });
       return body;
     } catch (error) {
-      if (requestSignal.aborted && options.method && options.method !== "GET") {
+      if ((requestSignal.aborted || error instanceof TypeError && /fetch failed/i.test(error.message)) && options.method && options.method !== "GET") {
         throw Object.assign(new Error(`request cancelled; ${options.method} ${requestPath} may have completed remotely; reconcile before retrying`), {
           code: "ECODE_UNCERTAIN", completionUnknown: true,
         });
@@ -430,11 +456,22 @@ export default function cubeExtension(pi: ExtensionAPI) {
   }
 
   const client = cfg.backend === "incus" ? new IncusClient() : undefined;
-  const sandbox = client
+  const localSandbox = client
     ? new IncusSandbox(cfg.instance, client)
     : new MockSandbox(cfg.instance, cfg.guestWorkspace, cfg.hostWorkspace);
   const waker = new Waker(cfg, client);
-  const files = client ? incusFiles(client, cfg.instance) : mockFiles();
+  const localFiles = client ? incusFiles(client, cfg.instance) : mockFiles();
+  const access = cfg.threadId
+    ? createLocalEnvironmentAccess({ threadId: cfg.threadId, nodeId: cfg.nodeId!, cubedUrl: cfg.cubedUrl })
+    : null; // standalone disposable Incus smoke; not a managed thread
+  const sandbox: import("@cube/sandbox").Sandbox = access ? {
+    name: localSandbox.name,
+    exec: (command, options) => access.run(true, () => localSandbox.exec(command, options), options.signal),
+  } : localSandbox;
+  const files: GuestFiles = access ? {
+    push: (file, content, options) => access.run(true, () => localFiles.push(file, content, options), options?.signal),
+    pull: (file, options) => access.run(false, () => localFiles.pull(file, options), options?.signal),
+  } : localFiles;
   const cubeFs = new CubeFs(sandbox, files, {
     guestCwd: cfg.guestWorkspace,
     ensure: (signal) => waker.ensure(undefined, signal),
@@ -484,7 +521,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
         onData(chunk);
       };
       try {
-        return await sandbox.exec(command, { cwd: guest(cwd), onData: boundedOnData, signal: limiter.signal, timeout });
+        return await sandbox.exec(command, { cwd: guest(cwd === cfg.agentCwd ? cfg.guestWorkspace : cwd), onData: boundedOnData, signal: limiter.signal, timeout });
       } finally {
         signal?.removeEventListener("abort", onAbort);
       }
@@ -513,7 +550,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
       throwIfCodeAborted(signal);
     }),
     async listRepositories(signal) {
-      const body = await threadRequest("/repositories", { timeoutMs: 30_000 }, signal);
+      const body = await threadRequest("/repositories?state=0", { timeoutMs: 30_000 }, signal);
       if (!Array.isArray(body.repositories)) throw new Error("cubed returned invalid repositories");
       return body.repositories;
     },
@@ -739,14 +776,15 @@ export default function cubeExtension(pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (event, ctx) => {
     runGuard(ctx);
-    const hostLine = `Current working directory: ${cfg.hostWorkspace}`;
+    const hostLine = `Current working directory: ${cfg.agentCwd ?? cfg.hostWorkspace}`;
     const guestLine =
       cfg.backend === "mock"
         ? `Current working directory: ${cfg.guestWorkspace} (mock environment; commands run locally with no nested isolation)`
-        : `Current working directory: ${cfg.guestWorkspace} (sandboxed environment; the workspace is shared with ${cfg.hostWorkspace})`;
+        : `Current working directory: ${cfg.guestWorkspace} (guest tool paths; relative paths resolve here, never in the control-plane runtime directory)`;
     let systemPrompt = event.systemPrompt.includes(hostLine)
       ? event.systemPrompt.replace(hostLine, guestLine)
       : `${event.systemPrompt}\n\n${guestLine}`;
+    systemPrompt += "\nEnvironment access is checked per action. If unavailable, continue the conversation using existing context only; do not claim fresh observations or queue/replay rejected work. Unknown operation outcomes must be inspected before another execution.";
     if (cfg.threadId) {
       systemPrompt += "\n\nUse the code tool's cube.git capabilities for authenticated repository network operations; ordinary git fetch/push in bash intentionally has no host credentials. Call cube.thread.archive() only when the user's current instruction explicitly requires archival after all other work is done.";
     }

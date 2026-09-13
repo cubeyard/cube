@@ -10,6 +10,17 @@ For codemode limits, structured errors, and isolated regression tests, see
 
 ---
 
+## Local node-boundary tests
+
+See [docs/execution-nodes.md](docs/execution-nodes.md). The offline suite includes
+`packages/server/test/execution-node-test.ts` and
+`packages/pi-extension/test/environment-access-test.ts`. Both use disposable
+state and explicit test doubles; there is no production disconnect toggle.
+They exercise real pi startup and local portal streams, not remote execution.
+Creation request keys now survive restart for the lifetime of their thread.
+The local node identity is persisted in the registry; never copy the database
+to a new host and treat that as moving its environments.
+
 ## Backends (`CUBED_BACKEND`)
 
 cubed talks to a swappable `CubeBackend` (`packages/sandbox/src/cube-backend.ts`).

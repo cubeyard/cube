@@ -269,12 +269,15 @@ export class MockBackend implements CubeBackend {
   }
 
   async getState(name: string): Promise<{ status: string }> {
-    return { status: this.instances.get(name)?.status ?? "Stopped" };
+    const instance = this.instances.get(name);
+    if (!instance) throw new IncusHttpError(404, `environment ${name} does not exist`);
+    return { status: instance.status };
   }
 
   async setState(name: string, action: IncusStateAction, opts: SetStateOptions = {}): Promise<void> {
     opts.signal?.throwIfAborted();
-    const inst: MockInstance = this.instances.get(name) ?? { status: "Stopped" };
+    const inst = this.instances.get(name);
+    if (!inst) throw new IncusHttpError(404, `environment ${name} does not exist`);
     inst.status = action === "stop" ? "Stopped" : "Running";
     this.instances.set(name, inst);
   }
