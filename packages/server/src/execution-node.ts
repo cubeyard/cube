@@ -1,36 +1,15 @@
-/** Local transition boundary, NOT an iroh implementation. Policy stays in
- * Supervisor; local streams and callbacks deliberately are not wire DTOs. */
+/** Node selection boundary. Policy stays in Supervisor; local streams and
+ * callbacks are not wire DTOs. Iroh's native adapter lives in iroh-node.ts. */
 import net from "node:net";
 import type { Duplex } from "node:stream";
 import type { CubeBackend } from "@cube/sandbox";
 import { IncusHttpError, IncusTimeoutError } from "../../sandbox/src/incus-client.ts";
 import type { Registry } from "./registry.ts";
 
-/** Logical installation identity, independent of any future iroh key. */
-export type NodeId = string;
-export type NodeContact = "unobserved" | "available" | "unavailable";
-export type NodeErrorCode = "NODE_UNAVAILABLE" | "ENVIRONMENT_MISSING" | "OPERATION_UNSUPPORTED" | "COMPLETION_UNKNOWN";
-export class ExecutionNodeError extends Error {
-  readonly code: NodeErrorCode;
-  readonly completionUnknown: boolean;
-  constructor(code: NodeErrorCode, cause?: unknown) {
-    super(code, { cause });
-    this.name = "ExecutionNodeError";
-    this.code = code;
-    this.completionUnknown = code === "COMPLETION_UNKNOWN";
-  }
-}
-export interface EnvironmentObservation { status: string; observedAt: number }
-export interface ExecutionNodeClient {
-  readonly nodeId: NodeId;
-  readonly contact: NodeContact;
-  status(environmentId: number): Promise<EnvironmentObservation>;
-  /** Contact only, for an environment not yet provisioned. */
-  check(environmentId: number): Promise<void>;
-  wake(environmentId: number): Promise<void>;
-  sleep(environmentId: number): Promise<void>;
-  openPortal(environmentId: number, port: number): Promise<Duplex>;
-}
+import { ExecutionNodeError, type NodeId, type NodeContact, type EnvironmentObservation, type ExecutionNodeClient } from "./execution-node-contract.ts";
+export { ExecutionNodeError } from "./execution-node-contract.ts";
+export type { NodeId, NodeContact, NodeErrorCode, EnvironmentObservation, ExecutionNodeClient } from "./execution-node-contract.ts";
+
 export function isNodeTransportFailure(error: unknown): boolean {
   if (error instanceof IncusTimeoutError && error.unresponsive) return true;
   const code = (error as { code?: unknown })?.code;
@@ -60,6 +39,7 @@ export class ExecutionNodes {
 }
 
 export class LocalExecutionNodeClient implements ExecutionNodeClient {
+  readonly locality = "local" as const;
   readonly nodeId: NodeId;
   contact: NodeContact = "unobserved";
   private readonly registry: Registry;

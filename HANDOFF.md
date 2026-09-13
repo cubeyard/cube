@@ -16,59 +16,68 @@ workspace cwd without rewriting the session. Keep that real-CLI regression gate.
 
 Remaining blockers to a different control-plane machine: local provisioning,
 Incus file/exec adapters, host-path Git/config/browser operations, service-IP
-readiness, templates/egress/network/CA management, and a real authenticated node
+readiness, templates/egress/network/CA management, and production wiring of the authenticated node
 transport/operation reconciliation protocol. Next vertical is the
 [host-node development loop](docs/plans/host-node-development-loop.md): real iroh,
 host exec/files and authorized control-plane thread messaging, before portals.
 This is a development bootstrap, **not** a VPN or failover scheduler.
-Offline tests are not Incus/macOS/iroh acceptance; no live instance was deployed,
-restarted or used as a disposable test resource for this slice.
+The local-boundary tests are not Incus/macOS/external-node acceptance; no live
+instance was deployed, restarted or used as a disposable test resource.
 
-Working-tree verification: Node 26.8.2 / pnpm 10.34.5; `pnpm typecheck`,
+Earlier local-boundary verification: Node 26.8.2 / pnpm 10.34.5; `pnpm typecheck`,
 `pnpm lint`, `pnpm test` (40 offline suites), and `pnpm build` passed. Real
 Incus sleep/wake/provision/delete, service portals and hairpin isolation still
-need the disposable VM portfolio. No real iroh or macOS acceptance was run.
+need the disposable VM portfolio. That earlier baseline did not exercise iroh or macOS.
 
-## Iroh bootstrap in this working tree
+## Iroh / in-process adapter development slice
 
-`packages/node-transport` is a separate, development-only Rust executable and
-library using pinned iroh 1.2.0 / Rust 1.91.0. It is not wired into cubed or
-release artifacts. Real loopback QUIC `node.hello` works between separate CLI
-processes, with a pinned server key, explicit allowed control peer, strict
-bounded framing and connection deadlines. Key reuse survives restart; key
-corruption/missing files fail rather than regenerating identity. Six Rust tests
-cover this boundary, including rejection before application data. The existing
-cubed `ExecutionNodeClient` is still local-only; do not advertise remote exec.
+The Rust `packages/node-transport` host uses pinned iroh 1.2.0 / Rust 1.91.0.
+It remains development-only, outside release artifacts and production enrollment.
+`host-init`/`host-serve` own one immutable binding and exclusive SQLite journal;
+Accepted/Running commits precede dispatch/spawn, and restart marks unfinished work
+Interrupted/uncertain, never queued. A hard crash does not prove descendants have
+stopped. The trusted unprivileged Linux host profile is NOT a sandbox; no
+control-plane credentials belong in that account.
 
-Run `bash scripts/test-node-transport.sh` after setup (fmt, clippy, tests with
-locked offline Cargo dependencies); a separate CI job runs the same checks.
-The hello-only `serve` probe remains available. A subsequent explicit
-`host-init`/`host-serve` mode now adds one immutable local environment binding,
-a single-owner SQLite operation journal, bounded real host exec and result
-retrieval over iroh. CLI intents are persisted before submission and cannot be
-automatically resubmitted. Same ID/content resolves without reexecution; different
-content conflicts. Unfinished records become Interrupted/uncertain on exclusive
-restart, never a queue. Tests include real multi-process crashes and lost
-Accepted responses; children can survive a hard daemon crash, which is why
-Interrupted does not claim cancellation. State/key integrity assumes a trusted
-OS account: this is NOT a sandbox, and executed commands have that account's
-filesystem access. No control-plane credentials belong in that account.
+`packages/server/src/iroh-node.ts` now uses pinned `@number0/iroh` 1.1.0 **inside
+Node**. The draft Rust stdio bridge is removed; no intermediary binary/process
+or subprocess fallback. It checks peer + full thread/environment/node binding on
+one connection, persists private intents/consumed markers before dispatch, bounds
+frames and performs read-only reconciliation. Native endpoint lifetime is per RPC;
+aborts close pending IO (QUIC drain can add ~3s), not remote work. The explicit
+remote locality flag prevents accidental control-plane filesystem/Git access.
+The independent CLI remains useful for enrollment and read-only intent inspection.
 
-See `packages/node-transport/HOST.md` for usage, limits and acceptance. No relay,
-public socket, VPN, remote workspace transfer, dynamic environment provisioning,
-cancellation API or thread communication is implemented. Next is the control-plane
-transport/tool adapter and explicitly configured external iroh connectivity;
-file/repository transfer and thread communication still block the full development
-loop. The setup milestone was published as `e03646a` on `cube/18myb7kl`; transport
-and host execution are subsequent local work. No live shared thread was used
-as an execution or restart fixture.
+Loopback is default; direct mode requires explicit operator selection and a
+concrete target. Rust direct listeners require an explicit unicast interface,
+not a wildcard. **Npm caveats:** use the published `/index.js` subpath because the
+1.1.0 manifest's main/types paths are broken; loopback binds both IP families;
+Minimal disables n0 relays/peer lookup, not the built-in NAT portmapper. This addon
+has no portmapper switch and can probe/map LAN gateways. See `HOST.md` for the
+operator/upstream decision required before external deployment. No policy or
+firewall expansion is made here; do not claim packet confinement or native crash
+isolation for an in-process addon.
 
-Current host-slice verification: Rust fmt/clippy and 13 Rust tests passed;
-`pnpm typecheck`, `pnpm lint`, all 40 Node offline suites and `pnpm build` passed.
-Coverage includes the retained-journal capacity limit, concurrent CLI submission,
-permission errors distinct from missing workspaces, and bounded process-group
-cleanup with both open and closed output pipes. This is local Linux evidence,
-not hosted CI, remote-machine, macOS, Incus or end-to-end thread acceptance.
+`bash scripts/test-node-transport.sh` now includes native Node/Rust interoperability;
+its CI job installs both toolchains. The Node offline list additionally tests real
+npm iroh with subprocess APIs disabled. Current local Linux evidence: 14 Rust tests,
+real Node→Rust host smoke in loopback/direct modes (both with loopback targets),
+41 Node suites, typecheck, lint and build. The Rust host fixtures serialize across
+cases to avoid sibling forks transiently inheriting another fixture's flock before
+exec; concurrent requests/submissions remain tested within cases.
+
+Still absent: production registry enrollment/tool routing, external-machine
+acceptance, file/repository transfer, remote cancellation, portals and thread
+communication. No live shared thread/node was used as a crash or execution fixture.
+The full development loop is not complete. Browser access and pi startup remain
+unchanged. Native-addon platforms other than local Linux x64 GNU are unverified.
+
+Publication: `e03646a` was pushed; subsequent commits are local. The last
+host-mediated push was rejected for missing GitHub OAuth `workflow` scope on
+`.github/workflows/ci.yml` (response unexpectedly named `cubeyard/thread` and
+`thread/18myb7kl`; registered/local repo was `cubeyard/cube`, `cube/18myb7kl`).
+Resolve host authorization/repository routing before retrying. Do not remove CI
+or rewrite history to bypass that rejection.
 
 ## Open security follow-up: agent-editable egress policy
 

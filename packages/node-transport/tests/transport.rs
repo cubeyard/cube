@@ -238,3 +238,40 @@ async fn refuses_shared_or_symlinked_keys() {
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(!run(&args(key.to_str().unwrap())).await.status.success());
 }
+
+#[tokio::test]
+async fn explicit_direct_mode_never_implies_a_wildcard_listener() {
+    use cube_node_transport::{NetworkMode, bind_node, validate_target};
+    for mode in [NetworkMode::Loopback, NetworkMode::Direct] {
+        for address in [
+            "0.0.0.0:1234",
+            "[::]:1234",
+            "224.0.0.1:1234",
+            "255.255.255.255:1234",
+            "[ff02::1]:1234",
+        ] {
+            assert!(validate_target(address.parse().unwrap(), mode).is_err());
+            assert!(
+                bind_node(SecretKey::generate(), address.parse().unwrap(), mode)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(validate_target("127.0.0.1:0".parse().unwrap(), mode).is_err());
+        let endpoint = bind_node(SecretKey::generate(), "127.0.0.1:0".parse().unwrap(), mode)
+            .await
+            .unwrap();
+        assert!(
+            endpoint
+                .bound_sockets()
+                .iter()
+                .all(|address| address.ip().is_loopback())
+        );
+        endpoint.close().await;
+    }
+    // Validate only; never contact documentation-range external addresses.
+    for address in ["203.0.113.1:443", "[2001:db8::1]:443"] {
+        assert!(validate_target(address.parse().unwrap(), NetworkMode::Loopback).is_err());
+        assert!(validate_target(address.parse().unwrap(), NetworkMode::Direct).is_ok());
+    }
+}

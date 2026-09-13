@@ -4,9 +4,13 @@ Status: in progress; full development-loop acceptance is not complete.
 The standalone [iroh transport](../../packages/node-transport/README.md) now
 includes an opt-in [trusted host executor](../../packages/node-transport/HOST.md):
 permanent local binding, durable operation journal, bounded exec and result
-retrieval, tested across response loss and process restart. It is still loopback
-only and separate from cubed. The control-plane adapter, external contact,
-file/repository transfer and thread communication are outstanding.
+retrieval, tested across response loss and process restart. The control-plane
+adapter now uses `@number0/iroh` directly in Node, not a Rust subprocess bridge.
+Loopback and explicit direct modes interoperate with the Rust host on loopback
+addresses. Production enrollment/tool routing, external acceptance, file/repository
+transfer and thread communication remain outstanding. The npm binding's missing
+portmapper controls need an operator/upstream decision before external deployment;
+see the host documentation. No network-policy exceptions are added by this slice.
 
 ## Outcome
 

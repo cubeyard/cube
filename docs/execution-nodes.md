@@ -16,12 +16,13 @@ Rejected environment work is not queued, and reconnect never replays it.
 Possible delivery without confirmation is reported as `COMPLETION_UNKNOWN`
 (or the existing bridge `ECODE_UNCERTAIN`); inspect before executing again.
 
-**iroh is the selected future control-to-node transport.** This patch implements
-only a local cubed adapter. A subsequent standalone development probe in
-[`packages/node-transport`](../packages/node-transport/README.md) now exercises
-real iroh hello and opt-in trusted host execution over loopback, with its own
-permanent binding and durable operation journal. It does not yet implement this
-cubed adapter or external-machine execution. The protocol
+**iroh is the selected control-to-node transport.** The released cubed path is
+still the local adapter. The separate development implementation in
+[`packages/node-transport`](../packages/node-transport/README.md) now includes real
+QUIC and opt-in trusted host execution with a permanent binding/durable journal.
+`packages/server/src/iroh-node.ts` connects directly through `@number0/iroh` in the
+Node process, without a Rust/stdio intermediary. It is not yet enrolled/routed into
+cubed's agent tools or acceptance-tested on an external machine. The protocol
 must not require Tailscale, WireGuard, SSH, or another VPN. Browser traffic stays
 HTTP(S)/WebSocket to the control plane. The existing restrictive loopback/trusted
 Tailnet browser access boundary is unchanged; there is no new public gateway.

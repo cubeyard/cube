@@ -1,4 +1,4 @@
-//! Authenticated loopback node protocol; optional trusted host execution.
+//! Authenticated node protocol (loopback by default); optional trusted host execution.
 //! Bounded frames, no retries, no 0-RTT; commands outlive their connection.
 pub mod host;
 pub mod intent;
@@ -50,6 +50,8 @@ pub enum Response {
         profiles: Vec<String>,
         capabilities: Vec<String>,
         limits: Limits,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding: Option<host::Binding>,
     },
     Accepted {
         #[serde(rename = "operationId")]
@@ -96,13 +98,34 @@ impl Response {
     }
 }
 
-/// No DNS discovery, relay, port mapping or non-loopback socket. External node
-/// connectivity must be added explicitly, with its own acceptance evidence.
-pub async fn bind_loopback(key: SecretKey, listen: SocketAddr) -> Result<Endpoint> {
+/// No implicit discovery, relay, port mapping or VPN. Direct mode must be
+/// explicitly selected by the operator; it does not change browser access.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkMode {
+    #[default]
+    Loopback,
+    Direct,
+}
+
+fn unicast(address: SocketAddr) -> bool {
+    let ip = address.ip().to_canonical();
+    !ip.is_unspecified()
+        && !ip.is_multicast()
+        && !matches!(ip, std::net::IpAddr::V4(ip) if ip.is_broadcast())
+}
+pub fn validate_target(address: SocketAddr, mode: NetworkMode) -> Result<()> {
     ensure!(
-        listen.ip().is_loopback(),
-        "bootstrap listener must be loopback"
+        unicast(address) && address.port() != 0,
+        "target must be a concrete unicast address and port"
     );
+    ensure!(
+        mode == NetworkMode::Direct || address.ip().to_canonical().is_loopback(),
+        "non-loopback target requires explicit direct mode"
+    );
+    Ok(())
+}
+async fn bind_transport(key: SecretKey, listen: SocketAddr) -> Result<Endpoint> {
     Ok(Endpoint::builder(presets::Minimal)
         .secret_key(key)
         .alpns(vec![ALPN.to_vec()])
@@ -112,6 +135,36 @@ pub async fn bind_loopback(key: SecretKey, listen: SocketAddr) -> Result<Endpoin
         .bind_addr(listen)?
         .bind()
         .await?)
+}
+pub async fn bind_node(key: SecretKey, listen: SocketAddr, mode: NetworkMode) -> Result<Endpoint> {
+    ensure!(
+        unicast(listen),
+        "listener must select a concrete unicast interface, not a wildcard"
+    );
+    ensure!(
+        mode == NetworkMode::Direct || listen.ip().to_canonical().is_loopback(),
+        "non-loopback listener requires explicit direct mode"
+    );
+    bind_transport(key, listen).await
+}
+pub async fn bind_loopback(key: SecretKey, listen: SocketAddr) -> Result<Endpoint> {
+    bind_node(key, listen, NetworkMode::Loopback).await
+}
+pub async fn bind_client(
+    key: SecretKey,
+    target: SocketAddr,
+    mode: NetworkMode,
+) -> Result<Endpoint> {
+    validate_target(target, mode)?;
+    let local = match (mode, target.is_ipv6()) {
+        (NetworkMode::Loopback, false) => "127.0.0.1:0",
+        (NetworkMode::Loopback, true) => "[::1]:0",
+        (NetworkMode::Direct, false) => "0.0.0.0:0",
+        (NetworkMode::Direct, true) => "[::]:0",
+    };
+    // A direct caller needs routing-selected local source addresses. There is
+    // no application accept loop on this ephemeral client endpoint.
+    bind_transport(key, local.parse()?).await
 }
 
 pub fn validate_node_id(node_id: &str) -> Result<()> {
@@ -164,6 +217,7 @@ fn hello(node_id: &str, query: Request) -> Response {
                 max_frame_bytes: MAX_FRAME_BYTES,
                 request_timeout_ms: REQUEST_TIMEOUT.as_millis() as u64,
             },
+            binding: None,
         },
         _ => Response::error("UNSUPPORTED", "unsupported protocol version"),
     }
@@ -172,13 +226,15 @@ fn hello(node_id: &str, query: Request) -> Response {
 fn dispatch(node_id: &str, query: Request, host: Option<&Arc<host::Host>>) -> Response {
     if matches!(query, Request::Hello { .. }) {
         let mut result = hello(node_id, query);
-        if host.is_some()
+        if let Some(host) = host
             && let Response::Hello {
                 profiles,
                 capabilities,
+                binding,
                 ..
             } = &mut result
         {
+            *binding = Some(host.installation().binding.clone());
             *profiles = vec!["host".into()];
             capabilities
                 .extend(["environment.inspect", "exec.start", "operation.get"].map(String::from));
@@ -354,6 +410,25 @@ pub async fn call(
     expected_node_id: &str,
     query: &Request,
 ) -> Result<Response> {
+    call_inner(endpoint, address, expected_node_id, None, query).await
+}
+
+pub async fn call_bound(
+    endpoint: &Endpoint,
+    address: EndpointAddr,
+    binding: &host::Binding,
+    query: &Request,
+) -> Result<Response> {
+    call_inner(endpoint, address, &binding.node_id, Some(binding), query).await
+}
+
+async fn call_inner(
+    endpoint: &Endpoint,
+    address: EndpointAddr,
+    expected_node_id: &str,
+    expected_binding: Option<&host::Binding>,
+    query: &Request,
+) -> Result<Response> {
     validate_node_id(expected_node_id)?;
     ensure!(
         !matches!(query, Request::Hello { .. }),
@@ -379,8 +454,10 @@ pub async fn call(
             Response::Hello {
                 node_id,
                 protocol_version: 1,
+                binding,
                 ..
-            } if node_id == expected_node_id => {}
+            } if node_id == expected_node_id
+                && expected_binding.is_none_or(|expected| binding.as_ref() == Some(expected)) => {}
             _ => {
                 return Err(DeliveryError {
                     code: "WRONG_NODE",

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Rust transport tests are separate from the released Node/Incus VM portfolio:
-# no Rust executable is shipped or wired into cubed yet. Fetch locked crates in
-# setup first; these tests themselves must not need registry or relay access.
+# Rust host plus in-process npm iroh interoperability. Separate from the
+# released Node/Incus VM portfolio: no Rust host binary is shipped there yet.
+# Install locked Node/Cargo dependencies in setup first; no registry fetches here.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo fmt --all --check
@@ -11,3 +11,7 @@ source scripts/test-offline.sh
 for package in "${RUST_OFFLINE_PACKAGES[@]}"; do
   cargo test --locked --offline -p "$package" -j 2
 done
+
+# Build explicitly: cargo test's internal artifacts are not the smoke's binary.
+cargo build --locked --offline -p cube-node-transport -j 2
+node scripts/smoke-node-adapter.ts "${CARGO_TARGET_DIR:-target}/debug/cube-node-transport"

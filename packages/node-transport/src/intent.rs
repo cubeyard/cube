@@ -17,6 +17,8 @@ pub struct Intent {
     pub operation_id: String,
     pub node_id: String,
     pub environment_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
     pub server_peer: String,
     pub control_peer: String,
     pub spec: ExecSpec,
@@ -34,6 +36,7 @@ impl Intent {
             operation_id: format!("op-{}", uuid::Uuid::new_v4()),
             node_id,
             environment_id,
+            thread_id: None,
             server_peer: server_peer.to_string(),
             control_peer: control_peer.to_string(),
             spec,
@@ -58,6 +61,12 @@ impl Intent {
         ensure!(
             (1..=9_007_199_254_740_991).contains(&self.environment_id),
             "invalid environment ID"
+        );
+        ensure!(
+            self.thread_id
+                .as_ref()
+                .is_none_or(|id| crate::host::valid_id(id)),
+            "invalid intent thread ID"
         );
         self.server_peer.parse::<EndpointId>()?;
         self.control_peer.parse::<EndpointId>()?;

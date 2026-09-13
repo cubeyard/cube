@@ -369,7 +369,7 @@ export class CubeSupervisor {
   async requireLocalEnvironment(name: string, allowMissing = false): Promise<void> {
     const cube = this.requireCube(name);
     const client = this.nodes.forEnvironment(cube.id);
-    if (client.nodeId !== this.registry.localNodeId) throw new ExecutionNodeError("OPERATION_UNSUPPORTED");
+    if (client.locality !== "local" || client.nodeId !== this.registry.localNodeId) throw new ExecutionNodeError("OPERATION_UNSUPPORTED");
     if (allowMissing) await client.check(cube.id);
     else await client.status(cube.id);
   }
@@ -378,7 +378,7 @@ export class CubeSupervisor {
     // Internal template builders have bindings too, but deliberately cannot
     // pass the user-thread requireCube policy (no thread owns them).
     const client = this.nodes.forEnvironment(cube.id);
-    if (client.nodeId !== this.registry.localNodeId) throw new ExecutionNodeError("OPERATION_UNSUPPORTED");
+    if (client.locality !== "local" || client.nodeId !== this.registry.localNodeId) throw new ExecutionNodeError("OPERATION_UNSUPPORTED");
     await client.status(cube.id);
     try { return await work(); }
     catch (error) {

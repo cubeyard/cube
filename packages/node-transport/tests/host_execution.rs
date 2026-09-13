@@ -24,6 +24,10 @@ use tokio::{
 
 const BIN: &str = env!("CARGO_BIN_EXE_cube-node-transport");
 const BUDGET: Duration = Duration::from_secs(12);
+// These cases fork from one test process. A sibling's child can transiently
+// inherit another fixture's flock before exec closes CLOEXEC descriptors.
+// Serialize fixtures, not the concurrent requests exercised inside each case.
+static CASE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 struct Fixture {
     root: tempfile::TempDir,
     state: PathBuf,
@@ -183,6 +187,7 @@ async fn cli(args: &[&str]) -> std::process::Output {
 
 #[tokio::test]
 async fn real_exec_dedup_capacity_binding_and_restart() {
+    let _case = CASE.lock().await;
     let fixture = Fixture::new();
     let (mut daemon, address, _) = fixture.start().await;
     let client = fixture.client().await;
@@ -256,6 +261,7 @@ async fn real_exec_dedup_capacity_binding_and_restart() {
 
 #[tokio::test]
 async fn bounded_output_timeout_cwd_and_environment() {
+    let _case = CASE.lock().await;
     let fixture = Fixture::new();
     fs::create_dir(fixture.workspace.join("sub")).unwrap();
     let (mut daemon, address, _) = fixture.start().await;
@@ -334,6 +340,7 @@ async fn bounded_output_timeout_cwd_and_environment() {
 
 #[tokio::test]
 async fn crash_during_exec_is_unknown_and_never_replayed() {
+    let _case = CASE.lock().await;
     let fixture = Fixture::new();
     let (mut daemon, address, _) = fixture.start().await;
     let client = fixture.client().await;
@@ -389,6 +396,7 @@ async fn crash_during_exec_is_unknown_and_never_replayed() {
 
 #[tokio::test]
 async fn lost_accepted_response_does_not_cancel_work() {
+    let _case = CASE.lock().await;
     let fixture = Fixture::new();
     let host = fixture.open();
     let server = bind_loopback(fixture.key.clone(), "127.0.0.1:0".parse().unwrap())
@@ -416,6 +424,7 @@ async fn lost_accepted_response_does_not_cancel_work() {
                 &encode(&Response::Hello {
                     node_id: "node-test".into(),
                     protocol_version: 1,
+                    binding: Some(host.installation().binding.clone()),
                     profiles: vec!["host".into()],
                     capabilities: vec!["exec.start".into()],
                     limits: Limits {
@@ -475,6 +484,7 @@ async fn lost_accepted_response_does_not_cancel_work() {
 
 #[tokio::test]
 async fn durable_cli_intent_cannot_be_submitted_twice() {
+    let _case = CASE.lock().await;
     let fixture = Fixture::new();
     let intent_path = fixture.root.path().join("intent.json");
     let prepared = cli(&[
@@ -556,6 +566,7 @@ async fn durable_cli_intent_cannot_be_submitted_twice() {
 
 #[tokio::test]
 async fn journal_immutability_no_identity_replacement_and_accepted_cutpoint() {
+    let _case = CASE.lock().await;
     let fixture = Fixture::new();
     let host = fixture.open();
     assert!(Host::open(&fixture.state, fixture.key.public()).is_err());

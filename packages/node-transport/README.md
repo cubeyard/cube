@@ -6,7 +6,11 @@ Real iroh 1.2.0, pinned in Cargo.lock, using Rust 1.91.0. The `serve` command
 remains a hello-only probe and advertises no execution profiles. The separate,
 explicitly opted-in [trusted host profile](HOST.md) now adds a permanent local
 binding, durable operation journal, bounded host exec and result retrieval.
-Neither mode is integrated into cubed yet.
+Neither mode is enrolled into cubed yet. The control-plane adapter in
+`packages/server/src/iroh-node.ts` now calls pinned `@number0/iroh` 1.1.0 **inside
+Node**, directly over this protocol. There is no Rust subprocess/stdio bridge
+between TypeScript and the host node; the CLI remains independent diagnostic
+and host-enrollment tooling. See [HOST.md](HOST.md#in-process-control-plane-client).
 
 ## Run locally
 
@@ -55,27 +59,36 @@ not the durable node registry/enrollment or an environment allocation mechanism.
 - Rejections use `type: Error`, `code`, a bounded static `message`,
   `completionUnknown` and optional `operationId`. Hello-only errors have no
   mutation uncertainty; host commands distinguish possible delivery and journal
-  uncertainty. See [HOST.md](HOST.md) for the durable command contract. Client
-  failures are CLI/library errors, not yet the control-plane error mapping.
-  No retry and no offline queue.
+  uncertainty. See [HOST.md](HOST.md) for the durable command contract. The Node
+  adapter maps `OUTCOME_UNKNOWN` to `COMPLETION_UNKNOWN`, retaining the operation
+  ID. No retry and no offline execution queue.
 - At most 16 active handshake/request tasks; each has a five-second deadline.
   Frames are bounded to 64 KiB before allocation. Slow/missing FIN also times out.
 
-Only explicitly bound loopback UDP sockets are enabled. Relay transports, address
-lookup/discovery and port mapping are disabled. There is no public socket, VPN,
-SSH tunnel, plaintext TCP substitute, or extra network allowlist expansion.
-The browser/control-plane boundary is untouched. This proves real transport
-between processes on one machine, **not** remote reachability or relay traversal.
+Loopback is the default. Rust network commands accept `--network direct` for an
+operator-selected unicast IP/port; a direct server additionally requires an
+explicit `--listen` interface and rejects wildcard listeners. No DNS hostname,
+relay or address-lookup discovery is used. The Rust build disables the portmapper
+feature. The npm binding has a separate NAT-portmapping limitation documented in
+[HOST.md](HOST.md#in-process-control-plane-client); do not claim packet confinement
+for that addon merely because its application sockets are loopback-bound.
+
+This is not a VPN, SSH tunnel or plaintext TCP substitute. No egress exceptions
+were added for direct iroh and the browser boundary is untouched. Both modes are
+tested using loopback targets, **not** external-machine reachability or traversal.
 
 ## Tests and next boundary
 
 ```sh
+pnpm install --frozen-lockfile       # includes the native npm addon
 cargo fetch --locked                 # setup also does this
-bash scripts/test-node-transport.sh  # fmt, clippy, real QUIC tests; --offline
+bash scripts/test-node-transport.sh  # fmt, clippy, Rust tests + real Node/Rust smoke
 ```
 
-The separate Rust CI job runs these checks; the existing Node offline/VM suites
-remain unchanged because no Rust binary is shipped into those VMs yet.
+The separate transport CI job installs Node 26, pinned pnpm and Rust, then runs
+these checks. The ordinary Node offline list additionally tests the in-process
+adapter against a real npm iroh protocol fixture, without building Rust. No Rust
+host binary is shipped into the released VMs yet.
 
 Tests exercise strict framing, unknown versions/methods, loopback-only binding,
 separate CLI processes, authenticated hello, key persistence across restart,
@@ -84,7 +97,7 @@ auth rejection before any application message, and idle-connection expiry.
 
 The [host tests](HOST.md) additionally exercise the durable operation/binding
 boundary and bounded real shell execution, including crashes and response loss.
-Next: the control-plane transport/tool adapter and explicitly configured external
-iroh connectivity. Thread communication, cancellation, file/repository transfer
+Next: explicit remote registry enrollment/tool routing and external connectivity
+acceptance. Thread communication, remote cancellation, file/repository transfer
 and portal streams remain follow-ups. No real remote machine, macOS or Incus
 acceptance has been performed.
