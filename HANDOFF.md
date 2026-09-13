@@ -386,3 +386,14 @@ changes; mock success is not sandbox acceptance. See DEVELOPING.md for commands.
 
 Keep this file focused on unresolved work and contracts that prevent mistakes.
 Put command reference in DEVELOPING.md and completed narratives in Git history.
+
+## CI publication exception approved by maintainer
+
+The maintainer requested publication without workflow changes because the current
+OAuth authorization lacks `workflow` scope. `.github/workflows/ci.yml` is restored
+to the published baseline. The proposed transport CI job is saved in
+`docs/plans/node-transport-ci.patch`; the maintainer can apply it with
+`git apply docs/plans/node-transport-ci.patch` and publish with workflow permission.
+The transport runner remains available locally; its new CI job is pending.
+The earlier `cubeyard/thread` routing concern was diagnosed as error-text
+rewriting in `sanitizeMessage`, not a changed Git destination.

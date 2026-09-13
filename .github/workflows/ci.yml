@@ -13,29 +13,6 @@ permissions:
   contents: read
 
 jobs:
-  node-transport:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 26
-      - name: pinned Node dependencies
-        run: |
-          npm i -g "pnpm@$(sed -n 's/.*"packageManager": *"pnpm@\([^"]*\)".*/\1/p' package.json)"
-          pnpm install --frozen-lockfile
-      - name: pinned Rust toolchain
-        run: |
-          version=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
-          test -n "$version"
-          rustup set auto-self-update disable
-          rustup toolchain install "$version" --profile minimal --component rustfmt --component clippy
-      - name: locked dependencies
-        run: cargo fetch --locked
-      - name: real-QUIC Rust and in-process Node interoperability
-        run: bash scripts/test-node-transport.sh
-
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 20
