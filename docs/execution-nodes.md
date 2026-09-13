@@ -19,8 +19,9 @@ Possible delivery without confirmation is reported as `COMPLETION_UNKNOWN`
 **iroh is the selected future control-to-node transport.** This patch implements
 only a local cubed adapter. A subsequent standalone development probe in
 [`packages/node-transport`](../packages/node-transport/README.md) now exercises
-real iroh hello over loopback; it does not yet implement this adapter or remote
-execution. The protocol
+real iroh hello and opt-in trusted host execution over loopback, with its own
+permanent binding and durable operation journal. It does not yet implement this
+cubed adapter or external-machine execution. The protocol
 must not require Tailscale, WireGuard, SSH, or another VPN. Browser traffic stays
 HTTP(S)/WebSocket to the control plane. The existing restrictive loopback/trusted
 Tailnet browser access boundary is unchanged; there is no new public gateway.

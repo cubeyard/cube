@@ -2,7 +2,7 @@
 //! provider calls, external listener, or existing thread resources.
 use std::{path::Path, process::Stdio, time::Duration};
 
-use cube_node_transport::{ALPN, Query, Response, bind_loopback, encode, read_frame, serve};
+use cube_node_transport::{ALPN, Request, Response, bind_loopback, encode, read_frame, serve};
 use iroh::{EndpointAddr, SecretKey};
 use serde_json::Value;
 use tokio::{
@@ -172,7 +172,7 @@ async fn real_wire_rejection_and_no_hello_before_authorization() {
         .unwrap();
     for (bytes, expected) in [
         (
-            encode(&Query::Hello {
+            encode(&Request::Hello {
                 protocol_version: 2,
             })
             .unwrap(),

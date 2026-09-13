@@ -42,12 +42,33 @@ cubed `ExecutionNodeClient` is still local-only; do not advertise remote exec.
 
 Run `bash scripts/test-node-transport.sh` after setup (fmt, clippy, tests with
 locked offline Cargo dependencies); a separate CI job runs the same checks.
-No relays, public sockets, VPN, host exec, mutation journal, environment
-allocation, or thread communication is implemented by the probe. See
-`packages/node-transport/README.md` for the exact contract and remaining work.
-Next is the durable operation/binding boundary and host exec, not unjournaled
-shell dispatch in the hello handler. The setup milestone was published as
-`e03646a` on `cube/18myb7kl`; this transport work is subsequent work.
+The hello-only `serve` probe remains available. A subsequent explicit
+`host-init`/`host-serve` mode now adds one immutable local environment binding,
+a single-owner SQLite operation journal, bounded real host exec and result
+retrieval over iroh. CLI intents are persisted before submission and cannot be
+automatically resubmitted. Same ID/content resolves without reexecution; different
+content conflicts. Unfinished records become Interrupted/uncertain on exclusive
+restart, never a queue. Tests include real multi-process crashes and lost
+Accepted responses; children can survive a hard daemon crash, which is why
+Interrupted does not claim cancellation. State/key integrity assumes a trusted
+OS account: this is NOT a sandbox, and executed commands have that account's
+filesystem access. No control-plane credentials belong in that account.
+
+See `packages/node-transport/HOST.md` for usage, limits and acceptance. No relay,
+public socket, VPN, remote workspace transfer, dynamic environment provisioning,
+cancellation API or thread communication is implemented. Next is the control-plane
+transport/tool adapter and explicitly configured external iroh connectivity;
+file/repository transfer and thread communication still block the full development
+loop. The setup milestone was published as `e03646a` on `cube/18myb7kl`; transport
+and host execution are subsequent local work. No live shared thread was used
+as an execution or restart fixture.
+
+Current host-slice verification: Rust fmt/clippy and 13 Rust tests passed;
+`pnpm typecheck`, `pnpm lint`, all 40 Node offline suites and `pnpm build` passed.
+Coverage includes the retained-journal capacity limit, concurrent CLI submission,
+permission errors distinct from missing workspaces, and bounded process-group
+cleanup with both open and closed output pipes. This is local Linux evidence,
+not hosted CI, remote-machine, macOS, Incus or end-to-end thread acceptance.
 
 ## Open security follow-up: agent-editable egress policy
 

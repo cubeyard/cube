@@ -21,6 +21,17 @@ Creation request keys now survive restart for the lifetime of their thread.
 The local node identity is persisted in the registry; never copy the database
 to a new host and treat that as moving its environments.
 
+## Standalone iroh / host-execution development
+
+The Rust workspace is separate from the released cubed backends. Run
+`bash scripts/test-node-transport.sh` after `.cube/setup`; it uses locked offline
+Cargo dependencies and disposable real loopback QUIC/child-process fixtures.
+See [`packages/node-transport/HOST.md`](packages/node-transport/HOST.md) for the
+opt-in host CLI, durable operation/restart behavior and its trust limitations.
+This does not add a `CUBED_BACKEND=host` option or route this thread's tools to
+another machine. Never run the host profile under the control-plane account or
+point its crash tests at a shared running node.
+
 ## Backends (`CUBED_BACKEND`)
 
 cubed talks to a swappable `CubeBackend` (`packages/sandbox/src/cube-backend.ts`).

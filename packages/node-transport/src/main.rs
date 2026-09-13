@@ -9,14 +9,24 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use cube_node_transport::{bind_loopback, query_hello, serve, validate_node_id};
+use cube_node_transport::{
+    Request, Response, bind_loopback, call,
+    host::{Binding, ExecSpec, Host},
+    intent::Intent,
+    query_hello, serve, serve_host, validate_node_id,
+};
 use iroh::{EndpointAddr, EndpointId, SecretKey};
 use serde_json::json;
 
 const USAGE: &str = "usage:
   cube-node-transport keygen --key <new-private-file>
   cube-node-transport serve --key <private-file> --allow-peer <public-key> --node-id <node-id> [--listen 127.0.0.1:0]
-  cube-node-transport hello --key <private-file> --peer <pinned-public-key> --address <loopback-ip:port> --expect-node <node-id>";
+  cube-node-transport hello --key <private-file> --peer <pinned-public-key> --address <loopback-ip:port> --expect-node <node-id>
+  cube-node-transport host-init --key <private-file> --state <NEW-directory> --workspace <existing-directory> --allow-peer <public-key> --node-id <node-id> --thread-id <thread-id> --env <integer>
+  cube-node-transport host-serve --key <private-file> --state <directory> [--listen 127.0.0.1:0]
+  cube-node-transport prepare-exec --key <control-key> --intent <NEW-file> --peer <server-key> --expect-node <node-id> --env <integer> --command <shell-command> [--cwd .] [--timeout-ms 10000] [--output-limit 8192]
+  cube-node-transport submit --key <control-key> --intent <file> --address <loopback-ip:port>
+  cube-node-transport operation --key <control-key> --intent <file> --address <loopback-ip:port>";
 
 #[cfg(unix)]
 fn read_key(path: &Path) -> Result<SecretKey> {
@@ -106,6 +116,138 @@ async fn main() -> Result<()> {
             };
             endpoint.close().await;
             result?;
+        }
+        "host-init" => {
+            let state = take(&mut options, "--state")?;
+            let workspace = take(&mut options, "--workspace")?;
+            let allowed: EndpointId = take(&mut options, "--allow-peer")?.parse()?;
+            let node_id = take(&mut options, "--node-id")?;
+            let thread_id = take(&mut options, "--thread-id")?;
+            let environment_id = take(&mut options, "--env")?.parse()?;
+            no_extra(&options)?;
+            let key = read_key(Path::new(&key_path))?;
+            Host::initialize(
+                Path::new(&state),
+                Binding {
+                    thread_id,
+                    environment_id,
+                    node_id,
+                },
+                key.public(),
+                allowed,
+                Path::new(&workspace),
+            )?;
+            println!("{}", json!({"initialized": true}));
+        }
+        "host-serve" => {
+            let state = take(&mut options, "--state")?;
+            let listen = options
+                .remove("--listen")
+                .unwrap_or_else(|| "127.0.0.1:0".into())
+                .parse()?;
+            no_extra(&options)?;
+            let key = read_key(Path::new(&key_path))?;
+            let host = Host::open(Path::new(&state), key.public())?;
+            let allowed = host.installation().allowed_peer.parse()?;
+            let node_id = host.installation().binding.node_id.clone();
+            eprintln!(
+                "trusted host execution enabled: no sandbox; same OS account; do not use an account with control-plane credentials"
+            );
+            let endpoint = bind_loopback(key, listen).await?;
+            println!(
+                "{}",
+                json!({"peerId":endpoint.id().to_string(), "nodeId":node_id, "addresses":endpoint.bound_sockets()})
+            );
+            std::io::stdout().flush()?;
+            let result = tokio::select! {
+                result = serve_host(&endpoint, allowed, &node_id, Some(host.clone())) => result,
+                result = tokio::signal::ctrl_c() => result.map_err(Into::into),
+            };
+            endpoint.close().await;
+            host.shutdown().await;
+            result?;
+        }
+        "prepare-exec" => {
+            let intent_path = take(&mut options, "--intent")?;
+            let server = take(&mut options, "--peer")?.parse()?;
+            let node_id = take(&mut options, "--expect-node")?;
+            let env = take(&mut options, "--env")?.parse()?;
+            let command = take(&mut options, "--command")?;
+            let guest_cwd = options.remove("--cwd").unwrap_or_else(|| ".".into());
+            let timeout_ms = options
+                .remove("--timeout-ms")
+                .unwrap_or_else(|| "10000".into())
+                .parse()?;
+            let output_limit = options
+                .remove("--output-limit")
+                .unwrap_or_else(|| "8192".into())
+                .parse()?;
+            no_extra(&options)?;
+            let control = read_key(Path::new(&key_path))?.public();
+            let intent = Intent::prepare(
+                Path::new(&intent_path),
+                node_id,
+                env,
+                server,
+                control,
+                ExecSpec {
+                    command,
+                    guest_cwd,
+                    timeout_ms,
+                    output_limit,
+                },
+            )?;
+            println!("{}", json!({"operationId":intent.operation_id}));
+        }
+        "submit" | "operation" => {
+            let intent_path = take(&mut options, "--intent")?;
+            let address: SocketAddr = take(&mut options, "--address")?.parse()?;
+            ensure!(
+                address.ip().is_loopback(),
+                "bootstrap target must be loopback"
+            );
+            no_extra(&options)?;
+            let intent = Intent::load(Path::new(&intent_path))?;
+            let key = read_key(Path::new(&key_path))?;
+            ensure!(
+                key.public().to_string() == intent.control_peer,
+                "intent belongs to another control peer"
+            );
+            let query = if command == "submit" {
+                // Persist consumed BEFORE the first possible network dispatch.
+                // A failed dial also stays consumed; there is no automatic retry.
+                Intent::consume(Path::new(&intent_path))?;
+                Request::ExecStart {
+                    env: intent.environment_id,
+                    operation_id: intent.operation_id,
+                    spec: intent.spec,
+                }
+            } else {
+                Request::OperationGet {
+                    env: intent.environment_id,
+                    operation_id: intent.operation_id,
+                }
+            };
+            let local = if address.is_ipv6() {
+                "[::1]:0"
+            } else {
+                "127.0.0.1:0"
+            };
+            let endpoint = bind_loopback(key, local.parse()?).await?;
+            let response = call(
+                &endpoint,
+                EndpointAddr::new(intent.server_peer.parse()?).with_ip_addr(address),
+                &intent.node_id,
+                &query,
+            )
+            .await;
+            endpoint.close().await;
+            let response = response?;
+            println!("{}", serde_json::to_string(&response)?);
+            ensure!(
+                !matches!(response, Response::Error { .. }),
+                "host request rejected; inspect response"
+            );
         }
         "hello" => {
             let peer: EndpointId = take(&mut options, "--peer")?.parse()?;

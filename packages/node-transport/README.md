@@ -1,9 +1,12 @@
 # Node transport bootstrap
 
-**Development-only; not wired into cubed, the agent tools or release artifacts.**
-Real iroh 1.2.0, pinned in Cargo.lock, using Rust 1.91.0. This first slice implements
-only `node.hello`, not environment binding, durable commands, files or host exec.
-It deliberately advertises no execution profiles and no other capabilities.
+**Development-only; not wired into cubed or agent tools. No Rust binary is built
+into release artifacts.**
+Real iroh 1.2.0, pinned in Cargo.lock, using Rust 1.91.0. The `serve` command
+remains a hello-only probe and advertises no execution profiles. The separate,
+explicitly opted-in [trusted host profile](HOST.md) now adds a permanent local
+binding, durable operation journal, bounded host exec and result retrieval.
+Neither mode is integrated into cubed yet.
 
 ## Run locally
 
@@ -40,18 +43,21 @@ not the durable node registry/enrollment or an environment allocation mechanism.
   reading application bytes. `nodeId` is not authentication. No 0-RTT/replay.
 - The accepting side has one explicitly allowed control peer. The caller pins
   the server key and checks the expected logical node ID in the response.
-- One QUERY per connection in this bootstrap, on one bidirectional stream.
-  Both directions carry a four-byte big-endian payload length, then exactly that
+- At most two streams per connection: successful hello, then one optional
+  request. Each stream carries one request/response. Both directions carry a
+  four-byte big-endian payload length, then exactly that
   many UTF-8 JSON bytes and FIN. Empty, oversized, truncated, trailing or unknown
   request fields fail closed. Unsupported methods are not executed.
 - Request: `{"method":"node.hello","protocolVersion":1}`.
 - Response: `{"type":"Hello","nodeId":"node-development","protocolVersion":1,
   "profiles":[],"capabilities":["node.hello"],"limits":{"maxFrameBytes":65536,
   "requestTimeoutMs":5000}}`.
-- Rejections use `type: Error`, `code`, a bounded static `message`, and
-  `completionUnknown: false` (this slice has no mutations). Client-side connect,
-  identity, frame and deadline failures are local CLI/library errors, not yet the
-  control-plane error mapping. No retry and no offline queue.
+- Rejections use `type: Error`, `code`, a bounded static `message`,
+  `completionUnknown` and optional `operationId`. Hello-only errors have no
+  mutation uncertainty; host commands distinguish possible delivery and journal
+  uncertainty. See [HOST.md](HOST.md) for the durable command contract. Client
+  failures are CLI/library errors, not yet the control-plane error mapping.
+  No retry and no offline queue.
 - At most 16 active handshake/request tasks; each has a five-second deadline.
   Frames are bounded to 64 KiB before allocation. Slow/missing FIN also times out.
 
@@ -76,11 +82,9 @@ separate CLI processes, authenticated hello, key persistence across restart,
 wrong client and server keys, wrong logical identity, key file restrictions,
 auth rejection before any application message, and idle-connection expiry.
 
-Next: a durable node-owned operation journal and bounded host exec/output with
-restart/uncertain-outcome acceptance, followed by the control-plane transport
-adapter. Before accepting mutations, implement immutable environment bindings,
-per-environment authorization, durable request IDs/hashes and reconciliation;
-do not simply add shell dispatch to this hello handler. External iroh connectivity,
-thread communication, cancellation, file/repository transfer and portal streams
-remain separate follow-ups. No real remote machine, macOS or Incus acceptance
-has been performed.
+The [host tests](HOST.md) additionally exercise the durable operation/binding
+boundary and bounded real shell execution, including crashes and response loss.
+Next: the control-plane transport/tool adapter and explicitly configured external
+iroh connectivity. Thread communication, cancellation, file/repository transfer
+and portal streams remain follow-ups. No real remote machine, macOS or Incus
+acceptance has been performed.

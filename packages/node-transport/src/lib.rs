@@ -1,6 +1,8 @@
-//! First real wire slice. No execution, environment allocation or public listener.
-//! One bounded QUERY per bidirectional stream; no retries and no 0-RTT.
-use std::{net::SocketAddr, time::Duration};
+//! Authenticated loopback node protocol; optional trusted host execution.
+//! Bounded frames, no retries, no 0-RTT; commands outlive their connection.
+pub mod host;
+pub mod intent;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey, endpoint::presets};
@@ -12,13 +14,28 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONNECTIONS: usize = 16;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "method", deny_unknown_fields)]
-pub enum Query {
+pub enum Request {
     #[serde(rename = "node.hello")]
     Hello {
         #[serde(rename = "protocolVersion")]
         protocol_version: u32,
+    },
+    #[serde(rename = "environment.inspect")]
+    Inspect { env: u64 },
+    #[serde(rename = "exec.start")]
+    ExecStart {
+        #[serde(rename = "operationId")]
+        operation_id: String,
+        env: u64,
+        spec: host::ExecSpec,
+    },
+    #[serde(rename = "operation.get")]
+    OperationGet {
+        env: u64,
+        #[serde(rename = "operationId")]
+        operation_id: String,
     },
 }
 
@@ -34,11 +51,30 @@ pub enum Response {
         capabilities: Vec<String>,
         limits: Limits,
     },
+    Accepted {
+        #[serde(rename = "operationId")]
+        operation_id: String,
+    },
+    Operation {
+        #[serde(rename = "operationId")]
+        operation_id: String,
+        operation: host::Operation,
+    },
+    Environment {
+        binding: host::Binding,
+        state: String,
+    },
     Error {
         code: String,
         message: String,
         #[serde(rename = "completionUnknown")]
         completion_unknown: bool,
+        #[serde(
+            rename = "operationId",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        operation_id: Option<String>,
     },
 }
 
@@ -55,6 +91,7 @@ impl Response {
             code: code.into(),
             message: message.into(),
             completion_unknown: false,
+            operation_id: None,
         }
     }
 }
@@ -113,14 +150,14 @@ pub async fn read_frame<T: DeserializeOwned>(reader: &mut (impl AsyncRead + Unpi
     Ok(serde_json::from_slice(&payload)?)
 }
 
-fn hello(node_id: &str, query: Query) -> Response {
+fn hello(node_id: &str, query: Request) -> Response {
     match query {
-        Query::Hello {
+        Request::Hello {
             protocol_version: 1,
         } => Response::Hello {
             node_id: node_id.into(),
             protocol_version: 1,
-            // Do not advertise a host executor before it exists.
+            // The plain serve probe never enables host execution.
             profiles: vec![],
             capabilities: vec!["node.hello".into()],
             limits: Limits {
@@ -132,35 +169,142 @@ fn hello(node_id: &str, query: Query) -> Response {
     }
 }
 
-/// The caller enrolls a peer key outside the wire protocol. Authenticate the
-/// QUIC peer before reading any application data, including hello/nodeId.
+fn dispatch(node_id: &str, query: Request, host: Option<&Arc<host::Host>>) -> Response {
+    if matches!(query, Request::Hello { .. }) {
+        let mut result = hello(node_id, query);
+        if host.is_some()
+            && let Response::Hello {
+                profiles,
+                capabilities,
+                ..
+            } = &mut result
+        {
+            *profiles = vec!["host".into()];
+            capabilities
+                .extend(["environment.inspect", "exec.start", "operation.get"].map(String::from));
+        }
+        return result;
+    }
+    let Some(host) = host else {
+        return Response::error("UNSUPPORTED", "host execution is not enabled");
+    };
+    let operation_id = match &query {
+        Request::ExecStart { operation_id, .. } | Request::OperationGet { operation_id, .. } => {
+            Some(operation_id.clone())
+        }
+        _ => None,
+    }
+    .filter(|id| host::valid_id(id));
+    let mutation = matches!(query, Request::ExecStart { .. });
+    let result = match query {
+        Request::Inspect { env } => host.inspect(env).map(|installation| Response::Environment {
+            binding: installation.binding.clone(),
+            state: "ready".into(),
+        }),
+        Request::ExecStart {
+            env,
+            operation_id,
+            spec,
+        } => host
+            .start(env, &operation_id, spec)
+            .map(|()| Response::Accepted { operation_id }),
+        Request::OperationGet { env, operation_id } => {
+            host.get(env, &operation_id)
+                .map(|operation| Response::Operation {
+                    operation_id,
+                    operation,
+                })
+        }
+        Request::Hello { .. } => unreachable!(),
+    };
+    result.unwrap_or_else(|error| {
+        if let Some(error) = error.downcast_ref::<host::HostError>() {
+            Response::Error {
+                code: error.0.into(),
+                message: "host request rejected".into(),
+                completion_unknown: false,
+                operation_id: operation_id.clone(),
+            }
+        } else {
+            // A journal commit may have happened. Do not assert no side effects.
+            Response::Error {
+                code: "IO_ERROR".into(),
+                message: "host state could not be confirmed".into(),
+                completion_unknown: mutation,
+                operation_id,
+            }
+        }
+    })
+}
+
+/// Authenticate before application data. A successful hello is required on
+/// this SAME connection before any environment operation. Each connection gets
+/// at most two streams: hello and one request; the client never retries.
 async fn accept(
     incoming: iroh::endpoint::Incoming,
     allowed_peer: EndpointId,
     node_id: String,
+    host: Option<Arc<host::Host>>,
 ) -> Result<()> {
     let connection = incoming.await?;
     if connection.remote_id() != allowed_peer {
         connection.close(1u32.into(), b"UNAUTHORIZED");
         bail!("unauthorized peer");
     }
-    let (mut send, mut recv) = connection.accept_bi().await?;
-    let response = match read_frame::<Query>(&mut recv).await {
-        Ok(query) => hello(&node_id, query),
-        Err(_) => Response::error("INVALID_REQUEST", "invalid request frame"),
-    };
-    send.write_all(&encode(&response)?).await?;
-    send.finish()?;
-    // Keep the connection alive until the caller consumes the response. The
-    // enclosing deadline also bounds callers that never close the connection.
+    let mut negotiated = false;
+    for _ in 0..2 {
+        let (mut send, mut recv) = connection.accept_bi().await?;
+        let response = match read_frame::<Request>(&mut recv).await {
+            Ok(query) => {
+                if !negotiated && !matches!(query, Request::Hello { .. }) {
+                    Response::error("INVALID_REQUEST", "hello required before environment work")
+                } else {
+                    let response = dispatch(&node_id, query, host.as_ref());
+                    if matches!(
+                        response,
+                        Response::Hello {
+                            protocol_version: 1,
+                            ..
+                        }
+                    ) {
+                        negotiated = true;
+                    }
+                    response
+                }
+            }
+            Err(_) => Response::error("INVALID_REQUEST", "invalid request frame"),
+        };
+        send.write_all(&encode(&response)?).await?;
+        send.finish()?;
+        if !negotiated {
+            break;
+        }
+    }
     connection.closed().await;
     Ok(())
 }
 
-/// Bounded handshakes and requests. Dropping this future aborts its owned tasks;
-/// callers must also close the endpoint. Per-peer failures never stop the server.
 pub async fn serve(endpoint: &Endpoint, allowed_peer: EndpointId, node_id: &str) -> Result<()> {
+    serve_host(endpoint, allowed_peer, node_id, None).await
+}
+
+/// Dropping connection tasks does not drop accepted host jobs. Graceful daemon
+/// shutdown closes the endpoint then waits through Host::shutdown().
+pub async fn serve_host(
+    endpoint: &Endpoint,
+    allowed_peer: EndpointId,
+    node_id: &str,
+    host: Option<Arc<host::Host>>,
+) -> Result<()> {
     validate_node_id(node_id)?;
+    if let Some(host) = &host {
+        ensure!(
+            host.installation().binding.node_id == node_id
+                && host.installation().allowed_peer == allowed_peer.to_string()
+                && host.installation().peer_id == endpoint.id().to_string(),
+            "WRONG_NODE: host installation mismatch"
+        );
+    }
     let mut tasks = JoinSet::new();
     loop {
         tokio::select! {
@@ -171,8 +315,9 @@ pub async fn serve(endpoint: &Endpoint, allowed_peer: EndpointId, node_id: &str)
                     continue;
                 }
                 let node_id = node_id.to_owned();
+                let host = host.clone();
                 tasks.spawn(async move {
-                    timeout(REQUEST_TIMEOUT, accept(incoming, allowed_peer, node_id)).await
+                    timeout(REQUEST_TIMEOUT, accept(incoming, allowed_peer, node_id, host)).await
                 });
             }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
@@ -181,6 +326,109 @@ pub async fn serve(endpoint: &Endpoint, allowed_peer: EndpointId, node_id: &str)
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
     Ok(())
+}
+
+#[derive(Debug)]
+pub struct DeliveryError {
+    pub code: &'static str,
+    pub completion_unknown: bool,
+    pub operation_id: Option<String>,
+}
+impl std::fmt::Display for DeliveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: operation={:?}; completionUnknown={}",
+            self.code, self.operation_id, self.completion_unknown
+        )
+    }
+}
+impl std::error::Error for DeliveryError {}
+
+/// Call exactly once, negotiating identity on the same connection before work.
+/// COMMAND callers must persist intent before calling; after possible delivery,
+/// reconcile operation.get, never invoke the command automatically again.
+pub async fn call(
+    endpoint: &Endpoint,
+    address: EndpointAddr,
+    expected_node_id: &str,
+    query: &Request,
+) -> Result<Response> {
+    validate_node_id(expected_node_id)?;
+    ensure!(
+        !matches!(query, Request::Hello { .. }),
+        "use query_hello for contact probes"
+    );
+    let bytes = encode(query)?;
+    let operation_id = match query {
+        Request::ExecStart { operation_id, .. } => Some(operation_id.clone()),
+        _ => None,
+    };
+    let mut possible_delivery = false;
+    let mut connection_to_close = None;
+    let result = timeout(REQUEST_TIMEOUT, async {
+        let connection = endpoint.connect(address, ALPN).await?;
+        connection_to_close = Some(connection.clone());
+        let (mut send, mut recv) = connection.open_bi().await?;
+        send.write_all(&encode(&Request::Hello {
+            protocol_version: 1,
+        })?)
+        .await?;
+        send.finish()?;
+        match read_frame::<Response>(&mut recv).await? {
+            Response::Hello {
+                node_id,
+                protocol_version: 1,
+                ..
+            } if node_id == expected_node_id => {}
+            _ => {
+                return Err(DeliveryError {
+                    code: "WRONG_NODE",
+                    completion_unknown: false,
+                    operation_id: operation_id.clone(),
+                }
+                .into());
+            }
+        }
+        let (mut send, mut recv) = connection.open_bi().await?;
+        possible_delivery = operation_id.is_some();
+        send.write_all(&bytes).await?;
+        send.finish()?;
+        let response: Response = read_frame(&mut recv).await?;
+        match (&response, query) {
+            (Response::Accepted { operation_id: got }, Request::ExecStart { operation_id, .. })
+                if got == operation_id => {}
+            (
+                Response::Operation {
+                    operation_id: got, ..
+                },
+                Request::OperationGet { operation_id, .. },
+            ) if got == operation_id => {}
+            (Response::Environment { binding, .. }, Request::Inspect { env })
+                if binding.environment_id == *env && binding.node_id == expected_node_id => {}
+            (Response::Error { .. }, _) => {}
+            _ => bail!("invalid response for request"),
+        }
+        Ok::<_, anyhow::Error>(response)
+    })
+    .await;
+    if let Some(connection) = connection_to_close {
+        connection.close(0u32.into(), b"request complete");
+    }
+    match result {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(error)) if error.is::<DeliveryError>() => Err(error),
+        _ => Err(DeliveryError {
+            code: if possible_delivery {
+                "OUTCOME_UNKNOWN"
+            } else {
+                "NODE_UNAVAILABLE"
+            },
+            completion_unknown: possible_delivery,
+            operation_id,
+        }
+        .into()),
+    }
 }
 
 /// `address.id` is the pinned, enrolled server peer key, not an unauthenticated
@@ -196,7 +444,7 @@ pub async fn query_hello(
         let connection = endpoint.connect(address, ALPN).await?;
         let result = async {
             let (mut send, mut recv) = connection.open_bi().await?;
-            send.write_all(&encode(&Query::Hello {
+            send.write_all(&encode(&Request::Hello {
                 protocol_version: 1,
             })?)
             .await?;
@@ -212,6 +460,7 @@ pub async fn query_hello(
                     bail!("WRONG_NODE: unexpected logical identity or version")
                 }
                 Response::Error { code, .. } => bail!("node rejected hello: {code}"),
+                _ => bail!("invalid hello response"),
             }
         }
         .await;
@@ -228,29 +477,33 @@ mod tests {
 
     #[tokio::test]
     async fn strict_bounded_frames() {
-        let bytes = encode(&Query::Hello {
+        let bytes = encode(&Request::Hello {
             protocol_version: 1,
         })
         .unwrap();
-        assert!(read_frame::<Query>(&mut bytes.as_slice()).await.is_ok());
+        assert!(read_frame::<Request>(&mut bytes.as_slice()).await.is_ok());
         for bytes in [
             vec![],
             vec![0, 0, 0, 0],
             vec![255; 4],
             vec![0, 0, 0, 2, b'{'],
         ] {
-            assert!(read_frame::<Query>(&mut bytes.as_slice()).await.is_err());
+            assert!(read_frame::<Request>(&mut bytes.as_slice()).await.is_err());
         }
         let mut trailing = bytes.clone();
         trailing.push(0);
-        assert!(read_frame::<Query>(&mut trailing.as_slice()).await.is_err());
+        assert!(
+            read_frame::<Request>(&mut trailing.as_slice())
+                .await
+                .is_err()
+        );
         for value in [
             serde_json::json!({"method":"exec.start"}),
             serde_json::json!({"method":"node.hello", "protocolVersion":1, "nodeId":"spoof"}),
             serde_json::json!({"method":"node.hello", "protocolVersion":-1}),
         ] {
             assert!(
-                read_frame::<Query>(&mut encode(&value).unwrap().as_slice())
+                read_frame::<Request>(&mut encode(&value).unwrap().as_slice())
                     .await
                     .is_err()
             );
@@ -261,7 +514,7 @@ mod tests {
     #[test]
     fn version_and_identity_validation() {
         assert!(
-            matches!(hello("node-test", Query::Hello { protocol_version: 2 }), Response::Error { code, .. } if code == "UNSUPPORTED")
+            matches!(hello("node-test", Request::Hello { protocol_version: 2 }), Response::Error { code, .. } if code == "UNSUPPORTED")
         );
         for id in ["", "node-", "other-node", "node-../etc", "node-é"] {
             assert!(validate_node_id(id).is_err());

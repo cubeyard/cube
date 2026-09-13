@@ -1,9 +1,12 @@
 # Host-node development loop
 
 Status: in progress; full development-loop acceptance is not complete.
-The standalone [iroh hello probe](../../packages/node-transport/README.md)
-implements real loopback transport and peer checks only. Host exec, durable
-operations and thread communication are still outstanding.
+The standalone [iroh transport](../../packages/node-transport/README.md) now
+includes an opt-in [trusted host executor](../../packages/node-transport/HOST.md):
+permanent local binding, durable operation journal, bounded exec and result
+retrieval, tested across response loss and process restart. It is still loopback
+only and separate from cubed. The control-plane adapter, external contact,
+file/repository transfer and thread communication are outstanding.
 
 ## Outcome
 
