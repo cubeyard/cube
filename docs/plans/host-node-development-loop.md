@@ -1,6 +1,9 @@
 # Host-node development loop
 
-Status: agreed next milestone; not implemented or accepted.
+Status: in progress; full development-loop acceptance is not complete.
+The standalone [iroh hello probe](../../packages/node-transport/README.md)
+implements real loopback transport and peer checks only. Host exec, durable
+operations and thread communication are still outstanding.
 
 ## Outcome
 

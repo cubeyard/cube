@@ -17,7 +17,10 @@ Possible delivery without confirmation is reported as `COMPLETION_UNKNOWN`
 (or the existing bridge `ECODE_UNCERTAIN`); inspect before executing again.
 
 **iroh is the selected future control-to-node transport.** This patch implements
-only a local adapter. It is not iroh and is not remote execution. The protocol
+only a local cubed adapter. A subsequent standalone development probe in
+[`packages/node-transport`](../packages/node-transport/README.md) now exercises
+real iroh hello over loopback; it does not yet implement this adapter or remote
+execution. The protocol
 must not require Tailscale, WireGuard, SSH, or another VPN. Browser traffic stays
 HTTP(S)/WebSocket to the control plane. The existing restrictive loopback/trusted
 Tailnet browser access boundary is unchanged; there is no new public gateway.

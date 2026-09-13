@@ -47,7 +47,12 @@ OFFLINE_TESTS=(
   packages/pi-extension/test/diagnostics-test.ts
 )
 
-# Executed (not sourced): run the list.
+# Development-only Rust packages: run by scripts/test-node-transport.sh and a
+# separate CI job, not the released Node/Incus VM portfolio (no Rust there yet).
+# shellcheck disable=SC2034 # Consumed by the separate Rust runner when sourced.
+RUST_OFFLINE_PACKAGES=(cube-node-transport)
+
+# Executed (not sourced): run the Node list.
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -uo pipefail
   cd "$(dirname "$0")/.." || exit 1

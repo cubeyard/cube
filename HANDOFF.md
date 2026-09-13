@@ -29,6 +29,26 @@ Working-tree verification: Node 26.8.2 / pnpm 10.34.5; `pnpm typecheck`,
 Incus sleep/wake/provision/delete, service portals and hairpin isolation still
 need the disposable VM portfolio. No real iroh or macOS acceptance was run.
 
+## Iroh bootstrap in this working tree
+
+`packages/node-transport` is a separate, development-only Rust executable and
+library using pinned iroh 1.2.0 / Rust 1.91.0. It is not wired into cubed or
+release artifacts. Real loopback QUIC `node.hello` works between separate CLI
+processes, with a pinned server key, explicit allowed control peer, strict
+bounded framing and connection deadlines. Key reuse survives restart; key
+corruption/missing files fail rather than regenerating identity. Six Rust tests
+cover this boundary, including rejection before application data. The existing
+cubed `ExecutionNodeClient` is still local-only; do not advertise remote exec.
+
+Run `bash scripts/test-node-transport.sh` after setup (fmt, clippy, tests with
+locked offline Cargo dependencies); a separate CI job runs the same checks.
+No relays, public sockets, VPN, host exec, mutation journal, environment
+allocation, or thread communication is implemented by the probe. See
+`packages/node-transport/README.md` for the exact contract and remaining work.
+Next is the durable operation/binding boundary and host exec, not unjournaled
+shell dispatch in the hello handler. The setup milestone was published as
+`e03646a` on `cube/18myb7kl`; this transport work is subsequent work.
+
 ## Open security follow-up: agent-editable egress policy
 
 Recorded during host-node bootstrap; acknowledged by the maintainer. An agent

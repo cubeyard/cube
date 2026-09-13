@@ -86,6 +86,10 @@ if [[ ! -x "$node_home/bin/pnpm" ]] || [[ "$("$node_home/bin/pnpm" --version)" !
 fi
 log 'install locked workspace dependencies'
 pnpm install --frozen-lockfile
+if [[ -f Cargo.lock ]]; then
+  log 'fetch locked Rust dependencies (builds remain explicit)'
+  cargo fetch --locked
+fi
 log 'verify toolchain'
 node --version
 pnpm --version
