@@ -1,3 +1,4 @@
+import { IncusHttpError } from "../../sandbox/src/incus-client.ts";
 /**
  * Offline unit test for EnvironmentTemplates: one build per (project, key)
  * shared by concurrent callers, a failed build leaves nothing behind, a new
@@ -27,7 +28,7 @@ const missing = new Set<string>();
 const errors: string[] = [];
 const backend = {
   async deleteTemplate(_pool: string, template: CubeTemplateSource) { deleted.push(template.instance); },
-  async getState(name: string) { if (missing.has(name)) throw new Error("not found"); return { status: "Stopped" }; },
+  async getState(name: string) { if (missing.has(name)) throw new IncusHttpError(404, "not found"); return { status: "Stopped" }; },
 };
 const templates = new EnvironmentTemplates(registry, backend, "pool", { onError: (context, error) => errors.push(`${context}: ${String(error)}`) });
 const capture = (instance: string): CubeTemplateSource => ({ instance, snapshot: "env", volume: `${instance}-docker`, volumeSnapshot: "env" });

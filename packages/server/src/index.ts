@@ -1,3 +1,4 @@
+import { ExecutionNodeError } from "./execution-node.ts";
 /**
  * cubed — Phase 2 slices 2+3. Multiple cubes (SQLite registry +
  * CubeSupervisor, one egress proxy per cube), multiple threads per cube (one
@@ -21,11 +22,11 @@ import { GithubAuth, GithubUnreachableError } from "./github-auth.ts";
 import { createLogger } from "./log.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { defaultPortalBase } from "./portal-config.ts";
-import { guardUpgradeSocket, portalLabel, proxyHttp, proxyUpgrade, refuseUpgrade, respondFailed, respondMissing, respondWaking, sameOriginUpgrade, upgradeAfterWake } from "./portal-proxy.ts";
+import { guardUpgradeSocket, portalLabel, proxyHttp, proxyUpgrade, refuseUpgrade, respondUnavailable, respondFailed, respondMissing, respondWaking, sameOriginUpgrade, upgradeAfterWake } from "./portal-proxy.ts";
 import { PiTerminals } from "./pty.ts";
 import { Registry } from "./registry.ts";
 import { CubeSupervisor, DEFAULT_EGRESS_ALLOW } from "./supervisor.ts";
-import { sanitizeMessage } from "./user-facing.ts";
+import { describeThreadError, sanitizeMessage } from "./user-facing.ts";
 import { APP_VERSION } from "./version.ts";
 import { listWorkspaceFiles, openWorkspaceFile } from "./workspace-files.ts";
 
@@ -161,6 +162,12 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
  * word "cube" must not leak through the product surface. */
 function fail(res: http.ServerResponse, error: unknown, sanitize = false, route?: string): void {
   if (res.destroyed) return;
+  if (error instanceof ExecutionNodeError) {
+    return json(res, error.code === "OPERATION_UNSUPPORTED" ? 501 : error.code === "ENVIRONMENT_MISSING" ? 409 : 503, {
+      code: error.code, completionUnknown: error.completionUnknown,
+      error: describeThreadError(error.code),
+    });
+  }
   let message = error instanceof Error ? error.message : String(error);
   const status = /no such/.test(message)
     ? 404
@@ -354,7 +361,7 @@ async function portalRequest(
   // No portal row yet, but the thread's committed declaration may name the
   // service — the UI links declared services before anything has started
   // them. Ensuring below creates the row.
-  const cubeName = target?.cubeName ?? supervisor.declaredPortalCube(label);
+  const cubeName = target?.cubeName ?? await supervisor.declaredPortalCube(label).catch(() => null);
   if (!cubeName) {
     // A bookmark to a deleted thread's service, or a typo: a page, not a
     // bare line naming an internal label.
@@ -368,6 +375,8 @@ async function portalRequest(
     res.writeHead(403, { "content-type": "text/plain" });
     return void res.end("not your portal\n");
   }
+  try { await supervisor.requireLocalEnvironment(cubeName); }
+  catch { return respondUnavailable(req, res); }
   if (target && !target.supervised) {
     const unavailable = () => respondFailed(req, res,
       "this temporary portal is not supervised — start the server in the thread and try again");
@@ -377,7 +386,7 @@ async function portalRequest(
   }
   if (target?.status !== "ready") return startAndHold(label, cubeName, req, res);
   supervisor.touchCube(cubeName); // a browsed portal is activity, like a prompt
-  proxyHttp(req, res, target, () => startAndHold(label, cubeName, req, res));
+  proxyHttp(req, res, target, () => respondUnavailable(req, res));
 }
 
 /**
@@ -556,6 +565,11 @@ async function api(
     }
   }
 
+  const environmentAccess = url.pathname.match(/^\/api\/threads\/([^/]+)\/environment-access$/);
+  if (environmentAccess && method === "GET") {
+    return json(res, 200, await supervisor.accessForUserThread(decodeId(environmentAccess[1]!)));
+  }
+
   const repositoryFile = url.pathname.match(
     /^\/api\/threads\/([^/]+)\/repositories\/(\d+)\/files\/(.+)$/,
   );
@@ -563,7 +577,7 @@ async function api(
     if (method !== "GET") return json(res, 404, { error: "not found" });
     const id = decodeId(repositoryFile[1]!);
     const repositoryId = Number(repositoryFile[2]);
-    const root = supervisor.workspaceForUserRepository(id, repositoryId);
+    const root = await supervisor.workspaceForUserRepository(id, repositoryId);
     return serveWorkspaceFile(res, root, decodeId(repositoryFile[3]!));
   }
 
@@ -587,7 +601,7 @@ async function api(
     const repositoryRaw = threadRepository[2];
     const action = threadRepository[3];
     if (!repositoryRaw && !action && method === "GET") {
-      return json(res, 200, { repositories: await supervisor.repositoriesForUserThread(id) });
+      return json(res, 200, { repositories: await supervisor.repositoriesForUserThread(id, url.searchParams.get("state") !== "0") });
     }
     if (!repositoryRaw || !action) return json(res, 404, { error: "not found" });
     const repositoryId = Number(repositoryRaw);
@@ -709,6 +723,7 @@ async function api(
       if (method === "POST") {
         // Intentionally independent of request disconnect: an accepted
         // explicit repair completes, just like initial provisioning.
+        await supervisor.accessForUserThread(id);
         void supervisor.retrySetupForUserThread(id).catch((error) => console.warn(`setup retry: ${String(error)}`));
         return json(res, 202, { accepted: true });
       }
@@ -738,7 +753,7 @@ async function api(
       // the agent's narrow code-mode capability: ensure exactly this
       // thread's declarations and return their live status/portal URLs.
       if (method === "GET") {
-        return json(res, 200, { services: supervisor.listServicesForUserThread(id) });
+        return json(res, 200, { services: await supervisor.listServicesForUserThread(id) });
       }
       if (method === "POST") {
         const services = await whileConnected(res, (signal) =>
@@ -757,7 +772,7 @@ async function api(
       // Workspace files are host-side: listing and serving work without
       // waking the sandbox (a sleeping thread's images still render).
       if (method !== "GET") return json(res, 404, { error: "not found" });
-      const root = supervisor.workspaceForUserThread(id);
+      const root = await supervisor.workspaceForUserThread(id);
       if (userThread[3] === undefined) return json(res, 200, listWorkspaceFiles(root));
       return serveWorkspaceFile(res, root, decodeId(userThread[3]));
     }
@@ -850,7 +865,7 @@ function serveWorkspaceFile(res: http.ServerResponse, root: string, rel: string)
 // cubed's own host, the only WebSocket is the thread terminal.
 const wss = new WebSocketServer({ noServer: true });
 
-server.on("upgrade", (req, socket, head) => {
+server.on("upgrade", async (req, socket, head) => {
   // From here the socket is ours: node has already dropped its own error
   // listener, so a reset before we destroy, refuse or proxy it would be
   // an unhandled 'error' — a crash. One listener for the socket's life.
@@ -888,7 +903,7 @@ server.on("upgrade", (req, socket, head) => {
   if (cubeSource && cubeSource !== target?.ip) return void socket.destroy();
   // No portal row yet, but the thread's committed declaration may name
   // the service — the HTTP path bootstraps the same way.
-  const cubeName = target?.cubeName ?? supervisor.declaredPortalCube(label);
+  const cubeName = target?.cubeName ?? await supervisor.declaredPortalCube(label).catch(() => null);
   if (!cubeName) return void socket.destroy();
   if (target?.status === "ready") {
     supervisor.touchCube(cubeName);

@@ -38,9 +38,23 @@ export function portalLabel(hostHeader: string | undefined, base: string): strin
   return label;
 }
 
+/** Opens one stream for an already authorized portal. Not a wire DTO. */
+export type PortalConnector = () => Promise<stream.Duplex>;
 export interface PortalTarget {
-  ip: string;
+  ip?: string; // legacy local test callers only; production uses connect
   port: number;
+  connect?: PortalConnector;
+}
+
+function connectPortal(target: PortalTarget): Promise<stream.Duplex> {
+  if (target.connect) return target.connect();
+  if (!target.ip) return Promise.reject(new Error("portal connector is required"));
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(target.port, target.ip);
+    const timer = setTimeout(() => socket.destroy(Object.assign(new Error("portal connection timed out"), { code: "ETIMEDOUT" })), 5_000);
+    socket.once("error", error => { clearTimeout(timer); reject(error); });
+    socket.once("connect", () => { clearTimeout(timer); resolve(socket); });
+  });
 }
 
 /** Forward one HTTP exchange to the cube service. The original Host header
@@ -59,10 +73,18 @@ export function proxyHttp(
   headers["x-forwarded-proto"] = "http";
   headers["x-forwarded-host"] = req.headers.host ?? "";
   headers["x-forwarded-for"] = req.socket.remoteAddress ?? "";
+  const agent = new http.Agent({ keepAlive: false });
+  agent.createConnection = (_options, callback) => {
+    void connectPortal(target).then(socket => {
+      if (res.destroyed) { socket.destroy(); callback!(new Error("portal client left"), undefined as never); return; }
+      callback!(null, socket);
+    }, error => callback!(error, undefined as never));
+    return undefined as never;
+  };
   const upstream = http.request(
     // agent:false — pooled keep-alive sockets to a service that then
     // sleeps/crashes would error on reuse and read as spurious downtime.
-    { host: target.ip, port: target.port, method: req.method, path: req.url, headers, agent: false },
+    { host: "portal", port: target.port, method: req.method, path: req.url, headers, agent },
     (upstreamRes) => {
       const out: http.OutgoingHttpHeaders = {};
       for (const [key, value] of Object.entries(upstreamRes.headers)) {
@@ -79,13 +101,13 @@ export function proxyHttp(
   upstream.on("error", (error: NodeJS.ErrnoException) => {
     log.warn("upstream error", { target: `${target.ip}:${target.port}`, method: req.method, path: pathOnly(req.url), error: error.code ?? error.message });
     if (res.headersSent) return void res.destroy();
-    if (error.code === "ECONNREFUSED" || error.code === "EHOSTUNREACH" || error.code === "ETIMEDOUT") {
+    if (error.code === "NODE_UNAVAILABLE" || error.code === "ENVIRONMENT_MISSING" || error.code === "ECONNREFUSED" || error.code === "EHOSTUNREACH" || error.code === "ETIMEDOUT") {
       return onConnectError();
     }
     res.writeHead(502, { "content-type": "text/plain" });
     res.end(`upstream error: ${error.code ?? error.message}`);
   });
-  res.on("close", () => upstream.destroy());
+  res.on("close", () => { upstream.destroy(); agent.destroy(); });
   req.pipe(upstream);
 }
 
@@ -98,10 +120,20 @@ export function proxyUpgrade(
   hooks: UpgradeHooks = {},
 ): void {
   guardUpgradeSocket(socket); // the teardown below is the working listener; this one outlives it
+  void connectPortal(target).then(upstream => {
+    if (socket.destroyed) { upstream.destroy(); return; }
+    bridgeUpgrade(req, socket, head, upstream, hooks);
+  }, error => {
+    if (hooks.connectError) hooks.connectError(error);
+    else refuseUpgrade(socket);
+  });
+}
+
+function bridgeUpgrade(req: http.IncomingMessage, socket: stream.Duplex, head: Buffer, upstream: stream.Duplex, hooks: UpgradeHooks): void {
   let connected = false;
   let answered = false;
   let lastError: Error | null = null;
-  const upstream = net.connect(target.port, target.ip, () => {
+  const connectedNow = () => {
     connected = true;
     hooks.connected?.();
     const lines = [`${req.method} ${req.url} HTTP/1.1`];
@@ -115,10 +147,10 @@ export function proxyUpgrade(
     if (head.length > 0) upstream.write(head);
     upstream.pipe(socket);
     socket.pipe(upstream);
-  });
+  };
   upstream.on("error", (error: NodeJS.ErrnoException) => {
     lastError = error;
-    log.warn("upstream error", { target: `${target.ip}:${target.port}`, upgrade: pathOnly(req.url), error: error.code ?? error.message });
+    log.warn("upstream error", { upgrade: pathOnly(req.url), error: error.code ?? error.message });
   });
   const teardown = (side: "upstream" | "client") => () => {
     upstream.destroy();
@@ -143,6 +175,7 @@ export function proxyUpgrade(
     side.on("end", drop);
     side.on("close", drop);
   }
+  connectedNow();
 }
 
 export interface UpgradeHooks {
@@ -272,6 +305,11 @@ export async function upgradeAfterWake(
 /** Holding page while a wake/ensure runs: HTML gets a self-refreshing 202
  * (thread vocabulary only — cubes are invisible), everything else a plain
  * 503 with Retry-After so API-ish clients back off politely. */
+export function respondUnavailable(req: http.IncomingMessage, res: http.ServerResponse): void {
+  holdingPage(req, res, { html: 503, plain: 503, title: "Environment unavailable", refreshSeconds: 0 },
+    "environment unavailable — the conversation is still available; try this address again later");
+}
+
 export function respondWaking(req: http.IncomingMessage, res: http.ServerResponse, message: string): void {
   holdingPage(req, res, { html: 202, plain: 503, title: "Starting…", refreshSeconds: 3 }, message);
 }
@@ -296,7 +334,7 @@ function holdingPage(
 ): void {
   // refreshSeconds 0 means "nothing is coming": no meta refresh (a 0 there
   // would reload continuously) and no Retry-After.
-  const refresh = page.refreshSeconds > 0;
+  const refresh = page.refreshSeconds > 0 && (req.method === "GET" || req.method === "HEAD");
   if ((req.headers.accept ?? "").includes("text/html")) {
     res.writeHead(page.html, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
     res.end(`<!doctype html><meta charset="utf-8">` +

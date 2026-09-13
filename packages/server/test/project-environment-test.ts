@@ -176,7 +176,7 @@ try {
   console.log("3 ok: setup and resume run from the reference folder; status names the directory");
 
   // --- 4. cube.toml is read from there too: services, and [network] allow on the proxy
-  assert.deepEqual(supervisor.listServicesForUserThread(thread.id).map((service) => service.name), ["web"]);
+  assert.deepEqual((await supervisor.listServicesForUserThread(thread.id)).map((service) => service.name), ["web"]);
   const provisionProxy = backend.proxies.at(-1)!;
   assert.deepEqual(provisionProxy.allow, ["registry.npmjs.org", "services.gradle.org", "*.gradle.org"],
     "defaults/operator list first, then the declaration");
@@ -218,7 +218,7 @@ try {
   assert.equal(fs.existsSync(path.join(registry.getCube(plainCube)!.workspacePath, "environment-marker")), false);
   assert.equal(supervisor.environmentForUserThread(plain.id).directory, "/workspace/.cube");
   assert.equal(supervisor.environmentForUserThread(thread.id).directory, "/repos/envs/gradle-app/.cube");
-  assert.deepEqual(supervisor.listServicesForUserThread(plain.id), []);
+  assert.deepEqual(await supervisor.listServicesForUserThread(plain.id), []);
   console.log("6 ok: the environment is snapshotted per thread");
 
   for (const id of [thread.id, plain.id]) await supervisor.removeUserThread(id);

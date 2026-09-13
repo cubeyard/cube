@@ -4,6 +4,29 @@ Short operational context for the next session, not a release log. Updated
 2026-09-10; live verification below is the last recorded evidence, not a fresh
 launch sign-off. Completed phase reports and review histories remain in Git.
 
+## Control ↔ node slice in this working tree
+
+Read [docs/execution-nodes.md](docs/execution-nodes.md) first: it supersedes the
+single-host product premise, not the credential or private-browser boundaries.
+Local permanent binding, restart-safe creation keys, status/wake/sleep and portal
+stream boundaries, offline pi cwd/CLI reopening, local-adapter access gates and
+separate UI contact status are implemented. No iroh or remote execution shipped.
+Pi's pinned CLI needs the `pi-session-cwd.ts` preload to ignore a historical
+workspace cwd without rewriting the session. Keep that real-CLI regression gate.
+
+Remaining blockers to a different control-plane machine: local provisioning,
+Incus file/exec adapters, host-path Git/config/browser operations, service-IP
+readiness, templates/egress/network/CA management, and a real authenticated node
+transport/operation reconciliation protocol. Next vertical is authenticated node
+contact and portal streams over iroh, **not** a VPN or failover scheduler.
+Offline tests are not Incus/macOS/iroh acceptance; no live instance was deployed,
+restarted or used as a disposable test resource for this slice.
+
+Working-tree verification: Node 26.8.2 / pnpm 10.34.5; `pnpm typecheck`,
+`pnpm lint`, `pnpm test` (40 offline suites), and `pnpm build` passed. Real
+Incus sleep/wake/provision/delete, service portals and hairpin isolation still
+need the disposable VM portfolio. No real iroh or macOS acceptance was run.
+
 ## Start here
 
 - [AGENTS.md](AGENTS.md): how an agent builds, deploys a working tree into
@@ -226,7 +249,7 @@ changes; mock success is not sandbox acceptance. See DEVELOPING.md for commands.
   then tear down) — the removal is reserved before the abort, and a
   builder (`building-environment`) is never cancelled through a thread.
 - `POST /api/threads` is idempotent per project and request key
-  (`Idempotency-Key` / body `requestId`, ten minutes, in memory); the web
+  (`Idempotency-Key` / body `requestId`, persisted for the thread lifetime); the web
   client sends one key per user action.
 - Plain HTTP over the Tailnet is an insecure browser context. Feature-detect
   clipboard/crypto APIs; use the existing UID fallback, not `crypto.randomUUID`

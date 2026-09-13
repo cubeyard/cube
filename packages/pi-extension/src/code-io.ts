@@ -50,13 +50,15 @@ export async function execCode(exec: CodeExec, input: ExecInput, defaultCwd: str
   if (!stopCode && elapsed >= input.timeoutMs) stopCode = "ETIMEDOUT";
   const output = Buffer.concat(chunks).toString("utf8");
   if (stopCode || failure !== undefined) {
-    const code = stopCode ?? "EEXEC";
+    const failureData = encodeError(failure);
+    const code = failureData.completionUnknown ? (failureData.code ?? "COMPLETION_UNKNOWN") : stopCode ?? failureData.code ?? "EEXEC";
     const message = code === "EOUTPUTLIMIT"
       ? `command output exceeded ${MAX_CODE_EXEC_OUTPUT} bytes; redirect large output to a workspace file`
       : code === "ETIMEDOUT"
         ? `command timed out after ${input.timeoutMs}ms (completed cancellation after ${durationMs}ms)`
         : code === "ABORT_ERR" ? `command aborted after ${durationMs}ms` : encodeError(failure).message;
     throw Object.assign(new Error(message), {
+      ...(failureData.completionUnknown ? { completionUnknown: true } : {}),
       code, operation: "exec", timeoutMs: input.timeoutMs, durationMs,
       output, outputBytes: retained, outputLimitBytes: MAX_CODE_EXEC_OUTPUT,
       truncated: observed > retained,

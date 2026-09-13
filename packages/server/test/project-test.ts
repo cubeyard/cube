@@ -200,14 +200,14 @@ console.log("3b ok: thread creation is idempotent per request key and project");
   const fresh = await supervisor.createUserThread(project.id, "fresh");
   requests.get(scoped("fresh"))!.at = Date.now() - 11 * 60_000;
   const later = await supervisor.createUserThread(project.id, "fresh");
-  assert.equal(later.created, true, "an expired key is a new action");
-  assert.notEqual(later.id, fresh.id);
-  for (const thread of [fresh, later]) {
+  assert.equal(later.created, false, "a persisted key survives cache expiry");
+  assert.equal(later.id, fresh.id);
+  for (const thread of [fresh]) {
     await readyCube(registry, supervisor.resolveUserThread(thread.id).cubeName);
     await supervisor.removeUserThread(thread.id);
   }
   assert.equal(registry.listCubes().length, 0);
-  console.log("3c ok: the idempotency store is capped, swept on the timer, and never replays an expired key");
+  console.log("3c ok: the cache is capped and swept; durable associations survive cache expiry");
 }
 
 // The new await must not let an edit/re-check/delete race allocate from an
@@ -316,10 +316,10 @@ const repositories = await supervisor.repositoriesForUserThread(thread.id);
 assert.deepEqual(repositories.map((repo) => repo.path), ["/workspace", "../repos/docs"]);
 assert.deepEqual(repositories.map((repo) => repo.role), ["primary", "additional"]);
 assert.equal(
-  supervisor.workspaceForUserRepository(thread.id, repositories[1]!.id),
+  await supervisor.workspaceForUserRepository(thread.id, repositories[1]!.id),
   path.join(path.dirname(cube.workspacePath), "repos", "docs"),
 );
-assert.throws(
+await assert.rejects(
   () => supervisor.workspaceForUserRepository(thread.id, Number.MAX_SAFE_INTEGER),
   /no such repository/,
 );
