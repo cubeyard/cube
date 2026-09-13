@@ -130,8 +130,10 @@ Constraints:
 - No authentication in front of the daemon or portals — the Tailnet is the
   boundary. The UI must not imply a login or account model it does not have.
 - Deliberately out of scope: multiplayer, team platform, clustering, Slack,
-  webhooks from the internet, thread-to-thread delivery, and a general-purpose
-  shell. A later durable delivery/ack protocol must be owned by cubed.
+  webhooks from the internet, unrestricted sub-agent messaging, and a separate
+  general-purpose shell outside the pi TUI. Explicitly authorized thread-to-thread
+  tasks are now a development milestone, not a shipped capability; see
+  [the task protocol plan](docs/plans/thread-to-thread.md).
 
 Undecided:
 

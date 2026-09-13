@@ -106,6 +106,24 @@ and config pinning across restart. No model call, shared live thread/node or
 external machine was used. Host file/repository transfer is still unsupported;
 that and separate-machine acceptance are next, before thread delegation.
 
+## Thread-to-thread foundation (unpublished)
+
+The maintainer selected thread-to-thread as the next slice. See
+[the task protocol plan](docs/plans/thread-to-thread.md). `thread-tasks.ts` adds
+an opt-in durable journal with directed operator grants, stable task/request IDs,
+one-shot delivery reservation, late acknowledgement and explicit results.
+It is NOT wired into cubed/Pi/HTTP yet; no usable messaging tool is claimed.
+Next: supported real-Pi delivery investigation, lifecycle preflights and scoped
+capabilities, then progress and two-session acceptance. No PTY input automation.
+Validation for this foundation: 44 Node offline suites, typecheck (Svelte zero
+errors/warnings), lint, build and diff whitespace checks passed. Rust is unchanged;
+the Rust suite was not rerun for this journal-only slice.
+
+Publication remains pending: plan `5aa2a48bc7218f861e5329448a7694ec` froze
+`2974c2f`; inspection was incomplete and no publish was attempted. New edits
+require a new committed candidate/plan on the existing prepared review branch.
+Do not publish the old plan or discard the enrollment commit. PR #44 stays unmerged.
+
 ## Open security follow-up: agent-editable egress policy
 
 Recorded during host-node bootstrap; acknowledged by the maintainer. An agent
