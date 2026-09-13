@@ -17,8 +17,10 @@ workspace cwd without rewriting the session. Keep that real-CLI regression gate.
 Remaining blockers to a different control-plane machine: local provisioning,
 Incus file/exec adapters, host-path Git/config/browser operations, service-IP
 readiness, templates/egress/network/CA management, and a real authenticated node
-transport/operation reconciliation protocol. Next vertical is authenticated node
-contact and portal streams over iroh, **not** a VPN or failover scheduler.
+transport/operation reconciliation protocol. Next vertical is the
+[host-node development loop](docs/plans/host-node-development-loop.md): real iroh,
+host exec/files and authorized control-plane thread messaging, before portals.
+This is a development bootstrap, **not** a VPN or failover scheduler.
 Offline tests are not Incus/macOS/iroh acceptance; no live instance was deployed,
 restarted or used as a disposable test resource for this slice.
 
@@ -26,6 +28,29 @@ Working-tree verification: Node 26.8.2 / pnpm 10.34.5; `pnpm typecheck`,
 `pnpm lint`, `pnpm test` (40 offline suites), and `pnpm build` passed. Real
 Incus sleep/wake/provision/delete, service portals and hairpin isolation still
 need the disposable VM portfolio. No real iroh or macOS acceptance was run.
+
+## Open security follow-up: agent-editable egress policy
+
+Recorded during host-node bootstrap; acknowledged by the maintainer. An agent
+can edit a writable `.cube/cube.toml` and request `cube.environment.retrySetup()`.
+`Supervisor.startProxy()` rereads that declaration and applies the added hosts
+without a separate operator approval. Wake also rereads it. The allowlist thus
+limits current traffic but is not an independent policy boundary against an
+agent that can edit the declaration and invoke these lifecycle capabilities.
+This permits widening outbound destinations (including potential exfiltration
+of guest-accessible data); it does not by itself prove access to host credentials
+or bypass the proxy's private-address/port checks.
+
+Follow-up: persist an operator-approved network ceiling outside the writable
+workspace; require approval outside agent-controlled tools for expansions and
+apply the same rule to provision, setup retry, wake and service lifecycle paths.
+Reject unapproved expansion before replacing the active proxy. Test edited
+configs across all these paths, including reference environments and restart.
+Review setup-script trust separately: approving hosts is not approving arbitrary
+new setup behavior. The current Rust/Node download hosts were explicitly approved
+for this development thread; that is not a general policy-expansion approval.
+No security fix is implemented yet; do not publish vulnerability details without
+coordinating disclosure with the maintainer.
 
 ## Start here
 

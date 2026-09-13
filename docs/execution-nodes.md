@@ -94,11 +94,13 @@ serializable protocol fields. The small environment observation and IDs are
 ordinary data. The bridge validates its response/binding at runtime; a future
 wire implementation needs authenticated versioned framing and validation too.
 
-Next vertical: authenticated node contact and portal streams over **real iroh**,
-using the stored binding and stream connector. Keep browser authorization and
-hairpin isolation intact. Then move remaining workspace/config/Git transfer and
-lifecycle operations across explicit boundaries; do not add a VPN or claim that
-a `CubeBackend` serialized wholesale is a node protocol.
+Next vertical: the [host-node development loop](plans/host-node-development-loop.md)
+over **real iroh**: authenticated contact, durable operations, usable exec/files
+and minimal repository transfer, plus authorized control-plane thread messaging.
+This supersedes the earlier portal-first ordering so further node development
+can be driven from a thread. Portal streams and remote Incus lifecycle follow;
+keep browser authorization and hairpin isolation intact when adding them. Do
+not add a VPN or claim that a `CubeBackend` serialized wholesale is a node protocol.
 
 ## Evidence
 
