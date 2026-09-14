@@ -1,4 +1,4 @@
-/** Read-only GitHub access to the host-selected primary repository.
+/** Read-only GitHub access to the host-selected attached repository.
  * Credentials remain in the host's gh process. */
 import { execFile } from "node:child_process";
 import { parseGitHubRepo } from "@cube/git";
@@ -19,7 +19,7 @@ export async function readGithub(
   run: GithubReadRunner = runGh,
 ) {
   const repo = parseGitHubRepo(repositoryUrl);
-  if (!repo || !/^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error("thread primary repository is not a GitHub repository");
+  if (!repo || !/^[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error("selected thread repository is not a GitHub repository");
   if (!Number.isSafeInteger(input.number) || input.number < 1) throw new Error("number must be a positive integer");
   if (input.type !== "issue" && input.type !== "pr") throw new Error("type must be issue or pr");
   const section = input.section ?? "details";

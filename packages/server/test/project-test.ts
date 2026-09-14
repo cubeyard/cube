@@ -325,10 +325,20 @@ await assert.rejects(
   () => supervisor.workspaceForUserRepository(thread.id, Number.MAX_SAFE_INTEGER),
   /no such repository/,
 );
-await assert.rejects(
-  () => supervisor.pushBaseForUserThread(thread.id, repositories[1]!.id),
-  /read-only references/,
-);
+// Reference edits and publication target its own remote, never the primary.
+const referencePath = supervisor.workspaceForUserRepository(thread.id, repositories[1]!.id);
+const primaryHead = git(cube.workspacePath, "rev-parse", "HEAD");
+const primaryRemote = git(primary.bare, "rev-parse", "main");
+fs.writeFileSync(path.join(referencePath, "DOCS.md"), "edited in the same thread\n");
+git(referencePath, ...author, "add", "DOCS.md");
+git(referencePath, ...author, "commit", "-m", "update reference");
+assert.equal((await supervisor.syncBaseForUserThread(thread.id, repositories[1]!.id)).base, "main");
+await supervisor.pushUserThread(thread.id, repositories[1]!.id);
+assert.equal(git(docs.bare, "rev-parse", repositories[1]!.branch), git(referencePath, "rev-parse", "HEAD"));
+await supervisor.pushBaseForUserThread(thread.id, repositories[1]!.id);
+assert.equal(git(docs.bare, "rev-parse", "main"), git(referencePath, "rev-parse", "HEAD"));
+assert.equal(git(cube.workspacePath, "rev-parse", "HEAD"), primaryHead);
+assert.equal(git(primary.bare, "rev-parse", "main"), primaryRemote);
 assert.equal(supervisor.listUserThreads()[0]!.project.id, project.id);
 assert.equal(supervisor.listUserThreads()[0]!.project.name, "workbench");
 assert.deepEqual(await supervisor.ensureServicesForUserThread(thread.id), []);
