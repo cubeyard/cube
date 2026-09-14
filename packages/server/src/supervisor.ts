@@ -1917,7 +1917,7 @@ export class CubeSupervisor {
     signal?: AbortSignal,
   ): Promise<{ base: string; oid: string }> {
     const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh(); // agent-driven Ship runs long after the 8h token dies (sol Medium)
+    await this.config.github?.ensureFresh(); // A long-lived thread may outlast the host token.
     signal?.throwIfAborted();
     this.requireSeeded(cube, repository);
     const oid = await this.withGitOp(cube.name, "sync", () =>
@@ -1934,7 +1934,7 @@ export class CubeSupervisor {
     signal?: AbortSignal,
   ): Promise<{ branch: string; base: string }> {
     const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh(); // agent-driven Ship runs long after the 8h token dies (sol Medium)
+    await this.config.github?.ensureFresh(); // A long-lived thread may outlast the host token.
     signal?.throwIfAborted();
     this.requireSeeded(cube, repository);
     const branch = await this.withGitOp(cube.name, "push-base", () =>

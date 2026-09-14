@@ -142,7 +142,7 @@ No `sqlite3` CLI ships in the VM; `node:sqlite` does the same job.
 ## Observability
 
 cubed records every lifecycle transition (provision stages, wake, sleep,
-delete, terminal spawn, ship steps, portal failures) as an **event** in the
+delete, terminal spawn, git operations, portal failures) as an **event** in the
 registry: `{ts, kind, phase, cube, thread, ok, ms, detail, version}`.
 `GET /api/events` returns them newest first (`?since=<ms>`, `?cube=`,
 `?thread=`, `?kind=`, `?limit=`); `cube events` prints the same from the

@@ -34,9 +34,7 @@
   let failedPolls = $state(0);
   const offline = $derived(failedPolls >= 2);
 
-  // A note for the list after the app moved the user off a thread — the
-  // Ship flow archives the thread under them; a silent redirect would
-  // read as a glitch. It says only what is known: archived, not shipped.
+  // Explain the redirect when the active thread is archived by the agent.
   let listNotice = $state<string | null>(null);
 
   // `n` pressed: one command, consumed exactly once by the view it is

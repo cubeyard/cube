@@ -189,15 +189,6 @@
     { label: "ctrl-c", data: "\x03" },
   ];
 
-  /** Submit a complete prompt through the same live TUI connection as
-   * keyboard input. Bracketed paste keeps the long multi-line Ship prompt
-   * inside pi's editor until the final carriage return submits it. */
-  export function submitPrompt(text: string): boolean {
-    if (pane.kind !== "live" || !sendInput(`\x1b[200~${text}\x1b[201~\r`)) return false;
-    term.focus();
-    return true;
-  }
-
   onMount(() => {
     let observer: ResizeObserver | undefined;
     // JetBrains Mono must be measurable before xterm takes its cell

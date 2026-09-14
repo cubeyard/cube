@@ -113,7 +113,7 @@ and pin the fetched OIDs. A failed refresh creates no thread and never falls
 back to stale checked code. Existing threads and idempotent replays keep their
 original snapshots; provisioning remains local-only. The primary checkout is `/workspace`; optional reference
 repositories mount at `/repos/<checkout-name>` and are read-only. Review and
-ship operate on the immutable primary repository snapshot.
+agent-requested publication are scoped to the primary repository.
 
 A project may declare `environment = "<checkout>/<folder>"`: its `.cube`
 (setup, resume, cube.toml) then comes from that folder of a reference
