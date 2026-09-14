@@ -224,6 +224,7 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
   private readonly configPath: string;
   readonly configHash: string;
   private readonly observe?: (environmentId: number, observation: EnvironmentObservation) => void;
+  private requestTail: Promise<void> = Promise.resolve();
 
   constructor(options: { configPath: string; configHash?: string; observe?: (environmentId: number, observation: EnvironmentObservation) => void }) {
     shape(options, ["configPath"], ["configHash", "observe"]);
@@ -274,13 +275,34 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     if (limits.maxFrameBytes !== MAX_FRAME || !integer(limits.requestTimeoutMs, 1, RPC_TIMEOUT_MS)) invalid();
     return hello;
   }
-  /** A native endpoint per RPC, in THIS process. Owning it per call lets a
-   * deadline close pending connect/read operations without disrupting siblings.
-   * Late bind/connect completions are closed too; no background retry task. */
+  /** A native endpoint per RPC, in THIS process. Calls are serialized because
+   * concurrent endpoints cannot safely publish the same Iroh identity. */
   private async request(key: SecretKey, query?: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    signal?.throwIfAborted();
-    this.assertConfig();
+    const previous = this.requestTail;
+    let release!: () => void;
+    const turn = new Promise<void>(resolve => { release = resolve; });
+    this.requestTail = previous.then(() => turn, () => turn);
     const id = typeof query?.operationId === "string" ? query.operationId : undefined;
+    let onAbort: (() => void) | undefined;
+    const interrupted = signal && new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(new IrohNodeError("NODE_UNAVAILABLE", id));
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      if (signal?.aborted) throw new IrohNodeError("NODE_UNAVAILABLE", id);
+      await (interrupted ? Promise.race([previous, interrupted]) : previous);
+      return await this.requestOne(key, query, signal);
+    } finally {
+      if (onAbort) signal!.removeEventListener("abort", onAbort);
+      release();
+    }
+  }
+  /** Owning the endpoint per call lets a deadline close pending connect/read
+   * operations. Late bind/connect completions are closed too; no retry task. */
+  private async requestOne(key: SecretKey, query?: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const id = typeof query?.operationId === "string" ? query.operationId : undefined;
+    if (signal?.aborted) throw new IrohNodeError("NODE_UNAVAILABLE", id);
+    this.assertConfig();
     const mutating = query?.method === "exec.start";
     const requestBytes = query ? frame(query) : undefined;
     const builder = Endpoint.builder();
