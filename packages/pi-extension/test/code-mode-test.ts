@@ -7,16 +7,13 @@ import assert from "node:assert";
 
 import { createCodeCapability, type CodeCapabilityHost } from "../src/code-capabilities.ts";
 import { runCodeMode } from "../src/code-mode.ts";
+import { CODE_MODE_API } from "../src/code-mode-sdk.ts";
 
 const files = new Map<string, string>();
 const hostCalls: Array<{ operation: string; value?: unknown }> = [];
 const host: CodeCapabilityHost = {
   async readGithub(input) {
     return { data: { title: "Private issue" }, ...input };
-  },
-  async reviewPr(repositoryId, input, signal) {
-    assert.equal(signal.aborted, false);
-    return { repositoryId, ...input };
   },
   async exec(input) {
     hostCalls.push({ operation: "exec", value: input });
@@ -41,8 +38,12 @@ const host: CodeCapabilityHost = {
     hostCalls.push({ operation: "syncBase", value: repositoryId });
     return { base: "main", oid: "abc123" };
   },
-  async pushBranch(repositoryId) {
-    hostCalls.push({ operation: "pushBranch", value: repositoryId });
+  async syncBranch(repositoryId, branch) {
+    hostCalls.push({ operation: "syncBranch", value: { repositoryId, branch } });
+    return { branch, oid: "def456" };
+  },
+  async pushBranch(repositoryId, options) {
+    hostCalls.push({ operation: "pushBranch", value: { repositoryId, options } });
     return { branch: "cube-work" };
   },
   async pushBase(repositoryId) {
@@ -82,40 +83,46 @@ const host: CodeCapabilityHost = {
     return { accepted: true };
   },
 };
-const capability = createCodeCapability(host);
+let allowPrCreation = true;
+let confirmations = 0;
+let allowForcePush = true;
+let forceConfirmations = 0;
+const capability = createCodeCapability(host, async (signal) => {
+  assert.equal(signal.aborted, false);
+  confirmations += 1;
+  return allowPrCreation;
+}, async (signal) => {
+  assert.equal(signal.aborted, false);
+  forceConfirmations += 1;
+  return allowForcePush;
+});
 
 assert.deepEqual((await runCodeMode({
   source: `return await cube.github.read(12, { type: "issue", section: "comments", page: 2 });`,
   call: capability,
 })).value, { data: { title: "Private issue" }, number: 12, type: "issue", section: "comments", page: 2 });
 await assert.rejects(capability("github.read", { number: 12, type: "issue", page: 0 }, new AbortController().signal), /positive integer/);
+await assert.rejects(capability("git.createPr", { repositoryId: 0 }, new AbortController().signal), /positive integer/);
+assert.equal(confirmations, 0, "invalid PR requests must fail before asking the user");
+assert.deepEqual((await runCodeMode({
+  source: 'return await cube.git.syncBranch(7, "fix/conflicts");',
+  call: capability,
+})).value, { branch: "fix/conflicts", oid: "def456" });
+assert.deepEqual(hostCalls.pop(), { operation: "syncBranch", value: { repositoryId: 7, branch: "fix/conflicts" } });
+assert.equal(confirmations, 0, "existing PR branch sync must not ask for confirmation");
+await assert.rejects(capability("git.syncBranch", { repositoryId: 7, branch: 20 }, new AbortController().signal), /branch must be a string/);
 
-const reviewToken = "a".repeat(32);
-const reviewPlan = "b".repeat(32);
-for (const [source, expected] of [
-  ["cube.git.preparePrUpdate(7, 845)", { repositoryId: 7, action: "prepare", number: 845 }],
-  ["cube.git.preparePrRebase(7, 845)", { repositoryId: 7, action: "prepare-rebase", number: 845 }],
-  [`cube.git.planPrUpdate(7, '${reviewToken}')`, { repositoryId: 7, action: "plan", token: reviewToken }],
-  [`cube.git.inspectPrUpdatePlan(7, '${reviewToken}', '${reviewPlan}', { number: 845, section: 'prDiff', page: 2 })`, { repositoryId: 7, action: "inspect", token: reviewToken, plan: reviewPlan, number: 845, section: "prDiff", page: 2 }],
-  [`cube.git.publishPrUpdate(7, '${reviewToken}', '${reviewPlan}')`, { repositoryId: 7, action: "publish", token: reviewToken, plan: reviewPlan }],
-  [`cube.git.verifyPrUpdate(7, '${reviewToken}')`, { repositoryId: 7, action: "verify", token: reviewToken }],
-] as const) {
-  assert.deepEqual((await runCodeMode({ source: `return await ${source};`, call: capability })).value, expected);
-}
-await assert.rejects(capability("git.preparePrRebase", { repositoryId: 7, number: 0 }, new AbortController().signal), /positive integer/);
-await assert.rejects(capability("git.preparePrUpdate", { repositoryId: 7, number: 0 }, new AbortController().signal), /positive integer/);
-await assert.rejects(capability("git.planPrUpdate", { repositoryId: 7, token: "../state" }, new AbortController().signal), /invalid review token/);
-await assert.rejects(capability("git.publishPrUpdate", { repositoryId: 7, token: reviewToken, plan: "" }, new AbortController().signal), /invalid review plan/);
-await assert.rejects(capability("git.inspectPrUpdatePlan", { repositoryId: 7, token: "A".repeat(32), plan: reviewPlan, number: 1, section: "patch" }, new AbortController().signal), /invalid review token/);
-for (const invalid of [
-  { repositoryId: 7, token: reviewToken, plan: reviewPlan, number: 0, section: "patch" },
-  { repositoryId: 7, token: reviewToken, plan: reviewPlan, number: Number.MAX_SAFE_INTEGER + 1, section: "patch" },
-  { repositoryId: 7, token: reviewToken, plan: reviewPlan, number: 1, section: "summary" },
-  { repositoryId: 7, token: reviewToken, plan: reviewPlan, number: 1, section: "patch", page: 0 },
+for (const removed of [
+  "git.preparePrUpdate",
+  "git.preparePrRebase",
+  "git.planPrUpdate",
+  "git.inspectPrUpdatePlan",
+  "git.publishPrUpdate",
+  "git.verifyPrUpdate",
 ]) {
-  await assert.rejects(capability("git.inspectPrUpdatePlan", invalid, new AbortController().signal), /positive integer|section must/);
+  await assert.rejects(capability(removed, {}, new AbortController().signal), /unknown code capability/);
+  assert.doesNotMatch(CODE_MODE_API, new RegExp(removed.replace("git.", "")));
 }
-await assert.rejects(capability("git.inspectPrUpdatePlan", { repositoryId: 7, token: reviewToken, plan: "A".repeat(32), number: 1, section: "patch" }, new AbortController().signal), /invalid review plan/);
 
 // ---- 1. Plain JavaScript and JSON result ---------------------------------
 
@@ -182,6 +189,7 @@ assert.deepEqual(workflow.value, {
   pushed: { branch: "cube-work", base: "main" },
 });
 assert.deepEqual(hostCalls.map((call) => call.operation), ["listRepositories", "exec", "pushBase"]);
+assert.equal(confirmations, 0, "ordinary publication must not ask for Cube confirmation");
 assert.deepEqual(
   workflow.traces.filter((trace) => trace.status === "ok").map((trace) => trace.operation),
   ["repositories.list", "exec", "git.pushBase"],
@@ -203,7 +211,42 @@ const capabilities = await runCodeMode({
 });
 assert.equal((capabilities.value as { text: string }).text, "hello");
 assert.deepEqual(hostCalls.map((call) => call.operation), ["writeText", "readText", "ensureServices", "createPr"]);
-console.log("4 ok: file/service/PR capabilities dispatch");
+assert.equal(confirmations, 1);
+console.log("4 ok: file/service/PR capabilities dispatch after explicit confirmation");
+
+hostCalls.length = 0;
+allowPrCreation = false;
+await assert.rejects(
+  runCodeMode({ source: `return await cube.git.createPr(7, { title: "Do not create" });`, call: capability }),
+  /cancelled by user/,
+);
+assert.deepEqual(hostCalls, [], "declining confirmation must stop before the host PR call");
+assert.equal(confirmations, 2);
+allowPrCreation = true;
+console.log("4a ok: declining PR confirmation causes no host-side publication");
+
+hostCalls.length = 0;
+assert.deepEqual((await runCodeMode({ source: "return await cube.git.pushBranch(7);", call: capability })).value,
+  { branch: "cube-work" });
+assert.equal(forceConfirmations, 0, "ordinary push must not ask for confirmation");
+await assert.rejects(
+  capability("git.pushBranch", { repositoryId: 7, forceWithLease: "short" }, new AbortController().signal),
+  /full commit ID/,
+);
+assert.equal(forceConfirmations, 0, "invalid leases fail before confirmation");
+hostCalls.length = 0;
+allowForcePush = false;
+const lease = "a".repeat(40);
+await assert.rejects(
+  runCodeMode({ source: `return await cube.git.pushBranch(7, { forceWithLease: "${lease}" });`, call: capability }),
+  /cancelled by user/,
+);
+assert.deepEqual(hostCalls, [], "declined force-with-lease must stop before the host call");
+allowForcePush = true;
+await runCodeMode({ source: `return await cube.git.pushBranch(7, { forceWithLease: "${lease}" });`, call: capability });
+assert.deepEqual(hostCalls, [{ operation: "pushBranch", value: { repositoryId: 7, options: { forceWithLease: lease } } }]);
+assert.equal(forceConfirmations, 2);
+console.log("4b ok: only valid force-with-lease pushes require explicit confirmation");
 
 hostCalls.length = 0;
 const environment = await runCodeMode({
@@ -215,7 +258,7 @@ assert.deepEqual(environment.value, {
   retry: { accepted: true },
 });
 assert.deepEqual(hostCalls.map((call) => call.operation), ["environmentStatus", "retryEnvironmentSetup"]);
-console.log("4b ok: environment SDK and capability dispatch");
+console.log("4c ok: environment SDK and capability dispatch");
 
 hostCalls.length = 0;
 const never = new AbortController().signal;
@@ -252,7 +295,7 @@ for (const input of [
   await assert.rejects(capability("portals.expose", input, never), /port must|name must|exceeds 80|lifetime must/);
 }
 await assert.rejects(capability("portals.remove", { port: -1 }, never), /port must/);
-console.log("4c ok: temporary portal SDK dispatch and validation");
+console.log("4d ok: temporary portal SDK dispatch and validation");
 
 // ---- 5. Dispatcher validation is fail-closed -----------------------------
 

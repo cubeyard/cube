@@ -99,7 +99,7 @@ const cases: Record<string, () => Promise<void>> = {
     }
     // Direct bridge calls must also fail closed in the authority dispatcher.
     const host = new Proxy({}, { get() { throw new Error("must not dispatch"); } });
-    const capability = createCodeCapability(host as any);
+    const capability = createCodeCapability(host as any, async () => false, async () => false);
     await assert.rejects(capability("exec", { command: "unused", timeotMs: 100 }, new AbortController().signal), /unknown exec option/);
     for (const value of [NaN, Infinity, 0, -1, 1.5]) {
       await assert.rejects(runCodeMode({ source: "return 1", call: async () => null, limits: { maxJobs: value } }), /invalid code limit/);

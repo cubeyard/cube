@@ -288,11 +288,60 @@ git(upstream, "update-ref", "-d", "refs/heads/cube/test1");
 const GH_URL = "https://github.com/x/y.git";
 const rewriteGitToLocal = (file: string, args: string[]) =>
   file === "git" ? args.map((a) => (a === GH_URL ? upstream : a)) : args;
+
+// A branch named by PR metadata is imported without inspecting patches/history
+// or switching the workspace branch.
+{
+  const prBranch = "fix/conflicts";
+  git(upstream, "update-ref", `refs/heads/${prBranch}`, git(ws, "rev-parse", "HEAD"));
+  const prHead = git(upstream, "rev-parse", `refs/heads/${prBranch}`);
+  const calls: Array<{ file: string; args: string[] }> = [];
+  const syncService = new GitService(path.join(tmp, "repos-sync-pr"), (file, args, opts) => {
+    calls.push({ file, args });
+    return defaultRunner(file, rewriteGitToLocal(file, args), opts);
+  });
+  const syncWs = path.join(tmp, "ws-sync-pr");
+  await syncService.seedWorkspace({ url: GH_URL, workspacePath: syncWs, base: "main", branch: "cube/reader" });
+  calls.length = 0;
+  assert.deepEqual(await syncService.syncBranch(syncWs, GH_URL, prBranch), { branch: prBranch, oid: prHead });
+  assert.equal(git(syncWs, "rev-parse", "--abbrev-ref", "HEAD"), "cube/reader");
+  assert.equal(git(syncWs, "rev-parse", `refs/remotes/origin/${prBranch}`), prHead);
+  const remoteFetch = calls.find((call) => call.file === "git" && call.args.includes(GH_URL) && call.args.includes("fetch"))!;
+  assert.ok(remoteFetch.args.includes(`+refs/heads/${prBranch}:refs/heads/${prBranch}`));
+  assert.equal(remoteFetch.args.filter((arg) => arg.startsWith("+refs/heads/")).length, 1,
+    "only the requested branch is fetched from the remote");
+  assert.ok(!calls.some((call) => call.file === "gh"), "branch transfer does not perform another PR lookup");
+  assert.ok(!calls.some((call) => call.args.some((arg) => ["diff", "log", "rev-list"].includes(arg))),
+    "syncing a branch must not read its diff or history");
+
+  git(syncWs, "checkout", "-b", prBranch, `origin/${prBranch}`);
+  fs.writeFileSync(path.join(syncWs, "rewritten.txt"), "approved rewrite\n");
+  git(syncWs, ...cfg, "add", "rewritten.txt");
+  git(syncWs, ...cfg, "commit", "--amend", "--no-edit");
+  await syncService.push(syncWs, GH_URL, undefined, undefined, { forceWithLease: prHead });
+  const rewritten = git(syncWs, "rev-parse", "HEAD");
+  assert.equal(git(upstream, "rev-parse", `refs/heads/${prBranch}`), rewritten);
+
+  fs.writeFileSync(path.join(syncWs, "rewritten.txt"), "stale rewrite\n");
+  git(syncWs, ...cfg, "add", "rewritten.txt");
+  git(syncWs, ...cfg, "commit", "--amend", "--no-edit");
+  await assert.rejects(
+    syncService.push(syncWs, GH_URL, undefined, undefined, { forceWithLease: prHead }),
+    /stale info|rejected/,
+  );
+  assert.equal(git(upstream, "rev-parse", `refs/heads/${prBranch}`), rewritten,
+    "stale force-with-lease must not change the remote");
+
+  calls.length = 0;
+  await assert.rejects(syncService.syncBranch(syncWs, GH_URL, "../other"), /invalid remote branch/);
+  assert.deepEqual(calls, [], "invalid branch stops before Git transfer");
+  console.log("6b ok: targeted branch sync plus force-with-lease; stale lease leaves remote unchanged");
+}
+
 const ghCalls: string[][] = [];
 const intercept: ProcessRunner = (file, args, opts) => {
   if (file === "gh") {
     ghCalls.push(args);
-    if (args[0] === "api") return Promise.resolve({ stdout: "[]", stderr: "" });
     if (args[1] === "create") return Promise.resolve({ stdout: "https://github.com/x/y/pull/7\n", stderr: "" });
     return Promise.resolve({ stdout: "", stderr: "" });
   }
@@ -306,7 +355,6 @@ const pr = await prService.createPr(ws, { url: GH_URL, base: "main", title: "My 
 assert.equal(pr.url, "https://github.com/x/y/pull/7");
 assert.equal(pr.branch, "cube/test1");
 assert.deepEqual(ghCalls, [
-  ["api", "--hostname", "github.com", "--method", "GET", "repos/x/y/pulls?state=open&head=x%3Acube%2Ftest1&per_page=1"],
   ["pr", "create", "-R", "x/y", "--head", "cube/test1", "--base", "main", "--title", "My change", "--body", "details"],
 ]);
 assert.equal(
@@ -319,7 +367,6 @@ console.log("7 ok: createPr pushes (bundle-relay), then drives gh -R with the ri
 // --- 8. existing-PR fallback: create fails with "already exists" -> view URL
 const fallback: ProcessRunner = (file, args, opts) => {
   if (file === "gh") {
-    if (args[0] === "api") return Promise.resolve({ stdout: "[]", stderr: "" });
     if (args[1] === "create") return Promise.reject(new Error("a pull request for branch already exists"));
     assert.deepEqual(args, ["pr", "view", "cube/test1", "-R", "x/y", "--json", "url", "--jq", ".url"]);
     return Promise.resolve({ stdout: "https://github.com/x/y/pull/3\n", stderr: "" });
@@ -334,30 +381,19 @@ const existing = await new GitService(path.join(tmp, "repos-pr2"), fallback).cre
 assert.equal(existing.url, "https://github.com/x/y/pull/3");
 console.log("8 ok: existing PR resolves to its URL instead of an error");
 
-// Existing PR updates must fail before ANY networked git command,
-// independently of the local branch's history or tree.
+// An existing PR branch uses the ordinary push path. Cube must not query PR
+// metadata, inspect diffs, or add a review gate before Git handles the push.
 {
-  const before = git(upstream, "show-ref");
-  for (const response of ['[{"number":845}]', '{"message":"not found"}', '[', null]) {
-    const guarded = new GitService(path.join(tmp, "repos-guard"), async (file, args, opts) => {
-      if (file === "gh") {
-        assert.equal(args[0], "api");
-        assert.equal(opts.cwd, path.join(tmp, "repos-guard"));
-        assert.match(args[5]!, /head=x%3Acube%2Ftest1&per_page=1$/);
-        if (response === null) throw new Error("authentication unavailable");
-        return { stdout: response, stderr: "" };
-      }
-      assert.ok(!args.some((arg) => ["push", "fetch", "clone", "bundle"].includes(arg)), "must reject before transferring or publishing objects");
-      return defaultRunner(file, args, opts);
-    });
-    const expected = response?.startsWith('[{') ? /existing open pull request/
-      : response?.startsWith('{') ? /incomplete pull request response/ : /unable to verify existing pull requests/;
-    await assert.rejects(guarded.push(ws, GH_URL), expected);
-    await assert.rejects(guarded.push(ws, GH_URL, "cube/test1"), expected);
-    await assert.rejects(guarded.createPr(ws, { url: GH_URL, base: "main", title: "review fix" }), expected);
-    assert.equal(git(upstream, "show-ref"), before);
-  }
-  console.log("8b ok: existing PR and unavailable metadata block all publication paths without remote changes");
+  fs.writeFileSync(path.join(ws, "review-fix.txt"), "small follow-up\n");
+  git(ws, ...cfg, "add", "review-fix.txt");
+  git(ws, ...cfg, "commit", "-m", "review fix");
+  const plainPush = new GitService(path.join(tmp, "repos-update"), (file, args, opts) => {
+    assert.notEqual(file, "gh", "updating an existing PR branch must not call the GitHub API");
+    return defaultRunner(file, rewriteGitToLocal(file, args), opts);
+  });
+  assert.equal(await plainPush.push(ws, GH_URL), "cube/test1");
+  assert.equal(git(upstream, "rev-parse", "refs/heads/cube/test1"), git(ws, "rev-parse", "HEAD"));
+  console.log("8b ok: existing PR update is one ordinary push with no Cube review or metadata gate");
 }
 
 // --- 9. non-GitHub PR is refused (gh cannot open one)
@@ -425,6 +461,16 @@ await assert.rejects(failed.prepareRepository(upstream), (error: unknown) =>
   error instanceof Error && error.message.includes("network unavailable"));
 assert.equal(fs.existsSync(failedRoot), false, "discovery failure never starts cloning");
 console.log("11 ok: Effect boundaries retain ordering, explicit bases, signals and failures");
+
+const policy = fs.readFileSync(path.resolve("docs/git-workflows.md"), "utf8");
+assert.match(policy, /Cube policy/);
+assert.match(policy, /Local security guards/);
+assert.match(policy, /GitHub branch protection and rulesets/);
+assert.match(policy, /Only GitHub can enforce these against every\s+writer/);
+assert.match(policy, /process that controls its checkout can bypass or\s+replace them/);
+assert.match(policy, /force_push = "confirm"/);
+assert.match(policy, /does\s+not expose unconditional force-push/);
+console.log("12 ok: policy documentation distinguishes Cube, local, and GitHub enforcement");
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("git-service-test: all ok");
