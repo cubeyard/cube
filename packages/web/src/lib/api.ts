@@ -2,11 +2,13 @@ import type {
   ConversationHistory,
   DaemonState,
   GithubAuthStatus,
+  ModelSelection,
   Project,
   ProjectInput,
   RepoDiff,
   ServiceLink,
   ThreadRepository,
+  ThreadModels,
   ThreadSummary,
   WorkspaceListing,
 } from "./types.ts";
@@ -117,8 +119,10 @@ export const deleteProject = (id: string) =>
  * `requestId` names the user action: a resend after a dropped connection
  * or a double submit with the same id gets the thread the first attempt
  * created, not a second one. Generate it once per action, not per call. */
-export const createUserThread = (projectId: string, requestId: string = uid()) =>
-  request<{ id: string }>("/api/threads", "POST", { projectId, requestId }).then((r) => r.id);
+export const createUserThread = (projectId: string, requestId: string = uid(), firstTurn?: { text: string; model: ModelSelection }) =>
+  request<{ id: string }>("/api/threads", "POST", { projectId, requestId, ...firstTurn }).then((r) => r.id);
+
+export const fetchModels = () => request<ThreadModels>("/api/models");
 
 const threadBase = (id: string) => `/api/threads/${encodeURIComponent(id)}`;
 
@@ -130,8 +134,14 @@ export const renameThread = (id: string, title: string) =>
 export const fetchConversation = (id: string) =>
   request<ConversationHistory>(`${threadBase(id)}/history`);
 
-export const sendPrompt = (id: string, text: string) =>
-  request<{ runId: string }>(`${threadBase(id)}/prompt`, "POST", { text });
+export const fetchThreadModels = (id: string) =>
+  request<ThreadModels>(`${threadBase(id)}/model`);
+
+export const setThreadModel = (id: string, model: ModelSelection) =>
+  request<ThreadModels>(`${threadBase(id)}/model`, "PATCH", model);
+
+export const sendPrompt = (id: string, text: string, model: ModelSelection) =>
+  request<{ runId: string }>(`${threadBase(id)}/prompt`, "POST", { text, model });
 
 /** Workspace listing — host-side, so it works while the thread sleeps. */
 export const fetchFiles = (threadId: string) =>

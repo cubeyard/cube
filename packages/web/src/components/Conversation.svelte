@@ -1,20 +1,28 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { errorText, fetchConversation, sendPrompt } from "../lib/api.ts";
-  import type { AgentRun, ConversationMessage } from "../lib/types.ts";
+  import type { AgentRun, ConversationMessage, ModelSelection } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
 
-  let { threadId, waitingText = null }: { threadId: string; waitingText?: string | null } = $props();
+  let { threadId, model, changingModel = false, busy = $bindable(false), waitingText = null }: {
+    threadId: string;
+    model: ModelSelection | null;
+    changingModel?: boolean;
+    busy?: boolean;
+    waitingText?: string | null;
+  } = $props();
   let messages = $state<ConversationMessage[]>([]);
   let run = $state<AgentRun | null>(null);
   let prompt = $state("");
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let historyError = $state<string | null>(null);
   let transcript: HTMLElement;
   let composer: HTMLTextAreaElement;
   let disposed = false;
   let sending = $state(false);
   const working = $derived(run?.status === "queued" || run?.status === "running");
+  $effect(() => { busy = working || sending; });
 
   async function refresh(): Promise<void> {
     try {
@@ -22,7 +30,7 @@
       const nearBottom = !transcript || transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120;
       messages = history.messages;
       run = history.run;
-      error = history.run?.status === "failed" ? history.run.error : null;
+      historyError = null;
       loading = false;
       if (nearBottom) {
         await tick();
@@ -30,7 +38,7 @@
       }
     } catch (cause) {
       if (!disposed) {
-        error = errorText(cause);
+        historyError = errorText(cause);
         loading = false;
       }
     }
@@ -53,11 +61,11 @@
 
   async function submit(): Promise<void> {
     const text = prompt.trim();
-    if (!text || working || sending || waitingText) return;
+    if (!text || working || sending || changingModel || !model || waitingText) return;
     sending = true;
     error = null;
     try {
-      await sendPrompt(threadId, text);
+      await sendPrompt(threadId, text, model);
       prompt = "";
       await tick();
       resizeComposer();
@@ -71,7 +79,7 @@
   }
 
   function onComposerKeydown(event: KeyboardEvent): void {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
       event.preventDefault();
       void submit();
     }
@@ -114,8 +122,9 @@
     {/if}
   </div>
 
-  {#if error}<div class="conversation-error" role="alert">{error}</div>{/if}
+  {#if error || historyError || run?.status === "failed"}<div class="conversation-error" role="alert">{error ?? historyError ?? run?.error}</div>{/if}
   <form class="composer" onsubmit={(event) => { event.preventDefault(); void submit(); }}>
+    <span class="sr-only" id="composer-hint">enter to send · shift enter for a new line</span>
     <textarea
       bind:this={composer}
       bind:value={prompt}
@@ -123,10 +132,12 @@
       onkeydown={onComposerKeydown}
       placeholder={waitingText ?? (working ? "agent is working…" : "message this thread")}
       aria-label="message this thread"
-      disabled={working || sending || !!waitingText}
+      aria-describedby="composer-hint"
+      title="enter to send · shift enter for a new line"
+      disabled={busy || !!waitingText}
       rows="1"
     ></textarea>
-    <button class="send-key" type="submit" title="send · ctrl/⌘ enter" aria-label="send message" disabled={!prompt.trim() || working || sending || !!waitingText}>
+    <button class="send-key" type="submit" title="send · enter" aria-label="send message" disabled={!prompt.trim() || busy || changingModel || !model || !!waitingText}>
       <Icon name="arrow" size={16} />
     </button>
   </form>

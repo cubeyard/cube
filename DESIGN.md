@@ -270,15 +270,31 @@ cells). A timestamp ticking from "2m" to "12m" must not shift the row.
 ## Layout
 
 The app is a full-height flex column (`100dvh`). The thread list keeps the
-centered **47rem** reading measure (`--col`). On desktop, the thread view folds
-global navigation and thread controls into one slim top rail; the active
-`threads` nav label is redundant there and recedes, while `projects` remains a
-direct exit. The Cube-owned conversation starts immediately below that rail
-without a second header repeating `thread`. Its full-width two-bay workspace
-starts evenly split between conversation and changes, then respects the
-visitor's remembered divider position. At 52rem and below, navigation and
-thread controls separate again for touch and wrapping, and the bays stack in
-the same viewport with the conversation receiving the larger share.
+centered **47rem** reading measure (`--col`). One thin desktop rail spans the
+sidebar, conversation and changes, with no extra global row above it.
+Global navigation lives at the top of the sidebar; `projects` remains a direct
+exit (inside the thread drawer on narrow screens). Each workspace bay owns its
+top rail: thread title, model and thread controls above the conversation,
+changes controls above changes. Rail edges match the pane below and follow
+the draggable divider. The two-bay workspace starts evenly split, then respects
+the visitor's remembered divider position. At 52rem and below, the bays stack
+in the same viewport with the conversation receiving the larger share, and
+thread controls wrap within the conversation's own rail.
+
+The thread sidebar groups active threads by project, with a small plus button
+beside each project name to start a thread in that project. It has no separate
+“all threads” heading or full-width create button. Project names appear once
+per group; thread rows carry the title and state.
+
+The quiet `+ thread` action and each project's plus open the same native
+dialog, also used by the thread list, project detail and `n` shortcut. A
+project-specific entry preselects its project; the general entry includes
+ready projects with no threads. The first message owns the surface, with
+project and actual model selectors beneath it and one start action. Enter
+starts; Shift+Enter adds a line. Escape closes without discarding the draft.
+On phones, the project selector takes its own row. Loading, missing setup and
+submission errors stay inside the dialog; uncertain submissions retain their
+exact payload for retry.
 
 Projects use that same measure rather than introducing a dashboard grid. The
 project index is a recessed module well; project detail is one vertical
@@ -295,8 +311,8 @@ at `40dvh`. The right workspace bay scrolls independently so expanding a long
 diff never moves the conversation. Spacing rhythm is in rem with recurring
 steps of 0.55 / 0.7–0.75 / 0.85–0.9 / 1.0 / 1.4 / 2.1.
 
-At the 40rem mobile breakpoint: header and paddings tighten, the model id
-disappears, the busy lamp drops its label (the blinking lamp alone carries
+At the 40rem mobile breakpoint: header and paddings tighten, the model selector
+stays in the thread rail, the busy lamp drops its label (the blinking lamp alone carries
 "working"), and the composer textarea rises to 16px. The composer form pads
 its bottom with `env(safe-area-inset-bottom)`.
 
@@ -448,7 +464,11 @@ or push-all control.
 Full-bleed `--s2` deck with the answering seam. Textarea: `--s4` field, 9px
 radius, shallow inset shadow, auto-growing to 11rem; focus swaps the border to
 `--signal` (the one sanctioned replacement of the global 2px signal focus
-ring). Send is the round signal key.
+ring). Send is the round signal key. Enter sends; Shift+Enter inserts a new
+line. The keyboard hint lives in the field's tooltip and accessible description,
+not a permanent extra row. Model selection belongs in the conversation pane's top rail:
+the actual model id as a quiet text control, with providers grouped in the
+opened list. Never substitute an effort label such as "high" for the model.
 
 ### Code Window
 Dark glass in both themes: `--glass` body inside an inset well shadow plus a

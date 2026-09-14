@@ -9,6 +9,7 @@ import fs from "node:fs";
 import {
   createAgentSession,
   DefaultResourceLoader,
+  ModelRuntime,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -18,6 +19,7 @@ const WorkerRequest = Schema.Struct({
   prompt: Schema.String,
   messages: Schema.Array(Schema.Unknown),
   extension: Schema.String,
+  model: Schema.Struct({ provider: Schema.String, id: Schema.String }),
 });
 
 const emit = (event: unknown): void => {
@@ -46,6 +48,14 @@ const run = Effect.fn("AgentWorker.run")(function*() {
   const agentDir = process.env.HOME ? `${process.env.HOME}/.pi/agent` : undefined;
   if (!agentDir) return yield* Effect.fail(new Error("HOME is not set"));
 
+  const modelRuntime = yield* Effect.tryPromise({
+    try: () => ModelRuntime.create({ authPath: `${agentDir}/auth.json`, modelsPath: `${agentDir}/models.json` }),
+    catch: (cause) => new Error(String(cause)),
+  });
+  const model = modelRuntime.getModel(request.model.provider, request.model.id);
+  if (!model || !modelRuntime.hasConfiguredAuth(model.provider)) {
+    return yield* Effect.fail(new Error("selected model is unavailable; choose another model"));
+  }
   const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
   const loader = new DefaultResourceLoader({
     cwd,
@@ -60,6 +70,8 @@ const run = Effect.fn("AgentWorker.run")(function*() {
     try: () => createAgentSession({
       cwd,
       agentDir,
+      modelRuntime,
+      model,
       resourceLoader: loader,
       sessionManager: SessionManager.inMemory(cwd),
       settingsManager,
