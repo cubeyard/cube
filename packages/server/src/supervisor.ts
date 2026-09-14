@@ -2399,6 +2399,9 @@ export class CubeSupervisor {
   terminalProgressForUserThread(id: string): EnvironmentProgress | undefined {
     const { cubeName } = this.resolveUserThread(id);
     const cube = this.requireCube(cubeName);
+    const waiting = this.waitingTemplates.get(cubeName);
+    const template = waiting && this.registry.findEnvironmentTemplate(waiting.projectId, waiting.key);
+    if (template?.status === "building") Effect.runSync(this.startup.copy(template.instance.replace(/^cube-/, ""), cubeName));
     let progress = Effect.runSync(this.startup.get(cubeName));
     if (cube.error && !progress?.failed) {
       // In-memory snapshots disappear on restart. Restore evidence from the
@@ -2420,7 +2423,8 @@ export class CubeSupervisor {
   ): Promise<{ cwd: string; env: Record<string, string | undefined> }> {
     const { cubeName, threadId } = this.resolveUserThread(id);
     const cube = this.requireCube(cubeName);
-    void onStatus;
+    const progress = this.terminalProgressForUserThread(id);
+    if (progress) onStatus(progress.phase, progress);
     const runtimeDir = path.join(this.config.cubesRoot, ".agent-runtime", threadId);
     fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
     return {

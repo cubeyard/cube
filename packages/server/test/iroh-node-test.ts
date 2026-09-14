@@ -248,6 +248,11 @@ try {
   }
   fs.writeFileSync(configPath, JSON.stringify({ ...config, network: "direct", address: "203.0.113.1:443" }));
   assert.equal(new IrohExecutionNodeClient({ configPath }).contact, "unobserved", "explicit direct config is not a probe");
+  const { address: _address, ...relayConfig } = config;
+  fs.writeFileSync(configPath, JSON.stringify({ ...relayConfig, network: "relay" }));
+  assert.equal(new IrohExecutionNodeClient({ configPath }).contact, "unobserved", "relay config uses the pinned peer with N0 lookup");
+  fs.writeFileSync(configPath, JSON.stringify({ ...config, network: "relay" }));
+  assert.throws(() => new IrohExecutionNodeClient({ configPath }), errorCode("INVALID_REQUEST"), "relay config rejects a stale direct target");
   await assert.rejects(client.status(1), errorCode("CONFLICT"));
   fs.writeFileSync(configPath, JSON.stringify(config));
   console.log("1 ok: in-process npm iroh, no subprocess APIs, strict bounded frames, durable intent, one submission, cancellation and read-only polling");

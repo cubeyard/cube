@@ -1,7 +1,8 @@
 import { smokeHostRouting } from "./smoke-host-routing.ts";
 /** Real TypeScript -> @number0/iroh (in process) -> Rust host acceptance.
  * Disposable keys, journals, workspaces and processes only. No cubed/Incus/model
- * instance is contacted; both network modes use loopback targets in this test. */
+ * instance is contacted. Loopback/direct stay offline; CUBE_TEST_IROH_RELAY=1
+ * adds an external N0 discovery/relay acceptance pass. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -14,7 +15,7 @@ const binary = path.resolve(process.argv[2] ?? "target/debug/cube-node-transport
 assert.ok(fs.existsSync(binary), "build cube-node-transport first; no simulated success or automatic cargo build");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-real-node-adapter-"));
 const children = new Set<ChildProcess>();
-const cli = (args: string[], input?: string): string => execFileSync(binary, args, { encoding: "utf8", input, timeout: 10000, maxBuffer: 65537, env: { PATH: "/usr/bin:/bin" } });
+const cli = (args: string[], input?: string): string => execFileSync(binary, args, { encoding: "utf8", input, timeout: 30000, maxBuffer: 65537, env: { PATH: "/usr/bin:/bin" } });
 const code = (expected: string, unknown = false) => (error: unknown) => error instanceof IrohNodeError && error.code === expected && error.completionUnknown === unknown;
 async function stop(child: ChildProcess) {
   if (child.exitCode === null && child.signalCode === null) {
@@ -24,13 +25,15 @@ async function stop(child: ChildProcess) {
   }
   children.delete(child);
 }
-async function start(key: string, state: string, network: string, listen = "127.0.0.1:0"): Promise<{ child: ChildProcess; address: string }> {
-  const child = spawn(binary, ["host-serve", "--key", key, "--state", state, "--network", network, "--listen", listen], { env: { PATH: "/usr/bin:/bin" }, stdio: ["ignore", "pipe", "pipe"] });
+async function start(key: string, state: string, network: string, listen = "127.0.0.1:0"): Promise<{ child: ChildProcess; address?: string; relayUrl?: string }> {
+  const args = ["host-serve", "--key", key, "--state", state, "--network", network];
+  if (network !== "relay") args.push("--listen", listen);
+  const child = spawn(binary, args, { env: { PATH: "/usr/bin:/bin" }, stdio: ["ignore", "pipe", "pipe"] });
   children.add(child);
-  const ready = await new Promise<{ addresses: string[] }>((resolve, reject) => {
+  const ready = await new Promise<{ addresses: string[]; relayUrl?: string }>((resolve, reject) => {
     let output = "";
     let stderr = "";
-    const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("node ready timeout")); }, 10000);
+    const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("node ready timeout")); }, network === "relay" ? 30000 : 10000);
     child.on("error", error => { clearTimeout(timer); reject(error); });
     child.on("exit", () => { clearTimeout(timer); reject(new Error(`node exited before ready: ${stderr}`)); });
     child.stderr!.on("data", (data: Buffer) => { stderr = (stderr + data.toString()).slice(-2048); });
@@ -41,11 +44,13 @@ async function start(key: string, state: string, network: string, listen = "127.
       if (end !== -1) { clearTimeout(timer); try { resolve(JSON.parse(output.slice(0, end))); } catch (error) { reject(error); } }
     });
   });
-  assert.equal(ready.addresses.length, 1);
-  return { child, address: ready.addresses[0] };
+  if (network === "relay") assert.match(ready.relayUrl ?? "", /^https:\/\//);
+  else assert.equal(ready.addresses.length, 1);
+  return { child, address: ready.addresses[0], relayUrl: ready.relayUrl };
 }
 try {
-  for (const network of ["loopback", "direct"]) {
+  const networks = process.env.CUBE_TEST_IROH_RELAY === "1" ? ["loopback", "direct", "relay"] : ["loopback", "direct"];
+  for (const network of networks) {
     const directory = path.join(root, network);
     fs.mkdirSync(directory, { mode: 0o700 });
     const workspace = path.join(directory, "workspace");
@@ -59,7 +64,8 @@ try {
     const state = path.join(directory, "state");
     cli(["host-init", "--key", key, "--state", state, "--workspace", workspace, "--allow-peer", controlPeer, "--node-id", "node-test", "--thread-id", "thread-test", "--env", "17"]);
     let daemon = await start(key, state, network);
-    const config = { version: 1, binding: { nodeId: "node-test", threadId: "thread-test", environmentId: 17 }, controlKey, serverPeer, address: daemon.address, network, intentDirectory: intents };
+    const config = { version: 1, binding: { nodeId: "node-test", threadId: "thread-test", environmentId: 17 }, controlKey, serverPeer,
+      ...(network === "relay" ? {} : { address: daemon.address }), network, intentDirectory: intents };
     const configPath = path.join(directory, "control.json");
     const original = JSON.stringify(config);
     fs.writeFileSync(configPath, original, { mode: 0o600 });
@@ -125,7 +131,9 @@ try {
     assert.equal((await restartedClient.operation(17, result.operationId)).state, "Succeeded");
     // The independent Rust diagnostic CLI can read the same saved intent. It
     // is not part of the control-plane call path and never submits this job.
-    const inspected = JSON.parse(cli(["operation", "--key", controlKey, "--intent", path.join(intents, `${result.operationId}.json`), "--address", daemon.address, "--network", network]));
+    const diagnosticArgs = ["operation", "--key", controlKey, "--intent", path.join(intents, `${result.operationId}.json`), "--network", network];
+    if (network !== "relay") diagnosticArgs.push("--address", daemon.address!);
+    const inspected = JSON.parse(cli(diagnosticArgs));
     assert.equal(inspected.operation.state, "Succeeded");
 
     // Result retrieval does not require the workspace to still exist. Binding
@@ -146,7 +154,7 @@ try {
     await smokeHostRouting(directory, configPath, workspace, {
       disconnect: () => stop(daemon.child),
       reconnect: async () => { daemon = await start(key, state, network, daemon.address); },
-    });
+    }, network);
     await stop(daemon.child);
     console.log(`ok: ${network} mode, real TS/native/iroh/exec, exact binding, durable intent, rejection, config pinning, offline observations and restart`);
   }

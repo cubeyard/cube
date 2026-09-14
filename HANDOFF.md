@@ -50,8 +50,10 @@ remote locality flag prevents accidental control-plane filesystem/Git access.
 The independent CLI remains useful for enrollment and read-only intent inspection.
 
 Loopback is default; direct mode requires explicit operator selection and a
-concrete target. Rust direct listeners require an explicit unicast interface,
-not a wildcard. **Npm caveats:** use the published `/index.js` subpath because the
+concrete target. Relay mode enables N0 discovery and public relay fallback using
+only the pinned peer ID, so neither side needs an inbound public listener. Rust
+direct listeners require an explicit unicast interface, not a wildcard.
+**Npm caveats:** use the published `/index.js` subpath because the
 1.1.0 manifest's main/types paths are broken; loopback binds both IP families;
 Minimal disables n0 relays/peer lookup, not the built-in NAT portmapper. This addon
 has no portmapper switch and can probe/map LAN gateways. See `HOST.md` for the
@@ -63,11 +65,12 @@ isolation for an in-process addon.
 its CI job installs both toolchains. The Node offline list additionally tests real
 npm iroh with subprocess APIs disabled. Current local Linux evidence: 14 Rust tests,
 real Node→Rust host smoke in loopback/direct modes (both with loopback targets),
+plus an opt-in public-N0 relay smoke covering enrollment, pi routing and restart,
 43 Node suites, typecheck, lint and build. The Rust host fixtures serialize across
 cases to avoid sibling forks transiently inheriting another fixture's flock before
 exec; concurrent requests/submissions remain tested within cases.
 
-Still absent: external-machine acceptance, file/repository transfer, remote cancellation, portals and thread
+Still absent: separate-machine/NAT acceptance, file/repository transfer, remote cancellation, portals and thread
 communication. No live shared thread/node was used as a crash or execution fixture.
 The full development loop is not complete. Browser access and pi startup remain
 unchanged. Native-addon platforms other than local Linux x64 GNU are unverified.

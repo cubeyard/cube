@@ -7,8 +7,10 @@ permanent local binding, durable operation journal, bounded exec and result
 retrieval, tested across response loss and process restart. The control-plane
 adapter now uses `@number0/iroh` directly in Node, not a Rust subprocess bridge.
 Loopback and explicit direct modes interoperate with the Rust host on loopback
-addresses. Explicit operator enrollment and pi bash/code/! routing through cubed
-are now implemented and tested on disposable resources. External acceptance,
+addresses. Explicit N0 relay mode discovers the pinned host peer, hole-punches
+where possible and otherwise uses encrypted relay transport; an opt-in smoke
+covers enrollment, pi bash/code/! routing, disconnect and restart through that
+path. External separate-machine acceptance,
 file/repository transfer and thread communication remain outstanding. The maintainer
 accepted the npm binding's missing portmapper controls for this development loop;
 see the host documentation. No network-policy exceptions are added by this slice.

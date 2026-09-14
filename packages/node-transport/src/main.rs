@@ -10,24 +10,25 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use cube_node_transport::{
-    NetworkMode, Request, Response, bind_client, bind_node, call,
+    NetworkMode, Request, Response, bind_client, bind_node, bind_relay_client, bind_relay_node,
+    call,
     host::{Binding, ExecSpec, Host},
     intent::Intent,
     query_hello, serve, serve_host, validate_node_id,
 };
-use iroh::{EndpointAddr, EndpointId, SecretKey};
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use serde_json::json;
 
 const USAGE: &str = "usage:
   cube-node-transport keygen --key <new-private-file>
   cube-node-transport serve --key <private-file> --allow-peer <public-key> --node-id <node-id> [--listen 127.0.0.1:0]
-  cube-node-transport hello --key <private-file> --peer <pinned-public-key> --address <ip:port> --expect-node <node-id>
+  cube-node-transport hello --key <private-file> --peer <pinned-public-key> --expect-node <node-id>
   cube-node-transport host-init --key <private-file> --state <NEW-directory> --workspace <existing-directory> --allow-peer <public-key> --node-id <node-id> --thread-id <thread-id> --env <integer>
   cube-node-transport host-serve --key <private-file> --state <directory> [--listen 127.0.0.1:0]
   cube-node-transport prepare-exec --key <control-key> --intent <NEW-file> --peer <server-key> --expect-node <node-id> --env <integer> --command <shell-command> [--cwd .] [--timeout-ms 10000] [--output-limit 8192]
-  cube-node-transport submit --key <control-key> --intent <file> --address <ip:port>
-  cube-node-transport operation --key <control-key> --intent <file> --address <ip:port>
-network commands accept --network loopback|direct (default loopback); direct mode requires explicit interface/target addresses";
+  cube-node-transport submit --key <control-key> --intent <file> [--address <ip:port>]
+  cube-node-transport operation --key <control-key> --intent <file> [--address <ip:port>]
+network commands accept --network loopback|direct|relay (default loopback); direct requires explicit addresses; relay uses N0 discovery and relays";
 
 #[cfg(unix)]
 fn read_key(path: &Path) -> Result<SecretKey> {
@@ -79,6 +80,56 @@ fn no_extra(options: &BTreeMap<String, String>) -> Result<()> {
     Ok(())
 }
 
+async fn endpoint(
+    key: SecretKey,
+    network: NetworkMode,
+    listen: Option<String>,
+) -> Result<Endpoint> {
+    if network == NetworkMode::Relay {
+        ensure!(listen.is_none(), "relay mode does not accept --listen");
+        bind_relay_node(key).await
+    } else {
+        let listen = if network == NetworkMode::Direct {
+            listen.context("direct mode requires --listen")?
+        } else {
+            listen.unwrap_or_else(|| "127.0.0.1:0".into())
+        };
+        bind_node(key, listen.parse()?, network).await
+    }
+}
+
+fn ready(endpoint: &Endpoint, node_id: &str, network: NetworkMode) -> serde_json::Value {
+    let addr = endpoint.addr();
+    json!({
+        "peerId": endpoint.id().to_string(),
+        "nodeId": node_id,
+        "addresses": addr.ip_addrs().map(ToString::to_string).collect::<Vec<_>>(),
+        "relayUrl": (network == NetworkMode::Relay).then(|| addr.relay_urls().next().map(ToString::to_string)).flatten(),
+    })
+}
+
+async fn client_destination(
+    options: &mut BTreeMap<String, String>,
+    key: SecretKey,
+    peer: EndpointId,
+    network: NetworkMode,
+) -> Result<(Endpoint, EndpointAddr)> {
+    if network == NetworkMode::Relay {
+        ensure!(
+            !options.contains_key("--address"),
+            "relay mode does not accept --address"
+        );
+        Ok((bind_relay_client(key).await?, EndpointAddr::new(peer)))
+    } else {
+        let address: SocketAddr = take(options, "--address")?.parse()?;
+        cube_node_transport::validate_target(address, network)?;
+        Ok((
+            bind_client(key, address, network).await?,
+            EndpointAddr::new(peer).with_ip_addr(address),
+        ))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -92,6 +143,7 @@ async fn main() -> Result<()> {
     let network = match options.remove("--network").as_deref() {
         None | Some("loopback") => NetworkMode::Loopback,
         Some("direct") => NetworkMode::Direct,
+        Some("relay") => NetworkMode::Relay,
         _ => bail!("invalid network mode"),
     };
     let key_path = take(&mut options, "--key")?;
@@ -105,20 +157,10 @@ async fn main() -> Result<()> {
             let allowed: EndpointId = take(&mut options, "--allow-peer")?.parse()?;
             let node_id = take(&mut options, "--node-id")?;
             validate_node_id(&node_id)?;
-            let listen = if network == NetworkMode::Direct {
-                take(&mut options, "--listen")?
-            } else {
-                options
-                    .remove("--listen")
-                    .unwrap_or_else(|| "127.0.0.1:0".into())
-            }
-            .parse()?;
+            let listen = options.remove("--listen");
             no_extra(&options)?;
-            let endpoint = bind_node(read_key(Path::new(&key_path))?, listen, network).await?;
-            println!(
-                "{}",
-                json!({"peerId":endpoint.id().to_string(), "nodeId":node_id, "addresses":endpoint.bound_sockets()})
-            );
+            let endpoint = endpoint(read_key(Path::new(&key_path))?, network, listen).await?;
+            println!("{}", ready(&endpoint, &node_id, network));
             std::io::stdout().flush()?;
             let result = tokio::select! {
                 result = serve(&endpoint, allowed, &node_id) => result,
@@ -151,14 +193,7 @@ async fn main() -> Result<()> {
         }
         "host-serve" => {
             let state = take(&mut options, "--state")?;
-            let listen = if network == NetworkMode::Direct {
-                take(&mut options, "--listen")?
-            } else {
-                options
-                    .remove("--listen")
-                    .unwrap_or_else(|| "127.0.0.1:0".into())
-            }
-            .parse()?;
+            let listen = options.remove("--listen");
             no_extra(&options)?;
             let key = read_key(Path::new(&key_path))?;
             let host = Host::open(Path::new(&state), key.public())?;
@@ -167,11 +202,8 @@ async fn main() -> Result<()> {
             eprintln!(
                 "trusted host execution enabled: no sandbox; same OS account; do not use an account with control-plane credentials"
             );
-            let endpoint = bind_node(key, listen, network).await?;
-            println!(
-                "{}",
-                json!({"peerId":endpoint.id().to_string(), "nodeId":node_id, "addresses":endpoint.bound_sockets()})
-            );
+            let endpoint = endpoint(key, network, listen).await?;
+            println!("{}", ready(&endpoint, &node_id, network));
             std::io::stdout().flush()?;
             let result = tokio::select! {
                 result = serve_host(&endpoint, allowed, &node_id, Some(host.clone())) => result,
@@ -215,9 +247,6 @@ async fn main() -> Result<()> {
         }
         "submit" | "operation" => {
             let intent_path = take(&mut options, "--intent")?;
-            let address: SocketAddr = take(&mut options, "--address")?.parse()?;
-            cube_node_transport::validate_target(address, network)?;
-            no_extra(&options)?;
             let intent = Intent::load(Path::new(&intent_path))?;
             let key = read_key(Path::new(&key_path))?;
             ensure!(
@@ -239,8 +268,9 @@ async fn main() -> Result<()> {
                     operation_id: intent.operation_id,
                 }
             };
-            let endpoint = bind_client(key, address, network).await?;
-            let destination = EndpointAddr::new(intent.server_peer.parse()?).with_ip_addr(address);
+            let (endpoint, destination) =
+                client_destination(&mut options, key, intent.server_peer.parse()?, network).await?;
+            no_extra(&options)?;
             let response = if let Some(thread_id) = intent.thread_id {
                 cube_node_transport::call_bound(
                     &endpoint,
@@ -266,17 +296,12 @@ async fn main() -> Result<()> {
         }
         "hello" => {
             let peer: EndpointId = take(&mut options, "--peer")?.parse()?;
-            let address: SocketAddr = take(&mut options, "--address")?.parse()?;
-            cube_node_transport::validate_target(address, network)?;
             let expected = take(&mut options, "--expect-node")?;
+            let (endpoint, destination) =
+                client_destination(&mut options, read_key(Path::new(&key_path))?, peer, network)
+                    .await?;
             no_extra(&options)?;
-            let endpoint = bind_client(read_key(Path::new(&key_path))?, address, network).await?;
-            let result = query_hello(
-                &endpoint,
-                EndpointAddr::new(peer).with_ip_addr(address),
-                &expected,
-            )
-            .await;
+            let result = query_hello(&endpoint, destination, &expected).await;
             endpoint.close().await;
             println!("{}", serde_json::to_string(&result?)?);
         }

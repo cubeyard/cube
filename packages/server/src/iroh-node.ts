@@ -35,7 +35,8 @@ export type HostOperation =
   | { state: "Interrupted"; completionUnknown: true };
 interface IrohConfig {
   version: 1; binding: NodeBinding; controlKey: string; serverPeer: string;
-  address: string; network: "loopback" | "direct"; intentDirectory: string;
+  address?: string;
+  network: "loopback" | "direct" | "relay"; intentDirectory: string;
 }
 interface Intent {
   operationId: string; nodeId: string; environmentId: number; threadId: string;
@@ -142,15 +143,9 @@ function readPrivate(filename: string, limit: number): Buffer {
 function json(bytes: Uint8Array): unknown {
   try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { return invalid(); }
 }
-function loadConfig(filename: string): { config: IrohConfig; hash: string } {
-  const bytes = readPrivate(filename, 16384);
-  const row = shape(json(bytes), ["version", "binding", "controlKey", "serverPeer", "address", "network", "intentDirectory"]);
-  if (row.version !== 1 || typeof row.serverPeer !== "string" || !PEER.test(row.serverPeer)
-    || typeof row.controlKey !== "string" || !path.isAbsolute(row.controlKey)
-    || typeof row.intentDirectory !== "string" || !path.isAbsolute(row.intentDirectory)
-    || !["loopback", "direct"].includes(String(row.network)) || typeof row.address !== "string") invalid();
-  try { EndpointId.fromBytes(Array.from(Buffer.from(row.serverPeer, "hex"))); } catch { invalid(); }
-  const match = /^(?:\[([^\]]+)\]|([^:]+)):(\d+)$/.exec(row.address);
+function socketAddress(value: unknown): { address: string; loopback: boolean } {
+  if (typeof value !== "string") invalid();
+  const match = /^(?:\[([^\]]+)\]|([^:]+)):(\d+)$/.exec(value);
   if (!match || !isIP(match[1] ?? match[2]) || !integer(Number(match[3]), 1, 65535)) invalid();
   const host = match[1] ?? match[2];
   let loopback: boolean;
@@ -160,13 +155,33 @@ function loadConfig(filename: string): { config: IrohConfig; hash: string } {
     loopback = first === 127;
   } else {
     const normalized = new URL(`http://[${host}]/`).hostname.slice(1, -1);
-    // No scoped or mapped addresses: use a plain IPv4 or unicast IPv6 literal.
     if (normalized === "::" || normalized.startsWith("ff") || normalized.startsWith("::ffff:")) invalid();
     loopback = normalized === "::1";
   }
-  if (row.network === "loopback" && !loopback) invalid();
+  return { address: value, loopback };
+}
+function loadConfig(filename: string): { config: IrohConfig; hash: string } {
+  const bytes = readPrivate(filename, 16384);
+  const raw = record(json(bytes));
+  const network = raw.network;
+  const row = network === "relay"
+    ? shape(raw, ["version", "binding", "controlKey", "serverPeer", "network", "intentDirectory"])
+    : shape(raw, ["version", "binding", "controlKey", "serverPeer", "address", "network", "intentDirectory"]);
+  if (row.version !== 1 || typeof row.serverPeer !== "string" || !PEER.test(row.serverPeer)
+    || typeof row.controlKey !== "string" || !path.isAbsolute(row.controlKey)
+    || typeof row.intentDirectory !== "string" || !path.isAbsolute(row.intentDirectory)
+    || !["loopback", "direct", "relay"].includes(String(row.network))) invalid();
+  try { EndpointId.fromBytes(Array.from(Buffer.from(row.serverPeer, "hex"))); } catch { return invalid(); }
+  let location: Pick<IrohConfig, "address">;
+  if (row.network === "relay") {
+    location = {};
+  } else {
+    const target = socketAddress(row.address);
+    if (row.network === "loopback" && !target.loopback) invalid();
+    location = { address: target.address };
+  }
   return { config: { version: 1, binding: binding(row.binding), controlKey: row.controlKey, serverPeer: row.serverPeer,
-    address: row.address, network: row.network as IrohConfig["network"], intentDirectory: row.intentDirectory },
+    ...location, network: row.network as IrohConfig["network"], intentDirectory: row.intentDirectory },
     hash: createHash("sha256").update(bytes).digest("hex") };
 }
 function writeNew(filename: string, bytes: Buffer): void {
@@ -269,7 +284,8 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     const mutating = query?.method === "exec.start";
     const requestBytes = query ? frame(query) : undefined;
     const builder = Endpoint.builder();
-    builder.applyMinimal(); // no n0 relay or address lookup; see npm NAT caveat in HOST.md
+    if (this.config.network === "relay") builder.applyN0();
+    else builder.applyMinimal();
     builder.secretKey(key.toBytes());
     builder.alpns([]); // caller endpoint has no server-side application protocols
     if (this.config.network === "loopback") {
@@ -279,7 +295,9 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
       builder.bindAddr("[::1]:0");
     }
     const peer = EndpointId.fromBytes(Array.from(Buffer.from(this.config.serverPeer, "hex")));
-    const address = new EndpointAddr(peer, null, [this.config.address]);
+    const address = this.config.network === "relay"
+      ? new EndpointAddr(peer)
+      : new EndpointAddr(peer, null, [this.config.address!]);
     const controller = new AbortController();
     const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
     let endpoint: Endpoint | undefined;

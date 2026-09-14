@@ -22,7 +22,7 @@ import { GithubAuth, GithubUnreachableError } from "./github-auth.ts";
 import { createLogger } from "./log.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { defaultPortalBase } from "./portal-config.ts";
-import { guardUpgradeSocket, portalLabel, proxyHttp, proxyUpgrade, refuseUpgrade, respondFailed, respondMissing, respondWaking, upgradeAfterWake } from "./portal-proxy.ts";
+import { guardUpgradeSocket, portalLabel, proxyHttp, proxyUpgrade, refuseUpgrade, respondFailed, respondMissing, respondUnavailable, respondWaking, upgradeAfterWake } from "./portal-proxy.ts";
 import { Registry } from "./registry.ts";
 import { CubeSupervisor, DEFAULT_EGRESS_ALLOW } from "./supervisor.ts";
 import { sanitizeMessage } from "./user-facing.ts";
@@ -859,7 +859,7 @@ function serveWorkspaceFile(res: http.ServerResponse, root: string, rel: string)
 
 // Upgrades are portal plumbing only. Cube's conversation UI is HTTP and no
 // longer exposes a credentialed terminal WebSocket.
-server.on("upgrade", (req, socket, head) => {
+server.on("upgrade", async (req, socket, head) => {
   // From here the socket is ours: node has already dropped its own error
   // listener, so a reset before we destroy, refuse or proxy it would be
   // an unhandled 'error' — a crash. One listener for the socket's life.

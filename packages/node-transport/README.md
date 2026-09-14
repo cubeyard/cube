@@ -68,15 +68,19 @@ not the durable node registry/enrollment or an environment allocation mechanism.
 
 Loopback is the default. Rust network commands accept `--network direct` for an
 operator-selected unicast IP/port; a direct server additionally requires an
-explicit `--listen` interface and rejects wildcard listeners. No DNS hostname,
-relay or address-lookup discovery is used. The Rust build disables the portmapper
-feature. The npm binding has a separate NAT-portmapping limitation documented in
-[HOST.md](HOST.md#in-process-control-plane-client); do not claim packet confinement
-for that addon merely because its application sockets are loopback-bound.
+explicit `--listen` interface and rejects wildcard listeners. `--network relay`
+instead enables Iroh's N0 preset on both peers: the host waits for a usable home
+relay, publishes its address, and callers locate the pinned peer ID through N0
+discovery. Iroh attempts direct UDP hole-punching and falls back to end-to-end
+encrypted relay traffic. Relay mode has no static `--address` or `--listen`.
+It depends on the public N0 discovery/relay service unless a custom relay is added
+later. The Rust build disables the portmapper feature. The npm binding has a
+separate NAT-portmapping limitation documented in [HOST.md](HOST.md#in-process-control-plane-client).
 
-This is not a VPN, SSH tunnel or plaintext TCP substitute. No egress exceptions
-were added for direct iroh and the browser boundary is untouched. Both modes are
-tested using loopback targets, **not** external-machine reachability or traversal.
+This is not a VPN, SSH tunnel or plaintext TCP substitute. No browser listener or
+network-policy exception is added. Loopback/direct tests remain offline. The
+opt-in relay smoke uses the public N0 service; separate-machine acceptance is
+still required before calling the host profile production-ready.
 
 ## Tests and next boundary
 
@@ -84,6 +88,7 @@ tested using loopback targets, **not** external-machine reachability or traversa
 pnpm install --frozen-lockfile       # includes the native npm addon
 cargo fetch --locked                 # setup also does this
 bash scripts/test-node-transport.sh  # fmt, clippy, Rust tests + real Node/Rust smoke
+CUBE_TEST_IROH_RELAY=1 node scripts/smoke-node-adapter.ts target/debug/cube-node-transport
 ```
 
 The separate transport CI job installs Node 26, pinned pnpm and Rust, then runs
@@ -98,7 +103,9 @@ auth rejection before any application message, and idle-connection expiry.
 
 The [host tests](HOST.md) additionally exercise the durable operation/binding
 boundary and bounded real shell execution, including crashes and response loss.
-Next: file/repository transfer and external connectivity
-acceptance. Thread communication, remote cancellation, file/repository transfer
+The opt-in N0 smoke additionally exercises discovery/relay bootstrap, control-plane
+enrollment, registered pi tools, disconnect, host restart and read-only operation
+reconciliation. Next: separate-NAT connectivity acceptance and file/repository
+transfer. Thread communication, remote cancellation, file/repository transfer
 and portal streams remain follow-ups. No real remote machine, macOS or Incus
 acceptance has been performed.

@@ -1,8 +1,8 @@
 # Trusted host execution bootstrap
 
-Development-only, Linux-only, one permanently bound environment, loopback iroh.
-This is a real executor with a durable journal, but is **not yet connected to
-cubed, thread tools or project provisioning, or built as a release binary**.
+Development-only, Linux-only, one permanently bound environment. This is a real
+executor with a durable journal and opt-in cubed/thread-tool routing, but is not
+built as a release binary.
 
 ## Trust boundary
 
@@ -120,6 +120,28 @@ existing intent directory (0700) on the control plane, outside guest reach:
 }
 ```
 
+For traversal through Iroh's public N0 discovery/relay network, omit `address`
+and select relay explicitly:
+
+```json
+{
+  "version": 1,
+  "binding": { "nodeId": "node-development", "threadId": "thread-development", "environmentId": 17 },
+  "controlKey": "/absolute/private/control.key",
+  "serverPeer": "REPLACE_WITH_THE_ENROLLED_64_CHARACTER_LOWERCASE_HEX_PEER",
+  "network": "relay",
+  "intentDirectory": "/absolute/private/intents"
+}
+```
+
+Start the host with `host-serve --network relay` and no `--listen`. It waits up
+to 20 seconds for a usable N0 home relay before printing readiness. The control
+plane uses the pinned peer ID with N0 lookup; there is no mutable IP in the
+admission config. Iroh will hole-punch a direct path where possible and otherwise
+relay end-to-end encrypted QUIC. Relay operators can observe peer IPs and traffic
+metadata, and availability now depends on the public N0 service. A configurable
+self-hosted relay is not implemented in this slice.
+
 Operator code constructs `new IrohExecutionNodeClient({ configPath })`. There is
 no `binary` option. Construction reads only config, not the key/workspace, and
 never probes or binds sockets. Config bytes are pinned for the client's lifetime;
@@ -154,7 +176,8 @@ no fork or custom addon is built. Linux x64 GNU interoperability with Rust iroh
 binds both IPv4 and IPv6 explicitly, requiring IPv6 loopback support because this
 binding cannot clear one family's default transport.
 
-`applyMinimal()` avoids n0 relays and peer address lookup, **but does not disable
+Loopback/direct use `applyMinimal()`, which avoids n0 relays and peer address
+lookup, **but does not disable
 the addon's built-in NAT portmapper**. The published API exposes no portmapper
 switch; the upstream implementation can probe/map a LAN gateway even with an empty
 relay map. Therefore this is not a packet-level loopback-only guarantee. External
@@ -257,9 +280,10 @@ migration, replacement, fallback, queue or automatic replay.
 2. Initialize the host using `host-init` above with precisely those IDs and the
    authorized control-plane public peer, then run `host-serve`. Keep the host
    account unprivileged and separate from control-plane credentials/sessions.
-3. On the control plane, create the owner-only adapter JSON shown above, a private
-   intent directory and private control key. Choose `network: "direct"` explicitly
-   for a non-loopback target. Keep these files outside all agent workspaces.
+3. On the control plane, create an owner-only adapter JSON shown above, a private
+   intent directory and private control key. Choose `network: "relay"` for NAT
+   traversal without an inbound listener, or `network: "direct"` with a concrete
+   reachable address. Keep these files outside all agent workspaces.
 4. Stop cubed and run as its operator (not from a managed thread):
 
    ```sh

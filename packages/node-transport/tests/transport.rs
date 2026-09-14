@@ -273,5 +273,15 @@ async fn explicit_direct_mode_never_implies_a_wildcard_listener() {
     for address in ["203.0.113.1:443", "[2001:db8::1]:443"] {
         assert!(validate_target(address.parse().unwrap(), NetworkMode::Loopback).is_err());
         assert!(validate_target(address.parse().unwrap(), NetworkMode::Direct).is_ok());
+        assert!(validate_target(address.parse().unwrap(), NetworkMode::Relay).is_err());
     }
+    assert!(
+        bind_node(
+            SecretKey::generate(),
+            "127.0.0.1:0".parse().unwrap(),
+            NetworkMode::Relay
+        )
+        .await
+        .is_err()
+    );
 }

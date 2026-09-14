@@ -12,6 +12,7 @@ use tokio::{io::AsyncRead, io::AsyncReadExt, task::JoinSet, time::timeout};
 pub const ALPN: &[u8] = b"cubeyard/node/1";
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+pub const RELAY_READY_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_CONNECTIONS: usize = 16;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -98,14 +99,15 @@ impl Response {
     }
 }
 
-/// No implicit discovery, relay, port mapping or VPN. Direct mode must be
-/// explicitly selected by the operator; it does not change browser access.
+/// Loopback and direct modes have no external dependencies. Relay mode uses
+/// Iroh's N0 discovery and relay preset and must be explicitly selected.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum NetworkMode {
     #[default]
     Loopback,
     Direct,
+    Relay,
 }
 
 fn unicast(address: SocketAddr) -> bool {
@@ -115,6 +117,10 @@ fn unicast(address: SocketAddr) -> bool {
         && !matches!(ip, std::net::IpAddr::V4(ip) if ip.is_broadcast())
 }
 pub fn validate_target(address: SocketAddr, mode: NetworkMode) -> Result<()> {
+    ensure!(
+        mode != NetworkMode::Relay,
+        "relay mode does not take a target address"
+    );
     ensure!(
         unicast(address) && address.port() != 0,
         "target must be a concrete unicast address and port"
@@ -136,7 +142,28 @@ async fn bind_transport(key: SecretKey, listen: SocketAddr) -> Result<Endpoint> 
         .bind()
         .await?)
 }
+async fn bind_relay_transport(key: SecretKey, alpns: Vec<Vec<u8>>) -> Result<Endpoint> {
+    let endpoint = Endpoint::builder(presets::N0)
+        .secret_key(key)
+        .alpns(alpns)
+        .bind()
+        .await?;
+    timeout(RELAY_READY_TIMEOUT, endpoint.online())
+        .await
+        .context("timed out connecting to an N0 relay")?;
+    Ok(endpoint)
+}
+pub async fn bind_relay_node(key: SecretKey) -> Result<Endpoint> {
+    bind_relay_transport(key, vec![ALPN.to_vec()]).await
+}
+pub async fn bind_relay_client(key: SecretKey) -> Result<Endpoint> {
+    bind_relay_transport(key, vec![]).await
+}
 pub async fn bind_node(key: SecretKey, listen: SocketAddr, mode: NetworkMode) -> Result<Endpoint> {
+    ensure!(
+        mode != NetworkMode::Relay,
+        "relay mode does not take a listener address"
+    );
     ensure!(
         unicast(listen),
         "listener must select a concrete unicast interface, not a wildcard"
@@ -161,6 +188,7 @@ pub async fn bind_client(
         (NetworkMode::Loopback, true) => "[::1]:0",
         (NetworkMode::Direct, false) => "0.0.0.0:0",
         (NetworkMode::Direct, true) => "[::]:0",
+        (NetworkMode::Relay, _) => bail!("relay mode requires a relay endpoint address"),
     };
     // A direct caller needs routing-selected local source addresses. There is
     // no application accept loop on this ephemeral client endpoint.
