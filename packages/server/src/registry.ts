@@ -1,8 +1,7 @@
 /**
  * cubed's SQLite registry (ARCHITECTURE §7) — metadata only, for what pi cannot
- * know: which cubes exist (with their allocated subnet), which pi session
- * file backs each thread, service portals (stable hostnames), and volumes. Conversation
- * content stays in pi's JSONL session files; the SSE buffer stays in-memory.
+ * know: which cubes exist (with their allocated subnet), Cube-owned thread
+ * history and agent runs, service portals (stable hostnames), and volumes.
  *
  * Uses node:sqlite (in Node since 22.5, no native dep). Single writer
  * (cubed) — no contention concerns.
@@ -71,13 +70,38 @@ export interface CubeRow {
 }
 
 export interface ThreadRow {
-  id: string; // pi session id
+  id: string;
   cubeId: number;
   projectId: string;
   piSessionPath: string;
   title: string | null;
   createdAt: number;
   archivedAt: number | null;
+}
+
+export type ConversationRole = "user" | "assistant" | "tool";
+export type AgentRunStatus = "queued" | "running" | "completed" | "failed";
+
+export interface ConversationMessageRow {
+  seq: number;
+  threadId: string;
+  runId: string;
+  role: ConversationRole;
+  content: string;
+  payload: unknown;
+  finalized: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AgentRunRow {
+  id: string;
+  threadId: string;
+  status: AgentRunStatus;
+  error: string | null;
+  createdAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
 }
 
 export type ProjectStatus = "checking" | "ready" | "error";
@@ -256,6 +280,30 @@ export class Registry {
         title           TEXT,
         created_at      INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS agent_run (
+        id          TEXT PRIMARY KEY,
+        thread_id   TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+        status      TEXT NOT NULL,
+        error       TEXT,
+        created_at  INTEGER NOT NULL,
+        started_at  INTEGER,
+        finished_at INTEGER
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS agent_run_active_thread
+        ON agent_run(thread_id) WHERE status IN ('queued', 'running');
+      CREATE TABLE IF NOT EXISTS conversation_message (
+        seq        INTEGER PRIMARY KEY,
+        thread_id  TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+        run_id     TEXT NOT NULL REFERENCES agent_run(id) ON DELETE CASCADE,
+        role       TEXT NOT NULL,
+        content    TEXT NOT NULL,
+        payload    TEXT NOT NULL,
+        finalized  INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS conversation_message_thread_seq
+        ON conversation_message(thread_id, seq);
       CREATE TABLE IF NOT EXISTS cube_repository (
         id            INTEGER PRIMARY KEY,
         cube_id       INTEGER NOT NULL REFERENCES cube(id) ON DELETE CASCADE,
@@ -811,6 +859,107 @@ export class Registry {
     this.db.prepare("DELETE FROM temporary_portal WHERE thread_id = ?").run(id);
   }
 
+  /** Persist acceptance before any worker starts. The active-run index makes
+   * the one-writer-per-thread invariant durable across HTTP requests. */
+  createAgentRun(input: { id: string; threadId: string; text: string }): AgentRunRow {
+    const now = Date.now();
+    this.transaction(() => {
+      this.db.prepare(
+        `INSERT INTO agent_run (id, thread_id, status, error, created_at)
+         VALUES (?, ?, 'queued', NULL, ?)`,
+      ).run(input.id, input.threadId, now);
+      this.db.prepare(
+        `INSERT INTO conversation_message
+         (thread_id, run_id, role, content, payload, created_at, updated_at)
+         VALUES (?, ?, 'user', ?, ?, ?, ?)`,
+      ).run(
+        input.threadId,
+        input.id,
+        input.text,
+        JSON.stringify({ role: "user", content: input.text, timestamp: now }),
+        now,
+        now,
+      );
+    });
+    return this.getAgentRun(input.id)!;
+  }
+
+  getAgentRun(id: string): AgentRunRow | null {
+    const row = this.db.prepare("SELECT * FROM agent_run WHERE id = ?").get(id);
+    return row ? agentRunRow(row) : null;
+  }
+
+  activeAgentRun(threadId: string): AgentRunRow | null {
+    const row = this.db.prepare(
+      "SELECT * FROM agent_run WHERE thread_id = ? AND status IN ('queued', 'running') LIMIT 1",
+    ).get(threadId);
+    return row ? agentRunRow(row) : null;
+  }
+
+  latestAgentRun(threadId: string): AgentRunRow | null {
+    const row = this.db.prepare(
+      "SELECT * FROM agent_run WHERE thread_id = ? ORDER BY created_at DESC LIMIT 1",
+    ).get(threadId);
+    return row ? agentRunRow(row) : null;
+  }
+
+  setAgentRunStatus(id: string, status: AgentRunStatus, error: string | null = null): void {
+    const now = Date.now();
+    const result = status === "running"
+      ? this.db.prepare(
+        "UPDATE agent_run SET status = ?, error = NULL, started_at = ? WHERE id = ? AND status = 'queued'",
+      ).run(status, now, id)
+      : this.db.prepare(
+        `UPDATE agent_run SET status = ?, error = ?, finished_at = ?
+         WHERE id = ? AND status IN ('queued', 'running')`,
+      ).run(status, error, now, id);
+    if (result.changes === 0) throw new Error(`agent run cannot transition to ${status}: ${id}`);
+  }
+
+  /** A daemon restart cannot know whether an external model or tool finished.
+   * Fail interrupted work rather than replaying side effects. */
+  failInterruptedAgentRuns(): number {
+    return Number(this.db.prepare(
+      `UPDATE agent_run SET status = 'failed', error = 'agent run interrupted by host restart', finished_at = ?
+       WHERE status IN ('queued', 'running')`,
+    ).run(Date.now()).changes);
+  }
+
+  appendConversationMessage(input: {
+    threadId: string;
+    runId: string;
+    role: ConversationRole;
+    content: string;
+    payload: unknown;
+    finalized?: boolean;
+  }): ConversationMessageRow {
+    const now = Date.now();
+    const result = this.db.prepare(
+      `INSERT INTO conversation_message
+       (thread_id, run_id, role, content, payload, finalized, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(input.threadId, input.runId, input.role, input.content, JSON.stringify(input.payload), input.finalized === false ? 0 : 1, now, now);
+    return this.getConversationMessage(Number(result.lastInsertRowid))!;
+  }
+
+  updateConversationMessage(seq: number, content: string, payload: unknown, finalized?: boolean): void {
+    this.db.prepare(
+      `UPDATE conversation_message SET content = ?, payload = ?,
+       finalized = COALESCE(?, finalized), updated_at = ? WHERE seq = ?`,
+    ).run(content, JSON.stringify(payload), finalized === undefined ? null : finalized ? 1 : 0, Date.now(), seq);
+  }
+
+  getConversationMessage(seq: number): ConversationMessageRow | null {
+    const row = this.db.prepare("SELECT * FROM conversation_message WHERE seq = ?").get(seq);
+    return row ? conversationMessageRow(row) : null;
+  }
+
+  listConversationMessages(threadId: string, after = 0): ConversationMessageRow[] {
+    return (this.db.prepare(
+      "SELECT * FROM conversation_message WHERE thread_id = ? AND seq > ? ORDER BY seq",
+    ).all(threadId, after) as unknown[]).map(conversationMessageRow);
+  }
+
   // ---------------------------------------------------------------- portal
 
   upsertTemporaryPortal(threadId: string, port: number, name: string, hostname: string): void {
@@ -932,6 +1081,32 @@ function threadRow(r: any): ThreadRow {
     title: r.title === null ? null : String(r.title),
     createdAt: Number(r.created_at),
     archivedAt: r.archived_at === null ? null : Number(r.archived_at),
+  };
+}
+
+function agentRunRow(r: any): AgentRunRow {
+  return {
+    id: String(r.id),
+    threadId: String(r.thread_id),
+    status: String(r.status) as AgentRunStatus,
+    error: r.error === null ? null : String(r.error),
+    createdAt: Number(r.created_at),
+    startedAt: r.started_at === null ? null : Number(r.started_at),
+    finishedAt: r.finished_at === null ? null : Number(r.finished_at),
+  };
+}
+
+function conversationMessageRow(r: any): ConversationMessageRow {
+  return {
+    seq: Number(r.seq),
+    threadId: String(r.thread_id),
+    runId: String(r.run_id),
+    role: String(r.role) as ConversationRole,
+    content: String(r.content),
+    payload: JSON.parse(String(r.payload)),
+    finalized: Number(r.finalized) === 1,
+    createdAt: Number(r.created_at),
+    updatedAt: Number(r.updated_at),
   };
 }
 

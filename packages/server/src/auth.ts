@@ -1,8 +1,7 @@
 /**
- * The one piece of pi the daemon itself calls: stored-credential state for
- * the header lamp. Everything else pi does happens in the pi TUI process
- * cubed spawns per thread (pty.ts) — this package is also where that binary
- * lives (node_modules/.bin/pi is what the pty bridge execs).
+ * Stored-credential state for the header lamp. Agent work happens in the
+ * disposable worker process; both use the pinned pi package and its host-side
+ * credential store.
  */
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 

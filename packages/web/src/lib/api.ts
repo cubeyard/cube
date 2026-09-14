@@ -1,4 +1,5 @@
 import type {
+  ConversationHistory,
   DaemonState,
   GithubAuthStatus,
   Project,
@@ -88,8 +89,6 @@ export const disconnectGithub = () =>
 
 // The UI speaks the thread-first API only — the user-facing unit is the
 // thread; the backing cube is invisible (cube routes are debug plumbing).
-// The conversation itself is NOT here: it lives on the terminal WebSocket
-// (the real pi TUI), see terminalUrl().
 
 export const fetchThreads = (includeArchived = false) =>
   request<{ threads: ThreadSummary[] }>(`/api/threads${includeArchived ? "?includeArchived=1" : ""}`).then(
@@ -128,12 +127,11 @@ export const deleteThread = (id: string) => request<{ ok: true }>(threadBase(id)
 export const renameThread = (id: string, title: string) =>
   request<{ ok: true }>(threadBase(id), "PATCH", { title });
 
-/** The thread's terminal WebSocket — raw pi TUI bytes down (binary),
- * JSON control frames as text; JSON input/resize frames up. */
-export function terminalUrl(threadId: string, cols: number, rows: number): string {
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}${threadBase(threadId)}/pty?cols=${cols}&rows=${rows}`;
-}
+export const fetchConversation = (id: string) =>
+  request<ConversationHistory>(`${threadBase(id)}/history`);
+
+export const sendPrompt = (id: string, text: string) =>
+  request<{ runId: string }>(`${threadBase(id)}/prompt`, "POST", { text });
 
 /** Workspace listing — host-side, so it works while the thread sleeps. */
 export const fetchFiles = (threadId: string) =>

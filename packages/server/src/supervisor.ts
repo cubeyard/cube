@@ -2,7 +2,7 @@
  * CubeSupervisor — Phase 2 slices 2+3. Owns WHICH cubes exist and their live
  * runtime state: provisioning via the registry (subnet allocation) +
  * provisionCube, one egress proxy per cube on <gateway>:3128 (pinned to the
- * cube's IP), per-cube threads (each backed by one pi session file), and the
+ * cube's IP), Cube-owned threads with disposable agent workers, and the
  * sleep/wake lifecycle (idle cubes are `incus stop`ped; a prompt wakes them —
  * gated on waitForCubeNetwork, never on status:Running alone).
  */
@@ -65,7 +65,7 @@ const EGRESS_FLUSH_MS = 60_000;
 const EGRESS_HOSTS_PER_CUBE = 200;
 const EGRESS_HOST_MAX_LEN = 253;
 
-// What the pty bridge spawns per attached thread (Phase 3d step 2). The
+// Legacy pty compatibility path, no longer exposed by the product API. The
 // pnpm bin shim is the same one `pnpm vm`'s dev.sh execs; the extension
 // entry must be a path (its guard compares tool sourceInfo paths against
 // the package dir). `--no-extensions` is LOAD-BEARING security, not tidy-up:
@@ -2147,11 +2147,9 @@ export class CubeSupervisor {
   /**
    * The Orbs-style "new thread": silently allocates a backing cube
    * (generated name the user never sees) after refreshing its repository
-   * tips, starts provisioning, and returns the thread id. No pi session object
-   * is created here — the thread's conversation lives in the pi TUI the pty bridge spawns on
-   * first attach, against a session file path chosen NOW (pi creates the
-   * file at that exact path on its first flush), so creating a thread
-   * needs neither model credentials nor a sandbox.
+   * tips, starts provisioning, and returns the durable Cube thread id. No
+   * model session or agent worker is created until the first accepted turn,
+   * so creating a thread needs neither model credentials nor a sandbox.
    */
   /**
    * `requestKey` makes creation idempotent: a client-generated id for one
@@ -2199,7 +2197,8 @@ export class CubeSupervisor {
     const cube = this.createProjectCube(this.freshCubeName(), repositories, project.environment);
     try {
       const sessionDir = path.join(this.config.cubesRoot, cube.name, "sessions");
-      // The pty bridge (and provisioning) need these before either runs.
+      // Keep the sessions directory during the legacy-column migration; new
+      // workers use in-memory Pi sessions and never write here.
       fs.mkdirSync(cube.workspacePath, { recursive: true });
       fs.mkdirSync(sessionDir, { recursive: true });
       const id = crypto.randomUUID();
@@ -2376,19 +2375,13 @@ export class CubeSupervisor {
     return progress;
   }
 
-  /**
-   * Spawn plan for a thread's pi TUI (Phase 3d step 2): the real `pi`
-   * binary with ONLY the cube extension, this thread's session file, and
-   * the workspace cwd. Waits out provisioning first (pi must not discover
-   * context from a half-seeded workspace); a sleeping cube is left asleep —
-   * the extension wakes it on the first tool use. Errors thrown here reach
-   * the user's terminal pane, so they speak thread vocabulary.
-   */
-  async terminalPlan(
+  /** Host plan for a disposable agent worker. Cubed supplies conversation
+   * history separately; no pi session path is part of this contract. */
+  async agentWorkerPlan(
     id: string,
     onStatus: (text: string, progress?: EnvironmentProgress) => void,
-  ): Promise<{ argv: string[]; cwd: string; env: Record<string, string | undefined> }> {
-    const { cubeName, threadId } = this.resolveUserThread(id);
+  ): Promise<{ cwd: string; env: Record<string, string | undefined> }> {
+    const { cubeName } = this.resolveUserThread(id);
     let cube = this.requireCube(cubeName);
     if (cube.status === "creating") {
       cube = await Effect.runPromise(Effect.gen({ self: this }, function* () {
@@ -2413,6 +2406,31 @@ export class CubeSupervisor {
     if (cube.status === "error") {
       throw new Error(`environment error: ${cube.error ?? "unknown"}`);
     }
+    return {
+      cwd: cube.workspacePath,
+      env: {
+        ...process.env,
+        // The extension is a separate process and cannot infer/share cubed's
+        // in-memory MockBackend. Tell it which execution adapter to create;
+        // real Incus remains the default and fail-closed path.
+        CUBE_BACKEND: this.backend.kind,
+        CUBE_NAME: cube.name,
+        CUBE_THREAD_ID: id,
+        CUBE_HOST_WORKSPACE: cube.workspacePath,
+        CUBE_GUEST_WORKSPACE: "/workspace",
+        CUBED_URL: `http://127.0.0.1:${this.config.publicPort}`,
+      },
+    };
+  }
+
+  /** Legacy spawn plan retained for the unexposed pty harness and its
+   * migration tests. New conversation runs must use agentWorkerPlan(). */
+  async terminalPlan(
+    id: string,
+    onStatus: (text: string, progress?: EnvironmentProgress) => void,
+  ): Promise<{ argv: string[]; cwd: string; env: Record<string, string | undefined> }> {
+    const plan = await this.agentWorkerPlan(id, onStatus);
+    const { threadId } = this.resolveUserThread(id);
     const row = this.registry.getThread(threadId)!;
     const sessionPath = this.currentSessionFile(row);
     return {
@@ -2431,19 +2449,8 @@ export class CubeSupervisor {
         "--session", sessionPath,
         "--session-dir", path.dirname(row.piSessionPath),
       ],
-      cwd: cube.workspacePath,
-      env: {
-        ...process.env,
-        // The extension is a separate process and cannot infer/share cubed's
-        // in-memory MockBackend. Tell it which execution adapter to create;
-        // real Incus remains the default and fail-closed path.
-        CUBE_BACKEND: this.backend.kind,
-        CUBE_NAME: cube.name,
-        CUBE_THREAD_ID: id,
-        CUBE_HOST_WORKSPACE: cube.workspacePath,
-        CUBE_GUEST_WORKSPACE: "/workspace",
-        CUBED_URL: `http://127.0.0.1:${this.config.publicPort}`,
-      },
+      cwd: plan.cwd,
+      env: plan.env,
     };
   }
 

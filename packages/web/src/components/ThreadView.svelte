@@ -22,9 +22,9 @@
     WorkspaceListing,
   } from "../lib/types.ts";
   import ChangesPane from "./ChangesPane.svelte";
+  import Conversation from "./Conversation.svelte";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
-  import Terminal from "./Terminal.svelte";
 
   let { threadId, threads, command = null, onConsume = () => {} }: {
     threadId: string;
@@ -91,7 +91,7 @@
   }
 
   // Navigation data lives above App.svelte's keyed thread view, so switching
-  // remounts the PTY without blanking or resizing the persistent chrome.
+  // remounts the conversation without blanking the persistent chrome.
   const summary = $derived(threads.find((thread) => thread.id === threadId) ?? null);
   // The list this view mounted with may predate a thread created a moment
   // ago; only a list refreshed since can say the thread is gone.
@@ -240,13 +240,12 @@
     untrack(() => void newThread());
   });
 
-  // Escape closes the topmost overlay — drawer, then files
-  // shelf — and hands focus back to the key that opened it. Never inside
-  // the terminal or a field: pi and the browser own Escape there.
+  // Escape closes the topmost overlay — drawer, then files shelf — and hands
+  // focus back to the key that opened it. Native fields keep their Escape.
   function onWindowKeydown(event: KeyboardEvent): void {
     if (event.key !== "Escape" || event.defaultPrevented) return;
     const target = event.target as HTMLElement | null;
-    if (target?.closest?.(".term-pane, input, textarea, select")) return;
+    if (target?.closest?.("input, textarea, select")) return;
     if (threadSidebarOpen) {
       event.preventDefault();
       closeSidebar();
@@ -430,9 +429,9 @@
 >
   <section class="workspace-pane thread-pane" aria-label="thread">
     {#if gone}
-      <div class="term-gone"><p>This thread was deleted.</p><a class="key" href="#/threads">back to threads</a></div>
+      <div class="conversation-gone"><p>this thread was deleted.</p><a class="key" href="#/threads">back to threads</a></div>
     {:else}
-      <Terminal {threadId} waitingText={waitingText(summary)} />
+      <Conversation {threadId} waitingText={waitingText(summary)} />
     {/if}
   </section>
 
