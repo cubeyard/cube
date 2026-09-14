@@ -968,6 +968,12 @@ cmd_up() {
   boot_vm "$ver" || return 1
   [ -z "$first" ] || note "first boot usually takes a couple of minutes"
   wait_ssh || return 1
+  # SSH can answer before the app mount and cubed's ownership fix are ready.
+  wait_step "app disk" 180 vm_ssh "test -r $GUEST_BUILD_ID && test -w /opt/cube" || {
+    fail "app disk was not ready within 3 minutes"
+    console_tail
+    return 1
+  }
   # The app overlay may carry an older build than the manifest says
   # (an upgrade interrupted between download and apply): heal in place.
   if ! check_identity 2>/dev/null; then

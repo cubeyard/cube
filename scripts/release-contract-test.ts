@@ -43,6 +43,45 @@ try {
   assert.match(packageScript, /^  "tag": "\$VERSION",$/m);
   console.log("1 ok: workflow gate and every release consumer use public vX.Y.Z tags");
 
+  // SSH readiness must not be mistaken for a mounted, writable app disk.
+  for (const state of ["current", "stale", "unavailable"]) {
+    const output = run("bash", ["-c", `
+      source launcher/cube
+      lock() { :; }
+      installed_version() { echo v0.1.19; }
+      vm_pid() { return 1; }
+      preflight_host() { :; }
+      settle_ports() { :; }
+      fetch_manifest() { :; }
+      fetch_role() { :; }
+      boot_vm() { :; }
+      wait_ssh() { :; }
+      print_url() { :; }
+      check_update() { :; }
+      ticks=0
+      sleep() { ticks=$((ticks+1)); }
+      vm_ssh() {
+        [ "$*" != true ] || return 1
+        [ "$*" = "test -r $GUEST_BUILD_ID && test -w /opt/cube" ] || exit 8
+        [ "$STATE" != unavailable ] && [ "$ticks" -ge 2 ]
+      }
+      check_identity() {
+        [ "$ticks" -ge 2 ] || exit 9
+        [ "$STATE" = current ] || [ "$applied" = yes ]
+      }
+      app_overlay_runtime() { echo runtime; }
+      mf() { echo runtime; }
+      applied=no
+      apply_app() { applied=yes; }
+      wait_cubed() { :; }
+      if cmd_up; then rc=0; else rc=$?; fi
+      echo "result:$rc:$applied:$ticks"
+    `], { env: { CUBE_LIB_ONLY: "1", CUBE_HOME: path.join(tmp, "boot"), STATE: state } });
+    assert.match(output, state === "unavailable" ? /result:1:no:90$/
+      : state === "stale" ? /result:0:yes:2$/ : /result:0:no:2$/);
+  }
+  console.log("ok: boot waits for app disk, still heals stale builds, and stops on timeout");
+
   // 2. Execute the exact version-selection shell embedded in the workflow.
   const versionStep = workflow.match(/      - id: v\n        run: \|\n([\s\S]*?)\n\n      - name:/)?.[1];
   assert.ok(versionStep, "prepare/version run block exists");
