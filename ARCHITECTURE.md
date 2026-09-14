@@ -15,7 +15,7 @@ is **harness outside sandbox**.
 
 | Amp      | Cube    | Actually is                                          |
 |----------|---------|------------------------------------------------------|
-| thread   | thread  | one pi session (JSONL tree)                           |
+| thread   | thread  | Cube-owned durable conversation and worker runs        |
 | orb      | **cube**| Incus system container + host-persisted workspace     |
 | portal   | portal  | service in the cube exposed via cubed's proxy         |
 
@@ -46,8 +46,10 @@ historical `orb` names.
 ### Out of scope (deliberately)
 
 Multiplayer, Slack, team platform, clustering, per-minute billing, webhooks from
-the internet, sub-cubes / agent-to-agent messaging, live terminal (phase 5+),
+the internet, sub-cubes / thread-to-thread messaging, live terminal (phase 5+),
 auth in front of cubed/portals (decided: none for now — Tailnet is the boundary).
+Thread-to-thread delivery is specifically deferred; future delivery and
+acknowledgement records belong in cubed, beside the durable transcript.
 
 ## 2. Sandbox backend: Incus
 
@@ -85,7 +87,7 @@ The alternatives weighed before this decision are recorded in
 
 | Need | Solution | Status |
 |---|---|---|
-| Agent loop, context, compaction, sessions | the pi TUI itself, spawned per thread on a host pty | done |
+| Agent loop, model context, run-local compaction | disposable Pi worker hydrated from Cube history | done |
 | Provider auth (Claude Pro/Max, ChatGPT, Copilot, 30+ API providers) | pi `/login` → `~/.pi/agent/auth.json`, auto-refresh | done |
 | Isolated exec environment | Incus system containers (unprivileged, userns) | done |
 | Docker-in-docker for full-stack testing | `security.nesting` + syscall intercepts, overlay2 inner storage | done |
@@ -95,8 +97,9 @@ The alternatives weighed before this decision are recorded in
 | Disk caps | ZFS storage pool quotas (root `size=`, custom volume `size=`) | done |
 | Streaming exec + lifecycle API | Incus REST over unix socket (exec = websocket) | done |
 
-**Cube is the glue layer:** cube lifecycle, persistence, HTTP/WS API, web UI,
-portal proxy, git flow, disk management. Not a new agent and not a new sandbox.
+**Cube is the control plane:** thread and run lifecycle, transcript persistence,
+HTTP API, web UI, portal proxy, git flow, and disk management. Pi remains the
+agent implementation; it does not own the durable product thread.
 
 ## 4. Architecture
 
@@ -104,14 +107,14 @@ portal proxy, git flow, disk management. Not a new agent and not a new sandbox.
 ┌─ VM (one per user — TRUSTED ZONE) ────────────────────────────────┐
 │                                                                   │
 │  systemd --user → cubed  (Node/Bun, one process)                  │
-│   ├── HTTP/WS :7777 — REST + event stream + web UI                │
+│   ├── HTTP :7777 — REST + Cube-owned conversation web UI          │
 │   ├── Portal proxy — Host-routed on the main listener, no ports   │
-│   ├── SQLite  ~/cube/cube.db — cubes, threads, events, portals    │
+│   ├── SQLite  ~/cube/cube.db — threads, messages, runs, lifecycle │
 │   ├── GitService — host-side git, OWNS credentials                │
 │   ├── DiskService — quotas, df monitoring, LRU pruning            │
 │   └── CubeSupervisor                                              │
 │        └── Cube (in-process actor, one per cube)                  │
-│             ├── pi TUI (pty)           ← THE HARNESS, host-side   │
+│             ├── disposable Pi worker (one accepted turn)         │
 │             │    └── every tool → the cube (extension-routed)  ↓   │
 │             └── cube handle (Incus REST over unix socket)         │
 │                                                                   │
@@ -243,19 +246,24 @@ The known failure mode: caches (Gradle especially) grow until the disk is full.
 ## 7. Data model (SQLite)
 
 ```
-cube    (id, name, status, repo, branch, workspace_path, image, size_tier,
-         created_at, last_active_at, wake_hooks_json)
-thread  (id, cube_id, pi_session_path, title, created_at)
-event   (id, thread_id, seq, type, payload_json, ts)   -- append-only
-portal  (id, cube_id, name, target_port, hostname, created_at)
-volume  (id, cube_id, purpose, pool_volume, cap_bytes)
+thread               (id, cube_id, project_id, title, created_at)
+agent_run             (id, thread_id, status, error, timestamps)
+conversation_message  (seq, thread_id, run_id, role, content, payload,
+                       finalized, timestamps)
+event                 (id, thread_id, seq, type, payload_json, ts)
+portal                (id, cube_id, name, target_port, hostname, created_at)
 ```
 
-pi owns the conversation itself (JSONL session with tree/branch/fork). `event`
-mirrors pi's event stream so the UI can replay a thread instantly **without
-waking the cube**. Mirrored events: `agent_start/end`, `turn_start/end`,
-`message_update`, `tool_execution_start/end`, `compaction_start/end`,
-`auto_retry_*`.
+`conversation_message` is the authoritative, append-ordered transcript and can
+be read without waking the environment. One partial unique index permits only
+one queued/running `agent_run` per thread. A worker receives finalized prior
+messages and has an in-memory Pi session; streaming drafts are durable but an
+interrupted draft is not fed to a later worker. Restart marks accepted in-flight
+runs failed instead of replaying potentially side-effecting work.
+
+The sequence cursor and explicit run/message ownership leave room for later
+cubed-owned durable thread-to-thread delivery and acknowledgements. No such
+delivery protocol is implemented yet.
 
 ## 8. Package structure (pnpm monorepo, TypeScript)
 
@@ -263,9 +271,9 @@ waking the cube**. Mirrored events: `agent_start/end`, `turn_start/end`,
 packages/
   sandbox/   Sandbox interface + IncusSandbox; micro-VM backend possible
              later behind the same interface
-  server/    cubed: REST + WS + portal proxy + static files; also owns pi's
-             binary (spawned per thread as the TUI) + the stored-credential
-             check (src/auth.ts)
+  server/    cubed: REST + portal proxy + static files; owns the durable
+             conversation service, disposable Pi workers, and the
+             stored-credential check (src/auth.ts)
   web/       UI (Svelte 5 + Vite, plain SPA — no SvelteKit). Desktop + mobile.
              Decision 2026-08-26 after a research pass (React/Preact, Svelte/
              Solid, Elm): runes' fine-grained updates fit the token-append SSE
@@ -483,10 +491,9 @@ pushed/self-healed like fsops today, held open over one long-lived exec
 websocket speaking JSON-RPC — replaces `fsops.mjs`, drops node from the
 image floor, and gives file tools gondolin-class latency. The fsops op
 set (stat/readdir/glob/grep/resolve) is the v1 protocol.
-Raw live terminal into the cube (subsumes into the 3d pty bridge).
-Scheduling/cron wake. DOM chat renderer over pi session files, if
-dogfooding ever demands richer-than-terminal conversation UI.
-Sub-cubes. Auth if the Tailnet stops being a sufficient boundary. Micro-VM
+Raw live terminal into the cube. Scheduling/cron wake. Rich rendering for
+structured assistant/tool payloads. Cubed-owned durable thread-to-thread
+delivery and acknowledgement. Sub-cubes. Auth if the Tailnet stops being a sufficient boundary. Micro-VM
 backend (kata/gondolin/boxlite) if container isolation proves insufficient.
 
 ## 14. Risk register
@@ -495,7 +502,7 @@ backend (kata/gondolin/boxlite) if container isolation proves insufficient.
 |---|---|---|---|
 | 1 | Container escape reaches host creds (auth.json, git) | Medium | userns + isolated idmap, nosuid workspace, dedicated VM, Tailnet-only; micro-VM backend as plan B |
 | 2 | Incus nesting quirks (AppArmor on 24.04, inner-docker version regressions) | Medium | Spike 1 validates E2E; pin inner Docker 28.x; document host sysctls |
-| 3 | pi is v0.x — breaking changes | Medium | Pin exact version; the daemon touches pi only in `server/src/auth.ts` and the pty spawn |
+| 3 | pi is v0.x — breaking changes | Medium | Pin exact version; isolate its SDK behind the disposable worker protocol |
 | 4 | OAuth refresh fails in long-lived daemon | Medium | Spike 4, explicit re-auth state in UI |
 | 5 | Disk fill from inner images / caches | Medium | ZFS quotas per volume, DiskService monitoring, prune schedules (§6) |
 | 6 | Egress proxy too coarse (non-HTTP protocols blocked) | Low | Acceptable: default deny is the point; add mapped exceptions per cube |

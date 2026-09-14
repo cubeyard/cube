@@ -2,7 +2,7 @@
 
 Two loops, by what you're changing. The **mock loop** develops cubed's own
 logic and UI from inside an ordinary cube (fast, no Incus). The **VM loop**
-validates the real sandbox and the live pi TUI (slow, real Incus).
+validates the real sandbox and disposable Pi workers (slow, real Incus).
 
 See `ARCHITECTURE.md` for the architecture and `HANDOFF.md` for current state.
 For codemode limits, structured errors, and isolated regression tests, see
@@ -96,7 +96,7 @@ folder and TOML against the newly fetched reference commit too. `[network] allow
 
 **What works under the mock:** the HTTP API, the registry (SQLite), thread
 lifecycle + statuses, git seeding / diff / Push / PR, the files shelf, portal
-registry + proxy routing, the whole web shell, and the real pi TUI. The cube
+registry + proxy routing, the whole web shell, and disposable Pi workers. The cube
 extension receives `CUBE_BACKEND=mock`; its file tools and bash/`!` commands
 execute locally against the thread workspace through the same bounded tool
 adapters used by the Incus path. `.cube/setup`, resume, and wake hooks also
@@ -637,7 +637,6 @@ warning level) — `npx --yes shellcheck launcher/cube` locally.
 | `CUBED_SUBNET_MIN` | `10` | first per-cube subnet index; tests reserve higher bands |
 | `CUBED_PORTAL_BASE` | `<tailscale-ip>.sslip.io`, else `127.0.0.1.sslip.io` | portal hostname base (`<svc>--<cube>.<base>`); VM seed supplies the host address |
 | `CUBED_PUBLIC_PORT` | `CUBED_PORT` | port in portal URLs; VM seed supplies the host's forwarded port |
-| `CUBED_PTY_LINGER_MS` | 30m | keep a pi TUI alive this long after the last detach |
 | `CUBED_IMAGE` / `CUBED_POOL` | `cube-node` / `cube` | Incus image + storage pool |
 | `CUBED_ROOT_SIZE` / `CUBED_DOCKER_VOLUME_SIZE` | `10GiB` / `5GiB` | per-cube disk |
 | `CUBED_CUBE_MEMORY` | half the host's RAM (min 1 GiB) | per-thread memory cap (Incus `limits.memory`); a build that hits it is killed inside the thread |

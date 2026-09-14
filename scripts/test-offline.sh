@@ -14,6 +14,7 @@ OFFLINE_TESTS=(
   packages/server/test/portal-proxy-test.ts
   packages/server/test/temporary-portals-test.ts
   packages/server/test/registry-test.ts
+  packages/server/test/conversation-test.ts
   packages/server/test/events-test.ts
   packages/server/test/user-facing-test.ts
   packages/server/test/services-test.ts

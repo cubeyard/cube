@@ -314,6 +314,15 @@ volumes, structured logging, prune schedules.
 - Leverage pi maximally (2026-08-26): thread persistence = pi session files
   (`SessionManager.continueRecent`), no SQLite for conversations; SQLite is
   Phase 2, cubed-metadata only (cube registry, portals, volumes).
+- **Cube-owned threads supersede Pi session authority (2026-09-14):** the
+  terminal-first decision and the preceding persistence decision remain above
+  as history, but are no longer the product architecture. Cubed now persists
+  accepted turns, ordered messages and run lifecycle in SQLite. Each turn uses
+  a fresh in-memory Pi worker hydrated from finalized Cube history; no Pi JSONL
+  is authoritative and no terminal WebSocket is exposed. This restores the
+  earlier native history/prompt/UI direction without restoring its unsafe
+  second long-lived host session or multiple writers. Thread-to-thread delivery
+  is deferred; any later delivery/ack state must be durable and cubed-owned.
 - The unit is called a **cube**, not an orb (2026-08-26). Code, UI, and docs
   say cube; spike artifacts keep their historical orb names.
 - No auth in front of cubed/portals for now; Tailnet is the boundary (2026-08-26).

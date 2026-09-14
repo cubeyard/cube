@@ -118,13 +118,12 @@
   }
 
   // Keyboard: `n` new thread, `g t` threads, `g p` projects — only while
-  // focus is on the panel itself, never inside a field or the terminal
-  // (pi owns every key there).
+  // focus is on the panel itself, never inside an editable field.
   let pendingG = 0;
   function onKeydown(event: KeyboardEvent): void {
     if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
     const target = event.target as HTMLElement | null;
-    if (target?.closest?.("input, textarea, select, [contenteditable], .term-pane")) return;
+    if (target?.closest?.("input, textarea, select, [contenteditable]")) return;
     const now = Date.now();
     const chord = pendingG && now - pendingG < 1500;
     pendingG = 0;

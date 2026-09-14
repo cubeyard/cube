@@ -273,9 +273,9 @@ The app is a full-height flex column (`100dvh`). The thread list keeps the
 centered **47rem** reading measure (`--col`). On desktop, the thread view folds
 global navigation and thread controls into one slim top rail; the active
 `threads` nav label is redundant there and recedes, while `projects` remains a
-direct exit. The pi terminal starts immediately below that rail without a
-second header repeating `thread`. Its full-width two-bay workspace starts
-evenly split between pi and the tabbed workspace panel, then respects the
+direct exit. The Cube-owned conversation starts immediately below that rail
+without a second header repeating `thread`. Its full-width two-bay workspace
+starts evenly split between conversation and changes, then respects the
 visitor's remembered divider position. At 52rem and below, navigation and
 thread controls separate again for touch and wrapping, and the bays stack in
 the same viewport with the conversation receiving the larger share.
@@ -440,8 +440,9 @@ Every thread names its project and links back to that switchboard. Repository
 review is always scoped to the thread's pinned primary checkout. There is no
 repository selector: reference checkouts exist for agent context, not as
 publish targets. The changes pane distinguishes committed, staged, and unstaged
-work. Publication is requested directly in the agent terminal, using its scoped
-host tools; the web UI has no publication panel, fixed runbook, or push-all control.
+work. Publication is requested in the conversation and performed through the
+worker's scoped host tools; the web UI has no publication panel, fixed runbook,
+or push-all control.
 
 ### Composer
 Full-bleed `--s2` deck with the answering seam. Textarea: `--s4` field, 9px
@@ -477,11 +478,9 @@ A tray pulled out under the header: full-bleed `--s1` with the well shadow,
 capped at 40dvh, rows of mono paths with tabular meta, hover washing in 60%
 `--s3`.
 
-### Workspace Tabs and Git Changes
-The thread's right bay starts with a flush raised-key bank containing
-`changes` and `terminal`. The active tab is pressed into `--s1`; the future
-terminal tab shows an honest disconnected state until its own shell PTY lands.
-The seam between the thread and workspace bays is a draggable separator with a
+### Workspace and Git Changes
+The thread's right bay is the primary repository's changes surface. The seam
+between the conversation and workspace bays is a draggable separator with a
 quiet physical grip. Pointer dragging and arrow keys adjust it, Enter restores
 the equal split, and the browser remembers the position. It disappears when
 the bays stack on narrow screens.

@@ -10,6 +10,7 @@
     chevron: "M6.5 9.5 l5.5 5.5 5.5 -5.5",
     file: "M6.5 3.5 H14 l3.5 3.5 V20.5 H6.5 Z M14 3.5 V7 h3.5",
     refresh: "M20 7 V3 l-2.5 2.5 A8 8 0 0 0 4 10 M20 3 h-4 M4 17 v4 l2.5 -2.5 A8 8 0 0 0 20 14 M4 21 h4",
+    arrow: "M12 19 V5 M6.5 10.5 12 5 l5.5 5.5",
   } as const satisfies Record<string, string>;
 
   // keyof-typed: a misspelled icon name fails `pnpm typecheck` instead of

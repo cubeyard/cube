@@ -1,9 +1,8 @@
 import type { EnvironmentProgress } from "../../../server/src/environment-progress.ts";
 export type { EnvironmentProgress };
 /**
- * UI-side shapes, mirroring cubed's thread-first API responses. The
- * conversation itself has no shapes here: it is the pi TUI streaming over
- * the terminal WebSocket — cubed (and this UI) never model chat.
+ * UI-side shapes mirroring cubed's thread-first API responses, including the
+ * Cube-owned durable conversation.
  */
 
 export type AuthState =
@@ -127,12 +126,27 @@ export interface WorkspaceListing {
   truncated: boolean;
 }
 
-/** Text control frames on the terminal WebSocket (binary frames are raw
- * pty output). */
-export type TerminalControlFrame =
-  | { t: "status"; text: string; progress?: EnvironmentProgress }
-  | { t: "spawned" }
-  /** Joined a live process; `replay` says a scrollback tail follows. */
-  | { t: "attached"; replay: boolean }
-  | { t: "exit"; code: number | null }
-  | { t: "error"; text: string };
+export interface ConversationMessage {
+  seq: number;
+  runId: string;
+  role: "user" | "assistant" | "tool";
+  content: string;
+  payload: unknown;
+  finalized: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AgentRun {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed";
+  error: string | null;
+  createdAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+}
+
+export interface ConversationHistory {
+  messages: ConversationMessage[];
+  run: AgentRun | null;
+}

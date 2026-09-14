@@ -1,7 +1,7 @@
 /**
  * cubed — Phase 2 slices 2+3. Multiple cubes (SQLite registry +
- * CubeSupervisor, one egress proxy per cube), multiple threads per cube (one
- * pi session file each), sleep/wake (idle default 1h; prompts wake the cube;
+ * CubeSupervisor, one egress proxy per cube), Cube-owned durable conversations
+ * with disposable Pi workers, sleep/wake (idle default 1h; prompts wake the cube;
  * POST /api/cubes/:name/{sleep,wake} for manual control). Portals proxying
  * is Phase 3.
  */
@@ -11,18 +11,17 @@ import os from "node:os";
 import path from "node:path";
 import stream from "node:stream";
 
-import { WebSocketServer, type WebSocket } from "ws";
-
+import { Effect } from "effect";
 import { IncusBackend, MockBackend, validateCaBundle, type CubeBackend } from "@cube/sandbox";
 
 import { checkAuth } from "./auth.ts";
+import { Conversations, ConversationError } from "./conversation.ts";
 import { formatEventLine, recordPoint } from "./events.ts";
 import { GithubAuth, GithubUnreachableError } from "./github-auth.ts";
 import { createLogger } from "./log.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { defaultPortalBase } from "./portal-config.ts";
-import { guardUpgradeSocket, portalLabel, proxyHttp, proxyUpgrade, refuseUpgrade, respondFailed, respondMissing, respondWaking, sameOriginUpgrade, upgradeAfterWake } from "./portal-proxy.ts";
-import { PiTerminals } from "./pty.ts";
+import { guardUpgradeSocket, portalLabel, proxyHttp, proxyUpgrade, refuseUpgrade, respondFailed, respondMissing, respondWaking, upgradeAfterWake } from "./portal-proxy.ts";
 import { Registry } from "./registry.ts";
 import { CubeSupervisor, DEFAULT_EGRESS_ALLOW } from "./supervisor.ts";
 import { sanitizeMessage } from "./user-facing.ts";
@@ -107,36 +106,18 @@ if (process.env.CUBED_WORKSPACE) {
 await supervisor.boot();
 
 
-// The pty bridge: one real pi TUI per attached thread (ARCHITECTURE §13 3d.2).
-const terminals = new PiTerminals(
-  {
-    plan: (id, onStatus) =>
-      supervisor.terminalPlan(id, onStatus).catch((error) => {
-        throw new Error(sanitizeMessage(error instanceof Error ? error.message : String(error)));
-      }),
-    progress: (id) => supervisor.terminalProgressForUserThread(id),
-    activity: (id) => supervisor.touchUserThread(id),
-    event: (e) => {
-      let cube: string | null = null;
-      try {
-        cube = supervisor.resolveUserThread(e.thread).cubeName;
-      } catch {
-        // thread already gone (deleted while the pty was still up)
-      }
-      registry.recordEvent({ kind: "terminal", phase: e.phase, cube, thread: e.thread, ok: e.ok, ms: e.ms ?? null, detail: e.detail ?? null });
+const conversations = new Conversations(registry, {
+  plan: (id) => Effect.tryPromise({
+    try: async () => {
+      return supervisor.agentWorkerPlan(id, () => {});
     },
-  },
-  { lingerMs: parseLingerMs(process.env.CUBED_PTY_LINGER_MS) },
-);
-
-function parseLingerMs(raw: string | undefined): number | undefined {
-  if (raw === undefined) return undefined;
-  const ms = Number(raw);
-  if (!Number.isFinite(ms) || ms < 0) {
-    throw new Error(`CUBED_PTY_LINGER_MS must be a non-negative number (ms), got: ${raw}`);
-  }
-  return ms;
-}
+    catch: (cause) => new ConversationError({
+      message: sanitizeMessage(cause instanceof Error ? cause.message : String(cause)),
+      cause,
+    }),
+  }),
+  activity: (id) => Effect.sync(() => supervisor.touchUserThread(id)),
+});
 
 // Built Svelte SPA (pnpm build). The daemon itself stays build-free.
 const WEB_ROOT = path.resolve(import.meta.dirname, "../../web/dist");
@@ -165,7 +146,7 @@ function fail(res: http.ServerResponse, error: unknown, sanitize = false, route?
   let message = error instanceof Error ? error.message : String(error);
   const status = /no such/.test(message)
     ? 404
-    : /already exists|busy|not ready|thread is archived|thread must be ready|has no threads|not deletable|has no project repositories|still has threads|still checking|detached HEAD|still setting up/.test(
+    : /already exists|already working|busy|not ready|thread is archived|thread must be ready|has no threads|not deletable|has no project repositories|still has threads|still checking|detached HEAD|still setting up/.test(
           message,
         )
       ? 409
@@ -670,13 +651,8 @@ async function api(
     return json(res, 404, { error: "not found" });
   }
 
-  // No history/prompt/events anywhere: the thread's conversation IS its pi
-  // TUI (the /pty WebSocket). A second, in-process pi session would write
-  // the same JSONL the TUI owns and — on the credentialed host with the
-  // workspace as cwd — hand out host-side file tools to whoever can reach
-  // the port. The pi spawn passes --no-context-files for the same reason.
   const userThread = url.pathname.match(
-    /^\/api\/threads\/([^/]+)(?:\/(files|services|portals|archive|environment)(?:\/(.+))?)?$/,
+    /^\/api\/threads\/([^/]+)(?:\/(history|prompt|files|services|portals|archive|environment)(?:\/(.+))?)?$/,
   );
   if (userThread) {
     const id = decodeId(userThread[1]!);
@@ -685,10 +661,9 @@ async function api(
     if (userThread[3] !== undefined && action !== "files" && action !== "portals") return json(res, 404, { error: "not found" });
     if (!action) {
       if (method === "DELETE") {
-        // Removal can refuse (409 mid-wake/push); only a thread that is
-        // actually gone loses its pi TUI.
+        // Stop the disposable worker before deleting its durable owner.
+        await Effect.runPromise(conversations.cancelThread(id));
         await supervisor.removeUserThread(id);
-        terminals.kill(id);
         return json(res, 200, { ok: true });
       }
       if (method === "PATCH") {
@@ -704,6 +679,26 @@ async function api(
         return json(res, 200, { ok: true });
       }
       return json(res, 404, { error: "not found" });
+    }
+    if (action === "history") {
+      if (method !== "GET") return json(res, 404, { error: "not found" });
+      const after = Number(url.searchParams.get("after") ?? 0);
+      if (!Number.isSafeInteger(after) || after < 0) return json(res, 400, { error: "after must be a non-negative integer" });
+      const history = conversations.history(id, after);
+      return json(res, 200, {
+        ...history,
+        run: history.run ? { ...history.run, error: history.run.error ? sanitizeMessage(history.run.error) : null } : null,
+      });
+    }
+    if (action === "prompt") {
+      if (method !== "POST") return json(res, 404, { error: "not found" });
+      let text: string;
+      try { text = String(JSON.parse(await readBody(req)).text ?? "").trim(); }
+      catch { return json(res, 400, { error: "invalid JSON body" }); }
+      if (!text) return json(res, 400, { error: "empty prompt" });
+      if (text.length > 100_000) return json(res, 400, { error: "prompt is too long" });
+      const accepted = await Effect.runPromise(conversations.submit(id, text));
+      return json(res, 202, accepted);
     }
     if (action === "environment") {
       if (method === "GET") return json(res, 200, supervisor.environmentForUserThread(id));
@@ -783,14 +778,11 @@ async function api(
       return json(res, 200, { ...summary, threads: supervisor.listThreads(cubeName) });
     }
     if (method === "DELETE") {
-      // Reap any live pi TUIs on this cube's threads first — the user-thread
-      // DELETE does this per thread; the cube-scoped route must too, or a
-      // credentialed pi process (and its WS) outlives the destroyed cube.
       const threadIds = supervisor.listThreads(cubeName).map((thread) => thread.id);
+      await Effect.runPromise(Effect.forEach(threadIds, (id) => conversations.cancelThread(id), { discard: true }));
       await supervisor.removeCube(cubeName, {
         deleteVolume: url.searchParams.get("volumes") === "1",
       });
-      for (const id of threadIds) terminals.kill(id);
       return json(res, 200, { ok: true });
     }
   }
@@ -847,10 +839,8 @@ function serveWorkspaceFile(res: http.ServerResponse, root: string, rel: string)
   stream.pipe(res);
 }
 
-// Upgrades: portal hosts pass straight through to the cube service; on
-// cubed's own host, the only WebSocket is the thread terminal.
-const wss = new WebSocketServer({ noServer: true });
-
+// Upgrades are portal plumbing only. Cube's conversation UI is HTTP and no
+// longer exposes a credentialed terminal WebSocket.
 server.on("upgrade", (req, socket, head) => {
   // From here the socket is ours: node has already dropped its own error
   // listener, so a reset before we destroy, refuse or proxy it would be
@@ -858,29 +848,7 @@ server.on("upgrade", (req, socket, head) => {
   guardUpgradeSocket(socket);
   const label = portalLabel(req.headers.host, PORTAL_BASE);
   if (label === null) {
-    // Same boundary as the request path: the firewall admits cubes here
-    // for portals only — a rooted agent must not reach thread terminals.
-    if (cubeSourceIp(req.socket.remoteAddress)) return void socket.destroy();
-    // WebSockets are exempt from the browser same-origin policy, so a
-    // terminal that opens on a bare UUID is a cross-site hijack primitive
-    // (any page could attach, read the transcript, inject keystrokes).
-    // Require same-origin: a browser always sends Origin; its host must
-    // match the request Host. A non-browser client (no Origin) is fine.
-    if (!sameOriginUpgrade(req.headers.origin, req.headers.host)) return void socket.destroy();
-    const url = new URL(req.url ?? "/", "http://localhost");
-    const match = url.pathname.match(/^\/api\/threads\/([^/]+)\/pty$/);
-    if (!match) return void socket.destroy();
-    let threadId: string;
-    try {
-      threadId = decodeId(match[1]!);
-      supervisor.resolveUserThread(threadId); // 404s die before the upgrade
-    } catch {
-      return void socket.destroy();
-    }
-    const size = (key: string) => Number(url.searchParams.get(key) ?? NaN);
-    return void wss.handleUpgrade(req, socket, head, (ws) =>
-      attachTerminal(threadId, ws, size("cols"), size("rows")),
-    );
+    return void socket.destroy();
   }
   const target = supervisor.resolvePortal(label);
   // Same isolation as the request path: own portals only for cube sources
@@ -925,60 +893,7 @@ server.on("upgrade", (req, socket, head) => {
   });
 });
 
-/** A client that stops reading must not become a host-memory leak: the pty
- * keeps producing regardless, and ws queues every unsent frame. Past this
- * much buffered output the socket is declared dead and dropped (the client
- * reconnects and gets the scrollback replay). */
-const WS_BUFFER_CAP = 4 * 1024 * 1024;
-
-/** One terminal WebSocket: binary frames down are raw pty output, text
- * frames down are JSON control; text frames up are JSON input/resize. */
-function attachTerminal(threadId: string, ws: WebSocket, cols: number, rows: number): void {
-  const handle = terminals.attach(
-    threadId,
-    {
-      send: (data) => {
-        if (ws.readyState !== ws.OPEN) return;
-        if (ws.bufferedAmount > WS_BUFFER_CAP) return void ws.terminate();
-        ws.send(data);
-      },
-      close: () => ws.close(),
-    },
-    cols,
-    rows,
-  );
-  ws.on("message", (data, isBinary) => {
-    if (isBinary) return; // protocol violation — input is JSON text frames
-    let frame: { t?: string; data?: unknown; cols?: unknown; rows?: unknown };
-    try {
-      frame = JSON.parse(data.toString("utf8"));
-    } catch {
-      return;
-    }
-    if (frame.t === "input" && typeof frame.data === "string") handle.input(frame.data);
-    else if (frame.t === "resize") handle.resize(Number(frame.cols), Number(frame.rows));
-  });
-  // Liveness: a laptop that sleeps or drops off the Tailnet never sends a
-  // close frame, so without this the client stays "attached" forever and the
-  // linger reap never arms — leaving a credentialed pi process running.
-  let alive = true;
-  ws.on("pong", () => (alive = true));
-  const heartbeat = setInterval(() => {
-    if (!alive) return void ws.terminate();
-    alive = false;
-    ws.ping();
-  }, 30_000);
-  heartbeat.unref();
-  const detach = () => {
-    clearInterval(heartbeat);
-    handle.detach();
-  };
-  ws.on("close", detach);
-  ws.on("error", detach);
-}
-
-// A stray rejection must not take every thread's terminal down with the
-// daemon; log it and stay up.
+// A stray rejection must not take every thread down with the daemon.
 process.on("unhandledRejection", (reason) => log.error("unhandled rejection", { error: reason }));
 
 server.listen(PORT, () => log.info("listening", { url: `http://localhost:${PORT}`, portals: `*.${PORTAL_BASE}` }));

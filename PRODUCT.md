@@ -94,8 +94,9 @@ Confirmed today:
   the writable primary checkout is `/workspace`, with read-only reference
   checkouts at `../repos/<checkout-name>` (guest paths
   `/repos/<checkout-name>`).
-- The thread view embeds the real pi TUI over a terminal WebSocket. Cube does
-  not model or render a parallel chat transcript.
+- The thread view is Cube's native web conversation: a durable transcript,
+  browser-native selectable text, and a multiline composer. Cube accepts and
+  records each turn before starting a replaceable Pi worker.
 - Primary-repository review in the thread view: inspect committed, staged,
   and unstaged changes. Publication is requested directly through the agent;
   there is no dedicated publish button or automatic runbook. Host-scoped tools
@@ -105,21 +106,23 @@ Confirmed today:
   services.
 - Provider auth state surfaced from the host (`pi` owns login; cube only
   reports it — signed out is fixed by running `pi` on the host, not in the UI).
-- History survives daemon restarts; the UI reattaches to the live stream.
+- History survives daemon restarts because SQLite, not a Pi session file, is
+  authoritative. Interrupted runs are shown as failed and are never replayed
+  automatically.
 
 Constraints:
 
 - Svelte 5 + Vite SPA in `packages/web`, hash routing, token-based CSS in
   `app.css`. Node backend packages carry no UI.
-- pi owns the agent loop, session persistence, compaction, provider auth, and
-  the model catalog. Cube is glue: lifecycle, persistence, HTTP/WS API, web UI,
-  portal proxy, git flow, disk management. Before designing a capability, check
-  whether pi already provides it.
+- pi owns each agent loop, compaction within a run, provider auth, and the model
+  catalog. Cube owns thread identity, accepted turns, transcript persistence,
+  run lifecycle, HTTP API, and UI. A Pi process is a disposable worker hydrated
+  from the Cube transcript, never the thread's source of truth.
 - No authentication in front of the daemon or portals — the Tailnet is the
   boundary. The UI must not imply a login or account model it does not have.
 - Deliberately out of scope: multiplayer, team platform, clustering, Slack,
-  webhooks from the internet, sub-agents messaging each other, and a separate
-  general-purpose shell outside the pi TUI.
+  webhooks from the internet, thread-to-thread delivery, and a general-purpose
+  shell. A later durable delivery/ack protocol must be owned by cubed.
 
 Undecided:
 

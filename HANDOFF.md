@@ -1,7 +1,7 @@
 # Handoff
 
 Short operational context for the next session, not a release log. Updated
-2026-09-10; live verification below is the last recorded evidence, not a fresh
+2026-09-14; live verification below is the last recorded evidence, not a fresh
 launch sign-off. Completed phase reports and review histories remain in Git.
 
 ## Start here
@@ -18,8 +18,10 @@ launch sign-off. Completed phase reports and review histories remain in Git.
   alternatives, the phase plan and the decision log — historical, not a
   checklist.
 
-Leverage pi rather than rebuilding it: pi owns the agent loop, JSONL session
-history, compaction, provider auth/refresh, model catalog and tool definitions.
+Leverage pi rather than rebuilding it: pi owns each agent loop, run-local
+compaction, provider auth/refresh, model catalog and tool definitions. Cube owns
+thread identity, durable history and run lifecycle; Pi processes are disposable
+workers, not sessions of record.
 Development credentials and account status are machine-local; never record
 them here.
 
@@ -124,6 +126,13 @@ before thread creation, snapshotted per cube
 maps it to host and guest paths. `[network] allow` in `cube.toml` extends the
 egress allowlist and is re-read at every proxy start (`startProxy`).
 
+The thread conversation is an append-ordered SQLite transcript with one durable
+run record per accepted user turn. The web UI reads that transcript and uses a
+native multiline composer. Each run starts a fresh in-memory Pi worker hydrated
+from finalized prior messages; daemon restart fails in-flight work rather than
+replaying side effects. Thread-to-thread messaging remains deferred. Its future
+delivery and acknowledgement state must live in cubed, not in a worker session.
+
 Threads are the home, newest-first across projects, with a URL-backed project
 filter and explicit project/name attribution. Do not use a pre-project populated
 database: startup refuses to invent project ownership.
@@ -204,8 +213,8 @@ changes; mock success is not sandbox acceptance. See DEVELOPING.md for commands.
 - Cubes have no default route/NAT; egress goes through a source-pinned allowlist
   proxy that resolves and vets public IPs. NIC IP/MAC filtering and bridge-forward
   drops are essential. Upstream DNS forwarding remains an accepted exfil channel.
-- Loopback or a trusted Tailnet is the access boundary; terminal WebSockets are
-  same-origin and portals are cube-source-guarded. Never use a `*.localhost`
+- Loopback or a trusted Tailnet is the access boundary; conversation APIs are
+  served by cubed and portals are cube-source-guarded. Never use a `*.localhost`
   portal base: it breaks in-cube hairpin access.
 - Wake waits for network readiness, not merely Incus `Running`, and restarts
   the egress proxy. Reserve per-cube transitions synchronously; set busy before

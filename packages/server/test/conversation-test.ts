@@ -1,0 +1,88 @@
+/** Durable Cube transcript across replaceable agent worker processes. */
+import assert from "node:assert";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { Effect } from "effect";
+
+import { Conversations } from "../src/conversation.ts";
+import { Registry } from "../src/registry.ts";
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-conversation-"));
+const worker = path.join(root, "worker.mjs");
+fs.writeFileSync(worker, `
+import fs from "node:fs";
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+const text = "history:" + request.messages.length + " prompt:" + request.prompt;
+const emit = (event) => fs.writeSync(3, JSON.stringify(event) + "\\n");
+emit({ type: "text_delta", delta: "checking" });
+emit({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "checking" }], timestamp: Date.now() } });
+emit({ type: "message", message: { role: "toolResult", toolName: "read", content: [{ type: "text", text: "tool output" }], timestamp: Date.now() } });
+emit({ type: "text_delta", delta: text.slice(0, 8) });
+emit({ type: "text_delta", delta: text.slice(8) });
+emit({ type: "message", message: { role: "assistant", content: [{ type: "text", text }], timestamp: Date.now() } });
+emit({ type: "complete" });
+`);
+
+const registry = new Registry(path.join(root, "cubed.db"));
+const project = registry.createProject({
+  id: "project",
+  name: "project",
+  repositories: [{ id: "repo", url: "https://example.test/repo", base: null, checkoutName: "workspace" }],
+});
+const cube = registry.createCube({ name: "threadtest", image: "image", workspacePath: root });
+registry.addThread({ id: "thread", cubeId: cube.id, projectId: project.id, piSessionPath: path.join(root, "unused.jsonl") });
+
+let activity = 0;
+const conversations = new Conversations(registry, {
+  plan: () => Effect.succeed({ cwd: root, env: { ...process.env } }),
+  activity: () => Effect.sync(() => { activity++; }),
+}, { worker, extension: "/unused-extension.ts" });
+
+const waitForRun = Effect.fnUntraced(function*(id: string) {
+  for (;;) {
+    const run = registry.getAgentRun(id)!;
+    if (run.status === "completed" || run.status === "failed") return run;
+    yield* Effect.sleep("10 millis");
+  }
+});
+
+await Effect.runPromise(Effect.gen(function*() {
+  const first = yield* conversations.submit("thread", "first\nmultiline");
+  assert.equal((yield* conversations.submit("thread", "overlap").pipe(Effect.result))._tag, "Failure");
+  assert.equal((yield* waitForRun(first.runId)).status, "completed");
+  assert.deepEqual(
+    conversations.history("thread").messages.map((message) => [message.role, message.content]),
+    [
+      ["user", "first\nmultiline"],
+      ["assistant", "checking"],
+      ["tool", "tool output"],
+      ["assistant", "history:0 prompt:first\nmultiline"],
+    ],
+  );
+
+  const second = yield* conversations.submit("thread", "second");
+  assert.equal((yield* waitForRun(second.runId)).status, "completed");
+  assert.deepEqual(
+    conversations.history("thread").messages.map((message) => [message.role, message.content]),
+    [
+      ["user", "first\nmultiline"],
+      ["assistant", "checking"],
+      ["tool", "tool output"],
+      ["assistant", "history:0 prompt:first\nmultiline"],
+      ["user", "second"],
+      ["assistant", "checking"],
+      ["tool", "tool output"],
+      ["assistant", "history:4 prompt:second"],
+    ],
+  );
+  assert.equal(activity, 4, "each worker run marks activity before and after");
+  yield* conversations.close();
+}));
+
+registry.close();
+fs.rmSync(root, { recursive: true, force: true });
+console.log("conversation-test: all ok");
