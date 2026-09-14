@@ -288,6 +288,56 @@ git(upstream, "update-ref", "-d", "refs/heads/cube/test1");
 const GH_URL = "https://github.com/x/y.git";
 const rewriteGitToLocal = (file: string, args: string[]) =>
   file === "git" ? args.map((a) => (a === GH_URL ? upstream : a)) : args;
+
+// A branch named by PR metadata is imported without inspecting patches/history
+// or switching the workspace branch.
+{
+  const prBranch = "fix/conflicts";
+  git(upstream, "update-ref", `refs/heads/${prBranch}`, git(ws, "rev-parse", "HEAD"));
+  const prHead = git(upstream, "rev-parse", `refs/heads/${prBranch}`);
+  const calls: Array<{ file: string; args: string[] }> = [];
+  const syncService = new GitService(path.join(tmp, "repos-sync-pr"), (file, args, opts) => {
+    calls.push({ file, args });
+    return defaultRunner(file, rewriteGitToLocal(file, args), opts);
+  });
+  const syncWs = path.join(tmp, "ws-sync-pr");
+  await syncService.seedWorkspace({ url: GH_URL, workspacePath: syncWs, base: "main", branch: "cube/reader" });
+  calls.length = 0;
+  assert.deepEqual(await syncService.syncBranch(syncWs, GH_URL, prBranch), { branch: prBranch, oid: prHead });
+  assert.equal(git(syncWs, "rev-parse", "--abbrev-ref", "HEAD"), "cube/reader");
+  assert.equal(git(syncWs, "rev-parse", `refs/remotes/origin/${prBranch}`), prHead);
+  const remoteFetch = calls.find((call) => call.file === "git" && call.args.includes(GH_URL) && call.args.includes("fetch"))!;
+  assert.ok(remoteFetch.args.includes(`+refs/heads/${prBranch}:refs/heads/${prBranch}`));
+  assert.equal(remoteFetch.args.filter((arg) => arg.startsWith("+refs/heads/")).length, 1,
+    "only the requested branch is fetched from the remote");
+  assert.ok(!calls.some((call) => call.file === "gh"), "branch transfer does not perform another PR lookup");
+  assert.ok(!calls.some((call) => call.args.some((arg) => ["diff", "log", "rev-list"].includes(arg))),
+    "syncing a branch must not read its diff or history");
+
+  git(syncWs, "checkout", "-b", prBranch, `origin/${prBranch}`);
+  fs.writeFileSync(path.join(syncWs, "rewritten.txt"), "approved rewrite\n");
+  git(syncWs, ...cfg, "add", "rewritten.txt");
+  git(syncWs, ...cfg, "commit", "--amend", "--no-edit");
+  await syncService.push(syncWs, GH_URL, undefined, undefined, { forceWithLease: prHead });
+  const rewritten = git(syncWs, "rev-parse", "HEAD");
+  assert.equal(git(upstream, "rev-parse", `refs/heads/${prBranch}`), rewritten);
+
+  fs.writeFileSync(path.join(syncWs, "rewritten.txt"), "stale rewrite\n");
+  git(syncWs, ...cfg, "add", "rewritten.txt");
+  git(syncWs, ...cfg, "commit", "--amend", "--no-edit");
+  await assert.rejects(
+    syncService.push(syncWs, GH_URL, undefined, undefined, { forceWithLease: prHead }),
+    /stale info|rejected/,
+  );
+  assert.equal(git(upstream, "rev-parse", `refs/heads/${prBranch}`), rewritten,
+    "stale force-with-lease must not change the remote");
+
+  calls.length = 0;
+  await assert.rejects(syncService.syncBranch(syncWs, GH_URL, "../other"), /invalid remote branch/);
+  assert.deepEqual(calls, [], "invalid branch stops before Git transfer");
+  console.log("6b ok: targeted branch sync plus force-with-lease; stale lease leaves remote unchanged");
+}
+
 const ghCalls: string[][] = [];
 const intercept: ProcessRunner = (file, args, opts) => {
   if (file === "gh") {
@@ -418,6 +468,8 @@ assert.match(policy, /Local security guards/);
 assert.match(policy, /GitHub branch protection and rulesets/);
 assert.match(policy, /Only GitHub can enforce these against every\s+writer/);
 assert.match(policy, /process that controls its checkout can bypass or\s+replace them/);
+assert.match(policy, /force_push = "confirm"/);
+assert.match(policy, /does\s+not expose unconditional force-push/);
 console.log("12 ok: policy documentation distinguishes Cube, local, and GitHub enforcement");
 
 fs.rmSync(tmp, { recursive: true, force: true });

@@ -415,9 +415,14 @@ Credentials never leave the host.
    network policy. That is the boundary, not a bug: push is an explicit host
    action via `GitService`.
 4. The agent uses `cube.git.pushBranch` for both initial publication and updates
-   to an existing PR branch. Cube adds no PR lookup or review gate. Creating a
-   new PR is the only interactive confirmation point, immediately before the
-   host runs the push and `gh pr create`.
+   to an existing PR branch. It reads targeted PR metadata with
+   `cube.github.read`, then can transfer the named head/base branches from the
+   host mirror with `cube.git.syncBranch`; checkout and conflict resolution
+   remain ordinary local Git. Branch sync does not generate diffs, ingest
+   history/reviews, or add a review gate. Interactive confirmation occurs only
+   immediately before creating a new PR or an explicitly requested
+   force-with-lease history rewrite. Ordinary existing-PR updates stay
+   unprompted; unconditional force is unavailable.
 
 **Hostile-workspace model (implemented 3c; sol review 2026-08-27).** The
 workspace `.git` is agent- and (with repo-attach) upstream-controlled, so

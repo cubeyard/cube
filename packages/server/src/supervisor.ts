@@ -1870,13 +1870,18 @@ export class CubeSupervisor {
   }
 
   /** Push the primary repository's current branch to its upstream (host creds). */
-  async pushUserThread(id: string, repositoryId: number, signal?: AbortSignal): Promise<string> {
+  async pushUserThread(
+    id: string,
+    repositoryId: number,
+    signal?: AbortSignal,
+    options: { forceWithLease?: string } = {},
+  ): Promise<string> {
     const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
     await this.config.github?.ensureFresh();
     signal?.throwIfAborted();
     this.requireSeeded(cube, repository);
     return this.withGitOp(cube.name, "push", () =>
-      this.git.push(repository.workspacePath, repository.url, undefined, signal),
+      this.git.push(repository.workspacePath, repository.url, undefined, signal, options),
     );
   }
 
@@ -1895,6 +1900,23 @@ export class CubeSupervisor {
       this.git.syncBase(repository.workspacePath, repository.url, repository.base, signal),
     );
     return { base: repository.base, oid };
+  }
+
+  /** Import one primary-repository branch without checking out, reviewing, or
+   * publishing anything. The agent handles PR lookup and conflicts locally. */
+  async syncBranchForUserThread(
+    id: string,
+    repositoryId: number,
+    branch: string,
+    signal?: AbortSignal,
+  ) {
+    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
+    await this.config.github?.ensureFresh();
+    signal?.throwIfAborted();
+    this.requireSeeded(cube, repository);
+    return this.withGitOp(cube.name, "sync-branch", () =>
+      this.git.syncBranch(repository.workspacePath, repository.url, branch, signal),
+    );
   }
 
   /** Publish HEAD to the repository's configured base. This is deliberately

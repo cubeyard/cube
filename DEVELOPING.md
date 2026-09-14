@@ -180,14 +180,17 @@ and `cube upgrade` keep working; it records what it shipped in
 Use ordinary local Git for commits, review, rebases, and conflict resolution.
 `cube.git.pushBranch` performs the same non-forced host-side push for a new
 branch and an existing PR branch; it does not query PR metadata or ingest a
-diff. `cube.git.pushBase` differs only in its destination ref.
+diff. `cube.github.read` plus `cube.git.syncBranch` supplies targeted existing
+PR metadata and branches without a review transaction. `cube.git.pushBase`
+differs only in its destination ref.
 
-`cube.git.createPr` is the single confirmation boundary. The pi extension asks
-the user immediately before the host call, then the server pushes the branch
-and runs `gh pr create`. Declining does not reach the server. GitHub remains the
-authority for non-fast-forward rejection, branch protection, rulesets, checks,
-and required reviews. See [the Git workflow guide](docs/git-workflows.md) for
-the policy boundary and a deliberately small declarative direction.
+The pi extension asks the user immediately before `cube.git.createPr` reaches
+the host. It does the same for an explicit `pushBranch` force-with-lease; normal
+pushes remain unprompted, unconditional force is unavailable, and a stale lease
+is rejected by Git. Declining does not reach the server. GitHub remains the
+authority for branch protection, rulesets, checks, and required reviews. See
+[the Git workflow guide](docs/git-workflows.md) for the policy boundary and a
+deliberately small declarative direction.
 
 ### VM host requirements and persistent state
 

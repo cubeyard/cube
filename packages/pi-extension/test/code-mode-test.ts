@@ -38,8 +38,12 @@ const host: CodeCapabilityHost = {
     hostCalls.push({ operation: "syncBase", value: repositoryId });
     return { base: "main", oid: "abc123" };
   },
-  async pushBranch(repositoryId) {
-    hostCalls.push({ operation: "pushBranch", value: repositoryId });
+  async syncBranch(repositoryId, branch) {
+    hostCalls.push({ operation: "syncBranch", value: { repositoryId, branch } });
+    return { branch, oid: "def456" };
+  },
+  async pushBranch(repositoryId, options) {
+    hostCalls.push({ operation: "pushBranch", value: { repositoryId, options } });
     return { branch: "cube-work" };
   },
   async pushBase(repositoryId) {
@@ -81,10 +85,16 @@ const host: CodeCapabilityHost = {
 };
 let allowPrCreation = true;
 let confirmations = 0;
+let allowForcePush = true;
+let forceConfirmations = 0;
 const capability = createCodeCapability(host, async (signal) => {
   assert.equal(signal.aborted, false);
   confirmations += 1;
   return allowPrCreation;
+}, async (signal) => {
+  assert.equal(signal.aborted, false);
+  forceConfirmations += 1;
+  return allowForcePush;
 });
 
 assert.deepEqual((await runCodeMode({
@@ -94,6 +104,13 @@ assert.deepEqual((await runCodeMode({
 await assert.rejects(capability("github.read", { number: 12, type: "issue", page: 0 }, new AbortController().signal), /positive integer/);
 await assert.rejects(capability("git.createPr", { repositoryId: 0 }, new AbortController().signal), /positive integer/);
 assert.equal(confirmations, 0, "invalid PR requests must fail before asking the user");
+assert.deepEqual((await runCodeMode({
+  source: 'return await cube.git.syncBranch(7, "fix/conflicts");',
+  call: capability,
+})).value, { branch: "fix/conflicts", oid: "def456" });
+assert.deepEqual(hostCalls.pop(), { operation: "syncBranch", value: { repositoryId: 7, branch: "fix/conflicts" } });
+assert.equal(confirmations, 0, "existing PR branch sync must not ask for confirmation");
+await assert.rejects(capability("git.syncBranch", { repositoryId: 7, branch: 20 }, new AbortController().signal), /branch must be a string/);
 
 for (const removed of [
   "git.preparePrUpdate",
@@ -209,6 +226,29 @@ allowPrCreation = true;
 console.log("4a ok: declining PR confirmation causes no host-side publication");
 
 hostCalls.length = 0;
+assert.deepEqual((await runCodeMode({ source: "return await cube.git.pushBranch(7);", call: capability })).value,
+  { branch: "cube-work" });
+assert.equal(forceConfirmations, 0, "ordinary push must not ask for confirmation");
+await assert.rejects(
+  capability("git.pushBranch", { repositoryId: 7, forceWithLease: "short" }, new AbortController().signal),
+  /full commit ID/,
+);
+assert.equal(forceConfirmations, 0, "invalid leases fail before confirmation");
+hostCalls.length = 0;
+allowForcePush = false;
+const lease = "a".repeat(40);
+await assert.rejects(
+  runCodeMode({ source: `return await cube.git.pushBranch(7, { forceWithLease: "${lease}" });`, call: capability }),
+  /cancelled by user/,
+);
+assert.deepEqual(hostCalls, [], "declined force-with-lease must stop before the host call");
+allowForcePush = true;
+await runCodeMode({ source: `return await cube.git.pushBranch(7, { forceWithLease: "${lease}" });`, call: capability });
+assert.deepEqual(hostCalls, [{ operation: "pushBranch", value: { repositoryId: 7, options: { forceWithLease: lease } } }]);
+assert.equal(forceConfirmations, 2);
+console.log("4b ok: only valid force-with-lease pushes require explicit confirmation");
+
+hostCalls.length = 0;
 const environment = await runCodeMode({
   source: `return { status: await cube.environment.status(), retry: await cube.environment.retrySetup() };`,
   call: capability,
@@ -218,7 +258,7 @@ assert.deepEqual(environment.value, {
   retry: { accepted: true },
 });
 assert.deepEqual(hostCalls.map((call) => call.operation), ["environmentStatus", "retryEnvironmentSetup"]);
-console.log("4b ok: environment SDK and capability dispatch");
+console.log("4c ok: environment SDK and capability dispatch");
 
 hostCalls.length = 0;
 const never = new AbortController().signal;
@@ -255,7 +295,7 @@ for (const input of [
   await assert.rejects(capability("portals.expose", input, never), /port must|name must|exceeds 80|lifetime must/);
 }
 await assert.rejects(capability("portals.remove", { port: -1 }, never), /port must/);
-console.log("4c ok: temporary portal SDK dispatch and validation");
+console.log("4d ok: temporary portal SDK dispatch and validation");
 
 // ---- 5. Dispatcher validation is fail-closed -----------------------------
 

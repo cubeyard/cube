@@ -23,7 +23,8 @@ export interface CodeCapabilityHost {
   listRepositories(signal: AbortSignal): Promise<unknown[]>;
   readGithub(input: { number: number; type: string; section?: string; page?: number }, signal: AbortSignal): Promise<unknown>;
   syncBase(repositoryId: number, signal: AbortSignal): Promise<unknown>;
-  pushBranch(repositoryId: number, signal: AbortSignal): Promise<unknown>;
+  syncBranch(repositoryId: number, branch: string, signal: AbortSignal): Promise<unknown>;
+  pushBranch(repositoryId: number, options: { forceWithLease?: string }, signal: AbortSignal): Promise<unknown>;
   pushBase(repositoryId: number, signal: AbortSignal): Promise<unknown>;
   createPr(
     repositoryId: number,
@@ -88,6 +89,7 @@ function portalPort(value: unknown): number {
 export function createCodeCapability(
   host: CodeCapabilityHost,
   confirmCreatePr: (signal: AbortSignal) => Promise<boolean>,
+  confirmForcePush: (signal: AbortSignal) => Promise<boolean>,
 ): CodeModeCapability {
   return async (operation, rawArgs, signal) => {
     const args = record(rawArgs);
@@ -99,7 +101,8 @@ export function createCodeCapability(
       "repositories.list": [], "services.ensure": [], "thread.archive": [],
       "portals.expose": ["port", "name", "lifetime"],
       "portals.list": [], "portals.remove": ["port"],
-      "git.syncBase": ["repositoryId"], "git.pushBranch": ["repositoryId"],
+      "git.syncBase": ["repositoryId"], "git.pushBranch": ["repositoryId", "forceWithLease"],
+      "git.syncBranch": ["repositoryId", "branch"],
       "git.pushBase": ["repositoryId"], "git.createPr": ["repositoryId", "title", "body"],
     };
     const allowed = Object.hasOwn(fields, operation) ? fields[operation] : undefined;
@@ -143,8 +146,21 @@ export function createCodeCapability(
       }
       case "git.syncBase":
         return host.syncBase(repositoryId(args), signal);
-      case "git.pushBranch":
-        return host.pushBranch(repositoryId(args), signal);
+      case "git.syncBranch":
+        return host.syncBranch(repositoryId(args), stringField(args, "branch", { maxLength: 255 })!, signal);
+      case "git.pushBranch": {
+        const id = repositoryId(args);
+        const forceWithLease = stringField(args, "forceWithLease", { optional: true, maxLength: 64 });
+        if (forceWithLease !== undefined && !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(forceWithLease)) {
+          throw new TypeError("forceWithLease must be a full commit ID");
+        }
+        if (forceWithLease !== undefined) {
+          const confirmed = await confirmForcePush(signal);
+          signal.throwIfAborted();
+          if (!confirmed) throw new Error("force-with-lease push cancelled by user");
+        }
+        return host.pushBranch(id, { forceWithLease }, signal);
+      }
       case "git.pushBase":
         return host.pushBase(repositoryId(args), signal);
       case "git.createPr": {

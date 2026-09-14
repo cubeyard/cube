@@ -562,11 +562,23 @@ console.log("6 ok: config resolution");
   let mutationStarted!: () => void;
   const started = new Promise<void>(resolve => { mutationStarted = resolve; });
   let prRequests = 0;
+  let syncBranchRequests = 0;
+  let forcePushRequests = 0;
   const server = http.createServer((req, res) => {
+    if (req.url?.endsWith("/sync-branch?branch=fix%2Fconflicts")) {
+      syncBranchRequests += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      return void res.end('{"branch":"fix/conflicts","oid":"def456"}');
+    }
     if (req.url?.endsWith("/pr")) {
       prRequests += 1;
       res.writeHead(200, { "content-type": "application/json" });
       return void res.end('{"url":"https://github.com/acme/repo/pull/1","branch":"feature"}');
+    }
+    if (req.url?.endsWith("/push")) {
+      forcePushRequests += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      return void res.end('{"branch":"fix/conflicts"}');
     }
     if (req.url?.endsWith("/services")) {
       mutationStarted();
@@ -595,6 +607,12 @@ console.log("6 ok: config resolution");
       hasUI: true,
       ui: { confirm: async () => { confirmations += 1; return allowPr; } },
     };
+    const synced = await code.execute("test", {
+      source: 'return await cube.git.syncBranch(1, "fix/conflicts");',
+    }, undefined, undefined, context);
+    assert.equal(synced.isError, undefined);
+    assert.equal(syncBranchRequests, 1);
+    assert.equal(confirmations, 0, "existing PR branch sync must not ask for confirmation");
     const declined = await code.execute("test", {
       source: 'return await cube.git.createPr(1, {title: "feature"});',
     }, undefined, undefined, context);
@@ -608,6 +626,21 @@ console.log("6 ok: config resolution");
     assert.equal(approved.isError, undefined);
     assert.equal(prRequests, 1);
     assert.equal(confirmations, 2);
+    const lease = "a".repeat(40);
+    allowPr = false;
+    const declinedForce = await code.execute("test", {
+      source: `return await cube.git.pushBranch(1, {forceWithLease: "${lease}"});`,
+    }, undefined, undefined, context);
+    assert.equal(declinedForce.isError, true);
+    assert.match(text(declinedForce), /cancelled by user/);
+    assert.equal(forcePushRequests, 0);
+    allowPr = true;
+    const approvedForce = await code.execute("test", {
+      source: `return await cube.git.pushBranch(1, {forceWithLease: "${lease}"});`,
+    }, undefined, undefined, context);
+    assert.equal(approvedForce.isError, undefined);
+    assert.equal(forcePushRequests, 1);
+    assert.equal(confirmations, 4);
     const timed = await code.execute("test", {
       source: 'return await cube.exec("printf partial; sleep 1", {timeoutMs: 200});',
     });
@@ -640,7 +673,7 @@ console.log("6 ok: config resolution");
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
-  console.log("8 ok: registered code tool confirms PR creation, preserves structured errors, and reports uncertain remote completion");
+  console.log("8 ok: registered code tool confirms PR creation/force-with-lease, preserves structured errors, and reports uncertain remote completion");
 }
 
 console.log("ALL PASS");

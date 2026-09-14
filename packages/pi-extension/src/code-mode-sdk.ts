@@ -10,8 +10,10 @@ Available API (all methods return promises):
 - cube.repositories.list() -> repository[]
 - cube.repositories.primary() -> repository
 - cube.git.syncBase(primaryRepositoryId)
-- cube.git.pushBranch(primaryRepositoryId)
-  Pushes the current branch. Use the same operation to update an existing PR branch; Cube adds no review workflow or PR lookup. Git and the remote decide whether the push is accepted.
+- cube.git.syncBranch(primaryRepositoryId, branch) -> { branch, oid }
+  Fetches one named branch from the primary repository into origin/<branch> without switching branches, reading diffs/history/reviews, or requiring confirmation. For an existing PR, read its details first, sync the returned head.ref and base.ref, preserve local work, then use ordinary Git to switch to or fast-forward the head branch. For conflict fixes, merge origin/<base>, resolve, test, commit, and use pushBranch. A fork head is not a branch of the primary repository and cannot be updated from this thread.
+- cube.git.pushBranch(primaryRepositoryId, { forceWithLease? })
+  Pushes the current branch. Use the same operation to update an existing PR branch; Cube adds no review workflow or PR lookup. A normal push requires no confirmation. For an explicitly requested history rewrite, pass the full oid returned by syncBranch as forceWithLease; Cube asks for interactive confirmation immediately before the host call, and Git rejects the push if the remote no longer matches that oid. Unconditional force is unavailable.
 - cube.git.pushBase(primaryRepositoryId)
 - cube.git.createPr(primaryRepositoryId, { title?, body? })
   Always opens an interactive confirmation immediately before the host call. Declining creates no PR. Use pushBranch, not createPr, when the branch already has a PR.
@@ -75,7 +77,8 @@ const cube = Object.freeze({
   }),
   git: Object.freeze({
     syncBase: (repositoryId) => __call("git.syncBase", { repositoryId }),
-    pushBranch: (repositoryId) => __call("git.pushBranch", { repositoryId }),
+    syncBranch: (repositoryId, branch) => __call("git.syncBranch", { repositoryId, branch }),
+    pushBranch: (repositoryId, options = {}) => __call("git.pushBranch", { ...__options(options, ["forceWithLease"]), repositoryId }),
     pushBase: (repositoryId) => __call("git.pushBase", { repositoryId }),
     createPr: (repositoryId, options = {}) => __call("git.createPr", { ...__options(options, ["title", "body"]), repositoryId }),
   }),

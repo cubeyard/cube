@@ -72,6 +72,16 @@ export interface PreparedRepository {
   baseOid: string;
 }
 
+export interface SyncedBranch {
+  branch: string;
+  oid: string;
+}
+
+export interface PushOptions {
+  /** Exact remote OID the caller observed through syncBranch. */
+  forceWithLease?: string;
+}
+
 export interface RepoState {
   /** Current branch, or null on a detached HEAD. */
   branch: string | null;
@@ -248,6 +258,15 @@ function assertRefName(name: string): void {
   if (!/^[A-Za-z0-9._/-]+$/.test(name) || name.startsWith("-")) {
     throw new Error(`invalid ref name: ${name}`);
   }
+}
+
+function remoteBranchRef(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_][A-Za-z0-9._/-]*$/.test(value)
+    || value.includes("..") || value.includes("//") || value.endsWith("/")
+    || value.split("/").some((part) => part.startsWith(".") || part.endsWith(".lock") || part.endsWith("."))) {
+    throw new Error("invalid remote branch name");
+  }
+  return value;
 }
 
 interface RepositoryTarget {
@@ -660,12 +679,22 @@ export class GitService {
    * url.*.insteadOf cannot steal the host's credentials or redirect the
    * push. Returns the branch pushed.
    */
-  async push(ws: string, url: string, targetBranch?: string, signal?: AbortSignal): Promise<string> {
+  async push(
+    ws: string,
+    url: string,
+    targetBranch?: string,
+    signal?: AbortSignal,
+    options: PushOptions = {},
+  ): Promise<string> {
     const { branch } = await this.state(ws, undefined, signal);
     if (!branch) throw new Error("cannot push: detached HEAD");
     assertRefName(branch);
     const target = targetBranch ?? branch;
     assertRefName(target);
+    const lease = options.forceWithLease;
+    if (lease !== undefined && !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(lease)) {
+      throw new Error("force-with-lease requires a full expected remote commit ID");
+    }
     await this.ensureMirrorExists(url, signal);
     const mirror = this.mirrorPathFor(url);
     // Full-history bundle of the branch: self-contained (no prerequisites
@@ -686,8 +715,8 @@ export class GitService {
       try {
         signal?.throwIfAborted();
         // Force into the mirror's own scratch head (a rebased branch is not a
-        // fast-forward of the mirror's copy); the UPSTREAM push below stays
-        // non-forced — never force-push a shared remote.
+        // fast-forward of the mirror's copy). The upstream push stays ordinary
+        // unless the confirmed caller supplied an exact force-with-lease OID.
         await this.git(
           ["-C", mirror, "fetch", "--no-tags", "--", bundle, `+refs/heads/${branch}:refs/heads/${branch}`],
           LOCAL_TIMEOUT_MS,
@@ -695,7 +724,9 @@ export class GitService {
           signal,
         );
         await this.git(
-          ["-C", mirror, "push", "--", url, `refs/heads/${branch}:refs/heads/${target}`],
+          ["-C", mirror, "push",
+            ...(lease ? [`--force-with-lease=refs/heads/${target}:${lease}`] : []),
+            "--", url, `refs/heads/${branch}:refs/heads/${target}`],
           NETWORK_TIMEOUT_MS,
           undefined,
           signal,
@@ -712,34 +743,64 @@ export class GitService {
    * agent-controlled workspace config or receives host credentials. */
   async syncBase(ws: string, url: string, base: string, signal?: AbortSignal): Promise<string> {
     assertRefName(base);
-    const mirror = await this.ensureMirror(url, signal);
-    const oid = (
-      await this.git(
-        ["--git-dir", mirror, "rev-parse", "--verify", `refs/heads/${base}`],
-        LOCAL_TIMEOUT_MS,
-        undefined,
-        signal,
-      )
-    ).stdout.trim();
-    const bundle = path.join(os.tmpdir(), `cube-sync-${crypto.randomBytes(8).toString("hex")}.bundle`);
-    try {
-      await this.git(
-        ["--git-dir", mirror, "bundle", "create", bundle, `refs/heads/${base}`],
-        NETWORK_TIMEOUT_MS,
-        undefined,
-        signal,
-      );
-      await this.git(
-        ["-C", ws, "fetch", "--force", "--no-tags", "--", bundle, `refs/heads/${base}:refs/remotes/origin/${base}`],
-        LOCAL_TIMEOUT_MS,
-        undefined,
-        signal,
-      );
-      return oid;
-    } finally {
-      fs.rmSync(bundle, { force: true });
-    }
+    return (await this.syncBranch(ws, url, base, signal)).oid;
   }
+
+  /** Import one branch from the recorded primary repository into the
+   * workspace's origin/* refs. The guest chooses a branch it learned from PR
+   * metadata, but receives neither credentials nor diff/history content. */
+  syncBranch(ws: string, url: string, requestedBranch: string, signal?: AbortSignal): Promise<SyncedBranch> {
+    let branch: string;
+    try {
+      branch = remoteBranchRef(requestedBranch);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const mirror = this.mirrorPathFor(url);
+    return this.withMirrorLock(mirror, () => Effect.runPromise(this.syncBranchLocked(ws, url, branch, mirror, signal)));
+  }
+
+  private readonly syncBranchLocked = Effect.fn("GitService.syncBranch")(
+    function*(this: GitService, ws: string, url: string, branch: string, mirror: string, signal?: AbortSignal) {
+      if (yield* Effect.sync(() => fs.existsSync(mirror))) {
+        yield* gitOperation(() => this.git(
+          ["--git-dir", mirror, "fetch", "--no-tags", "--", url,
+            `+refs/heads/${branch}:refs/heads/${branch}`],
+          NETWORK_TIMEOUT_MS,
+          undefined,
+          signal,
+        ));
+      } else {
+        yield* gitOperation(() => this.cloneMirrorAtomic(url, mirror, signal));
+      }
+
+      const resolved = yield* gitOperation(() => this.git(
+        ["--git-dir", mirror, "rev-parse", "--verify", `refs/heads/${branch}^{commit}`],
+        LOCAL_TIMEOUT_MS,
+        undefined,
+        signal,
+      )).pipe(Effect.mapError(() => new Error(`repository has no branch ${JSON.stringify(branch)}`)));
+      const oid = resolved.stdout.trim();
+
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() => path.join(os.tmpdir(), `cube-sync-${crypto.randomBytes(8).toString("hex")}.bundle`)),
+        (bundle) => gitOperation(() => this.git(
+            ["--git-dir", mirror, "bundle", "create", bundle, `refs/heads/${branch}`],
+            NETWORK_TIMEOUT_MS,
+            undefined,
+            signal,
+          )).pipe(Effect.flatMap(() => gitOperation(() => this.git(
+            ["-C", ws, "fetch", "--force", "--no-tags", "--", bundle,
+              `refs/heads/${branch}:refs/remotes/origin/${branch}`],
+            LOCAL_TIMEOUT_MS,
+            undefined,
+            signal,
+          )))),
+        (bundle) => Effect.sync(() => fs.rmSync(bundle, { force: true })),
+      );
+      return { branch, oid };
+    },
+  );
 
   /** Open a PR for the current branch with `gh` (host-side auth). */
   async createPr(

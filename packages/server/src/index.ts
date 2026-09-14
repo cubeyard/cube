@@ -562,7 +562,7 @@ async function api(
   }
 
   const threadRepository = url.pathname.match(
-    /^\/api\/threads\/([^/]+)\/repositories(?:\/(\d+)\/(diff|push|sync|push-base|pr))?$/,
+    /^\/api\/threads\/([^/]+)\/repositories(?:\/(\d+)\/(diff|push|sync|sync-branch|push-base|pr))?$/,
   );
   if (threadRepository) {
     const id = decodeId(threadRepository[1]!);
@@ -577,8 +577,23 @@ async function api(
       return json(res, 200, await supervisor.diffForUserThread(id, repositoryId));
     }
     if (action === "push" && method === "POST") {
+      let forceWithLease: string | undefined;
+      const raw = await readBody(req);
+      if (raw.trim()) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+            || Object.keys(parsed).some((key) => key !== "forceWithLease")
+            || (parsed.forceWithLease !== undefined && typeof parsed.forceWithLease !== "string")) {
+            return json(res, 400, { error: "invalid push body" });
+          }
+          forceWithLease = parsed.forceWithLease;
+        } catch {
+          return json(res, 400, { error: "invalid push body" });
+        }
+      }
       const branch = await whileConnected(res, (signal) =>
-        supervisor.pushUserThread(id, repositoryId, signal),
+        supervisor.pushUserThread(id, repositoryId, signal, { forceWithLease }),
       );
       return json(res, 200, { branch });
     }
@@ -587,6 +602,18 @@ async function api(
         res,
         200,
         await whileConnected(res, (signal) => supervisor.syncBaseForUserThread(id, repositoryId, signal)),
+      );
+    }
+    if (action === "sync-branch" && method === "POST") {
+      return json(
+        res,
+        200,
+        await whileConnected(res, (signal) => supervisor.syncBranchForUserThread(
+          id,
+          repositoryId,
+          url.searchParams.get("branch") ?? "",
+          signal,
+        )),
       );
     }
     if (action === "push-base" && method === "POST") {

@@ -519,14 +519,16 @@ export default function cubeExtension(pi: ExtensionAPI) {
     },
     syncBase: (repositoryId, signal) =>
       threadRequest(`/repositories/${repositoryId}/sync`, { method: "POST" }, signal),
+    syncBranch: (repositoryId, branch, signal) =>
+      threadRequest(`/repositories/${repositoryId}/sync-branch?branch=${encodeURIComponent(branch)}`, { method: "POST" }, signal),
     readGithub: (input, signal) => {
       const query = new URLSearchParams({ number: String(input.number), type: input.type });
       if (input.section !== undefined) query.set("section", input.section);
       if (input.page !== undefined) query.set("page", String(input.page));
       return threadRequest(`/github?${query}`, { timeoutMs: 40_000 }, signal);
     },
-    pushBranch: (repositoryId, signal) =>
-      threadRequest(`/repositories/${repositoryId}/push`, { method: "POST" }, signal),
+    pushBranch: (repositoryId, options, signal) =>
+      threadRequest(`/repositories/${repositoryId}/push`, { method: "POST", body: options }, signal),
     pushBase: (repositoryId, signal) =>
       threadRequest(`/repositories/${repositoryId}/push-base`, { method: "POST" }, signal),
     createPr: (repositoryId, options, signal) =>
@@ -648,6 +650,13 @@ export default function cubeExtension(pi: ExtensionAPI) {
             return ctx.ui.confirm(
               "create pull request?",
               "This will push the current branch and open a new pull request on GitHub.",
+              { signal: confirmationSignal },
+            );
+          }, async (confirmationSignal) => {
+            if (!ctx.hasUI) throw new Error("force-with-lease requires an interactive user confirmation");
+            return ctx.ui.confirm(
+              "force push branch?",
+              "This will rewrite the remote branch only if it still matches the expected commit.",
               { signal: confirmationSignal },
             );
           }),
