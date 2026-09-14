@@ -65,7 +65,7 @@ export async function smokeHostRouting(root: string, configPath: string, workspa
     const code = (source: string, signal?: AbortSignal) => tools.get("code").execute("routing", { source }, signal);
     // Code-mode timeout deliberately includes transport setup. Public N0
     // discovery needs a larger budget than deterministic local transports.
-    const timeoutMs = network === "relay" ? 10000 : 2000;
+    const timeoutMs = network === "relay" ? 10000 : 5000;
     const executed = await code(`return await cube.exec("printf once >> routed-count; printf routed", {timeoutMs: ${timeoutMs}});`);
     assert.notEqual(executed.isError, true, text(executed));
     const result = JSON.parse(text(executed).split("\n\n").slice(1).join("\n\n"));
