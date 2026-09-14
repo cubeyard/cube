@@ -1901,7 +1901,7 @@ export class CubeSupervisor {
     const { cubeName } = this.resolveUserThread(id);
     const cube = this.requireCube(cubeName);
     const repositories = this.registry.listCubeRepositories(cube.id);
-    if (includeState && cube.status !== "creating") await this.requireLocalEnvironment(cubeName);
+    if (includeState && repositories.length > 0 && cube.status !== "creating") await this.requireLocalEnvironment(cubeName);
     return Promise.all(
       repositories.map(async (repo, position) => ({
         id: repo.id,

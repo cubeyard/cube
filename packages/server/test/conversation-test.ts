@@ -18,6 +18,11 @@ for await (const chunk of process.stdin) chunks.push(chunk);
 const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 const text = "history:" + request.messages.length + " prompt:" + request.prompt;
 const emit = (event) => fs.writeSync(3, JSON.stringify(event) + "\\n");
+if (request.prompt === "provider failure") {
+  emit({ type: "message", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider rejected the request" } });
+  emit({ type: "complete" });
+  process.exit(0);
+}
 emit({ type: "text_delta", delta: "checking" });
 emit({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "checking" }], timestamp: Date.now() } });
 emit({ type: "message", message: { role: "toolResult", toolName: "read", content: [{ type: "text", text: "tool output" }], timestamp: Date.now() } });
@@ -80,6 +85,17 @@ await Effect.runPromise(Effect.gen(function*() {
     ],
   );
   assert.equal(activity, 4, "each worker run marks activity before and after");
+
+  const failed = yield* conversations.submit("thread", "provider failure");
+  const failedRun = yield* waitForRun(failed.runId);
+  assert.equal(failedRun.status, "failed");
+  assert.equal(failedRun.error, "provider rejected the request");
+  assert.deepEqual(
+    conversations.history("thread").messages.slice(-1).map((message) => [message.role, message.content]),
+    [["user", "provider failure"]],
+    "provider failures surface on the run instead of creating an empty assistant message",
+  );
+  assert.equal(activity, 5, "a failed worker marks activity before the attempt");
   yield* conversations.close();
 }));
 

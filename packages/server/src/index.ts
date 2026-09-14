@@ -25,7 +25,7 @@ import { defaultPortalBase } from "./portal-config.ts";
 import { guardUpgradeSocket, portalLabel, proxyHttp, proxyUpgrade, refuseUpgrade, respondFailed, respondMissing, respondUnavailable, respondWaking, upgradeAfterWake } from "./portal-proxy.ts";
 import { Registry } from "./registry.ts";
 import { CubeSupervisor, DEFAULT_EGRESS_ALLOW } from "./supervisor.ts";
-import { sanitizeMessage } from "./user-facing.ts";
+import { describeThreadError, sanitizeMessage } from "./user-facing.ts";
 import { APP_VERSION } from "./version.ts";
 import { listWorkspaceFiles, openWorkspaceFile } from "./workspace-files.ts";
 
@@ -703,7 +703,7 @@ async function api(
       const history = conversations.history(id, after);
       return json(res, 200, {
         ...history,
-        run: history.run ? { ...history.run, error: history.run.error ? sanitizeMessage(history.run.error) : null } : null,
+        run: history.run ? { ...history.run, error: describeThreadError(history.run.error) } : null,
       });
     }
     if (action === "prompt") {

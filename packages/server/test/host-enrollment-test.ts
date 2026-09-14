@@ -67,6 +67,7 @@ try {
   assert.equal(plan.env.CUBE_BACKEND, "host");
   assert.equal(plan.env.CUBE_NODE_ID, "node-host");
   assert.equal(fs.existsSync(admission.workspacePath), false);
+  assert.deepEqual(await supervisor.repositoriesForUserThread("host"), [], "a repository-free host thread needs no unsupported local probe");
   for (const action of [() => supervisor!.wakeCube("host"), () => supervisor!.sleepCube("host"),
     () => supervisor!.removeCube("host"), () => supervisor!.workspaceForUserThread("host")]) {
     await assert.rejects(action(), { code: "OPERATION_UNSUPPORTED" });

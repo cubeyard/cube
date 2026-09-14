@@ -32,6 +32,7 @@ export function sanitizeMessage(message: string): string {
 // it), deleting it, starting a new thread, `cube diagnose`. Nothing here
 // promises a control the UI does not have.
 const RULES: Array<[RegExp, string | ((m: RegExpMatchArray) => string)]> = [
+  [/requires more credits|openrouter_credits|max_tokens.*afford/i, "the model provider refused the request because this model exceeds the account's available credit — choose a cheaper model or add provider credit, then try again"],
   [/NODE_UNAVAILABLE/, "environment unavailable — you can keep talking here; try environment actions again later"],
   [/ENVIRONMENT_MISSING/, "the environment was confirmed missing — this thread's history is retained; work elsewhere needs a new thread"],
   [/OPERATION_UNSUPPORTED/, "this environment operation is not supported — the conversation is still available"],

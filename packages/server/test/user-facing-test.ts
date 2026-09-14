@@ -24,6 +24,9 @@ assert.match(describeThreadError("provisioning was interrupted by a cubed restar
 assert.match(describeThreadError("wake failed: Error: cube cube-t-ab12cd34: eth0 never came up at 10.90.14.2")!, /did not come up in time/);
 assert.match(describeThreadError("no free cube subnets (10.90.10-249.0/24 all allocated)")!, /no room for another thread/);
 assert.match(describeThreadError("destroy failed (retry DELETE): Error: incus: Instance is running")!, /could not be removed/);
+const credits = describeThreadError('402: {"message":"This request requires more credits, or fewer max_tokens","key":"provider-internal-id"}')!;
+assert.match(credits, /choose a cheaper model or add provider credit/);
+assert.doesNotMatch(credits, /provider-internal-id|\{|402/);
 console.log("2 ok: known failures become one sentence with the next action");
 
 const unknown = describeThreadError(`Error: cube t-ab12cd34: ${"x".repeat(400)}`)!;
