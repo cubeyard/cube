@@ -53,7 +53,11 @@ assert.equal(calls.length, 0);
 mode = "poll-loss";
 await assert.rejects(host.operation(operationId), { code: "NODE_UNAVAILABLE" });
 // The allowlist cannot smuggle a destination or thread into the new capability.
-const capability = createCodeCapability({ operation: async (id: string) => ({ id }) } as any);
+const capability = createCodeCapability(
+  { operation: async (id: string) => ({ id }) } as any,
+  async () => false,
+  async () => false,
+);
 await assert.rejects(capability("operations.get", { operationId, nodeId: "other" }, new AbortController().signal), /unknown/);
 assert.deepEqual(await capability("operations.get", { operationId }, new AbortController().signal), { id: operationId });
 console.log("ok: host HTTP failure cuts, no replay/fallback, read-only recovery and operation IDs across codemode");
