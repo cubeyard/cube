@@ -388,7 +388,7 @@ in a page banner. Other project and thread controls retain their treatment.
   face and `--ink` label. Press: 1px travel + `--shadow-key-down`.
 - **Primary:** `--signal` face, `--signal-ink` legend, border darkened to 80%
   signal; hover mixes 8% white in. One primary per screen: "new thread" on
-  the list, "save" in project configuration, and "ship" in a thread.
+  the list and "save" in project configuration. The thread rail has no primary action.
 - **Icon key** (`.key.icon`): square-ish padding, always `title` + `aria-label`.
 - **Round key** (`.key.round`): the 2.4rem circular signal send key.
 - **Held toggle** (`.key.held`): pressed-in look (`--s1` face, down shadow) for
@@ -439,19 +439,9 @@ important-looking secondary control.
 Every thread names its project and links back to that switchboard. Repository
 review is always scoped to the thread's pinned primary checkout. There is no
 repository selector: reference checkouts exist for agent context, not as
-publish targets. One signal-orange `ship` key pulls down an in-flow preflight
-panel with branch/base/ahead/working-copy readouts, committed paths on one side,
-and tracked/untracked local paths on the other. The distinction is load-bearing:
-the live diff is committed truth now; local paths cannot be pushed until the
-agent commits them.
-
-Confirming Ship sends the durable Ship runbook through the existing pi TUI — it
-does not bypass the agent with browser-side Git mutations. The agent gets narrow
-host tools for authenticated base sync, non-forced base push, and final thread
-archive while ordinary commands and credentials stay inside their established
-security boundaries. Progress and conflict questions remain in the terminal;
-the panel reports handoff rather than inventing completion. There is no combined
-diff or push-all control.
+publish targets. The changes pane distinguishes committed, staged, and unstaged
+work. Publication is requested directly in the agent terminal, using its scoped
+host tools; the web UI has no publication panel, fixed runbook, or push-all control.
 
 ### Composer
 Full-bleed `--s2` deck with the answering seam. Textarea: `--s4` field, 9px

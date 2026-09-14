@@ -259,7 +259,7 @@ await service.seedWorkspace({ url: upstream, workspacePath: ws2, base: "main", b
 assert.ok(fs.existsSync(path.join(ws2, "later.txt")), "fresh seed has the new upstream commit");
 console.log("5 ok: ensureMirror refreshes — second seed sees the new upstream commit");
 
-// --- 5b. Ship helpers: authenticated fetch updates origin/main through a
+// --- 5b. Base sync: authenticated fetch updates origin/main through a
 // static bundle; publishing HEAD to main stays non-forced.
 const syncedOid = await service.syncBase(ws, upstream, "main");
 assert.equal(syncedOid, git(upstream, "rev-parse", "refs/heads/main"));

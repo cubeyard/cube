@@ -96,12 +96,11 @@ Confirmed today:
   `/repos/<checkout-name>`).
 - The thread view embeds the real pi TUI over a terminal WebSocket. Cube does
   not model or render a parallel chat transcript.
-- Primary-repository review controls in the thread view: inspect its committed
-  diff and run Ship. Ship preflights committed versus local work, then hands the
-  full commit/fetch/rebase/test/push runbook to the live agent. Host-scoped tools
-  provide authenticated, non-forced fetch/push for the primary only, without
-  exposing credentials to the sandbox. Reference repositories cannot be
-  changed or published.
+- Primary-repository review in the thread view: inspect committed, staged,
+  and unstaged changes. Publication is requested directly through the agent;
+  there is no dedicated publish button or automatic runbook. Host-scoped tools
+  provide authenticated Git/PR operations for the primary only, without exposing
+  credentials to the sandbox. Reference repositories cannot be changed or published.
 - Primary-workspace file listing and disk usage, plus links to declared
   services.
 - Provider auth state surfaced from the host (`pi` owns login; cube only

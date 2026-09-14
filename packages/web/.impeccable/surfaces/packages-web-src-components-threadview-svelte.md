@@ -17,8 +17,8 @@ around it.
 A self-hoster who handed over a task. The job is "let me continue the pi
 session, know its project, and review exactly what the primary repository will
 publish." Tasks: use the TUI, open project context, inspect the primary diff,
-preflight and hand Ship to the agent, inspect primary-workspace files, and
-delete the thread.
+request publication directly in the TUI, inspect primary-workspace files,
+and delete the thread.
 
 ## Content and constraints
 
@@ -29,11 +29,10 @@ delete the thread.
 - Repository checkouts come from the immutable thread snapshot, not the
   project's current editable configuration. The writable primary is
   `/workspace`; read-only references are `../repos/<checkout-name>`.
-- Changes and Ship always act on the primary repository. Reference repositories
+- Changes always show the primary repository. Reference repositories
   cannot be selected, changed, or published.
-- Ship must preserve the primary checkout in the injected runbook. Its
-  preflight distinguishes committed files from tracked/untracked working-copy
-  files, and complete failures stay inline rather than becoming generic toasts.
+- The web UI has no publication button, preflight panel, or injected runbook.
+  The agent's scoped Git/PR tools remain available through the TUI.
 - The files shelf explicitly describes the primary workspace; it does not
   pretend to list additional repositories.
 - The desktop workspace is split into two equal bays: the pi conversation on
@@ -56,9 +55,9 @@ delete the thread.
 World: the bench instrument (seed 1a30da04), extended by the project switchboard
 (seed `e0bc0e78`). The terminal is dark glass in both themes. Above it, global
 navigation and the thread strip form one compact control rail: status lamp and
-title, project label, service links, then the primary `ship` key. The terminal has no redundant pane label,
-so this is the only vertical chrome between browser and work. Ship earns the
-screen's single signal-orange primary; no repository selector competes with it.
+title, project label, service links, and neutral file/delete controls. The terminal
+has no redundant pane label, so this is the only vertical chrome between browser
+and work. The thread rail has no signal-orange primary or repository selector.
 Muted branch/ahead/dirty evidence stays subordinate to the terminal rather than
 flattening the Braun hierarchy.
 
@@ -80,9 +79,6 @@ mobile-only surface.
 - The **files shelf** remains the full workspace manifest, newest-first with
   sizes and disk usage in thread terms. `.git`/`node_modules` are counted, not
   listed. It is separate from the git changes tab and keeps its header toggle.
-- The **Ship panel** repeats the committed boundary beside exact tracked and
-  untracked local paths, then hands the commit/fetch/rebase/test/push runbook to
-  the live agent and returns progress ownership to the conversation terminal.
 - The changes pane polls host-side git every 10 seconds, so it works while the
   thread sleeps. Patch payloads retain the 4 MB server cap; a truncated patch
   keeps the complete file list and says that later inline diffs may be omitted.
