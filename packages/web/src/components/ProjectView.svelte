@@ -3,7 +3,6 @@
   import {
     checkProject,
     createProject,
-    createUserThread,
     deleteProject,
     errorText,
     fetchProject,
@@ -22,8 +21,9 @@
   import Icon from "./Icon.svelte";
   import RepositoryInput from "./RepositoryInput.svelte";
 
-  let { projectId, githubLogin = false, command = null, onConsume = () => {} }: {
+  let { projectId, githubLogin = false, command = null, onConsume = () => {}, onNewThread }: {
     projectId: string;
+    onNewThread: (projectId?: string) => void;
     githubLogin?: boolean;
     /** App's `n` shortcut: start a thread from this project. */
     command?: Command | null;
@@ -47,7 +47,6 @@
   let notFound = $state(false);
   let saving = $state(false);
   let checking = $state(false);
-  let starting = $state(false);
   // "saved" / "checked", printed beside the key that just succeeded.
   const done = createTransient();
 
@@ -157,22 +156,9 @@
     }
   }
 
-  // One id per user action (see ThreadList): a failed press is retried
-  // with the same id, never as a second thread.
-  let startRequest: string | null = null;
-  async function startThread(): Promise<void> {
-    if (starting || !project || project.status !== "ready" || dirty || notFound) return;
-    starting = true;
-    error = null;
-    try {
-      startRequest ??= uid();
-      const id = await createUserThread(project.id, startRequest);
-      startRequest = null;
-      location.hash = `#/t/${id}`;
-    } catch (e) {
-      error = `new thread: ${errorText(e)}`;
-      starting = false;
-    }
+  function startThread(): void {
+    if (!project || project.status !== "ready" || dirty || notFound) return;
+    onNewThread(project.id);
   }
 
   // Take the shell's command once (see lib/command.ts).
@@ -203,7 +189,7 @@
   // Every disabled key prints its reason; a title alone is invisible on a
   // phone and to anyone who does not hover.
   const checkDisabled = $derived(checking || dirty || project?.status === "checking");
-  const startDisabled = $derived(starting || dirty || project?.status !== "ready");
+  const startDisabled = $derived(dirty || project?.status !== "ready");
   const workReason = $derived(
     !project || (!checkDisabled && !startDisabled) ? null
     : dirty ? "save your changes first"
@@ -408,7 +394,7 @@
         </button>
         {#if done.value === "checked"}<span class="key-reason" role="status">checked</span>{/if}
         <button class="key" onclick={startThread} disabled={startDisabled}>
-          <Icon name="plus" size={13} />{starting ? "starting…" : "new thread"}
+          <Icon name="plus" size={13} />new thread
         </button>
         {#if workReason}<span class="key-reason">{workReason}</span>{/if}
         <a class="key" href="#/threads?project={encodeURIComponent(project.id)}">

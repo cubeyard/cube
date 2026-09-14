@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import { createUserThread, deleteThread, errorText, fetchProjects, isUnreachable, renameThread } from "../lib/api.ts";
-  import { uid } from "../lib/uid.ts";
+  import { deleteThread, errorText, fetchProjects, isUnreachable, renameThread } from "../lib/api.ts";
   import { createArmed } from "../lib/armed.svelte.ts";
   import type { Command } from "../lib/command.ts";
   import { lampClass, stateLabel } from "../lib/thread-state.ts";
@@ -19,6 +18,7 @@
     onDismissNotice = () => {},
     command = null,
     onConsume = () => {},
+    onNewThread,
   }: {
     /** App polls the global list; this view only adds projects to it. */
     threads: ThreadSummary[];
@@ -31,6 +31,7 @@
     /** App's `n` shortcut: open the composer. */
     command?: Command | null;
     onConsume?: (id: number) => void;
+    onNewThread: (projectId?: string) => void;
   } = $props();
 
   let projects = $state<Project[]>([]);
@@ -41,14 +42,12 @@
   let unreachable = $state(false);
   let error = $state<string | null>(null);
   let actionError = $state<string | null>(null);
-  let creating = $state(false);
   // The filter IS the URL (#/threads?project=…): back/forward and a
   // project's "n threads" link then agree with the select.
   const selectedFilter = $derived(initialProjectId ?? "");
   const filteredThreads = $derived(
     selectedFilter ? threads.filter((thread) => thread.project.id === selectedFilter) : threads,
   );
-  const readyProjects = $derived(projects.filter((project) => project.status === "ready"));
 
   let refreshSeq = 0;
   async function refresh(): Promise<void> {
@@ -80,13 +79,8 @@
     location.hash = projectId ? `#/threads?project=${encodeURIComponent(projectId)}` : "#/threads";
   }
 
-  let composing = $state(false);
-  let selectedProjectId = $state("");
   function openComposer(): void {
-    composing = true;
-    selectedProjectId =
-      readyProjects.find((project) => project.id === selectedFilter)?.id ?? readyProjects[0]?.id ?? "";
-    actionError = null;
+    onNewThread(selectedFilter || undefined);
   }
 
   // Take the shell's command once (see lib/command.ts).
@@ -96,25 +90,6 @@
     onConsume(pending.id);
     untrack(openComposer);
   });
-
-  // One id per user action: a press that fails (host unreachable, a 5xx)
-  // is retried by the next press with the same id, so a request the host
-  // did complete is not repeated as a second thread.
-  let newThreadRequest: string | null = null;
-  async function newThread(): Promise<void> {
-    if (creating || !selectedProjectId) return;
-    creating = true;
-    try {
-      newThreadRequest ??= uid();
-      const id = await createUserThread(selectedProjectId, newThreadRequest);
-      newThreadRequest = null;
-      location.hash = `#/t/${id}`;
-    } catch (e) {
-      actionError = `new thread: ${errorText(e)}`;
-    } finally {
-      creating = false;
-    }
-  }
 
   // ---- delete: two presses on the row's own key, never a dialog. One row
   // is armed at a time; the request in flight disables its key ----
@@ -176,11 +151,9 @@
       <h1>threads</h1>
       <p class="list-intro">all work, across every project</p>
     </div>
-    {#if !composing}
       <button class="key primary" onclick={openComposer} title="new thread · press n">
         <Icon name="plus" size={13} />new thread
       </button>
-    {/if}
   </div>
 
   <div class="list-controls">
@@ -215,44 +188,6 @@
       <button class="key icon note-dismiss" title="dismiss" aria-label="dismiss error" onclick={() => (actionError = null)}>
         <Icon name="close" size={12} />
       </button>
-    </div>
-  {/if}
-
-  {#if composing}
-    <div class="compose well">
-      {#if !loaded}
-        <p class="compose-note" role="status">
-          {unreachable ? "can't reach the host — the project list will follow. retrying…" : error ? `projects unavailable — ${error}` : "reading projects…"}
-        </p>
-        <div class="compose-keys">
-          <button class="key" onclick={refresh}>retry now</button>
-          <button class="key" onclick={() => (composing = false)}>cancel</button>
-        </div>
-      {:else if readyProjects.length > 0}
-        <label class="compose-field">
-          <span class="silk">project</span>
-          <select class="compose-input" bind:value={selectedProjectId} aria-label="project for new thread">
-            {#each projects as project (project.id)}
-              <option value={project.id} disabled={project.status !== "ready"}>
-                {project.name}{project.status === "ready" ? "" : ` — ${project.status}`}
-              </option>
-            {/each}
-          </select>
-        </label>
-        <p class="compose-note">The checked repository snapshot is mounted before the thread starts.</p>
-        <div class="compose-keys">
-          <button class="key primary" onclick={newThread} disabled={creating || !selectedProjectId}>
-            {creating ? "starting…" : "new thread"}
-          </button>
-          <button class="key" onclick={() => (composing = false)} disabled={creating}>cancel</button>
-        </div>
-      {:else}
-        <p class="compose-note">A ready project is required before a thread can start.</p>
-        <div class="compose-keys">
-          <a class="key primary" href="#/projects/new">configure project</a>
-          <button class="key" onclick={() => (composing = false)}>cancel</button>
-        </div>
-      {/if}
     </div>
   {/if}
 
@@ -322,7 +257,7 @@
         </div>
       {/each}
     </div>
-  {:else if loaded && !error && !composing}
+  {:else if loaded && !error}
     <div class="empty-state">
       {#if projects.length === 0}
         <p class="hint">Projects prepare repositories before work starts.<br />Configure the first one to begin.</p>
@@ -336,7 +271,7 @@
       {/if}
       <p class="shortcuts"><kbd>n</kbd> new thread · <kbd>g</kbd> <kbd>t</kbd> threads · <kbd>g</kbd> <kbd>p</kbd> projects</p>
     </div>
-  {:else if !loaded && !composing}
+  {:else if !loaded}
     <!-- no threads and no answer about projects yet: not an empty box -->
     <div class="empty-state" role="status">
       <p class="hint">{unreachable ? "can't reach the host — it may be starting or restarting" : "reading projects…"}{#if unreachable}<br />retrying…{/if}</p>

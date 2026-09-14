@@ -150,3 +150,13 @@ export interface ConversationHistory {
   messages: ConversationMessage[];
   run: AgentRun | null;
 }
+
+export interface ModelSelection {
+  provider: string;
+  id: string;
+}
+
+export interface ThreadModels {
+  models: ModelSelection[];
+  selected: ModelSelection | null;
+}
