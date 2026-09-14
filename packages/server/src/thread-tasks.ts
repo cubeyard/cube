@@ -17,6 +17,14 @@ export interface ThreadTask {
   createdAt: number;
 }
 
+export interface ThreadTaskProgress {
+  sequence: number;
+  requestKey: string;
+  body: string;
+  createdAt: number;
+}
+
+const progressProjection = `sequence, request_key AS requestKey, body, created_at AS createdAt`;
 const projection = `id, sender, recipient, request_key AS requestKey, body, state, result, created_at AS createdAt`;
 const MAX_TASKS = 10_000;
 
@@ -53,6 +61,14 @@ export class ThreadTaskJournal {
         created_at INTEGER NOT NULL,
         UNIQUE(sender, request_key), CHECK(sender <> recipient),
         CHECK((state = 'completed') = (result IS NOT NULL))
+      );
+      CREATE TABLE IF NOT EXISTS thread_task_progress (
+        task_id TEXT NOT NULL REFERENCES thread_task(id),
+        sequence INTEGER NOT NULL CHECK(sequence BETWEEN 1 AND 100),
+        request_key TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(task_id, sequence), UNIQUE(task_id, request_key)
       );
     `);
   }
@@ -162,6 +178,40 @@ export class ThreadTaskJournal {
       }
       return this.get(recipient, id);
     });
+  }
+
+  /** Recipient-authored data only: no prompt, delivery acknowledgement, or node
+   * action. Keys survive completion/restart; progress never changes task state.
+   */
+  reportProgress(recipient: string, id: string, requestKey: string, body: string): ThreadTaskProgress {
+    bounded(requestKey, 128); bounded(body, 4096);
+    return this.transaction(() => {
+      const task = this.get(recipient, id);
+      if (task.recipient !== recipient) throw new Error("task recipient required");
+      const existing = this.db.prepare(`SELECT ${progressProjection} FROM thread_task_progress WHERE task_id = ? AND request_key = ?`)
+        .get(id, requestKey) as unknown as ThreadTaskProgress | undefined;
+      if (existing) {
+        if (existing.body !== body) throw new Error("task progress key conflict");
+        return { ...existing };
+      }
+      if (task.state !== "delivered") throw new Error("task not open for progress");
+      const count = this.db.prepare("SELECT count(*) AS n FROM thread_task_progress WHERE task_id = ?").get(id)!.n as number;
+      if (count >= 100) throw new Error("task progress full; retained keys cannot be evicted");
+      const progress = { sequence: count + 1, requestKey, body, createdAt: Date.now() };
+      this.db.prepare("INSERT INTO thread_task_progress VALUES (?, ?, ?, ?, ?)")
+        .run(id, progress.sequence, requestKey, body, progress.createdAt);
+      return progress;
+    });
+  }
+
+  /** Participant-scoped read-only pages. Sequence cursor is exclusive and stable;
+   * at most 20 records (80 KiB of body text) are returned per call.
+   */
+  progress(actor: string, id: string, after = 0): ThreadTaskProgress[] {
+    this.get(actor, id);
+    if (!Number.isSafeInteger(after) || after < 0 || after > 100) throw new Error("invalid progress cursor");
+    return (this.db.prepare(`SELECT ${progressProjection} FROM thread_task_progress WHERE task_id = ? AND sequence > ? ORDER BY sequence LIMIT 20`)
+      .all(id, after) as unknown as ThreadTaskProgress[]).map(row => ({ ...row }));
   }
 
   /** Explicit agent result, not inferred from terminal silence or agent_end.

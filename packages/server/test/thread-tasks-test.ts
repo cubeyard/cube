@@ -43,6 +43,8 @@ try {
   assert.throws(() => journal.acknowledge("target", task.id), /not started/);
   assert.throws(() => journal.complete("target", task.id, "done"), /not acknowledged/);
   assert.throws(() => journal.beginDelivery("source", task.id), /recipient/);
+  assert.throws(() => journal.reportProgress("target", task.id, "p", "working"), /not open/);
+  assert.deepEqual(journal.progress("source", task.id), []);
 
   // Two control-plane connections share the durable delivery reservation.
   const second = new DatabaseSync(dbPath);
@@ -68,12 +70,33 @@ try {
   assert.equal(journal.get("source", pending.id).state, "accepted");
   assert.throws(() => journal.accept("source", "target", "new", "task"), /not permitted/);
   assert.equal(journal.accept("source", "target", "pending", pending.body).id, pending.id);
+  // Progress is bounded recipient data, never implicit acknowledgement/result.
+  assert.throws(() => journal.reportProgress("source", task.id, "p", "working"), /recipient/);
+  assert.throws(() => journal.progress("third", task.id), /not found/);
+  for (const body of ["", " ", "é".repeat(2049), "\ud800"]) {
+    assert.throws(() => journal.reportProgress("target", task.id, "p", body), /invalid/);
+  }
+  const firstProgress = journal.reportProgress("target", task.id, "p", "tests started");
+  assert.deepEqual(journal.reportProgress("target", task.id, "p", "tests started"), firstProgress);
+  assert.throws(() => journal.reportProgress("target", task.id, "p", "changed"), /conflict/);
+  assert.equal(journal.get("source", task.id).state, "delivered");
+  for (const cursor of [-1, 101, NaN, 0.5]) assert.throws(() => journal.progress("source", task.id, cursor), /cursor/);
   // Revocation/archive stop dispatch, not read-only recovery or in-flight results.
   journal.grant("source", "target");
   registry.archiveThread("target");
   assert.throws(() => journal.beginDelivery("target", pending.id), /unavailable/);
   assert.throws(() => journal.grant("source", "target"), /unavailable/);
   assert.throws(() => journal.complete("source", task.id, "done"), /recipient/);
+  for (let n = 2; n <= 100; n++) journal.reportProgress("target", task.id, `p-${n}`, `step ${n}`);
+  assert.throws(() => journal.reportProgress("target", task.id, "overflow", "extra"), /full/);
+  const history = [];
+  for (let after = 0; after < 100; after += 20) {
+    const page = journal.progress("source", task.id, after);
+    assert.equal(page.length, 20);
+    history.push(...page);
+  }
+  assert.deepEqual(history.map(row => row.sequence), Array.from({ length: 100 }, (_, n) => n + 1));
+  assert.deepEqual(journal.progress("source", task.id, 100), []);
   assert.equal(journal.complete("target", task.id, "test passed; operation op-1").state, "completed");
   assert.equal(journal.complete("target", task.id, "test passed; operation op-1").state, "completed");
   assert.throws(() => journal.complete("target", task.id, "different"), /conflict/);
@@ -86,6 +109,10 @@ try {
   db = new DatabaseSync(dbPath);
   journal = new ThreadTaskJournal(db);
   assert.equal(journal.get("source", task.id).state, "completed");
+  assert.deepEqual(journal.progress("target", task.id)[0], firstProgress);
+  assert.deepEqual(journal.reportProgress("target", task.id, "p", "tests started"), firstProgress);
+  assert.throws(() => journal.reportProgress("target", task.id, "late", "too late"), /not open/);
+  assert.throws(() => journal.reportProgress("target", task.id, "p", "changed"), /conflict/);
   assert.equal(journal.beginDelivery("target", task.id), null);
   assert.equal(journal.get("source", pending.id).state, "accepted");
   assert.throws(() => journal.complete("target", task.id, "é".repeat(8193)), /invalid/);

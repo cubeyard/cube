@@ -119,10 +119,19 @@ Validation for this foundation: 44 Node offline suites, typecheck (Svelte zero
 errors/warnings), lint, build and diff whitespace checks passed. Rust is unchanged;
 the Rust suite was not rerun for this journal-only slice.
 
-Publication remains pending: plan `5aa2a48bc7218f861e5329448a7694ec` froze
-`2974c2f`; inspection was incomplete and no publish was attempted. New edits
-require a new committed candidate/plan on the existing prepared review branch.
-Do not publish the old plan or discard the enrollment commit. PR #44 stays unmerged.
+Follow-up: bounded recipient progress is implemented in the same opt-in journal:
+100 records/task, 4 KiB/record, immutable keys/sequences and participant-scoped
+20-record pages. Exact retries survive completion/restart; no automatic prompts
+or state transitions. Progress tests, all 44 Node suites, typecheck, lint, build
+and whitespace checks passed; Rust unchanged and not rerun.
+
+The maintainer subsequently authorized “push and continue”. Publication remains
+pending: plan `a80ec0cbb6462df5104fbdc359d469a2` froze `9f0344e`, but earlier
+batched diff output was truncated, so inspection is not complete. Full prDiff
+pages 31–34 were read without truncation (34 is final); earlier pages and patch
+need complete inspection. No publish was attempted. Progress edits require a new
+committed candidate/plan on the existing prepared review branch. Do not publish
+an old plan or discard the enrollment commit. PR #44 stays unmerged.
 
 ## Open security follow-up: agent-editable egress policy
 
