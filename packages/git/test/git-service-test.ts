@@ -292,7 +292,6 @@ const ghCalls: string[][] = [];
 const intercept: ProcessRunner = (file, args, opts) => {
   if (file === "gh") {
     ghCalls.push(args);
-    if (args[0] === "api") return Promise.resolve({ stdout: "[]", stderr: "" });
     if (args[1] === "create") return Promise.resolve({ stdout: "https://github.com/x/y/pull/7\n", stderr: "" });
     return Promise.resolve({ stdout: "", stderr: "" });
   }
@@ -306,7 +305,6 @@ const pr = await prService.createPr(ws, { url: GH_URL, base: "main", title: "My 
 assert.equal(pr.url, "https://github.com/x/y/pull/7");
 assert.equal(pr.branch, "cube/test1");
 assert.deepEqual(ghCalls, [
-  ["api", "--hostname", "github.com", "--method", "GET", "repos/x/y/pulls?state=open&head=x%3Acube%2Ftest1&per_page=1"],
   ["pr", "create", "-R", "x/y", "--head", "cube/test1", "--base", "main", "--title", "My change", "--body", "details"],
 ]);
 assert.equal(
@@ -319,7 +317,6 @@ console.log("7 ok: createPr pushes (bundle-relay), then drives gh -R with the ri
 // --- 8. existing-PR fallback: create fails with "already exists" -> view URL
 const fallback: ProcessRunner = (file, args, opts) => {
   if (file === "gh") {
-    if (args[0] === "api") return Promise.resolve({ stdout: "[]", stderr: "" });
     if (args[1] === "create") return Promise.reject(new Error("a pull request for branch already exists"));
     assert.deepEqual(args, ["pr", "view", "cube/test1", "-R", "x/y", "--json", "url", "--jq", ".url"]);
     return Promise.resolve({ stdout: "https://github.com/x/y/pull/3\n", stderr: "" });
@@ -334,30 +331,19 @@ const existing = await new GitService(path.join(tmp, "repos-pr2"), fallback).cre
 assert.equal(existing.url, "https://github.com/x/y/pull/3");
 console.log("8 ok: existing PR resolves to its URL instead of an error");
 
-// Existing PR updates must fail before ANY networked git command,
-// independently of the local branch's history or tree.
+// An existing PR branch uses the ordinary push path. Cube must not query PR
+// metadata, inspect diffs, or add a review gate before Git handles the push.
 {
-  const before = git(upstream, "show-ref");
-  for (const response of ['[{"number":845}]', '{"message":"not found"}', '[', null]) {
-    const guarded = new GitService(path.join(tmp, "repos-guard"), async (file, args, opts) => {
-      if (file === "gh") {
-        assert.equal(args[0], "api");
-        assert.equal(opts.cwd, path.join(tmp, "repos-guard"));
-        assert.match(args[5]!, /head=x%3Acube%2Ftest1&per_page=1$/);
-        if (response === null) throw new Error("authentication unavailable");
-        return { stdout: response, stderr: "" };
-      }
-      assert.ok(!args.some((arg) => ["push", "fetch", "clone", "bundle"].includes(arg)), "must reject before transferring or publishing objects");
-      return defaultRunner(file, args, opts);
-    });
-    const expected = response?.startsWith('[{') ? /existing open pull request/
-      : response?.startsWith('{') ? /incomplete pull request response/ : /unable to verify existing pull requests/;
-    await assert.rejects(guarded.push(ws, GH_URL), expected);
-    await assert.rejects(guarded.push(ws, GH_URL, "cube/test1"), expected);
-    await assert.rejects(guarded.createPr(ws, { url: GH_URL, base: "main", title: "review fix" }), expected);
-    assert.equal(git(upstream, "show-ref"), before);
-  }
-  console.log("8b ok: existing PR and unavailable metadata block all publication paths without remote changes");
+  fs.writeFileSync(path.join(ws, "review-fix.txt"), "small follow-up\n");
+  git(ws, ...cfg, "add", "review-fix.txt");
+  git(ws, ...cfg, "commit", "-m", "review fix");
+  const plainPush = new GitService(path.join(tmp, "repos-update"), (file, args, opts) => {
+    assert.notEqual(file, "gh", "updating an existing PR branch must not call the GitHub API");
+    return defaultRunner(file, rewriteGitToLocal(file, args), opts);
+  });
+  assert.equal(await plainPush.push(ws, GH_URL), "cube/test1");
+  assert.equal(git(upstream, "rev-parse", "refs/heads/cube/test1"), git(ws, "rev-parse", "HEAD"));
+  console.log("8b ok: existing PR update is one ordinary push with no Cube review or metadata gate");
 }
 
 // --- 9. non-GitHub PR is refused (gh cannot open one)
@@ -425,6 +411,14 @@ await assert.rejects(failed.prepareRepository(upstream), (error: unknown) =>
   error instanceof Error && error.message.includes("network unavailable"));
 assert.equal(fs.existsSync(failedRoot), false, "discovery failure never starts cloning");
 console.log("11 ok: Effect boundaries retain ordering, explicit bases, signals and failures");
+
+const policy = fs.readFileSync(path.resolve("docs/git-workflows.md"), "utf8");
+assert.match(policy, /Cube policy/);
+assert.match(policy, /Local security guards/);
+assert.match(policy, /GitHub branch protection and rulesets/);
+assert.match(policy, /Only GitHub can enforce these against every\s+writer/);
+assert.match(policy, /process that controls its checkout can bypass or\s+replace them/);
+console.log("12 ok: policy documentation distinguishes Cube, local, and GitHub enforcement");
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("git-service-test: all ok");

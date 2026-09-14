@@ -60,10 +60,11 @@ evidence; do not infer acceptance from a successful build.
    tree; unchanged by inspection), the macOS HVF preflight, and the
    `?timeout=` wait slices against a live Incus (needs the VM portfolio).
 
-Pushes, PRs, releases and destructive acceptance steps require explicit
-authorization. A shipped-file push to main triggers a release only when the
-repository Actions variable `CUBE_RELEASES_ENABLED` is `true`; leave it unset
-through the public repository import and source-only launch.
+Creating a PR, releases and destructive acceptance steps require explicit
+authorization. Ordinary commits, pushes, and updates to existing PR branches do
+not have a Cube approval gate. A shipped-file push to main triggers a release
+only when the repository Actions variable `CUBE_RELEASES_ENABLED` is `true`;
+leave it unset through the public repository import and source-only launch.
 Do not expose cubed publicly: it has no application-level authentication.
 
 ## Last recorded live evidence

@@ -329,18 +329,6 @@ await assert.rejects(
   () => supervisor.pushBaseForUserThread(thread.id, repositories[1]!.id),
   /read-only references/,
 );
-await assert.rejects(
-  () => supervisor.reviewPrForUserThread(thread.id, repositories[1]!.id, { action: "prepare", number: 845 }),
-  /read-only references/,
-);
-await assert.rejects(
-  () => supervisor.reviewPrForUserThread(thread.id, repositories[1]!.id, { action: "prepare-rebase", number: 845 }),
-  /read-only references/,
-);
-await assert.rejects(
-  () => supervisor.reviewPrForUserThread(thread.id, Number.MAX_SAFE_INTEGER, { action: "prepare", number: 845 }),
-  /no such repository/,
-);
 assert.equal(supervisor.listUserThreads()[0]!.project.id, project.id);
 assert.equal(supervisor.listUserThreads()[0]!.project.name, "workbench");
 assert.deepEqual(await supervisor.ensureServicesForUserThread(thread.id), []);

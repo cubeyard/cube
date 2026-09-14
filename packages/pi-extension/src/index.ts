@@ -62,7 +62,7 @@ import { Type } from "typebox";
 
 import { encodeError, type CodeErrorData } from "./code-errors.ts";
 import { execCode, codeFile } from "./code-io.ts";
-import { createCodeCapability } from "./code-capabilities.ts";
+import { createCodeCapability, type CodeCapabilityHost } from "./code-capabilities.ts";
 import { CODE_MODE_API, runCodeMode, type CodeModeTrace } from "./code-mode.ts";
 import { CubeFs, type GuestFiles } from "./cube-fs.ts";
 import { formatGrepResult } from "./grep-format.ts";
@@ -495,7 +495,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
    * never this URL, fetch, headers, credentials, or a generic request API. */
   const threadRequest = createThreadRequest(cfg);
 
-  const codeCapability = createCodeCapability({
+  const codeCapabilityHost: CodeCapabilityHost = {
     exec: (input, signal) => execCode(async (command, cwd, options) => {
       await waker.ensure(undefined, options.signal);
       options.signal.throwIfAborted();
@@ -519,8 +519,6 @@ export default function cubeExtension(pi: ExtensionAPI) {
     },
     syncBase: (repositoryId, signal) =>
       threadRequest(`/repositories/${repositoryId}/sync`, { method: "POST" }, signal),
-    reviewPr: (repositoryId, input, signal) =>
-      threadRequest(`/repositories/${repositoryId}/pr-review`, { method: "POST", body: input }, signal),
     readGithub: (input, signal) => {
       const query = new URLSearchParams({ number: String(input.number), type: input.type });
       if (input.section !== undefined) query.set("section", input.section);
@@ -554,7 +552,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
       { method: "POST", timeoutMs: 20 * 60_000 },
       signal,
     )),
-  });
+  };
 
   // ---- shadow the complete model-facing tool surface ----
 
@@ -638,13 +636,21 @@ export default function cubeExtension(pi: ExtensionAPI) {
       params: { source: string },
       signal: AbortSignal | undefined,
       onUpdate: ((result: { content: Array<{ type: "text"; text: string }>; details: CodeToolDetails }) => void) | undefined,
+      ctx: ExtensionContext,
     ) {
       const operationEvents: CodeModeTrace[] = [];
       let result;
       try {
         result = await runCodeMode({
           source: params.source,
-          call: codeCapability,
+          call: createCodeCapability(codeCapabilityHost, async (confirmationSignal) => {
+            if (!ctx.hasUI) throw new Error("pull request creation requires an interactive user confirmation");
+            return ctx.ui.confirm(
+              "create pull request?",
+              "This will push the current branch and open a new pull request on GitHub.",
+              { signal: confirmationSignal },
+            );
+          }),
           signal,
           onTrace: (trace) => {
             operationEvents.push(trace);

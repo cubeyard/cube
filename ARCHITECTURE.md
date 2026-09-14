@@ -414,8 +414,10 @@ Credentials never leave the host.
 3. `git push` fails inside the cube because egress to GitHub is blocked by
    network policy. That is the boundary, not a bug: push is an explicit host
    action via `GitService`.
-4. UI: diff review (host-side `git diff` against base), "Push branch",
-   "Create PR" (`gh pr create`, host-side).
+4. The agent uses `cube.git.pushBranch` for both initial publication and updates
+   to an existing PR branch. Cube adds no PR lookup or review gate. Creating a
+   new PR is the only interactive confirmation point, immediately before the
+   host runs the push and `gh pr create`.
 
 **Hostile-workspace model (implemented 3c; sol review 2026-08-27).** The
 workspace `.git` is agent- and (with repo-attach) upstream-controlled, so

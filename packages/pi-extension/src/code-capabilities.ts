@@ -22,7 +22,6 @@ export interface CodeCapabilityHost {
   writeText(path: string, content: string, signal: AbortSignal): Promise<void>;
   listRepositories(signal: AbortSignal): Promise<unknown[]>;
   readGithub(input: { number: number; type: string; section?: string; page?: number }, signal: AbortSignal): Promise<unknown>;
-  reviewPr(repositoryId: number, input: { action: "prepare" | "prepare-rebase"; number: number } | { action: "plan" | "verify"; token: string } | { action: "publish"; token: string; plan: string } | { action: "inspect"; token: string; plan: string; number: number; section: "patch" | "prDiff"; page?: number }, signal: AbortSignal): Promise<unknown>;
   syncBase(repositoryId: number, signal: AbortSignal): Promise<unknown>;
   pushBranch(repositoryId: number, signal: AbortSignal): Promise<unknown>;
   pushBase(repositoryId: number, signal: AbortSignal): Promise<unknown>;
@@ -86,18 +85,15 @@ function portalPort(value: unknown): number {
 
 /** Construct the closed capability dispatcher used by QuickJS. New SDK
  * methods must be added explicitly here and to CODE_MODE_API. */
-export function createCodeCapability(host: CodeCapabilityHost): CodeModeCapability {
+export function createCodeCapability(
+  host: CodeCapabilityHost,
+  confirmCreatePr: (signal: AbortSignal) => Promise<boolean>,
+): CodeModeCapability {
   return async (operation, rawArgs, signal) => {
     const args = record(rawArgs);
     const fields: Record<string, readonly string[]> = {
       exec: ["command", "cwd", "timeoutMs"],
       "github.read": ["number", "type", "section", "page"],
-      "git.preparePrUpdate": ["repositoryId", "number"],
-      "git.preparePrRebase": ["repositoryId", "number"],
-      "git.planPrUpdate": ["repositoryId", "token"],
-      "git.verifyPrUpdate": ["repositoryId", "token"],
-      "git.publishPrUpdate": ["repositoryId", "token", "plan"],
-      "git.inspectPrUpdatePlan": ["repositoryId", "token", "plan", "number", "section", "page"],
       "environment.status": [], "environment.retrySetup": [],
       "fs.readText": ["path"], "fs.writeText": ["path", "content"],
       "repositories.list": [], "services.ensure": [], "thread.archive": [],
@@ -147,46 +143,21 @@ export function createCodeCapability(host: CodeCapabilityHost): CodeModeCapabili
       }
       case "git.syncBase":
         return host.syncBase(repositoryId(args), signal);
-      case "git.preparePrUpdate":
-      case "git.preparePrRebase":
-        if (!Number.isSafeInteger(args.number) || Number(args.number) < 1) throw new TypeError("number must be a positive integer");
-        return host.reviewPr(repositoryId(args), { action: operation === "git.preparePrRebase" ? "prepare-rebase" : "prepare", number: Number(args.number) }, signal);
-      case "git.planPrUpdate":
-      case "git.inspectPrUpdatePlan":
-      case "git.publishPrUpdate":
-      case "git.verifyPrUpdate": {
-        const token = stringField(args, "token", { maxLength: 32 })!;
-        if (!/^[0-9a-f]{32}$/.test(token)) throw new TypeError("invalid review token");
-        if (operation === "git.inspectPrUpdatePlan") {
-          const plan = stringField(args, "plan", { maxLength: 32 })!;
-          if (!/^[0-9a-f]{32}$/.test(plan)) throw new TypeError("invalid review plan");
-          if (!Number.isSafeInteger(args.number) || Number(args.number) < 1) throw new TypeError("number must be a positive integer");
-          if (args.section !== "patch" && args.section !== "prDiff") throw new TypeError("section must be patch or prDiff");
-          if (args.page !== undefined && (!Number.isSafeInteger(args.page) || Number(args.page) < 1)) {
-            throw new TypeError("page must be a positive integer");
-          }
-          return host.reviewPr(repositoryId(args), { action: "inspect", token, plan, number: Number(args.number), section: args.section, page: args.page as number | undefined }, signal);
-        }
-        if (operation === "git.publishPrUpdate") {
-          const plan = stringField(args, "plan", { maxLength: 32 })!;
-          if (!/^[0-9a-f]{32}$/.test(plan)) throw new TypeError("invalid review plan");
-          return host.reviewPr(repositoryId(args), { action: "publish", token, plan }, signal);
-        }
-        return host.reviewPr(repositoryId(args), { action: operation === "git.planPrUpdate" ? "plan" : "verify", token }, signal);
-      }
       case "git.pushBranch":
         return host.pushBranch(repositoryId(args), signal);
       case "git.pushBase":
         return host.pushBase(repositoryId(args), signal);
-      case "git.createPr":
-        return host.createPr(
-          repositoryId(args),
-          {
-            title: stringField(args, "title", { optional: true, maxLength: 200 }),
-            body: stringField(args, "body", { optional: true, maxLength: 64 * 1024 }),
-          },
-          signal,
-        );
+      case "git.createPr": {
+        const id = repositoryId(args);
+        const options = {
+          title: stringField(args, "title", { optional: true, maxLength: 200 }),
+          body: stringField(args, "body", { optional: true, maxLength: 64 * 1024 }),
+        };
+        const confirmed = await confirmCreatePr(signal);
+        signal.throwIfAborted();
+        if (!confirmed) throw new Error("pull request creation cancelled by user");
+        return host.createPr(id, options, signal);
+      }
       case "services.ensure":
         return host.ensureServices(signal);
       case "portals.expose": {

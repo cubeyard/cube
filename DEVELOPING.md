@@ -175,100 +175,19 @@ curl -s 'localhost:7777/api/events?format=text&limit=40'
 and `cube upgrade` keep working; it records what it shipped in
 `.deployed-tree`, which becomes the version stamped on events.
 
-### Review fixes on native GitHub PR stacks
+### Git publication
 
-The agent's code-mode API supports existing PR updates through
-`preparePrUpdate`, `planPrUpdate`, `publishPrUpdate`, and `verifyPrUpdate`.
-These use GitHub's native Stack REST API and GraphQL queue state via the
-host's authenticated `gh api`; installing `gh-stack` is not required.
-See [GitHub's stack reference](https://docs.github.com/en/pull-requests/reference/stacked-prs-cli-commands).
+Use ordinary local Git for commits, review, rebases, and conflict resolution.
+`cube.git.pushBranch` performs the same non-forced host-side push for a new
+branch and an existing PR branch; it does not query PR metadata or ingest a
+diff. `cube.git.pushBase` differs only in its destination ref.
 
-1. Read the PR and all relevant review/comment pages with `cube.github.read`.
-2. Call `cube.git.preparePrUpdate(repositoryId, prNumber)`. Cube reads and
-   validates the entire ordered stack, fetches the actual head objects into
-   a host-owned repository, and imports them through a static bundle. It
-   returns a fresh local branch at the exact remote PR head. Switch to that
-   branch before editing. Existing local branches and worktrees are never
-   reset; a dirty worktree must be dealt with first.
-3. Make and test the scoped fix, adding commits without rewriting the PR's
-   existing history. Call `cube.git.planPrUpdate(repositoryId, token)`.
-   Cube freezes those commits, rebases each descendant onto its updated
-   parent in the host-owned repository, and returns compact per-PR summaries
-   with before/after SHAs, diffstats, UTF-8 byte counts, and SHA-256 hashes.
-   Repeating this call with the same candidate reuses the saved plan ID and
-   descendant SHAs, including after restart. Planning and inspection are
-   entirely local: they use the prepared snapshot without GitHub calls or
-   credential refresh. A plan may therefore be stale; publication rechecks
-   the complete remote snapshot and rejects it before push if anything changed.
-   Read each PR's diff from the saved commit IDs with
-   `cube.git.inspectPrUpdatePlan(repositoryId, token, plan, { number, section, page })`.
-   Read both `patch` (incremental change) and `prDiff` (resulting PR diff),
-   following `nextPage` until null. Pages contain at most 16000 UTF-16 code
-   units, so even long lines and JSON escaping fit the output limit. Hashes
-   cover the complete UTF-8 diff, not individual pages. Inspection does not
-   replan or check remote freshness. Each call computes only the requested
-   diff from pinned commits in the host repository, even after local or remote
-   changes. Diff text and summaries are not cached or persisted; the stored
-   plan still contains only its ID, candidate SHA, and layer SHAs. A new
-   candidate replaces the plan and invalidates its
-   old ID. Review all pages before publishing; summaries and hashes do not
-   replace content inspection. Conflicts or incomplete diff capture produce
-   no publishable plan. Git's per-command 4 MiB capture limit still applies.
-4. When publication is authorized, call
-   `cube.git.publishPrUpdate(repositoryId, token, plan)`. Cube rechecks the
-   snapshot, then pushes all changed branches with `--atomic` and explicit
-   original-SHA leases. It never uses mutable local tracking refs as leases
-   or falls back to a partial/non-atomic push. It preserves PR numbers,
-   base branches, and stack membership rather than recreating or relinking
-   PRs. Verification requires the planned head SHAs and unchanged stack
-   order/bases, checked through both GitHub and the Git transport.
-5. After a disconnect or uncertain result, call
-   `cube.git.verifyPrUpdate(repositoryId, token)`. The host persists intent
-   before pushing and refuses to repeat a consumed plan, including after a
-   restart. It never automatically rolls back potentially newer remote work.
-
-Direct push/PR creation cannot publish a detected existing PR; use the
-review workflow instead. `syncBase` still refreshes only the configured
-repository base and is not a PR-head or stack synchronization operation.
-Standalone PRs use the same review workflow when the REST PR response omits
-`stack` or returns `stack: null`. A contiguous merged prefix is retained in
-`stack.mergedPrefix` as historical membership; `stack.layers` contains only
-the open suffix. Cube verifies each prefix PR's `merge_commit_sha` is an
-ancestor of the fetched trunk, including squash/rebase results and shared
-native group-merge commits. Old PR head SHAs need not be ancestors of trunk,
-and merged branch refs need not exist. Only active heads are fetched,
-restacked, leased, and published; merged branch refs are never recreated.
-GitHub owns partial-merge retargeting: the first open PR must already target
-the native stack's trunk. Retained merged members need no unstacking or
-metadata cleanup. If retargeting has not completed, preparation stops with
-an explicit native-reconciliation message rather than guessing a base.
-Closed-but-unmerged, queued, forked, inconsistent, or inaccessible layers,
-non-prefix merges, unverified merge results, and nonlinear descendant
-histories still stop before publication.
-Review snapshots and their Git objects live under `reposRoot/pr-reviews/`
-on the host, not in the guest, and survive cubed restarts.
-
-GitHub does not expose a transaction spanning Git refs and stack metadata.
-Atomic leases prevent overwriting concurrent changes to the updated refs;
-pre/post checks detect concurrent membership, base, or predecessor changes,
-but cannot lock those relationships during the push. A post-check failure
-means refs may already have changed and requires reconciliation, not retry
-or rollback. The agent still needs to judge whether the review patch is
-within the user's requested scope; ancestry alone cannot prove that.
-
-### Explicitly rebasing a published PR
-
-See [the Git workflow guide](docs/git-workflows.md) for a shorter decision table.
-For a user-authorized standalone PR rewrite, `cube.git.preparePrRebase` prepares
-an explicitly different kind of session; it does not relax additive review
-sessions. It returns a fresh branch, pinned head/base/upstream SHAs, and local
-`rebaseCommand`/`rangeDiffCommand`. Switch to that branch, rebase (resolve or
-abort conflicts), preserve the original work including merge resolutions, and
-test. Then use the **same** plan/inspect/publish/verify operations as above.
-The planner requires linear history above the pinned base, and publication
-uses the original head's exact SHA lease. Stacks, forks, queued PRs, and malformed
-native membership metadata are rejected. There is no unconditional force flag,
-no user-supplied lease, and no automatic retry after an uncertain push.
+`cube.git.createPr` is the single confirmation boundary. The pi extension asks
+the user immediately before the host call, then the server pushes the branch
+and runs `gh pr create`. Declining does not reach the server. GitHub remains the
+authority for non-fast-forward rejection, branch protection, rulesets, checks,
+and required reviews. See [the Git workflow guide](docs/git-workflows.md) for
+the policy boundary and a deliberately small declarative direction.
 
 ### VM host requirements and persistent state
 
