@@ -11,12 +11,18 @@ let successes = 0;
 let failures = 0;
 let removing = false;
 let authFailure: Error | undefined;
+let workspaceFailure: Error | undefined = undefined;
 const operations = RepositoryOperations.make({
   resolve(threadId, id) {
     if (threadId !== "one" || id !== repository.id) throw new Error("no such repository");
     return { cube, repository };
   },
-  requireSeeded(target) { assert.equal(target.repository, repository); },
+  async requireSeeded(target) {
+    assert.equal(target.repository, repository);
+    assert.equal(reserved, 1, "workspace checks remain inside the lifetime reservation");
+    await Promise.resolve();
+    if (workspaceFailure) throw workspaceFailure;
+  },
   async authenticate() {
     assert.equal(reserved, 1, "auth is covered by the lifetime reservation too");
     authenticated++;
@@ -79,4 +85,11 @@ const before = authenticated;
 await assert.rejects(runRepositoryEffect(operations.run("one", 2, "push", async () => {}, { online: true, signal: controller.signal })), error => error === reason);
 assert.equal(authenticated, before, "pre-aborted calls never authenticate or publish");
 assert.equal(reserved, 0);
+workspaceFailure = new Error("execution node offline");
+await assert.rejects(run(), error => error === workspaceFailure);
+assert.equal(reserved, 0, "async workspace failure releases the reservation");
+assert.equal(authenticated, before, "unavailable workspace never authenticates or publishes");
+assert.equal(await runRepositoryEffect(operations.run("one", 2, "inspect", async repo => repo.workspacePath,
+  { online: false, needsWorkspace: false })), repository.workspacePath);
+assert.equal(reserved, 0, "host-only inspection remains available while the node is offline");
 console.log("repository operations: scoped authorization, auth, finalization and cancellation pass");

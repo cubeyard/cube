@@ -326,7 +326,7 @@ await assert.rejects(
   /no such repository/,
 );
 // Reference edits and publication target its own remote, never the primary.
-const referencePath = supervisor.workspaceForUserRepository(thread.id, repositories[1]!.id);
+const referencePath = await supervisor.workspaceForUserRepository(thread.id, repositories[1]!.id);
 const primaryHead = git(cube.workspacePath, "rev-parse", "HEAD");
 const primaryRemote = git(primary.bare, "rev-parse", "main");
 fs.writeFileSync(path.join(referencePath, "DOCS.md"), "edited in the same thread\n");

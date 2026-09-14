@@ -19,14 +19,14 @@ const failure = (cause: unknown) => new RepositoryOperationError({ cause });
 
 interface Dependencies {
   resolve(threadId: string, repositoryId: number): Target;
-  requireSeeded(target: Target): void;
+  requireSeeded(target: Target): void | Promise<void>;
   authenticate(): Promise<void>;
   reserve(cubeName: string, label: string | null): Reservation;
 }
 
 interface Operations {
   guard<A>(cubeName: string, label: string | null, work: Effect.Effect<A, RepositoryOperationError>): Effect.Effect<A, RepositoryOperationError>;
-  run<A>(threadId: string, repositoryId: number, label: string, work: (repository: CubeRepositoryRow) => Promise<A>, options: { signal?: AbortSignal; online: boolean }): Effect.Effect<A, RepositoryOperationError>;
+  run<A>(threadId: string, repositoryId: number, label: string, work: (repository: CubeRepositoryRow) => Promise<A>, options: { signal?: AbortSignal; online: boolean; needsWorkspace?: boolean }): Effect.Effect<A, RepositoryOperationError>;
 }
 
 /** Thread-scoped authorization and lifetime for every checkout. Credentials
@@ -53,15 +53,16 @@ export class RepositoryOperations extends Context.Service<RepositoryOperations, 
     const run = Effect.fn("RepositoryOperations.run")(function*<A>(
       threadId: string, repositoryId: number, label: string,
       work: (repository: CubeRepositoryRow) => Promise<A>,
-      options: { signal?: AbortSignal; online: boolean },
+      options: { signal?: AbortSignal; online: boolean; needsWorkspace?: boolean },
     ) {
       const id = yield* decodeRepositoryId(repositoryId).pipe(Effect.mapError(failure));
       const target = yield* Effect.try({ try: () => deps.resolve(threadId, id), catch: failure });
       return yield* guard(target.cube.name, label, Effect.gen(function*() {
         yield* Effect.try({
-          try: () => { options.signal?.throwIfAborted(); deps.requireSeeded(target); },
+          try: () => { options.signal?.throwIfAborted(); },
           catch: failure,
         });
+        if (options.needsWorkspace !== false) yield* Effect.tryPromise({ try: async () => { await deps.requireSeeded(target); }, catch: failure });
         if (options.online) yield* Effect.tryPromise({ try: () => deps.authenticate(), catch: failure });
         yield* Effect.try({ try: () => options.signal?.throwIfAborted(), catch: failure });
         return yield* Effect.tryPromise({ try: () => work(target.repository), catch: failure });
