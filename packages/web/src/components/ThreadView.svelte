@@ -1,15 +1,16 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
+  import { SvelteMap } from "svelte/reactivity";
   import {
-    createUserThread,
     deleteThread,
     errorText,
     fetchFiles,
     fetchRepositories,
     fetchServices,
+    fetchThreadModels,
     fileUrl,
+    setThreadModel,
   } from "../lib/api.ts";
-  import { uid } from "../lib/uid.ts";
   import { createArmed } from "../lib/armed.svelte.ts";
   import { fmtBytes } from "../lib/bytes.ts";
   import type { Command } from "../lib/command.ts";
@@ -17,6 +18,7 @@
   import { relTime } from "../lib/time.ts";
   import type {
     ServiceLink,
+    ThreadModels,
     ThreadRepository,
     ThreadSummary,
     WorkspaceListing,
@@ -26,9 +28,10 @@
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
 
-  let { threadId, threads, command = null, onConsume = () => {} }: {
+  let { threadId, threads, command = null, onConsume = () => {}, onNewThread }: {
     threadId: string;
     threads: ThreadSummary[];
+    onNewThread: (projectId?: string) => void;
     /** App's `n` shortcut: start a new thread in this thread's project. */
     command?: Command | null;
     onConsume?: (id: number) => void;
@@ -98,6 +101,57 @@
   const threadsAtMount = untrack(() => threads);
   const gone = $derived(summary === null && threads !== threadsAtMount);
 
+  const projectGroups = $derived.by(() => {
+    const groups = new SvelteMap<string, { project: ThreadSummary["project"]; threads: ThreadSummary[] }>();
+    for (const thread of threads) {
+      let group = groups.get(thread.project.id);
+      if (!group) {
+        group = { project: thread.project, threads: [] };
+        groups.set(thread.project.id, group);
+      }
+      group.threads.push(thread);
+    }
+    return [...groups.values()];
+  });
+
+  let modelState = $state<ThreadModels | null>(null);
+  let changingModel = $state(false);
+  let conversationBusy = $state(false);
+  let modelError = $state<string | null>(null);
+  const modelKey = $derived(modelState?.selected ? JSON.stringify(modelState.selected) : "");
+  const selectedModel = $derived(modelState?.models.find((model) =>
+    model.provider === modelState?.selected?.provider && model.id === modelState?.selected?.id) ?? null);
+  const providers = $derived([...new Set(modelState?.models.map((model) => model.provider) ?? [])]);
+
+  async function loadModels(): Promise<void> {
+    modelError = null;
+    try {
+      const fresh = await fetchThreadModels(threadId);
+      if (!disposed) modelState = fresh;
+    } catch (cause) {
+      if (!disposed) modelError = errorText(cause);
+    }
+  }
+
+  async function changeModel(event: Event): Promise<void> {
+    const select = event.currentTarget as HTMLSelectElement;
+    const selected = modelState?.models.find((model) => JSON.stringify(model) === select.value);
+    if (!selected || conversationBusy || changingModel) return;
+    changingModel = true;
+    modelError = null;
+    try {
+      const fresh = await setThreadModel(threadId, selected);
+      if (!disposed) modelState = fresh;
+    } catch (cause) {
+      if (!disposed) modelError = errorText(cause);
+    } finally {
+      if (!disposed) {
+        select.value = modelKey;
+        changingModel = false;
+      }
+    }
+  }
+
   // ---- the mobile thread drawer: opened from the strip, closed by its key,
   // the scrim, or Escape; focus goes in with it and back to the opener ----
   let threadSidebarOpen = $state(false);
@@ -152,6 +206,7 @@
     if (Number.isFinite(savedSplit) && savedSplit > 0) setSplit(savedSplit);
     refreshRepositories();
     refreshServices();
+    void loadModels();
     const slow = setInterval(() => {
       refreshRepositories();
       refreshServices();
@@ -211,25 +266,6 @@
     }
   }
 
-  let creating = $state(false);
-  // One id per user action (see ThreadList): a failed press is retried
-  // with the same id, never as a second thread.
-  let newThreadRequest: string | null = null;
-  async function newThread(): Promise<void> {
-    if (!summary || creating) return;
-    creating = true;
-    try {
-      newThreadRequest ??= uid();
-      const id = await createUserThread(summary.project.id, newThreadRequest);
-      newThreadRequest = null;
-      location.hash = `#/t/${id}`;
-    } catch (e) {
-      setNote({ text: `new thread: ${errorText(e)}`, bad: true });
-    } finally {
-      if (!disposed) creating = false;
-    }
-  }
-
   // Take the shell's command once: consume it before the action runs, and
   // run the action untracked so its own state (creating, the note) can
   // never re-arm this effect.
@@ -237,7 +273,7 @@
     const pending = command;
     if (!pending || pending.kind !== "new-thread") return;
     onConsume(pending.id);
-    untrack(() => void newThread());
+    untrack(() => onNewThread(summary?.project.id));
   });
 
   // Escape closes the topmost overlay — drawer, then files shelf — and hands
@@ -245,7 +281,7 @@
   function onWindowKeydown(event: KeyboardEvent): void {
     if (event.key !== "Escape" || event.defaultPrevented) return;
     const target = event.target as HTMLElement | null;
-    if (target?.closest?.("input, textarea, select")) return;
+    if (target?.closest?.("dialog, input, textarea, select")) return;
     if (threadSidebarOpen) {
       event.preventDefault();
       closeSidebar();
@@ -259,9 +295,7 @@
 
 <svelte:window onkeydown={onWindowKeydown} />
 
-<div class="thread-topbar">
-  <Header section="threads" />
-
+{#snippet threadControls()}
   <section class="thread-strip" class:hidden={!summary} aria-label="thread controls">
     {#if summary}
       <span class="lamp {lampClass(summary)}" aria-hidden="true"></span>
@@ -282,6 +316,26 @@
         <span class="strip-state" class:error={summary.state === "error"}>{stateLabel(summary)}</span>
       {/if}
       <span class="spacer"></span>
+      <label class="strip-model" title={modelState?.selected ? `${modelState.selected.provider}/${modelState.selected.id}` : "choose a model"}>
+        <span class="sr-only">model</span>
+        <select aria-label="model" value={modelKey} onchange={changeModel} disabled={!modelState || conversationBusy || changingModel || !modelState.models.length}>
+          {#if !modelState}
+            <option value="">loading models…</option>
+          {:else if !modelState.selected}
+            <option value="">no models available</option>
+          {:else if !selectedModel}
+            <option value={modelKey}>{modelState.selected.id} · unavailable</option>
+          {/if}
+          {#each providers as provider}
+            <optgroup label={provider}>
+              {#each modelState?.models.filter((model) => model.provider === provider) ?? [] as model}
+                <option value={JSON.stringify(model)}>{model.id}</option>
+              {/each}
+            </optgroup>
+          {/each}
+        </select>
+        <Icon name="chevron" size={12} />
+      </label>
       {#if services.length > 0}
         <span class="strip-services">
           {#each services as service (service.name)}
@@ -322,7 +376,7 @@
       </span>
     {/if}
   </section>
-</div>
+{/snippet}
 
 <div class="thread-body">
   {#if threadSidebarOpen}
@@ -334,17 +388,27 @@
   {/if}
 
   <aside id="thread-sidebar" class="thread-sidebar" class:open={threadSidebarOpen} aria-label="threads">
-    <div class="thread-sidebar-head">
-      <a href="#/threads">all threads</a>
+    <div class="thread-navigation"><Header section="threads" /></div>
+    <div class="sidebar-actions">
+      <button class="sidebar-create" onclick={() => onNewThread()} aria-label="new thread" title="new thread · press n"><Icon name="plus" size={14} />thread</button>
       <button class="key sidebar-close" bind:this={sidebarClose} onclick={closeSidebar}>close</button>
     </div>
-    <button class="key sidebar-new" onclick={newThread} disabled={!summary || creating}>
-      <Icon name="plus" size={13} />{creating ? "starting…" : "new thread"}
-    </button>
 
     {#if threads.length > 0}
       <nav class="thread-sidebar-list" aria-label="active threads">
-        {#each threads as thread (thread.id)}
+        {#each projectGroups as group (group.project.id)}
+          <section class="sidebar-project" aria-label={group.project.name}>
+            <div class="sidebar-project-head">
+              <a href="#/projects/{group.project.id}" title={group.project.name}>{group.project.name}</a>
+              <span class="project-rule" aria-hidden="true"></span>
+              <button
+                class="sidebar-project-new"
+                title={`new thread in ${group.project.name}`}
+                aria-label={`new thread in ${group.project.name}`}
+                onclick={() => onNewThread(group.project.id)}
+              ><Icon name="plus" size={14} /></button>
+            </div>
+        {#each group.threads as thread (thread.id)}
           <a
             class="thread-sidebar-row"
             class:current={thread.id === threadId}
@@ -355,12 +419,13 @@
             {#if !stateLabel(thread)}<span class="sr-only">ready</span>{/if}
             <span class="thread-sidebar-copy">
               <span class="thread-sidebar-title" class:untitled={!thread.title}>{thread.title ?? "untitled"}</span>
-              <span class="thread-sidebar-meta">
-                <span>{thread.project.name}</span>
-                {#if stateLabel(thread)}<span class:error={thread.state === "error"}>{stateLabel(thread)}</span>{/if}
-              </span>
+              {#if stateLabel(thread)}
+                <span class="thread-sidebar-meta"><span class:error={thread.state === "error"}>{stateLabel(thread)}</span></span>
+              {/if}
             </span>
           </a>
+        {/each}
+          </section>
         {/each}
       </nav>
     {:else}
@@ -369,6 +434,12 @@
   </aside>
 
   <div class="thread-stage">
+{#if modelError || (modelState && !selectedModel)}
+  <div class="strip-note bad" role="alert">
+    <span class="strip-note-text">{modelError ?? (modelState?.models.length ? "selected model is unavailable — choose another model" : "no models available — sign in to a provider")}</span>
+    <button class="key" onclick={loadModels}>retry models</button>
+  </div>
+{/if}
 {#if waitingText(summary)}
   <div class="strip-note wait" role="status">
     <span class="lamp on-amber blink" aria-hidden="true"></span>
@@ -433,10 +504,11 @@
   style={`--thread-pane-width: ${splitPercent}%`}
 >
   <section class="workspace-pane thread-pane" aria-label="thread">
+    {@render threadControls()}
     {#if gone}
       <div class="conversation-gone"><p>this thread was deleted.</p><a class="key" href="#/threads">back to threads</a></div>
     {:else}
-      <Conversation {threadId} waitingText={waitingText(summary)} />
+      <Conversation {threadId} model={selectedModel} {changingModel} bind:busy={conversationBusy} waitingText={waitingText(summary)} />
     {/if}
   </section>
 

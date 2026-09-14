@@ -7,6 +7,7 @@ import { Effect, Fiber, Schema } from "effect";
 
 import type { ConversationMessageRow } from "./registry.ts";
 import { Registry } from "./registry.ts";
+import type { ModelSelection } from "./models.ts";
 
 const WorkerEvent = Schema.Union([
   Schema.Struct({ type: Schema.Literal("text_delta"), delta: Schema.String }),
@@ -64,6 +65,8 @@ export class Conversations {
       if (this.registry.activeAgentRun(threadId)) {
         return yield* new ConversationError({ message: "thread is already working" });
       }
+      const model = this.registry.getThreadModel(threadId);
+      if (!model) return yield* new ConversationError({ message: "choose an available model before sending" });
       const runId = crypto.randomUUID();
       yield* Effect.try({
         try: () => {
@@ -73,7 +76,7 @@ export class Conversations {
         },
         catch: (cause) => new ConversationError({ message: "could not accept prompt", cause }),
       });
-      const fiber = Effect.runFork(this.execute(threadId, runId, text));
+      const fiber = Effect.runFork(this.execute(threadId, runId, text, model));
       this.fibers.set(runId, fiber);
       void Effect.runPromise(Fiber.await(fiber)).finally(() => this.fibers.delete(runId));
       return { runId };
@@ -95,6 +98,7 @@ export class Conversations {
     threadId: string,
     runId: string,
     prompt: string,
+    model: ModelSelection,
   ) {
     const program = Effect.gen({ self: this }, function*() {
       this.registry.setAgentRunStatus(runId, "running");
@@ -104,7 +108,7 @@ export class Conversations {
         .filter((message) => !(message.runId === runId && message.role === "user"))
         .filter((message) => message.finalized)
         .map((message) => message.payload);
-      yield* this.runWorker(plan, { prompt, messages: history, extension: this.extension }, threadId, runId);
+      yield* this.runWorker(plan, { prompt, messages: history, extension: this.extension, model }, threadId, runId);
       this.registry.setAgentRunStatus(runId, "completed");
       yield* this.host.activity(threadId);
     });

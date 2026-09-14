@@ -6,6 +6,7 @@
   import ThreadView from "./components/ThreadView.svelte";
   import Onboarding from "./components/Onboarding.svelte";
   import Wordmark from "./components/Wordmark.svelte";
+  import NewThreadDialog from "./components/NewThreadDialog.svelte";
   import { errorText, fetchState, fetchThreads, isUnreachable } from "./lib/api.ts";
   import { COMMAND_TTL_MS, type Command } from "./lib/command.ts";
   import type { DaemonState, ThreadSummary } from "./lib/types.ts";
@@ -28,6 +29,8 @@
   let threads = $state<ThreadSummary[]>([]);
   let threadsLoaded = $state(false);
   const activeThreads = $derived(threads.filter((thread) => !thread.archived));
+  let newThreadDialog = $state<NewThreadDialog>();
+  const onNewThread = (projectId?: string) => { void newThreadDialog?.open(projectId); };
 
   // Connection honesty after the first load: one missed poll is noise (a
   // laptop lid, a cubed restart); two in a row is worth a quiet word.
@@ -123,7 +126,7 @@
   function onKeydown(event: KeyboardEvent): void {
     if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
     const target = event.target as HTMLElement | null;
-    if (target?.closest?.("input, textarea, select, [contenteditable]")) return;
+    if (target?.closest?.("dialog, input, textarea, select, [contenteditable]")) return;
     const now = Date.now();
     const chord = pendingG && now - pendingG < 1500;
     pendingG = 0;
@@ -175,18 +178,19 @@
     location.hash = "#/projects";
   }} />
 {:else}
+  <NewThreadDialog bind:this={newThreadDialog} />
   {#if offline}
     <div class="conn-strip" role="status">not connected to the host — retrying</div>
   {/if}
   {#if threadId && threadsLoaded}
     {#key threadId}
-      <ThreadView {threadId} threads={activeThreads} {command} onConsume={consume} />
+      <ThreadView {threadId} threads={activeThreads} {command} onConsume={consume} {onNewThread} />
     {/key}
   {:else if threadId}
     <p class="loading">loading threads…</p>
   {:else if projectId}
     {#key projectId}
-      <ProjectView {projectId} githubLogin={/^#\/projects\/[^/?]+\/github(?:[?]|$)/.test(hash)} {command} onConsume={consume} />
+      <ProjectView {projectId} githubLogin={/^#\/projects\/[^/?]+\/github(?:[?]|$)/.test(hash)} {command} onConsume={consume} {onNewThread} />
     {/key}
   {:else if projectsRoute}
     <ProjectList />
@@ -199,6 +203,7 @@
       onDismissNotice={() => (listNotice = null)}
       {command}
       onConsume={consume}
+      {onNewThread}
     />
   {:else}
     <p class="loading">loading threads…</p>

@@ -20,6 +20,7 @@ import { Conversations, ConversationError } from "./conversation.ts";
 import { formatEventLine, recordPoint } from "./events.ts";
 import { GithubAuth, GithubUnreachableError } from "./github-auth.ts";
 import { createLogger } from "./log.ts";
+import { availableModels } from "./models.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { defaultPortalBase } from "./portal-config.ts";
 import { guardUpgradeSocket, portalLabel, proxyHttp, proxyUpgrade, refuseUpgrade, respondFailed, respondMissing, respondUnavailable, respondWaking, upgradeAfterWake } from "./portal-proxy.ts";
@@ -517,6 +518,11 @@ async function api(
     return json(res, 404, { error: "not found" });
   }
 
+  if (url.pathname === "/api/models" && method === "GET") {
+    const { models, defaultModel } = await availableModels();
+    return json(res, 200, { models, selected: defaultModel });
+  }
+
   if (url.pathname === "/api/threads") {
     if (method === "GET") {
       return json(res, 200, {
@@ -524,7 +530,7 @@ async function api(
       });
     }
     if (method === "POST") {
-      let parsed: { projectId?: unknown; requestId?: unknown };
+      let parsed: { projectId?: unknown; requestId?: unknown; text?: unknown; model?: unknown };
       try {
         parsed = JSON.parse(await readBody(req));
       } catch {
@@ -532,6 +538,18 @@ async function api(
       }
       if (typeof parsed.projectId !== "string" || !parsed.projectId.trim()) {
         return json(res, 400, { error: "projectId is required" });
+      }
+      const text = parsed.text;
+      if (text !== undefined && (typeof text !== "string" || !text.trim() || text.trim().length > 100_000)) {
+        return json(res, 400, { error: "prompt must be 1–100000 characters" });
+      }
+      let selected;
+      if (text !== undefined || parsed.model !== undefined) {
+        const { models, defaultModel } = await availableModels();
+        const input = parsed.model;
+        selected = input === undefined ? defaultModel : models.find((model) => input && typeof input === "object"
+          && "provider" in input && "id" in input && model.provider === input.provider && model.id === input.id);
+        if (!selected) return json(res, 400, { error: "selected model is unavailable; choose another model" });
       }
       // Idempotency: `Idempotency-Key` header or body `requestId`, a
       // client id for one user action. A replay answers 200 with the
@@ -545,6 +563,13 @@ async function api(
         requestKey = rawKey;
       }
       const created = await supervisor.createUserThread(parsed.projectId, requestKey);
+      // Accept the first turn without yielding between the history check and
+      // persistence. Concurrent creation replays must not send it twice, even
+      // when the worker has already finished or failed by the time of retry.
+      if (selected && !registry.latestAgentRun(created.id)) {
+        registry.setThreadModel(created.id, selected);
+        if (typeof text === "string") Effect.runSync(conversations.submit(created.id, text.trim()));
+      }
       return json(res, created.created ? 201 : 200, { id: created.id });
     }
   }
@@ -668,7 +693,7 @@ async function api(
   }
 
   const userThread = url.pathname.match(
-    /^\/api\/threads\/([^/]+)(?:\/(history|prompt|files|services|portals|archive|environment)(?:\/(.+))?)?$/,
+    /^\/api\/threads\/([^/]+)(?:\/(history|prompt|model|files|services|portals|archive|environment)(?:\/(.+))?)?$/,
   );
   if (userThread) {
     const id = decodeId(userThread[1]!);
@@ -696,6 +721,23 @@ async function api(
       }
       return json(res, 404, { error: "not found" });
     }
+    if (action === "model") {
+      if (!registry.getThread(id)) return json(res, 404, { error: "thread not found" });
+      if (method !== "GET" && method !== "PATCH") return json(res, 404, { error: "not found" });
+      const { models, defaultModel } = await availableModels();
+      if (method === "GET") {
+        return json(res, 200, { models, selected: registry.getThreadModel(id) ?? defaultModel });
+      }
+      let input: unknown;
+      try { input = JSON.parse(await readBody(req)); }
+      catch { return json(res, 400, { error: "invalid JSON body" }); }
+      const selected = models.find((model) => input && typeof input === "object"
+        && "provider" in input && "id" in input && model.provider === input.provider && model.id === input.id);
+      if (!selected) return json(res, 400, { error: "selected model is unavailable; choose another model" });
+      if (registry.activeAgentRun(id)) return json(res, 409, { error: "wait for the agent to finish before changing model" });
+      registry.setThreadModel(id, selected);
+      return json(res, 200, { models, selected });
+    }
     if (action === "history") {
       if (method !== "GET") return json(res, 404, { error: "not found" });
       const after = Number(url.searchParams.get("after") ?? 0);
@@ -709,10 +751,28 @@ async function api(
     if (action === "prompt") {
       if (method !== "POST") return json(res, 404, { error: "not found" });
       let text: string;
-      try { text = String(JSON.parse(await readBody(req)).text ?? "").trim(); }
+      let requestedModel: unknown;
+      try {
+        const body = JSON.parse(await readBody(req));
+        text = String(body.text ?? "").trim();
+        requestedModel = body.model;
+      }
       catch { return json(res, 400, { error: "invalid JSON body" }); }
       if (!text) return json(res, 400, { error: "empty prompt" });
       if (text.length > 100_000) return json(res, 400, { error: "prompt is too long" });
+      if (!registry.getThread(id)) return json(res, 404, { error: "thread not found" });
+      const { models, defaultModel } = await availableModels();
+      // Bind the turn to the model the sender sees, even if another tab changed
+      // the thread preference. Non-browser clients may omit it for the default.
+      const selected = requestedModel === undefined ? registry.getThreadModel(id) ?? defaultModel
+        : models.find((model) => requestedModel && typeof requestedModel === "object"
+          && "provider" in requestedModel && "id" in requestedModel
+          && model.provider === requestedModel.provider && model.id === requestedModel.id);
+      if (!selected || !models.some((model) => model.provider === selected.provider && model.id === selected.id)) {
+        return json(res, 400, { error: "selected model is unavailable; choose another model" });
+      }
+      if (registry.activeAgentRun(id)) return json(res, 409, { error: "thread is already working" });
+      registry.setThreadModel(id, selected);
       const accepted = await Effect.runPromise(conversations.submit(id, text));
       return json(res, 202, accepted);
     }

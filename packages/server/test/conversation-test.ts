@@ -28,7 +28,7 @@ emit({ type: "message", message: { role: "assistant", content: [{ type: "text", 
 emit({ type: "message", message: { role: "toolResult", toolName: "read", content: [{ type: "text", text: "tool output" }], timestamp: Date.now() } });
 emit({ type: "text_delta", delta: text.slice(0, 8) });
 emit({ type: "text_delta", delta: text.slice(8) });
-emit({ type: "message", message: { role: "assistant", content: [{ type: "text", text }], timestamp: Date.now() } });
+emit({ type: "message", message: { role: "assistant", content: [{ type: "text", text }], model: request.model, timestamp: Date.now() } });
 emit({ type: "complete" });
 `);
 
@@ -56,9 +56,16 @@ const waitForRun = Effect.fnUntraced(function*(id: string) {
 });
 
 await Effect.runPromise(Effect.gen(function*() {
+  assert.equal((yield* conversations.submit("thread", "no model").pipe(Effect.result))._tag, "Failure");
+  assert.equal(conversations.history("thread").messages.length, 0);
+  registry.setThreadModel("thread", { provider: "first-provider", id: "shared-model-id" });
   const first = yield* conversations.submit("thread", "first\nmultiline");
+  // Selection is captured before asynchronous planning, not when the worker starts.
+  registry.setThreadModel("thread", { provider: "second-provider", id: "shared-model-id" });
   assert.equal((yield* conversations.submit("thread", "overlap").pipe(Effect.result))._tag, "Failure");
   assert.equal((yield* waitForRun(first.runId)).status, "completed");
+  assert.deepEqual((conversations.history("thread").messages.at(-1)!.payload as { model: unknown }).model,
+    { provider: "first-provider", id: "shared-model-id" });
   assert.deepEqual(
     conversations.history("thread").messages.map((message) => [message.role, message.content]),
     [
@@ -71,6 +78,8 @@ await Effect.runPromise(Effect.gen(function*() {
 
   const second = yield* conversations.submit("thread", "second");
   assert.equal((yield* waitForRun(second.runId)).status, "completed");
+  assert.deepEqual((conversations.history("thread").messages.at(-1)!.payload as { model: unknown }).model,
+    { provider: "second-provider", id: "shared-model-id" });
   assert.deepEqual(
     conversations.history("thread").messages.map((message) => [message.role, message.content]),
     [
@@ -100,5 +109,8 @@ await Effect.runPromise(Effect.gen(function*() {
 }));
 
 registry.close();
+const reopened = new Registry(path.join(root, "cubed.db"));
+assert.deepEqual({ ...reopened.getThreadModel("thread") }, { provider: "second-provider", id: "shared-model-id" });
+reopened.close();
 fs.rmSync(root, { recursive: true, force: true });
 console.log("conversation-test: all ok");

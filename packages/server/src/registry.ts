@@ -378,6 +378,11 @@ export class Registry {
     this.migrateThreadArchive(); // after: the project upgrade recreates `thread` without it
     this.migrateEnvironmentColumns();
     this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS thread_cube_id_unique ON thread(cube_id)");
+    this.db.exec(`CREATE TABLE IF NOT EXISTS thread_model (
+      thread_id TEXT PRIMARY KEY REFERENCES thread(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL,
+      id TEXT NOT NULL
+    )`);
     this.migrateNodeBinding();
   }
 
@@ -1033,6 +1038,17 @@ export class Registry {
   getThread(id: string): ThreadRow | null {
     const row = this.db.prepare("SELECT * FROM thread WHERE id = ?").get(id);
     return row ? threadRow(row) : null;
+  }
+
+  getThreadModel(threadId: string): { provider: string; id: string } | null {
+    return this.db.prepare("SELECT provider, id FROM thread_model WHERE thread_id = ?").get(threadId) as
+      { provider: string; id: string } | undefined ?? null;
+  }
+
+  setThreadModel(threadId: string, model: { provider: string; id: string }): void {
+    this.db.prepare(`INSERT INTO thread_model (thread_id, provider, id) VALUES (?, ?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET provider = excluded.provider, id = excluded.id`)
+      .run(threadId, model.provider, model.id);
   }
 
   listThreads(cubeId: number): ThreadRow[] {
