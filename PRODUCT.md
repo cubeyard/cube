@@ -24,11 +24,13 @@ the person on the other end of a broken state has no context from this repo.
 
 ## Product Purpose
 
-Cube is a self-hosted equivalent of Amp Orbs, currently delivered on one VM per
-user. The control plane owns the conversation; each thread is permanently bound
-to one environment on one execution node. It gives a coding agent a real, isolated machine — full docker-in-docker,
-a persistent workspace, exposable services — while keeping the agent harness,
-credentials, and history outside that machine on the host.
+Cube is a self-hosted equivalent of Amp Orbs. The control plane owns the
+conversation; each thread is permanently bound to one environment on one
+execution node. Local Incus threads provide an isolated machine with
+docker-in-docker and portals. The optional remote trusted-host profile instead
+runs under a dedicated unprivileged Linux account and is explicitly not
+sandboxed. In both profiles, agent harness credentials and history stay on the
+control plane.
 
 Success is that a developer can hand a task to an agent, close the tab, and come
 back to trustworthy work and a legible account of what changed — without ever
@@ -79,9 +81,10 @@ plumbing, not product.
 node, including after failure or prolonged disconnection. Conversation access is
 independent of environment contact. Offline environment work is rejected, not
 queued; a confirmed missing environment is an error, not a replacement request.
-Working on another node requires a new thread. iroh is the selected future node
-transport; today's implementation is a local transition adapter, not remote
-execution. Browser access remains within the existing private boundary.
+Working on another node requires a new thread. The supported remote profile is
+trusted Linux x86_64 host execution over authenticated Iroh/N0 relay, with
+bounded durable exec and no filesystem, portal, provisioning or migration RPCs.
+Browser access remains within the existing private boundary.
 
 Confirmed today:
 

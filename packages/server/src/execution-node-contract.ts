@@ -5,7 +5,8 @@ import type { Duplex } from "node:stream";
 export type NodeId = string;
 export type NodeContact = "unobserved" | "available" | "unavailable";
 export type NodeErrorCode = "NODE_UNAVAILABLE" | "ENVIRONMENT_MISSING" | "OPERATION_UNSUPPORTED" | "COMPLETION_UNKNOWN"
-  | "WRONG_NODE" | "INVALID_REQUEST" | "CONFLICT" | "CAPACITY_EXCEEDED" | "IO_ERROR";
+  | "WRONG_NODE" | "INVALID_REQUEST" | "CONFLICT" | "CAPACITY_EXCEEDED" | "DRAINING" | "CANCELLED"
+  | "INCOMPATIBLE_PROTOCOL" | "IO_ERROR";
 export class ExecutionNodeError extends Error {
   readonly code: NodeErrorCode;
   readonly completionUnknown: boolean;

@@ -176,7 +176,7 @@ async fn real_wire_rejection_and_no_hello_before_authorization() {
                 protocol_version: 2,
             })
             .unwrap(),
-            "UNSUPPORTED",
+            "INCOMPATIBLE_PROTOCOL",
         ),
         (vec![255; 4], "INVALID_REQUEST"),
         (vec![0, 0, 0, 10, b'{'], "INVALID_REQUEST"),

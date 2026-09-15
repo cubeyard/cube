@@ -1,7 +1,7 @@
 # Handoff
 
 Short operational context for the next session, not a release log. Updated
-2026-09-14; live verification below is the last recorded evidence, not a fresh
+2026-09-15; live verification below is the last recorded evidence, not a fresh
 launch sign-off. Completed phase reports and review histories remain in Git.
 
 ## Control ↔ node slice in this working tree
@@ -10,17 +10,17 @@ Read [docs/execution-nodes.md](docs/execution-nodes.md) first: it supersedes the
 single-host product premise, not the credential or private-browser boundaries.
 Local permanent binding, restart-safe creation keys, status/wake/sleep and portal
 stream boundaries, offline pi cwd/CLI reopening, local-adapter access gates and
-separate UI contact status are implemented. Remote host enrollment/exec is now opt-in in source, not a deployed live-node sign-off.
+separate UI contact status are implemented. Remote trusted-host enrollment/exec
+is production-packaged for Linux x86_64; external acceptance remains a separate
+release sign-off.
 Pi's pinned CLI needs the `pi-session-cwd.ts` preload to ignore a historical
 workspace cwd without rewriting the session. Keep that real-CLI regression gate.
 
-Remaining blockers to a different control-plane machine: local provisioning,
-Incus file/exec adapters, host-path Git/config/browser operations, service-IP
-readiness, templates/egress/network/CA management, and production wiring of the authenticated node
-transport/operation reconciliation protocol. Next vertical is the
-[host-node development loop](docs/plans/host-node-development-loop.md): real iroh,
-host exec/files and authorized control-plane thread messaging, before portals.
-This is a development bootstrap, **not** a VPN or failover scheduler.
+The trusted-host profile is intentionally bounded exec only. Local provisioning,
+Incus file adapters, host-path Git/config/browser operations, services, portals,
+templates and sandbox egress remain local-only and are not future-host claims.
+This is **not** a VPN, sandbox, migration path or failover scheduler. Production
+operations are in [the trusted-host runbook](docs/trusted-host-operations.md).
 The local-boundary tests are not Incus/macOS/external-node acceptance; no live
 instance was deployed, restarted or used as a disposable test resource.
 
@@ -32,8 +32,8 @@ need the disposable VM portfolio. That earlier baseline did not exercise iroh or
 ## Iroh / in-process adapter development slice
 
 The Rust `packages/node-transport` host uses pinned iroh 1.2.0 / Rust 1.91.0.
-The host binary remains development-only, outside release artifacts; operator
-admission and thread exec routing are now implemented in source.
+The host binary has a separate Linux x86_64 installer bundle and systemd service;
+operator admission and thread exec routing remain explicit.
 `host-init`/`host-serve` own one immutable binding and exclusive SQLite journal;
 Accepted/Running commits precede dispatch/spawn, and restart marks unfinished work
 Interrupted/uncertain, never queued. A hard crash does not prove descendants have
@@ -63,26 +63,20 @@ isolation for an in-process addon.
 
 `bash scripts/test-node-transport.sh` now includes native Node/Rust interoperability;
 its CI job installs both toolchains. The Node offline list additionally tests real
-npm iroh with subprocess APIs disabled. Current local Linux evidence: 14 Rust tests,
+npm iroh with subprocess APIs disabled. Current local Linux evidence: 15 Rust tests,
 real Node→Rust host smoke in loopback/direct modes (both with loopback targets),
 plus an opt-in public-N0 relay smoke covering enrollment, pi routing and restart,
-43 Node suites, typecheck, lint and build. The Rust host fixtures serialize across
+46 Node suites, typecheck, lint and build. The Rust host fixtures serialize across
 cases to avoid sibling forks transiently inheriting another fixture's flock before
 exec; concurrent requests/submissions remain tested within cases.
 
-Still absent: separate-machine/NAT acceptance, file/repository transfer, remote cancellation, portals and thread
-communication. No live shared thread/node was used as a crash or execution fixture.
-The full development loop is not complete. Browser access and pi startup remain
-unchanged. Native-addon platforms other than local Linux x64 GNU are unverified.
+Still absent from the trusted-host profile: file/repository transfer and portals.
+Separate-machine/NAT acceptance must be repeated for release sign-off. Browser
+access and Pi startup remain unchanged. Other native-addon platforms are outside
+the supported Linux x86_64 boundary.
 
-Publication: PR #44 is open/unmerged at `44adfcf2` (maintainer restored CI).
-The `cubeyard/thread` push destination was a `sanitizeMessage` display rewrite,
-not Git routing. Do not infer repository names from sanitized errors.
-The current enrollment work uses prepared PR-update token
-`0415b9d6d879f0f96215336e2c49b54f`, branch
-`cube-review/0415b9d6d879f0f96215336e2c49b54f`, based on that exact head.
-Use the plan/inspect/publish review-update flow for further publication, never
-ordinary push; preserve these local commits if preparing a new snapshot.
+Publication remains operator-controlled. Do not record live publication tokens,
+node IDs, addresses, filesystem paths, or credentials in this file.
 
 ## Operator enrollment and thread exec slice
 
@@ -101,7 +95,7 @@ HTTP and codemode. Local exec/FS/Git adapters cannot authorize a remote binding.
 Archive forbids new dispatch but preserves inspection; destructive removal is
 unsupported. The native transport/host journal and no-replay semantics are intact.
 
-Evidence: 14 Rust tests, all 43 Node suites, typecheck/lint/build and real
+Evidence: 15 Rust tests, all 46 Node suites, typecheck/lint/build and real
 operator CLI → cubed HTTP → registered pi bash/code/! → npm iroh → Rust host
 smoke in both network modes (loopback targets). The smoke denies all local backend
 execution and tests cancellation/result inspection, cubed restart, no resubmission
@@ -119,13 +113,9 @@ shows participant status. Delivered work is never replayed after uncertainty.
 No PTY input automation or Pi session-file mutation is involved. See this
 change's commit and final thread report for current validation evidence.
 
-The maintainer subsequently authorized “push and continue”. Publication remains
-pending: plan `a80ec0cbb6462df5104fbdc359d469a2` froze `9f0344e`, but earlier
-batched diff output was truncated, so inspection is not complete. Full prDiff
-pages 31–34 were read without truncation (34 is final); earlier pages and patch
-need complete inspection. No publish was attempted. Progress edits require a new
-committed candidate/plan on the existing prepared review branch. Do not publish
-an old plan or discard the enrollment commit. PR #44 stays unmerged.
+The productionization branch remains local-only until the maintainer explicitly
+asks for publication. PR #44 remains the remote host-exec base; durable T2T was
+transferred by verified Git bundle before this work.
 
 ## Open security follow-up: agent-editable egress policy
 

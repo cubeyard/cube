@@ -8,6 +8,7 @@
 OFFLINE_TESTS=(
   scripts/release-contract-test.ts
   scripts/launcher-network-test.ts
+  scripts/host-production-test.ts
   packages/server/test/log-test.ts
   packages/server/test/cube-toml-test.ts
   packages/server/test/portal-config-test.ts

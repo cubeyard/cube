@@ -25,7 +25,7 @@ use tokio::{io::AsyncReadExt, process::Command, sync::Notify};
 
 pub const MAX_OUTPUT: u32 = 8192;
 pub const MAX_TIMEOUT_MS: u64 = 60_000;
-const MAX_RECORDS: i64 = 10_000;
+pub const MAX_RECORDS: i64 = 10_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -108,6 +108,16 @@ pub enum Operation {
     Unknown,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostStatus {
+    pub lifecycle: String,
+    pub active: bool,
+    pub operation_records: u64,
+    pub operation_capacity: u64,
+    pub error: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct HostError(pub &'static str);
 impl std::fmt::Display for HostError {
@@ -154,8 +164,12 @@ struct Journal {
 
 pub struct Host {
     installation: Installation,
+    recovery_quarantine: PathBuf,
     journal: Mutex<Journal>,
-    closed: AtomicBool,
+    accepting: AtomicBool,
+    faulted: AtomicBool,
+    cancel_active: AtomicBool,
+    cancel: Notify,
     idle: Notify,
 }
 
@@ -298,16 +312,76 @@ impl Host {
                 serde_json::to_string(&Operation::Running)?
             ],
         )?;
+        let recovery_quarantine = state.join("restore-quarantine");
+        let quarantined = recovery_quarantine.exists();
         Ok(Arc::new(Self {
             installation,
+            recovery_quarantine,
             journal: Mutex::new(Journal {
                 db,
                 _lock: lock,
                 active: false,
             }),
-            closed: AtomicBool::new(false),
+            accepting: AtomicBool::new(!quarantined),
+            faulted: AtomicBool::new(false),
+            cancel_active: AtomicBool::new(false),
+            cancel: Notify::new(),
             idle: Notify::new(),
         }))
+    }
+
+    pub fn status(&self) -> Result<HostStatus> {
+        let workspace_error = self.cwd(".").err().map(|error| {
+            error
+                .downcast_ref::<HostError>()
+                .map_or("IO_ERROR", |error| error.0)
+                .to_owned()
+        });
+        if workspace_error.is_some() {
+            self.accepting.store(false, Ordering::SeqCst);
+            self.faulted.store(true, Ordering::SeqCst);
+        }
+        let journal = self.journal.lock().unwrap();
+        let operation_records = journal
+            .db
+            .query_row("SELECT COUNT(*) FROM operation", [], |r| r.get::<_, i64>(0))?
+            as u64;
+        Ok(HostStatus {
+            lifecycle: if self.recovery_quarantine.exists() {
+                "recoveryRequired"
+            } else if self.faulted.load(Ordering::SeqCst) {
+                "faulted"
+            } else if self.accepting.load(Ordering::SeqCst) {
+                "ready"
+            } else {
+                "draining"
+            }
+            .into(),
+            active: journal.active,
+            operation_records,
+            operation_capacity: MAX_RECORDS as u64,
+            error: workspace_error.or_else(|| {
+                self.faulted
+                    .load(Ordering::SeqCst)
+                    .then(|| "IO_ERROR".into())
+            }),
+        })
+    }
+
+    /// Draining is local operator authority. Remote peers may observe it but
+    /// cannot enter or leave it. Existing operations remain inspectable.
+    pub fn drain(&self) {
+        self.accepting.store(false, Ordering::SeqCst);
+    }
+
+    pub fn resume(&self) -> Result<()> {
+        ensure!(
+            !self.recovery_quarantine.exists() && !self.faulted.load(Ordering::SeqCst),
+            "host requires offline operator recovery"
+        );
+        self.cancel_active.store(false, Ordering::SeqCst);
+        self.accepting.store(true, Ordering::SeqCst);
+        Ok(())
     }
 
     fn check_env(&self, env: u64) -> Result<()> {
@@ -410,7 +484,13 @@ impl Host {
             return Ok(()); // Including Interrupted: never run it again.
         }
         spec.validate().map_err(|_| HostError("INVALID_REQUEST"))?;
-        if self.closed.load(Ordering::SeqCst) || journal.active {
+        if self.faulted.load(Ordering::SeqCst) {
+            return reject("IO_ERROR");
+        }
+        if !self.accepting.load(Ordering::SeqCst) {
+            return reject("DRAINING");
+        }
+        if journal.active {
             return reject("CAPACITY_EXCEEDED");
         }
         if journal
@@ -439,7 +519,8 @@ impl Host {
             if let Err(error) = outcome {
                 // A storage/runner failure must stop further admission. Do not
                 // claim that an executed mutation failed without side effects.
-                host.closed.store(true, Ordering::SeqCst);
+                host.accepting.store(false, Ordering::SeqCst);
+                host.faulted.store(true, Ordering::SeqCst);
                 let state = Operation::Failed {
                     error: "IO_ERROR".into(),
                     completion_unknown: true,
@@ -453,7 +534,11 @@ impl Host {
                         serde_json::to_string(&Operation::Running).unwrap()
                     ],
                 );
-                eprintln!("host operation reconciliation required: {error}");
+                let _ = error;
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"operation_reconciliation_required\",\"operationId\":{}}}",
+                    serde_json::to_string(&id).unwrap()
+                );
             }
             journal.active = false;
             host.idle.notify_one();
@@ -470,12 +555,33 @@ impl Host {
     }
     async fn run(&self, id: &str, spec: &ExecSpec, cwd: File) -> Result<()> {
         self.save(id, Operation::Running)?; // Durable intent before possible spawn.
-        let result = execute(spec, cwd, &self.installation.workspace).await;
+        let result = execute(
+            spec,
+            cwd,
+            &self.installation.workspace,
+            &self.cancel_active,
+            &self.cancel,
+        )
+        .await;
         match result {
-            Ok(result) => self.save(id, Operation::Succeeded { result }),
+            Ok(ExecutionOutcome::Completed(result)) => {
+                self.save(id, Operation::Succeeded { result })
+            }
+            Ok(ExecutionOutcome::Cancelled) => self.save(
+                id,
+                Operation::Failed {
+                    error: "CANCELLED".into(),
+                    completion_unknown: false,
+                },
+            ),
             Err(error) => {
-                eprintln!("host exec failed: {error}");
-                self.closed.store(true, Ordering::SeqCst);
+                let _ = error;
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"operation_failed\",\"operationId\":{}}}",
+                    serde_json::to_string(id).unwrap()
+                );
+                self.accepting.store(false, Ordering::SeqCst);
+                self.faulted.store(true, Ordering::SeqCst);
                 self.save(
                     id,
                     Operation::Failed {
@@ -488,8 +594,12 @@ impl Host {
     }
     /// Graceful shutdown waits for already accepted bounded work. Disconnecting
     /// a client never calls this and never cancels its accepted operation.
-    pub async fn shutdown(&self) {
-        self.closed.store(true, Ordering::SeqCst);
+    pub async fn shutdown(&self, cancel_active: bool) {
+        self.drain();
+        if cancel_active {
+            self.cancel_active.store(true, Ordering::SeqCst);
+            self.cancel.notify_waiters();
+        }
         loop {
             let notified = self.idle.notified();
             if !self.journal.lock().unwrap().active {
@@ -500,7 +610,18 @@ impl Host {
     }
 }
 
-async fn execute(spec: &ExecSpec, cwd: File, workspace: &Path) -> Result<ExecResult> {
+enum ExecutionOutcome {
+    Completed(ExecResult),
+    Cancelled,
+}
+
+async fn execute(
+    spec: &ExecSpec,
+    cwd: File,
+    workspace: &Path,
+    cancel_active: &AtomicBool,
+    cancel: &Notify,
+) -> Result<ExecutionOutcome> {
     let mut command = Command::new("/bin/bash");
     command
         .args(["--noprofile", "--norc", "-c", &spec.command])
@@ -540,6 +661,13 @@ async fn execute(spec: &ExecSpec, cwd: File, workspace: &Path) -> Result<ExecRes
     let deadline = tokio::time::sleep(Duration::from_millis(spec.timeout_ms));
     tokio::pin!(deadline);
     let mut timed_out = false;
+    let mut cancelled = false;
+    let cancellation = async {
+        if !cancel_active.load(Ordering::SeqCst) {
+            cancel.notified().await;
+        }
+    };
+    tokio::pin!(cancellation);
     // Do not reap the leader while draining pipes: its PID/process-group ID
     // cannot be reused before timeout cleanup. Background pipe holders count
     // against the same deadline. Detached daemons are outside this profile.
@@ -548,6 +676,7 @@ async fn execute(spec: &ExecSpec, cwd: File, workspace: &Path) -> Result<ExecRes
             n = stdout.read(&mut a), if out_open => { let n = n?; out_open = n != 0; &a[..n] },
             n = stderr.read(&mut b), if err_open => { let n = n?; err_open = n != 0; &b[..n] },
             _ = &mut deadline => { timed_out = true; break; },
+            _ = &mut cancellation => { cancelled = true; break; },
         };
         output_bytes = output_bytes.saturating_add(chunk.len() as u64);
         let keep = chunk
@@ -555,12 +684,13 @@ async fn execute(spec: &ExecSpec, cwd: File, workspace: &Path) -> Result<ExecRes
             .min((spec.output_limit as usize).saturating_sub(output.len()));
         output.extend_from_slice(&chunk[..keep]);
     }
-    let status = if timed_out {
+    let status = if timed_out || cancelled {
         None
     } else {
         tokio::select! {
             status = child.wait() => Some(status?),
             _ = &mut deadline => { timed_out = true; None },
+            _ = &mut cancellation => { cancelled = true; None },
         }
     };
     let status = if let Some(status) = status {
@@ -576,7 +706,10 @@ async fn execute(spec: &ExecSpec, cwd: File, workspace: &Path) -> Result<ExecRes
             .context("child termination unconfirmed")??
     };
     group.armed = false; // The leader has been reaped; never signal this ID again.
-    Ok(ExecResult {
+    if cancelled {
+        return Ok(ExecutionOutcome::Cancelled);
+    }
+    Ok(ExecutionOutcome::Completed(ExecResult {
         exit_code: status.code(),
         termination: if timed_out {
             "timedOut"
@@ -589,7 +722,7 @@ async fn execute(spec: &ExecSpec, cwd: File, workspace: &Path) -> Result<ExecRes
         truncated: output_bytes > output.len() as u64 || timed_out,
         output,
         output_bytes,
-    })
+    }))
 }
 
 // While armed, the leader has not been reaped, so this process-group ID cannot

@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Duplex } from "node:stream";
+import { Schema } from "effect";
 // The 1.1.0 tarball publishes index.js/index.d.ts at its root, while its
 // manifest incorrectly points at iroh-js/. Pin and use the published subpath.
 import { Endpoint, EndpointAddr, EndpointId, SecretKey, type Connection, type BiStream } from "@number0/iroh/index.js";
@@ -18,7 +19,12 @@ const ALPN = Array.from(Buffer.from("cubeyard/node/1"));
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const NODE_ID = /^node-[a-zA-Z0-9-]{1,123}$/;
 const PEER = /^[0-9a-f]{64}$/;
-const CODES = new Set(["NODE_UNAVAILABLE", "OUTCOME_UNKNOWN", "UNSUPPORTED", "UNAUTHORIZED", "WRONG_NODE", "INVALID_REQUEST", "CONFLICT", "CAPACITY_EXCEEDED", "ENVIRONMENT_MISSING", "ENVIRONMENT_STOPPED", "IO_ERROR"]);
+const CODES = new Set(["NODE_UNAVAILABLE", "OUTCOME_UNKNOWN", "UNSUPPORTED", "UNAUTHORIZED", "WRONG_NODE", "INVALID_REQUEST", "CONFLICT", "CAPACITY_EXCEEDED", "DRAINING", "CANCELLED", "INCOMPATIBLE_PROTOCOL", "ENVIRONMENT_MISSING", "ENVIRONMENT_STOPPED", "IO_ERROR"]);
+const ProtocolCompatibility = Schema.Struct({
+  protocolVersion: Schema.Literal(1),
+  minimumProtocolVersion: Schema.Literal(1),
+  softwareVersion: Schema.String,
+});
 export interface NodeBinding { nodeId: string; environmentId: number; threadId: string }
 export interface HostExecSpec { command: string; guestCwd: string; timeoutMs: number; outputLimit: number }
 export interface HostExecResult {
@@ -27,6 +33,15 @@ export interface HostExecResult {
   output: number[];
   outputBytes: number;
   truncated: boolean;
+}
+export interface HostNodeHealth {
+  lifecycle: "ready" | "draining" | "faulted" | "recoveryRequired";
+  active: boolean;
+  operationRecords: number;
+  operationCapacity: number;
+  error: "ENVIRONMENT_MISSING" | "IO_ERROR" | null;
+  softwareVersion: string;
+  protocolVersion: 1;
 }
 export type HostOperation =
   | { state: "Accepted" | "Running" | "Unknown" }
@@ -55,7 +70,7 @@ export class IrohNodeError extends ExecutionNodeError {
     super(code);
     this.operationId = operationId;
     this.remoteCode = remoteCode;
-    this.message = `${code}${operationId ? `: operation ${operationId}` : ""}${this.completionUnknown ? "; inspect the saved operation before executing again; remote work was not cancelled" : ""}`;
+    this.message = `${code}${remoteCode === "INCOMPATIBLE_PROTOCOL" ? ": cubed and cube-host do not share protocol version 1; upgrade the older component" : ""}${operationId ? `: operation ${operationId}` : ""}${this.completionUnknown ? "; inspect the saved operation before executing again; remote work was not cancelled" : ""}`;
   }
 }
 class ValidationError extends IrohNodeError { constructor() { super("INVALID_REQUEST"); } }
@@ -97,8 +112,8 @@ function operation(value: unknown): HostOperation {
       return { state: "Interrupted", completionUnknown: true };
     case "Failed":
       shape(row, ["state", "error", "completionUnknown"]);
-      if (row.error !== "IO_ERROR" || typeof row.completionUnknown !== "boolean") invalid();
-      return { state: "Failed", error: row.error, completionUnknown: row.completionUnknown };
+      if (!["IO_ERROR", "CANCELLED"].includes(String(row.error)) || typeof row.completionUnknown !== "boolean") invalid();
+      return { state: "Failed", error: String(row.error), completionUnknown: row.completionUnknown };
     case "Succeeded": {
       shape(row, ["state", "result"]);
       const result = shape(row.result, ["exitCode", "termination", "output", "outputBytes", "truncated"]);
@@ -266,8 +281,11 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
       serverPeer: this.config.serverPeer, controlPeer, spec: validateSpec(value.spec as HostExecSpec) };
   }
   private hello(value: unknown): Record<string, unknown> {
-    const hello = shape(value, ["type", "nodeId", "protocolVersion", "profiles", "capabilities", "limits"], ["binding"]);
-    if (hello.type !== "Hello" || hello.protocolVersion !== 1 || hello.nodeId !== this.nodeId
+    const hello = shape(value, ["type", "nodeId", "profiles", "capabilities", "limits"],
+      ["binding", "protocolVersion", "minimumProtocolVersion", "softwareVersion"]);
+    try { Schema.decodeUnknownSync(ProtocolCompatibility)(hello); }
+    catch { throw new IrohNodeError("INCOMPATIBLE_PROTOCOL"); }
+    if (hello.type !== "Hello" || hello.nodeId !== this.nodeId
       || hello.binding === undefined || !equalBinding(binding(hello.binding), this.binding)) throw new IrohNodeError("WRONG_NODE");
     if (!Array.isArray(hello.profiles) || !hello.profiles.includes("host") || !hello.profiles.every(x => typeof x === "string")
       || !Array.isArray(hello.capabilities) || !hello.capabilities.every(x => typeof x === "string")) invalid();
@@ -373,6 +391,19 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
         throw failure;
       }
       switch (query.method) {
+        case "node.status": {
+          shape(result, ["type", "nodeId", "binding", "status"],
+            ["protocolVersion", "minimumProtocolVersion", "softwareVersion"]);
+          if (result.type !== "Status" || result.nodeId !== this.nodeId || !equalBinding(binding(result.binding), this.binding)) invalid();
+          try { Schema.decodeUnknownSync(ProtocolCompatibility)(result); }
+          catch { throw new IrohNodeError("INCOMPATIBLE_PROTOCOL"); }
+          const status = shape(result.status, ["lifecycle", "active", "operationRecords", "operationCapacity", "error"]);
+          if (!["ready", "draining", "faulted", "recoveryRequired"].includes(String(status.lifecycle)) || typeof status.active !== "boolean"
+            || !integer(status.operationRecords, 0) || !integer(status.operationCapacity, 1)
+            || status.operationRecords > status.operationCapacity
+            || ![null, "ENVIRONMENT_MISSING", "IO_ERROR"].includes(status.error as null | string)) invalid();
+          break;
+        }
         case "environment.inspect":
           shape(result, ["type", "binding", "state"]);
           if (result.type !== "Environment" || result.state !== "ready" || !equalBinding(binding(result.binding), this.binding)) invalid();
@@ -415,10 +446,22 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
   }
   async status(environmentId: number): Promise<EnvironmentObservation> {
     this.environment(environmentId); this.assertConfig();
+    const health = await this.health();
+    if (health.lifecycle === "draining" || health.lifecycle === "recoveryRequired") throw new IrohNodeError("DRAINING");
+    if (health.lifecycle === "faulted") {
+      if (health.error === "ENVIRONMENT_MISSING") this.observe?.(environmentId, { status: "missing", observedAt: Date.now() });
+      throw new IrohNodeError(health.error ?? "IO_ERROR");
+    }
     await this.request(this.identity().key, { method: "environment.inspect", env: environmentId });
     const observation = { status: "Running", observedAt: Date.now() };
     this.observe?.(environmentId, observation);
     return observation;
+  }
+  async health(): Promise<HostNodeHealth> {
+    this.assertConfig();
+    const result = await this.request(this.identity().key, { method: "node.status" });
+    const status = result.status as Omit<HostNodeHealth, "softwareVersion" | "protocolVersion">;
+    return { ...status, softwareVersion: result.softwareVersion as string, protocolVersion: 1 };
   }
   async check(environmentId: number): Promise<void> {
     this.environment(environmentId); this.assertConfig();

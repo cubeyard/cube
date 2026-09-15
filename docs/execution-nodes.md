@@ -16,14 +16,16 @@ Rejected environment work is not queued, and reconnect never replays it.
 Possible delivery without confirmation is reported as `COMPLETION_UNKNOWN`
 (or the existing bridge `ECODE_UNCERTAIN`); inspect before executing again.
 
-**iroh is the selected control-to-node transport.** The released cubed path is
-still the local adapter. The separate development implementation in
-[`packages/node-transport`](../packages/node-transport/README.md) now includes real
-QUIC and opt-in trusted host execution with a permanent binding/durable journal.
+**iroh is the trusted-host control-to-node transport.** The implementation in
+[`packages/node-transport`](../packages/node-transport/README.md) includes real
+QUIC and trusted host execution with a permanent binding/durable journal. The
+supported production boundary and lifecycle are documented in
+[trusted-host-operations.md](trusted-host-operations.md).
 `packages/server/src/iroh-node.ts` connects directly through `@number0/iroh` in the
 Node process, without a Rust/stdio intermediary. Explicit operator admission now
 creates fresh host-bound threads and routes pi bash/code/! exec through cubed.
-File/repository transfer and external-machine acceptance remain outstanding.
+File/repository transfer and portals are not part of the trusted-host profile;
+external-machine acceptance is required for release sign-off.
 See [host enrollment](../packages/node-transport/HOST.md#operator-enrollment-and-thread-tools). The protocol
 must not require Tailscale, WireGuard, SSH, or another VPN. Browser traffic stays
 HTTP(S)/WebSocket to the control plane. The existing restrictive loopback/trusted

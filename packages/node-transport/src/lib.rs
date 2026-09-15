@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{io::AsyncRead, io::AsyncReadExt, task::JoinSet, time::timeout};
 
 pub const ALPN: &[u8] = b"cubeyard/node/1";
+pub const PROTOCOL_VERSION: u32 = 1;
+pub const MIN_COMPATIBLE_PROTOCOL_VERSION: u32 = 1;
+pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const RELAY_READY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -25,6 +28,8 @@ pub enum Request {
     },
     #[serde(rename = "environment.inspect")]
     Inspect { env: u64 },
+    #[serde(rename = "node.status")]
+    Status,
     #[serde(rename = "exec.start")]
     ExecStart {
         #[serde(rename = "operationId")]
@@ -51,8 +56,24 @@ pub enum Response {
         profiles: Vec<String>,
         capabilities: Vec<String>,
         limits: Limits,
+        #[serde(rename = "minimumProtocolVersion")]
+        minimum_protocol_version: u32,
+        #[serde(rename = "softwareVersion")]
+        software_version: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         binding: Option<host::Binding>,
+    },
+    Status {
+        #[serde(rename = "nodeId")]
+        node_id: String,
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u32,
+        #[serde(rename = "minimumProtocolVersion")]
+        minimum_protocol_version: u32,
+        #[serde(rename = "softwareVersion")]
+        software_version: String,
+        binding: host::Binding,
+        status: host::HostStatus,
     },
     Accepted {
         #[serde(rename = "operationId")]
@@ -234,7 +255,7 @@ pub async fn read_frame<T: DeserializeOwned>(reader: &mut (impl AsyncRead + Unpi
 fn hello(node_id: &str, query: Request) -> Response {
     match query {
         Request::Hello {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
         } => Response::Hello {
             node_id: node_id.into(),
             protocol_version: 1,
@@ -245,9 +266,14 @@ fn hello(node_id: &str, query: Request) -> Response {
                 max_frame_bytes: MAX_FRAME_BYTES,
                 request_timeout_ms: REQUEST_TIMEOUT.as_millis() as u64,
             },
+            minimum_protocol_version: MIN_COMPATIBLE_PROTOCOL_VERSION,
+            software_version: SOFTWARE_VERSION.into(),
             binding: None,
         },
-        _ => Response::error("UNSUPPORTED", "unsupported protocol version"),
+        _ => Response::error(
+            "INCOMPATIBLE_PROTOCOL",
+            "protocol version 1 required; upgrade cubed or cube-host",
+        ),
     }
 }
 
@@ -264,8 +290,15 @@ fn dispatch(node_id: &str, query: Request, host: Option<&Arc<host::Host>>) -> Re
         {
             *binding = Some(host.installation().binding.clone());
             *profiles = vec!["host".into()];
-            capabilities
-                .extend(["environment.inspect", "exec.start", "operation.get"].map(String::from));
+            capabilities.extend(
+                [
+                    "node.status",
+                    "environment.inspect",
+                    "exec.start",
+                    "operation.get",
+                ]
+                .map(String::from),
+            );
         }
         return result;
     }
@@ -281,6 +314,14 @@ fn dispatch(node_id: &str, query: Request, host: Option<&Arc<host::Host>>) -> Re
     .filter(|id| host::valid_id(id));
     let mutation = matches!(query, Request::ExecStart { .. });
     let result = match query {
+        Request::Status => host.status().map(|status| Response::Status {
+            node_id: node_id.into(),
+            protocol_version: PROTOCOL_VERSION,
+            minimum_protocol_version: MIN_COMPATIBLE_PROTOCOL_VERSION,
+            software_version: SOFTWARE_VERSION.into(),
+            binding: host.installation().binding.clone(),
+            status,
+        }),
         Request::Inspect { env } => host.inspect(env).map(|installation| Response::Environment {
             binding: installation.binding.clone(),
             state: "ready".into(),
@@ -347,7 +388,7 @@ async fn accept(
                     if matches!(
                         response,
                         Response::Hello {
-                            protocol_version: 1,
+                            protocol_version: PROTOCOL_VERSION,
                             ..
                         }
                     ) {
@@ -474,14 +515,15 @@ async fn call_inner(
         connection_to_close = Some(connection.clone());
         let (mut send, mut recv) = connection.open_bi().await?;
         send.write_all(&encode(&Request::Hello {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
         })?)
         .await?;
         send.finish()?;
         match read_frame::<Response>(&mut recv).await? {
             Response::Hello {
                 node_id,
-                protocol_version: 1,
+                protocol_version: PROTOCOL_VERSION,
+                minimum_protocol_version: MIN_COMPATIBLE_PROTOCOL_VERSION,
                 binding,
                 ..
             } if node_id == expected_node_id
@@ -511,6 +553,15 @@ async fn call_inner(
             ) if got == operation_id => {}
             (Response::Environment { binding, .. }, Request::Inspect { env })
                 if binding.environment_id == *env && binding.node_id == expected_node_id => {}
+            (
+                Response::Status {
+                    node_id,
+                    protocol_version: PROTOCOL_VERSION,
+                    minimum_protocol_version: MIN_COMPATIBLE_PROTOCOL_VERSION,
+                    ..
+                },
+                Request::Status,
+            ) if node_id == expected_node_id => {}
             (Response::Error { .. }, _) => {}
             _ => bail!("invalid response for request"),
         }
@@ -550,7 +601,7 @@ pub async fn query_hello(
         let result = async {
             let (mut send, mut recv) = connection.open_bi().await?;
             send.write_all(&encode(&Request::Hello {
-                protocol_version: 1,
+                protocol_version: PROTOCOL_VERSION,
             })?)
             .await?;
             send.finish()?;
@@ -558,7 +609,8 @@ pub async fn query_hello(
             match &response {
                 Response::Hello {
                     node_id,
-                    protocol_version: 1,
+                    protocol_version: PROTOCOL_VERSION,
+                    minimum_protocol_version: MIN_COMPATIBLE_PROTOCOL_VERSION,
                     ..
                 } if node_id == expected_node_id => Ok(response),
                 Response::Hello { .. } => {
@@ -583,7 +635,7 @@ mod tests {
     #[tokio::test]
     async fn strict_bounded_frames() {
         let bytes = encode(&Request::Hello {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
         })
         .unwrap();
         assert!(read_frame::<Request>(&mut bytes.as_slice()).await.is_ok());
@@ -619,7 +671,7 @@ mod tests {
     #[test]
     fn version_and_identity_validation() {
         assert!(
-            matches!(hello("node-test", Request::Hello { protocol_version: 2 }), Response::Error { code, .. } if code == "UNSUPPORTED")
+            matches!(hello("node-test", Request::Hello { protocol_version: 2 }), Response::Error { code, .. } if code == "INCOMPATIBLE_PROTOCOL")
         );
         for id in ["", "node-", "other-node", "node-../etc", "node-é"] {
             assert!(validate_node_id(id).is_err());

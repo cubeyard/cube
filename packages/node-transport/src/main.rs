@@ -2,16 +2,16 @@
 //! public identities, listener addresses and the hello response.
 use std::{
     collections::BTreeMap,
-    fs::OpenOptions,
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
     net::SocketAddr,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail, ensure};
 use cube_node_transport::{
-    NetworkMode, Request, Response, bind_client, bind_node, bind_relay_client, bind_relay_node,
-    call,
+    MIN_COMPATIBLE_PROTOCOL_VERSION, NetworkMode, PROTOCOL_VERSION, Request, Response,
+    SOFTWARE_VERSION, bind_client, bind_node, bind_relay_client, bind_relay_node, call,
     host::{Binding, ExecSpec, Host},
     intent::Intent,
     query_hello, serve, serve_host, validate_node_id,
@@ -20,11 +20,12 @@ use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use serde_json::json;
 
 const USAGE: &str = "usage:
+  cube-node-transport version
   cube-node-transport keygen --key <new-private-file>
   cube-node-transport serve --key <private-file> --allow-peer <public-key> --node-id <node-id> [--listen 127.0.0.1:0]
   cube-node-transport hello --key <private-file> --peer <pinned-public-key> --expect-node <node-id>
   cube-node-transport host-init --key <private-file> --state <NEW-directory> --workspace <existing-directory> --allow-peer <public-key> --node-id <node-id> --thread-id <thread-id> --env <integer>
-  cube-node-transport host-serve --key <private-file> --state <directory> [--listen 127.0.0.1:0]
+  cube-node-transport host-serve --key <private-file> --state <directory> [--listen 127.0.0.1:0] [--ready-file <absolute-file>] [--stop-policy wait|cancel]
   cube-node-transport prepare-exec --key <control-key> --intent <NEW-file> --peer <server-key> --expect-node <node-id> --env <integer> --command <shell-command> [--cwd .] [--timeout-ms 10000] [--output-limit 8192]
   cube-node-transport submit --key <control-key> --intent <file> [--address <ip:port>]
   cube-node-transport operation --key <control-key> --intent <file> [--address <ip:port>]
@@ -103,9 +104,38 @@ fn ready(endpoint: &Endpoint, node_id: &str, network: NetworkMode) -> serde_json
     json!({
         "peerId": endpoint.id().to_string(),
         "nodeId": node_id,
+        "softwareVersion": SOFTWARE_VERSION,
+        "protocolVersion": PROTOCOL_VERSION,
+        "minimumProtocolVersion": MIN_COMPATIBLE_PROTOCOL_VERSION,
+        "lifecycle": "ready",
         "addresses": addr.ip_addrs().map(ToString::to_string).collect::<Vec<_>>(),
         "relayUrl": (network == NetworkMode::Relay).then(|| addr.relay_urls().next().map(ToString::to_string)).flatten(),
     })
+}
+
+fn write_ready(path: Option<&Path>, value: &serde_json::Value) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(path) = path else { return Ok(()) };
+    ensure!(path.is_absolute(), "ready file must be absolute");
+    let parent = path.parent().context("ready file has no parent")?;
+    let temporary = parent.join(format!(".ready.{}.tmp", std::process::id()));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o644)
+        .open(&temporary)?;
+    file.write_all(serde_json::to_string(value)?.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    fs::rename(&temporary, path)?;
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+fn remove_ready(path: Option<&Path>) {
+    if let Some(path) = path {
+        let _ = fs::remove_file(path);
+    }
 }
 
 async fn client_destination(
@@ -139,6 +169,18 @@ async fn main() -> Result<()> {
         ensure!(key.starts_with("--"), "{USAGE}");
         let value = args.next().context(USAGE)?;
         ensure!(options.insert(key, value).is_none(), "duplicate option");
+    }
+    if command == "version" {
+        no_extra(&options)?;
+        println!(
+            "{}",
+            json!({
+                "softwareVersion": SOFTWARE_VERSION,
+                "protocolVersion": PROTOCOL_VERSION,
+                "minimumProtocolVersion": MIN_COMPATIBLE_PROTOCOL_VERSION,
+            })
+        );
+        return Ok(());
     }
     let network = match options.remove("--network").as_deref() {
         None | Some("loopback") => NetworkMode::Loopback,
@@ -194,23 +236,61 @@ async fn main() -> Result<()> {
         "host-serve" => {
             let state = take(&mut options, "--state")?;
             let listen = options.remove("--listen");
+            let ready_file = options.remove("--ready-file").map(PathBuf::from);
+            let cancel_on_stop = match options.remove("--stop-policy").as_deref() {
+                None | Some("wait") => false,
+                Some("cancel") => true,
+                Some(_) => bail!("invalid stop policy"),
+            };
             no_extra(&options)?;
             let key = read_key(Path::new(&key_path))?;
             let host = Host::open(Path::new(&state), key.public())?;
             let allowed = host.installation().allowed_peer.parse()?;
             let node_id = host.installation().binding.node_id.clone();
             eprintln!(
-                "trusted host execution enabled: no sandbox; same OS account; do not use an account with control-plane credentials"
+                "{{\"level\":\"info\",\"event\":\"host_starting\",\"trust\":\"unprivileged-account-not-sandboxed\"}}"
             );
             let endpoint = endpoint(key, network, listen).await?;
-            println!("{}", ready(&endpoint, &node_id, network));
+            let mut readiness = ready(&endpoint, &node_id, network);
+            readiness["lifecycle"] = json!(host.status()?.lifecycle);
+            println!("{readiness}");
             std::io::stdout().flush()?;
-            let result = tokio::select! {
-                result = serve_host(&endpoint, allowed, &node_id, Some(host.clone())) => result,
-                result = tokio::signal::ctrl_c() => result.map_err(Into::into),
+            write_ready(ready_file.as_deref(), &readiness)?;
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut interrupt = signal(SignalKind::interrupt())?;
+            let mut terminate = signal(SignalKind::terminate())?;
+            let mut drain = signal(SignalKind::user_defined1())?;
+            let mut resume = signal(SignalKind::user_defined2())?;
+            let server = serve_host(&endpoint, allowed, &node_id, Some(host.clone()));
+            tokio::pin!(server);
+            let result = loop {
+                tokio::select! {
+                    result = &mut server => break result,
+                    _ = interrupt.recv() => break Ok(()),
+                    _ = terminate.recv() => break Ok(()),
+                    _ = drain.recv() => {
+                        host.drain();
+                        readiness["lifecycle"] = json!("draining");
+                        write_ready(ready_file.as_deref(), &readiness)?;
+                        eprintln!("{{\"level\":\"info\",\"event\":\"host_draining\"}}");
+                    },
+                    _ = resume.recv() => {
+                        if host.resume().is_ok() {
+                            readiness["lifecycle"] = json!("ready");
+                            write_ready(ready_file.as_deref(), &readiness)?;
+                            eprintln!("{{\"level\":\"info\",\"event\":\"host_ready\"}}");
+                        } else {
+                            eprintln!("{{\"level\":\"warn\",\"event\":\"host_resume_refused\",\"action\":\"stop and complete recovery\"}}");
+                        }
+                    },
+                }
             };
+            host.drain();
+            readiness["lifecycle"] = json!("draining");
+            write_ready(ready_file.as_deref(), &readiness)?;
             endpoint.close().await;
-            host.shutdown().await;
+            host.shutdown(cancel_on_stop).await;
+            remove_ready(ready_file.as_deref());
             result?;
         }
         "prepare-exec" => {

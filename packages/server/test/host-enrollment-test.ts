@@ -80,7 +80,14 @@ try {
   assert.equal((await supervisor.terminalPlan("host", () => {})).env.CUBE_BACKEND, "host", "configuration loss does not stop conversation startup");
   registry.archiveThread("host");
   await assert.rejects(supervisor.hostExecForUserThread("host", { action: "prepare", spec: {} }), { code: "OPERATION_UNSUPPORTED" });
-  console.log("ok: local-only schema migration, permanent fresh host admission, rollback, restart and no local fallback");
+  const replacement = { ...admission, nodeId: "node-host-replacement", environmentId: 124,
+    threadId: "host-replacement", name: "host-new", configPath: path.join(root, "replacement.json"),
+    configHash: "b".repeat(64), workspacePath: path.join(root, "replacement", "workspace"),
+    piSessionPath: path.join(root, "replacement", "sessions", "host.jsonl") };
+  registry.enrollHostThread(replacement);
+  assert.deepEqual(registry.hostNodeAdmissions().map(row => row.nodeId).sort(), ["node-host", "node-host-replacement"]);
+  assert.equal(registry.getThread("host")!.archivedAt !== null, true, "replacement preserves retired immutable binding");
+  console.log("ok: local migration, permanent admission, rollback, restart, replace/re-enroll and no local fallback");
 } finally {
   await supervisor?.close();
   try { registry.close(); } catch { /* may already be closed for migration */ }

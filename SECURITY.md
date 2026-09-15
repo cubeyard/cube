@@ -23,3 +23,9 @@ cubed does not provide application-level authentication. Keep it on loopback
 or a trusted private network such as a Tailnet; never expose it directly to the
 public internet. The launcher refuses public bind addresses, but operators are
 responsible for the surrounding VM, network, and access controls.
+
+The optional trusted-host executor is not a sandbox. Its dedicated unprivileged
+account is an explicit trust boundary and must carry no control-plane, provider,
+Git, SSH, or cloud credentials. Cube does not enforce trusted-host egress;
+operators must enforce network policy at the OS/network layer. See the
+[trusted-host security and operations runbook](docs/trusted-host-operations.md).

@@ -93,8 +93,9 @@ CUBE_TEST_IROH_RELAY=1 node scripts/smoke-node-adapter.ts target/debug/cube-node
 
 The separate transport CI job installs Node 26, pinned pnpm and Rust, then runs
 these checks. The ordinary Node offline list additionally tests the in-process
-adapter against a real npm iroh protocol fixture, without building Rust. No Rust
-host binary is shipped into the released VMs yet.
+adapter against a real npm iroh protocol fixture, without building Rust. The
+trusted-host binary is packaged separately with `scripts/host/package.sh`; it is
+not part of the Incus VM artifacts.
 
 Tests exercise strict framing, unknown versions/methods, loopback-only binding,
 separate CLI processes, authenticated hello, key persistence across restart,
@@ -106,6 +107,7 @@ boundary and bounded real shell execution, including crashes and response loss.
 The opt-in N0 smoke additionally exercises discovery/relay bootstrap, control-plane
 enrollment, registered pi tools, disconnect, host restart and read-only operation
 reconciliation. Next: separate-NAT connectivity acceptance and file/repository
-transfer. Thread communication, remote cancellation, file/repository transfer
-and portal streams remain follow-ups. No real remote machine, macOS or Incus
-acceptance has been performed.
+transfer. The production profile adds local drain/cancel lifecycle, systemd
+packaging, rollback and restore quarantine. File/repository transfer and portal
+streams remain unsupported for trusted hosts. Separate-machine acceptance is
+required for each release; macOS and Incus execution nodes are not this profile.

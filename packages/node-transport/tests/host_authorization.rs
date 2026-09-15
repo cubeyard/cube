@@ -76,7 +76,7 @@ async fn authorization_and_hello_gate_precede_mutation() {
     assert!(call(&rogue, address, "node-test", &query).await.is_err());
     assert_eq!(host.get(1, "op-rejected").unwrap(), Operation::Unknown);
     assert!(!workspace.join("must-not-exist").exists());
-    host.shutdown().await;
+    host.shutdown(false).await;
     client.close().await;
     rogue.close().await;
     server.close().await;

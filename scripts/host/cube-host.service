@@ -1,0 +1,38 @@
+[Unit]
+Description=Cube trusted host executor (not sandboxed)
+Documentation=https://github.com/cubeyard/cube/blob/main/packages/node-transport/HOST.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/cube-host/identity/node.key
+ConditionPathExists=/var/lib/cube-host/state/journal.db
+
+[Service]
+Type=simple
+User=cube-host
+Group=cube-host
+UMask=0077
+Environment=CUBE_HOST_STOP_POLICY=wait
+RuntimeDirectory=cube-host
+RuntimeDirectoryMode=0750
+StateDirectory=cube-host
+StateDirectoryMode=0700
+ExecStart=/opt/cube-host/current/cube-node-transport host-serve --key /var/lib/cube-host/identity/node.key --state /var/lib/cube-host/state --network relay --ready-file /run/cube-host/ready.json --stop-policy ${CUBE_HOST_STOP_POLICY}
+ExecReload=/bin/kill -USR1 $MAINPID
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=30
+TimeoutStopSec=75
+KillMode=mixed
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/cube-host /run/cube-host
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

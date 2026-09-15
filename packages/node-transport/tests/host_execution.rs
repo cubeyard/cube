@@ -96,6 +96,8 @@ impl Fixture {
                 self.key_file.to_str().unwrap(),
                 "--state",
                 self.state.to_str().unwrap(),
+                "--ready-file",
+                self.root.path().join("ready.json").to_str().unwrap(),
             ])
             .env("CUBE_TEST_SHOULD_NOT_LEAK", "private-fixture-value")
             .stdout(Stdio::piped())
@@ -221,6 +223,40 @@ async fn real_exec_dedup_capacity_binding_and_restart() {
     }
     assert_eq!(fs::read(fixture.workspace.join("count")).unwrap(), b"once");
     assert!(!fixture.workspace.join("must-not-exist").exists());
+    unsafe { libc::kill(daemon.id().unwrap() as i32, libc::SIGUSR1) };
+    timeout(BUDGET, async {
+        loop {
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(fixture.root.path().join("ready.json")).unwrap())
+                    .unwrap();
+            if value["lifecycle"] == "draining" {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(request(&client, &address, &start("op-draining", spec("touch must-not-exist"))).await,
+            Response::Error { code, .. } if code == "DRAINING")
+    );
+    assert!(matches!(
+        request(&client, &address, &Request::Status).await,
+        Response::Status { status, protocol_version: 1, minimum_protocol_version: 1, .. }
+            if status.lifecycle == "draining" && !status.active
+    ));
+    unsafe { libc::kill(daemon.id().unwrap() as i32, libc::SIGUSR2) };
+    timeout(BUDGET, async {
+        while !fs::read_to_string(fixture.root.path().join("ready.json"))
+            .unwrap()
+            .contains("\"lifecycle\":\"ready\"")
+        {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
     assert!(
         matches!(request(&client, &address, &start("op-once", spec("echo changed"))).await, Response::Error { code, .. } if code == "CONFLICT")
     );
@@ -424,6 +460,8 @@ async fn lost_accepted_response_does_not_cancel_work() {
                 &encode(&Response::Hello {
                     node_id: "node-test".into(),
                     protocol_version: 1,
+                    minimum_protocol_version: 1,
+                    software_version: env!("CARGO_PKG_VERSION").into(),
                     binding: Some(host.installation().binding.clone()),
                     profiles: vec!["host".into()],
                     capabilities: vec!["exec.start".into()],
@@ -477,7 +515,7 @@ async fn lost_accepted_response_does_not_cancel_work() {
     .await
     .unwrap();
     assert_eq!(fs::read(fixture.workspace.join("count")).unwrap(), b"once");
-    host.shutdown().await;
+    host.shutdown(false).await;
     client.close().await;
     server.close().await;
 }
@@ -662,4 +700,90 @@ async fn journal_immutability_no_identity_replacement_and_accepted_cutpoint() {
     fs::remove_file(fixture.state.join("journal.db")).unwrap();
     assert!(Host::open(&fixture.state, fixture.key.public()).is_err());
     assert!(!fixture.state.join("journal.db").exists());
+}
+
+#[tokio::test]
+async fn drain_wait_cancel_and_restore_quarantine_are_explicit() {
+    let _case = CASE.lock().await;
+
+    let waiting = Fixture::new();
+    let host = waiting.open();
+    host.start(
+        1,
+        "op-wait",
+        spec("while [ ! -f release ]; do sleep 0.01; done; printf completed"),
+    )
+    .unwrap();
+    timeout(BUDGET, async {
+        while !host.status().unwrap().active {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    host.drain();
+    assert_eq!(host.status().unwrap().lifecycle, "draining");
+    assert!(
+        host.start(1, "op-refused", spec("touch must-not-run"))
+            .unwrap_err()
+            .to_string()
+            .contains("DRAINING")
+    );
+    let shutdown = tokio::spawn({
+        let host = Arc::clone(&host);
+        async move { host.shutdown(false).await }
+    });
+    sleep(Duration::from_millis(40)).await;
+    assert!(
+        !shutdown.is_finished(),
+        "wait policy must preserve active work"
+    );
+    fs::write(waiting.workspace.join("release"), b"go").unwrap();
+    timeout(BUDGET, shutdown).await.unwrap().unwrap();
+    assert!(matches!(
+        host.get(1, "op-wait").unwrap(),
+        Operation::Succeeded { .. }
+    ));
+    assert!(!waiting.workspace.join("must-not-run").exists());
+    drop(host);
+
+    let cancelling = Fixture::new();
+    let host = cancelling.open();
+    host.start(1, "op-cancel", spec("sleep 2; touch survived-cancel"))
+        .unwrap();
+    timeout(BUDGET, async {
+        while !host.status().unwrap().active {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    timeout(BUDGET, host.shutdown(true)).await.unwrap();
+    assert_eq!(
+        host.get(1, "op-cancel").unwrap(),
+        Operation::Failed {
+            error: "CANCELLED".into(),
+            completion_unknown: false,
+        }
+    );
+    sleep(Duration::from_millis(50)).await;
+    assert!(!cancelling.workspace.join("survived-cancel").exists());
+    drop(host);
+
+    let recovered = Fixture::new();
+    fs::write(
+        recovered.state.join("restore-quarantine"),
+        b"operator review required\n",
+    )
+    .unwrap();
+    let host = recovered.open();
+    assert_eq!(host.status().unwrap().lifecycle, "recoveryRequired");
+    assert!(host.resume().is_err());
+    assert!(
+        host.start(1, "op-quarantined", spec("touch must-not-run"))
+            .unwrap_err()
+            .to_string()
+            .contains("DRAINING")
+    );
+    assert!(!recovered.workspace.join("must-not-run").exists());
 }

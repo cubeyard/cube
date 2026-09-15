@@ -14,11 +14,13 @@ is **harness outside sandbox**.
 
 ### Control ↔ node boundary (current authoritative contract)
 
-See [execution-nodes.md](docs/execution-nodes.md) for the implemented local
-boundary, permanent SQLite binding, independent pi startup, offline failures and
-remaining host couplings. **iroh** is selected for future node transport; it is
-not implemented here. Browser exposure remains restrictive HTTP/WS. Historical
-single-host details below describe the local deployment, not a remote protocol.
+See [execution-nodes.md](docs/execution-nodes.md) for permanent SQLite binding,
+offline failures and remaining host couplings. The current remote profile is a
+trusted, unprivileged Linux x86_64 account over authenticated Iroh/N0 relay. It
+is not sandboxed and supports bounded exec only; Incus/VM execution nodes and a
+general scheduler remain out of scope. Its production lifecycle and trust
+boundary are in [trusted-host-operations.md](docs/trusted-host-operations.md).
+Browser exposure remains restrictive HTTP/WS.
 
 ### Terminology
 

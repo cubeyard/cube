@@ -64,8 +64,11 @@ const accept = (async () => {
       const binding = mode === "wrong-thread" ? { ...nodeBinding, threadId: "other" }
         : mode === "wrong-node" ? { ...nodeBinding, nodeId: "node-other" }
         : mode === "wrong-environment" ? { ...nodeBinding, environmentId: 2 } : nodeBinding;
-      await stream.send.writeAll(frame({ type: "Hello", nodeId: binding.nodeId, protocolVersion: 1, binding,
-        profiles: ["host"], capabilities: mode === "unsupported" ? ["node.hello"] : ["node.hello", "exec.start", "environment.inspect", "operation.get"],
+      await stream.send.writeAll(frame({ type: "Hello", nodeId: binding.nodeId,
+        protocolVersion: mode === "legacy" ? undefined : mode === "incompatible" ? 2 : 1,
+        minimumProtocolVersion: mode === "legacy" ? undefined : mode === "incompatible" ? 2 : 1,
+        softwareVersion: mode === "legacy" ? undefined : "1.0.0", binding,
+        profiles: ["host"], capabilities: mode === "unsupported" ? ["node.hello"] : ["node.hello", "node.status", "exec.start", "environment.inspect", "operation.get"],
         limits: { maxFrameBytes: 65536, requestTimeoutMs: 5000 } }));
       await stream.send.finish();
       stream = await connection.acceptBi();
@@ -77,7 +80,11 @@ const accept = (async () => {
       if (mode === "garbage") { await stream.send.writeAll([0, 0, 0, 1, 255]); await stream.send.finish(); return; }
       const id = mode === "wrong-id" ? "op-other" : query.operationId;
       const result = mode === "reject" ? { type: "Error", code: "INVALID_REQUEST", message: "bad cwd", completionUnknown: false, operationId: id }
-        : mode === "missing" ? { type: "Error", code: "ENVIRONMENT_MISSING", message: "gone", completionUnknown: false }
+        : mode === "missing" && query.method === "environment.inspect" ? { type: "Error", code: "ENVIRONMENT_MISSING", message: "gone", completionUnknown: false }
+        : query.method === "node.status" ? { type: "Status", nodeId: binding.nodeId, protocolVersion: 1,
+          minimumProtocolVersion: 1, softwareVersion: "1.0.0", binding: mode === "wrong-binding" ? { ...binding, threadId: "other" } : binding,
+          status: { lifecycle: mode === "draining" ? "draining" : mode === "missing" ? "faulted" : "ready", active: false,
+            operationRecords: 2, operationCapacity: 10000, error: mode === "missing" ? "ENVIRONMENT_MISSING" : null } }
         : query.method === "environment.inspect" ? { type: "Environment", binding: mode === "wrong-binding" ? { ...binding, threadId: "other" } : binding, state: "ready" }
         : query.method === "exec.start" ? { type: "Accepted", operationId: id }
         : { type: "Operation", operationId: id, operation: mode === "running" ? { state: "Running" } : mode === "unknown" ? { state: "Unknown" }
@@ -116,6 +123,13 @@ try {
   assert.equal((await client.status(1)).status, "Running");
   assert.equal(observations.length, 1);
   await client.check(1);
+  scenario = "draining";
+  await assert.rejects(client.status(1), errorCode("DRAINING"));
+  scenario = "incompatible";
+  await assert.rejects(client.check(1), error => errorCode("INCOMPATIBLE_PROTOCOL")(error)
+    && (error as Error).message.includes("upgrade the older component"));
+  scenario = "legacy";
+  await assert.rejects(client.check(1), errorCode("INCOMPATIBLE_PROTOCOL"));
   scenario = "missing";
   await assert.rejects(client.status(1), errorCode("ENVIRONMENT_MISSING"));
   assert.equal(client.contact, "available");

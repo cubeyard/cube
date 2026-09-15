@@ -1,14 +1,15 @@
-# Trusted host execution bootstrap
+# Trusted host execution
 
-Development-only, Linux-only, one permanently bound environment. This is a real
-executor with a durable journal and opt-in cubed/thread-tool routing, but is not
-built as a release binary.
+The supported production boundary is Linux x86_64 with systemd, one permanently
+bound environment and Iroh relay transport. Build/install, lifecycle,
+upgrade/rollback, backup/recovery, replacement rotation, retention and acceptance
+are specified in the [operator runbook](../../docs/trusted-host-operations.md).
+The commands below remain the lower-level development and diagnostic interface.
 
 ## Trust boundary
 
-`host-serve` is explicit opt-in. Use a dedicated unprivileged development account
-with **no control-plane, provider or GitHub credentials**, on a disposable machine
-or inside a development sandbox. Root is refused. The host daemon and executed
+`host-serve` is explicit opt-in. Use the installer-created dedicated unprivileged
+account with **no control-plane, provider or GitHub credentials**. Root is refused. The host daemon and executed
 commands run as that same account. There is no container, filesystem isolation,
 per-environment UID, egress enforcement, or protection of the journal/transport
 keys against a hostile command with that UID. SQL guards prevent accidental
@@ -18,8 +19,8 @@ The caller is one enrolled control peer; the node accepts work for exactly its
 persisted environment ID. It authenticates the peer before reading application
 data, and requires hello on that same connection before an environment request.
 The client verifies both the pinned peer key and expected logical node ID before
-sending a command. No repository or agent tool can enroll a host through cubed
-in this slice; only the operator's local CLI creates this installation.
+sending a command. No repository or agent tool can enroll a host through cubed;
+only the authenticated operator flow creates this installation.
 
 ## Try it
 
@@ -261,10 +262,13 @@ HTTP/codemode cancellation, cubed restart allows read-only inspection without
 resubmission, and config changes remain refused across restart. Native protocol
 fixtures and registry migration/HTTP cutpoint tests are in the offline portfolio.
 
-Next are file/repository transfer and separate-machine connectivity acceptance,
-then thread communication. No shared live thread/node was used as an execution
-target. Registered tools are exercised without model calls; full interactive,
-external-machine development-loop acceptance is still outstanding.
+File/repository transfer remains outside the trusted-host profile, and
+separate-machine connectivity acceptance remains a release gate. Durable directed
+thread tasks are implemented at the Cube conversation/control layer and use this
+bounded host path for a host-bound recipient; they do not expand the host protocol.
+No shared live thread/node was used as an execution target. Registered tools are
+exercised without model calls; current external production acceptance is still
+outstanding.
 
 
 ## Operator enrollment and thread tools
