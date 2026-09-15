@@ -27,6 +27,7 @@ assert.match(describeThreadError("destroy failed (retry DELETE): Error: incus: I
 const credits = describeThreadError('402: {"message":"This request requires more credits, or fewer max_tokens","key":"provider-internal-id"}')!;
 assert.match(credits, /choose a cheaper model or add provider credit/);
 assert.doesNotMatch(credits, /provider-internal-id|\{|402/);
+assert.equal(describeThreadError("CAPACITY_EXCEEDED"), "the environment is busy with another operation — wait for it to finish, then try again");
 console.log("2 ok: known failures become one sentence with the next action");
 
 const unknown = describeThreadError(`Error: cube t-ab12cd34: ${"x".repeat(400)}`)!;
