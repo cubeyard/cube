@@ -349,7 +349,7 @@ export function mockFiles(): GuestFiles {
   };
 }
 
-/** Build the fixed thread HTTP bridge. QuickJS never receives this generic
+/** Build the fixed thread HTTP bridge. Monty never receives this generic
  * function, the cubed URL, request headers, or host credentials. */
 export function createThreadRequest(cfg: { threadId?: string; cubedUrl: string }) {
   return async (
@@ -491,7 +491,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
     },
   };
 
-  /** Thread-scoped cubed RPC. QuickJS receives only the parsed response,
+  /** Thread-scoped cubed RPC. Monty receives only the parsed response,
    * never this URL, fetch, headers, credentials, or a generic request API. */
   const threadRequest = createThreadRequest(cfg);
 
@@ -617,10 +617,10 @@ export default function cubeExtension(pi: ExtensionAPI) {
     name: "code",
     label: "Code mode",
     description:
-      "Execute a JavaScript workflow in isolated QuickJS. Use this to compose sandbox and authenticated " +
+      "Execute a Python workflow in isolated Monty. Use this to compose sandbox and authenticated " +
       "Cube operations with loops, filtering, and conditional control flow without repeated model turns.\n\n" +
       CODE_MODE_API,
-    promptSnippet: "code: compose Cube, git, service, and sandbox operations in isolated JavaScript",
+    promptSnippet: "code: compose Cube, git, service, and sandbox operations in isolated Python",
     promptGuidelines: [
       "Use code for multi-step workflows or when intermediate results should be filtered before entering context. Direct read/edit/bash tools remain appropriate for simple coding operations.",
       "Code mode has capabilities, never credentials: do not attempt to access process, fetch, require, environment variables, or host paths.",
@@ -630,7 +630,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
     parameters: Type.Object({
       source: Type.String({
         maxLength: 64 * 1024,
-        description: "JavaScript function body. Top-level await and return are supported; cube is the only host API.",
+        description: "Python function body. Top-level await and return are supported. Use cube capabilities and pathlib text I/O, never host access.",
       }),
     }),
     async execute(
@@ -645,6 +645,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
       try {
         result = await runCodeMode({
           source: params.source,
+          capabilityScope: codeCapabilityHost,
           call: createCodeCapability(codeCapabilityHost, async (confirmationSignal) => {
             if (!ctx.hasUI) throw new Error("pull request creation requires an interactive user confirmation");
             return ctx.ui.confirm(
@@ -681,7 +682,7 @@ export default function cubeExtension(pi: ExtensionAPI) {
       }
       const completed = result.traces.filter((trace) => trace.status !== "running");
       const prefix = completed.length > 0 ? `${codeTraceText(completed)}\n\n` : "";
-      const truncation = truncateHead(prefix + codeValueText(result.value));
+      const truncation = truncateHead(prefix + result.output + codeValueText(result.value));
       const suffix = truncation.truncated
         ? `\n\n[${formatSize(truncation.maxBytes)} result limit reached; write large results to a workspace file]`
         : "";
