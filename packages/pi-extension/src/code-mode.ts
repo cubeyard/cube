@@ -1,4 +1,4 @@
-/** QuickJS runs in a disposable worker. Host authority stays in this dispatcher.
+/** Monty WASM runs in a disposable worker. Host authority stays in this dispatcher.
  * Worker termination reclaims even damaged WASM runtimes without invoking their
  * potentially broken finalizers in the agent process. */
 import { Worker } from "node:worker_threads";
@@ -21,11 +21,11 @@ export interface CodeModeTrace {
 export interface CodeModeLimits {
   sourceBytes: number;
   memoryBytes: number;
-  stackBytes: number;
-  guestSliceMs: number;
+  recursionDepth: number;
+  cpuTimeMs: number;
   wallTimeMs: number;
   maxCalls: number;
-  maxJobs: number;
+  maxSuspensions: number;
   maxArgumentBytes: number;
   maxCapabilityResultBytes: number;
   maxResultBytes: number;
@@ -36,11 +36,11 @@ export interface CodeModeLimits {
 const DEFAULT_LIMITS: CodeModeLimits = {
   sourceBytes: 64 * 1024,
   memoryBytes: 64 * 1024 * 1024,
-  stackBytes: 128 * 1024,
-  guestSliceMs: 2_000,
+  recursionDepth: 100,
+  cpuTimeMs: 2_000,
   wallTimeMs: 15 * 60_000,
   maxCalls: 64,
-  maxJobs: 10_000,
+  maxSuspensions: 1_000,
   maxArgumentBytes: 1024 * 1024,
   maxCapabilityResultBytes: 4 * 1024 * 1024,
   maxResultBytes: 256 * 1024,
@@ -50,6 +50,8 @@ const DEFAULT_LIMITS: CodeModeLimits = {
 export interface RunCodeModeOptions {
   source: string;
   call: CodeModeCapability;
+  /** Stable authority identity when per-invocation callbacks capture UI context. */
+  capabilityScope?: object;
   signal?: AbortSignal;
   onTrace?: (trace: CodeModeTrace) => void;
   limits?: Partial<CodeModeLimits>;
@@ -57,24 +59,26 @@ export interface RunCodeModeOptions {
 
 export interface CodeModeResult {
   value: unknown;
+  output: string;
   traces: CodeModeTrace[];
 }
 
 // An abort-ignoring host operation must not silently become retryable. Block
 // reuse of that dispatcher until the outstanding work actually settles.
-const uncertain = new WeakSet<CodeModeCapability>();
+const uncertain = new WeakSet<object>();
 
 export async function runCodeMode(options: RunCodeModeOptions): Promise<CodeModeResult> {
   const limits = { ...DEFAULT_LIMITS, ...options.limits };
   for (const [key, value] of Object.entries(limits)) {
-    if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) {
+    if (!Object.hasOwn(DEFAULT_LIMITS, key) || !Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) {
       throw new TypeError(`invalid code limit ${key}: expected a positive bounded integer`);
     }
   }
   if (Buffer.byteLength(options.source, "utf8") > limits.sourceBytes) {
     throw new Error(`code source exceeds ${limits.sourceBytes} bytes`);
   }
-  if (uncertain.has(options.call)) {
+  const scope = options.capabilityScope ?? options.call;
+  if (uncertain.has(scope)) {
     throw Object.assign(new Error("previous code capabilities are still pending; reconcile before retrying"), {
       code: "ECODE_UNCERTAIN", completionUnknown: true,
     });
@@ -82,7 +86,7 @@ export async function runCodeMode(options: RunCodeModeOptions): Promise<CodeMode
   options.signal?.throwIfAborted();
   const worker = new Worker(new URL("./code-mode-worker.ts", import.meta.url), {
     workerData: { source: options.source, limits },
-    // The trusted wrapper needs no credentials. Guest code still only sees QuickJS.
+    // The trusted wrapper needs no credentials. Guest code only sees Monty.
     env: {},
     // Do not replay the agent's preload hooks or inspector flags in the worker.
     execArgv: [],
@@ -143,7 +147,8 @@ export async function runCodeMode(options: RunCodeModeOptions): Promise<CodeMode
       try {
         const envelope = JSON.parse(message.encoded);
         if (active.size) throw new Error("code worker completed with pending capabilities");
-        finish({ value: envelope.present ? envelope.value : undefined, traces });
+        if (typeof envelope.output !== "string") throw new Error("invalid code output");
+        finish({ value: envelope.present ? envelope.value : undefined, output: envelope.output, traces });
       } catch (error) { finish(decodeError(encodeError(error))); }
       return;
     }
@@ -153,7 +158,7 @@ export async function runCodeMode(options: RunCodeModeOptions): Promise<CodeMode
     if (typeof operation !== "string" || operation.length > 128 ||
         !/^[A-Za-z][A-Za-z0-9]*(?:\.[A-Za-z][A-Za-z0-9]*)*$/.test(operation) ||
         typeof encoded !== "string" || Buffer.byteLength(encoded) > limits.maxArgumentBytes ||
-        !Number.isSafeInteger(id) || ++calls > limits.maxCalls) {
+        !Number.isSafeInteger(id) || id !== ++calls || calls > limits.maxCalls) {
       return finish(new Error("invalid or excessive code capability call"));
     }
     let args: unknown;
@@ -205,7 +210,7 @@ export async function runCodeMode(options: RunCodeModeOptions): Promise<CodeMode
   options.signal?.removeEventListener("abort", abort);
   controller.abort(result instanceof Error ? result : new Error("code execution finished"));
   // Terminate the worker rather than asking a possibly damaged WASM VM to
-  // pump shutdown jobs or run finalizers. No guest job budget is needed here.
+  // run finalizers. No interpreter execution budget is needed for teardown.
   await worker.terminate();
   let drainTimer: NodeJS.Timeout | undefined;
   const drained = Promise.allSettled([...active]);
@@ -215,8 +220,8 @@ export async function runCodeMode(options: RunCodeModeOptions): Promise<CodeMode
   ]);
   clearTimeout(drainTimer);
   if (!settled) {
-    uncertain.add(options.call);
-    void drained.then(() => uncertain.delete(options.call));
+    uncertain.add(scope);
+    void drained.then(() => uncertain.delete(scope));
     throw Object.assign(new Error(`${result instanceof Error ? result.message + "; " : ""}host cancellation did not settle within ${limits.shutdownMs}ms; completion unknown, reconcile before retrying`), {
       code: "ECODE_UNCERTAIN", completionUnknown: true, traces,
     });

@@ -1,5 +1,5 @@
 /** Schema validation and dispatch for code mode's host capabilities. The
- * QuickJS bridge is intentionally generic internally; this allowlist is the
+ * interpreter bridge is intentionally generic internally; this allowlist is the
  * authorization surface. No operation receives credentials or arbitrary
  * access to the host process. */
 import type { CodeModeCapability } from "./code-mode.ts";
@@ -84,7 +84,7 @@ function portalPort(value: unknown): number {
   return Number(value);
 }
 
-/** Construct the closed capability dispatcher used by QuickJS. New SDK
+/** Construct the closed capability dispatcher used by Monty. New SDK
  * methods must be added explicitly here and to CODE_MODE_API. */
 export function createCodeCapability(
   host: CodeCapabilityHost,
