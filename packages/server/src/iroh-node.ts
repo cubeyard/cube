@@ -39,7 +39,7 @@ export interface HostNodeHealth {
   active: boolean;
   operationRecords: number;
   operationCapacity: number;
-  error: "ENVIRONMENT_MISSING" | "IO_ERROR" | null;
+  error: "ENVIRONMENT_MISSING" | "IO_ERROR" | "UNSUPPORTED" | null;
   softwareVersion: string;
   protocolVersion: 1;
 }
@@ -401,7 +401,7 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
           if (!["ready", "draining", "faulted", "recoveryRequired"].includes(String(status.lifecycle)) || typeof status.active !== "boolean"
             || !integer(status.operationRecords, 0) || !integer(status.operationCapacity, 1)
             || status.operationRecords > status.operationCapacity
-            || ![null, "ENVIRONMENT_MISSING", "IO_ERROR"].includes(status.error as null | string)) invalid();
+            || ![null, "ENVIRONMENT_MISSING", "IO_ERROR", "UNSUPPORTED"].includes(status.error as null | string)) invalid();
           break;
         }
         case "environment.inspect":

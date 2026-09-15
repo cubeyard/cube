@@ -31,7 +31,8 @@ ReadWritePaths=/var/lib/cube-host /run/cube-host
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-RestrictSUIDSGID=yes
+# No RestrictSUIDSGID: systemd 255's compatibility filter returns ENOSYS for
+# openat2, which is the host executor's required race-free cwd boundary.
 LockPersonality=yes
 
 [Install]

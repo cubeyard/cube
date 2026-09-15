@@ -36,6 +36,8 @@ try {
   assert.match(unit, /KillMode=mixed/);
   assert.match(unit, /--network relay/);
   assert.match(unit, /--stop-policy \$\{CUBE_HOST_STOP_POLICY\}/);
+  assert.doesNotMatch(unit, /RestrictSUIDSGID=yes/,
+    "systemd's RestrictSUIDSGID seccomp must not block the required openat2 cwd boundary");
 
   fs.mkdirSync(path.join(stage, "var/lib/cube-host/state"));
   fs.writeFileSync(path.join(stage, "var/lib/cube-host/state/journal.db"), "durable-journal", { mode: 0o600 });
@@ -84,8 +86,13 @@ case "$action" in
   *) exit 0 ;;
 esac
 `, { mode: 0o755 });
+  const installedUnit = path.join(stage, "etc/systemd/system/cube-host.service");
+  const candidateUnit = fs.readFileSync(path.join(repo, "scripts/host/cube-host.service"), "utf8");
+  fs.writeFileSync(installedUnit, `${candidateUnit}RestrictSUIDSGID=yes\n`);
   run("upgrade.sh", [bin("1.1.0")], { CUBE_HOST_SYSTEMCTL: fakeSystemctl });
   assert.match(fs.readlinkSync(path.join(stage, "opt/cube-host/current")), /1\.1\.0$/);
+  assert.equal(fs.readFileSync(installedUnit, "utf8"), candidateUnit, "upgrade installs the candidate systemd unit");
+  fs.writeFileSync(installedUnit, "previous production unit\n");
   const failed = spawnSync("bash", [path.join(repo, "scripts/host/upgrade.sh"), bin("1.2.0")], {
     encoding: "utf8",
     env: { ...process.env, CUBE_HOST_ROOT: stage, CUBE_HOST_USER: os.userInfo().username, CUBE_HOST_SYSTEMCTL: fakeSystemctl },
@@ -93,6 +100,7 @@ esac
   assert.notEqual(failed.status, 0);
   assert.match(failed.stderr, /rollback to 1\.1\.0 is healthy/);
   assert.match(fs.readlinkSync(path.join(stage, "opt/cube-host/current")), /1\.1\.0$/);
+  assert.equal(fs.readFileSync(installedUnit, "utf8"), "previous production unit\n", "rollback restores the previous systemd unit");
 
   console.log("host-production-test: install permissions, backup/restore quarantine, upgrade and rollback pass");
 } finally {

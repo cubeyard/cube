@@ -83,8 +83,8 @@ const accept = (async () => {
         : mode === "missing" && query.method === "environment.inspect" ? { type: "Error", code: "ENVIRONMENT_MISSING", message: "gone", completionUnknown: false }
         : query.method === "node.status" ? { type: "Status", nodeId: binding.nodeId, protocolVersion: 1,
           minimumProtocolVersion: 1, softwareVersion: "1.0.0", binding: mode === "wrong-binding" ? { ...binding, threadId: "other" } : binding,
-          status: { lifecycle: mode === "draining" ? "draining" : mode === "missing" ? "faulted" : "ready", active: false,
-            operationRecords: 2, operationCapacity: 10000, error: mode === "missing" ? "ENVIRONMENT_MISSING" : null } }
+          status: { lifecycle: mode === "draining" ? "draining" : ["missing", "unsupported-status"].includes(mode) ? "faulted" : "ready", active: false,
+            operationRecords: 2, operationCapacity: 10000, error: mode === "missing" ? "ENVIRONMENT_MISSING" : mode === "unsupported-status" ? "UNSUPPORTED" : null } }
         : query.method === "environment.inspect" ? { type: "Environment", binding: mode === "wrong-binding" ? { ...binding, threadId: "other" } : binding, state: "ready" }
         : query.method === "exec.start" ? { type: "Accepted", operationId: id }
         : { type: "Operation", operationId: id, operation: mode === "running" ? { state: "Running" } : mode === "unknown" ? { state: "Unknown" }
@@ -134,6 +134,8 @@ try {
   await assert.rejects(client.status(1), errorCode("ENVIRONMENT_MISSING"));
   assert.equal(client.contact, "available");
   assert.equal((observations[1] as { value: { status: string } }).value.status, "missing");
+  scenario = "unsupported-status";
+  await assert.rejects(client.status(1), errorCode("OPERATION_UNSUPPORTED"));
   scenario = "wrong-binding";
   await assert.rejects(client.status(1), errorCode("NODE_UNAVAILABLE"));
   assert.equal(observations.length, 2);
