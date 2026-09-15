@@ -1,3 +1,7 @@
+import { AdmittedHostNode } from "./admitted-host-node.ts";
+import type { HostExecSpec } from "./iroh-node.ts";
+import { fileURLToPath } from "node:url";
+import { ExecutionNodes, LocalExecutionNodeClient, ExecutionNodeError, isNodeTransportFailure, type ExecutionNodeClient } from "./execution-node.ts";
 /**
  * CubeSupervisor — Phase 2 slices 2+3. Owns WHICH cubes exist and their live
  * runtime state: provisioning via the registry (subnet allocation) +
@@ -9,6 +13,7 @@
 import { Effect } from "effect";
 import { makeEnvironmentProgress, type EnvironmentProgress } from "./environment-progress.ts";
 import { prepareRepositories, RepositoryRefreshError } from "./thread-preparation.ts";
+import { RepositoryOperations, RepositoryOperationError, runRepositoryEffect } from "./repository-operations.ts";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -73,7 +78,8 @@ const EGRESS_HOST_MAX_LEN = 253;
 // extension's `user_bash` handler) from executing on the credentialed host
 // — see packages/pi-extension/src/index.ts. `--no-approve` matches the
 // harness's projectTrusted:false stance for the same reason.
-const PI_BIN = path.resolve(import.meta.dirname, "../node_modules/.bin/pi");
+const PI_CLI = fileURLToPath(new URL("./cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
+const PI_SESSION_CWD = path.resolve(import.meta.dirname, "pi-session-cwd.ts");
 const PI_EXTENSION = path.resolve(import.meta.dirname, "../../pi-extension/src/index.ts");
 
 /** How much of a session file's head autoTitle reads looking for the first
@@ -170,6 +176,8 @@ export interface UserThreadSummary {
   createdAt: number | null;
   archived: boolean;
   project: { id: string; name: string };
+  nodeContact: "unobserved" | "available" | "unavailable";
+  environmentObservation: { status: string; observedAt: number } | null;
 }
 
 export interface ProjectRepositoryInput {
@@ -210,6 +218,7 @@ export interface PortalTargetInfo {
   status: string;
   ip: string;
   port: number;
+  connect: () => Promise<import("node:stream").Duplex>;
   supervised: boolean;
 }
 
@@ -276,10 +285,12 @@ function threadState(cubeStatus: string): UserThreadSummary["state"] {
 export class CubeSupervisor {
   private readonly startup = Effect.runSync(makeEnvironmentProgress());
   private readonly waitingTemplates = new Map<string, { projectId: string; key: string }>();
+  readonly nodes: ExecutionNodes;
   private readonly registry: Registry;
   private readonly backend: CubeBackend;
   private readonly config: SupervisorConfig;
   private readonly git: GitService;
+  private readonly repositoryOperations: RepositoryOperations["Service"];
   private readonly lifecycle: Lifecycle;
   private readonly templates: EnvironmentTemplates | null;
   private readonly runtimes = new Map<string, CubeRuntime>();
@@ -332,8 +343,8 @@ export class CubeSupervisor {
   private lastEnvironmentMaintenance = 0;
   // Idempotency keys of recent thread creations (see createUserThread):
   // `<project>\0<key>` -> the thread it made, in insertion (= time) order.
-  // In memory by design — a restart forgets them, and a key is only ever
-  // replayed within minutes. Bounded by CREATE_REQUEST_CAP; expiry and
+  // Cache only: SQLite owns the durable request association. Bounded by
+  // CREATE_REQUEST_CAP; cache expiry and
   // deleted threads are swept once a minute, not scanned per request.
   private readonly createRequests = new Map<string, { threadId: string; at: number }>();
   // Reserve keyed creates across the network preflight, not just allocation.
@@ -341,11 +352,21 @@ export class CubeSupervisor {
   private readonly threadPreparations = new Set<Promise<ProjectRepositoryRow[]>>();
   private closing = false;
 
-  constructor(registry: Registry, backend: CubeBackend, config: SupervisorConfig) {
+  constructor(registry: Registry, backend: CubeBackend, config: SupervisorConfig, nodes?: ExecutionNodeClient[]) {
+    this.nodes = new ExecutionNodes(registry, nodes ?? [new LocalExecutionNodeClient(registry, backend), ...registry.hostNodeAdmissions().map(row => new AdmittedHostNode(registry, row))]);
     this.registry = registry;
     this.backend = backend;
     this.config = config;
     this.git = new GitService(config.reposRoot);
+    this.repositoryOperations = RepositoryOperations.make({
+      resolve: (id, repositoryId) => this.repositoryForThread(id, repositoryId),
+      requireSeeded: async ({ cube, repository }) => {
+        await this.requireLocalEnvironment(cube.name);
+        this.requireSeeded(cube, repository);
+      },
+      authenticate: async () => { await this.config.github?.ensureFresh(); },
+      reserve: (name, label) => this.reserveGitOp(name, label),
+    });
     this.lifecycle = new Lifecycle(path.join(config.cubesRoot, ".lifecycle"));
     this.templates = config.environmentCache === false
       ? null
@@ -355,6 +376,74 @@ export class CubeSupervisor {
           kind: "environment", phase: "maintenance", ok: false, detail: `${context}: ${describeError(error)}`,
         }),
       });
+  }
+
+  /** Transitional local adapters must never select a host by fallback. */
+  async requireLocalEnvironment(name: string, allowMissing = false): Promise<void> {
+    const cube = this.requireCube(name);
+    const client = this.nodes.forEnvironment(cube.id);
+    if (client.locality !== "local" || client.nodeId !== this.registry.localNodeId) throw new ExecutionNodeError("OPERATION_UNSUPPORTED");
+    if (allowMissing) await client.check(cube.id);
+    else await client.status(cube.id);
+  }
+
+  private async localEnvironmentOperation<T>(cube: CubeRow, mutation: boolean, work: () => Promise<T>): Promise<T> {
+    // Internal template builders have bindings too, but deliberately cannot
+    // pass the user-thread requireCube policy (no thread owns them).
+    const client = this.nodes.forEnvironment(cube.id);
+    if (client.locality !== "local" || client.nodeId !== this.registry.localNodeId) throw new ExecutionNodeError("OPERATION_UNSUPPORTED");
+    await client.status(cube.id);
+    try { return await work(); }
+    catch (error) {
+      if (isNodeTransportFailure(error) || (error as { name?: string })?.name === "IncusTimeoutError") {
+        throw new ExecutionNodeError(mutation ? "COMPLETION_UNKNOWN" : "NODE_UNAVAILABLE", error);
+      }
+      throw error;
+    }
+  }
+
+  private localSandbox(cube: CubeRow): import("@cube/sandbox").Sandbox {
+    return {
+      name: instanceName(cube.name),
+      exec: (command, options) => this.localEnvironmentOperation(cube, true, () => this.backend.sandbox(instanceName(cube.name)).exec(command, options)),
+    };
+  }
+
+  /** Fixed thread-scoped RPC; requests cannot select a node, key, path or env.
+   * Preparation returns the durable operation ID before any dispatch. */
+  async hostExecForUserThread(id: string, value: unknown, signal?: AbortSignal): Promise<unknown> {
+    const { cubeName, threadId } = this.resolveUserThread(id);
+    const cube = this.requireCube(cubeName);
+    const client = this.nodes.forEnvironment(cube.id);
+    if (!(client instanceof AdmittedHostNode)) throw new ExecutionNodeError("OPERATION_UNSUPPORTED");
+    if (client.binding.threadId !== threadId || client.binding.environmentId !== cube.id) throw new ExecutionNodeError("WRONG_NODE");
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new ExecutionNodeError("INVALID_REQUEST");
+    const row = value as Record<string, unknown>;
+    if (["prepare", "submit"].includes(String(row.action)) && this.registry.getThread(threadId)?.archivedAt !== null) throw new ExecutionNodeError("OPERATION_UNSUPPORTED");
+    const keys = row.action === "prepare" ? ["action", "spec"] : row.action === "status" ? ["action"] : ["action", "operationId"];
+    if (Object.keys(row).length !== keys.length || Object.keys(row).some(key => !keys.includes(key))) throw new ExecutionNodeError("INVALID_REQUEST");
+    signal?.throwIfAborted();
+    this.registry.touchCube(cubeName);
+    switch (row.action) {
+      case "status": return client.status(cube.id);
+      case "prepare": return client.prepareExec(cube.id, row.spec as HostExecSpec, signal);
+      case "submit": case "operation":
+        if (typeof row.operationId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(row.operationId)) throw new ExecutionNodeError("INVALID_REQUEST");
+        return row.action === "submit" ? client.submitExec(cube.id, row.operationId, signal) : client.operation(cube.id, row.operationId, signal);
+      default: throw new ExecutionNodeError("INVALID_REQUEST");
+    }
+  }
+
+  async accessForUserThread(id: string): Promise<{ nodeId: string; local: true }> {
+    const { cubeName } = this.resolveUserThread(id);
+    await this.requireLocalEnvironment(cubeName);
+    return { nodeId: this.registry.nodeForCube(this.requireCube(cubeName).id), local: true };
+  }
+
+  async openPortalConnection(cubeName: string, port: number) {
+    const cube = this.requireCube(cubeName);
+    // The caller resolved an authorized portal, not an arbitrary guest address.
+    return this.nodes.forEnvironment(cube.id).openPortal(cube.id, port);
   }
 
   // ---------------------------------------------------------------- events
@@ -484,6 +573,12 @@ export class CubeSupervisor {
     }
     for (const cube of this.registry.listCubes()) {
       if (cube.status === "building-environment") continue; // quarantined cleanup remains retryable
+      if (this.registry.nodeForCube(cube.id) !== this.registry.localNodeId) continue; // no remote lifecycle/recovery side effects
+      try { await this.requireLocalEnvironment(cube.name, true); }
+      catch (error) {
+        recordPoint(this.registry, { kind: "boot", cube: cube.name, ok: false, detail: String(error) });
+        continue; // contact loss says nothing about the guest's run state
+      }
       for (const phase of ["setup", "resume"] as const) {
         const result = this.lifecycle.read(cube.name, phase);
         if (result?.state === "running") this.lifecycle.save(cube.name, phase, {
@@ -497,7 +592,10 @@ export class CubeSupervisor {
         // .cube/setup — an app upgrade restarts cubed) leaves a usable
         // environment: wake it on demand and say what may be missing.
         // Interrupted before that, there is nothing to wake.
-        const exists = await this.backend.getState(instanceName(cube.name)).then(() => true, () => false);
+        const exists = await this.nodes.forEnvironment(cube.id).status(cube.id).then(() => true, (error) => {
+          if (error instanceof ExecutionNodeError && error.code === "ENVIRONMENT_MISSING") return false;
+          throw error;
+        });
         this.registry.setCubeStatus(
           cube.name,
           exists ? "asleep" : "error",
@@ -518,7 +616,7 @@ export class CubeSupervisor {
         continue;
       }
       try {
-        const state = await this.backend.getState(instanceName(cube.name));
+        const state = await this.nodes.forEnvironment(cube.id).status(cube.id);
         if (state.status === "Running") {
           // Running is not readiness: if the instance was just (re)started,
           // its static IP may not be assigned yet — a prompt straight after
@@ -533,7 +631,7 @@ export class CubeSupervisor {
           span.end(true, "ready but stopped -> asleep");
         }
       } catch (error) {
-        this.registry.setCubeStatus(cube.name, "error", `boot: ${String(error)}`);
+        if (!(error instanceof ExecutionNodeError)) this.registry.setCubeStatus(cube.name, "error", `boot: ${String(error)}`);
         span.fail(error);
       }
     }
@@ -902,44 +1000,6 @@ export class CubeSupervisor {
   /** Allocate a cube from one immutable, already-checked Project snapshot.
    * Repository rows land before provisioning is queued, so the async seed
    * cannot observe a half-attached project. */
-  private createProjectCube(name: string, repositories: ProjectRepositoryRow[], environment: string | null): CubeRow {
-    if (this.registry.getCube(name)) throw new Error(`cube ${name} already exists`);
-    const row = this.registry.createCube({
-      name,
-      image: this.config.image,
-      workspacePath: path.join(this.config.cubesRoot, name, "workspace"),
-      environment,
-    });
-    const root = path.dirname(row.workspacePath);
-    const branch = `cube/${name.replace(/^t-/, "")}`;
-    try {
-      this.registry.addCubeRepositories(
-        row.id,
-        repositories.map((repo, position) => {
-          if (!repo.resolvedBase || !repo.baseOid) {
-            throw new Error(`project repository ${repo.checkoutName} is not ready`);
-          }
-          return {
-            url: repo.url,
-            base: repo.resolvedBase,
-            branch,
-            baseOid: repo.baseOid,
-            checkoutName: repo.checkoutName,
-            workspacePath:
-              position === 0 ? row.workspacePath : path.join(root, "repos", repo.checkoutName),
-          };
-        }),
-      );
-    } catch (error) {
-      // Without the repository snapshot there is no thread to expose this
-      // cube in the product UI. Roll back the registry allocation before
-      // any asynchronous provisioning starts.
-      this.registry.deleteCube(row.name);
-      throw error;
-    }
-    this.transition(row.name, this.provision(row, repositories[0]?.projectId)).catch(() => {});
-    return row;
-  }
 
   /** Validate a project repository synchronously (400-path). Rejects
    * bad URLs (incl. inline credentials) and bad base refs; local-path /
@@ -1023,6 +1083,7 @@ export class CubeSupervisor {
     // name its thread.
     await null;
     try {
+      await this.requireLocalEnvironment(cube.name, true);
       // The first host write of a provision belongs inside the guard: a
       // full or read-only disk fails here as an error the thread can be
       // deleted from, not as an escaped rejection that strands `creating`.
@@ -1079,24 +1140,20 @@ export class CubeSupervisor {
         }
       }
       signal.throwIfAborted();
-      let cloned = false;
-      if (template) {
-        try {
-          await this.backend.provision({ ...spec, template: template.source }, { signal });
-          cloned = true;
-        } catch (error) {
-          signal.throwIfAborted();
-          // provisionCube rolled the instance back; the base image still works.
-          recordPoint(this.registry, {
-            kind: "environment", phase: "clone-failed", cube: cube.name,
-            thread: this.threadIdFor(cube), ok: false, detail: `fresh setup instead: ${describeError(error)}`,
-          });
-          console.warn(`environment clone [${cube.name}]: ${String(error)}`);
-        } finally {
-          this.templates!.release(template.id);
+      const cloned = template !== null;
+      try {
+        await this.requireLocalEnvironment(cube.name, true);
+        // One dispatch only. A failed clone is not permission to send another
+        // provision: the first request may have completed without its reply.
+        await this.backend.provision(template ? { ...spec, template: template.source } : spec, { signal });
+      } catch (error) {
+        if (isNodeTransportFailure(error) || (error as { name?: string })?.name === "IncusTimeoutError") {
+          throw new ExecutionNodeError("COMPLETION_UNKNOWN", error);
         }
+        throw error;
+      } finally {
+        if (template) this.templates!.release(template.id);
       }
-      if (!cloned) await this.backend.provision(spec, { signal });
       span.phase("instance", cloned ? "cloned from a prepared environment" : null);
       this.registry.addVolume({
         cubeId: cube.id,
@@ -1288,10 +1345,11 @@ export class CubeSupervisor {
    * prompt takes the wake path (which awaits the in-flight stop).
    */
   async sleepCube(name: string, reason: "manual" | "idle" = "manual"): Promise<void> {
+    await this.requireLocalEnvironment(name);
     for (;;) {
       const inflight = this.pendingTransition(name);
       if (!inflight) break;
-      await inflight.catch(() => {}); // failures surface via cube status
+      await inflight; // never replay a failed transition for its waiting caller
     }
     // Sync from here to transition(): check-and-reserve is atomic. (An
     // `await settle()` variant yields to the microtask queue even when
@@ -1320,15 +1378,16 @@ export class CubeSupervisor {
    * destroying the cube).
    */
   async wakeCube(name: string): Promise<void> {
+    await this.requireLocalEnvironment(name);
     for (;;) {
       const inflight = this.pendingTransition(name);
       if (inflight) {
-        await inflight.catch(() => {}); // failures surface via cube status
+        await inflight; // never replay a failed transition for its waiting caller
         continue;
       }
       const cube = this.requireCube(name);
       if (cube.status === "ready") {
-        const state = await this.backend.getState(instanceName(name));
+        const state = await this.nodes.forEnvironment(cube.id).status(cube.id);
         // Re-validate after the await on BOTH paths: a setup retry or a
         // sleep may have reserved the cube while the state request was out,
         // and returning "running" then would let guest tools race it.
@@ -1371,25 +1430,24 @@ export class CubeSupervisor {
     return tracked;
   }
 
+  private async makeRepositoriesWritable(cube: CubeRow): Promise<void> {
+    if (this.registry.listCubeRepositories(cube.id).length > 1) {
+      await this.backend.makeRepositoriesWritable(instanceName(cube.name), path.join(path.dirname(cube.workspacePath), "repos"));
+    }
+  }
+
   private async doSleep(cube: CubeRow, reason: "manual" | "idle"): Promise<void> {
-    const name = instanceName(cube.name);
     const span = this.span("sleep", cube);
     try {
-      const state = await this.backend.getState(name);
+      const state = await this.nodes.forEnvironment(cube.id).status(cube.id);
       let how = "already stopped";
       if (state.status !== "Stopped") {
-        try {
-          await this.backend.setState(name, "stop", { timeout: 30 });
-          how = "stopped";
-        } catch {
-          // graceful stop timed out (a wedged inner dockerd can do this)
-          await this.backend.setState(name, "stop", { force: true });
-          how = "force-stopped after a 30s graceful timeout";
-        }
+        await this.nodes.forEnvironment(cube.id).sleep(cube.id);
+        how = "stopped";
       }
       span.end(true, `${reason}: ${how}`);
     } catch (error) {
-      this.registry.setCubeStatus(cube.name, "error", `sleep failed: ${String(error)}`);
+      this.registry.setCubeStatus(cube.name, error instanceof ExecutionNodeError ? cube.status : "error", error instanceof ExecutionNodeError ? cube.error : `sleep failed: ${String(error)}`);
       span.fail(error);
       throw error;
     }
@@ -1400,8 +1458,9 @@ export class CubeSupervisor {
     const net = networkForCube(cube.name, cube.subnetIndex);
     const span = this.span("wake", cube);
     try {
-      const state = await this.backend.getState(name);
-      if (state.status !== "Running") await this.backend.setState(name, "start");
+      const state = await this.nodes.forEnvironment(cube.id).status(cube.id);
+      await this.makeRepositoriesWritable(cube);
+      if (state.status !== "Running") await this.nodes.forEnvironment(cube.id).wake(cube.id);
       span.phase("start", state.status === "Running" ? "already running" : null);
       await this.backend.waitForNetwork(name, net.ip);
       span.phase("network");
@@ -1423,7 +1482,7 @@ export class CubeSupervisor {
       // A failed retry of an errored cube keeps the original complaint —
       // that is the root cause; "instance not found" on top of it is not.
       const detail = cube.status === "error" && cube.error ? cube.error : `wake failed: ${String(error)}`;
-      this.registry.setCubeStatus(cube.name, "error", detail);
+      this.registry.setCubeStatus(cube.name, error instanceof ExecutionNodeError ? cube.status : "error", error instanceof ExecutionNodeError ? cube.error : detail);
       span.fail(error);
       throw error;
     }
@@ -1438,7 +1497,7 @@ export class CubeSupervisor {
     } catch (error) {
       return String(error);
     }
-    const sandbox = this.backend.sandbox(instanceName(cube.name));
+    const sandbox = this.localSandbox(cube);
     for (const hook of hooks) {
       let out = "";
       try {
@@ -1454,6 +1513,7 @@ export class CubeSupervisor {
           return `wake hook failed (exit ${exitCode}): ${hook} — ${out.slice(-500).trim()}`;
         }
       } catch (error) {
+        if (error instanceof ExecutionNodeError) throw error;
         return `wake hook failed: ${hook} — ${String(error)}`;
       }
     }
@@ -1468,7 +1528,7 @@ export class CubeSupervisor {
     function*(this: CubeSupervisor, cube: CubeRow, script: LifecyclePhase, signal?: AbortSignal) {
       yield* this.startup.update(cube.name, `running ${environmentDirs(cube).guestAbsolute}/${script}…`);
       return yield* Effect.tryPromise({
-        try: () => this.lifecycle.run(cube.name, this.backend.sandbox(instanceName(cube.name)), script, {
+        try: () => this.lifecycle.run(cube.name, this.localSandbox(cube), script, {
           signal, directory: environmentDirs(cube).guest,
           onOutput: (chunk) => Effect.runSync(this.startup.update(cube.name, undefined, chunk.toString("utf8"))),
         }),
@@ -1496,8 +1556,9 @@ export class CubeSupervisor {
 
   /** Explicit in-place repair. Never publishes a working thread as a cache.
    * Reserve the same transition as provision/wake/remove before any await. */
-  retrySetupForUserThread(id: string): Promise<void> {
+  async retrySetupForUserThread(id: string): Promise<void> {
     const { cubeName } = this.resolveUserThread(id);
+    await this.requireLocalEnvironment(cubeName);
     if (this.pendingTransition(cubeName) || this.gitOps.has(cubeName) || this.ensuring.has(cubeName)) {
       throw new Error("environment is busy — retry setup shortly");
     }
@@ -1516,8 +1577,9 @@ export class CubeSupervisor {
         Effect.runSync(this.startup.forget(cubeName));
         this.lifecycle.save(cubeName, "setup", { state: "running", startedAt: Date.now(), durationMs: null, error: null });
         const name = instanceName(cubeName);
-        const state = await this.backend.getState(name);
-        if (state.status !== "Running") await this.backend.setState(name, "start");
+        const state = await this.nodes.forEnvironment(cube.id).status(cube.id);
+        await this.makeRepositoriesWritable(cube);
+        if (state.status !== "Running") await this.nodes.forEnvironment(cube.id).wake(cube.id);
         await this.backend.waitForNetwork(name, networkForCube(cubeName, cube.subnetIndex).ip);
         signal.throwIfAborted();
         await this.startProxy(cube, signal);
@@ -1643,7 +1705,7 @@ export class CubeSupervisor {
           gatewayIp: net.gateway,
           portalBase: this.config.portalBase,
           publicUrl: (label) => this.portalUrl(label),
-          execRoot: (cmd, execSignal) => this.backend.execSimple(instanceName(cube.name), cmd, execSignal),
+          execRoot: (cmd, execSignal) => this.localEnvironmentOperation(cube, true, () => this.backend.execSimple(instanceName(cube.name), cmd, execSignal)),
           upsertPortal: (name, targetPort, hostname) =>
             this.registry.upsertPortal(cube.id, name, targetPort, hostname),
           releasePortal: (name) => this.registry.releasePortal(cube.id, name),
@@ -1705,7 +1767,7 @@ export class CubeSupervisor {
    * declaration must be able to bootstrap its own portal — the caller
    * ensures the cube's services and re-resolves.
    */
-  declaredPortalCube(label: string): string | null {
+  async declaredPortalCube(label: string): Promise<string | null> {
     // Labels are `<service>--<cube>`; cube names never contain "--".
     const split = label.lastIndexOf("--");
     if (split < 0) return null;
@@ -1713,6 +1775,7 @@ export class CubeSupervisor {
     const cubeName = label.slice(split + 2);
     const cube = this.registry.getCube(cubeName);
     if (!cube) return null;
+    await this.requireLocalEnvironment(cube.name);
     try {
       return readCubeConfig(environmentDirs(cube).host).services.some((s) => s.name === serviceName)
         ? cube.name
@@ -1739,6 +1802,7 @@ export class CubeSupervisor {
         status: cube.status,
         ip: networkForCube(cube.name, cube.subnetIndex).ip,
         port: temporary.port,
+        connect: () => this.openPortalConnection(cubeName, temporary.port),
         supervised: false,
       };
     }
@@ -1753,6 +1817,7 @@ export class CubeSupervisor {
       status: cube.status,
       ip: net.ip,
       port: portal.targetPort,
+      connect: () => this.openPortalConnection(cube.name, portal.targetPort),
       supervised: true,
     };
   }
@@ -1806,8 +1871,9 @@ export class CubeSupervisor {
   /** Declared services + their stable URLs for a thread (reads only the
    * declaration and the portal naming scheme — no cube exec, works while
    * the thread sleeps). */
-  listServicesForUserThread(id: string): Array<{ name: string; url: string }> {
+  async listServicesForUserThread(id: string): Promise<Array<{ name: string; url: string }>> {
     const { cubeName } = this.resolveUserThread(id);
+    await this.requireLocalEnvironment(cubeName);
     const cube = this.requireCube(cubeName);
     return readCubeConfig(environmentDirs(cube).host).services.map((service) => ({
       name: service.name,
@@ -1831,10 +1897,11 @@ export class CubeSupervisor {
 
   /** Every repository attached to a thread, with independent live git state.
    * State is null until that checkout has finished seeding. */
-  async repositoriesForUserThread(id: string): Promise<ThreadRepositoryInfo[]> {
+  async repositoriesForUserThread(id: string, includeState = true): Promise<ThreadRepositoryInfo[]> {
     const { cubeName } = this.resolveUserThread(id);
     const cube = this.requireCube(cubeName);
     const repositories = this.registry.listCubeRepositories(cube.id);
+    if (includeState && repositories.length > 0 && cube.status !== "creating") await this.requireLocalEnvironment(cubeName);
     return Promise.all(
       repositories.map(async (repo, position) => ({
         id: repo.id,
@@ -1846,7 +1913,7 @@ export class CubeSupervisor {
         branch: repo.branch,
         // null until provisioning has seeded it: a half-written clone
         // answers git with errors, not state (the UI showed that as a 500).
-        state: cube.status !== "creating" && fs.existsSync(path.join(repo.workspacePath, ".git"))
+        state: includeState && cube.status !== "creating" && fs.existsSync(path.join(repo.workspacePath, ".git"))
           ? await this.withGitOp(cube.name, null, () => this.git.state(repo.workspacePath, repo.baseOid))
           : null,
       })),
@@ -1865,106 +1932,77 @@ export class CubeSupervisor {
    * committed, staged, unstaged, and untracked workspace changes. */
   async diffForUserThread(id: string, repositoryId: number): Promise<RepoDiff> {
     const { cube, repository } = this.repositoryForThread(id, repositoryId);
+    await this.requireLocalEnvironment(cube.name);
     this.requireSeeded(cube, repository);
     return this.withGitOp(cube.name, null, () => this.git.diff(repository.workspacePath, repository.baseOid));
   }
 
-  /** Push the primary repository's current branch to its upstream (host creds). */
-  async pushUserThread(
+  /** Push the selected checkout's current branch using host credentials. */
+  pushUserThread(
     id: string,
     repositoryId: number,
     signal?: AbortSignal,
     options: { forceWithLease?: string } = {},
   ): Promise<string> {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh();
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    return this.withGitOp(cube.name, "push", () =>
-      this.git.push(repository.workspacePath, repository.url, undefined, signal, options),
-    );
+    return this.runRepositoryOperation(id, repositoryId, "push", (repository) =>
+      this.git.push(repository.workspacePath, repository.url, undefined, signal, options), signal);
   }
 
-  /** Refresh origin/<base> through the host-owned mirror so the sandboxed
-   * agent can rebase without receiving host network credentials. */
-  async syncBaseForUserThread(
+  /** Refresh only the selected repository's configured base, without merging. */
+  syncBaseForUserThread(
     id: string,
     repositoryId: number,
     signal?: AbortSignal,
   ): Promise<{ base: string; oid: string }> {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh(); // A long-lived thread may outlast the host token.
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    const oid = await this.withGitOp(cube.name, "sync", () =>
-      this.git.syncBase(repository.workspacePath, repository.url, repository.base, signal),
-    );
-    return { base: repository.base, oid };
+    return this.runRepositoryOperation(id, repositoryId, "sync", async (repository) => {
+      const oid = await this.git.syncBase(repository.workspacePath, repository.url, repository.base, signal);
+      return { base: repository.base, oid };
+    }, signal);
   }
 
-  /** Import one primary-repository branch without checking out, reviewing, or
+  /** Import one repository branch without checking out, reviewing, or
    * publishing anything. The agent handles PR lookup and conflicts locally. */
-  async syncBranchForUserThread(
+  syncBranchForUserThread(
     id: string,
     repositoryId: number,
     branch: string,
     signal?: AbortSignal,
   ) {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh();
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    return this.withGitOp(cube.name, "sync-branch", () =>
-      this.git.syncBranch(repository.workspacePath, repository.url, branch, signal),
-    );
+    return this.runRepositoryOperation(id, repositoryId, "sync-branch", (repository) =>
+      this.git.syncBranch(repository.workspacePath, repository.url, branch, signal), signal);
   }
 
   /** Publish HEAD to the repository's configured base. This is deliberately
    * non-forced; an upstream advance is returned to the agent as a rejection. */
-  async pushBaseForUserThread(
+  pushBaseForUserThread(
     id: string,
     repositoryId: number,
     signal?: AbortSignal,
   ): Promise<{ branch: string; base: string }> {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh(); // A long-lived thread may outlast the host token.
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    const branch = await this.withGitOp(cube.name, "push-base", () =>
-      this.git.push(repository.workspacePath, repository.url, repository.base, signal),
-    );
-    return { branch, base: repository.base };
+    return this.runRepositoryOperation(id, repositoryId, "push-base", async (repository) => {
+      const branch = await this.git.push(repository.workspacePath, repository.url, repository.base, signal);
+      return { branch, base: repository.base };
+    }, signal);
   }
 
   /** Push, then open a PR via gh (host-side auth). Defaults the title to
    * the thread's own title — the user never has to invent one. */
-  async createPrForUserThread(
+  createPrForUserThread(
     id: string,
     repositoryId: number,
     opts: { title?: string; body?: string },
     signal?: AbortSignal,
   ): Promise<{ url: string; branch: string }> {
-    const { cube, repository } = this.primaryRepositoryForThread(id, repositoryId);
-    await this.config.github?.ensureFresh();
-    signal?.throwIfAborted();
-    this.requireSeeded(cube, repository);
-    const title =
-      opts.title?.trim() ||
-      this.registry.getThread(id)?.title ||
-      repository.branch ||
-      "cube changes";
-    return this.withGitOp(cube.name, "pr", () =>
-      this.git.createPr(
-        repository.workspacePath,
-        {
-          url: repository.url,
-          base: repository.base,
-          title,
-          body: opts.body,
-        },
-        signal,
-      ),
-    );
+    return this.runRepositoryOperation(id, repositoryId, "pr", (repository) => this.git.createPr(
+      repository.workspacePath,
+      {
+        url: repository.url,
+        base: repository.base,
+        title: opts.title?.trim() || this.registry.getThread(id)?.title || repository.branch || "cube changes",
+        body: opts.body,
+      },
+      signal,
+    ), signal);
   }
 
   /** Reject review against a half-written clone: provisioning still
@@ -1979,23 +2017,36 @@ export class CubeSupervisor {
    * while a push/PR is mid-flight (a DELETE must not race a publish). */
   /** `label` names the operation in the event record; null for the
    * read-only reads the UI polls (state, diff), which are not recorded. */
-  private async withGitOp<T>(cubeName: string, label: string | null, work: () => Promise<T>): Promise<T> {
+  private withGitOp<T>(cubeName: string, label: string | null, work: () => Promise<T>): Promise<T> {
+    return runRepositoryEffect(this.repositoryOperations.guard(cubeName, label,
+      Effect.tryPromise({ try: async () => {
+        await this.requireLocalEnvironment(cubeName);
+        return work();
+      }, catch: (cause) => new RepositoryOperationError({ cause }) }),
+    ));
+  }
+
+  private reserveGitOp(cubeName: string, label: string | null) {
     if (this.removing.has(cubeName)) throw new Error(`cube ${cubeName} is busy being removed`);
     const count = this.gitOps.get(cubeName) ?? 0;
     this.gitOps.set(cubeName, count + 1);
     const span = label === null ? null : this.span("git", cubeName);
-    try {
-      const result = await work();
-      span?.end(true, label);
-      return result;
-    } catch (error) {
-      span?.end(false, `${label}: ${describeError(error)}`);
-      throw error;
-    } finally {
-      const now = (this.gitOps.get(cubeName) ?? 1) - 1;
-      if (now <= 0) this.gitOps.delete(cubeName);
-      else this.gitOps.set(cubeName, now);
-    }
+    return {
+      success: () => { span?.end(true, label); },
+      failure: (error: unknown) => { span?.end(false, `${label}: ${describeError(error)}`); },
+      release: () => {
+        const now = (this.gitOps.get(cubeName) ?? 1) - 1;
+        if (now <= 0) this.gitOps.delete(cubeName);
+        else this.gitOps.set(cubeName, now);
+      },
+    };
+  }
+
+  private runRepositoryOperation<T>(
+    id: string, repositoryId: number, label: string,
+    work: (repository: CubeRepositoryRow) => Promise<T>, signal?: AbortSignal,
+  ): Promise<T> {
+    return runRepositoryEffect(this.repositoryOperations.run(id, repositoryId, label, work, { signal, online: true }));
   }
 
   /** Resolve a repository id only inside the thread's own cube. */
@@ -2030,6 +2081,7 @@ export class CubeSupervisor {
     const cutoff = Date.now() - this.config.idleMs;
     for (const cube of this.registry.listCubes()) {
       if (cube.status !== "ready" || cube.lastActiveAt > cutoff) continue;
+      if (this.registry.nodeForCube(cube.id) !== this.registry.localNodeId) continue; // host sleep is unsupported
       // Re-read next to the sleep call: the list is a snapshot, and a prompt
       // that completed while this loop awaited earlier cubes must not get
       // its cube slept right after being active (sleepCube itself rechecks
@@ -2047,6 +2099,7 @@ export class CubeSupervisor {
    * is aborted and awaited, then the teardown runs against whatever the
    * provision left (an instance, or nothing yet). */
   async removeCube(name: string, opts: { deleteVolume?: boolean } = {}): Promise<void> {
+    await this.requireLocalEnvironment(name, true);
     const cube = this.registry.getCube(name);
     if (!cube) throw new Error(`no such cube: ${name}`);
     if (this.removing.has(name)) throw new Error(`cube ${name} is busy (removal in flight) — retry shortly`);
@@ -2096,6 +2149,9 @@ export class CubeSupervisor {
       } catch (error) {
         // The runtime side is already torn down; a "ready" row would invite
         // new threads with no proxy. Park it as error — DELETE can be retried.
+        if (isNodeTransportFailure(error) || (error as { name?: string })?.name === "IncusTimeoutError") {
+          throw new ExecutionNodeError("COMPLETION_UNKNOWN", error);
+        }
         this.registry.setCubeStatus(name, "error", `destroy failed (retry DELETE): ${String(error)}`);
         span.fail(error);
         throw error;
@@ -2149,7 +2205,7 @@ export class CubeSupervisor {
    * user action (a retried POST after a dropped connection, a double
    * submit, two tabs replaying one form) returns the thread the first
    * attempt created instead of allocating a second cube. Keys are scoped
-   * to the project and remembered for CREATE_REQUEST_TTL_MS; `created` is
+   * to the project and persisted for the thread lifetime; `created` is
    * false on a replay.
    */
   async createUserThread(projectId: string, requestKey?: string): Promise<{ id: string; created: boolean }> {
@@ -2158,6 +2214,8 @@ export class CubeSupervisor {
     if (key !== null) {
       // O(1) per request: the hit itself is checked for expiry and for a
       // thread that no longer exists; the sweep does the full scan.
+      const persisted = this.registry.createdThread(key);
+      if (persisted) return { id: persisted, created: false };
       const prior = this.createRequests.get(key);
       if (prior && Date.now() - prior.at <= CREATE_REQUEST_TTL_MS && this.registry.getThread(prior.threadId)) {
         return { id: prior.threadId, created: false };
@@ -2187,20 +2245,18 @@ export class CubeSupervisor {
     if (this.requireReadyProject(projectId).revision !== project.revision) {
       throw new Error("project changed while refreshing repositories — start the thread again");
     }
-    const cube = this.createProjectCube(this.freshCubeName(), repositories, project.environment);
-    try {
-      const sessionDir = path.join(this.config.cubesRoot, cube.name, "sessions");
-      // Keep the sessions directory during the legacy-column migration; new
-      // workers use in-memory Pi sessions and never write here.
-      fs.mkdirSync(cube.workspacePath, { recursive: true });
-      fs.mkdirSync(sessionDir, { recursive: true });
-      const id = crypto.randomUUID();
-      this.registry.addThread({
-        id,
-        cubeId: cube.id,
-        projectId: project.id,
-        piSessionPath: path.join(sessionDir, `${id}.jsonl`),
-      });
+    const name = this.freshCubeName();
+    const root = path.join(this.config.cubesRoot, name);
+    const id = crypto.randomUUID();
+    const cube = this.registry.allocateThread({
+      cube: { name, image: this.config.image, workspacePath: path.join(root, "workspace"), environment: project.environment },
+      repositories: repositories.map((repo, position) => ({
+        url: repo.url, base: repo.resolvedBase!, baseOid: repo.baseOid!,
+        branch: `cube/${name.replace(/^t-/, "")}`, checkoutName: repo.checkoutName,
+        workspacePath: position === 0 ? path.join(root, "workspace") : path.join(root, "repos", repo.checkoutName),
+      })),
+      thread: { id, projectId: project.id, piSessionPath: path.join(root, "sessions", `${id}.jsonl`), requestKey: key ?? undefined },
+    });
       if (key !== null) {
         // Bounded: past the cap the oldest key goes. A Map iterates in
         // insertion order and keys are inserted in time order, so the
@@ -2211,15 +2267,8 @@ export class CubeSupervisor {
         }
         this.createRequests.set(key, { threadId: id, at: Date.now() });
       }
+      this.transition(cube.name, this.provision(cube, project.id)).catch(() => {});
       return { id, created: true };
-    } catch (error) {
-      // No thread row means no way for the user to see or delete the cube —
-      // reap it once its (already started) provisioning settles.
-      void this.reapOrphanCube(cube.name).catch((reapError) => {
-        console.log(`orphan cube ${cube.name} not reaped: ${String(reapError)}`);
-      });
-      throw error;
-    }
   }
 
   /** Forget creation keys past their window and keys whose thread has
@@ -2235,15 +2284,6 @@ export class CubeSupervisor {
     for (const [key, entry] of this.createRequests) {
       if (!this.registry.getThread(entry.threadId)) this.createRequests.delete(key);
     }
-  }
-
-  private async reapOrphanCube(name: string): Promise<void> {
-    for (;;) {
-      const inflight = this.transitions.get(name);
-      if (!inflight) break;
-      await inflight.catch(() => {});
-    }
-    await this.removeCube(name, { deleteVolume: true });
   }
 
   /** Internal cube names: "t-" + 8 base36 chars (fits the 11-char cap). */
@@ -2288,6 +2328,8 @@ export class CubeSupervisor {
           .find((result) => result?.state === "failed");
         threads.push({
           id: thread.id,
+          nodeContact: this.nodes.contactForEnvironment(cube.id),
+          environmentObservation: this.registry.environmentObservation(cube.id),
           title: thread.title ?? this.autoTitle(thread),
           state: failedPhase && cube.status !== "creating" ? "error" : threadState(cube.status),
           // The raw text stays in the registry for diagnosis; the list gets
@@ -2340,13 +2382,15 @@ export class CubeSupervisor {
   /** Host workspace directory backing a thread. File listing/serving is
    * host-side (the workspace is bind-mounted into the sandbox), so it
    * works without waking — a sleeping thread's files stay visible. */
-  workspaceForUserThread(id: string): string {
+  async workspaceForUserThread(id: string): Promise<string> {
     const { cubeName } = this.resolveUserThread(id);
+    await this.requireLocalEnvironment(cubeName);
     return this.requireCube(cubeName).workspacePath;
   }
 
   /** Host checkout directory for one repository selected inside a thread. */
-  workspaceForUserRepository(id: string, repositoryId: number): string {
+  async workspaceForUserRepository(id: string, repositoryId: number): Promise<string> {
+    await this.accessForUserThread(id);
     return this.repositoryForThread(id, repositoryId).repository.workspacePath;
   }
 
@@ -2355,6 +2399,9 @@ export class CubeSupervisor {
   terminalProgressForUserThread(id: string): EnvironmentProgress | undefined {
     const { cubeName } = this.resolveUserThread(id);
     const cube = this.requireCube(cubeName);
+    const waiting = this.waitingTemplates.get(cubeName);
+    const template = waiting && this.registry.findEnvironmentTemplate(waiting.projectId, waiting.key);
+    if (template?.status === "building") Effect.runSync(this.startup.copy(template.instance.replace(/^cube-/, ""), cubeName));
     let progress = Effect.runSync(this.startup.get(cubeName));
     if (cube.error && !progress?.failed) {
       // In-memory snapshots disappear on restart. Restore evidence from the
@@ -2374,41 +2421,24 @@ export class CubeSupervisor {
     id: string,
     onStatus: (text: string, progress?: EnvironmentProgress) => void,
   ): Promise<{ cwd: string; env: Record<string, string | undefined> }> {
-    const { cubeName } = this.resolveUserThread(id);
-    let cube = this.requireCube(cubeName);
-    if (cube.status === "creating") {
-      cube = await Effect.runPromise(Effect.gen({ self: this }, function* () {
-        let last: EnvironmentProgress | undefined;
-        for (;;) {
-          const current = this.requireCube(cubeName);
-          const waiting = this.waitingTemplates.get(cubeName);
-          const template = waiting && this.registry.findEnvironmentTemplate(waiting.projectId, waiting.key);
-          if (template?.status === "building") yield* this.startup.copy(template.instance.replace(/^cube-/, ""), cubeName);
-          const progress = yield* this.startup.get(cubeName);
-          if (progress && progress !== last) {
-            onStatus(progress.phase, progress);
-            last = progress;
-          } else if (!progress && !last) onStatus(this.provisionProgress(current));
-          if (current.status !== "creating") return current;
-          yield* Effect.sleep("500 millis");
-        }
-      }));
-    }
+    const { cubeName, threadId } = this.resolveUserThread(id);
+    const cube = this.requireCube(cubeName);
     const progress = this.terminalProgressForUserThread(id);
     if (progress) onStatus(progress.phase, progress);
-    if (cube.status === "error") {
-      throw new Error(`environment error: ${cube.error ?? "unknown"}`);
-    }
+    const runtimeDir = path.join(this.config.cubesRoot, ".agent-runtime", threadId);
+    fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
     return {
-      cwd: cube.workspacePath,
+      cwd: runtimeDir,
       env: {
         ...process.env,
         // The extension is a separate process and cannot infer/share cubed's
         // in-memory MockBackend. Tell it which execution adapter to create;
         // real Incus remains the default and fail-closed path.
-        CUBE_BACKEND: this.backend.kind,
+        CUBE_BACKEND: this.registry.nodeForCube(cube.id) === this.registry.localNodeId ? this.backend.kind : "host",
         CUBE_NAME: cube.name,
         CUBE_THREAD_ID: id,
+        CUBE_NODE_ID: this.registry.nodeForCube(cube.id),
+        CUBE_AGENT_CWD: runtimeDir,
         CUBE_HOST_WORKSPACE: cube.workspacePath,
         CUBE_GUEST_WORKSPACE: "/workspace",
         CUBED_URL: `http://127.0.0.1:${this.config.publicPort}`,
@@ -2425,11 +2455,12 @@ export class CubeSupervisor {
     const plan = await this.agentWorkerPlan(id, onStatus);
     const { threadId } = this.resolveUserThread(id);
     const row = this.registry.getThread(threadId)!;
+    fs.mkdirSync(path.dirname(row.piSessionPath), { recursive: true, mode: 0o700 });
     const sessionPath = this.currentSessionFile(row);
     return {
       argv: [
-        PI_BIN,
-        "--no-extensions", // load-bearing: see the PI_BIN note above
+        process.execPath, "--import", PI_SESSION_CWD, PI_CLI,
+        "--no-extensions", // load-bearing: see the PI_CLI note above
         "--no-approve",
         // pi runs on the CREDENTIALED host with the (agent- and upstream-
         // controlled) workspace as cwd. Its context loader reads AGENTS.md/

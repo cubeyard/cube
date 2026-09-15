@@ -17,6 +17,7 @@ export interface ExposePortalInput {
 }
 
 export interface CodeCapabilityHost {
+  operation?(operationId: string, signal: AbortSignal): Promise<unknown>;
   exec(input: ExecInput, signal: AbortSignal): Promise<unknown>;
   readText(path: string, signal: AbortSignal): Promise<string>;
   writeText(path: string, content: string, signal: AbortSignal): Promise<void>;
@@ -96,6 +97,7 @@ export function createCodeCapability(
     const fields: Record<string, readonly string[]> = {
       exec: ["command", "cwd", "timeoutMs"],
       "github.read": ["number", "type", "section", "page"],
+      "operations.get": ["operationId"],
       "environment.status": [], "environment.retrySetup": [],
       "fs.readText": ["path"], "fs.writeText": ["path", "content"],
       "repositories.list": [], "services.ensure": [], "thread.archive": [],
@@ -112,6 +114,12 @@ export function createCodeCapability(
     }
     signal.throwIfAborted();
     switch (operation) {
+      case "operations.get": {
+        const id = stringField(args, "operationId", { maxLength: 128 })!;
+        if (!/^[a-zA-Z0-9_-]{1,128}$/.test(id)) throw new TypeError("invalid operationId");
+        if (!host.operation) throw new Error("OPERATION_UNSUPPORTED");
+        return host.operation(id, signal);
+      }
       case "exec":
         return host.exec(
           {

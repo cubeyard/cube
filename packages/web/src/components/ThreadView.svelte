@@ -446,6 +446,11 @@
     <span class="strip-note-text">{waitingText(summary)}</span>
   </div>
 {/if}
+{#if summary?.nodeContact === "unavailable"}
+  <div class="strip-note"><span class="strip-note-text">environment unavailable — you can keep talking here. workspace actions need contact again.
+    {#if summary.environmentObservation}last confirmed: {summary.environmentObservation.status} at {new Date(summary.environmentObservation.observedAt).toLocaleString()}.{/if}
+  </span></div>
+{/if}
 {#if summary?.error}
   <div class="strip-note bad"><span class="strip-note-text">{summary.error}</span></div>
 {/if}

@@ -77,11 +77,15 @@ try {
 
   // ---------------------------------------- 1. the first provision write
   failNextSave = true;
-  const { id } = await supervisor.createUserThread(project.id);
+  const { id } = await supervisor.createUserThread(project.id, "failed-request");
+  const nodeBeforeFailure = registry.localNodeId;
   const cubeName = supervisor.resolveUserThread(id).cubeName;
   await until("provision to settle", () => registry.getCube(cubeName)!.status !== "creating");
   const cube = registry.getCube(cubeName)!;
   assert.equal(cube.status, "error");
+  assert.equal(registry.nodeForCube(cube.id), nodeBeforeFailure);
+  assert.deepEqual(await supervisor.createUserThread(project.id, "failed-request"), { id, created: false });
+  assert.equal(registry.nodeForCube(cube.id), nodeBeforeFailure);
   assert.match(cube.error ?? "", /ENOSPC/, "the raw cause stays in the registry");
   const listed = supervisor.listUserThreads().find((t) => t.id === id)!;
   assert.equal(listed.state, "error");

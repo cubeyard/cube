@@ -200,14 +200,14 @@ console.log("3b ok: thread creation is idempotent per request key and project");
   const fresh = await supervisor.createUserThread(project.id, "fresh");
   requests.get(scoped("fresh"))!.at = Date.now() - 11 * 60_000;
   const later = await supervisor.createUserThread(project.id, "fresh");
-  assert.equal(later.created, true, "an expired key is a new action");
-  assert.notEqual(later.id, fresh.id);
-  for (const thread of [fresh, later]) {
+  assert.equal(later.created, false, "a persisted key survives cache expiry");
+  assert.equal(later.id, fresh.id);
+  for (const thread of [fresh]) {
     await readyCube(registry, supervisor.resolveUserThread(thread.id).cubeName);
     await supervisor.removeUserThread(thread.id);
   }
   assert.equal(registry.listCubes().length, 0);
-  console.log("3c ok: the idempotency store is capped, swept on the timer, and never replays an expired key");
+  console.log("3c ok: the cache is capped and swept; durable associations survive cache expiry");
 }
 
 // The new await must not let an edit/re-check/delete race allocate from an
@@ -318,17 +318,27 @@ const repositories = await supervisor.repositoriesForUserThread(thread.id);
 assert.deepEqual(repositories.map((repo) => repo.path), ["/workspace", "../repos/docs"]);
 assert.deepEqual(repositories.map((repo) => repo.role), ["primary", "additional"]);
 assert.equal(
-  supervisor.workspaceForUserRepository(thread.id, repositories[1]!.id),
+  await supervisor.workspaceForUserRepository(thread.id, repositories[1]!.id),
   path.join(path.dirname(cube.workspacePath), "repos", "docs"),
 );
-assert.throws(
+await assert.rejects(
   () => supervisor.workspaceForUserRepository(thread.id, Number.MAX_SAFE_INTEGER),
   /no such repository/,
 );
-await assert.rejects(
-  () => supervisor.pushBaseForUserThread(thread.id, repositories[1]!.id),
-  /read-only references/,
-);
+// Reference edits and publication target its own remote, never the primary.
+const referencePath = await supervisor.workspaceForUserRepository(thread.id, repositories[1]!.id);
+const primaryHead = git(cube.workspacePath, "rev-parse", "HEAD");
+const primaryRemote = git(primary.bare, "rev-parse", "main");
+fs.writeFileSync(path.join(referencePath, "DOCS.md"), "edited in the same thread\n");
+git(referencePath, ...author, "add", "DOCS.md");
+git(referencePath, ...author, "commit", "-m", "update reference");
+assert.equal((await supervisor.syncBaseForUserThread(thread.id, repositories[1]!.id)).base, "main");
+await supervisor.pushUserThread(thread.id, repositories[1]!.id);
+assert.equal(git(docs.bare, "rev-parse", repositories[1]!.branch), git(referencePath, "rev-parse", "HEAD"));
+await supervisor.pushBaseForUserThread(thread.id, repositories[1]!.id);
+assert.equal(git(docs.bare, "rev-parse", "main"), git(referencePath, "rev-parse", "HEAD"));
+assert.equal(git(cube.workspacePath, "rev-parse", "HEAD"), primaryHead);
+assert.equal(git(primary.bare, "rev-parse", "main"), primaryRemote);
 assert.equal(supervisor.listUserThreads()[0]!.project.id, project.id);
 assert.equal(supervisor.listUserThreads()[0]!.project.name, "workbench");
 assert.deepEqual(await supervisor.ensureServicesForUserThread(thread.id), []);

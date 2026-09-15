@@ -5,6 +5,8 @@ export const CODE_MODE_API = `
 JavaScript body runs inside an async function; top-level await and return work.
 Available API (all methods return promises):
 - cube.exec(command, { cwd?, timeoutMs? }) -> { exitCode, output, durationMs }
+- cube.operations.get(operationId) -> saved host operation state/result (read-only)
+  Host exec returns an operationId; failures preserve it too. After unknown completion, inspect this ID, never automatically execute the command again. Host exec is trusted bare-metal Linux execution, not a sandbox: at most 60 seconds, 8192 retained output bytes. Caller abort does not cancel remote work. Host file/repository transfer is not implemented yet.
 - cube.fs.readText(path) -> string
 - cube.fs.writeText(path, content) -> { ok: true }
 - cube.repositories.list() -> repository[]
@@ -62,6 +64,7 @@ const __options = (options, allowed) => {
 };
 const cube = Object.freeze({
   exec: (command, options = {}) => __call("exec", { ...__options(options, ["cwd", "timeoutMs"]), command }),
+  operations: Object.freeze({ get: (operationId) => __call("operations.get", { operationId }) }),
   fs: Object.freeze({
     readText: (path) => __call("fs.readText", { path }),
     writeText: (path, content) => __call("fs.writeText", { path, content }),

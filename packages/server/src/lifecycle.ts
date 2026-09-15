@@ -1,3 +1,4 @@
+import { ExecutionNodeError } from "./execution-node.ts";
 import fs from "node:fs";
 import path from "node:path";
 import type { Sandbox } from "@cube/sandbox";
@@ -115,7 +116,12 @@ export class Lifecycle {
         },
       );
       if (exitCode !== 0) error = `.cube/${phase} failed (exit ${exitCode}): ${tail.slice(-500).trim()}`;
-    } catch (cause) { error = `.cube/${phase} failed: ${String(cause)} — ${tail.slice(-500).trim()}`; }
+    } catch (cause) {
+      if (cause instanceof ExecutionNodeError) {
+        this.save(name, phase, { state: "failed", startedAt, durationMs: Date.now() - startedAt, error: cause.code });
+        throw cause; // not a successful wake with a hook complaint
+      }
+      error = `.cube/${phase} failed: ${String(cause)} — ${tail.slice(-500).trim()}`; }
     if (loggingError) error = `.cube/${phase} failed: ${loggingError.message}`;
     else if (signal?.aborted) error = `.cube/${phase} cancelled: ${String(signal.reason instanceof Error ? signal.reason.message : signal.reason)}`;
     const durationMs = Date.now() - startedAt;

@@ -7,6 +7,7 @@
  * (cubed) — no contention concerns.
  */
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -227,12 +228,14 @@ export function networkForCube(name: string, subnetIndex: number): CubeNetworkPl
 
 export class Registry {
   private readonly db: DatabaseSync;
+  private transactionDepth = 0;
 
   constructor(dbPath: string) {
     if (dbPath !== ":memory:") fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
+    this.db.exec("PRAGMA recursive_triggers = ON");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS project (
         id          TEXT PRIMARY KEY,
@@ -380,6 +383,143 @@ export class Registry {
       provider TEXT NOT NULL,
       id TEXT NOT NULL
     )`);
+    this.migrateNodeBinding();
+  }
+
+  /** Local installation identity, not a transport key. Never regenerated once
+   * the binding schema exists: a missing identity requires operator recovery. */
+  get localNodeId(): string {
+    const row = this.db.prepare("SELECT id FROM execution_node WHERE local = 1").get() as { id: string } | undefined;
+    if (!row) throw new Error("local node identity is missing; restore the registry identity, do not rebind environments");
+    return row.id;
+  }
+
+  nodeForCube(cubeId: number): string {
+    const row = this.db.prepare("SELECT node_id FROM environment_node WHERE cube_id = ?").get(cubeId) as { node_id: string } | undefined;
+    if (!row) throw new Error(`environment ${cubeId} has no node binding`);
+    return row.node_id;
+  }
+
+  private migrateNodeBinding(): void {
+    this.transaction(() => {
+      const installed = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'execution_node'").get();
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS execution_node (id TEXT PRIMARY KEY, local INTEGER NOT NULL CHECK(local IN (0, 1)));
+        CREATE TABLE IF NOT EXISTS environment_node (
+          cube_id INTEGER PRIMARY KEY REFERENCES cube(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL REFERENCES execution_node(id)
+        );
+        CREATE TABLE IF NOT EXISTS environment_observation (
+          cube_id INTEGER PRIMARY KEY REFERENCES cube(id) ON DELETE CASCADE, status TEXT NOT NULL, observed_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS thread_create_request (
+          key TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE
+        );
+      `);
+      // Rebuild the old local-only table without disabling foreign keys or
+      // changing a single existing binding. Both replacements are transactional.
+      const definition = (this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'execution_node'").get() as { sql: string }).sql;
+      if (definition.includes("CHECK(local = 1)")) {
+        this.db.exec(`
+          DROP TRIGGER IF EXISTS bind_new_environment;
+          DROP TRIGGER IF EXISTS immutable_environment_node;
+          DROP TRIGGER IF EXISTS retain_environment_node;
+          DROP TRIGGER IF EXISTS immutable_node;
+          DROP TRIGGER IF EXISTS retain_node;
+          ALTER TABLE execution_node RENAME TO execution_node_legacy;
+          CREATE TABLE execution_node (id TEXT PRIMARY KEY, local INTEGER NOT NULL CHECK(local IN (0, 1)));
+          INSERT INTO execution_node SELECT * FROM execution_node_legacy;
+          CREATE TABLE environment_node_new (
+            cube_id INTEGER PRIMARY KEY REFERENCES cube(id) ON DELETE CASCADE,
+            node_id TEXT NOT NULL REFERENCES execution_node(id)
+          );
+          INSERT INTO environment_node_new SELECT * FROM environment_node;
+          DROP TABLE environment_node;
+          ALTER TABLE environment_node_new RENAME TO environment_node;
+          DROP TABLE execution_node_legacy;
+        `);
+      }
+      this.db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS one_local_node ON execution_node(local) WHERE local = 1;
+        CREATE TABLE IF NOT EXISTS host_node_admission (
+          node_id TEXT PRIMARY KEY REFERENCES execution_node(id),
+          environment_id INTEGER NOT NULL UNIQUE REFERENCES cube(id) DEFERRABLE INITIALLY DEFERRED,
+          thread_id TEXT NOT NULL UNIQUE REFERENCES thread(id) DEFERRABLE INITIALLY DEFERRED,
+          config_path TEXT NOT NULL, config_hash TEXT NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS immutable_host_admission BEFORE UPDATE ON host_node_admission BEGIN
+          SELECT RAISE(ABORT, 'host admission is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS retain_host_admission BEFORE DELETE ON host_node_admission BEGIN
+          SELECT RAISE(ABORT, 'host admission is permanent');
+        END;
+      `);
+      if (!installed) {
+        this.db.prepare("INSERT INTO execution_node(id, local) VALUES (?, 1)").run(`node-${randomUUID()}`);
+        this.db.prepare("INSERT INTO environment_node SELECT id, ? FROM cube").run(this.localNodeId);
+      } else {
+        void this.localNodeId; // missing metadata is not permission to adopt a new host
+        const unbound = this.db.prepare("SELECT id FROM cube WHERE id NOT IN (SELECT cube_id FROM environment_node) LIMIT 1").get();
+        if (unbound) throw new Error("unbound environment in migrated registry; restore its binding before startup");
+      }
+      this.db.exec(`
+        DROP TRIGGER IF EXISTS bind_new_environment;
+        CREATE TRIGGER bind_new_environment AFTER INSERT ON cube BEGIN
+          INSERT INTO environment_node(cube_id, node_id) VALUES (NEW.id,
+            COALESCE((SELECT node_id FROM host_node_admission WHERE environment_id = NEW.id),
+              (SELECT id FROM execution_node WHERE local = 1)));
+        END;
+        CREATE TRIGGER IF NOT EXISTS check_host_thread BEFORE INSERT ON thread
+          WHEN EXISTS (SELECT 1 FROM host_node_admission WHERE environment_id = NEW.cube_id AND thread_id != NEW.id)
+            OR EXISTS (SELECT 1 FROM host_node_admission WHERE thread_id = NEW.id AND environment_id != NEW.cube_id) BEGIN
+          SELECT RAISE(ABORT, 'wrong host thread binding');
+        END;
+        CREATE TRIGGER IF NOT EXISTS immutable_environment_node BEFORE UPDATE ON environment_node BEGIN
+          SELECT RAISE(ABORT, 'environment node binding is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS retain_environment_node BEFORE DELETE ON environment_node
+          WHEN EXISTS (SELECT 1 FROM cube WHERE id = OLD.cube_id) BEGIN
+          SELECT RAISE(ABORT, 'environment node binding is permanent');
+        END;
+        CREATE TRIGGER IF NOT EXISTS immutable_node BEFORE UPDATE ON execution_node BEGIN
+          SELECT RAISE(ABORT, 'node identity is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS retain_node BEFORE DELETE ON execution_node BEGIN
+          SELECT RAISE(ABORT, 'local node identity is permanent');
+        END;
+        CREATE TRIGGER IF NOT EXISTS retain_host_environment BEFORE DELETE ON cube
+          WHEN EXISTS (SELECT 1 FROM host_node_admission WHERE environment_id = OLD.id) BEGIN
+          SELECT RAISE(ABORT, 'host environment is permanent; archive its thread instead');
+        END;
+        CREATE TRIGGER IF NOT EXISTS retain_host_thread BEFORE DELETE ON thread
+          WHEN EXISTS (SELECT 1 FROM host_node_admission WHERE thread_id = OLD.id) BEGIN
+          SELECT RAISE(ABORT, 'host thread is permanent; archive it instead');
+        END;
+        CREATE TRIGGER IF NOT EXISTS immutable_environment_identity BEFORE UPDATE OF id, name, workspace_path ON cube
+          WHEN NEW.id != OLD.id OR NEW.name != OLD.name OR NEW.workspace_path != OLD.workspace_path BEGIN
+          SELECT RAISE(ABORT, 'environment identity is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS immutable_thread_environment BEFORE UPDATE OF cube_id ON thread
+          WHEN NEW.cube_id != OLD.cube_id BEGIN
+          SELECT RAISE(ABORT, 'thread environment binding is immutable');
+        END;
+      `);
+    });
+  }
+
+  observeEnvironment(cubeId: number, observation: { status: string; observedAt: number }): void {
+    this.db.prepare(`INSERT INTO environment_observation(cube_id, status, observed_at) VALUES (?, ?, ?)
+      ON CONFLICT(cube_id) DO UPDATE SET status = excluded.status, observed_at = excluded.observed_at`)
+      .run(cubeId, observation.status, observation.observedAt);
+  }
+
+  environmentObservation(cubeId: number): { status: string; observedAt: number } | null {
+    return (this.db.prepare("SELECT status, observed_at AS observedAt FROM environment_observation WHERE cube_id = ?").get(cubeId) as { status: string; observedAt: number } | undefined) ?? null;
+  }
+
+  createdThread(key: string): string | null {
+    const row = this.db.prepare("SELECT thread_id FROM thread_create_request WHERE key = ?").get(key) as { thread_id: string } | undefined;
+    return row?.thread_id ?? null;
   }
 
   // ---------------------------------------------------------------- events
@@ -668,6 +808,8 @@ export class Registry {
   }
 
   private transaction<T>(work: () => T): T {
+    if (this.transactionDepth) return work();
+    this.transactionDepth++;
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const result = work();
@@ -676,7 +818,7 @@ export class Registry {
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
-    }
+    } finally { this.transactionDepth--; }
   }
 
   // --------------------------------------------------- environment templates
@@ -726,7 +868,7 @@ export class Registry {
     image: string;
     workspacePath: string;
     environment?: string | null;
-  }): CubeRow {
+  }, environmentId?: number): CubeRow {
     if (!CUBE_NAME_RE.test(input.name)) {
       throw new Error(
         `invalid cube name ${JSON.stringify(input.name)} — need ${CUBE_NAME_RE} (bridge name must fit IFNAMSIZ)`,
@@ -736,11 +878,56 @@ export class Registry {
     const now = Date.now();
     this.db
       .prepare(
-        `INSERT INTO cube (name, status, image, workspace_path, environment, subnet_index, created_at, last_active_at)
-         VALUES (?, 'creating', ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO cube (id, name, status, image, workspace_path, environment, subnet_index, created_at, last_active_at)
+         VALUES (?, ?, 'creating', ?, ?, ?, ?, ?, ?)`,
       )
-      .run(input.name, input.image, input.workspacePath, input.environment ?? null, subnetIndex, now, now);
+      .run(environmentId ?? null, input.name, input.image, input.workspacePath, input.environment ?? null, subnetIndex, now, now);
     return this.getCube(input.name)!;
+  }
+
+  /** Atomic allocation: a crash cannot leave a committed environment without
+   * its thread and successful request identity. All inputs are metadata. */
+  allocateThread(input: {
+    cube: Parameters<Registry["createCube"]>[0];
+    repositories: Parameters<Registry["addCubeRepositories"]>[1];
+    thread: Omit<Parameters<Registry["addThread"]>[0], "cubeId">;
+  }): CubeRow {
+    return this.transaction(() => {
+      const cube = this.createCube(input.cube);
+      this.addCubeRepositories(cube.id, input.repositories);
+      this.addThread({ ...input.thread, cubeId: cube.id });
+      return cube;
+    });
+  }
+
+  /** Operator-only, create-only enrollment. No public route calls this method.
+   * The host is already initialized with these identities. Existing resources
+   * can never be adopted, moved or replaced, even when offline. */
+  enrollHostThread(input: {
+    nodeId: string; environmentId: number; threadId: string;
+    configPath: string; configHash: string; projectId: string;
+    name: string; workspacePath: string; piSessionPath: string;
+  }): CubeRow {
+    if (!/^node-[a-zA-Z0-9-]{1,123}$/.test(input.nodeId)
+      || !/^[a-zA-Z0-9_-]{1,128}$/.test(input.threadId)
+      || !Number.isSafeInteger(input.environmentId) || input.environmentId < 1
+      || !path.isAbsolute(input.configPath) || !/^[0-9a-f]{64}$/.test(input.configHash)
+      || !path.isAbsolute(input.workspacePath) || !path.isAbsolute(input.piSessionPath)) throw new Error("invalid host admission");
+    return this.transaction(() => {
+      if (this.getCubeById(input.environmentId) || this.getThread(input.threadId)) throw new Error("host enrollment requires fresh identities");
+      this.db.prepare("INSERT INTO execution_node(id, local) VALUES (?, 0)").run(input.nodeId);
+      this.db.prepare("INSERT INTO host_node_admission VALUES (?, ?, ?, ?, ?)")
+        .run(input.nodeId, input.environmentId, input.threadId, input.configPath, input.configHash);
+      const cube = this.createCube({ name: input.name, image: "trusted-host", workspacePath: input.workspacePath }, input.environmentId);
+      this.addThread({ id: input.threadId, cubeId: cube.id, projectId: input.projectId, piSessionPath: input.piSessionPath });
+      this.setCubeStatus(cube.name, "ready"); // admission, NOT a live contact observation
+      return this.getCube(cube.name)!;
+    });
+  }
+
+  hostNodeAdmissions(): Array<{ nodeId: string; environmentId: number; threadId: string; configPath: string; configHash: string }> {
+    return this.db.prepare(`SELECT node_id AS nodeId, environment_id AS environmentId,
+      thread_id AS threadId, config_path AS configPath, config_hash AS configHash FROM host_node_admission`).all() as ReturnType<Registry["hostNodeAdmissions"]>;
   }
 
   addCubeRepositories(
@@ -833,13 +1020,19 @@ export class Registry {
     projectId: string;
     piSessionPath: string;
     title?: string;
+    requestKey?: string;
   }): void {
+    this.transaction(() => {
     this.db
       .prepare(
         `INSERT INTO thread (id, cube_id, project_id, pi_session_path, title, created_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(input.id, input.cubeId, input.projectId, input.piSessionPath, input.title ?? null, Date.now());
+    if (input.requestKey !== undefined) {
+      this.db.prepare("INSERT INTO thread_create_request(key, thread_id) VALUES (?, ?)").run(input.requestKey, input.id);
+    }
+    });
   }
 
   getThread(id: string): ThreadRow | null {

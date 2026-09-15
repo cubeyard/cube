@@ -159,7 +159,19 @@ export class Conversations {
           });
           return;
         }
-        const message = event.message as { role?: unknown; content?: unknown; toolName?: unknown };
+        const message = event.message as {
+          role?: unknown;
+          content?: unknown;
+          toolName?: unknown;
+          stopReason?: unknown;
+          errorMessage?: unknown;
+        };
+        if (message.role === "assistant" && message.stopReason === "error") {
+          const detail = typeof message.errorMessage === "string" && message.errorMessage.trim()
+            ? message.errorMessage.trim().slice(0, 8192)
+            : "the model provider returned an error";
+          return finish(Effect.fail(new ConversationError({ message: detail })));
+        }
         const role = message.role === "toolResult" ? "tool" : "assistant";
         const content = messageText(message.content);
         if (role === "assistant" && draft) {
