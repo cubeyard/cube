@@ -55,10 +55,9 @@ historical `orb` names.
 ### Out of scope (deliberately)
 
 Multiplayer, Slack, team platform, clustering, per-minute billing, webhooks from
-the internet, sub-cubes / thread-to-thread messaging, live terminal (phase 5+),
-auth in front of cubed/portals (decided: none for now — Tailnet is the boundary).
-Thread-to-thread delivery is specifically deferred; future delivery and
-acknowledgement records belong in cubed, beside the durable transcript.
+the internet, unrestricted sub-cubes, live terminal (phase 5+), and auth in
+front of cubed/portals (decided: none for now — Tailnet is the boundary).
+The narrow exception is operator-granted, cubed-owned directed thread tasks.
 
 ## 2. Sandbox backend: Incus
 
@@ -259,6 +258,9 @@ thread               (id, cube_id, project_id, title, created_at)
 agent_run             (id, thread_id, status, error, timestamps)
 conversation_message  (seq, thread_id, run_id, role, content, payload,
                        finalized, timestamps)
+thread_task            (id, sender, recipient, request_key, status, run_id,
+                       body, result, error, timestamps)
+thread_task_grant      (sender, recipient)
 event                 (id, thread_id, seq, type, payload_json, ts)
 portal                (id, cube_id, name, target_port, hostname, created_at)
 ```
@@ -270,9 +272,13 @@ messages and has an in-memory Pi session; streaming drafts are durable but an
 interrupted draft is not fed to a later worker. Restart marks accepted in-flight
 runs failed instead of replaying potentially side-effecting work.
 
-The sequence cursor and explicit run/message ownership leave room for later
-cubed-owned durable thread-to-thread delivery and acknowledgements. No such
-delivery protocol is implemented yet.
+Directed thread tasks use that same authority. Cubed commits outbound intent
+before dispatch and atomically commits `delivered` with the recipient run and
+transcript message. Worker completion and the bounded result settle together;
+restart fails an in-flight delivered run and never replays it. Only `accepted`
+work, which has never crossed the recipient boundary, is resumed. Grants are
+operator-owned, directed and same-project; agent routes derive the sender from
+the thread capability rather than payload data.
 
 ## 8. Package structure (pnpm monorepo, TypeScript)
 
@@ -509,8 +515,8 @@ websocket speaking JSON-RPC — replaces `fsops.mjs`, drops node from the
 image floor, and gives file tools gondolin-class latency. The fsops op
 set (stat/readdir/glob/grep/resolve) is the v1 protocol.
 Raw live terminal into the cube. Scheduling/cron wake. Rich rendering for
-structured assistant/tool payloads. Cubed-owned durable thread-to-thread
-delivery and acknowledgement. Sub-cubes. Auth if the Tailnet stops being a sufficient boundary. Micro-VM
+structured assistant/tool payloads. Broader sub-cubes and automatic delegation.
+Auth if the Tailnet stops being a sufficient boundary. Micro-VM
 backend (kata/gondolin/boxlite) if container isolation proves insufficient.
 
 ## 14. Risk register

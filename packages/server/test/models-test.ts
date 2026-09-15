@@ -118,6 +118,40 @@ try {
     assert.match(protocol, id === "missing" ? /selected model is unavailable/ : /"type":"complete"/);
   }
   assert.deepEqual(requests.map((request) => request.model), ["first", "second"]);
+  requests.length = 0;
+
+  // Real cubed HTTP + two Cube conversations + real disposable Pi worker.
+  // The sender identity comes from the route; only the operator endpoint can
+  // create the directed grant.
+  const taskPost = (path: string, body: unknown) => fetch(`http://127.0.0.1:${port}${path}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  assert.equal((await taskPost(`/api/threads/alpha/tasks`, {
+    recipient: "beta", requestKey: "blocked", body: "reply with your model",
+  })).status, 409);
+  assert.equal((await taskPost("/api/thread-task-grants", { sender: "alpha", recipient: "beta" })).status, 200);
+  assert.deepEqual(await (await fetch(`${base}/alpha/tasks/destinations`)).json(), {
+    destinations: [{ id: "beta", title: null }],
+  });
+  const acceptedResponse = await taskPost(`/api/threads/alpha/tasks`, {
+    recipient: "beta", requestKey: "real-two-conversations", body: "reply with your model",
+  });
+  assert.equal(acceptedResponse.status, 202);
+  const acceptedTask = (await acceptedResponse.json()).task;
+  let completedTask: any;
+  for (let n = 0; n < 400; n++) {
+    completedTask = (await (await fetch(`${base}/alpha/tasks/${acceptedTask.id}`)).json()).task;
+    if (["completed", "failed"].includes(completedTask.status)) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(completedTask.status, "completed", JSON.stringify(completedTask));
+  assert.equal(completedTask.result, "second");
+  assert.equal(requests.at(-1)?.model, "second");
+  const betaHistory = await (await fetch(`${base}/beta/history`)).json();
+  assert.equal(betaHistory.messages[0].content, "reply with your model");
+  assert.equal(betaHistory.messages[0].payload.source.sender, "alpha");
+  console.log("models-test: real HTTP thread task crossed two Cube conversations and a disposable Pi worker");
+
   // Real creation route: invalid input must not allocate; concurrent and late
   // retries must retain one first turn with the explicitly selected model.
   const upstream = path.join(root, "upstream");

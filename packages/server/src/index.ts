@@ -26,6 +26,7 @@ import { defaultPortalBase } from "./portal-config.ts";
 import { guardUpgradeSocket, portalLabel, proxyHttp, proxyUpgrade, refuseUpgrade, respondFailed, respondMissing, respondUnavailable, respondWaking, upgradeAfterWake } from "./portal-proxy.ts";
 import { Registry } from "./registry.ts";
 import { CubeSupervisor, DEFAULT_EGRESS_ALLOW } from "./supervisor.ts";
+import { ThreadTaskError, ThreadTasks } from "./thread-tasks.ts";
 import { describeThreadError, sanitizeMessage } from "./user-facing.ts";
 import { APP_VERSION } from "./version.ts";
 import { listWorkspaceFiles, openWorkspaceFile } from "./workspace-files.ts";
@@ -44,6 +45,7 @@ const HOME = process.env.HOME!;
 
 const dbPath = process.env.CUBED_DB ?? path.join(HOME, "cube", "cubed.db");
 const registry = new Registry(dbPath);
+const threadTasks = new ThreadTasks(registry);
 const onboardingPath = path.join(path.dirname(dbPath), "onboarding.json");
 const githubAuth = new GithubAuth();
 // CUBED_BACKEND=mock runs cubed with cube ops simulated (no Incus daemon):
@@ -119,7 +121,11 @@ const conversations = new Conversations(registry, {
     }),
   }),
   activity: (id) => Effect.sync(() => supervisor.touchUserThread(id)),
-});
+  defaultModel: () => Effect.tryPromise({
+    try: async () => (await availableModels()).defaultModel,
+    catch: (cause) => new ConversationError({ message: "could not select a model for task delivery", cause }),
+  }),
+}, { tasks: threadTasks });
 
 // Built Svelte SPA (pnpm build). The daemon itself stays build-free.
 const WEB_ROOT = path.resolve(import.meta.dirname, "../../web/dist");
@@ -145,6 +151,12 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
  * word "cube" must not leak through the product surface. */
 function fail(res: http.ServerResponse, error: unknown, sanitize = false, route?: string): void {
   if (res.destroyed) return;
+  if (error instanceof ThreadTaskError) {
+    const status = error.code === "NOT_FOUND" ? 404
+      : error.code === "NOT_PERMITTED" || error.code === "CONFLICT" ? 409
+      : error.code === "CAPACITY_EXCEEDED" ? 429 : 400;
+    return json(res, status, { code: error.code, error: error.message });
+  }
   if (error instanceof ExecutionNodeError) {
     return json(res, error.code === "OPERATION_UNSUPPORTED" ? 501 : error.code === "INVALID_REQUEST" ? 400
       : ["ENVIRONMENT_MISSING", "WRONG_NODE", "CONFLICT"].includes(error.code) ? 409 : error.code === "CAPACITY_EXCEEDED" ? 429 : 503, {
@@ -609,6 +621,48 @@ async function api(
     return json(res, 200, await whileConnected(res, signal => supervisor.hostExecForUserThread(id, input, signal)));
   }
 
+  // Operator boundary: grants are never available through a thread-scoped
+  // agent capability. Cubed has no application login; its trusted loopback /
+  // Tailnet deployment boundary is the operator authority.
+  if (url.pathname === "/api/thread-task-grants" && (method === "POST" || method === "DELETE")) {
+    let input: unknown;
+    try { input = JSON.parse(await readBody(req)); }
+    catch { return json(res, 400, { error: "invalid JSON body" }); }
+    if (!input || typeof input !== "object" || Array.isArray(input)
+      || Object.keys(input).length !== 2 || typeof (input as any).sender !== "string" || typeof (input as any).recipient !== "string") {
+      return json(res, 400, { error: "invalid task grant" });
+    }
+    const { sender, recipient } = input as { sender: string; recipient: string };
+    await Effect.runPromise(method === "POST" ? threadTasks.grant(sender, recipient) : threadTasks.revoke(sender, recipient));
+    if (method === "POST") conversations.kickTasks(recipient);
+    return json(res, 200, { ok: true });
+  }
+
+  const threadTask = url.pathname.match(/^\/api\/threads\/([^/]+)\/tasks(?:\/(destinations|task-[a-zA-Z0-9-]+)(?:\/(cancel))?)?$/);
+  if (threadTask) {
+    const actor = decodeId(threadTask[1]!);
+    const target = threadTask[2];
+    const action = threadTask[3];
+    if (!registry.getThread(actor)) return json(res, 404, { error: "thread not found" });
+    if (!target && method === "GET") return json(res, 200, { tasks: await Effect.runPromise(conversations.listTasks(actor)) });
+    if (!target && method === "POST") {
+      let input: unknown;
+      try { input = JSON.parse(await readBody(req)); }
+      catch { return json(res, 400, { error: "invalid JSON body" }); }
+      return json(res, 202, { task: await Effect.runPromise(conversations.sendTask(actor, input)) });
+    }
+    if (target === "destinations" && !action && method === "GET") {
+      return json(res, 200, { destinations: await Effect.runPromise(conversations.taskDestinations(actor)) });
+    }
+    if (target?.startsWith("task-") && !action && method === "GET") {
+      return json(res, 200, { task: await Effect.runPromise(conversations.getTask(actor, target)) });
+    }
+    if (target?.startsWith("task-") && action === "cancel" && method === "POST") {
+      return json(res, 200, { task: await Effect.runPromise(conversations.cancelTask(actor, target)) });
+    }
+    return json(res, 404, { error: "not found" });
+  }
+
   const threadRepository = url.pathname.match(
     /^\/api\/threads\/([^/]+)\/repositories(?:\/(\d+)\/(diff|push|sync|sync-branch|push-base|pr))?$/,
   );
@@ -702,6 +756,7 @@ async function api(
     if (userThread[3] !== undefined && action !== "files" && action !== "portals") return json(res, 404, { error: "not found" });
     if (!action) {
       if (method === "DELETE") {
+        await Effect.runPromise(threadTasks.preflightDelete(id));
         // Stop the disposable worker before deleting its durable owner.
         await Effect.runPromise(conversations.cancelThread(id));
         await supervisor.removeUserThread(id);
@@ -856,6 +911,7 @@ async function api(
     }
     if (method === "DELETE") {
       const threadIds = supervisor.listThreads(cubeName).map((thread) => thread.id);
+      await Effect.runPromise(Effect.forEach(threadIds, (id) => threadTasks.preflightDelete(id), { discard: true }));
       await Effect.runPromise(Effect.forEach(threadIds, (id) => conversations.cancelThread(id), { discard: true }));
       await supervisor.removeCube(cubeName, {
         deleteVolume: url.searchParams.get("volumes") === "1",

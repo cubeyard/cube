@@ -153,6 +153,21 @@ export interface ConversationHistory {
   run: AgentRun | null;
 }
 
+export interface ThreadTask {
+  id: string;
+  sender: string;
+  recipient: string;
+  requestKey: string;
+  body: string;
+  status: "accepted" | "delivered" | "completed" | "failed" | "cancelled";
+  runId: string | null;
+  result: string | null;
+  error: string | null;
+  createdAt: number;
+  deliveredAt: number | null;
+  finishedAt: number | null;
+}
+
 export interface ModelSelection {
   provider: string;
   id: string;

@@ -2099,9 +2099,12 @@ export class CubeSupervisor {
    * is aborted and awaited, then the teardown runs against whatever the
    * provision left (an instance, or nothing yet). */
   async removeCube(name: string, opts: { deleteVolume?: boolean } = {}): Promise<void> {
-    await this.requireLocalEnvironment(name, true);
     const cube = this.registry.getCube(name);
     if (!cube) throw new Error(`no such cube: ${name}`);
+    // Retained delivery identities use restrictive foreign keys. Refuse before
+    // any node probe, cancellation, instance teardown, or host-tree mutation.
+    for (const thread of this.registry.listThreads(cube.id)) this.registry.assertThreadTaskDeletable(thread.id);
+    await this.requireLocalEnvironment(name, true);
     if (this.removing.has(name)) throw new Error(`cube ${name} is busy (removal in flight) — retry shortly`);
     let cancelling: Promise<void> | null = null;
     if (cube.status === "creating" || cube.status === "building-environment") {

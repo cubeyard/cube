@@ -39,6 +39,11 @@ export interface CodeCapabilityHost {
   archiveThread(signal: AbortSignal): Promise<unknown>;
   environmentStatus(signal: AbortSignal): Promise<unknown>;
   retryEnvironmentSetup(signal: AbortSignal): Promise<unknown>;
+  taskDestinations?(signal: AbortSignal): Promise<unknown[]>;
+  listTasks?(signal: AbortSignal): Promise<unknown[]>;
+  getTask?(id: string, signal: AbortSignal): Promise<unknown>;
+  sendTask?(input: { recipient: string; requestKey: string; body: string }, signal: AbortSignal): Promise<unknown>;
+  cancelTask?(id: string, signal: AbortSignal): Promise<unknown>;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -101,6 +106,8 @@ export function createCodeCapability(
       "environment.status": [], "environment.retrySetup": [],
       "fs.readText": ["path"], "fs.writeText": ["path", "content"],
       "repositories.list": [], "services.ensure": [], "thread.archive": [],
+      "tasks.destinations": [], "tasks.list": [], "tasks.get": ["id"],
+      "tasks.send": ["recipient", "requestKey", "body"], "tasks.cancel": ["id"],
       "portals.expose": ["port", "name", "lifetime"],
       "portals.list": [], "portals.remove": ["port"],
       "git.syncBase": ["repositoryId"], "git.pushBranch": ["repositoryId", "forceWithLease"],
@@ -197,6 +204,25 @@ export function createCodeCapability(
         return host.removePortal(portalPort(args.port), signal);
       case "thread.archive":
         return host.archiveThread(signal);
+      case "tasks.destinations":
+        if (!host.taskDestinations) throw new Error("OPERATION_UNSUPPORTED");
+        return host.taskDestinations(signal);
+      case "tasks.list":
+        if (!host.listTasks) throw new Error("OPERATION_UNSUPPORTED");
+        return host.listTasks(signal);
+      case "tasks.get":
+        if (!host.getTask) throw new Error("OPERATION_UNSUPPORTED");
+        return host.getTask(stringField(args, "id", { maxLength: 128 })!, signal);
+      case "tasks.send":
+        if (!host.sendTask) throw new Error("OPERATION_UNSUPPORTED");
+        return host.sendTask({
+          recipient: stringField(args, "recipient", { maxLength: 128 })!,
+          requestKey: stringField(args, "requestKey", { maxLength: 128 })!,
+          body: stringField(args, "body", { maxLength: 16_384 })!,
+        }, signal);
+      case "tasks.cancel":
+        if (!host.cancelTask) throw new Error("OPERATION_UNSUPPORTED");
+        return host.cancelTask(stringField(args, "id", { maxLength: 128 })!, signal);
       case "environment.status":
         return host.environmentStatus(signal);
       case "environment.retrySetup":

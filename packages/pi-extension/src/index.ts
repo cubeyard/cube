@@ -604,6 +604,28 @@ export default function cubeExtension(pi: ExtensionAPI) {
       { method: "POST", timeoutMs: 20 * 60_000 },
       signal,
     )),
+    async taskDestinations(signal) {
+      const body = await threadRequest("/tasks/destinations", {}, signal);
+      if (!Array.isArray(body.destinations)) throw new Error("cubed returned invalid task destinations");
+      return body.destinations;
+    },
+    async listTasks(signal) {
+      const body = await threadRequest("/tasks", {}, signal);
+      if (!Array.isArray(body.tasks)) throw new Error("cubed returned invalid tasks");
+      return body.tasks;
+    },
+    async getTask(id, signal) {
+      const body = await threadRequest(`/tasks/${encodeURIComponent(id)}`, {}, signal);
+      return body.task;
+    },
+    async sendTask(input, signal) {
+      const body = await threadRequest("/tasks", { method: "POST", body: input, timeoutMs: 10_000 }, signal);
+      return body.task;
+    },
+    async cancelTask(id, signal) {
+      const body = await threadRequest(`/tasks/${encodeURIComponent(id)}/cancel`, { method: "POST", timeoutMs: 10_000 }, signal);
+      return body.task;
+    },
   };
 
   // ---- shadow the complete model-facing tool surface ----

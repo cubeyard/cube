@@ -131,8 +131,8 @@ Constraints:
   boundary. The UI must not imply a login or account model it does not have.
 - Deliberately out of scope: multiplayer, team platform, clustering, Slack,
   webhooks from the internet, unrestricted sub-agent messaging, and a separate
-  general-purpose shell outside the pi TUI. Explicitly authorized thread-to-thread
-  tasks are now a development milestone, not a shipped capability; see
+  general-purpose shell outside the pi TUI. Explicitly authorized, directed
+  thread-to-thread tasks are the narrow shipped exception; see
   [the task protocol plan](docs/plans/thread-to-thread.md).
 
 Undecided:

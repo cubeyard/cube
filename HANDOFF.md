@@ -107,26 +107,17 @@ smoke in both network modes (loopback targets). The smoke denies all local backe
 execution and tests cancellation/result inspection, cubed restart, no resubmission
 and config pinning across restart. No model call, shared live thread/node or
 external machine was used. Host file/repository transfer is still unsupported;
-that and separate-machine acceptance are next, before thread delegation.
+separate-machine acceptance remains required for combined host-node delegation.
 
-## Thread-to-thread foundation (unpublished)
+## Thread-to-thread tasks (working tree)
 
-The maintainer selected thread-to-thread as the next slice. See
-[the task protocol plan](docs/plans/thread-to-thread.md). `thread-tasks.ts` adds
-an opt-in durable journal with directed operator grants, stable task/request IDs,
-one-shot delivery reservation, late acknowledgement and explicit results.
-It is NOT wired into cubed/Pi/HTTP yet; no usable messaging tool is claimed.
-Next: supported real-Pi delivery investigation, lifecycle preflights and scoped
-capabilities, then progress and two-session acceptance. No PTY input automation.
-Validation for this foundation: 44 Node offline suites, typecheck (Svelte zero
-errors/warnings), lint, build and diff whitespace checks passed. Rust is unchanged;
-the Rust suite was not rerun for this journal-only slice.
-
-Follow-up: bounded recipient progress is implemented in the same opt-in journal:
-100 records/task, 4 KiB/record, immutable keys/sequences and participant-scoped
-20-record pages. Exact retries survive completion/restart; no automatic prompts
-or state transitions. Progress tests, all 44 Node suites, typecheck, lint, build
-and whitespace checks passed; Rust unchanged and not rerun.
+See [the task protocol plan](docs/plans/thread-to-thread.md). Cubed now owns
+directed grants, stable task/request IDs, recipient queue/transcript delivery,
+replaceable workers, bounded results and terminal cancellation/failure. The
+thread-scoped Pi code capability can send and inspect tasks; the web conversation
+shows participant status. Delivered work is never replayed after uncertainty.
+No PTY input automation or Pi session-file mutation is involved. See this
+change's commit and final thread report for current validation evidence.
 
 The maintainer subsequently authorized “push and continue”. Publication remains
 pending: plan `a80ec0cbb6462df5104fbdc359d469a2` froze `9f0344e`, but earlier
@@ -286,8 +277,10 @@ The thread conversation is an append-ordered SQLite transcript with one durable
 run record per accepted user turn. The web UI reads that transcript and uses a
 native multiline composer. Each run starts a fresh in-memory Pi worker hydrated
 from finalized prior messages; daemon restart fails in-flight work rather than
-replaying side effects. Thread-to-thread messaging remains deferred. Its future
-delivery and acknowledgement state must live in cubed, not in a worker session.
+replaying side effects. Directed, operator-granted thread tasks use the same
+authority: accepted intent, recipient transcript acknowledgement, worker result
+and terminal failure/cancellation are durable in cubed. Delivered work is never
+replayed after restart or an uncertain completion.
 
 Threads are the home, newest-first across projects, with a URL-backed project
 filter and explicit project/name attribution. Do not use a pre-project populated

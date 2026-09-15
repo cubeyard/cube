@@ -82,6 +82,26 @@ const host: CodeCapabilityHost = {
     hostCalls.push({ operation: "retryEnvironmentSetup" });
     return { accepted: true };
   },
+  async taskDestinations() {
+    hostCalls.push({ operation: "taskDestinations" });
+    return [{ id: "target", title: "target" }];
+  },
+  async listTasks() {
+    hostCalls.push({ operation: "listTasks" });
+    return [{ id: "task-1", status: "completed" }];
+  },
+  async getTask(id) {
+    hostCalls.push({ operation: "getTask", value: id });
+    return { id, status: "completed" };
+  },
+  async sendTask(input) {
+    hostCalls.push({ operation: "sendTask", value: input });
+    return { id: "task-1", ...input, status: "accepted" };
+  },
+  async cancelTask(id) {
+    hostCalls.push({ operation: "cancelTask", value: id });
+    return { id, status: "cancelled" };
+  },
 };
 let allowPrCreation = true;
 let confirmations = 0;
@@ -261,6 +281,20 @@ assert.deepEqual(hostCalls.map((call) => call.operation), ["environmentStatus", 
 console.log("4c ok: environment SDK and capability dispatch");
 
 hostCalls.length = 0;
+const taskResult = await runCodeMode({
+  source: `
+    const destinations = await cube.tasks.destinations();
+    const sent = await cube.tasks.send(destinations[0].id, "stable-key", "do the bounded work");
+    return { sent, status: await cube.tasks.get(sent.id), all: await cube.tasks.list(), cancelled: await cube.tasks.cancel(sent.id) };
+  `,
+  call: capability,
+});
+assert.equal((taskResult.value as any).sent.status, "accepted");
+assert.deepEqual(hostCalls.map((call) => call.operation), ["taskDestinations", "sendTask", "getTask", "listTasks", "cancelTask"]);
+await assert.rejects(capability("tasks.send", { recipient: "target", requestKey: "key", body: "x", extra: true }, new AbortController().signal), /unknown/);
+console.log("4d ok: task SDK is closed, directed and status-oriented");
+
+hostCalls.length = 0;
 const never = new AbortController().signal;
 const portals = await runCodeMode({
   source: `return {
@@ -295,7 +329,7 @@ for (const input of [
   await assert.rejects(capability("portals.expose", input, never), /port must|name must|exceeds 80|lifetime must/);
 }
 await assert.rejects(capability("portals.remove", { port: -1 }, never), /port must/);
-console.log("4d ok: temporary portal SDK dispatch and validation");
+console.log("4e ok: temporary portal SDK dispatch and validation");
 
 // ---- 5. Dispatcher validation is fail-closed -----------------------------
 
@@ -456,9 +490,9 @@ await assert.rejects(
   () => runCodeMode({
     source: `return await cube.services.ensure();`,
     call: waitsForAbort(() => (wallCallCancelled = true)),
-    limits: { wallTimeMs: 20 },
+    limits: { wallTimeMs: 50 },
   }),
-  /execution exceeded 20ms/,
+  /execution exceeded 50ms/,
 );
 assert.equal(wallCallCancelled, true);
 

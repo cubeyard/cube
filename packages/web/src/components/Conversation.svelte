@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { errorText, fetchConversation, sendPrompt } from "../lib/api.ts";
-  import type { AgentRun, ConversationMessage, ModelSelection } from "../lib/types.ts";
+  import { errorText, fetchConversation, fetchThreadTasks, sendPrompt } from "../lib/api.ts";
+  import type { AgentRun, ConversationMessage, ModelSelection, ThreadTask } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
 
   let { threadId, model, changingModel = false, busy = $bindable(false), waitingText = null }: {
@@ -12,6 +12,7 @@
     waitingText?: string | null;
   } = $props();
   let messages = $state<ConversationMessage[]>([]);
+  let tasks = $state<ThreadTask[]>([]);
   let run = $state<AgentRun | null>(null);
   let prompt = $state("");
   let loading = $state(true);
@@ -26,10 +27,11 @@
 
   async function refresh(): Promise<void> {
     try {
-      const history = await fetchConversation(threadId);
+      const [history, taskHistory] = await Promise.all([fetchConversation(threadId), fetchThreadTasks(threadId)]);
       const nearBottom = !transcript || transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120;
       messages = history.messages;
       run = history.run;
+      tasks = taskHistory;
       historyError = null;
       loading = false;
       if (nearBottom) {
@@ -90,6 +92,13 @@
     const name = (message.payload as { toolName?: unknown }).toolName;
     return typeof name === "string" ? name : "tool";
   }
+
+  function messageLabel(message: ConversationMessage): string {
+    const source = message.payload && typeof message.payload === "object"
+      ? (message.payload as { source?: { type?: unknown; sender?: unknown } }).source : undefined;
+    return source?.type === "thread-task" && typeof source.sender === "string"
+      ? `thread / ${source.sender}` : message.role === "user" ? "you" : "agent";
+  }
 </script>
 
 <div class="conversation">
@@ -111,7 +120,7 @@
           </details>
         {:else}
           <article class="conversation-message {message.role}" aria-label={`${message.role} message`}>
-            <span class="message-label">{message.role === "user" ? "you" : "agent"}</span>
+            <span class="message-label">{messageLabel(message)}</span>
             <div class="message-copy">{message.content}</div>
           </article>
         {/if}
@@ -121,6 +130,21 @@
       {/if}
     {/if}
   </div>
+
+  {#if tasks.length > 0}
+    <details class="task-bank">
+      <summary><span class="lamp mini {tasks.some((task) => task.status === 'accepted' || task.status === 'delivered') ? 'on-amber blink' : 'on-green'}" aria-hidden="true"></span>thread tasks · {tasks.length}</summary>
+      <ul>
+        {#each tasks as task (task.id)}
+          <li>
+            <span>{task.sender === threadId ? `to ${task.recipient}` : `from ${task.sender}`}</span>
+            <strong class:bad={task.status === "failed"}>{task.status}</strong>
+            {#if task.result}<span>{task.result}</span>{:else if task.error}<span>{task.error}</span>{/if}
+          </li>
+        {/each}
+      </ul>
+    </details>
+  {/if}
 
   {#if error || historyError || run?.status === "failed"}<div class="conversation-error" role="alert">{error ?? historyError ?? run?.error}</div>{/if}
   <form class="composer" onsubmit={(event) => { event.preventDefault(); void submit(); }}>
