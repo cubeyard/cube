@@ -15,3 +15,5 @@ done
 # Build explicitly: cargo test's internal artifacts are not the smoke's binary.
 cargo build --locked --offline -p cube-runner -j 2
 node scripts/smoke-node-adapter.ts "${CARGO_TARGET_DIR:-target}/debug/cube-runner"
+node scripts/runner-production-test.ts
+for script in scripts/runner/*.sh; do bash -n "$script"; done

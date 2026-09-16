@@ -23,8 +23,9 @@ to a new host and treat that as moving its environments.
 
 ## Iroh / trusted-runner development
 
-The Rust workspace supplies the supported Linux x86_64 trusted-runner daemon; it
-is not an Incus/VM execution node and never becomes a sandbox. Run
+The Rust workspace supplies the supported Linux x86_64 and macOS arm64/x86_64
+trusted-runner daemon; it is not an Incus/VM execution node and never becomes a
+sandbox. Run
 `bash scripts/test-node-transport.sh` after `.cube/setup`; it uses locked offline
 Cargo dependencies and disposable real loopback QUIC/child-process fixtures. It
 also builds the Rust runner binary and runs `scripts/smoke-node-adapter.ts`: the
@@ -32,8 +33,8 @@ control-plane client uses pinned `@number0/iroh` directly inside Node, not a
 subprocess bridge. The ordinary Node suite tests that adapter without Rust.
 See [`packages/node-transport/RUNNER.md`](packages/node-transport/RUNNER.md) for the
 wire/CLI contract and [the production runbook](docs/trusted-runner-operations.md)
-for packaging, systemd, lifecycle, recovery and acceptance. Never run the runner
-under the control-plane account or point crash tests at a shared runner.
+for packaging, systemd/launchd lifecycle, recovery and acceptance. Never run
+the runner under the control-plane account or point crash tests at a shared runner.
 
 ## Backends (`CUBED_BACKEND`)
 

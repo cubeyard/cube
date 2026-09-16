@@ -11,8 +11,8 @@ single-host product premise, not the credential or private-browser boundaries.
 Local permanent binding, restart-safe creation keys, status/wake/sleep and portal
 stream boundaries, offline pi cwd/CLI reopening, local-adapter access gates and
 separate UI contact status are implemented. Remote trusted-runner enrollment/exec
-is production-packaged for Linux x86_64; external acceptance remains a separate
-release sign-off.
+is production-packaged for Linux x86_64 and macOS arm64/x86_64; external
+acceptance remains a separate per-platform release sign-off.
 Pi's pinned CLI needs the `pi-session-cwd.ts` preload to ignore a historical
 workspace cwd without rewriting the session. Keep that real-CLI regression gate.
 
@@ -21,8 +21,8 @@ Incus file adapters, host-path Git/config/browser operations, services, portals,
 templates and sandbox egress remain local-only and are not future-host claims.
 This is **not** a VPN, sandbox, migration path or failover scheduler. Production
 operations are in [the trusted-runner runbook](docs/trusted-runner-operations.md).
-The local-boundary tests are not Incus/macOS/external-node acceptance; no live
-instance was deployed, restarted or used as a disposable test resource.
+The local-boundary tests are not Incus or external-node acceptance; no live
+Incus instance was deployed, restarted or used as a disposable test resource.
 
 Earlier local-boundary verification: Node 26.8.2 / pnpm 10.34.5; `pnpm typecheck`,
 `pnpm lint`, `pnpm test` (40 offline suites), and `pnpm build` passed. Real
@@ -32,13 +32,19 @@ need the disposable VM portfolio. That earlier baseline did not exercise iroh or
 ## Iroh / in-process adapter development slice
 
 The Rust `packages/node-transport` runner uses pinned iroh 1.2.0 / Rust 1.91.0.
-The runner binary has a separate Linux x86_64 installer bundle and systemd service;
-operator admission and thread exec routing remain explicit.
+The runner binary has native Linux x86_64/systemd and macOS
+arm64/x86_64/launchd bundles; operator admission and thread exec routing remain
+explicit. The macOS production profile is a system LaunchDaemon under a
+pre-created, credential-free `_cube-runner` account. A per-user LaunchAgent is a
+lower-assurance development profile unless its login account is equally dedicated.
 `runner-init`/`runner-serve` own one immutable binding and exclusive SQLite journal;
 Accepted/Running commits precede dispatch/spawn, and restart marks unfinished work
 Interrupted/uncertain, never queued. A hard crash does not prove descendants have
-stopped. The trusted unprivileged Linux runner is NOT a sandbox; no
-control-plane credentials belong in that account.
+stopped. The trusted unprivileged runner is NOT a sandbox; no control-plane
+credentials belong in that account. Linux uses `openat2` for cwd confinement;
+macOS uses a no-symlink descriptor-relative `openat` walk. Neither confines
+arbitrary same-UID filesystem access. Darwin process-group cleanup cannot catch
+a deliberately detached new session or descendants of a hard daemon crash.
 
 `packages/server/src/iroh-node.ts` now uses pinned `@number0/iroh` 1.1.0 **inside
 Node**. The draft Rust stdio bridge is removed; no intermediary binary/process
@@ -71,9 +77,9 @@ cases to avoid sibling forks transiently inheriting another fixture's flock befo
 exec; concurrent requests/submissions remain tested within cases.
 
 Still absent from the trusted-runner profile: file/repository transfer and portals.
-Separate-machine/NAT acceptance must be repeated for release sign-off. Browser
-access and Pi startup remain unchanged. Other native-addon platforms are outside
-the supported Linux x86_64 boundary.
+Separate-machine/NAT acceptance must be repeated on Linux and macOS for release
+sign-off. Browser access and Pi startup remain unchanged. Other native-addon
+platforms are outside the supported runner boundary.
 
 Publication remains operator-controlled. Do not record live publication tokens,
 node IDs, addresses, filesystem paths, or credentials in this file.

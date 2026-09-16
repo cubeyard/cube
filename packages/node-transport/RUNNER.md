@@ -52,8 +52,15 @@ the first network dispatch. A failed dial stays consumed; never remove `.sent`.
 
 Commands run through `/bin/bash --noprofile --norc -c` with closed stdin and a
 cleared environment containing only bounded `PATH`, workspace `HOME`, and
-`LANG=C.UTF-8`. Cwd is relative to the bound workspace and opened with Linux
-`openat2` beneath the identity-checked directory. There is no insecure fallback.
+`LANG=C.UTF-8`. Cwd is relative to the identity-checked workspace. Linux opens
+it with `openat2` beneath/no-symlink resolution. macOS walks each component with
+descriptor-relative `openat(O_DIRECTORY|O_NOFOLLOW)`; absolute paths, `..`,
+symlink components and workspace replacement fail closed. Neither mechanism
+sandboxes arbitrary command filesystem access from the runner UID.
+
+Commands run in a new process group. Timeout/cancel reaps normal descendants.
+On macOS a hostile descendant can escape by creating a new session/process
+group, and a hard daemon crash cannot provide cgroup-style cleanup.
 
 Limits: 8-KiB command, 4-KiB cwd, 60-second runtime, 8-KiB retained output, one
 active job, 16 connections, 10,000 immutable operation records. Busy/capacity

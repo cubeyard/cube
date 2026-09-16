@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 //! Only disposable workspaces, node keys and child processes owned by the test.
 use cube_node_transport::{
     DeliveryError, Limits, Request, Response, bind_loopback, call, encode,
@@ -316,7 +315,10 @@ async fn bounded_output_timeout_cwd_and_environment() {
     assert!(result.output_bytes > 8 && result.truncated);
     assert_eq!(result.exit_code, Some(0));
     for (id, script) in [
-        ("op-timeout", "sleep 0.5; touch timeout-survived"),
+        (
+            "op-timeout",
+            "(sleep 0.5; touch timeout-descendant-survived) & wait",
+        ),
         ("op-closed-pipes", "exec 1>&- 2>&-; sleep 5"),
     ] {
         let mut command = spec(script);
@@ -329,7 +331,13 @@ async fn bounded_output_timeout_cwd_and_environment() {
         assert_eq!(result.exit_code, None);
     }
     sleep(Duration::from_millis(550)).await;
-    assert!(!fixture.workspace.join("timeout-survived").exists());
+    assert!(
+        !fixture
+            .workspace
+            .join("timeout-descendant-survived")
+            .exists(),
+        "timeout must kill ordinary descendants in the command process group"
+    );
     let mut command = spec("head -c 1000000 /dev/zero");
     command.output_limit = 0;
     request(&client, &address, &start("op-drain", command)).await;
@@ -749,8 +757,12 @@ async fn drain_wait_cancel_and_restore_quarantine_are_explicit() {
 
     let cancelling = Fixture::new();
     let host = cancelling.open();
-    host.start(1, "op-cancel", spec("sleep 2; touch survived-cancel"))
-        .unwrap();
+    host.start(
+        1,
+        "op-cancel",
+        spec("(sleep 2; touch survived-cancel) & wait"),
+    )
+    .unwrap();
     timeout(BUDGET, async {
         while !host.status().unwrap().active {
             sleep(Duration::from_millis(5)).await;
@@ -766,7 +778,7 @@ async fn drain_wait_cancel_and_restore_quarantine_are_explicit() {
             completion_unknown: false,
         }
     );
-    sleep(Duration::from_millis(50)).await;
+    sleep(Duration::from_millis(2100)).await;
     assert!(!cancelling.workspace.join("survived-cancel").exists());
     drop(host);
 
@@ -786,4 +798,81 @@ async fn drain_wait_cancel_and_restore_quarantine_are_explicit() {
             .contains("DRAINING")
     );
     assert!(!recovered.workspace.join("must-not-run").exists());
+}
+
+#[tokio::test]
+async fn restored_workspace_requires_explicit_identity_preserving_recovery() {
+    let _case = CASE.lock().await;
+    let fixture = Fixture::new();
+    let original = {
+        let runner = fixture.open();
+        runner.installation().clone()
+    };
+
+    fs::rename(
+        &fixture.workspace,
+        fixture.root.path().join("workspace-before-restore"),
+    )
+    .unwrap();
+    fs::create_dir(&fixture.workspace).unwrap();
+
+    let replaced = fixture.open();
+    assert!(
+        replaced.inspect(1).is_err(),
+        "ordinary replacement stays rejected"
+    );
+    drop(replaced);
+    assert!(
+        Runner::acknowledge_recovery(&fixture.state, fixture.key.public(), &fixture.workspace)
+            .is_err(),
+        "physical identity cannot change outside restore quarantine"
+    );
+
+    let marker = fixture.state.join("restore-quarantine");
+    fs::write(&marker, b"operator review required\n").unwrap();
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        Runner::acknowledge_recovery(
+            &fixture.state,
+            SecretKey::generate().public(),
+            &fixture.workspace,
+        )
+        .is_err(),
+        "the restored private identity must match"
+    );
+    assert!(marker.exists(), "failed recovery remains quarantined");
+
+    let other = fixture.root.path().join("other-workspace");
+    fs::create_dir(&other).unwrap();
+    assert!(
+        Runner::acknowledge_recovery(&fixture.state, fixture.key.public(), &other).is_err(),
+        "recovery cannot change the canonical workspace path"
+    );
+    assert!(marker.exists(), "failed recovery remains quarantined");
+
+    let owner = fixture.open();
+    assert!(
+        Runner::acknowledge_recovery(&fixture.state, fixture.key.public(), &fixture.workspace)
+            .is_err(),
+        "recovery requires exclusive journal ownership"
+    );
+    drop(owner);
+
+    Runner::acknowledge_recovery(&fixture.state, fixture.key.public(), &fixture.workspace).unwrap();
+    assert!(!marker.exists());
+    let recovered = fixture.open();
+    recovered.inspect(1).unwrap();
+    let installation = recovered.installation();
+    assert_eq!(installation.binding, original.binding);
+    assert_eq!(installation.peer_id, original.peer_id);
+    assert_eq!(installation.allowed_peer, original.allowed_peer);
+    assert_eq!(installation.workspace, original.workspace);
+    assert_ne!(installation.workspace_inode, original.workspace_inode);
+    drop(recovered);
+    let db = rusqlite::Connection::open(fixture.state.join("journal.db")).unwrap();
+    assert!(
+        db.execute("UPDATE installation SET document=document WHERE id=1", [])
+            .is_err(),
+        "recovery must restore the immutable installation trigger"
+    );
 }

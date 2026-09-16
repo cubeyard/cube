@@ -67,12 +67,12 @@ try {
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(calls.length, count, "reconnect itself does not replay any action");
   fs.mkdirSync(workspace);
-  const result = await tools.get("code").execute("test", { source: 'return await cube.exec("printf explicit-request");' });
+  const result = await tools.get("code").execute("test", { source: 'return await cube.exec("printf explicit-request")' });
   assert.ok(!result.isError, JSON.stringify(result));
   assert.match(JSON.stringify(result), /explicit-request/);
   let bangOutput = "";
   await bang.operations.exec("pwd", tmp, { onData: (chunk: Buffer) => { bangOutput += chunk.toString(); }, signal: new AbortController().signal });
-  assert.equal(bangOutput.trim(), workspace, "user ! cwd maps to the guest workspace, not pi runtime");
+  assert.equal(fs.realpathSync(bangOutput.trim()), fs.realpathSync(workspace), "user ! cwd maps to the guest workspace, not pi runtime");
   assert.equal(fs.existsSync(path.join(workspace, "must-not-exist")), false);
   // The injected transport gate checks before dispatch and preserves ambiguity
   // after dispatch. There is exactly one execution, never a retry loop.

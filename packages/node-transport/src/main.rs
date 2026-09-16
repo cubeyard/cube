@@ -26,6 +26,7 @@ const USAGE: &str = "usage:
   cube-runner serve --key <private-file> --allow-peer <public-key> --node-id <node-id> [--listen 127.0.0.1:0]
   cube-runner hello --key <private-file> --peer <pinned-public-key> --expect-node <node-id>
   cube-runner runner-init --key <private-file> --state <NEW-directory> --workspace <existing-directory> --allow-peer <public-key> --node-id <node-id> --thread-id <thread-id> --env <integer>
+  cube-runner runner-acknowledge-recovery --key <private-file> --state <directory> --workspace <existing-directory>
   cube-runner runner-serve --key <private-file> --state <directory> [--listen 127.0.0.1:0] [--ready-file <absolute-file>] [--stop-policy wait|cancel]
   cube-runner prepare-exec --key <control-key> --intent <NEW-file> --peer <server-key> --expect-node <node-id> --env <integer> --command <shell-command> [--cwd .] [--timeout-ms 10000] [--output-limit 8192]
   cube-runner submit --key <control-key> --intent <file> [--address <ip:port>]
@@ -236,6 +237,14 @@ async fn main() -> Result<()> {
                 Path::new(&workspace),
             )?;
             println!("{}", json!({"initialized": true}));
+        }
+        "runner-acknowledge-recovery" => {
+            let state = take(&mut options, "--state")?;
+            let workspace = take(&mut options, "--workspace")?;
+            no_extra(&options)?;
+            let key = read_key(Path::new(&key_path))?;
+            Runner::acknowledge_recovery(Path::new(&state), key.public(), Path::new(&workspace))?;
+            println!("{}", json!({"recoveryAcknowledged": true}));
         }
         "runner-serve" | "host-serve" => {
             if command == "host-serve" {

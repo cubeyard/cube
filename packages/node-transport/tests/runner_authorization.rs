@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 use cube_node_transport::{
     ALPN, DeliveryError, Request, Response, bind_loopback, call, encode, read_frame,
     runner::{Binding, ExecSpec, Operation, Runner},

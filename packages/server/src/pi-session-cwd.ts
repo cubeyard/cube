@@ -7,7 +7,7 @@ import fs from "node:fs";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 const cwd = process.env.CUBE_AGENT_CWD;
-if (!cwd || !path.isAbsolute(cwd) || path.resolve(process.cwd()) !== path.resolve(cwd) || !fs.lstatSync(cwd).isDirectory()) {
+if (!cwd || !path.isAbsolute(cwd) || fs.realpathSync(process.cwd()) !== fs.realpathSync(cwd) || !fs.lstatSync(cwd).isDirectory()) {
   throw new Error("invalid control-plane agent runtime directory");
 }
 const open = SessionManager.open;

@@ -106,7 +106,10 @@ boundary and bounded real shell execution, including crashes and response loss.
 The opt-in N0 smoke additionally exercises discovery/relay bootstrap, control-plane
 enrollment, registered pi tools, disconnect, runner restart and read-only operation
 reconciliation. Next: separate-NAT connectivity acceptance and file/repository
-transfer. The production profile adds local drain/cancel lifecycle, systemd
-packaging, rollback and restore quarantine. File/repository transfer and portal
-streams remain unsupported for trusted runners. Separate-machine acceptance is
-required for each release; macOS and Incus execution nodes are not this profile.
+transfer. The production profile adds local drain/cancel lifecycle, systemd or
+launchd packaging, rollback and restore quarantine. Supported native targets
+are Linux x86-64 and macOS arm64/x86-64; packages remain
+OS/architecture-specific. File/repository transfer and portal streams remain
+unsupported for trusted runners. Separate-machine acceptance on both production
+service profiles is required for each release; Incus execution nodes are not
+this profile.

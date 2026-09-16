@@ -20,6 +20,7 @@ const releaseScript = fs.readFileSync(path.join(root, "scripts/vm/release.sh"), 
 const packageScript = fs.readFileSync(path.join(root, "scripts/vm/package-release.sh"), "utf8");
 const inheritScript = fs.readFileSync(path.join(root, "scripts/vm/inherit-cube-node.sh"), "utf8");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cube-release-contract-"));
+const nativeGuestArch = process.arch === "arm64" ? "arm64" : "amd64";
 
 const run = (file: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) =>
   execFileSync(file, args, {
@@ -183,7 +184,7 @@ try {
     cwd: root,
     env: { CUBE_VM_BUILD_DIR: build, CUBE_VM_BIND: "", PATH: `${bin}:${process.env.PATH}` },
   });
-  const manifest = JSON.parse(fs.readFileSync(path.join(build, "dist/manifest-amd64.json"), "utf8"));
+  const manifest = JSON.parse(fs.readFileSync(path.join(build, `dist/manifest-${nativeGuestArch}.json`), "utf8"));
   assert.equal(manifest.version, "v0.1.0");
   assert.equal(manifest.tag, "v0.1.0");
   console.log("4 ok: packaged manifest advertises tag v0.1.0");
@@ -206,7 +207,7 @@ elif [ "$1 $2" = "release download" ]; then
   while [ "$#" -gt 0 ]; do
     case "$1" in -D) dest="$2"; shift 2;; -p) pattern="$2"; shift 2;; *) shift;; esac
   done
-  if [ "$pattern" = manifest-amd64.json ]; then cp "$FIXTURE_MANIFEST" "$dest/$pattern"
+  if [ "$pattern" = manifest-${nativeGuestArch}.json ]; then cp "$FIXTURE_MANIFEST" "$dest/$pattern"
   elif [ "$pattern" = node.qcow2 ]; then cp "$FIXTURE_NODE" "$dest/$pattern"
   else exit 1; fi
 fi
@@ -350,6 +351,7 @@ fi
     fs.writeFileSync(path.join(rbHome, "app-live.qcow2.build"), "cube-v1.0.0-gtest\n");
     return run("bash", ["-c", `
       . launcher/cube
+      ARCH=amd64
       sleep() { :; }
       vm_pid() { echo 4242; }
       self_update() { :; }

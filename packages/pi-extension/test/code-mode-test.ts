@@ -325,7 +325,7 @@ for (const input of [
   await assert.rejects(capability("portals.expose", input, never), /port must|name must|exceeds 80|lifetime must/);
 }
 await assert.rejects(capability("portals.remove", { port: -1 }, never), /port must/);
-console.log("4d ok: temporary portal SDK dispatch and validation");
+console.log("4e ok: temporary portal SDK dispatch and validation");
 
 // ---- 5. Dispatcher validation is fail-closed -----------------------------
 
