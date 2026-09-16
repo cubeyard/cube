@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2154 # repo_root is defined by sourced lib.sh.
 set -euo pipefail
+# shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
 require_build_platform
 [ "$#" -eq 1 ] || fail 'usage: package.sh /absolute/new-destination.tar.gz'

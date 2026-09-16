@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034 # Shared library exports are consumed by caller scripts.
 set -euo pipefail
 
 ROOT="${CUBE_HOST_ROOT:-}"
@@ -56,7 +57,8 @@ switch_release() {
   mv -Tf "$tmp" "$current"
 }
 wait_ready() {
-  local version="$1" ready="$(at /run/cube-host/ready.json)"
+  local version="$1" ready
+  ready="$(at /run/cube-host/ready.json)"
   for _ in $(seq 1 100); do
     if [ -s "$ready" ] && grep -q '"lifecycle":"ready"' "$ready" \
       && grep -q "\"softwareVersion\":\"$version\"" "$ready" \

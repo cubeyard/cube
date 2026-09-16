@@ -74,11 +74,11 @@ export async function smokeRunnerRouting(root: string, configPath: string, works
     assert.equal(fs.readFileSync(path.join(workspace, "routed-count"), "utf8"), "once");
     assert.ok(!fs.existsSync(settings.CUBE_RUNNER_WORKSPACE), "no local shadow workspace");
     await node.disconnect();
-    const offline = await code('return await cube.exec("touch must-not-fallback");');
+    const offline = await code('return await cube.exec("touch must-not-fallback")');
     assert.equal(offline.details.error.code, "NODE_UNAVAILABLE", text(offline));
     assert.equal((await fetch(`${base}/api/threads`)).status, 200, "conversation metadata stays available offline");
     await node.reconnect();
-    const observed = await code(`return await cube.operations.get(${JSON.stringify(result.operationId)});`);
+    const observed = await code(`return await cube.operations.get(${JSON.stringify(result.operationId)})`);
     assert.match(text(observed), /Succeeded/);
     assert.ok(!fs.existsSync(path.join(workspace, "must-not-fallback")));
     assert.equal(fs.readFileSync(path.join(workspace, "routed-count"), "utf8"), "once");
@@ -106,7 +106,7 @@ export async function smokeRunnerRouting(root: string, configPath: string, works
     assert.match(operationId, /^op-/);
     await new Promise(resolve => setTimeout(resolve, 600));
     await stop(); await start();
-    const recovered = await code(`return await cube.operations.get(${JSON.stringify(operationId)});`);
+    const recovered = await code(`return await cube.operations.get(${JSON.stringify(operationId)})`);
     assert.match(text(recovered), /Succeeded/);
     assert.equal(fs.readFileSync(marker, "utf8"), "once");
     const submit = await fetch(`${base}/api/threads/thread-test/runner-exec`, { method: "POST", body: JSON.stringify({ action: "submit", operationId }) });
@@ -119,15 +119,15 @@ export async function smokeRunnerRouting(root: string, configPath: string, works
     try {
       fs.appendFileSync(configPath, "\n");
       await stop(); await start();
-      const pinned = await code('return await cube.exec("touch must-not-route");');
+      const pinned = await code('return await cube.exec("touch must-not-route")');
       assert.equal(pinned.details.error.code, "CONFLICT", text(pinned));
       assert.ok(!fs.existsSync(path.join(workspace, "must-not-route")));
     } finally { fs.writeFileSync(configPath, original); }
     await stop(); await start();
     assert.equal((await fetch(`${base}/api/threads/thread-test/archive`, { method: "POST" })).status, 200);
-    const archived = await code('return await cube.exec("touch must-not-archive");');
+    const archived = await code('return await cube.exec("touch must-not-archive")');
     assert.equal(archived.details.error.code, "OPERATION_UNSUPPORTED", text(archived));
-    assert.match(text(await code(`return await cube.operations.get(${JSON.stringify(operationId)});`)), /Succeeded/);
+    assert.match(text(await code(`return await cube.operations.get(${JSON.stringify(operationId)})`)), /Succeeded/);
     assert.ok(!fs.existsSync(path.join(workspace, "must-not-archive")));
     assert.doesNotMatch(logs, /FORBIDDEN_LOCAL_BACKEND/);
     console.log("ok: operator enrollment, real cubed HTTP, registered pi bash/code/! tools, cancellation identity, restart inspection and pinned admission");

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2154 # repo_root is defined by sourced lib.sh.
 # Upgrade either a native runner or cube-host 0.1.1 without moving its state.
 set -euo pipefail
+# shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
 require_platform
 [ "$#" -eq 1 ] || fail 'usage: upgrade.sh /absolute/path/to/cube-runner'

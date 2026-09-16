@@ -1,4 +1,4 @@
-/** Actual registered tools, user ! and QuickJS, without credentials/models. */
+/** Actual registered tools, user ! and Monty, without credentials/models. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -86,7 +86,7 @@ try {
   const mismatch = createLocalEnvironmentAccess({ nodeId: "node-other", threadId: "thread", cubedUrl: url });
   await assert.rejects(mismatch.run(true, async () => { executions++; }), /binding mismatch/);
   assert.equal(executions, 1, "unknown binding never chooses the local adapter");
-  console.log("PASS: offline file/bash/!/QuickJS gates, control evidence, no replay, binding validation and uncertain outcomes");
+  console.log("PASS: offline file/bash/!/Monty gates, control evidence, no replay, binding validation and uncertain outcomes");
 } finally {
   for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));

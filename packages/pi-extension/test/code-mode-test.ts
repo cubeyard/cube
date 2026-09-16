@@ -14,7 +14,7 @@ const hostCalls: Array<{ operation: string; value?: unknown }> = [];
 const host: CodeCapabilityHost = {
   async operation(operationId) {
     hostCalls.push({ operation: "operation", value: operationId });
-    return { id: operationId, state: "Succeeded" };
+    return { state: "Succeeded", operationId };
   },
   async readGithub(input) {
     return { data: { title: "Private issue" }, ...input };
@@ -88,23 +88,23 @@ const host: CodeCapabilityHost = {
   },
   async taskDestinations() {
     hostCalls.push({ operation: "taskDestinations" });
-    return [{ threadId: "peer-thread" }];
+    return [{ id: "target", title: "target" }];
   },
   async listTasks() {
     hostCalls.push({ operation: "listTasks" });
-    return [{ id: "task-1" }];
+    return [{ id: "task-1", status: "completed" }];
   },
   async getTask(id) {
     hostCalls.push({ operation: "getTask", value: id });
-    return { id, state: "completed" };
+    return { id, status: "completed" };
   },
   async sendTask(input) {
     hostCalls.push({ operation: "sendTask", value: input });
-    return { id: "task-1", ...input, state: "accepted" };
+    return { id: "task-1", ...input, status: "accepted" };
   },
   async cancelTask(id) {
     hostCalls.push({ operation: "cancelTask", value: id });
-    return { id, state: "cancelled" };
+    return { id, status: "cancelled" };
   },
 };
 let allowPrCreation = true;
@@ -269,24 +269,26 @@ assert.deepEqual(hostCalls.map((call) => call.operation), ["environmentStatus", 
 console.log("4c ok: environment SDK and capability dispatch");
 
 hostCalls.length = 0;
-const durable = await runCodeMode({
+const operation = await runCodeMode({
+  source: `return await cube.operations.get("op-saved")`,
+  call: capability,
+});
+assert.deepEqual(operation.value, { state: "Succeeded", operationId: "op-saved" });
+assert.deepEqual(hostCalls, [{ operation: "operation", value: "op-saved" }]);
+
+hostCalls.length = 0;
+const taskResult = await runCodeMode({
   source: `
-operation = await cube.operations.get("op-saved")
 destinations = await cube.tasks.destinations()
-sent = await cube.tasks.send("peer-thread", "stable-key", "do work")
-listed = await cube.tasks.list()
-task = await cube.tasks.get("task-1")
-cancelled = await cube.tasks.cancel("task-1")
-return {"operation": operation, "destinations": destinations, "sent": sent, "listed": listed, "task": task, "cancelled": cancelled}
+sent = await cube.tasks.send(destinations[0]["id"], "stable-key", "do the bounded work")
+return {"sent": sent, "status": await cube.tasks.get(sent["id"]), "all": await cube.tasks.list(), "cancelled": await cube.tasks.cancel(sent["id"])}
   `,
   call: capability,
 });
-assert.equal((durable.value as any).operation.state, "Succeeded");
-assert.equal((durable.value as any).sent.requestKey, "stable-key");
-assert.deepEqual(hostCalls.map((call) => call.operation), [
-  "operation", "taskDestinations", "sendTask", "listTasks", "getTask", "cancelTask",
-]);
-console.log("4d ok: durable runner operation and T2T task SDK dispatch");
+assert.equal((taskResult.value as any).sent.status, "accepted");
+assert.deepEqual(hostCalls.map((call) => call.operation), ["taskDestinations", "sendTask", "getTask", "listTasks", "cancelTask"]);
+await assert.rejects(capability("tasks.send", { recipient: "target", requestKey: "key", body: "x", extra: true }, new AbortController().signal), /unknown/);
+console.log("4d ok: runner operation inspection and task SDK are closed, directed and status-oriented");
 
 hostCalls.length = 0;
 const never = new AbortController().signal;

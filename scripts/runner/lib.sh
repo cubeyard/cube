@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034 # Shared library exports are consumed by caller scripts.
 set -euo pipefail
 
 ROOT="${CUBE_RUNNER_ROOT:-${CUBE_HOST_ROOT:-}}"
@@ -205,7 +206,8 @@ service_remove() {
   if [ "$PLATFORM" = Linux ] && [ -z "$ROOT" ]; then "$SYSTEMCTL" daemon-reload; fi
 }
 wait_ready() {
-  local version="$1" ready; ready="$(ready_file)"
+  local version="$1" ready
+  ready="$(ready_file)"
   for _ in $(seq 1 100); do
     if [ -s "$ready" ] && grep -q '"lifecycle":"ready"' "$ready" \
       && grep -q "\"softwareVersion\":\"$version\"" "$ready" \
