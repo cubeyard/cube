@@ -25,14 +25,15 @@ terminology and N0 relay behavior are unchanged.
 
 ## Workspace and process boundaries
 
-Linux retains `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)`. Darwin has no
-equivalent. Its implementation opens the identity-checked workspace and walks
-each relative cwd component with `openat(O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`.
-Absolute paths, parent components, symlink components, missing components, and
-non-directories fail before journaling or spawn. The final cwd is an open file
-descriptor and the child enters it with `fchdir`, so path replacement after
-validation cannot redirect spawn. This deliberately rejects symlink cwd paths
-instead of providing an insecure canonicalize-then-open fallback.
+Linux retains `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS |
+RESOLVE_NO_SYMLINKS)`. Darwin has no equivalent. Its implementation opens the
+identity-checked workspace and walks each relative cwd component with
+`openat(O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`. Absolute paths, parent
+components, symlink components, missing components, and non-directories fail
+before journaling or spawn. The final cwd is an open file descriptor and the
+child enters it with `fchdir`, so path replacement after validation cannot
+redirect spawn. This deliberately rejects symlink cwd paths instead of
+providing an insecure canonicalize-then-open fallback.
 
 This is cwd confinement, not filesystem confinement. Once started, arbitrary
 shell code can access anything the runner UID can access. A same-UID process
