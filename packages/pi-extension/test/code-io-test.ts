@@ -60,7 +60,7 @@ console.log("timeout ok: millisecond deadline, actual duration, partial output, 
 
 // Structured failures survive both crossings, not just direct helper tests.
 const bridged = await runCodeMode({
-  source: 'try { await cube.exec("unused"); } catch (e) { return { code:e.code, output:e.output, durationMs:e.durationMs }; }',
+  source: 'try:\n    await cube.exec("unused")\nexcept RuntimeError as e:\n    return cube.error(e)',
   call: async () => execCode(async (_command, _cwd, { onData, signal }) => {
     onData(Buffer.from("partial"));
     await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));

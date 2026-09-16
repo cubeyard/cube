@@ -118,6 +118,16 @@ log "dependencies for linux/$NODE_ARCH: install, web build, prune to prod"
 ls -d "$STAGE/app/node_modules/.pnpm/@lydell+node-pty-linux-$NODE_ARCH@"* >/dev/null 2>&1 \
   || { fail "node-pty prebuild for linux/$NODE_ARCH did not land in the staged tree"; exit 1; }
 
+# Monty is platform-independent WASM. Exercise the staged production dependency
+# and worker URL with the HOST Node, including on macOS/cross-architecture builds.
+log "verify staged Monty WASM runtime"
+( cd "$STAGE/app" && node --input-type=module -e '
+    import assert from "node:assert/strict";
+    import { runCodeMode } from "./packages/pi-extension/src/code-mode.ts";
+    const result = await runCodeMode({ source: "return 6 * 7", call: async () => { throw new Error("unexpected host call"); } });
+    assert.equal(result.value, 42);
+  ' ) || { fail "staged Monty WASM runtime failed"; exit 1; }
+
 log "identity"
 # The sentinel every identity check reads (up/down/sync/test/launcher):
 # proves the VM on the ports runs THIS build. Lives on the app tree, not

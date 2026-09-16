@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034 # Shared library exports are consumed by caller scripts.
 set -euo pipefail
 
 ROOT="${CUBE_RUNNER_ROOT:-${CUBE_HOST_ROOT:-}}"
@@ -64,7 +65,8 @@ is_legacy_layout() {
 state_root() { if is_legacy_layout; then at /var/lib/cube-host; else at /var/lib/cube-runner; fi; }
 ready_file() { at /run/cube-runner/ready.json; }
 wait_ready() {
-  local version="$1" ready; ready="$(ready_file)"
+  local version="$1" ready
+  ready="$(ready_file)"
   for _ in $(seq 1 100); do
     if [ -s "$ready" ] && grep -q '"lifecycle":"ready"' "$ready" \
       && grep -q "\"softwareVersion\":\"$version\"" "$ready" \
@@ -74,7 +76,8 @@ wait_ready() {
   return 1
 }
 install_unit() {
-  local source="$1" unit="$(at /etc/systemd/system/cube-runner.service)"
+  local source="$1" unit
+  unit="$(at /etc/systemd/system/cube-runner.service)"
   install -m 0644 "$source" "$unit"
   if [ -z "$ROOT" ]; then chown root:root "$unit"; "$SYSTEMCTL" daemon-reload; fi
 }

@@ -531,7 +531,7 @@ console.log("6 ok: config resolution");
 }
 
 // A cancelled capability must tear down an in-flight wake fetch instead of
-// leaving Waker work attached after QuickJS has exited.
+// leaving Waker work attached after Monty has exited.
 {
   let startWake!: () => void;
   const wakeStarted = new Promise<void>((resolve) => (startWake = resolve));
@@ -627,14 +627,14 @@ console.log("6 ok: config resolution");
     assert.equal(syncBranchRequests, 1);
     assert.equal(confirmations, 0, "existing PR branch sync must not ask for confirmation");
     const declined = await code.execute("test", {
-      source: 'return await cube.git.createPr(1, {title: "feature"});',
+      source: 'return await cube.git.createPr(1, title="feature")',
     }, undefined, undefined, context);
     assert.equal(declined.isError, true);
     assert.match(text(declined), /cancelled by user/);
     assert.equal(prRequests, 0, "declining in the TUI must stop before the host request");
     allowPr = true;
     const approved = await code.execute("test", {
-      source: 'return await cube.git.createPr(1, {title: "feature"});',
+      source: 'return await cube.git.createPr(1, title="feature")',
     }, undefined, undefined, context);
     assert.equal(approved.isError, undefined);
     assert.equal(prRequests, 1);
@@ -642,20 +642,20 @@ console.log("6 ok: config resolution");
     const lease = "a".repeat(40);
     allowPr = false;
     const declinedForce = await code.execute("test", {
-      source: `return await cube.git.pushBranch(1, {forceWithLease: "${lease}"});`,
+      source: `return await cube.git.pushBranch(1, forceWithLease="${lease}")`,
     }, undefined, undefined, context);
     assert.equal(declinedForce.isError, true);
     assert.match(text(declinedForce), /cancelled by user/);
     assert.equal(forcePushRequests, 0);
     allowPr = true;
     const approvedForce = await code.execute("test", {
-      source: `return await cube.git.pushBranch(1, {forceWithLease: "${lease}"});`,
+      source: `return await cube.git.pushBranch(1, forceWithLease="${lease}")`,
     }, undefined, undefined, context);
     assert.equal(approvedForce.isError, undefined);
     assert.equal(forcePushRequests, 1);
     assert.equal(confirmations, 4);
     const timed = await code.execute("test", {
-      source: 'return await cube.exec("printf partial; sleep 1", {timeoutMs: 200});',
+      source: 'return await cube.exec("printf partial; sleep 1", timeoutMs=200)',
     });
     assert.equal(timed.isError, true);
     assert.equal(timed.details.error.code, "ETIMEDOUT");
@@ -668,7 +668,7 @@ console.log("6 ok: config resolution");
     assert.equal(overflow.details.error.code, "EOUTPUTLIMIT");
     assert.ok(overflow.details.error.output.length > 0, "JSON escaping must not discard all partial output");
     assert.equal(overflow.details.error.truncated, true);
-    const missing = await code.execute("test", { source: 'return await cube.fs.readText("does-not-exist");' });
+    const missing = await code.execute("test", { source: 'from pathlib import Path\nreturn Path("does-not-exist").read_text()' });
     assert.equal(missing.details.error.code, "ENOENT");
     assert.equal(missing.details.error.path, "does-not-exist");
     const controller = new AbortController();

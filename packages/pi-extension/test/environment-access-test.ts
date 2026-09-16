@@ -1,4 +1,4 @@
-/** Actual registered tools, user ! and QuickJS, without credentials/models. */
+/** Actual registered tools, user ! and Monty, without credentials/models. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -47,7 +47,11 @@ try {
   }
   const bang = await events.get("user_bash")({ command: "touch must-not-exist", cwd: tmp }, {});
   await assert.rejects(() => bang.operations.exec("touch must-not-exist", tmp, { onData() {}, signal: new AbortController().signal }), /NODE_UNAVAILABLE/);
-  for (const source of ['return await cube.exec("touch must-not-exist");', 'return await cube.fs.writeText("file", "no");', 'return await cube.fs.readText("file");']) {
+  for (const source of [
+    'return await cube.exec("touch must-not-exist")',
+    'from pathlib import Path\nreturn Path("file").write_text("no")',
+    'from pathlib import Path\nreturn Path("file").read_text()',
+  ]) {
     const result = await tools.get("code").execute("test", { source });
     assert.equal(result.isError, true);
     assert.equal(result.details.error.code, "NODE_UNAVAILABLE");
@@ -82,7 +86,7 @@ try {
   const mismatch = createLocalEnvironmentAccess({ nodeId: "node-other", threadId: "thread", cubedUrl: url });
   await assert.rejects(mismatch.run(true, async () => { executions++; }), /binding mismatch/);
   assert.equal(executions, 1, "unknown binding never chooses the local adapter");
-  console.log("PASS: offline file/bash/!/QuickJS gates, control evidence, no replay, binding validation and uncertain outcomes");
+  console.log("PASS: offline file/bash/!/Monty gates, control evidence, no replay, binding validation and uncertain outcomes");
 } finally {
   for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
   server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2154 # repo_root is defined by sourced lib.sh.
 # Atomic release switch with drain, readiness verification and safe rollback.
 set -euo pipefail
+# shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
 note_deprecated
 require_platform

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2154 # repo_root is defined by sourced lib.sh.
 # Fresh trusted-runner install. Existing cube-host installations use upgrade.sh.
 set -euo pipefail
+# shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
 require_platform
 [ "$#" -eq 1 ] || fail 'usage: install.sh /absolute/path/to/cube-runner'
