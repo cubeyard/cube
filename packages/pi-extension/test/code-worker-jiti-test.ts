@@ -1,5 +1,5 @@
 /**
- * The QuickJS worker must load the way pi actually loads this extension.
+ * The Monty worker must load the way pi actually loads this extension.
  * pi does not `import` the extension: it transpiles it with jiti
  * (pi-coding-agent/dist/core/extensions/loader.js), so `import.meta.url`
  * inside code-mode.ts — the URL the worker path is resolved against — is
@@ -56,12 +56,20 @@ try {
   assert.ok(code, "the code tool must be registered");
 
   const result = await code.execute("test", {
-    source: 'const r = await cube.exec("printf hello-from-quickjs"); return r.output + "|" + r.exitCode;',
+    source: 'r = await cube.exec("printf hello-from-monty")\nprint("python print")\nreturn r["output"] + "|" + str(r["exitCode"])',
   });
   const text = result.content.map((chunk: { text: string }) => chunk.text).join("");
   assert.ok(!result.isError, `code mode failed under jiti: ${text}`);
-  assert.match(text, /hello-from-quickjs\|0/);
-  console.log("1 ok: the QuickJS worker starts and reaches the cube when pi loads the extension with jiti");
+  assert.match(text, /hello-from-monty\|0/);
+  assert.match(text, /python print/);
+  console.log("1 ok: the Monty worker starts and reaches the cube when pi loads the extension with jiti");
+  const fileResult = await code.execute("files", {
+    source: 'from pathlib import Path\nn = Path("text.txt").write_text("æ😀\\0")\nreturn [n, Path("text.txt").read_text()]',
+  });
+  assert.ok(!fileResult.isError, JSON.stringify(fileResult));
+  assert.equal(fs.readFileSync(path.join(workspace, "text.txt"), "utf8"), "æ😀\0");
+  assert.ok(fileResult.content[0].text.endsWith(JSON.stringify([3, "æ😀\0"], null, 2)), "rendered result preserves character count and read-back text");
+  console.log("2 ok: pathlib reaches CubeFs through the registered tool and preserves Unicode/NUL");
 } finally {
   for (const [key, value] of Object.entries(saved)) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;

@@ -1,4 +1,4 @@
-/** Offline security/behavior tests for QuickJS code mode. No Incus, cubed,
+/** Offline security/behavior tests for Monty code mode. No Incus, cubed,
  * credentials, or model are required.
  *
  *   node packages/pi-extension/test/code-mode-test.ts
@@ -82,26 +82,6 @@ const host: CodeCapabilityHost = {
     hostCalls.push({ operation: "retryEnvironmentSetup" });
     return { accepted: true };
   },
-  async taskDestinations() {
-    hostCalls.push({ operation: "taskDestinations" });
-    return [{ id: "target", title: "target" }];
-  },
-  async listTasks() {
-    hostCalls.push({ operation: "listTasks" });
-    return [{ id: "task-1", status: "completed" }];
-  },
-  async getTask(id) {
-    hostCalls.push({ operation: "getTask", value: id });
-    return { id, status: "completed" };
-  },
-  async sendTask(input) {
-    hostCalls.push({ operation: "sendTask", value: input });
-    return { id: "task-1", ...input, status: "accepted" };
-  },
-  async cancelTask(id) {
-    hostCalls.push({ operation: "cancelTask", value: id });
-    return { id, status: "cancelled" };
-  },
 };
 let allowPrCreation = true;
 let confirmations = 0;
@@ -118,7 +98,7 @@ const capability = createCodeCapability(host, async (signal) => {
 });
 
 assert.deepEqual((await runCodeMode({
-  source: `return await cube.github.read(12, { type: "issue", section: "comments", page: 2 });`,
+  source: `return await cube.github.read(12, type="issue", section="comments", page=2)`,
   call: capability,
 })).value, { data: { title: "Private issue" }, number: 12, type: "issue", section: "comments", page: 2 });
 await assert.rejects(capability("github.read", { number: 12, type: "issue", page: 0 }, new AbortController().signal), /positive integer/);
@@ -144,51 +124,34 @@ for (const removed of [
   assert.doesNotMatch(CODE_MODE_API, new RegExp(removed.replace("git.", "")));
 }
 
-// ---- 1. Plain JavaScript and JSON result ---------------------------------
+// ---- 1. Plain Python and JSON result -------------------------------------
 
 const plain = await runCodeMode({
   source: `
-    const values = [1, 2, 3, 4];
-    return { sum: values.reduce((sum, value) => sum + value, 0) };
+values = [1, 2, 3, 4]
+return {"sum": sum(values)}
   `,
   call: capability,
 });
 assert.deepEqual(plain.value, { sum: 10 });
 assert.deepEqual(plain.traces, []);
-console.log("1 ok: plain QuickJS execution + JSON result");
+console.log("1 ok: plain Monty execution + JSON result");
 
 const tamperedJson = await runCodeMode({
   source: `
-    JSON.stringify = () => "corrupted";
-    JSON.parse = () => ({ corrupted: true });
-    return { repositories: await cube.repositories.list() };
+return {"repositories": await cube.repositories.list(), "nested": [{"text": "æ😀"}]}
   `,
   call: capability,
 });
 assert.equal((tamperedJson.value as { repositories: unknown[] }).repositories.length, 2);
-console.log("1b ok: captured bridge serialization cannot be replaced by guest code");
+assert.deepEqual((tamperedJson.value as any).nested, [{ text: "æ😀" }]);
+console.log("1b ok: Python dictionaries cross both JSON boundaries without data loss");
 
 // ---- 2. No ambient Node/browser authority --------------------------------
 
-const ambient = await runCodeMode({
-  source: `
-    return {
-      process: typeof process,
-      require: typeof require,
-      fetch: typeof fetch,
-      window: typeof window,
-      document: typeof document,
-    };
-  `,
-  call: capability,
-});
-assert.deepEqual(ambient.value, {
-  process: "undefined",
-  require: "undefined",
-  fetch: "undefined",
-  window: "undefined",
-  document: "undefined",
-});
+for (const name of ["process", "require", "fetch", "window", "document"]) {
+  await assert.rejects(runCodeMode({ source: `return ${name}`, call: capability }), /not defined/);
+}
 console.log("2 ok: process/require/fetch/DOM absent");
 
 // ---- 3. Async capabilities, filtering, and trace -------------------------
@@ -196,10 +159,10 @@ console.log("2 ok: process/require/fetch/DOM absent");
 hostCalls.length = 0;
 const workflow = await runCodeMode({
   source: `
-    const repository = await cube.repositories.primary();
-    const command = await cube.exec("printf tested", { cwd: repository.path, timeoutMs: 5000 });
-    const pushed = await cube.git.pushBase(repository.id);
-    return { repository: repository.id, command, pushed };
+repository = await cube.repositories.primary()
+command = await cube.exec("printf tested", cwd=repository["path"], timeoutMs=5000)
+pushed = await cube.git.pushBase(repository["id"])
+return {"repository": repository["id"], "command": command, "pushed": pushed}
   `,
   call: capability,
 });
@@ -221,15 +184,16 @@ console.log("3 ok: async workflow + capability trace");
 hostCalls.length = 0;
 const capabilities = await runCodeMode({
   source: `
-    await cube.fs.writeText("notes/result.txt", "hello");
-    const text = await cube.fs.readText("notes/result.txt");
-    const services = await cube.services.ensure();
-    const pr = await cube.git.createPr(7, { title: "Code mode", body: "tested" });
-    return { text, services, pr };
+from pathlib import Path
+assert Path("notes/result.txt").write_text("helloæ😀\\0") == 8
+text = Path("notes/result.txt").read_text()
+services = await cube.services.ensure()
+pr = await cube.git.createPr(7, title="Code mode", body="tested")
+return {"text": text, "services": services, "pr": pr}
   `,
   call: capability,
 });
-assert.equal((capabilities.value as { text: string }).text, "hello");
+assert.equal((capabilities.value as { text: string }).text, "helloæ😀\0");
 assert.deepEqual(hostCalls.map((call) => call.operation), ["writeText", "readText", "ensureServices", "createPr"]);
 assert.equal(confirmations, 1);
 console.log("4 ok: file/service/PR capabilities dispatch after explicit confirmation");
@@ -237,7 +201,7 @@ console.log("4 ok: file/service/PR capabilities dispatch after explicit confirma
 hostCalls.length = 0;
 allowPrCreation = false;
 await assert.rejects(
-  runCodeMode({ source: `return await cube.git.createPr(7, { title: "Do not create" });`, call: capability }),
+  runCodeMode({ source: `return await cube.git.createPr(7, title="Do not create")`, call: capability }),
   /cancelled by user/,
 );
 assert.deepEqual(hostCalls, [], "declining confirmation must stop before the host PR call");
@@ -258,19 +222,19 @@ hostCalls.length = 0;
 allowForcePush = false;
 const lease = "a".repeat(40);
 await assert.rejects(
-  runCodeMode({ source: `return await cube.git.pushBranch(7, { forceWithLease: "${lease}" });`, call: capability }),
+  runCodeMode({ source: `return await cube.git.pushBranch(7, forceWithLease="${lease}")`, call: capability }),
   /cancelled by user/,
 );
 assert.deepEqual(hostCalls, [], "declined force-with-lease must stop before the host call");
 allowForcePush = true;
-await runCodeMode({ source: `return await cube.git.pushBranch(7, { forceWithLease: "${lease}" });`, call: capability });
+await runCodeMode({ source: `return await cube.git.pushBranch(7, forceWithLease="${lease}")`, call: capability });
 assert.deepEqual(hostCalls, [{ operation: "pushBranch", value: { repositoryId: 7, options: { forceWithLease: lease } } }]);
 assert.equal(forceConfirmations, 2);
 console.log("4b ok: only valid force-with-lease pushes require explicit confirmation");
 
 hostCalls.length = 0;
 const environment = await runCodeMode({
-  source: `return { status: await cube.environment.status(), retry: await cube.environment.retrySetup() };`,
+  source: `return {"status": await cube.environment.status(), "retry": await cube.environment.retrySetup()}`,
   call: capability,
 });
 assert.deepEqual(environment.value, {
@@ -281,26 +245,12 @@ assert.deepEqual(hostCalls.map((call) => call.operation), ["environmentStatus", 
 console.log("4c ok: environment SDK and capability dispatch");
 
 hostCalls.length = 0;
-const taskResult = await runCodeMode({
-  source: `
-    const destinations = await cube.tasks.destinations();
-    const sent = await cube.tasks.send(destinations[0].id, "stable-key", "do the bounded work");
-    return { sent, status: await cube.tasks.get(sent.id), all: await cube.tasks.list(), cancelled: await cube.tasks.cancel(sent.id) };
-  `,
-  call: capability,
-});
-assert.equal((taskResult.value as any).sent.status, "accepted");
-assert.deepEqual(hostCalls.map((call) => call.operation), ["taskDestinations", "sendTask", "getTask", "listTasks", "cancelTask"]);
-await assert.rejects(capability("tasks.send", { recipient: "target", requestKey: "key", body: "x", extra: true }, new AbortController().signal), /unknown/);
-console.log("4d ok: task SDK is closed, directed and status-oriented");
-
-hostCalls.length = 0;
 const never = new AbortController().signal;
 const portals = await runCodeMode({
   source: `return {
-    exposed: await cube.portals.expose({ port: 4173, name: "preview" }),
-    listed: await cube.portals.list(),
-    removed: await cube.portals.remove(4173),
+    "exposed": await cube.portals.expose(port=4173, name="preview"),
+    "listed": await cube.portals.list(),
+    "removed": await cube.portals.remove(4173),
   };`,
   call: capability,
 });
@@ -312,8 +262,8 @@ assert.deepEqual(hostCalls[0]?.value, { port: 4173, name: "preview", lifetime: "
 assert.equal(hostCalls[2]?.value, 4173);
 assert.deepEqual((portals.value as any).removed, { ok: true });
 for (const source of [
-  `cube.portals.expose({ port: 4173, name: "preview", host: "evil.example" })`,
-  `cube.portals.expose({ port: 4173, name: "preview", thread: "other" })`,
+  `cube.portals.expose(port=4173, name="preview", host="evil.example")`,
+  `cube.portals.expose(port=4173, name="preview", thread="other")`,
 ]) {
   await assert.rejects(runCodeMode({ source: `return await ${source};`, call: capability }), /unknown capability option/);
 }
@@ -329,7 +279,7 @@ for (const input of [
   await assert.rejects(capability("portals.expose", input, never), /port must|name must|exceeds 80|lifetime must/);
 }
 await assert.rejects(capability("portals.remove", { port: -1 }, never), /port must/);
-console.log("4e ok: temporary portal SDK dispatch and validation");
+console.log("4d ok: temporary portal SDK dispatch and validation");
 
 // ---- 5. Dispatcher validation is fail-closed -----------------------------
 
@@ -345,7 +295,7 @@ let invalidOperationDispatched = false;
 const invalidOperationTraces: unknown[] = [];
 await assert.rejects(
   () => runCodeMode({
-    source: `return await __cubeCall("${"x".repeat(129)}", "{}");`,
+    source: `return await __cubeCall("${"x".repeat(129)}", {})`,
     call: async () => {
       invalidOperationDispatched = true;
       return null;
@@ -378,27 +328,27 @@ console.log("6 ok: host failures become bounded guest errors");
 
 await assert.rejects(
   () => runCodeMode({
-    source: "while (true) {}",
+    source: "while True:\n    pass",
     call: capability,
-    limits: { guestSliceMs: 20 },
+    limits: { cpuTimeMs: 20 },
   }),
-  /interrupted/,
+  /time|Timeout/i,
 );
 await assert.rejects(
   () => runCodeMode({
-    source: `return "x".repeat(8 * 1024 * 1024);`,
+    source: `return "x" * (8 * 1024 * 1024)`,
     call: capability,
     limits: { memoryBytes: 4 * 1024 * 1024 },
   }),
-  /out of memory/,
+  /memory|Memory/,
 );
 await assert.rejects(
   () => runCodeMode({
-    source: `const recurse = () => recurse(); recurse();`,
+    source: `def recurse():\n    return recurse()\nreturn recurse()`,
     call: capability,
-    limits: { stackBytes: 128 * 1024 },
+    limits: { recursionDepth: 100 },
   }),
-  /stack overflow/,
+  /recursion/i,
 );
 await assert.rejects(
   () => runCodeMode({
@@ -416,9 +366,9 @@ await assert.rejects(
 await assert.rejects(
   () => runCodeMode({
     source: `
-      await cube.repositories.list();
-      await cube.repositories.list();
-      return await cube.repositories.list();
+await cube.repositories.list()
+await cube.repositories.list()
+return await cube.repositories.list()
     `,
     call: capability,
     limits: { maxCalls: 2 },
@@ -430,12 +380,12 @@ await assert.rejects(
   /source exceeds 10 bytes/,
 );
 await assert.rejects(
-  () => runCodeMode({ source: `return "x".repeat(100);`, call: capability, limits: { maxResultBytes: 20 } }),
+  () => runCodeMode({ source: `return "x" * 100`, call: capability, limits: { maxResultBytes: 20 } }),
   /result exceeds 20 bytes/,
 );
 await assert.rejects(
-  () => runCodeMode({ source: `return () => "not JSON";`, call: capability }),
-  /result must be JSON-serializable/,
+  () => runCodeMode({ source: `return lambda: "not JSON"`, call: capability }),
+  /serializ|JSON/i,
 );
 const serializationTraces: string[] = [];
 await assert.rejects(
@@ -465,7 +415,7 @@ const waitsForAbort = (onAbort: () => void) =>
 let guestErrorCallCancelled = false;
 await assert.rejects(
   () => runCodeMode({
-    source: `cube.services.ensure(); throw new Error("guest failed");`,
+    source: `import asyncio\nasync def fail():\n    raise RuntimeError("guest failed")\nreturn await asyncio.gather(cube.services.ensure(), fail())`,
     call: waitsForAbort(() => (guestErrorCallCancelled = true)),
   }),
   /guest failed/,
@@ -490,17 +440,19 @@ await assert.rejects(
   () => runCodeMode({
     source: `return await cube.services.ensure();`,
     call: waitsForAbort(() => (wallCallCancelled = true)),
-    limits: { wallTimeMs: 50 },
+    // Leave enough time to compile the Python wrapper and enter the host call;
+    // code-boundaries-test separately exercises expiry during synchronous work.
+    limits: { wallTimeMs: 500 },
   }),
-  /execution exceeded 50ms/,
+  /execution exceeded 500ms/,
 );
 assert.equal(wallCallCancelled, true);
 
-// Repeated failure/teardown cycles must not retain dead QuickJS callbacks.
+// Repeated failure/teardown cycles must not retain dead Monty callbacks.
 for (let i = 0; i < 5; i++) {
   await assert.rejects(
     () => runCodeMode({
-      source: `cube.services.ensure(); throw new Error("cycle ${i}");`,
+      source: `import asyncio\nasync def fail():\n    raise RuntimeError("cycle ${i}")\nreturn await asyncio.gather(cube.services.ensure(), fail())`,
       call: waitsForAbort(() => {}),
     }),
     new RegExp(`cycle ${i}`),
@@ -510,13 +462,13 @@ const afterFailures = await runCodeMode({ source: `return "still alive";`, call:
 assert.equal(afterFailures.value, "still alive");
 console.log("8 ok: guest error/caller abort/wall timeout cancel and drain host work");
 
-// ---- 9. Successful unawaited calls stay attached to the invocation -------
+// ---- 9. Python coroutines must be awaited to start ------------------------
 
 let detachedFinished = false;
 const detached = await runCodeMode({
   source: `
-    cube.services.ensure();
-    return "started";
+cube.services.ensure()
+return "not started"
   `,
   call: async (operation) => {
     assert.equal(operation, "services.ensure");
@@ -525,8 +477,9 @@ const detached = await runCodeMode({
     return [];
   },
 });
-assert.equal(detached.value, "started");
-assert.equal(detachedFinished, true, "runner waited for the unawaited capability");
-console.log("9 ok: unawaited host work is drained before disposal");
+assert.equal(detached.value, "not started");
+assert.equal(detachedFinished, false, "unawaited Python coroutines must not run");
+assert.deepEqual(detached.traces, []);
+console.log("9 ok: unawaited Python coroutines do not dispatch");
 
 console.log("ALL PASS");

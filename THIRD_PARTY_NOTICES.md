@@ -39,6 +39,17 @@ Licensed under the MIT License reproduced below. This applies to the copied
 module, not to every package distributed in the VM images; those packages
 retain their individual licenses.
 
+## Monty runtime dependency
+
+Code mode uses the WebAssembly distribution of
+[Monty](https://github.com/pydantic/monty) from `@pydantic/monty` 0.0.23.
+The native addon and platform executables are not used.
+
+Copyright (c) Pydantic Services Inc. 2026 to present
+
+Licensed under the MIT License reproduced below. Bundled dependencies retain
+their upstream licenses and notices.
+
 ## Impeccable 4.1.1
 
 The installed skill distributions under `.agents/skills/impeccable/` and

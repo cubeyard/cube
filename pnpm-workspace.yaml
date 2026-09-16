@@ -1,5 +1,13 @@
 packages:
   - packages/*
+# Code mode uses Monty's WASM export in our disposable Node worker, never
+# its N-API addon or subprocess binary (including in cross-platform app builds).
+ignoredOptionalDependencies:
+  - '@pydantic/monty-darwin-x64'
+  - '@pydantic/monty-darwin-arm64'
+  - '@pydantic/monty-linux-x64-gnu'
+  - '@pydantic/monty-linux-arm64-gnu'
+  - '@pydantic/monty-win32-x64-msvc'
 allowBuilds:
   '@google/genai': false
   esbuild: true
