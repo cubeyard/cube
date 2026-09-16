@@ -11,7 +11,24 @@ const user = os.userInfo().username;
 const group = spawnSync("id", ["-gn"], { encoding: "utf8" }).stdout.trim();
 const binary = (version: string) => {
   const file = path.join(root, `runner-${version}`);
-  fs.writeFileSync(file, `#!/bin/sh\n[ "$1" = version ] || exit 1\nprintf '%s\\n' '{"softwareVersion":"${version}","protocolVersion":1,"minimumProtocolVersion":1}'\n`, { mode: 0o755 });
+  fs.writeFileSync(file, `#!/bin/sh
+set -eu
+if [ "$1" = version ]; then
+  printf '%s\\n' '{"softwareVersion":"${version}","protocolVersion":1,"minimumProtocolVersion":1}'
+elif [ "$1" = runner-acknowledge-recovery ]; then
+  shift; state=""
+  while [ "$#" -gt 0 ]; do
+    [ "$1" = --state ] && state="$2"
+    shift 2
+  done
+  [ -n "$state" ]
+  touch "$state/recovery-command-ran"
+  [ "\${CUBE_TEST_FAIL_RECOVERY:-}" != 1 ]
+  rm "$state/restore-quarantine"
+else
+  exit 1
+fi
+`, { mode: 0o755 });
   return file;
 };
 const plutilMarker = path.join(root, "linux-must-not-call-plutil");
@@ -62,8 +79,11 @@ const testLinux = () => {
   assert.equal(fs.readFileSync(path.join(restored, "var/lib/cube-runner/identity/node.key"), "utf8"), "fresh-private-key");
   assert.equal(fs.readFileSync(path.join(restored, "var/lib/cube-runner/workspace/result"), "utf8"), "fresh-result");
   assert.equal(fs.statSync(path.join(restored, "var/lib/cube-runner/state/restore-quarantine")).mode & 0o777, 0o600);
+  run("runner", "install.sh", [binary("0.2.0")], restored);
   run("runner", "acknowledge-recovery.sh", ["--i-reviewed-unknown-operations"], restored);
   assert.equal(fs.existsSync(path.join(restored, "var/lib/cube-runner/state/restore-quarantine")), false);
+  assert.ok(fs.existsSync(path.join(restored, "var/lib/cube-runner/state/recovery-command-ran")),
+    "acknowledgement delegates physical workspace recovery to the runner binary");
   run("runner", "uninstall.sh", ["--keep-state"], fresh, { CUBE_RUNNER_SYSTEMCTL: "/usr/bin/true" });
   assert.equal(fs.existsSync(path.join(fresh, "opt/cube-runner")), false);
   assert.equal(fs.existsSync(path.join(fresh, "var/lib/cube-runner")), true, "clean uninstall preserves durable state");
@@ -197,6 +217,19 @@ esac
   assert.equal(fs.readFileSync(path.join(restoredHome, "data/identity/node.key"), "utf8"), "darwin-private-key");
   assert.equal(fs.readFileSync(path.join(restoredHome, "data/workspace/result"), "utf8"), "darwin-result");
   assert.equal(fs.statSync(path.join(restoredHome, "data/state/restore-quarantine")).mode & 0o777, 0o600);
+  run("runner", "install.sh", [binary("0.3.0")], darwinRestore, {
+    ...darwinEnv, CUBE_RUNNER_HOME: restoredHome, CUBE_RUNNER_PLIST: path.join(darwinRestore, "runner.plist"),
+  });
+  reject("runner", "acknowledge-recovery.sh", ["--i-reviewed-unknown-operations"], darwinRestore, {
+    ...darwinEnv, CUBE_RUNNER_HOME: restoredHome, CUBE_RUNNER_PLIST: path.join(darwinRestore, "runner.plist"),
+    CUBE_TEST_FAIL_RECOVERY: "1",
+  });
+  assert.ok(fs.existsSync(path.join(restoredHome, "data/state/restore-quarantine")),
+    "failed physical workspace recovery stays quarantined");
+  run("runner", "acknowledge-recovery.sh", ["--i-reviewed-unknown-operations"], darwinRestore, {
+    ...darwinEnv, CUBE_RUNNER_HOME: restoredHome, CUBE_RUNNER_PLIST: path.join(darwinRestore, "runner.plist"),
+  });
+  assert.ok(fs.existsSync(path.join(restoredHome, "data/state/recovery-command-ran")));
 };
 
 try {

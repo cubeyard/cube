@@ -191,7 +191,18 @@ Restore accepts either layout, never starts a service, and creates
 `restore-quarantine`. Reconcile every operation accepted after the snapshot as
 unknown. Never recreate an intent, remove a `.sent` marker, resubmit an old ID,
 or repeat a side effect because restored state says `Unknown`. Only acknowledge
-an identity-preserving recovery after that review.
+an identity-preserving recovery after that review. On a replacement host,
+install the runner software before acknowledgment; restore contains durable
+state, not release binaries or service definitions.
+
+Acknowledgment runs in the runner account and requires exclusive ownership of
+the journal, the restored private key, a private quarantine marker, and the
+same canonical workspace path. Archive extraction cannot preserve a directory
+inode, so acknowledgment transactionally refreshes only the workspace device
+and inode and reinstates the journal's immutable-installation trigger before it
+removes quarantine. It cannot change the node/thread/environment binding,
+runner or control peer, or workspace path. Outside this explicit offline
+recovery boundary, replacing the workspace directory remains fail-closed.
 
 Software-only uninstall is intentionally explicit and non-destructive:
 

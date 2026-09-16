@@ -799,3 +799,80 @@ async fn drain_wait_cancel_and_restore_quarantine_are_explicit() {
     );
     assert!(!recovered.workspace.join("must-not-run").exists());
 }
+
+#[tokio::test]
+async fn restored_workspace_requires_explicit_identity_preserving_recovery() {
+    let _case = CASE.lock().await;
+    let fixture = Fixture::new();
+    let original = {
+        let runner = fixture.open();
+        runner.installation().clone()
+    };
+
+    fs::rename(
+        &fixture.workspace,
+        fixture.root.path().join("workspace-before-restore"),
+    )
+    .unwrap();
+    fs::create_dir(&fixture.workspace).unwrap();
+
+    let replaced = fixture.open();
+    assert!(
+        replaced.inspect(1).is_err(),
+        "ordinary replacement stays rejected"
+    );
+    drop(replaced);
+    assert!(
+        Runner::acknowledge_recovery(&fixture.state, fixture.key.public(), &fixture.workspace)
+            .is_err(),
+        "physical identity cannot change outside restore quarantine"
+    );
+
+    let marker = fixture.state.join("restore-quarantine");
+    fs::write(&marker, b"operator review required\n").unwrap();
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        Runner::acknowledge_recovery(
+            &fixture.state,
+            SecretKey::generate().public(),
+            &fixture.workspace,
+        )
+        .is_err(),
+        "the restored private identity must match"
+    );
+    assert!(marker.exists(), "failed recovery remains quarantined");
+
+    let other = fixture.root.path().join("other-workspace");
+    fs::create_dir(&other).unwrap();
+    assert!(
+        Runner::acknowledge_recovery(&fixture.state, fixture.key.public(), &other).is_err(),
+        "recovery cannot change the canonical workspace path"
+    );
+    assert!(marker.exists(), "failed recovery remains quarantined");
+
+    let owner = fixture.open();
+    assert!(
+        Runner::acknowledge_recovery(&fixture.state, fixture.key.public(), &fixture.workspace)
+            .is_err(),
+        "recovery requires exclusive journal ownership"
+    );
+    drop(owner);
+
+    Runner::acknowledge_recovery(&fixture.state, fixture.key.public(), &fixture.workspace).unwrap();
+    assert!(!marker.exists());
+    let recovered = fixture.open();
+    recovered.inspect(1).unwrap();
+    let installation = recovered.installation();
+    assert_eq!(installation.binding, original.binding);
+    assert_eq!(installation.peer_id, original.peer_id);
+    assert_eq!(installation.allowed_peer, original.allowed_peer);
+    assert_eq!(installation.workspace, original.workspace);
+    assert_ne!(installation.workspace_inode, original.workspace_inode);
+    drop(recovered);
+    let db = rusqlite::Connection::open(fixture.state.join("journal.db")).unwrap();
+    assert!(
+        db.execute("UPDATE installation SET document=document WHERE id=1", [])
+            .is_err(),
+        "recovery must restore the immutable installation trigger"
+    );
+}

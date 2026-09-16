@@ -221,6 +221,93 @@ impl Runner {
         &self.installation
     }
 
+    /// Complete an offline, identity-preserving restore. Archive extraction
+    /// necessarily changes the workspace directory inode, so this narrowly
+    /// refreshes that physical anchor while retaining every logical binding.
+    pub fn acknowledge_recovery(state: &Path, peer: EndpointId, workspace: &Path) -> Result<()> {
+        ensure!(
+            cfg!(any(target_os = "linux", target_os = "macos")) && unsafe { libc::geteuid() } != 0,
+            "runner recovery requires non-root Linux or macOS"
+        );
+        let state_meta = fs::symlink_metadata(state)?;
+        ensure!(
+            state_meta.is_dir() && state_meta.mode() & 0o077 == 0,
+            "state directory must be private and not a symlink"
+        );
+        let lock = private_file(&state.join("owner.lock"), false)?;
+        lock.try_lock()
+            .context("another daemon owns this journal")?;
+        let marker_path = state.join("restore-quarantine");
+        let _marker = private_file(&marker_path, false)
+            .context("restore quarantine is required for physical workspace recovery")?;
+        private_file(&state.join("journal.db"), false)?;
+        let db = Connection::open_with_flags(
+            state.join("journal.db"),
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        db.execute_batch("PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE;")?;
+        ensure!(
+            db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))? == 1,
+            "unknown journal version"
+        );
+        ensure!(
+            db.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))? == "ok",
+            "journal integrity check failed"
+        );
+        let document: String =
+            db.query_row("SELECT document FROM installation WHERE id=1", [], |r| {
+                r.get(0)
+            })?;
+        let mut installation: Installation = serde_json::from_str(&document)?;
+        ensure!(
+            installation.peer_id == peer.to_string(),
+            "WRONG_NODE: peer key differs from permanent installation"
+        );
+        crate::validate_node_id(&installation.binding.node_id)?;
+        installation.allowed_peer.parse::<EndpointId>()?;
+        ensure!(
+            valid_id(&installation.binding.thread_id)
+                && (1..=9_007_199_254_740_991).contains(&installation.binding.environment_id)
+                && installation.workspace.is_absolute(),
+            "invalid installation binding"
+        );
+        let canonical_workspace = fs::canonicalize(workspace)?;
+        ensure!(
+            canonical_workspace == installation.workspace,
+            "recovery workspace must match the permanent canonical path"
+        );
+        let metadata = fs::metadata(&canonical_workspace)?;
+        ensure!(metadata.is_dir(), "workspace must be a directory");
+        installation.workspace_device = metadata.dev();
+        installation.workspace_inode = metadata.ino();
+        let recovered_document = serde_json::to_string(&installation)?;
+        db.execute_batch(
+            "BEGIN IMMEDIATE;
+             DROP TRIGGER immutable_installation_update;",
+        )?;
+        let recovery = (|| -> Result<()> {
+            ensure!(
+                db.execute(
+                    "UPDATE installation SET document=?1 WHERE id=1 AND document=?2",
+                    params![recovered_document, document],
+                )? == 1,
+                "installation changed during recovery"
+            );
+            db.execute_batch(
+                "CREATE TRIGGER immutable_installation_update BEFORE UPDATE ON installation BEGIN SELECT RAISE(ABORT, 'immutable installation'); END;
+                 COMMIT;",
+            )?;
+            Ok(())
+        })();
+        if recovery.is_err() {
+            let _ = db.execute_batch("ROLLBACK");
+        }
+        recovery?;
+        fs::remove_file(marker_path)?;
+        File::open(state)?.sync_all()?;
+        Ok(())
+    }
+
     /// Local operator enrollment, not an RPC. Requires a NEW state directory and
     /// an already existing workspace. Incomplete initialization is fail-closed.
     pub fn initialize(
