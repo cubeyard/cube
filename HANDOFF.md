@@ -1,8 +1,144 @@
 # Handoff
 
 Short operational context for the next session, not a release log. Updated
-2026-09-14; live verification below is the last recorded evidence, not a fresh
+2026-09-15; live verification below is the last recorded evidence, not a fresh
 launch sign-off. Completed phase reports and review histories remain in Git.
+
+## Control ↔ node slice in this working tree
+
+Read [docs/execution-nodes.md](docs/execution-nodes.md) first: it supersedes the
+single-host product premise, not the credential or private-browser boundaries.
+Local permanent binding, restart-safe creation keys, status/wake/sleep and portal
+stream boundaries, offline pi cwd/CLI reopening, local-adapter access gates and
+separate UI contact status are implemented. Remote trusted-runner enrollment/exec
+is production-packaged for Linux x86_64; external acceptance remains a separate
+release sign-off.
+Pi's pinned CLI needs the `pi-session-cwd.ts` preload to ignore a historical
+workspace cwd without rewriting the session. Keep that real-CLI regression gate.
+
+The trusted-runner profile is intentionally bounded exec only. Local provisioning,
+Incus file adapters, host-path Git/config/browser operations, services, portals,
+templates and sandbox egress remain local-only and are not future-host claims.
+This is **not** a VPN, sandbox, migration path or failover scheduler. Production
+operations are in [the trusted-runner runbook](docs/trusted-runner-operations.md).
+The local-boundary tests are not Incus/macOS/external-node acceptance; no live
+instance was deployed, restarted or used as a disposable test resource.
+
+Earlier local-boundary verification: Node 26.8.2 / pnpm 10.34.5; `pnpm typecheck`,
+`pnpm lint`, `pnpm test` (40 offline suites), and `pnpm build` passed. Real
+Incus sleep/wake/provision/delete, service portals and hairpin isolation still
+need the disposable VM portfolio. That earlier baseline did not exercise iroh or macOS.
+
+## Iroh / in-process adapter development slice
+
+The Rust `packages/node-transport` runner uses pinned iroh 1.2.0 / Rust 1.91.0.
+The runner binary has a separate Linux x86_64 installer bundle and systemd service;
+operator admission and thread exec routing remain explicit.
+`runner-init`/`runner-serve` own one immutable binding and exclusive SQLite journal;
+Accepted/Running commits precede dispatch/spawn, and restart marks unfinished work
+Interrupted/uncertain, never queued. A hard crash does not prove descendants have
+stopped. The trusted unprivileged Linux runner is NOT a sandbox; no
+control-plane credentials belong in that account.
+
+`packages/server/src/iroh-node.ts` now uses pinned `@number0/iroh` 1.1.0 **inside
+Node**. The draft Rust stdio bridge is removed; no intermediary binary/process
+or subprocess fallback. It checks peer + full thread/environment/node binding on
+one connection, persists private intents/consumed markers before dispatch, bounds
+frames and performs read-only reconciliation. Native endpoint lifetime is per RPC;
+aborts close pending IO (QUIC drain can add ~3s), not remote work. The explicit
+remote locality flag prevents accidental control-plane filesystem/Git access.
+The independent CLI remains useful for enrollment and read-only intent inspection.
+
+Loopback is default; direct mode requires explicit operator selection and a
+concrete target. Relay mode enables N0 discovery and public relay fallback using
+only the pinned peer ID, so neither side needs an inbound public listener. Rust
+direct listeners require an explicit unicast interface, not a wildcard.
+**Npm caveats:** use the published `/index.js` subpath because the
+1.1.0 manifest's main/types paths are broken; loopback binds both IP families;
+Minimal disables n0 relays/peer lookup, not the built-in NAT portmapper. This addon
+has no portmapper switch and can probe/map LAN gateways. See `HOST.md` for the
+limitation explicitly accepted by the maintainer for this development loop. No policy or
+firewall expansion is made here; do not claim packet confinement or native crash
+isolation for an in-process addon.
+
+`bash scripts/test-node-transport.sh` now includes native Node/Rust interoperability;
+its CI job installs both toolchains. The Node offline list additionally tests real
+npm iroh with subprocess APIs disabled. Current local Linux evidence: 15 Rust tests,
+real Node→Rust runner smoke in loopback/direct modes (both with loopback targets),
+plus an opt-in public-N0 relay smoke covering enrollment, pi routing and restart,
+47 Node suites, typecheck, lint and build. The Rust runner fixtures serialize across
+cases to avoid sibling forks transiently inheriting another fixture's flock before
+exec; concurrent requests/submissions remain tested within cases.
+
+Still absent from the trusted-runner profile: file/repository transfer and portals.
+Separate-machine/NAT acceptance must be repeated for release sign-off. Browser
+access and Pi startup remain unchanged. Other native-addon platforms are outside
+the supported Linux x86_64 boundary.
+
+Publication remains operator-controlled. Do not record live publication tokens,
+node IDs, addresses, filesystem paths, or credentials in this file.
+
+## Operator enrollment and thread exec slice
+
+`node scripts/enroll-runner.ts` is an explicit **operator-only** command,
+requiring cubed stopped, a preinitialized disposable runner and private config/key.
+See [RUNNER.md](packages/node-transport/RUNNER.md).
+The registry migration preserves existing local identities and bindings, admits
+fresh remote identities atomically, and permanently pins config path/hash.
+There is no agent enrollment API, ordinary-creation remote selector or adoption.
+
+`AdmittedTrustedRunner` lazily loads the native client, so missing config/native addon
+or offline runners cannot prevent conversation startup. Pi receives `CUBE_BACKEND=runner`
+and calls the fixed `/runner-exec` cubed HTTP RPC. Durable prepare precedes exactly
+one submit. `cube.operations.get` is read-only; errors preserve operation IDs across
+HTTP and codemode. Local exec/FS/Git adapters cannot authorize a remote binding.
+Archive forbids new dispatch but preserves inspection; destructive removal is
+unsupported. The native runner journal and no-replay semantics are intact.
+
+Evidence: 15 Rust tests, all 47 Node suites, typecheck/lint/build and real
+operator CLI → cubed HTTP → registered pi bash/code/! → npm iroh → Rust runner
+smoke in both network modes (loopback targets). The smoke denies all local backend
+execution and tests cancellation/result inspection, cubed restart, no resubmission
+and config pinning across restart. No model call, shared live thread/node or
+external machine was used. Runner file/repository transfer is still unsupported;
+separate-machine acceptance remains required for runner delegation.
+
+## Thread-to-thread tasks (working tree)
+
+See [the task protocol plan](docs/plans/thread-to-thread.md). Cubed now owns
+directed grants, stable task/request IDs, recipient queue/transcript delivery,
+replaceable workers, bounded results and terminal cancellation/failure. The
+thread-scoped Pi code capability can send and inspect tasks; the web conversation
+shows participant status. Delivered work is never replayed after uncertainty.
+No PTY input automation or Pi session-file mutation is involved. See this
+change's commit and final thread report for current validation evidence.
+
+The productionization branch remains local-only until the maintainer explicitly
+asks for publication. PR #44 remains the remote host-exec base; durable T2T was
+transferred by verified Git bundle before this work.
+
+## Open security follow-up: agent-editable egress policy
+
+Recorded during host-node bootstrap; acknowledged by the maintainer. An agent
+can edit a writable `.cube/cube.toml` and request `cube.environment.retrySetup()`.
+`Supervisor.startProxy()` rereads that declaration and applies the added hosts
+without a separate operator approval. Wake also rereads it. The allowlist thus
+limits current traffic but is not an independent policy boundary against an
+agent that can edit the declaration and invoke these lifecycle capabilities.
+This permits widening outbound destinations (including potential exfiltration
+of guest-accessible data); it does not by itself prove access to host credentials
+or bypass the proxy's private-address/port checks.
+
+Follow-up: persist an operator-approved network ceiling outside the writable
+workspace; require approval outside agent-controlled tools for expansions and
+apply the same rule to provision, setup retry, wake and service lifecycle paths.
+Reject unapproved expansion before replacing the active proxy. Test edited
+configs across all these paths, including reference environments and restart.
+Review setup-script trust separately: approving hosts is not approving arbitrary
+new setup behavior. The current Rust/Node download hosts were explicitly approved
+for this development thread; that is not a general policy-expansion approval.
+No security fix is implemented yet; do not publish vulnerability details without
+coordinating disclosure with the maintainer.
 
 ## Start here
 
@@ -131,8 +267,10 @@ The thread conversation is an append-ordered SQLite transcript with one durable
 run record per accepted user turn. The web UI reads that transcript and uses a
 native multiline composer. Each run starts a fresh in-memory Pi worker hydrated
 from finalized prior messages; daemon restart fails in-flight work rather than
-replaying side effects. Thread-to-thread messaging remains deferred. Its future
-delivery and acknowledgement state must live in cubed, not in a worker session.
+replaying side effects. Directed, operator-granted thread tasks use the same
+authority: accepted intent, recipient transcript acknowledgement, worker result
+and terminal failure/cancellation are durable in cubed. Delivered work is never
+replayed after restart or an uncertain completion.
 
 Threads are the home, newest-first across projects, with a URL-backed project
 filter and explicit project/name attribution. Do not use a pre-project populated
@@ -236,7 +374,7 @@ changes; mock success is not sandbox acceptance. See DEVELOPING.md for commands.
   then tear down) — the removal is reserved before the abort, and a
   builder (`building-environment`) is never cancelled through a thread.
 - `POST /api/threads` is idempotent per project and request key
-  (`Idempotency-Key` / body `requestId`, ten minutes, in memory); the web
+  (`Idempotency-Key` / body `requestId`, persisted for the thread lifetime); the web
   client sends one key per user action.
 - Plain HTTP over the Tailnet is an insecure browser context. Feature-detect
   clipboard/crypto APIs; use the existing UID fallback, not `crypto.randomUUID`
@@ -288,3 +426,15 @@ changes; mock success is not sandbox acceptance. See DEVELOPING.md for commands.
 
 Keep this file focused on unresolved work and contracts that prevent mistakes.
 Put command reference in DEVELOPING.md and completed narratives in Git history.
+
+## Historical CI publication exception approved by maintainer
+
+The maintainer requested publication without workflow changes because the current
+OAuth authorization lacks `workflow` scope. `.github/workflows/ci.yml` is restored
+to the published baseline. The proposed transport CI job is saved in
+`docs/plans/node-transport-ci.patch`; the maintainer can apply it with
+`git apply docs/plans/node-transport-ci.patch` and publish with workflow permission.
+The maintainer subsequently restored the CI job in `44adfcf2` on PR #44;
+it is no longer pending. The patch remains a historical artifact.
+The earlier `cubeyard/thread` routing concern was diagnosed as error-text
+rewriting in `sanitizeMessage`, not a changed Git destination.

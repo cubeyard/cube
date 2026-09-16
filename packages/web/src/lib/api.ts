@@ -10,6 +10,7 @@ import type {
   ThreadRepository,
   ThreadModels,
   ThreadSummary,
+  ThreadTask,
   WorkspaceListing,
 } from "./types.ts";
 import { uid } from "./uid.ts";
@@ -142,6 +143,9 @@ export const setThreadModel = (id: string, model: ModelSelection) =>
 
 export const sendPrompt = (id: string, text: string, model: ModelSelection) =>
   request<{ runId: string }>(`${threadBase(id)}/prompt`, "POST", { text, model });
+
+export const fetchThreadTasks = (id: string) =>
+  request<{ tasks: ThreadTask[] }>(`${threadBase(id)}/tasks`).then((response) => response.tasks);
 
 /** Workspace listing — host-side, so it works while the thread sleeps. */
 export const fetchFiles = (threadId: string) =>

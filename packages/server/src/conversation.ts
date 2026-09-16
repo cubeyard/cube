@@ -8,6 +8,7 @@ import { Effect, Fiber, Schema } from "effect";
 import type { ConversationMessageRow } from "./registry.ts";
 import { Registry } from "./registry.ts";
 import type { ModelSelection } from "./models.ts";
+import { boundedTaskResult, ThreadTasks, type ThreadTaskRow } from "./thread-tasks.ts";
 
 const WorkerEvent = Schema.Union([
   Schema.Struct({ type: Schema.Literal("text_delta"), delta: Schema.String }),
@@ -26,6 +27,7 @@ export class ConversationError extends Schema.TaggedError<ConversationError>()("
 export interface ConversationHost {
   plan(threadId: string): Effect.Effect<{ cwd: string; env: Record<string, string | undefined> }, ConversationError>;
   activity(threadId: string): Effect.Effect<void>;
+  defaultModel?(): Effect.Effect<ModelSelection | null, ConversationError>;
 }
 
 const WORKER = path.resolve(import.meta.dirname, "agent-worker.ts");
@@ -36,14 +38,21 @@ export class Conversations {
   private readonly host: ConversationHost;
   private readonly worker: string;
   private readonly extension: string;
+  private readonly tasks: ThreadTasks | null;
   private readonly fibers = new Map<string, Fiber.Fiber<void, never>>();
+  private readonly dispatching = new Set<string>();
+  private readonly pendingDispatch = new Set<string>();
 
-  constructor(registry: Registry, host: ConversationHost, options: { worker?: string; extension?: string } = {}) {
+  constructor(registry: Registry, host: ConversationHost, options: { worker?: string; extension?: string; tasks?: ThreadTasks } = {}) {
     this.registry = registry;
     this.host = host;
     this.worker = options.worker ?? WORKER;
     this.extension = options.extension ?? EXTENSION;
+    this.tasks = options.tasks ?? null;
     registry.failInterruptedAgentRuns();
+    if (this.tasks) queueMicrotask(() => {
+      void Effect.runPromise(this.tasks!.acceptedRecipients()).then((recipients) => recipients.forEach((id) => this.kickTasks(id)));
+    });
   }
 
   history(threadId: string, after = 0): {
@@ -76,10 +85,75 @@ export class Conversations {
         },
         catch: (cause) => new ConversationError({ message: "could not accept prompt", cause }),
       });
-      const fiber = Effect.runFork(this.execute(threadId, runId, text, model));
-      this.fibers.set(runId, fiber);
-      void Effect.runPromise(Fiber.await(fiber)).finally(() => this.fibers.delete(runId));
+      this.startRun(threadId, runId, text, model);
       return { runId };
+    });
+  }
+
+  sendTask(sender: string, input: unknown): Effect.Effect<ThreadTaskRow, import("./thread-tasks.ts").ThreadTaskError> {
+    if (!this.tasks) return Effect.die("thread tasks are unavailable");
+    return this.tasks.send(sender, input).pipe(Effect.tap((task) => Effect.sync(() => this.kickTasks(task.recipient))));
+  }
+
+  taskDestinations(actor: string) { return this.tasks ? this.tasks.destinations(actor) : Effect.die("thread tasks are unavailable"); }
+  listTasks(actor: string) { return this.tasks ? this.tasks.list(actor) : Effect.die("thread tasks are unavailable"); }
+  getTask(actor: string, id: string) { return this.tasks ? this.tasks.get(actor, id) : Effect.die("thread tasks are unavailable"); }
+
+  cancelTask(sender: string, id: string): Effect.Effect<ThreadTaskRow, import("./thread-tasks.ts").ThreadTaskError> {
+    if (!this.tasks) return Effect.die("thread tasks are unavailable");
+    return Effect.gen({ self: this }, function*() {
+      const task = yield* this.tasks!.cancel(sender, id);
+      if (task.runId) {
+        const fiber = this.fibers.get(task.runId);
+        if (fiber) yield* Fiber.interrupt(fiber);
+        this.registry.cancelAgentRun(task.runId);
+      }
+      this.kickTasks(task.recipient);
+      return this.registry.getThreadTask(sender, id)!;
+    });
+  }
+
+  kickTasks(recipient: string): void {
+    if (!this.tasks) return;
+    if (this.dispatching.has(recipient)) {
+      this.pendingDispatch.add(recipient);
+      return;
+    }
+    this.dispatching.add(recipient);
+    void Effect.runPromise(this.dispatchTasks(recipient)).finally(() => {
+      this.dispatching.delete(recipient);
+      if (this.pendingDispatch.delete(recipient)) this.kickTasks(recipient);
+    });
+  }
+
+  private readonly dispatchTasks = Effect.fn("Conversations.dispatchTasks")(function*(this: Conversations, recipient: string) {
+    if (!this.tasks || this.registry.activeAgentRun(recipient)) return;
+    let selected = this.registry.getThreadModel(recipient);
+    if (!selected && this.host.defaultModel) {
+      selected = yield* this.host.defaultModel();
+      if (selected) this.registry.setThreadModel(recipient, selected);
+    }
+    if (!selected) return;
+    for (;;) {
+      const delivery = yield* this.tasks.beginNext(recipient);
+      if (!delivery) return;
+      if (delivery.task.status === "failed") continue;
+      const model = this.registry.getThreadModel(recipient);
+      if (!model) {
+        yield* this.tasks.fail(delivery.task.id, "recipient has no available model");
+        return;
+      }
+      this.startRun(recipient, delivery.task.runId!, delivery.prompt, model);
+      return;
+    }
+  });
+
+  private startRun(threadId: string, runId: string, prompt: string, model: ModelSelection): void {
+    const fiber = Effect.runFork(this.execute(threadId, runId, prompt, model));
+    this.fibers.set(runId, fiber);
+    void Effect.runPromise(Fiber.await(fiber)).finally(() => {
+      this.fibers.delete(runId);
+      this.kickTasks(threadId);
     });
   }
 
@@ -108,13 +182,13 @@ export class Conversations {
         .filter((message) => !(message.runId === runId && message.role === "user"))
         .filter((message) => message.finalized)
         .map((message) => message.payload);
-      yield* this.runWorker(plan, { prompt, messages: history, extension: this.extension, model }, threadId, runId);
-      this.registry.setAgentRunStatus(runId, "completed");
+      const result = yield* this.runWorker(plan, { prompt, messages: history, extension: this.extension, model }, threadId, runId);
+      this.registry.settleAgentRun(runId, "completed", null, boundedTaskResult(result));
       yield* this.host.activity(threadId);
     });
     yield* program.pipe(Effect.catch((error) => Effect.sync(() => {
       const message = error instanceof Error ? error.message : String(error);
-      try { this.registry.setAgentRunStatus(runId, "failed", message); } catch { /* deleted thread */ }
+      try { this.registry.settleAgentRun(runId, "failed", message, null); } catch { /* deleted or cancelled */ }
     })));
   });
 
@@ -123,8 +197,8 @@ export class Conversations {
     request: unknown,
     threadId: string,
     runId: string,
-  ): Effect.Effect<void, ConversationError> {
-    return Effect.callback<void, ConversationError>((resume) => {
+  ): Effect.Effect<string, ConversationError> {
+    return Effect.callback<string, ConversationError>((resume) => {
       const child = spawn(process.execPath, [this.worker], {
         cwd: plan.cwd,
         env: plan.env,
@@ -136,19 +210,24 @@ export class Conversations {
       let draft: ConversationMessageRow | null = null;
       let draftText = "";
       let draftThinking = "";
+      let lastAssistant = "";
+      const taskRun = this.registry.threadTaskForRun(runId) !== null;
 
-      const finish = (effect: Effect.Effect<void, ConversationError>): void => {
+      const finish = (effect: Effect.Effect<string, ConversationError>): void => {
         if (settled) return;
         settled = true;
         resume(effect);
       };
       const onEvent = (event: WorkerEvent): void => {
         if (event.type === "error") return finish(Effect.fail(new ConversationError({ message: event.message })));
-        if (event.type === "complete") return finish(Effect.void);
+        if (event.type === "complete") return finish(Effect.succeed(lastAssistant));
         if (event.type === "text_delta" || event.type === "thinking_delta") {
           if (event.type === "text_delta") draftText += event.delta;
           else draftThinking += event.delta;
           const content = draftThinking ? `${draftThinking}\n\n${draftText}`.trim() : draftText;
+          if (taskRun && Buffer.byteLength(content, "utf8") > 16_384) {
+            return finish(Effect.fail(new ConversationError({ message: "task result exceeded 16384 bytes" })));
+          }
           const payload = { role: "assistant", content: [
             ...(draftThinking ? [{ type: "thinking", thinking: draftThinking }] : []),
             ...(draftText ? [{ type: "text", text: draftText }] : []),
@@ -159,9 +238,25 @@ export class Conversations {
           });
           return;
         }
-        const message = event.message as { role?: unknown; content?: unknown; toolName?: unknown };
+        const message = event.message as {
+          role?: unknown;
+          content?: unknown;
+          toolName?: unknown;
+          stopReason?: unknown;
+          errorMessage?: unknown;
+        };
+        if (message.role === "assistant" && message.stopReason === "error") {
+          const detail = typeof message.errorMessage === "string" && message.errorMessage.trim()
+            ? message.errorMessage.trim().slice(0, 8192)
+            : "the model provider returned an error";
+          return finish(Effect.fail(new ConversationError({ message: detail })));
+        }
         const role = message.role === "toolResult" ? "tool" : "assistant";
         const content = messageText(message.content);
+        if (taskRun && role === "assistant" && Buffer.byteLength(content, "utf8") > 16_384) {
+          return finish(Effect.fail(new ConversationError({ message: "task result exceeded 16384 bytes" })));
+        }
+        if (role === "assistant") lastAssistant = content;
         if (role === "assistant" && draft) {
           this.registry.updateConversationMessage(draft.seq, content, message, true);
           draft = null;

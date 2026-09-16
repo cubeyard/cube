@@ -8,6 +8,8 @@
 OFFLINE_TESTS=(
   scripts/release-contract-test.ts
   scripts/launcher-network-test.ts
+  scripts/host-production-test.ts
+  scripts/runner-production-test.ts
   packages/server/test/log-test.ts
   packages/server/test/cube-toml-test.ts
   packages/server/test/portal-config-test.ts
@@ -16,6 +18,10 @@ OFFLINE_TESTS=(
   packages/server/test/registry-test.ts
   packages/server/test/conversation-test.ts
   packages/server/test/models-test.ts
+  packages/server/test/thread-tasks-test.ts
+  packages/server/test/execution-node-test.ts
+  packages/server/test/trusted-runner-enrollment-test.ts
+  packages/server/test/iroh-node-test.ts
   packages/server/test/events-test.ts
   packages/server/test/user-facing-test.ts
   packages/server/test/services-test.ts
@@ -27,6 +33,7 @@ OFFLINE_TESTS=(
   packages/server/test/pty-test.ts
   packages/server/test/terminal-guards-test.ts
   packages/server/test/project-test.ts
+  packages/server/test/repository-operations-test.ts
   packages/server/test/project-environment-test.ts
   packages/server/test/environment-templates-test.ts
   packages/server/test/environment-lifecycle-test.ts
@@ -43,10 +50,17 @@ OFFLINE_TESTS=(
   packages/pi-extension/test/code-io-test.ts
   packages/pi-extension/test/code-worker-jiti-test.ts
   packages/pi-extension/test/pi-extension-test.ts
+  packages/pi-extension/test/runner-exec-test.ts
+  packages/pi-extension/test/environment-access-test.ts
   packages/pi-extension/test/diagnostics-test.ts
 )
 
-# Executed (not sourced): run the list.
+# Development-only Rust packages: run by scripts/test-node-transport.sh and a
+# separate CI job, not the released Node/Incus VM portfolio (no Rust there yet).
+# shellcheck disable=SC2034 # Consumed by the separate Rust runner when sourced.
+RUST_OFFLINE_PACKAGES=(cube-runner)
+
+# Executed (not sourced): run the Node list.
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -uo pipefail
   cd "$(dirname "$0")/.." || exit 1

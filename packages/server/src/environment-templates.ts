@@ -1,3 +1,4 @@
+import { IncusHttpError } from "../../sandbox/src/incus-client.ts";
 /**
  * Prepared environments as templates (ARCHITECTURE §7): a dedicated builder
  * runs `.cube/setup` once per environment key, is stopped and snapshotted
@@ -154,7 +155,10 @@ export class EnvironmentTemplates {
     for (const row of this.registry.listEnvironmentTemplates()) {
       try {
         if (row.status === "building") { await this.remove(row); continue; }
-        const present = await this.backend.getState(row.instance).then(() => true, () => false);
+        const present = await this.backend.getState(row.instance).then(() => true, (error) => {
+          if (error instanceof IncusHttpError && error.errorCode === 404) return false;
+          throw error;
+        });
         if (!present) this.registry.deleteEnvironmentTemplate(row.id);
       } catch (error) {
         this.onError(`recover template ${row.instance}`, error);

@@ -140,6 +140,42 @@ async function cubeExec(cmd: string): Promise<{ exitCode: number | null; out: st
   console.log("3 ok: in-cube commit lands; in-cube push refused");
 }
 
+// Reference writes, upgrade of an old mount, and independent publication.
+{
+  await cubeExec("git config --global --add safe.directory /repos/docs");
+  const commit = await cubeExec("cd /repos/docs && echo reference-change >> DOCS.md && git -c user.name=agent -c user.email=agent@cube commit -am reference-change && echo keep-me > local-note");
+  assert.equal(commit.exitCode, 0, commit.out);
+  const referenceHead = git(snapshots[1]!.workspacePath, "rev-parse", "HEAD");
+  const primaryHead = git(cube.workspacePath, "rev-parse", "HEAD");
+  const primaryRemote = git(upstream, "rev-parse", "main");
+
+  // Simulate an existing sleeping thread from before writable references.
+  await supervisor.sleepCube(cubeName);
+  await incus.updateInstance(`cube-${cubeName}`, instance => {
+    instance.devices.repositories!.readonly = "true";
+  });
+  await supervisor.wakeCube(cubeName);
+  const write = await cubeExec("echo after-wake >> /repos/docs/local-note");
+  assert.equal(write.exitCode, 0, write.out);
+
+  // Running threads on an app-only upgrade take the boot recovery path.
+  await incus.updateInstance(`cube-${cubeName}`, instance => {
+    instance.devices.repositories!.readonly = "true";
+  });
+  await supervisor.boot();
+  const afterBoot = await cubeExec("echo after-boot >> /repos/docs/local-note");
+  assert.equal(afterBoot.exitCode, 0, afterBoot.out);
+  assert.match(fs.readFileSync(path.join(snapshots[1]!.workspacePath, "local-note"), "utf8"), /^keep-me\nafter-wake\nafter-boot\n$/);
+  assert.equal(git(snapshots[1]!.workspacePath, "rev-parse", "HEAD"), referenceHead);
+  const push = await cubeExec("cd /repos/docs && git push origin HEAD 2>&1");
+  assert.notEqual(push.exitCode, 0, "reference push also has no host credentials or paths");
+  await supervisor.pushUserThread(thread.id, docs.id);
+  assert.equal(git(docsUpstream, "rev-parse", docs.branch), referenceHead);
+  assert.equal(git(cube.workspacePath, "rev-parse", "HEAD"), primaryHead);
+  assert.equal(git(upstream, "rev-parse", "main"), primaryRemote);
+  console.log("3b ok: writable references, sleep/boot upgrade preserves local work, scoped host push");
+}
+
 // 4. host-side review separates the in-cube COMMIT from local untracked work.
 fs.writeFileSync(path.join(cube.workspacePath, "notes.txt"), "uncommitted\n");
 {

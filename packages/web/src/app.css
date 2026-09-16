@@ -935,6 +935,21 @@ header .spacer { margin-left: auto; }
   border-top: 1px solid var(--bad-line); background: var(--bad-soft);
   color: var(--bad); font-size: 13px; overflow-wrap: anywhere;
 }
+.task-bank {
+  flex: none; border-top: 1px solid var(--line); background: var(--s2);
+  color: var(--ink-2); font-size: 12px;
+}
+.task-bank summary {
+  display: flex; align-items: center; gap: 0.45rem; padding: 0.4rem 0.75rem;
+  cursor: pointer; list-style: none; letter-spacing: 0.04em;
+}
+.task-bank summary::-webkit-details-marker { display: none; }
+.task-bank ul { max-height: 10rem; overflow: auto; margin: 0; padding: 0; border-top: 1px solid var(--line); list-style: none; }
+.task-bank li { display: grid; grid-template-columns: minmax(7rem, auto) auto 1fr; gap: 0.7rem; padding: 0.35rem 0.75rem; border-bottom: 1px solid var(--line); }
+.task-bank li:last-child { border-bottom: 0; }
+.task-bank strong { color: var(--ink-3); font-weight: 600; }
+.task-bank strong.bad { color: var(--bad); }
+.task-bank li span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .composer {
   flex: none; display: flex; align-items: flex-end; gap: 0.55rem;
   padding: 0.55rem 0.7rem; border-top: 1px solid var(--line-2);
@@ -1170,6 +1185,8 @@ select.compose-input {
   .project-actions .action-spacer { display: none; }
   .strip-note { padding: 0.35rem 0.8rem; }
   .files-shelf { padding: 0.6rem 0.8rem; }
+  .task-bank li { grid-template-columns: minmax(0, 1fr) auto; }
+  .task-bank li span:last-child { grid-column: 1 / -1; white-space: normal; overflow-wrap: anywhere; }
   .composer { padding-bottom: max(0.55rem, env(safe-area-inset-bottom)); }
   .composer textarea { font-size: 16px; }
   .send-key { width: 2.75rem; height: 2.75rem; }

@@ -169,13 +169,13 @@ export class CubeFs {
 
     for (let attempt = 0; attempt < 2; attempt++) {
       if (!this.helperInstalled) await this.installHelper(signal);
-      let payload: string | null = null;
+      let payload: string | null;
       try {
         payload = CubeFs.extract((await this.run(command, signal)).output);
       } catch (err) {
         if (err instanceof OutputLimitError) throw err; // not a helper fault
         if (signal?.aborted) throw err; // the caller left — not a retry, either
-        // exec/transport error — fall through to a re-push + retry
+        throw err; // transport/exec failure is never permission to replay or re-push
       }
       if (payload !== null) {
         let parsed: T | { error: string };

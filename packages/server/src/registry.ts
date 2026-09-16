@@ -7,6 +7,7 @@
  * (cubed) — no contention concerns.
  */
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -101,6 +102,23 @@ export interface AgentRunRow {
   error: string | null;
   createdAt: number;
   startedAt: number | null;
+  finishedAt: number | null;
+}
+
+export type ThreadTaskStatus = "accepted" | "delivered" | "completed" | "failed" | "cancelled";
+
+export interface ThreadTaskRow {
+  id: string;
+  sender: string;
+  recipient: string;
+  requestKey: string;
+  body: string;
+  status: ThreadTaskStatus;
+  runId: string | null;
+  result: string | null;
+  error: string | null;
+  createdAt: number;
+  deliveredAt: number | null;
   finishedAt: number | null;
 }
 
@@ -227,12 +245,14 @@ export function networkForCube(name: string, subnetIndex: number): CubeNetworkPl
 
 export class Registry {
   private readonly db: DatabaseSync;
+  private transactionDepth = 0;
 
   constructor(dbPath: string) {
     if (dbPath !== ":memory:") fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
+    this.db.exec("PRAGMA recursive_triggers = ON");
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS project (
         id          TEXT PRIMARY KEY,
@@ -380,6 +400,206 @@ export class Registry {
       provider TEXT NOT NULL,
       id TEXT NOT NULL
     )`);
+    this.migrateNodeBinding();
+    this.migrateThreadTasks();
+  }
+
+  /** Replace PR #44's disconnected journal schema in place. Records that had
+   * already crossed its one-shot delivery reservation cannot be replayed and
+   * are conservatively retained as failed unless they had an explicit result. */
+  private migrateThreadTasks(): void {
+    this.transaction(() => {
+      const installed = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'thread_task'").get();
+      const columns = installed
+        ? this.db.prepare("PRAGMA table_info(thread_task)").all() as Array<{ name: string }>
+        : [];
+      if (installed && !columns.some((column) => column.name === "run_id")) {
+        this.db.exec(`
+          DROP TABLE IF EXISTS thread_task_progress;
+          ALTER TABLE thread_task RENAME TO thread_task_foundation;
+        `);
+      }
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS thread_task_grant (
+          sender TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+          recipient TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+          PRIMARY KEY(sender, recipient), CHECK(sender <> recipient)
+        );
+        CREATE TABLE IF NOT EXISTS thread_task (
+          id TEXT PRIMARY KEY,
+          sender TEXT NOT NULL REFERENCES thread(id) ON DELETE RESTRICT,
+          recipient TEXT NOT NULL REFERENCES thread(id) ON DELETE RESTRICT,
+          request_key TEXT NOT NULL,
+          body TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('accepted','delivered','completed','failed','cancelled')),
+          run_id TEXT UNIQUE REFERENCES agent_run(id) ON DELETE RESTRICT,
+          result TEXT,
+          error TEXT,
+          created_at INTEGER NOT NULL,
+          delivered_at INTEGER,
+          finished_at INTEGER,
+          UNIQUE(sender, request_key), CHECK(sender <> recipient),
+          CHECK((status = 'delivered') = (run_id IS NOT NULL AND finished_at IS NULL)),
+          CHECK((status = 'completed') = (result IS NOT NULL)),
+          CHECK(status IN ('completed','failed','cancelled') OR finished_at IS NULL)
+        );
+        CREATE INDEX IF NOT EXISTS thread_task_recipient_status
+          ON thread_task(recipient, status, created_at);
+        CREATE INDEX IF NOT EXISTS thread_task_participants
+          ON thread_task(sender, recipient, created_at);
+      `);
+      const foundation = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'thread_task_foundation'").get();
+      if (foundation) {
+        this.db.exec(`
+          INSERT INTO thread_task
+            (id, sender, recipient, request_key, body, status, result, error, created_at, finished_at)
+          SELECT id, sender, recipient, request_key, body,
+            CASE WHEN state = 'accepted' THEN 'accepted' WHEN state = 'completed' THEN 'completed' ELSE 'failed' END,
+            result,
+            CASE WHEN state IN ('delivery_unknown','delivered') THEN 'legacy delivery outcome unknown; not replayed' END,
+            created_at,
+            CASE WHEN state = 'accepted' THEN NULL ELSE created_at END
+          FROM thread_task_foundation;
+          DROP TABLE thread_task_foundation;
+        `);
+      }
+    });
+  }
+
+  /** Local installation identity, not a transport key. Never regenerated once
+   * the binding schema exists: a missing identity requires operator recovery. */
+  get localNodeId(): string {
+    const row = this.db.prepare("SELECT id FROM execution_node WHERE local = 1").get() as { id: string } | undefined;
+    if (!row) throw new Error("local node identity is missing; restore the registry identity, do not rebind environments");
+    return row.id;
+  }
+
+  nodeForCube(cubeId: number): string {
+    const row = this.db.prepare("SELECT node_id FROM environment_node WHERE cube_id = ?").get(cubeId) as { node_id: string } | undefined;
+    if (!row) throw new Error(`environment ${cubeId} has no node binding`);
+    return row.node_id;
+  }
+
+  private migrateNodeBinding(): void {
+    this.transaction(() => {
+      const installed = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'execution_node'").get();
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS execution_node (id TEXT PRIMARY KEY, local INTEGER NOT NULL CHECK(local IN (0, 1)));
+        CREATE TABLE IF NOT EXISTS environment_node (
+          cube_id INTEGER PRIMARY KEY REFERENCES cube(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL REFERENCES execution_node(id)
+        );
+        CREATE TABLE IF NOT EXISTS environment_observation (
+          cube_id INTEGER PRIMARY KEY REFERENCES cube(id) ON DELETE CASCADE, status TEXT NOT NULL, observed_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS thread_create_request (
+          key TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE
+        );
+      `);
+      // Rebuild the old local-only table without disabling foreign keys or
+      // changing a single existing binding. Both replacements are transactional.
+      const definition = (this.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'execution_node'").get() as { sql: string }).sql;
+      if (definition.includes("CHECK(local = 1)")) {
+        this.db.exec(`
+          DROP TRIGGER IF EXISTS bind_new_environment;
+          DROP TRIGGER IF EXISTS immutable_environment_node;
+          DROP TRIGGER IF EXISTS retain_environment_node;
+          DROP TRIGGER IF EXISTS immutable_node;
+          DROP TRIGGER IF EXISTS retain_node;
+          ALTER TABLE execution_node RENAME TO execution_node_legacy;
+          CREATE TABLE execution_node (id TEXT PRIMARY KEY, local INTEGER NOT NULL CHECK(local IN (0, 1)));
+          INSERT INTO execution_node SELECT * FROM execution_node_legacy;
+          CREATE TABLE environment_node_new (
+            cube_id INTEGER PRIMARY KEY REFERENCES cube(id) ON DELETE CASCADE,
+            node_id TEXT NOT NULL REFERENCES execution_node(id)
+          );
+          INSERT INTO environment_node_new SELECT * FROM environment_node;
+          DROP TABLE environment_node;
+          ALTER TABLE environment_node_new RENAME TO environment_node;
+          DROP TABLE execution_node_legacy;
+        `);
+      }
+      this.db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS one_local_node ON execution_node(local) WHERE local = 1;
+        CREATE TABLE IF NOT EXISTS host_node_admission (
+          node_id TEXT PRIMARY KEY REFERENCES execution_node(id),
+          environment_id INTEGER NOT NULL UNIQUE REFERENCES cube(id) DEFERRABLE INITIALLY DEFERRED,
+          thread_id TEXT NOT NULL UNIQUE REFERENCES thread(id) DEFERRABLE INITIALLY DEFERRED,
+          config_path TEXT NOT NULL, config_hash TEXT NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS immutable_host_admission BEFORE UPDATE ON host_node_admission BEGIN
+          SELECT RAISE(ABORT, 'host admission is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS retain_host_admission BEFORE DELETE ON host_node_admission BEGIN
+          SELECT RAISE(ABORT, 'host admission is permanent');
+        END;
+      `);
+      if (!installed) {
+        this.db.prepare("INSERT INTO execution_node(id, local) VALUES (?, 1)").run(`node-${randomUUID()}`);
+        this.db.prepare("INSERT INTO environment_node SELECT id, ? FROM cube").run(this.localNodeId);
+      } else {
+        void this.localNodeId; // missing metadata is not permission to adopt a new host
+        const unbound = this.db.prepare("SELECT id FROM cube WHERE id NOT IN (SELECT cube_id FROM environment_node) LIMIT 1").get();
+        if (unbound) throw new Error("unbound environment in migrated registry; restore its binding before startup");
+      }
+      this.db.exec(`
+        DROP TRIGGER IF EXISTS bind_new_environment;
+        CREATE TRIGGER bind_new_environment AFTER INSERT ON cube BEGIN
+          INSERT INTO environment_node(cube_id, node_id) VALUES (NEW.id,
+            COALESCE((SELECT node_id FROM host_node_admission WHERE environment_id = NEW.id),
+              (SELECT id FROM execution_node WHERE local = 1)));
+        END;
+        CREATE TRIGGER IF NOT EXISTS check_host_thread BEFORE INSERT ON thread
+          WHEN EXISTS (SELECT 1 FROM host_node_admission WHERE environment_id = NEW.cube_id AND thread_id != NEW.id)
+            OR EXISTS (SELECT 1 FROM host_node_admission WHERE thread_id = NEW.id AND environment_id != NEW.cube_id) BEGIN
+          SELECT RAISE(ABORT, 'wrong host thread binding');
+        END;
+        CREATE TRIGGER IF NOT EXISTS immutable_environment_node BEFORE UPDATE ON environment_node BEGIN
+          SELECT RAISE(ABORT, 'environment node binding is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS retain_environment_node BEFORE DELETE ON environment_node
+          WHEN EXISTS (SELECT 1 FROM cube WHERE id = OLD.cube_id) BEGIN
+          SELECT RAISE(ABORT, 'environment node binding is permanent');
+        END;
+        CREATE TRIGGER IF NOT EXISTS immutable_node BEFORE UPDATE ON execution_node BEGIN
+          SELECT RAISE(ABORT, 'node identity is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS retain_node BEFORE DELETE ON execution_node BEGIN
+          SELECT RAISE(ABORT, 'local node identity is permanent');
+        END;
+        CREATE TRIGGER IF NOT EXISTS retain_host_environment BEFORE DELETE ON cube
+          WHEN EXISTS (SELECT 1 FROM host_node_admission WHERE environment_id = OLD.id) BEGIN
+          SELECT RAISE(ABORT, 'host environment is permanent; archive its thread instead');
+        END;
+        CREATE TRIGGER IF NOT EXISTS retain_host_thread BEFORE DELETE ON thread
+          WHEN EXISTS (SELECT 1 FROM host_node_admission WHERE thread_id = OLD.id) BEGIN
+          SELECT RAISE(ABORT, 'host thread is permanent; archive it instead');
+        END;
+        CREATE TRIGGER IF NOT EXISTS immutable_environment_identity BEFORE UPDATE OF id, name, workspace_path ON cube
+          WHEN NEW.id != OLD.id OR NEW.name != OLD.name OR NEW.workspace_path != OLD.workspace_path BEGIN
+          SELECT RAISE(ABORT, 'environment identity is immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS immutable_thread_environment BEFORE UPDATE OF cube_id ON thread
+          WHEN NEW.cube_id != OLD.cube_id BEGIN
+          SELECT RAISE(ABORT, 'thread environment binding is immutable');
+        END;
+      `);
+    });
+  }
+
+  observeEnvironment(cubeId: number, observation: { status: string; observedAt: number }): void {
+    this.db.prepare(`INSERT INTO environment_observation(cube_id, status, observed_at) VALUES (?, ?, ?)
+      ON CONFLICT(cube_id) DO UPDATE SET status = excluded.status, observed_at = excluded.observed_at`)
+      .run(cubeId, observation.status, observation.observedAt);
+  }
+
+  environmentObservation(cubeId: number): { status: string; observedAt: number } | null {
+    return (this.db.prepare("SELECT status, observed_at AS observedAt FROM environment_observation WHERE cube_id = ?").get(cubeId) as { status: string; observedAt: number } | undefined) ?? null;
+  }
+
+  createdThread(key: string): string | null {
+    const row = this.db.prepare("SELECT thread_id FROM thread_create_request WHERE key = ?").get(key) as { thread_id: string } | undefined;
+    return row?.thread_id ?? null;
   }
 
   // ---------------------------------------------------------------- events
@@ -668,6 +888,8 @@ export class Registry {
   }
 
   private transaction<T>(work: () => T): T {
+    if (this.transactionDepth) return work();
+    this.transactionDepth++;
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const result = work();
@@ -676,7 +898,7 @@ export class Registry {
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
-    }
+    } finally { this.transactionDepth--; }
   }
 
   // --------------------------------------------------- environment templates
@@ -726,7 +948,7 @@ export class Registry {
     image: string;
     workspacePath: string;
     environment?: string | null;
-  }): CubeRow {
+  }, environmentId?: number): CubeRow {
     if (!CUBE_NAME_RE.test(input.name)) {
       throw new Error(
         `invalid cube name ${JSON.stringify(input.name)} — need ${CUBE_NAME_RE} (bridge name must fit IFNAMSIZ)`,
@@ -736,11 +958,58 @@ export class Registry {
     const now = Date.now();
     this.db
       .prepare(
-        `INSERT INTO cube (name, status, image, workspace_path, environment, subnet_index, created_at, last_active_at)
-         VALUES (?, 'creating', ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO cube (id, name, status, image, workspace_path, environment, subnet_index, created_at, last_active_at)
+         VALUES (?, ?, 'creating', ?, ?, ?, ?, ?, ?)`,
       )
-      .run(input.name, input.image, input.workspacePath, input.environment ?? null, subnetIndex, now, now);
+      .run(environmentId ?? null, input.name, input.image, input.workspacePath, input.environment ?? null, subnetIndex, now, now);
     return this.getCube(input.name)!;
+  }
+
+  /** Atomic allocation: a crash cannot leave a committed environment without
+   * its thread and successful request identity. All inputs are metadata. */
+  allocateThread(input: {
+    cube: Parameters<Registry["createCube"]>[0];
+    repositories: Parameters<Registry["addCubeRepositories"]>[1];
+    thread: Omit<Parameters<Registry["addThread"]>[0], "cubeId">;
+  }): CubeRow {
+    return this.transaction(() => {
+      const cube = this.createCube(input.cube);
+      this.addCubeRepositories(cube.id, input.repositories);
+      this.addThread({ ...input.thread, cubeId: cube.id });
+      return cube;
+    });
+  }
+
+  /** Operator-only, create-only enrollment. No public route calls this method.
+   * The runner is already initialized with these identities. Existing resources
+   * can never be adopted, moved or replaced, even when offline. */
+  enrollTrustedRunner(input: {
+    nodeId: string; environmentId: number; threadId: string;
+    configPath: string; configHash: string; projectId: string;
+    name: string; workspacePath: string; piSessionPath: string;
+  }): CubeRow {
+    if (!/^node-[a-zA-Z0-9-]{1,123}$/.test(input.nodeId)
+      || !/^[a-zA-Z0-9_-]{1,128}$/.test(input.threadId)
+      || !Number.isSafeInteger(input.environmentId) || input.environmentId < 1
+      || !path.isAbsolute(input.configPath) || !/^[0-9a-f]{64}$/.test(input.configHash)
+      || !path.isAbsolute(input.workspacePath) || !path.isAbsolute(input.piSessionPath)) throw new Error("invalid trusted runner admission");
+    return this.transaction(() => {
+      if (this.getCubeById(input.environmentId) || this.getThread(input.threadId)) throw new Error("runner enrollment requires fresh identities");
+      this.db.prepare("INSERT INTO execution_node(id, local) VALUES (?, 0)").run(input.nodeId);
+      // Storage name retained through the compatibility window so a rollback
+      // to cube-host 0.1.1 can read the immutable admission unchanged.
+      this.db.prepare("INSERT INTO host_node_admission VALUES (?, ?, ?, ?, ?)")
+        .run(input.nodeId, input.environmentId, input.threadId, input.configPath, input.configHash);
+      const cube = this.createCube({ name: input.name, image: "trusted-runner", workspacePath: input.workspacePath }, input.environmentId);
+      this.addThread({ id: input.threadId, cubeId: cube.id, projectId: input.projectId, piSessionPath: input.piSessionPath });
+      this.setCubeStatus(cube.name, "ready"); // admission, NOT a live contact observation
+      return this.getCube(cube.name)!;
+    });
+  }
+
+  trustedRunnerAdmissions(): Array<{ nodeId: string; environmentId: number; threadId: string; configPath: string; configHash: string }> {
+    return this.db.prepare(`SELECT node_id AS nodeId, environment_id AS environmentId,
+      thread_id AS threadId, config_path AS configPath, config_hash AS configHash FROM host_node_admission`).all() as ReturnType<Registry["trustedRunnerAdmissions"]>;
   }
 
   addCubeRepositories(
@@ -833,13 +1102,19 @@ export class Registry {
     projectId: string;
     piSessionPath: string;
     title?: string;
+    requestKey?: string;
   }): void {
+    this.transaction(() => {
     this.db
       .prepare(
         `INSERT INTO thread (id, cube_id, project_id, pi_session_path, title, created_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(input.id, input.cubeId, input.projectId, input.piSessionPath, input.title ?? null, Date.now());
+    if (input.requestKey !== undefined) {
+      this.db.prepare("INSERT INTO thread_create_request(key, thread_id) VALUES (?, ?)").run(input.requestKey, input.id);
+    }
+    });
   }
 
   getThread(id: string): ThreadRow | null {
@@ -871,8 +1146,14 @@ export class Registry {
   }
 
   archiveThread(id: string): void {
-    this.db.prepare("UPDATE thread SET archived_at = ? WHERE id = ?").run(Date.now(), id);
-    this.db.prepare("DELETE FROM temporary_portal WHERE thread_id = ?").run(id);
+    const now = Date.now();
+    this.transaction(() => {
+      this.db.prepare("UPDATE thread SET archived_at = ? WHERE id = ?").run(now, id);
+      this.db.prepare("DELETE FROM temporary_portal WHERE thread_id = ?").run(id);
+      this.db.prepare(`UPDATE thread_task SET status = 'failed', error = 'participant archived before delivery', finished_at = ?
+        WHERE status = 'accepted' AND (sender = ? OR recipient = ?)`)
+        .run(now, id, id);
+    });
   }
 
   /** Persist acceptance before any worker starts. The active-run index makes
@@ -932,13 +1213,45 @@ export class Registry {
     if (result.changes === 0) throw new Error(`agent run cannot transition to ${status}: ${id}`);
   }
 
+  cancelAgentRun(id: string): void {
+    this.db.prepare(`UPDATE agent_run SET status = 'failed', error = 'task cancelled by sender', finished_at = ?
+      WHERE id = ? AND status IN ('queued', 'running')`).run(Date.now(), id);
+  }
+
+  /** Settle the worker run and its optional inbound task in one SQLite
+   * transaction. A committed completed task therefore always has a committed
+   * completed run and bounded result; no process-memory acknowledgement exists. */
+  settleAgentRun(id: string, status: "completed" | "failed", error: string | null, result: string | null): void {
+    const now = Date.now();
+    this.transaction(() => {
+      this.setAgentRunStatus(id, status, error);
+      const task = this.db.prepare("SELECT id, status FROM thread_task WHERE run_id = ?").get(id) as
+        { id: string; status: ThreadTaskStatus } | undefined;
+      if (!task || task.status !== "delivered") return;
+      if (status === "completed" && result !== null) {
+        this.db.prepare("UPDATE thread_task SET status = 'completed', result = ?, error = NULL, finished_at = ? WHERE id = ?")
+          .run(result, now, task.id);
+      } else {
+        this.db.prepare("UPDATE thread_task SET status = 'failed', error = ?, finished_at = ? WHERE id = ?")
+          .run(error ?? "task worker completed without a response", now, task.id);
+      }
+    });
+  }
+
   /** A daemon restart cannot know whether an external model or tool finished.
    * Fail interrupted work rather than replaying side effects. */
   failInterruptedAgentRuns(): number {
-    return Number(this.db.prepare(
-      `UPDATE agent_run SET status = 'failed', error = 'agent run interrupted by host restart', finished_at = ?
-       WHERE status IN ('queued', 'running')`,
-    ).run(Date.now()).changes);
+    return this.transaction(() => {
+      const now = Date.now();
+      this.db.prepare(`UPDATE thread_task SET status = 'failed',
+        error = 'task worker interrupted by host restart; outcome unknown and not replayed', finished_at = ?
+        WHERE status = 'delivered' AND run_id IN (SELECT id FROM agent_run WHERE status IN ('queued', 'running'))`)
+        .run(now);
+      return Number(this.db.prepare(
+        `UPDATE agent_run SET status = 'failed', error = 'agent run interrupted by host restart', finished_at = ?
+         WHERE status IN ('queued', 'running')`,
+      ).run(now).changes);
+    });
   }
 
   appendConversationMessage(input: {
@@ -974,6 +1287,141 @@ export class Registry {
     return (this.db.prepare(
       "SELECT * FROM conversation_message WHERE thread_id = ? AND seq > ? ORDER BY seq",
     ).all(threadId, after) as unknown[]).map(conversationMessageRow);
+  }
+
+  // ----------------------------------------------------------- thread tasks
+
+  grantThreadTask(sender: string, recipient: string): void {
+    this.transaction(() => {
+      const source = this.getThread(sender);
+      const target = this.getThread(recipient);
+      if (!source || !target || source.archivedAt !== null || target.archivedAt !== null
+        || sender === recipient || source.projectId !== target.projectId) {
+        throw new Error("task destination not permitted");
+      }
+      this.db.prepare("INSERT OR IGNORE INTO thread_task_grant(sender, recipient) VALUES (?, ?)").run(sender, recipient);
+    });
+  }
+
+  revokeThreadTask(sender: string, recipient: string): void {
+    this.db.prepare("DELETE FROM thread_task_grant WHERE sender = ? AND recipient = ?").run(sender, recipient);
+  }
+
+  threadTaskDestinations(sender: string): Array<{ id: string; title: string | null }> {
+    return (this.db.prepare(`SELECT t.id, t.title FROM thread_task_grant g
+      JOIN thread t ON t.id = g.recipient
+      JOIN thread s ON s.id = g.sender
+      WHERE g.sender = ? AND t.archived_at IS NULL AND s.archived_at IS NULL
+        AND t.project_id = s.project_id ORDER BY COALESCE(t.title, t.id), t.id LIMIT 100`)
+      .all(sender) as Array<{ id: string; title: string | null }>).map((row) => ({ ...row }));
+  }
+
+  acceptThreadTask(input: { id: string; sender: string; recipient: string; requestKey: string; body: string }): ThreadTaskRow {
+    return this.transaction(() => {
+      const existing = this.db.prepare("SELECT * FROM thread_task WHERE sender = ? AND request_key = ?")
+        .get(input.sender, input.requestKey);
+      if (existing) {
+        const task = threadTaskRow(existing);
+        if (task.recipient !== input.recipient || task.body !== input.body) throw new Error("task request key conflict");
+        return task;
+      }
+      const permitted = this.threadTaskDestinations(input.sender).some((thread) => thread.id === input.recipient);
+      if (!permitted) throw new Error("task destination not permitted");
+      const recent = Number((this.db.prepare(
+        "SELECT count(*) AS n FROM thread_task WHERE sender = ? AND created_at >= ?",
+      ).get(input.sender, Date.now() - 60_000) as { n: number }).n);
+      const queued = Number((this.db.prepare(
+        "SELECT count(*) AS n FROM thread_task WHERE recipient = ? AND status IN ('accepted','delivered')",
+      ).get(input.recipient) as { n: number }).n);
+      const total = Number((this.db.prepare("SELECT count(*) AS n FROM thread_task").get() as { n: number }).n);
+      if (recent >= 30) throw new Error("task send rate exceeded");
+      if (queued >= 32) throw new Error("task recipient queue is full");
+      if (total >= 10_000) throw new Error("task journal is full");
+      this.db.prepare(`INSERT INTO thread_task
+        (id, sender, recipient, request_key, body, status, created_at)
+        VALUES (?, ?, ?, ?, ?, 'accepted', ?)`)
+        .run(input.id, input.sender, input.recipient, input.requestKey, input.body, Date.now());
+      return this.getThreadTask(input.sender, input.id)!;
+    });
+  }
+
+  getThreadTask(actor: string, id: string): ThreadTaskRow | null {
+    const row = this.db.prepare("SELECT * FROM thread_task WHERE id = ? AND (sender = ? OR recipient = ?)")
+      .get(id, actor, actor);
+    return row ? threadTaskRow(row) : null;
+  }
+
+  threadTaskForRun(runId: string): ThreadTaskRow | null {
+    const row = this.db.prepare("SELECT * FROM thread_task WHERE run_id = ?").get(runId);
+    return row ? threadTaskRow(row) : null;
+  }
+
+  listThreadTasks(actor: string): ThreadTaskRow[] {
+    return (this.db.prepare(`SELECT * FROM thread_task WHERE sender = ? OR recipient = ?
+      ORDER BY created_at DESC, id LIMIT 50`).all(actor, actor) as unknown[]).map(threadTaskRow);
+  }
+
+  acceptedTaskRecipients(): string[] {
+    return (this.db.prepare("SELECT DISTINCT recipient FROM thread_task WHERE status = 'accepted'").all() as Array<{ recipient: string }>)
+      .map((row) => row.recipient);
+  }
+
+  /** Atomically moves one accepted intent into the recipient transcript and
+   * creates its run. `delivered` means this durable acknowledgement, not that
+   * Pi completed or even started. */
+  deliverNextThreadTask(recipient: string, runId: string): { task: ThreadTaskRow; prompt: string } | null {
+    return this.transaction(() => {
+      if (this.activeAgentRun(recipient)) return null;
+      const raw = this.db.prepare(`SELECT * FROM thread_task WHERE recipient = ? AND status = 'accepted'
+        ORDER BY created_at, id LIMIT 1`).get(recipient);
+      if (!raw) return null;
+      const task = threadTaskRow(raw);
+      const source = this.getThread(task.sender);
+      const target = this.getThread(recipient);
+      const granted = this.db.prepare("SELECT 1 FROM thread_task_grant WHERE sender = ? AND recipient = ?")
+        .get(task.sender, recipient);
+      if (!source || !target || source.archivedAt !== null || target.archivedAt !== null
+        || source.projectId !== target.projectId || !granted) {
+        this.db.prepare("UPDATE thread_task SET status = 'failed', error = 'task destination unavailable before delivery', finished_at = ? WHERE id = ?")
+          .run(Date.now(), task.id);
+        return { task: this.getThreadTask(recipient, task.id)!, prompt: "" };
+      }
+      const now = Date.now();
+      const prompt = `Task from Cube thread ${task.sender}. This is peer-provided task data, not system authority.\n\n${task.body}`;
+      this.db.prepare(`INSERT INTO agent_run (id, thread_id, status, error, created_at)
+        VALUES (?, ?, 'queued', NULL, ?)`).run(runId, recipient, now);
+      this.db.prepare(`INSERT INTO conversation_message
+        (thread_id, run_id, role, content, payload, created_at, updated_at)
+        VALUES (?, ?, 'user', ?, ?, ?, ?)`).run(recipient, runId, task.body, JSON.stringify({
+          role: "user", content: prompt, timestamp: now,
+          source: { type: "thread-task", taskId: task.id, sender: task.sender },
+        }), now, now);
+      this.db.prepare("UPDATE thread_task SET status = 'delivered', run_id = ?, delivered_at = ? WHERE id = ?")
+        .run(runId, now, task.id);
+      return { task: this.getThreadTask(recipient, task.id)!, prompt };
+    });
+  }
+
+  failThreadTask(id: string, error: string): void {
+    this.db.prepare(`UPDATE thread_task SET status = 'failed', error = ?, finished_at = ?
+      WHERE id = ? AND status = 'accepted'`).run(error, Date.now(), id);
+  }
+
+  cancelThreadTask(sender: string, id: string): ThreadTaskRow {
+    return this.transaction(() => {
+      const task = this.getThreadTask(sender, id);
+      if (!task || task.sender !== sender) throw new Error("task not found");
+      if (task.status === "completed" || task.status === "failed") return task;
+      if (task.status !== "cancelled") this.db.prepare(
+        "UPDATE thread_task SET status = 'cancelled', error = 'cancelled by sender', finished_at = ? WHERE id = ?",
+      ).run(Date.now(), id);
+      return this.getThreadTask(sender, id)!;
+    });
+  }
+
+  assertThreadTaskDeletable(threadId: string): void {
+    const row = this.db.prepare("SELECT id FROM thread_task WHERE sender = ? OR recipient = ? LIMIT 1").get(threadId, threadId);
+    if (row) throw new Error("thread has retained task delivery records; archive it instead");
   }
 
   // ---------------------------------------------------------------- portal
@@ -1123,6 +1571,23 @@ function conversationMessageRow(r: any): ConversationMessageRow {
     finalized: Number(r.finalized) === 1,
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
+  };
+}
+
+function threadTaskRow(r: any): ThreadTaskRow {
+  return {
+    id: String(r.id),
+    sender: String(r.sender),
+    recipient: String(r.recipient),
+    requestKey: String(r.request_key),
+    body: String(r.body),
+    status: String(r.status) as ThreadTaskStatus,
+    runId: r.run_id === null ? null : String(r.run_id),
+    result: r.result === null ? null : String(r.result),
+    error: r.error === null ? null : String(r.error),
+    createdAt: Number(r.created_at),
+    deliveredAt: r.delivered_at === null ? null : Number(r.delivered_at),
+    finishedAt: r.finished_at === null ? null : Number(r.finished_at),
   };
 }
 

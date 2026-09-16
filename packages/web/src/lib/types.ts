@@ -29,6 +29,8 @@ export type ThreadState = "setting-up" | "waking" | "ready" | "sleeping" | "erro
 /** One entry of GET /api/threads — the user-facing unit. The backing cube
  * never appears; states are thread states. */
 export interface ThreadSummary {
+  nodeContact?: "unobserved" | "available" | "unavailable";
+  environmentObservation?: { status: string; observedAt: number } | null;
   id: string;
   title: string | null;
   state: ThreadState;
@@ -149,6 +151,21 @@ export interface AgentRun {
 export interface ConversationHistory {
   messages: ConversationMessage[];
   run: AgentRun | null;
+}
+
+export interface ThreadTask {
+  id: string;
+  sender: string;
+  recipient: string;
+  requestKey: string;
+  body: string;
+  status: "accepted" | "delivered" | "completed" | "failed" | "cancelled";
+  runId: string | null;
+  result: string | null;
+  error: string | null;
+  createdAt: number;
+  deliveredAt: number | null;
+  finishedAt: number | null;
 }
 
 export interface ModelSelection {

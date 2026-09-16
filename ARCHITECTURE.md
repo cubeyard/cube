@@ -7,9 +7,20 @@ the phase plan, the decision log — is in [docs/history.md](docs/history.md).
 ## 1. Goal and scope
 
 Build a self-hosted equivalent of [Amp Orbs](https://ampcode.com/what-are-orbs) that
-runs entirely on **one VM per user**. No clustering, no shared team platform, no
-multi-tenancy. Provider login is handled by [pi](https://pi.dev). The architecture
+currently ships on **one VM per user**. The product direction separates a control
+plane from permanently bound execution nodes; no failover or environment moves.
+No shared team platform or multi-tenancy. Provider login is handled by [pi](https://pi.dev). The architecture
 is **harness outside sandbox**.
+
+### Control ↔ node boundary (current authoritative contract)
+
+See [execution-nodes.md](docs/execution-nodes.md) for permanent SQLite binding,
+offline failures and remaining host couplings. The current remote profile is a
+trusted runner: an unprivileged Linux x86_64 account over authenticated Iroh/N0 relay. It
+is not sandboxed and supports bounded exec only; Incus/VM execution nodes and a
+general scheduler remain out of scope. Its production lifecycle and trust
+boundary are in [trusted-runner-operations.md](docs/trusted-runner-operations.md).
+Browser exposure remains restrictive HTTP/WS.
 
 ### Terminology
 
@@ -46,10 +57,9 @@ historical `orb` names.
 ### Out of scope (deliberately)
 
 Multiplayer, Slack, team platform, clustering, per-minute billing, webhooks from
-the internet, sub-cubes / thread-to-thread messaging, live terminal (phase 5+),
-auth in front of cubed/portals (decided: none for now — Tailnet is the boundary).
-Thread-to-thread delivery is specifically deferred; future delivery and
-acknowledgement records belong in cubed, beside the durable transcript.
+the internet, unrestricted sub-cubes, live terminal (phase 5+), and auth in
+front of cubed/portals (decided: none for now — Tailnet is the boundary).
+The narrow exception is operator-granted, cubed-owned directed thread tasks.
 
 ## 2. Sandbox backend: Incus
 
@@ -160,7 +170,8 @@ creating → ready ⇄ running → idle → asleep → waking → ready
 
 - **The truth lives on the host.** Workspace is a plain host directory,
   attached as a shifted disk device. Caches are capped custom volumes. The
-  container is cattle.
+  environment is permanently bound to its original node; confirmed absence is
+  an error, never permission to replace it.
 - **Fresh thread snapshots:** project checks establish access/configuration;
   each new thread refreshes every repository’s default branch before allocation and
   pins the returned OIDs. Fetch failures stop creation rather than falling back
@@ -212,10 +223,9 @@ creating → ready ⇄ running → idle → asleep → waking → ready
   describes repository discovery, cold/warm validation, login-shell and
   supervised-service checks. It is packaged with the trusted extension, not
   dependent on repository-local skill files.
-- **recreate** = delete + `incus init` from the cube image on image update or
-  explicit `cube rebuild`. Workspace and cache volumes persist across
-  recreates. This is the reproducibility boundary: anything not in the image,
-  `.cube/cube.toml`, or a persistent volume is expected to vanish on rebuild.
+- **No automatic replacement:** a missing environment remains attached to its
+  thread as an error. To work elsewhere, create a new thread. Copying snapshots
+  into a new thread is future explicit functionality, not relocation.
 - **Cube images** are Incus images per profile. **One profile for now:
   `cube-node` (decided 2026-08-26)**; more (e.g. `cube-jvm`) when needed.
   Provision: a base `ubuntu/24.04` container with a script
@@ -250,6 +260,9 @@ thread               (id, cube_id, project_id, title, created_at)
 agent_run             (id, thread_id, status, error, timestamps)
 conversation_message  (seq, thread_id, run_id, role, content, payload,
                        finalized, timestamps)
+thread_task            (id, sender, recipient, request_key, status, run_id,
+                       body, result, error, timestamps)
+thread_task_grant      (sender, recipient)
 event                 (id, thread_id, seq, type, payload_json, ts)
 portal                (id, cube_id, name, target_port, hostname, created_at)
 ```
@@ -261,9 +274,13 @@ messages and has an in-memory Pi session; streaming drafts are durable but an
 interrupted draft is not fed to a later worker. Restart marks accepted in-flight
 runs failed instead of replaying potentially side-effecting work.
 
-The sequence cursor and explicit run/message ownership leave room for later
-cubed-owned durable thread-to-thread delivery and acknowledgements. No such
-delivery protocol is implemented yet.
+Directed thread tasks use that same authority. Cubed commits outbound intent
+before dispatch and atomically commits `delivered` with the recipient run and
+transcript message. Worker completion and the bounded result settle together;
+restart fails an in-flight delivered run and never replays it. Only `accepted`
+work, which has never crossed the recipient boundary, is resumed. Grants are
+operator-owned, directed and same-project; agent routes derive the sender from
+the thread capability rather than payload data.
 
 ## 8. Package structure (pnpm monorepo, TypeScript)
 
@@ -296,15 +313,14 @@ need is small: instance CRUD, state changes, exec, storage volumes, networks.
 
 ## 9. Tool routing (the core)
 
-Pattern from `gondolin/host/examples/pi-gondolin.ts`, simplified by shared mounts:
+Pi tool factories use guest operations. Read/write/edit resolve symlinks in
+that guest, not through host workspace paths. Bash and user `!` use the same
+gated local execution adapter; QuickJS delegates to these bounded capabilities.
+Managed adapters validate the thread's registered local-node binding through the
+control bridge before access. Pi's own cwd is a trusted runtime directory,
+independent of the guest workspace or its contact state. See
+[execution-nodes.md](docs/execution-nodes.md) for the remaining local couplings.
 
-- **`read`/`write`/`edit`** operate **directly on the host path** of the
-  workspace. No exec roundtrip, native speed, and diffs/reads work even while
-  the cube sleeps. The shifted (idmapped) mount maps the host uid to the cube's
-  `dev` user, so ownership stays clean on both sides.
-- **`bash`** routes through Incus exec into the cube (websocket streams,
-  timeout, abort, pty when needed). The system prompt is patched so the model
-  sees `/workspace`.
 - **`services_ensure()`** — custom tool (the only portal-facing one,
   decided 2026-08-27): reads `[services.*]` from `.cube/cube.toml`, starts
   anything missing as a systemd unit inside the cube, waits for readiness,
@@ -319,8 +335,9 @@ Pattern from `gondolin/host/examples/pi-gondolin.ts`, simplified by shared mount
 - Cubes **never publish ports on the host** (no proxy devices, no `-p`
   anywhere); cubed's proxy is the only way in.
 - Each cube gets its own Incus bridge network with a static `ipv4.address`.
-  cubed proxies to `cubeIP:targetPort` directly — the bridge is a host
-  interface, no NAT hop.
+  the local node adapter opens a stream to `cubeIP:targetPort` internally.
+  The portal proxy consumes that stream; a future remote connector does not
+  require guest-IP routing from the control plane.
 - **No port allocator** (removed 2026-08-27). The main cubed listener routes
   on the Host header: portal hostnames → the cube service, everything else →
   UI/API. Each portal gets a **stable, deterministic hostname** derived from
@@ -476,13 +493,14 @@ allow = ["repo.maven.apache.org", "*.gradle.org"]
 - The environment directory (`.cube`: setup, resume, cube.toml) may live
   outside the primary repository. A project's
   `environment = "<checkout>/<folder>"` points at a folder of one of its
-  reference repositories, mounted read-only at `/repos/<checkout>`:
+  thread-local reference repositories, mounted writable at `/repos/<checkout>`:
   setup/resume run from there with `/workspace` as cwd, `cube.toml` (hooks,
   services, network) is read from there, and the project check verifies
   the folder and parses its `cube.toml` at the pinned commit. This is how a
   repository that does not (yet) carry cube files gets an environment,
   versioned in a repository of the user's own; each thread snapshots the
-  choice with its repositories.
+  choice with its repositories. Local environment edits can be tested with
+  setup retry; publication targets the reference repository explicitly.
 
 - Default: no secrets enter the cube. (Host-side secret *injection* à la
   gondolin is out of scope for now; revisit if the need appears.)
@@ -499,8 +517,8 @@ websocket speaking JSON-RPC — replaces `fsops.mjs`, drops node from the
 image floor, and gives file tools gondolin-class latency. The fsops op
 set (stat/readdir/glob/grep/resolve) is the v1 protocol.
 Raw live terminal into the cube. Scheduling/cron wake. Rich rendering for
-structured assistant/tool payloads. Cubed-owned durable thread-to-thread
-delivery and acknowledgement. Sub-cubes. Auth if the Tailnet stops being a sufficient boundary. Micro-VM
+structured assistant/tool payloads. Broader sub-cubes and automatic delegation.
+Auth if the Tailnet stops being a sufficient boundary. Micro-VM
 backend (kata/gondolin/boxlite) if container isolation proves insufficient.
 
 ## 14. Risk register

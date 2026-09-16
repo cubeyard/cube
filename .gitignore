@@ -24,6 +24,7 @@ github-auth.json
 *.img
 *.iso
 coverage/
+/target/
 
 # OS and editor-local files.
 .DS_Store

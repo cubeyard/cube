@@ -175,8 +175,17 @@ try {
   assert.equal(environment.directory, "/repos/envs/gradle-app/.cube");
   console.log("3 ok: setup and resume run from the reference folder; status names the directory");
 
+  // Edit the borrowed setup through the guest and retry in this same thread.
+  const edit = await backend.sandbox(`cube-${cubeName}`).exec(`printf '\\necho repaired > repaired-environment\\n' >> .cube/setup`, { cwd: "/repos/envs/gradle-app", onData: () => {} });
+  assert.equal(edit.exitCode, 0);
+  await supervisor.retrySetupForUserThread(thread.id);
+  await cubeSettled(registry, cubeName);
+  assert.equal(fs.readFileSync(path.join(cube.workspacePath, "repaired-environment"), "utf8"), "repaired\n");
+  assert.equal(supervisor.environmentForUserThread(thread.id).setup.state, "succeeded");
+  assert.equal(git(envs, "rev-parse", "main"), git(envSeed, "rev-parse", "HEAD"), "local retry does not publish reference changes");
+
   // --- 4. cube.toml is read from there too: services, and [network] allow on the proxy
-  assert.deepEqual(supervisor.listServicesForUserThread(thread.id).map((service) => service.name), ["web"]);
+  assert.deepEqual((await supervisor.listServicesForUserThread(thread.id)).map((service) => service.name), ["web"]);
   const provisionProxy = backend.proxies.at(-1)!;
   assert.deepEqual(provisionProxy.allow, ["registry.npmjs.org", "services.gradle.org", "*.gradle.org"],
     "defaults/operator list first, then the declaration");
@@ -218,7 +227,7 @@ try {
   assert.equal(fs.existsSync(path.join(registry.getCube(plainCube)!.workspacePath, "environment-marker")), false);
   assert.equal(supervisor.environmentForUserThread(plain.id).directory, "/workspace/.cube");
   assert.equal(supervisor.environmentForUserThread(thread.id).directory, "/repos/envs/gradle-app/.cube");
-  assert.deepEqual(supervisor.listServicesForUserThread(plain.id), []);
+  assert.deepEqual(await supervisor.listServicesForUserThread(plain.id), []);
   console.log("6 ok: the environment is snapshotted per thread");
 
   for (const id of [thread.id, plain.id]) await supervisor.removeUserThread(id);

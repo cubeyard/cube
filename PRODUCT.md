@@ -24,10 +24,13 @@ the person on the other end of a broken state has no context from this repo.
 
 ## Product Purpose
 
-Cube is a self-hosted equivalent of Amp Orbs that runs entirely on one VM per
-user. It gives a coding agent a real, isolated machine — full docker-in-docker,
-a persistent workspace, exposable services — while keeping the agent harness,
-credentials, and history outside that machine on the host.
+Cube is a self-hosted equivalent of Amp Orbs. The control plane owns the
+conversation; each thread is permanently bound to one environment on one
+execution node. Local Incus threads provide an isolated machine with
+docker-in-docker and portals. The optional remote **trusted runner** instead
+runs under a dedicated unprivileged Linux account and is explicitly not
+sandboxed. In both profiles, agent harness credentials and history stay on the
+control plane.
 
 Success is that a developer can hand a task to an agent, close the tab, and come
 back to trustworthy work and a legible account of what changed — without ever
@@ -73,6 +76,15 @@ allocates and provisions a backing cube; deleting a thread destroys it. Thread
 states read as thread states — `setting up`, `ready`, `sleeping`, `error` — never
 as container states. The cube-centric API routes that still exist are admin
 plumbing, not product.
+
+**Execution binding and availability.** A thread never changes environment or
+node, including after failure or prolonged disconnection. Conversation access is
+independent of environment contact. Offline environment work is rejected, not
+queued; a confirmed missing environment is an error, not a replacement request.
+Working on another node requires a new thread. The supported remote product is a
+trusted Linux x86_64 runner over authenticated Iroh/N0 relay, with
+bounded durable exec and no filesystem, portal, provisioning or migration RPCs.
+Browser access remains within the existing private boundary.
 
 Confirmed today:
 
@@ -121,8 +133,10 @@ Constraints:
 - No authentication in front of the daemon or portals — the Tailnet is the
   boundary. The UI must not imply a login or account model it does not have.
 - Deliberately out of scope: multiplayer, team platform, clustering, Slack,
-  webhooks from the internet, thread-to-thread delivery, and a general-purpose
-  shell. A later durable delivery/ack protocol must be owned by cubed.
+  webhooks from the internet, unrestricted sub-agent messaging, and a separate
+  general-purpose shell outside the pi TUI. Explicitly authorized, directed
+  thread-to-thread tasks are the narrow shipped exception; see
+  [the task protocol plan](docs/plans/thread-to-thread.md).
 
 Undecided:
 

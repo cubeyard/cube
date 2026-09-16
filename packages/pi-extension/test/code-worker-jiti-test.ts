@@ -30,7 +30,7 @@ const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "cube-jiti-"));
 // Wake goes through cubed; the extension must reach a ready thread before exec.
 const cubed = http.createServer((_req, res) => {
   res.writeHead(200, { "content-type": "application/json" });
-  res.end('{"status":"ready"}');
+  res.end('{"status":"ready","local":true,"nodeId":"node-test"}');
 });
 await new Promise<void>((resolve) => cubed.listen(0, "127.0.0.1", resolve));
 const address = cubed.address();
@@ -38,7 +38,7 @@ assert.ok(address && typeof address !== "string");
 
 const settings = {
   CUBE_NAME: "t-jiti", CUBE_BACKEND: "mock", CUBE_HOST_WORKSPACE: workspace,
-  CUBE_THREAD_ID: "t-jiti", CUBED_URL: `http://127.0.0.1:${address.port}`,
+  CUBE_NODE_ID: "node-test", CUBE_THREAD_ID: "t-jiti", CUBED_URL: `http://127.0.0.1:${address.port}`,
 };
 const saved = Object.fromEntries(Object.keys(settings).map((key) => [key, process.env[key]]));
 try {

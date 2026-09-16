@@ -348,7 +348,7 @@ console.log("6b ok: sentinel spoof-resistance, garbled-retry, oversize guard");
 // ---- 6. config resolution ------------------------------------------------
 
 assert.equal(resolveConfig({}, "/ws"), null);
-const byName = resolveConfig({ CUBE_NAME: "t-abc", CUBE_THREAD_ID: "thread-123" }, "/ws")!;
+const byName = resolveConfig({ CUBE_HOST_WORKSPACE: "/ws", CUBE_NAME: "t-abc", CUBE_NODE_ID: "node-test", CUBE_THREAD_ID: "thread-123" }, "/ws")!;
 assert.equal(byName.backend, "incus", "real Incus remains the default");
 assert.equal(byName.instance, "cube-t-abc");
 assert.equal(byName.name, "t-abc");
@@ -356,6 +356,14 @@ assert.equal(byName.threadId, "thread-123");
 assert.equal(byName.hostWorkspace, "/ws");
 assert.equal(byName.guestWorkspace, "/workspace");
 assert.equal(byName.cubedUrl, "http://127.0.0.1:7777");
+const runner = resolveConfig({ CUBE_BACKEND: "runner", CUBE_RUNNER_WORKSPACE: "/runner", CUBE_NAME: "t-runner",
+  CUBE_NODE_ID: "node-runner", CUBE_THREAD_ID: "thread-runner" }, "/fallback")!;
+assert.equal(runner.backend, "runner");
+assert.equal(runner.hostWorkspace, "/runner");
+const legacyRunner = resolveConfig({ CUBE_BACKEND: "host", CUBE_HOST_WORKSPACE: "/legacy", CUBE_NAME: "t-legacy",
+  CUBE_NODE_ID: "node-legacy", CUBE_THREAD_ID: "thread-legacy" }, "/fallback")!;
+assert.equal(legacyRunner.backend, "runner", "legacy host backend aliases to trusted runner");
+assert.equal(legacyRunner.hostWorkspace, "/legacy");
 const byInstance = resolveConfig({ CUBE_INSTANCE: "cube-xyz", CUBED_URL: "http://10.0.0.1:7777/" }, "/ws")!;
 assert.equal(byInstance.name, "xyz");
 assert.equal(byInstance.cubedUrl, "http://10.0.0.1:7777");
@@ -424,9 +432,13 @@ console.log("6 ok: config resolution");
   let physicalState = "Stopped";
   const server = http.createServer((req, res) => {
     requests.push(`${req.method} ${req.url}`);
+    if (req.url?.endsWith("/environment-access")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      return void res.end('{"local":true,"nodeId":"node-test"}');
+    }
     if (req.method === "GET" && req.url === "/api/cubes/t-managed") {
       res.writeHead(200, { "content-type": "application/json" });
-      return void res.end('{"status":"ready"}');
+      return void res.end('{"status":"ready","local":true,"nodeId":"node-test"}');
     }
     if (req.method === "POST" && req.url === "/api/cubes/t-managed/wake") {
       physicalState = "Running";
@@ -451,13 +463,14 @@ console.log("6 ok: config resolution");
     execSimple: async () => 0,
   } as unknown as IncusClient;
   const managedConfig = (name: string) => resolveConfig({
-    CUBE_NAME: name,
-    CUBE_THREAD_ID: `thread-${name}`,
+    CUBE_HOST_WORKSPACE: "/workspace", CUBE_NAME: name,
+    CUBE_NODE_ID: "node-test", CUBE_THREAD_ID: `thread-${name}`,
     CUBED_URL: `http://127.0.0.1:${address.port}`,
   }, "/workspace")!;
 
   await new Waker(managedConfig("t-managed"), client).ensure();
   assert.deepEqual(requests, [
+    "GET /api/threads/thread-t-managed/environment-access",
     "POST /api/cubes/t-managed/wake",
   ], "even a stale ready row gates tools through the supervisor wake route");
   assert.equal(physicalState, "Running");
@@ -473,7 +486,7 @@ console.log("6 ok: config resolution");
   );
   assert.equal(directStarts, 0, "managed supervisor errors never fall back to direct Incus");
 
-  const malformed = resolveConfig({ CUBE_THREAD_ID: "thread-123", CUBE_INSTANCE: "custom-instance" }, "/workspace")!;
+  const malformed = resolveConfig({ CUBE_HOST_WORKSPACE: "/workspace", CUBE_NODE_ID: "node-test", CUBE_THREAD_ID: "thread-123", CUBE_INSTANCE: "custom-instance" }, "/workspace")!;
   await assert.rejects(new Waker(malformed, client).ensure(), /managed environment requires CUBE_NAME/);
   assert.equal(directStarts, 0, "incomplete managed configuration cannot start Incus directly");
   assert.equal(rawStateReads, 0, "incomplete managed configuration fails before Incus access");
@@ -585,14 +598,14 @@ console.log("6 ok: config resolution");
       return; // simulate a remote mutation whose completion is unknown
     }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end('{"status":"ready"}');
+    res.end('{"status":"ready","local":true,"nodeId":"node-test"}');
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   const settings = {
     CUBE_NAME: "t-code-contract", CUBE_BACKEND: "mock", CUBE_HOST_WORKSPACE: guestWs,
-    CUBE_THREAD_ID: "t-code-contract", CUBED_URL: `http://127.0.0.1:${address.port}`,
+    CUBE_NODE_ID: "node-test", CUBE_THREAD_ID: "t-code-contract", CUBED_URL: `http://127.0.0.1:${address.port}`,
   };
   const saved = Object.fromEntries(Object.keys(settings).map(key => [key, process.env[key]]));
   try {

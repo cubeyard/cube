@@ -1,0 +1,38 @@
+[Unit]
+Description=Cube trusted runner (same-UID execution; not sandboxed)
+Documentation=https://github.com/cubeyard/cube/blob/main/docs/trusted-runner-operations.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/cube-runner/identity/node.key
+ConditionPathExists=/var/lib/cube-runner/state/journal.db
+
+[Service]
+Type=simple
+User=cube-runner
+Group=cube-runner
+UMask=0077
+Environment=CUBE_RUNNER_STOP_POLICY=wait
+RuntimeDirectory=cube-runner
+RuntimeDirectoryMode=0750
+StateDirectory=cube-runner
+StateDirectoryMode=0700
+ExecStart=/opt/cube-runner/current/cube-runner runner-serve --key /var/lib/cube-runner/identity/node.key --state /var/lib/cube-runner/state --network relay --ready-file /run/cube-runner/ready.json --stop-policy ${CUBE_RUNNER_STOP_POLICY}
+ExecReload=/bin/kill -USR1 $MAINPID
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=30
+TimeoutStopSec=75
+KillMode=mixed
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/cube-runner /run/cube-runner
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# systemd 255's RestrictSUIDSGID filter blocks required openat2.
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

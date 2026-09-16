@@ -10,6 +10,31 @@ For codemode limits, structured errors, and isolated regression tests, see
 
 ---
 
+## Local node-boundary tests
+
+See [docs/execution-nodes.md](docs/execution-nodes.md). The offline suite includes
+`packages/server/test/execution-node-test.ts` and
+`packages/pi-extension/test/environment-access-test.ts`. Both use disposable
+state and explicit test doubles; there is no production disconnect toggle.
+They exercise real pi startup and local portal streams, not remote execution.
+Creation request keys now survive restart for the lifetime of their thread.
+The local node identity is persisted in the registry; never copy the database
+to a new host and treat that as moving its environments.
+
+## Iroh / trusted-runner development
+
+The Rust workspace supplies the supported Linux x86_64 trusted-runner daemon; it
+is not an Incus/VM execution node and never becomes a sandbox. Run
+`bash scripts/test-node-transport.sh` after `.cube/setup`; it uses locked offline
+Cargo dependencies and disposable real loopback QUIC/child-process fixtures. It
+also builds the Rust runner binary and runs `scripts/smoke-node-adapter.ts`: the
+control-plane client uses pinned `@number0/iroh` directly inside Node, not a
+subprocess bridge. The ordinary Node suite tests that adapter without Rust.
+See [`packages/node-transport/RUNNER.md`](packages/node-transport/RUNNER.md) for the
+wire/CLI contract and [the production runbook](docs/trusted-runner-operations.md)
+for packaging, systemd, lifecycle, recovery and acceptance. Never run the runner
+under the control-plane account or point crash tests at a shared runner.
+
 ## Backends (`CUBED_BACKEND`)
 
 cubed talks to a swappable `CubeBackend` (`packages/sandbox/src/cube-backend.ts`).
@@ -88,7 +113,9 @@ A repository that carries no `.cube` can borrow one: add a reference
 repository to the project and set `"environment": "<checkout>/<folder>"`
 (also a field on the project page). The `.cube` in that folder then supplies
 setup, resume and `cube.toml`; it runs from `/repos/<checkout>/…` with
-`/workspace` as cwd and is read-only in the thread. The check verifies the
+`/workspace` as cwd. The reference checkout is writable: edit the declared
+folder, then retry setup to test it locally without publication. Publish
+through the reference repository ID, separately from the primary. The check verifies the
 folder and parses its `cube.toml` at the pinned commit, so a typo is a project
 error, not a thread that fails minutes into setup. Creation revalidates the
 folder and TOML against the newly fetched reference commit too. `[network] allow` in any

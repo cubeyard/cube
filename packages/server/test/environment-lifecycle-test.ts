@@ -105,6 +105,16 @@ try {
   await Effect.runPromise(Effect.all([a, b].map((thread, index) => Effect.tryPromise(() =>
     supervisor.terminalPlan(thread.id, (_text, progress) => { if (progress) streams[index]!.push(progress); }),
   )), { concurrency: 2 }));
+  assert.equal(registry.getCube(an)!.status, "creating", "conversation starts without waiting for setup");
+  await Effect.runPromise(Effect.all([a, b].map((thread, index) => Effect.gen(function*() {
+    for (let n = 0; n < 500; n++) {
+      const progress = supervisor.terminalProgressForUserThread(thread.id);
+      if (progress) streams[index]!.push(progress);
+      if (registry.getCube(supervisor.resolveUserThread(thread.id).cubeName)!.status !== "creating") return;
+      yield* Effect.sleep("20 millis");
+    }
+    throw new Error("environment progress timed out");
+  })), { concurrency: 2 }));
   for (const snapshots of streams) {
     assert.ok(snapshots.some((p) => p.phase.includes("/setup") && p.log.includes("setup-stderr")), "live output before setup finishes");
     assert.ok(snapshots.some((p) => p.phase.startsWith("preparing a reusable environment:") && p.log.includes("setup-stderr")), "each waiter sees the shared builder's output");
