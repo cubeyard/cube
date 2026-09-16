@@ -1,5 +1,5 @@
-import { AdmittedHostNode } from "./admitted-host-node.ts";
-import type { HostExecSpec } from "./iroh-node.ts";
+import { AdmittedTrustedRunner } from "./admitted-trusted-runner.ts";
+import type { RunnerExecSpec } from "./iroh-node.ts";
 import { fileURLToPath } from "node:url";
 import { ExecutionNodes, LocalExecutionNodeClient, ExecutionNodeError, isNodeTransportFailure, type ExecutionNodeClient } from "./execution-node.ts";
 /**
@@ -353,7 +353,7 @@ export class CubeSupervisor {
   private closing = false;
 
   constructor(registry: Registry, backend: CubeBackend, config: SupervisorConfig, nodes?: ExecutionNodeClient[]) {
-    this.nodes = new ExecutionNodes(registry, nodes ?? [new LocalExecutionNodeClient(registry, backend), ...registry.hostNodeAdmissions().map(row => new AdmittedHostNode(registry, row))]);
+    this.nodes = new ExecutionNodes(registry, nodes ?? [new LocalExecutionNodeClient(registry, backend), ...registry.trustedRunnerAdmissions().map(row => new AdmittedTrustedRunner(registry, row))]);
     this.registry = registry;
     this.backend = backend;
     this.config = config;
@@ -411,11 +411,11 @@ export class CubeSupervisor {
 
   /** Fixed thread-scoped RPC; requests cannot select a node, key, path or env.
    * Preparation returns the durable operation ID before any dispatch. */
-  async hostExecForUserThread(id: string, value: unknown, signal?: AbortSignal): Promise<unknown> {
+  async runnerExecForUserThread(id: string, value: unknown, signal?: AbortSignal): Promise<unknown> {
     const { cubeName, threadId } = this.resolveUserThread(id);
     const cube = this.requireCube(cubeName);
     const client = this.nodes.forEnvironment(cube.id);
-    if (!(client instanceof AdmittedHostNode)) throw new ExecutionNodeError("OPERATION_UNSUPPORTED");
+    if (!(client instanceof AdmittedTrustedRunner)) throw new ExecutionNodeError("OPERATION_UNSUPPORTED");
     if (client.binding.threadId !== threadId || client.binding.environmentId !== cube.id) throw new ExecutionNodeError("WRONG_NODE");
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new ExecutionNodeError("INVALID_REQUEST");
     const row = value as Record<string, unknown>;
@@ -426,7 +426,7 @@ export class CubeSupervisor {
     this.registry.touchCube(cubeName);
     switch (row.action) {
       case "status": return client.status(cube.id);
-      case "prepare": return client.prepareExec(cube.id, row.spec as HostExecSpec, signal);
+      case "prepare": return client.prepareExec(cube.id, row.spec as RunnerExecSpec, signal);
       case "submit": case "operation":
         if (typeof row.operationId !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(row.operationId)) throw new ExecutionNodeError("INVALID_REQUEST");
         return row.action === "submit" ? client.submitExec(cube.id, row.operationId, signal) : client.operation(cube.id, row.operationId, signal);
@@ -2437,11 +2437,14 @@ export class CubeSupervisor {
         // The extension is a separate process and cannot infer/share cubed's
         // in-memory MockBackend. Tell it which execution adapter to create;
         // real Incus remains the default and fail-closed path.
-        CUBE_BACKEND: this.registry.nodeForCube(cube.id) === this.registry.localNodeId ? this.backend.kind : "host",
+        CUBE_BACKEND: this.registry.nodeForCube(cube.id) === this.registry.localNodeId ? this.backend.kind : "runner",
         CUBE_NAME: cube.name,
         CUBE_THREAD_ID: id,
         CUBE_NODE_ID: this.registry.nodeForCube(cube.id),
         CUBE_AGENT_CWD: runtimeDir,
+        CUBE_RUNNER_WORKSPACE: cube.workspacePath,
+        // Remove after every supported extension predates neither runner env
+        // names nor /runner-exec. It contains no identity or secret.
         CUBE_HOST_WORKSPACE: cube.workspacePath,
         CUBE_GUEST_WORKSPACE: "/workspace",
         CUBED_URL: `http://127.0.0.1:${this.config.publicPort}`,

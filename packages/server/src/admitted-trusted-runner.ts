@@ -3,17 +3,17 @@
 import type { Duplex } from "node:stream";
 import type { Registry } from "./registry.ts";
 import { ExecutionNodeError, type ExecutionNodeClient, type NodeContact } from "./execution-node-contract.ts";
-import type { HostExecSpec, IrohExecutionNodeClient } from "./iroh-node.ts";
+import type { RunnerExecSpec, IrohExecutionNodeClient } from "./iroh-node.ts";
 
-export class AdmittedHostNode implements ExecutionNodeClient {
+export class AdmittedTrustedRunner implements ExecutionNodeClient {
   readonly locality = "remote" as const;
   readonly nodeId: string;
   readonly binding: Readonly<{ nodeId: string; environmentId: number; threadId: string }>;
   private client?: IrohExecutionNodeClient;
   private failed = false;
   private readonly registry: Registry;
-  private readonly admission: ReturnType<Registry["hostNodeAdmissions"]>[number];
-  constructor(registry: Registry, admission: ReturnType<Registry["hostNodeAdmissions"]>[number]) {
+  private readonly admission: ReturnType<Registry["trustedRunnerAdmissions"]>[number];
+  constructor(registry: Registry, admission: ReturnType<Registry["trustedRunnerAdmissions"]>[number]) {
     this.registry = registry; this.admission = { ...admission };
     this.nodeId = admission.nodeId;
     this.binding = Object.freeze({ nodeId: admission.nodeId, environmentId: admission.environmentId, threadId: admission.threadId });
@@ -42,7 +42,7 @@ export class AdmittedHostNode implements ExecutionNodeClient {
   async wake(_id: number): Promise<void> { throw new ExecutionNodeError("OPERATION_UNSUPPORTED"); }
   async sleep(_id: number): Promise<void> { throw new ExecutionNodeError("OPERATION_UNSUPPORTED"); }
   async openPortal(_id: number, _port: number): Promise<Duplex> { throw new ExecutionNodeError("OPERATION_UNSUPPORTED"); }
-  async prepareExec(id: number, spec: HostExecSpec, signal?: AbortSignal) { return (await this.load()).prepareExec(id, spec, signal); }
+  async prepareExec(id: number, spec: RunnerExecSpec, signal?: AbortSignal) { return (await this.load()).prepareExec(id, spec, signal); }
   async submitExec(id: number, operationId: string, signal?: AbortSignal) { return (await this.load()).submitExec(id, operationId, signal); }
   async operation(id: number, operationId: string, signal?: AbortSignal) { return (await this.load()).operation(id, operationId, signal); }
 }

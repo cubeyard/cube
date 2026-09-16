@@ -21,19 +21,19 @@ Creation request keys now survive restart for the lifetime of their thread.
 The local node identity is persisted in the registry; never copy the database
 to a new host and treat that as moving its environments.
 
-## Iroh / trusted-host development
+## Iroh / trusted-runner development
 
-The Rust workspace supplies the supported Linux x86_64 trusted-host daemon; it
+The Rust workspace supplies the supported Linux x86_64 trusted-runner daemon; it
 is not an Incus/VM execution node and never becomes a sandbox. Run
 `bash scripts/test-node-transport.sh` after `.cube/setup`; it uses locked offline
 Cargo dependencies and disposable real loopback QUIC/child-process fixtures. It
-also builds the Rust host binary and runs `scripts/smoke-node-adapter.ts`: the
+also builds the Rust runner binary and runs `scripts/smoke-node-adapter.ts`: the
 control-plane client uses pinned `@number0/iroh` directly inside Node, not a
 subprocess bridge. The ordinary Node suite tests that adapter without Rust.
-See [`packages/node-transport/HOST.md`](packages/node-transport/HOST.md) for the
-wire/CLI contract and [the production runbook](docs/trusted-host-operations.md)
-for packaging, systemd, lifecycle, recovery and acceptance. Never run the host
-profile under the control-plane account or point crash tests at a shared node.
+See [`packages/node-transport/RUNNER.md`](packages/node-transport/RUNNER.md) for the
+wire/CLI contract and [the production runbook](docs/trusted-runner-operations.md)
+for packaging, systemd, lifecycle, recovery and acceptance. Never run the runner
+under the control-plane account or point crash tests at a shared runner.
 
 ## Backends (`CUBED_BACKEND`)
 

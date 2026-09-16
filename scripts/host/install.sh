@@ -2,6 +2,7 @@
 # Install the trusted-host daemon boundary. Enrollment is intentionally separate.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
+note_deprecated
 require_platform
 [ "$#" -eq 1 ] || fail 'usage: install.sh /absolute/path/to/cube-node-transport'
 binary="$1"

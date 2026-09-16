@@ -2,6 +2,7 @@
 # Create a fresh immutable node identity and binding under the dedicated account.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
+note_deprecated
 require_platform
 [ "$#" -eq 4 ] || fail 'usage: initialize.sh CONTROL_PEER NODE_ID THREAD_ID ENVIRONMENT_ID'
 control_peer="$1"; node_id="$2"; thread_id="$3"; environment_id="$4"

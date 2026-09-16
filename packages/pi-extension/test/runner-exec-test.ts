@@ -2,7 +2,7 @@
  * HTTP boundary and preserve inspection IDs through codemode's error envelope. */
 import assert from "node:assert/strict";
 import { createThreadRequest } from "../src/index.ts";
-import { HostExecSandbox, unsupportedHostFiles } from "../src/host-exec.ts";
+import { TrustedRunnerSandbox, unsupportedRunnerFiles } from "../src/runner-exec.ts";
 import { execCode } from "../src/code-io.ts";
 import { encodeError } from "../src/code-errors.ts";
 import { createCodeCapability } from "../src/code-capabilities.ts";
@@ -10,7 +10,7 @@ import { createCodeCapability } from "../src/code-capabilities.ts";
 const operationId = "op-saved-before-dispatch";
 let calls: Record<string, unknown>[] = [];
 let mode = "ok";
-const host = new HostExecSandbox(async body => {
+const runner = new TrustedRunnerSandbox(async body => {
   calls.push(body);
   if (body.action === "prepare") {
     assert.deepEqual(body.spec, { command: "test", guestCwd: "sub", timeoutMs: 60000, outputLimit: 8192 });
@@ -30,11 +30,11 @@ const host = new HostExecSandbox(async body => {
 });
 let output = "";
 const options = { cwd: "/workspace/sub", onData: (chunk: Buffer) => { output += chunk; } };
-assert.deepEqual(await host.exec("test", options), { exitCode: 0, operationId });
+assert.deepEqual(await runner.exec("test", options), { exitCode: 0, operationId });
 assert.equal(output, "ok");
 for (const failure of ["prepare-loss", "submit-loss", "poll-loss", "unknown", "interrupted", "rejected", "failed"]) {
   calls = []; mode = failure;
-  await assert.rejects(execCode((command, cwd, options) => host.exec(command, { cwd, ...options }),
+  await assert.rejects(execCode((command, cwd, options) => runner.exec(command, { cwd, ...options }),
     { command: "test", cwd: options.cwd, timeoutMs: 2000 }, "/workspace", new AbortController().signal), error => {
       const encoded = encodeError(error);
       const unknown = ["submit-loss", "poll-loss", "unknown", "interrupted"].includes(failure);
@@ -45,13 +45,13 @@ for (const failure of ["prepare-loss", "submit-loss", "poll-loss", "unknown", "i
   assert.equal(calls.filter(row => row.action === "submit").length, failure === "prepare-loss" ? 0 : 1);
 }
 calls = []; mode = "ok";
-for (const cwd of ["/etc", "/workspace/../../etc", "/workspace-other"]) await assert.rejects(host.exec("test", { ...options, cwd }), { code: "OPERATION_UNSUPPORTED" });
-await assert.rejects(host.exec("test", { ...options, timeout: 61 }), { code: "INVALID_REQUEST" });
-await assert.rejects(host.operation("../escape"), { code: "INVALID_REQUEST" });
-await assert.rejects(unsupportedHostFiles(), { code: "OPERATION_UNSUPPORTED" });
+for (const cwd of ["/etc", "/workspace/../../etc", "/workspace-other"]) await assert.rejects(runner.exec("test", { ...options, cwd }), { code: "OPERATION_UNSUPPORTED" });
+await assert.rejects(runner.exec("test", { ...options, timeout: 61 }), { code: "INVALID_REQUEST" });
+await assert.rejects(runner.operation("../escape"), { code: "INVALID_REQUEST" });
+await assert.rejects(unsupportedRunnerFiles(), { code: "OPERATION_UNSUPPORTED" });
 assert.equal(calls.length, 0);
 mode = "poll-loss";
-await assert.rejects(host.operation(operationId), { code: "NODE_UNAVAILABLE" });
+await assert.rejects(runner.operation(operationId), { code: "NODE_UNAVAILABLE" });
 // The allowlist cannot smuggle a destination or thread into the new capability.
 const capability = createCodeCapability(
   { operation: async (id: string) => ({ id }) } as any,
@@ -60,13 +60,13 @@ const capability = createCodeCapability(
 );
 await assert.rejects(capability("operations.get", { operationId, nodeId: "other" }, new AbortController().signal), /unknown/);
 assert.deepEqual(await capability("operations.get", { operationId }, new AbortController().signal), { id: operationId });
-console.log("ok: host HTTP failure cuts, no replay/fallback, read-only recovery and operation IDs across codemode");
+console.log("ok: runner HTTP failure cuts, no replay/fallback, read-only recovery and operation IDs across codemode");
 
 const fetchBefore = globalThis.fetch;
 try {
   globalThis.fetch = async () => new Response(JSON.stringify({ code: "COMPLETION_UNKNOWN", completionUnknown: true,
     operationId, error: "inspect saved operation" }), { status: 503 });
-  await assert.rejects(createThreadRequest({ threadId: "test", cubedUrl: "http://unused.invalid" })("/host-exec", {
+  await assert.rejects(createThreadRequest({ threadId: "test", cubedUrl: "http://unused.invalid" })("/runner-exec", {
     method: "POST", body: { action: "submit", operationId },
   }), error => encodeError(error).operationId === operationId && encodeError(error).completionUnknown === true);
 } finally { globalThis.fetch = fetchBefore; }

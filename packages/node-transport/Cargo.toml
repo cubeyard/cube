@@ -1,10 +1,17 @@
 [package]
-name = "cube-node-transport"
-version = "0.1.1"
+name = "cube-runner"
+version = "0.2.0"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[lib]
+name = "cube_node_transport"
+
+[[bin]]
+name = "cube-runner"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

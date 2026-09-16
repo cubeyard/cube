@@ -1,5 +1,5 @@
-import { smokeHostRouting } from "./smoke-host-routing.ts";
-/** Real TypeScript -> @number0/iroh (in process) -> Rust host acceptance.
+import { smokeRunnerRouting } from "./smoke-runner-routing.ts";
+/** Real TypeScript -> @number0/iroh (in process) -> Rust runner acceptance.
  * Disposable keys, journals, workspaces and processes only. No cubed/Incus/model
  * instance is contacted. Loopback/direct stay offline; CUBE_TEST_IROH_RELAY=1
  * adds an external N0 discovery/relay acceptance pass. */
@@ -9,10 +9,10 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { IrohExecutionNodeClient, IrohNodeError, type HostExecSpec } from "../packages/server/src/iroh-node.ts";
+import { IrohExecutionNodeClient, IrohNodeError, type RunnerExecSpec } from "../packages/server/src/iroh-node.ts";
 
-const binary = path.resolve(process.argv[2] ?? "target/debug/cube-node-transport");
-assert.ok(fs.existsSync(binary), "build cube-node-transport first; no simulated success or automatic cargo build");
+const binary = path.resolve(process.argv[2] ?? "target/debug/cube-runner");
+assert.ok(fs.existsSync(binary), "build cube-runner first; no simulated success or automatic cargo build");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-real-node-adapter-"));
 const children = new Set<ChildProcess>();
 const cli = (args: string[], input?: string): string => execFileSync(binary, args, { encoding: "utf8", input, timeout: 30000, maxBuffer: 65537, env: { PATH: "/usr/bin:/bin" } });
@@ -26,7 +26,7 @@ async function stop(child: ChildProcess) {
   children.delete(child);
 }
 async function start(key: string, state: string, network: string, listen = "127.0.0.1:0"): Promise<{ child: ChildProcess; address?: string; relayUrl?: string }> {
-  const args = ["host-serve", "--key", key, "--state", state, "--network", network];
+  const args = ["runner-serve", "--key", key, "--state", state, "--network", network];
   if (network !== "relay") args.push("--listen", listen);
   const child = spawn(binary, args, { env: { PATH: "/usr/bin:/bin" }, stdio: ["ignore", "pipe", "pipe"] });
   children.add(child);
@@ -62,7 +62,7 @@ try {
     const serverPeer: string = JSON.parse(cli(["keygen", "--key", key])).peerId;
     const controlPeer: string = JSON.parse(cli(["keygen", "--key", controlKey])).peerId;
     const state = path.join(directory, "state");
-    cli(["host-init", "--key", key, "--state", state, "--workspace", workspace, "--allow-peer", controlPeer, "--node-id", "node-test", "--thread-id", "thread-test", "--env", "17"]);
+    cli(["runner-init", "--key", key, "--state", state, "--workspace", workspace, "--allow-peer", controlPeer, "--node-id", "node-test", "--thread-id", "thread-test", "--env", "17"]);
     let daemon = await start(key, state, network);
     const config = { version: 1, binding: { nodeId: "node-test", threadId: "thread-test", environmentId: 17 }, controlKey, serverPeer,
       ...(network === "relay" ? {} : { address: daemon.address }), network, intentDirectory: intents };
@@ -75,7 +75,7 @@ try {
     await client.check(17);
     assert.equal(client.contact, "available");
     assert.equal((await client.status(17)).status, "Running");
-    const spec: HostExecSpec = { command: "printf once >> count; printf hello", guestCwd: ".", timeoutMs: 1000, outputLimit: 100 };
+    const spec: RunnerExecSpec = { command: "printf once >> count; printf hello", guestCwd: ".", timeoutMs: 1000, outputLimit: 100 };
     const result = await client.exec(17, spec);
     assert.equal(Buffer.from(result.output).toString(), "hello");
     assert.equal(result.exitCode, 0);
@@ -86,7 +86,7 @@ try {
     await assert.rejects(client.submitExec(17, bad.operationId), code("INVALID_REQUEST"));
     assert.equal((await client.operation(17, bad.operationId)).state, "Unknown");
 
-    // Aborting a caller after the actual host command starts cannot cancel or
+    // Aborting a caller after the actual runner command starts cannot cancel or
     // replay its side effects. The saved operation remains inspectable.
     const controller = new AbortController();
     const startedFile = path.join(workspace, "cancel-count");
@@ -125,7 +125,7 @@ try {
     await assert.rejects(client.status(17), code("CONFLICT"));
     assert.equal(observations.length, 1);
     fs.writeFileSync(configPath, original);
-    await assert.rejects(client.prepareExec(17, { ...spec, address: "203.0.113.1:443" } as HostExecSpec), code("INVALID_REQUEST"));
+    await assert.rejects(client.prepareExec(17, { ...spec, address: "203.0.113.1:443" } as RunnerExecSpec), code("INVALID_REQUEST"));
     const restartedClient = new IrohExecutionNodeClient({ configPath });
     await assert.rejects(restartedClient.submitExec(17, result.operationId), code("COMPLETION_UNKNOWN", true));
     assert.equal((await restartedClient.operation(17, result.operationId)).state, "Succeeded");
@@ -151,7 +151,7 @@ try {
     assert.equal((await client.operation(17, result.operationId)).state, "Succeeded");
     assert.equal((await client.status(17)).status, "Running");
     assert.equal(fs.readFileSync(path.join(workspace, "count"), "utf8"), "once");
-    await smokeHostRouting(directory, configPath, workspace, {
+    await smokeRunnerRouting(directory, configPath, workspace, {
       disconnect: () => stop(daemon.child),
       reconnect: async () => { daemon = await start(key, state, network, daemon.address); },
     }, network);

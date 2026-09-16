@@ -2,9 +2,9 @@
 //! Only disposable workspaces, node keys and child processes owned by the test.
 use cube_node_transport::{
     DeliveryError, Limits, Request, Response, bind_loopback, call, encode,
-    host::{Binding, ExecSpec, Host, Operation},
     intent::Intent,
     read_frame,
+    runner::{Binding, ExecSpec, Operation, Runner},
 };
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 use std::{
@@ -22,7 +22,7 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-const BIN: &str = env!("CARGO_BIN_EXE_cube-node-transport");
+const BIN: &str = env!("CARGO_BIN_EXE_cube-runner");
 const BUDGET: Duration = Duration::from_secs(12);
 // These cases fork from one test process. A sibling's child can transiently
 // inherit another fixture's flock before exec closes CLOEXEC descriptors.
@@ -58,7 +58,7 @@ impl Fixture {
         let control_path = root.path().join("control.key");
         key_file(&key_path, &key);
         key_file(&control_path, &control);
-        Host::initialize(
+        Runner::initialize(
             &state,
             Binding {
                 thread_id: "thread-test".into(),
@@ -80,8 +80,8 @@ impl Fixture {
             control,
         }
     }
-    fn open(&self) -> Arc<Host> {
-        Host::open(&self.state, self.key.public()).unwrap()
+    fn open(&self) -> Arc<Runner> {
+        Runner::open(&self.state, self.key.public()).unwrap()
     }
     async fn client(&self) -> Endpoint {
         bind_loopback(self.control.clone(), "127.0.0.1:0".parse().unwrap())
@@ -91,7 +91,7 @@ impl Fixture {
     async fn start(&self) -> (Child, EndpointAddr, String) {
         let mut child = Command::new(BIN)
             .args([
-                "host-serve",
+                "runner-serve",
                 "--key",
                 self.key_file.to_str().unwrap(),
                 "--state",
@@ -271,7 +271,7 @@ async fn real_exec_dedup_capacity_binding_and_restart() {
     );
     // A second process cannot own, recover or alter the active journal.
     let duplicate = cli(&[
-        "host-serve",
+        "runner-serve",
         "--key",
         fixture.key_file.to_str().unwrap(),
         "--state",
@@ -463,7 +463,7 @@ async fn lost_accepted_response_does_not_cancel_work() {
                     minimum_protocol_version: 1,
                     software_version: env!("CARGO_PKG_VERSION").into(),
                     binding: Some(host.installation().binding.clone()),
-                    profiles: vec!["host".into()],
+                    profiles: vec!["runner".into(), "host".into()],
                     capabilities: vec!["exec.start".into()],
                     limits: Limits {
                         max_frame_bytes: 65536,
@@ -607,12 +607,12 @@ async fn journal_immutability_no_identity_replacement_and_accepted_cutpoint() {
     let _case = CASE.lock().await;
     let fixture = Fixture::new();
     let host = fixture.open();
-    assert!(Host::open(&fixture.state, fixture.key.public()).is_err());
+    assert!(Runner::open(&fixture.state, fixture.key.public()).is_err());
     let installation = host.installation().clone();
     drop(host);
-    assert!(Host::open(&fixture.state, SecretKey::generate().public()).is_err());
+    assert!(Runner::open(&fixture.state, SecretKey::generate().public()).is_err());
     assert!(
-        Host::initialize(
+        Runner::initialize(
             &fixture.state,
             installation.binding.clone(),
             fixture.key.public(),
@@ -698,7 +698,7 @@ async fn journal_immutability_no_identity_replacement_and_accepted_cutpoint() {
     assert!(!fixture.workspace.join("must-not-run").exists());
     drop(host);
     fs::remove_file(fixture.state.join("journal.db")).unwrap();
-    assert!(Host::open(&fixture.state, fixture.key.public()).is_err());
+    assert!(Runner::open(&fixture.state, fixture.key.public()).is_err());
     assert!(!fixture.state.join("journal.db").exists());
 }
 

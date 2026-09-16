@@ -356,6 +356,14 @@ assert.equal(byName.threadId, "thread-123");
 assert.equal(byName.hostWorkspace, "/ws");
 assert.equal(byName.guestWorkspace, "/workspace");
 assert.equal(byName.cubedUrl, "http://127.0.0.1:7777");
+const runner = resolveConfig({ CUBE_BACKEND: "runner", CUBE_RUNNER_WORKSPACE: "/runner", CUBE_NAME: "t-runner",
+  CUBE_NODE_ID: "node-runner", CUBE_THREAD_ID: "thread-runner" }, "/fallback")!;
+assert.equal(runner.backend, "runner");
+assert.equal(runner.hostWorkspace, "/runner");
+const legacyRunner = resolveConfig({ CUBE_BACKEND: "host", CUBE_HOST_WORKSPACE: "/legacy", CUBE_NAME: "t-legacy",
+  CUBE_NODE_ID: "node-legacy", CUBE_THREAD_ID: "thread-legacy" }, "/fallback")!;
+assert.equal(legacyRunner.backend, "runner", "legacy host backend aliases to trusted runner");
+assert.equal(legacyRunner.hostWorkspace, "/legacy");
 const byInstance = resolveConfig({ CUBE_INSTANCE: "cube-xyz", CUBED_URL: "http://10.0.0.1:7777/" }, "/ws")!;
 assert.equal(byInstance.name, "xyz");
 assert.equal(byInstance.cubedUrl, "http://10.0.0.1:7777");

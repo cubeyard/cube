@@ -11,7 +11,7 @@ use tokio::{
     time::timeout,
 };
 
-const BIN: &str = env!("CARGO_BIN_EXE_cube-node-transport");
+const BIN: &str = env!("CARGO_BIN_EXE_cube-runner");
 const DEADLINE: Duration = Duration::from_secs(12);
 
 async fn run(args: &[&str]) -> std::process::Output {

@@ -1,4 +1,4 @@
-//! Opt-in, trusted Linux host execution. This is not an isolation boundary.
+//! Opt-in, trusted Linux runner execution. This is not an isolation boundary.
 //! The daemon must have exclusive ownership of its journal; never replay on boot.
 use std::{
     fs::{self, File, OpenOptions},
@@ -110,7 +110,7 @@ pub enum Operation {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct HostStatus {
+pub struct RunnerStatus {
     pub lifecycle: String,
     pub active: bool,
     pub operation_records: u64,
@@ -119,15 +119,15 @@ pub struct HostStatus {
 }
 
 #[derive(Debug)]
-pub struct HostError(pub &'static str);
-impl std::fmt::Display for HostError {
+pub struct RunnerError(pub &'static str);
+impl std::fmt::Display for RunnerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.0)
     }
 }
-impl std::error::Error for HostError {}
+impl std::error::Error for RunnerError {}
 fn reject<T>(code: &'static str) -> Result<T> {
-    Err(HostError(code).into())
+    Err(RunnerError(code).into())
 }
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
@@ -162,7 +162,7 @@ struct Journal {
     active: bool,
 }
 
-pub struct Host {
+pub struct Runner {
     installation: Installation,
     recovery_quarantine: PathBuf,
     journal: Mutex<Journal>,
@@ -173,7 +173,7 @@ pub struct Host {
     idle: Notify,
 }
 
-impl Host {
+impl Runner {
     pub fn installation(&self) -> &Installation {
         &self.installation
     }
@@ -189,11 +189,11 @@ impl Host {
     ) -> Result<()> {
         ensure!(
             cfg!(target_os = "linux"),
-            "host execution currently requires Linux"
+            "runner execution currently requires Linux"
         );
         ensure!(
             unsafe { libc::geteuid() } != 0,
-            "refusing root host execution"
+            "refusing root runner execution"
         );
         crate::validate_node_id(&binding.node_id)?;
         ensure!(
@@ -258,7 +258,7 @@ impl Host {
     pub fn open(state: &Path, peer: EndpointId) -> Result<Arc<Self>> {
         ensure!(
             cfg!(target_os = "linux") && unsafe { libc::geteuid() } != 0,
-            "host execution requires non-root Linux"
+            "runner execution requires non-root Linux"
         );
         let meta = fs::symlink_metadata(state)?;
         ensure!(
@@ -330,10 +330,10 @@ impl Host {
         }))
     }
 
-    pub fn status(&self) -> Result<HostStatus> {
+    pub fn status(&self) -> Result<RunnerStatus> {
         let workspace_error = self.cwd(".").err().map(|error| {
             error
-                .downcast_ref::<HostError>()
+                .downcast_ref::<RunnerError>()
                 .map_or("IO_ERROR", |error| error.0)
                 .to_owned()
         });
@@ -346,7 +346,7 @@ impl Host {
             .db
             .query_row("SELECT COUNT(*) FROM operation", [], |r| r.get::<_, i64>(0))?
             as u64;
-        Ok(HostStatus {
+        Ok(RunnerStatus {
             lifecycle: if self.recovery_quarantine.exists() {
                 "recoveryRequired"
             } else if self.faulted.load(Ordering::SeqCst) {
@@ -377,7 +377,7 @@ impl Host {
     pub fn resume(&self) -> Result<()> {
         ensure!(
             !self.recovery_quarantine.exists() && !self.faulted.load(Ordering::SeqCst),
-            "host requires offline operator recovery"
+            "runner requires offline operator recovery"
         );
         self.cancel_active.store(false, Ordering::SeqCst);
         self.accepting.store(true, Ordering::SeqCst);
@@ -402,7 +402,7 @@ impl Host {
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
             .open(&self.installation.workspace)
             .map_err(|error| {
-                HostError(match error.raw_os_error() {
+                RunnerError(match error.raw_os_error() {
                     Some(libc::ENOENT | libc::ELOOP | libc::ENOTDIR) => "ENVIRONMENT_MISSING",
                     _ => "IO_ERROR",
                 })
@@ -427,7 +427,7 @@ impl Host {
             )
             .map_err(|error| {
                 use rustix::io::Errno;
-                HostError(match error {
+                RunnerError(match error {
                     Errno::NOENT | Errno::NOTDIR | Errno::LOOP | Errno::XDEV => "INVALID_REQUEST",
                     Errno::NOSYS | Errno::INVAL => "UNSUPPORTED",
                     _ => "IO_ERROR",
@@ -444,7 +444,7 @@ impl Host {
 
     pub fn get(&self, env: u64, id: &str) -> Result<Operation> {
         self.check_env(env)?;
-        ensure!(valid_id(id), HostError("INVALID_REQUEST"));
+        ensure!(valid_id(id), RunnerError("INVALID_REQUEST"));
         let journal = self.journal.lock().unwrap();
         let state: Option<String> = journal
             .db
@@ -458,10 +458,10 @@ impl Host {
     }
 
     /// Commit before spawning, without awaiting network IO. Work belongs to the
-    /// host, never to a connection task. Capacity is rejection, not queuing.
+    /// runner, never to a connection task. Capacity is rejection, not queuing.
     pub fn start(self: &Arc<Self>, env: u64, id: &str, spec: ExecSpec) -> Result<()> {
         self.check_env(env)?;
-        ensure!(valid_id(id), HostError("INVALID_REQUEST"));
+        ensure!(valid_id(id), RunnerError("INVALID_REQUEST"));
         // A typed, fixed-field serialization canonicalizes JSON field order.
         let request = serde_json::to_string(&("exec.start", &self.installation.binding, &spec))?;
         let hash = Sha256::digest(request.as_bytes())
@@ -483,7 +483,8 @@ impl Host {
             }
             return Ok(()); // Including Interrupted: never run it again.
         }
-        spec.validate().map_err(|_| HostError("INVALID_REQUEST"))?;
+        spec.validate()
+            .map_err(|_| RunnerError("INVALID_REQUEST"))?;
         if self.faulted.load(Ordering::SeqCst) {
             return reject("IO_ERROR");
         }
@@ -511,16 +512,16 @@ impl Host {
             ],
         )?;
         journal.active = true;
-        let host = Arc::clone(self);
+        let runner = Arc::clone(self);
         let id = id.to_owned();
         tokio::spawn(async move {
-            let outcome = host.run(&id, &spec, cwd).await;
-            let mut journal = host.journal.lock().unwrap();
+            let outcome = runner.run(&id, &spec, cwd).await;
+            let mut journal = runner.journal.lock().unwrap();
             if let Err(error) = outcome {
                 // A storage/runner failure must stop further admission. Do not
                 // claim that an executed mutation failed without side effects.
-                host.accepting.store(false, Ordering::SeqCst);
-                host.faulted.store(true, Ordering::SeqCst);
+                runner.accepting.store(false, Ordering::SeqCst);
+                runner.faulted.store(true, Ordering::SeqCst);
                 let state = Operation::Failed {
                     error: "IO_ERROR".into(),
                     completion_unknown: true,
@@ -541,7 +542,7 @@ impl Host {
                 );
             }
             journal.active = false;
-            host.idle.notify_one();
+            runner.idle.notify_one();
         });
         Ok(())
     }

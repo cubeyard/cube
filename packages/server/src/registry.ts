@@ -981,9 +981,9 @@ export class Registry {
   }
 
   /** Operator-only, create-only enrollment. No public route calls this method.
-   * The host is already initialized with these identities. Existing resources
+   * The runner is already initialized with these identities. Existing resources
    * can never be adopted, moved or replaced, even when offline. */
-  enrollHostThread(input: {
+  enrollTrustedRunner(input: {
     nodeId: string; environmentId: number; threadId: string;
     configPath: string; configHash: string; projectId: string;
     name: string; workspacePath: string; piSessionPath: string;
@@ -992,22 +992,24 @@ export class Registry {
       || !/^[a-zA-Z0-9_-]{1,128}$/.test(input.threadId)
       || !Number.isSafeInteger(input.environmentId) || input.environmentId < 1
       || !path.isAbsolute(input.configPath) || !/^[0-9a-f]{64}$/.test(input.configHash)
-      || !path.isAbsolute(input.workspacePath) || !path.isAbsolute(input.piSessionPath)) throw new Error("invalid host admission");
+      || !path.isAbsolute(input.workspacePath) || !path.isAbsolute(input.piSessionPath)) throw new Error("invalid trusted runner admission");
     return this.transaction(() => {
-      if (this.getCubeById(input.environmentId) || this.getThread(input.threadId)) throw new Error("host enrollment requires fresh identities");
+      if (this.getCubeById(input.environmentId) || this.getThread(input.threadId)) throw new Error("runner enrollment requires fresh identities");
       this.db.prepare("INSERT INTO execution_node(id, local) VALUES (?, 0)").run(input.nodeId);
+      // Storage name retained through the compatibility window so a rollback
+      // to cube-host 0.1.1 can read the immutable admission unchanged.
       this.db.prepare("INSERT INTO host_node_admission VALUES (?, ?, ?, ?, ?)")
         .run(input.nodeId, input.environmentId, input.threadId, input.configPath, input.configHash);
-      const cube = this.createCube({ name: input.name, image: "trusted-host", workspacePath: input.workspacePath }, input.environmentId);
+      const cube = this.createCube({ name: input.name, image: "trusted-runner", workspacePath: input.workspacePath }, input.environmentId);
       this.addThread({ id: input.threadId, cubeId: cube.id, projectId: input.projectId, piSessionPath: input.piSessionPath });
       this.setCubeStatus(cube.name, "ready"); // admission, NOT a live contact observation
       return this.getCube(cube.name)!;
     });
   }
 
-  hostNodeAdmissions(): Array<{ nodeId: string; environmentId: number; threadId: string; configPath: string; configHash: string }> {
+  trustedRunnerAdmissions(): Array<{ nodeId: string; environmentId: number; threadId: string; configPath: string; configHash: string }> {
     return this.db.prepare(`SELECT node_id AS nodeId, environment_id AS environmentId,
-      thread_id AS threadId, config_path AS configPath, config_hash AS configHash FROM host_node_admission`).all() as ReturnType<Registry["hostNodeAdmissions"]>;
+      thread_id AS threadId, config_path AS configPath, config_hash AS configHash FROM host_node_admission`).all() as ReturnType<Registry["trustedRunnerAdmissions"]>;
   }
 
   addCubeRepositories(

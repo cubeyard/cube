@@ -26,15 +26,15 @@ const ProtocolCompatibility = Schema.Struct({
   softwareVersion: Schema.String,
 });
 export interface NodeBinding { nodeId: string; environmentId: number; threadId: string }
-export interface HostExecSpec { command: string; guestCwd: string; timeoutMs: number; outputLimit: number }
-export interface HostExecResult {
+export interface RunnerExecSpec { command: string; guestCwd: string; timeoutMs: number; outputLimit: number }
+export interface RunnerExecResult {
   exitCode: number | null;
   termination: "exited" | "signalled" | "timedOut";
   output: number[];
   outputBytes: number;
   truncated: boolean;
 }
-export interface HostNodeHealth {
+export interface TrustedRunnerHealth {
   lifecycle: "ready" | "draining" | "faulted" | "recoveryRequired";
   active: boolean;
   operationRecords: number;
@@ -43,9 +43,9 @@ export interface HostNodeHealth {
   softwareVersion: string;
   protocolVersion: 1;
 }
-export type HostOperation =
+export type RunnerOperation =
   | { state: "Accepted" | "Running" | "Unknown" }
-  | { state: "Succeeded"; result: HostExecResult }
+  | { state: "Succeeded"; result: RunnerExecResult }
   | { state: "Failed"; error: string; completionUnknown: boolean }
   | { state: "Interrupted"; completionUnknown: true };
 interface IrohConfig {
@@ -55,7 +55,7 @@ interface IrohConfig {
 }
 interface Intent {
   operationId: string; nodeId: string; environmentId: number; threadId: string;
-  serverPeer: string; controlPeer: string; spec: HostExecSpec;
+  serverPeer: string; controlPeer: string; spec: RunnerExecSpec;
 }
 
 export class IrohNodeError extends ExecutionNodeError {
@@ -70,7 +70,7 @@ export class IrohNodeError extends ExecutionNodeError {
     super(code);
     this.operationId = operationId;
     this.remoteCode = remoteCode;
-    this.message = `${code}${remoteCode === "INCOMPATIBLE_PROTOCOL" ? ": cubed and cube-host do not share protocol version 1; upgrade the older component" : ""}${operationId ? `: operation ${operationId}` : ""}${this.completionUnknown ? "; inspect the saved operation before executing again; remote work was not cancelled" : ""}`;
+    this.message = `${code}${remoteCode === "INCOMPATIBLE_PROTOCOL" ? ": cubed and cube-runner do not share protocol version 1; upgrade the older component" : ""}${operationId ? `: operation ${operationId}` : ""}${this.completionUnknown ? "; inspect the saved operation before executing again; remote work was not cancelled" : ""}`;
   }
 }
 class ValidationError extends IrohNodeError { constructor() { super("INVALID_REQUEST"); } }
@@ -95,14 +95,14 @@ function binding(value: unknown): NodeBinding {
 function equalBinding(a: NodeBinding, b: NodeBinding): boolean {
   return a.nodeId === b.nodeId && a.environmentId === b.environmentId && a.threadId === b.threadId;
 }
-function validateSpec(spec: HostExecSpec): HostExecSpec {
+function validateSpec(spec: RunnerExecSpec): RunnerExecSpec {
   const row = shape(spec, ["command", "guestCwd", "timeoutMs", "outputLimit"]);
   if (typeof row.command !== "string" || !row.command || row.command.includes("\0") || Buffer.byteLength(row.command) > 8192
     || typeof row.guestCwd !== "string" || !row.guestCwd || row.guestCwd.includes("\0") || path.posix.isAbsolute(row.guestCwd) || Buffer.byteLength(row.guestCwd) > 4096
     || !integer(row.timeoutMs, 1, 60000) || !integer(row.outputLimit, 0, 8192)) invalid();
   return { command: row.command, guestCwd: row.guestCwd, timeoutMs: row.timeoutMs, outputLimit: row.outputLimit };
 }
-function operation(value: unknown): HostOperation {
+function operation(value: unknown): RunnerOperation {
   const row = record(value);
   switch (row.state) {
     case "Accepted": case "Running": case "Unknown": shape(row, ["state"]); return { state: row.state };
@@ -123,7 +123,7 @@ function operation(value: unknown): HostOperation {
         || !integer(result.outputBytes, result.output.length) || typeof result.truncated !== "boolean"
         || (result.termination === "exited") !== (result.exitCode !== null)
         || (!result.truncated && result.outputBytes !== result.output.length)) invalid();
-      return { state: "Succeeded", result: result as unknown as HostExecResult };
+      return { state: "Succeeded", result: result as unknown as RunnerExecResult };
     }
     default: return invalid();
   }
@@ -278,7 +278,7 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     if (value.operationId !== id || value.nodeId !== this.nodeId || value.environmentId !== this.binding.environmentId || value.threadId !== this.binding.threadId
       || value.serverPeer !== this.config.serverPeer || value.controlPeer !== controlPeer) throw new IrohNodeError("WRONG_NODE", id);
     return { operationId: id, nodeId: this.nodeId, environmentId: this.binding.environmentId, threadId: this.binding.threadId,
-      serverPeer: this.config.serverPeer, controlPeer, spec: validateSpec(value.spec as HostExecSpec) };
+      serverPeer: this.config.serverPeer, controlPeer, spec: validateSpec(value.spec as RunnerExecSpec) };
   }
   private hello(value: unknown): Record<string, unknown> {
     const hello = shape(value, ["type", "nodeId", "profiles", "capabilities", "limits"],
@@ -287,7 +287,8 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     catch { throw new IrohNodeError("INCOMPATIBLE_PROTOCOL"); }
     if (hello.type !== "Hello" || hello.nodeId !== this.nodeId
       || hello.binding === undefined || !equalBinding(binding(hello.binding), this.binding)) throw new IrohNodeError("WRONG_NODE");
-    if (!Array.isArray(hello.profiles) || !hello.profiles.includes("host") || !hello.profiles.every(x => typeof x === "string")
+    if (!Array.isArray(hello.profiles) || (!hello.profiles.includes("runner") && !hello.profiles.includes("host"))
+      || !hello.profiles.every(x => typeof x === "string")
       || !Array.isArray(hello.capabilities) || !hello.capabilities.every(x => typeof x === "string")) invalid();
     const limits = shape(hello.limits, ["maxFrameBytes", "requestTimeoutMs"]);
     if (limits.maxFrameBytes !== MAX_FRAME || !integer(limits.requestTimeoutMs, 1, RPC_TIMEOUT_MS)) invalid();
@@ -457,10 +458,10 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     this.observe?.(environmentId, observation);
     return observation;
   }
-  async health(): Promise<HostNodeHealth> {
+  async health(): Promise<TrustedRunnerHealth> {
     this.assertConfig();
     const result = await this.request(this.identity().key, { method: "node.status" });
-    const status = result.status as Omit<HostNodeHealth, "softwareVersion" | "protocolVersion">;
+    const status = result.status as Omit<TrustedRunnerHealth, "softwareVersion" | "protocolVersion">;
     return { ...status, softwareVersion: result.softwareVersion as string, protocolVersion: 1 };
   }
   async check(environmentId: number): Promise<void> {
@@ -470,7 +471,7 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
   async wake(environmentId: number): Promise<void> { this.environment(environmentId); throw new IrohNodeError("UNSUPPORTED"); }
   async sleep(environmentId: number): Promise<void> { this.environment(environmentId); throw new IrohNodeError("UNSUPPORTED"); }
   async openPortal(environmentId: number, _port: number): Promise<Duplex> { this.environment(environmentId); throw new IrohNodeError("UNSUPPORTED"); }
-  async prepareExec(environmentId: number, spec: HostExecSpec, signal?: AbortSignal): Promise<{ operationId: string }> {
+  async prepareExec(environmentId: number, spec: RunnerExecSpec, signal?: AbortSignal): Promise<{ operationId: string }> {
     this.environment(environmentId); signal?.throwIfAborted(); this.assertConfig();
     spec = validateSpec(spec);
     const { peer } = this.identity();
@@ -488,13 +489,13 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     await this.request(identity.key, { method: "exec.start", operationId, env: environmentId, spec: intent.spec }, signal);
     return { operationId };
   }
-  async operation(environmentId: number, operationId: string, signal?: AbortSignal): Promise<HostOperation> {
+  async operation(environmentId: number, operationId: string, signal?: AbortSignal): Promise<RunnerOperation> {
     this.environment(environmentId); signal?.throwIfAborted(); this.assertConfig();
     const identity = this.identity();
     this.intent(operationId, identity.peer);
-    return (await this.request(identity.key, { method: "operation.get", env: environmentId, operationId }, signal)).operation as HostOperation;
+    return (await this.request(identity.key, { method: "operation.get", env: environmentId, operationId }, signal)).operation as RunnerOperation;
   }
-  async exec(environmentId: number, spec: HostExecSpec, signal?: AbortSignal): Promise<HostExecResult & { operationId: string }> {
+  async exec(environmentId: number, spec: RunnerExecSpec, signal?: AbortSignal): Promise<RunnerExecResult & { operationId: string }> {
     this.environment(environmentId);
     spec = validateSpec(spec);
     const deadline = AbortSignal.timeout(spec.timeoutMs + 10000);

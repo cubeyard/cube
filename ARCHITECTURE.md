@@ -16,10 +16,10 @@ is **harness outside sandbox**.
 
 See [execution-nodes.md](docs/execution-nodes.md) for permanent SQLite binding,
 offline failures and remaining host couplings. The current remote profile is a
-trusted, unprivileged Linux x86_64 account over authenticated Iroh/N0 relay. It
+trusted runner: an unprivileged Linux x86_64 account over authenticated Iroh/N0 relay. It
 is not sandboxed and supports bounded exec only; Incus/VM execution nodes and a
 general scheduler remain out of scope. Its production lifecycle and trust
-boundary are in [trusted-host-operations.md](docs/trusted-host-operations.md).
+boundary are in [trusted-runner-operations.md](docs/trusted-runner-operations.md).
 Browser exposure remains restrictive HTTP/WS.
 
 ### Terminology

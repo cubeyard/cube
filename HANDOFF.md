@@ -10,17 +10,17 @@ Read [docs/execution-nodes.md](docs/execution-nodes.md) first: it supersedes the
 single-host product premise, not the credential or private-browser boundaries.
 Local permanent binding, restart-safe creation keys, status/wake/sleep and portal
 stream boundaries, offline pi cwd/CLI reopening, local-adapter access gates and
-separate UI contact status are implemented. Remote trusted-host enrollment/exec
+separate UI contact status are implemented. Remote trusted-runner enrollment/exec
 is production-packaged for Linux x86_64; external acceptance remains a separate
 release sign-off.
 Pi's pinned CLI needs the `pi-session-cwd.ts` preload to ignore a historical
 workspace cwd without rewriting the session. Keep that real-CLI regression gate.
 
-The trusted-host profile is intentionally bounded exec only. Local provisioning,
+The trusted-runner profile is intentionally bounded exec only. Local provisioning,
 Incus file adapters, host-path Git/config/browser operations, services, portals,
 templates and sandbox egress remain local-only and are not future-host claims.
 This is **not** a VPN, sandbox, migration path or failover scheduler. Production
-operations are in [the trusted-host runbook](docs/trusted-host-operations.md).
+operations are in [the trusted-runner runbook](docs/trusted-runner-operations.md).
 The local-boundary tests are not Incus/macOS/external-node acceptance; no live
 instance was deployed, restarted or used as a disposable test resource.
 
@@ -31,13 +31,13 @@ need the disposable VM portfolio. That earlier baseline did not exercise iroh or
 
 ## Iroh / in-process adapter development slice
 
-The Rust `packages/node-transport` host uses pinned iroh 1.2.0 / Rust 1.91.0.
-The host binary has a separate Linux x86_64 installer bundle and systemd service;
+The Rust `packages/node-transport` runner uses pinned iroh 1.2.0 / Rust 1.91.0.
+The runner binary has a separate Linux x86_64 installer bundle and systemd service;
 operator admission and thread exec routing remain explicit.
-`host-init`/`host-serve` own one immutable binding and exclusive SQLite journal;
+`runner-init`/`runner-serve` own one immutable binding and exclusive SQLite journal;
 Accepted/Running commits precede dispatch/spawn, and restart marks unfinished work
 Interrupted/uncertain, never queued. A hard crash does not prove descendants have
-stopped. The trusted unprivileged Linux host profile is NOT a sandbox; no
+stopped. The trusted unprivileged Linux runner is NOT a sandbox; no
 control-plane credentials belong in that account.
 
 `packages/server/src/iroh-node.ts` now uses pinned `@number0/iroh` 1.1.0 **inside
@@ -64,13 +64,13 @@ isolation for an in-process addon.
 `bash scripts/test-node-transport.sh` now includes native Node/Rust interoperability;
 its CI job installs both toolchains. The Node offline list additionally tests real
 npm iroh with subprocess APIs disabled. Current local Linux evidence: 15 Rust tests,
-real Node→Rust host smoke in loopback/direct modes (both with loopback targets),
+real Node→Rust runner smoke in loopback/direct modes (both with loopback targets),
 plus an opt-in public-N0 relay smoke covering enrollment, pi routing and restart,
-46 Node suites, typecheck, lint and build. The Rust host fixtures serialize across
+47 Node suites, typecheck, lint and build. The Rust runner fixtures serialize across
 cases to avoid sibling forks transiently inheriting another fixture's flock before
 exec; concurrent requests/submissions remain tested within cases.
 
-Still absent from the trusted-host profile: file/repository transfer and portals.
+Still absent from the trusted-runner profile: file/repository transfer and portals.
 Separate-machine/NAT acceptance must be repeated for release sign-off. Browser
 access and Pi startup remain unchanged. Other native-addon platforms are outside
 the supported Linux x86_64 boundary.
@@ -80,28 +80,28 @@ node IDs, addresses, filesystem paths, or credentials in this file.
 
 ## Operator enrollment and thread exec slice
 
-`node scripts/enroll-host-node.ts` is an explicit **operator-only** command,
-requiring cubed stopped, a preinitialized disposable host and private config/key.
-See [HOST.md](packages/node-transport/HOST.md#operator-enrollment-and-thread-tools).
+`node scripts/enroll-runner.ts` is an explicit **operator-only** command,
+requiring cubed stopped, a preinitialized disposable runner and private config/key.
+See [RUNNER.md](packages/node-transport/RUNNER.md).
 The registry migration preserves existing local identities and bindings, admits
 fresh remote identities atomically, and permanently pins config path/hash.
 There is no agent enrollment API, ordinary-creation remote selector or adoption.
 
-`AdmittedHostNode` lazily loads the native client, so missing config/native addon
-or offline nodes cannot prevent conversation startup. Pi receives `CUBE_BACKEND=host`
-and calls a fixed thread-scoped cubed HTTP RPC. Durable prepare precedes exactly
+`AdmittedTrustedRunner` lazily loads the native client, so missing config/native addon
+or offline runners cannot prevent conversation startup. Pi receives `CUBE_BACKEND=runner`
+and calls the fixed `/runner-exec` cubed HTTP RPC. Durable prepare precedes exactly
 one submit. `cube.operations.get` is read-only; errors preserve operation IDs across
 HTTP and codemode. Local exec/FS/Git adapters cannot authorize a remote binding.
 Archive forbids new dispatch but preserves inspection; destructive removal is
-unsupported. The native transport/host journal and no-replay semantics are intact.
+unsupported. The native runner journal and no-replay semantics are intact.
 
-Evidence: 15 Rust tests, all 46 Node suites, typecheck/lint/build and real
-operator CLI → cubed HTTP → registered pi bash/code/! → npm iroh → Rust host
+Evidence: 15 Rust tests, all 47 Node suites, typecheck/lint/build and real
+operator CLI → cubed HTTP → registered pi bash/code/! → npm iroh → Rust runner
 smoke in both network modes (loopback targets). The smoke denies all local backend
 execution and tests cancellation/result inspection, cubed restart, no resubmission
 and config pinning across restart. No model call, shared live thread/node or
-external machine was used. Host file/repository transfer is still unsupported;
-separate-machine acceptance remains required for combined host-node delegation.
+external machine was used. Runner file/repository transfer is still unsupported;
+separate-machine acceptance remains required for runner delegation.
 
 ## Thread-to-thread tasks (working tree)
 

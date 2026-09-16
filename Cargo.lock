@@ -379,8 +379,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "cube-node-transport"
-version = "0.1.1"
+name = "cube-runner"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "iroh",

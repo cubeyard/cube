@@ -12,23 +12,24 @@ use anyhow::{Context, Result, bail, ensure};
 use cube_node_transport::{
     MIN_COMPATIBLE_PROTOCOL_VERSION, NetworkMode, PROTOCOL_VERSION, Request, Response,
     SOFTWARE_VERSION, bind_client, bind_node, bind_relay_client, bind_relay_node, call,
-    host::{Binding, ExecSpec, Host},
     intent::Intent,
-    query_hello, serve, serve_host, validate_node_id,
+    query_hello,
+    runner::{Binding, ExecSpec, Runner},
+    serve, serve_runner, validate_node_id,
 };
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use serde_json::json;
 
 const USAGE: &str = "usage:
-  cube-node-transport version
-  cube-node-transport keygen --key <new-private-file>
-  cube-node-transport serve --key <private-file> --allow-peer <public-key> --node-id <node-id> [--listen 127.0.0.1:0]
-  cube-node-transport hello --key <private-file> --peer <pinned-public-key> --expect-node <node-id>
-  cube-node-transport host-init --key <private-file> --state <NEW-directory> --workspace <existing-directory> --allow-peer <public-key> --node-id <node-id> --thread-id <thread-id> --env <integer>
-  cube-node-transport host-serve --key <private-file> --state <directory> [--listen 127.0.0.1:0] [--ready-file <absolute-file>] [--stop-policy wait|cancel]
-  cube-node-transport prepare-exec --key <control-key> --intent <NEW-file> --peer <server-key> --expect-node <node-id> --env <integer> --command <shell-command> [--cwd .] [--timeout-ms 10000] [--output-limit 8192]
-  cube-node-transport submit --key <control-key> --intent <file> [--address <ip:port>]
-  cube-node-transport operation --key <control-key> --intent <file> [--address <ip:port>]
+  cube-runner version
+  cube-runner keygen --key <new-private-file>
+  cube-runner serve --key <private-file> --allow-peer <public-key> --node-id <node-id> [--listen 127.0.0.1:0]
+  cube-runner hello --key <private-file> --peer <pinned-public-key> --expect-node <node-id>
+  cube-runner runner-init --key <private-file> --state <NEW-directory> --workspace <existing-directory> --allow-peer <public-key> --node-id <node-id> --thread-id <thread-id> --env <integer>
+  cube-runner runner-serve --key <private-file> --state <directory> [--listen 127.0.0.1:0] [--ready-file <absolute-file>] [--stop-policy wait|cancel]
+  cube-runner prepare-exec --key <control-key> --intent <NEW-file> --peer <server-key> --expect-node <node-id> --env <integer> --command <shell-command> [--cwd .] [--timeout-ms 10000] [--output-limit 8192]
+  cube-runner submit --key <control-key> --intent <file> [--address <ip:port>]
+  cube-runner operation --key <control-key> --intent <file> [--address <ip:port>]
 network commands accept --network loopback|direct|relay (default loopback); direct requires explicit addresses; relay uses N0 discovery and relays";
 
 #[cfg(unix)]
@@ -211,7 +212,10 @@ async fn main() -> Result<()> {
             endpoint.close().await;
             result?;
         }
-        "host-init" => {
+        "runner-init" | "host-init" => {
+            if command == "host-init" {
+                eprintln!("cube-runner: host-init is deprecated; use runner-init");
+            }
             let state = take(&mut options, "--state")?;
             let workspace = take(&mut options, "--workspace")?;
             let allowed: EndpointId = take(&mut options, "--allow-peer")?.parse()?;
@@ -220,7 +224,7 @@ async fn main() -> Result<()> {
             let environment_id = take(&mut options, "--env")?.parse()?;
             no_extra(&options)?;
             let key = read_key(Path::new(&key_path))?;
-            Host::initialize(
+            Runner::initialize(
                 Path::new(&state),
                 Binding {
                     thread_id,
@@ -233,7 +237,10 @@ async fn main() -> Result<()> {
             )?;
             println!("{}", json!({"initialized": true}));
         }
-        "host-serve" => {
+        "runner-serve" | "host-serve" => {
+            if command == "host-serve" {
+                eprintln!("cube-runner: host-serve is deprecated; use runner-serve");
+            }
             let state = take(&mut options, "--state")?;
             let listen = options.remove("--listen");
             let ready_file = options.remove("--ready-file").map(PathBuf::from);
@@ -244,15 +251,15 @@ async fn main() -> Result<()> {
             };
             no_extra(&options)?;
             let key = read_key(Path::new(&key_path))?;
-            let host = Host::open(Path::new(&state), key.public())?;
-            let allowed = host.installation().allowed_peer.parse()?;
-            let node_id = host.installation().binding.node_id.clone();
+            let runner = Runner::open(Path::new(&state), key.public())?;
+            let allowed = runner.installation().allowed_peer.parse()?;
+            let node_id = runner.installation().binding.node_id.clone();
             eprintln!(
-                "{{\"level\":\"info\",\"event\":\"host_starting\",\"trust\":\"unprivileged-account-not-sandboxed\"}}"
+                "{{\"level\":\"info\",\"event\":\"runner_starting\",\"trust\":\"same-uid-not-sandboxed\"}}"
             );
             let endpoint = endpoint(key, network, listen).await?;
             let mut readiness = ready(&endpoint, &node_id, network);
-            readiness["lifecycle"] = json!(host.status()?.lifecycle);
+            readiness["lifecycle"] = json!(runner.status()?.lifecycle);
             println!("{readiness}");
             std::io::stdout().flush()?;
             write_ready(ready_file.as_deref(), &readiness)?;
@@ -261,7 +268,7 @@ async fn main() -> Result<()> {
             let mut terminate = signal(SignalKind::terminate())?;
             let mut drain = signal(SignalKind::user_defined1())?;
             let mut resume = signal(SignalKind::user_defined2())?;
-            let server = serve_host(&endpoint, allowed, &node_id, Some(host.clone()));
+            let server = serve_runner(&endpoint, allowed, &node_id, Some(runner.clone()));
             tokio::pin!(server);
             let result = loop {
                 tokio::select! {
@@ -269,27 +276,27 @@ async fn main() -> Result<()> {
                     _ = interrupt.recv() => break Ok(()),
                     _ = terminate.recv() => break Ok(()),
                     _ = drain.recv() => {
-                        host.drain();
+                        runner.drain();
                         readiness["lifecycle"] = json!("draining");
                         write_ready(ready_file.as_deref(), &readiness)?;
-                        eprintln!("{{\"level\":\"info\",\"event\":\"host_draining\"}}");
+                        eprintln!("{{\"level\":\"info\",\"event\":\"runner_draining\"}}");
                     },
                     _ = resume.recv() => {
-                        if host.resume().is_ok() {
+                        if runner.resume().is_ok() {
                             readiness["lifecycle"] = json!("ready");
                             write_ready(ready_file.as_deref(), &readiness)?;
-                            eprintln!("{{\"level\":\"info\",\"event\":\"host_ready\"}}");
+                            eprintln!("{{\"level\":\"info\",\"event\":\"runner_ready\"}}");
                         } else {
-                            eprintln!("{{\"level\":\"warn\",\"event\":\"host_resume_refused\",\"action\":\"stop and complete recovery\"}}");
+                            eprintln!("{{\"level\":\"warn\",\"event\":\"runner_resume_refused\",\"action\":\"stop and complete recovery\"}}");
                         }
                     },
                 }
             };
-            host.drain();
+            runner.drain();
             readiness["lifecycle"] = json!("draining");
             write_ready(ready_file.as_deref(), &readiness)?;
             endpoint.close().await;
-            host.shutdown(cancel_on_stop).await;
+            runner.shutdown(cancel_on_stop).await;
             remove_ready(ready_file.as_deref());
             result?;
         }
@@ -371,7 +378,7 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&response)?);
             ensure!(
                 !matches!(response, Response::Error { .. }),
-                "host request rejected; inspect response"
+                "runner request rejected; inspect response"
             );
         }
         "hello" => {

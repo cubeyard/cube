@@ -1,7 +1,7 @@
-//! Authenticated node protocol (loopback by default); optional trusted host execution.
+//! Authenticated node protocol (loopback by default); optional trusted runner execution.
 //! Bounded frames, no retries, no 0-RTT; commands outlive their connection.
-pub mod host;
 pub mod intent;
+pub mod runner;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -35,7 +35,7 @@ pub enum Request {
         #[serde(rename = "operationId")]
         operation_id: String,
         env: u64,
-        spec: host::ExecSpec,
+        spec: runner::ExecSpec,
     },
     #[serde(rename = "operation.get")]
     OperationGet {
@@ -61,7 +61,7 @@ pub enum Response {
         #[serde(rename = "softwareVersion")]
         software_version: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        binding: Option<host::Binding>,
+        binding: Option<runner::Binding>,
     },
     Status {
         #[serde(rename = "nodeId")]
@@ -72,8 +72,8 @@ pub enum Response {
         minimum_protocol_version: u32,
         #[serde(rename = "softwareVersion")]
         software_version: String,
-        binding: host::Binding,
-        status: host::HostStatus,
+        binding: runner::Binding,
+        status: runner::RunnerStatus,
     },
     Accepted {
         #[serde(rename = "operationId")]
@@ -82,10 +82,10 @@ pub enum Response {
     Operation {
         #[serde(rename = "operationId")]
         operation_id: String,
-        operation: host::Operation,
+        operation: runner::Operation,
     },
     Environment {
-        binding: host::Binding,
+        binding: runner::Binding,
         state: String,
     },
     Error {
@@ -259,7 +259,7 @@ fn hello(node_id: &str, query: Request) -> Response {
         } => Response::Hello {
             node_id: node_id.into(),
             protocol_version: 1,
-            // The plain serve probe never enables host execution.
+            // The plain serve probe never enables trusted-runner execution.
             profiles: vec![],
             capabilities: vec!["node.hello".into()],
             limits: Limits {
@@ -272,15 +272,15 @@ fn hello(node_id: &str, query: Request) -> Response {
         },
         _ => Response::error(
             "INCOMPATIBLE_PROTOCOL",
-            "protocol version 1 required; upgrade cubed or cube-host",
+            "protocol version 1 required; upgrade cubed or cube-runner",
         ),
     }
 }
 
-fn dispatch(node_id: &str, query: Request, host: Option<&Arc<host::Host>>) -> Response {
+fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>) -> Response {
     if matches!(query, Request::Hello { .. }) {
         let mut result = hello(node_id, query);
-        if let Some(host) = host
+        if let Some(runner) = runner
             && let Response::Hello {
                 profiles,
                 capabilities,
@@ -288,8 +288,10 @@ fn dispatch(node_id: &str, query: Request, host: Option<&Arc<host::Host>>) -> Re
                 ..
             } = &mut result
         {
-            *binding = Some(host.installation().binding.clone());
-            *profiles = vec!["host".into()];
+            *binding = Some(runner.installation().binding.clone());
+            // `host` is the protocol-v1 compatibility profile. New peers use
+            // `runner`; both names describe the same immutable binding.
+            *profiles = vec!["runner".into(), "host".into()];
             capabilities.extend(
                 [
                     "node.status",
@@ -302,8 +304,8 @@ fn dispatch(node_id: &str, query: Request, host: Option<&Arc<host::Host>>) -> Re
         }
         return result;
     }
-    let Some(host) = host else {
-        return Response::error("UNSUPPORTED", "host execution is not enabled");
+    let Some(runner) = runner else {
+        return Response::error("UNSUPPORTED", "runner execution is not enabled");
     };
     let operation_id = match &query {
         Request::ExecStart { operation_id, .. } | Request::OperationGet { operation_id, .. } => {
@@ -311,30 +313,33 @@ fn dispatch(node_id: &str, query: Request, host: Option<&Arc<host::Host>>) -> Re
         }
         _ => None,
     }
-    .filter(|id| host::valid_id(id));
+    .filter(|id| runner::valid_id(id));
     let mutation = matches!(query, Request::ExecStart { .. });
     let result = match query {
-        Request::Status => host.status().map(|status| Response::Status {
+        Request::Status => runner.status().map(|status| Response::Status {
             node_id: node_id.into(),
             protocol_version: PROTOCOL_VERSION,
             minimum_protocol_version: MIN_COMPATIBLE_PROTOCOL_VERSION,
             software_version: SOFTWARE_VERSION.into(),
-            binding: host.installation().binding.clone(),
+            binding: runner.installation().binding.clone(),
             status,
         }),
-        Request::Inspect { env } => host.inspect(env).map(|installation| Response::Environment {
-            binding: installation.binding.clone(),
-            state: "ready".into(),
-        }),
+        Request::Inspect { env } => runner
+            .inspect(env)
+            .map(|installation| Response::Environment {
+                binding: installation.binding.clone(),
+                state: "ready".into(),
+            }),
         Request::ExecStart {
             env,
             operation_id,
             spec,
-        } => host
+        } => runner
             .start(env, &operation_id, spec)
             .map(|()| Response::Accepted { operation_id }),
         Request::OperationGet { env, operation_id } => {
-            host.get(env, &operation_id)
+            runner
+                .get(env, &operation_id)
                 .map(|operation| Response::Operation {
                     operation_id,
                     operation,
@@ -343,10 +348,10 @@ fn dispatch(node_id: &str, query: Request, host: Option<&Arc<host::Host>>) -> Re
         Request::Hello { .. } => unreachable!(),
     };
     result.unwrap_or_else(|error| {
-        if let Some(error) = error.downcast_ref::<host::HostError>() {
+        if let Some(error) = error.downcast_ref::<runner::RunnerError>() {
             Response::Error {
                 code: error.0.into(),
-                message: "host request rejected".into(),
+                message: "runner request rejected".into(),
                 completion_unknown: false,
                 operation_id: operation_id.clone(),
             }
@@ -354,7 +359,7 @@ fn dispatch(node_id: &str, query: Request, host: Option<&Arc<host::Host>>) -> Re
             // A journal commit may have happened. Do not assert no side effects.
             Response::Error {
                 code: "IO_ERROR".into(),
-                message: "host state could not be confirmed".into(),
+                message: "runner state could not be confirmed".into(),
                 completion_unknown: mutation,
                 operation_id,
             }
@@ -369,7 +374,7 @@ async fn accept(
     incoming: iroh::endpoint::Incoming,
     allowed_peer: EndpointId,
     node_id: String,
-    host: Option<Arc<host::Host>>,
+    runner: Option<Arc<runner::Runner>>,
 ) -> Result<()> {
     let connection = incoming.await?;
     if connection.remote_id() != allowed_peer {
@@ -384,7 +389,7 @@ async fn accept(
                 if !negotiated && !matches!(query, Request::Hello { .. }) {
                     Response::error("INVALID_REQUEST", "hello required before environment work")
                 } else {
-                    let response = dispatch(&node_id, query, host.as_ref());
+                    let response = dispatch(&node_id, query, runner.as_ref());
                     if matches!(
                         response,
                         Response::Hello {
@@ -410,24 +415,24 @@ async fn accept(
 }
 
 pub async fn serve(endpoint: &Endpoint, allowed_peer: EndpointId, node_id: &str) -> Result<()> {
-    serve_host(endpoint, allowed_peer, node_id, None).await
+    serve_runner(endpoint, allowed_peer, node_id, None).await
 }
 
-/// Dropping connection tasks does not drop accepted host jobs. Graceful daemon
-/// shutdown closes the endpoint then waits through Host::shutdown().
-pub async fn serve_host(
+/// Dropping connection tasks does not drop accepted runner jobs. Graceful daemon
+/// shutdown closes the endpoint then waits through Runner::shutdown().
+pub async fn serve_runner(
     endpoint: &Endpoint,
     allowed_peer: EndpointId,
     node_id: &str,
-    host: Option<Arc<host::Host>>,
+    runner: Option<Arc<runner::Runner>>,
 ) -> Result<()> {
     validate_node_id(node_id)?;
-    if let Some(host) = &host {
+    if let Some(runner) = &runner {
         ensure!(
-            host.installation().binding.node_id == node_id
-                && host.installation().allowed_peer == allowed_peer.to_string()
-                && host.installation().peer_id == endpoint.id().to_string(),
-            "WRONG_NODE: host installation mismatch"
+            runner.installation().binding.node_id == node_id
+                && runner.installation().allowed_peer == allowed_peer.to_string()
+                && runner.installation().peer_id == endpoint.id().to_string(),
+            "WRONG_NODE: runner installation mismatch"
         );
     }
     let mut tasks = JoinSet::new();
@@ -440,9 +445,9 @@ pub async fn serve_host(
                     continue;
                 }
                 let node_id = node_id.to_owned();
-                let host = host.clone();
+                let runner = runner.clone();
                 tasks.spawn(async move {
-                    timeout(REQUEST_TIMEOUT, accept(incoming, allowed_peer, node_id, host)).await
+                    timeout(REQUEST_TIMEOUT, accept(incoming, allowed_peer, node_id, runner)).await
                 });
             }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
@@ -485,7 +490,7 @@ pub async fn call(
 pub async fn call_bound(
     endpoint: &Endpoint,
     address: EndpointAddr,
-    binding: &host::Binding,
+    binding: &runner::Binding,
     query: &Request,
 ) -> Result<Response> {
     call_inner(endpoint, address, &binding.node_id, Some(binding), query).await
@@ -495,7 +500,7 @@ async fn call_inner(
     endpoint: &Endpoint,
     address: EndpointAddr,
     expected_node_id: &str,
-    expected_binding: Option<&host::Binding>,
+    expected_binding: Option<&runner::Binding>,
     query: &Request,
 ) -> Result<Response> {
     validate_node_id(expected_node_id)?;

@@ -1,8 +1,8 @@
 #![cfg(target_os = "linux")]
 use cube_node_transport::{
-    ALPN, DeliveryError, Request, Response, bind_loopback, call, encode,
-    host::{Binding, ExecSpec, Host, Operation},
-    read_frame, serve_host,
+    ALPN, DeliveryError, Request, Response, bind_loopback, call, encode, read_frame,
+    runner::{Binding, ExecSpec, Operation, Runner},
+    serve_runner,
 };
 use iroh::{EndpointAddr, SecretKey};
 use std::{fs, sync::Arc, time::Duration};
@@ -16,7 +16,7 @@ async fn authorization_and_hello_gate_precede_mutation() {
     let state = root.path().join("state");
     let key = SecretKey::generate();
     let allowed = SecretKey::generate();
-    Host::initialize(
+    Runner::initialize(
         &state,
         Binding {
             thread_id: "t-test".into(),
@@ -28,17 +28,17 @@ async fn authorization_and_hello_gate_precede_mutation() {
         &workspace,
     )
     .unwrap();
-    let host = Host::open(&state, key.public()).unwrap();
+    let runner = Runner::open(&state, key.public()).unwrap();
     let server = bind_loopback(key, "127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
     let address = EndpointAddr::new(server.id()).with_ip_addr(server.bound_sockets()[0]);
     let task = tokio::spawn({
-        let host = Arc::clone(&host);
+        let runner = Arc::clone(&runner);
         let server = server.clone();
         let peer = allowed.public();
         async move {
-            serve_host(&server, peer, "node-test", Some(host))
+            serve_runner(&server, peer, "node-test", Some(runner))
                 .await
                 .unwrap();
         }
@@ -74,9 +74,9 @@ async fn authorization_and_hello_gate_precede_mutation() {
         .await
         .unwrap();
     assert!(call(&rogue, address, "node-test", &query).await.is_err());
-    assert_eq!(host.get(1, "op-rejected").unwrap(), Operation::Unknown);
+    assert_eq!(runner.get(1, "op-rejected").unwrap(), Operation::Unknown);
     assert!(!workspace.join("must-not-exist").exists());
-    host.shutdown(false).await;
+    runner.shutdown(false).await;
     client.close().await;
     rogue.close().await;
     server.close().await;

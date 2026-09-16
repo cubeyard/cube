@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
+note_deprecated
 require_platform
 "$SYSTEMCTL" reload cube-host.service
 ready="$(at /run/cube-host/ready.json)"

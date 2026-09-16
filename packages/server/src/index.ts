@@ -614,11 +614,11 @@ async function api(
     return json(res, 200, result);
   }
 
-  const hostExec = url.pathname.match(/^\/api\/threads\/([^/]+)\/host-exec$/);
-  if (hostExec && method === "POST") {
-    const id = decodeId(hostExec[1]!);
+  const runnerExec = url.pathname.match(/^\/api\/threads\/([^/]+)\/(?:runner-exec|host-exec)$/);
+  if (runnerExec && method === "POST") {
+    const id = decodeId(runnerExec[1]!);
     const input: unknown = JSON.parse(await readBody(req));
-    return json(res, 200, await whileConnected(res, signal => supervisor.hostExecForUserThread(id, input, signal)));
+    return json(res, 200, await whileConnected(res, signal => supervisor.runnerExecForUserThread(id, input, signal)));
   }
 
   // Operator boundary: grants are never available through a thread-scoped

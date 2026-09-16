@@ -1,5 +1,5 @@
 /** Real cubed HTTP and registered pi tools against the smoke's disposable Rust
- * host. No model call, shared registry, or live user thread is used. */
+ * runner. No model call, shared registry, or live user thread is used. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -9,15 +9,15 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { Registry } from "../packages/server/src/registry.ts";
 import cubeExtension from "../packages/pi-extension/src/index.ts";
 
-export async function smokeHostRouting(root: string, configPath: string, workspace: string, node: { disconnect(): Promise<void>; reconnect(): Promise<void> }, network = "loopback") {
+export async function smokeRunnerRouting(root: string, configPath: string, workspace: string, node: { disconnect(): Promise<void>; reconnect(): Promise<void> }, network = "loopback") {
   const database = path.join(root, "routing.db");
   const cubesRoot = path.join(root, "control-cubes");
   const registry = new Registry(database);
   registry.createProject({ id: "routing", name: "disposable", repositories: [] });
   registry.close();
   const env = { PATH: process.env.PATH, HOME: root, PI_OFFLINE: "1" };
-  const enrolled = JSON.parse(execFileSync(process.execPath, ["scripts/enroll-host-node.ts", "--database", database,
-    "--project", "routing", "--config", configPath, "--cubes-root", cubesRoot, "--trusted-host", "--server-stopped"],
+  const enrolled = JSON.parse(execFileSync(process.execPath, ["scripts/enroll-runner.ts", "--database", database,
+    "--project", "routing", "--config", configPath, "--cubes-root", cubesRoot, "--trusted-runner", "--server-stopped"],
   { env, encoding: "utf8", timeout: 20000 }));
   assert.equal(enrolled.threadId, "thread-test");
   const socket = net.createServer();
@@ -50,8 +50,8 @@ export async function smokeHostRouting(root: string, configPath: string, workspa
       await new Promise(resolve => setTimeout(resolve, 50));
     }
   };
-  const settings = { CUBE_BACKEND: "host", CUBE_THREAD_ID: enrolled.threadId, CUBE_NODE_ID: enrolled.nodeId,
-    CUBE_NAME: enrolled.name, CUBE_HOST_WORKSPACE: path.join(cubesRoot, enrolled.name, "workspace"),
+  const settings = { CUBE_BACKEND: "runner", CUBE_THREAD_ID: enrolled.threadId, CUBE_NODE_ID: enrolled.nodeId,
+    CUBE_NAME: enrolled.name, CUBE_RUNNER_WORKSPACE: path.join(cubesRoot, enrolled.name, "workspace"),
     CUBE_GUEST_WORKSPACE: "/workspace", CUBED_URL: base };
   const saved = Object.fromEntries(Object.keys(settings).map(key => [key, process.env[key]]));
   try {
@@ -72,7 +72,7 @@ export async function smokeHostRouting(root: string, configPath: string, workspa
     assert.equal(result.output, "routed");
     assert.match(result.operationId, /^op-/);
     assert.equal(fs.readFileSync(path.join(workspace, "routed-count"), "utf8"), "once");
-    assert.ok(!fs.existsSync(settings.CUBE_HOST_WORKSPACE), "no local shadow workspace");
+    assert.ok(!fs.existsSync(settings.CUBE_RUNNER_WORKSPACE), "no local shadow workspace");
     await node.disconnect();
     const offline = await code('return await cube.exec("touch must-not-fallback");');
     assert.equal(offline.details.error.code, "NODE_UNAVAILABLE", text(offline));
@@ -109,7 +109,7 @@ export async function smokeHostRouting(root: string, configPath: string, workspa
     const recovered = await code(`return await cube.operations.get(${JSON.stringify(operationId)});`);
     assert.match(text(recovered), /Succeeded/);
     assert.equal(fs.readFileSync(marker, "utf8"), "once");
-    const submit = await fetch(`${base}/api/threads/thread-test/host-exec`, { method: "POST", body: JSON.stringify({ action: "submit", operationId }) });
+    const submit = await fetch(`${base}/api/threads/thread-test/runner-exec`, { method: "POST", body: JSON.stringify({ action: "submit", operationId }) });
     const rejected = await submit.json() as Record<string, unknown>;
     assert.equal(rejected.code, "COMPLETION_UNKNOWN");
     assert.equal(rejected.operationId, operationId, "HTTP errors preserve inspection identity");

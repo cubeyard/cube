@@ -2,6 +2,7 @@
 # Atomic release switch with drain, readiness verification and safe rollback.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
+note_deprecated
 require_platform
 [ "$#" -eq 1 ] || fail 'usage: upgrade.sh /absolute/path/to/cube-node-transport'
 binary="$1"; version="$(require_binary "$binary")"

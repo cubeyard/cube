@@ -16,17 +16,17 @@ Rejected environment work is not queued, and reconnect never replays it.
 Possible delivery without confirmation is reported as `COMPLETION_UNKNOWN`
 (or the existing bridge `ECODE_UNCERTAIN`); inspect before executing again.
 
-**iroh is the trusted-host control-to-node transport.** The implementation in
+**Iroh is the trusted-runner control-to-node transport.** The implementation in
 [`packages/node-transport`](../packages/node-transport/README.md) includes real
-QUIC and trusted host execution with a permanent binding/durable journal. The
+QUIC and trusted-runner execution with a permanent binding/durable journal. The
 supported production boundary and lifecycle are documented in
-[trusted-host-operations.md](trusted-host-operations.md).
+[trusted-runner-operations.md](trusted-runner-operations.md).
 `packages/server/src/iroh-node.ts` connects directly through `@number0/iroh` in the
 Node process, without a Rust/stdio intermediary. Explicit operator admission now
-creates fresh host-bound threads and routes pi bash/code/! exec through cubed.
-File/repository transfer and portals are not part of the trusted-host profile;
+creates fresh runner-bound threads and routes pi bash/code/! exec through cubed.
+File/repository transfer and portals are not part of the trusted-runner profile;
 external-machine acceptance is required for release sign-off.
-See [host enrollment](../packages/node-transport/HOST.md#operator-enrollment-and-thread-tools). The protocol
+See [runner enrollment](../packages/node-transport/RUNNER.md). The protocol
 must not require Tailscale, WireGuard, SSH, or another VPN. Browser traffic stays
 HTTP(S)/WebSocket to the control plane. The existing restrictive loopback/trusted
 Tailnet browser access boundary is unchanged; there is no new public gateway.

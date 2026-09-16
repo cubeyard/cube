@@ -1,6 +1,6 @@
 //! Durable caller intent for the development CLI. A consumed marker prevents
 //! automatic resubmission even when a response was lost or the CLI crashed.
-use crate::{MAX_FRAME_BYTES, host::ExecSpec, validate_node_id};
+use crate::{MAX_FRAME_BYTES, runner::ExecSpec, validate_node_id};
 use anyhow::{Result, ensure};
 use iroh::EndpointId;
 use serde::{Deserialize, Serialize};
@@ -55,7 +55,7 @@ impl Intent {
     fn validate(&self) -> Result<()> {
         validate_node_id(&self.node_id)?;
         ensure!(
-            crate::host::valid_id(&self.operation_id),
+            crate::runner::valid_id(&self.operation_id),
             "invalid operation ID"
         );
         ensure!(
@@ -65,7 +65,7 @@ impl Intent {
         ensure!(
             self.thread_id
                 .as_ref()
-                .is_none_or(|id| crate::host::valid_id(id)),
+                .is_none_or(|id| crate::runner::valid_id(id)),
             "invalid intent thread ID"
         );
         self.server_peer.parse::<EndpointId>()?;

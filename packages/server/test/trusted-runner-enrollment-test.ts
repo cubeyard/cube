@@ -8,7 +8,7 @@ import { Registry } from "../src/registry.ts";
 import { CubeSupervisor } from "../src/supervisor.ts";
 import { MockBackend } from "@cube/sandbox";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "host-enrollment-"));
+const root = fs.mkdtempSync(path.join(os.tmpdir(), "trusted-runner-enrollment-"));
 const dbPath = path.join(root, "registry.db");
 let registry = new Registry(dbPath);
 let supervisor: CubeSupervisor | undefined;
@@ -32,61 +32,64 @@ try {
   registry = new Registry(dbPath);
   assert.equal(registry.localNodeId, identity);
   assert.deepEqual({ cube: registry.getCube("local"), thread: registry.getThread("local") }, prior);
-  const admission = { nodeId: "node-host", environmentId: 123, threadId: "host", projectId: "project",
-    configPath: path.join(root, "intentionally-missing.json"), configHash: "a".repeat(64), name: "host",
-    workspacePath: path.join(root, "host", "workspace"), piSessionPath: path.join(root, "host", "sessions", "host.jsonl") };
-  assert.throws(() => registry.enrollHostThread({ ...admission, environmentId: local.id }), /fresh/);
-  assert.throws(() => registry.enrollHostThread({ ...admission, threadId: "local" }), /fresh/);
-  assert.throws(() => registry.enrollHostThread({ ...admission, projectId: "missing" }), /FOREIGN KEY/);
-  assert.deepEqual(registry.hostNodeAdmissions(), [], "failed enrollment is wholly rolled back");
-  registry.enrollHostThread(admission);
-  assert.equal(registry.nodeForCube(123), "node-host");
+  const admission = { nodeId: "node-runner", environmentId: 123, threadId: "runner", projectId: "project",
+    configPath: path.join(root, "intentionally-missing.json"), configHash: "a".repeat(64), name: "runner",
+    workspacePath: path.join(root, "runner", "workspace"), piSessionPath: path.join(root, "runner", "sessions", "runner.jsonl") };
+  assert.throws(() => registry.enrollTrustedRunner({ ...admission, environmentId: local.id }), /fresh/);
+  assert.throws(() => registry.enrollTrustedRunner({ ...admission, threadId: "local" }), /fresh/);
+  assert.throws(() => registry.enrollTrustedRunner({ ...admission, projectId: "missing" }), /FOREIGN KEY/);
+  assert.deepEqual(registry.trustedRunnerAdmissions(), [], "failed enrollment is wholly rolled back");
+  registry.enrollTrustedRunner(admission);
+  assert.equal(registry.nodeForCube(123), "node-runner");
   assert.equal(registry.nodeForCube(local.id), identity);
-  assert.throws(() => registry.enrollHostThread(admission), /fresh/);
-  assert.throws(() => registry.enrollHostThread({ ...admission, environmentId: 124, threadId: "different", name: "different" }), /UNIQUE/);
+  assert.throws(() => registry.enrollTrustedRunner(admission), /fresh/);
+  assert.throws(() => registry.enrollTrustedRunner({ ...admission, environmentId: 124, threadId: "different", name: "different" }), /UNIQUE/);
   const raw = new DatabaseSync(dbPath);
   raw.exec("PRAGMA recursive_triggers=ON");
   for (const sql of ["UPDATE host_node_admission SET config_hash='different'", "DELETE FROM host_node_admission",
-    "UPDATE environment_node SET node_id='node-host'", "DELETE FROM thread WHERE id='host'", "DELETE FROM cube WHERE id=123",
-    "DELETE FROM execution_node WHERE id='node-host'", "UPDATE thread SET cube_id=123 WHERE id='local'"]) {
+    "UPDATE environment_node SET node_id='node-runner'", "DELETE FROM thread WHERE id='runner'", "DELETE FROM cube WHERE id=123",
+    "DELETE FROM execution_node WHERE id='node-runner'", "UPDATE thread SET cube_id=123 WHERE id='local'"]) {
     assert.throws(() => raw.exec(sql), /immutable|permanent/);
   }
   assert.deepEqual(raw.prepare("PRAGMA foreign_key_check").all(), []);
   raw.close();
   try { registry.close(); } catch { /* may already be closed for migration */ }
   registry = new Registry(dbPath);
-  assert.equal(registry.hostNodeAdmissions().length, 1);
-  assert.equal(registry.nodeForCube(123), "node-host");
+  assert.equal(registry.trustedRunnerAdmissions().length, 1);
+  assert.equal(registry.nodeForCube(123), "node-runner");
   const backend = new MockBackend();
   backend.getState = async () => { throw new Error("must not probe local backend"); };
   backend.sandbox = () => { throw new Error("must not create local sandbox"); };
   supervisor = new CubeSupervisor(registry, backend, { cubesRoot: root, reposRoot: path.join(root, "repos"),
     image: "mock", pool: "mock", rootSize: "1GiB", dockerVolumeSize: "1GiB", idleMs: 0,
     portalBase: "cube.localhost", publicPort: 7777, egressAllow: [], environmentCache: false });
-  const plan = await supervisor.terminalPlan("host", () => {});
-  assert.equal(plan.env.CUBE_BACKEND, "host");
-  assert.equal(plan.env.CUBE_NODE_ID, "node-host");
+  const plan = await supervisor.terminalPlan("runner", () => {});
+  assert.equal(plan.env.CUBE_BACKEND, "runner");
+  assert.equal(plan.env.CUBE_NODE_ID, "node-runner");
   assert.equal(fs.existsSync(admission.workspacePath), false);
-  assert.deepEqual(await supervisor.repositoriesForUserThread("host"), [], "a repository-free host thread needs no unsupported local probe");
-  for (const action of [() => supervisor!.wakeCube("host"), () => supervisor!.sleepCube("host"),
-    () => supervisor!.removeCube("host"), () => supervisor!.workspaceForUserThread("host")]) {
+  assert.deepEqual(await supervisor.repositoriesForUserThread("runner"), [], "a repository-free runner thread needs no unsupported local probe");
+  for (const action of [() => supervisor!.wakeCube("runner"), () => supervisor!.sleepCube("runner"),
+    () => supervisor!.removeCube("runner"), () => supervisor!.workspaceForUserThread("runner")]) {
     await assert.rejects(action(), { code: "OPERATION_UNSUPPORTED" });
   }
-  await assert.rejects(supervisor.hostExecForUserThread("local", { action: "prepare", spec: {} }), { code: "OPERATION_UNSUPPORTED" });
+  await assert.rejects(supervisor.runnerExecForUserThread("local", { action: "prepare", spec: {} }), { code: "OPERATION_UNSUPPORTED" });
   for (const value of [null, [], {}, { action: "status", nodeId: "node-other" }, { action: "submit", operationId: "../escape" }]) {
-    await assert.rejects(supervisor.hostExecForUserThread("host", value), { code: "INVALID_REQUEST" });
+    await assert.rejects(supervisor.runnerExecForUserThread("runner", value), { code: "INVALID_REQUEST" });
   }
-  await assert.rejects(supervisor.hostExecForUserThread("host", { action: "status" }));
-  assert.equal((await supervisor.terminalPlan("host", () => {})).env.CUBE_BACKEND, "host", "configuration loss does not stop conversation startup");
-  registry.archiveThread("host");
-  await assert.rejects(supervisor.hostExecForUserThread("host", { action: "prepare", spec: {} }), { code: "OPERATION_UNSUPPORTED" });
-  const replacement = { ...admission, nodeId: "node-host-replacement", environmentId: 124,
-    threadId: "host-replacement", name: "host-new", configPath: path.join(root, "replacement.json"),
+  await assert.rejects(supervisor.runnerExecForUserThread("runner", { action: "status" }));
+  const workerPlan = await supervisor.terminalPlan("runner", () => {});
+  assert.equal(workerPlan.env.CUBE_BACKEND, "runner", "configuration loss does not stop conversation startup");
+  assert.equal(workerPlan.env.CUBE_RUNNER_WORKSPACE, admission.workspacePath);
+  assert.equal(workerPlan.env.CUBE_HOST_WORKSPACE, admission.workspacePath, "legacy extension env alias remains during migration");
+  registry.archiveThread("runner");
+  await assert.rejects(supervisor.runnerExecForUserThread("runner", { action: "prepare", spec: {} }), { code: "OPERATION_UNSUPPORTED" });
+  const replacement = { ...admission, nodeId: "node-runner-replacement", environmentId: 124,
+    threadId: "runner-replacement", name: "runner-new", configPath: path.join(root, "replacement.json"),
     configHash: "b".repeat(64), workspacePath: path.join(root, "replacement", "workspace"),
-    piSessionPath: path.join(root, "replacement", "sessions", "host.jsonl") };
-  registry.enrollHostThread(replacement);
-  assert.deepEqual(registry.hostNodeAdmissions().map(row => row.nodeId).sort(), ["node-host", "node-host-replacement"]);
-  assert.equal(registry.getThread("host")!.archivedAt !== null, true, "replacement preserves retired immutable binding");
+    piSessionPath: path.join(root, "replacement", "sessions", "runner.jsonl") };
+  registry.enrollTrustedRunner(replacement);
+  assert.deepEqual(registry.trustedRunnerAdmissions().map(row => row.nodeId).sort(), ["node-runner", "node-runner-replacement"]);
+  assert.equal(registry.getThread("runner")!.archivedAt !== null, true, "replacement preserves retired immutable binding");
   console.log("ok: local migration, permanent admission, rollback, restart, replace/re-enroll and no local fallback");
 } finally {
   await supervisor?.close();

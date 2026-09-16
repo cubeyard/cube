@@ -28,7 +28,7 @@ fi
 tar --numeric-owner --acls --xattrs -C "${ROOT:-/}" -czf "$temporary" "${paths[@]}"
 chmod 0600 "$temporary"
 mv "$temporary" "$destination"
-sha256sum "$destination" > "$destination.sha256"
+(cd "$(dirname "$destination")" && sha256sum "$(basename "$destination")") > "$destination.sha256"
 chmod 0600 "$destination.sha256"
 trap - EXIT
 if [ "$was_active" = 1 ]; then "$SYSTEMCTL" start "$service"; fi
