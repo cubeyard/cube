@@ -29,3 +29,7 @@ account is an explicit trust boundary and must carry no control-plane, provider,
 Git, SSH, or cloud credentials. Cube does not enforce trusted-runner egress;
 operators must enforce network policy at the OS/network layer. See the
 [trusted-runner security and operations runbook](docs/trusted-runner-operations.md).
+Workspace-relative cwd validation prevents traversal and symlink races on both
+Linux and macOS, but commands retain all filesystem authority of that account.
+Process-group cancellation is not a cgroup: especially on macOS, a hostile
+command can deliberately create a new session and escape descendant cleanup.

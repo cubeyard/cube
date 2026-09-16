@@ -1,4 +1,4 @@
-//! Opt-in, trusted Linux runner execution. This is not an isolation boundary.
+//! Opt-in trusted Unix runner execution. This is not an isolation boundary.
 //! The daemon must have exclusive ownership of its journal; never replay on boot.
 use std::{
     fs::{self, File, OpenOptions},
@@ -7,7 +7,7 @@ use std::{
         fd::AsRawFd,
         unix::fs::{MetadataExt, OpenOptionsExt},
     },
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::Stdio,
     sync::{
         Arc, Mutex,
@@ -22,6 +22,12 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{io::AsyncReadExt, process::Command, sync::Notify};
+
+#[cfg(target_os = "macos")]
+use std::{
+    ffi::CString,
+    os::{fd::FromRawFd, unix::ffi::OsStrExt},
+};
 
 pub const MAX_OUTPUT: u32 = 8192;
 pub const MAX_TIMEOUT_MS: u64 = 60_000;
@@ -60,11 +66,15 @@ impl ExecSpec {
             !self.command.is_empty() && self.command.len() <= 8192 && !self.command.contains('\0'),
             "invalid command"
         );
+        let cwd = Path::new(&self.guest_cwd);
         ensure!(
             !self.guest_cwd.is_empty()
                 && self.guest_cwd.len() <= 4096
                 && !self.guest_cwd.contains('\0')
-                && !Path::new(&self.guest_cwd).is_absolute(),
+                && !cwd.is_absolute()
+                && cwd
+                    .components()
+                    .all(|component| matches!(component, Component::CurDir | Component::Normal(_))),
             "cwd must be relative to the workspace"
         );
         ensure!(
@@ -155,6 +165,39 @@ fn private_file(path: &Path, create: bool) -> Result<File> {
     Ok(file)
 }
 
+#[cfg(target_os = "macos")]
+fn open_beneath_without_symlinks(mut directory: File, path: &Path) -> Result<File> {
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(name) => {
+                let name =
+                    CString::new(name.as_bytes()).map_err(|_| RunnerError("INVALID_REQUEST"))?;
+                let fd = unsafe {
+                    libc::openat(
+                        directory.as_raw_fd(),
+                        name.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    )
+                };
+                if fd < 0 {
+                    return Err(
+                        RunnerError(match io::Error::last_os_error().raw_os_error() {
+                            Some(libc::ENOENT | libc::ENOTDIR | libc::ELOOP) => "INVALID_REQUEST",
+                            _ => "IO_ERROR",
+                        })
+                        .into(),
+                    );
+                }
+                // SAFETY: openat returned a new owned descriptor.
+                directory = unsafe { File::from_raw_fd(fd) };
+            }
+            _ => return reject("INVALID_REQUEST"),
+        }
+    }
+    Ok(directory)
+}
+
 struct Journal {
     db: Connection,
     // A kernel-released lock, not a stale-PID lock. Never unlink/replace this file.
@@ -188,8 +231,8 @@ impl Runner {
         workspace: &Path,
     ) -> Result<()> {
         ensure!(
-            cfg!(target_os = "linux"),
-            "runner execution currently requires Linux"
+            cfg!(any(target_os = "linux", target_os = "macos")),
+            "runner execution requires Linux or macOS"
         );
         ensure!(
             unsafe { libc::geteuid() } != 0,
@@ -257,8 +300,8 @@ impl Runner {
 
     pub fn open(state: &Path, peer: EndpointId) -> Result<Arc<Self>> {
         ensure!(
-            cfg!(target_os = "linux") && unsafe { libc::geteuid() } != 0,
-            "runner execution requires non-root Linux"
+            cfg!(any(target_os = "linux", target_os = "macos")) && unsafe { libc::geteuid() } != 0,
+            "runner execution requires non-root Linux or macOS"
         );
         let meta = fs::symlink_metadata(state)?;
         ensure!(
@@ -435,9 +478,13 @@ impl Runner {
             })?;
             Ok(File::from(fd))
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         {
-            let _ = path;
+            open_beneath_without_symlinks(workspace, Path::new(path))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = (workspace, path);
             reject("UNSUPPORTED")
         }
     }

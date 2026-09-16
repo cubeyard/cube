@@ -4,6 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
+if (process.platform !== "linux") {
+  console.log("host-production-test: SKIP legacy cube-host packaging is Linux x86-64 only");
+  process.exit(0);
+}
+
 const repo = path.resolve(import.meta.dirname, "..");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-host-production-"));
 const stage = path.join(root, "stage");

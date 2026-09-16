@@ -4,18 +4,27 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 require_platform
 [ "$#" -eq 1 ] || fail 'usage: install.sh /absolute/path/to/cube-runner'
-[ ! -e "$(at /opt/cube-host/current)" ] && [ ! -e "$(at /var/lib/cube-host/state/journal.db)" ] \
+[ "$PLATFORM" != Linux ] || { [ ! -e "$(at /opt/cube-host/current)" ] && [ ! -e "$(at /var/lib/cube-host/state/journal.db)" ]; } \
   || fail 'legacy cube-host installation detected; use scripts/runner/upgrade.sh to preserve its identity and journal'
 binary="$1"; version="$(require_binary "$binary")"
-if [ -z "$ROOT" ]; then
+if [ "$PLATFORM" = Linux ] && [ -z "$ROOT" ]; then
   getent group "$RUNNER_USER" >/dev/null || groupadd --system "$RUNNER_USER"
   id "$RUNNER_USER" >/dev/null 2>&1 || useradd --system --gid "$RUNNER_USER" \
     --home-dir /var/lib/cube-runner --shell /usr/sbin/nologin "$RUNNER_USER"
 fi
 install_release "$binary" "$version"
-switch_release "$(at /opt/cube-runner/releases/$version)"
-install -d -m 0700 -o "$RUNNER_USER" -g "$RUNNER_USER" \
-  "$(at /var/lib/cube-runner)" "$(at /var/lib/cube-runner/identity)" "$(at /var/lib/cube-runner/workspace)"
-install -d -m 0755 "$(at /etc/cube-runner)" "$(at /etc/systemd/system)"
+switch_release "$(release_root)/$version"
+if [ "$PLATFORM:$RUNNER_MODE" = Darwin:system ] && [ -z "$ROOT" ]; then
+  dscl . -read "/Users/$RUNNER_USER" >/dev/null 2>&1 \
+    || fail "create a passwordless, hidden $RUNNER_USER account before system installation"
+fi
+owner="$(id -un)"; group="$(id -gn)"
+if [ "$PLATFORM" = Linux ] || [ "$RUNNER_MODE" = system ]; then owner="$RUNNER_USER"; group="$RUNNER_GROUP"; fi
+install -d -m 0700 -o "$owner" -g "$group" \
+  "$(state_root)" "$(identity_root)" "$(workspace_root)" "$(log_root)" "$(dirname "$(ready_file)")"
+if [ "$PLATFORM" = Linux ]; then install -d -m 0755 "$(at /etc/cube-runner)" "$(at /etc/systemd/system)"; fi
 install_unit "$repo_root/scripts/runner/cube-runner.service"
+if [ "$PLATFORM:$RUNNER_MODE" = Darwin:user ]; then
+  note 'installed per-user LaunchAgent profile; this is production-safe only in a dedicated credential-free login account'
+fi
 note "installed $version; initialize immutable enrollment before starting cube-runner"

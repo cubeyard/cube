@@ -134,10 +134,21 @@ export function openWorkspaceFile(root: string, rel: string): OpenWorkspaceFile 
   }
   try {
     const stat = fs.fstatSync(fd);
-    // An intermediate symlinked directory still follows on open — resolve
-    // what this DESCRIPTOR points at and require it inside the workspace.
-    const real = fs.readlinkSync(`/proc/self/fd/${fd}`);
+    // An intermediate symlinked directory still follows on open. Linux can
+    // resolve the descriptor directly; Darwin has no /proc fd link, so bind
+    // the canonical path back to the opened descriptor by device+inode.
     const realRoot = fs.realpathSync(rootAbs);
+    let real: string;
+    if (process.platform === "linux") {
+      real = fs.readlinkSync(`/proc/self/fd/${fd}`);
+    } else {
+      real = fs.realpathSync(abs);
+      const pathStat = fs.statSync(real);
+      if (pathStat.dev !== stat.dev || pathStat.ino !== stat.ino) {
+        fs.closeSync(fd);
+        return null;
+      }
+    }
     if (
       !stat.isFile() ||
       (real !== realRoot && !real.startsWith(realRoot + path.sep))

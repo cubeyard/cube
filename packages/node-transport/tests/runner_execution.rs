@@ -1,4 +1,3 @@
-#![cfg(target_os = "linux")]
 //! Only disposable workspaces, node keys and child processes owned by the test.
 use cube_node_transport::{
     DeliveryError, Limits, Request, Response, bind_loopback, call, encode,
@@ -316,7 +315,10 @@ async fn bounded_output_timeout_cwd_and_environment() {
     assert!(result.output_bytes > 8 && result.truncated);
     assert_eq!(result.exit_code, Some(0));
     for (id, script) in [
-        ("op-timeout", "sleep 0.5; touch timeout-survived"),
+        (
+            "op-timeout",
+            "(sleep 0.5; touch timeout-descendant-survived) & wait",
+        ),
         ("op-closed-pipes", "exec 1>&- 2>&-; sleep 5"),
     ] {
         let mut command = spec(script);
@@ -329,7 +331,13 @@ async fn bounded_output_timeout_cwd_and_environment() {
         assert_eq!(result.exit_code, None);
     }
     sleep(Duration::from_millis(550)).await;
-    assert!(!fixture.workspace.join("timeout-survived").exists());
+    assert!(
+        !fixture
+            .workspace
+            .join("timeout-descendant-survived")
+            .exists(),
+        "timeout must kill ordinary descendants in the command process group"
+    );
     let mut command = spec("head -c 1000000 /dev/zero");
     command.output_limit = 0;
     request(&client, &address, &start("op-drain", command)).await;
@@ -749,8 +757,12 @@ async fn drain_wait_cancel_and_restore_quarantine_are_explicit() {
 
     let cancelling = Fixture::new();
     let host = cancelling.open();
-    host.start(1, "op-cancel", spec("sleep 2; touch survived-cancel"))
-        .unwrap();
+    host.start(
+        1,
+        "op-cancel",
+        spec("(sleep 2; touch survived-cancel) & wait"),
+    )
+    .unwrap();
     timeout(BUDGET, async {
         while !host.status().unwrap().active {
             sleep(Duration::from_millis(5)).await;
@@ -766,7 +778,7 @@ async fn drain_wait_cancel_and_restore_quarantine_are_explicit() {
             completion_unknown: false,
         }
     );
-    sleep(Duration::from_millis(50)).await;
+    sleep(Duration::from_millis(2100)).await;
     assert!(!cancelling.workspace.join("survived-cancel").exists());
     drop(host);
 

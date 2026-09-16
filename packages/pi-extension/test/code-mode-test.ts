@@ -12,6 +12,10 @@ import { CODE_MODE_API } from "../src/code-mode-sdk.ts";
 const files = new Map<string, string>();
 const hostCalls: Array<{ operation: string; value?: unknown }> = [];
 const host: CodeCapabilityHost = {
+  async operation(operationId) {
+    hostCalls.push({ operation: "operation", value: operationId });
+    return { id: operationId, state: "Succeeded" };
+  },
   async readGithub(input) {
     return { data: { title: "Private issue" }, ...input };
   },
@@ -81,6 +85,26 @@ const host: CodeCapabilityHost = {
   async retryEnvironmentSetup() {
     hostCalls.push({ operation: "retryEnvironmentSetup" });
     return { accepted: true };
+  },
+  async taskDestinations() {
+    hostCalls.push({ operation: "taskDestinations" });
+    return [{ threadId: "peer-thread" }];
+  },
+  async listTasks() {
+    hostCalls.push({ operation: "listTasks" });
+    return [{ id: "task-1" }];
+  },
+  async getTask(id) {
+    hostCalls.push({ operation: "getTask", value: id });
+    return { id, state: "completed" };
+  },
+  async sendTask(input) {
+    hostCalls.push({ operation: "sendTask", value: input });
+    return { id: "task-1", ...input, state: "accepted" };
+  },
+  async cancelTask(id) {
+    hostCalls.push({ operation: "cancelTask", value: id });
+    return { id, state: "cancelled" };
   },
 };
 let allowPrCreation = true;
@@ -245,6 +269,26 @@ assert.deepEqual(hostCalls.map((call) => call.operation), ["environmentStatus", 
 console.log("4c ok: environment SDK and capability dispatch");
 
 hostCalls.length = 0;
+const durable = await runCodeMode({
+  source: `
+operation = await cube.operations.get("op-saved")
+destinations = await cube.tasks.destinations()
+sent = await cube.tasks.send("peer-thread", "stable-key", "do work")
+listed = await cube.tasks.list()
+task = await cube.tasks.get("task-1")
+cancelled = await cube.tasks.cancel("task-1")
+return {"operation": operation, "destinations": destinations, "sent": sent, "listed": listed, "task": task, "cancelled": cancelled}
+  `,
+  call: capability,
+});
+assert.equal((durable.value as any).operation.state, "Succeeded");
+assert.equal((durable.value as any).sent.requestKey, "stable-key");
+assert.deepEqual(hostCalls.map((call) => call.operation), [
+  "operation", "taskDestinations", "sendTask", "listTasks", "getTask", "cancelTask",
+]);
+console.log("4d ok: durable runner operation and T2T task SDK dispatch");
+
+hostCalls.length = 0;
 const never = new AbortController().signal;
 const portals = await runCodeMode({
   source: `return {
@@ -279,7 +323,7 @@ for (const input of [
   await assert.rejects(capability("portals.expose", input, never), /port must|name must|exceeds 80|lifetime must/);
 }
 await assert.rejects(capability("portals.remove", { port: -1 }, never), /port must/);
-console.log("4d ok: temporary portal SDK dispatch and validation");
+console.log("4e ok: temporary portal SDK dispatch and validation");
 
 // ---- 5. Dispatcher validation is fail-closed -----------------------------
 

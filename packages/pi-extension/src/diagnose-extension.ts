@@ -5,8 +5,14 @@ import { Type } from "typebox";
 import { readDiagnosticFile } from "./diagnostics.ts";
 
 export default function diagnosisExtension(pi: ExtensionAPI): void {
-  const bundle = process.env.CUBE_DIAGNOSIS_BUNDLE;
-  if (!bundle || fs.realpathSync(bundle) !== path.resolve(bundle)) throw new Error("A canonical diagnosis bundle is required");
+  const configuredBundle = process.env.CUBE_DIAGNOSIS_BUNDLE;
+  if (!configuredBundle || !path.isAbsolute(configuredBundle) || !fs.lstatSync(configuredBundle).isDirectory()) {
+    throw new Error("A canonical diagnosis bundle is required");
+  }
+  // macOS exposes trusted temporary paths through /var -> /private/var. Accept
+  // that intermediate system alias, but reject a final symlink and operate on
+  // the canonical directory from here onward.
+  const bundle = fs.realpathSync(configuredBundle);
   const ownSource = fs.realpathSync(import.meta.filename);
   const allowed = () => {
     const tools = pi.getActiveTools();

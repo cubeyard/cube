@@ -5,6 +5,53 @@ source "$(dirname "$0")/lib.sh"
 require_platform
 [ "$#" -eq 1 ] || fail 'usage: upgrade.sh /absolute/path/to/cube-runner'
 binary="$1"; version="$(require_binary "$binary")"
+
+if [ "$PLATFORM" = Darwin ]; then
+  current="$(current_link)"; unit="$(service_file)"; ready="$(ready_file)"
+  [ -L "$current" ] || fail 'no installed cube-runner release'
+  [ -f "$unit" ] || fail 'installed cube-runner launchd plist is missing'
+  old="$(readlink "$current")"; old_version="$(basename "$old")"
+  install_release "$binary" "$version"
+  unit_backup="${unit}.rollback.$$"; install -m 0600 "$unit" "$unit_backup"
+  needs_rollback=0
+  rollback_previous() {
+    local healthy=0
+    set +e
+    service_stop
+    install -m 0644 "$unit_backup" "$unit"
+    switch_release "$old"
+    service_start && wait_ready "$old_version" && healthy=1
+    set -e
+    [ "$healthy" = 1 ]
+  }
+  cleanup() {
+    local rc=$?
+    if [ "$needs_rollback" = 1 ]; then
+      if rollback_previous; then note "interrupted upgrade rolled back to $old_version"
+      else note 'interrupted upgrade and rollback both failed; inspect launchd and runner logs'; fi
+    fi
+    rm -f -- "$unit_backup"
+    return "$rc"
+  }
+  trap cleanup EXIT
+  service_drain
+  for _ in $(seq 1 50); do [ -s "$ready" ] && grep -q '"lifecycle":"draining"' "$ready" && break; sleep 0.1; done
+  grep -q '"lifecycle":"draining"' "$ready" 2>/dev/null || fail 'drain was not confirmed; release unchanged'
+  service_stop; needs_rollback=1
+  install_unit "$repo_root/scripts/runner/cube-runner.service"
+  switch_release "$(release_root)/$version"
+  if service_start && wait_ready "$version"; then
+    ln -sfn "$old" "$(previous_link)"
+    needs_rollback=0
+    note "upgraded $old_version -> $version"
+    exit 0
+  fi
+  note "new runner failed readiness; restoring $old_version"
+  if rollback_previous; then needs_rollback=0; fail "upgrade failed; rollback to $old_version is healthy"; fi
+  needs_rollback=0
+  fail 'upgrade and rollback both failed; inspect launchd and runner logs'
+fi
+
 legacy=0; from_host=0; old_service=cube-runner.service; old_ready="$(ready_file)"
 current="$(at /opt/cube-runner/current)"
 if [ -f "$(at /etc/cube-runner/legacy-layout)" ]; then

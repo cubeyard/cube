@@ -47,7 +47,11 @@ try {
   }
   const bang = await events.get("user_bash")({ command: "touch must-not-exist", cwd: tmp }, {});
   await assert.rejects(() => bang.operations.exec("touch must-not-exist", tmp, { onData() {}, signal: new AbortController().signal }), /NODE_UNAVAILABLE/);
-  for (const source of ['return await cube.exec("touch must-not-exist");', 'return await cube.fs.writeText("file", "no");', 'return await cube.fs.readText("file");']) {
+  for (const source of [
+    'return await cube.exec("touch must-not-exist")',
+    'from pathlib import Path\nreturn Path("file").write_text("no")',
+    'from pathlib import Path\nreturn Path("file").read_text()',
+  ]) {
     const result = await tools.get("code").execute("test", { source });
     assert.equal(result.isError, true);
     assert.equal(result.details.error.code, "NODE_UNAVAILABLE");
@@ -63,12 +67,12 @@ try {
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(calls.length, count, "reconnect itself does not replay any action");
   fs.mkdirSync(workspace);
-  const result = await tools.get("code").execute("test", { source: 'return await cube.exec("printf explicit-request");' });
+  const result = await tools.get("code").execute("test", { source: 'return await cube.exec("printf explicit-request")' });
   assert.ok(!result.isError, JSON.stringify(result));
   assert.match(JSON.stringify(result), /explicit-request/);
   let bangOutput = "";
   await bang.operations.exec("pwd", tmp, { onData: (chunk: Buffer) => { bangOutput += chunk.toString(); }, signal: new AbortController().signal });
-  assert.equal(bangOutput.trim(), workspace, "user ! cwd maps to the guest workspace, not pi runtime");
+  assert.equal(fs.realpathSync(bangOutput.trim()), fs.realpathSync(workspace), "user ! cwd maps to the guest workspace, not pi runtime");
   assert.equal(fs.existsSync(path.join(workspace, "must-not-exist")), false);
   // The injected transport gate checks before dispatch and preserves ambiguity
   // after dispatch. There is exactly one execution, never a retry loop.

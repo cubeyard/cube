@@ -66,7 +66,7 @@ export async function smokeRunnerRouting(root: string, configPath: string, works
     // Code-mode timeout deliberately includes transport setup. Public N0
     // discovery needs a larger budget than deterministic local transports.
     const timeoutMs = network === "relay" ? 10000 : 5000;
-    const executed = await code(`return await cube.exec("printf once >> routed-count; printf routed", {timeoutMs: ${timeoutMs}});`);
+    const executed = await code(`return await cube.exec("printf once >> routed-count; printf routed", timeoutMs=${timeoutMs})`);
     assert.notEqual(executed.isError, true, text(executed));
     const result = JSON.parse(text(executed).split("\n\n").slice(1).join("\n\n"));
     assert.equal(result.output, "routed");
@@ -88,18 +88,18 @@ export async function smokeRunnerRouting(root: string, configPath: string, works
     let userOutput = "";
     await user.operations.exec("printf user-routed", "/workspace", { onData: (chunk: Buffer) => { userOutput += chunk; } });
     assert.equal(userOutput, "user-routed");
-    const read = await code('return await cube.fs.readText("missing");');
+    const read = await code('from pathlib import Path\nreturn Path("missing").read_text()');
     assert.equal(read.details.error.code, "OPERATION_UNSUPPORTED");
-    const signalled = await code(`return await cube.exec("kill -TERM $$", {timeoutMs: ${timeoutMs}});`);
+    const signalled = await code(`return await cube.exec("kill -TERM $$", timeoutMs=${timeoutMs})`);
     assert.equal(signalled.details.error.code, "ESIGNALLED", text(signalled));
     assert.match(signalled.details.error.operationId, /^op-/);
-    const overflow = await code(`return await cube.exec("head -c 9000 /dev/zero", {timeoutMs: ${timeoutMs}});`);
+    const overflow = await code(`return await cube.exec("head -c 9000 /dev/zero", timeoutMs=${timeoutMs})`);
     assert.match(text(overflow), /output truncated at 8192 bytes/);
     const controller = new AbortController();
     const marker = path.join(workspace, "routed-cancel");
     const watcher = setInterval(() => { if (fs.existsSync(marker)) controller.abort(); }, 10);
     let cancelled;
-    try { cancelled = await code(`return await cube.exec("printf once >> routed-cancel; sleep .4", {timeoutMs: ${network === "relay" ? 10000 : 3000}});`, controller.signal); }
+    try { cancelled = await code(`return await cube.exec("printf once >> routed-cancel; sleep .4", timeoutMs=${network === "relay" ? 10000 : 3000})`, controller.signal); }
     finally { clearInterval(watcher); }
     assert.equal(cancelled.details.error.completionUnknown, true, text(cancelled));
     const operationId = cancelled.details.error.operationId;
