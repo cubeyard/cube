@@ -59,9 +59,9 @@ sudo bash scripts/runner/initialize.sh CONTROL_PEER NODE_ID THREAD_ID ENVIRONMEN
 ```
 
 macOS production uses the same package and scripts, but first provision a
-hidden, passwordless, non-admin `_cube-runner` account with no login credentials
-or inherited keychain data. Account creation is deliberately outside the bundle
-and must follow local fleet policy. Then run as root with
+hidden, passwordless, non-admin `_cube-runner` account and dedicated group with
+no login credentials or inherited keychain data. Account creation is deliberately
+outside the bundle and must follow local fleet policy. Then run as root with
 `CUBE_RUNNER_MODE=system`; the installer creates
 `/Library/LaunchDaemons/com.cubeyard.cube-runner.plist`, validates it with
 `plutil`, and launchd drops execution to `_cube-runner`. Never pass credentials

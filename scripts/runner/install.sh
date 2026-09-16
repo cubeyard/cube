@@ -14,12 +14,14 @@ if [ "$PLATFORM" = Linux ] && [ -z "$ROOT" ]; then
   id "$RUNNER_USER" >/dev/null 2>&1 || useradd --system --gid "$RUNNER_USER" \
     --home-dir /var/lib/cube-runner --shell /usr/sbin/nologin "$RUNNER_USER"
 fi
-install_release "$binary" "$version"
-switch_release "$(release_root)/$version"
 if [ "$PLATFORM:$RUNNER_MODE" = Darwin:system ] && [ -z "$ROOT" ]; then
   dscl . -read "/Users/$RUNNER_USER" >/dev/null 2>&1 \
     || fail "create a passwordless, hidden $RUNNER_USER account before system installation"
+  dscl . -read "/Groups/$RUNNER_GROUP" >/dev/null 2>&1 \
+    || fail "create the dedicated $RUNNER_GROUP group before system installation"
 fi
+install_release "$binary" "$version"
+switch_release "$(release_root)/$version"
 owner="$(id -un)"; group="$(id -gn)"
 if [ "$PLATFORM" = Linux ] || [ "$RUNNER_MODE" = system ]; then owner="$RUNNER_USER"; group="$RUNNER_GROUP"; fi
 install -d -m 0700 -o "$owner" -g "$group" \
