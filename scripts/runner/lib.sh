@@ -9,6 +9,7 @@ RUNNER_MODE="${CUBE_RUNNER_MODE:-$([ "$PLATFORM" = Darwin ] && printf user || pr
 RUNNER_USER="${CUBE_RUNNER_USER:-$([ "$PLATFORM" = Darwin ] && printf _cube-runner || printf cube-runner)}"
 RUNNER_GROUP="${CUBE_RUNNER_GROUP:-$RUNNER_USER}"
 LEGACY_USER="${CUBE_HOST_USER:-cube-host}"
+LEGACY_GROUP="${CUBE_HOST_GROUP:-$LEGACY_USER}"
 SYSTEMCTL="${CUBE_RUNNER_SYSTEMCTL:-${CUBE_HOST_SYSTEMCTL:-systemctl}}"
 LAUNCHCTL="${CUBE_RUNNER_LAUNCHCTL:-launchctl}"
 LABEL="com.cubeyard.cube-runner"

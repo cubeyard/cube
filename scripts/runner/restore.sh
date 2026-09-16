@@ -24,4 +24,9 @@ else
   mkdir -p "$(dirname "$target")"; tar -C "$(dirname "$target")" -xzf "$archive"
 fi
 marker="$target/state/restore-quarantine"; touch "$marker"; chmod 0600 "$marker"
+if [ -z "$ROOT" ] && { [ "$PLATFORM" = Linux ] || [ "$RUNNER_MODE" = system ]; }; then
+  owner="$RUNNER_USER"; group="$RUNNER_GROUP"
+  if [ "$layout" = var/lib/cube-host ]; then owner="$LEGACY_USER"; group="$LEGACY_GROUP"; fi
+  chown "$owner:$group" "$marker"
+fi
 note 'restored files without starting the runner; reconcile all post-backup operations before acknowledgement'
