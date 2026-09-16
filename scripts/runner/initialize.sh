@@ -6,7 +6,7 @@ require_platform
 control_peer="$1"; node_id="$2"; thread_id="$3"; environment_id="$4"
 binary="$(current_link)/cube-runner"
 [ -x "$binary" ] || fail 'install the runner daemon first'
-root="$(state_root)"; key="$(identity_root)/node.key"; state="$(journal_root)"; workspace="$(workspace_root)"
+key="$(identity_root)/node.key"; state="$(journal_root)"; workspace="$(workspace_root)"
 [ ! -e "$key" ] && [ ! -e "$state" ] || fail 'identity/state already exists; never overwrite or rebind it'
 account="$RUNNER_USER"; is_legacy_layout && account="$LEGACY_USER"
 run_runner() {
