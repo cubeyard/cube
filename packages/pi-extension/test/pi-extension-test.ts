@@ -145,7 +145,7 @@ assert.ok(fs.lstatSync(path.join(guestWs, "link.txt")).isSymbolicLink(), "link s
 assert.equal(fs.readFileSync(path.join(guestWs, "src/deep/a.txt"), "utf8"), "rewritten\n");
 assert.equal(fs.statSync(path.join(guestWs, "src/deep/a.txt")).mode & 0o777, 0o755, "exec bit preserved");
 const resolvedMissing = await cubeFs.resolvePath(path.join(guestWs, "missing/new.txt"));
-assert.equal(resolvedMissing.path, path.join(guestWs, "missing/new.txt"));
+assert.equal(resolvedMissing.path, path.join(fs.realpathSync(guestWs), "missing/new.txt"));
 assert.equal(resolvedMissing.mode, null, "new file has no prior mode");
 
 // oversized read is refused rather than buffered

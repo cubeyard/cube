@@ -11,7 +11,7 @@
 // cube, outside the workspace, as the dev user.
 import fs from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 export const SENTINEL_START = "<<<CUBE-FSOPS>>>";
 export const SENTINEL_END = "<<<CUBE-FSOPS-END>>>";
@@ -226,7 +226,12 @@ async function main() {
 }
 
 // Only run as a CLI — the host-side test suite imports this module for its
-// sentinel constants without triggering an op.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// sentinel constants without triggering an op. Canonicalize both paths:
+// macOS exposes /tmp through /private/tmp (and /var through /private/var), so
+// comparing URL spellings makes a copied helper silently skip main().
+if (
+  process.argv[1] &&
+  await fs.realpath(fileURLToPath(import.meta.url)) === await fs.realpath(process.argv[1])
+) {
   await main();
 }
