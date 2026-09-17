@@ -84,8 +84,8 @@
     <p class="later">{projectLogin ? "Your project stays as you left it. We’ll check repository access when you return after login." : "You can always log in later from a project."}</p>
 
     <div class="access-note">
-      <p>Behind the scenes, cube runs <code>gh auth login</code> on your VM. You approve <strong>GitHub CLI</strong> in your browser, not a separate Cube app.</p>
-      <p>GitHub CLI keeps the credentials on your VM, outside thread environments.</p>
+      <p>The host runs <code>gh auth login</code>. You approve <strong>GitHub CLI</strong> in your browser, not a separate app.</p>
+      <p>GitHub CLI keeps the credentials on the host. Trusted runners should use a separate account or machine.</p>
       <p>This is standard GitHub CLI access, not per-repository access.</p>
       <details>
         <summary>before connecting work code</summary>
@@ -101,7 +101,7 @@
       <button class="key" onclick={back} disabled={saving}>back</button>
     </div>
     <div class="access-note">
-      <p>This setup is remembered on your VM.</p>
+      <p>This setup is remembered on the host.</p>
       <p>Model-provider login is separate. Set it up when you start a thread.</p>
     </div>
   {/if}

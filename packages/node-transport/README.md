@@ -1,12 +1,11 @@
 # Node transport bootstrap
 
-**Opt-in trusted-runner profile. No Rust runner binary is built into VM release
-artifacts; ordinary threads still use the local backend.**
+**Trusted-runner execution is the product's only execution path. It is not sandboxing.**
 Real iroh 1.2.0, pinned in Cargo.lock, using Rust 1.91.0. The `serve` command
 remains a hello-only probe and advertises no execution profiles. The separate,
 explicitly opted-in [trusted runner profile](RUNNER.md) adds a permanent local
 binding, durable operation journal, bounded runner exec and result retrieval.
-Operator-created runner threads route pi exec through cubed. The control-plane adapter in
+Operator-enrolled runners serve ordinary Pi AgentHarness threads. The control-plane adapter in
 `packages/server/src/iroh-node.ts` now calls pinned `@number0/iroh` 1.1.0 **inside
 Node**, directly over this protocol. There is no Rust subprocess/stdio bridge
 between TypeScript and the runner; the CLI remains independent diagnostic
@@ -93,8 +92,7 @@ CUBE_TEST_IROH_RELAY=1 node scripts/smoke-node-adapter.ts target/debug/cube-runn
 The separate transport CI job installs Node 26, pinned pnpm and Rust, then runs
 these checks. The ordinary Node offline list additionally tests the in-process
 adapter against a real npm iroh protocol fixture, without building Rust. The
-trusted-runner binary is packaged separately with `scripts/runner/package.sh`; it is
-not part of the Incus VM artifacts.
+trusted-runner binary is packaged with `scripts/runner/package.sh`.
 
 Tests exercise strict framing, unknown versions/methods, loopback-only binding,
 separate CLI processes, authenticated hello, key persistence across restart,
@@ -111,5 +109,4 @@ launchd packaging, rollback and restore quarantine. Supported native targets
 are Linux x86-64 and macOS arm64/x86-64; packages remain
 OS/architecture-specific. File/repository transfer and portal streams remain
 unsupported for trusted runners. Separate-machine acceptance on both production
-service profiles is required for each release; Incus execution nodes are not
-this profile.
+service profiles is required for each release.

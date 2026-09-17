@@ -3,8 +3,7 @@
   import { fetchState } from "../lib/api.ts";
   import type { AuthState } from "../lib/types.ts";
 
-  // Provider auth belongs to pi (`/login` in a thread); cubed only reports
-  // it. Polled slowly so a login shows up in the header without a reload.
+  // Pi owns credentials; the models page supplies its interactive login UI.
   let auth = $state<AuthState | null>(null);
 
   onMount(() => {
@@ -24,13 +23,13 @@
     <span class="auth-short" aria-hidden="true">ok</span>
   </span>
 {:else if auth}
-  <span
+  <a href="#/models"
     class="auth-missing"
-    aria-label="not signed in — run /login in a thread"
-    title="not signed in — run /login in a thread"
+    aria-label="connect a model provider"
+    title="connect a model provider"
   >
     <span class="lamp on-red"></span>
-    <span class="auth-full" aria-hidden="true">not signed in — run /login in a thread</span>
+    <span class="auth-full" aria-hidden="true">connect provider</span>
     <span class="auth-short" aria-hidden="true">auth</span>
-  </span>
+  </a>
 {/if}

@@ -2,8 +2,8 @@
 
 This is the production boundary for Cube **trusted runners**. One installation
 has one immutable thread/environment binding and uses Iroh's public N0
-discovery/relay transport. A trusted runner is not an Incus or VM execution node
-and is not a general scheduler.
+discovery/relay transport. A trusted runner executes under its account without
+sandboxing and is not a general scheduler.
 
 | Platform | Lifecycle | Support profile |
 |---|---|---|
@@ -48,7 +48,7 @@ inbound public listener.
 Linux production:
 
 ```sh
-bash .cube/setup
+bash scripts/setup-dev.sh
 bash scripts/runner/package.sh /absolute/private-output/cube-runner.tar.gz
 cd /absolute/private-output
 sha256sum -c cube-runner.tar.gz.sha256 # use: shasum -a 256 -c ... on macOS
@@ -74,19 +74,22 @@ preferred production profile.
 
 Transfer the archive and checksum over an authenticated operator channel.
 `initialize.sh` prints only the public Iroh peer ID. Create the private adapter
-config from [RUNNER.md](../packages/node-transport/RUNNER.md), stop cubed, then:
+config from [RUNNER.md](../packages/node-transport/RUNNER.md), then:
 
 ```sh
 node scripts/enroll-runner.ts \
-  --database /absolute/cubed.db \
+  --state /absolute/host-state \
   --project EXISTING_PROJECT_ID \
   --config /absolute/private-runner.json \
-  --cubes-root /absolute/cubes \
-  --trusted-runner --server-stopped
+  --trusted-runner
 ```
 
 Enrollment authenticates the full binding and pins the config hash. It never
-executes work. Existing IDs cannot be adopted or rebound.
+executes work. Existing IDs cannot be adopted or rebound. Prepare the workspace
+before enrollment: host repository checks do not transfer files to a runner.
+The next new thread for this project consumes this runner's binding. No restart
+is needed after enrollment. The host state is the fresh `CUBED_STATE` layout;
+old registries and sessions are not migrated.
 
 Fresh Linux layout:
 
@@ -220,7 +223,7 @@ There is no in-place key, peer, node, thread, environment, or admission rotation
 If either side's key is lost without a matched backup, archive the old thread,
 retain its journal/intents for result inspection, and enroll a fresh runner with
 new identities. Copy workspace content only through an authenticated offline
-operator process. Recreate only required task grants and run a harmless canary.
+operator process. Run a harmless canary before accepting new work.
 Never delete old evidence to make an ambiguous command retryable.
 
 ## Capacity and diagnostics
@@ -247,20 +250,18 @@ addresses, IDs, and paths.
 
 ## Compatibility window
 
-Protocol v1 still accepts the wire profile `host`; new daemons advertise both
-`runner` and `host`. Cubed accepts `/host-exec`, `CUBE_BACKEND=host`,
-`CUBE_HOST_WORKSPACE`, `--trusted-host`, `host-init`, and `host-serve` as
-deprecated aliases. SQLite tables `execution_node` and `host_node_admission`
-remain unchanged for rollback. The packaged `cube-node-transport` name is a
-symlink to `cube-runner`. Keep these aliases through the first stable release
-after every supported installation has upgraded; remove them only with a
-protocol/storage migration and a release-note removal date.
+Protocol v1 still accepts the wire profile `host`; native daemons advertise both
+`runner` and `host`. Native runner CLI aliases and Linux package rollback remain
+supported. The packaged `cube-node-transport` name is a symlink to `cube-runner`.
+These are runner transport/package compatibility, not a second product backend.
+Cubed has no backend selector, legacy execution routes or admission tables.
+Its fresh registry and Pi sessions are not compatible with old host databases.
 
 ## Production acceptance
 
 Release sign-off requires separate Linux x86-64/systemd and macOS production
-profiles over N0 relay: fresh install/enrollment, runner exec, directed T2T
-recipient execution, drain, cancellation/stop, upgrade/induced rollback,
+profiles over N0 relay: fresh install/enrollment, product prompts and runner exec,
+drain, cancellation/stop, upgrade/induced rollback,
 daemon/control loss, matched backup/restore quarantine, and
 replacement/re-enrollment. Rootless macOS LaunchAgent acceptance proves the
 portable scripts and daemon but does not prove the dedicated-account

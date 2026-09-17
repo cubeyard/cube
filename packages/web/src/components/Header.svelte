@@ -2,7 +2,7 @@
   import AuthBadge from "./AuthBadge.svelte";
   import Wordmark from "./Wordmark.svelte";
 
-  let { section }: { section: "threads" | "projects" } = $props();
+  let { section }: { section: "threads" | "projects" | "models" } = $props();
 </script>
 
 <header>
@@ -10,6 +10,7 @@
   <nav aria-label="main">
     <a href="#/threads" class:active={section === "threads"} title="threads · press g then t">threads</a>
     <a href="#/projects" class:active={section === "projects"} title="projects · press g then p">projects</a>
+    <a href="#/models" class:active={section === "models"}>models</a>
   </nav>
   <span class="spacer"></span>
   <AuthBadge />

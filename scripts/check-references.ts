@@ -5,8 +5,11 @@ import path from "node:path";
 
 const root = path.resolve(import.meta.dirname, "..");
 const references = [
-  { name: "@earendil-works/pi-coding-agent", source: "pi/packages/coding-agent", consumers: ["server", "pi-extension"] },
-  { name: "effect", source: "effect/packages/effect", consumers: ["server", "git", "sandbox", "web"] },
+  { name: "@earendil-works/pi-coding-agent", source: "pi/packages/coding-agent", consumers: ["server"] },
+  { name: "@earendil-works/pi-agent-core", source: "pi/packages/agent", consumers: ["server"] },
+  { name: "@earendil-works/pi-ai", source: "pi/packages/ai", consumers: ["server"] },
+  { name: "@earendil-works/pi-session-backend-sqlite-node", source: "pi/packages/session-backends/sqlite-node", consumers: ["server"] },
+  { name: "effect", source: "effect/packages/effect", consumers: ["server", "git", "web"] },
 ];
 
 for (const { name, source, consumers } of references) {

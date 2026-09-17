@@ -1,80 +1,29 @@
 #!/usr/bin/env bash
-# The offline test suites — every test that needs neither Incus nor a
-# VM. ONE list, used by CI (.github/workflows/ci.yml) on every push and
-# by the VM portfolio (scripts/vm/run-tests.sh), which sources this file
-# and appends the real-Incus smokes.
-#
-#   bash scripts/test-offline.sh        # run them all, from any host
+# Offline Node checks. Real Rust/Iroh execution runs in test-node-transport.sh.
 OFFLINE_TESTS=(
-  scripts/release-contract-test.ts
-  scripts/launcher-network-test.ts
   scripts/host-production-test.ts
   scripts/runner-production-test.ts
   packages/server/test/log-test.ts
-  packages/server/test/cube-toml-test.ts
-  packages/server/test/portal-config-test.ts
-  packages/server/test/portal-proxy-test.ts
-  packages/server/test/temporary-portals-test.ts
   packages/server/test/registry-test.ts
-  packages/server/test/conversation-test.ts
+  packages/server/test/api-test.ts
   packages/server/test/models-test.ts
-  packages/server/test/thread-tasks-test.ts
-  packages/server/test/execution-node-test.ts
-  packages/server/test/trusted-runner-enrollment-test.ts
+  packages/server/test/model-auth-test.ts
   packages/server/test/iroh-node-test.ts
-  packages/server/test/events-test.ts
-  packages/server/test/user-facing-test.ts
-  packages/server/test/services-test.ts
-  packages/server/test/workspace-files-test.ts
   packages/server/test/github-auth-test.ts
   packages/server/test/github-read-test.ts
   packages/server/test/onboarding-test.ts
-  packages/server/test/startup-effects-test.ts
-  packages/server/test/pty-test.ts
-  packages/server/test/terminal-guards-test.ts
-  packages/server/test/project-test.ts
-  packages/server/test/repository-operations-test.ts
-  packages/server/test/project-environment-test.ts
-  packages/server/test/environment-templates-test.ts
-  packages/server/test/environment-lifecycle-test.ts
-  packages/server/test/lifecycle-test.ts
-  packages/server/test/provision-cancel-test.ts
-  packages/server/test/provision-failure-test.ts
-  packages/sandbox/test/ca-trust-test.ts
-  packages/sandbox/test/environment-backend-test.ts
-  packages/sandbox/test/incus-client-test.ts
-  packages/sandbox/test/mock-backend-test.ts
   packages/git/test/git-service-test.ts
-  packages/pi-extension/test/code-mode-test.ts
-  packages/pi-extension/test/code-boundaries-test.ts
-  packages/pi-extension/test/code-io-test.ts
-  packages/pi-extension/test/code-worker-jiti-test.ts
-  packages/pi-extension/test/pi-extension-test.ts
-  packages/pi-extension/test/runner-exec-test.ts
-  packages/pi-extension/test/environment-access-test.ts
-  packages/pi-extension/test/diagnostics-test.ts
 )
-
-# Development-only Rust packages: run by scripts/test-node-transport.sh and a
-# separate CI job, not the released Node/Incus VM portfolio (no Rust there yet).
-# shellcheck disable=SC2034 # Consumed by the separate Rust runner when sourced.
+# shellcheck disable=SC2034
 RUST_OFFLINE_PACKAGES=(cube-runner)
-
-# Executed (not sourced): run the Node list.
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -uo pipefail
   cd "$(dirname "$0")/.." || exit 1
-  # No model credentials anywhere near tests. Some suites read pi's model
-  # catalog (never prompt); a placeholder key makes the deepseek models
-  # "available" and its value is never sent anywhere.
-  export DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-placeholder-cube-tests}"
   failed=()
   for t in "${OFFLINE_TESTS[@]}"; do
-    echo
-    echo "==== $t ===="
+    printf '\n==== %s ====\n' "$t"
     node "$t" || failed+=("$t")
   done
-  echo
   if [ "${#failed[@]}" -gt 0 ]; then
     printf 'FAIL: %s\n' "${failed[@]}"
     exit 1

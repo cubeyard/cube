@@ -1,9 +1,0 @@
-# Development dependencies only; no public control-plane or relay access.
-[network]
-allow = [
-  "nodejs.org",
-  "static.rust-lang.org",
-  "index.crates.io",
-  "static.crates.io",
-  "crates.io",
-]

@@ -1,4 +1,4 @@
-//! Real iroh/QUIC on explicitly bound loopback sockets. No relays, Incus,
+//! Real iroh/QUIC on explicitly bound loopback sockets. No relays,
 //! provider calls, external listener, or existing thread resources.
 use std::{path::Path, process::Stdio, time::Duration};
 

@@ -1,7 +1,7 @@
 # Security policy
 
 cube runs coding agents against repositories and keeps provider and GitHub
-credentials on the VM host. Security reports are taken seriously.
+credentials on the control-plane host. Security reports are taken seriously.
 
 ## Supported versions
 
@@ -19,12 +19,11 @@ sensitive details and ask the maintainer for a private contact channel.
 
 ## Important deployment boundary
 
-cubed does not provide application-level authentication. Keep it on loopback
-or a trusted private network such as a Tailnet; never expose it directly to the
-public internet. The launcher refuses public bind addresses, but operators are
-responsible for the surrounding VM, network, and access controls.
+cubed does not provide application-level authentication. It binds loopback;
+use an authenticated private proxy for remote access. Never expose it directly
+to the public internet. Operators are responsible for network/access controls.
 
-The optional trusted runner is not a sandbox. Its dedicated unprivileged
+The trusted runner is not a sandbox. Its dedicated unprivileged
 account is an explicit trust boundary and must carry no control-plane, provider,
 Git, SSH, or cloud credentials. Cube does not enforce trusted-runner egress;
 operators must enforce network policy at the OS/network layer. See the

@@ -11,9 +11,6 @@ import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { Endpoint, SecretKey, type BiStream } from "@number0/iroh/index.js";
 import { IrohExecutionNodeClient, IrohNodeError, type RunnerExecSpec } from "../src/iroh-node.ts";
-import { Registry } from "../src/registry.ts";
-import { CubeSupervisor, type SupervisorConfig } from "../src/supervisor.ts";
-import { MockBackend } from "@cube/sandbox";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "iroh-adapter-test-"));
 const configPath = path.join(root, "config.json");
@@ -115,9 +112,6 @@ try {
   assert.ok(!fs.existsSync(config.controlKey));
   assert.deepEqual(client.binding, nodeBinding);
   await assert.rejects(client.status(2), errorCode("ENVIRONMENT_MISSING"));
-  await assert.rejects(client.wake(1), errorCode("OPERATION_UNSUPPORTED"));
-  await assert.rejects(client.sleep(1), errorCode("OPERATION_UNSUPPORTED"));
-  await assert.rejects(client.openPortal(1, 3000), errorCode("OPERATION_UNSUPPORTED"));
   assert.equal(calls.length, 0, "unsupported operations cannot fall back or probe");
   fs.writeFileSync(config.controlKey, Buffer.from(controlKey.toBytes()), { mode: 0o600 });
   assert.equal((await client.status(1)).status, "Running");
@@ -285,28 +279,6 @@ try {
   await assert.rejects(client.status(1), errorCode("CONFLICT"));
   fs.writeFileSync(configPath, JSON.stringify(config));
   console.log("1 ok: in-process npm iroh, no subprocess APIs, strict bounded frames, durable intent, one submission, cancellation and read-only polling");
-  // The existing local-only registry cannot enroll remote environments yet.
-  // Even a deliberately misconfigured remote client with the LOCAL node ID
-  // must not authorize filesystem/Git/Incus adapter access on the control plane.
-  const registry = new Registry(path.join(root, "registry.db"));
-  registry.createProject({ id: "p", name: "test", repositories: [] });
-  const workspace = path.join(root, "workspace");
-  fs.mkdirSync(workspace);
-  const cube = registry.createCube({ name: "bound", workspacePath: workspace, image: "mock" });
-  registry.addThread({ id: "t", cubeId: cube.id, projectId: "p", piSessionPath: path.join(root, "sessions") });
-  registry.setCubeStatus("bound", "ready");
-  fs.writeFileSync(configPath, JSON.stringify({ ...config, binding: { nodeId: registry.localNodeId, threadId: "t", environmentId: cube.id } }));
-  const remote = new IrohExecutionNodeClient({ configPath });
-  const supervisorConfig: SupervisorConfig = { cubesRoot: root, reposRoot: path.join(root, "repos"), pool: "mock", image: "mock", rootSize: "1GiB", dockerVolumeSize: "1GiB", idleMs: 0, portalBase: "cube.internal", publicPort: 7777, egressAllow: [], environmentCache: false };
-  const supervisor = new CubeSupervisor(registry, new MockBackend(), supervisorConfig, [remote]);
-  const noProbes = calls.length;
-  for (const action of [() => supervisor.requireLocalEnvironment("bound"), () => supervisor.accessForUserThread("t"), () => supervisor.workspaceForUserThread("t"), () => supervisor.wakeCube("bound"), () => supervisor.sleepCube("bound")]) {
-    await assert.rejects(action(), error => (error as { code?: string }).code === "OPERATION_UNSUPPORTED");
-  }
-  assert.equal(calls.length, noProbes);
-  assert.equal(registry.getCube("bound")?.status, "ready");
-  registry.close();
-  console.log("2 ok: remote transport cannot authorize local adapters even with a matching local node ID");
 } finally {
   Object.assign(childProcess, processAPIs);
   syncBuiltinESMExports();

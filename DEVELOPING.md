@@ -1,664 +1,89 @@
 # Developing cube
 
-Two loops, by what you're changing. The **mock loop** develops cubed's own
-logic and UI from inside an ordinary cube (fast, no Incus). The **VM loop**
-validates the real sandbox and disposable Pi workers (slow, real Incus).
+Read [ARCHITECTURE.md](ARCHITECTURE.md) for ownership and
+[docs/trusted-runner-operations.md](docs/trusted-runner-operations.md) for runner
+operations. No deployment is necessary for the local development loop.
 
-See `ARCHITECTURE.md` for the architecture and `HANDOFF.md` for current state.
-For codemode limits, structured errors, and isolated regression tests, see
-[`docs/codemode.md`](docs/codemode.md).
+## Checks
 
----
-
-## Local node-boundary tests
-
-See [docs/execution-nodes.md](docs/execution-nodes.md). The offline suite includes
-`packages/server/test/execution-node-test.ts` and
-`packages/pi-extension/test/environment-access-test.ts`. Both use disposable
-state and explicit test doubles; there is no production disconnect toggle.
-They exercise real pi startup and local portal streams, not remote execution.
-Creation request keys now survive restart for the lifetime of their thread.
-The local node identity is persisted in the registry; never copy the database
-to a new host and treat that as moving its environments.
-
-## Iroh / trusted-runner development
-
-The Rust workspace supplies the supported Linux x86_64 and macOS arm64/x86_64
-trusted-runner daemon; it is not an Incus/VM execution node and never becomes a
-sandbox. Run
-`bash scripts/test-node-transport.sh` after `.cube/setup`; it uses locked offline
-Cargo dependencies and disposable real loopback QUIC/child-process fixtures. It
-also builds the Rust runner binary and runs `scripts/smoke-node-adapter.ts`: the
-control-plane client uses pinned `@number0/iroh` directly inside Node, not a
-subprocess bridge. The ordinary Node suite tests that adapter without Rust.
-See [`packages/node-transport/RUNNER.md`](packages/node-transport/RUNNER.md) for the
-wire/CLI contract and [the production runbook](docs/trusted-runner-operations.md)
-for packaging, systemd/launchd lifecycle, recovery and acceptance. Never run
-the runner under the control-plane account or point crash tests at a shared runner.
-
-## Backends (`CUBED_BACKEND`)
-
-cubed talks to a swappable `CubeBackend` (`packages/sandbox/src/cube-backend.ts`).
-
-- **`incus`** (default) — real cubes over the local Incus socket. The cube IS
-  the sandbox. This is production.
-- **`mock`** — cube ops simulated in memory; no Incus daemon needed. Cube
-  commands (a repo's `.cube/setup`, wake hooks, service control, pi tools and
-  `!` commands) run LOCALLY with cubed's own uid — there is **no nested
-  isolation**. That is safe *only because this mode is meant to run inside a
-  real cube*: the outer cube is the sandbox. cubed prints a loud banner to say
-  so. Never point `CUBED_BACKEND=mock` at an untrusted repo on a host you care
-  about.
-
----
-
-## The mock loop — develop cube with cube
-
-The tier-1 loop (ARCHITECTURE §13 3d.3). You're inside a cube (or any trusted box),
-running cubed against the cube repo with the backend mocked, iterating on the
-server / registry / portals / web UI with real git, real files, and fast
-feedback.
-
-```bash
-pnpm install
-pnpm build                      # builds the web UI into packages/web/dist
-                                # (cubed serves API-only without it)
-
-# From a throwaway state dir so you never touch a real cube tree:
-CUBED_BACKEND=mock \
-CUBED_ALLOW_LOCAL_REPOS=1 \
-CUBED_DB=/tmp/dev/cubed.db \
-CUBED_CUBES_ROOT=/tmp/dev/cubes \
-CUBED_REPOS_ROOT=/tmp/dev/repos \
-CUBED_IDLE_MS=0 \
-pnpm cubed                      # → http://localhost:7777
-```
-
-Create and check a project, then start a thread from it (a local path needs
-`CUBED_ALLOW_LOCAL_REPOS=1`):
-
-```bash
-PROJECT_ID=$(curl -sX POST localhost:7777/api/projects \
-  -H 'content-type: application/json' \
-  -d '{"name":"demo","repositories":[{"url":"/abs/path/to/some/repo"}]}' \
-  | jq -r .project.id)
-
-curl -sX POST "localhost:7777/api/projects/$PROJECT_ID/check" >/dev/null
-while [ "$(curl -s "localhost:7777/api/projects/$PROJECT_ID" | jq -r .project.status)" = checking ]; do
-  sleep 0.2
-done
-[ "$(curl -s "localhost:7777/api/projects/$PROJECT_ID" | jq -r .project.status)" = ready ] || exit 1
-
-curl -sX POST localhost:7777/api/threads \
-  -H 'content-type: application/json' \
-  -d "{\"projectId\":\"$PROJECT_ID\"}"
-```
-
-The project check verifies repository access and base configuration. Creating
-a new thread refreshes all repository default branches, including reference
-repositories, and pins the fetched commits before allocation. The request may
-wait for network/auth checks; a failed refresh reports an error and creates no
-thread rather than using stale code. Provisioning then seeds those exact
-snapshots under `$CUBED_CUBES_ROOT/<name>/workspace` and runs `.cube/setup`.
-Existing threads and replays of a successful request ID keep their original
-commits. Concurrent submissions with the same ID share one refresh/allocation;
-a failed attempt can be retried. Editing/deleting/rechecking the project during
-refresh rejects the obsolete creation. The remote default branch is rediscovered each time, including after a rename;
-legacy project base overrides no longer select the starting branch. Refreshes run
-as Effect jobs, at most four at once, and drain before any failure is returned.
-Prepared environments are reused only
-when the fresh checkout's environment declaration and runtime key still match;
-a normal code commit does not unnecessarily rebuild the template.
-
-A repository that carries no `.cube` can borrow one: add a reference
-repository to the project and set `"environment": "<checkout>/<folder>"`
-(also a field on the project page). The `.cube` in that folder then supplies
-setup, resume and `cube.toml`; it runs from `/repos/<checkout>/…` with
-`/workspace` as cwd. The reference checkout is writable: edit the declared
-folder, then retry setup to test it locally without publication. Publish
-through the reference repository ID, separately from the primary. The check verifies the
-folder and parses its `cube.toml` at the pinned commit, so a typo is a project
-error, not a thread that fails minutes into setup. Creation revalidates the
-folder and TOML against the newly fetched reference commit too. `[network] allow` in any
-`cube.toml` extends the egress allowlist (see `CUBED_EGRESS_ALLOW` below).
-
-**What works under the mock:** the HTTP API, the registry (SQLite), thread
-lifecycle + statuses, git seeding / diff / Push / PR, the files shelf, portal
-registry + proxy routing, the whole web shell, and disposable Pi workers. The cube
-extension receives `CUBE_BACKEND=mock`; its file tools and bash/`!` commands
-execute locally against the thread workspace through the same bounded tool
-adapters used by the Incus path. `.cube/setup`, resume, and wake hooks also
-execute for real (under `bash -lc`, matching the Incus `su - dev -c` login
-shell), rebased onto the host workspace.
-
-**What does NOT work under the mock** (by design — use the VM loop):
-- **Real isolation and systemd service *starts*.** `execSimple` is not root and
-  there's no per-cube systemd, so declared services stay best-effort; the
-  portal registry/proxy logic still exercises.
-
-Mock instance state is **process-lifetime**: a cubed restart forgets its cubes,
-so waking a stale thread fails loudly rather than running its hooks in the wrong
-directory. Recreate threads after a restart.
-
----
-
-## The VM loop — validate the real sandbox
-
-To build from source, install the host requirements described below, then:
+Node 26+, pnpm pinned in `package.json`, Rust pinned in `rust-toolchain.toml`.
+On Linux `bash scripts/setup-dev.sh` installs development prerequisites and
+fetches locked dependencies. On macOS install the pinned toolchains and Xcode
+command-line tools, then install/fetch dependencies explicitly.
 
 ```sh
-git clone https://github.com/cubeyard/cube.git
-cd cube
-bash scripts/vm/dev.sh      # build what's missing, boot, open pi on the VM
+pnpm install --frozen-lockfile
+cargo fetch --locked
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm build
+bash scripts/test-node-transport.sh
 ```
 
-A single VM is the Incus host, assembled from three build products plus
-your data disk:
+The Node test list is `scripts/test-offline.sh`. Add tests there. Real runner
+tests use disposable state, keys and workspaces; do not point them at an
+operator's installation. The runner suite runs on Linux and macOS in CI. To run
+only integration after building: `node scripts/smoke-node-adapter.ts target/debug/cube-runner`.
+N0 relay testing is opt-in via `CUBE_TEST_IROH_RELAY=1` and contacts public services.
 
-| disk | contents | built by |
-|---|---|---|
-| base (`cube-vm-base.qcow2`) | NixOS: incus + ZFS + firewall + data-init + the seed unit (`scripts/vm/base/`), assembled by systemd-repart — no VM, no KVM, so CI can build it on any runner | `build.sh` (`nix build`) |
-| app (`cube-vm-app.qcow2`, ext4 `LABEL=cubed`) | `/opt/cube`: `bin/cubed`, the app's own node runtime (`node/`), and the app tree (`app/`: cubed from source, built web UI, prod deps, `build-id`) | `build-app.sh` |
-| app tarball (`cube-vm-app.tar.zst`) | `app/` alone, ~30 MB — what an in-place upgrade streams into a running VM (`cube-app-apply`) | `build-app.sh` (same staged tree) |
-| cube-node (`cube-vm-node.qcow2`, ext4 `LABEL=cube-node`) | inner container image, imported by the base at boot | `build-cube-node.sh`, or inherited from a release (`inherit-cube-node.sh`) |
-| data (`cube-vm-data.qcow2`) | ZFS pool: ALL mutable state | created blank; never replaced |
-
-Boots never open a pristine disk read-write: base and app ride on qcow2
-overlays (`cube-vm-live.qcow2`, `cube-vm-app-live.qcow2`), cube-node is
-attached read-only. `build.sh`/`build-app.sh` replace a disk together
-with its overlay and touch nothing else.
-
-`pnpm vm` builds what's missing on first run, brings the VM up, and drops
-you into a pi terminal on the VM as the user cubed runs as (so `/login`
-there writes the `~/.pi/agent/auth.json` cubed reads). The VM is the
-Tailnet node; cubed has no auth, so the Tailnet is the boundary (ARCHITECTURE §15) —
-`0.0.0.0`/public binds are refused.
-
-GitHub auth for the VM is connected from the web UI by relaying the normal
-`gh auth login --web` device flow. `GET /api/github/auth` reports the state,
-including credentials created manually with `gh auth login`. GitHub CLI's
-credential store is the sole source of truth; cubed stores no access or
-refresh tokens. Disconnect runs `gh auth logout` on the VM.
-
-Before projects or threads appear, the first-run wizard offers GitHub login
-or a skip. Finishing writes `onboarding.json` alongside `cubed.db` (normally
-`~/cube/onboarding.json`). This is VM-wide state, not browser storage.
-
-### Working tree → VM → proof
-
-The short loop against a running VM (the launcher's `~/.cube` by default,
-the dev VM with `--dev`), also usable by an agent (see AGENTS.md):
+## Product development
 
 ```sh
-bash scripts/vm/deploy-tree.sh            # ship the working tree, build web on the host, restart cubed
-bash scripts/vm/deploy-tree.sh --install  # deps changed (auto-detected from the lockfile too)
-bash scripts/vm/deploy-tree.sh --restore  # put the installed release's app tree back
-node scripts/smoke-live.ts                # create → provision → terminal → sleep → wake → delete, with timings
-node scripts/events-report.ts --since 24h # runs, failures, p50/p95 per operation and version
-node scripts/events-report.ts --failures  # the failures themselves
-curl -s 'localhost:7777/api/events?format=text&limit=40'
+pnpm build
+CUBED_STATE=/absolute/fresh-state pnpm cubed
 ```
 
-`deploy-tree.sh` never touches `/opt/cube/app/build-id`, so `cube status`
-and `cube upgrade` keep working; it records what it shipped in
-`.deployed-tree`, which becomes the version stamped on events.
+The host binds loopback on `CUBED_PORT` (default 7777). `CUBED_STATE` defaults to
+`~/.cube-host`. Model configuration uses `PI_CODING_AGENT_DIR` or `~/.pi/agent`;
+model requests and credentials stay in the host. Never mount that directory in
+a runner account. Run runners with a dedicated unprivileged account or machine.
+The trust profile is not a security sandbox.
 
-### Git publication
+Open **models** in the GUI for provider login, API keys, cancellation and logout.
+Pi owns the provider flows, credential persistence and token refresh. For browser
+flows opened away from the host, paste the final redirect URL/code if Pi offers
+that prompt. Providers without an interactive Pi flow are marked as requiring
+host configuration. Logout removes saved credentials, not environment variables
+or other ambient host credentials. Pending login interactions expire after 15
+minutes and are cancelled on host shutdown; restart the login after a host crash.
+Connecting or disconnecting refreshes availability without a cubed restart.
+An unavailable selected model stays selected until explicitly changed; its
+transcript remains readable. Use **refresh models** after a catalog fetch error.
+Offline auth acceptance uses a controlled provider and real Pi credential storage
+in disposable state; it never signs in to a live account.
 
-Use ordinary local Git for commits, review, rebases, and conflict resolution.
-`cube.git.pushBranch` performs the same non-forced host-side push for a new
-branch and an existing PR branch; it does not query PR metadata or ingest a
-diff. `cube.github.read` plus `cube.git.syncBranch` supplies targeted existing
-PR metadata and branches without a review transaction. `cube.git.pushBase`
-differs only in its destination ref.
+Host headers default to loopback names; for a private authenticated reverse
+proxy, list its exact hostnames in comma-separated `CUBED_ALLOWED_HOSTS`.
+The proxy must preserve Host and Origin consistently. This allowlist is DNS
+rebinding protection, not authentication or permission to expose cubed publicly.
 
-The pi extension asks the user immediately before `cube.git.createPr` reaches
-the host. It does the same for an explicit `pushBranch` force-with-lease; normal
-pushes remain unprompted, unconditional force is unavailable, and a stale lease
-is rejected by Git. Declining does not reach the server. GitHub remains the
-authority for branch protection, rulesets, checks, and required reviews. See
-[the Git workflow guide](docs/git-workflows.md) for the policy boundary and a
-deliberately small declarative direction.
+Create a project through the UI/API. Prepare a runner workspace and immutable
+binding using `packages/node-transport/RUNNER.md`. Register its private connection
+configuration with `scripts/enroll-runner.ts --state /absolute/fresh-state
+--project PROJECT --config /absolute/private-runner.json --trusted-runner`.
+One new thread consumes one unused runner. Host repository checks do not clone
+into the runner; operators currently prepare that workspace themselves.
 
-### VM host requirements and persistent state
+Useful reads: `/api/threads`, `/api/projects`, `/api/threads/<id>/history`,
+`/api/threads/<id>/stream`. The last endpoint is SSE and starts with a full
+snapshot on every connection. Stop uses `POST /api/threads/<id>/stop`; DELETE
+archives an idle thread without touching its runner workspace.
 
-**Hosts:** Linux (KVM) and macOS (HVF). The dev loop needs qemu, UEFI
-firmware for the guest arch (Linux: `apt install ovmf`; macOS: brew's
-qemu ships the edk2 files), node ≥ 26 with npm (pnpm is installed at the
-version `package.json` pins — no host pnpm needed), e2fsprogs
-(`mke2fs -d`; keg-only on macOS: add `$(brew --prefix e2fsprogs)/sbin`
-to PATH), `zstd`, and — for building the BASE image — nix with a Linux
-builder. On macOS, skip building the base: point `CUBE_BASE_IMAGE` at a
-base qcow2 from a release (or any Linux-built one) and `build.sh`
-installs it instead. The app's dependencies are always installed for
-the GUEST platform (linux/<arch>), whatever the host is — node-pty's
-prebuilds are per-platform optional deps, and a darwin one on the disk
-would kill every thread's terminal at spawn. The guest arch always
-follows the host arch (arm64 mac ⇒ arm64 VM); hardware acceleration is
-required — cross-arch TCG emulation is not a supported loop.
-`scripts/vm/lib.sh` shims the host-tool differences (`flock`→`shlock`,
-`genisoimage`→`hdiutil`, `sha256sum`→`shasum`); disks under
-`~/cube/vm/` are per-arch and per-machine.
+For UI changes use the existing browser workflow: build, run cubed on disposable
+state, check desktop and phone (390×844), exercise affected interactions and
+inspect screenshots. In an Amp orb use supervised orb services and portal URLs,
+not an unmanaged background shell. Never expose unauthenticated cubed publicly.
 
-The base image carries **no trust** (a nix-built image has never booted,
-so it never HAD keys): every boot attaches a tiny seed disk
-(`LABEL=CUBESEED`) holding `authorized_keys` for the `cube` user, and the
-base's `cube-seed` unit installs it on every boot as an exact replace —
-rotating the key revokes the old one. `run.sh`/`up.sh` build it from
-`~/cube/vm/id_ed25519`, the `cube` launcher does the same per deploy.
-There is no cloud-init (dropped 2026-09-02: python + cloud-init were
-~140 MB for one file copy). Host keys are sshd's, generated on the base
-overlay's first boot and stable until the overlay is reset.
+## Fresh start and recovery
 
-**State persistence (the data disk).** All mutable product state lives in
-`cube/state/*` ZFS datasets on the DATA disk, mounted by the baked
-`cube-data-init` oneshot before incus and cubed start (legacy mountpoints,
-mounted explicitly by the oneshot — no auto-mount races):
+There is no migration/adoption of old registries or terminal sessions. Stop
+cubed and set `CUBED_STATE` to a new empty directory to reset the product. Create
+projects and enroll fresh runner identities. Do not delete an unspecified live
+installation. Archive does not recycle a runner.
 
-| dataset           | mountpoint             | holds                                    |
-|-------------------|------------------------|------------------------------------------|
-| `cube/state/incus`| `/var/lib/incus`       | incus DB, images, per-install server cert|
-| `cube/state/cubed`| `/home/cube/cube`      | `cubed.db`, `onboarding.json`, cubes/repos workspaces |
-| `cube/state/pi`   | `/home/cube/.pi`       | `/login` credential, pi session files    |
-| `cube/state/gh`   | `/home/cube/.config/gh`| GitHub CLI credential store |
-
-A missing dataset is created and seeded from whatever the OS disk holds
-at that path. incus ships NO baked state: it starts empty and its NixOS
-preseed adopts the pool on first boot (layout: `cube/incus` is incus's
-world, `cube/state/*` is ours). Swapping any of the base/app/cube-node
-disks therefore keeps threads, `/login`, github auth AND incus's
-instance registry — no path in the loop destroys the data disk anymore;
-delete `~/cube/vm/build/cube-vm-data.qcow2` yourself if you truly want a
-blank slate.
-
-```bash
-pnpm vm                                   # up + pi terminal (builds base+app
-                                          # on first run)
-bash scripts/vm/up.sh                      # boot without opening pi
-bash scripts/vm/ssh.sh                     # shell on the VM
-CUBE_VM_BIND=tailscale bash scripts/vm/up.sh   # reach cubed from another
-                                               # machine (adds a 2nd hostfwd on
-                                               # this node's 100.x address)
-bash scripts/vm/down.sh                    # stop the VM
-bash scripts/vm/sync.sh                    # deploy latest ORIGIN/MAIN into the
-                                           # running VM + restart cubed —
-                                           # threads//login survive
-bash scripts/vm/build.sh                   # rebuild the BASE image (nix; OS
-                                           # only — data disk untouched)
-bash scripts/vm/build-app.sh               # rebuild the app disk from the
-                                           # WORKING TREE (boot to pick up)
-bash scripts/vm/build-cube-node.sh         # rebuild the inner image (needs
-                                           # the VM up; rarely changes)
-bash scripts/vm/test.sh                    # full portfolio inside the VM
-                                           # (offline suites + real-Incus smokes)
-```
-
-The app disk builds from the **working tree** (tracked +
-untracked-unignored), so an in-progress slice tests itself. After a
-build+run in a harness worktree, the LOCAL main checkout is behind —
-`git pull` in `~/repos/cube` before running cubed from there.
-
-**cubed moves faster than the disks — sync instead of rebuilding.** cubed
-runs straight from source in the VM (no server build step; only the web
-UI builds), so `sync.sh` upgrades a running VM to the latest landed code
-in seconds: fetch `origin/main`, `git archive` it over `/opt/cube/app` (on the
-app overlay), `pnpm install && pnpm build` with the disk's own
-node, restart cubed. Threads, `/login`, github auth and the data disk
-survive. It deliberately deploys origin/main (what landed), not your
-working tree — the working tree's loop is the mock backend, and OS-level
-changes (`scripts/vm/base/`, incus, firewall) still need `build.sh`.
-The first sync after an app-disk build re-downloads dev deps (~a
-minute); after that the store is warm.
-
-Tests: run offline suites directly with `node packages/**/test/*.ts` on any
-host; the real-Incus smokes (`*-smoke.ts`) need the VM and run via
-`scripts/vm/test.sh` (guest `run-tests.sh`). `pnpm lint` (ESLint,
-correctness rules only — `eslint.config.js`) runs in CI between
-`pnpm typecheck` and the offline suites.
-
-## Releasing
-
-Publishing is disabled unless the repository Actions variable
-`CUBE_RELEASES_ENABLED` is exactly `true`. Leave it unset during initial import
-and source-only publication. Manual dry runs remain available and publish
-nothing; `dry_run` defaults to `true`. Enable publishing only after artifact
-license review and VM acceptance. The first release needs a manually chosen
-`vX.Y.Z` tag; a new repository has no prior version to increment. For this
-repository, start with `v0.1.0`.
-
-Once publishing is enabled, create the first release explicitly:
-
-```sh
-git tag -a v0.1.0 -m 'cube release v0.1.0'
-git push origin v0.1.0
-```
-
-After that, ordinary shipped-file changes release the next patch when pushed:
-
-```sh
-git push origin HEAD:main
-```
-
-That is the release. Trunk-based: main is the sign-off point, and every
-push to it that touches shipped files (anything but `*.md`, `docs/`,
-`.claude/`, `spikes/`) becomes the next PATCH release on its own.
-`.github/workflows/release.yml` tags main's commit `vX.Y.(Z+1)`,
-builds every artifact for both architectures natively (amd64 on
-`ubuntu-latest`, arm64 on `ubuntu-24.04-arm`), verifies the amd64 set by
-installing it with the launcher on a blank data disk, running a nested
-container and applying the app tarball in place, and only then
-publishes. ~12 min. The launcher itself is uploaded as the asset `cube`,
-so the install line never changes. A release is an offer, not a rollout:
-nothing upgrades until `cube upgrade`, and `cube upgrade vX.Y.Z` walks
-back. Runs queue one at a time and every pending run waits its turn.
-An automatic release that fails takes back its own tag and draft — only
-those, checked by tag object id and a run marker in the notes — so the
-next push mints a fresh number; whatever it cannot take back fails the
-`cleanup` job visibly. Release notes list the commits since the
-previous release (`docs:` excluded).
-
-Minor/major bumps are a hand-made tag, pushed BEFORE main — a main push
-whose commit already carries a `vX.Y.Z` tag does nothing, while the other
-order builds the same bytes twice:
-
-```sh
-git tag -a v0.7.0 -m 'cube release v0.7.0' && git push origin v0.7.0
-git push origin HEAD:main
-```
-
-The next automatic release counts on from it.
-
-Manual runs (Actions → release → Run workflow) take three inputs:
-`version` (an existing tag — the workflow checks out THAT tag, not the
-branch the form shows), `prerelease` (publish hidden from `cube up`'s
-"latest"; promote later with `gh release edit vX.Y.Z
---prerelease=false`), and `dry_run` (build + package + verify from the
-chosen branch, publish nothing — how to test the pipeline itself:
-`gh workflow run release.yml --ref <branch> -f dry_run=true`).
-
-What a release contains, per arch: `cube-base-<v>-<arch>.qcow2`,
-`cube-app-<v>-<arch>.qcow2`, `cube-app-<v>-<arch>.tar.zst`,
-`cube-node-<v>-<arch>.qcow2`, `manifest-<arch>.json` (flat, schema 2:
-version, build_id, commit, `runtime_id`, `images_tree`, per-artifact
-file/sha256/bytes, `node_inherited_from`) and `SHA256SUMS.<arch>`.
-
-**Only what changed is new.** The base is a pure function of
-`scripts/vm/base/` (nix), so two releases with the same config produce
-byte-identical base images. cube-node is built from mutable inputs, so
-`inherit-cube-node.sh` reuses the published artifact whenever the
-`images/` git tree is unchanged (recorded as `images_tree`), copying the
-exact bytes into the new release. The app changes every release; its
-tarball is ~30 MB. Net effect: a typical app-only release costs the
-user a 30 MB download and no reboot.
-
-`scripts/vm/release.sh vX.Y.Z [--no-publish]` is the one-machine escape
-hatch. It shares the workflow's steps (`build*.sh`,
-`inherit-cube-node.sh`, `package-release.sh`, `verify-release.sh`) so
-the two cannot drift, runs in an isolated build dir
-(`~/cube/vm/release/<version>`, ports 2422/7977) and builds from a clean
-worktree of the tag. Do not run it AND let the workflow run for the same
-tag — they would race the same draft.
-
-## Diagnostics
-
-### Corporate CA trust
-
-`cube ca set <pem-file>` validates and copies an administrator-selected CA
-bundle to `~/.cube/ca.pem`. It rejects keys, leaf certificates and malformed
-input. `clear` removes it; `status` reports configuration, not connectivity.
-Set/clear require the VM to be stopped. On each boot, the launcher includes
-the current bundle in `CUBESEED`; the base regenerates `/run/cube-ca.pem`
-and `/run/cube-ca-bundle.pem` (public roots plus the selected roots), before
-Incus and cubed start. Nothing writes to the Nix store, release images, or
-the physical host's system trust store. This needs a base-image release,
-not only `deploy-tree.sh` or an app-only update.
-Boot refuses to proceed if the current seed cannot be generated; it never
-falls back to an older seed containing possibly revoked roots.
-
-VM curl, Git/gh, Incus and Node/pi use the managed bundle. cubed reads the
-additional roots through `CUBED_CA_FILE` once at startup. For non-launcher
-development, supply that variable explicitly and configure the daemon's own
-TLS clients separately (`SSL_CERT_FILE`, `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS`).
-Never source CA configuration from a repository or pass host environment
-variables wholesale into a thread.
-
-Before enabling thread egress, cubed replaces only its managed certificates
-under `/usr/local/share/ca-certificates/cube/`, runs `update-ca-certificates`,
-and refreshes an active Docker daemon when the bundle changed. The same path
-covers builders, clones, boot recovery, wake and setup retry. CA contents
-participate in prepared-environment cache keys. Empty configuration revokes
-managed roots without deleting workspaces or separately installed roots.
-An incomplete installation is marked before trust changes, so clear or
-rotation repairs partial updates rather than treating them as unchanged.
-Login shells receive `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` and
-`REQUESTS_CA_BUNDLE`; curl/apt/Git use the OS store. Software with custom TLS
-settings can still override these defaults.
-
-**Separate stores remain separate.** A downloaded Temurin JDK normally uses
-its own `lib/security/cacerts`. After installing the JDK, setup must import
-the approved roots with that JDK's `keytool`, or configure a separate managed
-Java truststore retaining public roots. Those roots are available as individual
-PEMs in the managed directory above. Setup also owns removal of such imports
-and restarting Java daemons. Docker daemon trust covers pulls, not TLS inside
-Docker build/run images; install certificates into those images separately.
-CA support does not add proxy routing, bypass the egress allowlist, or disable
-TLS verification.
-
-`cube doctor` makes bounded, unauthenticated HTTPS requests to
-`https://api.github.com` from the physical host and VM (curl and Node), and
-checks SSH and the control plane. Curl failures distinguish certificate
-verification, DNS/connectivity, and HTTP policy failures. No threads are opened,
-no setup scripts run, and no diagnostic bundle is collected or uploaded.
-The control-plane probe uses `/api/state`, not the thread listing. Curl
-probes ignore `.curlrc` (including `insecure`) and have a 12-second deadline;
-each SSH invocation has a local 20-second deadline, even if its remote
-command stops responding. The Node probe also forces TLS verification on.
-Failures return nonzero; unavailable VM checks are explicitly skipped when it
-is stopped. Success proves only these probes, not Incus downloads, model
-providers, thread allowlists, Java, or a complete JDK redirect chain.
-
-Offline regression: `node scripts/launcher-network-test.ts` and
-`node packages/sandbox/test/ca-trust-test.ts`. The latter exercises real curl
-and Node TLS against a local test CA, including rejection before installation
-and after revocation; the Debian trust-store portion skips on non-Debian hosts.
-Before release, run the VM portfolio and a disposable install on both host
-architectures: no CA → TLS failure, set CA → VM and thread download success,
-rotate/clear → old issuer rejected, reboot/upgrade → configuration retained.
-Verify a Temurin download through all redirects with the project's allowlist,
-then retry setup in an existing thread. Offline stubs are not VM acceptance.
-
-The release launcher runs diagnostics inside the VM:
-
-```bash
-cube diagnose                         # collect a bundle, then open interactive Pi RCA
-cube diagnose --collect-only          # collect without calling a model
-cube diagnose --export <bundle-id> > cube-diagnostics.tar.gz
-```
-
-From a VM shell, the equivalent entry point is
-`sh /opt/cube/app/scripts/diagnose.sh`. This entry point ships in app-only
-updates too; it does not require a new base image. Model-assisted diagnosis
-requires existing Pi authentication in the VM and sends collected evidence
-to the selected model provider when you submit a message. Pi opens with no
-automatic prompt: describe the issue, paste the failing tool output, and ask
-follow-up questions. Use `/model` to choose a model (before or during the
-analysis), and `/quit` to exit. The launcher allocates an SSH terminal for
-this session; direct SSH callers should use `ssh -t`. Collection and export
-remain non-interactive. Pi has only a
-`read` tool restricted to the package; it reports likely causes and does not
-attempt repairs. Collection and Pi write only their diagnostic output/session.
-Review every bundle before sharing it; log redaction reduces exposure but
-is not perfect. Host logs can include information from multiple workspaces.
-
-Packages are retained under `~/cube/diagnostics/<id>/` on the VM. The export
-contains `bundle/` and `report.md` (the latest successfully completed Pi
-answer, when present), not terminal output or the full Pi session. Ask Pi
-for a consolidated report before exiting if the last answer was a follow-up.
-Interrupted or failed answers do not replace the last completed report. There
-is no automatic upload or deletion. Collection remains usable without cubed,
-Incus, or model access: unavailable checks are recorded individually. This
-first version covers the VM/control plane, not workspace contents or the
-original tool process's environment. Its HTTP probe uses VM port 7777.
-The cubed journal check covers the last 24 hours (at most 2000 entries);
-cubed's own lines are `level component msg key=value …`, so
-`grep thread=<id>` in `cubed-journal.txt` follows one thread.
-
-## The launcher (`launcher/cube`)
-
-The user-facing lifecycle CLI: `up/down/status/upgrade/ssh/logs/events/
-diagnose/version/destroy` against a released artifact set — standalone
-bash (3.2 is the floor: macOS), no repo checkout, state in `~/.cube`.
-Before the first download it checks the host (hypervisor: `/dev/kvm` or
-HVF; UEFI firmware, ISO tool, ssh, curl, free space) and the ports; a
-port nobody set in the environment moves to the next free one and is
-remembered in `~/.cube/config`. Downloads go through the GitHub API with
-`gh`'s token (`curl`, progress bar, resumable; a partial file the server
-will not resume is restarted once), are verified against the manifest +
-`SHA256SUMS.<arch>`, and land content-addressed in `~/.cube/images`.
-
-Each boot rotates the serial console to `~/.cube/console.log.1`; a boot
-that does not reach ssh or cubed prints the console's last lines. While
-the VM is down, `cube ssh`/`events`/`diagnose` say so and `cube logs`
-shows the console instead of the journal (`cube logs -n 50` passes
-journalctl arguments through). Changing `CUBE_PORT`/`CUBE_BIND`/`CUBE_MEM`
-while the VM runs is refused until `cube down`. `cube version` (also
-`--version`) prints the launcher version and the installed release; the
-`LAUNCHER_VERSION=dev` line is stamped with the tag by `release.yml`
-when it ships the file, so a checkout always says `dev`.
-
-`cube upgrade` compares the installed and target manifests and does the
-least that is correct:
-
-- **app only** (base, cube-node and `runtime_id` unchanged — the common
-  case): fetch the ~30 MB tarball, stream it into the RUNNING VM
-  (`cube-app-apply` unpacks beside the live tree, checks the runtime
-  contract, swaps directories around a cubed restart). Seconds, no
-  reboot, containers keep running.
-- **anything else**: stop, reset exactly the overlays whose backing
-  bytes changed (the app overlay only when the runtime changed), boot,
-  then apply the tarball if the app also moved. The data disk is never
-  touched.
-
-The installed-version file is written only after the new release has
-proved itself (identity check, cubed answering). An app-only upgrade
-first makes sure the installed release's own tarball is in the store
-and re-applies it if cubed never answers after the swap ("rolled back");
-a failed upgrade always names the release you are still on and the
-exact way back (for a rebooted upgrade: which of its artifacts are still
-cached). Boot prerequisites (qemu, accelerator, firmware, ISO tool) are
-required only when the upgrade will start a VM. Afterwards it
-prunes the store to the current + one previous release
-and replaces itself with the release's `cube` asset. `cube up` and
-`cube status` print a one-line hint when a newer release exists
-(4-second budget, silent offline; `CUBE_NO_UPDATE_CHECK=1` disables).
-A manifest with a schema this launcher does not understand is refused
-with the download line for the matching launcher.
-
-Smoke-test it against a packaged-but-unpublished release, on ports that
-dodge the dev VM:
-
-```bash
-bash scripts/vm/release.sh vX.Y.Z --no-publish
-CUBE_HOME=/tmp/cube-smoke CUBE_RELEASE_DIR=~/cube/vm/release/vX.Y.Z/dist \
-  CUBE_SSH_PORT=2722 CUBE_PORT=7877 launcher/cube up
-```
-
-`CUBE_LIB_ONLY=1 . launcher/cube` sources its functions without running
-a command (what `verify-release.sh` and ad-hoc tests use). CI runs
-`bash -n` and shellcheck over it (default severity; `scripts/*.sh` at
-warning level) — `npx --yes shellcheck launcher/cube` locally.
-
----
-
-## Environment variables
-
-**cubed** (`packages/server/src/index.ts`):
-
-| var | default | meaning |
-| --- | --- | --- |
-| `CUBED_BACKEND` | `incus` | `incus` or `mock` |
-| `CUBED_PORT` | `7777` | HTTP listener (UI + API + portals) |
-| `CUBED_DB` | `~/cube/cubed.db` | SQLite registry path |
-| `CUBED_CUBES_ROOT` | `~/cube/cubes` | per-cube `{workspace,sessions}` root |
-| `CUBED_REPOS_ROOT` | `~/cube/repos` | bare-mirror root for checked project repositories |
-| `CUBED_ALLOW_LOCAL_REPOS` | off | set `1` to allow `file://` / local-path repos |
-| `CUBED_IDLE_MS` | 1h | idle-to-sleep; `0` disables the sweep |
-| `CUBED_AUTH_PROVIDER` | `openai-codex` | provider whose host auth state appears in the UI |
-| `CUBED_SUBNET_MIN` | `10` | first per-cube subnet index; tests reserve higher bands |
-| `CUBED_PORTAL_BASE` | `<tailscale-ip>.sslip.io`, else `127.0.0.1.sslip.io` | portal hostname base (`<svc>--<cube>.<base>`); VM seed supplies the host address |
-| `CUBED_PUBLIC_PORT` | `CUBED_PORT` | port in portal URLs; VM seed supplies the host's forwarded port |
-| `CUBED_IMAGE` / `CUBED_POOL` | `cube-node` / `cube` | Incus image + storage pool |
-| `CUBED_ROOT_SIZE` / `CUBED_DOCKER_VOLUME_SIZE` | `10GiB` / `5GiB` | per-cube disk |
-| `CUBED_CUBE_MEMORY` | half the host's RAM (min 1 GiB) | per-thread memory cap (Incus `limits.memory`); a build that hits it is killed inside the thread |
-| `CUBED_ENVIRONMENT_CACHE` | on | `0` disables prepared environments (the per-project template threads are cloned from) |
-| `CUBED_EGRESS_ALLOW` | — | extra allowed egress hosts, comma-separated, `*.suffix` allowed (extends the defaults; a cube's `[network] allow` extends both) |
-| `CUBED_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error`; one `level component msg key=value` line per event on stdout (`journalctl -u cubed`); `debug` adds stacks to every error field |
-
-**VM scripts** (`scripts/vm/lib.sh`): `CUBE_VM_BIND` (`tailscale` or an explicit
-private IP; defaults to detected Tailscale IPv4, else loopback; `127.0.0.1`
-forces local-only use; loopback always kept), `CUBE_VM_MEM` (`8G`),
-`CUBE_VM_CPUS` (`6`), `CUBE_VM_SSH_PORT` (`2222`), `CUBE_VM_CUBED_PORT` (`7777`),
-`CUBE_VM_DIR` (`~/cube/vm`), `CUBE_VM_DATA_SIZE` (`40G`), `CUBE_BASE_IMAGE`
-(install a prebuilt base instead of `nix build`).
-
-**Launcher** (`launcher/cube`; env beats `~/.cube/config` beats defaults):
-`CUBE_HOME` (`~/.cube`), `CUBE_REPO` (`cubeyard/cube`), `CUBE_RELEASE_DIR`
-(local assets instead of GitHub), `CUBE_PORT` (`7777`), `CUBE_SSH_PORT`
-(`2222`), `CUBE_BIND` (same rules as `CUBE_VM_BIND`), `CUBE_MEM` (`8G`),
-`CUBE_CPUS` (`6`), `CUBE_DATA_SIZE` (`40G`), `CUBE_NO_UPDATE_CHECK`.
-
-**Toolchain pins:** Node 26 (`build-app.sh` `NODE_VERSION`, CI
-`node-version`, `package.json` engines) and pnpm via `packageManager` in
-`package.json` — build-app.sh, CI and the app disk all install exactly
-that version; a different local pnpm still works for the mock loop.
-
-## Homebrew publishing
-
-The macOS tap is `cubeyard/homebrew-tap` (`Formula/cube.rb`), installed
-with `brew install cubeyard/tap/cube`. It packages only the Bash launcher
-and depends on QEMU; VM downloads remain an explicit `cube up` operation.
-The formula sets `INSTALL_METHOD=homebrew` so `cube upgrade` never replaces
-Homebrew's launcher or symlink. `brew upgrade cube` owns launcher updates.
-Uninstalling the formula does not stop or delete the VM: run `cube down`
-first, or `cube destroy --yes` if the user wants to delete their data too.
-
-One-time setup (requires repository-owner authorization):
-
-1. Create the public `cubeyard/homebrew-tap` repository with an initial
-   README commit and a default branch.
-2. Create a fine-grained token restricted to that repository with Contents:
-   read/write. Store it as `HOMEBREW_TAP_TOKEN` in `cubeyard/cube` Actions
-   secrets. The normal `GITHUB_TOKEN` cannot push to the other repository.
-3. Set the `cubeyard/cube` Actions variable `CUBE_HOMEBREW_ENABLED=true`.
-4. Publish a stable release containing the Homebrew-aware launcher. Older
-   releases (including v0.1.1) cannot be used: formula generation rejects
-   launchers without the install-method marker.
-5. After the Homebrew job succeeds, remove the pending-publication notice
-   from README and make Homebrew the primary macOS install instructions.
-
-The release workflow calls `.github/workflows/homebrew.yml` directly after
-publication (not via a `release` event, which `GITHUB_TOKEN` would not
-trigger). It downloads the exact stable release's `cube` asset, generates
-the versioned URL and SHA-256 using `scripts/homebrew-formula.ts`, runs
-`brew install`, `brew audit --strict`, and `brew test` on macOS, then commits
-the formula to the tap. Prereleases and dry runs do not update the tap.
-The job is opt-in; without the variable, existing releases are unaffected.
-
-To retry a failed tap update or publish a promoted stable release, run
-the `homebrew` workflow manually with its `version` input. Choose the
-latest supported stable release; an older input would downgrade the tap.
-The formula tests do not boot a VM. Before announcing support, verify
-`cube up`, `cube upgrade`, and `cube down` on real Apple Silicon and Intel
-Macs, including a Homebrew upgrade with existing VM data.
-
-### Startup progress
-
-The waiting terminal shows actual provisioning steps and a bounded, plain-text
-setup/resume tail (32,768 characters), including shared environment builders.
-It shows elapsed time and silence without treating missing output as failure.
-Expand the captured tail for detail. Failed setup remains inspectable before
-continuing to the repair-capable thread, and reconnect replays the latest status.
-Fuller, durable lifecycle evidence remains in the environment endpoint (up to
-1 MiB per phase); the live progress buffer is in-memory, not another log store.
-Effect 4 models progress state, UI timers and repository batches; Promise-based
-supervisor/backend boundaries retain their existing cancellation and rollback.
+Restart cubed against the same state to resume accepted Pi operations. Do not
+run two writable owners for a session. Backups of the host must be taken with
+cubed stopped; keep Pi databases and product metadata together. Runner backup,
+restore quarantine, drain and recovery acknowledgement follow the runbook.
+Never erase a runner's retained operation evidence just to retry a command.

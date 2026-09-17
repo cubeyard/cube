@@ -26,30 +26,6 @@ Copyright (c) 2025 Mario Zechner
 Licensed under the MIT License in `repos/pi/LICENSE`. Any bundled third-party
 files retain their upstream notices and licenses.
 
-## Nixpkgs / NixOS Incus module
-
-`scripts/vm/base/incus-container-only.nix` is a modified copy of
-`nixos/modules/virtualisation/incus.nix` from
-[Nixpkgs](https://github.com/NixOS/nixpkgs), at the revision recorded in
-`scripts/vm/base/flake.lock`. The file's opening comment describes the changes.
-
-Copyright (c) 2003-2026 Eelco Dolstra and the Nixpkgs/NixOS contributors
-
-Licensed under the MIT License reproduced below. This applies to the copied
-module, not to every package distributed in the VM images; those packages
-retain their individual licenses.
-
-## Monty runtime dependency
-
-Code mode uses the WebAssembly distribution of
-[Monty](https://github.com/pydantic/monty) from `@pydantic/monty` 0.0.23.
-The native addon and platform executables are not used.
-
-Copyright (c) Pydantic Services Inc. 2026 to present
-
-Licensed under the MIT License reproduced below. Bundled dependencies retain
-their upstream licenses and notices.
-
 ## Impeccable 4.1.1
 
 The installed skill distributions under `.agents/skills/impeccable/` and
@@ -72,24 +48,14 @@ Copyright (c) 2021-present wxm
 
 Licensed under the MIT License reproduced below.
 
-## Svelte and xterm.js
+## Svelte
 
 The built web application contains code from
-[Svelte](https://github.com/sveltejs/svelte),
-[@xterm/xterm](https://github.com/xtermjs/xterm.js), and
-[@xterm/addon-fit](https://github.com/xtermjs/xterm.js/tree/master/addons/addon-fit).
+[Svelte](https://github.com/sveltejs/svelte).
 
 Copyright (c) 2016-2025 Svelte Contributors
 
-Copyright (c) 2017-2019, The xterm.js authors
-
-Copyright (c) 2014-2016, SourceLair Private Company
-
-Copyright (c) 2012-2013, Christopher Jeffrey
-
-Copyright (c) 2019, The xterm.js authors
-
-These components are licensed under the MIT License reproduced below.
+Svelte is licensed under the MIT License reproduced below.
 
 ### MIT License
 

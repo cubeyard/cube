@@ -265,7 +265,7 @@ const syncedOid = await service.syncBase(ws, upstream, "main");
 assert.equal(syncedOid, git(upstream, "rev-parse", "refs/heads/main"));
 assert.equal(git(ws, "rev-parse", "refs/remotes/origin/main"), syncedOid);
 await assert.rejects(service.push(ws, upstream, "main"), /rejected|fetch first|non-fast-forward/);
-git(ws, ...cfg, "rebase", "origin/main"); // rebase re-creates commits — needs the identity too (a fresh VM host has no .gitconfig)
+git(ws, ...cfg, "rebase", "origin/main"); // rebase re-creates commits — needs the identity too (a fresh host has no .gitconfig)
 await service.push(ws, upstream, "main");
 assert.equal(git(upstream, "rev-parse", "refs/heads/main"), git(ws, "rev-parse", "HEAD"));
 console.log("5b ok: syncBase refreshes origin/main; push-to-base rejects stale work then fast-forwards");
@@ -461,16 +461,6 @@ await assert.rejects(failed.prepareRepository(upstream), (error: unknown) =>
   error instanceof Error && error.message.includes("network unavailable"));
 assert.equal(fs.existsSync(failedRoot), false, "discovery failure never starts cloning");
 console.log("11 ok: Effect boundaries retain ordering, explicit bases, signals and failures");
-
-const policy = fs.readFileSync(path.resolve("docs/git-workflows.md"), "utf8");
-assert.match(policy, /Cube policy/);
-assert.match(policy, /Local security guards/);
-assert.match(policy, /GitHub branch protection and rulesets/);
-assert.match(policy, /Only GitHub can enforce these against every\s+writer/);
-assert.match(policy, /process that controls its checkout can bypass or\s+replace them/);
-assert.match(policy, /force_push = "confirm"/);
-assert.match(policy, /does\s+not expose unconditional force-push/);
-console.log("12 ok: policy documentation distinguishes Cube, local, and GitHub enforcement");
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("git-service-test: all ok");

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { errorText, fetchConversation, fetchThreadTasks, sendPrompt } from "../lib/api.ts";
-  import type { AgentRun, ConversationMessage, ModelSelection, ThreadTask } from "../lib/types.ts";
+  import { errorText, fetchConversation, sendPrompt, stopThread } from "../lib/api.ts";
+  import { uid } from "../lib/uid.ts";
+  import type { AgentRun, ConversationHistory, ConversationMessage, ModelSelection } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
 
   let { threadId, model, changingModel = false, busy = $bindable(false), waitingText = null }: {
@@ -12,7 +13,6 @@
     waitingText?: string | null;
   } = $props();
   let messages = $state<ConversationMessage[]>([]);
-  let tasks = $state<ThreadTask[]>([]);
   let run = $state<AgentRun | null>(null);
   let prompt = $state("");
   let loading = $state(true);
@@ -22,22 +22,26 @@
   let composer: HTMLTextAreaElement;
   let disposed = false;
   let sending = $state(false);
+  let pending: { text: string; requestId: string } | null = null;
   const working = $derived(run?.status === "queued" || run?.status === "running");
   $effect(() => { busy = working || sending; });
 
-  async function refresh(): Promise<void> {
-    try {
-      const [history, taskHistory] = await Promise.all([fetchConversation(threadId), fetchThreadTasks(threadId)]);
+  async function show(history: ConversationHistory): Promise<void> {
+      if (disposed) return;
       const nearBottom = !transcript || transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120;
       messages = history.messages;
       run = history.run;
-      tasks = taskHistory;
       historyError = null;
       loading = false;
       if (nearBottom) {
         await tick();
         transcript?.scrollTo({ top: transcript.scrollHeight });
       }
+  }
+
+  async function refresh(): Promise<void> {
+    try {
+      await show(await fetchConversation(threadId));
     } catch (cause) {
       if (!disposed) {
         historyError = errorText(cause);
@@ -47,11 +51,12 @@
   }
 
   onMount(() => {
-    void refresh();
-    const timer = setInterval(() => void refresh(), 500);
+    const stream = new EventSource(`/api/threads/${encodeURIComponent(threadId)}/stream`);
+    stream.onmessage = event => { void show(JSON.parse(event.data)); };
+    stream.onerror = () => { historyError = "connection interrupted — reconnecting…"; };
     return () => {
       disposed = true;
-      clearInterval(timer);
+      stream.close();
     };
   });
 
@@ -67,7 +72,9 @@
     sending = true;
     error = null;
     try {
-      await sendPrompt(threadId, text, model);
+      if (pending?.text !== text) pending = { text, requestId: uid() };
+      await sendPrompt(threadId, text, model, pending.requestId);
+      pending = null;
       prompt = "";
       await tick();
       resizeComposer();
@@ -94,10 +101,7 @@
   }
 
   function messageLabel(message: ConversationMessage): string {
-    const source = message.payload && typeof message.payload === "object"
-      ? (message.payload as { source?: { type?: unknown; sender?: unknown } }).source : undefined;
-    return source?.type === "thread-task" && typeof source.sender === "string"
-      ? `thread / ${source.sender}` : message.role === "user" ? "you" : "agent";
+    return message.role === "user" ? "you" : "agent";
   }
 </script>
 
@@ -131,21 +135,6 @@
     {/if}
   </div>
 
-  {#if tasks.length > 0}
-    <details class="task-bank">
-      <summary><span class="lamp mini {tasks.some((task) => task.status === 'accepted' || task.status === 'delivered') ? 'on-amber blink' : 'on-green'}" aria-hidden="true"></span>thread tasks · {tasks.length}</summary>
-      <ul>
-        {#each tasks as task (task.id)}
-          <li>
-            <span>{task.sender === threadId ? `to ${task.recipient}` : `from ${task.sender}`}</span>
-            <strong class:bad={task.status === "failed"}>{task.status}</strong>
-            {#if task.result}<span>{task.result}</span>{:else if task.error}<span>{task.error}</span>{/if}
-          </li>
-        {/each}
-      </ul>
-    </details>
-  {/if}
-
   {#if error || historyError || run?.status === "failed"}<div class="conversation-error" role="alert">{error ?? historyError ?? run?.error}</div>{/if}
   <form class="composer" onsubmit={(event) => { event.preventDefault(); void submit(); }}>
     <span class="sr-only" id="composer-hint">enter to send · shift enter for a new line</span>
@@ -164,5 +153,6 @@
     <button class="send-key" type="submit" title="send · enter" aria-label="send message" disabled={!prompt.trim() || busy || changingModel || !model || !!waitingText}>
       <Icon name="arrow" size={16} />
     </button>
+    {#if working}<button class="key" type="button" onclick={() => { void stopThread(threadId).catch(cause => { error = errorText(cause); }); }}>stop</button>{/if}
   </form>
 </div>

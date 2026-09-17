@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Rust runner plus in-process npm iroh interoperability. Separate from the
-# released Node/Incus VM portfolio: no Rust runner binary is shipped there yet.
+# Rust runner plus in-process npm iroh and durable product interoperability.
 # Install locked Node/Cargo dependencies in setup first; no registry fetches here.
 set -euo pipefail
 cd "$(dirname "$0")/.."

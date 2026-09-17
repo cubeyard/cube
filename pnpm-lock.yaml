@@ -45,53 +45,32 @@ importers:
         specifier: 4.0.0-rc.113
         version: 4.0.0-rc.113
 
-  packages/pi-extension:
-    dependencies:
-      '@cube/sandbox':
-        specifier: workspace:*
-        version: link:../sandbox
-      '@earendil-works/pi-coding-agent':
-        specifier: 0.85.1
-        version: 0.85.1(ws@8.21.3)
-      '@pydantic/monty':
-        specifier: 0.0.23
-        version: 0.0.23
-      typebox:
-        specifier: ^1.0.64
-        version: 1.3.7
-
-  packages/sandbox:
-    dependencies:
-      effect:
-        specifier: 4.0.0-rc.113
-        version: 4.0.0-rc.113
-      ws:
-        specifier: ^8.21.3
-        version: 8.21.3
-
   packages/server:
     dependencies:
       '@cube/git':
         specifier: workspace:*
         version: link:../git
-      '@cube/sandbox':
-        specifier: workspace:*
-        version: link:../sandbox
+      '@earendil-works/pi-agent-core':
+        specifier: 0.85.1
+        version: 0.85.1(ws@8.21.3)
+      '@earendil-works/pi-ai':
+        specifier: 0.85.1
+        version: 0.85.1(ws@8.21.3)
       '@earendil-works/pi-coding-agent':
         specifier: 0.85.1
         version: 0.85.1(ws@8.21.3)
-      '@lydell/node-pty':
-        specifier: 1.2.0-beta.15
-        version: 1.2.0-beta.15
+      '@earendil-works/pi-session-backend-sqlite-node':
+        specifier: 0.85.1
+        version: 0.85.1(ws@8.21.3)
       '@number0/iroh':
         specifier: 1.1.0
         version: 1.1.0
       effect:
         specifier: 4.0.0-rc.113
         version: 4.0.0-rc.113
-      ws:
-        specifier: ^8.21.3
-        version: 8.21.3
+      typebox:
+        specifier: 1.3.7
+        version: 1.3.7
 
   packages/web:
     dependencies:
@@ -233,9 +212,6 @@ packages:
     resolution: {integrity: sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw==}
     engines: {node: '>=6.9.0'}
 
-  '@bytecodealliance/preview2-shim@0.19.0':
-    resolution: {integrity: sha512-OSUlcM62fXLuzYP0DjBn/SwjKMZ/y/2PMXZ8v5cRiiFcroauntlPRl/oCnx0xYjYiqdYvE0PY50VCNutll0xOw==}
-
   '@cacheable/memory@2.2.0':
     resolution: {integrity: sha512-CTLKqLItRCEixEAewD3/j9DB3/o96gpTPD4eJ1v+DGOlxZRZncRQkGYqqnAGCscYd6RNeXfGeiuCphsPtqyIfQ==}
 
@@ -259,6 +235,10 @@ packages:
     resolution: {integrity: sha512-FGRN+OHbWaefBPGaTggAdLjrIHW+s2PzLyglz/5dfLzb9of7uuXMXYC0fJIeZTw+shS32o2cuQ9jF7YSDuL/oQ==}
     engines: {node: '>=22.19.0'}
     hasBin: true
+
+  '@earendil-works/pi-session-backend-sqlite-node@0.85.1':
+    resolution: {integrity: sha512-L//vhkibKRWrw0m7bErAcN8Lh7FFumlIoCzWgUMGx2Bl3s9JEQPnwRyBvIDZNRcgdLXRq0IDpB1wLDY6xj4dMg==}
+    engines: {node: '>=22.19.0'}
 
   '@earendil-works/pi-telemetry@0.85.1':
     resolution: {integrity: sha512-Bg/YN6kA7Swja/NQxka8xFdecb4E/auIEGF2G5A25EaQXhRnPj300/7/KpgsDDMYUzHTDAv4RyUxaQPJKW81Rw==}
@@ -523,39 +503,6 @@ packages:
   '@keyv/serialize@1.1.1':
     resolution: {integrity: sha512-dXn3FZhPv0US+7dtJsIi2R+c7qWYiReoEh5zUntWCf4oSpMNib8FDhSoed6m3QyZdx5hK7iLFkYk3rNxwt8vTA==}
 
-  '@lydell/node-pty-darwin-arm64@1.2.0-beta.15':
-    resolution: {integrity: sha512-6TSBbzdcLiNTHl1mTuzflqXrkmcC36USVGvERoDgvHk2ItEDaMaFZuAJ1CqPmwYj0DyhCS16TVS8OGK9xZnjyQ==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@lydell/node-pty-darwin-x64@1.2.0-beta.15':
-    resolution: {integrity: sha512-yDT2oqPqYMBScyuk1U9Rg5VKcrbMOD9o9jWYYamDADA3NSbUISroPChrqYRQ74Y7BQtNH4gqYAiWOZRi5uQZ0Q==}
-    cpu: [x64]
-    os: [darwin]
-
-  '@lydell/node-pty-linux-arm64@1.2.0-beta.15':
-    resolution: {integrity: sha512-wkbNF7dYAmtJv+o2+iztVlNwnUB4B0uX0wh/UD+mwMcmE2gNMnW9GChXO7fEE5XJokD0vB5idiHpGegaN+G/sg==}
-    cpu: [arm64]
-    os: [linux]
-
-  '@lydell/node-pty-linux-x64@1.2.0-beta.15':
-    resolution: {integrity: sha512-+U/5AVvHT6W+8OCYcnJgN0Qgc0ycO3TfD6aaFJHK+WHij797f8gsi5dV1HEO9l6YQmWCD+VL5gaLDhx3mxHwCA==}
-    cpu: [x64]
-    os: [linux]
-
-  '@lydell/node-pty-win32-arm64@1.2.0-beta.15':
-    resolution: {integrity: sha512-pyAk91w7wnnKrD4mrHXtIXRfmzSWV5bEzvRhurXcMCtCc2TJ424ciUskIgWMhAPP6y3KyUnqElj+U6kY3iOt0A==}
-    cpu: [arm64]
-    os: [win32]
-
-  '@lydell/node-pty-win32-x64@1.2.0-beta.15':
-    resolution: {integrity: sha512-2f8twEmDVxZ7drchAXjtevpmSPhFok0avAnzXro4t5gmz0xsPNKkoZvymwtuIS3xo7PzQqZOPQ/YzwEMb7oIzQ==}
-    cpu: [x64]
-    os: [win32]
-
-  '@lydell/node-pty@1.2.0-beta.15':
-    resolution: {integrity: sha512-Br8wBxzbxFwdWgk9uQ+rdzE0xfoxOK4QuGH54swhRwc5IxP6H9Y1/bcyazRGvNUs6XkB5qNVkezuKSRxUwZe7A==}
-
   '@mariozechner/clipboard-darwin-arm64@0.3.9':
     resolution: {integrity: sha512-BfgV7vCEWZwJwZJw03r6bP5+tf0iI/ANuQYCxi9RNn7FrWB3yzGuMKCrNLRl6V761vXRdL8+OqZ0wd4TqlsNOQ==}
     engines: {node: '>= 10'}
@@ -698,14 +645,6 @@ packages:
     resolution: {integrity: sha512-DlrJ4Sza5MiI+WwQg63lg+7eSbxlfQR2Bd+wVDjo7XTqenALD2OCRoSfPTuD12IhcvDbVHr4l7qH48DilocqYA==}
     engines: {node: '>= 20.3.0'}
 
-  '@opentelemetry/api-logs@0.222.0':
-    resolution: {integrity: sha512-9mb1If+IF6u0ZVXkHQ6ogEae5HwA6ajIVUgpSDQyRASxft6BSXHvBvPooRle3yFN/fKnCdSOnuu0OC3PLcF6+g==}
-    engines: {node: '>=8.0.0'}
-
-  '@opentelemetry/api@1.9.1':
-    resolution: {integrity: sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q==}
-    engines: {node: '>=8.0.0'}
-
   '@oxc-project/types@0.147.0':
     resolution: {integrity: sha512-IJ3s6ltHLp45S0bh7phkX+gJO7A1Wuz2EaqpAhb8WjqDwbzMiWKHhyyT42tskaWjEYXtHtVCPpnBJVT9+dcRLg==}
 
@@ -735,10 +674,6 @@ packages:
 
   '@protobufjs/utf8@1.1.2':
     resolution: {integrity: sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug==}
-
-  '@pydantic/monty@0.0.23':
-    resolution: {integrity: sha512-gl2pOn01Gno8eUcMlfFStgEV91JcVN9DQdQPT/Dp8ItQ+PfzPcn/pkc39ffqODhCsdmylOxGL1k4xpPMDGk/IA==}
-    engines: {node: '>= 20'}
 
   '@rolldown/binding-android-arm-eabi@1.2.6':
     resolution: {integrity: sha512-b+jTcARdTiFLI6jB4a5XjTm0RWd6KcRfQj/I2356fxUZemiho9zQLxo0RtCuMDAyKcLo6cEltkgbQp6d1+sjjQ==}
@@ -1783,13 +1718,6 @@ packages:
   zimmerframe@1.1.4:
     resolution: {integrity: sha512-B58NGBEoc8Y9MWWCQGl/gq9xBCe4IiKM0a2x7GZdQKOW5Exr8S1W24J6OgM1njK8xCRGvAJIL/MxXHf6SkmQKQ==}
 
-ignoredOptionalDependencies:
-  - '@pydantic/monty-darwin-arm64'
-  - '@pydantic/monty-darwin-x64'
-  - '@pydantic/monty-linux-arm64-gnu'
-  - '@pydantic/monty-linux-x64-gnu'
-  - '@pydantic/monty-win32-x64-msvc'
-
 snapshots:
 
   '@anthropic-ai/sdk@0.123.0':
@@ -2013,8 +1941,6 @@ snapshots:
 
   '@babel/runtime@7.29.7': {}
 
-  '@bytecodealliance/preview2-shim@0.19.0': {}
-
   '@cacheable/memory@2.2.0':
     dependencies:
       '@cacheable/utils': 2.5.0
@@ -2091,6 +2017,18 @@ snapshots:
       yaml: 2.9.0
     optionalDependencies:
       '@mariozechner/clipboard': 0.3.9
+    transitivePeerDependencies:
+      - '@modelcontextprotocol/sdk'
+      - bufferutil
+      - supports-color
+      - utf-8-validate
+      - ws
+      - zod
+
+  '@earendil-works/pi-session-backend-sqlite-node@0.85.1(ws@8.21.3)':
+    dependencies:
+      '@earendil-works/pi-agent-core': 0.85.1(ws@8.21.3)
+      '@earendil-works/pi-ai': 0.85.1(ws@8.21.3)
     transitivePeerDependencies:
       - '@modelcontextprotocol/sdk'
       - bufferutil
@@ -2276,33 +2214,6 @@ snapshots:
 
   '@keyv/serialize@1.1.1': {}
 
-  '@lydell/node-pty-darwin-arm64@1.2.0-beta.15':
-    optional: true
-
-  '@lydell/node-pty-darwin-x64@1.2.0-beta.15':
-    optional: true
-
-  '@lydell/node-pty-linux-arm64@1.2.0-beta.15':
-    optional: true
-
-  '@lydell/node-pty-linux-x64@1.2.0-beta.15':
-    optional: true
-
-  '@lydell/node-pty-win32-arm64@1.2.0-beta.15':
-    optional: true
-
-  '@lydell/node-pty-win32-x64@1.2.0-beta.15':
-    optional: true
-
-  '@lydell/node-pty@1.2.0-beta.15':
-    optionalDependencies:
-      '@lydell/node-pty-darwin-arm64': 1.2.0-beta.15
-      '@lydell/node-pty-darwin-x64': 1.2.0-beta.15
-      '@lydell/node-pty-linux-arm64': 1.2.0-beta.15
-      '@lydell/node-pty-linux-x64': 1.2.0-beta.15
-      '@lydell/node-pty-win32-arm64': 1.2.0-beta.15
-      '@lydell/node-pty-win32-x64': 1.2.0-beta.15
-
   '@mariozechner/clipboard-darwin-arm64@0.3.9':
     optional: true
 
@@ -2394,12 +2305,6 @@ snapshots:
       '@number0/iroh-win32-arm64-msvc': 1.1.0
       '@number0/iroh-win32-x64-msvc': 1.1.0
 
-  '@opentelemetry/api-logs@0.222.0':
-    dependencies:
-      '@opentelemetry/api': 1.9.1
-
-  '@opentelemetry/api@1.9.1': {}
-
   '@oxc-project/types@0.147.0': {}
 
   '@protobufjs/aspromise@1.1.2': {}
@@ -2421,12 +2326,6 @@ snapshots:
   '@protobufjs/pool@1.1.0': {}
 
   '@protobufjs/utf8@1.1.2': {}
-
-  '@pydantic/monty@0.0.23':
-    dependencies:
-      '@bytecodealliance/preview2-shim': 0.19.0
-      '@opentelemetry/api': 1.9.1
-      '@opentelemetry/api-logs': 0.222.0
 
   '@rolldown/binding-android-arm-eabi@1.2.6':
     optional: true

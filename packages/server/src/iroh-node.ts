@@ -6,7 +6,6 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
-import type { Duplex } from "node:stream";
 import { Schema } from "effect";
 // The 1.1.0 tarball publishes index.js/index.d.ts at its root, while its
 // manifest incorrectly points at iroh-js/. Pin and use the published subpath.
@@ -468,9 +467,28 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     this.environment(environmentId); this.assertConfig();
     await this.request(this.identity().key);
   }
-  async wake(environmentId: number): Promise<void> { this.environment(environmentId); throw new IrohNodeError("UNSUPPORTED"); }
-  async sleep(environmentId: number): Promise<void> { this.environment(environmentId); throw new IrohNodeError("UNSUPPORTED"); }
-  async openPortal(environmentId: number, _port: number): Promise<Duplex> { this.environment(environmentId); throw new IrohNodeError("UNSUPPORTED"); }
+  /** Pi owns the durable intent. The runner owns deduplication and results.
+   * Repeated dispatch uses exactly the same session-scoped identity; the runner
+   * rejects changed arguments and never re-executes a retained operation,
+   * including Interrupted. Runner journals do not evict operation identities. */
+  async resumeExec(sessionId: string, invocationId: string, spec: RunnerExecSpec, signal?: AbortSignal): Promise<RunnerExecResult & { operationId: string }> {
+    signal?.throwIfAborted(); this.assertConfig();
+    if (!sessionId || !invocationId) invalid();
+    spec = validateSpec(spec);
+    const operationId = `pi-${createHash("sha256").update(JSON.stringify([this.binding, sessionId, invocationId])).digest("hex")}`;
+    const { key } = this.identity();
+    const env = this.binding.environmentId;
+    // Unlike the legacy prepare/submit API, Pi has already committed the
+    // intent. No second local operation journal or sent marker is necessary.
+    await this.request(key, { method: "exec.start", operationId, env, spec }, signal);
+    for (;;) {
+      const state = (await this.request(key, { method: "operation.get", operationId, env }, signal)).operation as RunnerOperation;
+      if (state.state === "Succeeded") return { ...state.result, operationId };
+      if (state.state === "Failed") throw new IrohNodeError(state.error, operationId, state.completionUnknown);
+      if (state.state === "Interrupted" || state.state === "Unknown") throw new IrohNodeError("OUTCOME_UNKNOWN", operationId, true);
+      await delay(100, undefined, { signal });
+    }
+  }
   async prepareExec(environmentId: number, spec: RunnerExecSpec, signal?: AbortSignal): Promise<{ operationId: string }> {
     this.environment(environmentId); signal?.throwIfAborted(); this.assertConfig();
     spec = validateSpec(spec);

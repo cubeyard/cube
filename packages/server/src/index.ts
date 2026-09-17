@@ -1,1032 +1,178 @@
-import { ExecutionNodeError } from "./execution-node.ts";
-/**
- * cubed — Phase 2 slices 2+3. Multiple cubes (SQLite registry +
- * CubeSupervisor, one egress proxy per cube), Cube-owned durable conversations
- * with disposable Pi workers, sleep/wake (idle default 1h; prompts wake the cube;
- * POST /api/cubes/:name/{sleep,wake} for manual control). Portals proxying
- * is Phase 3.
- */
 import http from "node:http";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import stream from "node:stream";
-
-import { Effect } from "effect";
-import { IncusBackend, MockBackend, validateCaBundle, type CubeBackend } from "@cube/sandbox";
-
-import { checkAuth } from "./auth.ts";
-import { Conversations, ConversationError } from "./conversation.ts";
-import { formatEventLine, recordPoint } from "./events.ts";
-import { GithubAuth, GithubUnreachableError } from "./github-auth.ts";
-import { createLogger } from "./log.ts";
-import { availableModels } from "./models.ts";
+import os from "node:os";
+import { randomUUID } from "node:crypto";
+import type { Models } from "@earendil-works/pi-ai";
+import { GitService, normalizeRepoUrl } from "@cube/git";
+import { Registry, type Project } from "./registry.ts";
+import { Conversations } from "./conversation.ts";
+import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
+import { GithubAuth } from "./github-auth.ts";
+import { ModelAuth } from "./model-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
-import { defaultPortalBase } from "./portal-config.ts";
-import { guardUpgradeSocket, portalLabel, proxyHttp, proxyUpgrade, refuseUpgrade, respondFailed, respondMissing, respondUnavailable, respondWaking, upgradeAfterWake } from "./portal-proxy.ts";
-import { Registry } from "./registry.ts";
-import { CubeSupervisor, DEFAULT_EGRESS_ALLOW } from "./supervisor.ts";
-import { ThreadTaskError, ThreadTasks } from "./thread-tasks.ts";
-import { describeThreadError, sanitizeMessage } from "./user-facing.ts";
-import { APP_VERSION } from "./version.ts";
-import { listWorkspaceFiles, openWorkspaceFile } from "./workspace-files.ts";
 
-const log = createLogger("api");
-const PORT = Number(process.env.CUBED_PORT ?? 7777);
-// Host-header portal routing (ARCHITECTURE §10). The base must resolve to this
-// machine for every device that should reach portals: a wildcard record /
-// split-DNS / sslip.io for LAN+Tailnet, dnsmasq for same-machine dev. Do
-// NOT use a *.localhost base: resolvers special-case the localhost TLD to
-// loopback (RFC 6761) even over /etc/hosts, which breaks the in-cube
-// hairpin (OAuth issuers) — found the hard way in services-smoke.
-const PORTAL_BASE = (process.env.CUBED_PORTAL_BASE ?? defaultPortalBase()).toLowerCase();
-const AUTH_PROVIDER = process.env.CUBED_AUTH_PROVIDER ?? "openai-codex";
-const HOME = process.env.HOME!;
-
-const dbPath = process.env.CUBED_DB ?? path.join(HOME, "cube", "cubed.db");
-const registry = new Registry(dbPath);
-const threadTasks = new ThreadTasks(registry);
-const onboardingPath = path.join(path.dirname(dbPath), "onboarding.json");
-const githubAuth = new GithubAuth();
-// CUBED_BACKEND=mock runs cubed with cube ops simulated (no Incus daemon):
-// the tier-1 loop for developing cube inside a cube (ARCHITECTURE §13 3d.3). Default
-// is the real Incus backend.
-const BACKEND = (process.env.CUBED_BACKEND ?? "incus").toLowerCase();
-if (BACKEND !== "incus" && BACKEND !== "mock") {
-  throw new Error(`CUBED_BACKEND must be "incus" or "mock", got: ${BACKEND}`);
-}
-const backend: CubeBackend = BACKEND === "mock" ? new MockBackend() : new IncusBackend();
-if (BACKEND === "mock") {
-  log.warn(
-    "MOCK backend — cube ops are simulated (no Incus). Cube commands (repo .cube/setup, hooks, services, " +
-      "pi tools and ! commands) run LOCALLY with NO nested isolation, as cubed's own user. Run this ONLY " +
-      "inside a cube; never point it at an untrusted repo on a host you care about.",
-  );
-}
-const supervisor = new CubeSupervisor(registry, backend, {
-  cubesRoot: process.env.CUBED_CUBES_ROOT ?? path.join(HOME, "cube", "cubes"),
-  reposRoot: process.env.CUBED_REPOS_ROOT ?? path.join(HOME, "cube", "repos"),
-  pool: process.env.CUBED_POOL ?? "cube",
-  image: process.env.CUBED_IMAGE ?? "cube-node",
-  rootSize: process.env.CUBED_ROOT_SIZE ?? "10GiB",
-  dockerVolumeSize: process.env.CUBED_DOCKER_VOLUME_SIZE ?? "5GiB",
-  caCertificates: process.env.CUBED_CA_FILE
-    ? validateCaBundle(fs.readFileSync(process.env.CUBED_CA_FILE, "utf8")) : "",
-  // Prepared environments (templates threads are cloned from) are on unless
-  // switched off; CUBED_CUBE_MEMORY caps each thread (default: half the host).
-  environmentCache: process.env.CUBED_ENVIRONMENT_CACHE !== "0",
-  cubeMemory: process.env.CUBED_CUBE_MEMORY ?? defaultCubeMemory(),
-  // CUBED_EGRESS_ALLOW extends (not replaces) the package-manager defaults.
-  egressAllow: [
-    ...DEFAULT_EGRESS_ALLOW,
-    ...(process.env.CUBED_EGRESS_ALLOW?.split(",").map((s) => s.trim()).filter(Boolean) ?? []),
-  ],
-  // Idle-to-sleep (ms off last activity; 0 disables). PLAN default: 1h.
-  idleMs: parseIdleMs(process.env.CUBED_IDLE_MS),
-  portalBase: PORTAL_BASE,
-  publicPort: Number(process.env.CUBED_PUBLIC_PORT ?? PORT),
-  github: githubAuth,
-});
-
-/** Half the host's RAM in MiB, never under 1 GiB: one runaway build (a
- * Gradle daemon and its test workers) then ends inside its own cgroup
- * instead of taking cubed and every other thread with it. */
-function defaultCubeMemory(): string {
-  const half = Math.floor(os.totalmem() / 2 / (1024 * 1024));
-  return `${Math.max(1024, half)}MiB`;
-}
-
-function parseIdleMs(raw: string | undefined): number {
-  if (raw === undefined) return 3_600_000;
-  const ms = Number(raw);
-  if (!Number.isFinite(ms)) throw new Error(`CUBED_IDLE_MS must be a finite number (ms), got: ${raw}`);
-  return ms;
-}
-
-if (process.env.CUBED_WORKSPACE) {
-  throw new Error("CUBED_WORKSPACE review mode was removed: every thread must start from a ready project");
-}
-
-await supervisor.boot();
-
-
-const conversations = new Conversations(registry, {
-  plan: (id) => Effect.tryPromise({
-    try: async () => {
-      return supervisor.agentWorkerPlan(id, () => {});
-    },
-    catch: (cause) => new ConversationError({
-      message: sanitizeMessage(cause instanceof Error ? cause.message : String(cause)),
-      cause,
-    }),
-  }),
-  activity: (id) => Effect.sync(() => supervisor.touchUserThread(id)),
-  defaultModel: () => Effect.tryPromise({
-    try: async () => (await availableModels()).defaultModel,
-    catch: (cause) => new ConversationError({ message: "could not select a model for task delivery", cause }),
-  }),
-}, { tasks: threadTasks });
-
-// Built Svelte SPA (pnpm build). The daemon itself stays build-free.
-const WEB_ROOT = path.resolve(import.meta.dirname, "../../web/dist");
-if (!fs.existsSync(path.join(WEB_ROOT, "index.html"))) {
-  log.warn("web UI not built — run `pnpm build` (serving API only)");
-}
-
-// ------------------------------------------------------------------- http
-
-const MIME: Record<string, string> = {
-  ".html": "text/html", ".js": "text/javascript", ".css": "text/css",
-  ".svg": "image/svg+xml", ".png": "image/png",
-  ".webmanifest": "application/manifest+json",
-};
-
-function json(res: http.ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "content-type": "application/json" });
-  res.end(JSON.stringify(body));
-}
-
-/** Map supervisor/registry errors onto HTTP statuses. `sanitize` rewrites
- * cube vocabulary for the thread-first routes — internal cube names and the
- * word "cube" must not leak through the product surface. */
-function fail(res: http.ServerResponse, error: unknown, sanitize = false, route?: string): void {
-  if (res.destroyed) return;
-  if (error instanceof ThreadTaskError) {
-    const status = error.code === "NOT_FOUND" ? 404
-      : error.code === "NOT_PERMITTED" || error.code === "CONFLICT" ? 409
-      : error.code === "CAPACITY_EXCEEDED" ? 429 : 400;
-    return json(res, status, { code: error.code, error: error.message });
-  }
-  if (error instanceof ExecutionNodeError) {
-    return json(res, error.code === "OPERATION_UNSUPPORTED" ? 501 : error.code === "INVALID_REQUEST" ? 400
-      : ["ENVIRONMENT_MISSING", "WRONG_NODE", "CONFLICT"].includes(error.code) ? 409 : error.code === "CAPACITY_EXCEEDED" ? 429 : 503, {
-      code: error.code, completionUnknown: error.completionUnknown,
-      error: error.message,
-      ...("operationId" in error && typeof error.operationId === "string" ? { operationId: error.operationId } : {}),
-    });
-  }
-  let message = error instanceof Error ? error.message : String(error);
-  const status = /no such/.test(message)
-    ? 404
-    : /already exists|already working|busy|not ready|thread is archived|thread must be ready|has no threads|not deletable|has no project repositories|still has threads|still checking|detached HEAD|still setting up/.test(
-          message,
-        )
-      ? 409
-      : /invalid portal options|unknown portal option|portal (name|port|lifetime) must|invalid cube name|invalid id encoding|invalid project|invalid repository|empty repository|unsupported repository|non-GitHub/.test(
-            message,
-          )
-        ? 400
-        : 500;
-  if (sanitize) message = sanitizeMessage(message);
-  if (status === 500) log.error("api error", { error });
-  if (status === 500) {
-    console.log(`api error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
-    recordPoint(registry, { kind: "api", phase: "500", ok: false, detail: `${route ?? ""} ${error instanceof Error ? error.message : String(error)}`.trim() });
-  }
-  json(res, status, { error: message });
-}
-
-/** decodeURIComponent that reports bad encodings as 400s, not 500s. */
-function decodeId(raw: string): string {
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    throw new Error("invalid id encoding");
-  }
-}
-
-/** Request bodies are small JSON; anything past this is not a client of
- * ours and must not become host memory. */
-const BODY_CAP = 1 << 20;
-
-async function readBody(req: http.IncomingMessage): Promise<string> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += (chunk as Buffer).length;
-    if (size > BODY_CAP) {
-      req.destroy();
-      throw new Error("invalid request: body too large");
+/** Loopback product host. No remote provisioning or implicit sandbox backend. */
+export async function createCubed(options: { state: string; models?: Models; web?: string }) {
+  const registry = new Registry(path.join(options.state, "registry.sqlite"));
+  const models = options.models ?? await createModelRuntime();
+  const modelAuth = new ModelAuth(models);
+  const conversations = new Conversations(registry, path.join(options.state, "threads"), models);
+  const github = new GithubAuth();
+  const git = new GitService(path.join(options.state, "repositories"));
+  const onboarding = path.join(options.state, "onboarding.json");
+  const allowedHosts = new Set(["localhost", "127.0.0.1", "[::1]", ...(process.env.CUBED_ALLOWED_HOSTS?.split(",") ?? [])]);
+  const catalog = async () => (await models.getAvailable()).map(({ provider, id }) => ({ provider, id }));
+  const projectView = (project: Project) => ({ ...project,
+    availableRunnerCount: registry.availableRunners(project.id).length,
+    runnerCount: registry.runnerCount(project.id),
+    threadCount: registry.listThreads().filter(thread => thread.projectId === project.id && !thread.archived).length });
+  async function check(project: Project) {
+    for (const repository of project.repositories) {
+      try {
+        const result = await git.prepareRepository(repository.url, repository.base);
+        Object.assign(repository, { status: "ready", error: null, resolvedBase: result.base, baseOid: result.baseOid, checkedAt: Date.now() });
+      } catch (error) { Object.assign(repository, { status: "error", error: String(error), checkedAt: Date.now() }); }
     }
-    chunks.push(chunk as Buffer);
+    project.status = project.repositories.some(repository => repository.status === "error") ? "error" : "ready";
+    project.error = project.repositories.find(repository => repository.error)?.error ?? null;
+    project.checkedAt = project.updatedAt = Date.now();
+    const current = registry.getProject(project.id);
+    if (!current) throw new Error("project was deleted during check");
+    if (current.revision !== project.revision) return projectView(current);
+    registry.saveProject(project);
+    return projectView(project);
   }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-/** Tie long-running authenticated work to the HTTP caller. Fetch aborts
- * close the response socket; without this bridge cubed would keep pushing,
- * opening a PR, or waiting on a service after code mode had been cancelled. */
-async function whileConnected<T>(
-  res: http.ServerResponse,
-  work: (signal: AbortSignal) => Promise<T>,
-): Promise<T> {
-  const controller = new AbortController();
-  const onClose = () => {
-    if (!res.writableEnded) controller.abort(new Error("request disconnected"));
-  };
-  res.once("close", onClose);
-  try {
-    return await work(controller.signal);
-  } finally {
-    res.removeListener("close", onClose);
-  }
-}
-
-async function readProjectInput(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-): Promise<
-  | {
-      name: string;
-      repositories: Array<{ url: string; base?: string | null; checkoutName?: string }>;
-      environment?: string | null;
-    }
-  | null
-> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(await readBody(req));
-  } catch {
-    json(res, 400, { error: "invalid JSON body" });
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    json(res, 400, { error: "invalid project: object body required" });
-    return null;
-  }
-  const body = parsed as { name?: unknown; repositories?: unknown; environment?: unknown };
-  if (typeof body.name !== "string" || !Array.isArray(body.repositories)) {
-    json(res, 400, { error: "invalid project: name and repositories are required" });
-    return null;
-  }
-  if (body.environment !== undefined && body.environment !== null && typeof body.environment !== "string") {
-    json(res, 400, { error: "invalid project: environment must be a string like \"<checkout>/<folder>\"" });
-    return null;
-  }
-  const repositories: Array<{ url: string; base?: string | null; checkoutName?: string }> = [];
-  for (const [index, candidate] of body.repositories.entries()) {
-    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
-      json(res, 400, { error: `invalid project: repository ${index + 1} must be an object` });
-      return null;
-    }
-    const repo = candidate as { url?: unknown; base?: unknown; checkoutName?: unknown };
-    if (typeof repo.url !== "string") {
-      json(res, 400, { error: `invalid project: repository ${index + 1} needs a URL` });
-      return null;
-    }
-    if (repo.base !== undefined && repo.base !== null && typeof repo.base !== "string") {
-      json(res, 400, { error: `invalid project: repository ${index + 1} base must be a string` });
-      return null;
-    }
-    if (repo.checkoutName !== undefined && typeof repo.checkoutName !== "string") {
-      json(res, 400, { error: `invalid project: repository ${index + 1} checkoutName must be a string` });
-      return null;
-    }
-    repositories.push({
-      url: repo.url,
-      base: repo.base as string | null | undefined,
-      checkoutName: repo.checkoutName as string | undefined,
-    });
-  }
-  return { name: body.name, repositories, environment: body.environment as string | null | undefined };
-}
-
-/** Cube-subnet source address (the firewall admits cubes to this port for
- * the portal hairpin — see scripts/host-firewall.sh). Normalizes the
- * IPv6-mapped form node reports for IPv4 peers. */
-function cubeSourceIp(remoteAddress: string | undefined): string | null {
-  const ip = (remoteAddress ?? "").replace(/^::ffff:/, "");
-  return /^10\.90\.\d+\.\d+$/.test(ip) ? ip : null;
-}
-
-const server = http.createServer(async (req, res) => {
-  // Portals first: a Host of `<label>.<PORTAL_BASE>` belongs to a cube
-  // service, never to the UI/API (which are reached on any other host).
-  const label = portalLabel(req.headers.host, PORTAL_BASE);
-  if (label !== null) return portalRequest(label, req, res);
-
-  // The firewall opens this port to cubes ONLY for the portal hairpin;
-  // everything else (UI, API, static files) is off-limits to a rooted
-  // agent — without this, any cube could drive the thread API unauthenticated.
-  if (cubeSourceIp(req.socket.remoteAddress)) {
-    res.writeHead(403, { "content-type": "text/plain" });
-    return void res.end("portal hostnames only\n");
-  }
-
-  const url = new URL(req.url ?? "/", "http://localhost");
-  const method = req.method ?? "GET";
-  try {
-    if (url.pathname.startsWith("/api/")) return await api(method, url, req, res);
-  } catch (error) {
-    return fail(res, error, url.pathname.startsWith("/api/threads"), `${method} ${url.pathname}`);
-  }
-
-  // static web UI
-  if (method === "GET" || method === "HEAD") {
-    const rel = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-    const file = path.join(WEB_ROOT, rel);
-    if (file.startsWith(WEB_ROOT + path.sep) && fs.statSync(file, { throwIfNoEntry: false })?.isFile()) {
-      res.writeHead(200, {
-        "content-type": MIME[path.extname(file)] ?? "application/octet-stream",
-        // Vite hashes everything under assets/, so those may live forever;
-        // the entry files must revalidate, or an in-place app update leaves
-        // a tab pointing at assets that no longer exist.
-        "cache-control": rel.startsWith("assets/") ? "public, max-age=31536000, immutable" : "no-cache",
-      });
-      // A dist swapped mid-read (app upgrade) errors the source stream, and
-      // an unhandled 'error' there would take the whole daemon down.
-      return void stream.pipeline(fs.createReadStream(file), res, () => {
-        if (!res.writableEnded) res.destroy();
-      });
-    }
-  }
-  json(res, 404, { error: "not found" });
-});
-
-/**
- * One portal request: proxy straight through when the thread's environment
- * is up and the service answers. Otherwise — asleep, still setting up,
- * service crashed or never started — the same medicine every time: kick the
- * wake+ensure (coalesced in the supervisor) and hold the request briefly.
- */
-async function portalRequest(
-  label: string,
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-): Promise<void> {
-  const target = supervisor.resolvePortal(label);
-  // No portal row yet, but the thread's committed declaration may name the
-  // service — the UI links declared services before anything has started
-  // them. Ensuring below creates the row.
-  const cubeName = target?.cubeName ?? await supervisor.declaredPortalCube(label).catch(() => null);
-  if (!cubeName) {
-    // A bookmark to a deleted thread's service, or a typo: a page, not a
-    // bare line naming an internal label.
-    return respondMissing(req, res, "nothing is published at this address — the thread may have been deleted, or the service renamed");
-  }
-  // Hairpin isolation: a cube may reach its OWN portals (OAuth issuer
-  // path), never a sibling's — portals must not become a cube-to-cube
-  // bridge through the trusted zone. Nor may a cube bootstrap one.
-  const cubeSource = cubeSourceIp(req.socket.remoteAddress);
-  if (cubeSource && cubeSource !== target?.ip) {
-    res.writeHead(403, { "content-type": "text/plain" });
-    return void res.end("not your portal\n");
-  }
-  try { await supervisor.requireLocalEnvironment(cubeName); }
-  catch { return respondUnavailable(req, res); }
-  if (target && !target.supervised) {
-    const unavailable = () => respondFailed(req, res,
-      "this temporary portal is not supervised — start the server in the thread and try again");
-    if (target.status !== "ready") return unavailable();
-    supervisor.touchCube(cubeName);
-    return proxyHttp(req, res, target, unavailable);
-  }
-  if (target?.status !== "ready") return startAndHold(label, cubeName, req, res);
-  supervisor.touchCube(cubeName); // a browsed portal is activity, like a prompt
-  proxyHttp(req, res, target, () => respondUnavailable(req, res));
-}
-
-/**
- * The service is not answering. Start the wake+ensure, give the common fast
- * case 2s, then: proxy if it came up; explain if the last attempt left this
- * service down (a failure page beats "starting…" forever); else hold with
- * the self-refreshing page.
- */
-async function startAndHold(
-  label: string,
-  cubeName: string,
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-): Promise<void> {
-  const serviceName = label.slice(0, label.lastIndexOf("--"));
-  if (supervisor.cubeStatus(cubeName) === "creating") {
-    return respondWaking(req, res, "Setting up the environment…");
-  }
-  const settled = await Promise.race([
-    supervisor.ensureCubeServices(cubeName).then(() => true, () => true),
-    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 2_000)),
-  ]);
-  const failure = supervisor.serviceFailure(cubeName, serviceName);
-  const fresh = settled && !failure ? supervisor.resolvePortal(label) : null;
-  if (fresh?.status === "ready") {
-    supervisor.touchCube(cubeName);
-    return proxyHttp(req, res, fresh, () => respondWaking(req, res, "Starting the service…"));
-  }
-  if (failure) {
-    recordPoint(registry, { kind: "portal", phase: "failed", cube: cubeName, ok: false, detail: `${serviceName}: ${failure}` });
-    return respondFailed(req, res, `${serviceName}: ${sanitizeMessage(failure)}`);
-  }
-  respondWaking(
-    req,
-    res,
-    supervisor.cubeStatus(cubeName) === "ready" ? "Starting the service…" : "Waking the environment…",
-  );
-}
-
-async function api(
-  method: string,
-  url: URL,
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-): Promise<void> {
-  if (method === "GET" && url.pathname === "/api/state") {
-    return json(res, 200, { auth: checkAuth(AUTH_PROVIDER), onboardingComplete: isOnboardingComplete(onboardingPath) });
-  }
-
-  if (method === "POST" && url.pathname === "/api/onboarding") {
-    completeOnboarding(onboardingPath);
-    return json(res, 200, { onboardingComplete: true });
-  }
-
-  // Lifecycle events (events.ts): diagnosis and hill-climbing, newest
-  // first. Raw by design — internal names included — so nothing here is
-  // rendered by the product UI verbatim. `since`/`until` take ms epochs or
-  // durations (`24h`, `7d`, `30m`); `format=text` is what `cube events` prints.
-  if (method === "GET" && url.pathname === "/api/events") {
-    const q = url.searchParams;
-    const when = (key: string): number | undefined => {
-      const raw = q.get(key);
-      if (!raw) return undefined;
-      const rel = raw.match(/^(\d+)([smhd])$/);
-      if (rel) {
-        const unit = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[rel[2]!]!;
-        return Date.now() - Number(rel[1]) * unit;
-      }
-      const abs = Number(raw);
-      return Number.isFinite(abs) ? abs : undefined;
-    };
-    const events = registry.listEvents({
-      since: when("since"),
-      until: when("until"),
-      cube: q.get("cube") ?? undefined,
-      thread: q.get("thread") ?? undefined,
-      kind: q.get("kind") ?? undefined,
-      failed: q.get("failed") === "1",
-      limit: q.get("limit") ? Number(q.get("limit")) : undefined,
-    });
-    if (q.get("format") === "text") {
-      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-      return void res.end(`${events.map(formatEventLine).join("\n")}\n`);
-    }
-    return json(res, 200, { version: APP_VERSION, events });
-  }
-
-  // GitHub CLI owns the VM credential and device flow; no token is handled
-  // by cubed or returned here. GET is also the UI's pending poll.
-  if (url.pathname === "/api/github/auth") {
-    if (method === "GET") {
-      await githubAuth.ensureFresh(); // reconcile with gh (including manual login)
-      return json(res, 200, { github: githubAuth.status() });
-    }
-    if (method === "POST") return json(res, 200, { github: await githubAuth.connect() });
-    if (method === "DELETE") {
-      await githubAuth.disconnect();
-      return json(res, 200, { github: githubAuth.status() });
-    }
-    return json(res, 404, { error: "not found" });
-  }
-
-  // `repositories: null` means no account is connected; a stored credential
-  // that cannot be verified right now is 503 so the UI offers retry, not login.
-  if (method === "GET" && url.pathname === "/api/github/repositories") {
+  const server = http.createServer(async (request, response) => {
+    const json = (body: unknown, status = 200) => { response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); response.end(JSON.stringify(body)); };
     try {
-      return json(res, 200, { repositories: await githubAuth.repositories() });
-    } catch (error) {
-      if (error instanceof GithubUnreachableError) {
-        return json(res, 503, { error: "could not reach github — retry, or enter a repository manually" });
+      const url = new URL(request.url!, "http://localhost");
+      const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+      const method = request.method;
+      if (!allowedHosts.has(new URL(`http://${request.headers.host}`).hostname)) return json({ error: "host rejected" }, 403);
+      if (request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) return json({ error: "origin rejected" }, 403);
+      let body: Record<string, unknown> = {};
+      if (["POST", "PUT", "PATCH"].includes(method!)) {
+        if (request.headers["content-type"]?.split(";")[0] !== "application/json") return json({ error: "json body required" }, 415);
+        let raw = "";
+        request.setEncoding("utf8");
+        for await (const chunk of request) { raw += chunk; if (Buffer.byteLength(raw) > 1024 * 1024) throw new Error("request too large"); }
+        try { if (raw) body = JSON.parse(raw); } catch { throw new Error("invalid json body"); }
+        if (!body || Array.isArray(body) || typeof body !== "object") throw new Error("invalid request");
       }
-      return json(res, 502, { error: "could not load repositories — retry, or enter a repository manually" });
-    }
-  }
-
-  // ---- thread-first API: the product surface (cubes are invisible) ----
-
-  if (url.pathname === "/api/projects") {
-    if (method === "GET") return json(res, 200, { projects: supervisor.listProjects() });
-    if (method === "POST") {
-      const input = await readProjectInput(req, res);
-      if (!input) return;
-      return json(res, 201, { project: supervisor.createProject(input) });
-    }
-  }
-
-  const projectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)(?:\/(check))?$/);
-  if (projectMatch) {
-    const id = decodeId(projectMatch[1]!);
-    const action = projectMatch[2];
-    if (!action && method === "GET") return json(res, 200, { project: supervisor.getProject(id) });
-    if (!action && method === "PUT") {
-      const input = await readProjectInput(req, res);
-      if (!input) return;
-      return json(res, 200, { project: supervisor.updateProject(id, input) });
-    }
-    if (!action && method === "DELETE") {
-      await supervisor.deleteProject(id);
-      return json(res, 200, { ok: true });
-    }
-    if (action === "check" && method === "POST") {
-      return json(res, 202, { project: supervisor.checkProject(id) });
-    }
-    return json(res, 404, { error: "not found" });
-  }
-
-  if (url.pathname === "/api/models" && method === "GET") {
-    const { models, defaultModel } = await availableModels();
-    return json(res, 200, { models, selected: defaultModel });
-  }
-
-  if (url.pathname === "/api/threads") {
-    if (method === "GET") {
-      return json(res, 200, {
-        threads: supervisor.listUserThreads(url.searchParams.get("includeArchived") === "1"),
-      });
-    }
-    if (method === "POST") {
-      let parsed: { projectId?: unknown; requestId?: unknown; text?: unknown; model?: unknown };
-      try {
-        parsed = JSON.parse(await readBody(req));
-      } catch {
-        return json(res, 400, { error: "invalid JSON body" });
+      const text = (key: string) => { const value = body[key]; if (typeof value !== "string" || !value.trim() || value.length > 100000) throw new Error(`${key} is required and must be at most 100000 characters`); return value; };
+      const selection = async (input: unknown): Promise<ModelSelection> => {
+        const available = await catalog();
+        const candidate = input as ModelSelection | undefined;
+        const selected = candidate ? available.find(model => model.provider === candidate.provider && model.id === candidate.id) : preferredModel(available);
+        if (!selected) throw new Error("connect a model provider first");
+        return selected;
+      };
+      if (url.pathname === "/api/state" && method === "GET") {
+        const available = await catalog();
+        return json({ onboardingComplete: isOnboardingComplete(onboarding), auth: available.length ? { state: "ok", provider: available[0].provider, credentialType: "host" } : { state: "missing", provider: "model" } });
       }
-      if (typeof parsed.projectId !== "string" || !parsed.projectId.trim()) {
-        return json(res, 400, { error: "projectId is required" });
-      }
-      const text = parsed.text;
-      if (text !== undefined && (typeof text !== "string" || !text.trim() || text.trim().length > 100_000)) {
-        return json(res, 400, { error: "prompt must be 1–100000 characters" });
-      }
-      let selected;
-      if (text !== undefined || parsed.model !== undefined) {
-        const { models, defaultModel } = await availableModels();
-        const input = parsed.model;
-        selected = input === undefined ? defaultModel : models.find((model) => input && typeof input === "object"
-          && "provider" in input && "id" in input && model.provider === input.provider && model.id === input.id);
-        if (!selected) return json(res, 400, { error: "selected model is unavailable; choose another model" });
-      }
-      // Idempotency: `Idempotency-Key` header or body `requestId`, a
-      // client id for one user action. A replay answers 200 with the
-      // thread the first attempt made; a first creation answers 201.
-      const rawKey = req.headers["idempotency-key"] ?? parsed.requestId;
-      let requestKey: string | undefined;
-      if (rawKey !== undefined) {
-        if (typeof rawKey !== "string" || !/^[A-Za-z0-9._-]{1,64}$/.test(rawKey)) {
-          return json(res, 400, { error: "requestId must be 1–64 characters of letters, digits, dot, dash or underscore" });
-        }
-        requestKey = rawKey;
-      }
-      const created = await supervisor.createUserThread(parsed.projectId, requestKey);
-      // Accept the first turn without yielding between the history check and
-      // persistence. Concurrent creation replays must not send it twice, even
-      // when the worker has already finished or failed by the time of retry.
-      if (selected && !registry.latestAgentRun(created.id)) {
-        registry.setThreadModel(created.id, selected);
-        if (typeof text === "string") Effect.runSync(conversations.submit(created.id, text.trim()));
-      }
-      return json(res, created.created ? 201 : 200, { id: created.id });
-    }
-  }
-
-  const environmentAccess = url.pathname.match(/^\/api\/threads\/([^/]+)\/environment-access$/);
-  if (environmentAccess && method === "GET") {
-    return json(res, 200, await supervisor.accessForUserThread(decodeId(environmentAccess[1]!)));
-  }
-
-  const repositoryFile = url.pathname.match(
-    /^\/api\/threads\/([^/]+)\/repositories\/(\d+)\/files\/(.+)$/,
-  );
-  if (repositoryFile) {
-    if (method !== "GET") return json(res, 404, { error: "not found" });
-    const id = decodeId(repositoryFile[1]!);
-    const repositoryId = Number(repositoryFile[2]);
-    const root = await supervisor.workspaceForUserRepository(id, repositoryId);
-    return serveWorkspaceFile(res, root, decodeId(repositoryFile[3]!));
-  }
-
-  const githubRead = url.pathname.match(/^\/api\/threads\/([^/]+)\/github$/);
-  if (githubRead && method === "GET") {
-    const result = await whileConnected(res, (signal) => supervisor.readGithubForUserThread(
-      decodeId(githubRead[1]!),
-      { number: Number(url.searchParams.get("number")), type: url.searchParams.get("type") ?? "",
-        section: url.searchParams.get("section") ?? undefined,
-        page: url.searchParams.has("page") ? Number(url.searchParams.get("page")) : undefined },
-      signal,
-    ));
-    return json(res, 200, result);
-  }
-
-  const runnerExec = url.pathname.match(/^\/api\/threads\/([^/]+)\/(?:runner-exec|host-exec)$/);
-  if (runnerExec && method === "POST") {
-    const id = decodeId(runnerExec[1]!);
-    const input: unknown = JSON.parse(await readBody(req));
-    return json(res, 200, await whileConnected(res, signal => supervisor.runnerExecForUserThread(id, input, signal)));
-  }
-
-  // Operator boundary: grants are never available through a thread-scoped
-  // agent capability. Cubed has no application login; its trusted loopback /
-  // Tailnet deployment boundary is the operator authority.
-  if (url.pathname === "/api/thread-task-grants" && (method === "POST" || method === "DELETE")) {
-    let input: unknown;
-    try { input = JSON.parse(await readBody(req)); }
-    catch { return json(res, 400, { error: "invalid JSON body" }); }
-    if (!input || typeof input !== "object" || Array.isArray(input)
-      || Object.keys(input).length !== 2 || typeof (input as any).sender !== "string" || typeof (input as any).recipient !== "string") {
-      return json(res, 400, { error: "invalid task grant" });
-    }
-    const { sender, recipient } = input as { sender: string; recipient: string };
-    await Effect.runPromise(method === "POST" ? threadTasks.grant(sender, recipient) : threadTasks.revoke(sender, recipient));
-    if (method === "POST") conversations.kickTasks(recipient);
-    return json(res, 200, { ok: true });
-  }
-
-  const threadTask = url.pathname.match(/^\/api\/threads\/([^/]+)\/tasks(?:\/(destinations|task-[a-zA-Z0-9-]+)(?:\/(cancel))?)?$/);
-  if (threadTask) {
-    const actor = decodeId(threadTask[1]!);
-    const target = threadTask[2];
-    const action = threadTask[3];
-    if (!registry.getThread(actor)) return json(res, 404, { error: "thread not found" });
-    if (!target && method === "GET") return json(res, 200, { tasks: await Effect.runPromise(conversations.listTasks(actor)) });
-    if (!target && method === "POST") {
-      let input: unknown;
-      try { input = JSON.parse(await readBody(req)); }
-      catch { return json(res, 400, { error: "invalid JSON body" }); }
-      return json(res, 202, { task: await Effect.runPromise(conversations.sendTask(actor, input)) });
-    }
-    if (target === "destinations" && !action && method === "GET") {
-      return json(res, 200, { destinations: await Effect.runPromise(conversations.taskDestinations(actor)) });
-    }
-    if (target?.startsWith("task-") && !action && method === "GET") {
-      return json(res, 200, { task: await Effect.runPromise(conversations.getTask(actor, target)) });
-    }
-    if (target?.startsWith("task-") && action === "cancel" && method === "POST") {
-      return json(res, 200, { task: await Effect.runPromise(conversations.cancelTask(actor, target)) });
-    }
-    return json(res, 404, { error: "not found" });
-  }
-
-  const threadRepository = url.pathname.match(
-    /^\/api\/threads\/([^/]+)\/repositories(?:\/(\d+)\/(diff|push|sync|sync-branch|push-base|pr))?$/,
-  );
-  if (threadRepository) {
-    const id = decodeId(threadRepository[1]!);
-    const repositoryRaw = threadRepository[2];
-    const action = threadRepository[3];
-    if (!repositoryRaw && !action && method === "GET") {
-      return json(res, 200, { repositories: await supervisor.repositoriesForUserThread(id, url.searchParams.get("state") !== "0") });
-    }
-    if (!repositoryRaw || !action) return json(res, 404, { error: "not found" });
-    const repositoryId = Number(repositoryRaw);
-    if (action === "diff" && method === "GET") {
-      return json(res, 200, await supervisor.diffForUserThread(id, repositoryId));
-    }
-    if (action === "push" && method === "POST") {
-      let forceWithLease: string | undefined;
-      const raw = await readBody(req);
-      if (raw.trim()) {
-        try {
-          const parsed = JSON.parse(raw);
-          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
-            || Object.keys(parsed).some((key) => key !== "forceWithLease")
-            || (parsed.forceWithLease !== undefined && typeof parsed.forceWithLease !== "string")) {
-            return json(res, 400, { error: "invalid push body" });
+      if (url.pathname === "/api/onboarding" && method === "POST") { completeOnboarding(onboarding); return json({ onboardingComplete: true }); }
+      if (parts[0] === "api" && parts[1] === "providers") {
+        const id = parts[2];
+        if (parts.length === 2 && method === "GET") return json({ providers: await modelAuth.list() });
+        if (parts.length === 3 && method === "DELETE") { await modelAuth.disconnect(id); return json({ ok: true }); }
+        if (parts.length === 4 && parts[3] === "refresh" && method === "POST") { await modelAuth.refresh(id); return json({ ok: true }); }
+        if (parts.length === 4 && parts[3] === "login") {
+          if (method === "POST") {
+            if (body.type !== "api_key" && body.type !== "oauth") throw new Error("invalid login method");
+            return json({ flow: modelAuth.start(id, body.type) });
           }
-          forceWithLease = parsed.forceWithLease;
-        } catch {
-          return json(res, 400, { error: "invalid push body" });
+          if (method === "DELETE") { await modelAuth.cancel(id); return json({ ok: true }); }
         }
-      }
-      const branch = await whileConnected(res, (signal) =>
-        supervisor.pushUserThread(id, repositoryId, signal, { forceWithLease }),
-      );
-      return json(res, 200, { branch });
-    }
-    if (action === "sync" && method === "POST") {
-      return json(
-        res,
-        200,
-        await whileConnected(res, (signal) => supervisor.syncBaseForUserThread(id, repositoryId, signal)),
-      );
-    }
-    if (action === "sync-branch" && method === "POST") {
-      return json(
-        res,
-        200,
-        await whileConnected(res, (signal) => supervisor.syncBranchForUserThread(
-          id,
-          repositoryId,
-          url.searchParams.get("branch") ?? "",
-          signal,
-        )),
-      );
-    }
-    if (action === "push-base" && method === "POST") {
-      return json(
-        res,
-        200,
-        await whileConnected(res, (signal) => supervisor.pushBaseForUserThread(id, repositoryId, signal)),
-      );
-    }
-    if (action === "pr" && method === "POST") {
-      let title: string | undefined;
-      let prBody: string | undefined;
-      const raw = await readBody(req);
-      if (raw.trim()) {
-        try {
-          const parsed = JSON.parse(raw);
-          if (parsed.title !== undefined) title = String(parsed.title);
-          if (parsed.body !== undefined) prBody = String(parsed.body);
-        } catch {
-          return json(res, 400, { error: "invalid JSON body" });
+        if (parts.length === 4 && parts[3] === "answer" && method === "POST") {
+          if (typeof body.value !== "string" || body.value.length > 100000) throw new Error("invalid login answer");
+          modelAuth.answer(id, text("flowId"), text("promptId"), body.value);
+          return json({ ok: true });
         }
+        return json({ error: "not found" }, 404);
       }
-      const created = await whileConnected(res, (signal) =>
-        supervisor.createPrForUserThread(id, repositoryId, { title, body: prBody }, signal),
-      );
-      return json(res, 200, created);
-    }
-    return json(res, 404, { error: "not found" });
-  }
-
-  const userThread = url.pathname.match(
-    /^\/api\/threads\/([^/]+)(?:\/(history|prompt|model|files|services|portals|archive|environment)(?:\/(.+))?)?$/,
-  );
-  if (userThread) {
-    const id = decodeId(userThread[1]!);
-    const action = userThread[2];
-    // Only files and portal removal take a subpath.
-    if (userThread[3] !== undefined && action !== "files" && action !== "portals") return json(res, 404, { error: "not found" });
-    if (!action) {
-      if (method === "DELETE") {
-        await Effect.runPromise(threadTasks.preflightDelete(id));
-        // Stop the disposable worker before deleting its durable owner.
-        await Effect.runPromise(conversations.cancelThread(id));
-        await supervisor.removeUserThread(id);
-        return json(res, 200, { ok: true });
+      if (url.pathname === "/api/github/auth" && ["GET", "POST", "DELETE"].includes(method!)) {
+        if (method === "POST") await github.connect();
+        else if (method === "DELETE") await github.disconnect();
+        else await github.ensureFresh();
+        return json({ github: github.status() });
       }
-      if (method === "PATCH") {
-        // Rename. Whitespace collapses to match the auto-title convention.
-        let title: string;
-        try {
-          title = String(JSON.parse(await readBody(req)).title ?? "").replace(/\s+/g, " ").trim();
-        } catch {
-          return json(res, 400, { error: "invalid JSON body" });
+      if (url.pathname === "/api/github/repositories" && method === "GET") return json({ repositories: await github.repositories() });
+      if (url.pathname === "/api/models" && method === "GET") { const available = await catalog(); return json({ models: available, selected: preferredModel(available) }); }
+      if (parts[0] === "api" && parts[1] === "projects") {
+        const id = parts[2];
+        if (parts.length > 4 || (parts[3] && !(parts[3] === "check" && method === "POST"))) return json({ error: "not found" }, 404);
+        if (!id && method === "GET") return json({ projects: registry.listProjects().map(projectView) });
+        if ((!id && method === "POST") || (id && method === "PUT")) {
+          const previous = id ? registry.getProject(id) : null;
+          if (id && !previous) return json({ error: "project not found" }, 404);
+          const projectId = id ?? randomUUID();
+          if (!Array.isArray(body.repositories) || body.repositories.length > 20) throw new Error("repositories must be an array of at most 20 entries");
+          const project: Project = { id: projectId, name: text("name"), status: "checking", error: null,
+            revision: (previous?.revision ?? 0) + 1, checkedAt: null, createdAt: previous?.createdAt ?? Date.now(), updatedAt: Date.now(),
+            repositories: body.repositories.map((item, position) => {
+              if (!item || typeof item !== "object" || typeof item.url !== "string" ||
+                (item.base != null && (typeof item.base !== "string" || !item.base.trim())) ||
+                (item.checkoutName != null && (typeof item.checkoutName !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(item.checkoutName)))) throw new Error("invalid repository configuration");
+              return { id: randomUUID(), projectId, position,
+                url: normalizeRepoUrl(item.url), base: item.base ?? null, checkoutName: item.checkoutName ?? `repo-${position + 1}`,
+                status: "checking", error: null, resolvedBase: null, baseOid: null, checkedAt: null };
+            }) };
+          registry.saveProject(project);
+          return json({ project: await check(project) });
         }
-        if (!title) return json(res, 400, { error: "empty title" });
-        supervisor.renameUserThread(id, title.slice(0, 200));
-        return json(res, 200, { ok: true });
+        const project = registry.getProject(id);
+        if (!project) return json({ error: "project not found" }, 404);
+        if (method === "DELETE") { registry.deleteProject(id); return json({ ok: true }); }
+        if (parts[3] === "check" && method === "POST") return json({ project: await check(project) });
+        if (method === "GET") return json({ project: projectView(project) });
       }
-      return json(res, 404, { error: "not found" });
-    }
-    if (action === "model") {
-      if (!registry.getThread(id)) return json(res, 404, { error: "thread not found" });
-      if (method !== "GET" && method !== "PATCH") return json(res, 404, { error: "not found" });
-      const { models, defaultModel } = await availableModels();
-      if (method === "GET") {
-        return json(res, 200, { models, selected: registry.getThreadModel(id) ?? defaultModel });
-      }
-      let input: unknown;
-      try { input = JSON.parse(await readBody(req)); }
-      catch { return json(res, 400, { error: "invalid JSON body" }); }
-      const selected = models.find((model) => input && typeof input === "object"
-        && "provider" in input && "id" in input && model.provider === input.provider && model.id === input.id);
-      if (!selected) return json(res, 400, { error: "selected model is unavailable; choose another model" });
-      if (registry.activeAgentRun(id)) return json(res, 409, { error: "wait for the agent to finish before changing model" });
-      registry.setThreadModel(id, selected);
-      return json(res, 200, { models, selected });
-    }
-    if (action === "history") {
-      if (method !== "GET") return json(res, 404, { error: "not found" });
-      const after = Number(url.searchParams.get("after") ?? 0);
-      if (!Number.isSafeInteger(after) || after < 0) return json(res, 400, { error: "after must be a non-negative integer" });
-      const history = conversations.history(id, after);
-      return json(res, 200, {
-        ...history,
-        run: history.run ? { ...history.run, error: describeThreadError(history.run.error) } : null,
-      });
-    }
-    if (action === "prompt") {
-      if (method !== "POST") return json(res, 404, { error: "not found" });
-      let text: string;
-      let requestedModel: unknown;
-      try {
-        const body = JSON.parse(await readBody(req));
-        text = String(body.text ?? "").trim();
-        requestedModel = body.model;
-      }
-      catch { return json(res, 400, { error: "invalid JSON body" }); }
-      if (!text) return json(res, 400, { error: "empty prompt" });
-      if (text.length > 100_000) return json(res, 400, { error: "prompt is too long" });
-      if (!registry.getThread(id)) return json(res, 404, { error: "thread not found" });
-      const { models, defaultModel } = await availableModels();
-      // Bind the turn to the model the sender sees, even if another tab changed
-      // the thread preference. Non-browser clients may omit it for the default.
-      const selected = requestedModel === undefined ? registry.getThreadModel(id) ?? defaultModel
-        : models.find((model) => requestedModel && typeof requestedModel === "object"
-          && "provider" in requestedModel && "id" in requestedModel
-          && model.provider === requestedModel.provider && model.id === requestedModel.id);
-      if (!selected || !models.some((model) => model.provider === selected.provider && model.id === selected.id)) {
-        return json(res, 400, { error: "selected model is unavailable; choose another model" });
-      }
-      if (registry.activeAgentRun(id)) return json(res, 409, { error: "thread is already working" });
-      registry.setThreadModel(id, selected);
-      const accepted = await Effect.runPromise(conversations.submit(id, text));
-      return json(res, 202, accepted);
-    }
-    if (action === "environment") {
-      if (method === "GET") return json(res, 200, supervisor.environmentForUserThread(id));
-      if (method === "POST") {
-        // Intentionally independent of request disconnect: an accepted
-        // explicit repair completes, just like initial provisioning.
-        await supervisor.accessForUserThread(id);
-        void supervisor.retrySetupForUserThread(id).catch((error) => console.warn(`setup retry: ${String(error)}`));
-        return json(res, 202, { accepted: true });
-      }
-      return json(res, 404, { error: "not found" });
-    }
-    if (action === "portals") {
-      const port = userThread[3];
-      if (port !== undefined) {
-        if (method !== "DELETE" || !/^[1-9][0-9]{0,4}$/.test(port) || Number(port) > 65535) {
-          return json(res, 404, { error: "not found" });
+      if (parts[0] === "api" && parts[1] === "threads") {
+        const id = parts[2];
+        if (parts.length > 4) return json({ error: "not found" }, 404);
+        if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...thread, state: conversations.error(thread.id) ? "error" : "ready", error: conversations.error(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
+        if (!id && method === "POST") {
+          const thread = registry.createThread(text("projectId"), text("requestId"), await selection(body.model), text("text"));
+          await conversations.activate(thread.id);
+          return json({ id: thread.id });
         }
-        supervisor.removePortalForUserThread(id, Number(port));
-        return json(res, 200, { ok: true });
+        const thread = registry.getThread(id);
+        if (!thread || thread.archived) return json({ error: "thread not found" }, 404);
+        if (!parts[3] && method === "DELETE") { await conversations.archive(id); return json({ ok: true }); }
+        if (!parts[3] && method === "PATCH") { registry.saveThread({ ...thread, title: text("title").slice(0, 200) }); return json({ ok: true }); }
+        if (parts[3] === "history" && method === "GET") return json(await conversations.history(id));
+        if (parts[3] === "stream" && method === "GET") return await conversations.stream(id, response);
+        if (parts[3] === "stop" && method === "POST") { await conversations.stop(id); return json({ ok: true }); }
+        if (parts[3] === "model" && (method === "GET" || method === "PATCH")) return json({ models: await catalog(), selected: await conversations.model(id, method === "PATCH" ? await selection(body) : undefined) });
+        if (parts[3] === "prompt" && method === "POST") return json(await conversations.submit(id, text("text"), text("requestId")));
       }
-      if (method === "GET") return json(res, 200, { portals: supervisor.listPortalsForUserThread(id) });
-      if (method === "POST") {
-        let input: unknown;
-        try { input = JSON.parse(await readBody(req)); }
-        catch { return json(res, 400, { error: "invalid JSON body" }); }
-        return json(res, 200, supervisor.exposePortalForUserThread(id, input));
-      }
-      return json(res, 404, { error: "not found" });
+      if (parts[0] === "api") return json({ error: "not found" }, 404);
+      if (method !== "GET") return json({ error: "not found" }, 404);
+      const web = path.resolve(options.web ?? path.join(import.meta.dirname, "../../web/dist"));
+      const file = path.resolve(web, `.${url.pathname === "/" ? "/index.html" : url.pathname}`);
+      if (!file.startsWith(`${web}${path.sep}`) || !fs.existsSync(file) || !fs.statSync(file).isFile()) return json({ error: "not found" }, 404);
+      const types: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
+      response.writeHead(200, { "content-type": types[path.extname(file)] ?? "application/octet-stream" });
+      fs.createReadStream(file).pipe(response);
+    } catch (error) {
+      if (response.headersSent) response.destroy();
+      else json({ error: error instanceof Error ? error.message : String(error) }, 409);
     }
-    if (action === "services") {
-      // Declared services + stable portal URLs — reads the committed
-      // declaration only, so GET works without waking the thread. POST is
-      // the agent's narrow code-mode capability: ensure exactly this
-      // thread's declarations and return their live status/portal URLs.
-      if (method === "GET") {
-        return json(res, 200, { services: await supervisor.listServicesForUserThread(id) });
-      }
-      if (method === "POST") {
-        const services = await whileConnected(res, (signal) =>
-          supervisor.ensureServicesForUserThread(id, signal),
-        );
-        return json(res, 200, { services });
-      }
-      return json(res, 404, { error: "not found" });
-    }
-    if (action === "archive") {
-      if (method !== "POST") return json(res, 404, { error: "not found" });
-      supervisor.archiveUserThread(id);
-      return json(res, 200, { ok: true });
-    }
-    if (action === "files") {
-      // Workspace files are host-side: listing and serving work without
-      // waking the sandbox (a sleeping thread's images still render).
-      if (method !== "GET") return json(res, 404, { error: "not found" });
-      const root = await supervisor.workspaceForUserThread(id);
-      if (userThread[3] === undefined) return json(res, 200, listWorkspaceFiles(root));
-      return serveWorkspaceFile(res, root, decodeId(userThread[3]));
-    }
-    return json(res, 404, { error: "not found" });
-  }
-
-  // ---- cube-scoped API: plumbing/debug ----
-
-  if (url.pathname === "/api/cubes" && method === "GET") {
-    return json(res, 200, { cubes: supervisor.listCubes() });
-  }
-
-  const cubeMatch = url.pathname.match(/^\/api\/cubes\/([^/]+)(?:\/(.*))?$/);
-  if (!cubeMatch) return json(res, 404, { error: "not found" });
-  const cubeName = decodeId(cubeMatch[1]!);
-  const rest = cubeMatch[2] ?? "";
-
-  if (rest === "") {
-    if (method === "GET") {
-      const summary = supervisor.listCubes().find((c) => c.name === cubeName);
-      if (!summary) return json(res, 404, { error: `no such cube: ${cubeName}` });
-      return json(res, 200, { ...summary, threads: supervisor.listThreads(cubeName) });
-    }
-    if (method === "DELETE") {
-      const threadIds = supervisor.listThreads(cubeName).map((thread) => thread.id);
-      await Effect.runPromise(Effect.forEach(threadIds, (id) => threadTasks.preflightDelete(id), { discard: true }));
-      await Effect.runPromise(Effect.forEach(threadIds, (id) => conversations.cancelThread(id), { discard: true }));
-      await supervisor.removeCube(cubeName, {
-        deleteVolume: url.searchParams.get("volumes") === "1",
-      });
-      return json(res, 200, { ok: true });
-    }
-  }
-
-  // Manual lifecycle control; prompts wake automatically, and the idle
-  // sweep sleeps automatically — these are the explicit buttons.
-  if (rest === "sleep" && method === "POST") {
-    await supervisor.sleepCube(cubeName);
-    return json(res, 200, { ok: true });
-  }
-  if (rest === "wake" && method === "POST") {
-    await supervisor.wakeCube(cubeName);
-    return json(res, 200, { ok: true });
-  }
-
-  json(res, 404, { error: "not found" });
+  });
+  await conversations.boot();
+  const recovery = setInterval(() => { void conversations.boot(); }, 30000);
+  recovery.unref();
+  return { server, registry, conversations, async close() {
+    clearInterval(recovery);
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await modelAuth.close(); await conversations.close(); registry.close();
+  } };
 }
 
-/** Image types render inline (an <img> never executes scripts); everything
- * else serves as text/plain so agent-authored HTML cannot run on cubed's
- * origin. CSP `sandbox` additionally isolates what does render (e.g. SVG). */
-const WORKSPACE_IMAGE_MIME: Record<string, string> = {
-  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-  ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
-  ".avif": "image/avif", ".ico": "image/x-icon",
-};
-
-function serveWorkspaceFile(res: http.ServerResponse, root: string, rel: string): void {
-  // Descriptor-based: containment was verified on this fd, and the stream
-  // reads from the same fd — a concurrent path swap cannot redirect it.
-  const file = openWorkspaceFile(root, rel);
-  if (!file) return json(res, 404, { error: "no such file" });
-  res.writeHead(200, {
-    "content-type": WORKSPACE_IMAGE_MIME[path.extname(rel).toLowerCase()] ?? "text/plain; charset=utf-8",
-    "content-length": file.size,
-    "cache-control": "no-cache",
-    "last-modified": file.mtime.toUTCString(),
-    "content-security-policy": "sandbox",
-    "x-content-type-options": "nosniff",
-  });
-  if (file.size === 0) {
-    fs.closeSync(file.fd);
-    return void res.end();
-  }
-  // `end` pins the response to the size announced above even if the agent
-  // grows the file mid-stream; a shrink ends the stream short, and the
-  // destroy tells the client the body is truncated instead of letting the
-  // connection be reused against a wrong content-length.
-  const stream = fs.createReadStream("", { fd: file.fd, start: 0, end: file.size - 1 });
-  stream.on("error", () => res.destroy());
-  // autoClose releases the fd on end/error; a client that disconnects
-  // mid-stream must release it too.
-  res.on("close", () => stream.destroy());
-  stream.pipe(res);
+if (import.meta.main) {
+  const app = await createCubed({ state: process.env.CUBED_STATE ?? path.join(os.homedir(), ".cube-host") });
+  app.server.listen(Number(process.env.CUBED_PORT ?? 7777), "127.0.0.1", () => console.log("cubed listening on loopback; trusted runners only"));
+  for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => { void app.close().then(() => process.exit(0)); });
 }
-
-// Upgrades are portal plumbing only. Cube's conversation UI is HTTP and no
-// longer exposes a credentialed terminal WebSocket.
-server.on("upgrade", async (req, socket, head) => {
-  // From here the socket is ours: node has already dropped its own error
-  // listener, so a reset before we destroy, refuse or proxy it would be
-  // an unhandled 'error' — a crash. One listener for the socket's life.
-  guardUpgradeSocket(socket);
-  const label = portalLabel(req.headers.host, PORTAL_BASE);
-  if (label === null) {
-    return void socket.destroy();
-  }
-  const target = supervisor.resolvePortal(label);
-  // Same isolation as the request path: own portals only for cube sources
-  // (a cube may not bootstrap a portal that has no row yet, either).
-  const cubeSource = cubeSourceIp(req.socket.remoteAddress);
-  if (cubeSource && cubeSource !== target?.ip) return void socket.destroy();
-  // No portal row yet, but the thread's committed declaration may name
-  // the service — the HTTP path bootstraps the same way.
-  const cubeName = target?.cubeName ?? await supervisor.declaredPortalCube(label).catch(() => null);
-  if (!cubeName) return void socket.destroy();
-  if (target?.status === "ready") {
-    supervisor.touchCube(cubeName);
-    return void proxyUpgrade(req, socket, head, target);
-  }
-  // An ad hoc process has no start command to replay, on HTTP or WS.
-  if (target && !target.supervised) return void refuseUpgrade(socket);
-  // Not up (asleep, waking, service down): a WebSocket-only page — Vite
-  // HMR, a WS app — used to die here until a full HTTP reload woke the
-  // thread. Wake it the same way the HTTP path does, hold the upgrade
-  // briefly, then proxy; otherwise refuse with a 503 the client can retry.
-  // Setup is minutes, not seconds: refused outright.
-  const serviceName = label.slice(0, label.lastIndexOf("--"));
-  const record = (outcome: { ok: boolean; ms: number; detail: string }) =>
-    recordPoint(registry, { kind: "portal", phase: "ws-wake", cube: cubeName, ok: outcome.ok, ms: outcome.ms, detail: `${serviceName}: ${outcome.detail}` });
-  if (supervisor.cubeStatus(cubeName) === "creating") {
-    refuseUpgrade(socket);
-    return record({ ok: false, ms: 0, detail: "still setting up; refused with 503" });
-  }
-  void upgradeAfterWake(req, socket, head, async (signal) => {
-    // The thread being up is not the service being up: the ensure's own
-    // outcome for this service decides, never the retained portal row —
-    // which reads "ready" (thread state) as soon as the wake lands.
-    const statuses = await supervisor.ensureCubeServices(cubeName, signal);
-    const service = statuses.find((s) => s.name === serviceName);
-    if (!service) throw new Error(`${serviceName} is not declared in .cube/cube.toml`);
-    if (service.state !== "running") throw new Error(service.detail ?? `${serviceName} did not start`);
-    const fresh = supervisor.resolvePortal(label);
-    return fresh?.status === "ready" ? fresh : null;
-  }).then((outcome) => {
-    if (outcome.ok) supervisor.touchCube(cubeName);
-    record(outcome);
-  });
-});
-
-// A stray rejection must not take every thread down with the daemon.
-process.on("unhandledRejection", (reason) => log.error("unhandled rejection", { error: reason }));
-
-server.listen(PORT, () => log.info("listening", { url: `http://localhost:${PORT}`, portals: `*.${PORTAL_BASE}` }));

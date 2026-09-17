@@ -3,8 +3,7 @@ node_modules/
 *.log
 packages/web/dist/
 
-# Secrets and machine-local env never enter a build (build-app.sh stages
-# git's view of the working tree, which honours this file).
+# Secrets and machine-local environment.
 .env
 .env.*
 !.env.example
@@ -15,14 +14,11 @@ id_rsa
 id_ed25519
 github-auth.json
 
-# Runtime state and generated VM artifacts.
+# Runtime state.
 *.db
 *.db-*
 *.sqlite
 *.sqlite-*
-*.qcow2
-*.img
-*.iso
 coverage/
 /target/
 
