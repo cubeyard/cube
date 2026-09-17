@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
+import { spawn } from "node:child_process";
+import { on, once } from "node:events";
 import { createModels, fauxProvider } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
 
@@ -50,5 +52,42 @@ try {
   assert.equal(threads.length, 1); assert.equal(threads[0].state, "error");
   assert.match(threads[0].error, /IO_ERROR/);
   assert.equal((await fetch(`${base}/api/threads/broken-thread/history/extra`)).status, 404);
+  for (const host of [undefined, "0.0.0.0"]) {
+    const directory = path.join(state, host ?? "default");
+    fs.mkdirSync(directory);
+    const child = spawn(process.execPath, [path.resolve("packages/server/src/index.ts")], {
+      env: { PATH: process.env.PATH, HOME: directory, PI_CODING_AGENT_DIR: directory, CUBED_STATE: directory, CUBED_PORT: "0",
+        ...(host ? { CUBED_HOST: host, CUBED_ALLOWED_HOSTS: "cube.tailnet.example,100.64.0.2" } : {}) },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const closed = once(child, "close");
+    let output = "";
+    child.stderr.on("data", chunk => { output += String(chunk); });
+    try {
+      let listener: RegExpMatchArray | null = null;
+      for await (const [chunk] of on(child.stdout, "data", { signal: AbortSignal.timeout(15000) })) {
+        output += String(chunk);
+        listener = output.match(/cubed listening on ([\d.]+):(\d+);/);
+        if (listener) break;
+      }
+      assert(listener, output);
+      assert.equal(listener[1], host ?? "127.0.0.1", "CLI must bind the configured address and default to loopback");
+      const url = `http://127.0.0.1:${listener[2]}/api/providers`;
+      assert.equal((await fetch(url)).status, 200);
+      // Node fetch overrides Host; use raw HTTP to exercise the actual header.
+      const status = (authority: string, origin?: string) => new Promise<number | undefined>((resolve, reject) => {
+        http.get(url, { headers: { host: authority, ...(origin ? { origin } : {}) } }, response => {
+          response.resume(); resolve(response.statusCode);
+        }).on("error", reject);
+      });
+      for (const name of ["cube.tailnet.example", "100.64.0.2"]) {
+        const authority: string = `${name}:${listener[2]}`;
+        assert.equal(await status(authority, `http://${authority}`), host ? 200 : 403);
+        assert.equal(await status(authority, "http://untrusted.example"), 403);
+      }
+      assert.equal(await status("untrusted.example"), 403);
+    } finally { child.kill("SIGTERM"); await closed; }
+  }
+  console.log("ok: actual CLI loopback default and all-IPv4 opt-in; explicit private hosts allowed, unknown hosts/cross-origin rejected");
   console.log("ok: host/origin and JSON guards, method/path routing, repository validation, durable allocation despite failed activation");
 } finally { await app.close(); fs.rmSync(state, { recursive: true, force: true }); }

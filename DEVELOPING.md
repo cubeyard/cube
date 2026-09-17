@@ -34,8 +34,9 @@ pnpm build
 CUBED_STATE=/absolute/fresh-state pnpm cubed
 ```
 
-The host binds loopback on `CUBED_PORT` (default 7777). `CUBED_STATE` defaults to
-`~/.cube-host`. Model configuration uses `PI_CODING_AGENT_DIR` or `~/.pi/agent`;
+The host binds `CUBED_HOST` (default `127.0.0.1`) on `CUBED_PORT` (default 7777).
+`CUBED_STATE` defaults to `~/.cube-host`. Model configuration uses
+`PI_CODING_AGENT_DIR` or `~/.pi/agent`;
 model requests and credentials stay in the host. Never mount that directory in
 a runner account. Run runners with a dedicated unprivileged account or machine.
 The trust profile is not a security sandbox.
@@ -53,10 +54,15 @@ transcript remains readable. Use **refresh models** after a catalog fetch error.
 Offline auth acceptance uses a controlled provider and real Pi credential storage
 in disposable state; it never signs in to a live account.
 
-Host headers default to loopback names; for a private authenticated reverse
-proxy, list its exact hostnames in comma-separated `CUBED_ALLOWED_HOSTS`.
-The proxy must preserve Host and Origin consistently. This allowlist is DNS
-rebinding protection, not authentication or permission to expose cubed publicly.
+For direct Tailscale access, set `CUBED_HOST` to the host's Tailscale IP and list
+its exact MagicDNS name/IP in comma-separated `CUBED_ALLOWED_HOSTS`. Binding
+`0.0.0.0` listens on every IPv4 interface: use it only when firewall/network
+controls restrict access to the intended private clients. Tailnet access grants
+full Cube access; there is no application-level user authentication.
+Host headers default to loopback names. An authenticated private reverse proxy
+is also supported; allow its exact hostname and preserve Host/Origin consistently.
+The host allowlist prevents DNS rebinding; it does not restrict network ingress
+or authorize public exposure.
 
 Create a project through the UI/API. Prepare a runner workspace and immutable
 binding using `packages/node-transport/RUNNER.md`. Register its private connection
