@@ -38,7 +38,7 @@ export const defaultGhRunner: GhRunner = (args) => new Promise((resolve, reject)
 const defaultGhSpawner: GhSpawner = (args) => spawn("gh", args, {
   stdio: ["pipe", "pipe", "pipe"],
   // Non-TTY --web prints a device code and polls without waiting for Enter.
-  // Never launch a browser on the VM if gh's behavior changes.
+  // Never launch a browser on the server if gh's behavior changes.
   env: { ...process.env, BROWSER: "false" },
 }) as GhLoginProcess;
 
@@ -287,7 +287,7 @@ export class GithubAuth {
       try {
         await this.gh(["auth", "logout", "--hostname", "github.com", "--user", login]);
       } catch {
-        throw new Error("GitHub CLI could not log out this account — run `gh auth logout --hostname github.com` on the VM");
+        throw new Error("GitHub CLI could not log out this account — run `gh auth logout --hostname github.com` on the host");
       }
       ++this.generation;
       this.identity = null;

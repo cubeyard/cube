@@ -15,8 +15,6 @@ export default defineConfig([
     "repos/",
     ".claude/",
     ".agents/",
-    "images/",
-    "scripts/vm/base/",
   ]),
   js.configs.recommended,
   tseslint.configs.recommended,

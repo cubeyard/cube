@@ -1,7 +1,8 @@
-import { smokeRunnerRouting } from "./smoke-runner-routing.ts";
+import { smokeDurableAgent } from "./smoke-durable-agent.ts";
+import { smokeProduct } from "./smoke-product.ts";
 /** Real TypeScript -> @number0/iroh (in process) -> Rust runner acceptance.
- * Disposable keys, journals, workspaces and processes only. No cubed/Incus/model
- * instance is contacted. Loopback/direct stay offline; CUBE_TEST_IROH_RELAY=1
+ * Disposable keys, journals, workspaces and processes only. No existing host
+ * or model service is contacted. Loopback/direct stay offline; CUBE_TEST_IROH_RELAY=1
  * adds an external N0 discovery/relay acceptance pass. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -86,6 +87,24 @@ try {
     await assert.rejects(client.submitExec(17, bad.operationId), code("INVALID_REQUEST"));
     assert.equal((await client.operation(17, bad.operationId)).state, "Unknown");
 
+    // Pi identities are stable across caller loss, but scoped to the Session.
+    const piSpec = { ...spec, command: "printf once >> pi-count; sleep 0.4; printf 74" };
+    const lost = new AbortController();
+    const piWatcher = setInterval(() => {
+      if (fs.existsSync(path.join(workspace, "pi-count"))) lost.abort();
+    }, 10);
+    try { await assert.rejects(client.resumeExec("session-a", "invocation-a", piSpec, lost.signal)); }
+    finally { clearInterval(piWatcher); }
+    const piResult = await new IrohExecutionNodeClient({ configPath }).resumeExec("session-a", "invocation-a", piSpec);
+    assert.equal(Buffer.from(piResult.output).toString(), "74");
+    assert.equal(fs.readFileSync(path.join(workspace, "pi-count"), "utf8"), "once");
+    const again = await client.resumeExec("session-a", "invocation-a", piSpec);
+    assert.equal(again.operationId, piResult.operationId);
+    await assert.rejects(client.resumeExec("session-a", "invocation-a", { ...piSpec, command: "touch must-not-run" }), code("CONFLICT"));
+    const separate = await client.resumeExec("session-b", "invocation-a", { ...spec, command: "printf separate" });
+    assert.notEqual(separate.operationId, piResult.operationId);
+    assert.ok(!fs.existsSync(path.join(workspace, "must-not-run")));
+
     // Aborting a caller after the actual runner command starts cannot cancel or
     // replay its side effects. The saved operation remains inspectable.
     const controller = new AbortController();
@@ -151,10 +170,8 @@ try {
     assert.equal((await client.operation(17, result.operationId)).state, "Succeeded");
     assert.equal((await client.status(17)).status, "Running");
     assert.equal(fs.readFileSync(path.join(workspace, "count"), "utf8"), "once");
-    await smokeRunnerRouting(directory, configPath, workspace, {
-      disconnect: () => stop(daemon.child),
-      reconnect: async () => { daemon = await start(key, state, network, daemon.address); },
-    }, network);
+    if (network === "loopback") await smokeDurableAgent(directory, configPath, workspace);
+    if (network === "loopback") await smokeProduct(directory, configPath, workspace);
     await stop(daemon.child);
     console.log(`ok: ${network} mode, real TS/native/iroh/exec, exact binding, durable intent, rejection, config pinning, offline observations and restart`);
   }

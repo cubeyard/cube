@@ -1,6 +1,6 @@
 {
   "name": "cube",
-  "description": "Self-hosted coding-agent sandboxes on a VM you own",
+  "description": "Self-hosted durable coding-agent threads and trusted runners",
   "private": true,
   "license": "Apache-2.0",
   "repository": {
@@ -18,8 +18,7 @@
     "check:references": "node scripts/check-references.ts",
     "test": "pnpm check:references && bash scripts/test-offline.sh",
     "typecheck": "tsc -p tsconfig.json && pnpm --filter @cube/web check",
-    "lint": "eslint .",
-    "vm": "bash scripts/vm/dev.sh"
+    "lint": "eslint ."
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

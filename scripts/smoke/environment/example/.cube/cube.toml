@@ -1,3 +1,0 @@
-# Environment kept outside the primary repository (see setup).
-[network]
-allow = ["services.gradle.org", "downloads.gradle.org"]

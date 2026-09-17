@@ -694,7 +694,7 @@ header .spacer { margin-left: auto; }
 .thread-workspace {
   flex: 1; min-height: 0;
   display: grid;
-  grid-template-columns: minmax(14rem, var(--thread-pane-width, 50%)) 0.65rem minmax(14rem, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   background: var(--s2);
 }
 .thread-workspace.resizing { cursor: col-resize; user-select: none; }
@@ -1140,7 +1140,7 @@ select.compose-input {
   .sidebar-close { display: inline-flex; }
   .thread-workspace {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 3fr) minmax(11rem, 2fr);
+    grid-template-rows: minmax(0, 1fr);
   }
   /* the changes pane is a sheet under the terminal: folded to its head
      until asked for, so the conversation keeps the screen */

@@ -1,12 +1,8 @@
 {
   "extends": "./tsconfig.base.json",
   "include": [
-    "packages/sandbox/src",
-    "packages/sandbox/test",
     "packages/git/src",
     "packages/git/test",
-    "packages/pi-extension/src",
-    "packages/pi-extension/test",
     "packages/server/src",
     "packages/server/test",
     "scripts"

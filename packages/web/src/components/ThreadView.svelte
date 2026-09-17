@@ -4,26 +4,16 @@
   import {
     deleteThread,
     errorText,
-    fetchFiles,
-    fetchRepositories,
-    fetchServices,
     fetchThreadModels,
-    fileUrl,
     setThreadModel,
   } from "../lib/api.ts";
   import { createArmed } from "../lib/armed.svelte.ts";
-  import { fmtBytes } from "../lib/bytes.ts";
   import type { Command } from "../lib/command.ts";
-  import { lampClass, stateLabel, waitingText } from "../lib/thread-state.ts";
-  import { relTime } from "../lib/time.ts";
+  import { lampClass, stateLabel } from "../lib/thread-state.ts";
   import type {
-    ServiceLink,
     ThreadModels,
-    ThreadRepository,
     ThreadSummary,
-    WorkspaceListing,
   } from "../lib/types.ts";
-  import ChangesPane from "./ChangesPane.svelte";
   import Conversation from "./Conversation.svelte";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
@@ -36,62 +26,6 @@
     command?: Command | null;
     onConsume?: (id: number) => void;
   } = $props();
-
-  // ---- workspace split: draggable on desktop, remembered per browser ----
-  const SPLIT_STORAGE_KEY = "cube.threadSplitPercent";
-  let workspaceElement: HTMLElement;
-  let splitPercent = $state(50);
-  let resizing = $state(false);
-
-  function clampSplit(percent: number): number {
-    const width = workspaceElement?.getBoundingClientRect().width ?? 0;
-    const minimum = width > 0 ? Math.min(45, Math.max(20, (224 / width) * 100)) : 20;
-    return Math.min(100 - minimum, Math.max(minimum, percent));
-  }
-
-  function setSplit(percent: number, persist = false): void {
-    splitPercent = clampSplit(percent);
-    if (persist) localStorage.setItem(SPLIT_STORAGE_KEY, String(splitPercent));
-  }
-
-  function resizeFromPointer(event: PointerEvent): void {
-    const bounds = workspaceElement.getBoundingClientRect();
-    setSplit(((event.clientX - bounds.left) / bounds.width) * 100);
-  }
-
-  function startResize(event: PointerEvent): void {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    resizing = true;
-    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-    resizeFromPointer(event);
-  }
-
-  function moveResize(event: PointerEvent): void {
-    if (resizing) resizeFromPointer(event);
-  }
-
-  function finishResize(event: PointerEvent): void {
-    if (!resizing) return;
-    resizeFromPointer(event);
-    resizing = false;
-    (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
-    setSplit(splitPercent, true);
-  }
-
-  function resizeWithKeyboard(event: KeyboardEvent): void {
-    const step = event.shiftKey ? 5 : 2;
-    const next =
-      event.key === "ArrowLeft" ? splitPercent - step
-      : event.key === "ArrowRight" ? splitPercent + step
-      : event.key === "Home" ? 20
-      : event.key === "End" ? 80
-      : event.key === "Enter" ? 50
-      : null;
-    if (next === null) return;
-    event.preventDefault();
-    setSplit(next, true);
-  }
 
   // Navigation data lives above App.svelte's keyed thread view, so switching
   // remounts the conversation without blanking the persistent chrome.
@@ -170,50 +104,14 @@
     sidebarOpener = null;
   }
 
-  let repositories = $state<ThreadRepository[]>([]);
-  let repositoriesReady = $state(false);
-  let repositoriesError = $state<string | null>(null);
-  const primaryRepository = $derived(
-    repositories.find((repository) => repository.role === "primary") ?? null,
-  );
-  async function refreshRepositories(): Promise<void> {
-    try {
-      repositories = await fetchRepositories(threadId);
-      repositoriesReady = true;
-      repositoriesError = null;
-    } catch (error) {
-      // Mid-delete or setup — retain the last known repository bank.
-      if (!repositoriesReady) repositoriesError = errorText(error);
-    }
-  }
-
-  let services = $state<ServiceLink[]>([]);
-  async function refreshServices(): Promise<void> {
-    try {
-      services = await fetchServices(threadId);
-    } catch {
-      // Keep the last good links through a transient error or a cube.toml
-      // caught mid-edit — the strip must not flicker.
-    }
-  }
-
   // The view is keyed on threadId: a delete or a new thread navigates
   // away mid-request, and the completion must then touch nothing here.
   let disposed = false;
 
   onMount(() => {
-    const savedSplit = Number(localStorage.getItem(SPLIT_STORAGE_KEY));
-    if (Number.isFinite(savedSplit) && savedSplit > 0) setSplit(savedSplit);
-    refreshRepositories();
-    refreshServices();
     void loadModels();
-    const slow = setInterval(() => {
-      refreshRepositories();
-      refreshServices();
-    }, 10_000);
     return () => {
       disposed = true;
-      clearInterval(slow);
       if (noteTimer) clearTimeout(noteTimer);
     };
   });
@@ -230,26 +128,6 @@
     if (next && !next.bad) noteTimer = setTimeout(() => (note = null), 8000);
   }
 
-  // ---- workspace manifest shelf; git changes have their own fixed pane ----
-  let filesOpen = $state(false);
-  let filesKey = $state<HTMLButtonElement>();
-  let files = $state<WorkspaceListing | null>(null);
-  let filesError = $state<string | null>(null);
-
-  function loadFiles(): void {
-    files = null;
-    filesError = null;
-    fetchFiles(threadId).then(
-      (fresh) => (files = fresh),
-      (e) => (filesError = errorText(e)),
-    );
-  }
-
-  function toggleFiles(): void {
-    filesOpen = !filesOpen;
-    if (filesOpen) loadFiles();
-  }
-
   // ---- delete: two presses on the same key, never a dialog ----
   const armed = createArmed();
   let deleting = $state(false);
@@ -260,7 +138,7 @@
       await deleteThread(threadId);
       location.hash = "#/threads";
     } catch (e) {
-      setNote({ text: `delete: ${errorText(e)}`, bad: true });
+      setNote({ text: `archive: ${errorText(e)}`, bad: true });
     } finally {
       if (!disposed) deleting = false;
     }
@@ -285,10 +163,6 @@
     if (threadSidebarOpen) {
       event.preventDefault();
       closeSidebar();
-    } else if (filesOpen) {
-      event.preventDefault();
-      filesOpen = false;
-      filesKey?.focus();
     }
   }
 </script>
@@ -336,42 +210,22 @@
         </select>
         <Icon name="chevron" size={12} />
       </label>
-      {#if services.length > 0}
-        <span class="strip-services">
-          {#each services as service (service.name)}
-            <a class="strip-link" href={service.url} target="_blank" rel="noopener noreferrer">{service.name}</a>
-          {/each}
-        </span>
-      {/if}
       {#if armed.is("thread")}
-        <!-- honest about what a delete does right now: mid-setup it also
-             cancels the setup that is running -->
-        <span class="bank-note" role="status">{summary?.state === "setting-up" ? "setup is cancelled; workspace and history are destroyed; the project is kept" : "workspace and history are destroyed; the project is kept"}</span>
+        <span class="bank-note" role="status">removed from active threads; the runner workspace is kept</span>
       {/if}
       <span class="key-bank">
-        <button
-          class="key icon"
-          bind:this={filesKey}
-          title="workspace files"
-          aria-label="workspace files"
-          class:held={filesOpen}
-          aria-expanded={filesOpen}
-          onclick={toggleFiles}
-        >
-          <Icon name="file" size={13} />
-        </button>
         <button
           class="key danger"
           class:icon={!armed.is("thread") && !deleting}
           class:armed={armed.is("thread")}
-          title={armed.is("thread") ? "press again to delete this thread" : "delete thread"}
-          aria-label={armed.is("thread") ? "confirm: delete this thread" : "delete thread"}
-          disabled={deleting}
+          title={armed.is("thread") ? "press again to archive this thread" : "archive thread"}
+          aria-label={armed.is("thread") ? "confirm: archive this thread" : "archive thread"}
+          disabled={deleting || conversationBusy}
           onclick={remove}
           onkeydown={armed.onKeydown}
           onblur={() => armed.disarm()}
         >
-          {#if deleting}deleting…{:else if armed.is("thread")}delete?{:else}<Icon name="trash" size={13} />{/if}
+          {#if deleting}archiving…{:else if armed.is("thread")}archive?{:else}<Icon name="trash" size={13} />{/if}
         </button>
       </span>
     {/if}
@@ -437,19 +291,9 @@
 {#if modelError || (modelState && !selectedModel)}
   <div class="strip-note bad" role="alert">
     <span class="strip-note-text">{modelError ?? (modelState?.models.length ? "selected model is unavailable — choose another model" : "no models available — sign in to a provider")}</span>
+    <a class="key" href="#/models">providers</a>
     <button class="key" onclick={loadModels}>retry models</button>
   </div>
-{/if}
-{#if waitingText(summary)}
-  <div class="strip-note wait" role="status">
-    <span class="lamp on-amber blink" aria-hidden="true"></span>
-    <span class="strip-note-text">{waitingText(summary)}</span>
-  </div>
-{/if}
-{#if summary?.nodeContact === "unavailable"}
-  <div class="strip-note"><span class="strip-note-text">environment unavailable — you can keep talking here. workspace actions need contact again.
-    {#if summary.environmentObservation}last confirmed: {summary.environmentObservation.status} at {new Date(summary.environmentObservation.observedAt).toLocaleString()}.{/if}
-  </span></div>
 {/if}
 {#if summary?.error}
   <div class="strip-note bad"><span class="strip-note-text">{summary.error}</span></div>
@@ -466,77 +310,16 @@
   </div>
 {/if}
 
-{#if filesOpen}
-  <aside class="files-shelf" aria-label="workspace files">
-    {#if filesError}
-      <div class="files-note bad">
-        <span>files unavailable — {filesError}</span>
-        <button class="key" onclick={loadFiles}>retry</button>
-      </div>
-    {:else if !files}
-      <p class="files-note">reading files…</p>
-    {:else if files.files.length === 0}
-      <p class="files-note">No files yet — this thread's primary workspace is empty.</p>
-    {:else}
-      <p class="files-head">
-        primary workspace · {files.files.length}{files.truncated ? "+" : ""}
-        {files.files.length === 1 && !files.truncated ? "file" : "files"}
-        · {fmtBytes(files.totalBytes)} on disk
-      </p>
-      <ul class="files-list">
-        {#each files.files as file (file.path)}
-          <li>
-            <a href={fileUrl(threadId, file.path)} target="_blank" rel="noopener noreferrer">
-              <span class="file-path">{file.path}</span>
-              <span class="file-meta">{fmtBytes(file.size)} · {relTime(file.mtime)}</span>
-            </a>
-          </li>
-        {/each}
-      </ul>
-    {/if}
-  </aside>
-{/if}
-
-<main
-  class="thread-workspace"
-  class:resizing
-  bind:this={workspaceElement}
-  style={`--thread-pane-width: ${splitPercent}%`}
->
+<main class="thread-workspace">
   <section class="workspace-pane thread-pane" aria-label="thread">
     {@render threadControls()}
     {#if gone}
-      <div class="conversation-gone"><p>this thread was deleted.</p><a class="key" href="#/threads">back to threads</a></div>
+      <div class="conversation-gone"><p>this thread is no longer active.</p><a class="key" href="#/threads">back to threads</a></div>
     {:else}
-      <Conversation {threadId} model={selectedModel} {changingModel} bind:busy={conversationBusy} waitingText={waitingText(summary)} />
+      <Conversation {threadId} model={selectedModel} {changingModel} bind:busy={conversationBusy} />
     {/if}
   </section>
 
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions: an adjustable ARIA separator is keyboard-interactive -->
-  <div
-    class="workspace-splitter"
-    role="separator"
-    aria-label="resize thread and changes panes"
-    aria-orientation="vertical"
-    aria-valuemin="20"
-    aria-valuemax="80"
-    aria-valuenow={Math.round(splitPercent)}
-    tabindex="0"
-    title="drag to resize · arrow keys adjust · enter resets"
-    onpointerdown={startResize}
-    onpointermove={moveResize}
-    onpointerup={finishResize}
-    onpointercancel={() => (resizing = false)}
-    onkeydown={resizeWithKeyboard}
-  ><span aria-hidden="true"></span></div>
-
-  <ChangesPane
-    {threadId}
-    repository={primaryRepository}
-    {repositoriesReady}
-    {repositoriesError}
-    onRetryRepositories={refreshRepositories}
-  />
 </main>
   </div>
 </div>

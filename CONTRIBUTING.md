@@ -29,9 +29,9 @@ pnpm test
 ```
 
 `pnpm lint` is ESLint with correctness rules only (no formatting). `pnpm test`
-runs the offline suites and does not require Incus, a VM, or model
-credentials. Changes to VM provisioning, isolation, or networking should also
-run the relevant VM checks described in [DEVELOPING.md](DEVELOPING.md).
+runs the offline Node suites without model credentials. Runner and execution
+changes also require `bash scripts/test-node-transport.sh`, which exercises real
+Rust/Iroh calls and process-crash recovery with disposable data.
 
 ## Pull requests
 
@@ -47,5 +47,6 @@ Apache-2.0 license.
 
 ## Releases
 
-Maintainers release from `main` using `.github/workflows/release.yml`.
+No automatic product release workflow is configured during this architecture
+replacement. Runner packaging remains available for explicit operator use.
 Contributors should not create release tags as part of a pull request.

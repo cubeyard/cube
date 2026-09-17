@@ -1,5 +1,4 @@
-/** Transport-neutral control-plane contracts. No Incus/runtime imports. */
-import type { Duplex } from "node:stream";
+/** Runner transport contracts. */
 
 /** Logical installation identity, independent of any future iroh key. */
 export type NodeId = string;
@@ -26,7 +25,4 @@ export interface ExecutionNodeClient {
   status(environmentId: number): Promise<EnvironmentObservation>;
   /** Contact only, for an environment not yet provisioned. */
   check(environmentId: number): Promise<void>;
-  wake(environmentId: number): Promise<void>;
-  sleep(environmentId: number): Promise<void>;
-  openPortal(environmentId: number, port: number): Promise<Duplex>;
 }

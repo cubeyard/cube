@@ -5,6 +5,7 @@
   import ThreadList from "./components/ThreadList.svelte";
   import ThreadView from "./components/ThreadView.svelte";
   import Onboarding from "./components/Onboarding.svelte";
+  import ModelProviders from "./components/ModelProviders.svelte";
   import Wordmark from "./components/Wordmark.svelte";
   import NewThreadDialog from "./components/NewThreadDialog.svelte";
   import { errorText, fetchState, fetchThreads, isUnreachable } from "./lib/api.ts";
@@ -58,8 +59,7 @@
     if (command?.id === id) command = null;
   }
 
-  /** One poll: cubed's state until it answers (a tab opened while the VM
-   * boots recovers by itself), then the thread list. */
+  /** One poll: cubed's state until it answers, then the thread list. */
   async function refresh(): Promise<void> {
     if (!daemon) {
       try {
@@ -155,6 +155,7 @@
     document.title =
       threadId ? `${current?.title ?? "untitled"} · cube`
       : projectsRoute ? "projects · cube"
+      : hash === "#/models" ? "models · cube"
       : "threads · cube";
   });
 </script>
@@ -172,6 +173,8 @@
   </main>
 {:else if !daemon}
   <p class="loading">loading…</p>
+{:else if hash === "#/models"}
+  <ModelProviders />
 {:else if !daemon.onboardingComplete}
   <Onboarding onComplete={() => {
     daemon = { ...daemon!, onboardingComplete: true };

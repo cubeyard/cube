@@ -20,7 +20,7 @@
   const key = (model: ModelSelection) => JSON.stringify([model.provider, model.id]);
   const model = $derived(catalog?.models.find((item) => key(item) === modelKey));
   const providers = $derived([...new Set(catalog?.models.map((item) => item.provider))]);
-  const ready = $derived(projects.some((project) => project.id === projectId && project.status === "ready"));
+  const ready = $derived(projects.some((project) => project.id === projectId && project.status === "ready" && project.availableRunnerCount > 0));
   const canSend = $derived(!loading && !loadError && !sending && (pending !== null || (ready && model && text.trim())));
 
   async function load(): Promise<void> {
@@ -96,7 +96,8 @@
       {:else if loadError}<p class="error" role="alert">{loadError} <button type="button" class="key" onclick={load}>retry loading</button></p>
       {:else if !projects.some((project) => project.status === "ready")}
         <p>a ready project is required. <a href="#/projects" onclick={() => dialog.close()}>configure a project</a></p>
-      {:else if !catalog?.models.length}<p>no models available — sign in to a provider on the host, then <button type="button" class="key" onclick={load}>retry loading</button></p>
+      {:else if !ready}<p>register an unused trusted runner for this project, then <button type="button" class="key" onclick={load}>refresh runners</button></p>
+      {:else if !catalog?.models.length}<p>no models available — <a href="#/models" onclick={() => dialog?.close()}>connect a provider</a>, then <button type="button" class="key" onclick={load}>retry loading</button></p>
       {:else if !model}<p>choose an available model below.</p>{/if}
       {#if error}<p class="error" role="alert">{error}{pending ? " — retry to confirm this thread; your message is kept." : ""}</p>{/if}
     </div>
@@ -105,7 +106,7 @@
         <select aria-label="project for new thread" bind:value={projectId} disabled={loading || pending !== null} required>
           <option value="" disabled>choose project</option>
           {#each projects as project (project.id)}
-            <option value={project.id} disabled={project.status !== "ready"}>{project.name}{project.status === "ready" ? "" : ` — ${project.status}`}</option>
+            <option value={project.id} disabled={project.status !== "ready"}>{project.name}{project.status === "ready" ? ` — ${project.availableRunnerCount} available` : ` — ${project.status}`}</option>
           {/each}
         </select>
       </label>

@@ -102,7 +102,7 @@
       await deleteThread(thread.id);
       actionError = null;
     } catch (e) {
-      actionError = `delete: ${errorText(e)}`;
+      actionError = `archive: ${errorText(e)}`;
     } finally {
       deleting = null;
     }
@@ -239,20 +239,20 @@
               class="key danger"
               class:icon={!armed.is(thread.id) && deleting !== thread.id}
               class:armed={armed.is(thread.id)}
-              title={armed.is(thread.id) ? "press again to delete this thread" : "delete thread"}
-              aria-label={armed.is(thread.id) ? "confirm: delete this thread" : "delete thread"}
+              title={armed.is(thread.id) ? "press again to archive this thread" : "archive thread"}
+              aria-label={armed.is(thread.id) ? "confirm: archive this thread" : "archive thread"}
               disabled={deleting === thread.id}
               onclick={() => remove(thread)}
               onkeydown={armed.onKeydown}
               onblur={() => armed.disarm()}
             >
-              {#if deleting === thread.id}deleting…{:else if armed.is(thread.id)}delete?{:else}<Icon name="trash" size={13} />{/if}
+              {#if deleting === thread.id}archiving…{:else if armed.is(thread.id)}archive?{:else}<Icon name="trash" size={13} />{/if}
             </button>
           </div>
           {#if armed.is(thread.id)}
             <!-- a sibling of the face and the bank: beside them on a wide
                  panel, beneath the row on a phone, never over the title -->
-            <span class="module-note bank-note" role="status">{thread.state === "setting-up" ? "setup is cancelled; workspace and history are destroyed; the project is kept" : "workspace and history are destroyed; the project is kept"}</span>
+            <span class="module-note bank-note" role="status">removed from active threads; the runner workspace is kept</span>
           {/if}
         </div>
       {/each}

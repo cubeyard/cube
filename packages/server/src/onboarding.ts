@@ -4,7 +4,7 @@ import * as Schema from "effect/Schema";
 
 const isCompletedState = Schema.is(Schema.Struct({ completed: Schema.Literal(true) }));
 
-/** One first-run decision per VM, independent of GitHub's login state. */
+/** One first-run decision per host state directory, independent of GitHub login. */
 export function isOnboardingComplete(file: string): boolean {
   try {
     return isCompletedState(JSON.parse(fs.readFileSync(file, "utf8")));

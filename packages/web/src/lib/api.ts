@@ -5,21 +5,23 @@ import type {
   ModelSelection,
   Project,
   ProjectInput,
-  RepoDiff,
-  ServiceLink,
-  ThreadRepository,
   ThreadModels,
   ThreadSummary,
-  ThreadTask,
-  WorkspaceListing,
 } from "./types.ts";
 import { uid } from "./uid.ts";
+import type { ModelAuth } from "../../../server/src/model-auth.ts";
+
+export const fetchProviders = () => request<{ providers: Awaited<ReturnType<ModelAuth["list"]>> }>("/api/providers").then(result => result.providers);
+export const providerAction = (id: string, operation: "login" | "answer" | "cancel" | "disconnect" | "refresh", body?: unknown) => {
+  const suffix = operation === "disconnect" ? "" : `/${operation === "cancel" ? "login" : operation}`;
+  return request<{ ok?: true }>(`/api/providers/${encodeURIComponent(id)}${suffix}`, operation === "disconnect" || operation === "cancel" ? "DELETE" : "POST", body);
+};
 
 /** Banner text for a failure: the message itself, never "Error: …". */
 export const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** A failed exchange with cubed. `status` is the HTTP status, or 0 when
- * the request never reached the host (connection refused, VM booting,
+ * the request never reached the host (connection refused, host starting,
  * network gone) — callers use it to tell "no such thing" from "can't
  * reach the host". The message is always a user sentence. */
 export class ApiError extends Error {
@@ -50,6 +52,7 @@ function fallbackMessage(status: number): string {
  * not as a status code. */
 async function request<T>(path: string, method = "GET", body?: unknown): Promise<T> {
   let res: Response;
+  if (body === undefined && ["POST", "PUT", "PATCH"].includes(method)) body = {};
   try {
     res = await fetch(path, {
       method,
@@ -90,8 +93,7 @@ export const connectGithub = () =>
 export const disconnectGithub = () =>
   request<{ github: GithubAuthStatus }>("/api/github/auth", "DELETE").then((r) => r.github);
 
-// The UI speaks the thread-first API only — the user-facing unit is the
-// thread; the backing cube is invisible (cube routes are debug plumbing).
+// The UI speaks the thread-first product API.
 
 export const fetchThreads = (includeArchived = false) =>
   request<{ threads: ThreadSummary[] }>(`/api/threads${includeArchived ? "?includeArchived=1" : ""}`).then(
@@ -116,7 +118,7 @@ export const checkProject = (id: string) =>
 export const deleteProject = (id: string) =>
   request<{ ok: true }>(`/api/projects/${encodeURIComponent(id)}`, "DELETE");
 
-/** New thread, always from a ready project's prepared repository snapshot.
+/** New thread, allocated from a ready project's enrolled trusted runners.
  * `requestId` names the user action: a resend after a dropped connection
  * or a double submit with the same id gets the thread the first attempt
  * created, not a second one. Generate it once per action, not per call. */
@@ -141,37 +143,7 @@ export const fetchThreadModels = (id: string) =>
 export const setThreadModel = (id: string, model: ModelSelection) =>
   request<ThreadModels>(`${threadBase(id)}/model`, "PATCH", model);
 
-export const sendPrompt = (id: string, text: string, model: ModelSelection) =>
-  request<{ runId: string }>(`${threadBase(id)}/prompt`, "POST", { text, model });
+export const sendPrompt = (id: string, text: string, model: ModelSelection, requestId: string) =>
+  request<{ runId: string }>(`${threadBase(id)}/prompt`, "POST", { text, model, requestId });
 
-export const fetchThreadTasks = (id: string) =>
-  request<{ tasks: ThreadTask[] }>(`${threadBase(id)}/tasks`).then((response) => response.tasks);
-
-/** Workspace listing — host-side, so it works while the thread sleeps. */
-export const fetchFiles = (threadId: string) =>
-  request<WorkspaceListing>(`${threadBase(threadId)}/files`);
-
-/** URL serving one workspace file. */
-export const fileUrl = (threadId: string, rel: string) =>
-  `${threadBase(threadId)}/files/${rel.split("/").map(encodeURIComponent).join("/")}`;
-
-/** Every project repository with independent live git state. */
-export const fetchRepositories = (threadId: string) =>
-  request<{ repositories: ThreadRepository[] }>(`${threadBase(threadId)}/repositories`).then(
-    (r) => r.repositories,
-  );
-
-const repositoryBase = (threadId: string, repositoryId: number) =>
-  `${threadBase(threadId)}/repositories/${repositoryId}`;
-
-/** Selected repository changes, separated by committed/staged/unstaged state. */
-export const fetchDiff = (threadId: string, repositoryId: number) =>
-  request<RepoDiff>(`${repositoryBase(threadId, repositoryId)}/diff`);
-
-/** URL serving one file from a repository checkout. */
-export const repositoryFileUrl = (threadId: string, repositoryId: number, rel: string) =>
-  `${repositoryBase(threadId, repositoryId)}/files/${rel.split("/").map(encodeURIComponent).join("/")}`;
-
-/** Declared services and their stable portal URLs. */
-export const fetchServices = (threadId: string) =>
-  request<{ services: ServiceLink[] }>(`${threadBase(threadId)}/services`).then((r) => r.services);
+export const stopThread = (id: string) => request<{ ok: true }>(`${threadBase(id)}/stop`, "POST");

@@ -37,9 +37,6 @@
   let repositories = $state<RepositoryDraft[]>([
     { key: uid(), url: "", checkoutName: "workspace" },
   ]);
-  // "<checkout>/<folder>" of a reference that carries .cube; "" = the
-  // primary's own .cube. Only meaningful once there is a reference.
-  let environment = $state("");
   let dirty = $state(untrack(() => projectId === "new"));
   let loaded = $state(untrack(() => projectId === "new"));
   let error = $state<string | null>(null);
@@ -58,7 +55,6 @@
       url: repository.url,
       checkoutName: repository.checkoutName,
     }));
-    environment = fresh.environment ?? "";
     dirty = false;
   }
 
@@ -117,7 +113,6 @@
         base: null,
         ...(index === 0 ? {} : { checkoutName: repository.checkoutName }),
       })),
-      environment: environment.trim() || null,
     };
   }
 
@@ -189,18 +184,19 @@
   // Every disabled key prints its reason; a title alone is invisible on a
   // phone and to anyone who does not hover.
   const checkDisabled = $derived(checking || dirty || project?.status === "checking");
-  const startDisabled = $derived(dirty || project?.status !== "ready");
+  const startDisabled = $derived(dirty || project?.status !== "ready" || !project.availableRunnerCount);
   const workReason = $derived(
     !project || (!checkDisabled && !startDisabled) ? null
     : dirty ? "save your changes first"
     : checking || project.status === "checking" ? "checking the repositories…"
     : project.status === "error" ? "new thread waits for a passing check"
+    : !project.availableRunnerCount ? "register an unused trusted runner first"
     : null,
   );
-  const deleteDisabled = $derived(!project || project.threadCount > 0 || project.status === "checking" || deleting);
+  const deleteDisabled = $derived(!project || project.runnerCount > 0 || project.status === "checking" || deleting);
   const deleteReason = $derived(
     !project || !deleteDisabled || deleting ? null
-    : project.threadCount > 0 ? `delete its ${project.threadCount === 1 ? "thread" : `${project.threadCount} threads`} first`
+    : project.runnerCount > 0 ? "projects with registered runners are retained"
     : "wait for the check to finish",
   );
 
@@ -364,24 +360,9 @@
         {/each}
       </div>
 
-      {#if repositories.length > 1 || environment}
-        <label class="config-field project-environment-field">
-          <span class="silk">environment</span>
-          <input
-            class="compose-input"
-            aria-label="environment folder"
-            placeholder={`${repositories[1]?.checkoutName || "reference"}/folder`}
-            bind:value={environment}
-            oninput={changed}
-          />
-          <span class="field-hint">
-            a folder in a reference that carries .cube (setup, resume, cube.toml) — for a primary that does not ship its own · empty: /workspace/.cube
-          </span>
-        </label>
-      {/if}
     </section>
 
-    <p class="config-note">Each new thread fetches the latest commit on every repository’s default branch.</p>
+    <p class="config-note">Prepare the workspace on a trusted runner and register it for this project before starting a thread. Commands run with that account’s permissions, without sandboxing.</p>
 
     <div class="project-actions">
       <button class="key primary" onclick={save} disabled={saving || !dirty}>
@@ -403,7 +384,7 @@
         <span class="action-spacer"></span>
         <span class="action-group">
           {#if armed.is("project")}
-            <span class="key-reason bad" role="status">the project and its repository checks are removed; threads must be deleted first</span>
+            <span class="key-reason bad" role="status">the project and its repository checks are removed</span>
           {:else if deleteReason}
             <span class="key-reason">{deleteReason}</span>
           {/if}
@@ -426,8 +407,6 @@
 
 <style>
   .project-view { overflow: visible; }
-  .project-environment-field { margin-top: 0.9rem; }
-  .field-hint { display: block; margin-top: 0.35rem; font-size: 12px; color: var(--ink-3); }
   .github-login-link { font-family: var(--font-ui); }
   .draft { margin: -0.6rem 0 1.3rem; font-size: 12px; color: var(--ink-3); overflow-wrap: anywhere; }
   .draft code { font-family: var(--font-mono); color: var(--ink-2); }
