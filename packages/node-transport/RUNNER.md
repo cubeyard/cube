@@ -103,10 +103,12 @@ profiles `["runner", "host"]`; `host` is the protocol-v1 compatibility alias.
 Capabilities are `node.status`, `environment.inspect`, `exec.start`, and
 `operation.get`. `nodeId` and field names remain stable on wire.
 
-The canonical thread endpoint is `POST /api/threads/:id/runner-exec`, accepting
-only `status`, `prepare {spec}`, `submit {operationId}`, and
-`operation {operationId}`. It derives destination and binding from the thread.
-The old `/host-exec` path is a temporary alias.
+Product threads reach the enrolled runner through Pi's `bash` tool and
+`IrohExecutionNodeClient.resumeExec`. Pi supplies the stable invocation identity;
+the adapter derives and retains the runner operation identity. There is no
+standalone HTTP runner-exec endpoint or legacy host-exec alias. Operator canaries
+use `IrohExecutionNodeClient` directly with the private pinned configuration;
+ordinary users submit prompts through the thread UI/API.
 
 ## Tests
 
