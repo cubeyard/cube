@@ -40,8 +40,9 @@ Upgrade consuming pins, lockfile and reference subtree together, update
   <3679075+dizk@users.noreply.github.com>.
 - Never operate on other people's threads or shared data for tests. Use
   disposable state. A fresh schema does not authorize wiping a live installation.
-- Keep cubed bound to loopback behind authenticated access when needed. It has
-  no application-level user authentication.
+- Keep cubed private: loopback, an authenticated proxy, or an explicit
+  access-controlled private-network binding. It has no application-level user
+  authentication; HTTP host validation does not replace network access controls.
 - Never call trusted same-UID runner execution sandboxed. Keep runner accounts
   separate from host/provider/Git/cloud credentials.
 - English in repository files; calm lowercase user copy and thread vocabulary.

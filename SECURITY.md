@@ -19,8 +19,12 @@ sensitive details and ask the maintainer for a private contact channel.
 
 ## Important deployment boundary
 
-cubed does not provide application-level authentication. It binds loopback;
-use an authenticated private proxy for remote access. Never expose it directly
+cubed does not provide application-level authentication. It defaults to loopback;
+use an authenticated private proxy or explicitly configured Tailscale/private
+network binding for remote access. Every permitted network client has full Cube
+access. `CUBED_HOST=0.0.0.0` listens on all IPv4 interfaces, not only Tailscale;
+firewall/network controls must enforce the private boundary. The HTTP host
+allowlist is not a substitute for those controls. Never expose cubed directly
 to the public internet. Operators are responsible for network/access controls.
 
 The trusted runner is not a sandbox. Its dedicated unprivileged

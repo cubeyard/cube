@@ -21,9 +21,10 @@ pnpm build
 CUBED_STATE="$HOME/.cube-host" pnpm cubed
 ```
 
-cubed listens on loopback port 7777. Use your local browser or an authenticated
-access proxy; cubed itself has no user authentication. GitHub login is available
-in the UI. Open **models** to connect model providers using Pi's supported
+cubed defaults to loopback port 7777. Use your local browser, an authenticated
+access proxy, or [configured private Tailscale access](DEVELOPING.md#product-development)
+with `CUBED_HOST` and `CUBED_ALLOWED_HOSTS`; cubed itself has no user authentication.
+GitHub login is available in the UI. Open **models** to connect model providers using Pi's supported
 browser/device login or API-key prompts, check connection status, or disconnect.
 Credentials and configuration use Pi's `~/.pi/agent` directory (or
 `PI_CODING_AGENT_DIR`); the CLI is not a prerequisite. Catalog changes take effect

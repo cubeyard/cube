@@ -55,8 +55,9 @@ Current Linux/macOS runners are trusted same-account execution, **not sandboxes*
 Platform-specific sandbox technology remains undecided. The supported operation
 is bounded shell execution; remote file transfer, portals and authenticated Git
 mutation are not implemented. Keep host Git/model credentials out of runner
-accounts. Browser access is loopback/private proxy; Iroh authenticates runner
-communication, not browser users.
+accounts. Browser access is loopback, an access-controlled private network, or
+an authenticated private proxy; Iroh authenticates runner communication, not
+browser users.
 
 ## Verification
 

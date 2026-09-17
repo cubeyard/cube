@@ -1,4 +1,5 @@
 import http from "node:http";
+import type { AddressInfo } from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -12,7 +13,7 @@ import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 
-/** Loopback product host. No remote provisioning or implicit sandbox backend. */
+/** Private product host. No remote provisioning or implicit sandbox backend. */
 export async function createCubed(options: { state: string; models?: Models; web?: string }) {
   const registry = new Registry(path.join(options.state, "registry.sqlite"));
   const models = options.models ?? await createModelRuntime();
@@ -173,6 +174,9 @@ export async function createCubed(options: { state: string; models?: Models; web
 
 if (import.meta.main) {
   const app = await createCubed({ state: process.env.CUBED_STATE ?? path.join(os.homedir(), ".cube-host") });
-  app.server.listen(Number(process.env.CUBED_PORT ?? 7777), "127.0.0.1", () => console.log("cubed listening on loopback; trusted runners only"));
+  app.server.listen(Number(process.env.CUBED_PORT ?? 7777), process.env.CUBED_HOST ?? "127.0.0.1", () => {
+    const address = app.server.address() as AddressInfo;
+    console.log(`cubed listening on ${address.address}:${address.port}; trusted runners only`);
+  });
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => { void app.close().then(() => process.exit(0)); });
 }
