@@ -13,6 +13,16 @@ pub const ALPN: &[u8] = b"cubeyard/node/1";
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MIN_COMPATIBLE_PROTOCOL_VERSION: u32 = 1;
 pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
+const RUNNER_CAPABILITIES: [&str; 8] = [
+    "node.status",
+    "environment.inspect",
+    "workspace.allocate",
+    "workspace.fresh-base",
+    "workspace.allocate.v2",
+    "workspace.release",
+    "exec.start",
+    "operation.get",
+];
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const RELAY_READY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -315,19 +325,7 @@ fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>)
             // `host` is the protocol-v1 compatibility profile. New peers use
             // `runner`; both names describe the same immutable binding.
             *profiles = vec!["runner".into(), "host".into()];
-            capabilities.extend(
-                [
-                    "node.status",
-                    "environment.inspect",
-                    "workspace.allocate",
-                    "workspace.fresh-base",
-                    "workspace.allocate.v2",
-                    "workspace.release",
-                    "exec.start",
-                    "operation.get",
-                ]
-                .map(String::from),
-            );
+            capabilities.extend(RUNNER_CAPABILITIES.map(String::from));
         }
         return result;
     }
@@ -737,6 +735,27 @@ mod tests {
         for id in ["", "node-", "other-node", "node-../etc", "node-é"] {
             assert!(validate_node_id(id).is_err());
         }
+    }
+
+    #[test]
+    fn runner_capabilities_are_versioned() {
+        assert_eq!(
+            (SOFTWARE_VERSION, RUNNER_CAPABILITIES),
+            (
+                "0.2.2",
+                [
+                    "node.status",
+                    "environment.inspect",
+                    "workspace.allocate",
+                    "workspace.fresh-base",
+                    "workspace.allocate.v2",
+                    "workspace.release",
+                    "exec.start",
+                    "operation.get",
+                ]
+            ),
+            "capability changes require a new immutable software version"
+        );
     }
 
     #[tokio::test]
