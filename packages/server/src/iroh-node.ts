@@ -15,6 +15,7 @@ import type { WorkspaceAllocation } from "./registry.ts";
 
 const MAX_FRAME = 65536;
 const RPC_TIMEOUT_MS = 5000;
+const WORKSPACE_RPC_TIMEOUT_MS = 30000;
 const ALPN = Array.from(Buffer.from("cubeyard/node/1"));
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const NODE_ID = /^node-[a-zA-Z0-9-]{1,123}$/;
@@ -382,7 +383,9 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
       };
       combined.addEventListener("abort", onAbort, { once: true });
     });
-    const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+    const timeoutMs = query && ["workspace.allocate", "workspace.allocate.v2", "workspace.release"].includes(String(query.method))
+      ? WORKSPACE_RPC_TIMEOUT_MS : RPC_TIMEOUT_MS;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     const work = async () => {
       endpoint = await builder.bind();
       if (finished || combined.aborted) { close(); throw new Error("request ended before bind"); }
