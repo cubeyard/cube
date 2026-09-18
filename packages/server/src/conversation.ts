@@ -5,6 +5,8 @@ import { BACKGROUND_CONTEXT, type LaneSnapshot, type AgentMessage } from "@earen
 import type { Models } from "@earendil-works/pi-ai";
 import { openAgent } from "./durable-agent.ts";
 import { IrohExecutionNodeClient } from "./iroh-node.ts";
+import { jevOutputComparison, redactJevDetails } from "./jev-memory.ts";
+import type { JevSettings } from "./jev-settings.ts";
 import { Registry } from "./registry.ts";
 import type { ModelSelection } from "./models.ts";
 
@@ -14,14 +16,15 @@ export class Conversations {
   private readonly registry: Registry;
   private readonly directory: string;
   private readonly models: Models;
+  private readonly jev: JevSettings;
   private readonly agents = new Map<string, Promise<Agent>>();
   private readonly drives = new Map<string, Promise<void>>();
   private readonly activations = new Set<string>();
   private readonly failures = new Map<string, string>();
   private readonly commands = new Map<string, Promise<unknown>>();
   private closing = false;
-  constructor(registry: Registry, directory: string, models: Models) {
-    this.registry = registry; this.directory = directory; this.models = models;
+  constructor(registry: Registry, directory: string, models: Models, jev: JevSettings) {
+    this.registry = registry; this.directory = directory; this.models = models; this.jev = jev;
   }
   async boot(): Promise<void> {
     for (const thread of this.registry.listThreads()) {
@@ -45,7 +48,7 @@ export class Conversations {
     const loading = (async () => {
       const admission = this.registry.runner(id)!;
       const runner = new IrohExecutionNodeClient({ configPath: admission.configPath, configHash: admission.configHash });
-      const agent = await openAgent({ directory: path.join(this.directory, id), runner, models: this.models, model: thread.model });
+      const agent = await openAgent({ directory: path.join(this.directory, id), runner, models: this.models, model: thread.model, getJevApiKey: () => this.jev.apiKey() });
       try {
         const watch = await agent.lane.watch(context);
         watch.unsubscribe();
@@ -118,10 +121,24 @@ export class Conversations {
     return { provider: selected.provider, id: selected.modelId };
     });
   }
+  async syncMemory(): Promise<void> {
+    await Promise.all([...this.agents.values()].map(async agent => (await agent).syncMemory()));
+  }
   async history(id: string) {
     const watch = await (await this.agent(id)).lane.watch(context);
     watch.unsubscribe();
     return history(watch.snapshot, this.failures.get(id));
+  }
+  async toolOutput(id: string, toolCallId: string) {
+    const lane = (await this.agent(id)).lane;
+    const entries = await lane.findEntries({ type: "message", order: "newestFirst" }, context);
+    for (const entry of entries) {
+      if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolCallId !== toolCallId) continue;
+      const comparison = jevOutputComparison(entry.message);
+      if (!comparison) throw new Error("tool output was not compressed by JEV");
+      return comparison;
+    }
+    throw new Error("tool output not found");
   }
   async stream(id: string, response: ServerResponse): Promise<void> {
     const watch = await (await this.agent(id)).lane.watch(context);
@@ -185,7 +202,7 @@ function messageText(message: AgentMessage): string {
 function history(snapshot: LaneSnapshot, failure?: string) {
   const messages = snapshot.transcript.flatMap(entry => entry.type === "message" ? [{
     seq: entry.id, role: entry.message.role === "toolResult" ? "tool" : entry.message.role,
-    content: messageText(entry.message), payload: entry.message, finalized: true,
+    content: messageText(entry.message), payload: entry.message.role === "toolResult" ? redactJevDetails(entry.message) : entry.message, finalized: true,
   }] : []);
   const streaming = snapshot.operation?.streamingMessage;
   if (streaming) messages.push({ seq: `stream-${snapshot.operation!.id}`, role: "assistant", content: messageText(streaming), payload: streaming, finalized: false });

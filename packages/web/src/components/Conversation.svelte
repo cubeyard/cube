@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { errorText, fetchConversation, sendPrompt, stopThread } from "../lib/api.ts";
+  import { errorText, fetchConversation, fetchJevToolOutput, sendPrompt, stopThread } from "../lib/api.ts";
   import { uid } from "../lib/uid.ts";
   import type { AgentRun, ConversationHistory, ConversationMessage, ModelSelection } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
@@ -23,6 +23,7 @@
   let disposed = false;
   let sending = $state(false);
   let pending: { text: string; requestId: string } | null = null;
+  let toolComparisons = $state<Record<string, { view: "compressed" | "original"; original?: string; loading?: boolean; error?: string }>>({});
   const working = $derived(run?.status === "queued" || run?.status === "running");
   $effect(() => { busy = working || sending; });
 
@@ -100,6 +101,39 @@
     return typeof name === "string" ? name : "tool";
   }
 
+  function toolCallId(message: ConversationMessage): string | null {
+    if (!message.payload || typeof message.payload !== "object") return null;
+    const id = (message.payload as { toolCallId?: unknown }).toolCallId;
+    return typeof id === "string" ? id : null;
+  }
+
+  function jevMetadata(message: ConversationMessage): { view: string; sentLines: number; totalLines: number } | null {
+    if (!message.payload || typeof message.payload !== "object") return null;
+    const details = (message.payload as { details?: unknown }).details;
+    if (!details || typeof details !== "object") return null;
+    const value = (details as { jevMemory?: unknown }).jevMemory;
+    if (!value || typeof value !== "object") return null;
+    const meta = value as { view?: unknown; sentLines?: unknown; totalLines?: unknown };
+    return typeof meta.view === "string" && typeof meta.sentLines === "number" && typeof meta.totalLines === "number"
+      ? { view: meta.view, sentLines: meta.sentLines, totalLines: meta.totalLines } : null;
+  }
+
+  async function showToolView(message: ConversationMessage, view: "compressed" | "original") {
+    const key = String(message.seq);
+    if (view === "compressed") { toolComparisons[key] = { ...toolComparisons[key], view }; return; }
+    const current = toolComparisons[key];
+    if (current?.original) { toolComparisons[key] = { ...current, view }; return; }
+    const id = toolCallId(message);
+    if (!id) return;
+    toolComparisons[key] = { view, loading: true };
+    try {
+      const comparison = await fetchJevToolOutput(threadId, id);
+      toolComparisons[key] = { view, original: comparison.original };
+    } catch (cause) {
+      toolComparisons[key] = { view, error: errorText(cause) };
+    }
+  }
+
   function messageLabel(message: ConversationMessage): string {
     return message.role === "user" ? "you" : "agent";
   }
@@ -118,9 +152,23 @@
     {:else}
       {#each messages as message (message.seq)}
         {#if message.role === "tool"}
+          {@const jev = jevMetadata(message)}
+          {@const toolState = toolComparisons[String(message.seq)]}
           <details class="tool-strip" open>
             <summary><span class="lamp mini on-green" aria-hidden="true"></span><code>{toolName(message)}</code></summary>
-            {#if message.content}<pre>{message.content}</pre>{/if}
+            {#if jev}
+              <div class="jev-inspector">
+                <span>jev · {jev.view} · {jev.sentLines} of {jev.totalLines} lines sent</span>
+                <div class="jev-toggle" aria-label="jev context view">
+                  <button type="button" aria-pressed={!toolState || toolState.view === "compressed"} onclick={() => void showToolView(message, "compressed")}>sent to model</button>
+                  <button type="button" aria-pressed={toolState?.view === "original"} onclick={() => void showToolView(message, "original")}>original</button>
+                </div>
+              </div>
+            {/if}
+            {#if toolState?.loading}<p class="tool-view-status" role="status">loading original output…</p>
+            {:else if toolState?.error}<p class="tool-view-error" role="alert">{toolState.error} <button type="button" class="text-action" onclick={() => void showToolView(message, "original")}>retry</button></p>
+            {:else if toolState?.view === "original" && toolState.original !== undefined}<pre>{toolState.original}</pre>
+            {:else if message.content}<pre>{message.content}</pre>{/if}
           </details>
         {:else}
           <article class="conversation-message {message.role}" aria-label={`${message.role} message`}>
@@ -156,3 +204,15 @@
     {#if working}<button class="key" type="button" onclick={() => { void stopThread(threadId).catch(cause => { error = errorText(cause); }); }}>stop</button>{/if}
   </form>
 </div>
+
+<style>
+  .jev-inspector { display: flex; justify-content: space-between; gap: 0.75rem; align-items: center; flex-wrap: wrap; padding: 0.45rem 0.7rem; border-top: 1px solid var(--line); color: var(--ink-3); font-size: 11px; letter-spacing: 0.04em; }
+  .jev-toggle { display: flex; border: 1px solid var(--line-2); border-radius: 5px; overflow: hidden; }
+  .jev-toggle button { border: 0; border-right: 1px solid var(--line-2); padding: 0.25rem 0.55rem; background: var(--s2); color: var(--ink-2); font: 550 11px var(--font-ui); cursor: pointer; }
+  .jev-toggle button:last-child { border-right: 0; }
+  .jev-toggle button[aria-pressed="true"] { background: var(--s4); color: var(--ink); box-shadow: inset 0 -2px 0 var(--signal); }
+  .jev-toggle button:focus-visible { outline: 2px solid var(--signal); outline-offset: -2px; }
+  .tool-view-status, .tool-view-error { margin: 0; padding: 0.7rem; background: var(--s1); color: var(--ink-3); font: 12px/1.5 var(--font-mono); }
+  .tool-view-error { color: var(--bad); }
+  @media (max-width: 40rem) { .jev-inspector { align-items: start; } }
+</style>

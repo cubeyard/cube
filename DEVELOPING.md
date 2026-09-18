@@ -54,6 +54,18 @@ transcript remains readable. Use **refresh models** after a catalog fetch error.
 Offline auth acceptance uses a controlled provider and real Pi credential storage
 in disposable state; it never signs in to a live account.
 
+JEV memory is a separate optional host capability at the top of **models**.
+Saving its key writes `CUBED_STATE/jev-key.json` with mode `0600`; API responses
+expose only whether it is configured. With no saved key, the recall tool is
+inactive and Cube makes no JEV requests. When enabled, selected prompts,
+responses and tool-output excerpts are sent to TypeSafe AI. Durable notes use
+Pi's thread session values, while full compressed tool output stays in the Pi
+tool-result details for exact recall. Ordinary history/SSE omits that retained
+original; opening a compressed tool result fetches it on demand so the inspector
+can switch between **sent to model** and **original**. Removing the key disables
+new classification and compression immediately without deleting prior session
+evidence.
+
 For direct Tailscale access, set `CUBED_HOST` to the host's Tailscale IP and list
 its exact MagicDNS name/IP in comma-separated `CUBED_ALLOWED_HOSTS`. Binding
 `0.0.0.0` listens on every IPv4 interface: use it only when firewall/network

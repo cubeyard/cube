@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import Header from "./Header.svelte";
-  import { errorText, fetchProviders, providerAction } from "../lib/api.ts";
+  import { errorText, fetchJevStatus, fetchProviders, providerAction, removeJevKey, saveJevKey } from "../lib/api.ts";
 
   let providers = $state<Awaited<ReturnType<typeof fetchProviders>>>([]);
   let loaded = $state(false);
@@ -9,6 +9,10 @@
   let busy = $state<string | null>(null);
   let search = $state("");
   let answers = $state<Record<string, string>>({});
+  let jev = $state<{ configured: boolean } | null>(null);
+  let jevKey = $state("");
+  let jevBusy = $state(false);
+  let jevError = $state<string | null>(null);
   let disposed = false;
   let polling = false;
   const visible = $derived(providers.filter(provider => `${provider.name} ${provider.id}`.toLowerCase().includes(search.toLowerCase())));
@@ -22,6 +26,22 @@
     catch { if (!disposed) error = "could not check providers — retry"; }
     finally { polling = false; }
   }
+  async function refreshJev() {
+    try { const next = await fetchJevStatus(); if (!disposed) jev = next; }
+    catch { if (!disposed) jevError = "could not check jev memory — retry"; }
+  }
+  async function saveJev() {
+    jevBusy = true; jevError = null;
+    try { jev = await saveJevKey(jevKey); jevKey = ""; }
+    catch (cause) { jevError = errorText(cause); }
+    finally { jevBusy = false; }
+  }
+  async function disableJev() {
+    jevBusy = true; jevError = null;
+    try { jev = await removeJevKey(); jevKey = ""; }
+    catch (cause) { jevError = errorText(cause); }
+    finally { jevBusy = false; }
+  }
   async function action(id: string, operation: "login" | "answer" | "cancel" | "disconnect" | "refresh", body?: unknown) {
     busy = id; error = null;
     try { await providerAction(id, operation, body); await refresh(); }
@@ -34,7 +54,7 @@
     void action(id, "answer", { flowId, promptId, value });
   }
   onMount(() => {
-    void refresh();
+    void refresh(); void refreshJev();
     const timer = setInterval(() => { void refresh(); }, 2000);
     return () => { disposed = true; clearInterval(timer); answers = {}; };
   });
@@ -44,6 +64,28 @@
 <main class="provider-settings">
   <div class="intro">
     <h1>model providers</h1>
+  </div>
+  <section class="jev" aria-labelledby="jev-title">
+    <div class="jev-head">
+      <span class:blink={jevBusy} class:on-amber={jevBusy} class:on-green={jev?.configured && !jevBusy} class="lamp"></span>
+      <div>
+        <h2 id="jev-title">jev memory</h2>
+        <p class="jev-status">{jev === null ? "checking configuration…" : jev.configured ? "configured · memory is active" : "not configured · memory is off"}</p>
+      </div>
+    </div>
+    <p>let jev retain useful thread context and choose compact views of large tool output. selected prompts, responses, and tool excerpts are sent to typesafe ai.</p>
+    <p class="hint">optional. the key stays on this host, never reaches a runner or the browser again, and no jev requests are made while it is missing.</p>
+    <form class="jev-form" onsubmit={event => { event.preventDefault(); void saveJev(); }}>
+      <label for="jev-key">jev api key</label>
+      <div class="jev-controls">
+        <input id="jev-key" type="password" bind:value={jevKey} placeholder={jev?.configured ? "enter a replacement key" : "enter your jev key"} autocomplete="off" spellcheck="false" required />
+        <button class="key" type="submit" disabled={jevBusy || !jevKey.trim()}>{jev?.configured ? "replace key" : "enable memory"}</button>
+        {#if jev?.configured}<button class="key danger" type="button" disabled={jevBusy} onclick={() => void disableJev()}>turn off memory</button>{/if}
+      </div>
+    </form>
+    {#if jevError}<p class="error" role="alert">{jevError} <button class="key" onclick={() => { jevError = null; void refreshJev(); }}>retry</button></p>{/if}
+  </section>
+  <div class="intro providers-intro">
     <p>connect a provider to choose its models in your threads. credentials stay on this host and are managed by pi.</p>
     <p class="hint">disconnect removes the saved login, not credentials supplied by the host environment. it does not change a thread's selected model.</p>
   </div>
@@ -124,6 +166,14 @@
   p { line-height: 1.6; overflow-wrap: anywhere; }
   .hint { color: var(--ink-3); font-size: 13px; }
   .search { display: grid; gap: 0.5rem; max-width: 28rem; margin-bottom: 1.5rem; }
+  .jev { max-width: 52rem; margin: 0 0 2.1rem; padding: 1rem; background: var(--s1); border: 1px solid var(--line); border-radius: var(--r-well); box-shadow: var(--shadow-well); }
+  .jev-head { display: flex; align-items: center; gap: 0.75rem; }
+  .jev-head h2 { margin-bottom: 0.1rem; }
+  .jev-status { margin: 0; color: var(--ink-3); font-size: 13px; }
+  .jev > p { max-width: 68ch; margin: 0.65rem 0 0; }
+  .jev-form { margin-top: 1rem; }
+  .jev-controls { display: grid; grid-template-columns: minmax(14rem, 1fr) auto auto; gap: 0.55rem; align-items: center; }
+  .providers-intro { padding-top: 1.4rem; border-top: 1px solid var(--line-2); }
   input, select { padding: 0.65rem; min-width: 0; width: 100%; background: var(--s4); color: var(--ink); border: 1px solid var(--line-2); border-radius: var(--r-key); font: inherit; }
   .providers { border-top: 1px solid var(--line-2); }
   .provider { padding: 1.25rem 0; border-bottom: 1px solid var(--line-2); }
@@ -137,5 +187,11 @@
   .device-code { font: 600 24px var(--font-mono); user-select: all; }
   .error { color: var(--bad); }
   a { color: var(--ink); text-underline-offset: 3px; }
-  @media (max-width: 40rem) { input, select { font-size: 16px; } .provider-row { align-items: start; } }
+  @media (max-width: 40rem) {
+    input, select { font-size: 16px; }
+    .provider-row { align-items: start; }
+    .jev { padding: 0.85rem; }
+    .jev-controls { grid-template-columns: 1fr; }
+    .jev-controls .key { justify-self: start; }
+  }
 </style>
