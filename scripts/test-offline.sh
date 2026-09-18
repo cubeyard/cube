@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Offline Node checks. Real Rust/Iroh execution runs in test-node-transport.sh.
 OFFLINE_TESTS=(
+  scripts/cubed-signing-key-test.ts
+  scripts/cubed-update-test.ts
   scripts/host-production-test.ts
   scripts/runner-production-test.ts
   packages/server/test/log-test.ts

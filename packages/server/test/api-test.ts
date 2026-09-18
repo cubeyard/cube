@@ -28,6 +28,14 @@ try {
   assert.equal(rejectedHost, 403);
   assert.equal((await fetch(`${base}/api/state`, { headers: { origin: "http://untrusted.example" } })).status, 403);
   assert.equal((await write("/api/models", {})).status, 404);
+  assert.deepEqual(await (await fetch(`${base}/api/health`)).json(), {
+    lifecycle: "ready", version: "dev", commit: "unknown", stateSchema: 100,
+  });
+  const unmanagedUpdate = await (await fetch(`${base}/api/system/update`)).json();
+  assert.equal(unmanagedUpdate.installation, "unmanaged");
+  assert.equal(unmanagedUpdate.enabled, false);
+  assert.equal(unmanagedUpdate.runnersUpdated, false);
+  assert.equal((await write("/api/system/update", { action: "check" })).status, 409);
   assert.deepEqual(await (await fetch(`${base}/api/jev`)).json(), { configured: false });
   const jevSecret = "jev-secret-not-for-responses";
   const savedJev = await write("/api/jev", { apiKey: jevSecret }, "PUT");

@@ -102,6 +102,24 @@ state, check desktop and phone (390×844), exercise affected interactions and
 inspect screenshots. In an Amp orb use supervised orb services and portal URLs,
 not an unmanaged background shell. Never expose unauthenticated cubed publicly.
 
+## cubed release acceptance
+
+`node scripts/cubed-update-test.ts` exercises the real foreground supervisor with
+a disposable signed feed. It verifies capability authorization, the single-owner
+lock, checksum/signature enforcement, atomic activation, state preservation,
+readiness rollback and interrupted-update recovery. It is part of
+`scripts/test-offline.sh`. A local packaging acceptance can use a disposable
+Ed25519 key with `scripts/cubed/build-release.ts`, then run `install.sh` against
+the resulting archive and manifest. Never use the production signing key locally.
+
+Pushing a stable `vX.Y.Z` tag runs `.github/workflows/release.yml` on Linux x64,
+Linux arm64 and macOS arm64. It requires the protected
+`CUBED_UPDATE_SIGNING_KEY` Ed25519 PEM secret and creates a draft release. Review
+the generated packages, manifests, signatures and checksums before explicitly
+publishing the draft. Publication and deployment are not CI acceptance steps.
+The workflow contains no runner artifacts. See [the operator update
+runbook](docs/cubed-updates.md) for the manifest and supervisor contracts.
+
 ## Fresh start and recovery
 
 Registry v100 upgrades in place. There is no adoption of older registries or

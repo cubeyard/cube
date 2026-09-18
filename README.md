@@ -48,6 +48,10 @@ browser/device login or API-key prompts, check connection status, or disconnect.
 Credentials and configuration use Pi's `~/.pi/agent` directory (or
 `PI_CODING_AGENT_DIR`); the CLI is not a prerequisite. Catalog changes take effect
 without restarting cubed, and existing threads keep their selected model.
+Managed binary installations also expose **system**, where an operator can check
+for and install signed cubed releases. Browser updates are opt-in and never update
+runners. Source checkouts and externally managed installations remain read-only;
+see [the cubed update runbook](docs/cubed-updates.md).
 Optional JEV memory is configured separately at the top of **models**. It is
 strictly off until a JEV key is saved there; Cube then uses JEV to retain useful
 thread notes and select compact, recallable views of large tool output.

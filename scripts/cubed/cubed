@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+root="${CUBED_INSTALL_ROOT:-$HOME/.local/share/cubed}"
+config="${CUBED_CONFIG_FILE:-$HOME/.config/cubed/environment}"
+if [ -f "$config" ]; then
+  set -a
+  # This is an operator-owned shell environment file and may contain secrets.
+  # shellcheck source=/dev/null
+  . "$config"
+  set +a
+  root="${CUBED_INSTALL_ROOT:-$root}"
+fi
+exec "$root/current/bin/node" "$root/supervisor.ts" "$@"
