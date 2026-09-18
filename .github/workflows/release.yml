@@ -82,7 +82,8 @@ jobs:
             scripts/cubed/update-public-key.fingerprint \
             dist/
           chmod 0755 dist/install.sh dist/service.sh
-          sha256sum dist/* > dist/SHA256SUMS
+          bash scripts/cubed/write-checksums.sh dist
+          (cd dist && sha256sum -c SHA256SUMS)
       - name: create or refresh draft release
         env:
           GH_TOKEN: ${{ github.token }}
