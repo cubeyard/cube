@@ -20,6 +20,7 @@
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
   import RepositoryInput from "./RepositoryInput.svelte";
+  import RunnerPanel from "./RunnerPanel.svelte";
 
   let { projectId, githubLogin = false, command = null, onConsume = () => {}, onNewThread }: {
     projectId: string;
@@ -364,21 +365,7 @@
 
     <p class="config-note">ready projects share one global trusted-runner pool. repository URLs and checked commit IDs are pinned per allocation. commands run with the selected runner account’s permissions, without sandboxing.</p>
 
-    {#if project}
-      <section aria-label="global runner pool">
-        <p class="silk">global runner pool · {project.availableRunnerCount} available</p>
-        <div class="well">
-          {#each project.runners as runner (runner.id)}
-            <div class="module">
-              <div class="module-face">
-                <span class="lamp" class:on-green={runner.state === "available"} class:on-amber={["allocating", "busy", "releasing"].includes(runner.state)} class:blink={["allocating", "busy", "releasing"].includes(runner.state)} class:on-red={runner.state === "failed"} aria-hidden="true"></span>
-                <span class="module-text"><span class="module-title">{runner.nodeId}</span><span class="module-meta">{runner.state}{runner.projectId ? ` · ${runner.projectName ?? runner.projectId}` : " · unallocated"}</span></span>
-              </div>
-            </div>
-          {/each}
-        </div>
-      </section>
-    {/if}
+    {#if project}<RunnerPanel onChanged={() => void refresh()} />{/if}
 
     <div class="project-actions">
       <button class="key primary" onclick={save} disabled={saving || !dirty}>

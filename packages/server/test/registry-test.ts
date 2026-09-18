@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
-import { Registry } from "../src/registry.ts";
+import { Registry, RUNNER_STALE_AFTER_MS } from "../src/registry.ts";
+
+const idleHealth = { lifecycle: "ready" as const, active: false, operationRecords: 0, operationCapacity: 100,
+  error: null, softwareVersion: "test", protocolVersion: 1 as const, activeWorkspaces: 0, retainedWorkspaces: 0,
+  workspaceBytes: 0, workspaceCapacity: 1, workspaceByteLimit: 1024 };
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-registry-"));
 const filename = path.join(root, "registry.sqlite");
@@ -39,11 +43,56 @@ try {
   const next = registry.createThread("other", "next", model, "two");
   assert.notEqual(next.id, thread.id);
   assert.equal(next.projectId, "other", "a runner migrated from one project serves another");
+  assert.equal(registry.runnerStatuses().find(row => row.id === "thread-test")?.allocationProjectId, "other",
+    "operator status reads the current global allocation snapshot, not runner ownership");
+  assert.throws(() => registry.beginRunnerRetirement("thread-test"), /active global allocation/, "global allocation blocks retirement");
   registry.enrollRunner({ nodeId: "node-two", environmentId: 7, threadId: "runner-two", configPath: "/private/two.json", configHash: "two" });
   assert.equal(registry.availableRunners().length, 1, "environment IDs may collide across immutable runner identities");
-  registry.retireRunner("runner-two");
+
+  registry.beginRunnerRetirement("runner-two");
+  assert.equal(registry.runnerCapacity().states.retiring, 1, "global capacity exposes the fail-closed retirement reservation");
+  assert.equal(registry.availableRunners().length, 0, "retiring capacity cannot be globally allocated");
+  registry.close(); registry = new Registry(filename);
+  assert.equal(registry.runnerStatuses().find(row => row.id === "runner-two")?.allocationState, "available",
+    "restart reconciles an interrupted read-only retirement check back to global capacity");
+  registry.recordRunnerProbe("runner-two", { health: { ...idleHealth, active: true } }, 10);
+  registry.beginRunnerRetirement("runner-two");
+  assert.throws(() => registry.finishRunnerRetirement("runner-two", "must not retire", 10, 11), /reachable and idle/,
+    "runner-reported active work blocks retirement");
+  registry.cancelRunnerRetirement("runner-two");
+  registry.recordRunnerProbe("runner-two", { health: { ...idleHealth, activeWorkspaces: 1 } }, 12);
+  registry.beginRunnerRetirement("runner-two");
+  assert.throws(() => registry.finishRunnerRetirement("runner-two", "must not retire", 12, 13), /reachable and idle/,
+    "runner-reported active workspace blocks retirement");
+  registry.cancelRunnerRetirement("runner-two");
+  registry.recordRunnerProbe("runner-two", { health: idleHealth }, 14);
+  registry.beginRunnerRetirement("runner-two");
+  registry.finishRunnerRetirement("runner-two", "replacement enrolled", 14, 15);
   assert.equal(registry.runnerCapacity().states.retired, 1);
   assert.equal(registry.availableRunners().length, 0, "retired runners never re-enter the global pool");
+  assert.equal(registry.runnerAudit("runner-two").length, 1, "retirement evidence is durable registry metadata");
+
+  registry.enrollRunner({ nodeId: "node-stale", environmentId: 9, threadId: "runner-stale",
+    configPath: "/private/stale.json", configHash: "stale" });
+  const staleSince = 100;
+  registry.recordRunnerProbe("runner-stale", { health: idleHealth }, staleSince);
+  registry.recordRunnerProbe("runner-stale", { error: "NODE_UNAVAILABLE" }, staleSince);
+  assert.equal(registry.runnerStatuses(staleSince).find(row => row.id === "runner-stale")?.contactStatus, "unreachable",
+    "latest outcome, not timestamp equality, determines contact status");
+  assert.equal(registry.runnerStatuses(staleSince + RUNNER_STALE_AFTER_MS - 1).find(row => row.id === "runner-stale")?.contactStatus,
+    "unreachable", "unreachable is not stale before the full interval");
+  const staleAt = staleSince + RUNNER_STALE_AFTER_MS;
+  assert.equal(registry.runnerStatuses(staleAt).find(row => row.id === "runner-stale")?.contactStatus, "stale");
+  registry.beginRunnerRetirement("runner-stale");
+  registry.finishRunnerRetirement("runner-stale", "continuously unreachable", staleSince, staleAt);
+  registry.close(); registry = new Registry(filename);
+  assert.equal(registry.runnerStatuses().find(row => row.id === "runner-stale")?.contactStatus, "retired",
+    "installation-global retirement survives restart");
+
+  registry.saveProject({ id: "retirement-context", name: "retirement context", status: "ready", error: null, revision: 1,
+    checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
+  registry.deleteProject("retirement-context");
+  assert.equal(registry.runnerAudit("runner-stale").length, 1, "project deletion cannot erase global retirement evidence");
   assert.throws(() => registry.deleteProject("project"), /retained thread history/);
 
   const raceFile = path.join(root, "race.sqlite");
@@ -113,6 +162,7 @@ try {
   assert.equal(migrated.getThread(oldThread.id)?.allocation.repositories[0]?.checkoutName, "workspace",
     "legacy primary repositories migrate to the isolated workspace path");
   assert.equal(migrated.listRunners()[0]?.legacyProjectId, oldProject.id, "legacy binding remains audit metadata");
+  assert.equal(migrated.runnerStatuses()[0]?.contactStatus, "unknown", "migration adds global observations without inventing contact history");
   migrated.close();
   const rollback = new DatabaseSync(v100);
   assert.equal(rollback.prepare("PRAGMA user_version").get()!.user_version, 101, "global migration retains the rollback-compatible registry version");
@@ -121,8 +171,32 @@ try {
   assert(rollback.prepare("SELECT 1 FROM global_pool WHERE schema_version=1").get(), "global migration is durably marked and idempotent");
   assert.deepEqual(rollback.prepare("PRAGMA foreign_key_check").all(), [], "migration preserves registry references");
   rollback.close();
+
+  const v101 = path.join(root, "v101.sqlite");
+  const current = new DatabaseSync(v101);
+  current.exec(`PRAGMA user_version=101;
+    CREATE TABLE project(id TEXT PRIMARY KEY, data TEXT NOT NULL);
+    CREATE TABLE runner(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES project(id), node_id TEXT NOT NULL UNIQUE,
+      data TEXT NOT NULL, state TEXT NOT NULL, thread_id TEXT, error TEXT);
+    CREATE TABLE thread(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES project(id), runner_id TEXT NOT NULL REFERENCES runner(id), data TEXT NOT NULL);
+    CREATE TABLE creation(project_id TEXT NOT NULL, request_id TEXT NOT NULL, thread_id TEXT NOT NULL REFERENCES thread(id), payload TEXT NOT NULL, PRIMARY KEY(project_id, request_id));`);
+  current.prepare("INSERT INTO project VALUES (?,?)").run(oldProject.id, JSON.stringify(oldProject));
+  current.prepare("INSERT INTO runner VALUES (?,?,?,?,?,?,?)").run(oldRunner.threadId, oldRunner.projectId, oldRunner.nodeId,
+    JSON.stringify(oldRunner), "available", null, null);
+  current.close();
+  const upgraded = new Registry(v101);
+  assert.equal(upgraded.runnerStatuses()[0]?.contactStatus, "unknown", "v101 gains global observation metadata without invented contact history");
+  assert.equal(upgraded.availableRunners().length, 1, "v101 project binding migrates to global capacity");
+  upgraded.recordRunnerProbe(oldRunner.threadId, { health: idleHealth }, 20);
+  upgraded.beginRunnerRetirement(oldRunner.threadId);
+  upgraded.finishRunnerRetirement(oldRunner.threadId, "legacy host removed", 20, 21);
+  upgraded.deleteProject(oldProject.id);
+  assert.equal(upgraded.runnerStatuses()[0]?.contactStatus, "retired", "project deletion preserves a migrated global tombstone");
+  assert.equal(upgraded.runnerAudit(oldRunner.threadId).length, 1, "project deletion preserves migrated retirement evidence");
+  upgraded.close();
+
   const old = path.join(root, "old.sqlite");
   const db = new DatabaseSync(old); db.exec("CREATE TABLE cube(id INTEGER)"); db.close();
   assert.throws(() => new Registry(old), /fresh CUBED_STATE/);
-  console.log("ok: global allocation, release/reuse, retirement, restart-safe creation keys, rollback-compatible v100 migration and legacy rejection");
+  console.log("ok: global allocation snapshots, retirement guards/audit, restart reconcile, project deletion, rollback-compatible migration and legacy rejection");
 } finally { registry.close(); fs.rmSync(root, { recursive: true, force: true }); }

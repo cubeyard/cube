@@ -5,6 +5,9 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type { ModelSelection } from "./models.ts";
 import type { NodeBinding } from "./iroh-node.ts";
+import type { TrustedRunnerHealth } from "./iroh-node.ts";
+
+export const RUNNER_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface ProjectRepository {
   id: string; projectId: string; position: number; url: string; base: string | null;
@@ -28,7 +31,16 @@ export interface WorkspaceRepository {
 export interface WorkspaceAllocation {
   projectId: string; projectRevision: number; repositories: WorkspaceRepository[];
 }
-export type RunnerAllocationState = "available" | "allocating" | "busy" | "releasing" | "failed" | "retired";
+export type RunnerAllocationState = "available" | "allocating" | "busy" | "releasing" | "failed" | "retiring" | "retired";
+export type RunnerContactStatus = "unknown" | "reachable" | "unreachable" | "stale" | "retired";
+export interface RunnerStatus {
+  id: string; nodeId: string; environmentId: number;
+  allocationState: RunnerAllocationState; threadId: string | null;
+  allocationProjectId: string | null; allocationProjectName: string | null;
+  contactStatus: RunnerContactStatus; enrolledAt: number | null; lastAttemptAt: number | null;
+  lastContactAt: number | null; unreachableSince: number | null; error: string | null;
+  health: TrustedRunnerHealth | null; retiredAt: number | null; retirementReason: string | null;
+}
 export interface Thread {
   id: string; projectId: string; title: string | null; createdAt: number;
   archived: boolean; model: ModelSelection; runnerId: string;
@@ -79,6 +91,15 @@ export class Registry {
         CREATE TABLE IF NOT EXISTS global_pool(schema_version INTEGER PRIMARY KEY CHECK(schema_version=1));
         PRAGMA user_version=101;`);
       this.migrateGlobalPool();
+      this.db.exec(`CREATE TABLE IF NOT EXISTS runner_operator(runner_id TEXT PRIMARY KEY REFERENCES runner(id), enrolled_at INTEGER,
+          last_attempt_at INTEGER, last_contact_at INTEGER, unreachable_since INTEGER, last_error TEXT, health TEXT,
+          retiring_at INTEGER, retired_at INTEGER, retirement_reason TEXT);
+        CREATE TABLE IF NOT EXISTS runner_audit(id INTEGER PRIMARY KEY, runner_id TEXT NOT NULL REFERENCES runner(id),
+          action TEXT NOT NULL, at INTEGER NOT NULL, evidence TEXT NOT NULL);
+        INSERT OR IGNORE INTO runner_operator(runner_id) SELECT id FROM runner;
+        UPDATE runner SET state='available',error=NULL WHERE state='failed' AND thread_id IS NULL
+          AND id IN (SELECT runner_id FROM runner_operator WHERE retiring_at IS NOT NULL AND retired_at IS NULL);
+        UPDATE runner_operator SET retiring_at=NULL WHERE retiring_at IS NOT NULL AND retired_at IS NULL;`);
     } catch (error) { this.db.close(); throw error; }
   }
   private parse<T>(row: unknown): T | null {
@@ -146,7 +167,12 @@ export class Registry {
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   enrollRunner(runner: Runner): void {
-    this.db.prepare("INSERT INTO runner VALUES (?,?,?,?,?,?,?)").run(runner.threadId, null, runner.nodeId, JSON.stringify(runner), "available", null, null);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("INSERT INTO runner VALUES (?,?,?,?,?,?,?)").run(runner.threadId, null, runner.nodeId, JSON.stringify(runner), "available", null, null);
+      this.db.prepare("INSERT INTO runner_operator(runner_id,enrolled_at) VALUES (?,?)").run(runner.threadId, Date.now());
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   runner(threadId: string): Runner | null {
     return this.parse(this.db.prepare("SELECT r.data FROM runner r JOIN thread t ON t.runner_id=r.id WHERE t.id=?").get(threadId));
@@ -154,27 +180,109 @@ export class Registry {
   listRunners(): Runner[] {
     return this.db.prepare("SELECT data FROM runner ORDER BY rowid").all().map(row => this.parse<Runner>(row)!);
   }
+  getRunner(id: string): Runner | null { return this.parse(this.db.prepare("SELECT data FROM runner WHERE id=?").get(id)); }
   availableRunners(): Runner[] {
-    return this.db.prepare("SELECT data FROM runner WHERE state='available'").all().map(row => this.parse<Runner>(row)!);
+    return this.db.prepare(`SELECT r.data FROM runner r JOIN runner_operator o ON o.runner_id=r.id
+      WHERE r.state='available' AND o.retired_at IS NULL`).all().map(row => this.parse<Runner>(row)!);
   }
   runnerCount(): number {
     return Number(this.db.prepare("SELECT count(*) AS n FROM runner").get()!.n);
   }
   runnerCapacity(): { states: Record<RunnerAllocationState, number>; errors: string[] } {
-    const states: Record<RunnerAllocationState, number> = { available: 0, allocating: 0, busy: 0, releasing: 0, failed: 0, retired: 0 };
-    const rows = this.db.prepare("SELECT state,error FROM runner").all() as Array<{ state: RunnerAllocationState; error: string | null }>;
+    const states: Record<RunnerAllocationState, number> = { available: 0, allocating: 0, busy: 0, releasing: 0, failed: 0, retiring: 0, retired: 0 };
+    const rows = this.db.prepare(`SELECT CASE WHEN o.retiring_at IS NOT NULL AND o.retired_at IS NULL THEN 'retiring' ELSE r.state END AS state,r.error
+      FROM runner r JOIN runner_operator o ON o.runner_id=r.id`).all() as Array<{ state: RunnerAllocationState; error: string | null }>;
     for (const row of rows) states[row.state]++;
     return { states, errors: rows.flatMap(row => row.error ? [row.error] : []) };
   }
-  runnerViews(): Array<{ id: string; nodeId: string; state: RunnerAllocationState; threadId: string | null; projectId: string | null; projectName: string | null; error: string | null }> {
-    const rows = this.db.prepare(`SELECT r.id,r.node_id AS nodeId,r.state,r.thread_id AS threadId,
-      t.project_id AS projectId,json_extract(p.data, '$.name') AS projectName,r.error FROM runner r
-      LEFT JOIN thread t ON t.id=r.thread_id LEFT JOIN project p ON p.id=t.project_id ORDER BY r.rowid`).all();
-    return rows as Array<{ id: string; nodeId: string; state: RunnerAllocationState; threadId: string | null; projectId: string | null; projectName: string | null; error: string | null }>;
+  runnerStatuses(now = Date.now()): RunnerStatus[] {
+    const rows = this.db.prepare(`SELECT r.id,r.node_id,r.data,r.state,r.thread_id,
+      t.project_id AS allocation_project_id,json_extract(p.data, '$.name') AS allocation_project_name,
+      o.enrolled_at,o.last_attempt_at,o.last_contact_at,o.unreachable_since,o.last_error,o.health,o.retiring_at,o.retired_at,o.retirement_reason
+      FROM runner r JOIN runner_operator o ON o.runner_id=r.id
+      LEFT JOIN thread t ON t.id=r.thread_id LEFT JOIN project p ON p.id=t.project_id ORDER BY r.rowid`).all() as Array<Record<string, unknown>>;
+    return rows.map(row => {
+      const runner = JSON.parse(String(row.data)) as Runner;
+      const retiringAt = row.retiring_at == null ? null : Number(row.retiring_at);
+      const retiredAt = row.retired_at == null ? null : Number(row.retired_at);
+      const lastAttemptAt = row.last_attempt_at == null ? null : Number(row.last_attempt_at);
+      const lastContactAt = row.last_contact_at == null ? null : Number(row.last_contact_at);
+      const unreachableSince = row.unreachable_since == null ? null : Number(row.unreachable_since);
+      const error = row.last_error == null ? null : String(row.last_error);
+      const contactStatus: RunnerContactStatus = retiredAt ? "retired"
+        : !lastAttemptAt ? "unknown"
+        : !error && row.health != null ? "reachable"
+        : unreachableSince && now - unreachableSince >= RUNNER_STALE_AFTER_MS ? "stale"
+        : "unreachable";
+      return { id: String(row.id), nodeId: String(row.node_id), environmentId: runner.environmentId,
+        allocationState: retiringAt && !retiredAt ? "retiring" : String(row.state) as RunnerAllocationState,
+        threadId: row.thread_id == null ? null : String(row.thread_id),
+        allocationProjectId: row.allocation_project_id == null ? null : String(row.allocation_project_id),
+        allocationProjectName: row.allocation_project_name == null ? null : String(row.allocation_project_name),
+        contactStatus, enrolledAt: row.enrolled_at == null ? null : Number(row.enrolled_at), lastAttemptAt, lastContactAt,
+        unreachableSince, error, health: row.health == null ? null : JSON.parse(String(row.health)) as TrustedRunnerHealth,
+        retiredAt, retirementReason: row.retirement_reason == null ? null : String(row.retirement_reason) };
+    });
   }
-  retireRunner(id: string): void {
-    const changed = this.db.prepare("UPDATE runner SET state='retired',error=NULL WHERE id=? AND state IN ('available','failed') AND thread_id IS NULL").run(id);
-    if (changed.changes !== 1) throw new Error("runner has an active or retained allocation");
+  recordRunnerProbe(id: string, result: { health: TrustedRunnerHealth } | { error: string }, at = Date.now()): void {
+    const success = "health" in result;
+    const updated = this.db.prepare(`UPDATE runner_operator SET last_attempt_at=?,
+      last_contact_at=CASE WHEN ? THEN ? ELSE last_contact_at END,
+      unreachable_since=CASE WHEN ? THEN NULL ELSE coalesce(unreachable_since,?) END,
+      last_error=?, health=? WHERE runner_id=? AND retired_at IS NULL`).run(
+      at, success ? 1 : 0, at, success ? 1 : 0, at, success ? null : result.error,
+      success ? JSON.stringify(result.health) : null, id);
+    if (updated.changes !== 1) throw new Error("runner not found or already retired");
+  }
+  beginRunnerRetirement(id: string): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const changed = this.db.prepare(`UPDATE runner SET state='failed',error=NULL
+        WHERE id=? AND state='available' AND thread_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM thread WHERE runner_id=runner.id AND json_extract(data, '$.archived')=0)
+          AND id IN (SELECT runner_id FROM runner_operator WHERE retiring_at IS NULL AND retired_at IS NULL)`).run(id);
+      if (changed.changes !== 1) throw new Error("runner has an active global allocation or workspace and cannot be retired");
+      const reserved = this.db.prepare("UPDATE runner_operator SET retiring_at=? WHERE runner_id=? AND retiring_at IS NULL AND retired_at IS NULL").run(Date.now(), id);
+      if (reserved.changes !== 1) throw new Error("runner retirement reservation changed; check it again");
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  cancelRunnerRetirement(id: string): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const restored = this.db.prepare(`UPDATE runner SET state='available',error=NULL WHERE id=? AND state='failed' AND thread_id IS NULL
+        AND id IN (SELECT runner_id FROM runner_operator WHERE retiring_at IS NOT NULL AND retired_at IS NULL)`).run(id);
+      if (restored.changes !== 1) throw new Error("runner retirement reservation changed; check it again");
+      const cancelled = this.db.prepare("UPDATE runner_operator SET retiring_at=NULL WHERE runner_id=? AND retiring_at IS NOT NULL AND retired_at IS NULL").run(id);
+      if (cancelled.changes !== 1) throw new Error("runner retirement reservation changed; check it again");
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  finishRunnerRetirement(id: string, reason: string, expectedAttemptAt: number, now = Date.now()): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const status = this.runnerStatuses(now).find(row => row.id === id);
+      if (!status || status.allocationState !== "retiring" || status.threadId || status.allocationProjectId) {
+        throw new Error("runner global allocation changed; check it again");
+      }
+      if (status.lastAttemptAt !== expectedAttemptAt) throw new Error("runner status changed; check it again");
+      const idleReachable = status.contactStatus === "reachable" && status.health && !status.health.active && status.health.activeWorkspaces === 0;
+      if (!idleReachable && status.contactStatus !== "stale") throw new Error("runner must be reachable and idle, or stale, before retirement");
+      const retired = this.db.prepare(`UPDATE runner SET state='retired',error=NULL
+        WHERE id=? AND state='failed' AND thread_id IS NULL
+          AND NOT EXISTS (SELECT 1 FROM thread WHERE runner_id=runner.id AND json_extract(data, '$.archived')=0)`).run(id);
+      if (retired.changes !== 1) throw new Error("runner global allocation changed; check it again");
+      const tombstoned = this.db.prepare(`UPDATE runner_operator SET retiring_at=NULL,retired_at=?,retirement_reason=?
+        WHERE runner_id=? AND retiring_at IS NOT NULL AND retired_at IS NULL`).run(now, reason, id);
+      if (tombstoned.changes !== 1) throw new Error("runner retirement reservation changed; check it again");
+      this.db.prepare("INSERT INTO runner_audit(runner_id,action,at,evidence) VALUES (?,'retired',?,?)").run(id, now,
+        JSON.stringify({ reason, contactStatus: status.contactStatus, lastContactAt: status.lastContactAt,
+          unreachableSince: status.unreachableSince, health: status.health, error: status.error }));
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  runnerAudit(id: string): Array<{ action: string; at: number; evidence: unknown }> {
+    return (this.db.prepare("SELECT action,at,evidence FROM runner_audit WHERE runner_id=? ORDER BY id").all(id) as Array<{ action: string; at: number; evidence: string }>).map(row => ({ ...row, evidence: JSON.parse(row.evidence) }));
   }
   getThread(id: string): Thread | null { return this.parse(this.db.prepare("SELECT data FROM thread WHERE id=?").get(id)); }
   listThreads(): Thread[] { return this.db.prepare("SELECT data FROM thread ORDER BY rowid DESC").all().map(row => this.parse<Thread>(row)!); }
@@ -240,7 +348,8 @@ export class Registry {
       if (this.getProject(projectId)?.status !== "ready") throw new Error("check the project before starting a thread");
       const project = this.getProject(projectId)!;
       const repositories = allocationRepositories(project, true);
-      const row = this.db.prepare("SELECT id,data FROM runner WHERE state='available' ORDER BY rowid LIMIT 1").get() as { id: string; data: string } | undefined;
+      const row = this.db.prepare(`SELECT r.id,r.data FROM runner r JOIN runner_operator o ON o.runner_id=r.id
+        WHERE r.state='available' AND o.retired_at IS NULL ORDER BY r.rowid LIMIT 1`).get() as { id: string; data: string } | undefined;
       const runner = row ? JSON.parse(row.data) as Runner : null;
       if (!runner) throw new Error("no runner available in the global pool — archive an idle thread or register another trusted runner");
       const thread: Thread = { id: randomUUID(), projectId, runnerId: row!.id,
