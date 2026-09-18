@@ -4,7 +4,8 @@ set -euo pipefail
 archive="$1"; manifest="$2"; signature="$3"; public_key="$4"
 root="${CUBED_INSTALL_ROOT:-$HOME/.local/share/cubed}"
 bin="${CUBED_BIN_DIR:-$HOME/.local/bin}"
-mkdir -p -m 0700 "$root/releases" "$bin"
+mkdir -p "$root/releases" "$bin"
+chmod 0700 "$root" "$root/releases"
 node - "$archive" "$manifest" "$signature" "$public_key" "$root" "$bin" <<'NODE'
 const fs = require("fs"), path = require("path"), crypto = require("crypto"), cp = require("child_process");
 const [archive, manifestPath, signaturePath, keyPath, rootInput, binInput] = process.argv.slice(2);
