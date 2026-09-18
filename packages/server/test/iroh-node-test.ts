@@ -65,7 +65,7 @@ const accept = (async () => {
         protocolVersion: mode === "legacy" ? undefined : mode === "incompatible" ? 2 : 1,
         minimumProtocolVersion: mode === "legacy" ? undefined : mode === "incompatible" ? 2 : 1,
         softwareVersion: mode === "legacy" ? undefined : "1.0.0", binding,
-        profiles: ["host"], capabilities: mode === "unsupported" ? ["node.hello"] : ["node.hello", "node.status", "workspace.allocate", "workspace.release", "exec.start", "environment.inspect", "operation.get"],
+        profiles: ["host"], capabilities: mode === "unsupported" ? ["node.hello"] : ["node.hello", "node.status", "workspace.allocate", "workspace.fresh-base", "workspace.release", "exec.start", "environment.inspect", "operation.get"],
         limits: { maxFrameBytes: 65536, requestTimeoutMs: 5000 } }));
       await stream.send.finish();
       stream = await connection.acceptBi();

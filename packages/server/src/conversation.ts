@@ -55,8 +55,15 @@ export class Conversations {
     if (thread.workspaceState === "available") return;
     if (thread.workspaceState === "releasing") throw new Error("thread workspace is releasing");
     try {
-      await this.runner(id).allocateWorkspace();
-      this.registry.markWorkspaceAvailable(id);
+      const project = this.registry.getProject(thread.projectId);
+      const primary = project?.repositories.toSorted((a, b) => a.position - b.position)[0];
+      const repository = primary?.status === "ready" && primary.resolvedBase
+        ? { url: primary.url, branch: primary.resolvedBase }
+        : undefined;
+      const workspace = await this.runner(id).allocateWorkspace(repository);
+      this.registry.markWorkspaceAvailable(id, workspace.baseRemote && workspace.baseRef && workspace.baseOid
+        ? { remote: workspace.baseRemote, ref: workspace.baseRef, oid: workspace.baseOid }
+        : null);
     } catch (error) {
       const message = `workspace allocation failed: ${error instanceof Error ? error.message : String(error)}`;
       this.registry.markWorkspaceFailed(id, message);

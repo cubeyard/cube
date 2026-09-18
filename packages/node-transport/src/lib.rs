@@ -32,6 +32,8 @@ pub enum Request {
     WorkspaceAllocate {
         #[serde(rename = "threadId")]
         thread_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repository: Option<runner::RepositorySource>,
     },
     #[serde(rename = "workspace.release")]
     WorkspaceRelease {
@@ -312,6 +314,7 @@ fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>)
                     "node.status",
                     "environment.inspect",
                     "workspace.allocate",
+                    "workspace.fresh-base",
                     "workspace.release",
                     "exec.start",
                     "operation.get",
@@ -331,7 +334,12 @@ fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>)
         _ => None,
     }
     .filter(|id| runner::valid_id(id));
-    let mutation = matches!(query, Request::ExecStart { .. });
+    let mutation = matches!(
+        query,
+        Request::ExecStart { .. }
+            | Request::WorkspaceAllocate { .. }
+            | Request::WorkspaceRelease { .. }
+    );
     let result = match query {
         Request::Status => runner.status().map(|status| Response::Status {
             node_id: node_id.into(),
@@ -347,8 +355,11 @@ fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>)
                 binding: installation.binding.clone(),
                 state: "ready".into(),
             }),
-        Request::WorkspaceAllocate { thread_id } => runner
-            .allocate(&thread_id)
+        Request::WorkspaceAllocate {
+            thread_id,
+            repository,
+        } => runner
+            .allocate(&thread_id, repository.as_ref())
             .map(|workspace| Response::Workspace { workspace }),
         Request::WorkspaceRelease { thread_id } => runner
             .release(&thread_id)
@@ -376,6 +387,13 @@ fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>)
             Response::Error {
                 code: error.0.into(),
                 message: "runner request rejected".into(),
+                completion_unknown: false,
+                operation_id: operation_id.clone(),
+            }
+        } else if let Some(error) = error.downcast_ref::<runner::RunnerErrorDetail>() {
+            Response::Error {
+                code: error.0.into(),
+                message: error.1.clone(),
                 completion_unknown: false,
                 operation_id: operation_id.clone(),
             }

@@ -18,6 +18,8 @@ assert.ok(fs.existsSync(binary), "build cube-runner first; no simulated success 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-real-node-adapter-"));
 const children = new Set<ChildProcess>();
 const cli = (args: string[], input?: string): string => execFileSync(binary, args, { encoding: "utf8", input, timeout: 30000, maxBuffer: 65537, env: { PATH: "/usr/bin:/bin" } });
+const git = (cwd: string, args: string[]): string => execFileSync("git", ["-c", "user.name=Cube Test", "-c", "user.email=cube@example.invalid", "-c", "commit.gpgsign=false", "-C", cwd, ...args],
+  { encoding: "utf8", timeout: 30000, env: { PATH: process.env.PATH } }).trim();
 const code = (expected: string, unknown = false) => (error: unknown) => error instanceof IrohNodeError && error.code === expected && error.completionUnknown === unknown;
 async function stop(child: ChildProcess) {
   if (child.exitCode === null && child.signalCode === null) {
@@ -59,6 +61,13 @@ try {
     const intents = path.join(directory, "intents");
     fs.mkdirSync(workspace);
     fs.mkdirSync(intents, { mode: 0o700 });
+    git(workspace, ["init", "-q", "--initial-branch=develop"]);
+    fs.writeFileSync(path.join(workspace, "remote-base"), "fresh base\n");
+    git(workspace, ["add", "remote-base"]);
+    git(workspace, ["commit", "-qm", "remote base"]);
+    const remote = path.join(directory, "remote.git");
+    git(workspace, ["clone", "--bare", ".", remote]);
+    git(workspace, ["remote", "add", "origin", remote]);
     const key = path.join(directory, "node.key");
     const controlKey = path.join(directory, "control.key");
     const serverPeer: string = JSON.parse(cli(["keygen", "--key", key])).peerId;

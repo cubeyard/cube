@@ -22,7 +22,9 @@ try {
   assert.deepEqual(registry.createThread("project", "request", model, "one"), thread);
   assert.throws(() => registry.createThread("project", "request", model, "two"), /conflicts/);
   assert.equal(registry.initialPrompt(thread.id), "one");
-  registry.markWorkspaceAvailable(thread.id);
+  const base = { remote: "https://github.com/example/project.git", ref: "refs/heads/develop", oid: "a".repeat(40) };
+  registry.markWorkspaceAvailable(thread.id, base);
+  assert.deepEqual(registry.getThread(thread.id)?.workspaceBase, base, "workspace base survives host restart/recovery");
   registry.beginRelease(thread.id);
   registry.finishRelease(thread.id);
   assert.equal(registry.availableRunners("project").length, 1, "release returns runner capacity");

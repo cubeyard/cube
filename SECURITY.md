@@ -42,9 +42,13 @@ preserve the external state and credential directories, but only the exact
 state-schema/rollback contract in a signed manifest is supported. Runner
 software is outside this update mechanism.
 
-The trusted runner is not a sandbox. Its dedicated unprivileged
-account is an explicit trust boundary and must carry no control-plane, provider,
-Git, SSH, or cloud credentials. Cube does not enforce trusted-runner egress;
+The trusted runner is not a sandbox. Its dedicated unprivileged account is an
+explicit trust boundary and must carry no control-plane, provider, cloud or
+unrelated credentials. A private repository necessarily requires a
+repository-scoped, preferably read-only Git credential or deploy key in that
+account so allocation can fetch a fresh base. Agent commands run as the same UID
+and can access that credential; Cube does not claim otherwise. Cube does not
+enforce trusted-runner egress;
 operators must enforce network policy at the OS/network layer. See the
 [trusted-runner security and operations runbook](docs/trusted-runner-operations.md).
 Workspace-relative cwd validation prevents traversal and symlink races on both
@@ -53,6 +57,11 @@ Per-thread Git worktrees or copied directories reduce accidental workspace
 collisions only. They do not prevent a command from reading or modifying another
 workspace through an absolute path. Container/VM or native process isolation is
 separate future work.
+Fresh-base fetches use validated remote/ref inputs, a runner-owned bare control
+repository and an exact fetched commit OID. They do not checkout or rewrite the
+operator's template worktree. Fetch failures fail closed rather than using stale
+template state. This is workspace freshness and collision isolation, not
+sandboxing or protection from malicious same-UID Git configuration.
 Process-group cancellation is not a cgroup: especially on macOS, a hostile
 command can deliberately create a new session and escape descendant cleanup.
 

@@ -500,6 +500,10 @@ header .spacer { margin-left: auto; }
   letter-spacing: 0.05em; text-decoration: none; white-space: nowrap;
 }
 .strip-project:hover { color: var(--signal); }
+.strip-base {
+  min-width: 0; max-width: 14rem; overflow: hidden; text-overflow: ellipsis;
+  color: var(--ink-3); font: 10px var(--font-mono); white-space: nowrap;
+}
 
 .strip-model {
   position: relative; display: inline-flex; align-items: center;

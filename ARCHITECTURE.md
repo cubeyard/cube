@@ -71,9 +71,13 @@ A runner has one permanent node/environment admission and one operator-prepared
 repository template. It admits one active thread workspace at a time. Cubed
 persists `available/allocating/busy/releasing/failed`; the runner journal persists
 the physical allocation and reconciles interrupted transitions without deleting
-the tree. New Git repositories use detached worktrees. Non-Git templates use a
-copy fallback. Archive releases logical capacity; clean Git worktrees still at
-the template HEAD are removed, while changed or independently committed
+the tree. New Git repositories fetch the primary repository's checked branch
+into a runner-owned bare control repository, journal the remote/ref/exact OID,
+and create detached worktrees from that OID. The template branch, HEAD, index,
+and working tree are not used as the base or mutated. Fetch/auth/network errors
+fail closed; there is no stale-template fallback. Non-Git templates use a copy
+fallback. Archive releases logical capacity; clean Git worktrees still at
+their journaled base OID are removed, while changed or independently committed
 worktrees and fallback copies are retained under runner state.
 Registry v100 is upgraded in place; existing bound threads continue on their
 original workspace. There is no relocation, automatic remote provisioning or

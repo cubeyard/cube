@@ -20,9 +20,12 @@ cross-platform binaries. Linux and macOS each require release acceptance.
 
 The runner is trusted and **not sandboxed**. Agent commands run as the dedicated
 runner account and can read, change, execute, or delete anything that user can
-access. Give that account no control-plane, provider, GitHub, SSH, cloud or login
-credentials, sudo, or privileged groups. Service-manager restrictions are host
-hygiene, not an adversarial same-UID filesystem boundary.
+access. Give that account no control-plane, provider, cloud, unrelated repository
+or login credentials, sudo, or privileged groups. A private repository needs a
+repository-scoped read credential/deploy key in this account for fresh-base
+fetches; agent commands can read or use it because they share the UID.
+Service-manager restrictions are host hygiene, not an adversarial same-UID
+filesystem boundary.
 
 Linux validates cwd with `openat2` using `RESOLVE_BENEATH`,
 `RESOLVE_NO_SYMLINKS`, and `RESOLVE_NO_MAGICLINKS`. macOS instead walks every
@@ -132,7 +135,15 @@ node scripts/enroll-runner.ts \
 Enrollment authenticates the full binding and pins the config hash. It never
 executes work. Existing IDs cannot be adopted or rebound. Prepare the repository
 template before enrollment: host repository checks do not transfer files to a
-runner. The next new thread leases a derived workspace; archive returns capacity.
+runner. Configure non-interactive fetch access in the runner's actual service
+environment before enrollment. For private GitHub HTTPS, install `gh` for this
+account and run `gh auth login` and `gh auth setup-git`, or configure another
+credential helper; SSH uses a batch-capable key. Prefer a read-only deploy
+credential scoped to this repository. A service must use the same `HOME` and
+helper files as this setup. Missing `gh`/helper/key, denied access, an unreachable
+remote, or a missing branch fails allocation visibly; Cube never falls back to
+the template's stale HEAD. The next new thread leases a derived workspace;
+archive returns capacity.
 No restart is needed after enrollment. Registry v100 upgrades in place; older
 execution stacks are not migrated.
 

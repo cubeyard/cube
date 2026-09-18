@@ -30,10 +30,15 @@ owns the product. The user-facing unit is a thread.
 ## Capabilities and Constraints
 
 Projects retain repository configuration and host-side access checks. A new
-thread leases one available enrolled runner and gets a separate workspace; an
+thread leases one available enrolled runner and gets a separate workspace based
+on a newly fetched, exact primary-repository branch tip; base branch/OID and
+allocation failures remain visible. Git allocation does not silently use an
+offline or stale template. An
 idle archived thread returns that lease. The thread supports streaming chat,
-model choice, bounded shell tools, stop, rename and archive. Provider and GitHub
-authentication remain host capabilities. Dirty workspaces are retained.
+model choice, bounded shell tools, stop, rename and archive. Provider auth and
+project repository checks remain host capabilities; private fresh-base fetches
+use explicitly configured runner-account Git authentication. Dirty workspaces
+are retained.
 
 Workspace separation prevents accidental cross-thread collisions; it is not a
 security or process sandbox. Remote workspace transfer, service portals, authenticated Git writes,
