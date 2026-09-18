@@ -190,13 +190,13 @@
     : dirty ? "save your changes first"
     : checking || project.status === "checking" ? "checking the repositories…"
     : project.status === "error" ? "new thread waits for a passing check"
-    : !project.availableRunnerCount ? "register an unused trusted runner first"
+    : !project.availableRunnerCount ? "the global runner pool is full"
     : null,
   );
-  const deleteDisabled = $derived(!project || project.runnerCount > 0 || project.status === "checking" || deleting);
+  const deleteDisabled = $derived(!project || project.retainedThreadCount > 0 || project.status === "checking" || deleting);
   const deleteReason = $derived(
     !project || !deleteDisabled || deleting ? null
-    : project.runnerCount > 0 ? "projects with registered runners are retained"
+    : project.retainedThreadCount > 0 ? "projects with retained thread history are retained"
     : "wait for the check to finish",
   );
 
@@ -362,7 +362,23 @@
 
     </section>
 
-    <p class="config-note">Prepare the workspace on a trusted runner and register it for this project before starting a thread. Commands run with that account’s permissions, without sandboxing.</p>
+    <p class="config-note">ready projects share one global trusted-runner pool. repository URLs and checked commit IDs are pinned per allocation. commands run with the selected runner account’s permissions, without sandboxing.</p>
+
+    {#if project}
+      <section aria-label="global runner pool">
+        <p class="silk">global runner pool · {project.availableRunnerCount} available</p>
+        <div class="well">
+          {#each project.runners as runner (runner.id)}
+            <div class="module">
+              <div class="module-face">
+                <span class="lamp" class:on-green={runner.state === "available"} class:on-amber={["allocating", "busy", "releasing"].includes(runner.state)} class:blink={["allocating", "busy", "releasing"].includes(runner.state)} class:on-red={runner.state === "failed"} aria-hidden="true"></span>
+                <span class="module-text"><span class="module-title">{runner.nodeId}</span><span class="module-meta">{runner.state}{runner.projectId ? ` · ${runner.projectName ?? runner.projectId}` : " · unallocated"}</span></span>
+              </div>
+            </div>
+          {/each}
+        </div>
+      </section>
+    {/if}
 
     <div class="project-actions">
       <button class="key primary" onclick={save} disabled={saving || !dirty}>

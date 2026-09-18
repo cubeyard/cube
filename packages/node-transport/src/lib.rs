@@ -35,6 +35,12 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repository: Option<runner::RepositorySource>,
     },
+    #[serde(rename = "workspace.allocate.v2")]
+    WorkspaceAllocateV2 {
+        #[serde(rename = "threadId")]
+        thread_id: String,
+        allocation: runner::WorkspaceAllocation,
+    },
     #[serde(rename = "workspace.release")]
     WorkspaceRelease {
         #[serde(rename = "threadId")]
@@ -315,6 +321,7 @@ fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>)
                     "environment.inspect",
                     "workspace.allocate",
                     "workspace.fresh-base",
+                    "workspace.allocate.v2",
                     "workspace.release",
                     "exec.start",
                     "operation.get",
@@ -338,6 +345,7 @@ fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>)
         query,
         Request::ExecStart { .. }
             | Request::WorkspaceAllocate { .. }
+            | Request::WorkspaceAllocateV2 { .. }
             | Request::WorkspaceRelease { .. }
     );
     let result = match query {
@@ -360,6 +368,12 @@ fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>)
             repository,
         } => runner
             .allocate(&thread_id, repository.as_ref())
+            .map(|workspace| Response::Workspace { workspace }),
+        Request::WorkspaceAllocateV2 {
+            thread_id,
+            allocation,
+        } => runner
+            .allocate_with(&thread_id, &allocation)
             .map(|workspace| Response::Workspace { workspace }),
         Request::WorkspaceRelease { thread_id } => runner
             .release(&thread_id)

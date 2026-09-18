@@ -157,6 +157,67 @@ pub struct RepositorySource {
     pub branch: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceRepository {
+    pub url: String,
+    pub base: String,
+    pub base_oid: String,
+    pub checkout_name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceAllocation {
+    pub project_id: String,
+    pub project_revision: u64,
+    pub repositories: Vec<WorkspaceRepository>,
+}
+
+impl WorkspaceAllocation {
+    fn validate(&self) -> Result<()> {
+        ensure!(valid_id(&self.project_id), RunnerError("INVALID_REQUEST"));
+        ensure!(
+            self.repositories.len() <= 20,
+            RunnerError("INVALID_REQUEST")
+        );
+        for (position, repository) in self.repositories.iter().enumerate() {
+            ensure!(
+                !repository.url.is_empty()
+                    && repository.url.len() <= 2048
+                    && !repository.url.starts_with('-')
+                    && !repository.url.contains('\0')
+                    && !repository.base.is_empty()
+                    && repository.base.len() <= 255
+                    && matches!(repository.base_oid.len(), 40 | 64)
+                    && repository
+                        .base_oid
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit())
+                    && valid_checkout_name(&repository.checkout_name)
+                    && (position != 0 || repository.checkout_name == "workspace"),
+                RunnerError("INVALID_REQUEST")
+            );
+            ensure!(
+                !self.repositories[..position]
+                    .iter()
+                    .any(|prior| prior.checkout_name == repository.checkout_name),
+                RunnerError("INVALID_REQUEST")
+            );
+        }
+        Ok(())
+    }
+}
+
+fn valid_checkout_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
 #[derive(Debug)]
 pub struct RunnerError(pub &'static str);
 impl std::fmt::Display for RunnerError {
@@ -408,7 +469,8 @@ impl Runner {
             CREATE TABLE installation(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL);
             CREATE TABLE operation(id TEXT PRIMARY KEY, request TEXT NOT NULL, hash TEXT NOT NULL, state TEXT NOT NULL);
             CREATE TABLE workspace(thread_id TEXT PRIMARY KEY, state TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
-              kind TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL, error TEXT);
+              kind TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL, error TEXT,
+              allocation TEXT NOT NULL DEFAULT '{}');
             CREATE TABLE workspace_base(thread_id TEXT PRIMARY KEY REFERENCES workspace(thread_id),
               remote TEXT NOT NULL, ref_name TEXT NOT NULL, oid TEXT);
             CREATE TRIGGER retain_installation_insert BEFORE INSERT ON installation WHEN EXISTS(SELECT 1 FROM installation) BEGIN SELECT RAISE(ABORT, 'immutable installation'); END;
@@ -486,9 +548,21 @@ impl Runner {
             ],
         )?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS workspace(thread_id TEXT PRIMARY KEY, state TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
-            kind TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL, error TEXT);
+            kind TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL, error TEXT, allocation TEXT NOT NULL DEFAULT '{}');
             CREATE TABLE IF NOT EXISTS workspace_base(thread_id TEXT PRIMARY KEY REFERENCES workspace(thread_id),
               remote TEXT NOT NULL, ref_name TEXT NOT NULL, oid TEXT);")?;
+        let has_allocation = db
+            .prepare("PRAGMA table_info(workspace)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|column| column == "allocation");
+        if !has_allocation {
+            db.execute(
+                "ALTER TABLE workspace ADD COLUMN allocation TEXT NOT NULL DEFAULT '{}'",
+                [],
+            )?;
+        }
         let recovery_quarantine = state.join("restore-quarantine");
         let quarantined = recovery_quarantine.exists();
         let workspace_root = state.join("workspaces");
@@ -583,37 +657,149 @@ impl Runner {
         thread_id: &str,
         repository: Option<&RepositorySource>,
     ) -> Result<WorkspaceStatus> {
+        if let Some((kind, base_remote, base_ref, base_oid)) = self.journal.lock().unwrap().db.query_row(
+            "SELECT w.kind,b.remote,b.ref_name,b.oid FROM workspace w LEFT JOIN workspace_base b USING(thread_id) WHERE w.thread_id=?1 AND w.state='available'",
+            [thread_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional()? {
+            return Ok(WorkspaceStatus { thread_id: thread_id.into(), state: "available".into(), kind, retained: false, base_remote, base_ref, base_oid });
+        }
+        if let Some(error) = self
+            .journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row(
+                "SELECT error FROM workspace WHERE thread_id=?1 AND state='failed'",
+                [thread_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+        {
+            return Err(RunnerErrorDetail("IO_ERROR", error).into());
+        }
+        let discovered = if repository.is_none() {
+            discover_template_repository(&self.installation.workspace)?
+        } else {
+            None
+        };
+        if let Some(repository) = repository.or(discovered.as_ref()) {
+            let base = if repository.branch.starts_with("refs/heads/") {
+                repository.branch.clone()
+            } else {
+                format!("refs/heads/{}", repository.branch)
+            };
+            let (_, base_oid) = match resolve_repository(repository) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    let message = allocation_error(&error, Some(&repository.url));
+                    let destination = self.workspace_root.join(thread_id);
+                    let journal = self.journal.lock().unwrap();
+                    journal.db.execute(
+                        "INSERT INTO workspace(thread_id,state,path,kind,device,inode,error,allocation) VALUES(?1,'failed',?2,'pending',0,0,?3,'{}')",
+                        params![thread_id, destination.to_string_lossy(), message],
+                    )?;
+                    journal.db.execute(
+                        "INSERT INTO workspace_base VALUES(?1,?2,?3,NULL)",
+                        params![thread_id, repository.url, base],
+                    )?;
+                    return Err(RunnerErrorDetail("IO_ERROR", message).into());
+                }
+            };
+            let result = self.allocate_inner(
+                thread_id,
+                &WorkspaceAllocation {
+                    project_id: "legacy".into(),
+                    project_revision: 0,
+                    repositories: vec![WorkspaceRepository {
+                        url: repository.url.clone(),
+                        base: base.clone(),
+                        base_oid: base_oid.clone(),
+                        checkout_name: "workspace".into(),
+                    }],
+                },
+                true,
+                false,
+            )?;
+            self.journal.lock().unwrap().db.execute(
+                "INSERT INTO workspace_base VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(thread_id) DO UPDATE SET remote=excluded.remote,ref_name=excluded.ref_name,oid=excluded.oid",
+                params![thread_id, repository.url, base, base_oid],
+            )?;
+            return Ok(result);
+        }
+        self.allocate_inner(
+            thread_id,
+            &WorkspaceAllocation {
+                project_id: "legacy".into(),
+                project_revision: 0,
+                repositories: Vec::new(),
+            },
+            true,
+            true,
+        )
+    }
+
+    pub fn allocate_with(
+        &self,
+        thread_id: &str,
+        allocation: &WorkspaceAllocation,
+    ) -> Result<WorkspaceStatus> {
+        self.allocate_inner(thread_id, allocation, false, false)
+    }
+
+    fn allocate_inner(
+        &self,
+        thread_id: &str,
+        allocation: &WorkspaceAllocation,
+        legacy_layout: bool,
+        legacy_template: bool,
+    ) -> Result<WorkspaceStatus> {
         ensure!(valid_id(thread_id), RunnerError("INVALID_REQUEST"));
+        allocation.validate()?;
         ensure!(
             thread_id != self.installation.binding.thread_id,
             RunnerError("CONFLICT")
         );
         let journal = self.journal.lock().unwrap();
-        if let Some((state, kind, error, base_remote, base_ref, base_oid)) = journal
+        let allocation_document = serde_json::to_string(allocation)?;
+        if let Some((state, kind, existing_allocation)) = journal
             .db
             .query_row(
-                "SELECT w.state,w.kind,w.error,b.remote,b.ref_name,b.oid FROM workspace w LEFT JOIN workspace_base b USING(thread_id) WHERE w.thread_id=?1",
+                "SELECT state,kind,allocation FROM workspace WHERE thread_id=?1",
                 [thread_id],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()?
         {
+            ensure!(
+                existing_allocation == allocation_document,
+                RunnerError("CONFLICT")
+            );
             return match state.as_str() {
                 "available" => Ok(WorkspaceStatus {
                     thread_id: thread_id.into(),
                     state,
                     kind,
                     retained: false,
-                    base_remote,
-                    base_ref,
-                    base_oid,
+                    base_remote: allocation.repositories.first().map(|repo| repo.url.clone()),
+                    base_ref: allocation
+                        .repositories
+                        .first()
+                        .map(|repo| full_branch_ref(&repo.base)),
+                    base_oid: allocation
+                        .repositories
+                        .first()
+                        .map(|repo| repo.base_oid.clone()),
                 }),
                 "released" => reject("CONFLICT"),
-                "failed" => Err(RunnerErrorDetail(
-                    "IO_ERROR",
-                    error.unwrap_or_else(|| "workspace allocation previously failed".into()),
-                )
-                .into()),
                 _ => reject("IO_ERROR"),
             };
         }
@@ -631,65 +817,54 @@ impl Runner {
             directory_bytes(&self.workspace_root)? < MAX_WORKSPACE_BYTES,
             RunnerError("CAPACITY_EXCEEDED")
         );
-        let destination = self.workspace_root.join(thread_id);
-        ensure!(!destination.exists(), RunnerError("CONFLICT"));
+        let allocation_root = self.workspace_root.join(thread_id);
+        let destination = if legacy_layout {
+            allocation_root.clone()
+        } else {
+            allocation_root.join("workspace")
+        };
+        ensure!(!allocation_root.exists(), RunnerError("CONFLICT"));
         journal.db.execute(
-            "INSERT INTO workspace VALUES(?1,'allocating',?2,'pending',0,0,NULL)",
-            params![thread_id, destination.to_string_lossy()],
+            "INSERT INTO workspace(thread_id,state,path,kind,device,inode,error,allocation) VALUES(?1,'allocating',?2,'pending',0,0,NULL,?3)",
+            params![thread_id, destination.to_string_lossy(), allocation_document],
         )?;
         drop(journal);
 
-        let provisioned = (|| -> Result<(&'static str, Option<GitBase>)> {
-            let base = git_worktree(
-                &self.installation.workspace,
-                &self.workspace_root,
-                &destination,
-                thread_id,
-                repository,
-                |remote, ref_name, oid| {
-                    self.journal.lock().unwrap().db.execute(
-                        "INSERT INTO workspace_base VALUES(?1,?2,?3,?4)
-                         ON CONFLICT(thread_id) DO UPDATE SET remote=excluded.remote,ref_name=excluded.ref_name,oid=excluded.oid",
-                        params![thread_id, remote, ref_name, oid],
-                    )?;
-                    Ok(())
-                },
-            )?;
-            let kind = if base.is_some() {
+        let provisioned = (|| -> Result<&'static str> {
+            let kind = if legacy_template {
+                if git_worktree(&self.installation.workspace, &destination)? {
+                    "git"
+                } else {
+                    copy_directory(&self.installation.workspace, &destination)?;
+                    "copy"
+                }
+            } else if allocation.repositories.is_empty() {
+                let mut builder = fs::DirBuilder::new();
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700).create(&allocation_root)?;
+                builder.mode(0o700).create(&destination)?;
+                "copy"
+            } else if legacy_layout {
+                provision_repository(&destination, &allocation.repositories[0])?;
                 "git"
             } else {
-                copy_directory(&self.installation.workspace, &destination)?;
-                "copy"
+                provision_repositories(&allocation_root, &allocation.repositories)?;
+                "git"
             };
             let metadata = fs::metadata(&destination)?;
             let journal = self.journal.lock().unwrap();
             journal.db.execute("UPDATE workspace SET state='available',kind=?1,device=?2,inode=?3 WHERE thread_id=?4 AND state='allocating'",
                 params![kind, i64::try_from(metadata.dev())?, i64::try_from(metadata.ino())?, thread_id])?;
-            Ok((kind, base))
+            Ok(kind)
         })();
-        let (kind, base) = match provisioned {
-            Ok(value) => value,
+        let kind = match provisioned {
+            Ok(kind) => kind,
             Err(error) => {
-                let journal = self.journal.lock().unwrap();
-                let discovered_remote = journal
-                    .db
-                    .query_row(
-                        "SELECT remote FROM workspace_base WHERE thread_id=?1",
-                        [thread_id],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?;
-                let message = allocation_error(
-                    &error,
-                    repository
-                        .map(|source| source.url.as_str())
-                        .or(discovered_remote.as_deref()),
-                );
-                journal.db.execute(
+                self.journal.lock().unwrap().db.execute(
                     "UPDATE workspace SET state='failed',error=?1 WHERE thread_id=?2",
-                    params![message, thread_id],
+                    params![format!("workspace allocation failed: {error}"), thread_id],
                 )?;
-                return Err(RunnerErrorDetail("IO_ERROR", message).into());
+                return reject("IO_ERROR");
             }
         };
         File::open(&self.workspace_root)?.sync_all()?;
@@ -698,9 +873,15 @@ impl Runner {
             state: "available".into(),
             kind: kind.into(),
             retained: false,
-            base_remote: base.as_ref().map(|base| base.remote.clone()),
-            base_ref: base.as_ref().map(|base| base.ref_name.clone()),
-            base_oid: base.map(|base| base.oid),
+            base_remote: allocation.repositories.first().map(|repo| repo.url.clone()),
+            base_ref: allocation
+                .repositories
+                .first()
+                .map(|repo| full_branch_ref(&repo.base)),
+            base_oid: allocation
+                .repositories
+                .first()
+                .map(|repo| repo.base_oid.clone()),
         })
     }
 
@@ -718,23 +899,41 @@ impl Runner {
         let row = journal
             .db
             .query_row(
-                "SELECT w.state,w.path,w.kind,b.remote,b.ref_name,b.oid FROM workspace w LEFT JOIN workspace_base b USING(thread_id) WHERE w.thread_id=?1",
+                "SELECT state,path,kind,allocation,device,inode FROM workspace WHERE thread_id=?1",
                 [thread_id],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         PathBuf::from(r.get::<_, String>(1)?),
                         r.get::<_, String>(2)?,
-                        r.get::<_, Option<String>>(3)?,
-                        r.get::<_, Option<String>>(4)?,
-                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, i64>(4)? as u64,
+                        r.get::<_, i64>(5)? as u64,
                     ))
                 },
             )
             .optional()?;
-        let Some((state, workspace, kind, base_remote, base_ref, base_oid)) = row else {
+        let Some((state, workspace, kind, allocation, device, inode)) = row else {
             return reject("ENVIRONMENT_MISSING");
         };
+        let allocation_record: WorkspaceAllocation =
+            serde_json::from_str(&allocation).unwrap_or(WorkspaceAllocation {
+                project_id: "legacy".into(),
+                project_revision: 0,
+                repositories: Vec::new(),
+            });
+        let base_remote = allocation_record
+            .repositories
+            .first()
+            .map(|repo| repo.url.clone());
+        let base_ref = allocation_record
+            .repositories
+            .first()
+            .map(|repo| full_branch_ref(&repo.base));
+        let base_oid = allocation_record
+            .repositories
+            .first()
+            .map(|repo| repo.base_oid.clone());
         if state == "released" {
             return Ok(WorkspaceStatus {
                 thread_id: thread_id.into(),
@@ -767,13 +966,55 @@ impl Runner {
             });
         }
         ensure!(state == "available", RunnerError("IO_ERROR"));
+        let metadata = fs::symlink_metadata(&workspace);
+        if !matches!(metadata, Ok(ref metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() && metadata.dev() == device && metadata.ino() == inode)
+        {
+            journal.db.execute(
+                "UPDATE workspace SET state='failed',error='workspace identity changed; retained for inspection' WHERE thread_id=?1",
+                [thread_id],
+            )?;
+            return reject("ENVIRONMENT_MISSING");
+        }
         journal.db.execute(
             "UPDATE workspace SET state='releasing' WHERE thread_id=?1",
             [thread_id],
         )?;
         drop(journal);
 
-        let retained = if kind == "git" {
+        let allocation: WorkspaceAllocation =
+            serde_json::from_str(&allocation).unwrap_or(WorkspaceAllocation {
+                project_id: self.installation.binding.thread_id.clone(),
+                project_revision: 0,
+                repositories: Vec::new(),
+            });
+        let retained = if kind == "git" && !allocation.repositories.is_empty() {
+            let clean = allocation
+                .repositories
+                .iter()
+                .enumerate()
+                .all(|(position, repository)| {
+                    let checkout = if position == 0 {
+                        workspace.clone()
+                    } else {
+                        workspace
+                            .parent()
+                            .unwrap()
+                            .join("repos")
+                            .join(&repository.checkout_name)
+                    };
+                    clean_at_oid(&checkout, &repository.base_oid)
+                });
+            if clean {
+                if allocation.project_id == "legacy" {
+                    fs::remove_dir_all(&workspace)?;
+                } else {
+                    fs::remove_dir_all(workspace.parent().unwrap())?;
+                }
+                false
+            } else {
+                true
+            }
+        } else if kind == "git" {
             let status = StdCommand::new("git")
                 .args(["-C"])
                 .arg(&workspace)
@@ -784,35 +1025,24 @@ impl Runner {
                 .arg(&workspace)
                 .args(["rev-parse", "HEAD"])
                 .output()?;
-            let expected_head = if let Some(oid) = &base_oid {
-                format!("{oid}\n").into_bytes()
-            } else {
-                let output = StdCommand::new("git")
-                    .args(["-C"])
-                    .arg(&self.installation.workspace)
-                    .args(["rev-parse", "HEAD"])
-                    .output()?;
-                if !output.status.success() || !output.stderr.is_empty() {
-                    return self.fail_release(thread_id, "could not inspect git template");
-                }
-                output.stdout
-            };
+            let template_head = StdCommand::new("git")
+                .args(["-C"])
+                .arg(&self.installation.workspace)
+                .args(["rev-parse", "HEAD"])
+                .output()?;
             if !status.status.success()
                 || !status.stderr.is_empty()
                 || !workspace_head.status.success()
                 || !workspace_head.stderr.is_empty()
+                || !template_head.status.success()
+                || !template_head.stderr.is_empty()
             {
                 return self.fail_release(thread_id, "could not inspect git workspace");
             }
-            if status.stdout.is_empty() && workspace_head.stdout == expected_head {
-                let worktree_owner = if base_oid.is_some() {
-                    self.workspace_root.join("repository.git")
-                } else {
-                    self.installation.workspace.clone()
-                };
+            if status.stdout.is_empty() && workspace_head.stdout == template_head.stdout {
                 let status = StdCommand::new("git")
-                    .arg("--git-dir")
-                    .arg(worktree_owner)
+                    .args(["-C"])
+                    .arg(&self.installation.workspace)
                     .args(["worktree", "remove", "--"])
                     .arg(&workspace)
                     .status()?;
@@ -942,6 +1172,20 @@ impl Runner {
         }
     }
 
+    fn workspace_path(&self, thread_id: &str) -> Result<PathBuf> {
+        self.journal
+            .lock()
+            .unwrap()
+            .db
+            .query_row(
+                "SELECT path FROM workspace WHERE thread_id=?1 AND state='available'",
+                [thread_id],
+                |row| row.get::<_, String>(0).map(PathBuf::from),
+            )
+            .optional()?
+            .ok_or_else(|| RunnerError("ENVIRONMENT_MISSING").into())
+    }
+
     pub fn get(&self, env: u64, id: &str) -> Result<Operation> {
         self.check_env(env)?;
         ensure!(valid_id(id), RunnerError("INVALID_REQUEST"));
@@ -977,6 +1221,10 @@ impl Runner {
         // Resolve the descriptor before taking the journal mutex; allocated
         // workspace identity is itself stored in that journal.
         let cwd = self.cwd(thread_id, &spec.guest_cwd)?;
+        let workspace = thread_id.map_or_else(
+            || Ok(self.installation.workspace.clone()),
+            |thread_id| self.workspace_path(thread_id),
+        )?;
         // A typed, fixed-field serialization canonicalizes JSON field order.
         let request = if let Some(thread_id) = thread_id {
             serde_json::to_string(&("exec.start", &self.installation.binding, thread_id, &spec))?
@@ -1032,10 +1280,6 @@ impl Runner {
         journal.active_thread = thread_id.map(str::to_owned);
         let runner = Arc::clone(self);
         let id = id.to_owned();
-        let workspace = thread_id.map_or_else(
-            || runner.installation.workspace.clone(),
-            |thread_id| runner.workspace_root.join(thread_id),
-        );
         tokio::spawn(async move {
             let outcome = runner.run(&id, &spec, cwd, &workspace).await;
             let mut journal = runner.journal.lock().unwrap();
@@ -1127,177 +1371,42 @@ impl Runner {
     }
 }
 
-#[derive(Clone)]
-struct GitBase {
-    remote: String,
-    ref_name: String,
-    oid: String,
-}
-
-fn git_worktree(
-    source: &Path,
-    workspace_root: &Path,
-    destination: &Path,
-    thread_id: &str,
-    configured: Option<&RepositorySource>,
-    mut record_base: impl FnMut(&str, &str, Option<&str>) -> Result<()>,
-) -> Result<Option<GitBase>> {
-    let probe = StdCommand::new("git")
-        .args(["-C"])
-        .arg(source)
-        .args(["rev-parse", "--show-toplevel"])
-        .output();
-    let Ok(probe) = probe else {
-        return Ok(None);
-    };
-    if !probe.status.success() {
-        return Ok(None);
-    }
-    let top = PathBuf::from(String::from_utf8(probe.stdout)?.trim());
-    if fs::canonicalize(top)? != fs::canonicalize(source)? {
-        return Ok(None);
-    }
-    let (remote, branch) = if let Some(configured) = configured {
-        validate_remote_url(&configured.url)?;
-        validate_branch(&configured.branch)?;
-        (configured.url.clone(), configured.branch.clone())
-    } else {
-        discover_remote_default(source)?
-    };
-    let ref_name = format!("refs/heads/{branch}");
-    record_base(&remote, &ref_name, None)?;
-    let control = workspace_root.join("repository.git");
-    if control.exists() {
-        let metadata = fs::symlink_metadata(&control)?;
-        ensure!(
-            metadata.is_dir() && !metadata.file_type().is_symlink(),
-            "controlled git repository is not a directory"
-        );
-        ensure!(
-            git_text_bare(&control, &["rev-parse", "--is-bare-repository"])? == "true",
-            "controlled git repository is invalid"
-        );
-    } else {
-        let temporary = workspace_root.join(format!("repository.git.tmp-{thread_id}"));
-        if temporary.exists() {
-            fs::remove_dir_all(&temporary)?;
-        }
-        let output = StdCommand::new("git")
-            .args(["init", "--bare", "--"])
-            .arg(&temporary)
-            .output()?;
-        ensure!(
-            output.status.success(),
-            "could not initialize controlled git repository"
-        );
-        fs::rename(&temporary, &control)?;
-        File::open(workspace_root)?.sync_all()?;
-    }
-    let internal_ref = format!("refs/cube/bases/{thread_id}");
-    let fetch = git_network_command()
-        .arg("--git-dir")
-        .arg(&control)
-        .args([
-            "fetch",
-            "--no-tags",
-            "--force",
-            "--no-write-fetch-head",
-            "--",
-        ])
-        .arg(&remote)
-        .arg(format!("+{ref_name}:{internal_ref}"))
-        .output()?;
-    ensure!(
-        fetch.status.success(),
-        "git fetch failed: {}",
-        String::from_utf8_lossy(&fetch.stderr).trim()
-    );
-    let resolved = StdCommand::new("git")
-        .arg("--git-dir")
-        .arg(&control)
-        .args(["rev-parse", "--verify"])
-        .arg(format!("{internal_ref}^{{commit}}"))
-        .output()?;
-    ensure!(
-        resolved.status.success(),
-        "fetched branch did not resolve to a commit"
-    );
-    let oid = String::from_utf8(resolved.stdout)?.trim().to_owned();
-    ensure!(valid_oid(&oid), "fetch returned an invalid commit OID");
-    record_base(&remote, &ref_name, Some(&oid))?;
-    let output = StdCommand::new("git")
-        .arg("--git-dir")
-        .arg(&control)
-        .args(["worktree", "add", "--detach", "--"])
-        .arg(destination)
-        .arg(&oid)
-        .output()?;
-    ensure!(
-        output.status.success(),
-        "git worktree add failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    Ok(Some(GitBase {
-        remote,
-        ref_name,
-        oid,
-    }))
-}
-
-fn git_network_command() -> StdCommand {
+fn git_command() -> StdCommand {
     let mut command = StdCommand::new("git");
     command
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ALLOW_PROTOCOL", "file:https:ssh")
-        .env("LC_ALL", "C")
         .env(
             "GIT_SSH_COMMAND",
             std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "ssh -oBatchMode=yes".into()),
-        );
+        )
+        .env("GIT_ALLOW_PROTOCOL", "file:https:ssh")
+        .env("LC_ALL", "C");
     command
 }
 
-fn validate_branch(branch: &str) -> Result<()> {
-    ensure!(
-        !branch.is_empty()
-            && branch.len() <= 255
-            && !branch.starts_with('-')
-            && !branch.contains("..")
-            && !branch.contains("//")
-            && !branch.ends_with('/')
-            && !branch.ends_with('.')
-            && !branch.ends_with(".lock")
-            && branch
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte))
-            && branch
-                .split('/')
-                .all(|part| !part.is_empty() && !part.starts_with('.')),
-        "invalid remote branch"
-    );
-    Ok(())
+fn full_branch_ref(branch: &str) -> String {
+    if branch.starts_with("refs/heads/") {
+        branch.to_owned()
+    } else {
+        format!("refs/heads/{branch}")
+    }
 }
 
-fn validate_remote_url(url: &str) -> Result<()> {
+fn validate_repository(url: &str, branch: &str) -> Result<()> {
     ensure!(
         !url.is_empty()
             && url.len() <= 4096
             && !url.starts_with('-')
             && !url
                 .bytes()
-                .any(|byte| byte.is_ascii_whitespace() || byte == 0),
-        "invalid repository remote"
-    );
-    ensure!(
-        !url.starts_with("ext::") && !url.starts_with("http://"),
-        "unsupported repository remote"
-    );
-    ensure!(
-        url.starts_with("https://")
-            || url.starts_with("ssh://")
-            || url.starts_with("file://")
-            || Path::new(url).is_absolute()
-            || (url.contains('@') && url.contains(':')),
+                .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+            && !url.starts_with("ext::")
+            && !url.starts_with("http://")
+            && (url.starts_with("https://")
+                || url.starts_with("ssh://")
+                || url.starts_with("file://")
+                || Path::new(url).is_absolute()
+                || (url.contains('@') && url.contains(':'))),
         "unsupported repository remote"
     );
     ensure!(
@@ -1319,10 +1428,65 @@ fn validate_remote_url(url: &str) -> Result<()> {
                 .is_some_and(|(userinfo, _)| userinfo.contains(':')),
         "repository credentials must not be embedded in the URL"
     );
+    ensure!(
+        !branch.is_empty()
+            && branch.len() <= 255
+            && !branch.starts_with('-')
+            && !branch.contains("..")
+            && !branch.contains("//")
+            && !branch.ends_with('/')
+            && !branch.ends_with('.')
+            && !branch.ends_with(".lock")
+            && branch
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte))
+            && branch
+                .split('/')
+                .all(|part| !part.is_empty() && !part.starts_with('.')),
+        "invalid remote branch"
+    );
     Ok(())
 }
 
-fn discover_remote_default(source: &Path) -> Result<(String, String)> {
+fn resolve_repository(repository: &RepositorySource) -> Result<(String, String)> {
+    validate_repository(&repository.url, &repository.branch)?;
+    let base = if repository.branch.starts_with("refs/heads/") {
+        repository.branch.clone()
+    } else {
+        format!("refs/heads/{}", repository.branch)
+    };
+    let advertised = git_command()
+        .args(["ls-remote", "--exit-code", "--"])
+        .arg(&repository.url)
+        .arg(&base)
+        .output()?;
+    ensure!(
+        advertised.status.success(),
+        "could not resolve remote branch: {}",
+        String::from_utf8_lossy(&advertised.stderr).trim()
+    );
+    let oid = String::from_utf8(advertised.stdout)?
+        .split_whitespace()
+        .next()
+        .context("remote branch did not advertise a commit")?
+        .to_owned();
+    ensure!(
+        matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "remote branch advertised an invalid commit OID"
+    );
+    Ok((base, oid))
+}
+
+fn discover_template_repository(source: &Path) -> Result<Option<RepositorySource>> {
+    let probe = git_command()
+        .args(["-C"])
+        .arg(source)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output();
+    let Ok(probe) = probe else { return Ok(None) };
+    if !probe.status.success() {
+        return Ok(None);
+    }
     let remotes = git_text(source, &["remote"])?;
     let remotes: Vec<&str> = remotes.lines().filter(|line| !line.is_empty()).collect();
     ensure!(!remotes.is_empty(), "git template has no configured remote");
@@ -1350,8 +1514,8 @@ fn discover_remote_default(source: &Path) -> Result<(String, String)> {
         "invalid git remote name"
     );
     let url = git_text(source, &["remote", "get-url", remote])?;
-    validate_remote_url(&url)?;
-    let advertised = git_network_command()
+    validate_repository(&url, "main")?;
+    let advertised = git_command()
         .args(["ls-remote", "--symref", "--"])
         .arg(&url)
         .arg("HEAD")
@@ -1361,40 +1525,23 @@ fn discover_remote_default(source: &Path) -> Result<(String, String)> {
         "could not resolve remote default branch: {}",
         String::from_utf8_lossy(&advertised.stderr).trim()
     );
-    let stdout = String::from_utf8(advertised.stdout)?;
-    let branch = stdout
+    let output = String::from_utf8(advertised.stdout)?;
+    let branch = output
         .lines()
         .find_map(|line| {
             line.strip_prefix("ref: refs/heads/")?
                 .strip_suffix("\tHEAD")
         })
-        .context("remote has no resolvable default branch")?;
-    validate_branch(branch)?;
-    Ok((url, branch.to_owned()))
+        .context("remote has no resolvable default branch")?
+        .to_owned();
+    validate_repository(&url, &branch)?;
+    Ok(Some(RepositorySource { url, branch }))
 }
 
 fn git_text(source: &Path, args: &[&str]) -> Result<String> {
-    let output = StdCommand::new("git")
-        .args(["-C"])
-        .arg(source)
-        .args(args)
-        .output()?;
+    let output = git_command().args(["-C"]).arg(source).args(args).output()?;
     ensure!(output.status.success(), "git metadata lookup failed");
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
-}
-
-fn git_text_bare(repository: &Path, args: &[&str]) -> Result<String> {
-    let output = StdCommand::new("git")
-        .arg("--git-dir")
-        .arg(repository)
-        .args(args)
-        .output()?;
-    ensure!(output.status.success(), "git metadata lookup failed");
-    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
-}
-
-fn valid_oid(value: &str) -> bool {
-    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn allocation_error(error: &anyhow::Error, remote: Option<&str>) -> String {
@@ -1426,15 +1573,170 @@ fn allocation_error(error: &anyhow::Error, remote: Option<&str>) -> String {
     if lower.contains("couldn't find remote ref") || lower.contains("not our ref") {
         return "git fetch failed because the configured remote branch does not exist; no stale local fallback was used".into();
     }
-    if lower.starts_with("git fetch failed:") {
-        return "git fetch failed for the configured repository branch; check runner network, repository access and branch configuration — no stale local fallback was used".into();
-    }
     let safe: String = detail
         .chars()
         .filter(|character| !character.is_control() || *character == ' ')
         .take(160)
         .collect();
     format!("{safe}; no stale local fallback was used")
+}
+
+fn provision_repository(destination: &Path, repository: &WorkspaceRepository) -> Result<()> {
+    validate_repository(&repository.url, &repository.base)?;
+    let init = git_command()
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=",
+            "-c",
+            "init.templateDir=",
+            "init",
+            "--",
+        ])
+        .arg(destination)
+        .output()?;
+    ensure!(
+        init.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&init.stderr).trim()
+    );
+    let remote = git_command()
+        .args(["-C"])
+        .arg(destination)
+        .args(["remote", "add", "origin"])
+        .arg(&repository.url)
+        .output()?;
+    ensure!(
+        remote.status.success(),
+        "could not configure repository remote"
+    );
+    let ref_name = repository
+        .base
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&repository.base);
+    let fetch = git_command()
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=",
+            "-C",
+        ])
+        .arg(destination)
+        .args(["fetch", "--no-tags", "--", "origin"])
+        .arg(format!(
+            "+refs/heads/{ref_name}:refs/remotes/origin/{ref_name}"
+        ))
+        .output()?;
+    ensure!(
+        fetch.status.success(),
+        "git fetch failed: {}",
+        String::from_utf8_lossy(&fetch.stderr).trim()
+    );
+    let verify = git_command()
+        .args(["-C"])
+        .arg(destination)
+        .args(["cat-file", "-e"])
+        .arg(format!("{}^{{commit}}", repository.base_oid))
+        .output()?;
+    ensure!(
+        verify.status.success(),
+        "the immutable base commit is unavailable from the declared branch"
+    );
+    let reachable = git_command()
+        .args(["-C"])
+        .arg(destination)
+        .args(["merge-base", "--is-ancestor"])
+        .arg(&repository.base_oid)
+        .arg(format!("refs/remotes/origin/{ref_name}"))
+        .status()?;
+    ensure!(
+        reachable.success(),
+        "the immutable base commit is not reachable from the declared branch"
+    );
+    let checkout = git_command()
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=",
+            "-C",
+        ])
+        .arg(destination)
+        .args(["checkout", "--detach"])
+        .arg(&repository.base_oid)
+        .output()?;
+    ensure!(
+        checkout.status.success(),
+        "git checkout failed: {}",
+        String::from_utf8_lossy(&checkout.stderr).trim()
+    );
+    Ok(())
+}
+
+fn provision_repositories(root: &Path, repositories: &[WorkspaceRepository]) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    use std::os::unix::fs::DirBuilderExt;
+    builder.mode(0o700).create(root)?;
+    builder.mode(0o700).create(root.join("repos"))?;
+    for (position, repository) in repositories.iter().enumerate() {
+        let destination = if position == 0 {
+            root.join("workspace")
+        } else {
+            root.join("repos").join(&repository.checkout_name)
+        };
+        provision_repository(&destination, repository)?;
+    }
+    Ok(())
+}
+
+fn clean_at_oid(workspace: &Path, oid: &str) -> bool {
+    let status = git_command()
+        .args(["-C"])
+        .arg(workspace)
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output();
+    let head = git_command()
+        .args(["-C"])
+        .arg(workspace)
+        .args(["rev-parse", "HEAD"])
+        .output();
+    matches!((status, head), (Ok(status), Ok(head))
+        if status.status.success() && status.stderr.is_empty() && status.stdout.is_empty()
+          && head.status.success() && head.stderr.is_empty()
+          && String::from_utf8_lossy(&head.stdout).trim() == oid)
+}
+
+fn git_worktree(source: &Path, destination: &Path) -> Result<bool> {
+    let probe = StdCommand::new("git")
+        .args(["-C"])
+        .arg(source)
+        .args(["rev-parse", "--show-toplevel"])
+        .output();
+    let Ok(probe) = probe else {
+        return Ok(false);
+    };
+    if !probe.status.success() {
+        return Ok(false);
+    }
+    let top = PathBuf::from(String::from_utf8(probe.stdout)?.trim());
+    if fs::canonicalize(top)? != fs::canonicalize(source)? {
+        return Ok(false);
+    }
+    let output = StdCommand::new("git")
+        .args(["-C"])
+        .arg(source)
+        .args(["worktree", "add", "--detach", "--"])
+        .arg(destination)
+        .arg("HEAD")
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "git worktree add failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(true)
 }
 
 fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
@@ -1607,47 +1909,5 @@ impl Drop for ProcessGroup {
                 libc::kill(-self.pid, libc::SIGKILL);
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{allocation_error, validate_branch, validate_remote_url};
-
-    #[test]
-    fn repository_inputs_and_auth_failures_are_safe_and_actionable() {
-        for branch in [
-            "-main",
-            "../main",
-            "main.lock",
-            "feature//escape",
-            "refs heads/main",
-        ] {
-            assert!(
-                validate_branch(branch).is_err(),
-                "accepted branch {branch:?}"
-            );
-        }
-        for remote in [
-            "--upload-pack=evil",
-            "ext::evil",
-            "http://example.test/repo",
-            "relative/repo",
-            "user:password@example.test:repo",
-        ] {
-            assert!(
-                validate_remote_url(remote).is_err(),
-                "accepted remote {remote:?}"
-            );
-        }
-        let message = allocation_error(
-            &anyhow::anyhow!(
-                "git fetch failed: fatal: could not read Username for 'https://github.com'"
-            ),
-            Some("https://github.com/private/repository.git"),
-        );
-        assert!(message.contains("authentication failed"));
-        assert!(message.contains("runner service account"));
-        assert!(!message.contains("private/repository"));
     }
 }

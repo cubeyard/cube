@@ -96,8 +96,8 @@
       {:else if loadError}<p class="error" role="alert">{loadError} <button type="button" class="key" onclick={load}>retry loading</button></p>
       {:else if !projects.some((project) => project.status === "ready")}
         <p>a ready project is required. <a href="#/projects" onclick={() => dialog.close()}>configure a project</a></p>
-      {:else if projects.find((project) => project.id === projectId)?.runnerCapacity.states.failed}
-        <p class="error">runner workspace unavailable — {projects.find((project) => project.id === projectId)?.runnerCapacity.errors[0] ?? "inspect the runner logs"}. <button type="button" class="key" onclick={load}>retry status</button></p>
+      {:else if !ready && projects.find((project) => project.id === projectId)?.runnerCapacity.states.failed}
+        <p class="error">global runner pool has a failed allocation — {projects.find((project) => project.id === projectId)?.runnerCapacity.errors[0] ?? "inspect the runner logs"}. <button type="button" class="key" onclick={load}>retry status</button></p>
       {:else if !ready}<p>all trusted runners are in use; archive an idle thread or register another runner, then <button type="button" class="key" onclick={load}>refresh runners</button></p>
       {:else if !catalog?.models.length}<p>no models available — <a href="#/models" onclick={() => dialog?.close()}>connect a provider</a>, then <button type="button" class="key" onclick={load}>retry loading</button></p>
       {:else if !model}<p>choose an available model below.</p>{/if}
@@ -108,7 +108,7 @@
         <select aria-label="project for new thread" bind:value={projectId} disabled={loading || pending !== null} required>
           <option value="" disabled>choose project</option>
           {#each projects as project (project.id)}
-            <option value={project.id} disabled={project.status !== "ready"}>{project.name}{project.status === "ready" ? ` — ${project.availableRunnerCount} available` : ` — ${project.status}`}</option>
+            <option value={project.id} disabled={project.status !== "ready"}>{project.name}{project.status === "ready" ? ` — ${project.availableRunnerCount} globally available` : ` — ${project.status}`}</option>
           {/each}
         </select>
       </label>

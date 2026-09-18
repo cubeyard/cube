@@ -61,11 +61,13 @@ const accept = (async () => {
       const binding = mode === "wrong-thread" ? { ...nodeBinding, threadId: "other" }
         : mode === "wrong-node" ? { ...nodeBinding, nodeId: "node-other" }
         : mode === "wrong-environment" ? { ...nodeBinding, environmentId: 2 } : nodeBinding;
+      const capabilities = ["node.hello", "node.status", "workspace.allocate", "workspace.allocate.v2", "workspace.release", "exec.start", "environment.inspect", "operation.get"];
       await stream.send.writeAll(frame({ type: "Hello", nodeId: binding.nodeId,
         protocolVersion: mode === "legacy" ? undefined : mode === "incompatible" ? 2 : 1,
         minimumProtocolVersion: mode === "legacy" ? undefined : mode === "incompatible" ? 2 : 1,
         softwareVersion: mode === "legacy" ? undefined : "1.0.0", binding,
-        profiles: ["host"], capabilities: mode === "unsupported" ? ["node.hello"] : ["node.hello", "node.status", "workspace.allocate", "workspace.fresh-base", "workspace.release", "exec.start", "environment.inspect", "operation.get"],
+        profiles: ["host"], capabilities: mode === "unsupported" ? ["node.hello"]
+          : mode === "old-allocation" ? capabilities.filter(capability => capability !== "workspace.allocate.v2") : capabilities,
         limits: { maxFrameBytes: 65536, requestTimeoutMs: 5000 } }));
       await stream.send.finish();
       stream = await connection.acceptBi();
@@ -83,7 +85,7 @@ const accept = (async () => {
           status: { lifecycle: mode === "draining" ? "draining" : ["missing", "unsupported-status"].includes(mode) ? "faulted" : "ready", active: false,
             operationRecords: 2, operationCapacity: 10000, error: mode === "missing" ? "ENVIRONMENT_MISSING" : mode === "unsupported-status" ? "UNSUPPORTED" : null,
             activeWorkspaces: 0, retainedWorkspaces: 0, workspaceBytes: 0, workspaceCapacity: 1, workspaceByteLimit: 53687091200 } }
-        : query.method === "workspace.allocate" ? { type: "Workspace", workspace: { threadId: query.threadId, state: "available", kind: "git", retained: false } }
+        : query.method === "workspace.allocate.v2" ? { type: "Workspace", workspace: { threadId: query.threadId, state: "available", kind: "git", retained: false } }
         : query.method === "workspace.release" ? { type: "Workspace", workspace: { threadId: query.threadId, state: "released", kind: "git", retained: true } }
         : query.method === "environment.inspect" ? { type: "Environment", binding: mode === "wrong-binding" ? { ...binding, threadId: "other" } : binding, state: "ready" }
         : query.method === "exec.start" ? { type: "Accepted", operationId: id }
@@ -117,6 +119,13 @@ try {
   await assert.rejects(client.status(2), errorCode("ENVIRONMENT_MISSING"));
   assert.equal(calls.length, 0, "unsupported operations cannot fall back or probe");
   fs.writeFileSync(config.controlKey, Buffer.from(controlKey.toBytes()), { mode: 0o600 });
+  const allocated = new IrohExecutionNodeClient({ configPath, threadId: "allocated-thread" });
+  scenario = "old-allocation";
+  const beforeUnsupportedAllocation = calls.length;
+  await assert.rejects(allocated.allocateWorkspace({ projectId: "project", projectRevision: 1, repositories: [] }), errorCode("OPERATION_UNSUPPORTED"));
+  assert.equal(calls.length, beforeUnsupportedAllocation + 1, "an old runner is rejected after hello and before allocation bytes");
+  assert.equal(calls.at(-1)?.method, "node.hello");
+  scenario = "normal";
   assert.equal((await client.status(1)).status, "Running");
   assert.equal(observations.length, 1);
   await client.check(1);

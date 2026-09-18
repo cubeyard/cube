@@ -20,11 +20,9 @@ faux.setResponses(Array.from({ length: 10 }, () => async request => {
 const models = createModels();
 models.setProvider(faux.provider);
 const app = await createCubed({ state, models });
-if (!app.registry.getProject("product")) {
-  app.registry.saveProject({ id: "product", name: "product test", status: "ready", error: null, revision: 1,
-    checkedAt: Date.now(), createdAt: Date.now(), updatedAt: Date.now(), repositories: [] });
+if (app.registry.runnerCount() === 0) {
   const runner = new IrohExecutionNodeClient({ configPath });
-  app.registry.enrollRunner({ ...runner.binding, projectId: "product", configPath, configHash: runner.configHash });
+  app.registry.enrollRunner({ ...runner.binding, configPath, configHash: runner.configHash });
 }
 await new Promise<void>(resolve => app.server.listen(Number(process.env.CUBE_FIXTURE_PORT ?? 0), "127.0.0.1", resolve));
 const address = app.server.address();

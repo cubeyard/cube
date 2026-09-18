@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { fork, type ChildProcess } from "node:child_process";
+import { execFileSync, fork, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 
 export async function smokeProduct(root: string, config: string) {
@@ -33,12 +33,17 @@ export async function smokeProduct(root: string, config: string) {
   try {
     const first = start("hold");
     const ready = await first.wait("ready");
-    const input = { projectId: "product", requestId: "create-once", text: "calculate with bash", model: { provider: ready.provider, id: ready.model } };
+    const remote = String(execFileSync("git", ["-C", path.join(root, "workspace"), "remote", "get-url", "origin"], { encoding: "utf8" })).trim();
+    const projectResponse = await post(`${ready.url}/api/projects`, { name: "product test", repositories: [{ url: remote, base: "develop" }] });
+    assert.equal(projectResponse.status, 200, await projectResponse.clone().text());
+    const projectId = (await projectResponse.json()).project.id;
+    const input = { projectId, requestId: "create-once", text: "calculate with bash", model: { provider: ready.provider, id: ready.model } };
     const response = await post(`${ready.url}/api/threads`, input);
     assert.equal(response.status, 200, await response.clone().text());
     const { id } = await response.json();
-    const threadWorkspace = path.join(root, "state", "workspaces", id);
+    const threadWorkspace = path.join(root, "state", "workspaces", id, "workspace");
     const createdThread = (await (await fetch(`${ready.url}/api/threads`)).json()).threads.find((thread: { id: string }) => thread.id === id);
+    assert.ok(createdThread.workspaceBase, createdThread.workspaceError ?? "workspace base was not recorded");
     assert.equal(createdThread.workspaceBase.ref, "refs/heads/develop");
     assert.match(createdThread.workspaceBase.oid, /^[0-9a-f]{40}$/);
     assert.equal(fs.readFileSync(path.join(threadWorkspace, "remote-base"), "utf8"), "fresh base\n");
@@ -120,12 +125,16 @@ export async function smokeProduct(root: string, config: string) {
     assert.equal(projects[0].availableRunnerCount, 1, "archive must return runner capacity");
     assert.equal(projects[0].runnerCapacity.states.available, 1);
     assert.equal(fs.readFileSync(path.join(threadWorkspace, "product-count"), "utf8"), "once", "dirty archived worktree is retained");
-    const next = await post(`${missing.url}/api/threads`, { projectId: "product", requestId: "after-archive", text: "new workspace", model: replacement });
+    const otherProjectResponse = await post(`${missing.url}/api/projects`, { name: "other project", repositories: [] });
+    assert.equal(otherProjectResponse.status, 200);
+    const otherProject = (await otherProjectResponse.json()).project;
+    assert.equal(otherProject.availableRunnerCount, 1, "every project sees the same global capacity");
+    const next = await post(`${missing.url}/api/threads`, { projectId: otherProject.id, requestId: "after-archive", text: "new workspace", model: replacement });
     assert.equal(next.status, 200, await next.clone().text());
     const nextId = (await next.json()).id;
     assert.notEqual(nextId, id);
-    assert.notEqual(path.join(root, "state", "workspaces", nextId), threadWorkspace);
+    assert.notEqual(path.join(root, "state", "workspaces", nextId, "workspace"), threadWorkspace);
     console.log("ok: product API creation dedup/conflict, SIGKILL/startup activation, actual runner once, streaming snapshots, SSE reconnect, third reopen");
-    console.log("ok: concurrent followup deduplication, stop, model recovery, archive capacity release, dirty retention and distinct next workspace");
+    console.log("ok: concurrent followup deduplication, stop, model recovery, archive release to the global pool, cross-project reuse, dirty retention and distinct next workspace");
   } finally { await Promise.all([...children].map(stop)); }
 }

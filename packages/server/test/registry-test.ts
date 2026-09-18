@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Worker } from "node:worker_threads";
 import { Registry } from "../src/registry.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-registry-"));
@@ -11,13 +12,20 @@ let registry = new Registry(filename);
 try {
   registry.saveProject({ id: "project", name: "test", status: "ready", error: null, revision: 1,
     checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
+  registry.saveProject({ id: "other", name: "other", status: "ready", error: null, revision: 1,
+    checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
+  registry.saveProject({ id: "disposable", name: "disposable", status: "ready", error: null, revision: 1,
+    checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
   const model = { provider: "fixture", id: "selected" };
   assert.throws(() => registry.createThread("project", "request", model, "one"), /no runner available/);
-  registry.enrollRunner({ projectId: "project", nodeId: "node-test", environmentId: 7, threadId: "thread-test", configPath: "/private/config.json", configHash: "hash" });
+  registry.enrollRunner({ nodeId: "node-test", environmentId: 7, threadId: "thread-test", configPath: "/private/config.json", configHash: "hash" });
+  registry.deleteProject("disposable");
+  assert.equal(registry.getProject("disposable"), null, "global runners do not block project deletion");
   assert.deepEqual(registry.listRunners().map(runner => runner.nodeId), ["node-test"]);
   const thread = registry.createThread("project", "request", model, "one");
   assert.notEqual(thread.id, "thread-test", "thread identity is independent of reusable runner identity");
-  assert.equal(registry.availableRunners("project").length, 0);
+  assert.equal(registry.availableRunners().length, 0);
+  assert.throws(() => registry.createThread("other", "racing-project", model, "race"), /global pool/);
   registry.close(); registry = new Registry(filename);
   assert.deepEqual(registry.createThread("project", "request", model, "one"), thread);
   assert.throws(() => registry.createThread("project", "request", model, "two"), /conflicts/);
@@ -27,13 +35,66 @@ try {
   assert.deepEqual(registry.getThread(thread.id)?.workspaceBase, base, "workspace base survives host restart/recovery");
   registry.beginRelease(thread.id);
   registry.finishRelease(thread.id);
-  assert.equal(registry.availableRunners("project").length, 1, "release returns runner capacity");
-  const next = registry.createThread("project", "next", model, "two");
+  assert.equal(registry.availableRunners().length, 1, "release returns global runner capacity");
+  const next = registry.createThread("other", "next", model, "two");
   assert.notEqual(next.id, thread.id);
+  assert.equal(next.projectId, "other", "a runner migrated from one project serves another");
+  registry.enrollRunner({ nodeId: "node-two", environmentId: 7, threadId: "runner-two", configPath: "/private/two.json", configHash: "two" });
+  assert.equal(registry.availableRunners().length, 1, "environment IDs may collide across immutable runner identities");
+  registry.retireRunner("runner-two");
+  assert.equal(registry.runnerCapacity().states.retired, 1);
+  assert.equal(registry.availableRunners().length, 0, "retired runners never re-enter the global pool");
+  assert.throws(() => registry.deleteProject("project"), /retained thread history/);
+
+  const raceFile = path.join(root, "race.sqlite");
+  const raceRegistry = new Registry(raceFile);
+  for (const id of ["race-one", "race-two"]) raceRegistry.saveProject({ id, name: id, status: "ready", error: null, revision: 1,
+    checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
+  raceRegistry.enrollRunner({ nodeId: "node-race", environmentId: 1, threadId: "runner-race",
+    configPath: "/private/race.json", configHash: "race" });
+  raceRegistry.close();
+  const workerSource = `
+    const { parentPort, workerData } = require("node:worker_threads");
+    import(workerData.module).then(({ Registry }) => {
+      const registry = new Registry(workerData.filename);
+      parentPort.postMessage({ ready: true });
+      parentPort.once("message", () => {
+        try {
+          const thread = registry.createThread(workerData.projectId, workerData.projectId, { provider: "fixture", id: "selected" }, workerData.projectId);
+          parentPort.postMessage({ ok: true, threadId: thread.id });
+        } catch (error) { parentPort.postMessage({ ok: false, error: error.message }); }
+        finally { registry.close(); }
+      });
+    });`;
+  const competitors = ["race-one", "race-two"].map(projectId => {
+    const worker = new Worker(workerSource, { eval: true, workerData: {
+      module: new URL("../src/registry.ts", import.meta.url).href, filename: raceFile, projectId } });
+    let ready!: () => void;
+    let result!: (value: { ok: boolean; error?: string }) => void;
+    const started = new Promise<void>(resolve => { ready = resolve; });
+    const finished = new Promise<{ ok: boolean; error?: string }>((resolve, reject) => {
+      result = resolve; worker.once("error", reject);
+    });
+    worker.on("message", message => message.ready ? ready() : result(message));
+    return { worker, started, finished };
+  });
+  await Promise.all(competitors.map(competitor => competitor.started));
+  competitors.forEach(competitor => competitor.worker.postMessage("start"));
+  const raceResults = await Promise.all(competitors.map(competitor => competitor.finished));
+  await Promise.all(competitors.map(competitor => competitor.worker.terminate()));
+  assert.equal(raceResults.filter(result => result.ok).length, 1, "simultaneous projects cannot double-allocate one runner");
+  assert.match(raceResults.find(result => !result.ok)?.error ?? "", /global pool/);
+  const raced = new Registry(raceFile);
+  assert.equal(raced.listThreads().length, 1);
+  assert.equal(raced.availableRunners().length, 0);
+  raced.close();
+
   const v100 = path.join(root, "v100.sqlite");
   const previous = new DatabaseSync(v100);
   const oldProject = { id: "old-project", name: "old", status: "ready", error: null, revision: 1,
-    checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] };
+    checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [{ id: "old-repo", projectId: "old-project", position: 0,
+      url: "file:///old.git", base: null, checkoutName: "repo-1", status: "ready", error: null,
+      resolvedBase: "main", baseOid: "a".repeat(40), checkedAt: 1 }] };
   const oldRunner = { projectId: "old-project", nodeId: "node-old", environmentId: 3, threadId: "thread-old", configPath: "/private/old.json", configHash: "old" };
   const oldThread = { id: "thread-old", projectId: "old-project", title: "done", model, archived: true, createdAt: 1 };
   previous.exec(`PRAGMA user_version=100;
@@ -47,11 +108,21 @@ try {
   previous.prepare("INSERT INTO creation VALUES (?,?,?,?)").run(oldProject.id, "old-request", oldThread.id, JSON.stringify({ model, text: "done" }));
   previous.close();
   const migrated = new Registry(v100);
-  assert.equal(migrated.availableRunners(oldProject.id).length, 1, "archived v100 bindings become reusable");
+  assert.equal(migrated.availableRunners().length, 1, "archived v100 bindings become globally reusable");
   assert.equal(migrated.getThread(oldThread.id)?.runnerId, oldRunner.threadId);
+  assert.equal(migrated.getThread(oldThread.id)?.allocation.repositories[0]?.checkoutName, "workspace",
+    "legacy primary repositories migrate to the isolated workspace path");
+  assert.equal(migrated.listRunners()[0]?.legacyProjectId, oldProject.id, "legacy binding remains audit metadata");
   migrated.close();
+  const rollback = new DatabaseSync(v100);
+  assert.equal(rollback.prepare("PRAGMA user_version").get()!.user_version, 101, "global migration retains the rollback-compatible registry version");
+  assert.deepEqual(rollback.prepare("PRAGMA table_info(runner)").all().map(column => column.name),
+    ["id", "project_id", "node_id", "data", "state", "thread_id", "error"], "previous releases retain their expected runner table contract");
+  assert(rollback.prepare("SELECT 1 FROM global_pool WHERE schema_version=1").get(), "global migration is durably marked and idempotent");
+  assert.deepEqual(rollback.prepare("PRAGMA foreign_key_check").all(), [], "migration preserves registry references");
+  rollback.close();
   const old = path.join(root, "old.sqlite");
   const db = new DatabaseSync(old); db.exec("CREATE TABLE cube(id INTEGER)"); db.close();
   assert.throws(() => new Registry(old), /fresh CUBED_STATE/);
-  console.log("ok: fresh metadata, atomic reusable allocation, restart-safe creation keys, conflicts, v100 migration and legacy schema rejection");
+  console.log("ok: global allocation, release/reuse, retirement, restart-safe creation keys, rollback-compatible v100 migration and legacy rejection");
 } finally { registry.close(); fs.rmSync(root, { recursive: true, force: true }); }

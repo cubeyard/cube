@@ -46,7 +46,8 @@ try {
   assert.deepEqual(await (await write("/api/jev", {}, "DELETE")).json(), { configured: false });
   assert.equal((await write("/api/github/auth", {}, "PUT")).status, 404);
   assert.equal((await fetch(`${base}/api/projects`, { method: "POST", body: "{}" })).status, 415);
-  for (const repositories of [[null], [{ url: "org/repo", base: {} }], [{ url: "org/repo", checkoutName: "../outside" }]]) {
+  for (const repositories of [[null], [{ url: "org/repo", base: {} }], [{ url: "org/repo", checkoutName: "../outside" }],
+    [{ url: "org/one" }, { url: "org/two", checkoutName: "workspace" }]]) {
     assert.equal((await write("/api/projects", { name: "invalid", repositories })).status, 409);
   }
   assert.equal(app.registry.listProjects().length, 0, "invalid input must not allocate metadata");
@@ -58,7 +59,7 @@ try {
   assert(app.registry.getProject(project.id), "unknown subroute must not delete project");
   const input = { projectId: project.id, requestId: "retry", text: "inspect workspace", model: { provider: faux.getModel().provider, id: faux.getModel().id } };
   assert.equal((await write("/api/threads", input)).status, 409);
-  app.registry.enrollRunner({ projectId: project.id, nodeId: "broken-node", threadId: "broken-thread", environmentId: 1,
+  app.registry.enrollRunner({ nodeId: "broken-node", threadId: "broken-thread", environmentId: 1,
     configPath: path.join(state, "absent.json"), configHash: "missing" });
   const accepted = await write("/api/threads", input);
   assert.equal(accepted.status, 200, "activation failure must not lose accepted allocation");
