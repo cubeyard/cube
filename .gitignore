@@ -9,6 +9,7 @@ packages/web/dist/
 !.env.example
 !.env.*.example
 *.pem
+!scripts/cubed/update-public-key.pem
 *.key
 id_rsa
 id_ed25519

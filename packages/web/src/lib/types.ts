@@ -3,6 +3,7 @@ import type { Conversations } from "../../../server/src/conversation.ts";
 export type { ModelSelection } from "../../../server/src/models.ts";
 export type { ProjectRepository } from "../../../server/src/registry.ts";
 export type { GithubAuthStatus } from "../../../server/src/github-auth.ts";
+export type { UpdateStatus } from "../../../server/src/update-service.ts";
 
 export type AuthState =
   | { state: "ok"; provider: string; credentialType: string; expiresAt?: number }

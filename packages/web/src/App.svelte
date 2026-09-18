@@ -6,6 +6,7 @@
   import ThreadView from "./components/ThreadView.svelte";
   import Onboarding from "./components/Onboarding.svelte";
   import ModelProviders from "./components/ModelProviders.svelte";
+  import SystemSettings from "./components/SystemSettings.svelte";
   import Wordmark from "./components/Wordmark.svelte";
   import NewThreadDialog from "./components/NewThreadDialog.svelte";
   import { errorText, fetchState, fetchThreads, isUnreachable } from "./lib/api.ts";
@@ -156,6 +157,7 @@
       threadId ? `${current?.title ?? "untitled"} · cube`
       : projectsRoute ? "projects · cube"
       : hash === "#/models" ? "models · cube"
+      : hash === "#/system" ? "system · cube"
       : "threads · cube";
   });
 </script>
@@ -175,6 +177,8 @@
   <p class="loading">loading…</p>
 {:else if hash === "#/models"}
   <ModelProviders />
+{:else if hash === "#/system"}
+  <SystemSettings />
 {:else if !daemon.onboardingComplete}
   <Onboarding onComplete={() => {
     daemon = { ...daemon!, onboardingComplete: true };

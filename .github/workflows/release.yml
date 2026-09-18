@@ -1,0 +1,95 @@
+# Build signed cubed-only release assets. Publishing the draft remains an
+# explicit maintainer action; runner binaries are intentionally absent.
+name: cubed release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64-gnu
+          - os: ubuntu-24.04-arm
+            target: linux-arm64-gnu
+          - os: macos-14
+            target: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 26
+      - name: pinned dependencies
+        run: |
+          npm i -g "pnpm@$(sed -n 's/.*"packageManager": *"pnpm@\([^"]*\)".*/\1/p' package.json)"
+          pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm build
+      - name: build and sign cubed package
+        env:
+          SIGNING_KEY: ${{ secrets.CUBED_UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SIGNING_KEY"
+          umask 077
+          key="$RUNNER_TEMP/cubed-update-key.pem"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$SIGNING_KEY" > "$key"
+          node scripts/cubed/verify-signing-key.ts \
+            "$key" \
+            scripts/cubed/update-public-key.pem \
+            scripts/cubed/update-public-key.fingerprint
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          node scripts/cubed/build-release.ts "$GITHUB_REF_NAME" dist "$base" "$key"
+          test -f "dist/cubed-${GITHUB_REF_NAME}-${{ matrix.target }}.tar.gz"
+          test -f "dist/cubed-${{ matrix.target }}.json.sig"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cubed-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  draft:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 26
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: add trust bootstrap and installer assets
+        run: |
+          set -euo pipefail
+          cp \
+            scripts/cubed/install.sh \
+            scripts/cubed/service.sh \
+            scripts/cubed/update-public-key.pem \
+            scripts/cubed/update-public-key.fingerprint \
+            dist/
+          chmod 0755 dist/install.sh dist/service.sh
+          sha256sum dist/* > dist/SHA256SUMS
+      - name: create or refresh draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --draft --generate-notes --title "$GITHUB_REF_NAME"
+          fi

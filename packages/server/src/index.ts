@@ -15,6 +15,8 @@ import { GithubAuth } from "./github-auth.ts";
 import { JevSettings } from "./jev-settings.ts";
 import { ModelAuth } from "./model-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
+import { UpdateService } from "./update-service.ts";
+import { versionInfo } from "./version.ts";
 
 const CUBED_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
 const HELP = `usage: cubed [options]
@@ -33,7 +35,13 @@ cubed stays in the foreground. It has no application-level user authentication;
 keep it on loopback or behind an authenticated, access-controlled private network.`;
 
 /** Private product host. No remote provisioning or implicit sandbox backend. */
-export async function createCubed(options: { state: string; models?: Models; web?: string; allowedHosts?: string[] }) {
+export async function createCubed(options: {
+  state: string;
+  models?: Models;
+  web?: string;
+  allowedHosts?: string[];
+  updates?: UpdateService;
+}) {
   const registry = new Registry(path.join(options.state, "registry.sqlite"));
   const models = options.models ?? await createModelRuntime();
   const modelAuth = new ModelAuth(models);
@@ -41,6 +49,7 @@ export async function createCubed(options: { state: string; models?: Models; web
   const conversations = new Conversations(registry, path.join(options.state, "threads"), models, jev);
   const github = new GithubAuth();
   const git = new GitService(path.join(options.state, "repositories"));
+  const updates = options.updates ?? new UpdateService();
   const onboarding = path.join(options.state, "onboarding.json");
   const configuredHosts = options.allowedHosts ?? process.env.CUBED_ALLOWED_HOSTS?.split(",") ?? [];
   const allowedHosts = new Set(["localhost", "127.0.0.1", "[::1]", ...configuredHosts.map(host => host.trim()).filter(Boolean)]);
@@ -91,6 +100,22 @@ export async function createCubed(options: { state: string; models?: Models; web
         if (!selected) throw new Error("connect a model provider first");
         return selected;
       };
+      if (url.pathname === "/api/health" && method === "GET") {
+        return json({ lifecycle: "ready", ...versionInfo() });
+      }
+      if (url.pathname === "/api/system/update") {
+        if (method === "GET") return json(await updates.status());
+        if (method === "POST") {
+          if (body.action === "check") return json(await updates.check());
+          if (body.action === "install") return json(await updates.install({
+            targetVersion: body.targetVersion,
+            expectedCurrentVersion: body.expectedCurrentVersion,
+            requestId: body.requestId,
+          }), 202);
+          throw new Error("update action must be check or install");
+        }
+        return json({ error: "not found" }, 404);
+      }
       if (url.pathname === "/api/state" && method === "GET") {
         const available = await catalog();
         return json({ onboardingComplete: isOnboardingComplete(onboarding), auth: available.length ? { state: "ok", provider: available[0].provider, credentialType: "host" } : { state: "missing", provider: "model" } });
@@ -293,7 +318,7 @@ async function main(argv: string[]): Promise<void> {
   console.log(`runners enrolled: ${app.registry.listRunners().length}`);
   console.log("press Ctrl-C to stop");
   let shutdown: Promise<void> | undefined;
-  const stop = (signal: NodeJS.Signals) => {
+  const stop = (signal: NodeJS.Signals | "supervisor-exit") => {
     if (shutdown) {
       console.log(`stopping: ${signal} received while shutdown is already in progress`);
       return;
@@ -303,12 +328,24 @@ async function main(argv: string[]): Promise<void> {
     void shutdown.catch(error => { console.error(`cubed: shutdown failed: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; });
   };
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, stop);
+  let lifeline: fs.ReadStream | undefined;
+  if (process.env.CUBED_SUPERVISOR_LIFELINE_FD === "3") {
+    lifeline = fs.createReadStream("/dev/null", { fd: 3, autoClose: false });
+    lifeline.resume();
+    lifeline.once("end", () => stop("supervisor-exit"));
+    lifeline.once("error", () => stop("supervisor-exit"));
+  }
   await new Promise<void>(resolve => app.server.once("close", resolve));
   await shutdown;
+  lifeline?.destroy();
   for (const signal of ["SIGTERM", "SIGINT"] as const) process.off(signal, stop);
 }
 
 if (import.meta.main) {
-  try { await main(process.argv.slice(2)); }
-  catch (error) { console.error(`cubed: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }
+  if (process.argv.includes("--self-check")) {
+    process.stdout.write(`${JSON.stringify(versionInfo())}\n`);
+  } else {
+    try { await main(process.argv.slice(2)); }
+    catch (error) { console.error(`cubed: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }
+  }
 }

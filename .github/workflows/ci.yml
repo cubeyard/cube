@@ -55,7 +55,7 @@ jobs:
       - name: shell syntax
         run: |
           set -e
-          for f in scripts/*.sh scripts/runner/*.sh scripts/host/*.sh; do
+          for f in scripts/*.sh scripts/cubed/*.sh scripts/runner/*.sh scripts/host/*.sh; do
             bash -n "$f"
           done
       - name: shellcheck scripts/*.sh

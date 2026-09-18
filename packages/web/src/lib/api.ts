@@ -7,6 +7,7 @@ import type {
   ProjectInput,
   ThreadModels,
   ThreadSummary,
+  UpdateStatus,
 } from "./types.ts";
 import { uid } from "./uid.ts";
 import type { ModelAuth } from "../../../server/src/model-auth.ts";
@@ -20,6 +21,10 @@ export const providerAction = (id: string, operation: "login" | "answer" | "canc
 export const fetchJevStatus = () => request<{ configured: boolean }>("/api/jev");
 export const saveJevKey = (apiKey: string) => request<{ configured: boolean }>("/api/jev", "PUT", { apiKey });
 export const removeJevKey = () => request<{ configured: boolean }>("/api/jev", "DELETE");
+export const fetchUpdateStatus = () => request<UpdateStatus>("/api/system/update");
+export const checkForUpdate = () => request<UpdateStatus>("/api/system/update", "POST", { action: "check" });
+export const installUpdate = (targetVersion: string, expectedCurrentVersion: string, requestId: string) =>
+  request<UpdateStatus>("/api/system/update", "POST", { action: "install", targetVersion, expectedCurrentVersion, requestId });
 
 /** Banner text for a failure: the message itself, never "Error: …". */
 export const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));

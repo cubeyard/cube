@@ -13,7 +13,28 @@
 
 There is one execution core, in process. No worker transcript hydration, second
 agent-run journal or fallback backend. The old virtual-machine/container stack
-and its installation/release machinery have been removed.
+and its release machinery have been removed. The current cubed-only release path
+is described below and does not provision or update runners.
+
+## cubed process lifecycle and updates
+
+A managed installation starts a stable foreground supervisor, which owns one
+cubed child and an exclusive installation lock. This is the direct execution
+contract; optional systemd-user and launchd-user profiles only invoke the same
+launcher. The supervisor passes a private capability over a mode-0600 local Unix
+socket, plus a lifeline descriptor that makes cubed exit if the supervisor dies.
+The HTTP process can request lifecycle actions but never receives signing keys or
+filesystem paths, and a source checkout has no update capability.
+
+Signed, platform-specific manifests bind the version, commit, artifact SHA-256,
+size, supervisor floor and state-schema rollback contract. The supervisor stages
+an immutable release, rejects unsafe archive paths and escaping symlinks, runs the
+candidate's offline self-check, drains cubed, then atomically swaps `current` and
+retains `previous`. Readiness checks require the signed version and commit, followed
+by a probation interval. Startup recovery and failed readiness restore `previous`.
+State and credentials live outside release directories and are never copied or
+migrated by the updater. Schema 100 is currently accepted only by releases that
+declare exact, rollback-safe schema 100 compatibility.
 
 ## Action, result, resume
 
