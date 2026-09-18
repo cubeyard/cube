@@ -60,6 +60,9 @@ export class Registry {
     this.db.prepare("INSERT INTO runner VALUES (?,?,?,?)").run(runner.threadId, runner.projectId, runner.nodeId, JSON.stringify(runner));
   }
   runner(threadId: string): Runner | null { return this.parse(this.db.prepare("SELECT data FROM runner WHERE thread_id=?").get(threadId)); }
+  listRunners(): Runner[] {
+    return this.db.prepare("SELECT data FROM runner ORDER BY rowid").all().map(row => this.parse<Runner>(row)!);
+  }
   availableRunners(projectId: string): Runner[] {
     return this.db.prepare("SELECT data FROM runner WHERE project_id=? AND thread_id NOT IN (SELECT id FROM thread)").all(projectId).map(row => this.parse<Runner>(row)!);
   }

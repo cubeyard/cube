@@ -6,7 +6,7 @@ the lower-level daemon, wire, and development contract.
 
 ## Trust boundary
 
-`runner-serve` is explicit opt-in. The daemon and commands execute as the same
+The runner and commands execute as the same
 dedicated, unprivileged Unix account. This is **not a sandbox**: there is no
 same-UID filesystem protection, per-job UID, egress enforcement, or protection
 of the journal/key from a hostile command running as that UID. Root is refused.
@@ -15,7 +15,36 @@ The runner accepts one enrolled Iroh control peer and exactly one persisted
 logical node/thread/environment binding. Iroh `peerId` authenticates transport;
 Cube `nodeId` is domain identity and is not authentication.
 
-## Disposable development loop
+## Foreground laptop loop
+
+`init` creates a private home, identity key, immutable state and a small network
+manifest. `run` reopens that home as a normal foreground process:
+
+```sh
+bin="$PWD/target/debug/cube-runner"
+mkdir -p "$HOME/work/cube-workspace" "$HOME/.cube/control-intents"
+chmod 700 "$HOME/.cube/control-intents"
+"$bin" keygen --key "$HOME/.cube/control.key"
+# Read the public control peer from that JSON output.
+"$bin" init --home "$HOME/.cube/runner" \
+  --workspace "$HOME/work/cube-workspace" --allow-peer CONTROL_PEER \
+  --node-id node-laptop --thread-id thread-laptop --env 1
+"$bin" run --home "$HOME/.cube/runner"
+```
+
+`run` prints human lifecycle status to stderr and leaves stdout quiet.
+`network ready / waiting for cubed` means the authenticated Iroh endpoint is
+listening; it does not claim a permanent cubed connection. Its peer and current
+addresses are shown so the private cubed adapter configuration can be created and enrolled.
+Use relay mode at initialization when the runner is not directly reachable.
+
+First Ctrl-C enters drain, rejects new operation IDs, and waits up to the active
+command's existing 60-second bound. Second Ctrl-C cancels and reaps the active
+process group, then durably records `CANCELLED`. An idle Ctrl-C exits immediately.
+SIGTERM follows the same drain-first path. Restart with the same home; do not
+reinitialize it.
+
+## Low-level automation interface
 
 ```sh
 cargo build --locked -j 2 -p cube-runner
@@ -29,6 +58,11 @@ runner_peer=$("$bin" keygen --key "$scratch/runner.key" | node -pe 'JSON.parse(r
   --node-id node-development --thread-id thread-development --env 1
 "$bin" runner-serve --key "$scratch/runner.key" --state "$scratch/state"
 ```
+
+The existing `runner-init`, `runner-serve`, recovery, intent and diagnostic
+commands remain the automation boundary. Their one-line JSON stdout is
+unchanged; bounded lifecycle diagnostics use stderr. `host-init` and
+`host-serve` remain deprecated protocol-v1 compatibility aliases.
 
 Prepare/submit from another terminal with the control key and pinned runner peer.
 Preparation fsyncs a create-only intent. Submit fsyncs its consumed marker before

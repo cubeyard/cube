@@ -58,8 +58,30 @@ const reject = (area: "host" | "runner", script: string, args: string[], stage: 
 const digest = (file: string) => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 
 const testLinux = () => {
+  const direct = path.join(root, "direct-linux");
+  const managerMarker = path.join(root, "direct-linux-called-systemctl");
+  const manager = path.join(root, "direct-linux-systemctl");
+  fs.writeFileSync(manager, `#!/bin/sh\ntouch ${JSON.stringify(managerMarker)}\nexit 97\n`, { mode: 0o755 });
+  run("runner", "install.sh", [binary("0.1.9")], direct, {
+    CUBE_RUNNER_PREFIX: path.join(direct, "home/.local"), CUBE_RUNNER_SYSTEMCTL: manager,
+  });
+  assert.ok(fs.existsSync(path.join(direct, "home/.local/bin/cube-runner")));
+  assert.equal(fs.existsSync(managerMarker), false, "direct install must not call systemd");
+  assert.equal(fs.existsSync(path.join(direct, "etc/systemd/system/cube-runner.service")), false);
+  const directDarwin = path.join(root, "direct-darwin");
+  const launchctlMarker = path.join(root, "direct-darwin-called-launchctl");
+  const launchctl = path.join(root, "direct-darwin-launchctl");
+  fs.writeFileSync(launchctl, `#!/bin/sh\ntouch ${JSON.stringify(launchctlMarker)}\nexit 97\n`, { mode: 0o755 });
+  run("runner", "install.sh", [binary("0.1.8")], directDarwin, {
+    CUBE_RUNNER_PLATFORM: "Darwin", CUBE_RUNNER_ARCH: "x86_64", CUBE_RUNNER_MODE: "user",
+    CUBE_RUNNER_PREFIX: path.join(directDarwin, "home/.local"), CUBE_RUNNER_LAUNCHCTL: launchctl,
+  });
+  assert.ok(fs.existsSync(path.join(directDarwin, "home/.local/bin/cube-runner")));
+  assert.equal(fs.existsSync(launchctlMarker), false, "direct install must not call launchd");
+  assert.equal(fs.existsSync(plutilMarker), false, "direct install must not create or validate a plist");
+
   const fresh = path.join(root, "fresh");
-  run("runner", "install.sh", [binary("0.2.0")], fresh);
+  run("runner", "install.sh", ["--service", binary("0.2.0")], fresh);
   assert.equal(fs.readlinkSync(path.join(fresh, "opt/cube-runner/current")), path.join(fresh, "opt/cube-runner/releases/0.2.0"));
   assert.equal(fs.statSync(path.join(fresh, "var/lib/cube-runner")).mode & 0o777, 0o700);
   const freshUnit = fs.readFileSync(path.join(fresh, "etc/systemd/system/cube-runner.service"), "utf8");
@@ -79,7 +101,7 @@ const testLinux = () => {
   assert.equal(fs.readFileSync(path.join(restored, "var/lib/cube-runner/identity/node.key"), "utf8"), "fresh-private-key");
   assert.equal(fs.readFileSync(path.join(restored, "var/lib/cube-runner/workspace/result"), "utf8"), "fresh-result");
   assert.equal(fs.statSync(path.join(restored, "var/lib/cube-runner/state/restore-quarantine")).mode & 0o777, 0o600);
-  run("runner", "install.sh", [binary("0.2.0")], restored);
+  run("runner", "install.sh", ["--service", binary("0.2.0")], restored);
   run("runner", "acknowledge-recovery.sh", ["--i-reviewed-unknown-operations"], restored);
   assert.equal(fs.existsSync(path.join(restored, "var/lib/cube-runner/state/restore-quarantine")), false);
   assert.ok(fs.existsSync(path.join(restored, "var/lib/cube-runner/state/recovery-command-ran")),
@@ -138,7 +160,7 @@ esac
   assert.ok(fs.existsSync(path.join(legacy, "run/cube-host/ready.json")));
 
   const native = path.join(root, "native");
-  run("runner", "install.sh", [binary("0.2.0")], native);
+  run("runner", "install.sh", ["--service", binary("0.2.0")], native);
   fs.mkdirSync(path.join(native, "run/cube-runner"), { recursive: true });
   fs.writeFileSync(path.join(native, "run/cube-runner/ready.json"), '{"lifecycle":"ready","softwareVersion":"0.2.0","protocolVersion":1}\n');
   run("runner", "upgrade.sh", [binary("0.3.0")], native, env);
@@ -158,7 +180,7 @@ const testDarwin = () => {
   const darwinPlist = path.join(darwin, "Library/LaunchAgents/com.cubeyard.cube-runner.plist");
   const darwinEnv = { CUBE_RUNNER_PLATFORM: "Darwin", CUBE_RUNNER_ARCH: process.arch === "arm64" ? "arm64" : "x86_64",
     CUBE_RUNNER_MODE: "user", CUBE_RUNNER_HOME: darwinHome, CUBE_RUNNER_PLIST: darwinPlist };
-  run("runner", "install.sh", [binary("0.2.0")], darwin, darwinEnv);
+  run("runner", "install.sh", ["--service", binary("0.2.0")], darwin, darwinEnv);
   assert.equal(fs.readlinkSync(path.join(darwinHome, "current")), path.join(darwinHome, "releases/0.2.0"));
   assert.equal(fs.statSync(path.join(darwinHome, "data")).mode & 0o777, 0o700);
   const plist = fs.readFileSync(darwinPlist, "utf8");
@@ -168,7 +190,7 @@ const testDarwin = () => {
   assert.match(plist, /<string>--stop-policy<\/string><string>wait<\/string>/);
   assert.doesNotMatch(plist, /<key>UserName<\/key>/, "per-user LaunchAgent uses its login account");
   assert.equal(spawnSync("plutil", ["-lint", darwinPlist]).status, 0);
-  reject("runner", "install.sh", [binary("0.2.1")], path.join(root, "invalid-stop-policy"), {
+  reject("runner", "install.sh", ["--service", binary("0.2.1")], path.join(root, "invalid-stop-policy"), {
     ...darwinEnv, CUBE_RUNNER_HOME: path.join(root, "invalid-stop-policy/home"),
     CUBE_RUNNER_PLIST: path.join(root, "invalid-stop-policy/runner.plist"), CUBE_RUNNER_STOP_POLICY: "detach",
   });
@@ -176,7 +198,7 @@ const testDarwin = () => {
   const darwinSystem = path.join(root, "darwin-system");
   const darwinSystemEnv = { CUBE_RUNNER_PLATFORM: "Darwin", CUBE_RUNNER_ARCH: process.arch === "arm64" ? "arm64" : "x86_64",
     CUBE_RUNNER_MODE: "system", CUBE_RUNNER_USER: user, CUBE_RUNNER_GROUP: group, CUBE_RUNNER_STOP_POLICY: "cancel" };
-  run("runner", "install.sh", [binary("0.2.1")], darwinSystem, darwinSystemEnv);
+  run("runner", "install.sh", ["--service", binary("0.2.1")], darwinSystem, darwinSystemEnv);
   const systemPlistPath = path.join(darwinSystem, "Library/LaunchDaemons/com.cubeyard.cube-runner.plist");
   const systemPlist = fs.readFileSync(systemPlistPath, "utf8");
   assert.match(systemPlist, new RegExp(`<key>UserName</key><string>${user}</string>`));
@@ -217,7 +239,7 @@ esac
   assert.equal(fs.readFileSync(path.join(restoredHome, "data/identity/node.key"), "utf8"), "darwin-private-key");
   assert.equal(fs.readFileSync(path.join(restoredHome, "data/workspace/result"), "utf8"), "darwin-result");
   assert.equal(fs.statSync(path.join(restoredHome, "data/state/restore-quarantine")).mode & 0o777, 0o600);
-  run("runner", "install.sh", [binary("0.3.0")], darwinRestore, {
+  run("runner", "install.sh", ["--service", binary("0.3.0")], darwinRestore, {
     ...darwinEnv, CUBE_RUNNER_HOME: restoredHome, CUBE_RUNNER_PLIST: path.join(darwinRestore, "runner.plist"),
   });
   reject("runner", "acknowledge-recovery.sh", ["--i-reviewed-unknown-operations"], darwinRestore, {

@@ -14,6 +14,7 @@ try {
   const model = { provider: "fixture", id: "selected" };
   assert.throws(() => registry.createThread("project", "request", model, "one"), /no runner available/);
   registry.enrollRunner({ projectId: "project", nodeId: "node-test", environmentId: 7, threadId: "thread-test", configPath: "/private/config.json", configHash: "hash" });
+  assert.deepEqual(registry.listRunners().map(runner => runner.nodeId), ["node-test"]);
   const thread = registry.createThread("project", "request", model, "one");
   assert.equal(registry.availableRunners("project").length, 0);
   registry.close(); registry = new Registry(filename);

@@ -676,7 +676,7 @@ impl Runner {
                 );
             }
             journal.active = false;
-            runner.idle.notify_one();
+            runner.idle.notify_waiters();
         });
         Ok(())
     }

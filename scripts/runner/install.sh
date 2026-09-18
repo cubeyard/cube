@@ -1,11 +1,24 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2154 # repo_root is defined by sourced lib.sh.
-# Fresh trusted-runner install. Existing cube-host installations use upgrade.sh.
+# Direct binary install by default; --service opts into the existing supervised profile.
+# Existing cube-host service installations use upgrade.sh.
 set -euo pipefail
 # shellcheck source=lib.sh
 source "$(dirname "$0")/lib.sh"
+service=false
+if [ "${1:-}" = --service ]; then service=true; shift; fi
+[ "$#" -eq 1 ] || fail 'usage: install.sh [--service] /absolute/path/to/cube-runner'
+if ! $service; then
+  require_build_platform
+  binary="$1"; version="$(require_binary "$binary")"
+  prefix="${CUBE_RUNNER_PREFIX:-$HOME/.local}"
+  case "$prefix" in /*) ;; *) fail 'CUBE_RUNNER_PREFIX must be absolute' ;; esac
+  install -d -m 0755 "$prefix/bin"
+  install -m 0755 "$binary" "$prefix/bin/cube-runner"
+  note "installed $version at $prefix/bin/cube-runner; no service was created or started"
+  exit 0
+fi
 require_platform
-[ "$#" -eq 1 ] || fail 'usage: install.sh /absolute/path/to/cube-runner'
 [ "$PLATFORM" != Linux ] || { [ ! -e "$(at /opt/cube-host/current)" ] && [ ! -e "$(at /var/lib/cube-host/state/journal.db)" ]; } \
   || fail 'legacy cube-host installation detected; use scripts/runner/upgrade.sh to preserve its identity and journal'
 binary="$1"; version="$(require_binary "$binary")"
