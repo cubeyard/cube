@@ -45,6 +45,7 @@ async fn authorization_and_hello_gate_precede_mutation() {
     let query = Request::ExecStart {
         env: 1,
         operation_id: "op-rejected".into(),
+        thread_id: None,
         spec: ExecSpec {
             command: "touch must-not-exist".into(),
             guest_cwd: ".".into(),

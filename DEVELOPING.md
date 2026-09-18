@@ -82,17 +82,20 @@ is also supported; allow its exact hostname and preserve Host/Origin consistentl
 The host allowlist prevents DNS rebinding; it does not restrict network ingress
 or authorize public exposure.
 
-Create a project through the UI/API. Prepare a runner workspace and immutable
+Create a project through the UI/API. Prepare a runner repository template and immutable
 binding using `packages/node-transport/RUNNER.md`. Register its private connection
 configuration with `scripts/enroll-runner.ts --state /absolute/fresh-state
 --project PROJECT --config /absolute/private-runner.json --trusted-runner`.
-One new thread consumes one unused runner. Host repository checks do not clone
-into the runner; operators currently prepare that workspace themselves.
+One new thread leases one available runner until archive. The runner creates a
+detached Git worktree, or copies a non-Git template. Host repository checks do
+not clone into the runner; operators prepare the template themselves.
 
 Useful reads: `/api/threads`, `/api/projects`, `/api/threads/<id>/history`,
 `/api/threads/<id>/stream`. The last endpoint is SSE and starts with a full
 snapshot on every connection. Stop uses `POST /api/threads/<id>/stop`; DELETE
-archives an idle thread without touching its runner workspace.
+archives an idle thread and releases runner capacity. Changed or independently
+committed Git worktrees and fallback copies are retained; a clean Git worktree
+still at the template HEAD is removed.
 
 For UI changes use the existing browser workflow: build, run cubed on disposable
 state, check desktop and phone (390×844), exercise affected interactions and
@@ -101,10 +104,11 @@ not an unmanaged background shell. Never expose unauthenticated cubed publicly.
 
 ## Fresh start and recovery
 
-There is no migration/adoption of old registries or terminal sessions. Stop
-cubed and set `CUBED_STATE` to a new empty directory to reset the product. Create
+Registry v100 upgrades in place. There is no adoption of older registries or
+terminal sessions. Stop cubed and set `CUBED_STATE` to a new empty directory to reset the product. Create
 projects and enroll fresh runner identities. Do not delete an unspecified live
-installation. Archive does not recycle a runner.
+installation. Archive recycles runner capacity, not the archived Pi session or
+retained user changes.
 
 Restart cubed against the same state to resume accepted Pi operations. Do not
 run two writable owners for a session. Backups of the host must be taken with

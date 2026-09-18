@@ -18,7 +18,8 @@ export interface ThreadSummary {
   archived: boolean;
   project: { id: string; name: string };
 }
-export type Project = ProjectRecord & { threadCount: number; runnerCount: number; availableRunnerCount: number };
+export type Project = ProjectRecord & { threadCount: number; runnerCount: number; availableRunnerCount: number;
+  runnerCapacity: { states: Record<"available" | "allocating" | "busy" | "releasing" | "failed", number>; errors: string[] } };
 export type ProjectStatus = Project["status"];
 export interface ProjectInput {
   name: string;

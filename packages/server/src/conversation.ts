@@ -28,16 +28,40 @@ export class Conversations {
   }
   async boot(): Promise<void> {
     for (const thread of this.registry.listThreads()) {
-      if (!thread.archived) await this.activate(thread.id);
+      if (thread.archived) continue;
+      if (thread.workspaceState === "releasing" || (thread.workspaceState === "failed" && thread.workspaceError?.startsWith("workspace release failed:"))) {
+        await this.release(thread.id).catch(() => {});
+      }
+      else await this.activate(thread.id);
     }
   }
   error(id: string): string | null { return this.failures.get(id) ?? null; }
   async activate(id: string): Promise<void> {
     try {
+      await this.ensureWorkspace(id);
       const agent = await this.agent(id);
       this.failures.delete(id);
       this.kick(id, agent);
     } catch (error) { this.failures.set(id, String(error)); }
+  }
+  private runner(id: string): IrohExecutionNodeClient {
+    const admission = this.registry.runner(id);
+    if (!admission) throw new Error("thread runner allocation is missing");
+    return new IrohExecutionNodeClient({ configPath: admission.configPath, configHash: admission.configHash, threadId: id });
+  }
+  private async ensureWorkspace(id: string): Promise<void> {
+    const thread = this.registry.getThread(id);
+    if (!thread || thread.archived) throw new Error("thread not found");
+    if (thread.workspaceState === "available") return;
+    if (thread.workspaceState === "releasing") throw new Error("thread workspace is releasing");
+    try {
+      await this.runner(id).allocateWorkspace();
+      this.registry.markWorkspaceAvailable(id);
+    } catch (error) {
+      const message = `workspace allocation failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.registry.markWorkspaceFailed(id, message);
+      throw new Error(message, { cause: error });
+    }
   }
   async agent(id: string): Promise<Agent> {
     if (this.closing) throw new Error("host is stopping");
@@ -46,8 +70,7 @@ export class Conversations {
     const cached = this.agents.get(id);
     if (cached) return cached;
     const loading = (async () => {
-      const admission = this.registry.runner(id)!;
-      const runner = new IrohExecutionNodeClient({ configPath: admission.configPath, configHash: admission.configHash });
+      const runner = this.runner(id);
       const agent = await openAgent({ directory: path.join(this.directory, id), runner, models: this.models, model: thread.model, getJevApiKey: () => this.jev.apiKey() });
       try {
         const watch = await agent.lane.watch(context);
@@ -174,12 +197,30 @@ export class Conversations {
     return this.command(id, async () => {
     const thread = this.registry.getThread(id);
     if (!thread) throw new Error("thread not found");
+    if (thread.workspaceState === "failed") {
+      this.registry.beginRelease(id);
+      await this.release(id);
+      return;
+    }
     const agent = await this.agent(id);
     const execution = await agent.lane.inspectExecution(context);
     if (execution.current) throw new Error("stop the current run before archiving");
-    this.registry.saveThread({ ...thread, archived: true });
     await agent.close(); this.agents.delete(id);
+    this.registry.beginRelease(id);
+    await this.release(id);
     });
+  }
+  private async release(id: string): Promise<void> {
+    try {
+      await this.runner(id).releaseWorkspace();
+      this.registry.finishRelease(id);
+      this.failures.delete(id);
+    } catch (error) {
+      const message = `workspace release failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.registry.markWorkspaceFailed(id, message);
+      this.failures.set(id, message);
+      throw new Error(message, { cause: error });
+    }
   }
   async stop(id: string): Promise<void> {
     const agent = await this.agent(id);

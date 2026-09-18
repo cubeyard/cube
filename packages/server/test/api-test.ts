@@ -54,11 +54,13 @@ try {
     configPath: path.join(state, "absent.json"), configHash: "missing" });
   const accepted = await write("/api/threads", input);
   assert.equal(accepted.status, 200, "activation failure must not lose accepted allocation");
-  assert.deepEqual(await accepted.json(), { id: "broken-thread" });
-  assert.deepEqual(await (await write("/api/threads", input)).json(), { id: "broken-thread" });
+  const acceptedBody = await accepted.json();
+  assert.equal(typeof acceptedBody.id, "string");
+  assert.notEqual(acceptedBody.id, "broken-thread");
+  assert.deepEqual(await (await write("/api/threads", input)).json(), acceptedBody);
   const { threads } = await (await fetch(`${base}/api/threads`)).json();
   assert.equal(threads.length, 1); assert.equal(threads[0].state, "error");
-  assert.match(threads[0].error, /IO_ERROR/);
+  assert.match(threads[0].error, /workspace allocation failed.*IO_ERROR/);
   assert.equal((await fetch(`${base}/api/threads/broken-thread/history/extra`)).status, 404);
   const cli = path.resolve("packages/server/src/index.ts");
   const help = spawnSync(process.execPath, [cli, "--help"], { encoding: "utf8" });

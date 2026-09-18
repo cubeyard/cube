@@ -252,7 +252,7 @@
           {#if armed.is(thread.id)}
             <!-- a sibling of the face and the bank: beside them on a wide
                  panel, beneath the row on a phone, never over the title -->
-            <span class="module-note bank-note" role="status">removed from active threads; the runner workspace is kept</span>
+            <span class="module-note bank-note" role="status">workspace released; user changes are retained</span>
           {/if}
         </div>
       {/each}

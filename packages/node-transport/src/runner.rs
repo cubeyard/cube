@@ -8,7 +8,7 @@ use std::{
         unix::fs::{MetadataExt, OpenOptionsExt},
     },
     path::{Component, Path, PathBuf},
-    process::Stdio,
+    process::{Command as StdCommand, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -32,6 +32,8 @@ use std::{
 pub const MAX_OUTPUT: u32 = 8192;
 pub const MAX_TIMEOUT_MS: u64 = 60_000;
 pub const MAX_RECORDS: i64 = 10_000;
+pub const MAX_ACTIVE_WORKSPACES: u64 = 1;
+pub const MAX_WORKSPACE_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -126,6 +128,20 @@ pub struct RunnerStatus {
     pub operation_records: u64,
     pub operation_capacity: u64,
     pub error: Option<String>,
+    pub active_workspaces: u64,
+    pub retained_workspaces: u64,
+    pub workspace_bytes: u64,
+    pub workspace_capacity: u64,
+    pub workspace_byte_limit: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceStatus {
+    pub thread_id: String,
+    pub state: String,
+    pub kind: String,
+    pub retained: bool,
 }
 
 #[derive(Debug)]
@@ -203,10 +219,12 @@ struct Journal {
     // A kernel-released lock, not a stale-PID lock. Never unlink/replace this file.
     _lock: File,
     active: bool,
+    active_thread: Option<String>,
 }
 
 pub struct Runner {
     installation: Installation,
+    workspace_root: PathBuf,
     recovery_quarantine: PathBuf,
     journal: Mutex<Journal>,
     accepting: AtomicBool,
@@ -368,6 +386,8 @@ impl Runner {
             BEGIN IMMEDIATE;
             CREATE TABLE installation(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL);
             CREATE TABLE operation(id TEXT PRIMARY KEY, request TEXT NOT NULL, hash TEXT NOT NULL, state TEXT NOT NULL);
+            CREATE TABLE workspace(thread_id TEXT PRIMARY KEY, state TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
+              kind TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL, error TEXT);
             CREATE TRIGGER retain_installation_insert BEFORE INSERT ON installation WHEN EXISTS(SELECT 1 FROM installation) BEGIN SELECT RAISE(ABORT, 'immutable installation'); END;
             CREATE TRIGGER retain_operation_insert BEFORE INSERT ON operation WHEN EXISTS(SELECT 1 FROM operation WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT, 'immutable request'); END;
             CREATE TRIGGER immutable_installation_update BEFORE UPDATE ON installation BEGIN SELECT RAISE(ABORT, 'immutable installation'); END;
@@ -442,15 +462,34 @@ impl Runner {
                 serde_json::to_string(&Operation::Running)?
             ],
         )?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS workspace(thread_id TEXT PRIMARY KEY, state TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL, error TEXT);")?;
         let recovery_quarantine = state.join("restore-quarantine");
         let quarantined = recovery_quarantine.exists();
+        let workspace_root = state.join("workspaces");
+        if !workspace_root.exists() {
+            let mut builder = fs::DirBuilder::new();
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700).create(&workspace_root)?;
+        }
+        let workspace_meta = fs::symlink_metadata(&workspace_root)?;
+        ensure!(
+            workspace_meta.is_dir() && workspace_meta.mode() & 0o077 == 0,
+            "workspace allocation root must be private and not a symlink"
+        );
+        // A crash can strand a filesystem tree between two durable transitions.
+        // Preserve it and require explicit inspection; never infer that it is safe
+        // to delete user work during startup reconciliation.
+        db.execute("UPDATE workspace SET state='failed', error='allocation interrupted; workspace retained' WHERE state='allocating' OR state='releasing'", [])?;
         Ok(Arc::new(Self {
             installation,
+            workspace_root,
             recovery_quarantine,
             journal: Mutex::new(Journal {
                 db,
                 _lock: lock,
                 active: false,
+                active_thread: None,
             }),
             accepting: AtomicBool::new(!quarantined),
             faulted: AtomicBool::new(false),
@@ -461,7 +500,7 @@ impl Runner {
     }
 
     pub fn status(&self) -> Result<RunnerStatus> {
-        let workspace_error = self.cwd(".").err().map(|error| {
+        let workspace_error = self.cwd(None, ".").err().map(|error| {
             error
                 .downcast_ref::<RunnerError>()
                 .map_or("IO_ERROR", |error| error.0)
@@ -476,6 +515,17 @@ impl Runner {
             .db
             .query_row("SELECT COUNT(*) FROM operation", [], |r| r.get::<_, i64>(0))?
             as u64;
+        let active_workspaces = journal.db.query_row(
+            "SELECT COUNT(*) FROM workspace WHERE state='available'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64;
+        let retained_workspaces = journal.db.query_row(
+            "SELECT COUNT(*) FROM workspace WHERE state='released' OR state='failed'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64;
+        let workspace_bytes = directory_bytes(&self.workspace_root).unwrap_or(MAX_WORKSPACE_BYTES);
         Ok(RunnerStatus {
             lifecycle: if self.recovery_quarantine.exists() {
                 "recoveryRequired"
@@ -495,7 +545,218 @@ impl Runner {
                     .load(Ordering::SeqCst)
                     .then(|| "IO_ERROR".into())
             }),
+            active_workspaces,
+            retained_workspaces,
+            workspace_bytes,
+            workspace_capacity: MAX_ACTIVE_WORKSPACES,
+            workspace_byte_limit: MAX_WORKSPACE_BYTES,
         })
+    }
+
+    pub fn allocate(&self, thread_id: &str) -> Result<WorkspaceStatus> {
+        ensure!(valid_id(thread_id), RunnerError("INVALID_REQUEST"));
+        ensure!(
+            thread_id != self.installation.binding.thread_id,
+            RunnerError("CONFLICT")
+        );
+        let journal = self.journal.lock().unwrap();
+        if let Some((state, kind)) = journal
+            .db
+            .query_row(
+                "SELECT state,kind FROM workspace WHERE thread_id=?1",
+                [thread_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?
+        {
+            return match state.as_str() {
+                "available" => Ok(WorkspaceStatus {
+                    thread_id: thread_id.into(),
+                    state,
+                    kind,
+                    retained: false,
+                }),
+                "released" => reject("CONFLICT"),
+                _ => reject("IO_ERROR"),
+            };
+        }
+        ensure!(
+            self.accepting.load(Ordering::SeqCst),
+            RunnerError("DRAINING")
+        );
+        ensure!(!journal.active, RunnerError("CAPACITY_EXCEEDED"));
+        let active = journal.db.query_row("SELECT COUNT(*) FROM workspace WHERE state='available' OR state='allocating' OR state='releasing'", [], |r| r.get::<_, i64>(0))? as u64;
+        ensure!(
+            active < MAX_ACTIVE_WORKSPACES,
+            RunnerError("CAPACITY_EXCEEDED")
+        );
+        ensure!(
+            directory_bytes(&self.workspace_root)? < MAX_WORKSPACE_BYTES,
+            RunnerError("CAPACITY_EXCEEDED")
+        );
+        let destination = self.workspace_root.join(thread_id);
+        ensure!(!destination.exists(), RunnerError("CONFLICT"));
+        journal.db.execute(
+            "INSERT INTO workspace VALUES(?1,'allocating',?2,'pending',0,0,NULL)",
+            params![thread_id, destination.to_string_lossy()],
+        )?;
+        drop(journal);
+
+        let provisioned = (|| -> Result<&'static str> {
+            let kind = if git_worktree(&self.installation.workspace, &destination)? {
+                "git"
+            } else {
+                copy_directory(&self.installation.workspace, &destination)?;
+                "copy"
+            };
+            let metadata = fs::metadata(&destination)?;
+            let journal = self.journal.lock().unwrap();
+            journal.db.execute("UPDATE workspace SET state='available',kind=?1,device=?2,inode=?3 WHERE thread_id=?4 AND state='allocating'",
+                params![kind, i64::try_from(metadata.dev())?, i64::try_from(metadata.ino())?, thread_id])?;
+            Ok(kind)
+        })();
+        let kind = match provisioned {
+            Ok(kind) => kind,
+            Err(error) => {
+                self.journal.lock().unwrap().db.execute(
+                    "UPDATE workspace SET state='failed',error=?1 WHERE thread_id=?2",
+                    params![format!("workspace allocation failed: {error}"), thread_id],
+                )?;
+                return reject("IO_ERROR");
+            }
+        };
+        File::open(&self.workspace_root)?.sync_all()?;
+        Ok(WorkspaceStatus {
+            thread_id: thread_id.into(),
+            state: "available".into(),
+            kind: kind.into(),
+            retained: false,
+        })
+    }
+
+    pub fn release(&self, thread_id: &str) -> Result<WorkspaceStatus> {
+        ensure!(valid_id(thread_id), RunnerError("INVALID_REQUEST"));
+        ensure!(
+            thread_id != self.installation.binding.thread_id,
+            RunnerError("CONFLICT")
+        );
+        let journal = self.journal.lock().unwrap();
+        ensure!(
+            journal.active_thread.as_deref() != Some(thread_id),
+            RunnerError("CAPACITY_EXCEEDED")
+        );
+        let row = journal
+            .db
+            .query_row(
+                "SELECT state,path,kind FROM workspace WHERE thread_id=?1",
+                [thread_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        PathBuf::from(r.get::<_, String>(1)?),
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((state, workspace, kind)) = row else {
+            return reject("ENVIRONMENT_MISSING");
+        };
+        if state == "released" {
+            return Ok(WorkspaceStatus {
+                thread_id: thread_id.into(),
+                state,
+                kind,
+                retained: workspace.exists(),
+            });
+        }
+        if state == "failed" {
+            let kind = if kind == "pending" {
+                "retained".to_owned()
+            } else {
+                kind
+            };
+            journal.db.execute(
+                "UPDATE workspace SET state='released',kind=?1 WHERE thread_id=?2",
+                params![kind, thread_id],
+            )?;
+            return Ok(WorkspaceStatus {
+                thread_id: thread_id.into(),
+                state: "released".into(),
+                kind,
+                retained: workspace.exists(),
+            });
+        }
+        ensure!(state == "available", RunnerError("IO_ERROR"));
+        journal.db.execute(
+            "UPDATE workspace SET state='releasing' WHERE thread_id=?1",
+            [thread_id],
+        )?;
+        drop(journal);
+
+        let retained = if kind == "git" {
+            let status = StdCommand::new("git")
+                .args(["-C"])
+                .arg(&workspace)
+                .args(["status", "--porcelain", "--untracked-files=all"])
+                .output()?;
+            let workspace_head = StdCommand::new("git")
+                .args(["-C"])
+                .arg(&workspace)
+                .args(["rev-parse", "HEAD"])
+                .output()?;
+            let template_head = StdCommand::new("git")
+                .args(["-C"])
+                .arg(&self.installation.workspace)
+                .args(["rev-parse", "HEAD"])
+                .output()?;
+            if !status.status.success()
+                || !status.stderr.is_empty()
+                || !workspace_head.status.success()
+                || !workspace_head.stderr.is_empty()
+                || !template_head.status.success()
+                || !template_head.stderr.is_empty()
+            {
+                return self.fail_release(thread_id, "could not inspect git workspace");
+            }
+            if status.stdout.is_empty() && workspace_head.stdout == template_head.stdout {
+                let status = StdCommand::new("git")
+                    .args(["-C"])
+                    .arg(&self.installation.workspace)
+                    .args(["worktree", "remove", "--"])
+                    .arg(&workspace)
+                    .status()?;
+                if !status.success() {
+                    return self.fail_release(thread_id, "could not remove clean git workspace");
+                }
+                false
+            } else {
+                true
+            }
+        } else {
+            // A copied non-Git tree has no trustworthy clean/dirty oracle.
+            true
+        };
+        let journal = self.journal.lock().unwrap();
+        journal.db.execute(
+            "UPDATE workspace SET state='released',error=NULL WHERE thread_id=?1",
+            [thread_id],
+        )?;
+        File::open(&self.workspace_root)?.sync_all()?;
+        Ok(WorkspaceStatus {
+            thread_id: thread_id.into(),
+            state: "released".into(),
+            kind,
+            retained,
+        })
+    }
+
+    fn fail_release<T>(&self, thread_id: &str, message: &str) -> Result<T> {
+        self.journal.lock().unwrap().db.execute(
+            "UPDATE workspace SET state='failed',error=?1 WHERE thread_id=?2",
+            params![message, thread_id],
+        )?;
+        reject("IO_ERROR")
     }
 
     /// Draining is local operator authority. Remote peers may observe it but
@@ -522,15 +783,29 @@ impl Runner {
     }
     pub fn inspect(&self, env: u64) -> Result<&Installation> {
         self.check_env(env)?;
-        self.cwd(".")?;
+        self.cwd(None, ".")?;
         Ok(&self.installation)
     }
 
-    fn cwd(&self, path: &str) -> Result<File> {
+    fn cwd(&self, thread_id: Option<&str>, path: &str) -> Result<File> {
+        let (root, expected_device, expected_inode) = if let Some(thread_id) = thread_id {
+            ensure!(valid_id(thread_id), RunnerError("INVALID_REQUEST"));
+            let row = self.journal.lock().unwrap().db.query_row(
+                "SELECT path,device,inode FROM workspace WHERE thread_id=?1 AND state='available'", [thread_id],
+                |r| Ok((PathBuf::from(r.get::<_, String>(0)?), r.get::<_, i64>(1)? as u64, r.get::<_, i64>(2)? as u64)),
+            ).optional()?;
+            row.ok_or(RunnerError("ENVIRONMENT_MISSING"))?
+        } else {
+            (
+                self.installation.workspace.clone(),
+                self.installation.workspace_device,
+                self.installation.workspace_inode,
+            )
+        };
         let workspace = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-            .open(&self.installation.workspace)
+            .open(&root)
             .map_err(|error| {
                 RunnerError(match error.raw_os_error() {
                     Some(libc::ENOENT | libc::ELOOP | libc::ENOTDIR) => "ENVIRONMENT_MISSING",
@@ -538,9 +813,7 @@ impl Runner {
                 })
             })?;
         let meta = workspace.metadata()?;
-        if meta.dev() != self.installation.workspace_device
-            || meta.ino() != self.installation.workspace_inode
-        {
+        if meta.dev() != expected_device || meta.ino() != expected_inode {
             return reject("ENVIRONMENT_MISSING");
         }
         #[cfg(target_os = "linux")]
@@ -594,10 +867,30 @@ impl Runner {
     /// Commit before spawning, without awaiting network IO. Work belongs to the
     /// runner, never to a connection task. Capacity is rejection, not queuing.
     pub fn start(self: &Arc<Self>, env: u64, id: &str, spec: ExecSpec) -> Result<()> {
+        self.start_in_workspace(env, None, id, spec)
+    }
+
+    pub fn start_in_workspace(
+        self: &Arc<Self>,
+        env: u64,
+        thread_id: Option<&str>,
+        id: &str,
+        spec: ExecSpec,
+    ) -> Result<()> {
         self.check_env(env)?;
         ensure!(valid_id(id), RunnerError("INVALID_REQUEST"));
+        spec.validate()
+            .map_err(|_| RunnerError("INVALID_REQUEST"))?;
+        // Resolve the descriptor before taking the journal mutex; allocated
+        // workspace identity is itself stored in that journal.
+        let cwd = self.cwd(thread_id, &spec.guest_cwd)?;
         // A typed, fixed-field serialization canonicalizes JSON field order.
-        let request = serde_json::to_string(&("exec.start", &self.installation.binding, &spec))?;
+        let request = if let Some(thread_id) = thread_id {
+            serde_json::to_string(&("exec.start", &self.installation.binding, thread_id, &spec))?
+        } else {
+            // Preserve protocol-v1 operation hashes for existing bound threads.
+            serde_json::to_string(&("exec.start", &self.installation.binding, &spec))?
+        };
         let hash = Sha256::digest(request.as_bytes())
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -617,8 +910,6 @@ impl Runner {
             }
             return Ok(()); // Including Interrupted: never run it again.
         }
-        spec.validate()
-            .map_err(|_| RunnerError("INVALID_REQUEST"))?;
         if self.faulted.load(Ordering::SeqCst) {
             return reject("IO_ERROR");
         }
@@ -635,7 +926,6 @@ impl Runner {
         {
             return reject("CAPACITY_EXCEEDED");
         }
-        let cwd = self.cwd(&spec.guest_cwd)?;
         journal.db.execute(
             "INSERT INTO operation VALUES(?1,?2,?3,?4)",
             params![
@@ -646,10 +936,15 @@ impl Runner {
             ],
         )?;
         journal.active = true;
+        journal.active_thread = thread_id.map(str::to_owned);
         let runner = Arc::clone(self);
         let id = id.to_owned();
+        let workspace = thread_id.map_or_else(
+            || runner.installation.workspace.clone(),
+            |thread_id| runner.workspace_root.join(thread_id),
+        );
         tokio::spawn(async move {
-            let outcome = runner.run(&id, &spec, cwd).await;
+            let outcome = runner.run(&id, &spec, cwd, &workspace).await;
             let mut journal = runner.journal.lock().unwrap();
             if let Err(error) = outcome {
                 // A storage/runner failure must stop further admission. Do not
@@ -676,6 +971,7 @@ impl Runner {
                 );
             }
             journal.active = false;
+            journal.active_thread = None;
             runner.idle.notify_waiters();
         });
         Ok(())
@@ -688,16 +984,9 @@ impl Runner {
         ensure!(changed == 1, "operation record disappeared");
         Ok(())
     }
-    async fn run(&self, id: &str, spec: &ExecSpec, cwd: File) -> Result<()> {
+    async fn run(&self, id: &str, spec: &ExecSpec, cwd: File, workspace: &Path) -> Result<()> {
         self.save(id, Operation::Running)?; // Durable intent before possible spawn.
-        let result = execute(
-            spec,
-            cwd,
-            &self.installation.workspace,
-            &self.cancel_active,
-            &self.cancel,
-        )
-        .await;
+        let result = execute(spec, cwd, workspace, &self.cancel_active, &self.cancel).await;
         match result {
             Ok(ExecutionOutcome::Completed(result)) => {
                 self.save(id, Operation::Succeeded { result })
@@ -743,6 +1032,79 @@ impl Runner {
             notified.await;
         }
     }
+}
+
+fn git_worktree(source: &Path, destination: &Path) -> Result<bool> {
+    let probe = StdCommand::new("git")
+        .args(["-C"])
+        .arg(source)
+        .args(["rev-parse", "--show-toplevel"])
+        .output();
+    let Ok(probe) = probe else {
+        return Ok(false);
+    };
+    if !probe.status.success() {
+        return Ok(false);
+    }
+    let top = PathBuf::from(String::from_utf8(probe.stdout)?.trim());
+    if fs::canonicalize(top)? != fs::canonicalize(source)? {
+        return Ok(false);
+    }
+    let output = StdCommand::new("git")
+        .args(["-C"])
+        .arg(source)
+        .args(["worktree", "add", "--detach", "--"])
+        .arg(destination)
+        .arg("HEAD")
+        .output()?;
+    ensure!(
+        output.status.success(),
+        "git worktree add failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(true)
+}
+
+fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "copy source must be a directory"
+    );
+    let mut builder = fs::DirBuilder::new();
+    use std::os::unix::fs::DirBuilderExt;
+    builder.mode(metadata.mode() & 0o777).create(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&from)?;
+        if metadata.is_dir() {
+            copy_directory(&from, &to)?;
+        } else if metadata.is_file() {
+            fs::copy(&from, &to)?;
+            fs::set_permissions(&to, metadata.permissions())?;
+        } else if metadata.file_type().is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
+        } else {
+            ensure!(false, "unsupported file type in workspace template");
+        }
+    }
+    Ok(())
+}
+
+fn directory_bytes(root: &Path) -> Result<u64> {
+    let mut total = 0u64;
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.is_dir() {
+            total = total.saturating_add(directory_bytes(&entry.path())?);
+        } else {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
 }
 
 enum ExecutionOutcome {

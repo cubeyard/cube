@@ -41,7 +41,13 @@ export interface TrustedRunnerHealth {
   error: "ENVIRONMENT_MISSING" | "IO_ERROR" | "UNSUPPORTED" | null;
   softwareVersion: string;
   protocolVersion: 1;
+  activeWorkspaces: number;
+  retainedWorkspaces: number;
+  workspaceBytes: number;
+  workspaceCapacity: number;
+  workspaceByteLimit: number;
 }
+export interface RunnerWorkspace { threadId: string; state: "available" | "released"; kind: "git" | "copy" | "retained"; retained: boolean }
 export type RunnerOperation =
   | { state: "Accepted" | "Running" | "Unknown" }
   | { state: "Succeeded"; result: RunnerExecResult }
@@ -235,16 +241,19 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
   readonly binding: Readonly<NodeBinding>;
   contact: NodeContact = "unobserved";
   private readonly config: IrohConfig;
+  private readonly installationBinding: Readonly<NodeBinding>;
   private readonly configPath: string;
   readonly configHash: string;
   private readonly observe?: (environmentId: number, observation: EnvironmentObservation) => void;
   private requestTail: Promise<void> = Promise.resolve();
 
-  constructor(options: { configPath: string; configHash?: string; observe?: (environmentId: number, observation: EnvironmentObservation) => void }) {
-    shape(options, ["configPath"], ["configHash", "observe"]);
+  constructor(options: { configPath: string; configHash?: string; threadId?: string; observe?: (environmentId: number, observation: EnvironmentObservation) => void }) {
+    shape(options, ["configPath"], ["configHash", "threadId", "observe"]);
     const { config, hash } = loadConfig(options.configPath);
     if (options.configHash !== undefined && options.configHash !== hash) throw new IrohNodeError("CONFLICT");
-    this.binding = Object.freeze({ ...config.binding });
+    if (options.threadId !== undefined && !ID.test(options.threadId)) invalid();
+    this.installationBinding = Object.freeze({ ...config.binding });
+    this.binding = Object.freeze({ ...config.binding, threadId: options.threadId ?? config.binding.threadId });
     this.nodeId = config.binding.nodeId;
     this.config = config;
     this.configPath = options.configPath;
@@ -285,7 +294,7 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     try { Schema.decodeUnknownSync(ProtocolCompatibility)(hello); }
     catch { throw new IrohNodeError("INCOMPATIBLE_PROTOCOL"); }
     if (hello.type !== "Hello" || hello.nodeId !== this.nodeId
-      || hello.binding === undefined || !equalBinding(binding(hello.binding), this.binding)) throw new IrohNodeError("WRONG_NODE");
+      || hello.binding === undefined || !equalBinding(binding(hello.binding), this.installationBinding)) throw new IrohNodeError("WRONG_NODE");
     if (!Array.isArray(hello.profiles) || (!hello.profiles.includes("runner") && !hello.profiles.includes("host"))
       || !hello.profiles.every(x => typeof x === "string")
       || !Array.isArray(hello.capabilities) || !hello.capabilities.every(x => typeof x === "string")) invalid();
@@ -394,20 +403,32 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
         case "node.status": {
           shape(result, ["type", "nodeId", "binding", "status"],
             ["protocolVersion", "minimumProtocolVersion", "softwareVersion"]);
-          if (result.type !== "Status" || result.nodeId !== this.nodeId || !equalBinding(binding(result.binding), this.binding)) invalid();
+          if (result.type !== "Status" || result.nodeId !== this.nodeId || !equalBinding(binding(result.binding), this.installationBinding)) invalid();
           try { Schema.decodeUnknownSync(ProtocolCompatibility)(result); }
           catch { throw new IrohNodeError("INCOMPATIBLE_PROTOCOL"); }
-          const status = shape(result.status, ["lifecycle", "active", "operationRecords", "operationCapacity", "error"]);
+          const status = shape(result.status, ["lifecycle", "active", "operationRecords", "operationCapacity", "error",
+            "activeWorkspaces", "retainedWorkspaces", "workspaceBytes", "workspaceCapacity", "workspaceByteLimit"]);
           if (!["ready", "draining", "faulted", "recoveryRequired"].includes(String(status.lifecycle)) || typeof status.active !== "boolean"
             || !integer(status.operationRecords, 0) || !integer(status.operationCapacity, 1)
             || status.operationRecords > status.operationCapacity
+            || !integer(status.activeWorkspaces, 0) || !integer(status.retainedWorkspaces, 0)
+            || !integer(status.workspaceBytes, 0) || !integer(status.workspaceCapacity, 1) || !integer(status.workspaceByteLimit, 1)
+            || status.activeWorkspaces > status.workspaceCapacity
             || ![null, "ENVIRONMENT_MISSING", "IO_ERROR", "UNSUPPORTED"].includes(status.error as null | string)) invalid();
           break;
         }
         case "environment.inspect":
           shape(result, ["type", "binding", "state"]);
-          if (result.type !== "Environment" || result.state !== "ready" || !equalBinding(binding(result.binding), this.binding)) invalid();
+          if (result.type !== "Environment" || result.state !== "ready" || !equalBinding(binding(result.binding), this.installationBinding)) invalid();
           break;
+        case "workspace.allocate": case "workspace.release": {
+          shape(result, ["type", "workspace"]);
+          if (result.type !== "Workspace") invalid();
+          const workspace = shape(result.workspace, ["threadId", "state", "kind", "retained"]);
+          if (workspace.threadId !== this.binding.threadId || !["available", "released"].includes(String(workspace.state))
+            || !["git", "copy", "retained"].includes(String(workspace.kind)) || typeof workspace.retained !== "boolean") invalid();
+          break;
+        }
         case "exec.start":
           shape(result, ["type", "operationId"]);
           if (result.type !== "Accepted" || result.operationId !== id) invalid();
@@ -467,6 +488,16 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     this.environment(environmentId); this.assertConfig();
     await this.request(this.identity().key);
   }
+  async allocateWorkspace(): Promise<RunnerWorkspace> {
+    if (this.binding.threadId === this.installationBinding.threadId) return { threadId: this.binding.threadId, state: "available", kind: "copy", retained: true };
+    const result = await this.request(this.identity().key, { method: "workspace.allocate", threadId: this.binding.threadId });
+    return result.workspace as RunnerWorkspace;
+  }
+  async releaseWorkspace(): Promise<RunnerWorkspace> {
+    if (this.binding.threadId === this.installationBinding.threadId) return { threadId: this.binding.threadId, state: "released", kind: "copy", retained: true };
+    const result = await this.request(this.identity().key, { method: "workspace.release", threadId: this.binding.threadId });
+    return result.workspace as RunnerWorkspace;
+  }
   /** Pi owns the durable intent. The runner owns deduplication and results.
    * Repeated dispatch uses exactly the same session-scoped identity; the runner
    * rejects changed arguments and never re-executes a retained operation,
@@ -480,7 +511,8 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     const env = this.binding.environmentId;
     // Unlike the legacy prepare/submit API, Pi has already committed the
     // intent. No second local operation journal or sent marker is necessary.
-    await this.request(key, { method: "exec.start", operationId, env, spec }, signal);
+    await this.request(key, { method: "exec.start", operationId, env,
+      ...(this.binding.threadId === this.installationBinding.threadId ? {} : { threadId: this.binding.threadId }), spec }, signal);
     for (;;) {
       const state = (await this.request(key, { method: "operation.get", operationId, env }, signal)).operation as RunnerOperation;
       if (state.state === "Succeeded") return { ...state.result, operationId };
