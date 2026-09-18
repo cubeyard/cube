@@ -137,3 +137,58 @@ The draft publishes the committed public key, never a newly derived replacement.
 Maintainers review the draft and explicitly publish it; GitHub's
 `releases/latest/download/...` redirect then exposes the new platform manifest.
 Pre-releases are rejected by the supervisor, and drafts are not discoverable.
+
+## First post-v0.1.28 acceptance on server1
+
+Use this flow for the first stable managed update after v0.1.28. The expected
+next version is v0.1.29. Tagging, publishing the draft and changing the server1
+installation each require an explicit maintainer decision; preparing or running
+the disposable test below does not authorize any of them.
+
+1. From the exact candidate commit in a clean checkout, run the normal checks
+   and the disposable managed-update acceptance:
+
+   ```sh
+   pnpm typecheck
+   pnpm lint
+   pnpm test
+   pnpm build
+   bash scripts/test-node-transport.sh
+   node scripts/cubed-update-test.ts
+   ```
+
+   The update test creates its own state, signing key, feed and installation. It
+   must report GUI/API discovery, signed activation, restart probation, state
+   preservation and both unhealthy-candidate and interrupted-update rollback.
+   Never point it at server1 state.
+
+2. On server1, before publishing, record the current **system** readout and
+   confirm it reports managed v0.1.28, state schema 100 and browser updates
+   enabled. Record the current project/thread count and provider connection
+   status. Confirm the configured feed suffix matches server1's platform. Do
+   not copy, edit or remove `CUBED_STATE`, `current`, `previous` or runner state.
+
+3. After explicit authorization, create the stable v0.1.29 tag. Wait for all
+   Linux x64, Linux arm64 and macOS arm64 release jobs, review the draft assets,
+   signatures, checksums and generated notes, and publish only after a second
+   explicit authorization. Drafts cannot be discovered by server1.
+
+4. In server1's **system** page, select **check for updates**. Require a signed
+   v0.1.29 candidate with the expected commit, publication time and release-notes
+   link. If the version or commit differs, stop; do not install.
+
+5. Select **install v0.1.29** and confirm. Observe verification, download,
+   staging, drain, restart and probation. A short browser disconnect is expected;
+   leave the page open so polling reconnects. Acceptance requires the final
+   readout to show v0.1.29, the reviewed commit, schema 100 and no error.
+
+6. Recheck the recorded projects, threads, transcript access and provider
+   connection status. Confirm one representative retained thread still opens.
+   Confirm runner versions did not change. Keep the prior release through the
+   acceptance window; do not delete `previous` or v0.1.28.
+
+If installation reports `rolled-back`, require server1 to show v0.1.28 healthy
+again and verify the same retained state before collecting `update.json` and
+service logs. Do not retry until the candidate failure is understood. If both
+candidate and rollback fail, stop the service and follow manual recovery above;
+never reset product or runner state as a recovery shortcut.
