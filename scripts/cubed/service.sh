@@ -8,8 +8,16 @@ label="com.cubeyard.cubed"
 umask 077
 case "$root$launcher$config" in *$'\n'*|*'"'*|*'\\'*) echo 'service paths may not contain newlines, quotes or backslashes' >&2; exit 1;; esac
 xml_escape() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'; }
+shell_quote() { printf "'"; printf '%s' "$1" | sed "s/'/'\\\\''/g"; printf "'"; }
+preserve_path() {
+  grep -Eq '^[[:space:]]*(export[[:space:]]+)?PATH=' "$config" 2>/dev/null && return
+  mkdir -p "$(dirname "$config")"
+  { [ ! -s "$config" ] || printf '\n'; printf 'PATH='; shell_quote "$PATH"; printf '\n'; } >> "$config"
+  chmod 600 "$config"
+}
 case "$(uname -s):$action" in
   Linux:install)
+    preserve_path
     unit="$HOME/.config/systemd/user/cubed.service"; mkdir -p "$(dirname "$unit")" "$(dirname "$config")"
     cat > "$unit" <<EOF
 [Unit]
@@ -28,9 +36,10 @@ UMask=0077
 [Install]
 WantedBy=default.target
 EOF
-    systemctl --user daemon-reload; systemctl --user enable --now cubed.service ;;
+    systemctl --user daemon-reload; systemctl --user enable cubed.service; systemctl --user restart cubed.service ;;
   Linux:remove) systemctl --user disable --now cubed.service || true; rm -f "$HOME/.config/systemd/user/cubed.service"; systemctl --user daemon-reload ;;
   Darwin:install)
+    preserve_path
     plist="$HOME/Library/LaunchAgents/$label.plist"; mkdir -p "$(dirname "$plist")" "$root/logs"
     xml_launcher="$(xml_escape "$launcher")"; xml_root="$(xml_escape "$root")"; xml_config="$(xml_escape "$config")"
     cat > "$plist" <<EOF

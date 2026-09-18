@@ -86,12 +86,17 @@ systemd and launchd are profiles, not requirements. After validating foreground
 operation, install the native user profile with:
 
 ```sh
+command -v gh
 bash service.sh install
 ```
 
 On Linux this creates `~/.config/systemd/user/cubed.service`; on macOS it creates
 `~/Library/LaunchAgents/com.cubeyard.cubed.plist`. Both invoke the same foreground
-launcher and environment file without sudo. Remove the profile with
+launcher and environment file without sudo. Installation records the invoking
+operator `PATH` in the environment file when that file has no explicit `PATH`,
+preserves an operator-owned assignment, and restarts the profile so the supervised
+child receives it. Run the install command from a shell where required host tools
+such as `gh` resolve. Remove the profile with
 `bash service.sh remove`. Do not run the foreground command and service together;
 the installation lock rejects a second supervisor.
 
