@@ -7,9 +7,9 @@ import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import type { Models } from "@earendil-works/pi-ai";
 import { GitService, normalizeRepoUrl } from "@cube/git";
-import { Registry, type Project } from "./registry.ts";
+import { Registry, type Project, type Runner } from "./registry.ts";
 import { Conversations } from "./conversation.ts";
-import { IrohExecutionNodeClient } from "./iroh-node.ts";
+import { IrohExecutionNodeClient, type TrustedRunnerHealth } from "./iroh-node.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
 import { JevSettings } from "./jev-settings.ts";
@@ -41,6 +41,7 @@ export async function createCubed(options: {
   web?: string;
   allowedHosts?: string[];
   updates?: UpdateService;
+  runnerHealth?: (runner: Runner) => Promise<TrustedRunnerHealth>;
 }) {
   const registry = new Registry(path.join(options.state, "registry.sqlite"));
   const models = options.models ?? await createModelRuntime();
@@ -53,12 +54,26 @@ export async function createCubed(options: {
   const onboarding = path.join(options.state, "onboarding.json");
   const configuredHosts = options.allowedHosts ?? process.env.CUBED_ALLOWED_HOSTS?.split(",") ?? [];
   const allowedHosts = new Set(["localhost", "127.0.0.1", "[::1]", ...configuredHosts.map(host => host.trim()).filter(Boolean)]);
+  const runnerHealth = options.runnerHealth ?? (runner => new IrohExecutionNodeClient({ configPath: runner.configPath, configHash: runner.configHash }).health());
+  const runnerView = (id: string) => registry.runnerStatuses().find(runner => runner.id === id);
+  const probeRunner = async (id: string) => {
+    const runner = registry.getRunner(id);
+    if (!runner) throw new Error("runner not found");
+    const current = runnerView(id);
+    if (current?.retiredAt) return current;
+    try {
+      registry.recordRunnerProbe(id, { health: await runnerHealth(runner) });
+    } catch (error) {
+      registry.recordRunnerProbe(id, { error: error instanceof Error ? error.message : String(error) });
+    }
+    return runnerView(id)!;
+  };
   const catalog = async () => (await models.getAvailable()).map(({ provider, id }) => ({ provider, id }));
   const projectView = (project: Project) => ({ ...project,
     availableRunnerCount: registry.availableRunners().length,
     runnerCount: registry.runnerCount(),
     runnerCapacity: registry.runnerCapacity(),
-    runners: registry.runnerViews(),
+    runners: registry.runnerStatuses(),
     threadCount: registry.listThreads().filter(thread => thread.projectId === project.id && !thread.archived).length,
     retainedThreadCount: registry.listThreads().filter(thread => thread.projectId === project.id).length });
   async function check(project: Project) {
@@ -165,6 +180,34 @@ export async function createCubed(options: {
       }
       if (url.pathname === "/api/github/repositories" && method === "GET") return json({ repositories: await github.repositories() });
       if (url.pathname === "/api/models" && method === "GET") { const available = await catalog(); return json({ models: available, selected: preferredModel(available) }); }
+      if (parts[0] === "api" && parts[1] === "runners") {
+        const id = parts[2];
+        if (!id && parts.length === 2 && method === "GET") {
+          return json({ runners: registry.runnerStatuses() });
+        }
+        if (!id || parts.length !== 4 || method !== "POST") return json({ error: "not found" }, 404);
+        if (parts[3] === "check") return json({ runner: await probeRunner(id) });
+        if (parts[3] === "retire") {
+          const runner = registry.getRunner(id);
+          if (!runner) return json({ error: "runner not found" }, 404);
+          if (body.confirm !== runner.nodeId) throw new Error(`type ${runner.nodeId} to confirm retirement`);
+          const reason = text("reason");
+          if (reason.length > 500) throw new Error("reason must be at most 500 characters");
+          registry.beginRunnerRetirement(id);
+          try {
+            const status = await probeRunner(id);
+            if (status.contactStatus === "reachable" && (status.health?.active || status.health?.activeWorkspaces)) {
+              throw new Error("runner reports active work or an active workspace and cannot be retired");
+            }
+            registry.finishRunnerRetirement(id, reason, status.lastAttemptAt!);
+            return json({ runner: runnerView(id) });
+          } catch (error) {
+            registry.cancelRunnerRetirement(id);
+            throw error;
+          }
+        }
+        return json({ error: "not found" }, 404);
+      }
       if (parts[0] === "api" && parts[1] === "projects") {
         const id = parts[2];
         if (parts.length > 4 || (parts[3] && !(parts[3] === "check" && method === "POST"))) return json({ error: "not found" }, 404);

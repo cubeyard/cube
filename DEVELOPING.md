@@ -100,6 +100,15 @@ archives an idle thread and releases runner capacity. Changed or independently
 committed Git worktrees and fallback copies are retained; a clean Git worktree
 still at the template HEAD is removed.
 
+Runner operations are installation-global. `GET /api/runners` returns persisted
+contact and the current global allocation snapshot without private adapter paths;
+`POST /api/runners/<id>/check` performs a fresh authenticated check. Retirement
+uses `POST /api/runners/<id>/retire` with the exact node ID in `confirm` and a
+non-empty audit `reason`. It is unavailable while the global snapshot contains an
+active thread/workspace, while a reachable runner reports active work, or while an
+unreachable binding has not yet been continuously unreachable for seven days.
+Retirement removes global capacity but does not delete runner state or evidence.
+
 For UI changes use the existing browser workflow: build, run cubed on disposable
 state, check desktop and phone (390×844), exercise affected interactions and
 inspect screenshots. In an Amp orb use supervised orb services and portal URLs,

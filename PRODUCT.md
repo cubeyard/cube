@@ -43,6 +43,14 @@ thread-to-thread tasks and native sandboxing are not currently exposed. Do not
 show controls or copy promising those capabilities. Registry v100/v101 receives a rollback-compatible global-pool extension;
 older execution stacks are not migrated.
 
+The project switchboard exposes installation-global operator truth for trusted
+runners: current global allocation, latest authenticated contact, last successful
+contact and active command/workspace counts when reachable. `unreachable` means
+the latest check failed; `stale` requires seven continuous days of failed checks.
+Retiring is permanent, explicitly confirmed, fail-closed against the global
+allocation snapshot and active runner work, and removes capacity while retaining
+audit and runner-side evidence.
+
 ## Design and voice
 
 Preserve the instrument-panel visual world in DESIGN.md: calm lowercase labels,

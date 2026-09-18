@@ -146,6 +146,29 @@ per-allocation repository plan. An older runner remains enrolled and its existin
 evidence is untouched, but new allocation fails safely as unsupported before Cubed
 sends mutation bytes.
 
+### Unreachable and retired bindings
+
+The project switchboard's global-runner panel uses authenticated `node.status`
+checks. **Unreachable** means the latest check failed. **Stale** means every
+check has failed for at least seven continuous days; one successful check clears
+the interval. The panel shows the last successful contact, current global
+allocation, latest error, and active command/workspace counts when reachable.
+An unknown binding has no observation yet and is not stale.
+
+Use **retire binding** only after deciding that the immutable installation
+admission will not return. Cube requires an exact node-ID confirmation and an
+audit reason. It reserves the runner against every project, checks it again, and
+fails closed if the global allocation snapshot contains a thread/workspace or if
+a reachable runner reports active work. An unreachable runner cannot be retired
+until stale. A restart during the read-only check returns the reservation to the
+installation-wide pool.
+
+Retirement is permanent and is not remote uninstall: Cube keeps the binding,
+thread references, reason and status evidence, excludes it from global capacity,
+and never asks the runner to delete journals, operation records or retained
+workspaces. Project deletion cannot remove this global evidence. Enroll a fresh
+identity for replacement capacity; do not reuse or edit the retired binding.
+
 Fresh Linux layout:
 
 | Path | Owner/mode | Purpose |

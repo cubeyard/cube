@@ -7,11 +7,17 @@ import { spawn, spawnSync } from "node:child_process";
 import { on, once } from "node:events";
 import { createModels, fauxProvider } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
+import type { TrustedRunnerHealth } from "../src/iroh-node.ts";
 
 const state = fs.mkdtempSync(path.join(os.tmpdir(), "cube-api-"));
 const models = createModels();
 const faux = fauxProvider(); models.setProvider(faux.provider);
-const app = await createCubed({ state, models });
+const runnerHealth = new Map<string, TrustedRunnerHealth>();
+const app = await createCubed({ state, models, runnerHealth: async runner => {
+  const health = runnerHealth.get(runner.nodeId);
+  if (!health) throw new Error("NODE_UNAVAILABLE");
+  return health;
+} });
 await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
 const address = app.server.address();
 assert(address && typeof address === "object");
@@ -70,6 +76,33 @@ try {
   const { threads } = await (await fetch(`${base}/api/threads`)).json();
   assert.equal(threads.length, 1); assert.equal(threads[0].state, "error");
   assert.match(threads[0].error, /workspace allocation failed.*IO_ERROR/);
+  const idleHealth: TrustedRunnerHealth = { lifecycle: "ready", active: false, operationRecords: 2, operationCapacity: 100,
+    error: null, softwareVersion: "test", protocolVersion: 1, activeWorkspaces: 0, retainedWorkspaces: 1,
+    workspaceBytes: 1024, workspaceCapacity: 1, workspaceByteLimit: 2048 };
+  app.registry.enrollRunner({ nodeId: "node-operator", threadId: "operator-binding", environmentId: 2,
+    configPath: path.join(state, "operator.json"), configHash: "operator" });
+  runnerHealth.set("node-operator", { ...idleHealth, active: true });
+  const runnerCheck = await write("/api/runners/operator-binding/check", {});
+  assert.equal(runnerCheck.status, 200);
+  const checkedRunner = (await runnerCheck.json()).runner;
+  assert.equal(checkedRunner.contactStatus, "reachable");
+  assert.equal(checkedRunner.health.active, true);
+  assert.equal(checkedRunner.allocationProjectId, null);
+  assert.equal(Object.hasOwn(checkedRunner, "projectId"), false, "runner lifecycle is installation-global, never project-owned");
+  assert.equal(JSON.stringify(checkedRunner).includes("configPath"), false, "runner API must not expose private adapter paths");
+  assert.equal((await write("/api/runners/operator-binding/retire", { confirm: "wrong", reason: "test" })).status, 409,
+    "retirement requires exact node confirmation");
+  const activeRetire = await write("/api/runners/operator-binding/retire", { confirm: "node-operator", reason: "test" });
+  assert.equal(activeRetire.status, 409);
+  assert.match((await activeRetire.json()).error, /active work/);
+  runnerHealth.set("node-operator", idleHealth);
+  const retired = await write("/api/runners/operator-binding/retire", { confirm: "node-operator", reason: "replacement enrolled" });
+  assert.equal(retired.status, 200);
+  assert.equal((await retired.json()).runner.contactStatus, "retired");
+  const projectAfterRetire = (await (await fetch(`${base}/api/projects/${project.id}`)).json()).project;
+  assert.equal(projectAfterRetire.availableRunnerCount, 0, "retired runner contributes no available capacity");
+  assert.equal((await write("/api/runners/broken-thread/retire", { confirm: "broken-node", reason: "still allocated" })).status, 409,
+    "host allocation blocks retirement before a runner probe");
   assert.equal((await fetch(`${base}/api/threads/broken-thread/history/extra`)).status, 404);
   const cli = path.resolve("packages/server/src/index.ts");
   const help = spawnSync(process.execPath, [cli, "--help"], { encoding: "utf8" });
@@ -149,4 +182,5 @@ try {
   console.log("ok: actual CLI loopback default and all-IPv4 opt-in; explicit private hosts allowed, unknown hosts/cross-origin rejected");
   console.log("ok: CLI help/version/flag precedence/live unreachable status and idempotent SIGINT/SIGTERM shutdown");
   console.log("ok: host/origin and JSON guards, method/path routing, repository validation, durable allocation despite failed activation");
+  console.log("ok: runner status privacy, exact confirmation, active-work/allocation guards, retirement audit path and capacity exclusion");
 } finally { await app.close(); fs.rmSync(state, { recursive: true, force: true }); }

@@ -61,7 +61,10 @@ Create a project and enroll trusted runners using
 global pool for every project in the installation. Each allocation receives the
 project's checked repository URLs, branches and exact commit IDs and creates a
 fresh workspace; a runner serves one active thread at a time and archiving
-releases that capacity. There is no automatic fleet provisioning. The UI supports prompts,
+releases that capacity. There is no automatic fleet provisioning. The global
+runner panel records authenticated contact, distinguishes a current failure from
+seven days of continuous unreachability, and can permanently retire an idle or
+stale installation binding without deleting audit or runner-side evidence. The UI supports prompts,
 streamed results, reconnect, model selection, stop, rename and archive.
 
 This is workspace collision isolation only, not process or security isolation.

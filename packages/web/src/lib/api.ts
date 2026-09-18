@@ -5,6 +5,7 @@ import type {
   ModelSelection,
   Project,
   ProjectInput,
+  RunnerStatus,
   ThreadModels,
   ThreadSummary,
   UpdateStatus,
@@ -126,6 +127,15 @@ export const checkProject = (id: string) =>
 
 export const deleteProject = (id: string) =>
   request<{ ok: true }>(`/api/projects/${encodeURIComponent(id)}`, "DELETE");
+
+export const fetchRunners = () =>
+  request<{ runners: RunnerStatus[] }>("/api/runners").then((r) => r.runners);
+
+export const checkRunner = (id: string) =>
+  request<{ runner: RunnerStatus }>(`/api/runners/${encodeURIComponent(id)}/check`, "POST").then((r) => r.runner);
+
+export const retireRunner = (id: string, confirm: string, reason: string) =>
+  request<{ runner: RunnerStatus }>(`/api/runners/${encodeURIComponent(id)}/retire`, "POST", { confirm, reason }).then((r) => r.runner);
 
 /** New thread, allocated from a ready project's enrolled trusted runners.
  * `requestId` names the user action: a resend after a dropped connection

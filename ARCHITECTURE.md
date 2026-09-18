@@ -62,8 +62,9 @@ bill both attempts. SIGKILL tests are not proof of power-loss durability.
 
 ## Product state and limitations
 
-`CUBED_STATE/registry.sqlite` contains projects, globally registered runners, thread
-metadata and creation request keys. `CUBED_STATE/threads/<id>/session` contains
+`CUBED_STATE/registry.sqlite` contains projects, globally registered runners,
+operator contact observations and retirement audit, thread metadata and creation
+request keys. `CUBED_STATE/threads/<id>/session` contains
 Pi's databases. Registry v100/v101 receives the rollback-compatible global-pool extension in place; older execution stacks are
 not migrated. See the reset workflow in README.
 
@@ -92,7 +93,16 @@ keys and archived evidence are preserved. Numeric environment IDs need only be u
 inside their immutable node binding, so collisions across runners are preserved rather
 than rewritten. Existing active threads keep their runner and pinned allocation.
 Project deletion never owns or deletes a runner and remains blocked while any thread
-history references the project. Retire is allowed only without an active allocation.
+history references the project. Runner contact is authenticated `node.status`
+evidence. A failed latest check is `unreachable`; it becomes `stale` only after seven
+continuous days without a successful check. Success clears that interval.
+Retirement is installation-global and first reserves the runner against allocation.
+Both reservation and commit read the global runner/thread allocation snapshot and
+require no active allocation. A reachable runner must also report no active command
+or workspace; an unreachable runner must be stale. Changed status or allocation fails
+closed. The permanent tombstone removes global capacity while retaining immutable
+identity, thread links, reason, probe evidence, runner journals, operation records and
+retained workspaces.
 The extension preserves the v101 runner column order and stores an idempotent marker;
 an older rollback release can still open the registry. Its scheduler ignores newly
 enrolled global runners rather than rebinding or deleting them.
