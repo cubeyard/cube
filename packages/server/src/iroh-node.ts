@@ -47,7 +47,16 @@ export interface TrustedRunnerHealth {
   workspaceCapacity: number;
   workspaceByteLimit: number;
 }
-export interface RunnerWorkspace { threadId: string; state: "available" | "released"; kind: "git" | "copy" | "retained"; retained: boolean }
+export interface RunnerRepositorySource { url: string; branch: string }
+export interface RunnerWorkspace {
+  threadId: string;
+  state: "available" | "released";
+  kind: "git" | "copy" | "retained";
+  retained: boolean;
+  baseRemote?: string;
+  baseRef?: string;
+  baseOid?: string;
+}
 export type RunnerOperation =
   | { state: "Accepted" | "Running" | "Unknown" }
   | { state: "Succeeded"; result: RunnerExecResult }
@@ -66,7 +75,7 @@ interface Intent {
 export class IrohNodeError extends ExecutionNodeError {
   readonly operationId?: string;
   readonly remoteCode: string;
-  constructor(remoteCode: string, operationId?: string, completionUnknown = false) {
+  constructor(remoteCode: string, operationId?: string, completionUnknown = false, detail?: string) {
     const code: NodeErrorCode = completionUnknown || remoteCode === "OUTCOME_UNKNOWN" ? "COMPLETION_UNKNOWN"
       : remoteCode === "UNSUPPORTED" ? "OPERATION_UNSUPPORTED"
       : remoteCode === "UNAUTHORIZED" ? "WRONG_NODE"
@@ -75,7 +84,9 @@ export class IrohNodeError extends ExecutionNodeError {
     super(code);
     this.operationId = operationId;
     this.remoteCode = remoteCode;
-    this.message = `${code}${remoteCode === "INCOMPATIBLE_PROTOCOL" ? ": cubed and cube-runner do not share protocol version 1; upgrade the older component" : ""}${operationId ? `: operation ${operationId}` : ""}${this.completionUnknown ? "; inspect the saved operation before executing again; remote work was not cancelled" : ""}`;
+    this.message = detail && detail !== "runner request rejected" && detail !== "runner state could not be confirmed"
+      ? detail
+      : `${code}${remoteCode === "INCOMPATIBLE_PROTOCOL" ? ": cubed and cube-runner do not share protocol version 1; upgrade the older component" : ""}${operationId ? `: operation ${operationId}` : ""}${this.completionUnknown ? "; inspect the saved operation before executing again; remote work was not cancelled" : ""}`;
   }
 }
 class ValidationError extends IrohNodeError { constructor() { super("INVALID_REQUEST"); } }
@@ -232,7 +243,7 @@ function remoteError(result: Record<string, unknown>, id?: string): IrohNodeErro
   shape(result, ["type", "code", "message", "completionUnknown"], ["operationId"]);
   if (typeof result.code !== "string" || !CODES.has(result.code) || typeof result.message !== "string" || result.message.length > 256
     || typeof result.completionUnknown !== "boolean" || !(result.operationId === undefined || result.operationId === id)) invalid();
-  return new IrohNodeError(result.code, id, result.completionUnknown);
+  return new IrohNodeError(result.code, id, result.completionUnknown, result.message);
 }
 
 export class IrohExecutionNodeClient implements ExecutionNodeClient {
@@ -386,6 +397,8 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
       const hello = this.hello(response); // full immutable thread/env/node binding
       if (!query) return hello;
       if (!(hello.capabilities as string[]).includes(query.method as string)) throw new IrohNodeError("UNSUPPORTED", id);
+      if (query.method === "workspace.allocate"
+        && !(hello.capabilities as string[]).includes("workspace.fresh-base")) throw new IrohNodeError("INCOMPATIBLE_PROTOCOL");
       combined.throwIfAborted();
       stream = await connection.openBi();
       combined.throwIfAborted();
@@ -424,9 +437,12 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
         case "workspace.allocate": case "workspace.release": {
           shape(result, ["type", "workspace"]);
           if (result.type !== "Workspace") invalid();
-          const workspace = shape(result.workspace, ["threadId", "state", "kind", "retained"]);
+          const workspace = shape(result.workspace, ["threadId", "state", "kind", "retained"], ["baseRemote", "baseRef", "baseOid"]);
           if (workspace.threadId !== this.binding.threadId || !["available", "released"].includes(String(workspace.state))
-            || !["git", "copy", "retained"].includes(String(workspace.kind)) || typeof workspace.retained !== "boolean") invalid();
+            || !["git", "copy", "retained"].includes(String(workspace.kind)) || typeof workspace.retained !== "boolean"
+            || (workspace.baseRemote !== undefined && (typeof workspace.baseRemote !== "string" || workspace.baseRemote.length > 4096))
+            || (workspace.baseRef !== undefined && (typeof workspace.baseRef !== "string" || !/^refs\/heads\/[A-Za-z0-9._/-]+$/.test(workspace.baseRef)))
+            || (workspace.baseOid !== undefined && (typeof workspace.baseOid !== "string" || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(workspace.baseOid)))) invalid();
           break;
         }
         case "exec.start":
@@ -488,9 +504,9 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     this.environment(environmentId); this.assertConfig();
     await this.request(this.identity().key);
   }
-  async allocateWorkspace(): Promise<RunnerWorkspace> {
+  async allocateWorkspace(repository?: RunnerRepositorySource): Promise<RunnerWorkspace> {
     if (this.binding.threadId === this.installationBinding.threadId) return { threadId: this.binding.threadId, state: "available", kind: "copy", retained: true };
-    const result = await this.request(this.identity().key, { method: "workspace.allocate", threadId: this.binding.threadId });
+    const result = await this.request(this.identity().key, { method: "workspace.allocate", threadId: this.binding.threadId, ...(repository ? { repository } : {}) });
     return result.workspace as RunnerWorkspace;
   }
   async releaseWorkspace(): Promise<RunnerWorkspace> {

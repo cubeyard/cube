@@ -24,6 +24,7 @@ export interface Thread {
   id: string; projectId: string; title: string | null; createdAt: number;
   archived: boolean; model: ModelSelection; runnerId: string;
   workspaceState: "allocating" | "available" | "releasing" | "failed"; workspaceError: string | null;
+  workspaceBase?: { remote: string; ref: string; oid: string } | null;
 }
 
 export class Registry {
@@ -108,12 +109,12 @@ export class Registry {
   saveThread(thread: Thread): void {
     this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify(thread), thread.id);
   }
-  markWorkspaceAvailable(threadId: string): void {
+  markWorkspaceAvailable(threadId: string, workspaceBase: Thread["workspaceBase"] = null): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const thread = this.getThread(threadId);
       if (!thread) throw new Error("thread not found");
-      this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, workspaceState: "available", workspaceError: null }), threadId);
+      this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, workspaceState: "available", workspaceError: null, workspaceBase }), threadId);
       this.db.prepare("UPDATE runner SET state='busy', error=NULL WHERE id=? AND thread_id=?").run(thread.runnerId, threadId);
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
@@ -170,7 +171,7 @@ export class Registry {
       if (!runner) throw new Error("no runner available — register a fresh trusted runner for this project");
       const thread: Thread = { id: randomUUID(), projectId, runnerId: row!.id,
         title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, archived: false, createdAt: Date.now(),
-        workspaceState: "allocating", workspaceError: null };
+        workspaceState: "allocating", workspaceError: null, workspaceBase: null };
       this.db.prepare("INSERT INTO thread VALUES (?,?,?,?)").run(thread.id, projectId, row!.id, JSON.stringify(thread));
       const claimed = this.db.prepare("UPDATE runner SET state='allocating',thread_id=?,error=NULL WHERE id=? AND state='available'").run(thread.id, row!.id);
       if (claimed.changes !== 1) throw new Error("runner allocation conflict");

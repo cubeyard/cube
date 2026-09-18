@@ -38,6 +38,10 @@ export async function smokeProduct(root: string, config: string) {
     assert.equal(response.status, 200, await response.clone().text());
     const { id } = await response.json();
     const threadWorkspace = path.join(root, "state", "workspaces", id);
+    const createdThread = (await (await fetch(`${ready.url}/api/threads`)).json()).threads.find((thread: { id: string }) => thread.id === id);
+    assert.equal(createdThread.workspaceBase.ref, "refs/heads/develop");
+    assert.match(createdThread.workspaceBase.oid, /^[0-9a-f]{40}$/);
+    assert.equal(fs.readFileSync(path.join(threadWorkspace, "remote-base"), "utf8"), "fresh base\n");
     assert.deepEqual(await (await post(`${ready.url}/api/threads`, input)).json(), { id });
     assert.equal((await post(`${ready.url}/api/threads`, { ...input, text: "changed" })).status, 409);
     await first.wait("accepted");

@@ -29,7 +29,9 @@ not established by them. Newer macOS runner support remains intact.
 
 Operators prepare a repository template and enroll immutable runners. Each runner
 leases one separate active-thread workspace at a time and is reusable after
-archive; dirty worktrees are retained. This is collision isolation, not a
+archive; Git allocations fetch the checked primary branch into runner-owned
+state, pin and journal its exact OID, and never use stale template HEAD as an
+offline fallback. Dirty worktrees are retained. This is collision isolation, not a
 security sandbox. Workspace transfer, authenticated Git mutation, portals and
 thread-to-thread tools are not exposed. Pi's saved model choice now controls
 reopening even when the registry's initial model or the selected model disappears

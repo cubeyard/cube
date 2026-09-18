@@ -59,7 +59,9 @@ thread notes and select compact, recallable views of large tool output.
 Create a project, prepare its repository template on a trusted runner, then enroll
 that runner using [the operator runbook](docs/trusted-runner-operations.md). A
 runner serves one active thread at a time in a separate Git worktree (or a
-non-Git copy fallback); archiving releases that capacity. There is no automatic
+non-Git copy fallback). Git workspaces fail closed unless the configured remote
+branch can be fetched at allocation time; they never silently start from a stale
+template HEAD. Archiving releases that capacity. There is no automatic
 fleet provisioning. The UI supports prompts,
 streamed results, reconnect, model selection, stop, rename and archive.
 

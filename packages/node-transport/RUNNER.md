@@ -96,11 +96,19 @@ symlink components and workspace replacement fail closed. Neither mechanism
 sandboxes arbitrary command filesystem access from the runner UID.
 
 `workspace.allocate` creates `state/workspaces/<thread-id>` after strict ID
-validation. A repository-root Git template uses `git worktree add --detach`;
-other templates are recursively copied without following symlinks. The journal
+validation. For a repository-root Git template it selects the server-supplied
+primary repository URL/checked branch, or deterministically falls back to the
+current branch's configured remote, `origin`, or the sole remote and resolves
+that remote's advertised HEAD. Ambiguous or invalid names fail closed. It fetches
+only that branch into `state/workspaces/repository.git`, resolves and journals
+the exact commit OID, then runs `git worktree add --detach` with the OID. It does
+not mutate the template's HEAD, branch, index, staged/unstaged/untracked files or
+remote-tracking refs, and it never falls back to template HEAD when fetch fails.
+Other templates are recursively copied without following symlinks. The journal
 commits `allocating/available/releasing/released/failed` with path device/inode
-anchors. Startup changes interrupted transitions to `failed` and preserves the
-tree. Release removes a clean Git worktree still at the template HEAD, but
+anchors plus Git base remote/ref/OID. Startup changes interrupted transitions to
+`failed` and preserves the tree. Release removes a clean Git worktree still at
+its journaled base OID, but
 retains changed or independently committed Git worktrees and
 all copy fallbacks because there is no trustworthy clean oracle for a plain
 directory. A retained tree does not consume the one active-workspace slot.
@@ -152,7 +160,10 @@ Frames are four-byte big-endian length plus bounded UTF-8 JSON and FIN. A
 connection performs hello then at most one request. New daemons advertise
 profiles `["runner", "host"]`; `host` is the protocol-v1 compatibility alias.
 Capabilities are `node.status`, `environment.inspect`, `workspace.allocate`,
-`workspace.release`, `exec.start`, and `operation.get`. Existing requests without
+`workspace.fresh-base`, `workspace.release`, `exec.start`, and `operation.get`.
+Cubed requires `workspace.fresh-base` before any workspace allocation, so a
+rolling mismatch fails with an upgrade error rather than silently using old
+allocation behavior. Existing requests without
 `threadId` continue to use the legacy template workspace and preserve their
 operation hashes. `nodeId` and existing field names remain stable on wire.
 
@@ -162,6 +173,16 @@ the adapter derives and retains the runner operation identity. There is no
 standalone HTTP runner-exec endpoint or legacy host-exec alias. Operator canaries
 use `IrohExecutionNodeClient` directly with the private pinned configuration;
 ordinary users submit prompts through the thread UI/API.
+
+Git fetches are non-interactive (`GIT_TERMINAL_PROMPT=0`; SSH batch mode) in
+both foreground and service profiles. Public repositories need no credential.
+For a private GitHub HTTPS repository, install `gh` for the runner account and
+run `gh auth login` plus `gh auth setup-git`, or install another non-interactive
+credential helper; SSH URLs require a non-interactive key. The service must see
+the same `HOME`/helper configuration as the setup command. Missing `gh`, helper,
+key, authorization or network access produces an actionable allocation error in
+the API/UI and runner journal; credentials and helper output are never included
+in the base metadata. Prefer a repository-scoped read-only deploy credential.
 
 ## Tests
 

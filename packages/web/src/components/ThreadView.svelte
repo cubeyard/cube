@@ -186,6 +186,11 @@
         <Icon name="chevron" size={12} />
       </button>
       <a class="strip-project" href="#/projects/{summary.project.id}">project / {summary.project.name}</a>
+      {#if summary.workspaceBase}
+        <span class="strip-base" title={`${summary.workspaceBase.remote}\n${summary.workspaceBase.ref}\n${summary.workspaceBase.oid}`}>
+          base / {summary.workspaceBase.ref.replace("refs/heads/", "")} @ {summary.workspaceBase.oid.slice(0, 8)}
+        </span>
+      {/if}
       {#if stateLabel(summary)}
         <span class="strip-state" class:error={summary.state === "error"}>{stateLabel(summary)}</span>
       {/if}

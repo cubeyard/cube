@@ -17,6 +17,7 @@ export interface ThreadSummary {
   error: string | null;
   createdAt: number | null;
   archived: boolean;
+  workspaceBase?: { remote: string; ref: string; oid: string } | null;
   project: { id: string; name: string };
 }
 export type Project = ProjectRecord & { threadCount: number; runnerCount: number; availableRunnerCount: number;

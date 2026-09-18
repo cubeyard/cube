@@ -3,6 +3,7 @@ use cube_node_transport::{
     DeliveryError, Limits, Request, Response, bind_loopback, call, encode,
     intent::Intent,
     read_frame,
+    runner::RepositorySource,
     runner::{Binding, ExecSpec, Operation, Runner},
 };
 use iroh::{Endpoint, EndpointAddr, SecretKey};
@@ -214,11 +215,15 @@ async fn thread_worktrees_are_distinct_reusable_and_dirty_safe_across_restart() 
     git(&["add", "tracked"]);
     git(&["commit", "-qm", "template"]);
 
+    let remote = fixture.root.path().join("remote.git");
+    git(&["clone", "--bare", ".", remote.to_str().unwrap()]);
+    git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+
     let runner = fixture.open();
-    let first = runner.allocate("thread-one").unwrap();
+    let first = runner.allocate("thread-one", None).unwrap();
     assert_eq!(first.kind, "git");
     assert!(
-        matches!(runner.allocate("thread-two"), Err(error) if error.to_string() == "CAPACITY_EXCEEDED")
+        matches!(runner.allocate("thread-two", None), Err(error) if error.to_string() == "CAPACITY_EXCEEDED")
     );
     runner
         .start_in_workspace(
@@ -248,7 +253,7 @@ async fn thread_worktrees_are_distinct_reusable_and_dirty_safe_across_restart() 
     drop(runner);
 
     let runner = fixture.open();
-    let second = runner.allocate("thread-two").unwrap();
+    let second = runner.allocate("thread-two", None).unwrap();
     assert_eq!(second.kind, "git");
     let second_path = fixture.state.join("workspaces/thread-two");
     assert_ne!(first_path, second_path);
@@ -271,12 +276,12 @@ async fn thread_worktrees_are_distinct_reusable_and_dirty_safe_across_restart() 
         "interrupted release must retain user work"
     );
     assert!(second_path.join("recovery-marker").exists());
-    runner.allocate("thread-three").unwrap();
+    runner.allocate("thread-three", None).unwrap();
     assert!(
         !runner.release("thread-three").unwrap().retained,
         "clean worktree should be removed"
     );
-    runner.allocate("thread-four").unwrap();
+    runner.allocate("thread-four", None).unwrap();
     let fourth_path = fixture.state.join("workspaces/thread-four");
     fs::write(fourth_path.join("committed"), b"keep committed work").unwrap();
     let commit = StdCommand::new("git")
@@ -322,8 +327,193 @@ async fn thread_worktrees_are_distinct_reusable_and_dirty_safe_across_restart() 
         "later releases must not delete retained user work"
     );
     assert!(
-        matches!(runner.allocate("../escape"), Err(error) if error.to_string() == "INVALID_REQUEST")
+        matches!(runner.allocate("../escape", None), Err(error) if error.to_string() == "INVALID_REQUEST")
     );
+}
+
+#[tokio::test]
+async fn git_allocation_fetches_remote_tip_without_touching_dirty_template() {
+    let _case = CASE.lock().await;
+    let fixture = Fixture::new();
+    let run = |cwd: &Path, args: &[&str]| -> String {
+        let output = StdCommand::new("git")
+            .args([
+                "-c",
+                "user.name=Cube Test",
+                "-c",
+                "user.email=cube@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-C",
+            ])
+            .arg(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    run(
+        &fixture.workspace,
+        &["init", "-q", "--initial-branch=develop"],
+    );
+    fs::write(fixture.workspace.join("tracked"), b"old remote\n").unwrap();
+    run(&fixture.workspace, &["add", "tracked"]);
+    run(&fixture.workspace, &["commit", "-qm", "old"]);
+    let old_oid = run(&fixture.workspace, &["rev-parse", "HEAD"]);
+    let remote = fixture.root.path().join("remote.git");
+    run(
+        &fixture.workspace,
+        &["clone", "--bare", ".", remote.to_str().unwrap()],
+    );
+    run(
+        &fixture.workspace,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+
+    let publisher = fixture.root.path().join("publisher");
+    run(
+        fixture.root.path(),
+        &[
+            "clone",
+            remote.to_str().unwrap(),
+            publisher.to_str().unwrap(),
+        ],
+    );
+    fs::write(publisher.join("tracked"), b"fresh remote\n").unwrap();
+    run(&publisher, &["add", "tracked"]);
+    run(&publisher, &["commit", "-qm", "fresh"]);
+    run(&publisher, &["push", "origin", "develop"]);
+    let fresh_oid = run(&publisher, &["rev-parse", "HEAD"]);
+
+    fs::write(fixture.workspace.join("tracked"), b"dirty template\n").unwrap();
+    fs::write(fixture.workspace.join("staged"), b"staged\n").unwrap();
+    run(&fixture.workspace, &["add", "staged"]);
+    fs::write(fixture.workspace.join("untracked"), b"untracked\n").unwrap();
+    let status_before = run(&fixture.workspace, &["status", "--porcelain=v1"]);
+    let head_before = run(&fixture.workspace, &["rev-parse", "HEAD"]);
+
+    let runner = fixture.open();
+    let first = runner.allocate("thread-fresh", None).unwrap();
+    assert_eq!(first.base_ref.as_deref(), Some("refs/heads/develop"));
+    assert_eq!(first.base_oid.as_deref(), Some(fresh_oid.as_str()));
+    let first_path = fixture.state.join("workspaces/thread-fresh");
+    assert_eq!(
+        fs::read(first_path.join("tracked")).unwrap(),
+        b"fresh remote\n"
+    );
+    assert_eq!(run(&first_path, &["rev-parse", "HEAD"]), fresh_oid);
+    assert_eq!(
+        run(&first_path, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "HEAD"
+    );
+    assert_eq!(
+        run(&fixture.workspace, &["status", "--porcelain=v1"]),
+        status_before
+    );
+    assert_eq!(run(&fixture.workspace, &["rev-parse", "HEAD"]), head_before);
+    assert_eq!(
+        fs::read(fixture.workspace.join("tracked")).unwrap(),
+        b"dirty template\n"
+    );
+    drop(runner);
+    let runner = fixture.open();
+    let recovered = runner.allocate("thread-fresh", None).unwrap();
+    assert_eq!(
+        recovered.base_oid, first.base_oid,
+        "restart must recover the pinned base"
+    );
+    assert!(!runner.release("thread-fresh").unwrap().retained);
+
+    run(&publisher, &["reset", "--hard", &old_oid]);
+    fs::write(publisher.join("tracked"), b"force pushed\n").unwrap();
+    run(&publisher, &["add", "tracked"]);
+    run(&publisher, &["commit", "-qm", "rewritten"]);
+    run(&publisher, &["push", "--force", "origin", "develop"]);
+    let rewritten_oid = run(&publisher, &["rev-parse", "HEAD"]);
+    let configured = RepositorySource {
+        url: remote.to_string_lossy().into_owned(),
+        branch: "develop".into(),
+    };
+    let second = runner
+        .allocate("thread-rewritten", Some(&configured))
+        .unwrap();
+    assert_eq!(second.base_oid.as_deref(), Some(rewritten_oid.as_str()));
+    assert_eq!(
+        fs::read(fixture.state.join("workspaces/thread-rewritten/tracked")).unwrap(),
+        b"force pushed\n"
+    );
+    assert!(!runner.release("thread-rewritten").unwrap().retained);
+
+    fs::rename(&remote, fixture.root.path().join("remote-offline.git")).unwrap();
+    let offline = runner
+        .allocate("thread-offline", Some(&configured))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        offline.contains("no stale local fallback was used"),
+        "{offline}"
+    );
+    assert!(!fixture.state.join("workspaces/thread-offline").exists());
+    drop(runner);
+    let db = Connection::open(fixture.state.join("journal.db")).unwrap();
+    let journaled: (String, String, Option<String>) = db
+        .query_row(
+            "SELECT remote,ref_name,oid FROM workspace_base WHERE thread_id='thread-offline'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(journaled.0, configured.url);
+    assert_eq!(journaled.1, "refs/heads/develop");
+    assert_eq!(
+        journaled.2, None,
+        "a failed fetch must not invent a base OID"
+    );
+    drop(db);
+    let restarted = fixture.open();
+    assert_eq!(
+        restarted
+            .allocate("thread-offline", Some(&configured))
+            .unwrap_err()
+            .to_string(),
+        offline,
+        "restart must retain the actionable allocation failure"
+    );
+    fs::rename(fixture.root.path().join("remote-offline.git"), &remote).unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let attempts: Vec<_> = ["thread-concurrent-a", "thread-concurrent-b"]
+        .into_iter()
+        .map(|thread_id| {
+            let runner = restarted.clone();
+            let repository = configured.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                (thread_id, runner.allocate(thread_id, Some(&repository)))
+            })
+        })
+        .collect();
+    barrier.wait();
+    let results: Vec<_> = attempts
+        .into_iter()
+        .map(|attempt| attempt.join().unwrap())
+        .collect();
+    let allocated: Vec<_> = results
+        .iter()
+        .filter_map(|(thread_id, result)| result.as_ref().ok().map(|_| *thread_id))
+        .collect();
+    assert_eq!(allocated.len(), 1, "only one concurrent allocation may win");
+    assert!(results.iter().any(|(_, result)| {
+        result
+            .as_ref()
+            .is_err_and(|error| error.to_string() == "CAPACITY_EXCEEDED")
+    }));
+    restarted.release(allocated[0]).unwrap();
 }
 
 #[tokio::test]

@@ -142,6 +142,19 @@ pub struct WorkspaceStatus {
     pub state: String,
     pub kind: String,
     pub retained: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_remote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_oid: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepositorySource {
+    pub url: String,
+    pub branch: String,
 }
 
 #[derive(Debug)]
@@ -152,6 +165,14 @@ impl std::fmt::Display for RunnerError {
     }
 }
 impl std::error::Error for RunnerError {}
+#[derive(Debug)]
+pub struct RunnerErrorDetail(pub &'static str, pub String);
+impl std::fmt::Display for RunnerErrorDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+impl std::error::Error for RunnerErrorDetail {}
 fn reject<T>(code: &'static str) -> Result<T> {
     Err(RunnerError(code).into())
 }
@@ -388,6 +409,8 @@ impl Runner {
             CREATE TABLE operation(id TEXT PRIMARY KEY, request TEXT NOT NULL, hash TEXT NOT NULL, state TEXT NOT NULL);
             CREATE TABLE workspace(thread_id TEXT PRIMARY KEY, state TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
               kind TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL, error TEXT);
+            CREATE TABLE workspace_base(thread_id TEXT PRIMARY KEY REFERENCES workspace(thread_id),
+              remote TEXT NOT NULL, ref_name TEXT NOT NULL, oid TEXT);
             CREATE TRIGGER retain_installation_insert BEFORE INSERT ON installation WHEN EXISTS(SELECT 1 FROM installation) BEGIN SELECT RAISE(ABORT, 'immutable installation'); END;
             CREATE TRIGGER retain_operation_insert BEFORE INSERT ON operation WHEN EXISTS(SELECT 1 FROM operation WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT, 'immutable request'); END;
             CREATE TRIGGER immutable_installation_update BEFORE UPDATE ON installation BEGIN SELECT RAISE(ABORT, 'immutable installation'); END;
@@ -463,7 +486,9 @@ impl Runner {
             ],
         )?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS workspace(thread_id TEXT PRIMARY KEY, state TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
-            kind TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL, error TEXT);")?;
+            kind TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL, error TEXT);
+            CREATE TABLE IF NOT EXISTS workspace_base(thread_id TEXT PRIMARY KEY REFERENCES workspace(thread_id),
+              remote TEXT NOT NULL, ref_name TEXT NOT NULL, oid TEXT);")?;
         let recovery_quarantine = state.join("restore-quarantine");
         let quarantined = recovery_quarantine.exists();
         let workspace_root = state.join("workspaces");
@@ -553,19 +578,23 @@ impl Runner {
         })
     }
 
-    pub fn allocate(&self, thread_id: &str) -> Result<WorkspaceStatus> {
+    pub fn allocate(
+        &self,
+        thread_id: &str,
+        repository: Option<&RepositorySource>,
+    ) -> Result<WorkspaceStatus> {
         ensure!(valid_id(thread_id), RunnerError("INVALID_REQUEST"));
         ensure!(
             thread_id != self.installation.binding.thread_id,
             RunnerError("CONFLICT")
         );
         let journal = self.journal.lock().unwrap();
-        if let Some((state, kind)) = journal
+        if let Some((state, kind, error, base_remote, base_ref, base_oid)) = journal
             .db
             .query_row(
-                "SELECT state,kind FROM workspace WHERE thread_id=?1",
+                "SELECT w.state,w.kind,w.error,b.remote,b.ref_name,b.oid FROM workspace w LEFT JOIN workspace_base b USING(thread_id) WHERE w.thread_id=?1",
                 [thread_id],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .optional()?
         {
@@ -575,8 +604,16 @@ impl Runner {
                     state,
                     kind,
                     retained: false,
+                    base_remote,
+                    base_ref,
+                    base_oid,
                 }),
                 "released" => reject("CONFLICT"),
+                "failed" => Err(RunnerErrorDetail(
+                    "IO_ERROR",
+                    error.unwrap_or_else(|| "workspace allocation previously failed".into()),
+                )
+                .into()),
                 _ => reject("IO_ERROR"),
             };
         }
@@ -602,8 +639,23 @@ impl Runner {
         )?;
         drop(journal);
 
-        let provisioned = (|| -> Result<&'static str> {
-            let kind = if git_worktree(&self.installation.workspace, &destination)? {
+        let provisioned = (|| -> Result<(&'static str, Option<GitBase>)> {
+            let base = git_worktree(
+                &self.installation.workspace,
+                &self.workspace_root,
+                &destination,
+                thread_id,
+                repository,
+                |remote, ref_name, oid| {
+                    self.journal.lock().unwrap().db.execute(
+                        "INSERT INTO workspace_base VALUES(?1,?2,?3,?4)
+                         ON CONFLICT(thread_id) DO UPDATE SET remote=excluded.remote,ref_name=excluded.ref_name,oid=excluded.oid",
+                        params![thread_id, remote, ref_name, oid],
+                    )?;
+                    Ok(())
+                },
+            )?;
+            let kind = if base.is_some() {
                 "git"
             } else {
                 copy_directory(&self.installation.workspace, &destination)?;
@@ -613,16 +665,31 @@ impl Runner {
             let journal = self.journal.lock().unwrap();
             journal.db.execute("UPDATE workspace SET state='available',kind=?1,device=?2,inode=?3 WHERE thread_id=?4 AND state='allocating'",
                 params![kind, i64::try_from(metadata.dev())?, i64::try_from(metadata.ino())?, thread_id])?;
-            Ok(kind)
+            Ok((kind, base))
         })();
-        let kind = match provisioned {
-            Ok(kind) => kind,
+        let (kind, base) = match provisioned {
+            Ok(value) => value,
             Err(error) => {
-                self.journal.lock().unwrap().db.execute(
+                let journal = self.journal.lock().unwrap();
+                let discovered_remote = journal
+                    .db
+                    .query_row(
+                        "SELECT remote FROM workspace_base WHERE thread_id=?1",
+                        [thread_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?;
+                let message = allocation_error(
+                    &error,
+                    repository
+                        .map(|source| source.url.as_str())
+                        .or(discovered_remote.as_deref()),
+                );
+                journal.db.execute(
                     "UPDATE workspace SET state='failed',error=?1 WHERE thread_id=?2",
-                    params![format!("workspace allocation failed: {error}"), thread_id],
+                    params![message, thread_id],
                 )?;
-                return reject("IO_ERROR");
+                return Err(RunnerErrorDetail("IO_ERROR", message).into());
             }
         };
         File::open(&self.workspace_root)?.sync_all()?;
@@ -631,6 +698,9 @@ impl Runner {
             state: "available".into(),
             kind: kind.into(),
             retained: false,
+            base_remote: base.as_ref().map(|base| base.remote.clone()),
+            base_ref: base.as_ref().map(|base| base.ref_name.clone()),
+            base_oid: base.map(|base| base.oid),
         })
     }
 
@@ -648,18 +718,21 @@ impl Runner {
         let row = journal
             .db
             .query_row(
-                "SELECT state,path,kind FROM workspace WHERE thread_id=?1",
+                "SELECT w.state,w.path,w.kind,b.remote,b.ref_name,b.oid FROM workspace w LEFT JOIN workspace_base b USING(thread_id) WHERE w.thread_id=?1",
                 [thread_id],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         PathBuf::from(r.get::<_, String>(1)?),
                         r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, Option<String>>(5)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((state, workspace, kind)) = row else {
+        let Some((state, workspace, kind, base_remote, base_ref, base_oid)) = row else {
             return reject("ENVIRONMENT_MISSING");
         };
         if state == "released" {
@@ -668,6 +741,9 @@ impl Runner {
                 state,
                 kind,
                 retained: workspace.exists(),
+                base_remote,
+                base_ref,
+                base_oid,
             });
         }
         if state == "failed" {
@@ -685,6 +761,9 @@ impl Runner {
                 state: "released".into(),
                 kind,
                 retained: workspace.exists(),
+                base_remote,
+                base_ref,
+                base_oid,
             });
         }
         ensure!(state == "available", RunnerError("IO_ERROR"));
@@ -705,24 +784,35 @@ impl Runner {
                 .arg(&workspace)
                 .args(["rev-parse", "HEAD"])
                 .output()?;
-            let template_head = StdCommand::new("git")
-                .args(["-C"])
-                .arg(&self.installation.workspace)
-                .args(["rev-parse", "HEAD"])
-                .output()?;
+            let expected_head = if let Some(oid) = &base_oid {
+                format!("{oid}\n").into_bytes()
+            } else {
+                let output = StdCommand::new("git")
+                    .args(["-C"])
+                    .arg(&self.installation.workspace)
+                    .args(["rev-parse", "HEAD"])
+                    .output()?;
+                if !output.status.success() || !output.stderr.is_empty() {
+                    return self.fail_release(thread_id, "could not inspect git template");
+                }
+                output.stdout
+            };
             if !status.status.success()
                 || !status.stderr.is_empty()
                 || !workspace_head.status.success()
                 || !workspace_head.stderr.is_empty()
-                || !template_head.status.success()
-                || !template_head.stderr.is_empty()
             {
                 return self.fail_release(thread_id, "could not inspect git workspace");
             }
-            if status.stdout.is_empty() && workspace_head.stdout == template_head.stdout {
+            if status.stdout.is_empty() && workspace_head.stdout == expected_head {
+                let worktree_owner = if base_oid.is_some() {
+                    self.workspace_root.join("repository.git")
+                } else {
+                    self.installation.workspace.clone()
+                };
                 let status = StdCommand::new("git")
-                    .args(["-C"])
-                    .arg(&self.installation.workspace)
+                    .arg("--git-dir")
+                    .arg(worktree_owner)
                     .args(["worktree", "remove", "--"])
                     .arg(&workspace)
                     .status()?;
@@ -748,6 +838,9 @@ impl Runner {
             state: "released".into(),
             kind,
             retained,
+            base_remote,
+            base_ref,
+            base_oid,
         })
     }
 
@@ -1034,35 +1127,314 @@ impl Runner {
     }
 }
 
-fn git_worktree(source: &Path, destination: &Path) -> Result<bool> {
+#[derive(Clone)]
+struct GitBase {
+    remote: String,
+    ref_name: String,
+    oid: String,
+}
+
+fn git_worktree(
+    source: &Path,
+    workspace_root: &Path,
+    destination: &Path,
+    thread_id: &str,
+    configured: Option<&RepositorySource>,
+    mut record_base: impl FnMut(&str, &str, Option<&str>) -> Result<()>,
+) -> Result<Option<GitBase>> {
     let probe = StdCommand::new("git")
         .args(["-C"])
         .arg(source)
         .args(["rev-parse", "--show-toplevel"])
         .output();
     let Ok(probe) = probe else {
-        return Ok(false);
+        return Ok(None);
     };
     if !probe.status.success() {
-        return Ok(false);
+        return Ok(None);
     }
     let top = PathBuf::from(String::from_utf8(probe.stdout)?.trim());
     if fs::canonicalize(top)? != fs::canonicalize(source)? {
-        return Ok(false);
+        return Ok(None);
     }
+    let (remote, branch) = if let Some(configured) = configured {
+        validate_remote_url(&configured.url)?;
+        validate_branch(&configured.branch)?;
+        (configured.url.clone(), configured.branch.clone())
+    } else {
+        discover_remote_default(source)?
+    };
+    let ref_name = format!("refs/heads/{branch}");
+    record_base(&remote, &ref_name, None)?;
+    let control = workspace_root.join("repository.git");
+    if control.exists() {
+        let metadata = fs::symlink_metadata(&control)?;
+        ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "controlled git repository is not a directory"
+        );
+        ensure!(
+            git_text_bare(&control, &["rev-parse", "--is-bare-repository"])? == "true",
+            "controlled git repository is invalid"
+        );
+    } else {
+        let temporary = workspace_root.join(format!("repository.git.tmp-{thread_id}"));
+        if temporary.exists() {
+            fs::remove_dir_all(&temporary)?;
+        }
+        let output = StdCommand::new("git")
+            .args(["init", "--bare", "--"])
+            .arg(&temporary)
+            .output()?;
+        ensure!(
+            output.status.success(),
+            "could not initialize controlled git repository"
+        );
+        fs::rename(&temporary, &control)?;
+        File::open(workspace_root)?.sync_all()?;
+    }
+    let internal_ref = format!("refs/cube/bases/{thread_id}");
+    let fetch = git_network_command()
+        .arg("--git-dir")
+        .arg(&control)
+        .args([
+            "fetch",
+            "--no-tags",
+            "--force",
+            "--no-write-fetch-head",
+            "--",
+        ])
+        .arg(&remote)
+        .arg(format!("+{ref_name}:{internal_ref}"))
+        .output()?;
+    ensure!(
+        fetch.status.success(),
+        "git fetch failed: {}",
+        String::from_utf8_lossy(&fetch.stderr).trim()
+    );
+    let resolved = StdCommand::new("git")
+        .arg("--git-dir")
+        .arg(&control)
+        .args(["rev-parse", "--verify"])
+        .arg(format!("{internal_ref}^{{commit}}"))
+        .output()?;
+    ensure!(
+        resolved.status.success(),
+        "fetched branch did not resolve to a commit"
+    );
+    let oid = String::from_utf8(resolved.stdout)?.trim().to_owned();
+    ensure!(valid_oid(&oid), "fetch returned an invalid commit OID");
+    record_base(&remote, &ref_name, Some(&oid))?;
     let output = StdCommand::new("git")
-        .args(["-C"])
-        .arg(source)
+        .arg("--git-dir")
+        .arg(&control)
         .args(["worktree", "add", "--detach", "--"])
         .arg(destination)
-        .arg("HEAD")
+        .arg(&oid)
         .output()?;
     ensure!(
         output.status.success(),
         "git worktree add failed: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     );
-    Ok(true)
+    Ok(Some(GitBase {
+        remote,
+        ref_name,
+        oid,
+    }))
+}
+
+fn git_network_command() -> StdCommand {
+    let mut command = StdCommand::new("git");
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ALLOW_PROTOCOL", "file:https:ssh")
+        .env("LC_ALL", "C")
+        .env(
+            "GIT_SSH_COMMAND",
+            std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "ssh -oBatchMode=yes".into()),
+        );
+    command
+}
+
+fn validate_branch(branch: &str) -> Result<()> {
+    ensure!(
+        !branch.is_empty()
+            && branch.len() <= 255
+            && !branch.starts_with('-')
+            && !branch.contains("..")
+            && !branch.contains("//")
+            && !branch.ends_with('/')
+            && !branch.ends_with('.')
+            && !branch.ends_with(".lock")
+            && branch
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte))
+            && branch
+                .split('/')
+                .all(|part| !part.is_empty() && !part.starts_with('.')),
+        "invalid remote branch"
+    );
+    Ok(())
+}
+
+fn validate_remote_url(url: &str) -> Result<()> {
+    ensure!(
+        !url.is_empty()
+            && url.len() <= 4096
+            && !url.starts_with('-')
+            && !url
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte == 0),
+        "invalid repository remote"
+    );
+    ensure!(
+        !url.starts_with("ext::") && !url.starts_with("http://"),
+        "unsupported repository remote"
+    );
+    ensure!(
+        url.starts_with("https://")
+            || url.starts_with("ssh://")
+            || url.starts_with("file://")
+            || Path::new(url).is_absolute()
+            || (url.contains('@') && url.contains(':')),
+        "unsupported repository remote"
+    );
+    ensure!(
+        !(url.starts_with("https://") || url.starts_with("ssh://"))
+            || !url.split_once("//").is_some_and(|(_, authority)| {
+                authority.split('/').next().is_some_and(|value| {
+                    value
+                        .rsplit_once('@')
+                        .is_some_and(|(userinfo, _)| userinfo.contains(':'))
+                })
+            }),
+        "repository credentials must not be embedded in the URL"
+    );
+    ensure!(
+        url.starts_with("https://")
+            || url.starts_with("ssh://")
+            || !url
+                .split_once('@')
+                .is_some_and(|(userinfo, _)| userinfo.contains(':')),
+        "repository credentials must not be embedded in the URL"
+    );
+    Ok(())
+}
+
+fn discover_remote_default(source: &Path) -> Result<(String, String)> {
+    let remotes = git_text(source, &["remote"])?;
+    let remotes: Vec<&str> = remotes.lines().filter(|line| !line.is_empty()).collect();
+    ensure!(!remotes.is_empty(), "git template has no configured remote");
+    let current = git_text(source, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok();
+    let configured = current.as_deref().and_then(|branch| {
+        git_text(
+            source,
+            &["config", "--get", &format!("branch.{branch}.remote")],
+        )
+        .ok()
+    });
+    let remote = configured
+        .as_deref()
+        .filter(|name| *name != "." && remotes.contains(name))
+        .or_else(|| remotes.contains(&"origin").then_some("origin"))
+        .or_else(|| (remotes.len() == 1).then_some(remotes[0]))
+        .context(
+            "git template has ambiguous remotes; configure the current branch remote or origin",
+        )?;
+    ensure!(
+        remote
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            && !remote.starts_with('-'),
+        "invalid git remote name"
+    );
+    let url = git_text(source, &["remote", "get-url", remote])?;
+    validate_remote_url(&url)?;
+    let advertised = git_network_command()
+        .args(["ls-remote", "--symref", "--"])
+        .arg(&url)
+        .arg("HEAD")
+        .output()?;
+    ensure!(
+        advertised.status.success(),
+        "could not resolve remote default branch: {}",
+        String::from_utf8_lossy(&advertised.stderr).trim()
+    );
+    let stdout = String::from_utf8(advertised.stdout)?;
+    let branch = stdout
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("ref: refs/heads/")?
+                .strip_suffix("\tHEAD")
+        })
+        .context("remote has no resolvable default branch")?;
+    validate_branch(branch)?;
+    Ok((url, branch.to_owned()))
+}
+
+fn git_text(source: &Path, args: &[&str]) -> Result<String> {
+    let output = StdCommand::new("git")
+        .args(["-C"])
+        .arg(source)
+        .args(args)
+        .output()?;
+    ensure!(output.status.success(), "git metadata lookup failed");
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+fn git_text_bare(repository: &Path, args: &[&str]) -> Result<String> {
+    let output = StdCommand::new("git")
+        .arg("--git-dir")
+        .arg(repository)
+        .args(args)
+        .output()?;
+    ensure!(output.status.success(), "git metadata lookup failed");
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+fn valid_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn allocation_error(error: &anyhow::Error, remote: Option<&str>) -> String {
+    let detail = error.to_string();
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("authentication failed")
+        || lower.contains("could not read username")
+        || lower.contains("could not read password")
+        || lower.contains("permission denied (publickey")
+        || lower.contains("returned error: 401")
+        || lower.contains("returned error: 403")
+    {
+        let github = remote.is_some_and(|url| url.contains("github.com"));
+        let gh = StdCommand::new("gh").arg("--version").output().is_ok();
+        return if github && !gh {
+            "git fetch authentication failed; gh is not installed in the runner environment — install it and run `gh auth setup-git`, or configure a non-interactive credential helper/SSH key for the runner service account".into()
+        } else if github {
+            "git fetch authentication failed; authenticate the runner service account with `gh auth setup-git`, a non-interactive credential helper, or an SSH key".into()
+        } else {
+            "git fetch authentication failed; configure a non-interactive credential helper or SSH key for the runner service account".into()
+        };
+    }
+    if lower.contains("could not resolve host")
+        || lower.contains("failed to connect")
+        || lower.contains("network is unreachable")
+    {
+        return "git fetch failed because the repository remote is unreachable; no stale local fallback was used".into();
+    }
+    if lower.contains("couldn't find remote ref") || lower.contains("not our ref") {
+        return "git fetch failed because the configured remote branch does not exist; no stale local fallback was used".into();
+    }
+    if lower.starts_with("git fetch failed:") {
+        return "git fetch failed for the configured repository branch; check runner network, repository access and branch configuration — no stale local fallback was used".into();
+    }
+    let safe: String = detail
+        .chars()
+        .filter(|character| !character.is_control() || *character == ' ')
+        .take(160)
+        .collect();
+    format!("{safe}; no stale local fallback was used")
 }
 
 fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
@@ -1235,5 +1607,47 @@ impl Drop for ProcessGroup {
                 libc::kill(-self.pid, libc::SIGKILL);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{allocation_error, validate_branch, validate_remote_url};
+
+    #[test]
+    fn repository_inputs_and_auth_failures_are_safe_and_actionable() {
+        for branch in [
+            "-main",
+            "../main",
+            "main.lock",
+            "feature//escape",
+            "refs heads/main",
+        ] {
+            assert!(
+                validate_branch(branch).is_err(),
+                "accepted branch {branch:?}"
+            );
+        }
+        for remote in [
+            "--upload-pack=evil",
+            "ext::evil",
+            "http://example.test/repo",
+            "relative/repo",
+            "user:password@example.test:repo",
+        ] {
+            assert!(
+                validate_remote_url(remote).is_err(),
+                "accepted remote {remote:?}"
+            );
+        }
+        let message = allocation_error(
+            &anyhow::anyhow!(
+                "git fetch failed: fatal: could not read Username for 'https://github.com'"
+            ),
+            Some("https://github.com/private/repository.git"),
+        );
+        assert!(message.contains("authentication failed"));
+        assert!(message.contains("runner service account"));
+        assert!(!message.contains("private/repository"));
     }
 }
