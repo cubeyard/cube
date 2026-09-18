@@ -96,7 +96,9 @@
       {:else if loadError}<p class="error" role="alert">{loadError} <button type="button" class="key" onclick={load}>retry loading</button></p>
       {:else if !projects.some((project) => project.status === "ready")}
         <p>a ready project is required. <a href="#/projects" onclick={() => dialog.close()}>configure a project</a></p>
-      {:else if !ready}<p>register an unused trusted runner for this project, then <button type="button" class="key" onclick={load}>refresh runners</button></p>
+      {:else if projects.find((project) => project.id === projectId)?.runnerCapacity.states.failed}
+        <p class="error">runner workspace unavailable — {projects.find((project) => project.id === projectId)?.runnerCapacity.errors[0] ?? "inspect the runner logs"}. <button type="button" class="key" onclick={load}>retry status</button></p>
+      {:else if !ready}<p>all trusted runners are in use; archive an idle thread or register another runner, then <button type="button" class="key" onclick={load}>refresh runners</button></p>
       {:else if !catalog?.models.length}<p>no models available — <a href="#/models" onclick={() => dialog?.close()}>connect a provider</a>, then <button type="button" class="key" onclick={load}>retry loading</button></p>
       {:else if !model}<p>choose an available model below.</p>{/if}
       {#if error}<p class="error" role="alert">{error}{pending ? " — retry to confirm this thread; your message is kept." : ""}</p>{/if}

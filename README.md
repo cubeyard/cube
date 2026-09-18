@@ -33,12 +33,14 @@ Optional JEV memory is configured separately at the top of **models**. It is
 strictly off until a JEV key is saved there; Cube then uses JEV to retain useful
 thread notes and select compact, recallable views of large tool output.
 
-Create a project, prepare its workspace on a trusted runner, then enroll that
-runner using [the operator runbook](docs/trusted-runner-operations.md). Starting a
-thread consumes one unused runner binding. Each runner currently serves exactly
-one thread; there is no automatic fleet provisioning. The UI supports prompts,
+Create a project, prepare its repository template on a trusted runner, then enroll
+that runner using [the operator runbook](docs/trusted-runner-operations.md). A
+runner serves one active thread at a time in a separate Git worktree (or a
+non-Git copy fallback); archiving releases that capacity. There is no automatic
+fleet provisioning. The UI supports prompts,
 streamed results, reconnect, model selection, stop, rename and archive.
 
+This is workspace collision isolation only, not process or security isolation.
 The current tool is bounded `bash`. Workspace transfer, authenticated Git writes,
 service links, thread-to-thread tasks and native sandboxing are not yet exposed
 by this implementation. Project repository checks remain host-side; they do not
@@ -46,8 +48,9 @@ claim to prepare the runner workspace.
 
 ## Fresh state, not migration
 
-Old sessions and registries are **not migrated**. Use a fresh `CUBED_STATE`
-directory. For a fresh start, stop cubed and choose a different empty directory;
+Registry v100 is upgraded in place for reusable runner allocations; older
+registries and execution stacks are **not migrated**. For a fresh start, stop
+cubed and choose a different empty `CUBED_STATE` directory;
 create projects and enroll fresh runner identities. This does not erase old
 installations or runner workspaces. Never copy a live Pi session into two hosts:
 each session requires one writable owner.

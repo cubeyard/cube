@@ -34,6 +34,10 @@ operators must enforce network policy at the OS/network layer. See the
 [trusted-runner security and operations runbook](docs/trusted-runner-operations.md).
 Workspace-relative cwd validation prevents traversal and symlink races on both
 Linux and macOS, but commands retain all filesystem authority of that account.
+Per-thread Git worktrees or copied directories reduce accidental workspace
+collisions only. They do not prevent a command from reading or modifying another
+workspace through an absolute path. Container/VM or native process isolation is
+separate future work.
 Process-group cancellation is not a cgroup: especially on macOS, a hostile
 command can deliberately create a new session and escape descendant cleanup.
 

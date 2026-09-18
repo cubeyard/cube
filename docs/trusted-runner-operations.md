@@ -1,9 +1,10 @@
 # Trusted runner production operations
 
 This is the production boundary for Cube **trusted runners**. One installation
-has one immutable thread/environment binding and uses Iroh's public N0
-discovery/relay transport. A trusted runner executes under its account without
-sandboxing and is not a general scheduler.
+has one immutable protocol-v1 installation/environment binding, leases one
+active thread workspace at a time, and uses Iroh's public N0 discovery/relay
+transport. A trusted runner executes under its account without sandboxing and
+is not a general scheduler.
 
 | Platform | Lifecycle | Support profile |
 |---|---|---|
@@ -30,6 +31,11 @@ the identity-checked workspace descriptor with
 components and replaced workspaces fail closed. This prevents cwd traversal and
 canonicalize/open races. It does **not** confine arbitrary command filesystem
 access: a command retains all authority of the runner UID.
+
+Per-thread Git worktrees (or copied-directory fallback) isolate workspace names
+and ordinary edits from other active threads. They are **not a security
+sandbox**: every command can still use absolute paths and has all authority of
+the runner account. Container/VM or native process isolation is later work.
 
 Each job starts a new Unix process group. Timeout, explicit cancel and orderly
 daemon stop signal and reap that group, including ordinary descendants. macOS
@@ -85,11 +91,11 @@ node scripts/enroll-runner.ts \
 ```
 
 Enrollment authenticates the full binding and pins the config hash. It never
-executes work. Existing IDs cannot be adopted or rebound. Prepare the workspace
-before enrollment: host repository checks do not transfer files to a runner.
-The next new thread for this project consumes this runner's binding. No restart
-is needed after enrollment. The host state is the fresh `CUBED_STATE` layout;
-old registries and sessions are not migrated.
+executes work. Existing IDs cannot be adopted or rebound. Prepare the repository
+template before enrollment: host repository checks do not transfer files to a
+runner. The next new thread leases a derived workspace; archive returns capacity.
+No restart is needed after enrollment. Registry v100 upgrades in place; older
+execution stacks are not migrated.
 
 Fresh Linux layout:
 
@@ -100,7 +106,8 @@ Fresh Linux layout:
 | `/etc/systemd/system/cube-runner.service` | root, 0644 | service boundary |
 | `/var/lib/cube-runner/identity/node.key` | cube-runner, 0600 | Iroh identity secret |
 | `/var/lib/cube-runner/state/` | cube-runner, 0700 | immutable binding and SQLite journal |
-| `/var/lib/cube-runner/workspace/` | cube-runner, 0700 | trusted job workspace |
+| `/var/lib/cube-runner/workspace/` | cube-runner, 0700 | repository template and legacy workspace |
+| `/var/lib/cube-runner/state/workspaces/` | cube-runner, 0700 | allocated and retained thread workspaces |
 | `/run/cube-runner/ready.json` | runtime only | bounded readiness/version state |
 
 Fresh macOS system layout uses `/Library/Application Support/CubeRunner` for
@@ -228,11 +235,14 @@ Never delete old evidence to make an ambiguous command retryable.
 
 ## Capacity and diagnostics
 
-One operation runs at a time. Commands are capped at 8 KiB, cwd at 4 KiB,
-runtime at 60 seconds, output at 8 KiB, connections at 16, and immutable journal
-records at 10,000. Records do not expire because they are no-replay evidence.
+One operation and one active thread workspace run at a time. Commands are capped
+at 8 KiB, cwd at 4 KiB, runtime at 60 seconds, output at 8 KiB, connections at
+16, immutable journal records at 10,000, and new workspace admission at 50 GiB
+of managed workspace data. `node.status` reports active/retained counts and
+managed bytes. Records do not expire because they are no-replay evidence.
 These protocol limits are not CPU, memory, process-count, network, or disk
-quotas. Apply host-level controls where required; macOS has no cgroup-equivalent
+quotas; the byte threshold is admission/observability, not enforcement. Apply
+host-level controls where required; macOS has no cgroup-equivalent
 per-job resource boundary in this profile.
 Logs use bounded runner events (`runner_starting`, `runner_ready`,
 `runner_draining`, `runner_resume_refused`) and omit commands, output, keys,

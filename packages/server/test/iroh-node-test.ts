@@ -65,7 +65,7 @@ const accept = (async () => {
         protocolVersion: mode === "legacy" ? undefined : mode === "incompatible" ? 2 : 1,
         minimumProtocolVersion: mode === "legacy" ? undefined : mode === "incompatible" ? 2 : 1,
         softwareVersion: mode === "legacy" ? undefined : "1.0.0", binding,
-        profiles: ["host"], capabilities: mode === "unsupported" ? ["node.hello"] : ["node.hello", "node.status", "exec.start", "environment.inspect", "operation.get"],
+        profiles: ["host"], capabilities: mode === "unsupported" ? ["node.hello"] : ["node.hello", "node.status", "workspace.allocate", "workspace.release", "exec.start", "environment.inspect", "operation.get"],
         limits: { maxFrameBytes: 65536, requestTimeoutMs: 5000 } }));
       await stream.send.finish();
       stream = await connection.acceptBi();
@@ -81,7 +81,10 @@ const accept = (async () => {
         : query.method === "node.status" ? { type: "Status", nodeId: binding.nodeId, protocolVersion: 1,
           minimumProtocolVersion: 1, softwareVersion: "1.0.0", binding: mode === "wrong-binding" ? { ...binding, threadId: "other" } : binding,
           status: { lifecycle: mode === "draining" ? "draining" : ["missing", "unsupported-status"].includes(mode) ? "faulted" : "ready", active: false,
-            operationRecords: 2, operationCapacity: 10000, error: mode === "missing" ? "ENVIRONMENT_MISSING" : mode === "unsupported-status" ? "UNSUPPORTED" : null } }
+            operationRecords: 2, operationCapacity: 10000, error: mode === "missing" ? "ENVIRONMENT_MISSING" : mode === "unsupported-status" ? "UNSUPPORTED" : null,
+            activeWorkspaces: 0, retainedWorkspaces: 0, workspaceBytes: 0, workspaceCapacity: 1, workspaceByteLimit: 53687091200 } }
+        : query.method === "workspace.allocate" ? { type: "Workspace", workspace: { threadId: query.threadId, state: "available", kind: "git", retained: false } }
+        : query.method === "workspace.release" ? { type: "Workspace", workspace: { threadId: query.threadId, state: "released", kind: "git", retained: true } }
         : query.method === "environment.inspect" ? { type: "Environment", binding: mode === "wrong-binding" ? { ...binding, threadId: "other" } : binding, state: "ready" }
         : query.method === "exec.start" ? { type: "Accepted", operationId: id }
         : { type: "Operation", operationId: id, operation: mode === "running" ? { state: "Running" } : mode === "unknown" ? { state: "Unknown" }

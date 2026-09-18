@@ -30,13 +30,16 @@ owns the product. The user-facing unit is a thread.
 ## Capabilities and Constraints
 
 Projects retain repository configuration and host-side access checks. A new
-thread consumes one unused enrolled runner. The thread supports streaming chat,
+thread leases one available enrolled runner and gets a separate workspace; an
+idle archived thread returns that lease. The thread supports streaming chat,
 model choice, bounded shell tools, stop, rename and archive. Provider and GitHub
-authentication remain host capabilities. Archive does not delete a runner.
+authentication remain host capabilities. Dirty workspaces are retained.
 
-Remote workspace transfer, service portals, authenticated Git writes,
+Workspace separation prevents accidental cross-thread collisions; it is not a
+security or process sandbox. Remote workspace transfer, service portals, authenticated Git writes,
 thread-to-thread tasks and native sandboxing are not currently exposed. Do not
-show controls or copy promising those capabilities. Old data is not migrated.
+show controls or copy promising those capabilities. Registry v100 is upgraded;
+older execution stacks are not migrated.
 
 ## Design and voice
 

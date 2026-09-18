@@ -171,7 +171,7 @@ try {
     assert.equal((await client.status(17)).status, "Running");
     assert.equal(fs.readFileSync(path.join(workspace, "count"), "utf8"), "once");
     if (network === "loopback") await smokeDurableAgent(directory, configPath, workspace);
-    if (network === "loopback") await smokeProduct(directory, configPath, workspace);
+    if (network === "loopback") await smokeProduct(directory, configPath);
     await stop(daemon.child);
     console.log(`ok: ${network} mode, real TS/native/iroh/exec, exact binding, durable intent, rejection, config pinning, offline observations and restart`);
   }

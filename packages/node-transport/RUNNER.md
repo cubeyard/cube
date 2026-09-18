@@ -11,9 +11,12 @@ dedicated, unprivileged Unix account. This is **not a sandbox**: there is no
 same-UID filesystem protection, per-job UID, egress enforcement, or protection
 of the journal/key from a hostile command running as that UID. Root is refused.
 
-The runner accepts one enrolled Iroh control peer and exactly one persisted
-logical node/thread/environment binding. Iroh `peerId` authenticates transport;
-Cube `nodeId` is domain identity and is not authentication.
+The runner accepts one enrolled Iroh control peer and one persisted installation
+binding. It leases at most one active thread workspace. The historical
+`threadId` in the installation binding remains the protocol-v1 identity and
+legacy-workspace key; new product thread IDs are allocated separately. Iroh
+`peerId` authenticates transport; Cube `nodeId` is domain identity and is not
+authentication.
 
 ## Disposable development loop
 
@@ -36,8 +39,8 @@ the first network dispatch. A failed dial stays consumed; never remove `.sent`.
 
 ## Permanent state and no replay
 
-- `runner-init` requires a new state directory and existing workspace. It saves
-  immutable binding, both peer identities, and workspace path/device/inode.
+- `runner-init` requires a new state directory and existing repository template.
+  It saves immutable binding, both peer identities, and template path/device/inode.
 - `runner-serve` opens existing state only. Wrong key, corrupt metadata, missing
   journal/lock, unsupported schema, or replaced workspace fails closed.
 - SQLite uses FULL synchronous durability and rollback journal. One process owns
@@ -58,13 +61,27 @@ descriptor-relative `openat(O_DIRECTORY|O_NOFOLLOW)`; absolute paths, `..`,
 symlink components and workspace replacement fail closed. Neither mechanism
 sandboxes arbitrary command filesystem access from the runner UID.
 
+`workspace.allocate` creates `state/workspaces/<thread-id>` after strict ID
+validation. A repository-root Git template uses `git worktree add --detach`;
+other templates are recursively copied without following symlinks. The journal
+commits `allocating/available/releasing/released/failed` with path device/inode
+anchors. Startup changes interrupted transitions to `failed` and preserves the
+tree. Release removes a clean Git worktree still at the template HEAD, but
+retains changed or independently committed Git worktrees and
+all copy fallbacks because there is no trustworthy clean oracle for a plain
+directory. A retained tree does not consume the one active-workspace slot.
+This prevents accidental active-thread collisions; it is not filesystem or
+process confinement.
+
 Commands run in a new process group. Timeout/cancel reaps normal descendants.
 On macOS a hostile descendant can escape by creating a new session/process
 group, and a hard daemon crash cannot provide cgroup-style cleanup.
 
 Limits: 8-KiB command, 4-KiB cwd, 60-second runtime, 8-KiB retained output, one
-active job, 16 connections, 10,000 immutable operation records. Busy/capacity
-reject new work; existing IDs remain inspectable.
+active job, one active workspace, 16 connections, 10,000 immutable operation
+records, and a 50-GiB managed-workspace admission threshold. Status reports
+active/retained workspace counts and bytes. Busy/capacity rejects new work;
+existing IDs remain inspectable.
 
 ## Control-plane adapter
 
@@ -100,8 +117,10 @@ ALPN remains `cubeyard/node/1`. This is transport terminology and is not renamed
 Frames are four-byte big-endian length plus bounded UTF-8 JSON and FIN. A
 connection performs hello then at most one request. New daemons advertise
 profiles `["runner", "host"]`; `host` is the protocol-v1 compatibility alias.
-Capabilities are `node.status`, `environment.inspect`, `exec.start`, and
-`operation.get`. `nodeId` and field names remain stable on wire.
+Capabilities are `node.status`, `environment.inspect`, `workspace.allocate`,
+`workspace.release`, `exec.start`, and `operation.get`. Existing requests without
+`threadId` continue to use the legacy template workspace and preserve their
+operation hashes. `nodeId` and existing field names remain stable on wire.
 
 Product threads reach the enrolled runner through Pi's `bash` tool and
 `IrohExecutionNodeClient.resumeExec`. Pi supplies the stable invocation identity;

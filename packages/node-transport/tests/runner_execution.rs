@@ -6,12 +6,13 @@ use cube_node_transport::{
     runner::{Binding, ExecSpec, Operation, Runner},
 };
 use iroh::{Endpoint, EndpointAddr, SecretKey};
+use rusqlite::Connection;
 use std::{
     fs::{self, OpenOptions},
     io::Write,
     os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Command as StdCommand, Stdio},
     sync::Arc,
     time::Duration,
 };
@@ -134,6 +135,7 @@ fn start(id: &str, spec: ExecSpec) -> Request {
     Request::ExecStart {
         operation_id: id.into(),
         env: 1,
+        thread_id: None,
         spec,
     }
 }
@@ -184,6 +186,144 @@ async fn cli(args: &[&str]) -> std::process::Output {
     .await
     .unwrap()
     .unwrap()
+}
+
+#[tokio::test]
+async fn thread_worktrees_are_distinct_reusable_and_dirty_safe_across_restart() {
+    let _case = CASE.lock().await;
+    let fixture = Fixture::new();
+    let git = |args: &[&str]| {
+        let status = StdCommand::new("git")
+            .args([
+                "-c",
+                "user.name=Cube Test",
+                "-c",
+                "user.email=cube@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-C",
+            ])
+            .arg(&fixture.workspace)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    fs::write(fixture.workspace.join("tracked"), b"template").unwrap();
+    git(&["add", "tracked"]);
+    git(&["commit", "-qm", "template"]);
+
+    let runner = fixture.open();
+    let first = runner.allocate("thread-one").unwrap();
+    assert_eq!(first.kind, "git");
+    assert!(
+        matches!(runner.allocate("thread-two"), Err(error) if error.to_string() == "CAPACITY_EXCEEDED")
+    );
+    runner
+        .start_in_workspace(
+            1,
+            Some("thread-one"),
+            "workspace-one",
+            spec("printf one > unique"),
+        )
+        .unwrap();
+    timeout(BUDGET, async {
+        loop {
+            if matches!(
+                runner.get(1, "workspace-one").unwrap(),
+                Operation::Succeeded { .. }
+            ) {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let first_path = fixture.state.join("workspaces/thread-one");
+    assert_eq!(fs::read(first_path.join("unique")).unwrap(), b"one");
+    let released = runner.release("thread-one").unwrap();
+    assert!(released.retained, "dirty worktree must be retained");
+    drop(runner);
+
+    let runner = fixture.open();
+    let second = runner.allocate("thread-two").unwrap();
+    assert_eq!(second.kind, "git");
+    let second_path = fixture.state.join("workspaces/thread-two");
+    assert_ne!(first_path, second_path);
+    assert!(
+        !second_path.join("unique").exists(),
+        "threads must not share workspace contents"
+    );
+    drop(runner);
+    fs::write(second_path.join("recovery-marker"), b"keep").unwrap();
+    let db = Connection::open(fixture.state.join("journal.db")).unwrap();
+    db.execute(
+        "UPDATE workspace SET state='releasing' WHERE thread_id='thread-two'",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let runner = fixture.open();
+    assert!(
+        runner.release("thread-two").unwrap().retained,
+        "interrupted release must retain user work"
+    );
+    assert!(second_path.join("recovery-marker").exists());
+    runner.allocate("thread-three").unwrap();
+    assert!(
+        !runner.release("thread-three").unwrap().retained,
+        "clean worktree should be removed"
+    );
+    runner.allocate("thread-four").unwrap();
+    let fourth_path = fixture.state.join("workspaces/thread-four");
+    fs::write(fourth_path.join("committed"), b"keep committed work").unwrap();
+    let commit = StdCommand::new("git")
+        .args([
+            "-c",
+            "user.name=Cube Test",
+            "-c",
+            "user.email=cube@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+        ])
+        .arg(&fourth_path)
+        .args(["add", "committed"])
+        .status()
+        .unwrap();
+    assert!(commit.success());
+    let commit = StdCommand::new("git")
+        .args([
+            "-c",
+            "user.name=Cube Test",
+            "-c",
+            "user.email=cube@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+        ])
+        .arg(&fourth_path)
+        .args(["commit", "-qm", "thread work"])
+        .status()
+        .unwrap();
+    assert!(commit.success());
+    assert!(
+        runner.release("thread-four").unwrap().retained,
+        "a clean worktree with a thread-only commit must be retained"
+    );
+    assert_eq!(
+        fs::read(fourth_path.join("committed")).unwrap(),
+        b"keep committed work"
+    );
+    assert!(
+        first_path.join("unique").exists(),
+        "later releases must not delete retained user work"
+    );
+    assert!(
+        matches!(runner.allocate("../escape"), Err(error) if error.to_string() == "INVALID_REQUEST")
+    );
 }
 
 #[tokio::test]
@@ -260,7 +400,7 @@ async fn real_exec_dedup_capacity_binding_and_restart() {
         matches!(request(&client, &address, &start("op-once", spec("echo changed"))).await, Response::Error { code, .. } if code == "CONFLICT")
     );
     assert!(
-        matches!(request(&client, &address, &Request::ExecStart { operation_id: "wrong-env".into(), env: 2, spec: spec("touch wrong-env") }).await, Response::Error { code, .. } if code == "ENVIRONMENT_MISSING")
+        matches!(request(&client, &address, &Request::ExecStart { operation_id: "wrong-env".into(), env: 2, thread_id: None, spec: spec("touch wrong-env") }).await, Response::Error { code, .. } if code == "ENVIRONMENT_MISSING")
     );
     assert!(
         matches!(request(&client, &address, &Request::OperationGet { operation_id: "op-once".into(), env: 2 }).await, Response::Error { code, .. } if code == "ENVIRONMENT_MISSING")
@@ -488,6 +628,7 @@ async fn lost_accepted_response_does_not_cancel_work() {
                 env,
                 operation_id,
                 spec,
+                ..
             } = read_frame::<Request>(&mut recv).await.unwrap()
             else {
                 panic!()

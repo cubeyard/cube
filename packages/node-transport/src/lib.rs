@@ -28,6 +28,16 @@ pub enum Request {
     },
     #[serde(rename = "environment.inspect")]
     Inspect { env: u64 },
+    #[serde(rename = "workspace.allocate")]
+    WorkspaceAllocate {
+        #[serde(rename = "threadId")]
+        thread_id: String,
+    },
+    #[serde(rename = "workspace.release")]
+    WorkspaceRelease {
+        #[serde(rename = "threadId")]
+        thread_id: String,
+    },
     #[serde(rename = "node.status")]
     Status,
     #[serde(rename = "exec.start")]
@@ -35,6 +45,8 @@ pub enum Request {
         #[serde(rename = "operationId")]
         operation_id: String,
         env: u64,
+        #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
         spec: runner::ExecSpec,
     },
     #[serde(rename = "operation.get")]
@@ -87,6 +99,9 @@ pub enum Response {
     Environment {
         binding: runner::Binding,
         state: String,
+    },
+    Workspace {
+        workspace: runner::WorkspaceStatus,
     },
     Error {
         code: String,
@@ -296,6 +311,8 @@ fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>)
                 [
                     "node.status",
                     "environment.inspect",
+                    "workspace.allocate",
+                    "workspace.release",
                     "exec.start",
                     "operation.get",
                 ]
@@ -330,12 +347,19 @@ fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>)
                 binding: installation.binding.clone(),
                 state: "ready".into(),
             }),
+        Request::WorkspaceAllocate { thread_id } => runner
+            .allocate(&thread_id)
+            .map(|workspace| Response::Workspace { workspace }),
+        Request::WorkspaceRelease { thread_id } => runner
+            .release(&thread_id)
+            .map(|workspace| Response::Workspace { workspace }),
         Request::ExecStart {
             env,
             operation_id,
+            thread_id,
             spec,
         } => runner
-            .start(env, &operation_id, spec)
+            .start_in_workspace(env, thread_id.as_deref(), &operation_id, spec)
             .map(|()| Response::Accepted { operation_id }),
         Request::OperationGet { env, operation_id } => {
             runner

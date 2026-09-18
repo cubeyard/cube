@@ -27,8 +27,10 @@ These tests use a controlled model and disposable state. Paid-model integration,
 power-loss durability and separate-machine Linux/macOS lifecycle acceptance are
 not established by them. Newer macOS runner support remains intact.
 
-Operators still prepare workspaces and enroll one fresh immutable runner per
-thread. Workspace transfer, authenticated Git mutation, portals and
+Operators prepare a repository template and enroll immutable runners. Each runner
+leases one separate active-thread workspace at a time and is reusable after
+archive; dirty worktrees are retained. This is collision isolation, not a
+security sandbox. Workspace transfer, authenticated Git mutation, portals and
 thread-to-thread tools are not exposed. Pi's saved model choice now controls
 reopening even when the registry's initial model or the selected model disappears
 from the catalog; unavailable models are not silently replaced.

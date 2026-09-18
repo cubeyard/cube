@@ -29,6 +29,7 @@ export async function createCubed(options: { state: string; models?: Models; web
   const projectView = (project: Project) => ({ ...project,
     availableRunnerCount: registry.availableRunners(project.id).length,
     runnerCount: registry.runnerCount(project.id),
+    runnerCapacity: registry.runnerCapacity(project.id),
     threadCount: registry.listThreads().filter(thread => thread.projectId === project.id && !thread.archived).length });
   async function check(project: Project) {
     for (const repository of project.repositories) {

@@ -356,6 +356,7 @@ async fn main() -> Result<()> {
                 Request::ExecStart {
                     env: intent.environment_id,
                     operation_id: intent.operation_id,
+                    thread_id: None,
                     spec: intent.spec,
                 }
             } else {

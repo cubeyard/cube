@@ -43,15 +43,24 @@ bill both attempts. SIGKILL tests are not proof of power-loss durability.
 
 `CUBED_STATE/registry.sqlite` contains projects, registered runners, thread
 metadata and creation request keys. `CUBED_STATE/threads/<id>/session` contains
-Pi's databases. The schema is fresh; old data is not migrated. See the reset
-workflow in README.
+Pi's databases. Registry v100 is upgraded in place; older execution stacks are
+not migrated. See the reset workflow in README.
 
-A runner has one permanent node/thread/workspace binding. Operators prepare and
-enroll it for a project; new-thread allocation consumes it. Archive removes the
-thread from the active product list without deleting or reassigning its workspace.
-There is no relocation, automatic remote provisioning or implicit local execution.
+A runner has one permanent node/environment admission and one operator-prepared
+repository template. It admits one active thread workspace at a time. Cubed
+persists `available/allocating/busy/releasing/failed`; the runner journal persists
+the physical allocation and reconciles interrupted transitions without deleting
+the tree. New Git repositories use detached worktrees. Non-Git templates use a
+copy fallback. Archive releases logical capacity; clean Git worktrees still at
+the template HEAD are removed, while changed or independently committed
+worktrees and fallback copies are retained under runner state.
+Registry v100 is upgraded in place; existing bound threads continue on their
+original workspace. There is no relocation, automatic remote provisioning or
+implicit local execution.
 
-Current Linux/macOS runners are trusted same-account execution, **not sandboxes**.
+These directories prevent active threads from colliding by default; they do not
+constrain an absolute path or a command running as the runner UID. Current
+Linux/macOS runners are trusted same-account execution, **not sandboxes**.
 Platform-specific sandbox technology remains undecided. The supported operation
 is bounded shell execution; remote file transfer, portals and authenticated Git
 mutation are not implemented. Keep host Git/model credentials out of runner

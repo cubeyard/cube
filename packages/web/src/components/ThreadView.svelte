@@ -211,7 +211,7 @@
         <Icon name="chevron" size={12} />
       </label>
       {#if armed.is("thread")}
-        <span class="bank-note" role="status">removed from active threads; the runner workspace is kept</span>
+        <span class="bank-note" role="status">workspace released; user changes are retained</span>
       {/if}
       <span class="key-bank">
         <button
