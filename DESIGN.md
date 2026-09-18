@@ -486,6 +486,12 @@ closed). Output sits in a recessed `--s1` window underneath (12px mono,
 16rem max-height), visible by default; collapse animates via CSS grid rows
 (1fr ↔ 0fr at 120ms), so the output stays in the DOM.
 
+When JEV sent a compact view, a quiet measurement strip names that view and
+the exact sent/total line counts. Its two-position control switches the same
+output window between `sent to model` and the on-demand `original`; the active
+position uses the signal underline rather than introducing another state color.
+The full original is not included in ordinary transcript payloads.
+
 ### Banners
 Printed notices, 7px radius, one per tone: error is red ink on `--bad-soft`
 with `--bad-line` border; info is silkscreen (`--note-soft` / `--note-line`,

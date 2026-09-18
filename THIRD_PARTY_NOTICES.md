@@ -57,6 +57,15 @@ Copyright (c) 2016-2025 Svelte Contributors
 
 Svelte is licensed under the MIT License reproduced below.
 
+## TypeSafe AI JavaScript SDK
+
+The server uses the published
+[`@typesafe-ai/sdk`](https://github.com/typesafe-ai/typesafe-sdk-js) package.
+
+Copyright (c) 2026 TypeSafe
+
+Licensed under the MIT License reproduced below.
+
 ### MIT License
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

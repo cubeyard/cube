@@ -28,6 +28,14 @@ try {
   assert.equal(rejectedHost, 403);
   assert.equal((await fetch(`${base}/api/state`, { headers: { origin: "http://untrusted.example" } })).status, 403);
   assert.equal((await write("/api/models", {})).status, 404);
+  assert.deepEqual(await (await fetch(`${base}/api/jev`)).json(), { configured: false });
+  const jevSecret = "jev-secret-not-for-responses";
+  const savedJev = await write("/api/jev", { apiKey: jevSecret }, "PUT");
+  const savedJevText = await savedJev.text();
+  assert.equal(savedJev.status, 200); assert(!savedJevText.includes(jevSecret));
+  assert.deepEqual(JSON.parse(savedJevText), { configured: true });
+  assert.equal(fs.statSync(path.join(state, "jev-key.json")).mode & 0o777, 0o600);
+  assert.deepEqual(await (await write("/api/jev", {}, "DELETE")).json(), { configured: false });
   assert.equal((await write("/api/github/auth", {}, "PUT")).status, 404);
   assert.equal((await fetch(`${base}/api/projects`, { method: "POST", body: "{}" })).status, 415);
   for (const repositories of [[null], [{ url: "org/repo", base: {} }], [{ url: "org/repo", checkoutName: "../outside" }]]) {

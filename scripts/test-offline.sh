@@ -7,6 +7,7 @@ OFFLINE_TESTS=(
   packages/server/test/registry-test.ts
   packages/server/test/api-test.ts
   packages/server/test/models-test.ts
+  packages/server/test/jev-memory-test.ts
   packages/server/test/model-auth-test.ts
   packages/server/test/iroh-node-test.ts
   packages/server/test/github-auth-test.ts
