@@ -82,6 +82,9 @@
           <div>
             <h3>{status.available.version}</h3>
             <p>{bytes(status.available.bytes)} · commit {status.available.commit.slice(0, 12)}</p>
+            {#if status.available.publishedAt}
+              <p>published <time datetime={status.available.publishedAt}>{new Date(status.available.publishedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</time></p>
+            {/if}
           </div>
           {#if status.available.notesUrl}<a href={status.available.notesUrl} target="_blank" rel="noreferrer">release notes</a>{/if}
         </div>
