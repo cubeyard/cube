@@ -17,7 +17,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     process::{Child, Command},
     time::{sleep, timeout},
 };
@@ -939,6 +939,189 @@ async fn drain_wait_cancel_and_restore_quarantine_are_explicit() {
             .contains("DRAINING")
     );
     assert!(!recovered.workspace.join("must-not-run").exists());
+}
+
+#[tokio::test]
+async fn direct_aliases_are_foreground_and_second_interrupt_cancels() {
+    let _case = CASE.lock().await;
+    let fixture = Fixture::new();
+    let mut child = Command::new(BIN)
+        .args([
+            "runner-serve",
+            "--key",
+            fixture.key_file.to_str().unwrap(),
+            "--state",
+            fixture.state.to_str().unwrap(),
+            "--ready-file",
+            fixture.root.path().join("ready.json").to_str().unwrap(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    timeout(
+        BUDGET,
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut ready),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let ready: serde_json::Value = serde_json::from_str(&ready).unwrap();
+    let address = EndpointAddr::new(fixture.key.public())
+        .with_ip_addr(ready["addresses"][0].as_str().unwrap().parse().unwrap());
+    let client = fixture.client().await;
+    assert!(matches!(
+        request(
+            &client,
+            &address,
+            &start("op-two-stage", spec("sleep 10; touch must-not-survive")),
+        )
+        .await,
+        Response::Accepted { .. }
+    ));
+    timeout(BUDGET, async {
+        loop {
+            if matches!(
+                get(&client, &address, "op-two-stage").await,
+                Operation::Running
+            ) {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    unsafe { libc::kill(child.id().unwrap() as i32, libc::SIGINT) };
+    timeout(BUDGET, async {
+        loop {
+            if fs::read_to_string(fixture.root.path().join("ready.json"))
+                .unwrap_or_default()
+                .contains("\"lifecycle\":\"draining\"")
+            {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "first Ctrl-C waits for active work"
+    );
+    unsafe { libc::kill(child.id().unwrap() as i32, libc::SIGINT) };
+    let status = timeout(BUDGET, child.wait()).await;
+    let timed_out = status.is_err();
+    if timed_out {
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
+    let mut diagnostics = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut diagnostics)
+        .await
+        .unwrap();
+    assert!(!timed_out, "{diagnostics}");
+    assert!(status.unwrap().unwrap().success(), "{diagnostics}");
+    assert!(diagnostics.contains("runner_stopping"), "{diagnostics}");
+    assert!(
+        diagnostics.contains("runner_cancelling_active"),
+        "{diagnostics}"
+    );
+    drop(client);
+    let runner = fixture.open();
+    assert_eq!(
+        runner.get(1, "op-two-stage").unwrap(),
+        Operation::Failed {
+            error: "CANCELLED".into(),
+            completion_unknown: false,
+        }
+    );
+    assert!(!fixture.workspace.join("must-not-survive").exists());
+    drop(runner);
+
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let control = SecretKey::generate();
+    let initialized = cli(&[
+        "init",
+        "--home",
+        home.to_str().unwrap(),
+        "--workspace",
+        workspace.to_str().unwrap(),
+        "--allow-peer",
+        &control.public().to_string(),
+        "--node-id",
+        "node-direct",
+        "--thread-id",
+        "thread-direct",
+        "--env",
+        "7",
+    ])
+    .await;
+    assert!(
+        initialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    assert!(String::from_utf8_lossy(&initialized.stdout).contains("next: cube-runner run"));
+    assert_eq!(
+        fs::metadata(&home).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(home.join("runner.key"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let mut foreground = Command::new(BIN)
+        .args(["run", "--home", home.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let stderr = foreground.stderr.take().unwrap();
+    let mut lines = BufReader::new(stderr).lines();
+    let mut startup = String::new();
+    timeout(BUDGET, async {
+        while let Some(line) = lines.next_line().await.unwrap() {
+            startup.push_str(&line);
+            startup.push('\n');
+            if line.contains("network ready / waiting for cubed") {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(startup.contains("cube-runner"));
+    let mut stdout = foreground.stdout.take().unwrap();
+    assert!(
+        timeout(Duration::from_millis(50), stdout.read_u8())
+            .await
+            .is_err(),
+        "human run reserves stdout for future machine output"
+    );
+    unsafe { libc::kill(foreground.id().unwrap() as i32, libc::SIGINT) };
+    assert!(
+        timeout(BUDGET, foreground.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
 }
 
 #[tokio::test]

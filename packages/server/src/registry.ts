@@ -88,6 +88,9 @@ export class Registry {
   runner(threadId: string): Runner | null {
     return this.parse(this.db.prepare("SELECT r.data FROM runner r JOIN thread t ON t.runner_id=r.id WHERE t.id=?").get(threadId));
   }
+  listRunners(): Runner[] {
+    return this.db.prepare("SELECT data FROM runner ORDER BY rowid").all().map(row => this.parse<Runner>(row)!);
+  }
   availableRunners(projectId: string): Runner[] {
     return this.db.prepare("SELECT data FROM runner WHERE project_id=? AND state='available'").all(projectId).map(row => this.parse<Runner>(row)!);
   }

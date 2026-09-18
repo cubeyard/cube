@@ -18,9 +18,12 @@ use cube_node_transport::{
     serve, serve_runner, validate_node_id,
 };
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 const USAGE: &str = "usage:
+  cube-runner init --home <NEW-directory> --workspace <existing-directory> --allow-peer <public-key> --node-id <node-id> --thread-id <thread-id> --env <integer> [--network loopback|direct|relay] [--listen <ip:port>]
+  cube-runner run --home <directory> [--network loopback|direct|relay]
   cube-runner version
   cube-runner keygen --key <new-private-file>
   cube-runner serve --key <private-file> --allow-peer <public-key> --node-id <node-id> [--listen 127.0.0.1:0]
@@ -32,6 +35,14 @@ const USAGE: &str = "usage:
   cube-runner submit --key <control-key> --intent <file> [--address <ip:port>]
   cube-runner operation --key <control-key> --intent <file> [--address <ip:port>]
 network commands accept --network loopback|direct|relay (default loopback); direct requires explicit addresses; relay uses N0 discovery and relays";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectHome {
+    version: u32,
+    network: NetworkMode,
+    listen: Option<String>,
+}
 
 #[cfg(unix)]
 fn read_key(path: &Path) -> Result<SecretKey> {
@@ -140,6 +151,34 @@ fn remove_ready(path: Option<&Path>) {
     }
 }
 
+fn write_direct_home(home: &Path, value: &DirectHome) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = home.join("runner.json");
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(serde_json::to_string_pretty(value)?.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    File::open(home)?.sync_all()?;
+    Ok(())
+}
+
+fn read_direct_home(home: &Path) -> Result<DirectHome> {
+    use std::os::unix::fs::MetadataExt;
+    ensure!(home.is_absolute(), "--home must be absolute");
+    let metadata = fs::symlink_metadata(home)?;
+    ensure!(
+        metadata.is_dir() && metadata.mode() & 0o077 == 0,
+        "runner home must be a private directory, not a symlink"
+    );
+    let manifest: DirectHome = serde_json::from_slice(&fs::read(home.join("runner.json"))?)?;
+    ensure!(manifest.version == 1, "unsupported runner home version");
+    Ok(manifest)
+}
+
 async fn client_destination(
     options: &mut BTreeMap<String, String>,
     key: SecretKey,
@@ -166,6 +205,11 @@ async fn client_destination(
 async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let command = args.next().context(USAGE)?;
+    if command == "--help" || command == "help" {
+        ensure!(args.next().is_none(), "{USAGE}");
+        println!("{USAGE}");
+        return Ok(());
+    }
     let mut options = BTreeMap::new();
     while let Some(key) = args.next() {
         ensure!(key.starts_with("--"), "{USAGE}");
@@ -184,17 +228,26 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
-    let network = match options.remove("--network").as_deref() {
-        None | Some("loopback") => NetworkMode::Loopback,
-        Some("direct") => NetworkMode::Direct,
-        Some("relay") => NetworkMode::Relay,
+    let network_option = match options.remove("--network").as_deref() {
+        None => None,
+        Some("loopback") => Some(NetworkMode::Loopback),
+        Some("direct") => Some(NetworkMode::Direct),
+        Some("relay") => Some(NetworkMode::Relay),
         _ => bail!("invalid network mode"),
     };
-    let key_path = take(&mut options, "--key")?;
+    let direct_home = matches!(command.as_str(), "init" | "run")
+        .then(|| take(&mut options, "--home"))
+        .transpose()?
+        .map(PathBuf::from);
+    let key_path = if let Some(home) = &direct_home {
+        home.join("runner.key")
+    } else {
+        PathBuf::from(take(&mut options, "--key")?)
+    };
     match command.as_str() {
         "keygen" => {
             no_extra(&options)?;
-            let key = keygen(Path::new(&key_path))?;
+            let key = keygen(&key_path)?;
             println!("{}", json!({"peerId": key.public().to_string()}));
         }
         "serve" => {
@@ -203,7 +256,8 @@ async fn main() -> Result<()> {
             validate_node_id(&node_id)?;
             let listen = options.remove("--listen");
             no_extra(&options)?;
-            let endpoint = endpoint(read_key(Path::new(&key_path))?, network, listen).await?;
+            let network = network_option.unwrap_or_default();
+            let endpoint = endpoint(read_key(&key_path)?, network, listen).await?;
             println!("{}", ready(&endpoint, &node_id, network));
             std::io::stdout().flush()?;
             let result = tokio::select! {
@@ -213,20 +267,49 @@ async fn main() -> Result<()> {
             endpoint.close().await;
             result?;
         }
-        "runner-init" | "host-init" => {
+        "init" | "runner-init" | "host-init" => {
             if command == "host-init" {
                 eprintln!("cube-runner: host-init is deprecated; use runner-init");
             }
-            let state = take(&mut options, "--state")?;
+            let state = if direct_home.is_some() {
+                None
+            } else {
+                Some(take(&mut options, "--state")?)
+            };
             let workspace = take(&mut options, "--workspace")?;
             let allowed: EndpointId = take(&mut options, "--allow-peer")?.parse()?;
             let node_id = take(&mut options, "--node-id")?;
             let thread_id = take(&mut options, "--thread-id")?;
             let environment_id = take(&mut options, "--env")?.parse()?;
+            let listen = options.remove("--listen");
             no_extra(&options)?;
-            let key = read_key(Path::new(&key_path))?;
+            let home = direct_home.as_deref();
+            let network = network_option.unwrap_or_default();
+            if network == NetworkMode::Relay {
+                ensure!(listen.is_none(), "relay mode does not accept --listen");
+            } else if network == NetworkMode::Direct {
+                ensure!(listen.is_some(), "direct mode requires --listen");
+            }
+            if let Some(home) = home {
+                use std::os::unix::fs::DirBuilderExt;
+                ensure!(home.is_absolute(), "--home must be absolute");
+                let mut builder = fs::DirBuilder::new();
+                builder.mode(0o700).create(home)?;
+            } else {
+                ensure!(listen.is_none(), "runner-init does not accept --listen");
+            }
+            let key = if home.is_some() {
+                keygen(&key_path)?
+            } else {
+                read_key(&key_path)?
+            };
+            let state = home.map_or_else(
+                || PathBuf::from(state.as_ref().unwrap()),
+                |home| home.join("state"),
+            );
+            let display_node = node_id.clone();
             Runner::initialize(
-                Path::new(&state),
+                &state,
                 Binding {
                     thread_id,
                     environment_id,
@@ -236,31 +319,73 @@ async fn main() -> Result<()> {
                 allowed,
                 Path::new(&workspace),
             )?;
-            println!("{}", json!({"initialized": true}));
+            if let Some(home) = home {
+                write_direct_home(
+                    home,
+                    &DirectHome {
+                        version: 1,
+                        network,
+                        listen,
+                    },
+                )?;
+                println!("cube-runner {SOFTWARE_VERSION}");
+                println!("initialized: {}", home.display());
+                println!("node: {display_node}");
+                println!("peer: {}", key.public());
+                println!(
+                    "network: {}",
+                    match network {
+                        NetworkMode::Loopback => "loopback",
+                        NetworkMode::Direct => "direct",
+                        NetworkMode::Relay => "relay",
+                    }
+                );
+                println!("next: cube-runner run --home {}", home.display());
+            } else {
+                println!("{}", json!({"initialized": true}));
+            }
         }
         "runner-acknowledge-recovery" => {
             let state = take(&mut options, "--state")?;
             let workspace = take(&mut options, "--workspace")?;
             no_extra(&options)?;
-            let key = read_key(Path::new(&key_path))?;
+            let key = read_key(&key_path)?;
             Runner::acknowledge_recovery(Path::new(&state), key.public(), Path::new(&workspace))?;
             println!("{}", json!({"recoveryAcknowledged": true}));
         }
-        "runner-serve" | "host-serve" => {
+        "run" | "runner-serve" | "host-serve" => {
             if command == "host-serve" {
                 eprintln!("cube-runner: host-serve is deprecated; use runner-serve");
             }
-            let state = take(&mut options, "--state")?;
-            let listen = options.remove("--listen");
+            let human = command == "run";
+            let manifest = direct_home.as_deref().map(read_direct_home).transpose()?;
+            let state = manifest.as_ref().map_or_else(
+                || take(&mut options, "--state").map(PathBuf::from),
+                |_| Ok(direct_home.as_ref().unwrap().join("state")),
+            )?;
+            let listen = manifest
+                .as_ref()
+                .and_then(|manifest| manifest.listen.clone())
+                .or_else(|| options.remove("--listen"));
+            let network = network_option
+                .or_else(|| manifest.as_ref().map(|manifest| manifest.network))
+                .unwrap_or_default();
             let ready_file = options.remove("--ready-file").map(PathBuf::from);
             let cancel_on_stop = match options.remove("--stop-policy").as_deref() {
                 None | Some("wait") => false,
                 Some("cancel") => true,
                 Some(_) => bail!("invalid stop policy"),
             };
+            if human {
+                ensure!(ready_file.is_none(), "run does not accept --ready-file");
+                ensure!(
+                    !cancel_on_stop,
+                    "run uses two-stage Ctrl-C; --stop-policy cancel belongs to runner-serve"
+                );
+            }
             no_extra(&options)?;
-            let key = read_key(Path::new(&key_path))?;
-            let runner = Runner::open(Path::new(&state), key.public())?;
+            let key = read_key(&key_path)?;
+            let runner = Runner::open(&state, key.public())?;
             let allowed = runner.installation().allowed_peer.parse()?;
             let node_id = runner.installation().binding.node_id.clone();
             eprintln!(
@@ -269,44 +394,103 @@ async fn main() -> Result<()> {
             let endpoint = endpoint(key, network, listen).await?;
             let mut readiness = ready(&endpoint, &node_id, network);
             readiness["lifecycle"] = json!(runner.status()?.lifecycle);
-            println!("{readiness}");
-            std::io::stdout().flush()?;
+            if human {
+                eprintln!("cube-runner {SOFTWARE_VERSION}");
+                eprintln!("node: {node_id}");
+                eprintln!(
+                    "peer: {}",
+                    readiness["peerId"].as_str().unwrap_or("unknown")
+                );
+                eprintln!("network ready / waiting for cubed");
+                if let Some(addresses) = readiness["addresses"].as_array() {
+                    let addresses = addresses
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if !addresses.is_empty() {
+                        eprintln!("listen: {addresses}");
+                    }
+                }
+                eprintln!(
+                    "lifecycle: {}",
+                    readiness["lifecycle"].as_str().unwrap_or("unknown")
+                );
+                eprintln!("press Ctrl-C to drain and stop");
+            } else {
+                println!("{readiness}");
+                std::io::stdout().flush()?;
+            }
             write_ready(ready_file.as_deref(), &readiness)?;
             use tokio::signal::unix::{SignalKind, signal};
             let mut interrupt = signal(SignalKind::interrupt())?;
             let mut terminate = signal(SignalKind::terminate())?;
             let mut drain = signal(SignalKind::user_defined1())?;
             let mut resume = signal(SignalKind::user_defined2())?;
-            let server = serve_runner(&endpoint, allowed, &node_id, Some(runner.clone()));
-            tokio::pin!(server);
-            let result = loop {
-                tokio::select! {
-                    result = &mut server => break result,
-                    _ = interrupt.recv() => break Ok(()),
-                    _ = terminate.recv() => break Ok(()),
-                    _ = drain.recv() => {
-                        runner.drain();
-                        readiness["lifecycle"] = json!("draining");
-                        write_ready(ready_file.as_deref(), &readiness)?;
-                        eprintln!("{{\"level\":\"info\",\"event\":\"runner_draining\"}}");
-                    },
-                    _ = resume.recv() => {
-                        if runner.resume().is_ok() {
-                            readiness["lifecycle"] = json!("ready");
+            let result = {
+                let server = serve_runner(&endpoint, allowed, &node_id, Some(runner.clone()));
+                tokio::pin!(server);
+                loop {
+                    tokio::select! {
+                        result = &mut server => break result,
+                        _ = interrupt.recv() => break Ok(()),
+                        _ = terminate.recv() => break Ok(()),
+                        _ = drain.recv() => {
+                            runner.drain();
+                            readiness["lifecycle"] = json!("draining");
                             write_ready(ready_file.as_deref(), &readiness)?;
-                            eprintln!("{{\"level\":\"info\",\"event\":\"runner_ready\"}}");
-                        } else {
-                            eprintln!("{{\"level\":\"warn\",\"event\":\"runner_resume_refused\",\"action\":\"stop and complete recovery\"}}");
-                        }
-                    },
+                            eprintln!("{{\"level\":\"info\",\"event\":\"runner_draining\"}}");
+                        },
+                        _ = resume.recv() => {
+                            if runner.resume().is_ok() {
+                                readiness["lifecycle"] = json!("ready");
+                                write_ready(ready_file.as_deref(), &readiness)?;
+                                eprintln!("{{\"level\":\"info\",\"event\":\"runner_ready\"}}");
+                            } else {
+                                eprintln!("{{\"level\":\"warn\",\"event\":\"runner_resume_refused\",\"action\":\"stop and complete recovery\"}}");
+                            }
+                        },
+                    }
                 }
             };
             runner.drain();
             readiness["lifecycle"] = json!("draining");
             write_ready(ready_file.as_deref(), &readiness)?;
+            let active = runner.status()?.active;
+            if human {
+                if active {
+                    eprintln!("stopping: draining; waiting for the active command (up to 60s)");
+                    eprintln!("press Ctrl-C again to cancel it");
+                } else {
+                    eprintln!("stopping: drained; no active command");
+                }
+            } else {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"runner_stopping\",\"active\":{active}}}"
+                );
+            }
+            if cancel_on_stop {
+                runner.shutdown(true).await;
+            } else {
+                let graceful = runner.shutdown(false);
+                tokio::pin!(graceful);
+                tokio::select! {
+                    _ = &mut graceful => {},
+                    _ = interrupt.recv() => {
+                        if human { eprintln!("cancelling: active command"); }
+                        else { eprintln!("{{\"level\":\"warn\",\"event\":\"runner_cancelling_active\"}}"); }
+                        runner.shutdown(true).await;
+                    },
+                    _ = terminate.recv() => {
+                        runner.shutdown(true).await;
+                    },
+                }
+            }
             endpoint.close().await;
-            runner.shutdown(cancel_on_stop).await;
             remove_ready(ready_file.as_deref());
+            if human {
+                eprintln!("stopped");
+            }
             result?;
         }
         "prepare-exec" => {
@@ -365,8 +549,13 @@ async fn main() -> Result<()> {
                     operation_id: intent.operation_id,
                 }
             };
-            let (endpoint, destination) =
-                client_destination(&mut options, key, intent.server_peer.parse()?, network).await?;
+            let (endpoint, destination) = client_destination(
+                &mut options,
+                key,
+                intent.server_peer.parse()?,
+                network_option.unwrap_or_default(),
+            )
+            .await?;
             no_extra(&options)?;
             let response = if let Some(thread_id) = intent.thread_id {
                 cube_node_transport::call_bound(
@@ -394,9 +583,13 @@ async fn main() -> Result<()> {
         "hello" => {
             let peer: EndpointId = take(&mut options, "--peer")?.parse()?;
             let expected = take(&mut options, "--expect-node")?;
-            let (endpoint, destination) =
-                client_destination(&mut options, read_key(Path::new(&key_path))?, peer, network)
-                    .await?;
+            let (endpoint, destination) = client_destination(
+                &mut options,
+                read_key(&key_path)?,
+                peer,
+                network_option.unwrap_or_default(),
+            )
+            .await?;
             no_extra(&options)?;
             let result = query_hello(&endpoint, destination, &expected).await;
             endpoint.close().await;

@@ -31,7 +31,7 @@ N0 relay testing is opt-in via `CUBE_TEST_IROH_RELAY=1` and contacts public serv
 
 ```sh
 pnpm build
-CUBED_STATE=/absolute/fresh-state pnpm cubed
+pnpm cubed --state /absolute/fresh-state --host 127.0.0.1 --port 7777
 ```
 
 The host binds `CUBED_HOST` (default `127.0.0.1`) on `CUBED_PORT` (default 7777).
@@ -40,6 +40,12 @@ The host binds `CUBED_HOST` (default `127.0.0.1`) on `CUBED_PORT` (default 7777)
 model requests and credentials stay in the host. Never mount that directory in
 a runner account. Run runners with a dedicated unprivileged account or machine.
 The trust profile is not a security sandbox.
+
+CLI flags override their matching environment variables. Use repeatable
+`--allowed-host` flags instead of `CUBED_ALLOWED_HOSTS` when both are present;
+`--log-level` accepts `debug`, `info`, `warn`, or `error`. `--help` and
+`--version` do not open state. Startup and shutdown status goes to stdout;
+errors go to stderr. SIGINT and SIGTERM share one idempotent close operation.
 
 Open **models** in the GUI for provider login, API keys, cancellation and logout.
 Pi owns the provider flows, credential persistence and token refresh. For browser
@@ -109,3 +115,11 @@ run two writable owners for a session. Backups of the host must be taken with
 cubed stopped; keep Pi databases and product metadata together. Runner backup,
 restore quarantine, drain and recovery acknowledgement follow the runbook.
 Never erase a runner's retained operation evidence just to retry a command.
+
+For the runner's foreground development profile, use `cube-runner init` once
+and `cube-runner run --home ...` thereafter as described in
+[`packages/node-transport/RUNNER.md`](packages/node-transport/RUNNER.md). Human
+runner lifecycle output is on stderr and stdout stays quiet; low-level commands
+retain JSON stdout. First Ctrl-C drains, second Ctrl-C cancels active work and
+persists `CANCELLED`. A restart marks any crash-interrupted accepted/running
+record completion-unknown and never reexecutes it.

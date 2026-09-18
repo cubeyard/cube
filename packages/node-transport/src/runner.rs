@@ -972,7 +972,7 @@ impl Runner {
             }
             journal.active = false;
             journal.active_thread = None;
-            runner.idle.notify_one();
+            runner.idle.notify_waiters();
         });
         Ok(())
     }
