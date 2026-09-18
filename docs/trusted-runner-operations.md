@@ -1,15 +1,16 @@
-# Trusted runner production operations
+# Trusted runner operations
 
-This is the production boundary for Cube **trusted runners**. One installation
+This is the operations boundary for Cube **trusted runners**. One installation
 has one immutable thread/environment binding and uses Iroh's public N0
 discovery/relay transport. A trusted runner executes under its account without
 sandboxing and is not a general scheduler.
 
-| Platform | Lifecycle | Support profile |
+| Platform | Lifecycle | Profile |
 |---|---|---|
-| Linux x86-64 | systemd system service, dedicated `cube-runner` account | production |
-| macOS arm64/x86-64 | system LaunchDaemon, pre-created dedicated `_cube-runner` account | production |
-| macOS arm64/x86-64 | per-user LaunchAgent | development/disposable; production only when the login account itself is dedicated and credential-free |
+| Linux x86-64, macOS arm64/x86-64 | foreground `cube-runner run` | laptop/direct default |
+| Linux x86-64 | explicit systemd service, dedicated `cube-runner` account | optional always-on server |
+| macOS arm64/x86-64 | explicit LaunchDaemon, pre-created dedicated `_cube-runner` account | optional always-on server |
+| macOS arm64/x86-64 | explicit per-user LaunchAgent | disposable; safe only when that login is credential-free |
 
 Packages are native to their manifest's OS and architecture; they are not
 cross-platform binaries. Linux and macOS each require release acceptance.
@@ -43,7 +44,40 @@ N0 operators can observe endpoint IPs and traffic metadata. Cube does not enforc
 runner egress; enforce it at the OS/network boundary. Relay mode requires no
 inbound public listener.
 
-## Build, fresh install, and enrollment
+## Foreground install and operation
+
+The normal install only copies the binary. It does not inspect, create, enable,
+or start systemd/launchd state:
+
+```sh
+bash scripts/setup-dev.sh
+bash scripts/runner/package.sh /absolute/private-output/cube-runner.tar.gz
+cd /absolute/private-output
+sha256sum -c cube-runner.tar.gz.sha256 # shasum -a 256 -c ... on macOS
+tar -xzf cube-runner.tar.gz
+cd cube-runner
+bash scripts/runner/install.sh "$PWD/bin/cube-runner"
+"$HOME/.local/bin/cube-runner" init --home "$HOME/.cube/runner" \
+  --workspace /absolute/prepared-workspace --allow-peer CONTROL_PEER \
+  --node-id NODE_ID --thread-id THREAD_ID --env ENVIRONMENT_ID --network relay
+"$HOME/.local/bin/cube-runner" run --home "$HOME/.cube/runner"
+```
+
+Set `CUBE_RUNNER_PREFIX` to another absolute prefix if needed. The foreground
+process reports `network ready / waiting for cubed`, not `connected`. First
+Ctrl-C drains and waits; a second Ctrl-C performs controlled cancellation and
+persists `CANCELLED`. Closing the terminal, logging out, sleeping, or powering
+off provides no always-on execution or automatic restart. Restart with the same
+home. Unfinished work after an uncontrolled stop becomes completion-unknown and
+is never replayed.
+
+Human `run` status is on stderr and stdout stays quiet. Existing low-level
+commands retain JSON stdout. From the cubed machine,
+`cubed runners status --state ...` performs an authenticated live `node.status`
+probe and reports `reachable` or `unreachable`; there is intentionally no
+heartbeat or permanent connection claim.
+
+## Optional always-on service profile
 
 Linux production:
 
@@ -54,9 +88,14 @@ cd /absolute/private-output
 sha256sum -c cube-runner.tar.gz.sha256 # use: shasum -a 256 -c ... on macOS
 tar -xzf cube-runner.tar.gz
 cd cube-runner
-sudo bash scripts/runner/install.sh "$PWD/bin/cube-runner"
+sudo bash scripts/runner/install.sh --service "$PWD/bin/cube-runner"
 sudo bash scripts/runner/initialize.sh CONTROL_PEER NODE_ID THREAD_ID ENVIRONMENT_ID
 ```
+
+`--service` is the explicit opt-in that installs a unit/plist. `initialize.sh`
+then creates the service-profile identity and state and enables/starts that
+service. The supervised command is still the same foreground `runner-serve`
+runtime; it never daemonizes itself.
 
 macOS production uses the same package and scripts, but first provision a
 hidden, passwordless, non-admin `_cube-runner` account and dedicated group with
@@ -67,7 +106,7 @@ outside the bundle and must follow local fleet policy. Then run as root with
 `plutil`, and launchd drops execution to `_cube-runner`. Never pass credentials
 from the interactive operator account to that account.
 
-For a disposable rootless macOS test, omit `sudo` and set
+For an explicit disposable rootless macOS service test, omit `sudo` and set
 `CUBE_RUNNER_MODE=user`; this installs a LaunchAgent under the current login
 session. It deliberately has that user's full same-UID authority and is not the
 preferred production profile.
@@ -110,7 +149,7 @@ runtime state. The plist is root-owned at
 `~/Library/Application Support/CubeRunner` and
 `~/Library/LaunchAgents/com.cubeyard.cube-runner.plist`.
 
-## Status, drain, and stop
+## Service status, drain, and stop
 
 ```sh
 sudo systemctl start cube-runner

@@ -4,18 +4,36 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
+import { parseArgs } from "node:util";
 import type { Models } from "@earendil-works/pi-ai";
 import { GitService, normalizeRepoUrl } from "@cube/git";
 import { Registry, type Project } from "./registry.ts";
 import { Conversations } from "./conversation.ts";
+import { IrohExecutionNodeClient } from "./iroh-node.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
 import { JevSettings } from "./jev-settings.ts";
 import { ModelAuth } from "./model-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 
+const CUBED_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
+const HELP = `usage: cubed [options]
+       cubed runners status [--state <directory>]
+
+options:
+  --state <directory>       product state (default: CUBED_STATE or ~/.cube-host)
+  --host <address>          listen address (default: CUBED_HOST or 127.0.0.1)
+  --port <port>             listen port (default: CUBED_PORT or 7777)
+  --allowed-host <hostname> allow an HTTP Host value; repeat as needed
+  --log-level <level>       debug, info, warn, or error (default: CUBED_LOG_LEVEL or info)
+  --version                 print the version
+  --help                    show this help
+
+cubed stays in the foreground. It has no application-level user authentication;
+keep it on loopback or behind an authenticated, access-controlled private network.`;
+
 /** Private product host. No remote provisioning or implicit sandbox backend. */
-export async function createCubed(options: { state: string; models?: Models; web?: string }) {
+export async function createCubed(options: { state: string; models?: Models; web?: string; allowedHosts?: string[] }) {
   const registry = new Registry(path.join(options.state, "registry.sqlite"));
   const models = options.models ?? await createModelRuntime();
   const modelAuth = new ModelAuth(models);
@@ -24,7 +42,8 @@ export async function createCubed(options: { state: string; models?: Models; web
   const github = new GithubAuth();
   const git = new GitService(path.join(options.state, "repositories"));
   const onboarding = path.join(options.state, "onboarding.json");
-  const allowedHosts = new Set(["localhost", "127.0.0.1", "[::1]", ...(process.env.CUBED_ALLOWED_HOSTS?.split(",") ?? [])]);
+  const configuredHosts = options.allowedHosts ?? process.env.CUBED_ALLOWED_HOSTS?.split(",") ?? [];
+  const allowedHosts = new Set(["localhost", "127.0.0.1", "[::1]", ...configuredHosts.map(host => host.trim()).filter(Boolean)]);
   const catalog = async () => (await models.getAvailable()).map(({ provider, id }) => ({ provider, id }));
   const projectView = (project: Project) => ({ ...project,
     availableRunnerCount: registry.availableRunners(project.id).length,
@@ -182,19 +201,113 @@ export async function createCubed(options: { state: string; models?: Models; web
   await conversations.boot();
   const recovery = setInterval(() => { void conversations.boot(); }, 30000);
   recovery.unref();
-  return { server, registry, conversations, async close() {
-    clearInterval(recovery);
-    server.closeAllConnections();
-    await new Promise<void>(resolve => server.close(() => resolve()));
-    await modelAuth.close(); await conversations.close(); registry.close();
+  let closePromise: Promise<void> | undefined;
+  return { server, registry, conversations, close() {
+    closePromise ??= (async () => {
+      clearInterval(recovery);
+      server.closeAllConnections();
+      if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
+      await modelAuth.close(); await conversations.close(); registry.close();
+    })();
+    return closePromise;
   } };
 }
 
-if (import.meta.main) {
-  const app = await createCubed({ state: process.env.CUBED_STATE ?? path.join(os.homedir(), ".cube-host") });
-  app.server.listen(Number(process.env.CUBED_PORT ?? 7777), process.env.CUBED_HOST ?? "127.0.0.1", () => {
-    const address = app.server.address() as AddressInfo;
-    console.log(`cubed listening on ${address.address}:${address.port}; trusted runners only`);
+interface CubedCli {
+  state: string;
+  host: string;
+  port: number;
+  allowedHosts?: string[];
+  logLevel: "debug" | "info" | "warn" | "error";
+  command: "serve" | "runners-status" | "help" | "version";
+}
+
+function cli(argv: string[]): CubedCli {
+  const args = argv[0] === "--" ? argv.slice(1) : argv;
+  const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
+    state: { type: "string" }, host: { type: "string" }, port: { type: "string" },
+    "allowed-host": { type: "string", multiple: true }, "log-level": { type: "string" },
+    version: { type: "boolean" }, help: { type: "boolean" },
+  } });
+  if (values.help) return { state: "", host: "", port: 0, logLevel: "info", command: "help" };
+  if (values.version) return { state: "", host: "", port: 0, logLevel: "info", command: "version" };
+  const command = positionals.length === 0 ? "serve"
+    : positionals.length === 2 && positionals[0] === "runners" && positionals[1] === "status" ? "runners-status"
+    : (() => { throw new Error(HELP); })();
+  const state = path.resolve(values.state ?? process.env.CUBED_STATE ?? path.join(os.homedir(), ".cube-host"));
+  const host = values.host ?? process.env.CUBED_HOST ?? "127.0.0.1";
+  if (!host.trim()) throw new Error("--host must not be empty");
+  const rawPort = values.port ?? process.env.CUBED_PORT ?? "7777";
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 0 || port > 65535 || String(port) !== rawPort) throw new Error("--port must be an integer from 0 through 65535");
+  const logLevel = values["log-level"] ?? process.env.CUBED_LOG_LEVEL ?? "info";
+  if (!["debug", "info", "warn", "error"].includes(logLevel)) throw new Error("--log-level must be debug, info, warn, or error");
+  const allowedHosts = values["allowed-host"];
+  if (allowedHosts?.some(value => !value.trim() || value.includes(","))) throw new Error("repeat --allowed-host for each non-empty hostname");
+  return { state, host, port, allowedHosts, logLevel: logLevel as CubedCli["logLevel"], command };
+}
+
+async function runnersStatus(state: string): Promise<number> {
+  const filename = path.join(state, "registry.sqlite");
+  if (!fs.existsSync(filename)) throw new Error(`cubed state not found: ${state}`);
+  const registry = new Registry(filename);
+  try {
+    const runners = registry.listRunners();
+    if (!runners.length) {
+      console.log("no runners enrolled");
+      return 0;
+    }
+    const results = await Promise.all(runners.map(async runner => {
+      try {
+        const health = await new IrohExecutionNodeClient({ configPath: runner.configPath, configHash: runner.configHash }).health();
+        return { runner, reachable: true as const, health };
+      } catch (error) {
+        return { runner, reachable: false as const, error: error instanceof Error ? error.message : String(error) };
+      }
+    }));
+    for (const result of results) {
+      if (result.reachable) console.log(`${result.runner.nodeId}: reachable; lifecycle=${result.health.lifecycle}; active=${result.health.active}`);
+      else console.log(`${result.runner.nodeId}: unreachable; ${result.error}`);
+    }
+    return results.some(result => !result.reachable) ? 1 : 0;
+  } finally { registry.close(); }
+}
+
+async function main(argv: string[]): Promise<void> {
+  const options = cli(argv);
+  if (options.command === "help") { console.log(HELP); return; }
+  if (options.command === "version") { console.log(`cubed ${CUBED_VERSION}`); return; }
+  if (options.command === "runners-status") { process.exitCode = await runnersStatus(options.state); return; }
+  process.env.CUBED_LOG_LEVEL = options.logLevel;
+  const app = await createCubed({ state: options.state, allowedHosts: options.allowedHosts });
+  await new Promise<void>((resolve, reject) => {
+    app.server.once("error", reject);
+    app.server.listen(options.port, options.host, () => { app.server.off("error", reject); resolve(); });
   });
-  for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => { void app.close().then(() => process.exit(0)); });
+  const address = app.server.address() as AddressInfo;
+  console.log(`cubed ${CUBED_VERSION}`);
+  console.log(`state: ${options.state}`);
+  console.log(`listening: http://${address.address.includes(":") ? `[${address.address}]` : address.address}:${address.port}`);
+  console.log(`threads resumed: ${app.registry.listThreads().filter(thread => !thread.archived).length}`);
+  console.log(`runners enrolled: ${app.registry.listRunners().length}`);
+  console.log("press Ctrl-C to stop");
+  let shutdown: Promise<void> | undefined;
+  const stop = (signal: NodeJS.Signals) => {
+    if (shutdown) {
+      console.log(`stopping: ${signal} received while shutdown is already in progress`);
+      return;
+    }
+    console.log(`stopping: ${signal}; waiting for accepted work to reconcile`);
+    shutdown = app.close().then(() => { console.log("stopped"); });
+    void shutdown.catch(error => { console.error(`cubed: shutdown failed: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; });
+  };
+  for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, stop);
+  await new Promise<void>(resolve => app.server.once("close", resolve));
+  await shutdown;
+  for (const signal of ["SIGTERM", "SIGINT"] as const) process.off(signal, stop);
+}
+
+if (import.meta.main) {
+  try { await main(process.argv.slice(2)); }
+  catch (error) { console.error(`cubed: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }
 }

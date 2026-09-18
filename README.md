@@ -10,7 +10,7 @@ own account, without sandboxing.** Native platform-appropriate sandboxing is
 undecided. Use a separate unprivileged account or machine without valuable
 credentials. Do not run untrusted repositories or commands under your own account.
 
-## Run from source
+## Laptop-first quickstart
 
 Requires Node 26+, the pnpm version in `package.json`, Git, and a configured
 model provider. Rust is needed when building the runner.
@@ -18,11 +18,30 @@ model provider. Rust is needed when building the runner.
 ```sh
 pnpm install --frozen-lockfile
 pnpm build
-CUBED_STATE="$HOME/.cube-host" pnpm cubed
+cargo build --locked -p cube-runner
+
+# after one-time runner initialization and enrollment (linked below):
+target/debug/cube-runner run --home "$HOME/.cube/runner"
+# in a second terminal:
+pnpm cubed --state "$HOME/.cube-host"
 ```
 
-cubed defaults to loopback port 7777. Use your local browser, an authenticated
-access proxy, or [configured private Tailscale access](DEVELOPING.md#product-development)
+Both programs are ordinary foreground processes. They create no systemd or
+launchd service, do not auto-restart, and stop when their terminal or laptop
+stops. The runner truthfully reports `network ready / waiting for cubed`; Cube
+does not maintain a permanent runner connection. Check enrolled runners with
+`pnpm cubed runners status --state "$HOME/.cube-host"`.
+
+On the first Ctrl-C, the runner drains and waits for its one active command. A
+second Ctrl-C records a controlled `CANCELLED` result. Cubed closes admission and
+its durable owners cleanly on SIGINT or SIGTERM. Restart both against the same
+state to reconcile accepted work; neither component blindly replays a command.
+
+Cubed defaults to loopback port 7777. `cubed --help` documents `--state`,
+`--host`, `--port`, repeatable `--allowed-host`, and `--log-level`; the existing
+`CUBED_*` variables remain supported and flags take precedence. Use your local
+browser, an authenticated access proxy, or
+[configured private Tailscale access](DEVELOPING.md#product-development)
 with `CUBED_HOST` and `CUBED_ALLOWED_HOSTS`; cubed itself has no user authentication.
 GitHub login is available in the UI. Open **models** to connect model providers using Pi's supported
 browser/device login or API-key prompts, check connection status, or disconnect.
@@ -43,6 +62,12 @@ The current tool is bounded `bash`. Workspace transfer, authenticated Git writes
 service links, thread-to-thread tasks and native sandboxing are not yet exposed
 by this implementation. Project repository checks remain host-side; they do not
 claim to prepare the runner workspace.
+
+**A laptop runner under your login UID can read everything that UID can read,
+including SSH, cloud, browser, Git and provider credentials. It is not a
+sandbox.** Use a separate credential-free account or machine for stronger
+separation. The optional systemd/launchd server profile is documented in the
+operator runbook; it is never installed by the direct flow.
 
 ## Fresh state, not migration
 

@@ -11,6 +11,7 @@ import path from "node:path";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { IrohExecutionNodeClient, IrohNodeError, type RunnerExecSpec } from "../packages/server/src/iroh-node.ts";
+import { Registry } from "../packages/server/src/registry.ts";
 
 const binary = path.resolve(process.argv[2] ?? "target/debug/cube-runner");
 assert.ok(fs.existsSync(binary), "build cube-runner first; no simulated success or automatic cargo build");
@@ -170,6 +171,18 @@ try {
     assert.equal((await client.operation(17, result.operationId)).state, "Succeeded");
     assert.equal((await client.status(17)).status, "Running");
     assert.equal(fs.readFileSync(path.join(workspace, "count"), "utf8"), "once");
+    if (network === "loopback") {
+      const hostState = path.join(directory, "status-host");
+      const registry = new Registry(path.join(hostState, "registry.sqlite"));
+      registry.saveProject({ id: "status", name: "status", status: "ready", error: null, revision: 1,
+        checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
+      registry.enrollRunner({ ...client.binding, projectId: "status", configPath, configHash: client.configHash });
+      registry.close();
+      const statusOutput = execFileSync(process.execPath,
+        [path.resolve("packages/server/src/index.ts"), "runners", "status", "--state", hostState],
+        { encoding: "utf8", timeout: 15000, env: { PATH: process.env.PATH } });
+      assert.match(statusOutput, /node-test: reachable; lifecycle=ready; active=false/);
+    }
     if (network === "loopback") await smokeDurableAgent(directory, configPath, workspace);
     if (network === "loopback") await smokeProduct(directory, configPath, workspace);
     await stop(daemon.child);

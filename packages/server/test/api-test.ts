@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { on, once } from "node:events";
 import { createModels, fauxProvider } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
@@ -60,6 +60,15 @@ try {
   assert.equal(threads.length, 1); assert.equal(threads[0].state, "error");
   assert.match(threads[0].error, /IO_ERROR/);
   assert.equal((await fetch(`${base}/api/threads/broken-thread/history/extra`)).status, 404);
+  const cli = path.resolve("packages/server/src/index.ts");
+  const help = spawnSync(process.execPath, [cli, "--help"], { encoding: "utf8" });
+  assert.equal(help.status, 0); assert.match(help.stdout, /--allowed-host/); assert.match(help.stdout, /runners status/);
+  const separatedHelp = spawnSync(process.execPath, [cli, "--", "--help"], { encoding: "utf8" });
+  assert.equal(separatedHelp.status, 0); assert.equal(separatedHelp.stdout, help.stdout);
+  const version = spawnSync(process.execPath, [cli, "--version"], { encoding: "utf8" });
+  assert.equal(version.status, 0); assert.match(version.stdout, /^cubed \d+\.\d+\.\d+/);
+  const status = spawnSync(process.execPath, [cli, "runners", "status", "--state", state], { encoding: "utf8" });
+  assert.equal(status.status, 1); assert.match(status.stdout, /broken-node: unreachable/);
   for (const host of [undefined, "0.0.0.0"]) {
     const directory = path.join(state, host ?? "default");
     fs.mkdirSync(directory);
@@ -75,10 +84,11 @@ try {
       let listener: RegExpMatchArray | null = null;
       for await (const [chunk] of on(child.stdout, "data", { signal: AbortSignal.timeout(15000) })) {
         output += String(chunk);
-        listener = output.match(/cubed listening on ([\d.]+):(\d+);/);
+        listener = output.match(/listening: http:\/\/([\d.]+):(\d+)/);
         if (listener) break;
       }
       assert(listener, output);
+      child.stdout.on("data", chunk => { output += String(chunk); });
       assert.equal(listener[1], host ?? "127.0.0.1", "CLI must bind the configured address and default to loopback");
       const url = `http://127.0.0.1:${listener[2]}/api/providers`;
       assert.equal((await fetch(url)).status, 200);
@@ -94,8 +104,38 @@ try {
         assert.equal(await status(authority, "http://untrusted.example"), 403);
       }
       assert.equal(await status("untrusted.example"), 403);
-    } finally { child.kill("SIGTERM"); await closed; }
+    } finally {
+      child.kill(host ? "SIGINT" : "SIGTERM");
+      if (host) child.kill("SIGINT");
+      const [code] = await closed;
+      assert.equal(code, 0, output);
+      assert.match(output, /stopping: SIG(?:INT|TERM)/);
+      assert.match(output, /stopped/);
+    }
   }
+  const flagState = path.join(state, "flags"); fs.mkdirSync(flagState);
+  const flagChild = spawn(process.execPath, [cli, "--state", flagState, "--host", "127.0.0.1", "--port", "0",
+    "--allowed-host", "flag.example", "--log-level", "warn"], {
+    env: { PATH: process.env.PATH, HOME: flagState, PI_CODING_AGENT_DIR: flagState, CUBED_STATE: "/must-not-win", CUBED_HOST: "invalid", CUBED_PORT: "not-a-port", CUBED_ALLOWED_HOSTS: "env-must-not-win.example" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let flagOutput = ""; flagChild.stderr.on("data", chunk => { flagOutput += String(chunk); });
+  const flagClosed = once(flagChild, "close");
+  for await (const [chunk] of on(flagChild.stdout, "data", { signal: AbortSignal.timeout(15000) })) {
+    flagOutput += String(chunk);
+    if (flagOutput.includes("press Ctrl-C to stop")) break;
+  }
+  assert.match(flagOutput, new RegExp(`state: ${flagState.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  const flagPort = flagOutput.match(/listening: http:\/\/127\.0\.0\.1:(\d+)/)?.[1]; assert(flagPort);
+  const flagStatus = (host: string) => new Promise<number | undefined>((resolve, reject) => {
+    http.get(`http://127.0.0.1:${flagPort}/api/state`, { headers: { host } }, response => {
+      response.resume(); resolve(response.statusCode);
+    }).on("error", reject);
+  });
+  assert.equal(await flagStatus(`flag.example:${flagPort}`), 200);
+  assert.equal(await flagStatus(`env-must-not-win.example:${flagPort}`), 403);
+  flagChild.kill("SIGTERM"); assert.equal((await flagClosed)[0], 0);
   console.log("ok: actual CLI loopback default and all-IPv4 opt-in; explicit private hosts allowed, unknown hosts/cross-origin rejected");
+  console.log("ok: CLI help/version/flag precedence/live unreachable status and idempotent SIGINT/SIGTERM shutdown");
   console.log("ok: host/origin and JSON guards, method/path routing, repository validation, durable allocation despite failed activation");
 } finally { await app.close(); fs.rmSync(state, { recursive: true, force: true }); }
