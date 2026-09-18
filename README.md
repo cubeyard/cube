@@ -56,20 +56,19 @@ Optional JEV memory is configured separately at the top of **models**. It is
 strictly off until a JEV key is saved there; Cube then uses JEV to retain useful
 thread notes and select compact, recallable views of large tool output.
 
-Create a project, prepare its repository template on a trusted runner, then enroll
-that runner using [the operator runbook](docs/trusted-runner-operations.md). A
-runner serves one active thread at a time in a separate Git worktree (or a
-non-Git copy fallback). Git workspaces fail closed unless the configured remote
-branch can be fetched at allocation time; they never silently start from a stale
-template HEAD. Archiving releases that capacity. There is no automatic
-fleet provisioning. The UI supports prompts,
+Create a project and enroll trusted runners using
+[the operator runbook](docs/trusted-runner-operations.md). Runners form one
+global pool for every project in the installation. Each allocation receives the
+project's checked repository URLs, branches and exact commit IDs and creates a
+fresh workspace; a runner serves one active thread at a time and archiving
+releases that capacity. There is no automatic fleet provisioning. The UI supports prompts,
 streamed results, reconnect, model selection, stop, rename and archive.
 
 This is workspace collision isolation only, not process or security isolation.
 The current tool is bounded `bash`. Workspace transfer, authenticated Git writes,
 service links, thread-to-thread tasks and native sandboxing are not yet exposed
-by this implementation. Project repository checks remain host-side; they do not
-claim to prepare the runner workspace.
+by this implementation. Project repository checks remain host-side and pin the
+metadata used for runner-side checkout; host credentials never cross that boundary.
 
 **A laptop runner under your login UID can read everything that UID can read,
 including SSH, cloud, browser, Git and provider credentials. It is not a
@@ -79,7 +78,7 @@ operator runbook; it is never installed by the direct flow.
 
 ## Fresh state, not migration
 
-Registry v100 is upgraded in place for reusable runner allocations; older
+Registry v100 and v101 receive the rollback-compatible global-pool extension in place; older
 registries and execution stacks are **not migrated**. For a fresh start, stop
 cubed and choose a different empty `CUBED_STATE` directory;
 create projects and enroll fresh runner identities. This does not erase old

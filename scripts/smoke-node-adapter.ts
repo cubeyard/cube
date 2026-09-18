@@ -185,7 +185,7 @@ try {
       const registry = new Registry(path.join(hostState, "registry.sqlite"));
       registry.saveProject({ id: "status", name: "status", status: "ready", error: null, revision: 1,
         checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
-      registry.enrollRunner({ ...client.binding, projectId: "status", configPath, configHash: client.configHash });
+      registry.enrollRunner({ ...client.binding, configPath, configHash: client.configHash });
       registry.close();
       const statusOutput = execFileSync(process.execPath,
         [path.resolve("packages/server/src/index.ts"), "runners", "status", "--state", hostState],

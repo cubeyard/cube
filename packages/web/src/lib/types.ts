@@ -20,8 +20,10 @@ export interface ThreadSummary {
   workspaceBase?: { remote: string; ref: string; oid: string } | null;
   project: { id: string; name: string };
 }
-export type Project = ProjectRecord & { threadCount: number; runnerCount: number; availableRunnerCount: number;
-  runnerCapacity: { states: Record<"available" | "allocating" | "busy" | "releasing" | "failed", number>; errors: string[] } };
+export type Project = ProjectRecord & { threadCount: number; retainedThreadCount: number; runnerCount: number; availableRunnerCount: number;
+  runnerCapacity: { states: Record<"available" | "allocating" | "busy" | "releasing" | "failed" | "retired", number>; errors: string[] };
+  runners: Array<{ id: string; nodeId: string; state: "available" | "allocating" | "busy" | "releasing" | "failed" | "retired";
+    threadId: string | null; projectId: string | null; projectName: string | null; error: string | null }> };
 export type ProjectStatus = Project["status"];
 export interface ProjectInput {
   name: string;

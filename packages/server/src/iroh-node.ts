@@ -11,9 +11,11 @@ import { Schema } from "effect";
 // manifest incorrectly points at iroh-js/. Pin and use the published subpath.
 import { Endpoint, EndpointAddr, EndpointId, SecretKey, type Connection, type BiStream } from "@number0/iroh/index.js";
 import { ExecutionNodeError, type ExecutionNodeClient, type EnvironmentObservation, type NodeContact, type NodeErrorCode } from "./execution-node-contract.ts";
+import type { WorkspaceAllocation } from "./registry.ts";
 
 const MAX_FRAME = 65536;
 const RPC_TIMEOUT_MS = 5000;
+const WORKSPACE_RPC_TIMEOUT_MS = 30000;
 const ALPN = Array.from(Buffer.from("cubeyard/node/1"));
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const NODE_ID = /^node-[a-zA-Z0-9-]{1,123}$/;
@@ -341,7 +343,7 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     const id = typeof query?.operationId === "string" ? query.operationId : undefined;
     if (signal?.aborted) throw new IrohNodeError("NODE_UNAVAILABLE", id);
     this.assertConfig();
-    const mutating = query?.method === "exec.start";
+    const mutating = ["exec.start", "workspace.allocate", "workspace.allocate.v2", "workspace.release"].includes(String(query?.method));
     const requestBytes = query ? frame(query) : undefined;
     const builder = Endpoint.builder();
     if (this.config.network === "relay") builder.applyN0();
@@ -381,7 +383,9 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
       };
       combined.addEventListener("abort", onAbort, { once: true });
     });
-    const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+    const timeoutMs = query && ["workspace.allocate", "workspace.allocate.v2", "workspace.release"].includes(String(query.method))
+      ? WORKSPACE_RPC_TIMEOUT_MS : RPC_TIMEOUT_MS;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     const work = async () => {
       endpoint = await builder.bind();
       if (finished || combined.aborted) { close(); throw new Error("request ended before bind"); }
@@ -434,7 +438,7 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
           shape(result, ["type", "binding", "state"]);
           if (result.type !== "Environment" || result.state !== "ready" || !equalBinding(binding(result.binding), this.installationBinding)) invalid();
           break;
-        case "workspace.allocate": case "workspace.release": {
+        case "workspace.allocate": case "workspace.allocate.v2": case "workspace.release": {
           shape(result, ["type", "workspace"]);
           if (result.type !== "Workspace") invalid();
           const workspace = shape(result.workspace, ["threadId", "state", "kind", "retained"], ["baseRemote", "baseRef", "baseOid"]);
@@ -504,9 +508,9 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     this.environment(environmentId); this.assertConfig();
     await this.request(this.identity().key);
   }
-  async allocateWorkspace(repository?: RunnerRepositorySource): Promise<RunnerWorkspace> {
+  async allocateWorkspace(allocation: WorkspaceAllocation): Promise<RunnerWorkspace> {
     if (this.binding.threadId === this.installationBinding.threadId) return { threadId: this.binding.threadId, state: "available", kind: "copy", retained: true };
-    const result = await this.request(this.identity().key, { method: "workspace.allocate", threadId: this.binding.threadId, ...(repository ? { repository } : {}) });
+    const result = await this.request(this.identity().key, { method: "workspace.allocate.v2", threadId: this.binding.threadId, allocation });
     return result.workspace as RunnerWorkspace;
   }
   async releaseWorkspace(): Promise<RunnerWorkspace> {

@@ -4,7 +4,7 @@ use cube_node_transport::{
     intent::Intent,
     read_frame,
     runner::RepositorySource,
-    runner::{Binding, ExecSpec, Operation, Runner},
+    runner::{Binding, ExecSpec, Operation, Runner, WorkspaceAllocation, WorkspaceRepository},
 };
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 use rusqlite::Connection;
@@ -130,6 +130,52 @@ fn spec(command: &str) -> ExecSpec {
         guest_cwd: ".".into(),
         timeout_ms: 3000,
         output_limit: 8192,
+    }
+}
+
+fn project_repo(root: &Path, name: &str, contents: &str) -> (PathBuf, String) {
+    let repository = root.join(name);
+    fs::create_dir(&repository).unwrap();
+    let git = |args: &[&str]| {
+        let output = StdCommand::new("git")
+            .args([
+                "-c",
+                "user.name=Cube Test",
+                "-c",
+                "user.email=cube@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-C",
+            ])
+            .arg(&repository)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    fs::write(repository.join("project-marker"), contents).unwrap();
+    git(&["add", "project-marker"]);
+    git(&["commit", "-qm", "base"]);
+    let oid = git(&["rev-parse", "HEAD"]);
+    (repository, oid)
+}
+
+fn allocation(project_id: &str, repository: &Path, oid: &str) -> WorkspaceAllocation {
+    WorkspaceAllocation {
+        project_id: project_id.into(),
+        project_revision: 1,
+        repositories: vec![WorkspaceRepository {
+            url: repository.to_string_lossy().into_owned(),
+            base: "main".into(),
+            base_oid: oid.into(),
+            checkout_name: "workspace".into(),
+        }],
     }
 }
 fn start(id: &str, spec: ExecSpec) -> Request {
@@ -328,6 +374,129 @@ async fn thread_worktrees_are_distinct_reusable_and_dirty_safe_across_restart() 
     );
     assert!(
         matches!(runner.allocate("../escape", None), Err(error) if error.to_string() == "INVALID_REQUEST")
+    );
+}
+
+#[tokio::test]
+async fn one_runner_switches_projects_without_reusing_workspace_state() {
+    let _case = CASE.lock().await;
+    let fixture = Fixture::new();
+    fs::write(fixture.workspace.join("legacy-template-marker"), b"legacy").unwrap();
+    let (alpha, alpha_oid) = project_repo(fixture.root.path(), "alpha", "alpha");
+    let (beta, beta_oid) = project_repo(fixture.root.path(), "beta", "beta");
+    fs::write(alpha.join("project-marker"), b"newer alpha").unwrap();
+    let update = StdCommand::new("git")
+        .args([
+            "-c",
+            "user.name=Cube Test",
+            "-c",
+            "user.email=cube@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+        ])
+        .arg(&alpha)
+        .args(["commit", "-qam", "advance branch after host snapshot"])
+        .status()
+        .unwrap();
+    assert!(update.success());
+    let runner = fixture.open();
+
+    runner
+        .allocate_with(
+            "thread-alpha",
+            &allocation("project-alpha", &alpha, &alpha_oid),
+        )
+        .unwrap();
+    let alpha_workspace = fixture.state.join("workspaces/thread-alpha/workspace");
+    assert_eq!(
+        fs::read(alpha_workspace.join("project-marker")).unwrap(),
+        b"alpha"
+    );
+    let checked_out = StdCommand::new("git")
+        .arg("-C")
+        .arg(&alpha_workspace)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(checked_out.stdout).unwrap().trim(),
+        alpha_oid,
+        "runner must use the host-supplied immutable OID, not the branch's newer tip"
+    );
+    assert!(!runner.release("thread-alpha").unwrap().retained);
+
+    let (rewritten, unavailable_oid) = project_repo(fixture.root.path(), "rewritten", "old");
+    let rewrite = |args: &[&str]| {
+        let status = StdCommand::new("git")
+            .args([
+                "-c",
+                "user.name=Cube Test",
+                "-c",
+                "user.email=cube@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-C",
+            ])
+            .arg(&rewritten)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    rewrite(&["checkout", "--orphan", "replacement"]);
+    rewrite(&["rm", "-f", "project-marker"]);
+    fs::write(rewritten.join("project-marker"), b"replacement").unwrap();
+    rewrite(&["add", "project-marker"]);
+    rewrite(&["commit", "-qm", "replacement"]);
+    rewrite(&["branch", "-M", "main"]);
+    let unavailable = runner
+        .allocate_with(
+            "thread-unavailable",
+            &allocation("project-rewritten", &rewritten, &unavailable_oid),
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        unavailable, "IO_ERROR",
+        "a force-pushed-away OID must fail closed"
+    );
+    assert!(
+        fixture.state.join("workspaces/thread-unavailable").exists(),
+        "partial allocation evidence must be retained for inspection"
+    );
+
+    runner
+        .allocate_with("thread-beta", &allocation("project-beta", &beta, &beta_oid))
+        .unwrap();
+    let beta_workspace = fixture.state.join("workspaces/thread-beta/workspace");
+    assert_eq!(
+        fs::read(beta_workspace.join("project-marker")).unwrap(),
+        b"beta"
+    );
+    assert!(!beta_workspace.join("alpha-only").exists());
+    fs::write(beta_workspace.join("dirty"), b"retained evidence").unwrap();
+    assert!(runner.release("thread-beta").unwrap().retained);
+    assert_eq!(
+        fs::read(beta_workspace.join("dirty")).unwrap(),
+        b"retained evidence"
+    );
+
+    runner
+        .allocate_with(
+            "thread-empty",
+            &WorkspaceAllocation {
+                project_id: "project-empty".into(),
+                project_revision: 1,
+                repositories: Vec::new(),
+            },
+        )
+        .unwrap();
+    let empty_workspace = fixture.state.join("workspaces/thread-empty/workspace");
+    assert!(empty_workspace.is_dir());
+    assert!(
+        !empty_workspace.join("legacy-template-marker").exists(),
+        "global empty projects must not reuse the installation template"
     );
 }
 

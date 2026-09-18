@@ -55,10 +55,12 @@ export async function createCubed(options: {
   const allowedHosts = new Set(["localhost", "127.0.0.1", "[::1]", ...configuredHosts.map(host => host.trim()).filter(Boolean)]);
   const catalog = async () => (await models.getAvailable()).map(({ provider, id }) => ({ provider, id }));
   const projectView = (project: Project) => ({ ...project,
-    availableRunnerCount: registry.availableRunners(project.id).length,
-    runnerCount: registry.runnerCount(project.id),
-    runnerCapacity: registry.runnerCapacity(project.id),
-    threadCount: registry.listThreads().filter(thread => thread.projectId === project.id && !thread.archived).length });
+    availableRunnerCount: registry.availableRunners().length,
+    runnerCount: registry.runnerCount(),
+    runnerCapacity: registry.runnerCapacity(),
+    runners: registry.runnerViews(),
+    threadCount: registry.listThreads().filter(thread => thread.projectId === project.id && !thread.archived).length,
+    retainedThreadCount: registry.listThreads().filter(thread => thread.projectId === project.id).length });
   async function check(project: Project) {
     for (const repository of project.repositories) {
       try {
@@ -172,14 +174,18 @@ export async function createCubed(options: {
           if (id && !previous) return json({ error: "project not found" }, 404);
           const projectId = id ?? randomUUID();
           if (!Array.isArray(body.repositories) || body.repositories.length > 20) throw new Error("repositories must be an array of at most 20 entries");
+          const checkoutNames = new Set<string>();
           const project: Project = { id: projectId, name: text("name"), status: "checking", error: null,
             revision: (previous?.revision ?? 0) + 1, checkedAt: null, createdAt: previous?.createdAt ?? Date.now(), updatedAt: Date.now(),
             repositories: body.repositories.map((item, position) => {
-              if (!item || typeof item !== "object" || typeof item.url !== "string" ||
+              if (!item || typeof item !== "object" || typeof item.url !== "string" || item.url.length > 2048 ||
                 (item.base != null && (typeof item.base !== "string" || !item.base.trim())) ||
                 (item.checkoutName != null && (typeof item.checkoutName !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(item.checkoutName)))) throw new Error("invalid repository configuration");
+              const checkoutName = position === 0 ? "workspace" : item.checkoutName ?? `repo-${position + 1}`;
+              if (checkoutNames.has(checkoutName)) throw new Error("repository checkout names must be unique");
+              checkoutNames.add(checkoutName);
               return { id: randomUUID(), projectId, position,
-                url: normalizeRepoUrl(item.url), base: item.base ?? null, checkoutName: item.checkoutName ?? `repo-${position + 1}`,
+                url: normalizeRepoUrl(item.url), base: item.base ?? null, checkoutName,
                 status: "checking", error: null, resolvedBase: null, baseOid: null, checkedAt: null };
             }) };
           registry.saveProject(project);

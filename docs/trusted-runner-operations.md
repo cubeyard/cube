@@ -1,8 +1,9 @@
 # Trusted runner operations
 
 This is the operations boundary for Cube **trusted runners**. One installation
-has one immutable protocol-v1 installation/environment binding, leases one
-active thread workspace at a time, and uses Iroh's public N0 discovery/relay
+has one immutable protocol-v1 installation/environment binding, belongs to the
+global Cube pool, leases one active thread workspace at a time across all projects,
+and uses Iroh's public N0 discovery/relay
 transport. A trusted runner executes under its account without sandboxing and
 is not a general scheduler.
 
@@ -20,12 +21,9 @@ cross-platform binaries. Linux and macOS each require release acceptance.
 
 The runner is trusted and **not sandboxed**. Agent commands run as the dedicated
 runner account and can read, change, execute, or delete anything that user can
-access. Give that account no control-plane, provider, cloud, unrelated repository
-or login credentials, sudo, or privileged groups. A private repository needs a
-repository-scoped read credential/deploy key in this account for fresh-base
-fetches; agent commands can read or use it because they share the UID.
-Service-manager restrictions are host hygiene, not an adversarial same-UID
-filesystem boundary.
+access. Give that account no control-plane, provider, GitHub, SSH, cloud or login
+credentials, sudo, or privileged groups. Service-manager restrictions are host
+hygiene, not an adversarial same-UID filesystem boundary.
 
 Linux validates cwd with `openat2` using `RESOLVE_BENEATH`,
 `RESOLVE_NO_SYMLINKS`, and `RESOLVE_NO_MAGICLINKS`. macOS instead walks every
@@ -127,25 +125,26 @@ config from [RUNNER.md](../packages/node-transport/RUNNER.md), then:
 ```sh
 node scripts/enroll-runner.ts \
   --state /absolute/host-state \
-  --project EXISTING_PROJECT_ID \
   --config /absolute/private-runner.json \
   --trusted-runner
 ```
 
 Enrollment authenticates the full binding and pins the config hash. It never
-executes work. Existing IDs cannot be adopted or rebound. Prepare the repository
-template before enrollment: host repository checks do not transfer files to a
-runner. Configure non-interactive fetch access in the runner's actual service
-environment before enrollment. For private GitHub HTTPS, install `gh` for this
-account and run `gh auth login` and `gh auth setup-git`, or configure another
-credential helper; SSH uses a batch-capable key. Prefer a read-only deploy
-credential scoped to this repository. A service must use the same `HOME` and
-helper files as this setup. Missing `gh`/helper/key, denied access, an unreachable
-remote, or a missing branch fails allocation visibly; Cube never falls back to
-the template's stale HEAD. The next new thread leases a derived workspace;
-archive returns capacity.
-No restart is needed after enrollment. Registry v100 upgrades in place; older
+executes work. Existing IDs cannot be adopted or rebound. The next new thread in
+any ready project leases the runner and sends normalized repository metadata plus
+the exact host-checked commit OIDs. Host credentials are never transferred; runner
+Git is noninteractive and only `file`, `https` and `ssh` transports are allowed.
+The runner fetches the declared branch only to transfer and verify the pinned object;
+it does not resolve a second branch tip. An unavailable pinned OID fails closed.
+Archive returns capacity without deleting dirty or uncertain evidence.
+No restart is needed after enrollment. Registry v100/v101 receives the rollback-compatible global-pool extension; older
 execution stacks are not migrated.
+
+Upgrade runner binaries before creating threads through the global pool. New Cubed
+uses the separately advertised `workspace.allocate.v2` capability for the immutable
+per-allocation repository plan. An older runner remains enrolled and its existing
+evidence is untouched, but new allocation fails safely as unsupported before Cubed
+sends mutation bytes.
 
 Fresh Linux layout:
 

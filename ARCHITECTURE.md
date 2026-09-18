@@ -62,26 +62,53 @@ bill both attempts. SIGKILL tests are not proof of power-loss durability.
 
 ## Product state and limitations
 
-`CUBED_STATE/registry.sqlite` contains projects, registered runners, thread
+`CUBED_STATE/registry.sqlite` contains projects, globally registered runners, thread
 metadata and creation request keys. `CUBED_STATE/threads/<id>/session` contains
-Pi's databases. Registry v100 is upgraded in place; older execution stacks are
+Pi's databases. Registry v100/v101 receives the rollback-compatible global-pool extension in place; older execution stacks are
 not migrated. See the reset workflow in README.
 
-A runner has one permanent node/environment admission and one operator-prepared
-repository template. It admits one active thread workspace at a time. Cubed
+A runner has one permanent node/environment admission and belongs to the Cube
+installation, not a project. It admits one active thread workspace at a time. Cubed
 persists `available/allocating/busy/releasing/failed`; the runner journal persists
 the physical allocation and reconciles interrupted transitions without deleting
-the tree. New Git repositories fetch the primary repository's checked branch
-into a runner-owned bare control repository, journal the remote/ref/exact OID,
-and create detached worktrees from that OID. The template branch, HEAD, index,
-and working tree are not used as the base or mutated. Fetch/auth/network errors
-fail closed; there is no stale-template fallback. Non-Git templates use a copy
-fallback. Archive releases logical capacity; clean Git worktrees still at
-their journaled base OID are removed, while changed or independently committed
-worktrees and fallback copies are retained under runner state.
-Registry v100 is upgraded in place; existing bound threads continue on their
-original workspace. There is no relocation, automatic remote provisioning or
-implicit local execution.
+the tree. Thread creation captures the checked project revision and each repository's
+normalized URL, resolved branch and exact base OID. `workspace.allocate.v2` sends that
+immutable plan to the authenticated runner, which creates `/workspace` plus reference
+checkouts under `../repos`. The runner fetches only each declared branch, verifies the
+supplied OID is an available commit, and checks out that immutable OID; it never
+rediscovers the default branch or substitutes a newer tip. Git prompts and
+command-running transports are disabled.
+Projects without repositories receive a fresh empty workspace rather than the
+installation's legacy template, preventing state carryover during project switches.
+Archive releases logical capacity; checkouts still clean at every pinned OID are
+removed, while changed, independently committed or transition-interrupted trees are
+retained under runner state. Empty legacy project plans continue through the immutable
+installation template so migrated evidence remains usable.
+
+Registry allocation uses `BEGIN IMMEDIATE` and a conditional `available` update, so
+two project requests cannot claim one runner. v100/v101 project bindings become
+`legacyProjectId` audit metadata; runner IDs, node admission, thread rows, creation
+keys and archived evidence are preserved. Numeric environment IDs need only be unique
+inside their immutable node binding, so collisions across runners are preserved rather
+than rewritten. Existing active threads keep their runner and pinned allocation.
+Project deletion never owns or deletes a runner and remains blocked while any thread
+history references the project. Retire is allowed only without an active allocation.
+The extension preserves the v101 runner column order and stores an idempotent marker;
+an older rollback release can still open the registry. Its scheduler ignores newly
+enrolled global runners rather than rebinding or deleting them.
+
+The repository plan is the integration boundary for fresh-remote-default-branch work:
+`GitService.prepareRepository` must resolve the remote branch and OID before allocation,
+and future changes must keep emitting `resolvedBase` + `baseOid`. The scheduler does not
+depend on unpublished branch-selection work and never asks a runner to rediscover a
+moving default branch. If a force-push makes the pinned object unavailable when the
+runner fetches the declared branch, allocation fails closed rather than using stale state.
+
+The original `workspace.allocate` remains a metadata-free compatibility operation.
+Cubed requires the separately advertised `workspace.allocate.v2` capability for new
+global allocations, so an older runner fails with `UNSUPPORTED` before request bytes
+or filesystem mutation. Upgrade runner binaries before relying on the global pool;
+existing active work and retained evidence remain inspectable during a rolling upgrade.
 
 These directories prevent active threads from colliding by default; they do not
 constrain an absolute path or a command running as the runner UID. Current
