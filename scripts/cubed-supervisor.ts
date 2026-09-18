@@ -418,6 +418,9 @@ function message(error: unknown): string { return error instanceof Error ? error
 fs.rmSync(socketPath, { force: true });
 const control = net.createServer(connection => {
   connection.setEncoding("utf8"); let raw = "";
+  // cubed can disappear while a GUI status poll is in flight during restart.
+  // That client disconnect must not turn a successful update into supervisor death.
+  connection.on("error", () => {});
   connection.on("data", chunk => { raw += chunk; if (raw.length > 64 * 1024) connection.destroy(); });
   connection.on("end", () => {
     try {
