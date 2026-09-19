@@ -2,6 +2,7 @@
 # Offline Node checks. Real Rust/Iroh execution runs in test-node-transport.sh.
 OFFLINE_TESTS=(
   scripts/cubed-release-checksum-test.ts
+  scripts/cubed-service-test.ts
   scripts/cubed-signing-key-test.ts
   scripts/cubed-update-test.ts
   scripts/host-production-test.ts
