@@ -272,7 +272,7 @@ try {
     // command is not started a second time.
     const { files, directory, runner, workspace } = thread("replay");
     let agent = await openAgent({ directory, runner: { binding: runner.binding, configHash: "fake" }, workspace, ...model([
-      codemode(`await tools.bash({ command: "printf x >> count; sleep 0.5" }); await tools.bash({ command: "printf y >> count" }); return "finished"`),
+      codemode(`await tools.bash({ command: "printf x >> count; sleep 0.5; printf z >> count" }); await tools.bash({ command: "printf y >> count" }); return "finished"`),
       fauxAssistantMessage("first"),
     ]) });
     const submission = await agent.conversation.submit({ type: "input", content: "count" }, context);
@@ -289,9 +289,10 @@ try {
       assert.match(text(result!), /\[codemode\] call 1 bash started \(key pi:[0-9a-f-]+:\d+:code:1\)/);
       assert.match(JSON.stringify(result), /codemode was interrupted and may have partially run/);
       await delay(200);
-      assert.equal(fs.readFileSync(path.join(files, "count"), "utf8"), "x", "nothing ran twice and the script did not continue");
+      // Codemode is never reattached, so shutdown cancelled its nested command.
+      assert.equal(fs.readFileSync(path.join(files, "count"), "utf8"), "x", "the nested command was cancelled, nothing ran twice and the script did not continue");
     } finally { await agent.close(); }
-    console.log("ok: an interrupted codemode call is reported as possibly partially run, never replayed");
+    console.log("ok: shutdown cancels nested commands; an interrupted codemode call is reported as possibly partially run, never replayed");
   }
 } finally {
   for (const runner of runners) runner.close();

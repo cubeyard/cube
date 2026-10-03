@@ -1,5 +1,6 @@
 import { smokeDurableAgent } from "./smoke-durable-agent.ts";
 import { smokeProduct } from "./smoke-product.ts";
+import { smokeCodemode } from "../packages/server/test/codemode-runner-smoke.ts";
 /** Real TypeScript -> @number0/iroh (in process) -> Rust runner acceptance.
  * Disposable keys, journals, workspaces and processes only. No existing host
  * or model service is contacted. Loopback/direct stay offline; CUBE_TEST_IROH_RELAY=1
@@ -198,6 +199,10 @@ try {
     }
     if (network === "loopback") await smokeDurableAgent(directory, configPath, workspace);
     if (network === "loopback") await smokeProduct(directory, configPath);
+    if (network === "loopback") {
+      await smokeCodemode(directory, configPath, workspace);
+      console.log("ok: codemode on the actual runner: nested write, edit, bash and read under their nested keys");
+    }
 
     // Protocol 2 workspace operations against the real runner. Pi's lease
     // above already fenced the installation thread with time-based epochs.

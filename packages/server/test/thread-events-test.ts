@@ -125,15 +125,27 @@ try {
     // Closing the agent ends every watch; the SSE transport ends its stream.
     let ended = 0;
     let frames = 0;
-    const closedOverHttp = await remote.watch(() => { frames++; }, { onInterrupt: () => { ended++; } });
+    let refused: Error | undefined;
+    const closedOverHttp = await remote.watch(() => { frames++; }, { onInterrupt: () => { ended++; }, onEnd: error => { refused = error; } });
     await until(() => frames > 0, "SSE frame");
     await agent.close();
     await watch.closed;
     await until(() => ended > 0, "SSE stream end");
+    // The reconnect is refused (409): the watch ends instead of retrying forever.
+    await closedOverHttp.closed;
+    assert.match(String(refused?.message), /409/);
     await closedOverHttp.stop();
+    // A thread that is gone (404) ends the watch at once, without retries.
+    let missing: Error | undefined;
+    let retries = 0;
+    const gone = await new HttpThreadEvents({ base: `http://127.0.0.1:${address.port}/api/threads/missing`, retryMs: 50 })
+      .watch(() => {}, { onInterrupt: () => { retries++; }, onEnd: error => { missing = error; } });
+    await gone.closed;
+    assert.match(String(missing?.message), /404/);
+    assert.equal(retries, 0);
     assert.equal(leases.holder(), null, "the lease is released with the agent");
     assert.equal(fs.existsSync(path.join(files, "late")), false, "stop cancelled the command");
-    console.log("ok: stop shows a stopped status; closing the agent ends watches and releases the owner");
+    console.log("ok: stop shows a stopped status; closing the agent ends watches and releases the owner; a 4xx ends an SSE watch without retrying");
   }
 } finally {
   await agent.close();

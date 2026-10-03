@@ -65,7 +65,9 @@ runner paths; a write after a read in the same call carries the read content's
 storage identity and the Pi tool task ID, so a replayed task finds the same
 runner operation: a repeated `exec.start` retrieves retained work; changed
 arguments conflict. `read`, `write` and `bash` are replay-safe; `edit` is not and
-is reported as interrupted after a crash.
+is reported as interrupted after a crash. The file tools read whole files of at
+most 2 MiB, as the Claude Code mod does; a larger file is refused after its
+first page with a hint to use bash.
 
 `codemode` (`codemode.ts`) runs one model-written JavaScript script in
 pi-codemode's QuickJS VM, a fresh worker per script whose only capabilities are
@@ -85,8 +87,9 @@ it does. Nothing is retried automatically. The worker is fault containment, not
 a sandbox, and the runner stays trusted.
 
 Stop aborts Pi's tasks and cancels a
-running runner command; a host shutdown leaves the command running and the next
-process reattaches to it. The runner never silently reexecutes Interrupted operations or evicts
+running runner command; a host shutdown leaves a direct `bash` command running
+and the next process reattaches to it. Codemode's nested commands are cancelled
+on shutdown too, because codemode is never rerun. The runner never silently reexecutes Interrupted operations or evicts
 IDs to create room. A lost response therefore does not imply a second effect.
 Diagnostic runner CLI intents remain separate from Pi's production call path.
 Runner protocol 2 adds paged command output, `exec.cancel` (process-group
@@ -158,24 +161,33 @@ reaches Anthropic models with an API key.
 
 `ClaudeAgent` (`claude-agent.ts`) takes the thread's `claude-code` lease for its
 lifetime and starts `claude -p --input-format stream-json --output-format
-stream-json --verbose --include-partial-messages --plugin-dir
-packages/claude-mod --model <model>` on the first prompt, in a stable per-thread
+stream-json --verbose --include-partial-messages --setting-sources ""
+--strict-mcp-config --mcp-config '{"mcpServers":{}}' --tools <allow-list>
+--plugin-dir packages/claude-mod --model <model>` on the first prompt, in a stable per-thread
 directory, with `--resume <session-id>` once Claude Code has reported a session.
 Prompts go to stdin under their request ID (a repeated ID is accepted once), stop
-is a stream-json `interrupt` control request with a kill after a grace period,
-and a model change closes the idle child so the next prompt resumes with the new
-`--model`. An idle child is closed after ten minutes. cubed never stores or
-forwards Claude credentials and removes `ANTHROPIC_API_KEY` and
-`ANTHROPIC_AUTH_TOKEN` from the child's environment, so the subscription is used
-instead of API billing. `findClaude()` locates the binary (`CUBED_CLAUDE` names
+is a stream-json `interrupt` control request; a child that ignores it is sent
+SIGTERM, then SIGKILL. cubed follows the Bash calls in Claude Code's messages
+and cancels their runner commands (`claude:<tool_use_id>:bash`) itself when it
+kills the child, when the child dies mid-turn and on close, because the mod
+never sees an abort then and the runner admits one command at a time. A model
+change closes the idle child so the next prompt resumes with the new
+`--model`. An idle child is closed after ten minutes. cubed never stores Claude
+credentials; the child gets an allow-listed environment without any
+`ANTHROPIC_*` variable or Bedrock/Vertex switch, so the subscription is used
+instead of API billing, and without cubed's other credentials. The user's
+settings files and MCP servers are not loaded. `findClaude()` locates the binary (`CUBED_CLAUDE` names
 it, or `off`); without one, claude · max is not offered.
 
 The mod (`packages/claude-mod`) is a Claude Code plugin of function hooks. Its
 `tool.call` hooks answer Bash, Read, Write and Edit from the thread Workspace,
 keyed by `tool_use_id`, in each tool's own output shape; Edit is read, replace,
-then a write conditional on the sha it read. It refuses background Bash,
-`NotebookEdit`, worktrees, subagents with worktree or remote isolation and tools
-that would act on the cubed host (Glob, Grep, LSP, Monitor, PowerShell), and its
+then a write conditional on the sha it read. Tools are an allow-list
+(`ALLOWED_TOOLS` in `hooks/tools.ts`, also passed as `--tools`): everything else,
+MCP tools and built-ins the list does not know included, is refused because it
+would act on the cubed host. It also refuses background Bash, subagents with
+worktree or remote isolation and agent types that are not Claude Code's
+built-ins, and its
 `prompt.context` hook adds the workspace's `AGENTS.md` and `CLAUDE.md`. The mod
 reaches cubed on a private Unix socket (`CUBED_STATE/run/workspace.sock`, mode
 0600) that serves only workspace routes; the lease token cubed holds for the
@@ -197,7 +209,12 @@ request keys. `CUBED_STATE/threads/<id>/pi.sqlite` is
 the thread's pi-durable storage (`claude.sqlite` and the `claude/` working
 directory for a claude-code thread); `threads/<id>/lease.sqlite` keeps the thread's lease epoch and
 owner, and `lease.lock` is only held while a lease is. Registry v100/v101 receives the rollback-compatible global-pool extension in place; older execution stacks are
-not migrated. See the reset workflow in README.
+not migrated. See the reset workflow in README. The state schema is 101: the
+supervisor refuses to update a schema 100 installation in place, and cubed
+refuses to open a thread directory that still holds the old Pi store
+(`session/` or `owner.sqlite`) instead of starting it again empty. One cubed
+serves one `CUBED_STATE`: a second refuses to start while the first's
+workspace socket answers.
 
 A runner has one permanent node/environment admission and belongs to the Cube
 installation, not a project. It admits one active thread workspace at a time. Cubed

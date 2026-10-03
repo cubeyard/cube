@@ -10,9 +10,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { LiveDoc, type LiveState } from "@earendil-works/pi-durable";
-import { openAgent, type Agent } from "../src/durable-agent.ts";
+import { LEGACY_THREAD, openAgent, type Agent } from "../src/durable-agent.ts";
 import { RunnerWorkspace } from "../src/workspace.ts";
-import { WorkspaceEnv } from "../src/workspace-env.ts";
+import { MAX_FILE_READ_BYTES, WorkspaceEnv } from "../src/workspace-env.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
 import { FakeRunner } from "./workspace-fake-runner.ts";
 
@@ -97,10 +97,23 @@ try {
     const stale = await reader.writeFile("a.txt", "mine", context);
     assert(!stale.ok && /changed since it was read/.test(stale.error.message));
     assert.deepEqual(await reader.exists("missing", context), { ok: true, value: false });
+    // The file tools read whole files up to a cap; larger ones are for bash,
+    // refused after the first page instead of paging gigabytes into cubed.
+    fs.writeFileSync(path.join(files, "big.log"), Buffer.alloc(MAX_FILE_READ_BYTES + 1, 0x61));
+    let pages = 0;
+    const counting = new Proxy(workspace, { get: (target, name) => name === "readFile"
+      ? (...args: Parameters<typeof workspace.readFile>) => { pages++; return target.readFile(...args); }
+      : Reflect.get(target, name, target) });
+    const big = await new WorkspaceEnv({ workspace: counting, token: lease.token, id: "env", key: "pi:test:3" }).readTextFile("big.log", context);
+    assert(!big.ok && big.error.code === "invalid" && /use bash/.test(big.error.message), "a file over the cap is refused");
+    assert.equal(pages, 1, "only the first page was read");
+    fs.writeFileSync(path.join(files, "fits.log"), Buffer.alloc(MAX_FILE_READ_BYTES, 0x62));
+    const fits = await reader.readBinaryFile("fits.log", context);
+    assert(fits.ok && fits.value.length === MAX_FILE_READ_BYTES, "a file at the cap is read whole");
     const shell = await reader.exec();
     assert(!shell.ok && shell.error.code === "shell_unavailable");
     await workspace.release(lease.token);
-    console.log("ok: WorkspaceEnv write keys replay without writing, expectedSha after read, no shell fallback");
+    console.log("ok: WorkspaceEnv write keys replay without writing, expectedSha after read, read size cap, no shell fallback");
   }
   {
     // Stop cancels the runner command for real.
@@ -141,6 +154,20 @@ try {
       assert.equal(fs.readFileSync(path.join(files, "count"), "utf8"), "x", "the replayed call found the same command");
     } finally { await agent.close(); }
     console.log("ok: shutdown keeps the runner command; reopen replays bash by task key without running it again");
+  }
+  {
+    // A thread directory from before pi-durable is refused: opening it would
+    // start an empty conversation and run the first message again.
+    for (const legacy of ["session", "owner.sqlite"]) {
+      const { directory, runner, workspace } = thread(`legacy-${legacy}`);
+      if (legacy === "session") fs.mkdirSync(path.join(directory, "session"), { recursive: true });
+      else fs.writeFileSync(path.join(directory, "owner.sqlite"), "");
+      const steps = model([call("bash", { command: "touch must-not-run" }), fauxAssistantMessage("no")]);
+      await assert.rejects(openAgent({ directory, runner: { binding: runner.binding, configHash: "fake" }, workspace, ...steps }), (error: Error) => error.message === LEGACY_THREAD);
+      assert.equal(fs.existsSync(path.join(directory, "pi.sqlite")), false, "no new Pi store is created");
+      assert.equal(await workspace.lease({ owner: "pi" }).then(lease => workspace.release(lease.token)).then(() => true), true, "the lease was never taken");
+    }
+    console.log("ok: a thread directory with the old Pi store is refused before any lease, store or submission");
   }
 } finally {
   for (const runner of runners) runner.close();

@@ -149,7 +149,10 @@ terminal sessions. Stop cubed and set `CUBED_STATE` to a new empty directory to 
 projects and enroll fresh runner identities. Do not delete an unspecified live
 installation. Archive recycles runner capacity, not the archived Pi storage or
 retained user changes. Threads created before the move to pi-durable 1.0.1 are
-not migrated: reset to a new `CUBED_STATE` as above.
+not migrated: reset to a new `CUBED_STATE` as above. cubed refuses to open such a
+thread (its directory still has `session/` or `owner.sqlite`) rather than run its
+first message again, and the state schema is 101, so a managed schema 100
+installation is not updated in place.
 
 Restart cubed against the same state to resume accepted Pi tasks. Do not
 run two writable owners for a session. Backups of the host must be taken with

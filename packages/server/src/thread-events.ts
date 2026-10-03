@@ -43,19 +43,26 @@ export interface ThreadWatch {
   readonly closed: Promise<void>;
 }
 
+export interface ThreadWatchOptions {
+  onInterrupt?: (error: unknown) => void;
+  onEnd?: (error: Error) => void;
+}
+
 export interface ThreadEvents {
   /** The current transcript. */
   read(): Promise<ThreadTranscript>;
   /** The listener receives the current transcript, then each later one.
    * Calls are serialized; a slow listener sees the newest transcript, not
    * every intermediate one. `onInterrupt` reports a lost connection that the
-   * source is retrying (transports only). */
-  watch(listener: (transcript: ThreadTranscript) => void | Promise<void>, options?: { onInterrupt?: (error: unknown) => void }): Promise<ThreadWatch>;
+   * source is retrying; `onEnd` reports a refusal it does not retry, such as
+   * an archived thread or an agent that failed to open (transports only). */
+  watch(listener: (transcript: ThreadTranscript) => void | Promise<void>, options?: ThreadWatchOptions): Promise<ThreadWatch>;
 }
 
 /** `ThreadEvents` over cubed's HTTP routes: `GET <base>/history` and the
  * SSE stream `GET <base>/stream`, whose frames are `ThreadTranscript`s. A
- * lost stream reconnects; reconnecting starts from the current transcript. */
+ * lost stream (a network error or a 5xx) reconnects, starting from the
+ * current transcript; a 4xx refusal ends the watch. */
 export class HttpThreadEvents implements ThreadEvents {
   private readonly base: string;
   private readonly fetch: typeof fetch;
@@ -69,14 +76,11 @@ export class HttpThreadEvents implements ThreadEvents {
   async read(): Promise<ThreadTranscript> {
     const response = await this.fetch(`${this.base}/history`, { headers: { accept: "application/json" } });
     const body = await response.json().catch(() => null) as ThreadTranscript | { error?: unknown } | null;
-    if (!response.ok) {
-      const message = body && "error" in body && typeof body.error === "string" ? body.error : `thread history unavailable (${response.status})`;
-      throw new Error(message);
-    }
+    if (!response.ok) throw new Error(serverError(body, `thread history unavailable (${response.status})`));
     return body as ThreadTranscript;
   }
 
-  async watch(listener: (transcript: ThreadTranscript) => void | Promise<void>, options: { onInterrupt?: (error: unknown) => void } = {}): Promise<ThreadWatch> {
+  async watch(listener: (transcript: ThreadTranscript) => void | Promise<void>, options: ThreadWatchOptions = {}): Promise<ThreadWatch> {
     const controller = new AbortController();
     let wake: (() => void) | undefined;
     const closed = (async () => {
@@ -84,6 +88,11 @@ export class HttpThreadEvents implements ThreadEvents {
         let failure: unknown = new Error("thread stream ended");
         try {
           const response = await this.fetch(`${this.base}/stream`, { headers: { accept: "text/event-stream" }, signal: controller.signal });
+          if (response.status >= 400 && response.status < 500) {
+            const body = await response.json().catch(() => null) as { error?: unknown } | null;
+            options.onEnd?.(new Error(serverError(body, `thread stream unavailable (${response.status})`)));
+            return;
+          }
           if (!response.ok || !response.body) throw new Error(`thread stream unavailable (${response.status})`);
           await readFrames(response.body, listener);
         } catch (error) { failure = error; }
@@ -100,6 +109,10 @@ export class HttpThreadEvents implements ThreadEvents {
       async stop() { controller.abort(); wake?.(); await closed; },
     };
   }
+}
+
+function serverError(body: unknown, fallback: string): string {
+  return body && typeof body === "object" && "error" in body && typeof body.error === "string" ? body.error : fallback;
 }
 
 async function readFrames(body: ReadableStream<Uint8Array>, listener: (transcript: ThreadTranscript) => void | Promise<void>): Promise<void> {

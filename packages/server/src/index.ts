@@ -1,5 +1,5 @@
 import http from "node:http";
-import type { AddressInfo } from "node:net";
+import net, { type AddressInfo } from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -49,13 +49,26 @@ export function findClaude(env: NodeJS.ProcessEnv = process.env): string[] | nul
 
 /** The private socket the Claude Code mod reaches the thread workspace on.
  * It serves workspace routes only; the lease token is the authorization. */
-function workspaceSocketPath(state: string): string {
+async function workspaceSocket(state: string): Promise<{ socket: string; temporary: string | null }> {
   const directory = path.join(state, "run");
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   fs.chmodSync(directory, 0o700);
   const socket = path.join(directory, "workspace.sock");
   // Unix socket paths are short; a deep state directory gets a private temporary one.
-  return Buffer.byteLength(socket) <= 100 ? socket : path.join(fs.mkdtempSync(path.join(os.tmpdir(), "cubed-")), "workspace.sock");
+  if (Buffer.byteLength(socket) > 100) {
+    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "cubed-"));
+    return { socket: path.join(temporary, "workspace.sock"), temporary };
+  }
+  // A socket that still answers belongs to a live cubed on this state: never
+  // take it from that instance's Claude Code threads. A dead one is stale.
+  const live = await new Promise<boolean>(resolve => {
+    const probe = net.connect(socket);
+    probe.once("connect", () => { probe.destroy(); resolve(true); });
+    probe.once("error", () => resolve(false));
+  });
+  if (live) throw new Error(`another cubed is serving this CUBED_STATE (${socket} answers); run one cubed per state`);
+  fs.rmSync(socket, { force: true });
+  return { socket, temporary: null };
 }
 
 /** A JSON request body; at most 1 MiB. */
@@ -85,11 +98,11 @@ export async function createCubed(options: {
   /** Claude Code process tuning, for tests. */
   claudeOptions?: { idleMs?: number; stopGraceMs?: number };
 }) {
+  const { socket, temporary: socketDirectory } = await workspaceSocket(options.state);
   const registry = new Registry(path.join(options.state, "registry.sqlite"));
   const models = options.models ?? await createModelRuntime();
   const modelAuth = new ModelAuth(models);
   const claudeCommand = options.claude === undefined ? findClaude() : options.claude;
-  const socket = workspaceSocketPath(options.state);
   const conversations = new Conversations(registry, path.join(options.state, "threads"), models, claudeCommand ? {
     command: claudeCommand, socket, mod: path.resolve(import.meta.dirname, "../../claude-mod"), ...options.claudeOptions,
   } : null);
@@ -176,7 +189,12 @@ export async function createCubed(options: {
       }
       if (url.pathname === "/api/state" && method === "GET") {
         const available = await catalog();
-        return json({ onboardingComplete: isOnboardingComplete(onboarding), auth: available.length ? { state: "ok", provider: available[0].provider, credentialType: "host" } : { state: "missing", provider: "model" } });
+        // With no Pi provider, Claude Code on this host still runs threads on
+        // its own login (which cubed cannot see); do not point to providers.
+        const auth = available.length ? { state: "ok", provider: available[0].provider, credentialType: "host" }
+          : conversations.claudeAvailable ? { state: "ok", provider: CLAUDE_PROVIDER, credentialType: "claude code login" }
+          : { state: "missing", provider: "model" };
+        return json({ onboardingComplete: isOnboardingComplete(onboarding), auth });
       }
       if (url.pathname === "/api/onboarding" && method === "POST") { completeOnboarding(onboarding); return json({ onboardingComplete: true }); }
       if (parts[0] === "api" && parts[1] === "providers") {
@@ -327,7 +345,6 @@ export async function createCubed(options: {
       else json({ error: error instanceof Error ? error.message : String(error), code: "IO_ERROR", completionUnknown: false }, 409);
     }
   });
-  fs.rmSync(socket, { force: true });
   await new Promise<void>((resolve, reject) => { workspaceServer.once("error", reject); workspaceServer.listen(socket, () => { workspaceServer.off("error", reject); resolve(); }); });
   fs.chmodSync(socket, 0o600);
   await conversations.boot();
@@ -342,7 +359,7 @@ export async function createCubed(options: {
       await modelAuth.close(); await conversations.close();
       workspaceServer.closeAllConnections();
       await new Promise<void>(resolve => workspaceServer.close(() => resolve()));
-      fs.rmSync(socket, { force: true });
+      fs.rmSync(socketDirectory ?? socket, { recursive: true, force: true });
       registry.close();
     })();
     return closePromise;

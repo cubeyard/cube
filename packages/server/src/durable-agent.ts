@@ -47,6 +47,16 @@ async function openStorage(file: string): Promise<SqliteStorage> {
   return SqliteStorage.open(new NodeSqliteDatabase(database));
 }
 
+/** Files the Pi store before pi-durable 1.0.1 left in a thread directory. */
+const LEGACY_STORE = ["session", "owner.sqlite"];
+export const LEGACY_THREAD = "this thread was created by an older cube and is not migrated — reset to a new CUBED_STATE (see DEVELOPING.md)";
+
+/** Refuses a thread directory with the old Pi store: opening it would start
+ * an empty conversation and submit the first message again on its runner. */
+export function assertCurrentThreadStore(directory: string): void {
+  if (LEGACY_STORE.some(name => fs.existsSync(path.join(directory, name)))) throw new Error(LEGACY_THREAD);
+}
+
 export async function openAgent(options: {
   directory: string;
   runner: { binding: Readonly<NodeBinding>; configHash: string };
@@ -63,6 +73,7 @@ export async function openAgent(options: {
   // in this process or another, is refused, and process death releases it.
   // Its epoch fences runner mutations of any older holder. pi-durable has no
   // cross-process storage lock; the lease is that lock.
+  assertCurrentThreadStore(options.directory);
   const lease = await options.workspace.lease({ owner: "pi" });
   const release = () => options.workspace.release(lease.token).catch(() => {});
   let storage: SqliteStorage | undefined;
@@ -96,9 +107,11 @@ export async function openAgent(options: {
         execute: (args, api, callContext) => runBash(args, api, callContext, taskKey(api)),
       }),
       mutates: true,
-      run: (args: Static<typeof bashParameters>, api, callContext, key) => runBash(args, api, callContext, key),
+      // Codemode is replay "unsafe": its nested commands are never reattached,
+      // so a host shutdown cancels them too.
+      run: (args: Static<typeof bashParameters>, api, callContext, key) => runBash(args, api, callContext, key, false),
     };
-    async function runBash(args: Static<typeof bashParameters>, api: ToolExecutionApi, callContext: Context, base: string) {
+    async function runBash(args: Static<typeof bashParameters>, api: ToolExecutionApi, callContext: Context, base: string, reattached = true) {
       const key = `${base}:bash`;
       const signal = callContext.abortSignal;
       try {
@@ -116,9 +129,9 @@ export async function openAgent(options: {
         };
       } catch (error) {
         // A stop aborts the call: kill the runner command. A host shutdown
-        // also aborts it, but then the command keeps running and the next
-        // process reattaches to it.
-        if (signal?.aborted && !closing) await options.workspace.cancel(lease.token, key).catch(() => {});
+        // also aborts it, but then a direct command keeps running and the
+        // next process reattaches to it.
+        if (signal?.aborted && (!closing || !reattached)) await options.workspace.cancel(lease.token, key).catch(() => {});
         throw error;
       }
     }

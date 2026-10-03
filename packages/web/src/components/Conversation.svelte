@@ -56,7 +56,10 @@
   }
 
   onMount(() => {
-    const watching = events.watch(show, { onInterrupt: () => { if (!disposed) historyError = "connection interrupted — reconnecting…"; } });
+    const watching = events.watch(show, {
+      onInterrupt: () => { if (!disposed) historyError = "connection interrupted — reconnecting…"; },
+      onEnd: cause => { if (!disposed) { historyError = errorText(cause); loading = false; } },
+    });
     return () => {
       disposed = true;
       void watching.then(watch => watch.stop());

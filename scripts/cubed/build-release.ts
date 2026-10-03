@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash, sign } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { CUBED_STATE_SCHEMA } from "../../packages/server/src/version.ts";
 
 const [version, destination, baseUrl, privateKey] = process.argv.slice(2);
 if (!/^v\d+\.\d+\.\d+$/.test(version ?? "") || !destination || !baseUrl || !privateKey) {
@@ -39,7 +40,7 @@ try {
   fs.copyFileSync("scripts/cubed/cubed", path.join(root, "bin/cubed"));
   fs.chmodSync(path.join(root, "bin/cubed"), 0o755);
   fs.writeFileSync(path.join(root, "release.json"), `${JSON.stringify({
-    version, commit, stateSchema: 100, entry: "app/packages/server/src/index.ts",
+    version, commit, stateSchema: CUBED_STATE_SCHEMA, entry: "app/packages/server/src/index.ts",
   })}\n`, { mode: 0o644 });
 
   const artifactName = `cubed-${version}-${platform}.tar.gz`;
@@ -49,7 +50,7 @@ try {
   const sha256 = createHash("sha256").update(fs.readFileSync(artifact)).digest("hex");
   const manifest = Buffer.from(`${JSON.stringify({
     schema: 1, product: "cubed", version, commit, platform, minimumSupervisor: 1,
-    stateSchema: { minimum: 100, maximum: 100, rollbackSafeFrom: 100 },
+    stateSchema: { minimum: CUBED_STATE_SCHEMA, maximum: CUBED_STATE_SCHEMA, rollbackSafeFrom: CUBED_STATE_SCHEMA },
     artifact: { url: `${baseUrl.replace(/\/$/, "")}/${artifactName}`, sha256, bytes },
     publishedAt: new Date().toISOString(), notesUrl: `https://github.com/cubeyard/cube/releases/tag/${version}`,
     includesRunner: false,

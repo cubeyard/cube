@@ -11,6 +11,9 @@ import { WorkspaceError, type Workspace } from "./workspace.ts";
 
 /** Paths the model sees: the workspace root is this virtual directory. */
 export const WORKSPACE_ROOT = "/workspace";
+/** The largest file the file tools read whole, as the Claude Code mod does;
+ * bash reads past it. */
+export const MAX_FILE_READ_BYTES = 2 * 1024 * 1024;
 
 export class WorkspaceEnv implements ExecutionEnv {
   readonly id: string;
@@ -47,6 +50,9 @@ export class WorkspaceEnv implements ExecutionEnv {
         const page = await this.workspace.readFile(this.token, relative, { offset, limit: maxReadBytes });
         // Each page reports the whole-file sha; a change between pages is not one file.
         if (sha !== undefined && page.sha256 !== sha) throw new FileError("unknown", `${file} changed while it was read`, file);
+        if (offset === 0 && page.size > MAX_FILE_READ_BYTES) {
+          throw new FileError("invalid", `${file} is ${page.size} bytes; the file tools read at most ${MAX_FILE_READ_BYTES} bytes — use bash (head, sed -n, rg) for larger files`, file);
+        }
         sha = page.sha256;
         pages.push(page.content);
         offset += page.content.length;
