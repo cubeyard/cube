@@ -1,5 +1,4 @@
 import type { Project as ProjectRecord } from "../../../server/src/registry.ts";
-import type { Conversations } from "../../../server/src/conversation.ts";
 export type { ModelSelection } from "../../../server/src/models.ts";
 export type { ProjectRepository } from "../../../server/src/registry.ts";
 export type { RunnerStatus } from "../../../server/src/registry.ts";
@@ -29,9 +28,7 @@ export interface ProjectInput {
   name: string;
   repositories: Array<{ url: string; base?: string | null; checkoutName?: string }>;
 }
-export type ConversationHistory = Awaited<ReturnType<Conversations["history"]>>;
-export type ConversationMessage = ConversationHistory["messages"][number];
-export type AgentRun = NonNullable<ConversationHistory["run"]>;
+export type { ThreadEvent, ThreadStatus, ThreadTranscript } from "../../../server/src/thread-events.ts";
 export interface ThreadModels {
   models: import("../../../server/src/models.ts").ModelSelection[];
   selected: import("../../../server/src/models.ts").ModelSelection | null;

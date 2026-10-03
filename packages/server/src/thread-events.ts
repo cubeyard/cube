@@ -1,0 +1,123 @@
+/** The neutral thread event model: what a thread shows, whatever agent runs
+ * it. An agent adapter renders its own state into a `ThreadTranscript`; the
+ * browser reads only this model. The same `ThreadEvents` interface is
+ * implemented in-process by an adapter and over SSE by `HttpThreadEvents`.
+ *
+ * This module is browser-safe: no Node imports, so packages/web can import
+ * the client and the types directly. */
+
+/** The agent a thread was created with; fixed for the thread. */
+export type ThreadAgent = "pi" | "claude-code";
+
+/** One thing a thread shows, in transcript order. `id` is stable across
+ * frames for committed events; an event still streaming (`final: false`) gets
+ * a new id once committed. */
+export type ThreadEvent =
+  | { type: "user-message"; id: string; text: string }
+  /** Assistant text; `reasoning` marks the model's visible thinking. */
+  | { type: "assistant-text"; id: string; text: string; reasoning: boolean; final: boolean }
+  /** A tool call; its result, if any, carries the same `callId`. */
+  | { type: "tool-call"; id: string; callId: string; name: string; input: unknown; final: boolean }
+  /** A tool result, or with `final: false` the running output of a call. */
+  | { type: "tool-result"; id: string; callId: string; name: string; output: string; isError: boolean; final: boolean };
+
+/** `idle` before the first run; `working` while a run is active; otherwise
+ * how the newest run ended. `error` is the failure text, if any. */
+export type ThreadStatus = {
+  state: "idle" | "working" | "completed" | "failed" | "stopped";
+  run: string | null;
+  error: string | null;
+};
+
+export interface ThreadTranscript {
+  agent: ThreadAgent;
+  /** The current writable owner of the thread workspace, if any. */
+  owner: ThreadAgent | null;
+  status: ThreadStatus;
+  events: ThreadEvent[];
+}
+
+export interface ThreadWatch {
+  stop(): Promise<void>;
+  /** Settles when the watch ends: stopped, or the source closed. */
+  readonly closed: Promise<void>;
+}
+
+export interface ThreadEvents {
+  /** The current transcript. */
+  read(): Promise<ThreadTranscript>;
+  /** The listener receives the current transcript, then each later one.
+   * Calls are serialized; a slow listener sees the newest transcript, not
+   * every intermediate one. `onInterrupt` reports a lost connection that the
+   * source is retrying (transports only). */
+  watch(listener: (transcript: ThreadTranscript) => void | Promise<void>, options?: { onInterrupt?: (error: unknown) => void }): Promise<ThreadWatch>;
+}
+
+/** `ThreadEvents` over cubed's HTTP routes: `GET <base>/history` and the
+ * SSE stream `GET <base>/stream`, whose frames are `ThreadTranscript`s. A
+ * lost stream reconnects; reconnecting starts from the current transcript. */
+export class HttpThreadEvents implements ThreadEvents {
+  private readonly base: string;
+  private readonly fetch: typeof fetch;
+  private readonly retryMs: number;
+  constructor(options: { base: string; fetch?: typeof fetch; retryMs?: number }) {
+    this.base = options.base.replace(/\/$/, "");
+    this.fetch = options.fetch ?? ((input, init) => fetch(input, init));
+    this.retryMs = options.retryMs ?? 1000;
+  }
+
+  async read(): Promise<ThreadTranscript> {
+    const response = await this.fetch(`${this.base}/history`, { headers: { accept: "application/json" } });
+    const body = await response.json().catch(() => null) as ThreadTranscript | { error?: unknown } | null;
+    if (!response.ok) {
+      const message = body && "error" in body && typeof body.error === "string" ? body.error : `thread history unavailable (${response.status})`;
+      throw new Error(message);
+    }
+    return body as ThreadTranscript;
+  }
+
+  async watch(listener: (transcript: ThreadTranscript) => void | Promise<void>, options: { onInterrupt?: (error: unknown) => void } = {}): Promise<ThreadWatch> {
+    const controller = new AbortController();
+    let wake: (() => void) | undefined;
+    const closed = (async () => {
+      while (!controller.signal.aborted) {
+        let failure: unknown = new Error("thread stream ended");
+        try {
+          const response = await this.fetch(`${this.base}/stream`, { headers: { accept: "text/event-stream" }, signal: controller.signal });
+          if (!response.ok || !response.body) throw new Error(`thread stream unavailable (${response.status})`);
+          await readFrames(response.body, listener);
+        } catch (error) { failure = error; }
+        if (controller.signal.aborted) break;
+        options.onInterrupt?.(failure);
+        await new Promise<void>(resolve => {
+          const timer = setTimeout(resolve, this.retryMs);
+          wake = () => { clearTimeout(timer); resolve(); };
+        });
+      }
+    })();
+    return {
+      closed,
+      async stop() { controller.abort(); wake?.(); await closed; },
+    };
+  }
+}
+
+async function readFrames(body: ReadableStream<Uint8Array>, listener: (transcript: ThreadTranscript) => void | Promise<void>): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n?/g, "\n");
+      let end;
+      while ((end = buffer.indexOf("\n\n")) >= 0) {
+        const block = buffer.slice(0, end);
+        buffer = buffer.slice(end + 2);
+        const data = block.split("\n").filter(line => line.startsWith("data:")).map(line => line.slice(line.startsWith("data: ") ? 6 : 5)).join("\n");
+        if (data) await listener(JSON.parse(data) as ThreadTranscript);
+      }
+    }
+  } finally { reader.releaseLock(); }
+}

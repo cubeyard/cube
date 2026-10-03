@@ -77,10 +77,13 @@ export async function smokeProduct(root: string, config: string) {
       history = await (await fetch(`${base}/history`)).json();
       assert(Date.now() < deadline, JSON.stringify(history));
       await new Promise(resolve => setTimeout(resolve, 25));
-    } while (history.run?.status !== "completed");
+    } while (history.status.state !== "completed");
     assert.match(JSON.stringify(history), /product recovered runner result: 93/);
-    assert.match(frames, /"finalized":false/);
-    assert.match(frames, /"role":"tool"/);
+    assert.match(frames, /"final":false/);
+    assert.match(frames, /"type":"tool-result"/);
+    assert.match(frames, /"type":"tool-call"/);
+    assert.equal(history.agent, "pi");
+    assert.equal(history.owner, "pi");
     controller.abort(); await consume;
     const replay = await fetch(`${base}/stream`);
     const reader = replay.body!.getReader();
@@ -103,8 +106,9 @@ export async function smokeProduct(root: string, config: string) {
       history = await (await fetch(`${followup}/history`)).json();
       assert(Date.now() < stoppedDeadline, JSON.stringify(history));
       await new Promise(resolve => setTimeout(resolve, 20));
-    } while (history.run?.status === "running");
-    assert.equal(history.messages.filter((entry: { role: string }) => entry.role === "user").length, 2);
+    } while (history.status.state === "working");
+    assert.equal(history.events.filter((event: { type: string }) => event.type === "user-message").length, 2);
+    assert.equal(history.status.state, "stopped");
     assert.equal((await post(`${followup}/prompt`, message)).status, 200);
     assert.deepEqual(await (await fetch(`${followup}/history`)).json(), history, "stopped prompt retry must not launch a new run");
     const selected = { provider: final.provider, id: "faux-2" };

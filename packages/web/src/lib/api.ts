@@ -1,5 +1,4 @@
 import type {
-  ConversationHistory,
   DaemonState,
   GithubAuthStatus,
   ModelSelection,
@@ -11,6 +10,7 @@ import type {
   UpdateStatus,
 } from "./types.ts";
 import { uid } from "./uid.ts";
+import { HttpThreadEvents } from "../../../server/src/thread-events.ts";
 import type { ModelAuth } from "../../../server/src/model-auth.ts";
 
 export const fetchProviders = () => request<{ providers: Awaited<ReturnType<ModelAuth["list"]>> }>("/api/providers").then(result => result.providers);
@@ -149,8 +149,8 @@ export const deleteThread = (id: string) => request<{ ok: true }>(threadBase(id)
 export const renameThread = (id: string, title: string) =>
   request<{ ok: true }>(threadBase(id), "PATCH", { title });
 
-export const fetchConversation = (id: string) =>
-  request<ConversationHistory>(`${threadBase(id)}/history`);
+/** The thread in the neutral event model: history and the live stream. */
+export const threadEvents = (id: string) => new HttpThreadEvents({ base: threadBase(id) });
 
 export const fetchThreadModels = (id: string) =>
   request<ThreadModels>(`${threadBase(id)}/model`);

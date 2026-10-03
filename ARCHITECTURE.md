@@ -9,8 +9,9 @@
   allocation, access boundary, HTTP/SSE and activation of Pi's open operations.
 - **runner:** workspace execution and durable deduplication/result retention for
   commands. It cannot read Pi sessions or model credentials through the protocol.
-- **web:** rendering and user actions. SSE reconnect starts with a complete Pi
-  snapshot; the browser is never a workflow owner.
+- **web:** rendering and user actions, from the neutral thread event model
+  only. SSE reconnect starts with a complete transcript; the browser is never a
+  workflow owner.
 
 There is one execution core, in process. No worker transcript hydration, second
 agent-run journal or fallback backend. The old virtual-machine/container stack
@@ -123,6 +124,23 @@ Mutations carry a caller-chosen idempotency key, scoped to the runner binding
 and hashed into the runner operation ID. A key already seen is never executed
 again; the same key with a different request is `CONFLICT`. No shell fallback
 exists: a runner lacking a workspace capability is incompatible.
+
+## Thread event model
+
+`thread-events.ts` defines what a thread shows, whatever agent runs it: a
+`ThreadTranscript` with the thread's `agent`, the workspace's current writable
+`owner`, a `status` (`idle`, `working`, `completed`, `failed`, `stopped`) and an
+ordered list of events: user message, assistant text (with a reasoning flag),
+tool call and tool result (paired by `callId`). An event still streaming carries
+`final: false`: the in-flight model partial and a running tool's output.
+
+`ThreadEvents` has the same interface in-process and over HTTP: `read()` and a
+serialized, coalescing `watch()`. `PiThreadEvents` renders pi-durable's
+conversation view (entries plus `pi.live`); `GET …/history` returns `read()` and
+`GET …/stream` (`thread-events-http.ts`) sends one transcript per SSE frame and
+ends the stream when the source closes. `HttpThreadEvents` is the client; it is
+browser-safe and the web UI uses it directly. An agent adapter is the only code
+that knows its agent's shapes; the UI never reads Pi messages.
 
 ## Product state and limitations
 

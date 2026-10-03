@@ -82,8 +82,9 @@ repositories therefore need credential-free runner access. The initialization
 workspace remains the compatibility template for empty legacy plans.
 
 Useful reads: `/api/threads`, `/api/projects`, `/api/threads/<id>/history`,
-`/api/threads/<id>/stream`. The last endpoint is SSE and starts with a full
-snapshot on every connection. Stop uses `POST /api/threads/<id>/stop`; DELETE
+`/api/threads/<id>/stream`. Both return the neutral `ThreadTranscript`
+(`packages/server/src/thread-events.ts`); the stream is SSE and starts with the
+full transcript on every connection. Stop uses `POST /api/threads/<id>/stop`; DELETE
 archives an idle thread and releases runner capacity. Changed or independently
 committed Git worktrees and fallback copies are retained; a clean Git worktree
 still at the template HEAD is removed.

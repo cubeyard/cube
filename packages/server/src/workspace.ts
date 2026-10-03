@@ -10,9 +10,11 @@ import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { ExecutionNodeError, type NodeErrorCode } from "./execution-node-contract.ts";
 import type { NodeBinding, RunnerDescription, RunnerExecSpec, RunnerFile, RunnerFileStat, RunnerLimits, RunnerOperation, RunnerWriteResult } from "./iroh-node.ts";
+import type { ThreadAgent } from "./thread-events.ts";
 import type { LeaseStore } from "./workspace-lease.ts";
 
-export type WorkspaceOwner = "pi" | "claude-code";
+/** The lease owner is the thread's agent. */
+export type WorkspaceOwner = ThreadAgent;
 export const WORKSPACE_OWNERS: readonly WorkspaceOwner[] = ["pi", "claude-code"];
 /** Every operation the contract needs. A runner lacking one is incompatible. */
 export const WORKSPACE_CAPABILITIES = ["exec.start", "exec.cancel", "operation.get", "fs.read", "fs.write", "fs.stat"] as const;

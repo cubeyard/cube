@@ -914,6 +914,8 @@ header .spacer { margin-left: auto; }
   white-space: pre-wrap; overflow-wrap: anywhere;
   font-size: 15.5px; line-height: 1.6;
 }
+.message-copy.reasoning { color: var(--ink-3); font-size: 13.5px; }
+.conversation-message.continued { margin-top: -0.5rem; }
 .tool-strip {
   border: 1px solid var(--line); border-radius: var(--r-key);
   background: var(--s3); color: var(--ink-2);
@@ -924,6 +926,12 @@ header .spacer { margin-left: auto; }
 }
 .tool-strip summary::-webkit-details-marker { display: none; }
 .tool-strip code { font: 600 12px/1.4 var(--font-mono); }
+.tool-strip summary > code { flex: none; }
+.tool-summary {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ink-3); font: 12px/1.4 var(--font-mono);
+}
+.tool-strip pre.tool-input { max-height: 10rem; color: var(--ink-3); }
 .tool-strip pre {
   max-height: 16rem; overflow: auto; margin: 0; padding: 0.65rem;
   border-top: 1px solid var(--line); background: var(--s1);

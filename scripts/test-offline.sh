@@ -16,6 +16,8 @@ OFFLINE_TESTS=(
   packages/server/test/workspace-test.ts
   packages/server/test/durable-agent-test.ts
   packages/server/test/codemode-test.ts
+  packages/server/test/thread-events-test.ts
+  packages/web/test/transcript-test.ts
   packages/server/test/github-auth-test.ts
   packages/server/test/github-read-test.ts
   packages/server/test/onboarding-test.ts

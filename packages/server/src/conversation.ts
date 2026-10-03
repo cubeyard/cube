@@ -3,9 +3,12 @@ import path from "node:path";
 import type { ServerResponse } from "node:http";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message, Models } from "@earendil-works/pi-ai";
-import { ConversationBusy, LiveDoc, type ConversationView, type EntryRecord, type SubmissionRecord } from "@earendil-works/pi-durable";
+import { ConversationBusy, LiveDoc } from "@earendil-works/pi-durable";
 import { openAgent, type Agent } from "./durable-agent.ts";
 import { IrohExecutionNodeClient } from "./iroh-node.ts";
+import { PiThreadEvents } from "./pi-thread-events.ts";
+import type { ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-events.ts";
+import { serveThreadEvents } from "./thread-events-http.ts";
 import { Registry } from "./registry.ts";
 import { RunnerWorkspace } from "./workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
@@ -22,6 +25,7 @@ export class Conversations {
   private readonly workspaces = new Map<string, { workspace: RunnerWorkspace; leases: LeaseStore }>();
   private readonly failures = new Map<string, string>();
   private readonly commands = new Map<string, Promise<unknown>>();
+  private readonly feeds = new WeakMap<Agent, PiThreadEvents>();
   private closing = false;
   constructor(registry: Registry, directory: string, models: Models) {
     this.registry = registry; this.directory = directory; this.models = models;
@@ -142,85 +146,26 @@ export class Conversations {
     return { provider: selected.provider, id: selected.modelId };
     });
   }
-  async history(id: string) {
+  /** The thread in the neutral event model; the same interface the SSE
+   * stream serves and the browser reads. */
+  async events(id: string): Promise<ThreadEvents> {
     const agent = await this.agent(id);
-    const watch = await agent.conversation.watch(context);
-    try { return await this.render(id, agent, watch.value); }
-    finally { await watch.stop(); }
+    let events = this.feeds.get(agent);
+    if (!events) {
+      events = new PiThreadEvents({ agent, owner: () => this.owner(id), failure: () => this.failures.get(id) ?? null });
+      this.feeds.set(agent, events);
+    }
+    return events;
+  }
+  /** The thread workspace's current writable owner, if any. */
+  owner(id: string): ThreadAgent | null {
+    return this.workspaces.get(id)?.leases.holder() ?? null;
+  }
+  async history(id: string): Promise<ThreadTranscript> {
+    return (await this.events(id)).read();
   }
   async stream(id: string, response: ServerResponse): Promise<void> {
-    const agent = await this.agent(id);
-    const watch = await agent.conversation.watch(context);
-    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", "x-accel-buffering": "no" });
-    let closed = false;
-    let pending = false;
-    const send = async (view: ConversationView) => {
-      if (closed) return;
-      pending = true;
-      try {
-        if (!response.write(`data: ${JSON.stringify(await this.render(id, agent, view))}\n\n`)) {
-          await new Promise<void>(resolve => {
-            const done = () => { response.off("drain", done); response.off("close", done); resolve(); };
-            response.once("drain", done); response.once("close", done);
-          });
-        }
-      } finally { pending = false; }
-    };
-    // Pi's watch delivers one frame at a time and coalesces a slow client to
-    // the newest view; reconnect starts from the current committed view.
-    const heartbeat = setInterval(() => { if (!pending) response.write(": keepalive\n\n"); }, 15000);
-    response.on("close", () => { closed = true; clearInterval(heartbeat); void watch.stop(); });
-    try { await send(watch.value); }
-    catch { response.destroy(); return; }
-    watch.start(async value => { try { await send(value); } catch { response.destroy(); } });
-  }
-  private readonly earlier = new Map<string, { head: number; messages: HistoryMessage[] }>();
-  private readonly results = new Map<string, { key: string; run: HistoryRun | null }>();
-  /** The thread transcript in cube's shape. Pi's view holds the active
-   * context; entries a compaction or reset hid are read once and kept. */
-  private async render(id: string, agent: Agent, view: ConversationView) {
-    // A head marker (compaction or reset) leads the view; the entries before
-    // its head are only hidden from the model, not from the thread.
-    const head = view.entries[0]?.head;
-    let earlier: HistoryMessage[] = [];
-    if (head !== undefined && head > 1) {
-      const cached = this.earlier.get(id);
-      if (cached?.head === head) earlier = cached.messages;
-      else {
-        const entries: EntryRecord[] = [];
-        let cursor;
-        do {
-          const page = await agent.conversation.entries({ maxEntryId: head }, 256, cursor, context);
-          entries.push(...page.items.filter(entry => entry.id < head));
-          cursor = page.next;
-        } while (cursor);
-        earlier = messages(entries.reverse());
-        this.earlier.set(id, { head, messages: earlier });
-      }
-    }
-    const live = view.docs["pi.live"] as { run?: { taskId: number; inputs: number[] }; generation?: { message?: Message } } | undefined;
-    const all = [...earlier, ...messages(view.entries)];
-    const streaming = live?.generation?.message;
-    if (streaming && live?.run) all.push({ seq: `stream-${live.run.taskId}`, role: "assistant", content: messageText(streaming), payload: streaming, finalized: false });
-    const failure = this.failures.get(id) ?? null;
-    if (live?.run) return { messages: all, run: { id: String(live.run.inputs[0] ?? live.run.taskId), status: "running", error: failure } as HistoryRun };
-    return { messages: all, run: await this.lastRun(id, agent, `${view.entries.length}:${view.entries.at(-1)?.id}`) };
-  }
-  /** The newest settled input decides the idle run state. */
-  private async lastRun(id: string, agent: Agent, key: string): Promise<HistoryRun | null> {
-    const cached = this.results.get(id);
-    if (cached?.key === key) return cached.run;
-    let last: SubmissionRecord | undefined;
-    let cursor;
-    do {
-      const page = await agent.storage.scanSubmissions({ conversationId: agent.conversation.id }, 256, cursor, context);
-      last = page.items.findLast(submission => submission.type === "input" && (submission.status === "done" || submission.status === "unanswered")) ?? last;
-      cursor = page.next;
-    } while (cursor);
-    const run: HistoryRun | null = !last ? null : { id: last.requestId ?? String(last.id), status: last.status === "done" ? "completed" : "failed",
-      error: last.status === "done" ? null : last.reason === "aborted" ? "stopped" : typeof last.detail === "string" ? last.detail : last.reason === "no_model" ? "model unavailable — choose another model" : last.reason ?? null };
-    this.results.set(id, { key, run });
-    return run;
+    await serveThreadEvents(await this.events(id), response);
   }
   async archive(id: string): Promise<void> {
     return this.command(id, async () => {
@@ -234,7 +179,7 @@ export class Conversations {
     }
     const agent = await this.agent(id);
     if ((await agent.harness.snapshot(LiveDoc, agent.conversation.id, context))?.run) throw new Error("stop the current run before archiving");
-    await agent.close(); this.agents.delete(id); this.earlier.delete(id); this.results.delete(id);
+    await agent.close(); this.agents.delete(id);
     this.closeWorkspace(id);
     this.registry.beginRelease(id);
     await this.release(id);
@@ -265,14 +210,6 @@ export class Conversations {
   }
 }
 
-type HistoryMessage = { seq: number | string; role: string; content: string; payload: Message; finalized: boolean };
-type HistoryRun = { id: string; status: string; error: string | null };
-const SHOWN = new Set(["pi.user", "pi.assistant", "pi.tool-result"]);
-function messages(entries: readonly EntryRecord[]): HistoryMessage[] {
-  return entries.flatMap(entry => SHOWN.has(entry.kind) ? (entry.model ?? []).map(message => ({
-    seq: entry.id, role: message.role === "toolResult" ? "tool" : message.role, content: messageText(message), payload: message, finalized: true,
-  })) : []);
-}
 function messageText(message: Message): string {
   if (typeof message.content === "string") return message.content;
   return message.content.map(part => part.type === "text" ? part.text : part.type === "thinking" ? part.thinking : "").filter(Boolean).join("\n");

@@ -83,6 +83,13 @@ export class LeaseStore {
     return current;
   }
 
+  /** The owner holding the lease now, if any. */
+  holder(): WorkspaceOwner | null {
+    if (this.closed) return null;
+    this.expire();
+    return this.held?.owner ?? null;
+  }
+
   release(token: string): void {
     this.verify(token);
     this.clear();
