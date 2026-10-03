@@ -1,11 +1,12 @@
 //! Opt-in trusted Unix runner execution. This is not an isolation boundary.
 //! The daemon must have exclusive ownership of its journal; never replay on boot.
 use std::{
+    ffi::OsStr,
     fs::{self, File, OpenOptions},
     io,
     os::{
         fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
+        unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     },
     path::{Component, Path, PathBuf},
     process::{Command as StdCommand, Stdio},
@@ -29,9 +30,18 @@ use std::{
     os::{fd::FromRawFd, unix::ffi::OsStrExt},
 };
 
-pub const MAX_OUTPUT: u32 = 8192;
-pub const MAX_TIMEOUT_MS: u64 = 60_000;
-pub const MAX_RECORDS: i64 = 10_000;
+/// Retained combined output per command; `operation.get` pages through it.
+pub const MAX_OUTPUT: u32 = 256 * 1024;
+pub const OUTPUT_PAGE_BYTES: usize = 64 * 1024;
+pub const MAX_TIMEOUT_MS: u64 = 600_000;
+pub const MAX_COMMAND_BYTES: usize = 8192;
+pub const MAX_PATH_BYTES: usize = 4096;
+pub const MAX_READ_BYTES: u64 = 512 * 1024;
+pub const MAX_WRITE_BYTES: usize = 512 * 1024;
+/// Whole-file digests are reported for regular files up to this size.
+pub const MAX_HASH_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_RECORDS: i64 = 100_000;
+pub const MAX_EPOCH: u64 = 9_007_199_254_740_991;
 pub const MAX_ACTIVE_WORKSPACES: u64 = 1;
 pub const MAX_WORKSPACE_BYTES: u64 = 50 * 1024 * 1024 * 1024;
 
@@ -65,13 +75,15 @@ pub struct ExecSpec {
 impl ExecSpec {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            !self.command.is_empty() && self.command.len() <= 8192 && !self.command.contains('\0'),
+            !self.command.is_empty()
+                && self.command.len() <= MAX_COMMAND_BYTES
+                && !self.command.contains('\0'),
             "invalid command"
         );
         let cwd = Path::new(&self.guest_cwd);
         ensure!(
             !self.guest_cwd.is_empty()
-                && self.guest_cwd.len() <= 4096
+                && self.guest_cwd.len() <= MAX_PATH_BYTES
                 && !self.guest_cwd.contains('\0')
                 && !cwd.is_absolute()
                 && cwd
@@ -97,6 +109,53 @@ pub struct ExecResult {
     pub output: Vec<u8>,
     pub output_bytes: u64,
     pub truncated: bool,
+    /// Byte offset of `output` within the retained output. Set on reads only;
+    /// journal records keep the protocol-1 shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WriteResult {
+    pub sha256: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FileContent {
+    #[serde(with = "base64_bytes")]
+    pub content: Vec<u8>,
+    pub offset: u64,
+    pub size: u64,
+    pub eof: bool,
+    pub sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FileStat {
+    pub kind: String,
+    pub size: u64,
+    pub mode: u32,
+    pub modified_ms: i64,
+    pub sha256: Option<String>,
+}
+
+/// File bytes travel as standard padded base64 strings, not JSON number arrays.
+pub mod base64_bytes {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        STANDARD.decode(text.as_bytes()).map_err(D::Error::custom)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -106,6 +165,10 @@ pub enum Operation {
     Running,
     Succeeded {
         result: ExecResult,
+    },
+    /// A completed `fs.write`, retained under its idempotency key.
+    Written {
+        result: WriteResult,
     },
     Failed {
         error: String,
@@ -234,6 +297,15 @@ impl std::fmt::Display for RunnerErrorDetail {
     }
 }
 impl std::error::Error for RunnerErrorDetail {}
+/// A retained mutation whose effect cannot be confirmed. Never repeat it.
+#[derive(Debug)]
+pub struct OutcomeUnknown;
+impl std::fmt::Display for OutcomeUnknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OUTCOME_UNKNOWN")
+    }
+}
+impl std::error::Error for OutcomeUnknown {}
 fn reject<T>(code: &'static str) -> Result<T> {
     Err(RunnerError(code).into())
 }
@@ -302,6 +374,7 @@ struct Journal {
     _lock: File,
     active: bool,
     active_thread: Option<String>,
+    active_id: Option<String>,
 }
 
 pub struct Runner {
@@ -312,6 +385,8 @@ pub struct Runner {
     accepting: AtomicBool,
     faulted: AtomicBool,
     cancel_active: AtomicBool,
+    /// `exec.cancel` for the one active operation. Reset on each admission.
+    cancel_operation: AtomicBool,
     cancel: Notify,
     idle: Notify,
 }
@@ -550,7 +625,13 @@ impl Runner {
         db.execute_batch("CREATE TABLE IF NOT EXISTS workspace(thread_id TEXT PRIMARY KEY, state TEXT NOT NULL, path TEXT NOT NULL UNIQUE,
             kind TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL, error TEXT, allocation TEXT NOT NULL DEFAULT '{}');
             CREATE TABLE IF NOT EXISTS workspace_base(thread_id TEXT PRIMARY KEY REFERENCES workspace(thread_id),
-              remote TEXT NOT NULL, ref_name TEXT NOT NULL, oid TEXT);")?;
+              remote TEXT NOT NULL, ref_name TEXT NOT NULL, oid TEXT);
+            CREATE TABLE IF NOT EXISTS operation_output(id TEXT PRIMARY KEY REFERENCES operation(id), output BLOB NOT NULL);
+            CREATE TRIGGER IF NOT EXISTS retain_operation_output BEFORE DELETE ON operation_output BEGIN SELECT RAISE(ABORT, 'retain operation output'); END;
+            CREATE TRIGGER IF NOT EXISTS immutable_operation_output BEFORE UPDATE ON operation_output BEGIN SELECT RAISE(ABORT, 'immutable operation output'); END;
+            CREATE TABLE IF NOT EXISTS lease_epoch(thread_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL CHECK(epoch >= 1));
+            CREATE TRIGGER IF NOT EXISTS monotonic_lease_epoch BEFORE UPDATE OF epoch ON lease_epoch WHEN NEW.epoch < OLD.epoch BEGIN SELECT RAISE(ABORT, 'lease epoch decreased'); END;
+            CREATE TRIGGER IF NOT EXISTS retain_lease_epoch BEFORE DELETE ON lease_epoch BEGIN SELECT RAISE(ABORT, 'retain lease epoch'); END;")?;
         let has_allocation = db
             .prepare("PRAGMA table_info(workspace)")?
             .query_map([], |row| row.get::<_, String>(1))?
@@ -589,10 +670,12 @@ impl Runner {
                 _lock: lock,
                 active: false,
                 active_thread: None,
+                active_id: None,
             }),
             accepting: AtomicBool::new(!quarantined),
             faulted: AtomicBool::new(false),
             cancel_active: AtomicBool::new(false),
+            cancel_operation: AtomicBool::new(false),
             cancel: Notify::new(),
             idle: Notify::new(),
         }))
@@ -1187,8 +1270,15 @@ impl Runner {
     }
 
     pub fn get(&self, env: u64, id: &str) -> Result<Operation> {
+        self.get_page(env, id, None)
+    }
+
+    /// A terminal command result carries one page of retained output starting
+    /// at `cursor`; callers advance by the page length up to `retainedBytes`.
+    pub fn get_page(&self, env: u64, id: &str, cursor: Option<u64>) -> Result<Operation> {
         self.check_env(env)?;
         ensure!(valid_id(id), RunnerError("INVALID_REQUEST"));
+        let start = cursor.unwrap_or(0);
         let journal = self.journal.lock().unwrap();
         let state: Option<String> = journal
             .db
@@ -1196,9 +1286,259 @@ impl Runner {
                 r.get(0)
             })
             .optional()?;
-        state
-            .map(|s| serde_json::from_str(&s).map_err(Into::into))
-            .unwrap_or(Ok(Operation::Unknown))
+        let mut operation = match state {
+            Some(state) => serde_json::from_str(&state)?,
+            None => Operation::Unknown,
+        };
+        if let Operation::Succeeded { result } = &mut operation {
+            // Protocol-1 records kept their (at most 8 KiB) output inline.
+            let retained = journal
+                .db
+                .query_row(
+                    "SELECT output FROM operation_output WHERE id=?1",
+                    [id],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .optional()?
+                .unwrap_or_else(|| std::mem::take(&mut result.output));
+            ensure!(
+                start <= retained.len() as u64,
+                RunnerError("INVALID_REQUEST")
+            );
+            let start = start as usize;
+            let end = retained.len().min(start + OUTPUT_PAGE_BYTES);
+            result.output = retained[start..end].to_vec();
+            result.output_offset = Some(start as u64);
+            result.retained_bytes = Some(retained.len() as u64);
+        } else {
+            ensure!(start == 0, RunnerError("INVALID_REQUEST"));
+        }
+        Ok(operation)
+    }
+
+    /// Lease epochs fence mutations per thread. Calls without an epoch count
+    /// as epoch 0, so they are refused once any lease epoch has been seen.
+    fn fence(&self, db: &Connection, thread_id: Option<&str>, epoch: Option<u64>) -> Result<()> {
+        let epoch = epoch.unwrap_or(0);
+        let key = thread_id.unwrap_or(&self.installation.binding.thread_id);
+        let seen = db
+            .query_row(
+                "SELECT epoch FROM lease_epoch WHERE thread_id=?1",
+                [key],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .map_or(0, |epoch| epoch as u64);
+        if epoch < seen {
+            return reject("LEASE_STALE");
+        }
+        if epoch > seen {
+            db.execute(
+                "INSERT INTO lease_epoch VALUES(?1,?2) ON CONFLICT(thread_id) DO UPDATE SET epoch=excluded.epoch",
+                params![key, i64::try_from(epoch)?],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Real cancellation of the one active command: its process group is
+    /// SIGKILLed and the record ends `Failed { CANCELLED }`. Returns the state
+    /// observed right after the request; poll `operation.get` for the outcome.
+    pub fn cancel(
+        &self,
+        env: u64,
+        thread_id: Option<&str>,
+        id: &str,
+        epoch: Option<u64>,
+    ) -> Result<Operation> {
+        self.check_env(env)?;
+        ensure!(
+            valid_id(id) && thread_id.is_none_or(valid_id) && valid_epoch(epoch),
+            RunnerError("INVALID_REQUEST")
+        );
+        {
+            let journal = self.journal.lock().unwrap();
+            self.fence(&journal.db, thread_id, epoch)?;
+            if journal.active_id.as_deref() == Some(id)
+                && journal.active_thread.as_deref() == thread_id
+            {
+                self.cancel_operation.store(true, Ordering::SeqCst);
+                self.cancel.notify_waiters();
+            }
+        }
+        self.get(env, id)
+    }
+
+    pub fn read_file(
+        &self,
+        env: u64,
+        thread_id: Option<&str>,
+        path: &str,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<FileContent> {
+        self.check_env(env)?;
+        let offset = offset.unwrap_or(0);
+        let limit = limit.unwrap_or(MAX_READ_BYTES);
+        ensure!(
+            thread_id.is_none_or(valid_id)
+                && (1..=MAX_READ_BYTES).contains(&limit)
+                && offset <= MAX_EPOCH,
+            RunnerError("INVALID_REQUEST")
+        );
+        let components = workspace_components(path, false)?;
+        let root = self.cwd(thread_id, ".")?;
+        let file = open_file(&root, &components)?;
+        let size = file.metadata()?.len();
+        let mut content = vec![0u8; limit.min(size.saturating_sub(offset)) as usize];
+        let mut filled = 0;
+        while filled < content.len() {
+            let read = file.read_at(&mut content[filled..], offset + filled as u64)?;
+            if read == 0 {
+                break;
+            }
+            filled += read;
+        }
+        content.truncate(filled);
+        Ok(FileContent {
+            eof: offset + filled as u64 >= size,
+            sha256: file_digest(&file, size, MAX_HASH_BYTES)?,
+            content,
+            offset,
+            size,
+        })
+    }
+
+    pub fn stat_path(&self, env: u64, thread_id: Option<&str>, path: &str) -> Result<FileStat> {
+        self.check_env(env)?;
+        ensure!(
+            thread_id.is_none_or(valid_id),
+            RunnerError("INVALID_REQUEST")
+        );
+        let components = workspace_components(path, true)?;
+        let root = self.cwd(thread_id, ".")?;
+        let Some((name, parents)) = components.split_last() else {
+            return describe(rustix::fs::fstat(&root).map_err(errno)?, None);
+        };
+        let parent = open_directory(&root, parents)?;
+        let stat = rustix::fs::statat(&parent, *name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(errno)?;
+        describe(stat, Some((&parent, name)))
+    }
+
+    /// Atomic replacement (temporary file, fsync, rename, directory fsync)
+    /// retained under an idempotency key. The same key with the same request
+    /// returns the original result and never writes again; a changed request
+    /// is `CONFLICT`. `expected_sha` is the whole current file's SHA-256.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_file(
+        &self,
+        env: u64,
+        thread_id: Option<&str>,
+        epoch: Option<u64>,
+        key: &str,
+        path: &str,
+        content: &[u8],
+        expected_sha: Option<&str>,
+        create_parents: bool,
+    ) -> Result<WriteResult> {
+        self.check_env(env)?;
+        ensure!(
+            valid_id(key)
+                && thread_id.is_none_or(valid_id)
+                && valid_epoch(epoch)
+                && content.len() <= MAX_WRITE_BYTES
+                && expected_sha.is_none_or(valid_sha),
+            RunnerError("INVALID_REQUEST")
+        );
+        let components = workspace_components(path, false)?;
+        let root = self.cwd(thread_id, ".")?;
+        let content_sha = hex(&Sha256::digest(content));
+        // The epoch is a fence, not part of the request identity.
+        let request = serde_json::to_string(&(
+            "fs.write",
+            &self.installation.binding,
+            thread_id,
+            path,
+            &content_sha,
+            content.len(),
+            expected_sha,
+            create_parents,
+        ))?;
+        let hash = hex(&Sha256::digest(request.as_bytes()));
+        let journal = self.journal.lock().unwrap();
+        self.fence(&journal.db, thread_id, epoch)?;
+        let previous: Option<(String, String, String)> = journal
+            .db
+            .query_row(
+                "SELECT request,hash,state FROM operation WHERE id=?1",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((previous_request, previous_hash, state)) = previous {
+            if (previous_request, previous_hash) != (request, hash) {
+                return reject("CONFLICT");
+            }
+            return match serde_json::from_str::<Operation>(&state)? {
+                Operation::Written { result } => Ok(result),
+                Operation::Failed {
+                    error,
+                    completion_unknown: false,
+                } => reject(retained_code(&error)),
+                _ => Err(OutcomeUnknown.into()),
+            };
+        }
+        if self.faulted.load(Ordering::SeqCst) {
+            return reject("IO_ERROR");
+        }
+        if !self.accepting.load(Ordering::SeqCst) {
+            return reject("DRAINING");
+        }
+        if journal
+            .db
+            .query_row("SELECT COUNT(*) FROM operation", [], |r| r.get::<_, i64>(0))?
+            >= MAX_RECORDS
+        {
+            return reject("CAPACITY_EXCEEDED");
+        }
+        // Durable before the first filesystem change; startup turns an
+        // unfinished record into Interrupted { completionUnknown: true }.
+        journal.db.execute(
+            "INSERT INTO operation VALUES(?1,?2,?3,?4)",
+            params![
+                key,
+                request,
+                hash,
+                serde_json::to_string(&Operation::Running)?
+            ],
+        )?;
+        let outcome = write_beneath(
+            &root,
+            &components,
+            content,
+            &content_sha,
+            expected_sha,
+            create_parents,
+        );
+        let state = match &outcome {
+            Ok(result) => Operation::Written {
+                result: result.clone(),
+            },
+            Err((code, completion_unknown)) => Operation::Failed {
+                error: (*code).into(),
+                completion_unknown: *completion_unknown,
+            },
+        };
+        journal.db.execute(
+            "UPDATE operation SET state=?1 WHERE id=?2",
+            params![serde_json::to_string(&state)?, key],
+        )?;
+        match outcome {
+            Ok(result) => Ok(result),
+            Err((_, true)) => Err(OutcomeUnknown.into()),
+            Err((code, false)) => reject(code),
+        }
     }
 
     /// Commit before spawning, without awaiting network IO. Work belongs to the
@@ -1214,8 +1554,22 @@ impl Runner {
         id: &str,
         spec: ExecSpec,
     ) -> Result<()> {
+        self.start_fenced(env, thread_id, id, None, spec)
+    }
+
+    pub fn start_fenced(
+        self: &Arc<Self>,
+        env: u64,
+        thread_id: Option<&str>,
+        id: &str,
+        epoch: Option<u64>,
+        spec: ExecSpec,
+    ) -> Result<()> {
         self.check_env(env)?;
-        ensure!(valid_id(id), RunnerError("INVALID_REQUEST"));
+        ensure!(
+            valid_id(id) && valid_epoch(epoch),
+            RunnerError("INVALID_REQUEST")
+        );
         spec.validate()
             .map_err(|_| RunnerError("INVALID_REQUEST"))?;
         // Resolve the descriptor before taking the journal mutex; allocated
@@ -1232,11 +1586,10 @@ impl Runner {
             // Preserve protocol-v1 operation hashes for existing bound threads.
             serde_json::to_string(&("exec.start", &self.installation.binding, &spec))?
         };
-        let hash = Sha256::digest(request.as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let hash = hex(&Sha256::digest(request.as_bytes()));
         let mut journal = self.journal.lock().unwrap();
+        // The epoch is a fence, not part of the request identity.
+        self.fence(&journal.db, thread_id, epoch)?;
         let previous: Option<(String, String)> = journal
             .db
             .query_row(
@@ -1278,6 +1631,8 @@ impl Runner {
         )?;
         journal.active = true;
         journal.active_thread = thread_id.map(str::to_owned);
+        journal.active_id = Some(id.to_owned());
+        self.cancel_operation.store(false, Ordering::SeqCst);
         let runner = Arc::clone(self);
         let id = id.to_owned();
         tokio::spawn(async move {
@@ -1309,6 +1664,7 @@ impl Runner {
             }
             journal.active = false;
             journal.active_thread = None;
+            journal.active_id = None;
             runner.idle.notify_waiters();
         });
         Ok(())
@@ -1321,13 +1677,37 @@ impl Runner {
         ensure!(changed == 1, "operation record disappeared");
         Ok(())
     }
+    /// Retained output goes to its own table; the record keeps the protocol-1
+    /// result shape so an older binary can still open the journal.
+    fn save_result(&self, id: &str, mut result: ExecResult) -> Result<()> {
+        let output = std::mem::take(&mut result.output);
+        let journal = self.journal.lock().unwrap();
+        let transaction = journal.db.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO operation_output VALUES(?1,?2)",
+            params![id, output],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE operation SET state=?1 WHERE id=?2",
+            params![serde_json::to_string(&Operation::Succeeded { result })?, id],
+        )?;
+        ensure!(changed == 1, "operation record disappeared");
+        transaction.commit()?;
+        Ok(())
+    }
     async fn run(&self, id: &str, spec: &ExecSpec, cwd: File, workspace: &Path) -> Result<()> {
         self.save(id, Operation::Running)?; // Durable intent before possible spawn.
-        let result = execute(spec, cwd, workspace, &self.cancel_active, &self.cancel).await;
+        let result = if self.cancel_operation.load(Ordering::SeqCst) {
+            Ok(ExecutionOutcome::Cancelled) // cancelled before spawn
+        } else {
+            let cancelled = || {
+                self.cancel_active.load(Ordering::SeqCst)
+                    || self.cancel_operation.load(Ordering::SeqCst)
+            };
+            execute(spec, cwd, workspace, &cancelled, &self.cancel).await
+        };
         match result {
-            Ok(ExecutionOutcome::Completed(result)) => {
-                self.save(id, Operation::Succeeded { result })
-            }
+            Ok(ExecutionOutcome::Completed(result)) => self.save_result(id, result),
             Ok(ExecutionOutcome::Cancelled) => self.save(
                 id,
                 Operation::Failed {
@@ -1781,6 +2161,325 @@ fn directory_bytes(root: &Path) -> Result<u64> {
     Ok(total)
 }
 
+fn valid_epoch(epoch: Option<u64>) -> bool {
+    epoch.is_none_or(|epoch| (1..=MAX_EPOCH).contains(&epoch))
+}
+fn valid_sha(sha: &str) -> bool {
+    sha.len() == 64
+        && sha
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+/// Failure codes a retained `fs.write` may replay. Anything else is IO.
+fn retained_code(error: &str) -> &'static str {
+    match error {
+        "PRECONDITION_FAILED" => "PRECONDITION_FAILED",
+        "NOT_FOUND" => "NOT_FOUND",
+        "INVALID_REQUEST" => "INVALID_REQUEST",
+        "UNSUPPORTED" => "UNSUPPORTED",
+        _ => "IO_ERROR",
+    }
+}
+fn errno_code(error: rustix::io::Errno) -> &'static str {
+    use rustix::io::Errno;
+    match error {
+        Errno::NOENT => "NOT_FOUND",
+        Errno::NOTDIR
+        | Errno::LOOP
+        | Errno::XDEV
+        | Errno::ISDIR
+        | Errno::NAMETOOLONG
+        | Errno::EXIST => "INVALID_REQUEST",
+        Errno::NOSYS => "UNSUPPORTED",
+        _ => "IO_ERROR",
+    }
+}
+fn errno(error: rustix::io::Errno) -> anyhow::Error {
+    RunnerError(errno_code(error)).into()
+}
+fn error_code(error: &anyhow::Error) -> &'static str {
+    error
+        .downcast_ref::<RunnerError>()
+        .map_or("IO_ERROR", |error| error.0)
+}
+
+/// A relative workspace path as plain components: no absolute paths, `..`,
+/// NUL or empty path. Only `fs.stat` may name the workspace root itself.
+fn workspace_components(path: &str, allow_root: bool) -> Result<Vec<&OsStr>> {
+    let candidate = Path::new(path);
+    ensure!(
+        !path.is_empty()
+            && path.len() <= MAX_PATH_BYTES
+            && !path.contains('\0')
+            && !candidate.is_absolute(),
+        RunnerError("INVALID_REQUEST")
+    );
+    let mut components = Vec::new();
+    for component in candidate.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(name) => components.push(name),
+            _ => return reject("INVALID_REQUEST"),
+        }
+    }
+    ensure!(
+        allow_root || !components.is_empty(),
+        RunnerError("INVALID_REQUEST")
+    );
+    Ok(components)
+}
+
+/// A directory beneath the identity-checked workspace root. Linux resolves
+/// it in the kernel with `openat2(RESOLVE_BENEATH)`; macOS walks components
+/// with `openat(O_NOFOLLOW)`. Neither confines commands run by the same UID.
+fn open_directory(root: &File, components: &[&OsStr]) -> Result<File> {
+    if components.is_empty() {
+        return Ok(root.try_clone()?);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+        let path: PathBuf = components.iter().collect();
+        openat2(
+            root,
+            &path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS,
+        )
+        .map(File::from)
+        .map_err(openat2_error)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use rustix::fs::{Mode, OFlags, openat};
+        let mut directory = root.try_clone()?;
+        for name in components {
+            directory = File::from(
+                openat(
+                    &directory,
+                    *name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(errno)?,
+            );
+        }
+        Ok(directory)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        reject("UNSUPPORTED")
+    }
+}
+#[cfg(target_os = "linux")]
+fn openat2_error(error: rustix::io::Errno) -> anyhow::Error {
+    use rustix::io::Errno;
+    // EINVAL here means the kernel does not support the resolve flags.
+    RunnerError(if error == Errno::INVAL {
+        "UNSUPPORTED"
+    } else {
+        errno_code(error)
+    })
+    .into()
+}
+
+/// Like `open_directory`, creating missing directories one component at a
+/// time beneath the root.
+fn ensure_directory(root: &File, components: &[&OsStr]) -> Result<File> {
+    match open_directory(root, components) {
+        Err(error) if error_code(&error) == "NOT_FOUND" => {}
+        other => return other,
+    }
+    for depth in 1..=components.len() {
+        match open_directory(root, &components[..depth]) {
+            Ok(_) => continue,
+            Err(error) if error_code(&error) == "NOT_FOUND" => {
+                let parent = open_directory(root, &components[..depth - 1])?;
+                match rustix::fs::mkdirat(
+                    &parent,
+                    components[depth - 1],
+                    rustix::fs::Mode::from_bits_truncate(0o777),
+                ) {
+                    Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                    Err(error) => return Err(errno(error)),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    open_directory(root, components)
+}
+
+/// The final component without following a symlink; `None` when absent.
+/// NONBLOCK keeps a FIFO from stalling the request before it is rejected.
+fn open_leaf(parent: &File, name: &OsStr) -> Result<Option<File>> {
+    use rustix::fs::{Mode, OFlags, openat};
+    match openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY,
+        Mode::empty(),
+    ) {
+        Ok(fd) => Ok(Some(File::from(fd))),
+        Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(error) => Err(errno(error)),
+    }
+}
+
+/// A regular file for reading. Linux follows symlinks only while they stay
+/// beneath the workspace; macOS refuses every symlink component.
+fn open_file(root: &File, components: &[&OsStr]) -> Result<File> {
+    #[cfg(target_os = "linux")]
+    let file = {
+        use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+        let path: PathBuf = components.iter().collect();
+        File::from(
+            openat2(
+                root,
+                &path,
+                OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY,
+                Mode::empty(),
+                ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS,
+            )
+            .map_err(openat2_error)?,
+        )
+    };
+    #[cfg(not(target_os = "linux"))]
+    let file = {
+        let (name, parents) = components
+            .split_last()
+            .ok_or(RunnerError("INVALID_REQUEST"))?;
+        open_leaf(&open_directory(root, parents)?, name)?.ok_or(RunnerError("NOT_FOUND"))?
+    };
+    ensure!(file.metadata()?.is_file(), RunnerError("INVALID_REQUEST"));
+    Ok(file)
+}
+
+fn file_digest(file: &File, size: u64, limit: u64) -> Result<Option<String>> {
+    if size > limit {
+        return Ok(None);
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut offset = 0u64;
+    loop {
+        let read = file.read_at(&mut buffer, offset)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        offset += read as u64;
+    }
+    Ok(Some(hex(&hasher.finalize())))
+}
+
+// Stat field widths differ between Linux and macOS.
+#[allow(clippy::unnecessary_cast)]
+fn describe(stat: rustix::fs::Stat, leaf: Option<(&File, &OsStr)>) -> Result<FileStat> {
+    use rustix::fs::FileType;
+    let size = stat.st_size as u64;
+    let kind = match FileType::from_raw_mode(stat.st_mode as _) {
+        FileType::RegularFile => "file",
+        FileType::Directory => "directory",
+        FileType::Symlink => "symlink",
+        _ => "other",
+    };
+    let sha256 = match leaf {
+        Some((parent, name)) if kind == "file" && size <= MAX_HASH_BYTES => {
+            open_leaf(parent, name)?
+                .map(|file| file_digest(&file, size, MAX_HASH_BYTES))
+                .transpose()?
+                .flatten()
+        }
+        _ => None,
+    };
+    Ok(FileStat {
+        kind: kind.into(),
+        size,
+        mode: stat.st_mode as u32 & 0o7777,
+        modified_ms: (stat.st_mtime as i64)
+            .saturating_mul(1000)
+            .saturating_add(stat.st_mtime_nsec as i64 / 1_000_000),
+        sha256,
+    })
+}
+
+/// Errors carry whether the target may already have changed.
+fn write_beneath(
+    root: &File,
+    components: &[&OsStr],
+    content: &[u8],
+    content_sha: &str,
+    expected_sha: Option<&str>,
+    create_parents: bool,
+) -> std::result::Result<WriteResult, (&'static str, bool)> {
+    use rustix::fs::{AtFlags, Mode, OFlags, openat, renameat, unlinkat};
+    use std::io::Write;
+    let unchanged = |error: anyhow::Error| (error_code(&error), false);
+    let (name, parents) = components.split_last().ok_or(("INVALID_REQUEST", false))?;
+    let parent = if create_parents {
+        ensure_directory(root, parents)
+    } else {
+        open_directory(root, parents)
+    }
+    .map_err(unchanged)?;
+    // A symlink at the final component is refused (ELOOP), never replaced.
+    let existing = open_leaf(&parent, name).map_err(unchanged)?;
+    let mode = match &existing {
+        Some(file) => {
+            let metadata = file.metadata().map_err(|_| ("IO_ERROR", false))?;
+            if !metadata.is_file() {
+                return Err(("INVALID_REQUEST", false));
+            }
+            if let Some(expected) = expected_sha
+                && file_digest(file, metadata.len(), u64::MAX)
+                    .map_err(unchanged)?
+                    .as_deref()
+                    != Some(expected)
+            {
+                return Err(("PRECONDITION_FAILED", false));
+            }
+            Some(metadata.mode() & 0o7777)
+        }
+        None if expected_sha.is_some() => return Err(("PRECONDITION_FAILED", false)),
+        None => None,
+    };
+    drop(existing);
+    let temporary = format!(".cube-write-{}", uuid::Uuid::new_v4().simple());
+    let mut file = File::from(
+        openat(
+            &parent,
+            temporary.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_bits_truncate(0o666),
+        )
+        .map_err(|error| (errno_code(error), false))?,
+    );
+    let written = (|| -> io::Result<()> {
+        file.write_all(content)?;
+        if let Some(mode) = mode {
+            file.set_permissions(fs::Permissions::from_mode(mode))?;
+        }
+        file.sync_all()
+    })();
+    drop(file);
+    if written.is_err() || renameat(&parent, temporary.as_str(), &parent, *name).is_err() {
+        let _ = unlinkat(&parent, temporary.as_str(), AtFlags::empty());
+        return Err(("IO_ERROR", false));
+    }
+    if parent.sync_all().is_err() {
+        return Err(("IO_ERROR", true));
+    }
+    Ok(WriteResult {
+        sha256: content_sha.into(),
+        size: content.len() as u64,
+    })
+}
+
 enum ExecutionOutcome {
     Completed(ExecResult),
     Cancelled,
@@ -1790,7 +2489,7 @@ async fn execute(
     spec: &ExecSpec,
     cwd: File,
     workspace: &Path,
-    cancel_active: &AtomicBool,
+    cancel_requested: &(dyn Fn() -> bool + Sync),
     cancel: &Notify,
 ) -> Result<ExecutionOutcome> {
     let mut command = Command::new("/bin/bash");
@@ -1833,9 +2532,17 @@ async fn execute(
     tokio::pin!(deadline);
     let mut timed_out = false;
     let mut cancelled = false;
+    // Register for the wakeup before checking the flag so a cancellation
+    // between check and wait is never lost.
     let cancellation = async {
-        if !cancel_active.load(Ordering::SeqCst) {
-            cancel.notified().await;
+        loop {
+            let notified = cancel.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if cancel_requested() {
+                break;
+            }
+            notified.await;
         }
     };
     tokio::pin!(cancellation);
@@ -1893,6 +2600,8 @@ async fn execute(
         truncated: output_bytes > output.len() as u64 || timed_out,
         output,
         output_bytes,
+        output_offset: None,
+        retained_bytes: None,
     }))
 }
 

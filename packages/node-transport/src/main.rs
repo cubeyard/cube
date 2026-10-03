@@ -459,7 +459,9 @@ async fn main() -> Result<()> {
             let active = runner.status()?.active;
             if human {
                 if active {
-                    eprintln!("stopping: draining; waiting for the active command (up to 60s)");
+                    eprintln!(
+                        "stopping: draining; waiting for the active command (up to 10 minutes)"
+                    );
                     eprintln!("press Ctrl-C again to cancel it");
                 } else {
                     eprintln!("stopping: drained; no active command");
@@ -541,12 +543,14 @@ async fn main() -> Result<()> {
                     env: intent.environment_id,
                     operation_id: intent.operation_id,
                     thread_id: None,
+                    epoch: None,
                     spec: intent.spec,
                 }
             } else {
                 Request::OperationGet {
                     env: intent.environment_id,
                     operation_id: intent.operation_id,
+                    cursor: None,
                 }
             };
             let (endpoint, destination) = client_destination(

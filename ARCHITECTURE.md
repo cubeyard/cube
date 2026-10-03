@@ -55,6 +55,11 @@ operation ID. A repeated `exec.start` retrieves retained work; changed arguments
 conflict. The runner never silently reexecutes Interrupted operations or evicts
 IDs to create room. A lost response therefore does not imply a second effect.
 Diagnostic runner CLI intents remain separate from Pi's production call path.
+Runner protocol 2 adds paged command output, `exec.cancel` (process-group
+SIGKILL), `fs.read`/`fs.write`/`fs.stat` beneath the workspace, idempotency keys
+for writes and per-thread lease-epoch fencing of mutations. A protocol-1 runner
+is incompatible and must be upgraded; see
+[RUNNER.md](packages/node-transport/RUNNER.md).
 
 Pi recovery is a durable state machine, not complete-history replay. Partial
 model responses can be interrupted and retried under Pi policy; a provider may

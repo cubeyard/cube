@@ -1,7 +1,8 @@
 # Trusted runner operations
 
 This is the operations boundary for Cube **trusted runners**. One installation
-has one immutable protocol-v1 installation/environment binding, belongs to the
+has one immutable installation/environment binding, speaks runner protocol 2,
+belongs to the
 global Cube pool, leases one active thread workspace at a time across all projects,
 and uses Iroh's public N0 discovery/relay
 transport. A trusted runner executes under its account without sandboxing and
@@ -243,11 +244,15 @@ sudo bash scripts/runner/rollback-legacy.sh
 ```
 
 Rollback stops the runner service and starts the untouched `cube-host.service`
-against the same state. It does not convert new protocol or journal formats;
-protocol v1 and journal schema v1 therefore remain frozen throughout this phase.
+against the same state. It does not convert journal formats, so journal schema
+v1 remains frozen throughout this phase; protocol-2 additions are additive
+tables. A rolled-back runner speaks protocol 1, which current cubed reports as
+`INCOMPATIBLE_PROTOCOL`.
 Remove the legacy layout only in a later explicit migration after `cube-host`
 rollback support leaves the supported release window.
 
+Install and upgrade accept only protocol-2 binaries (cube-runner 0.3.0 or
+newer); cubed requires protocol 2 and never falls back to an older runner.
 Native runner upgrades on both platforms use the same `upgrade.sh`: stage an
 immutable native release, confirm drain, switch `current`, require matching
 readiness, and restore the previous target and service definition on failure.
@@ -308,9 +313,10 @@ Never delete old evidence to make an ambiguous command retryable.
 ## Capacity and diagnostics
 
 One operation and one active thread workspace run at a time. Commands are capped
-at 8 KiB, cwd at 4 KiB, runtime at 60 seconds, output at 8 KiB, connections at
-16, immutable journal records at 10,000, and new workspace admission at 50 GiB
-of managed workspace data. `node.status` reports active/retained counts and
+at 8 KiB, cwd and file paths at 4 KiB, runtime at 600 seconds, retained output
+at 256 KiB (read in 64-KiB pages), file reads and writes at 512 KiB per call,
+connections at 16, immutable journal records (commands and file writes) at
+100,000, and new workspace admission at 50 GiB of managed workspace data. `node.status` reports active/retained counts and
 managed bytes. Records do not expire because they are no-replay evidence.
 These protocol limits are not CPU, memory, process-count, network, or disk
 quotas; the byte threshold is admission/observability, not enforcement. Apply
@@ -325,6 +331,7 @@ addresses, IDs, and paths.
 | `DRAINING` | wait or explicitly resume/restart after maintenance |
 | `CAPACITY_EXCEEDED` | wait for active work; replace before journal exhaustion |
 | `INCOMPATIBLE_PROTOCOL` | upgrade the older cubed/cube-runner component |
+| `LEASE_STALE` | a newer thread lease owns the workspace; never retry with the old epoch |
 | `recoveryRequired` | reconcile uncertainty, then acknowledge while stopped |
 | `COMPLETION_UNKNOWN` / `Interrupted` | inspect the saved ID; never resubmit |
 | `WRONG_NODE` | verify Iroh peers and the full immutable binding out of band |

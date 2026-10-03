@@ -5,7 +5,7 @@ export type NodeId = string;
 export type NodeContact = "unobserved" | "available" | "unavailable";
 export type NodeErrorCode = "NODE_UNAVAILABLE" | "ENVIRONMENT_MISSING" | "OPERATION_UNSUPPORTED" | "COMPLETION_UNKNOWN"
   | "WRONG_NODE" | "INVALID_REQUEST" | "CONFLICT" | "CAPACITY_EXCEEDED" | "DRAINING" | "CANCELLED"
-  | "INCOMPATIBLE_PROTOCOL" | "IO_ERROR";
+  | "INCOMPATIBLE_PROTOCOL" | "IO_ERROR" | "LEASE_STALE" | "PRECONDITION_FAILED" | "NOT_FOUND";
 export class ExecutionNodeError extends Error {
   readonly code: NodeErrorCode;
   readonly completionUnknown: boolean;

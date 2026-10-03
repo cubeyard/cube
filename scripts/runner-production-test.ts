@@ -9,12 +9,12 @@ const repo = path.resolve(import.meta.dirname, "..");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-runner-production-"));
 const user = os.userInfo().username;
 const group = spawnSync("id", ["-gn"], { encoding: "utf8" }).stdout.trim();
-const binary = (version: string) => {
-  const file = path.join(root, `runner-${version}`);
+const binary = (version: string, protocol = 2) => {
+  const file = path.join(root, `runner-${version}-p${protocol}`);
   fs.writeFileSync(file, `#!/bin/sh
 set -eu
 if [ "$1" = version ]; then
-  printf '%s\\n' '{"softwareVersion":"${version}","protocolVersion":1,"minimumProtocolVersion":1}'
+  printf '%s\\n' '{"softwareVersion":"${version}","protocolVersion":${protocol},"minimumProtocolVersion":${protocol}}'
 elif [ "$1" = runner-acknowledge-recovery ]; then
   shift; state=""
   while [ "$#" -gt 0 ]; do
@@ -81,6 +81,8 @@ const testLinux = () => {
   assert.equal(fs.existsSync(plutilMarker), false, "direct install must not create or validate a plist");
 
   const fresh = path.join(root, "fresh");
+  const protocolOne = reject("runner", "install.sh", ["--service", binary("0.2.2", 1)], path.join(root, "protocol-one"));
+  assert.match(protocolOne.stderr + protocolOne.stdout, /runner protocol 2/, "a protocol-1 runner is not installable");
   run("runner", "install.sh", ["--service", binary("0.2.0")], fresh);
   assert.equal(fs.readlinkSync(path.join(fresh, "opt/cube-runner/current")), path.join(fresh, "opt/cube-runner/releases/0.2.0"));
   assert.equal(fs.statSync(path.join(fresh, "var/lib/cube-runner")).mode & 0o777, 0o700);
@@ -129,7 +131,7 @@ esac
 `, { mode: 0o755 });
   const env = { CUBE_RUNNER_SYSTEMCTL: systemctl };
   const legacy = path.join(root, "legacy");
-  run("host", "install.sh", [binary("0.1.1")], legacy);
+  run("host", "install.sh", [binary("0.1.1", 1)], legacy);
   fs.mkdirSync(path.join(legacy, "var/lib/cube-host/state"));
   const key = path.join(legacy, "var/lib/cube-host/identity/node.key");
   const journal = path.join(legacy, "var/lib/cube-host/state/journal.db");

@@ -46,6 +46,7 @@ async fn authorization_and_hello_gate_precede_mutation() {
         env: 1,
         operation_id: "op-rejected".into(),
         thread_id: None,
+        epoch: None,
         spec: ExecSpec {
             command: "touch must-not-exist".into(),
             guest_cwd: ".".into(),

@@ -51,10 +51,12 @@ not the durable node registry/enrollment or an environment allocation mechanism.
   four-byte big-endian payload length, then exactly that
   many UTF-8 JSON bytes and FIN. Empty, oversized, truncated, trailing or unknown
   request fields fail closed. Unsupported methods are not executed.
-- Request: `{"method":"node.hello","protocolVersion":1}`.
-- Response: `{"type":"Hello","nodeId":"node-development","protocolVersion":1,
-  "profiles":[],"capabilities":["node.hello"],"limits":{"maxFrameBytes":65536,
-  "requestTimeoutMs":5000}}`.
+- Request: `{"method":"node.hello","protocolVersion":2}`. Any other version is
+  `INCOMPATIBLE_PROTOCOL`.
+- Response: `{"type":"Hello","nodeId":"node-development","protocolVersion":2,
+  "minimumProtocolVersion":2,"profiles":[],"capabilities":["node.hello"],
+  "limits":{"maxFrameBytes":1048576,"requestTimeoutMs":5000,...}}`; see
+  [RUNNER.md](RUNNER.md) for every advertised limit.
 - Rejections use `type: Error`, `code`, a bounded static `message`,
   `completionUnknown` and optional `operationId`. Hello-only errors have no
   mutation uncertainty; runner commands distinguish possible delivery and journal
@@ -62,7 +64,7 @@ not the durable node registry/enrollment or an environment allocation mechanism.
   adapter maps `OUTCOME_UNKNOWN` to `COMPLETION_UNKNOWN`, retaining the operation
   ID. No retry and no offline execution queue.
 - At most 16 active handshake/request tasks; each has a five-second deadline.
-  Frames are bounded to 64 KiB before allocation. Slow/missing FIN also times out.
+  Frames are bounded to 1 MiB before allocation. Slow/missing FIN also times out.
 
 Loopback is the default. Rust network commands accept `--network direct` for an
 operator-selected unicast IP/port; a direct server additionally requires an

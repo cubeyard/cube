@@ -86,9 +86,10 @@ require_binary() {
   [ -f "$binary" ] && [ -x "$binary" ] && [ ! -L "$binary" ] \
     || fail 'binary must be an executable regular file, not a symlink'
   metadata="$($binary version 2>/dev/null)" || fail 'binary version check failed'
-  printf '%s' "$metadata" | grep -q '"protocolVersion":1' \
-    || fail 'binary does not support runner protocol 1'
-  printf '%s' "$metadata" | grep -q '"minimumProtocolVersion":1' \
+  # Protocol 2 only: older runners lack exec.cancel, files and lease fencing.
+  printf '%s' "$metadata" | grep -q '"protocolVersion":2' \
+    || fail 'binary does not support runner protocol 2; use cube-runner 0.3.0 or newer'
+  printf '%s' "$metadata" | grep -q '"minimumProtocolVersion":2' \
     || fail 'binary does not report protocol compatibility'
   version="$(printf '%s' "$metadata" | sed -n 's/.*"softwareVersion":"\([^"]*\)".*/\1/p')"
   printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$' \
@@ -212,7 +213,7 @@ wait_ready() {
   for _ in $(seq 1 100); do
     if [ -s "$ready" ] && grep -q '"lifecycle":"ready"' "$ready" \
       && grep -q "\"softwareVersion\":\"$version\"" "$ready" \
-      && grep -q '"protocolVersion":1' "$ready"; then return 0; fi
+      && grep -Eq '"protocolVersion":[0-9]+' "$ready"; then return 0; fi
     sleep 0.1
   done
   return 1

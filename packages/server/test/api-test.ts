@@ -69,7 +69,7 @@ try {
   assert.equal(threads.length, 1); assert.equal(threads[0].state, "error");
   assert.match(threads[0].error, /workspace allocation failed.*IO_ERROR/);
   const idleHealth: TrustedRunnerHealth = { lifecycle: "ready", active: false, operationRecords: 2, operationCapacity: 100,
-    error: null, softwareVersion: "test", protocolVersion: 1, activeWorkspaces: 0, retainedWorkspaces: 1,
+    error: null, softwareVersion: "test", protocolVersion: 2, activeWorkspaces: 0, retainedWorkspaces: 1,
     workspaceBytes: 1024, workspaceCapacity: 1, workspaceByteLimit: 2048 };
   app.registry.enrollRunner({ nodeId: "node-operator", threadId: "operator-binding", environmentId: 2,
     configPath: path.join(state, "operator.json"), configHash: "operator" });
