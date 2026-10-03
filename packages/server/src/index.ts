@@ -9,6 +9,7 @@ import type { Models } from "@earendil-works/pi-ai";
 import { GitService, normalizeRepoUrl } from "@cube/git";
 import { Registry, type Project, type Runner } from "./registry.ts";
 import { Conversations } from "./conversation.ts";
+import { workspaceRoute } from "./workspace-http.ts";
 import { IrohExecutionNodeClient, type TrustedRunnerHealth } from "./iroh-node.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
@@ -225,7 +226,7 @@ export async function createCubed(options: {
       }
       if (parts[0] === "api" && parts[1] === "threads") {
         const id = parts[2];
-        if (parts.length > 4) return json({ error: "not found" }, 404);
+        if (parts.length > 4 && parts[3] !== "workspace") return json({ error: "not found" }, 404);
         if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...thread, state: conversations.error(thread.id) ? "error" : "ready", error: conversations.error(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
         if (!id && method === "POST") {
           const thread = registry.createThread(text("projectId"), text("requestId"), await selection(body.model), text("text"));
@@ -234,6 +235,10 @@ export async function createCubed(options: {
         }
         const thread = registry.getThread(id);
         if (!thread || thread.archived) return json({ error: "thread not found" }, 404);
+        if (parts[3] === "workspace") {
+          const result = await workspaceRoute(conversations.workspace(id), { method: method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body });
+          return json(result.body, result.status);
+        }
         if (!parts[3] && method === "DELETE") { await conversations.archive(id); return json({ ok: true }); }
         if (!parts[3] && method === "PATCH") { registry.saveThread({ ...thread, title: text("title").slice(0, 200) }); return json({ ok: true }); }
         if (parts[3] === "history" && method === "GET") return json(await conversations.history(id));

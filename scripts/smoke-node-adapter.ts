@@ -12,6 +12,10 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { IrohExecutionNodeClient, IrohNodeError, type RunnerExecSpec } from "../packages/server/src/iroh-node.ts";
 import { Registry } from "../packages/server/src/registry.ts";
+import { RunnerWorkspace } from "../packages/server/src/workspace.ts";
+import { HttpWorkspace } from "../packages/server/src/workspace-http.ts";
+import { LeaseStore } from "../packages/server/src/workspace-lease.ts";
+import { serveWorkspace, workspaceContract } from "../packages/server/test/workspace-contract.ts";
 
 const binary = path.resolve(process.argv[2] ?? "target/debug/cube-runner");
 assert.ok(fs.existsSync(binary), "build cube-runner first; no simulated success or automatic cargo build");
@@ -195,15 +199,16 @@ try {
     if (network === "loopback") await smokeDurableAgent(directory, configPath, workspace);
     if (network === "loopback") await smokeProduct(directory, configPath);
 
-    // Protocol 2 workspace operations against the real runner. These fence
-    // the installation thread at epoch 3, so they run last in this pass.
+    // Protocol 2 workspace operations against the real runner. Pi's lease
+    // above already fenced the installation thread with time-based epochs.
+    const epoch = Date.now();
     const described = await client.describe();
     assert.equal(described.limits.maxExecTimeoutMs, 600000);
     assert.ok(["exec.cancel", "fs.read", "fs.write", "fs.stat"].every(capability => described.capabilities.includes(capability)));
-    const big = await client.resumeExec("session-paged", "invocation-paged", { command: "head -c 150000 /dev/zero | tr '\\0' b", guestCwd: ".", timeoutMs: 10000, outputLimit: 262144 }, undefined, 3);
+    const big = await client.resumeExec("session-paged", "invocation-paged", { command: "head -c 150000 /dev/zero | tr '\\0' b", guestCwd: ".", timeoutMs: 10000, outputLimit: 262144 }, undefined, epoch);
     assert.equal(big.output.length, 150000);
     assert.ok(big.output.every(byte => byte === 98));
-    const writeOptions = { idempotencyKey: `write-${network}`, createParents: true, epoch: 3 };
+    const writeOptions = { idempotencyKey: `write-${network}`, createParents: true, epoch };
     const written = await client.writeFile("notes/hello.txt", Buffer.from("hello\n"), writeOptions);
     fs.writeFileSync(path.join(workspace, "notes/hello.txt"), "changed\n");
     assert.deepEqual(await client.writeFile("notes/hello.txt", Buffer.from("hello\n"), writeOptions), written, "a repeated key returns the original result");
@@ -211,19 +216,19 @@ try {
     await assert.rejects(client.writeFile("notes/hello.txt", Buffer.from("other\n"), writeOptions), code("CONFLICT"));
     const read = await client.readFile("notes/hello.txt");
     assert.equal(read.content.toString(), "changed\n");
-    await assert.rejects(client.writeFile("notes/hello.txt", Buffer.from("stale\n"), { idempotencyKey: `stale-${network}`, expectedSha: written.sha256, epoch: 3 }), code("PRECONDITION_FAILED"));
-    const edited = await client.writeFile("notes/hello.txt", Buffer.from("edited\n"), { idempotencyKey: `edit-${network}`, expectedSha: read.sha256!, epoch: 3 });
+    await assert.rejects(client.writeFile("notes/hello.txt", Buffer.from("stale\n"), { idempotencyKey: `stale-${network}`, expectedSha: written.sha256, epoch }), code("PRECONDITION_FAILED"));
+    const edited = await client.writeFile("notes/hello.txt", Buffer.from("edited\n"), { idempotencyKey: `edit-${network}`, expectedSha: read.sha256!, epoch });
     assert.equal(fs.readFileSync(path.join(workspace, "notes/hello.txt"), "utf8"), "edited\n");
     assert.equal((await client.stat("notes/hello.txt")).sha256, edited.sha256);
     await assert.rejects(client.readFile("../control.json"), code("INVALID_REQUEST"));
     await assert.rejects(client.stat("notes/missing"), code("NOT_FOUND"));
     const cancelId = `op-cancel-${network}`;
-    await client.startOperation(cancelId, { command: "sleep 30 & printf %s $! > sleeper.pid; wait", guestCwd: ".", timeoutMs: 600000, outputLimit: 100 }, { epoch: 3 });
+    await client.startOperation(cancelId, { command: "sleep 30 & printf %s $! > sleeper.pid; wait", guestCwd: ".", timeoutMs: 600000, outputLimit: 100 }, { epoch });
     const pidFile = path.join(workspace, "sleeper.pid");
     for (let attempt = 0; attempt < 200 && !(fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8")); attempt++) await new Promise(resolve => setTimeout(resolve, 25));
     const sleeper = Number(fs.readFileSync(pidFile, "utf8"));
-    await assert.rejects(client.cancelOperation(cancelId, { epoch: 2 }), code("LEASE_STALE"));
-    await client.cancelOperation(cancelId, { epoch: 3 });
+    await assert.rejects(client.cancelOperation(cancelId, { epoch: epoch - 1 }), code("LEASE_STALE"));
+    await client.cancelOperation(cancelId, { epoch });
     let cancelled;
     for (let attempt = 0; attempt < 100; attempt++) {
       cancelled = await client.inspectOperation(cancelId);
@@ -233,8 +238,17 @@ try {
     assert.deepEqual(cancelled, { state: "Failed", error: "CANCELLED", completionUnknown: false });
     assert.throws(() => process.kill(sleeper, 0), { code: "ESRCH" }, "cancellation SIGKILLs the whole process group");
     await assert.rejects(client.resumeExec("session-unfenced", "invocation-unfenced", spec), code("LEASE_STALE"));
+
+    // The one Workspace contract over the real runner and Iroh, in process
+    // and through the HTTP routes. Each lease store issues newer epochs.
+    const runnerWorkspace = (name: string) => new RunnerWorkspace({ runner: new IrohExecutionNodeClient({ configPath }),
+      leases: new LeaseStore(path.join(directory, `lease-${name}`)), owner: "claude-code" });
+    await workspaceContract(`${network}: RunnerWorkspace`, runnerWorkspace("direct"), "claude-code");
+    const served = await serveWorkspace(runnerWorkspace("http"));
+    try { await workspaceContract(`${network}: HttpWorkspace -> routes -> RunnerWorkspace`, new HttpWorkspace({ url: served.url }), "claude-code"); }
+    finally { await served.close(); }
     await stop(daemon.child);
-    console.log(`ok: ${network} mode, real TS/native/iroh/exec, exact binding, durable intent, rejection, config pinning, offline observations, restart, paged output, files, cancel and epoch fence`);
+    console.log(`ok: ${network} mode, real TS/native/iroh/exec, exact binding, durable intent, rejection, config pinning, offline observations, restart, paged output, files, cancel, epoch fence and workspace contract`);
   }
 } finally {
   await Promise.all([...children].map(stop));

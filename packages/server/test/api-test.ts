@@ -96,6 +96,7 @@ try {
   assert.equal((await write("/api/runners/broken-thread/retire", { confirm: "broken-node", reason: "still allocated" })).status, 409,
     "host allocation blocks retirement before a runner probe");
   assert.equal((await fetch(`${base}/api/threads/broken-thread/history/extra`)).status, 404);
+  assert.equal((await fetch(`${base}/api/threads/missing-thread/workspace/operations/key`)).status, 404);
   const cli = path.resolve("packages/server/src/index.ts");
   const help = spawnSync(process.execPath, [cli, "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0); assert.match(help.stdout, /--allowed-host/); assert.match(help.stdout, /runners status/);

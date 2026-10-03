@@ -46,9 +46,7 @@ messages, atomically with admission, so a repeated HTTP action does not append
 another turn. The product registry stores no model or tool progress.
 
 The published `@earendil-works/pi-session-backend-sqlite-node` backend uses WAL.
-Cube sets and checks `synchronous=FULL` on creation and reopening. A separate
-SQLite connection holds a lifetime write lock for each session owner. It stores
-no execution state. Process death releases the lock; competing writers fail.
+Cube sets and checks `synchronous=FULL` on creation and reopening.
 
 Pi's stable session/invocation identity maps deterministically to an Iroh runner
 operation ID. A repeated `exec.start` retrieves retained work; changed arguments
@@ -65,12 +63,41 @@ Pi recovery is a durable state machine, not complete-history replay. Partial
 model responses can be interrupted and retried under Pi policy; a provider may
 bill both attempts. SIGKILL tests are not proof of power-loss durability.
 
+## Workspace and lease
+
+`Workspace` (`packages/server/src/workspace.ts`) is the one contract for a
+thread's workspace: `lease`, `exec`, `operation`, `cancel`, `readFile`,
+`writeFile`, `stat`, `capabilities()` and `limits()`. `RunnerWorkspace`
+implements it over the Iroh runner client; workspace semantics stay on the
+runner and cubed only translates, checks capabilities and limits, and enforces
+the lease. The HTTP routes under `/api/threads/:id/workspace` are a thin
+transport over the same interface, and `HttpWorkspace` implements it again for
+out-of-process agents. One contract suite runs against both.
+
+Each thread has one writable owner, `pi` or `claude-code`, fixed for the thread.
+The lease (`workspace-lease.ts`) has a random token, which is the authorization
+for every lease-scoped call, the owner, a fencing epoch and, for remote holders,
+a heartbeat deadline. While a lease is held, a dedicated SQLite connection keeps
+a write transaction open on the thread's `lease.lock`; a competing process or
+instance cannot take it, and process death releases it at once without stale PID
+files. Pi holds the lease for its whole Session lifetime. The epoch is the only
+durable lease state: it never decreases and is at least the wall-clock time in
+milliseconds, so it stays increasing even if the thread directory is lost. Every
+runner mutation carries it, and the runner refuses an older epoch than the
+newest it has seen for the thread.
+
+Mutations carry a caller-chosen idempotency key, scoped to the runner binding
+and hashed into the runner operation ID. A key already seen is never executed
+again; the same key with a different request is `CONFLICT`. No shell fallback
+exists: a runner lacking a workspace capability is incompatible.
+
 ## Product state and limitations
 
 `CUBED_STATE/registry.sqlite` contains projects, globally registered runners,
 operator contact observations and retirement audit, thread metadata and creation
 request keys. `CUBED_STATE/threads/<id>/session` contains
-Pi's databases. Registry v100/v101 receives the rollback-compatible global-pool extension in place; older execution stacks are
+Pi's databases; `threads/<id>/lease.sqlite` keeps the thread's lease epoch and
+owner, and `lease.lock` is only held while a lease is. Registry v100/v101 receives the rollback-compatible global-pool extension in place; older execution stacks are
 not migrated. See the reset workflow in README.
 
 A runner has one permanent node/environment admission and belongs to the Cube

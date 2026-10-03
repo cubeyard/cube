@@ -55,6 +55,14 @@ export async function smokeProduct(root: string, config: string) {
     const second = start("resume");
     const recovered = await second.wait("ready");
     const base = `${recovered.url}/api/threads/${id}`;
+    // cubed mounts the workspace routes; the thread's agent is fixed and Pi
+    // holds its lease, so no second writable owner can be admitted.
+    const workspace = await (await fetch(`${base}/workspace`)).json();
+    assert.ok(workspace.capabilities.includes("fs.write") && workspace.limits.maxWriteBytes > 0, JSON.stringify(workspace));
+    const leaseRoute = (owner: string) => post(`${base}/workspace/lease`, { owner });
+    assert.equal((await (await leaseRoute("claude-code")).json()).code, "CONFLICT");
+    assert.equal((await (await leaseRoute("pi")).json()).code, "LEASE_HELD");
+    assert.equal((await fetch(`${base}/workspace/stat?path=.`)).status, 401);
     const controller = new AbortController();
     const stream = await fetch(`${base}/stream`, { signal: controller.signal });
     assert.equal(stream.status, 200);

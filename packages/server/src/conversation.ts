@@ -6,6 +6,8 @@ import type { Models } from "@earendil-works/pi-ai";
 import { openAgent } from "./durable-agent.ts";
 import { IrohExecutionNodeClient } from "./iroh-node.ts";
 import { Registry } from "./registry.ts";
+import { RunnerWorkspace } from "./workspace.ts";
+import { LeaseStore } from "./workspace-lease.ts";
 import type { ModelSelection } from "./models.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -15,6 +17,7 @@ export class Conversations {
   private readonly directory: string;
   private readonly models: Models;
   private readonly agents = new Map<string, Promise<Agent>>();
+  private readonly workspaces = new Map<string, { workspace: RunnerWorkspace; leases: LeaseStore }>();
   private readonly drives = new Map<string, Promise<void>>();
   private readonly activations = new Set<string>();
   private readonly failures = new Map<string, string>();
@@ -46,6 +49,22 @@ export class Conversations {
     if (!admission) throw new Error("thread runner allocation is missing");
     return new IrohExecutionNodeClient({ configPath: admission.configPath, configHash: admission.configHash, threadId: id });
   }
+  /** The thread's one Workspace and lease store. Every thread agent is Pi
+   * until a thread records another agent. */
+  workspace(id: string): RunnerWorkspace {
+    if (this.closing) throw new Error("host is stopping");
+    const cached = this.workspaces.get(id);
+    if (cached) return cached.workspace;
+    const runner = this.runner(id);
+    const leases = new LeaseStore(path.join(this.directory, id));
+    const workspace = new RunnerWorkspace({ runner, leases, owner: "pi" });
+    this.workspaces.set(id, { workspace, leases });
+    return workspace;
+  }
+  private closeWorkspace(id: string): void {
+    this.workspaces.get(id)?.leases.close();
+    this.workspaces.delete(id);
+  }
   private async ensureWorkspace(id: string): Promise<void> {
     const thread = this.registry.getThread(id);
     if (!thread || thread.archived) throw new Error("thread not found");
@@ -71,7 +90,7 @@ export class Conversations {
     if (cached) return cached;
     const loading = (async () => {
       const runner = this.runner(id);
-      const agent = await openAgent({ directory: path.join(this.directory, id), runner, models: this.models, model: thread.model });
+      const agent = await openAgent({ directory: path.join(this.directory, id), runner, workspace: this.workspace(id), models: this.models, model: thread.model });
       try {
         const watch = await agent.lane.watch(context);
         watch.unsubscribe();
@@ -184,6 +203,7 @@ export class Conversations {
     const thread = this.registry.getThread(id);
     if (!thread) throw new Error("thread not found");
     if (thread.workspaceState === "failed") {
+      this.closeWorkspace(id);
       this.registry.beginRelease(id);
       await this.release(id);
       return;
@@ -192,6 +212,7 @@ export class Conversations {
     const execution = await agent.lane.inspectExecution(context);
     if (execution.current) throw new Error("stop the current run before archiving");
     await agent.close(); this.agents.delete(id);
+    this.closeWorkspace(id);
     this.registry.beginRelease(id);
     await this.release(id);
     });
@@ -218,6 +239,7 @@ export class Conversations {
     await Promise.all([...this.agents.values()].map(async promise => (await promise).close()));
     await Promise.all(this.drives.values());
     this.agents.clear();
+    for (const id of [...this.workspaces.keys()]) this.closeWorkspace(id);
   }
 }
 

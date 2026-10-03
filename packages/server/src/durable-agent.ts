@@ -1,31 +1,30 @@
-/** In-process Pi execution. The host owns activation and the exclusive writer
- * lock; Pi owns every conversation entry and execution checkpoint. */
+/** In-process Pi execution. The host owns activation and the thread's
+ * workspace lease; Pi owns every conversation entry and execution checkpoint. */
 import fs from "node:fs";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { AgentHarness, BACKGROUND_CONTEXT, value, type AgentHarnessOptions, type AgentHarnessTool, type LaneConfiguration } from "@earendil-works/pi-agent-core";
 import { createNodeSqliteFactory, SqliteSessionRepo } from "@earendil-works/pi-session-backend-sqlite-node";
 import { Type } from "typebox";
 import type { IrohExecutionNodeClient } from "./iroh-node.ts";
+import type { Workspace } from "./workspace.ts";
 
 const context = BACKGROUND_CONTEXT;
 
 export async function openAgent(options: {
   directory: string;
   runner: IrohExecutionNodeClient;
+  /** The thread workspace; Pi holds its lease for the whole Session lifetime. */
+  workspace: Workspace;
   models: AgentHarnessOptions["models"];
   model: { provider: string; id: string };
 }) {
-  fs.mkdirSync(options.directory, { recursive: true, mode: 0o700 });
-  // A dedicated SQLite connection holds an OS-backed writer lock for the
-  // entire Session lifetime. Process death releases it without stale PID files.
-  // It contains no workflow state and never contends with Pi's transactions.
-  const owner = new DatabaseSync(path.join(options.directory, "owner.sqlite"));
-  try { owner.exec("PRAGMA busy_timeout=0; BEGIN IMMEDIATE"); }
-  catch (cause) {
-    owner.close();
-    throw new Error("thread session already has a writable owner", { cause });
-  }
+  // The lease is the single writable owner of the thread: a competing holder,
+  // in this process or another, is refused, and process death releases it.
+  // Its epoch fences runner mutations of any older holder.
+  const lease = await options.workspace.lease({ owner: "pi" });
+  const release = () => options.workspace.release(lease.token).catch(() => {});
+  try { fs.mkdirSync(options.directory, { recursive: true, mode: 0o700 }); }
+  catch (error) { await release(); throw error; }
   const databaseFactory = createNodeSqliteFactory();
   for (const method of ["open", "openExisting"] as const) {
     const open = databaseFactory[method];
@@ -72,7 +71,7 @@ export async function openAgent(options: {
           guestCwd: input.cwd ?? ".",
           timeoutMs: input.timeoutMs ?? 60000,
           outputLimit: 8192,
-        }, callContext.abortSignal);
+        }, callContext.abortSignal, lease.epoch);
         return {
           content: [{ type: "text" as const, text: Buffer.from(result.output).toString("utf8")
             + `\n[exit=${result.exitCode}; ${result.termination}${result.truncated ? "; output truncated" : ""}]` }],
@@ -101,13 +100,13 @@ export async function openAgent(options: {
         try { await harness.close(context); }
         finally {
           try { await session!.close(context); }
-          finally { owner.close(); }
+          finally { await release(); }
         }
       },
     };
   } catch (error) {
     try { await session?.close(context); }
-    finally { owner.close(); }
+    finally { await release(); }
     throw error;
   }
 }

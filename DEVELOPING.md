@@ -88,6 +88,15 @@ archives an idle thread and releases runner capacity. Changed or independently
 committed Git worktrees and fallback copies are retained; a clean Git worktree
 still at the template HEAD is removed.
 
+`/api/threads/<id>/workspace` exposes the thread's `Workspace` (capabilities,
+limits, lease, exec, operations, file and stat; see
+`packages/server/src/workspace-http.ts`). Every route except reading
+capabilities and acquiring the lease requires `authorization: Bearer <lease
+token>`. A Pi thread's lease is held by Pi itself, so these routes admit no second
+writable owner. `node packages/server/test/workspace-test.ts` runs the shared
+contract offline; `scripts/test-node-transport.sh` runs it against the real
+runner and Iroh.
+
 Runner operations are installation-global. `GET /api/runners` returns persisted
 contact and the current global allocation snapshot without private adapter paths;
 `POST /api/runners/<id>/check` performs a fresh authenticated check. Retirement

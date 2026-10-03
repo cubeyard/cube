@@ -8,6 +8,8 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/pi-agent-core";
 import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { openAgent } from "../src/durable-agent.ts";
 import { IrohExecutionNodeClient } from "../src/iroh-node.ts";
+import { RunnerWorkspace } from "../src/workspace.ts";
+import { LeaseStore } from "../src/workspace-lease.ts";
 
 const [directory, configPath, mode, boundary] = process.argv.slice(2);
 const context = BACKGROUND_CONTEXT;
@@ -39,7 +41,8 @@ faux.setResponses(Array.from({ length: 4 }, () => request => {
 }));
 const models = createModels();
 models.setProvider(faux.provider);
-const options = { directory, runner, models, model: faux.getModel() };
+const workspace = new RunnerWorkspace({ runner, leases: new LeaseStore(directory), owner: "pi" });
+const options = { directory, runner, workspace, models, model: faux.getModel() };
 if (mode === "contend") {
   await assert.rejects(openAgent(options), /already has a writable owner/);
   process.send!({ type: "blocked" });
