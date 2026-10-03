@@ -7,7 +7,7 @@
  *   POST   …/workspace/lease                 acquire {owner, ttlMs?}; with a token: heartbeat
  *   DELETE …/workspace/lease                 release
  *   POST   …/workspace/exec                  {key, command, cwd?, timeoutMs, outputLimit?}
- *   GET    …/workspace/operations/:key       ?cursor=
+ *   GET    …/workspace/operations/:key       ?cursor=&wait=  (wait: hold up to 30 s while running)
  *   POST   …/workspace/operations/:key/cancel
  *   GET    …/workspace/file                  ?path=&offset=&limit=
  *   PUT    …/workspace/file                  {key, path, content (base64), expectedSha?, createParents?}
@@ -15,6 +15,8 @@
  *
  * Bytes travel as base64. Errors are `{error, code, completionUnknown}`. */
 import type { IncomingHttpHeaders } from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
+import { MAX_OPERATION_WAIT_MS, WorkspaceClient, WorkspaceClientError } from "../../claude-mod/hooks/workspace.ts";
 import { DEFAULT_LEASE_TTL_MS } from "./workspace-lease.ts";
 import {
   WorkspaceError, type Workspace, type WorkspaceErrorCode, type WorkspaceExecSpec, type WorkspaceFile, type WorkspaceLease,
@@ -29,7 +31,7 @@ const STATUS: Partial<Record<WorkspaceErrorCode, number>> = {
   PRECONDITION_FAILED: 412, CAPACITY_EXCEEDED: 429, OPERATION_UNSUPPORTED: 501, INCOMPATIBLE_PROTOCOL: 501,
   COMPLETION_UNKNOWN: 502, NODE_UNAVAILABLE: 503, DRAINING: 503, ENVIRONMENT_MISSING: 503,
 };
-const CODES = new Set<string>([...Object.keys(STATUS), "IO_ERROR"]);
+const WAIT_POLL_MS = 100;
 
 /** `parts` are the path segments after `…/workspace`. */
 export async function workspaceRoute(workspace: Workspace, request: {
@@ -59,8 +61,17 @@ export async function workspaceRoute(workspace: Workspace, request: {
       return ok(operationJson(await workspace.exec(token(), body.key as string, spec)));
     }
     if (parts[0] === "operations" && parts.length === 2 && method === "GET") {
-      const cursor = query.get("cursor");
-      return ok(operationJson(await workspace.operation(token(), parts[1], cursor === null ? {} : { cursor: integer(cursor) })));
+      const cursor = query.get("cursor"), wait = query.get("wait");
+      const read = () => workspace.operation(token(), parts[1], cursor === null ? {} : { cursor: integer(cursor) });
+      // A long poll is transport only: callers that cannot sleep cheaply (a
+      // Claude Code hook's own time is budgeted) wait here instead.
+      const deadline = Date.now() + (wait === null ? 0 : Math.min(integer(wait), MAX_OPERATION_WAIT_MS));
+      let state = await read();
+      while (state.state === "running" && Date.now() < deadline) {
+        await delay(Math.min(WAIT_POLL_MS, Math.max(1, deadline - Date.now())));
+        state = await read();
+      }
+      return ok(operationJson(state));
     }
     if (parts[0] === "operations" && parts.length === 3 && parts[2] === "cancel" && method === "POST") {
       return ok(operationJson(await workspace.cancel(token(), parts[1])));
@@ -102,63 +113,45 @@ function operationJson(operation: WorkspaceOperation): unknown {
   return operation.state === "succeeded" ? { ...operation, output: Buffer.from(operation.output).toString("base64") } : operation;
 }
 
-/** Workspace client for out-of-process agents. `url` ends in `/workspace`. */
+/** Workspace client for out-of-process agents over Node's fetch. The
+ * protocol lives in the Claude Code mod's portable client, which this wraps;
+ * `url` ends in `/workspace`. */
 export class HttpWorkspace implements Workspace {
-  private readonly url: string;
-  constructor(options: { url: string }) { this.url = options.url.replace(/\/+$/, ""); }
-
-  async lease(request: WorkspaceLeaseRequest | { token: string }): Promise<WorkspaceLease> {
-    if ("token" in request) return this.call("POST", "/lease", { token: request.token, body: {} });
-    return this.call("POST", "/lease", { body: request.ttlMs === undefined ? { owner: request.owner } : { owner: request.owner, ttlMs: request.ttlMs } });
-  }
-  async release(token: string): Promise<void> { await this.call("DELETE", "/lease", { token }); }
-  async capabilities(): Promise<string[]> { return (await this.call<{ capabilities: string[] }>("GET", "")).capabilities; }
-  async limits(): Promise<WorkspaceLimits> { return (await this.call<{ limits: WorkspaceLimits }>("GET", "")).limits; }
-  async exec(token: string, key: string, spec: WorkspaceExecSpec): Promise<WorkspaceOperation> {
-    return operation(await this.call("POST", "/exec", { token, body: { key, ...spec } }));
-  }
-  async operation(token: string, key: string, options: { cursor?: number } = {}): Promise<WorkspaceOperation> {
-    const query = options.cursor === undefined ? "" : `?cursor=${options.cursor}`;
-    return operation(await this.call("GET", `/operations/${encodeURIComponent(key)}${query}`, { token }));
-  }
-  async cancel(token: string, key: string): Promise<WorkspaceOperation> {
-    return operation(await this.call("POST", `/operations/${encodeURIComponent(key)}/cancel`, { token, body: {} }));
-  }
-  async readFile(token: string, file: string, options: { offset?: number; limit?: number } = {}): Promise<WorkspaceFile> {
-    const query = new URLSearchParams({ path: file });
-    if (options.offset !== undefined) query.set("offset", String(options.offset));
-    if (options.limit !== undefined) query.set("limit", String(options.limit));
-    const result = await this.call<Omit<WorkspaceFile, "content"> & { content: string }>("GET", `/file?${query}`, { token });
-    return { ...result, content: Buffer.from(result.content, "base64") };
-  }
-  async writeFile(token: string, key: string, file: string, content: Uint8Array, options: WorkspaceWrite = {}): Promise<WorkspaceWriteResult> {
-    return this.call("PUT", "/file", { token, body: { key, path: file, content: Buffer.from(content).toString("base64"), ...options } });
-  }
-  async stat(token: string, file: string): Promise<WorkspaceStat> {
-    return this.call("GET", `/stat?${new URLSearchParams({ path: file })}`, { token });
+  private readonly client: WorkspaceClient;
+  constructor(options: { url: string }) {
+    const url = new URL(options.url.replace(/\/+$/, ""));
+    this.client = new WorkspaceClient({ base: url.pathname, transport: async request => {
+      const response = await fetch(new URL(request.path, url), { method: request.method, headers: request.headers, ...(request.body === undefined ? {} : { body: request.body }) });
+      return { status: response.status, text: await response.text() };
+    } });
   }
 
-  private async call<T>(method: string, route: string, options: { token?: string; body?: unknown } = {}): Promise<T> {
-    const headers: Record<string, string> = {};
-    if (options.token !== undefined) headers.authorization = `Bearer ${options.token}`;
-    if (options.body !== undefined) headers["content-type"] = "application/json";
-    let response: Response;
-    try {
-      response = await fetch(`${this.url}${route}`, { method, headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
-    } catch (cause) {
-      // The request may have reached cubed; mutations are safe to repeat by key.
-      throw new WorkspaceError("NODE_UNAVAILABLE", "cubed workspace is unreachable", { cause, completionUnknown: method !== "GET" });
-    }
-    const text = await response.text();
-    let result: Record<string, unknown>;
-    try { result = JSON.parse(text); } catch { throw new WorkspaceError("IO_ERROR", `unexpected workspace response (${response.status})`); }
-    if (response.ok) return result as T;
-    const code = typeof result.code === "string" && CODES.has(result.code) ? result.code as WorkspaceErrorCode : "IO_ERROR";
-    throw new WorkspaceError(code, typeof result.error === "string" ? result.error : code, { completionUnknown: result.completionUnknown === true });
+  lease(request: WorkspaceLeaseRequest | { token: string }): Promise<WorkspaceLease> { return translate(() => this.client.lease(request)); }
+  release(token: string): Promise<void> { return translate(() => this.client.release(token)); }
+  capabilities(): Promise<string[]> { return translate(() => this.client.capabilities()); }
+  limits(): Promise<WorkspaceLimits> { return translate(() => this.client.limits()); }
+  exec(token: string, key: string, spec: WorkspaceExecSpec): Promise<WorkspaceOperation> {
+    return translate(() => this.client.exec(token, key, spec)) as Promise<WorkspaceOperation>;
   }
+  operation(token: string, key: string, options: { cursor?: number } = {}): Promise<WorkspaceOperation> {
+    return translate(() => this.client.operation(token, key, options)) as Promise<WorkspaceOperation>;
+  }
+  cancel(token: string, key: string): Promise<WorkspaceOperation> {
+    return translate(() => this.client.cancel(token, key)) as Promise<WorkspaceOperation>;
+  }
+  readFile(token: string, file: string, options: { offset?: number; limit?: number } = {}): Promise<WorkspaceFile> {
+    return translate(() => this.client.readFile(token, file, options));
+  }
+  writeFile(token: string, key: string, file: string, content: Uint8Array, options: WorkspaceWrite = {}): Promise<WorkspaceWriteResult> {
+    return translate(() => this.client.writeFile(token, key, file, content, options));
+  }
+  stat(token: string, file: string): Promise<WorkspaceStat> { return translate(() => this.client.stat(token, file)); }
 }
 
-function operation(value: unknown): WorkspaceOperation {
-  const row = value as WorkspaceOperation & { output?: unknown };
-  return row.state === "succeeded" ? { ...row, output: Buffer.from(String(row.output), "base64") } : row;
+async function translate<T>(action: () => Promise<T>): Promise<T> {
+  try { return await action(); }
+  catch (error) {
+    if (!(error instanceof WorkspaceClientError)) throw error;
+    throw new WorkspaceError(error.code as WorkspaceErrorCode, error.message, { cause: error.cause, completionUnknown: error.completionUnknown });
+  }
 }

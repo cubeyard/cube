@@ -1,5 +1,6 @@
 /** Actual product HTTP server, published Pi storage and real runner; controlled model only. */
 import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import path from "node:path";
 import { createCubed } from "../src/index.ts";
 import { IrohExecutionNodeClient } from "../src/iroh-node.ts";
 
@@ -16,7 +17,7 @@ faux.setResponses(Array.from({ length: 10 }, () => async request => {
 }));
 const models = createModels();
 models.setProvider(faux.provider);
-const app = await createCubed({ state, models });
+const app = await createCubed({ state, models, claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], claudeOptions: { stopGraceMs: 2000 } });
 if (app.registry.runnerCount() === 0) {
   const runner = new IrohExecutionNodeClient({ configPath });
   app.registry.enrollRunner({ ...runner.binding, configPath, configHash: runner.configHash });

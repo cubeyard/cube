@@ -11,6 +11,10 @@ export interface LoginView {
   events: AuthEvent[];
   error: string | null;
 }
+/** Providers whose OAuth login is a consumer subscription Pi must not use:
+ * Claude Pro/Max is used through claude-code threads and Claude Code's own
+ * login. Pi threads reach Anthropic models with an API key. */
+const NO_OAUTH = new Set(["anthropic"]);
 type Flow = { view: LoginView; controller: AbortController; done: Promise<void>; answer?: (value: string) => void };
 
 export class ModelAuth {
@@ -28,7 +32,7 @@ export class ModelAuth {
       return { id: provider.id, name: provider.name, connected, type, checkError,
         methods: [
           ...(provider.auth.apiKey?.login ? [{ type: "api_key" as const, label: "api key" }] : []),
-          ...(provider.auth.oauth ? [{ type: "oauth" as const, label: provider.auth.oauth.loginLabel ?? "log in" }] : []),
+          ...(provider.auth.oauth && !NO_OAUTH.has(provider.id) ? [{ type: "oauth" as const, label: provider.auth.oauth.loginLabel ?? "log in" }] : []),
         ],
         flow: this.flows.get(provider.id)?.view ?? null,
       };
@@ -37,7 +41,7 @@ export class ModelAuth {
 
   start(providerId: string, type: AuthType): LoginView {
     const provider = this.models.getProvider(providerId);
-    if (!provider || !(type === "oauth" ? provider.auth.oauth : type === "api_key" && provider.auth.apiKey?.login)) throw new Error("this login method is not supported by the provider");
+    if (!provider || !(type === "oauth" ? provider.auth.oauth && !NO_OAUTH.has(provider.id) : type === "api_key" && provider.auth.apiKey?.login)) throw new Error("this login method is not supported by the provider");
     if (this.flows.get(providerId)?.view.state === "pending") throw new Error("finish or cancel the current login first");
     const controller = new AbortController();
     const flow: Flow = { controller, done: Promise.resolve(), view: { id: randomUUID(), state: "pending", prompt: null, events: [], error: null } };

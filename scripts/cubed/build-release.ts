@@ -31,6 +31,10 @@ try {
   fs.symlinkSync("../../../git", path.join(root, "app/packages/server/node_modules/@cube/git"));
   fs.symlinkSync("../../server/node_modules/effect", path.join(root, "app/packages/git/node_modules/effect"));
   fs.cpSync("packages/web/dist", path.join(root, "app/packages/web/dist"), { recursive: true });
+  // cube's Claude Code mod: cubed loads it with --plugin-dir and imports its workspace client.
+  for (const entry of [".claude-plugin/plugin.json", "hooks", "package.json"]) {
+    fs.cpSync(path.join("packages/claude-mod", entry), path.join(root, "app/packages/claude-mod", entry), { recursive: true });
+  }
   fs.copyFileSync("scripts/cubed-supervisor.ts", path.join(root, "supervisor.ts"));
   fs.copyFileSync("scripts/cubed/cubed", path.join(root, "bin/cubed"));
   fs.chmodSync(path.join(root, "bin/cubed"), 0o755);

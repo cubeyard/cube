@@ -8,7 +8,7 @@ import { authFixture } from "./model-auth-fixture.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-auth-"));
 let fixture = await authFixture(root);
-let app = await createCubed({ state: root, models: fixture.runtime });
+let app = await createCubed({ state: root, models: fixture.runtime, claude: null });
 async function listen() {
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
   const address = app.server.address(); assert(address && typeof address === "object");
@@ -52,7 +52,7 @@ try {
   assert(fixture.refreshCount() > 0, "login must refresh catalog without host restart");
   await app.close();
   fixture = await authFixture(root);
-  app = await createCubed({ state: root, models: fixture.runtime }); base = await listen();
+  app = await createCubed({ state: root, models: fixture.runtime, claude: null }); base = await listen();
   assert.equal((await provider()).connected, true, "Pi persisted login across host recreation");
   assert.equal((await available()).length, 1);
   await request(route, "DELETE");
@@ -82,7 +82,7 @@ try {
   assert.deepEqual(await available(), []);
   await request(`${route}/login`, "POST", { type: "api_key" });
   await app.close();
-  fixture = await authFixture(root); app = await createCubed({ state: root, models: fixture.runtime }); base = await listen();
+  fixture = await authFixture(root); app = await createCubed({ state: root, models: fixture.runtime, claude: null }); base = await listen();
   assert.equal((await provider()).flow, null, "restart drops transient pending interaction, not credentials");
   assert.equal((await provider()).connected, false, "logout persists across restart");
   console.log("ok: Pi credential persistence; API-key/OAuth browser/device/callback; cancellation, safe errors, stale prompts, logout, live catalog and restart; no paid calls");

@@ -4,12 +4,14 @@ import type { ServerResponse } from "node:http";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message, Models } from "@earendil-works/pi-ai";
 import { ConversationBusy, LiveDoc } from "@earendil-works/pi-durable";
+import { ClaudeAgent, ClaudeBusy, CLAUDE_PROVIDER, type ClaudeRuntime } from "./claude-agent.ts";
+import { ClaudeThreadEvents } from "./claude-thread-events.ts";
 import { openAgent, type Agent } from "./durable-agent.ts";
 import { IrohExecutionNodeClient } from "./iroh-node.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
 import type { ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
-import { Registry } from "./registry.ts";
+import { Registry, threadAgent } from "./registry.ts";
 import { RunnerWorkspace } from "./workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
 import type { ModelSelection } from "./models.ts";
@@ -26,10 +28,16 @@ export class Conversations {
   private readonly failures = new Map<string, string>();
   private readonly commands = new Map<string, Promise<unknown>>();
   private readonly feeds = new WeakMap<Agent, PiThreadEvents>();
+  private readonly claudes = new Map<string, Promise<ClaudeAgent>>();
+  private readonly claudeFeeds = new WeakMap<ClaudeAgent, ClaudeThreadEvents>();
+  private readonly claude: ClaudeRuntime | null;
   private closing = false;
-  constructor(registry: Registry, directory: string, models: Models) {
-    this.registry = registry; this.directory = directory; this.models = models;
+  /** `claude` is null when this host has no Claude Code to start. */
+  constructor(registry: Registry, directory: string, models: Models, claude: ClaudeRuntime | null = null) {
+    this.registry = registry; this.directory = directory; this.models = models; this.claude = claude;
   }
+  /** Whether claude-code threads can run on this host. */
+  get claudeAvailable(): boolean { return this.claude !== null; }
   async boot(): Promise<void> {
     for (const thread of this.registry.listThreads()) {
       if (thread.archived) continue;
@@ -43,7 +51,8 @@ export class Conversations {
   async activate(id: string): Promise<void> {
     try {
       await this.ensureWorkspace(id);
-      await this.agent(id);
+      if (this.isClaude(id)) await this.claudeAgent(id);
+      else await this.agent(id);
       this.failures.delete(id);
     } catch (error) { this.failures.set(id, String(error)); }
   }
@@ -52,15 +61,20 @@ export class Conversations {
     if (!admission) throw new Error("thread runner allocation is missing");
     return new IrohExecutionNodeClient({ configPath: admission.configPath, configHash: admission.configHash, threadId: id });
   }
-  /** The thread's one Workspace and lease store. Every thread agent is Pi
-   * until a thread records another agent. */
+  private isClaude(id: string): boolean {
+    const thread = this.registry.getThread(id);
+    return !!thread && threadAgent(thread) === "claude-code";
+  }
+  /** The thread's one Workspace and lease store; its owner is the agent the
+   * thread was created with. */
   workspace(id: string): RunnerWorkspace {
     if (this.closing) throw new Error("host is stopping");
     const cached = this.workspaces.get(id);
     if (cached) return cached.workspace;
     const runner = this.runner(id);
     const leases = new LeaseStore(path.join(this.directory, id));
-    const workspace = new RunnerWorkspace({ runner, leases, owner: "pi" });
+    const thread = this.registry.getThread(id);
+    const workspace = new RunnerWorkspace({ runner, leases, owner: thread ? threadAgent(thread) : "pi" });
     this.workspaces.set(id, { workspace, leases });
     return workspace;
   }
@@ -89,6 +103,7 @@ export class Conversations {
     if (this.closing) throw new Error("host is stopping");
     const thread = this.registry.getThread(id);
     if (!thread || thread.archived) throw new Error("thread not found");
+    if (threadAgent(thread) !== "pi") throw new Error("thread is not a pi thread");
     const cached = this.agents.get(id);
     if (cached) return cached;
     const loading = (async () => {
@@ -106,6 +121,28 @@ export class Conversations {
     try { return await loading; }
     catch (error) { this.agents.delete(id); throw error; }
   }
+  async claudeAgent(id: string): Promise<ClaudeAgent> {
+    if (this.closing) throw new Error("host is stopping");
+    const thread = this.registry.getThread(id);
+    if (!thread || thread.archived) throw new Error("thread not found");
+    if (threadAgent(thread) !== "claude-code") throw new Error("thread is not a claude code thread");
+    if (!this.claude) throw new Error("claude code is not installed on this host — install it and log in with claude /login");
+    const cached = this.claudes.get(id);
+    if (cached) return cached;
+    const runtime = this.claude;
+    const loading = (async () => {
+      const agent = await ClaudeAgent.open({ directory: path.join(this.directory, id), threadId: id, workspace: this.workspace(id), runtime, model: thread.model.id });
+      try {
+        // The first message is accepted once under this request id.
+        const initial = this.registry.initialPrompt(id);
+        if (initial) await agent.submit(INITIAL_REQUEST, initial);
+        return agent;
+      } catch (error) { await agent.close(); throw error; }
+    })();
+    this.claudes.set(id, loading);
+    try { return await loading; }
+    catch (error) { this.claudes.delete(id); throw error; }
+  }
   private async command<T>(id: string, action: () => Promise<T>): Promise<T> {
     const promise = (this.commands.get(id) ?? Promise.resolve()).catch(() => {}).then(action);
     this.commands.set(id, promise);
@@ -116,6 +153,15 @@ export class Conversations {
     return this.command(id, () => this.accept(id, text, requestId));
   }
   private async accept(id: string, text: string, requestId: string): Promise<{ runId: string }> {
+    if (this.isClaude(id)) {
+      const agent = await this.claudeAgent(id);
+      try { await agent.submit(requestId, text); }
+      catch (error) {
+        if (error instanceof ClaudeBusy) throw new Error("thread is already working or message is invalid", { cause: error });
+        throw error;
+      }
+      return { runId: requestId };
+    }
     const { conversation } = await this.agent(id);
     // Request identity is committed atomically with the user message by Pi,
     // not stored in a second host workflow journal.
@@ -135,8 +181,17 @@ export class Conversations {
   }
   async model(id: string, selection?: ModelSelection): Promise<ModelSelection> {
     return this.command(id, async () => {
+    if (this.isClaude(id)) {
+      const agent = await this.claudeAgent(id);
+      if (selection) {
+        if (selection.provider !== CLAUDE_PROVIDER) throw new Error("a claude code thread runs claude models only");
+        await agent.setModel(selection.id);
+      }
+      return { provider: CLAUDE_PROVIDER, id: agent.model };
+    }
     const agent = await this.agent(id);
     if (selection) {
+      if (selection.provider === CLAUDE_PROVIDER) throw new Error("claude · max is chosen when a thread starts");
       if ((await agent.harness.snapshot(LiveDoc, agent.conversation.id, context))?.run) throw new Error("wait for the current run before changing model");
       if (!this.models.getModel(selection.provider, selection.id)) throw new Error("model unavailable");
       await agent.conversation.configure({ model: { provider: selection.provider, modelId: selection.id } }, context);
@@ -149,6 +204,15 @@ export class Conversations {
   /** The thread in the neutral event model; the same interface the SSE
    * stream serves and the browser reads. */
   async events(id: string): Promise<ThreadEvents> {
+    if (this.isClaude(id)) {
+      const agent = await this.claudeAgent(id);
+      let events = this.claudeFeeds.get(agent);
+      if (!events) {
+        events = new ClaudeThreadEvents({ agent, owner: () => this.owner(id), failure: () => this.failures.get(id) ?? null });
+        this.claudeFeeds.set(agent, events);
+      }
+      return events;
+    }
     const agent = await this.agent(id);
     let events = this.feeds.get(agent);
     if (!events) {
@@ -177,9 +241,15 @@ export class Conversations {
       await this.release(id);
       return;
     }
-    const agent = await this.agent(id);
-    if ((await agent.harness.snapshot(LiveDoc, agent.conversation.id, context))?.run) throw new Error("stop the current run before archiving");
-    await agent.close(); this.agents.delete(id);
+    if (this.isClaude(id)) {
+      const agent = await this.claudeAgent(id);
+      if (agent.running) throw new Error("stop the current run before archiving");
+      await agent.close(); this.claudes.delete(id);
+    } else {
+      const agent = await this.agent(id);
+      if ((await agent.harness.snapshot(LiveDoc, agent.conversation.id, context))?.run) throw new Error("stop the current run before archiving");
+      await agent.close(); this.agents.delete(id);
+    }
     this.closeWorkspace(id);
     this.registry.beginRelease(id);
     await this.release(id);
@@ -198,6 +268,7 @@ export class Conversations {
     }
   }
   async stop(id: string): Promise<void> {
+    if (this.isClaude(id)) { await (await this.claudeAgent(id)).stop(); return; }
     const agent = await this.agent(id);
     await agent.conversation.abort(context);
   }
@@ -205,7 +276,8 @@ export class Conversations {
     this.closing = true;
     await Promise.allSettled(this.commands.values());
     await Promise.all([...this.agents.values()].map(async promise => (await promise).close()));
-    this.agents.clear();
+    await Promise.all([...this.claudes.values()].map(async promise => (await promise.catch(() => null))?.close()));
+    this.agents.clear(); this.claudes.clear();
     for (const id of [...this.workspaces.keys()]) this.closeWorkspace(id);
   }
 }

@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { ModelSelection } from "./models.ts";
 import type { NodeBinding } from "./iroh-node.ts";
 import type { TrustedRunnerHealth } from "./iroh-node.ts";
+import type { ThreadAgent } from "./thread-events.ts";
 
 export const RUNNER_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -44,10 +45,15 @@ export interface RunnerStatus {
 export interface Thread {
   id: string; projectId: string; title: string | null; createdAt: number;
   archived: boolean; model: ModelSelection; runnerId: string;
+  /** The agent chosen at creation, fixed for the thread; absent means pi. */
+  agent?: ThreadAgent;
   allocation: WorkspaceAllocation;
   workspaceState: "allocating" | "available" | "releasing" | "failed"; workspaceError: string | null;
   workspaceBase?: { remote: string; ref: string; oid: string } | null;
 }
+
+/** The thread's agent: claude-code threads are created with a claude model. */
+export function threadAgent(thread: Pick<Thread, "agent">): ThreadAgent { return thread.agent ?? "pi"; }
 
 function allocationRepositories(project: Project, strict: boolean): WorkspaceRepository[] {
   const repositories: WorkspaceRepository[] = [];
@@ -334,7 +340,7 @@ export class Registry {
     const row = this.db.prepare("SELECT payload FROM creation WHERE thread_id=?").get(threadId);
     return row ? (JSON.parse(String(row.payload)) as { text: string }).text : "";
   }
-  createThread(projectId: string, requestId: string, model: ModelSelection, text: string): Thread {
+  createThread(projectId: string, requestId: string, model: ModelSelection, text: string, agent: ThreadAgent = "pi"): Thread {
     const payload = JSON.stringify({ model, text });
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -353,7 +359,7 @@ export class Registry {
       const runner = row ? JSON.parse(row.data) as Runner : null;
       if (!runner) throw new Error("no runner available in the global pool — archive an idle thread or register another trusted runner");
       const thread: Thread = { id: randomUUID(), projectId, runnerId: row!.id,
-        title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, archived: false, createdAt: Date.now(),
+        title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, agent, archived: false, createdAt: Date.now(),
         allocation: { projectId, projectRevision: project.revision, repositories },
         workspaceState: "allocating", workspaceError: null, workspaceBase: null };
       this.db.prepare("INSERT INTO thread VALUES (?,?,?,?)").run(thread.id, projectId, row!.id, JSON.stringify(thread));

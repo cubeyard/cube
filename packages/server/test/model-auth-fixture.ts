@@ -52,7 +52,7 @@ export async function authFixture(directory: string) {
 if (import.meta.main) {
   const directory = process.argv[2];
   const { runtime } = await authFixture(directory);
-  const app = await createCubed({ state: directory, models: runtime, web: path.resolve("packages/web/dist") });
+  const app = await createCubed({ state: directory, models: runtime, claude: null, web: path.resolve("packages/web/dist") });
   app.server.listen(Number(process.env.CUBED_PORT ?? 7778), "127.0.0.1");
   process.on("SIGTERM", () => { void app.close().then(() => process.exit()); });
 }

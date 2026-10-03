@@ -13,7 +13,7 @@ const state = fs.mkdtempSync(path.join(os.tmpdir(), "cube-api-"));
 const models = createModels();
 const faux = fauxProvider(); models.setProvider(faux.provider);
 const runnerHealth = new Map<string, TrustedRunnerHealth>();
-const app = await createCubed({ state, models, runnerHealth: async runner => {
+const app = await createCubed({ state, models, claude: null, runnerHealth: async runner => {
   const health = runnerHealth.get(runner.nodeId);
   if (!health) throw new Error("NODE_UNAVAILABLE");
   return health;

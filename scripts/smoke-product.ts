@@ -146,7 +146,82 @@ export async function smokeProduct(root: string, config: string) {
     const nextId = (await next.json()).id;
     assert.notEqual(nextId, id);
     assert.notEqual(path.join(root, "state", "workspaces", nextId, "workspace"), threadWorkspace);
+    await stop(fifth.child);
+
+    // A claude · max thread on the same runner, with a fake `claude` that
+    // runs the Claude Code mod's tool functions over cubed's workspace socket.
+    const sixth = start("resume");
+    const host = await sixth.wait("ready");
+    const historyOf = async (threadId: string) => (await fetch(`${host.url}/api/threads/${threadId}/history`)).json();
+    const settled = async (threadId: string, run?: string) => {
+      const deadline = Date.now() + 20000;
+      for (;;) {
+        const value = await historyOf(threadId);
+        if (value.status?.state && value.status.state !== "working" && value.status.state !== "idle" && (!run || value.status.run === run)) return value;
+        assert(Date.now() < deadline, JSON.stringify(value));
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+    };
+    await settled(nextId);
+    assert.equal((await fetch(`${host.url}/api/threads/${nextId}`, { method: "DELETE" })).status, 200);
+    const catalog = (await (await fetch(`${host.url}/api/models`)).json()).models as Array<{ provider: string; id: string }>;
+    assert.ok(catalog.some(model => model.provider === "claude-code" && model.id === "sonnet"), JSON.stringify(catalog));
+    const claudeInput = { projectId: otherProject.id, requestId: "claude-once", text: "run printf once >> claude-count; printf 41", model: { provider: "claude-code", id: "sonnet" } };
+    const created = await post(`${host.url}/api/threads`, claudeInput);
+    assert.equal(created.status, 200, await created.clone().text());
+    const claudeId = (await created.json()).id;
+    const claudeBase = `${host.url}/api/threads/${claudeId}`;
+    const claudeWorkspace = path.join(root, "state", "workspaces", claudeId, "workspace");
+    let claudeHistory = await settled(claudeId);
+    assert.equal(claudeHistory.status.state, "completed", JSON.stringify(claudeHistory));
+    assert.equal(claudeHistory.agent, "claude-code");
+    assert.equal(claudeHistory.owner, "claude-code");
+    assert.ok(claudeHistory.events.some((event: { type: string; name?: string; output?: string }) => event.type === "tool-result" && event.name === "Bash" && event.output === "41"), JSON.stringify(claudeHistory.events));
+    assert.equal(fs.readFileSync(path.join(claudeWorkspace, "claude-count"), "utf8"), "once");
+    assert.equal((await (await post(`${claudeBase}/workspace/lease`, { owner: "pi" })).json()).code, "CONFLICT");
+    assert.equal((await (await post(`${claudeBase}/workspace/lease`, { owner: "claude-code" })).json()).code, "LEASE_HELD");
+    const claudeModels = await (await fetch(`${claudeBase}/model`)).json();
+    assert.deepEqual(claudeModels.models.map((model: { provider: string }) => model.provider), ["claude-code", "claude-code", "claude-code"]);
+    assert.deepEqual(claudeModels.selected, { provider: "claude-code", id: "sonnet" });
+    const toOpus = await fetch(`${claudeBase}/model`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "claude-code", id: "opus" }) });
+    assert.equal(toOpus.status, 200, await toOpus.clone().text());
+    assert.equal((await fetch(`${claudeBase}/model`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(selected) })).status, 409, "a claude thread runs claude models only");
+    await stop(sixth.child);
+    const seventh = start("resume");
+    const restarted = await seventh.wait("ready");
+    const again = `${restarted.url}/api/threads/${claudeId}`;
+    assert.deepEqual(await (await fetch(`${again}/history`)).json(), claudeHistory, "the claude transcript survives a cubed SIGKILL");
+    assert.deepEqual((await (await fetch(`${again}/model`)).json()).selected, { provider: "claude-code", id: "opus" });
+    assert.equal((await post(`${again}/prompt`, { text: "id toolu_once run printf again >> claude-count", requestId: "claude-2" })).status, 200);
+    const waitRun = async (run: string) => {
+      const deadline = Date.now() + 20000;
+      for (;;) {
+        const value = await (await fetch(`${again}/history`)).json();
+        if (value.status.run === run && value.status.state !== "working") return value;
+        assert(Date.now() < deadline, JSON.stringify(value));
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+    };
+    claudeHistory = await waitRun("claude-2");
+    assert.equal(claudeHistory.status.state, "completed");
+    assert.match(JSON.stringify(claudeHistory.events.at(-1)), /done with opus/);
+    assert.equal((await post(`${again}/prompt`, { text: "id toolu_once run printf again >> claude-count", requestId: "claude-3" })).status, 200);
+    assert.equal((await waitRun("claude-3")).status.state, "completed");
+    assert.equal(fs.readFileSync(path.join(claudeWorkspace, "claude-count"), "utf8"), "onceagain", "a tool_use_id runs once on the runner");
+    assert.equal((await post(`${again}/prompt`, { text: "slow sleep 5; touch claude-late", requestId: "claude-4" })).status, 200);
+    const slowDeadline = Date.now() + 10000;
+    while (!JSON.stringify(await (await fetch(`${again}/history`)).json()).includes("claude-late")) {
+      assert(Date.now() < slowDeadline, "claude tool call did not start");
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal((await post(`${again}/stop`, {})).status, 200);
+    assert.equal((await waitRun("claude-4")).status.state, "stopped");
+    assert.equal((await fetch(again, { method: "DELETE" })).status, 200);
+    await new Promise(resolve => setTimeout(resolve, 5500));
+    assert.ok(!fs.existsSync(path.join(claudeWorkspace, "claude-late")), "stop cancelled the runner command");
     console.log("ok: product API creation dedup/conflict, SIGKILL/startup activation, actual runner once, streaming snapshots, SSE reconnect, third reopen");
     console.log("ok: concurrent followup deduplication, stop, model recovery, archive release to the global pool, cross-project reuse, dirty retention and distinct next workspace");
+    console.log("ok: claude · max thread on the actual runner through the mod's tools: lease owner, transcript, model switch, SIGKILL reopen with resume, keyed tool once, stop with runner cancel");
   } finally { await Promise.all([...children].map(stop)); }
 }

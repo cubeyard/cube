@@ -17,6 +17,7 @@ OFFLINE_TESTS=(
   packages/server/test/durable-agent-test.ts
   packages/server/test/codemode-test.ts
   packages/server/test/thread-events-test.ts
+  packages/server/test/claude-agent-test.ts
   packages/web/test/transcript-test.ts
   packages/server/test/github-auth-test.ts
   packages/server/test/github-read-test.ts
@@ -28,6 +29,8 @@ RUST_OFFLINE_PACKAGES=(cube-runner)
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -uo pipefail
   cd "$(dirname "$0")/.." || exit 1
+  # Never start an installed Claude Code from tests; they use a fake.
+  export CUBED_CLAUDE=off
   failed=()
   for t in "${OFFLINE_TESTS[@]}"; do
     printf '\n==== %s ====\n' "$t"
