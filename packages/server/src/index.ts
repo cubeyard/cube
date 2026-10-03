@@ -12,7 +12,6 @@ import { Conversations } from "./conversation.ts";
 import { IrohExecutionNodeClient, type TrustedRunnerHealth } from "./iroh-node.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
-import { JevSettings } from "./jev-settings.ts";
 import { ModelAuth } from "./model-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { UpdateService } from "./update-service.ts";
@@ -46,8 +45,7 @@ export async function createCubed(options: {
   const registry = new Registry(path.join(options.state, "registry.sqlite"));
   const models = options.models ?? await createModelRuntime();
   const modelAuth = new ModelAuth(models);
-  const jev = new JevSettings(options.state);
-  const conversations = new Conversations(registry, path.join(options.state, "threads"), models, jev);
+  const conversations = new Conversations(registry, path.join(options.state, "threads"), models);
   const github = new GithubAuth();
   const git = new GitService(path.join(options.state, "repositories"));
   const updates = options.updates ?? new UpdateService();
@@ -138,21 +136,6 @@ export async function createCubed(options: {
         return json({ onboardingComplete: isOnboardingComplete(onboarding), auth: available.length ? { state: "ok", provider: available[0].provider, credentialType: "host" } : { state: "missing", provider: "model" } });
       }
       if (url.pathname === "/api/onboarding" && method === "POST") { completeOnboarding(onboarding); return json({ onboardingComplete: true }); }
-      if (url.pathname === "/api/jev") {
-        if (method === "GET") return json(jev.status());
-        if (method === "PUT") {
-          if (typeof body.apiKey !== "string") throw new Error("JEV key is required");
-          jev.save(body.apiKey);
-          await conversations.syncMemory();
-          return json(jev.status());
-        }
-        if (method === "DELETE") {
-          jev.remove();
-          await conversations.syncMemory();
-          return json(jev.status());
-        }
-        return json({ error: "not found" }, 404);
-      }
       if (parts[0] === "api" && parts[1] === "providers") {
         const id = parts[2];
         if (parts.length === 2 && method === "GET") return json({ providers: await modelAuth.list() });
@@ -242,7 +225,7 @@ export async function createCubed(options: {
       }
       if (parts[0] === "api" && parts[1] === "threads") {
         const id = parts[2];
-        if (parts.length > 5 || (parts.length === 5 && parts[3] !== "tool-output")) return json({ error: "not found" }, 404);
+        if (parts.length > 4) return json({ error: "not found" }, 404);
         if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...thread, state: conversations.error(thread.id) ? "error" : "ready", error: conversations.error(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
         if (!id && method === "POST") {
           const thread = registry.createThread(text("projectId"), text("requestId"), await selection(body.model), text("text"));
@@ -254,7 +237,6 @@ export async function createCubed(options: {
         if (!parts[3] && method === "DELETE") { await conversations.archive(id); return json({ ok: true }); }
         if (!parts[3] && method === "PATCH") { registry.saveThread({ ...thread, title: text("title").slice(0, 200) }); return json({ ok: true }); }
         if (parts[3] === "history" && method === "GET") return json(await conversations.history(id));
-        if (parts[3] === "tool-output" && parts[4] && method === "GET") return json(await conversations.toolOutput(id, parts[4]));
         if (parts[3] === "stream" && method === "GET") return await conversations.stream(id, response);
         if (parts[3] === "stop" && method === "POST") { await conversations.stop(id); return json({ ok: true }); }
         if (parts[3] === "model" && (method === "GET" || method === "PATCH")) return json({ models: await catalog(), selected: await conversations.model(id, method === "PATCH" ? await selection(body) : undefined) });

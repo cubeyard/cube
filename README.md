@@ -52,9 +52,6 @@ Managed binary installations also expose **system**, where an operator can check
 for and install signed cubed releases. Browser updates are opt-in and never update
 runners. Source checkouts and externally managed installations remain read-only;
 see [the cubed update runbook](docs/cubed-updates.md).
-Optional JEV memory is configured separately at the top of **models**. It is
-strictly off until a JEV key is saved there; Cube then uses JEV to retain useful
-thread notes and select compact, recallable views of large tool output.
 
 Create a project and enroll trusted runners using
 [the operator runbook](docs/trusted-runner-operations.md). Runners form one

@@ -7,7 +7,6 @@ import { AgentHarness, BACKGROUND_CONTEXT, value, type AgentHarnessOptions, type
 import { createNodeSqliteFactory, SqliteSessionRepo } from "@earendil-works/pi-session-backend-sqlite-node";
 import { Type } from "typebox";
 import type { IrohExecutionNodeClient } from "./iroh-node.ts";
-import { installJevMemory, JevMemory } from "./jev-memory.ts";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -16,7 +15,6 @@ export async function openAgent(options: {
   runner: IrohExecutionNodeClient;
   models: AgentHarnessOptions["models"];
   model: { provider: string; id: string };
-  getJevApiKey?: () => string | null;
 }) {
   fs.mkdirSync(options.directory, { recursive: true, mode: 0o700 });
   // A dedicated SQLite connection holds an OS-backed writer lock for the
@@ -59,7 +57,6 @@ export async function openAgent(options: {
     const model = identity ? options.models.getModel(identity.provider, identity.modelId) ?? options.models.getModels()[0]
       : options.models.getModel(options.model.provider, options.model.id);
     if (!model) throw new Error("model catalog unavailable — connect a provider before starting this thread");
-    const memory = await JevMemory.create(session, options.getJevApiKey ?? (() => null), context);
     const bashParameters = Type.Object({ command: Type.String(), cwd: Type.Optional(Type.String()), timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 60000 })) });
     const bash: AgentHarnessTool<object | undefined, typeof bashParameters, { operationId: string; exitCode: number | null; termination: string }> = {
       name: "bash",
@@ -90,23 +87,14 @@ export async function openAgent(options: {
       models: options.models,
       model,
       toolExecution: "sequential",
-      activeToolNames: memory.enabled() ? ["bash", "recall"] : ["bash"],
+      activeToolNames: ["bash"],
       systemPrompt: "You are a coding agent. Use bash to inspect and edit the runner workspace. The runner executes trusted commands under its own account; it is not a sandbox. Never assume access to control-plane files or credentials.",
-      tools: [bash, memory.recallTool()],
+      tools: [bash],
     }, context);
-    installJevMemory(harness, memory);
     const lane = await harness.lane("main", context);
-    const entries = await lane.findEntries({ type: "message" }, context);
-    memory.restore(entries.flatMap(entry => entry.type === "message" ? [entry.message] : []));
-    const syncMemory = async () => {
-      const enabled = (options.getJevApiKey?.() ?? null) !== null;
-      try { await lane.setActiveTools(enabled ? ["bash", "recall"] : ["bash"], context); memory.setActive(enabled); }
-      catch { memory.setActive(false); }
-    };
-    await syncMemory();
     let closed = false;
     return {
-      harness, lane, open, syncMemory,
+      harness, lane, open,
       async close() {
         if (closed) return;
         closed = true;

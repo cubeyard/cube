@@ -64,13 +64,3 @@ template state. This is workspace freshness and collision isolation, not
 sandboxing or protection from malicious same-UID Git configuration.
 Process-group cancellation is not a cgroup: especially on macOS, a hostile
 command can deliberately create a new session and escape descendant cleanup.
-
-JEV memory is opt-in. When configured, Cube sends selected conversation text,
-tool arguments, and deterministic tool-output excerpts to TypeSafe AI. These
-may contain repository content or secrets printed by tools. The JEV key is kept
-only on the control-plane host in a mode-`0600` state file and is never returned
-by the API, forwarded to a runner, or included in session data. Full outputs
-retained for recall remain part of the local Pi session and are withheld from
-ordinary browser history; a permitted private-network Cube client can request an
-original explicitly from the tool inspector. Do not enable JEV for repositories
-whose disclosure policy does not permit this processing.
