@@ -4,9 +4,13 @@
  * cube's mod (packages/claude-mod), which sends Bash, Read, Write and Edit to
  * the thread Workspace keyed by tool_use_id.
  *
- * cubed never stores or forwards Claude credentials, and starts the child
- * without ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN so the subscription is
- * used, not API billing. Durability is weaker than Pi's: Claude Code keeps
+ * cubed never stores Claude credentials. The child gets an allow-listed
+ * environment: no API key, auth token, base URL or Bedrock/Vertex switch, so
+ * the subscription is used, not API billing, and none of cubed's provider,
+ * Git or cloud credentials. Claude Code's own login is read from its config
+ * directory (or CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`). The user's
+ * settings files and MCP servers are not loaded, and only the mod's allowed
+ * tools are offered. Durability is weaker than Pi's: Claude Code keeps
  * its own session (resumed with --resume) but has no task checkpoints, so a
  * turn cut off by a cubed restart is not continued. Workspace keys still
  * keep the runner from executing any tool call twice.
@@ -19,14 +23,21 @@ import fs from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
+import { ALLOWED_TOOLS } from "../../claude-mod/hooks/tools.ts";
 import type { ModelSelection } from "./models.ts";
 import type { Workspace, WorkspaceLease } from "./workspace.ts";
 
 export const CLAUDE_PROVIDER = "claude-code";
 /** Claude Code's own model aliases; it resolves them to current models. */
 export const CLAUDE_MODELS: readonly ModelSelection[] = ["opus", "sonnet", "haiku"].map(id => ({ provider: CLAUDE_PROVIDER, id }));
-/** Credentials that would bill the API instead of the subscription. */
-export const CLAUDE_REMOVED_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] as const;
+/** The only variables the child inherits from cubed: locale, home and
+ * config, proxies and certificates, and Claude Code's own login token. */
+const CLAUDE_ENV = /^(HOME|PATH|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_[A-Z_]+|TERM|TZ|TMPDIR|XDG_[A-Z_]+|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR)$/;
+/** Never passed, not even from ClaudeRuntime.env: each would bill the API or
+ * another provider instead of the subscription. */
+export const CLAUDE_REMOVED_ENV = /^(ANTHROPIC_[A-Z_]+|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY))$/;
+/** What a stop waits after SIGTERM before SIGKILL. */
+const KILL_GRACE_MS = 5000;
 const INTERRUPTED = "cubed stopped during this turn; claude code does not continue an interrupted turn — send a message to go on";
 
 export interface ClaudeRuntime {
@@ -40,6 +51,18 @@ export interface ClaudeRuntime {
   idleMs?: number;
   /** How long a stop waits for Claude Code to end the turn before killing it. */
   stopGraceMs?: number;
+  /** Extra variables for the child (tests). */
+  env?: Readonly<Record<string, string>>;
+}
+
+/** The child's environment: the allow-list, the runtime's extras and the
+ * cube workspace, never a credential that moves billing. */
+export function claudeEnvironment(source: NodeJS.ProcessEnv, extra: Readonly<Record<string, string>>, workspace: Readonly<Record<string, string>>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(source)) if (value !== undefined && CLAUDE_ENV.test(name)) env[name] = value;
+  Object.assign(env, extra);
+  for (const name of Object.keys(env)) if (CLAUDE_REMOVED_ENV.test(name)) delete env[name];
+  return { ...env, ...workspace };
 }
 
 export interface ClaudeSubmission {
@@ -64,7 +87,10 @@ export class ClaudeAgent {
   private readonly messages: ClaudeMessage[];
   private partial: ClaudePartial = [];
   private child: { process: ChildProcessWithoutNullStreams; exited: Promise<void>; stderr: string[] } | undefined;
-  private interrupt: { timer: NodeJS.Timeout } | undefined;
+  private interrupt: { timer: NodeJS.Timeout; kill?: NodeJS.Timeout } | undefined;
+  /** Bash calls Claude Code started whose results have not come back, by
+   * tool_use_id: the mod runs each as `claude:<id>:bash` on the runner. */
+  private readonly commands = new Set<string>();
   private idle: NodeJS.Timeout | undefined;
   private readonly listeners = new Set<() => void>();
   private closing = false;
@@ -141,9 +167,18 @@ export class ClaudeAgent {
     const child = this.child;
     if (!this.running || !child || this.interrupt) return;
     this.write(child.process, { type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } });
-    const timer = setTimeout(() => { if (this.child === child) child.process.kill("SIGTERM"); }, this.runtime.stopGraceMs ?? 10000);
-    timer.unref();
-    this.interrupt = { timer };
+    // A child that ignores the interrupt is killed. Its mod never sees an
+    // abort then, so cubed cancels the runner commands itself: the runner
+    // admits one command at a time and would stay busy otherwise.
+    const interrupt: NonNullable<ClaudeAgent["interrupt"]> = { timer: setTimeout(() => {
+      if (this.child !== child) return;
+      void this.cancelCommands();
+      child.process.kill("SIGTERM");
+      interrupt.kill = setTimeout(() => { if (child.process.exitCode === null && child.process.signalCode === null) child.process.kill("SIGKILL"); }, KILL_GRACE_MS);
+      interrupt.kill.unref();
+    }, this.runtime.stopGraceMs ?? 10000) };
+    interrupt.timer.unref();
+    this.interrupt = interrupt;
   }
 
   /** The model for the next turn: an idle child is closed and the next
@@ -160,6 +195,9 @@ export class ClaudeAgent {
     if (this.closing) return this.closed;
     this.closing = true;
     clearTimeout(this.idle);
+    // Claude Code does not continue a turn cut off here: its runner
+    // commands are cancelled before the lease goes.
+    await this.cancelCommands();
     await this.endChild();
     this.settle("failed", INTERRUPTED);
     await this.workspace.release(this.lease.token).catch(() => {});
@@ -176,14 +214,16 @@ export class ClaudeAgent {
     if (this.child) return this.child;
     const session = this.sessionId;
     const [command, ...prefix] = this.runtime.command;
-    const env: NodeJS.ProcessEnv = { ...process.env,
+    const env = claudeEnvironment(process.env, this.runtime.env ?? {}, {
       CUBE_WORKSPACE_SOCKET: this.runtime.socket,
       CUBE_WORKSPACE_PATH: `/api/threads/${encodeURIComponent(this.threadId)}/workspace`,
       CUBE_WORKSPACE_TOKEN: this.lease.token,
-      CUBE_WORKSPACE_ROOT: this.cwd };
-    for (const name of CLAUDE_REMOVED_ENV) delete env[name];
+      CUBE_WORKSPACE_ROOT: this.cwd });
     const child = spawn(command!, [...prefix,
       "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+      // Only cube's mod: no user or project settings (their hooks), no MCP
+      // servers, and only the tools the mod allows.
+      "--setting-sources", "", "--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: {} }), "--tools", ALLOWED_TOOLS.join(","),
       "--plugin-dir", this.runtime.mod, "--model", this.model, ...(session ? ["--resume", session] : [])],
       { cwd: this.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     const stderr: string[] = [];
@@ -199,6 +239,8 @@ export class ClaudeAgent {
       if (this.child !== current) return;
       this.child = undefined;
       this.partial = [];
+      // A child that died mid-turn leaves its commands to cubed.
+      void this.cancelCommands();
       const detail = stderr.join("").trim().split("\n").slice(-3).join(" ").trim();
       if (this.closing) this.settle("failed", INTERRUPTED);
       else if (this.interrupt) this.settle("stopped", null);
@@ -222,6 +264,7 @@ export class ClaudeAgent {
       const seq = Number(this.db.prepare("INSERT INTO message(submission, data) VALUES (?, ?)").run(current.seq, line).lastInsertRowid);
       this.messages.push({ seq, submission: current.seq, data });
     }
+    this.track(data);
     if (data.type === "assistant" && data.parent_tool_use_id == null) this.partial = [];
     if (data.type === "result" && this.running) {
       const failed = data.is_error === true || data.subtype !== "success";
@@ -241,7 +284,10 @@ export class ClaudeAgent {
       const block = event.content_block;
       if (block?.type === "text") this.partial[event.index] = { type: "text", text: block.text ?? "" };
       else if (block?.type === "thinking") this.partial[event.index] = { type: "thinking", thinking: block.thinking ?? "" };
-      else if (block?.type === "tool_use") this.partial[event.index] = { type: "tool_use", id: block.id ?? "", name: block.name ?? "", json: "" };
+      else if (block?.type === "tool_use") {
+        this.partial[event.index] = { type: "tool_use", id: block.id ?? "", name: block.name ?? "", json: "" };
+        if (block.name === "Bash" && block.id) this.commands.add(block.id);
+      }
     } else if (event.type === "content_block_delta") {
       const block = this.partial[event.index];
       const delta = event.delta;
@@ -259,6 +305,26 @@ export class ClaudeAgent {
     this.db.prepare("UPDATE submission SET state=?, error=? WHERE seq=?").run(state, error, current.seq);
     current.state = state; current.error = error;
     if (this.interrupt) { clearTimeout(this.interrupt.timer); this.interrupt = undefined; }
+  }
+
+  /** Follow Bash calls from Claude Code's messages, subagents' included:
+   * a tool_use opens one, its tool_result closes it, a turn's result ends all. */
+  private track(data: Record<string, unknown>): void {
+    if (data.type === "result") { this.commands.clear(); return; }
+    const content = (data.message as { content?: unknown } | undefined)?.content;
+    if (!Array.isArray(content)) return;
+    for (const block of content as Array<{ type?: string; id?: string; name?: string; tool_use_id?: string }>) {
+      if (data.type === "assistant" && block.type === "tool_use" && block.name === "Bash" && block.id) this.commands.add(block.id);
+      if (data.type === "user" && block.type === "tool_result" && block.tool_use_id) this.commands.delete(block.tool_use_id);
+    }
+  }
+
+  /** Cancel the runner commands of Bash calls still open. A key the runner
+   * never saw, or one already finished, is no harm. */
+  private async cancelCommands(): Promise<void> {
+    const ids = [...this.commands];
+    this.commands.clear();
+    await Promise.all(ids.map(id => this.workspace.cancel(this.lease.token, `claude:${id}:bash`).catch(() => {})));
   }
 
   private scheduleIdle(): void {

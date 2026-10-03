@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Models } from "@earendil-works/pi-ai";
-import { ClaudeAgent, ClaudeBusy, type ClaudeRuntime } from "../src/claude-agent.ts";
+import { ClaudeAgent, ClaudeBusy, claudeEnvironment, type ClaudeRuntime } from "../src/claude-agent.ts";
 import { ClaudeThreadEvents } from "../src/claude-thread-events.ts";
 import { ModelAuth } from "../src/model-auth.ts";
 import type { ThreadTranscript } from "../src/thread-events.ts";
@@ -43,11 +43,21 @@ const log = path.join(root, "claude.log");
 // The child must never see API credentials: the subscription is what Claude Code uses.
 process.env.ANTHROPIC_API_KEY = "sk-ant-api-must-not-reach-claude";
 process.env.ANTHROPIC_AUTH_TOKEN = "bearer-must-not-reach-claude";
-process.env.FAKE_CLAUDE_LOG = log;
+// Nor anything else of cubed's: other providers' keys, Git and cloud
+// tokens, or a switch that moves billing off the subscription.
+process.env.ANTHROPIC_BASE_URL = "http://127.0.0.1:9/must-not-reach-claude";
+process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+process.env.OPENAI_API_KEY = "sk-openai-must-not-reach-claude";
+process.env.GITHUB_TOKEN = "ghp-must-not-reach-claude";
+process.env.CLAUDE_CODE_OAUTH_TOKEN = "the-person's-own-claude-login";
 const mod = path.resolve(import.meta.dirname, "../../claude-mod");
-const runtime: ClaudeRuntime = { command: [process.execPath, path.join(import.meta.dirname, "fake-claude.ts")], mod, socket, stopGraceMs: 1000 };
+const runtime: ClaudeRuntime = { command: [process.execPath, path.join(import.meta.dirname, "fake-claude.ts")], mod, socket, stopGraceMs: 1000, env: { FAKE_CLAUDE_LOG: log } };
+const leaseToken = (holder: ClaudeAgent) => (holder as unknown as { lease: { token: string } }).lease.token;
+async function cancelled(holder: ClaudeAgent, key: string): Promise<void> {
+  await until(async () => { const state = await workspace.operation(leaseToken(holder), key); return state.state === "failed" && state.error === "CANCELLED"; }, `${key} cancelled on the runner`);
+}
 const directory = path.join(root, "thread");
-const starts = () => fs.readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as { args: string[]; cwd: string; session: string; apiKey: boolean; authToken: boolean });
+const starts = () => fs.readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as { args: string[]; cwd: string; session: string; apiKey: boolean; authToken: boolean; env: string[] });
 async function until<T>(check: () => T | undefined | false | Promise<T | undefined | false>, what: string, ms = 15000): Promise<T> {
   const deadline = Date.now() + ms;
   for (;;) {
@@ -90,6 +100,12 @@ try {
   const [first] = starts();
   assert.equal(first!.apiKey, false, "ANTHROPIC_API_KEY is removed from the child");
   assert.equal(first!.authToken, false, "ANTHROPIC_AUTH_TOKEN is removed from the child");
+  for (const name of ["ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "OPENAI_API_KEY", "GITHUB_TOKEN"]) assert.ok(!first!.env.includes(name), `${name} does not reach the child`);
+  assert.ok(first!.env.includes("CLAUDE_CODE_OAUTH_TOKEN") && first!.env.includes("HOME") && first!.env.includes("CUBE_WORKSPACE_TOKEN"));
+  assert.ok(first!.env.every(name => /^(HOME|PATH|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_\w+|TERM|TZ|TMPDIR|XDG_\w+|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|CUBE_WORKSPACE_\w+|FAKE_CLAUDE_LOG)$/.test(name)), `only allow-listed variables: ${first!.env.join(" ")}`);
+  assert.deepEqual(Object.keys(claudeEnvironment({ PATH: "/bin", AWS_SECRET_ACCESS_KEY: "x" }, { ANTHROPIC_BASE_URL: "x", CLAUDE_CODE_USE_VERTEX: "1", EXTRA: "y" }, { CUBE_WORKSPACE_TOKEN: "t" })).sort(), ["CUBE_WORKSPACE_TOKEN", "EXTRA", "PATH"]);
+  assert.equal(first!.args[first!.args.indexOf("--setting-sources") + 1], "");
+  assert.ok(first!.args.includes("--strict-mcp-config"));
   assert.deepEqual(first!.args.slice(0, 7), ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
   assert.equal(first!.args[first!.args.indexOf("--plugin-dir") + 1], mod);
   assert.equal(first!.args[first!.args.indexOf("--model") + 1], "sonnet");
@@ -130,11 +146,19 @@ try {
   await delay(2500);
   assert.ok(!fs.existsSync(path.join(files, "late")), "the runner command was killed");
 
-  // A child that ignores the interrupt is killed after the grace period.
-  await agent.submit("r6", "ignore-interrupt\nhang");
-  await delay(300);
+  // A child that ignores the interrupt is killed after the grace period, and
+  // cubed cancels its runner command itself: the mod never saw an abort.
+  await agent.submit("r6", "ignore-interrupt\nid toolu_ignored slow sleep 3; touch late-ignored");
+  await until(() => agent.state().messages.some(message => JSON.stringify(message.data).includes("toolu_ignored")), "the ignored tool call");
+  await delay(200);
   await agent.stop();
   assert.equal((await settled("r6")).status.state, "stopped");
+  await cancelled(agent, "claude:toolu_ignored:bash");
+  // One that ignores SIGTERM as well is killed.
+  await agent.submit("r6b", "ignore-interrupt\nignore-term\nhang");
+  await delay(300);
+  await agent.stop();
+  assert.equal((await settled("r6b")).status.state, "stopped");
 
   // A child that exits mid-turn fails the turn with what it said.
   await agent.submit("r7", "crash");
@@ -148,7 +172,7 @@ try {
 
   // A cubed stop during a turn: the turn is over after reopen, honestly,
   // and the transcript is kept.
-  await agent.submit("r9", "slow sleep 30");
+  await agent.submit("r9", "id toolu_close slow sleep 30");
   await until(() => agent.state().messages.some(message => JSON.stringify(message.data).includes("sleep 30")), "the long tool call");
   const before = (await events.read()).events.length;
   await agent.close();
@@ -161,6 +185,9 @@ try {
   assert.match(transcript.status.error ?? "", /does not continue an interrupted turn/);
   assert.equal(transcript.events.length, before);
   assert.equal(agent.model, "opus", "the chosen model survives a reopen");
+  // Closing cancelled the turn's runner command: it would never be continued.
+  await cancelled(agent, "claude:toolu_close:bash");
+  assert.ok(!fs.existsSync(path.join(files, "late-ignored")), "the ignored stop's command never finished");
   await agent.submit("r10", "say back again");
   transcript = await settled("r10");
   assert.equal(transcript.status.state, "completed");
@@ -172,8 +199,13 @@ try {
   // sha condition and refusals.
   const lease = await workspace.lease({ owner: "claude-code" }).catch(() => null);
   assert.equal(lease, null, "the reopened agent holds the lease");
-  const token = (agent as unknown as { lease: { token: string } }).lease.token;
+  const token = leaseToken(agent);
   const client = new WorkspaceClient({ base: "/api/threads/t1/workspace", transport: unixTransport(socket) });
+  // cubed's own lease cannot be released or renewed over the routes, even
+  // with its token (which the child and its processes can see).
+  await assert.rejects(client.release(token), /held by cubed/);
+  await assert.rejects(client.lease({ token }), /held by cubed/);
+  assert.equal(leases.holder(), "claude-code");
   const scope = { client, token, root: "/home/cube/thread" };
   assert.deepEqual(workspacePath(scope.root, "/home/cube/thread/src/../x"), { deny: "/home/cube/thread/src/../x leaves the thread workspace" });
   assert.equal(workspacePath(scope.root, "/workspace/src/a.ts"), "src/a.ts");

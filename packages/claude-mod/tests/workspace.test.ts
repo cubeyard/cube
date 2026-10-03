@@ -156,6 +156,34 @@ describe('workspace tools', () => {
     expect(workspace.requests.filter(request => request.method !== 'GET').length).toBe(0)
   })
 
+  test('only allow-listed tools run: MCP and unknown tools are refused', async ($, on) => {
+    const workspace = fakeWorkspace(on)
+    const reached = engine(on)
+    const mcp = await $.tool.call({ tool: 'mcp__github__create_issue', title: 'x' } as never)
+    expect(refusal(mcp)).toMatch(/mcp__github__create_issue is not available/)
+    const fetch = await $.tool.call({ tool: 'WebFetch', url: 'http://127.0.0.1:7777/api/state', prompt: 'read it' })
+    expect(refusal(fetch)).toMatch(/WebFetch is not available/)
+    const unknown = await $.tool.call({ tool: 'SomeFutureTool', path: '/' } as never)
+    expect(refusal(unknown)).toMatch(/SomeFutureTool is not available/)
+    const glob = await $.tool.call({ tool: 'Glob', pattern: '**/*' } as never)
+    expect(refusal(glob)).toMatch(/Glob is not available/)
+    const todo = await $.tool.call({ tool: 'TodoWrite', todos: [] })
+    expect(todo.result).toBe('engine ran TodoWrite')
+    expect(reached).toEqual(['TodoWrite'])
+    expect(workspace.requests.filter(request => request.method !== 'GET').length).toBe(0)
+  })
+
+  test('subagents start only as built-in types without isolation', async ($, on) => {
+    fakeWorkspace(on)
+    const spawned: string[] = []
+    on('agent.spawn', ($, e) => { spawned.push(e.subagentType); return { model: 'haiku', agentId: `agent-${spawned.length}` } })
+    const builtin = await $.agent.spawn({ prompt: 'look around', description: 'look', subagentType: 'general-purpose' } as never)
+    expect(builtin.deny).toBe(undefined)
+    const isolated = await $.agent.spawn({ prompt: 'look around', description: 'look', subagentType: 'general-purpose', isolation: 'worktree' } as never)
+    expect(String(isolated.deny)).toMatch(/worktree isolation/)
+    expect(spawned).toEqual(['general-purpose'])
+  })
+
   test('the workspace instructions join the first message context', async ($, on) => {
     fakeWorkspace(on, { 'AGENTS.md': '# Working on demo\nrun the tests\n' })
     on('prompt.context', ($, e) => ({ blocks: e.blocks }))

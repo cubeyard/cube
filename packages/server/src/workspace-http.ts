@@ -46,14 +46,22 @@ export async function workspaceRoute(workspace: Workspace, request: {
     };
     const route = parts.join("/");
     if (route === "" && method === "GET") return ok({ capabilities: await workspace.capabilities(), limits: await workspace.limits() });
+    // A lease without a ttl is cubed's own, held for an in-process agent or
+    // the Claude Code child it started: its token reaches that child's
+    // environment, but only cubed renews or releases it.
+    const remote = async () => {
+      const lease = await workspace.lease({ token: token() });
+      if (lease.expiresAt === null) throw new WorkspaceError("LEASE_HELD", "workspace lease is held by cubed for its agent; only cubed renews or releases it");
+      return lease;
+    };
     if (route === "lease" && method === "POST") {
-      if (request.headers.authorization) return ok(await workspace.lease({ token: token() }));
+      if (request.headers.authorization) return ok(await remote());
       const ttlMs = body.ttlMs === undefined ? DEFAULT_LEASE_TTL_MS : body.ttlMs;
       if (typeof ttlMs !== "number") throw invalid("ttlMs must be a number");
       // Remote holders always heartbeat; only in-process agents hold without one.
       return ok(await workspace.lease({ owner: body.owner as WorkspaceOwner, ttlMs }));
     }
-    if (route === "lease" && method === "DELETE") { await workspace.release(token()); return ok({ ok: true }); }
+    if (route === "lease" && method === "DELETE") { await remote(); await workspace.release(token()); return ok({ ok: true }); }
     if (route === "exec" && method === "POST") {
       const spec: WorkspaceExecSpec = { command: body.command as string, timeoutMs: body.timeoutMs as number,
         ...(body.cwd === undefined ? {} : { cwd: body.cwd as string }),

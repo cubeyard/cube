@@ -8,6 +8,13 @@
  * module binds them to `$`, and cubed's offline tests drive them directly. */
 import { WorkspaceClientError, type WorkspaceClient, type WorkspaceOperation } from "./workspace.ts";
 
+/** The only Claude Code tools a cube thread offers: Bash, Read, Write and
+ * Edit go to the workspace, the rest plan, search the web through the model
+ * provider or delegate inside Claude Code. Everything else, MCP tools and
+ * built-ins this list does not know included, would act on the cubed host as
+ * the cubed user and is refused. cubed also passes this list as --tools. */
+export const ALLOWED_TOOLS: readonly string[] = ["Bash", "Read", "Write", "Edit", "Agent", "TodoWrite", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "ToolSearch", "WebSearch", "EnterPlanMode", "ExitPlanMode"];
+
 /** The virtual workspace root Pi uses; accepted here as an alias too. */
 export const VIRTUAL_ROOT = "/workspace";
 export const BASH_DEFAULT_TIMEOUT_MS = 120000;

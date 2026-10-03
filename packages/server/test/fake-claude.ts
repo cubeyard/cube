@@ -6,7 +6,7 @@
  *
  * Steps, one per line: `run <command>`, `slow <command>`, `write <file> <text>`,
  * `edit <file> <old> <new>`, `read <file>`, `say <text>`, `crash`, `fail`,
- * `id <tool_use_id> run <command>`, `ignore-interrupt`.
+ * `id <tool_use_id> run <command>`, `ignore-interrupt`, `ignore-term`.
  * FAKE_CLAUDE_LOG names a file that receives one JSON line per start. */
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -23,10 +23,14 @@ if (!args.includes("-p") || flag("--input-format") !== "stream-json" || flag("--
 const mod = flag("--plugin-dir");
 if (!mod || !fs.existsSync(`${mod}/.claude-plugin/plugin.json`) || !fs.existsSync(`${mod}/hooks/hooks.json`)) fail("expected --plugin-dir with cube's mod");
 const model = flag("--model") ?? fail("expected --model");
+// Only cube's mod: no settings files, no MCP servers, only the allowed tools.
+if (flag("--setting-sources") !== "" || !args.includes("--strict-mcp-config") || flag("--mcp-config") !== JSON.stringify({ mcpServers: {} })) fail("expected no setting sources and an empty strict MCP config");
+const tools = (flag("--tools") ?? "").split(",");
+if (!["Bash", "Read", "Write", "Edit"].every(name => tools.includes(name)) || tools.some(name => name.startsWith("mcp__") || name === "WebFetch")) fail("expected --tools with the mod's allow-list");
 const session = flag("--resume") ?? randomUUID();
 if (process.env.FAKE_CLAUDE_LOG) {
   fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, `${JSON.stringify({ args, cwd: process.cwd(), session,
-    apiKey: "ANTHROPIC_API_KEY" in process.env, authToken: "ANTHROPIC_AUTH_TOKEN" in process.env, pid: process.pid })}\n`);
+    apiKey: "ANTHROPIC_API_KEY" in process.env, authToken: "ANTHROPIC_AUTH_TOKEN" in process.env, env: Object.keys(process.env).sort(), pid: process.pid })}\n`);
 }
 const env = process.env;
 if (!env.CUBE_WORKSPACE_SOCKET || !env.CUBE_WORKSPACE_PATH || !env.CUBE_WORKSPACE_TOKEN || !env.CUBE_WORKSPACE_ROOT) fail("expected the cube workspace environment");
@@ -94,6 +98,7 @@ async function turn(text: string): Promise<void> {
       if (verb === "crash") { process.stderr.write("fake claude crashed\n"); process.exit(3); }
       if (verb === "fail") { emit({ type: "result", subtype: "success", is_error: true, result: "API Error: 401 · Please run /login", duration_ms: Date.now() - started }); return; }
       if (verb === "ignore-interrupt") { ignoreInterrupt = true; continue; }
+      if (verb === "ignore-term") { process.on("SIGTERM", () => {}); continue; }
       if (verb === "say") await say(rest.join(" "));
       else if (verb === "run" || verb === "slow") await tool(id, "Bash", { command: rest.join(" "), description: "run it" }, controller.signal);
       else if (verb === "write") await tool(id, "Write", { file_path: `${env.CUBE_WORKSPACE_ROOT}/${rest[0]}`, content: rest.slice(1).join(" ") }, controller.signal);
