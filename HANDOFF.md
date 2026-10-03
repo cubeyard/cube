@@ -43,9 +43,18 @@ SIGKILL through `exec.cancel`). A host shutdown does not cancel it; the next
 process reattaches to the same runner operation.
 Do not equate these constraints with a native sandbox implementation.
 
+A thread can run on Claude Code instead ("claude · max" at creation): cubed
+starts the unmodified `claude` binary with the user's own login and cube's mod
+(`packages/claude-mod`), which sends Bash, Read, Write and Edit to the thread
+Workspace keyed by `tool_use_id`. It is tested only with a fake `claude` that
+speaks stream-json and runs the mod's tool functions, and with `claude plugin
+validate`/`claude plugin test`, which call no model; no turn against a real
+Claude model has been run. A turn cut off by a cubed restart is not continued.
+
 GUI provider settings use Pi's public Models login/logout/refresh APIs and the
 existing host credential store. Browser/device login, key entry, cancellation,
-status and disconnect are supported wherever Pi exposes that interaction.
+status and disconnect are supported wherever Pi exposes that interaction, except
+Anthropic's Claude Pro/Max OAuth, which is not offered to Pi.
 Providers with ambient-only auth still require host configuration. A host restart
 discards unfinished login interactions, not saved credentials. Live provider
 OAuth acceptance remains distinct from controlled-provider integration tests.

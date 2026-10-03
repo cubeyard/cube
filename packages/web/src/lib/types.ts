@@ -17,6 +17,8 @@ export interface ThreadSummary {
   error: string | null;
   createdAt: number | null;
   archived: boolean;
+  /** Fixed at creation; absent means pi. */
+  agent?: import("../../../server/src/thread-events.ts").ThreadAgent;
   workspaceBase?: { remote: string; ref: string; oid: string } | null;
   project: { id: string; name: string };
 }

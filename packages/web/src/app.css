@@ -897,6 +897,10 @@ header .spacer { margin-left: auto; }
 }
 .conversation-empty p { margin: 0; color: var(--ink); font-size: 15.5px; }
 .conversation-empty > span:last-child { max-width: 30rem; font-size: 13px; }
+.conversation-notice {
+  flex: none; margin: 0; max-width: 42rem; padding-left: 0.65rem;
+  border-left: 2px solid var(--line); color: var(--ink-3); font-size: 12.5px; line-height: 1.5;
+}
 .conversation-message { max-width: min(42rem, 92%); }
 .conversation-message.user {
   align-self: flex-end; min-width: min(12rem, 70%);

@@ -96,7 +96,19 @@ capabilities and acquiring the lease requires `authorization: Bearer <lease
 token>`. A Pi thread's lease is held by Pi itself, so these routes admit no second
 writable owner. `node packages/server/test/workspace-test.ts` runs the shared
 contract offline; `scripts/test-node-transport.sh` runs it against the real
-runner and Iroh.
+runner and Iroh. A running operation can be long-polled with `?wait=<ms>` (at
+most 30000).
+
+A claude-code thread holds its lease in cubed for the Claude Code child, which
+reaches the same routes on `CUBED_STATE/run/workspace.sock` through the mod in
+`packages/claude-mod`. cubed finds `claude` on `PATH`; `CUBED_CLAUDE=<path>`
+names another binary and `CUBED_CLAUDE=off` disables claude · max. Tests never
+start the real CLI: `packages/server/test/claude-agent-test.ts` and the product
+smoke use `packages/server/test/fake-claude.ts`, which speaks stream-json and
+runs the mod's tool functions over the socket. `bash scripts/check-claude-mod.sh`
+runs `claude plugin validate`, `claude plugin test` (the mod's tests against the
+engine with the routes answered in memory; no model call) and, with
+`CLAUDE_CODE_TYPES` pointing at Claude Code's `claude-code.d.ts`, tsc.
 
 Runner operations are installation-global. `GET /api/runners` returns persisted
 contact and the current global allocation snapshot without private adapter paths;

@@ -6,12 +6,14 @@
   import type { ModelSelection, ThreadStatus, ThreadTranscript } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
 
-  let { threadId, model, changingModel = false, busy = $bindable(false), waitingText = null }: {
+  let { threadId, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null }: {
     threadId: string;
     model: ModelSelection | null;
     changingModel?: boolean;
     busy?: boolean;
     waitingText?: string | null;
+    /** A standing note about the thread, shown above its transcript. */
+    notice?: string | null;
   } = $props();
   // The neutral thread event model is the only input; no agent shapes here.
   const events = $derived(threadEvents(threadId));
@@ -101,6 +103,7 @@
 
 <div class="conversation">
   <div class="transcript" bind:this={scroller} aria-live="polite" aria-busy={working}>
+    {#if notice}<p class="conversation-notice" role="note">{notice}</p>{/if}
     {#if loading}
       <p class="conversation-empty">reading thread…</p>
     {:else if rows.length === 0}

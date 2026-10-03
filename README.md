@@ -66,7 +66,15 @@ streamed results, reconnect, model selection, stop, rename and archive.
 
 This is workspace collision isolation only, not process or security isolation.
 The current tools are `read`, `write`, `edit`, bounded `bash` and `codemode`,
-which runs one model-written JavaScript script that calls those tools. Workspace transfer, authenticated Git writes,
+which runs one model-written JavaScript script that calls those tools.
+A thread can instead run on Claude Code with your own Claude Max login: choose
+a model under "claude · max" when you start it. cubed starts the unmodified
+`claude` binary with cube's mod, which sends Claude Code's Bash, Read, Write and
+Edit to the thread workspace on the runner. Install Claude Code on the cubed
+host and log in there (`claude /login`); cubed never stores Claude credentials
+and starts it without `ANTHROPIC_API_KEY`. These threads are less durable than
+Pi's: a turn cut off by a host restart is not continued, though no tool call
+runs twice. Workspace transfer, authenticated Git writes,
 service links, thread-to-thread tasks and native sandboxing are not yet exposed
 by this implementation. Project repository checks remain host-side and pin the
 metadata used for runner-side checkout; host credentials never cross that boundary.

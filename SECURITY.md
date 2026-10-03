@@ -64,3 +64,15 @@ template state. This is workspace freshness and collision isolation, not
 sandboxing or protection from malicious same-UID Git configuration.
 Process-group cancellation is not a cgroup: especially on macOS, a hostile
 command can deliberately create a new session and escape descendant cleanup.
+
+Claude Code threads run the unmodified `claude` binary on the cubed host, as the
+cubed user, with that user's own Claude login. cubed never stores or forwards
+Claude credentials and removes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`
+from the child's environment. cube's mod sends Bash, Read, Write and Edit to the
+trusted runner and refuses tools that would act on the cubed host, but Claude
+Code itself (its other tools, MCP servers and settings hooks of that user) runs
+with the cubed user's authority: it is not sandboxed either. The mod reaches the
+thread workspace on a mode-0600 Unix socket under `CUBED_STATE/run` that serves
+only workspace routes; the thread's lease token, passed in the child's
+environment, is the authorization, and it stops working when the thread's lease
+is released.

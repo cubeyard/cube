@@ -7,6 +7,8 @@
   resumption policy.
 - **cubed:** projects, immutable runner admission, thread metadata, request
   allocation, access boundary, HTTP/SSE and activation of Pi's open operations.
+  For a claude-code thread, the Claude Code child process and the thread record
+  (accepted prompts, printed messages, session ID); Claude Code owns its session.
 - **runner:** workspace execution and durable deduplication/result retention for
   commands. It cannot read Pi sessions or model credentials through the protocol.
 - **web:** rendering and user actions, from the neutral thread event model
@@ -141,13 +143,59 @@ conversation view (entries plus `pi.live`); `GET …/history` returns `read()` a
 ends the stream when the source closes. `HttpThreadEvents` is the client; it is
 browser-safe and the web UI uses it directly. An agent adapter is the only code
 that knows its agent's shapes; the UI never reads Pi messages.
+`ClaudeThreadEvents` renders a claude-code thread into the same transcript.
+
+## Claude Code threads
+
+Claude Code is an alternative thread agent for one purpose: to use the person's
+own Claude Max subscription through the unmodified `claude` binary and its own
+login (`claude /login` or `claude setup-token`). Choosing a model under
+"claude · max" at thread creation makes a `claude-code` thread; the agent is
+fixed for the thread, and within it only Claude Code's own models (`opus`,
+`sonnet`, `haiku`) can be chosen. Claude Code is not a provider in cube's model
+settings, and Pi does not offer Anthropic's Claude Pro/Max OAuth login: Pi
+reaches Anthropic models with an API key.
+
+`ClaudeAgent` (`claude-agent.ts`) takes the thread's `claude-code` lease for its
+lifetime and starts `claude -p --input-format stream-json --output-format
+stream-json --verbose --include-partial-messages --plugin-dir
+packages/claude-mod --model <model>` on the first prompt, in a stable per-thread
+directory, with `--resume <session-id>` once Claude Code has reported a session.
+Prompts go to stdin under their request ID (a repeated ID is accepted once), stop
+is a stream-json `interrupt` control request with a kill after a grace period,
+and a model change closes the idle child so the next prompt resumes with the new
+`--model`. An idle child is closed after ten minutes. cubed never stores or
+forwards Claude credentials and removes `ANTHROPIC_API_KEY` and
+`ANTHROPIC_AUTH_TOKEN` from the child's environment, so the subscription is used
+instead of API billing. `findClaude()` locates the binary (`CUBED_CLAUDE` names
+it, or `off`); without one, claude · max is not offered.
+
+The mod (`packages/claude-mod`) is a Claude Code plugin of function hooks. Its
+`tool.call` hooks answer Bash, Read, Write and Edit from the thread Workspace,
+keyed by `tool_use_id`, in each tool's own output shape; Edit is read, replace,
+then a write conditional on the sha it read. It refuses background Bash,
+`NotebookEdit`, worktrees, subagents with worktree or remote isolation and tools
+that would act on the cubed host (Glob, Grep, LSP, Monitor, PowerShell), and its
+`prompt.context` hook adds the workspace's `AGENTS.md` and `CLAUDE.md`. The mod
+reaches cubed on a private Unix socket (`CUBED_STATE/run/workspace.sock`, mode
+0600) that serves only workspace routes; the lease token cubed holds for the
+child is the authorization. A Claude Code hook's own time is budgeted, so it
+waits on a running command with the route's long poll (`?wait=`) instead of
+sleeping. `HttpWorkspace` wraps the mod's portable client, so the shared
+contract suite covers both.
+
+Durability is weaker than Pi's, and the UI says so: Claude Code keeps its own
+session but has no task checkpoints, so a turn cut off by a cubed restart is
+marked failed and not continued. Workspace keys still keep the runner from
+executing any tool call twice. Repository skills reach Claude Code only as text.
 
 ## Product state and limitations
 
 `CUBED_STATE/registry.sqlite` contains projects, globally registered runners,
 operator contact observations and retirement audit, thread metadata and creation
 request keys. `CUBED_STATE/threads/<id>/pi.sqlite` is
-the thread's pi-durable storage; `threads/<id>/lease.sqlite` keeps the thread's lease epoch and
+the thread's pi-durable storage (`claude.sqlite` and the `claude/` working
+directory for a claude-code thread); `threads/<id>/lease.sqlite` keeps the thread's lease epoch and
 owner, and `lease.lock` is only held while a lease is. Registry v100/v101 receives the rollback-compatible global-pool extension in place; older execution stacks are
 not migrated. See the reset workflow in README.
 
@@ -218,6 +266,9 @@ browser users.
 `scripts/test-node-transport.sh` runs Rust checks and actual Node/Iroh/runner
 integration. `smoke-durable-agent.ts` covers four SIGKILL boundaries; `smoke-product.ts`
 covers ordinary API creation, startup activation, streaming/reconnect and prompt
-deduplication. These use controlled models and disposable data, never live users.
+deduplication, and a claude · max thread through a fake `claude` that runs the
+mod's tool functions over the workspace socket. `scripts/check-claude-mod.sh`
+validates and tests the mod with the installed `claude` CLI without calling a
+model; the real CLI is never started by tests. These use controlled models and disposable data, never live users.
 Separate-machine Linux/macOS lifecycle and paid-model acceptance remain separate
 release checks. The pinned reference snapshots are under `repos/`.

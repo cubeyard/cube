@@ -2,6 +2,7 @@
   import { tick } from "svelte";
   import { ApiError, createUserThread, errorText, fetchModels, fetchProjects } from "../lib/api.ts";
   import type { ModelSelection, Project, ThreadModels } from "../lib/types.ts";
+  import { CLAUDE_DURABILITY, isClaude, providerLabel } from "../lib/agent.ts";
   import { uid } from "../lib/uid.ts";
   import Icon from "./Icon.svelte";
 
@@ -100,7 +101,8 @@
         <p class="error">global runner pool has a failed allocation — {projects.find((project) => project.id === projectId)?.runnerCapacity.errors[0] ?? "inspect the runner logs"}. <button type="button" class="key" onclick={load}>retry status</button></p>
       {:else if !ready}<p>all trusted runners are in use; archive an idle thread or register another runner, then <button type="button" class="key" onclick={load}>refresh runners</button></p>
       {:else if !catalog?.models.length}<p>no models available — <a href="#/models" onclick={() => dialog?.close()}>connect a provider</a>, then <button type="button" class="key" onclick={load}>retry loading</button></p>
-      {:else if !model}<p>choose an available model below.</p>{/if}
+      {:else if !model}<p>choose an available model below.</p>
+      {:else if isClaude(model)}<p>{CLAUDE_DURABILITY}</p>{/if}
       {#if error}<p class="error" role="alert">{error}{pending ? " — retry to confirm this thread; your message is kept." : ""}</p>{/if}
     </div>
     <div class="new-thread-footer">
@@ -117,7 +119,7 @@
           <option value="" disabled>choose model</option>
           {#if modelKey && !model}<option value={modelKey} disabled>unavailable — choose model</option>{/if}
           {#each providers as provider}
-            <optgroup label={provider}>
+            <optgroup label={providerLabel(provider)}>
               {#each catalog?.models.filter((item) => item.provider === provider) ?? [] as item}
                 <option value={key(item)}>{item.id}</option>
               {/each}
