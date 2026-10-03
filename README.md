@@ -1,8 +1,8 @@
 # cube
 
 Self-hosted coding-agent threads. The browser talks to cubed; an in-process
-[Pi AgentHarness](https://github.com/earendil-works/pi) owns the agent loop and
-durable SQLite session. Tools run on an explicitly enrolled Iroh runner.
+[pi-durable](https://github.com/earendil-works/pi) Harness owns the agent loop
+and the durable SQLite conversation. Tools run on an explicitly enrolled Iroh runner.
 Closing the tab or restarting cubed does not discard accepted work.
 
 **Experimental software. Current runners execute trusted commands under their

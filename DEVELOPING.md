@@ -134,10 +134,11 @@ runbook](docs/cubed-updates.md) for the manifest and supervisor contracts.
 Registry v100/v101 receives the rollback-compatible global-pool extension in place. There is no adoption of older registries or
 terminal sessions. Stop cubed and set `CUBED_STATE` to a new empty directory to reset the product. Create
 projects and enroll fresh runner identities. Do not delete an unspecified live
-installation. Archive recycles runner capacity, not the archived Pi session or
-retained user changes.
+installation. Archive recycles runner capacity, not the archived Pi storage or
+retained user changes. Threads created before the move to pi-durable 1.0.1 are
+not migrated: reset to a new `CUBED_STATE` as above.
 
-Restart cubed against the same state to resume accepted Pi operations. Do not
+Restart cubed against the same state to resume accepted Pi tasks. Do not
 run two writable owners for a session. Backups of the host must be taken with
 cubed stopped; keep Pi databases and product metadata together. Runner backup,
 restore quarantine, drain and recovery acknowledgement follow the runbook.

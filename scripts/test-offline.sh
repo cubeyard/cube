@@ -14,6 +14,7 @@ OFFLINE_TESTS=(
   packages/server/test/model-auth-test.ts
   packages/server/test/iroh-node-test.ts
   packages/server/test/workspace-test.ts
+  packages/server/test/durable-agent-test.ts
   packages/server/test/github-auth-test.ts
   packages/server/test/github-read-test.ts
   packages/server/test/onboarding-test.ts

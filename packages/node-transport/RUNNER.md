@@ -224,10 +224,11 @@ bytes. Upgrade runner binaries before allocating new threads; existing requests
 without `threadId` continue to use the legacy template workspace and preserve their
 operation hashes. `nodeId` and existing field names remain stable on wire.
 
-Product threads reach the enrolled runner through Pi's `bash` tool and
-`IrohExecutionNodeClient.resumeExec`. Pi supplies the stable invocation identity;
-the adapter derives and retains the runner operation identity and collects every
-output page. Until cubed's thread lease exists, these calls carry no epoch. There is no
+Product threads reach the enrolled runner through cubed's `Workspace`
+(`RunnerWorkspace` over `IrohExecutionNodeClient`): Pi's `bash`, `read`, `write`
+and `edit` tools. Keys derived from Pi's durable tool task IDs become runner
+operation IDs and write idempotency keys; every mutation carries the thread
+lease epoch, and stop is `exec.cancel`. There is no
 standalone HTTP runner-exec endpoint or legacy host-exec alias. Operator canaries
 use `IrohExecutionNodeClient` directly with the private pinned configuration;
 ordinary users submit prompts through the thread UI/API.

@@ -1,9 +1,10 @@
 /** Host activation and transport, never a second agent state machine. */
 import path from "node:path";
 import type { ServerResponse } from "node:http";
-import { BACKGROUND_CONTEXT, type LaneSnapshot, type AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Models } from "@earendil-works/pi-ai";
-import { openAgent } from "./durable-agent.ts";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Message, Models } from "@earendil-works/pi-ai";
+import { ConversationBusy, LiveDoc, type ConversationView, type EntryRecord, type SubmissionRecord } from "@earendil-works/pi-durable";
+import { openAgent, type Agent } from "./durable-agent.ts";
 import { IrohExecutionNodeClient } from "./iroh-node.ts";
 import { Registry } from "./registry.ts";
 import { RunnerWorkspace } from "./workspace.ts";
@@ -11,15 +12,14 @@ import { LeaseStore } from "./workspace-lease.ts";
 import type { ModelSelection } from "./models.ts";
 
 const context = BACKGROUND_CONTEXT;
-type Agent = Awaited<ReturnType<typeof openAgent>>;
+/** The registry's first message is submitted once under this request id. */
+const INITIAL_REQUEST = "cube:initial";
 export class Conversations {
   private readonly registry: Registry;
   private readonly directory: string;
   private readonly models: Models;
   private readonly agents = new Map<string, Promise<Agent>>();
   private readonly workspaces = new Map<string, { workspace: RunnerWorkspace; leases: LeaseStore }>();
-  private readonly drives = new Map<string, Promise<void>>();
-  private readonly activations = new Set<string>();
   private readonly failures = new Map<string, string>();
   private readonly commands = new Map<string, Promise<unknown>>();
   private closing = false;
@@ -39,9 +39,8 @@ export class Conversations {
   async activate(id: string): Promise<void> {
     try {
       await this.ensureWorkspace(id);
-      const agent = await this.agent(id);
+      await this.agent(id);
       this.failures.delete(id);
-      this.kick(id, agent);
     } catch (error) { this.failures.set(id, String(error)); }
   }
   private runner(id: string): IrohExecutionNodeClient {
@@ -92,14 +91,10 @@ export class Conversations {
       const runner = this.runner(id);
       const agent = await openAgent({ directory: path.join(this.directory, id), runner, workspace: this.workspace(id), models: this.models, model: thread.model });
       try {
-        const watch = await agent.lane.watch(context);
-        watch.unsubscribe();
+        // Pi deduplicates by request id: a reopen finds the first submission
+        // instead of submitting it again, whatever happened since.
         const initial = this.registry.initialPrompt(id);
-        if (!watch.snapshot.transcript.length && !watch.snapshot.operation && initial) {
-          const accepted = await agent.lane.accept({ kind: "prompt", prompt: initial }, context);
-          if (!accepted.ok) throw new Error("could not accept first message");
-        }
-        this.kick(id, agent);
+        if (initial) await agent.conversation.submit({ type: "input", content: initial, requestId: INITIAL_REQUEST }, context);
         return agent;
       } catch (error) { await agent.close(); throw error; }
     })();
@@ -107,96 +102,125 @@ export class Conversations {
     try { return await loading; }
     catch (error) { this.agents.delete(id); throw error; }
   }
-  private kick(id: string, agent: Agent): void {
-    if (this.closing) return;
-    if (this.drives.has(id)) { this.activations.add(id); return; }
-    const drive = (async () => {
-      const execution = await agent.lane.inspectExecution(context);
-      if (!execution.current) return;
-      this.failures.delete(id);
-      const result = await agent.lane.drive({ operationId: execution.current.id, waitForRetry: true, pollDeferred: true }, context);
-      if (!result.ok) throw new Error("could not resume thread");
-    })().catch(error => { if (!this.closing) this.failures.set(id, String(error)); });
-    this.drives.set(id, drive);
-    void drive.finally(() => {
-      this.drives.delete(id);
-      if (this.activations.delete(id)) this.kick(id, agent);
-    });
-  }
   private async command<T>(id: string, action: () => Promise<T>): Promise<T> {
     const promise = (this.commands.get(id) ?? Promise.resolve()).catch(() => {}).then(action);
     this.commands.set(id, promise);
     try { return await promise; }
     finally { if (this.commands.get(id) === promise) this.commands.delete(id); }
   }
-  submit(id: string, text: string, operationId: string): Promise<{ runId: string }> {
-    return this.command(id, () => this.accept(id, text, operationId));
+  submit(id: string, text: string, requestId: string): Promise<{ runId: string }> {
+    return this.command(id, () => this.accept(id, text, requestId));
   }
-  private async accept(id: string, text: string, operationId: string): Promise<{ runId: string }> {
-    const agent = await this.agent(id);
-    const watch = await agent.lane.watch(context);
-    watch.unsubscribe();
-    const prior = watch.snapshot.transcript.find(entry => entry.type === "message" &&
-      (entry.message as AgentMessage & { cubeRequestId?: string }).cubeRequestId === operationId);
-    if (prior?.type === "message") {
-      if (messageText(prior.message) !== text) throw new Error("message request conflicts with the previous request");
-      this.kick(id, agent);
-      return { runId: operationId };
-    }
+  private async accept(id: string, text: string, requestId: string): Promise<{ runId: string }> {
+    const { conversation } = await this.agent(id);
     // Request identity is committed atomically with the user message by Pi,
     // not stored in a second host workflow journal.
-    const prompt = { role: "user" as const, content: text, timestamp: Date.now(), cubeRequestId: operationId };
-    const accepted = await agent.lane.accept({ kind: "prompt", prompt, operationId }, context);
-    if (!accepted.ok) throw new Error("thread is already working or message is invalid");
-    this.kick(id, agent);
-    return { runId: accepted.value.operationId };
+    const prior = await conversation.commit(async tx => {
+      const submission = await tx.submissionByRequest(conversation.id, requestId);
+      if (!submission) return undefined;
+      const entry = submission.type === "input" && submission.entry !== undefined ? await tx.entry(submission.entry) : undefined;
+      return { type: submission.type, text: entry?.model?.[0] ? messageText(entry.model[0]) : undefined };
+    }, context);
+    if (prior && (prior.type !== "input" || (prior.text !== undefined && prior.text !== text))) throw new Error("message request conflicts with the previous request");
+    try { await conversation.submit({ type: "input", content: text, requestId, whenBusy: "reject" }, context); }
+    catch (error) {
+      if (error instanceof ConversationBusy) throw new Error("thread is already working or message is invalid", { cause: error });
+      throw error;
+    }
+    return { runId: requestId };
   }
   async model(id: string, selection?: ModelSelection): Promise<ModelSelection> {
     return this.command(id, async () => {
     const agent = await this.agent(id);
     if (selection) {
-      if ((await agent.lane.inspectExecution(context)).current) throw new Error("wait for the current run before changing model");
+      if ((await agent.harness.snapshot(LiveDoc, agent.conversation.id, context))?.run) throw new Error("wait for the current run before changing model");
       if (!this.models.getModel(selection.provider, selection.id)) throw new Error("model unavailable");
-      await agent.lane.setModel({ provider: selection.provider, modelId: selection.id }, context);
+      await agent.conversation.configure({ model: { provider: selection.provider, modelId: selection.id } }, context);
     }
-    const selected = (await agent.lane.inspectExecution(context)).configuredModel;
+    const selected = (await agent.conversation.agent(context)).model;
+    if (!selected) throw new Error("thread has no model");
     return { provider: selected.provider, id: selected.modelId };
     });
   }
   async history(id: string) {
-    const watch = await (await this.agent(id)).lane.watch(context);
-    watch.unsubscribe();
-    return history(watch.snapshot, this.failures.get(id));
+    const agent = await this.agent(id);
+    const watch = await agent.conversation.watch(context);
+    try { return await this.render(id, agent, watch.value); }
+    finally { await watch.stop(); }
   }
   async stream(id: string, response: ServerResponse): Promise<void> {
-    const watch = await (await this.agent(id)).lane.watch(context);
+    const agent = await this.agent(id);
+    const watch = await agent.conversation.watch(context);
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", "x-accel-buffering": "no" });
     let closed = false;
     let pending = false;
-    let dirty = false;
-    const send = async (snapshot: LaneSnapshot) => {
-      if (!response.write(`data: ${JSON.stringify(history(snapshot, this.failures.get(id)))}\n\n`)) {
-        await new Promise<void>(resolve => {
-          const done = () => { response.off("drain", done); response.off("close", done); resolve(); };
-          response.once("drain", done); response.once("close", done);
-        });
-      }
-    };
-    // Coalesce frames, not durable state. Reconnect always reads Pi's snapshot.
-    const flush = async () => {
-      if (pending || closed) return;
+    const send = async (view: ConversationView) => {
+      if (closed) return;
       pending = true;
       try {
-        do { dirty = false; const snapshot = await watch.resnapshot(context); if (!closed) await send(snapshot); } while (dirty && !closed);
-      } catch { response.destroy(); }
-      finally { pending = false; }
+        if (!response.write(`data: ${JSON.stringify(await this.render(id, agent, view))}\n\n`)) {
+          await new Promise<void>(resolve => {
+            const done = () => { response.off("drain", done); response.off("close", done); resolve(); };
+            response.once("drain", done); response.once("close", done);
+          });
+        }
+      } finally { pending = false; }
     };
+    // Pi's watch delivers one frame at a time and coalesces a slow client to
+    // the newest view; reconnect starts from the current committed view.
     const heartbeat = setInterval(() => { if (!pending) response.write(": keepalive\n\n"); }, 15000);
-    response.on("close", () => { closed = true; clearInterval(heartbeat); watch.unsubscribe(); });
-    pending = true;
-    watch.start(() => { dirty = true; void flush(); });
-    try { await send(watch.snapshot); }
-    finally { pending = false; if (dirty) void flush(); }
+    response.on("close", () => { closed = true; clearInterval(heartbeat); void watch.stop(); });
+    try { await send(watch.value); }
+    catch { response.destroy(); return; }
+    watch.start(async value => { try { await send(value); } catch { response.destroy(); } });
+  }
+  private readonly earlier = new Map<string, { head: number; messages: HistoryMessage[] }>();
+  private readonly results = new Map<string, { key: string; run: HistoryRun | null }>();
+  /** The thread transcript in cube's shape. Pi's view holds the active
+   * context; entries a compaction or reset hid are read once and kept. */
+  private async render(id: string, agent: Agent, view: ConversationView) {
+    // A head marker (compaction or reset) leads the view; the entries before
+    // its head are only hidden from the model, not from the thread.
+    const head = view.entries[0]?.head;
+    let earlier: HistoryMessage[] = [];
+    if (head !== undefined && head > 1) {
+      const cached = this.earlier.get(id);
+      if (cached?.head === head) earlier = cached.messages;
+      else {
+        const entries: EntryRecord[] = [];
+        let cursor;
+        do {
+          const page = await agent.conversation.entries({ maxEntryId: head }, 256, cursor, context);
+          entries.push(...page.items.filter(entry => entry.id < head));
+          cursor = page.next;
+        } while (cursor);
+        earlier = messages(entries.reverse());
+        this.earlier.set(id, { head, messages: earlier });
+      }
+    }
+    const live = view.docs["pi.live"] as { run?: { taskId: number; inputs: number[] }; generation?: { message?: Message } } | undefined;
+    const all = [...earlier, ...messages(view.entries)];
+    const streaming = live?.generation?.message;
+    if (streaming && live?.run) all.push({ seq: `stream-${live.run.taskId}`, role: "assistant", content: messageText(streaming), payload: streaming, finalized: false });
+    const failure = this.failures.get(id) ?? null;
+    if (live?.run) return { messages: all, run: { id: String(live.run.inputs[0] ?? live.run.taskId), status: "running", error: failure } as HistoryRun };
+    return { messages: all, run: await this.lastRun(id, agent, `${view.entries.length}:${view.entries.at(-1)?.id}`) };
+  }
+  /** The newest settled input decides the idle run state. */
+  private async lastRun(id: string, agent: Agent, key: string): Promise<HistoryRun | null> {
+    const cached = this.results.get(id);
+    if (cached?.key === key) return cached.run;
+    let last: SubmissionRecord | undefined;
+    let cursor;
+    do {
+      const page = await agent.storage.scanSubmissions({ conversationId: agent.conversation.id }, 256, cursor, context);
+      last = page.items.findLast(submission => submission.type === "input" && (submission.status === "done" || submission.status === "unanswered")) ?? last;
+      cursor = page.next;
+    } while (cursor);
+    const run: HistoryRun | null = !last ? null : { id: last.requestId ?? String(last.id), status: last.status === "done" ? "completed" : "failed",
+      error: last.status === "done" ? null : last.reason === "aborted" ? "stopped" : typeof last.detail === "string" ? last.detail : last.reason === "no_model" ? "model unavailable — choose another model" : last.reason ?? null };
+    this.results.set(id, { key, run });
+    return run;
   }
   async archive(id: string): Promise<void> {
     return this.command(id, async () => {
@@ -209,9 +233,8 @@ export class Conversations {
       return;
     }
     const agent = await this.agent(id);
-    const execution = await agent.lane.inspectExecution(context);
-    if (execution.current) throw new Error("stop the current run before archiving");
-    await agent.close(); this.agents.delete(id);
+    if ((await agent.harness.snapshot(LiveDoc, agent.conversation.id, context))?.run) throw new Error("stop the current run before archiving");
+    await agent.close(); this.agents.delete(id); this.earlier.delete(id); this.results.delete(id);
     this.closeWorkspace(id);
     this.registry.beginRelease(id);
     await this.release(id);
@@ -231,31 +254,26 @@ export class Conversations {
   }
   async stop(id: string): Promise<void> {
     const agent = await this.agent(id);
-    await agent.lane.abort(context);
+    await agent.conversation.abort(context);
   }
   async close(): Promise<void> {
     this.closing = true;
     await Promise.allSettled(this.commands.values());
     await Promise.all([...this.agents.values()].map(async promise => (await promise).close()));
-    await Promise.all(this.drives.values());
     this.agents.clear();
     for (const id of [...this.workspaces.keys()]) this.closeWorkspace(id);
   }
 }
 
-function messageText(message: AgentMessage): string {
-  if (!("content" in message)) return "";
+type HistoryMessage = { seq: number | string; role: string; content: string; payload: Message; finalized: boolean };
+type HistoryRun = { id: string; status: string; error: string | null };
+const SHOWN = new Set(["pi.user", "pi.assistant", "pi.tool-result"]);
+function messages(entries: readonly EntryRecord[]): HistoryMessage[] {
+  return entries.flatMap(entry => SHOWN.has(entry.kind) ? (entry.model ?? []).map(message => ({
+    seq: entry.id, role: message.role === "toolResult" ? "tool" : message.role, content: messageText(message), payload: message, finalized: true,
+  })) : []);
+}
+function messageText(message: Message): string {
   if (typeof message.content === "string") return message.content;
   return message.content.map(part => part.type === "text" ? part.text : part.type === "thinking" ? part.thinking : "").filter(Boolean).join("\n");
-}
-function history(snapshot: LaneSnapshot, failure?: string) {
-  const messages = snapshot.transcript.flatMap(entry => entry.type === "message" ? [{
-    seq: entry.id, role: entry.message.role === "toolResult" ? "tool" : entry.message.role,
-    content: messageText(entry.message), payload: entry.message, finalized: true,
-  }] : []);
-  const streaming = snapshot.operation?.streamingMessage;
-  if (streaming) messages.push({ seq: `stream-${snapshot.operation!.id}`, role: "assistant", content: messageText(streaming), payload: streaming, finalized: false });
-  const terminal = snapshot.lastResult;
-  return { messages, run: snapshot.operation ? { id: snapshot.operation.id, status: "running", error: failure ?? null }
-    : terminal ? { id: terminal.operationId, status: terminal.status === "completed" ? "completed" : "failed", error: terminal.error?.message ?? (terminal.status === "aborted" ? "stopped" : null) } : null };
 }

@@ -1,15 +1,17 @@
 # Handoff
 
 Architecture replacement is implemented in this working tree. The ordinary
-HTTP conversation path now uses in-process Pi AgentHarness + SQLite, with
-startup activation and snapshot SSE. The old execution stack has been removed.
+HTTP conversation path now uses an in-process pi-durable 1.0.1 Harness + SQLite,
+with startup activation and snapshot SSE. Pi's tools reach the runner only
+through the thread `Workspace` and its lease. The old execution stack has been removed.
 Current runner execution is trusted, not sandboxed; native sandboxing remains
 undecided. No migration of old data is required or implemented.
 
 Verified locally on Linux:
 
 - `pnpm typecheck`: zero TypeScript/Svelte errors or warnings; `pnpm lint` passed.
-- `pnpm test`: all 12 offline suites; `pnpm build` passed.
+- `pnpm test`: all offline suites, including Pi over the Workspace with a fake
+  runner (`durable-agent-test.ts`); `pnpm build` passed.
 - `scripts/test-node-transport.sh`: fmt, clippy, Rust tests, actual Iroh shell
   calls, four SIGKILL recovery boundaries, single writer exclusion, stable
   invocation identity and one effect, product startup activation, SSE snapshots,
@@ -36,8 +38,9 @@ security sandbox. Workspace transfer, authenticated Git mutation, portals and
 thread-to-thread tools are not exposed. Pi's saved model choice now controls
 reopening even when the registry's initial model or the selected model disappears
 from the catalog; unavailable models are not silently replaced.
-Stop aborts Pi's run and polling; an already accepted remote shell command may
-continue until its runner deadline. Remote cancellation is not wired to Pi abort.
+Stop aborts Pi's run and cancels a running runner command (process-group
+SIGKILL through `exec.cancel`). A host shutdown does not cancel it; the next
+process reattaches to the same runner operation.
 Do not equate these constraints with a native sandbox implementation.
 
 GUI provider settings use Pi's public Models login/logout/refresh APIs and the

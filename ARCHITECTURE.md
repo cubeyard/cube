@@ -2,8 +2,9 @@
 
 ## Ownership
 
-- **Pi AgentHarness + SQLite:** accepted prompts, transcript, model stream
-  checkpoints, tool invocations/results, operation status and resumption policy.
+- **pi-durable Harness + SQLite:** accepted prompts and their request IDs,
+  transcript, model stream checkpoints, tool tasks/results, run status and
+  resumption policy.
 - **cubed:** projects, immutable runner admission, thread metadata, request
   allocation, access boundary, HTTP/SSE and activation of Pi's open operations.
 - **runner:** workspace execution and durable deduplication/result retention for
@@ -39,18 +40,31 @@ declare exact, rollback-safe schema 100 compatibility.
 ## Action, result, resume
 
 Thread allocation and its first message are committed in the product registry
-before activation. The host accepts that first message into an empty Pi lane;
-afterwards Pi owns execution. On startup cubed opens nonarchived threads and
-drives Pi's current operations. Followup request IDs are stored in their Pi user
-messages, atomically with admission, so a repeated HTTP action does not append
-another turn. The product registry stores no model or tool progress.
+before activation. Each thread is one pi-durable Harness over its own storage;
+the thread transcript is the Harness's root conversation. The host submits the
+first message under a fixed request ID; afterwards Pi owns execution. On startup
+cubed opens nonarchived threads and resumes Pi's unfinished tasks. Followup
+request IDs are Pi submission request IDs, committed atomically with admission,
+so a repeated HTTP action does not append another turn; a busy thread rejects a
+new prompt instead of queueing it. The product registry stores no model or tool
+progress. The thread's runner binding and a random storage identity live in a
+session-scoped Pi document, `cube.runner`; a changed binding refuses to open.
 
-The published `@earendil-works/pi-session-backend-sqlite-node` backend uses WAL.
-Cube sets and checks `synchronous=FULL` on creation and reopening.
+Cube opens pi-durable's `SqliteStorage` on its own `node:sqlite` connection in
+WAL mode and sets and checks `synchronous=FULL` on every open. pi-durable has no
+cross-process storage lock; the thread's workspace lease is that lock.
 
-Pi's stable session/invocation identity maps deterministically to an Iroh runner
-operation ID. A repeated `exec.start` retrieves retained work; changed arguments
-conflict. The runner never silently reexecutes Interrupted operations or evicts
+Pi's tools reach the runner only through the thread `Workspace`. `read`,
+`write` and `edit` are pi-durable's own file tools over an `ExecutionEnv`
+(`workspace-env.ts`) that maps the virtual root `/workspace` to workspace-relative
+runner paths; a write after a read in the same call carries the read content's
+`expectedSha`. `bash` is cube's own tool. Every mutation key is derived from the
+storage identity and the Pi tool task ID, so a replayed task finds the same
+runner operation: a repeated `exec.start` retrieves retained work; changed
+arguments conflict. `read`, `write` and `bash` are replay-safe; `edit` is not and
+is reported as interrupted after a crash. Stop aborts Pi's tasks and cancels a
+running runner command; a host shutdown leaves the command running and the next
+process reattaches to it. The runner never silently reexecutes Interrupted operations or evicts
 IDs to create room. A lost response therefore does not imply a second effect.
 Diagnostic runner CLI intents remain separate from Pi's production call path.
 Runner protocol 2 adds paged command output, `exec.cancel` (process-group
@@ -59,7 +73,7 @@ for writes and per-thread lease-epoch fencing of mutations. A protocol-1 runner
 is incompatible and must be upgraded; see
 [RUNNER.md](packages/node-transport/RUNNER.md).
 
-Pi recovery is a durable state machine, not complete-history replay. Partial
+Pi recovery is a durable task state machine, not complete-history replay. Partial
 model responses can be interrupted and retried under Pi policy; a provider may
 bill both attempts. SIGKILL tests are not proof of power-loss durability.
 
@@ -80,7 +94,7 @@ for every lease-scoped call, the owner, a fencing epoch and, for remote holders,
 a heartbeat deadline. While a lease is held, a dedicated SQLite connection keeps
 a write transaction open on the thread's `lease.lock`; a competing process or
 instance cannot take it, and process death releases it at once without stale PID
-files. Pi holds the lease for its whole Session lifetime. The epoch is the only
+files. Pi holds the lease for its whole Harness lifetime. The epoch is the only
 durable lease state: it never decreases and is at least the wall-clock time in
 milliseconds, so it stays increasing even if the thread directory is lost. Every
 runner mutation carries it, and the runner refuses an older epoch than the
@@ -95,8 +109,8 @@ exists: a runner lacking a workspace capability is incompatible.
 
 `CUBED_STATE/registry.sqlite` contains projects, globally registered runners,
 operator contact observations and retirement audit, thread metadata and creation
-request keys. `CUBED_STATE/threads/<id>/session` contains
-Pi's databases; `threads/<id>/lease.sqlite` keeps the thread's lease epoch and
+request keys. `CUBED_STATE/threads/<id>/pi.sqlite` is
+the thread's pi-durable storage; `threads/<id>/lease.sqlite` keeps the thread's lease epoch and
 owner, and `lease.lock` is only held while a lease is. Registry v100/v101 receives the rollback-compatible global-pool extension in place; older execution stacks are
 not migrated. See the reset workflow in README.
 

@@ -7,10 +7,11 @@ Licenses and upstream notices remain in each subtree.
 
 | Directory | Upstream | Tag | Commit | Used by cube |
 | --- | --- | --- | --- | --- |
-| `pi/` | https://github.com/earendil-works/pi | `v0.85.1` | `d981de1229ef899957bbe968bc8dcda02a21f477` | `@earendil-works/pi-coding-agent` in server and pi-extension |
+| `pi/` | https://github.com/earendil-works/pi | `v1.0.1` | `a7229ddc21810d6245105978033b7df645ecc2f7` | `@earendil-works/pi-durable`, `pi-ai`, `pi-coding-agent` and `chord` in server |
 | `effect/` | https://github.com/Effect-TS/effect | `effect@4.0.0-rc.113` | `d3b837aee836f35d625d55205f7d6e61305fc198` | `effect` in server, git, sandbox and web |
 
-Cube delegates its agent loop, sessions and terminal UI to pi. Effect 4 is an
+Cube delegates its agent loop, durable conversations and model access to pi
+(`packages/durable` is pi-durable). Effect 4 is an
 explicitly pinned release candidate, initially used for onboarding-state schema
 validation. Read `effect/LLMS.md` before using its APIs. Add other references only
 when their source will help a concrete task.
@@ -21,7 +22,7 @@ Use Git with the `subtree` command installed. From a clean working tree on a
 branch, update to the release tag matching cube's dependency version:
 
 ```sh
-git subtree pull --prefix=repos/pi https://github.com/earendil-works/pi.git v0.85.1 --squash
+git subtree pull --prefix=repos/pi https://github.com/earendil-works/pi.git v1.0.1 --squash
 git subtree pull --prefix=repos/effect https://github.com/Effect-TS/effect.git effect@4.0.0-rc.113 --squash
 ```
 
