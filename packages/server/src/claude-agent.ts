@@ -167,9 +167,11 @@ export class ClaudeAgent {
     const child = this.child;
     if (!this.running || !child || this.interrupt) return;
     this.write(child.process, { type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } });
-    // A child that ignores the interrupt is killed. Its mod never sees an
-    // abort then, so cubed cancels the runner commands itself: the runner
-    // admits one command at a time and would stay busy otherwise.
+    // Claude Code answers an interrupt by rejecting the running tool use
+    // without aborting the mod's hook, so the runner command would run on.
+    // cubed cancels it itself; the runner admits one command at a time.
+    void this.cancelCommands();
+    // A child that ignores the interrupt is killed (and cancelled again).
     const interrupt: NonNullable<ClaudeAgent["interrupt"]> = { timer: setTimeout(() => {
       if (this.child !== child) return;
       void this.cancelCommands();

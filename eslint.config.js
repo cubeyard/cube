@@ -15,6 +15,8 @@ export default defineConfig([
     "repos/",
     ".claude/",
     ".agents/",
+    // Laid by Claude Code when it loads the mod from a checkout.
+    "packages/claude-mod/.claude-plugin/types/",
   ]),
   js.configs.recommended,
   tseslint.configs.recommended,

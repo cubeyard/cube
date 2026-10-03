@@ -47,6 +47,18 @@ export function findClaude(env: NodeJS.ProcessEnv = process.env): string[] | nul
   return null;
 }
 
+/** A private copy of the Claude Code mod under the state directory. Claude
+ * Code writes type declarations into a plugin folder it loads, so the
+ * application tree is never handed to it. Copied afresh at every start. */
+function claudeMod(state: string): string {
+  const target = path.join(state, "run", "claude-mod");
+  fs.rmSync(target, { recursive: true, force: true });
+  fs.cpSync(path.resolve(import.meta.dirname, "../../claude-mod"), target, {
+    recursive: true, filter: source => !source.includes(`${path.sep}.claude-plugin${path.sep}types`),
+  });
+  return target;
+}
+
 /** The private socket the Claude Code mod reaches the thread workspace on.
  * It serves workspace routes only; the lease token is the authorization. */
 async function workspaceSocket(state: string): Promise<{ socket: string; temporary: string | null }> {
@@ -104,7 +116,7 @@ export async function createCubed(options: {
   const modelAuth = new ModelAuth(models);
   const claudeCommand = options.claude === undefined ? findClaude() : options.claude;
   const conversations = new Conversations(registry, path.join(options.state, "threads"), models, claudeCommand ? {
-    command: claudeCommand, socket, mod: path.resolve(import.meta.dirname, "../../claude-mod"), ...options.claudeOptions,
+    command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
   } : null);
   const github = new GithubAuth();
   const git = new GitService(path.join(options.state, "repositories"));

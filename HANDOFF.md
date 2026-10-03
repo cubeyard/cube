@@ -68,24 +68,27 @@ Workspace keyed by `tool_use_id`. The child gets an allow-listed environment
 credentials), no user settings or MCP servers (`--setting-sources ""`,
 `--strict-mcp-config`), and only the mod's allow-listed tools (`--tools` and the
 mod's own `tool.call` allow-list; non-built-in and isolated subagents are
-refused). When a stop has to kill the child, when it dies mid-turn and on
-close, cubed cancels the turn's open Bash commands on the runner itself, and a
-child that ignores SIGTERM gets SIGKILL. cubed's own lease cannot be renewed or
-released over the workspace routes. A turn cut off by a cubed restart is not
-continued.
+refused). A stop sends the stream-json interrupt and cubed cancels the turn's
+open Bash commands on the runner at once: Claude Code answers an interrupt by
+rejecting the tool use without aborting the mod's hook. cubed also cancels when a
+stop has to kill the child, when it dies mid-turn and on close, and a child that
+ignores SIGTERM gets SIGKILL. cubed hands Claude Code a private copy of the mod
+under `CUBED_STATE/run/claude-mod`, because Claude Code writes type declarations
+into a plugin folder it loads. cubed's own lease cannot be renewed or released
+over the workspace routes. A turn cut off by a cubed restart is not continued.
 
-None of this has run against the real Claude Code with a real model or a Max
-login. It is tested only with a fake `claude` that checks the flags, speaks
-stream-json and runs the mod's tool functions, and with `claude plugin
-validate`/`claude plugin test`, which call no model. Not verified in a real
-session: that `$.http.fetch` with `socketPath` reaches cubed's socket; that
-Claude Code accepts the mod's Bash/Read/Write/Edit result objects and does not
-trip its own read-before-write or file-existence checks first; that `-p`
-honours the stream-json `interrupt` and keeps one session across `--resume`
-with a new `--model`; that `--setting-sources ""`, `--tools` and
-`--strict-mcp-config` behave as documented in 2.1.288; that subagents' tool
-calls pass through the mod's hooks; and that the Max subscription, not API
-billing, is what a turn uses.
+Live run on 2026-10-03 (Linux, disposable state, a local cube-runner 0.3.0,
+the real `claude` 2.1.288 with the maintainer's Max login): a claude · max
+thread used Write, Read, Edit and Bash in the runner workspace, a
+general-purpose subagent's Bash ran there too, AGENTS.md was read from the
+runner, nothing was written into Claude Code's host directory, and Claude Code
+reported `apiKeySource: "none"` (subscription login, no API key). A follow-up
+after a model change resumed the session on the new model (sonnet, then opus).
+Stop rejected a running `sleep 90` and cancelled it on the runner (its later
+write never happened). The automated suites still use a fake `claude`; this
+live run is a manual script, not part of `pnpm test`. Not verified live:
+`--resume` after a cubed restart, the SIGTERM/SIGKILL fallback, isolated or
+plugin subagents being refused, and runners on separate machines.
 
 GUI provider settings use Pi's public Models login/logout/refresh APIs and the
 existing host credential store. Browser/device login, key entry, cancellation,
