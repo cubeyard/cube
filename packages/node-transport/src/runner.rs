@@ -1513,6 +1513,10 @@ impl Runner {
                 serde_json::to_string(&Operation::Running)?
             ],
         )?;
+        // The filesystem work runs without the journal lock, so a slow fsync
+        // or hash never delays cancellation or status reads. A duplicate of
+        // this key meanwhile sees Running and reports an unknown outcome.
+        drop(journal);
         let outcome = write_beneath(
             &root,
             &components,
@@ -1530,7 +1534,7 @@ impl Runner {
                 completion_unknown: *completion_unknown,
             },
         };
-        journal.db.execute(
+        self.journal.lock().unwrap().db.execute(
             "UPDATE operation SET state=?1 WHERE id=?2",
             params![serde_json::to_string(&state)?, key],
         )?;
@@ -2436,7 +2440,7 @@ fn write_beneath(
                 return Err(("INVALID_REQUEST", false));
             }
             if let Some(expected) = expected_sha
-                && file_digest(file, metadata.len(), u64::MAX)
+                && file_digest(file, metadata.len(), MAX_HASH_BYTES)
                     .map_err(unchanged)?
                     .as_deref()
                     != Some(expected)

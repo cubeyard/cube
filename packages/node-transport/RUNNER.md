@@ -197,8 +197,11 @@ workspace descriptor, so a symlink may be read only while it stays beneath the
 workspace; macOS walks components with `openat(O_NOFOLLOW)` and refuses every
 symlink. `fs.write` never follows or replaces a symlink at the final component,
 preserves an existing file's mode, and leaves no temporary file on failure.
-`expectedSha` is the SHA-256 of the whole current file; a mismatch or missing
-file is `PRECONDITION_FAILED`. Missing files are `NOT_FOUND`.
+`expectedSha` is the SHA-256 of the whole current file; a mismatch, a missing
+file or a file over 16 MiB (which reports no sha) is `PRECONDITION_FAILED`.
+The filesystem work runs outside the journal lock, so a slow write never
+delays `operation.get` or `exec.cancel`; a duplicate of a key still being
+written reports `OUTCOME_UNKNOWN`. Missing files are `NOT_FOUND`.
 
 `fs.write` is retained under its idempotency key exactly like a command: the
 same key and request returns the original result without touching the file, a
