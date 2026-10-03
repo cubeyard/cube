@@ -62,7 +62,26 @@ runner paths; a write after a read in the same call carries the read content's
 storage identity and the Pi tool task ID, so a replayed task finds the same
 runner operation: a repeated `exec.start` retrieves retained work; changed
 arguments conflict. `read`, `write` and `bash` are replay-safe; `edit` is not and
-is reported as interrupted after a crash. Stop aborts Pi's tasks and cancels a
+is reported as interrupted after a crash.
+
+`codemode` (`codemode.ts`) runs one model-written JavaScript script in
+pi-codemode's QuickJS VM, a fresh worker per script whose only capabilities are
+the same four tools. It is one pi-durable tool with replay `unsafe`: a script
+interrupted by a crash is reported as possibly partially run and never rerun;
+its running output names each nested call that had started. Nested calls run one
+at a time in call order, and each reaches the Workspace under the codemode task
+key plus its sequence number (`pi:<instance>:<task>:code:<n>`), so every nested
+call has a stable identity. The host enforces strict limits modelled on cube's
+earlier codemode: 64 KiB source, 64 MiB VM memory, a 15-minute wall deadline,
+64 nested calls, 1 MiB arguments per call (both stop the script), 4 MiB per
+nested result handed to the script and a 256 KiB final result, cut with a
+notice. A mutating call stopped while running, or one whose runner outcome is
+unknown, makes the result an error that lists it as uncertain; a call that does
+not settle within 10 seconds of the script ending blocks the next script until
+it does. Nothing is retried automatically. The worker is fault containment, not
+a sandbox, and the runner stays trusted.
+
+Stop aborts Pi's tasks and cancels a
 running runner command; a host shutdown leaves the command running and the next
 process reattaches to it. The runner never silently reexecutes Interrupted operations or evicts
 IDs to create room. A lost response therefore does not imply a second effect.

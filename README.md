@@ -65,7 +65,8 @@ stale installation binding without deleting audit or runner-side evidence. The U
 streamed results, reconnect, model selection, stop, rename and archive.
 
 This is workspace collision isolation only, not process or security isolation.
-The current tool is bounded `bash`. Workspace transfer, authenticated Git writes,
+The current tools are `read`, `write`, `edit`, bounded `bash` and `codemode`,
+which runs one model-written JavaScript script that calls those tools. Workspace transfer, authenticated Git writes,
 service links, thread-to-thread tasks and native sandboxing are not yet exposed
 by this implementation. Project repository checks remain host-side and pin the
 metadata used for runner-side checkout; host credentials never cross that boundary.

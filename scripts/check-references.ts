@@ -7,6 +7,7 @@ const root = path.resolve(import.meta.dirname, "..");
 const references = [
   { name: "@earendil-works/pi-coding-agent", source: "pi/packages/coding-agent", consumers: ["server"] },
   { name: "@earendil-works/pi-durable", source: "pi/packages/durable", consumers: ["server"] },
+  { name: "@earendil-works/pi-codemode", source: "pi/packages/codemode", consumers: ["server"] },
   { name: "@earendil-works/pi-ai", source: "pi/packages/ai", consumers: ["server"] },
   { name: "@earendil-works/chord", source: "pi/packages/chord", consumers: ["server"] },
   { name: "effect", source: "effect/packages/effect", consumers: ["server", "git", "web"] },

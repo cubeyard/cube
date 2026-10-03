@@ -7,11 +7,12 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Type, type Models } from "@earendil-works/pi-ai";
-import { createRegistry, defineDoc, defineExtension, defineTool, Harness, ROOT_CONVERSATION_ID, section, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
+import { Type, type Models, type Static } from "@earendil-works/pi-ai";
+import { createRegistry, defineDoc, defineExtension, defineTool, Harness, ROOT_CONVERSATION_ID, section, type Extension, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import { NodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
+import { createCodemodeTool, type CodemodeLimits, type NestedTool } from "./codemode.ts";
 import type { NodeBinding } from "./iroh-node.ts";
 import { settleOperation, WorkspaceError, type Workspace } from "./workspace.ts";
 import { WORKSPACE_ROOT, WorkspaceEnv } from "./workspace-env.ts";
@@ -20,6 +21,11 @@ const context = BACKGROUND_CONTEXT;
 const BASH_OUTPUT_BYTES = 50 * 1024;
 const BASH_DEFAULT_TIMEOUT_MS = 120_000;
 const BASH_MAX_TIMEOUT_MS = 600_000;
+const bashParameters = Type.Object({
+  command: Type.String({ description: "Bash command to execute" }),
+  cwd: Type.Optional(Type.String({ description: "Directory relative to the workspace root" })),
+  timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: BASH_MAX_TIMEOUT_MS })),
+});
 
 /** The runner this thread's storage belongs to, plus a random storage
  * identity that scopes every workspace key Pi derives from task ids. */
@@ -48,6 +54,8 @@ export async function openAgent(options: {
   workspace: Workspace;
   models: Models;
   model: { provider: string; id: string };
+  /** Tests lower these; production uses CODEMODE_LIMITS. */
+  codemodeLimits?: Partial<CodemodeLimits>;
   /** Installed after cube's own extension; tests use this for hooks. */
   extensions?: readonly Extension[];
 }) {
@@ -65,55 +73,67 @@ export async function openAgent(options: {
     storage = await openStorage(path.join(options.directory, "pi.sqlite"));
     const registry = createRegistry();
     // Keys are bound in each tool call; replay of the same task finds the
-    // same runner operation instead of executing again.
+    // same runner operation instead of executing again. A direct call's key is
+    // its task's; a codemode call's nested calls extend the codemode task's
+    // key with their sequence number.
     let instance = "";
-    const keyed = <T extends ToolRegistration>(tool: T): T => ({
-      ...tool,
-      execute: (args, api, callContext) => tool.execute(args, {
-        ...api, env: new WorkspaceEnv({ workspace: options.workspace, token: lease.token, id: `cube-workspace:${instance}`, key: `pi:${instance}:${api.taskId}` }),
+    const taskKey = (api: ToolExecutionApi) => `pi:${instance}:${api.taskId}`;
+    const fileTool = (tool: ToolRegistration, mutates: boolean): NestedTool => ({
+      registration: tool, mutates,
+      run: (args, api, callContext, key) => tool.execute(args, {
+        ...api, env: new WorkspaceEnv({ workspace: options.workspace, token: lease.token, id: `cube-workspace:${instance}`, key }),
       }, callContext),
     });
-    const bash = defineTool({
-      name: "bash",
-      description: `Execute a shell command in the thread runner workspace and return combined stdout and stderr. Output is bounded to ${BASH_OUTPUT_BYTES / 1024} KiB. cwd is relative to the workspace root, which is also the default. Timeout defaults to ${BASH_DEFAULT_TIMEOUT_MS / 1000} seconds, at most ${BASH_MAX_TIMEOUT_MS / 1000}.`,
-      parameters: Type.Object({
-        command: Type.String({ description: "Bash command to execute" }),
-        cwd: Type.Optional(Type.String({ description: "Directory relative to the workspace root" })),
-        timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: BASH_MAX_TIMEOUT_MS })),
+    const bashTool: NestedTool = {
+      registration: defineTool({
+        name: "bash",
+        description: `Execute a shell command in the thread runner workspace and return combined stdout and stderr. Output is bounded to ${BASH_OUTPUT_BYTES / 1024} KiB. cwd is relative to the workspace root, which is also the default. Timeout defaults to ${BASH_DEFAULT_TIMEOUT_MS / 1000} seconds, at most ${BASH_MAX_TIMEOUT_MS / 1000}.`,
+        parameters: bashParameters,
+        // The task id is the runner operation key: a rerun after a crash
+        // reattaches to the same command and never starts it twice.
+        replay: "safe",
+        executionMode: "sequential",
+        execute: (args, api, callContext) => runBash(args, api, callContext, taskKey(api)),
       }),
-      // The task id is the runner operation key: a rerun after a crash
-      // reattaches to the same command and never starts it twice.
-      replay: "safe",
-      executionMode: "sequential",
-      async execute(args, api, callContext: Context) {
-        const key = `pi:${instance}:${api.taskId}:bash`;
-        const signal = callContext.abortSignal;
-        try {
-          await options.workspace.exec(lease.token, key, {
-            command: args.command, timeoutMs: args.timeoutMs ?? BASH_DEFAULT_TIMEOUT_MS, outputLimit: BASH_OUTPUT_BYTES,
-            ...(args.cwd === undefined ? {} : { cwd: relative(args.cwd) }),
-          });
-          const state = await settleOperation(options.workspace, lease.token, key, signal ? { signal } : {});
-          if (state.state === "failed") throw new WorkspaceError(state.error, `command failed: ${state.error}`, { completionUnknown: state.completionUnknown });
-          if (state.state !== "succeeded") throw new Error("command outcome is unknown; inspect the workspace before retrying");
-          await api.details({ operationKey: key, exitCode: state.exitCode, termination: state.termination }, callContext);
-          return {
-            content: [{ type: "text" as const, text: Buffer.from(state.output).toString("utf8")
-              + `\n[exit=${state.exitCode}; ${state.termination}${state.truncated ? "; output truncated" : ""}]` }],
-          };
-        } catch (error) {
-          // A stop aborts the call: kill the runner command. A host shutdown
-          // also aborts it, but then the command keeps running and the next
-          // process reattaches to it.
-          if (signal?.aborted && !closing) await options.workspace.cancel(lease.token, key).catch(() => {});
-          throw error;
-        }
-      },
+      mutates: true,
+      run: (args: Static<typeof bashParameters>, api, callContext, key) => runBash(args, api, callContext, key),
+    };
+    async function runBash(args: Static<typeof bashParameters>, api: ToolExecutionApi, callContext: Context, base: string) {
+      const key = `${base}:bash`;
+      const signal = callContext.abortSignal;
+      try {
+        await options.workspace.exec(lease.token, key, {
+          command: args.command, timeoutMs: args.timeoutMs ?? BASH_DEFAULT_TIMEOUT_MS, outputLimit: BASH_OUTPUT_BYTES,
+          ...(args.cwd === undefined ? {} : { cwd: relative(args.cwd) }),
+        });
+        const state = await settleOperation(options.workspace, lease.token, key, signal ? { signal } : {});
+        if (state.state === "failed") throw new WorkspaceError(state.error, `command failed: ${state.error}`, { completionUnknown: state.completionUnknown });
+        if (state.state !== "succeeded") throw new WorkspaceError("COMPLETION_UNKNOWN", "command outcome is unknown; inspect the workspace before retrying");
+        await api.details({ operationKey: key, exitCode: state.exitCode, termination: state.termination }, callContext);
+        return {
+          content: [{ type: "text" as const, text: Buffer.from(state.output).toString("utf8")
+            + `\n[exit=${state.exitCode}; ${state.termination}${state.truncated ? "; output truncated" : ""}]` }],
+        };
+      } catch (error) {
+        // A stop aborts the call: kill the runner command. A host shutdown
+        // also aborts it, but then the command keeps running and the next
+        // process reattaches to it.
+        if (signal?.aborted && !closing) await options.workspace.cancel(lease.token, key).catch(() => {});
+        throw error;
+      }
+    }
+    const direct = (tool: NestedTool): ToolRegistration => ({
+      ...tool.registration,
+      execute: (args, api, callContext) => tool.run(args as never, api, callContext, taskKey(api)),
     });
+    const read = fileTool({ ...createReadTool(), replay: "safe" }, false);
+    const write = fileTool({ ...createWriteTool(), replay: "safe" }, true);
+    const edit = fileTool(createEditTool(), true);
+    const codemode = createCodemodeTool({ tools: [read, write, edit, bashTool], key: taskKey, ...(options.codemodeLimits ? { limits: options.codemodeLimits } : {}) });
     registry.install(defineExtension({
       name: "cube",
-      tools: [keyed({ ...createReadTool(), replay: "safe" }), keyed({ ...createWriteTool(), replay: "safe" }), keyed(createEditTool()), bash],
-      sections: [section("preamble", () => `You are a coding agent working in a thread runner workspace. File tools address the workspace root as ${WORKSPACE_ROOT}; bash runs commands with the workspace root as its working directory. The runner executes trusted commands under its own account; it is not a sandbox. Never assume access to control-plane files or credentials.`, { tag: false })],
+      tools: [direct(read), direct(write), direct(edit), bashTool.registration, codemode],
+      sections: [section("preamble", () => `You are a coding agent working in a thread runner workspace. File tools address the workspace root as ${WORKSPACE_ROOT}; bash runs commands with the workspace root as its working directory. codemode runs one JavaScript script that calls these tools, for batching, chaining or filtering their results. The runner executes trusted commands under its own account; it is not a sandbox. Never assume access to control-plane files or credentials.`, { tag: false })],
     }));
     for (const extension of options.extensions ?? []) registry.install(extension);
     harness = await Harness.open(storage, { models: options.models, registry, settings: { toolExecution: "sequential" } }, context);
