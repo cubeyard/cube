@@ -139,6 +139,9 @@ export class ClaudeAgent {
     }
   }
 
+  /** The host directory Claude Code runs in; its tools address the
+   * workspace through it. */
+  get root(): string { return this.cwd; }
   get model(): string { return this.meta("model")!; }
   get sessionId(): string | null { return this.meta("session"); }
   get running(): boolean { return this.submissions.at(-1)?.state === "running"; }

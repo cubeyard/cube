@@ -17,7 +17,7 @@ export class ClaudeThreadEvents implements ThreadEvents {
   }
 
   async read(): Promise<ThreadTranscript> {
-    return render(this.agent.state(), this.owner(), this.failure());
+    return render(this.agent.state(), this.owner(), this.failure(), this.agent.root);
   }
 
   async watch(listener: (transcript: ThreadTranscript) => void | Promise<void>): Promise<ThreadWatch> {
@@ -40,7 +40,10 @@ export class ClaudeThreadEvents implements ThreadEvents {
   }
 }
 
-export function render(state: ClaudeState, owner: ThreadAgent | null, failure: string | null): ThreadTranscript {
+/** Claude Code's tools see the workspace at its host directory (`root`); the
+ * transcript shows it as /workspace, as Pi threads do, never the host path. */
+export function render(state: ClaudeState, owner: ThreadAgent | null, failure: string | null, root?: string): ThreadTranscript {
+  const shown = root ? virtualize(root) : <T>(value: T) => value;
   const events: ThreadEvent[] = [];
   const names = new Map<string, string>();
   const bySubmission = new Map<number, ClaudeState["messages"]>();
@@ -62,14 +65,14 @@ export function render(state: ClaudeState, owner: ThreadAgent | null, failure: s
           else if (block.type === "thinking" && block.thinking) events.push({ type: "assistant-text", id, text: block.thinking, reasoning: true, final: true });
           else if (block.type === "tool_use" && block.id) {
             names.set(block.id, block.name ?? "tool");
-            events.push({ type: "tool-call", id, callId: block.id, name: block.name ?? "tool", input: block.input ?? {}, final: true });
+            events.push({ type: "tool-call", id, callId: block.id, name: block.name ?? "tool", input: shown(block.input ?? {}), final: true });
           }
         });
       } else if (data.type === "user") {
         blocks.forEach((block, index) => {
           if (block.type !== "tool_result" || !block.tool_use_id) return;
           events.push({ type: "tool-result", id: `m${seq}.${index}`, callId: block.tool_use_id, name: names.get(block.tool_use_id) ?? "tool",
-            output: resultText(block.content), isError: block.is_error === true, final: true });
+            output: shown(resultText(block.content)), isError: block.is_error === true, final: true });
         });
       }
     }
@@ -81,7 +84,7 @@ export function render(state: ClaudeState, owner: ThreadAgent | null, failure: s
       const id = `live.${current.seq}.${index}`;
       if (block.type === "text" && block.text) events.push({ type: "assistant-text", id, text: block.text, reasoning: false, final: false });
       else if (block.type === "thinking" && block.thinking) events.push({ type: "assistant-text", id, text: block.thinking, reasoning: true, final: false });
-      else if (block.type === "tool_use") events.push({ type: "tool-call", id, callId: block.id, name: block.name, input: partialInput(block.json), final: false });
+      else if (block.type === "tool_use") events.push({ type: "tool-call", id, callId: block.id, name: block.name, input: shown(partialInput(block.json)), final: false });
     });
   }
   return { agent: "claude-code", owner, status: status(current, failure), events };
@@ -97,6 +100,16 @@ function resultText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return (content as Block[]).map(part => part.type === "text" ? part.text ?? "" : `[${part.type ?? "content"}]`).join("\n");
+}
+
+function virtualize(root: string) {
+  const prefix = root.replace(/\/+$/, "");
+  const swap = (text: string) => text.split(`${prefix}/`).join("/workspace/").split(prefix).join("/workspace");
+  const walk = (value: unknown): unknown => typeof value === "string" ? swap(value)
+    : Array.isArray(value) ? value.map(walk)
+    : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, walk(item)]))
+    : value;
+  return <T>(value: T): T => walk(value) as T;
 }
 
 function partialInput(json: string): unknown {

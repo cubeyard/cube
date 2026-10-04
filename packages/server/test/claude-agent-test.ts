@@ -92,6 +92,9 @@ try {
   assert.equal(fs.readFileSync(path.join(files, "notes/b.txt"), "utf8"), "alpha gamma");
   const types = transcript.events.map(event => event.type === "tool-call" || event.type === "tool-result" ? `${event.type}:${event.name}` : event.type);
   assert.deepEqual(types, ["user-message", "tool-call:Bash", "tool-result:Bash", "tool-call:Write", "tool-result:Write", "tool-call:Edit", "tool-result:Edit", "tool-call:Read", "tool-result:Read", "assistant-text"]);
+  // The transcript shows the workspace as /workspace, never Claude Code's host directory.
+  assert.ok(!JSON.stringify(transcript).includes(agent.root), "no host path in the transcript");
+  assert.match(JSON.stringify(transcript.events.find(event => event.type === "tool-call" && event.name === "Write")), /"\/workspace\//);
   const results = transcript.events.filter(event => event.type === "tool-result");
   assert.equal(results[0]!.type === "tool-result" && results[0]!.output, "7");
   assert.equal(results[3]!.type === "tool-result" && results[3]!.output, "alpha gamma");
