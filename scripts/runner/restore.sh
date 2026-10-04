@@ -8,9 +8,8 @@ archive="$1"; [ -f "$archive" ] && [ -f "$archive.sha256" ] || fail 'archive and
 checksum_check "$archive"
 first="$(tar -tzf "$archive" | sed -n '1p')"
 case "$first" in var/lib/cube-runner|var/lib/cube-runner/*) layout=var/lib/cube-runner; target="$(at /var/lib/cube-runner)";;
-  var/lib/cube-host|var/lib/cube-host/*) layout=var/lib/cube-host; target="$(at /var/lib/cube-host)";;
   data|data/*) [ "$PLATFORM" = Darwin ] || fail 'macOS backup cannot be restored as a Linux layout'; layout=data; target="$(state_root)";;
-  *) fail 'archive is not a cube-runner or legacy cube-host backup';; esac
+  *) fail 'archive is not a cube-runner backup';; esac
 [ ! -e "$target" ] || [ -z "$(find "$target" -mindepth 1 -print -quit 2>/dev/null)" ] \
   || fail 'restore target is not empty; restore onto a fresh root'
 while IFS= read -r member; do
@@ -25,8 +24,6 @@ else
 fi
 marker="$target/state/restore-quarantine"; touch "$marker"; chmod 0600 "$marker"
 if [ -z "$ROOT" ] && { [ "$PLATFORM" = Linux ] || [ "$RUNNER_MODE" = system ]; }; then
-  owner="$RUNNER_USER"; group="$RUNNER_GROUP"
-  if [ "$layout" = var/lib/cube-host ]; then owner="$LEGACY_USER"; group="$LEGACY_GROUP"; fi
-  chown "$owner:$group" "$marker"
+  chown "$RUNNER_USER:$RUNNER_GROUP" "$marker"
 fi
-note 'restored files without starting the runner; reconcile all post-backup operations before acknowledgement'
+note 'restored files without starting the runner; VMs running at backup time come back stopped; review retained VMs before acknowledgement'

@@ -1,5 +1,5 @@
 [Unit]
-Description=Cube trusted runner (same-UID execution; not sandboxed)
+Description=Cube runner (one QEMU VM per thread; QEMU runs as this account, not hardened beyond -sandbox)
 Documentation=https://github.com/cubeyard/cube/blob/main/docs/trusted-runner-operations.md
 After=network-online.target
 Wants=network-online.target
@@ -10,6 +10,8 @@ ConditionPathExists=/var/lib/cube-runner/state/journal.db
 Type=simple
 User=cube-runner
 Group=cube-runner
+# QEMU needs /dev/kvm.
+SupplementaryGroups=kvm
 UMask=0077
 Environment=CUBE_RUNNER_STOP_POLICY=wait
 RuntimeDirectory=cube-runner
@@ -20,9 +22,9 @@ ExecStart=/opt/cube-runner/current/cube-runner runner-serve --key /var/lib/cube-
 ExecReload=/bin/kill -USR1 $MAINPID
 Restart=on-failure
 RestartSec=3
-TimeoutStartSec=30
-# Graceful drain waits for the 600-second command bound.
-TimeoutStopSec=615
+TimeoutStartSec=60
+# Stop gives each guest 30 s of ACPI power-down, then QEMU quits.
+TimeoutStopSec=60
 KillMode=mixed
 NoNewPrivileges=yes
 PrivateTmp=yes
@@ -32,7 +34,6 @@ ReadWritePaths=/var/lib/cube-runner /run/cube-runner
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-# systemd 255's RestrictSUIDSGID filter blocks required openat2.
 LockPersonality=yes
 
 [Install]
