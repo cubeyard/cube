@@ -2,10 +2,13 @@
  *
  * Workspace semantics (journaled keys, epoch fencing, retained output, paths
  * beneath /workspace) live in the helper; this class checks limits, enforces
- * the lease and translates. A transport failure on a read is
- * NODE_UNAVAILABLE; on a mutation the outcome is unknown (COMPLETION_UNKNOWN)
- * and the key can be inspected again. */
+ * the lease and translates. Every helper operation is idempotent by its key
+ * (or read-only), so a transport failure — a gateway restart, a dead SSH
+ * master — is retried for a bounded time. When that runs out, a read is
+ * NODE_UNAVAILABLE and a mutation's outcome is unknown (COMPLETION_UNKNOWN);
+ * the key can be inspected again. */
 import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { GuestTransportError, type GuestAnswer, type GuestCallOptions, type GuestOp, type GuestTransport } from "./guest-ssh.ts";
 import type { LeaseStore } from "./workspace-lease.ts";
 import {
@@ -17,6 +20,9 @@ import {
 
 /** The guest helper's own long poll bound. */
 const MAX_GUEST_WAIT_MS = 20000;
+/** How long transport failures are retried (a gateway restart takes seconds;
+ * a dead SSH master is noticed within 30 s). */
+const DEFAULT_RETRY_MS = 90000;
 const SHA = /^[0-9a-f]{64}$/;
 const STATES = new Set(["Accepted", "Running", "Unknown", "Succeeded", "Written", "Failed", "Interrupted"]);
 
@@ -40,12 +46,14 @@ export class VmWorkspace implements Workspace {
   private readonly guest: GuestTransport;
   private readonly leases: LeaseStore;
   private readonly binding: string;
+  private readonly retryMs: number;
   private description: Promise<GuestDescription> | undefined;
 
   /** `binding` scopes every key: it names the thread and its VM, whose
    * journal outlives any one cubed process. */
-  constructor(options: { guest: GuestTransport; leases: LeaseStore; owner: WorkspaceOwner; binding: string }) {
+  constructor(options: { guest: GuestTransport; leases: LeaseStore; owner: WorkspaceOwner; binding: string; retryMs?: number }) {
     this.guest = options.guest; this.leases = options.leases; this.owner = options.owner; this.binding = options.binding;
+    this.retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
   }
 
   async lease(request: WorkspaceLeaseRequest | { token: string }): Promise<WorkspaceLease> {
@@ -139,12 +147,17 @@ export class VmWorkspace implements Workspace {
     let answer: GuestAnswer;
     const options: GuestCallOptions = { ...(signal ? { signal } : {}), ...(body ? { body } : {}),
       timeoutMs: 60000 + (typeof header.waitMs === "number" ? header.waitMs : 0) };
-    try { answer = await this.guest.call(op, header, options); }
-    catch (error) {
-      if (!(error instanceof GuestTransportError)) throw error;
-      if (signal?.aborted) throw signal.reason ?? error;
-      throw new WorkspaceError(mutation ? "COMPLETION_UNKNOWN" : "NODE_UNAVAILABLE",
-        `the thread machine did not answer: ${error.message}${mutation ? "; inspect the key before retrying" : ""}`, { cause: error, completionUnknown: mutation });
+    const deadline = Date.now() + this.retryMs;
+    for (let attempt = 0; ; attempt++) {
+      try { answer = await this.guest.call(op, header, options); break; }
+      catch (error) {
+        if (!(error instanceof GuestTransportError)) throw error;
+        if (signal?.aborted) throw signal.reason ?? error;
+        const pause = Math.min(500 * 2 ** attempt, 5000);
+        if (Date.now() + pause < deadline) { await delay(pause, undefined, signal ? { signal } : {}); continue; }
+        throw new WorkspaceError(mutation ? "COMPLETION_UNKNOWN" : "NODE_UNAVAILABLE",
+          `the thread machine did not answer: ${error.message}${mutation ? "; inspect the key before retrying" : ""}`, { cause: error, completionUnknown: mutation });
+      }
     }
     // A helper error is an object; a Failed operation state names its code as a string.
     const failure = answer.header.error as { code?: unknown; message?: unknown } | string | undefined;

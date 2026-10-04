@@ -31,7 +31,7 @@ if (process.argv[2] === "hold") {
     const guest = new LocalGuestTransport(path.join(root, name, "guest"));
     const leases = new LeaseStore(path.join(root, name, "thread"));
     guests.push(guest); stores.push(leases);
-    return { guest, leases, workspace: new VmWorkspace({ guest: wrap ? wrap(guest) : guest, leases, owner, binding: `test-${name}` }) };
+    return { guest, leases, workspace: new VmWorkspace({ guest: wrap ? wrap(guest) : guest, leases, owner, binding: `test-${name}`, retryMs: name === "gone" ? 3000 : 5000 }) };
   };
   try {
     await workspaceContract("VmWorkspace", open("direct").workspace, "pi");
@@ -84,6 +84,13 @@ if (process.argv[2] === "hold") {
       error instanceof WorkspaceError && error.code === "COMPLETION_UNKNOWN");
     gone.guest.offline = false;
     assert.ok(!fs.existsSync(path.join(gone.guest.workspace, "a")));
+    // A short outage (a gateway restart) is retried: every helper operation is idempotent by key.
+    const calls = gone.guest.calls;
+    gone.guest.offline = true;
+    setTimeout(() => { gone.guest.offline = false; }, 700);
+    assert.equal((await gone.workspace.writeFile(goneLease.token, "k2", "b", Buffer.from("y"))).size, 1);
+    assert.ok(gone.guest.calls > calls + 1, "the write was retried");
+    assert.equal(fs.readFileSync(path.join(gone.guest.workspace, "b"), "utf8"), "y");
 
     // One writable owner across processes and instances; process death
     // releases the lease at once and the next holder gets a newer epoch.
@@ -106,7 +113,7 @@ if (process.argv[2] === "hold") {
     assert.ok(next.epoch > taken.epoch);
     sibling.release(next.token);
     assert.throws(() => sibling.acquire("claude-code"), (error: unknown) => error instanceof WorkspaceError && error.code === "CONFLICT", "the owner is fixed for the thread");
-    console.log("ok: workspace lease across processes and instances, routes, incompatible guest, unreachable machine");
+    console.log("ok: workspace lease across processes and instances, routes, incompatible guest, unreachable machine, retried outage");
   } finally {
     for (const guest of guests) guest.stop();
     for (const store of stores) store.close();

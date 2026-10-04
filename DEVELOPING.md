@@ -21,11 +21,20 @@ pnpm build
 bash scripts/test-node-transport.sh
 ```
 
-The Node test list is `scripts/test-offline.sh`. Add tests there. Real runner
-tests use disposable state, keys and workspaces; do not point them at an
-operator's installation. The runner suite runs on Linux and macOS in CI. To run
-only integration after building: `node scripts/smoke-node-adapter.ts target/debug/cube-runner`.
-N0 relay testing is opt-in via `CUBE_TEST_IROH_RELAY=1` and contacts public services.
+The Node test list is `scripts/test-offline.sh`. Add tests there. Offline tests
+run the real guest helper under a temporary root (`packages/server/test/local-guest.ts`)
+instead of a VM; they need `python3` and OpenSSH's `ssh-keygen`. Real runner
+tests use disposable state, keys and VMs; do not point them at an operator's
+installation. With Linux, a usable `/dev/kvm`, QEMU 7.2+ and a Debian 13
+genericcloud image, `CUBE_TEST_VM_IMAGE=/path/debian-13-genericcloud-amd64.qcow2
+bash scripts/test-node-transport.sh` also runs the real-VM acceptance
+(`smoke-runner-vm.ts`, `smoke-node-adapter.ts`, `test-vm-e2e.ts`); without them
+it prints a SKIP notice, and `CUBE_TEST_VM=required` makes that a failure. To
+run one of them after building:
+`node scripts/smoke-node-adapter.ts target/debug/cube-runner target/debug/cube-gateway <image>` or
+`node scripts/test-vm-e2e.ts target/debug/cube-runner <image>` (it builds a
+`test-hooks` gateway under `target/test-hooks`). `CUBE_SMOKE_KEEP=1` keeps their
+work directories.
 
 ## Product development
 
@@ -38,8 +47,18 @@ The host binds `CUBED_HOST` (default `127.0.0.1`) on `CUBED_PORT` (default 7777)
 `CUBED_STATE` defaults to `~/.cube-host`. Model configuration uses
 `PI_CODING_AGENT_DIR` or `~/.pi/agent`;
 model requests and credentials stay in the host. Never mount that directory in
-a runner account. Run runners with a dedicated unprivileged account or machine.
-The trust profile is not a security sandbox.
+a runner account. Run runners with a dedicated unprivileged account (group
+`kvm`) or machine; the guest is a VM, but QEMU runs as that account.
+
+cubed starts `cube-gateway` itself: `CUBED_GATEWAY` names the binary, otherwise
+a release's `bin/cube-gateway` or the checkout's `target/{release,debug}/cube-gateway`
+is used (`cargo build -p cube-gateway`). Its network mode is the widest of the
+enrolled runners' (relay > direct > loopback). `CUBED_VM_VCPUS`,
+`CUBED_VM_MEMORY_MIB` and `CUBED_VM_DISK_GIB` size new thread machines (default
+2, 4096, 32; clamped to each runner's limits; fixed for a machine's life).
+`CUBED_GITHUB_TOKEN` gives the egress policy a GitHub token instead of
+`gh auth token`. `CUBED_GATEWAY_TEST_ARGS` (a JSON array) is for tests with a
+`test-hooks` gateway build only.
 
 CLI flags override their matching environment variables. Use repeatable
 `--allowed-host` flags instead of `CUBED_ALLOWED_HOSTS` when both are present;
@@ -71,23 +90,32 @@ The host allowlist prevents DNS rebinding; it does not restrict network ingress
 or authorize public exposure.
 
 Create and check a project through the UI/API, then initialize an immutable runner
-binding using `packages/node-transport/RUNNER.md`. Register its private connection
-configuration with `scripts/enroll-runner.ts --state /absolute/fresh-state
---config /absolute/private-runner.json --trusted-runner`.
-Runners are global installation capacity. A new thread atomically leases any
-available runner until archive. The runner receives the checked project revision,
-repository URLs, resolved branches and exact OIDs and creates fresh primary/reference
-checkouts. It never receives host Git credentials and Git prompting is disabled;
-repositories therefore need credential-free runner access. The initialization
-workspace remains the compatibility template for empty legacy plans.
+binding (with its base image) using `packages/node-transport/RUNNER.md`. Write its
+private connection configuration (version 2, mode 0600):
+
+```json
+{"version":2,"binding":{"nodeId":"node-…","threadId":"…","environmentId":1},
+ "controlKey":"/abs/control.key","serverPeer":"<runner peer>","network":"loopback|direct|relay",
+ "address":"host:port"}
+```
+
+(no `address` for relay) and register it with `scripts/enroll-runner.ts --state
+/absolute/fresh-state --config /absolute/private-runner.json --trusted-runner`;
+the script refuses a protocol-2 runner. Runners are global installation
+capacity. A new thread atomically leases any available runner until archive and
+gets its own VM there. The project's checked repository URLs, resolved branches
+and exact OIDs are checked out inside the VM through the gateway; GitHub
+repositories authenticate with the placeholder the gateway replaces by the
+host's token. Git prompting is disabled.
 
 Useful reads: `/api/threads`, `/api/projects`, `/api/threads/<id>/history`,
 `/api/threads/<id>/stream`. Both return the neutral `ThreadTranscript`
 (`packages/server/src/thread-events.ts`); the stream is SSE and starts with the
-full transcript on every connection. Stop uses `POST /api/threads/<id>/stop`; DELETE
-archives an idle thread and releases runner capacity. Changed or independently
-committed Git worktrees and fallback copies are retained; a clean Git worktree
-still at the template HEAD is removed.
+full transcript on every connection. `/api/threads` reports a thread `starting`
+while its machine boots. Stop uses `POST /api/threads/<id>/stop`; DELETE archives
+an idle thread, releases runner capacity and answers `{retained, reason}`: a
+clean machine is deleted, one with changes, commits of its own or an unknown
+state is retained on the runner.
 
 `/api/threads/<id>/workspace` exposes the thread's `Workspace` (capabilities,
 limits, lease, exec, operations, file and stat; see
@@ -95,8 +123,7 @@ limits, lease, exec, operations, file and stat; see
 capabilities and acquiring the lease requires `authorization: Bearer <lease
 token>`. A Pi thread's lease is held by Pi itself, so these routes admit no second
 writable owner. `node packages/server/test/workspace-test.ts` runs the shared
-contract offline; `scripts/test-node-transport.sh` runs it against the real
-runner and Iroh. A running operation can be long-polled with `?wait=<ms>` (at
+contract offline; `scripts/smoke-node-adapter.ts` runs it against a real VM. A running operation can be long-polled with `?wait=<ms>` (at
 most 30000).
 
 A claude-code thread holds its lease in cubed for the Claude Code child, which
@@ -144,26 +171,29 @@ runbook](docs/cubed-updates.md) for the manifest and supervisor contracts.
 
 ## Fresh start and recovery
 
-Registry v100/v101 receives the rollback-compatible global-pool extension in place. There is no adoption of older registries or
-terminal sessions. Stop cubed and set `CUBED_STATE` to a new empty directory to reset the product. Create
-projects and enroll fresh runner identities. Do not delete an unspecified live
+State schema 102 (thread machines) adopts no older registry (v100/v101 are
+refused), runner config (version 1) or runner (protocol 2). Stop cubed and set
+`CUBED_STATE` to a new empty directory to reset the product. Create projects,
+initialize fresh VM runners and enroll them. Do not delete an unspecified live
 installation. Archive recycles runner capacity, not the archived Pi storage or
 retained user changes. Threads created before the move to pi-durable 1.0.1 are
 not migrated: reset to a new `CUBED_STATE` as above. cubed refuses to open such a
 thread (its directory still has `session/` or `owner.sqlite`) rather than run its
-first message again, and the state schema is 101, so a managed schema 100
+first message again, and the state schema is 102, so a managed schema 100 or 101
 installation is not updated in place.
 
-Restart cubed against the same state to resume accepted Pi tasks. Do not
-run two writable owners for a session. Backups of the host must be taken with
-cubed stopped; keep Pi databases and product metadata together. Runner backup,
-restore quarantine, drain and recovery acknowledgement follow the runbook.
-Never erase a runner's retained operation evidence just to retry a command.
+Restart cubed against the same state to resume accepted Pi tasks; thread
+machines keep running meanwhile. Do not run two writable owners for a session.
+Backups of the host must be taken with cubed stopped; keep Pi databases, product
+metadata, `threads/<id>/vm` keys and `gateway/` (the installation CA) together.
+Runner backup, restore quarantine, drain and recovery acknowledgement follow the
+runbook. Never erase a retained machine disk just to retry a command.
 
 For the runner's foreground development profile, use `cube-runner init` once
 and `cube-runner run --home ...` thereafter as described in
 [`packages/node-transport/RUNNER.md`](packages/node-transport/RUNNER.md). Human
 runner lifecycle output is on stderr and stdout stays quiet; low-level commands
-retain JSON stdout. First Ctrl-C drains, second Ctrl-C cancels active work and
-persists `CANCELLED`. A restart marks any crash-interrupted accepted/running
-record completion-unknown and never reexecutes it.
+retain JSON stdout. First Ctrl-C refuses new machines and powers the guest down,
+a second makes QEMU quit at once. A restart marks a machine that was running
+stopped and interrupted; its next start boots the same disk, and the guest
+marks unfinished commands interrupted, never reexecuting them.
