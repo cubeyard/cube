@@ -124,9 +124,14 @@ export class ClaudeAgent {
         CREATE TABLE IF NOT EXISTS message(seq INTEGER PRIMARY KEY AUTOINCREMENT, submission INTEGER NOT NULL REFERENCES submission(seq), data TEXT NOT NULL);`);
       db.prepare("INSERT OR IGNORE INTO meta VALUES ('model', ?)").run(options.model);
       // A turn that was running when cubed stopped is over: Claude Code has
-      // no checkpoint to continue it from.
+      // no checkpoint to continue it from, so its open runner commands are
+      // cancelled too rather than left to finish unseen.
+      const interrupted = new Set((db.prepare("SELECT seq FROM submission WHERE state='running'").all() as Array<{ seq: number }>).map(row => row.seq));
       db.prepare("UPDATE submission SET state='failed', error=? WHERE state='running'").run(INTERRUPTED);
-      return new ClaudeAgent({ threadId: options.threadId, db, workspace: options.workspace, lease, runtime: options.runtime, cwd });
+      const agent = new ClaudeAgent({ threadId: options.threadId, db, workspace: options.workspace, lease, runtime: options.runtime, cwd });
+      for (const message of agent.messages) if (interrupted.has(message.submission)) agent.track(message.data);
+      await agent.cancelCommands();
+      return agent;
     } catch (error) {
       db?.close();
       await options.workspace.release(lease.token).catch(() => {});

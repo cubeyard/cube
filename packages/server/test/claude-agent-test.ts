@@ -7,6 +7,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Models } from "@earendil-works/pi-ai";
 import { ClaudeAgent, ClaudeBusy, claudeEnvironment, type ClaudeRuntime } from "../src/claude-agent.ts";
@@ -194,6 +195,31 @@ try {
   assert.equal(starts().at(-1)!.args[starts().at(-1)!.args.indexOf("--resume") + 1], first!.session);
   console.log("ok: claude code thread over the fake claude: mod tools on the workspace, keyed calls once, env without api credentials, resume, model change");
   console.log("ok: stop as interrupt with runner cancel and kill fallback, crash and api failure, interrupted turn after reopen, lease held and released");
+
+  // cubed itself dies mid-turn (no close): the reopen finds the turn's open
+  // Bash call in the stored transcript and cancels its runner command.
+  await agent.close();
+  {
+    const crashed = path.join(root, "crashed");
+    const opened = await ClaudeAgent.open({ directory: crashed, threadId: "t1", workspace, runtime, model: "sonnet" });
+    const token = leaseToken(opened);
+    await workspace.exec(token, "claude:toolu_crash:bash", { command: "sleep 3; touch late-crash", timeoutMs: 10000, outputLimit: 1024 });
+    const db = new DatabaseSync(path.join(crashed, "claude.sqlite"));
+    db.prepare("INSERT INTO submission(request_id, text, state, error, created_at) VALUES ('crash', 'run it', 'running', NULL, 0)").run();
+    db.prepare("INSERT INTO message(submission, data) VALUES ((SELECT seq FROM submission WHERE request_id='crash'), ?)")
+      .run(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_crash", name: "Bash", input: { command: "sleep 3; touch late-crash" } }] } }));
+    db.close();
+    // The lease's process is gone; the reopened agent is the next holder.
+    await opened.close();
+    const reopened = await ClaudeAgent.open({ directory: crashed, threadId: "t1", workspace, runtime, model: "sonnet" });
+    try {
+      await cancelled(reopened, "claude:toolu_crash:bash");
+      await delay(3500);
+      assert.ok(!fs.existsSync(path.join(files, "late-crash")), "the interrupted turn's command never finished");
+    } finally { await reopened.close(); }
+  }
+  agent = await ClaudeAgent.open({ directory, threadId: "t1", workspace, runtime, model: "sonnet" });
+  console.log("ok: a reopen after cubed died mid-turn cancels the interrupted turn's runner commands");
 
   // The mod's workspace functions against the real routes: paths, Edit's
   // sha condition and refusals.
