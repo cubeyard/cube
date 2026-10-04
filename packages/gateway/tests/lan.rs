@@ -226,6 +226,58 @@ async fn private_upstreams_are_refused_even_when_allowed() {
 }
 
 #[tokio::test]
+async fn the_gateway_hosts_own_addresses_are_refused() {
+    // A public address assigned to the gateway host would be dialled over
+    // loopback, past perimeter firewalls. Machines without one have nothing
+    // to check here; addr.rs covers the rule itself.
+    let own: Vec<_> = cube_gateway::addr::local_addresses()
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.is_ipv4() && cube_gateway::addr::is_public(*a))
+        .collect();
+    if own.is_empty() {
+        eprintln!("this machine has no public IPv4 address; skipped");
+        return;
+    }
+    let env = Env::new(allow_with(&[])).await;
+    env.guest.wait_for_lease().await;
+    for (i, address) in own.iter().enumerate() {
+        let host = address.to_string();
+        let tcp = env
+            .guest
+            .connect(Ipv4Addr::new(203, 0, 113, 1), 80, 40070 + i as u16)
+            .await
+            .unwrap();
+        let (status, headers, _) = request(tcp, get(&host, "/", &[])).await;
+        assert_eq!(status, 403, "{host}");
+        assert_eq!(headers["x-cube-denied"], "upstream address is not public");
+    }
+}
+
+#[tokio::test]
+async fn a_second_host_header_is_refused_before_any_decision() {
+    let env = Env::new(allow_with(&[(GH, REAL_TOKEN)])).await;
+    env.guest.wait_for_lease().await;
+    let tls = env.tls(name("github.test"), 40080).await.unwrap();
+    let (status, headers, _) = request(
+        tls,
+        get(
+            "github.test",
+            "/",
+            &[
+                ("host", "other.example".to_string()),
+                ("authorization", format!("Bearer {GH}")),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(headers["x-cube-denied"], "more than one Host header");
+    assert!(env.decide.requests.lock().unwrap().is_empty());
+    assert_eq!(env.tls_upstream.hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn plain_http_works_but_never_carries_secrets() {
     let env = Env::new(allow_with(&[(GH, REAL_TOKEN)])).await;
     env.guest.wait_for_lease().await;

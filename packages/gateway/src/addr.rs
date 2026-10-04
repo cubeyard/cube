@@ -1,7 +1,66 @@
 //! Upstream address check. Enforced after resolution and independent of the
 //! policy decision, so a guest can never reach cubed, the runner's or
-//! gateway's networks, or a metadata service through the gateway.
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+//! gateway's networks, the gateway host itself, or a metadata service
+//! through the gateway.
+use std::{
+    collections::HashSet,
+    io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
+
+/// True when `ip` may be dialled upstream: globally routable unicast and not
+/// assigned to one of the gateway host's own interfaces. A connection to the
+/// host's own public address would travel over loopback and bypass perimeter
+/// firewalls that protect services on the host.
+pub fn is_upstream(ip: IpAddr, local: &HashSet<IpAddr>) -> bool {
+    is_public(ip) && !local.contains(&canonical(ip))
+}
+
+/// Every address currently assigned to one of this host's interfaces.
+/// Read fresh on every call, so address changes need no refresh logic.
+pub fn local_addresses() -> io::Result<HashSet<IpAddr>> {
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills `list` on success; it is freed below.
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut out = HashSet::new();
+    let mut cursor = list;
+    while !cursor.is_null() {
+        // SAFETY: `cursor` walks the list getifaddrs returned and is valid
+        // until freeifaddrs; ifa_addr is either null or a sockaddr whose
+        // sa_family tells its concrete type.
+        unsafe {
+            let entry = &*cursor;
+            let address = entry.ifa_addr;
+            if !address.is_null() {
+                match i32::from((*address).sa_family) {
+                    libc::AF_INET => {
+                        let v4 = &*(address as *const libc::sockaddr_in);
+                        out.insert(IpAddr::V4(Ipv4Addr::from(u32::from_be(v4.sin_addr.s_addr))));
+                    }
+                    libc::AF_INET6 => {
+                        let v6 = &*(address as *const libc::sockaddr_in6);
+                        out.insert(IpAddr::V6(Ipv6Addr::from(v6.sin6_addr.s6_addr)));
+                    }
+                    _ => {}
+                }
+            }
+            cursor = entry.ifa_next;
+        }
+    }
+    // SAFETY: `list` came from a successful getifaddrs.
+    unsafe { libc::freeifaddrs(list) };
+    Ok(out)
+}
+
+/// IPv4-mapped IPv6 addresses compare as their IPv4 address.
+fn canonical(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        IpAddr::V4(_) => ip,
+    }
+}
 
 /// True only for globally routable unicast addresses.
 pub fn is_public(ip: IpAddr) -> bool {
@@ -66,6 +125,32 @@ fn public_v6(ip: Ipv6Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_addresses_include_loopback() {
+        let local = local_addresses().unwrap();
+        assert!(local.contains(&ip("127.0.0.1")), "{local:?}");
+    }
+
+    #[test]
+    fn the_hosts_own_addresses_are_never_upstream() {
+        // A public address that is assigned to this host is refused, the
+        // same address elsewhere is allowed.
+        let own = ip("95.216.32.156");
+        let local: HashSet<IpAddr> = [ip("127.0.0.1"), own, ip("2a01:4f9:2a:20de::2")].into();
+        assert!(is_public(own));
+        assert!(!is_upstream(own, &local));
+        assert!(!is_upstream(ip("2a01:4f9:2a:20de::2"), &local));
+        assert!(is_upstream(own, &HashSet::new()));
+        assert!(is_upstream(ip("1.1.1.1"), &local));
+        // Every address this machine really has is refused.
+        for address in local_addresses().unwrap() {
+            assert!(
+                !is_upstream(address, &local_addresses().unwrap()),
+                "{address}"
+            );
+        }
+    }
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
