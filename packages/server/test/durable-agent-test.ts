@@ -1,7 +1,8 @@
 /** Offline Pi checks over the Workspace: pi-durable's file tools through the
  * WorkspaceEnv, cube's keyed bash, stop as real cancellation, and shutdown
- * leaving a command to the next process. A fake runner stands in; the real
- * runner and SIGKILL boundaries run in smoke-node-adapter.ts. */
+ * leaving a command to the next process. The real guest helper under a
+ * temporary root stands in for the VM (local guest); real VMs run in
+ * scripts/test-vm-e2e.ts. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -11,22 +12,22 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { LiveDoc, type LiveState } from "@earendil-works/pi-durable";
 import { LEGACY_THREAD, openAgent, type Agent } from "../src/durable-agent.ts";
-import { RunnerWorkspace } from "../src/workspace.ts";
+import { VmWorkspace } from "../src/vm-workspace.ts";
 import { MAX_FILE_READ_BYTES, WorkspaceEnv } from "../src/workspace-env.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
-import { FakeRunner } from "./workspace-fake-runner.ts";
+import { LocalGuestTransport } from "./local-guest.ts";
 
 const context = BACKGROUND_CONTEXT;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-durable-agent-"));
-const runners: FakeRunner[] = [];
+const guests: LocalGuestTransport[] = [];
 const stores: LeaseStore[] = [];
 function thread(name: string) {
   const files = path.join(root, name, "workspace");
   fs.mkdirSync(files, { recursive: true });
-  const runner = new FakeRunner(files);
+  const guest = new LocalGuestTransport(path.dirname(files));
   const leases = new LeaseStore(path.join(root, name, "thread"));
-  runners.push(runner); stores.push(leases);
-  return { files, directory: path.join(root, name, "thread"), runner, workspace: new RunnerWorkspace({ runner, leases, owner: "pi" }) };
+  guests.push(guest); stores.push(leases);
+  return { files, directory: path.join(root, name, "thread"), guest, workspace: new VmWorkspace({ guest, leases, owner: "pi", binding: guest.binding }) };
 }
 function model(steps: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0]) {
   const faux = fauxProvider({ tokensPerSecond: 10000 });
@@ -51,8 +52,8 @@ const live = async (agent: Agent) => (await agent.harness.snapshot(LiveDoc, agen
 try {
   {
     // read/write/edit are pi-durable's own tools; files only change through the Workspace.
-    const { files, directory, runner, workspace } = thread("tools");
-    const agent = await openAgent({ directory, runner: { binding: runner.binding, configHash: "fake" }, workspace, ...model([
+    const { files, directory, guest, workspace } = thread("tools");
+    const agent = await openAgent({ directory, binding: guest.binding, workspace, ...model([
       call("write", { path: "notes/a.txt", content: "hello\nworld\n" }),
       call("read", { path: "notes/a.txt" }),
       call("edit", { path: "/workspace/notes/a.txt", edits: [{ oldText: "world", newText: "pi" }] }),
@@ -75,16 +76,16 @@ try {
       // The same request id never submits twice.
       assert.equal((await agent.conversation.submit({ type: "input", content: "use the tools", requestId: "tools" }, context)).id, submission.id);
     } finally { await agent.close(); }
-    // The runner binding is fixed for the storage.
-    await assert.rejects(openAgent({ directory, runner: { binding: { ...runner.binding, threadId: "other" }, configHash: "fake" }, workspace, ...model([]) }), /runner binding changed/);
+    // The machine binding is fixed for the storage.
+    await assert.rejects(openAgent({ directory, binding: "other", workspace, ...model([]) }), /thread machine binding changed/);
     console.log("ok: pi-durable read/write/edit through the WorkspaceEnv, keyed bash, outside paths refused, request ids, fixed binding");
   }
   {
-    // The repository's AGENTS.md/CLAUDE.md on the runner reach the model, and an edit applies to the next generation.
-    const { files, directory, runner, workspace } = thread("instructions");
+    // The repository's AGENTS.md/CLAUDE.md on the guest reach the model, and an edit applies to the next generation.
+    const { files, directory, guest, workspace } = thread("instructions");
     fs.writeFileSync(path.join(files, "AGENTS.md"), "The secret word is PAPAYA.\n");
     const seen: string[] = [];
-    const agent = await openAgent({ directory, runner: { binding: runner.binding, configHash: "fake" }, workspace, ...model([
+    const agent = await openAgent({ directory, binding: guest.binding, workspace, ...model([
       async request => { seen.push(JSON.stringify(request)); return call("write", { path: "CLAUDE.md", content: "Answer in haiku.\n" }); },
       async request => { seen.push(JSON.stringify(request)); return fauxAssistantMessage("done"); },
     ]) });
@@ -95,7 +96,7 @@ try {
       assert.doesNotMatch(seen[0]!, /Answer in haiku/);
       assert.match(seen[1]!, /Contents of CLAUDE\.md in the thread workspace[^"]*Answer in haiku/);
     } finally { await agent.close(); }
-    console.log("ok: repository AGENTS.md and CLAUDE.md come from the runner workspace and follow edits");
+    console.log("ok: repository AGENTS.md and CLAUDE.md come from the guest workspace and follow edits");
   }
   {
     // Keys and expectedSha: a replayed write is not written twice, and a
@@ -134,9 +135,9 @@ try {
     console.log("ok: WorkspaceEnv write keys replay without writing, expectedSha after read, read size cap, no shell fallback");
   }
   {
-    // Stop cancels the runner command for real.
-    const { files, directory, runner, workspace } = thread("stop");
-    const agent = await openAgent({ directory, runner: { binding: runner.binding, configHash: "fake" }, workspace, ...model([
+    // Stop cancels the guest command for real.
+    const { files, directory, guest, workspace } = thread("stop");
+    const agent = await openAgent({ directory, binding: guest.binding, workspace, ...model([
       call("bash", { command: "sleep 5; touch late" }),
       fauxAssistantMessage("unreachable"),
     ]) });
@@ -151,19 +152,19 @@ try {
       const [result] = await results(agent);
       assert.equal(result.isError, true);
     } finally { await agent.close(); }
-    console.log("ok: stop aborts the run and cancels the runner command");
+    console.log("ok: stop aborts the run and cancels the guest command");
   }
   {
     // Shutdown leaves a running command alone; the next process reattaches.
-    const { files, directory, runner, workspace } = thread("shutdown");
+    const { files, directory, guest, workspace } = thread("shutdown");
     const steps = model([call("bash", { command: "sleep 0.5; printf x >> count; printf done" }), fauxAssistantMessage("first")]);
-    let agent = await openAgent({ directory, runner: { binding: runner.binding, configHash: "fake" }, workspace, ...steps });
+    let agent = await openAgent({ directory, binding: guest.binding, workspace, ...steps });
     const submission = await agent.conversation.submit({ type: "input", content: "count" }, context);
     await until(async () => (await live(agent))?.tools?.some(slot => slot.status === "running") ?? false, "running bash");
     await agent.close();
     await delay(800);
     assert.equal(fs.readFileSync(path.join(files, "count"), "utf8"), "x", "shutdown did not cancel the command");
-    agent = await openAgent({ directory, runner: { binding: runner.binding, configHash: "fake" }, workspace, ...model([fauxAssistantMessage("recovered")]) });
+    agent = await openAgent({ directory, binding: guest.binding, workspace, ...model([fauxAssistantMessage("recovered")]) });
     try {
       const settled = await (await agent.harness.submission(submission.id, context))!.wait(context);
       assert.equal(settled.status, "done");
@@ -171,24 +172,24 @@ try {
       assert.equal(text(result), "done\n[exit=0; exited]");
       assert.equal(fs.readFileSync(path.join(files, "count"), "utf8"), "x", "the replayed call found the same command");
     } finally { await agent.close(); }
-    console.log("ok: shutdown keeps the runner command; reopen replays bash by task key without running it again");
+    console.log("ok: shutdown keeps the guest command; reopen replays bash by task key without running it again");
   }
   {
     // A thread directory from before pi-durable is refused: opening it would
     // start an empty conversation and run the first message again.
     for (const legacy of ["session", "owner.sqlite"]) {
-      const { directory, runner, workspace } = thread(`legacy-${legacy}`);
+      const { directory, guest, workspace } = thread(`legacy-${legacy}`);
       if (legacy === "session") fs.mkdirSync(path.join(directory, "session"), { recursive: true });
       else fs.writeFileSync(path.join(directory, "owner.sqlite"), "");
       const steps = model([call("bash", { command: "touch must-not-run" }), fauxAssistantMessage("no")]);
-      await assert.rejects(openAgent({ directory, runner: { binding: runner.binding, configHash: "fake" }, workspace, ...steps }), (error: Error) => error.message === LEGACY_THREAD);
+      await assert.rejects(openAgent({ directory, binding: guest.binding, workspace, ...steps }), (error: Error) => error.message === LEGACY_THREAD);
       assert.equal(fs.existsSync(path.join(directory, "pi.sqlite")), false, "no new Pi store is created");
       assert.equal(await workspace.lease({ owner: "pi" }).then(lease => workspace.release(lease.token)).then(() => true), true, "the lease was never taken");
     }
     console.log("ok: a thread directory with the old Pi store is refused before any lease, store or submission");
   }
 } finally {
-  for (const runner of runners) runner.close();
+  for (const guest of guests) guest.stop();
   for (const store of stores) store.close();
   fs.rmSync(root, { recursive: true, force: true });
 }

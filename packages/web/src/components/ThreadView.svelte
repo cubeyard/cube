@@ -10,7 +10,7 @@
   import { CLAUDE_DURABILITY, isClaude, providerLabel } from "../lib/agent.ts";
   import { createArmed } from "../lib/armed.svelte.ts";
   import type { Command } from "../lib/command.ts";
-  import { lampClass, stateLabel } from "../lib/thread-state.ts";
+  import { lampClass, stateLabel, STARTING_TEXT } from "../lib/thread-state.ts";
   import type {
     ThreadModels,
     ThreadSummary,
@@ -324,6 +324,7 @@
       <div class="conversation-gone"><p>this thread is no longer active.</p><a class="key" href="#/threads">back to threads</a></div>
     {:else}
       <Conversation {threadId} model={selectedModel} {changingModel} bind:busy={conversationBusy}
+        waitingText={summary?.state === "starting" ? STARTING_TEXT : null}
         notice={summary?.agent === "claude-code" || isClaude(modelState?.selected) ? `claude · max — ${CLAUDE_DURABILITY}` : null} />
     {/if}
   </section>

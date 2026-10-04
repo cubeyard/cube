@@ -1,261 +1,181 @@
-import { smokeDurableAgent } from "./smoke-durable-agent.ts";
-import { smokeProduct } from "./smoke-product.ts";
-import { smokeCodemode } from "../packages/server/test/codemode-runner-smoke.ts";
-/** Real TypeScript -> @number0/iroh (in process) -> Rust runner acceptance.
- * Disposable keys, journals, workspaces and processes only. No existing host
- * or model service is contacted. Loopback/direct stay offline; CUBE_TEST_IROH_RELAY=1
- * adds an external N0 discovery/relay acceptance pass. */
+// cubed's runner adapter with a real guest: the TypeScript protocol-3 client
+// (in-process Iroh) against the real cube-runner, cubed's supervision of the
+// real cube-gateway, its egress policy, ThreadVms booting a real Debian VM,
+// and the Workspace contract over VmWorkspace (system OpenSSH through
+// `cube-gateway dial`) in process and through the HTTP routes. Disposable
+// state under /tmp; every process started is stopped. No model is contacted.
+//
+//   node scripts/smoke-node-adapter.ts <cube-runner> <cube-gateway> <image.qcow2>
+//
+// CUBE_SMOKE_KEEP=1 keeps the work directory.
 import assert from "node:assert/strict";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { once } from "node:events";
-import { IrohExecutionNodeClient, IrohNodeError, type RunnerExecSpec } from "../packages/server/src/iroh-node.ts";
+import readline from "node:readline";
+import { EgressPolicy, serveEgress, type SecretSource } from "../packages/server/src/egress-policy.ts";
+import { GatewaySupervisor } from "../packages/server/src/gateway.ts";
+import { IrohNodeError, IrohRunnerClient } from "../packages/server/src/iroh-node.ts";
 import { Registry } from "../packages/server/src/registry.ts";
-import { RunnerWorkspace } from "../packages/server/src/workspace.ts";
+import { ThreadVms, releaseCheck } from "../packages/server/src/vm.ts";
+import { VmWorkspace } from "../packages/server/src/vm-workspace.ts";
 import { HttpWorkspace } from "../packages/server/src/workspace-http.ts";
 import { LeaseStore } from "../packages/server/src/workspace-lease.ts";
+import { settleOperation, type Workspace } from "../packages/server/src/workspace.ts";
 import { serveWorkspace, workspaceContract } from "../packages/server/test/workspace-contract.ts";
 
-const binary = path.resolve(process.argv[2] ?? "target/debug/cube-runner");
-assert.ok(fs.existsSync(binary), "build cube-runner first; no simulated success or automatic cargo build");
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-real-node-adapter-"));
-const children = new Set<ChildProcess>();
-const cli = (args: string[], input?: string): string => execFileSync(binary, args, { encoding: "utf8", input, timeout: 30000, maxBuffer: 65537, env: { PATH: "/usr/bin:/bin" } });
-const git = (cwd: string, args: string[]): string => execFileSync("git", ["-c", "user.name=Cube Test", "-c", "user.email=cube@example.invalid", "-c", "commit.gpgsign=false", "-C", cwd, ...args],
-  { encoding: "utf8", timeout: 30000, env: { PATH: process.env.PATH } }).trim();
-const code = (expected: string, unknown = false) => (error: unknown) => error instanceof IrohNodeError && error.code === expected && error.completionUnknown === unknown;
-async function stop(child: ChildProcess) {
-  if (child.exitCode === null && child.signalCode === null) {
-    const closed = once(child, "close");
-    child.kill("SIGKILL");
-    await closed;
-  }
-  children.delete(child);
-}
-async function start(key: string, state: string, network: string, listen = "127.0.0.1:0"): Promise<{ child: ChildProcess; address?: string; relayUrl?: string }> {
-  const args = ["runner-serve", "--key", key, "--state", state, "--network", network];
-  if (network !== "relay") args.push("--listen", listen);
-  const child = spawn(binary, args, { env: { PATH: "/usr/bin:/bin" }, stdio: ["ignore", "pipe", "pipe"] });
-  children.add(child);
-  const ready = await new Promise<{ addresses: string[]; relayUrl?: string }>((resolve, reject) => {
-    let output = "";
-    let stderr = "";
-    const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("node ready timeout")); }, network === "relay" ? 30000 : 10000);
-    child.on("error", error => { clearTimeout(timer); reject(error); });
-    child.on("exit", () => { clearTimeout(timer); reject(new Error(`node exited before ready: ${stderr}`)); });
-    child.stderr!.on("data", (data: Buffer) => { stderr = (stderr + data.toString()).slice(-2048); });
-    child.stdout!.on("data", (data: Buffer) => {
-      output += data.toString();
-      if (output.length > 8192) { child.kill("SIGKILL"); clearTimeout(timer); reject(new Error("oversized ready response")); return; }
-      const end = output.indexOf("\n");
-      if (end !== -1) { clearTimeout(timer); try { resolve(JSON.parse(output.slice(0, end))); } catch (error) { reject(error); } }
-    });
+const [runnerBin, gatewayBin, image] = process.argv.slice(2).map(p => path.resolve(p));
+if (!runnerBin || !gatewayBin || !image) throw new Error("usage: smoke-node-adapter.ts <cube-runner> <cube-gateway> <image.qcow2>");
+const work = fs.mkdtempSync(path.join("/tmp", "cube-adapter-"));
+fs.chmodSync(work, 0o700);
+const children: ChildProcess[] = [];
+const started = Date.now();
+const log = (message: string) => console.log(`[${((Date.now() - started) / 1000).toFixed(1)}s] ${message}`);
+const quiet = { debug() {}, info() {}, warn() {}, error() {}, child() { return quiet; } };
+const fakeToken = "ghs_adapter-smoke-fake-token-0123456789";
+
+async function firstLine(child: ChildProcess): Promise<Record<string, unknown>> {
+  const lines = readline.createInterface({ input: child.stdout! });
+  const line = await new Promise<string>((resolve, reject) => {
+    lines.once("line", resolve);
+    child.once("exit", code => reject(new Error(`process exited (${code}) before its ready line`)));
   });
-  if (network === "relay") assert.match(ready.relayUrl ?? "", /^https:\/\//);
-  else assert.equal(ready.addresses.length, 1);
-  return { child, address: ready.addresses[0], relayUrl: ready.relayUrl };
+  return JSON.parse(line);
 }
+async function startRunner(): Promise<{ child: ChildProcess; ready: Record<string, unknown> }> {
+  const child = spawn(runnerBin, ["runner-serve", "--key", path.join(work, "runner.key"), "--state", path.join(work, "runner-state"),
+    "--listen", "127.0.0.1:0"], { stdio: ["ignore", "pipe", "pipe"] });
+  child.stderr!.pipe(fs.createWriteStream(path.join(work, "runner.log"), { flags: "a" }));
+  children.push(child);
+  return { child, ready: await firstLine(child) };
+}
+async function run(workspace: Workspace, token: string, key: string, command: string): Promise<{ code: number | null; output: string }> {
+  await workspace.exec(token, key, { command, timeoutMs: 120000 });
+  const state = await settleOperation(workspace, token, key);
+  assert.equal(state.state, "succeeded", JSON.stringify(state));
+  if (state.state !== "succeeded") throw new Error("unreachable");
+  return { code: state.exitCode, output: Buffer.from(state.output).toString("utf8").trim() };
+}
+
+let gateway: GatewaySupervisor | undefined;
+let vms: ThreadVms | undefined;
+let egress: { close(): Promise<void> } | undefined;
+let registry: Registry | undefined;
+let runner: ChildProcess | undefined;
 try {
-  const networks = process.env.CUBE_TEST_IROH_RELAY === "1" ? ["loopback", "direct", "relay"] : ["loopback", "direct"];
-  for (const network of networks) {
-    const directory = path.join(root, network);
-    fs.mkdirSync(directory, { mode: 0o700 });
-    const workspace = path.join(directory, "workspace");
-    const intents = path.join(directory, "intents");
-    fs.mkdirSync(workspace);
-    fs.mkdirSync(intents, { mode: 0o700 });
-    git(workspace, ["init", "-q", "--initial-branch=develop"]);
-    fs.writeFileSync(path.join(workspace, "remote-base"), "fresh base\n");
-    git(workspace, ["add", "remote-base"]);
-    git(workspace, ["commit", "-qm", "remote base"]);
-    const remote = path.join(directory, "remote.git");
-    git(workspace, ["clone", "--bare", ".", remote]);
-    git(workspace, ["remote", "add", "origin", remote]);
-    const key = path.join(directory, "node.key");
-    const controlKey = path.join(directory, "control.key");
-    const serverPeer: string = JSON.parse(cli(["keygen", "--key", key])).peerId;
-    const controlPeer: string = JSON.parse(cli(["keygen", "--key", controlKey])).peerId;
-    const state = path.join(directory, "state");
-    cli(["runner-init", "--key", key, "--state", state, "--workspace", workspace, "--allow-peer", controlPeer, "--node-id", "node-test", "--thread-id", "thread-test", "--env", "17"]);
-    let daemon = await start(key, state, network);
-    const config = { version: 1, binding: { nodeId: "node-test", threadId: "thread-test", environmentId: 17 }, controlKey, serverPeer,
-      ...(network === "relay" ? {} : { address: daemon.address }), network, intentDirectory: intents };
-    const configPath = path.join(directory, "control.json");
-    const original = JSON.stringify(config);
-    fs.writeFileSync(configPath, original, { mode: 0o600 });
-    const observations: unknown[] = [];
-    const client = new IrohExecutionNodeClient({ configPath, observe: (environmentId, observation) => observations.push({ environmentId, observation }) });
-    assert.equal(client.contact, "unobserved");
-    await client.check(17);
-    assert.equal(client.contact, "available");
-    assert.equal((await client.status(17)).status, "Running");
-    const spec: RunnerExecSpec = { command: "printf once >> count; printf hello", guestCwd: ".", timeoutMs: 1000, outputLimit: 100 };
-    const result = await client.exec(17, spec);
-    assert.equal(Buffer.from(result.output).toString(), "hello");
-    assert.equal(result.exitCode, 0);
-    assert.equal(fs.readFileSync(path.join(workspace, "count"), "utf8"), "once");
-    await assert.rejects(client.submitExec(17, result.operationId), code("COMPLETION_UNKNOWN", true));
-    assert.equal((await client.operation(17, result.operationId)).state, "Succeeded");
-    const bad = await client.prepareExec(17, { ...spec, guestCwd: ".." });
-    await assert.rejects(client.submitExec(17, bad.operationId), code("INVALID_REQUEST"));
-    assert.equal((await client.operation(17, bad.operationId)).state, "Unknown");
+  const peerOf = (file: string) => JSON.parse(execFileSync(runnerBin, ["keygen", "--key", file], { encoding: "utf8" })).peerId as string;
+  const controlPeer = peerOf(path.join(work, "control.key"));
+  peerOf(path.join(work, "runner.key"));
+  execFileSync(runnerBin, ["runner-init", "--key", path.join(work, "runner.key"), "--state", path.join(work, "runner-state"), "--image", image,
+    "--allow-peer", controlPeer, "--node-id", "node-adapter", "--thread-id", "install-adapter", "--env", "1",
+    "--max-vcpus", "2", "--max-memory-mib", "2048", "--max-disk-gib", "16"], { stdio: "ignore" });
+  const first = await startRunner();
+  runner = first.child;
+  fs.writeFileSync(path.join(work, "runner.json"), JSON.stringify({ version: 2, binding: { nodeId: "node-adapter", threadId: "install-adapter", environmentId: 1 },
+    controlKey: path.join(work, "control.key"), serverPeer: first.ready.peerId, address: (first.ready.addresses as string[])[0], network: "loopback" }), { mode: 0o600 });
 
-    // Pi identities are stable across caller loss, but scoped to the Session.
-    const piSpec = { ...spec, command: "printf once >> pi-count; sleep 0.4; printf 74" };
-    const lost = new AbortController();
-    const piWatcher = setInterval(() => {
-      if (fs.existsSync(path.join(workspace, "pi-count"))) lost.abort();
-    }, 10);
-    try { await assert.rejects(client.resumeExec("session-a", "invocation-a", piSpec, lost.signal)); }
-    finally { clearInterval(piWatcher); }
-    const piResult = await new IrohExecutionNodeClient({ configPath }).resumeExec("session-a", "invocation-a", piSpec);
-    assert.equal(Buffer.from(piResult.output).toString(), "74");
-    assert.equal(fs.readFileSync(path.join(workspace, "pi-count"), "utf8"), "once");
-    const again = await client.resumeExec("session-a", "invocation-a", piSpec);
-    assert.equal(again.operationId, piResult.operationId);
-    await assert.rejects(client.resumeExec("session-a", "invocation-a", { ...piSpec, command: "touch must-not-run" }), code("CONFLICT"));
-    const separate = await client.resumeExec("session-b", "invocation-a", { ...spec, command: "printf separate" });
-    assert.notEqual(separate.operationId, piResult.operationId);
-    assert.ok(!fs.existsSync(path.join(workspace, "must-not-run")));
+  // The protocol-3 client in process: hello, status, a version-1 config refused.
+  const client = new IrohRunnerClient({ configPath: path.join(work, "runner.json") });
+  const described = await client.describe();
+  assert.deepEqual(described.capabilities, ["node.hello", "node.status", "vm.allocate", "vm.start", "vm.stop", "vm.inspect", "vm.release"]);
+  assert.match(described.baseImageSha256, /^[0-9a-f]{64}$/);
+  assert.equal(described.platform, "linux-x86_64");
+  assert.equal((await client.health()).activeVms, 0);
+  fs.writeFileSync(path.join(work, "v1.json"), JSON.stringify({ ...JSON.parse(fs.readFileSync(path.join(work, "runner.json"), "utf8")), version: 1, intentDirectory: work }), { mode: 0o600 });
+  assert.throws(() => new IrohRunnerClient({ configPath: path.join(work, "v1.json") }), /re-enroll the runner/);
+  await assert.rejects(client.vmInspect({ threadId: "t-none", vmId: "0000000000000000" }), (error: unknown) => error instanceof IrohNodeError && error.code === "NOT_FOUND");
+  log(`runner ${described.softwareVersion} on ${described.platform}; protocol-3 client ok`);
 
-    // Aborting a caller after the actual runner command starts cannot cancel or
-    // replay its side effects. The saved operation remains inspectable.
-    const controller = new AbortController();
-    const startedFile = path.join(workspace, "cancel-count");
-    const watcher = setInterval(() => { if (fs.existsSync(startedFile)) controller.abort(); }, 10);
-    let interruptedId: string | undefined;
-    try {
-      await assert.rejects(client.exec(17, { ...spec, command: "printf once >> cancel-count; sleep 0.4; printf recovered" }, controller.signal), error => {
-        if (!(error instanceof IrohNodeError) || !error.completionUnknown) return false;
-        interruptedId = error.operationId;
-        return !!interruptedId;
-      });
-    } finally { clearInterval(watcher); }
-    assert.ok(interruptedId);
-    let recovered;
-    for (let attempt = 0; attempt < 30; attempt++) {
-      recovered = await client.operation(17, interruptedId);
-      if (recovered.state === "Succeeded") break;
-      await new Promise(resolve => setTimeout(resolve, 50));
-    }
-    assert.equal(recovered?.state, "Succeeded");
-    assert.equal(fs.readFileSync(startedFile, "utf8"), "once");
-    await assert.rejects(client.submitExec(17, interruptedId), code("COMPLETION_UNKNOWN", true));
+  // cubed's side: registry, egress policy, supervised gateway, thread VMs.
+  const state = path.join(work, "cubed");
+  const runDir = path.join(state, "run");
+  fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
+  registry = new Registry(path.join(state, "registry.sqlite"));
+  registry.saveProject({ id: "empty", name: "empty", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
+  registry.enrollRunner({ ...client.binding, configPath: path.join(work, "runner.json"), configHash: client.configHash });
+  const github: SecretSource = { name: "github", hosts: ["github.com", "api.github.com"], value: async () => fakeToken };
+  const decisions: string[] = [];
+  const policy = new EgressPolicy({ vms: { vm: vmId => { const thread = registry!.threadByVm(vmId); return thread?.vm ? { threadId: thread.id, placeholders: thread.vm.placeholders } : null; } },
+    secrets: [github], log: { ...quiet, info: (msg: string, fields?: object) => decisions.push(`${msg} ${JSON.stringify(fields)}`) } });
+  egress = await serveEgress(path.join(runDir, "egress.sock"), policy);
+  gateway = new GatewaySupervisor({ state: path.join(state, "gateway"), control: path.join(runDir, "gateway.sock"), decide: path.join(runDir, "egress.sock"),
+    network: "loopback", binary: gatewayBin, log: quiet });
+  gateway.start();
+  const { hello } = await gateway.ready();
+  log(`gateway ${hello.version} ready, peer ${hello.peer.slice(0, 12)}`);
+  vms = new ThreadVms({ registry, threads: path.join(state, "threads"), run: runDir, gateway, sizes: { vcpus: 2, memoryMiB: 2048, diskGiB: 8 }, log: quiet });
+  const thread = registry.createThread("empty", "adapter", { provider: "faux", id: "faux" }, "adapter smoke");
+  await vms.start(thread);
+  log("thread machine booted; guest helper ready over ssh through the gateway");
+  assert.equal((await client.health()).activeVms, 1);
 
-    // Same peer/node/environment but wrong thread: deny before any command bytes.
-    const wrongConfigPath = path.join(directory, "wrong-thread.json");
-    fs.writeFileSync(wrongConfigPath, JSON.stringify({ ...config, binding: { ...config.binding, threadId: "other-thread" } }), { mode: 0o600 });
-    const wrong = new IrohExecutionNodeClient({ configPath: wrongConfigPath });
-    const denied = await wrong.prepareExec(17, { ...spec, command: "touch must-not-run" });
-    await assert.rejects(wrong.submitExec(17, denied.operationId), code("WRONG_NODE"));
-    await assert.rejects(client.operation(17, denied.operationId), code("WRONG_NODE"));
-    assert.ok(!fs.existsSync(path.join(workspace, "must-not-run")));
+  // The Workspace contract over the real VM, in process and over HTTP.
+  const workspace = (name: string) => new VmWorkspace({ guest: vms!.guest(thread), leases: new LeaseStore(path.join(work, `lease-${name}`)), owner: "pi", binding: `adapter:${name}` });
+  await workspaceContract("real VM: VmWorkspace", workspace("direct"), "pi");
+  const served = await serveWorkspace(workspace("http"));
+  try { await workspaceContract("real VM: HttpWorkspace -> routes -> VmWorkspace", new HttpWorkspace({ url: served.url }), "pi"); }
+  finally { await served.close(); }
 
-    // Config is operator-owned, not an RPC override. Once loaded its exact bytes
-    // are pinned, including the destination key/address and intent directory.
-    fs.writeFileSync(configPath, JSON.stringify({ ...config, serverPeer: "b".repeat(64) }));
-    await assert.rejects(client.status(17), code("CONFLICT"));
-    assert.equal(observations.length, 1);
-    fs.writeFileSync(configPath, original);
-    await assert.rejects(client.prepareExec(17, { ...spec, address: "203.0.113.1:443" } as RunnerExecSpec), code("INVALID_REQUEST"));
-    const restartedClient = new IrohExecutionNodeClient({ configPath });
-    await assert.rejects(restartedClient.submitExec(17, result.operationId), code("COMPLETION_UNKNOWN", true));
-    assert.equal((await restartedClient.operation(17, result.operationId)).state, "Succeeded");
-    // The independent Rust diagnostic CLI can read the same saved intent. It
-    // is not part of the control-plane call path and never submits this job.
-    const diagnosticArgs = ["operation", "--key", controlKey, "--intent", path.join(intents, `${result.operationId}.json`), "--network", network];
-    if (network !== "relay") diagnosticArgs.push("--address", daemon.address!);
-    const inspected = JSON.parse(cli(diagnosticArgs));
-    assert.equal(inspected.operation.state, "Succeeded");
-
-    // Result retrieval does not require the workspace to still exist. Binding
-    // verification happens in authenticated hello, not filesystem inspect.
-    fs.renameSync(workspace, path.join(directory, "old-workspace"));
-    await assert.rejects(client.status(17), code("ENVIRONMENT_MISSING"));
-    assert.equal((await client.operation(17, result.operationId)).state, "Succeeded");
-    fs.renameSync(path.join(directory, "old-workspace"), workspace);
-    const lastObservation = structuredClone(observations);
-    await stop(daemon.child);
-    await assert.rejects(client.status(17), code("NODE_UNAVAILABLE"));
-    assert.equal(client.contact, "unavailable");
-    assert.deepEqual(observations, lastObservation);
-    daemon = await start(key, state, network, daemon.address);
-    assert.equal((await client.operation(17, result.operationId)).state, "Succeeded");
-    assert.equal((await client.status(17)).status, "Running");
-    assert.equal(fs.readFileSync(path.join(workspace, "count"), "utf8"), "once");
-    if (network === "loopback") {
-      const hostState = path.join(directory, "status-host");
-      const registry = new Registry(path.join(hostState, "registry.sqlite"));
-      registry.saveProject({ id: "status", name: "status", status: "ready", error: null, revision: 1,
-        checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
-      registry.enrollRunner({ ...client.binding, configPath, configHash: client.configHash });
-      registry.close();
-      const statusOutput = execFileSync(process.execPath,
-        [path.resolve("packages/server/src/index.ts"), "runners", "status", "--state", hostState],
-        { encoding: "utf8", timeout: 15000, env: { PATH: process.env.PATH } });
-      assert.match(statusOutput, /node-test: reachable; lifecycle=ready; active=false/);
-    }
-    if (network === "loopback") await smokeDurableAgent(directory, configPath, workspace);
-    if (network === "loopback") await smokeProduct(directory, configPath);
-    if (network === "loopback") {
-      await smokeCodemode(directory, configPath, workspace);
-      console.log("ok: codemode on the actual runner: nested write, edit, bash and read under their nested keys");
-    }
-
-    // Protocol 2 workspace operations against the real runner. Pi's lease
-    // above already fenced the installation thread with time-based epochs.
-    const epoch = Date.now();
-    const described = await client.describe();
-    assert.equal(described.limits.maxExecTimeoutMs, 600000);
-    assert.ok(["exec.cancel", "fs.read", "fs.write", "fs.stat"].every(capability => described.capabilities.includes(capability)));
-    const big = await client.resumeExec("session-paged", "invocation-paged", { command: "head -c 150000 /dev/zero | tr '\\0' b", guestCwd: ".", timeoutMs: 10000, outputLimit: 262144 }, undefined, epoch);
-    assert.equal(big.output.length, 150000);
-    assert.ok(big.output.every(byte => byte === 98));
-    const writeOptions = { idempotencyKey: `write-${network}`, createParents: true, epoch };
-    const written = await client.writeFile("notes/hello.txt", Buffer.from("hello\n"), writeOptions);
-    fs.writeFileSync(path.join(workspace, "notes/hello.txt"), "changed\n");
-    assert.deepEqual(await client.writeFile("notes/hello.txt", Buffer.from("hello\n"), writeOptions), written, "a repeated key returns the original result");
-    assert.equal(fs.readFileSync(path.join(workspace, "notes/hello.txt"), "utf8"), "changed\n", "a repeated key never writes again");
-    await assert.rejects(client.writeFile("notes/hello.txt", Buffer.from("other\n"), writeOptions), code("CONFLICT"));
-    const read = await client.readFile("notes/hello.txt");
-    assert.equal(read.content.toString(), "changed\n");
-    await assert.rejects(client.writeFile("notes/hello.txt", Buffer.from("stale\n"), { idempotencyKey: `stale-${network}`, expectedSha: written.sha256, epoch }), code("PRECONDITION_FAILED"));
-    const edited = await client.writeFile("notes/hello.txt", Buffer.from("edited\n"), { idempotencyKey: `edit-${network}`, expectedSha: read.sha256!, epoch });
-    assert.equal(fs.readFileSync(path.join(workspace, "notes/hello.txt"), "utf8"), "edited\n");
-    assert.equal((await client.stat("notes/hello.txt")).sha256, edited.sha256);
-    await assert.rejects(client.readFile("../control.json"), code("INVALID_REQUEST"));
-    await assert.rejects(client.stat("notes/missing"), code("NOT_FOUND"));
-    const cancelId = `op-cancel-${network}`;
-    await client.startOperation(cancelId, { command: "sleep 30 & printf %s $! > sleeper.pid; wait", guestCwd: ".", timeoutMs: 600000, outputLimit: 100 }, { epoch });
-    const pidFile = path.join(workspace, "sleeper.pid");
-    for (let attempt = 0; attempt < 200 && !(fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8")); attempt++) await new Promise(resolve => setTimeout(resolve, 25));
-    const sleeper = Number(fs.readFileSync(pidFile, "utf8"));
-    await assert.rejects(client.cancelOperation(cancelId, { epoch: epoch - 1 }), code("LEASE_STALE"));
-    await client.cancelOperation(cancelId, { epoch });
-    let cancelled;
-    for (let attempt = 0; attempt < 100; attempt++) {
-      cancelled = await client.inspectOperation(cancelId);
-      if (cancelled.state !== "Accepted" && cancelled.state !== "Running") break;
-      await new Promise(resolve => setTimeout(resolve, 50));
-    }
-    assert.deepEqual(cancelled, { state: "Failed", error: "CANCELLED", completionUnknown: false });
-    assert.throws(() => process.kill(sleeper, 0), { code: "ESRCH" }, "cancellation SIGKILLs the whole process group");
-    await assert.rejects(client.resumeExec("session-unfenced", "invocation-unfenced", spec), code("LEASE_STALE"));
-
-    // The one Workspace contract over the real runner and Iroh, in process
-    // and through the HTTP routes. Each lease store issues newer epochs.
-    const runnerWorkspace = (name: string) => new RunnerWorkspace({ runner: new IrohExecutionNodeClient({ configPath }),
-      leases: new LeaseStore(path.join(directory, `lease-${name}`)), owner: "claude-code" });
-    await workspaceContract(`${network}: RunnerWorkspace`, runnerWorkspace("direct"), "claude-code");
-    const served = await serveWorkspace(runnerWorkspace("http"));
-    try { await workspaceContract(`${network}: HttpWorkspace -> routes -> RunnerWorkspace`, new HttpWorkspace({ url: served.url }), "claude-code"); }
-    finally { await served.close(); }
-    await stop(daemon.child);
-    console.log(`ok: ${network} mode, real TS/native/iroh/exec, exact binding, durable intent, rejection, config pinning, offline observations, restart, paged output, files, cancel, epoch fence and workspace contract`);
+  // Egress from the guest: only HTTP/HTTPS to public addresses, decided by cubed.
+  const probes = workspace("probes");
+  const lease = await probes.lease({ owner: "pi" });
+  const whoami = await run(probes, lease.token, "whoami", "id -un; pwd; test -n \"$GH_TOKEN\" && echo placeholder-set");
+  assert.equal(whoami.output, "agent\n/workspace\nplaceholder-set", "commands run as agent in /workspace with the placeholder");
+  const status = (url: string, extra = "") => `curl -s -o /dev/null -m 15 ${extra} -w '%{http_code}' ${url} || true`;
+  const internet = (await run(probes, lease.token, "public", status("https://example.com/"))).output;
+  if (internet === "200") log("guest https://example.com: 200 through interception");
+  else log(`NOTICE: guest https://example.com answered ${internet || "nothing"} (no upstream internet?); public egress unverified here`);
+  for (const [key, url] of [["gateway-ip", "http://10.77.0.1/"], ["metadata", "http://169.254.169.254/"], ["lan", "http://192.168.0.1/"], ["loopback-host", "http://127.0.0.1.nip.io/"]]) {
+    const answer = (await run(probes, lease.token, `deny-${key}`, status(url))).output;
+    assert.ok(answer === "403" || answer === "000", `${url} must not be reached from the guest (got ${answer})`);
   }
+  const ssh = await run(probes, lease.token, "tcp-22", "timeout 8 bash -c 'exec 3<>/dev/tcp/1.1.1.1/22' 2>/dev/null && echo open || echo refused");
+  assert.equal(ssh.output, "refused", "TCP other than 80/443 is refused");
+  const misuse = await run(probes, lease.token, "placeholder-elsewhere", status("https://example.com/", "-H \"Authorization: Bearer $GH_TOKEN\""));
+  assert.ok(misuse.output === "403" || internet !== "200", `the GitHub placeholder sent to example.com is denied (got ${misuse.output})`);
+  if (internet === "200") assert.ok(decisions.some(line => line.includes("not allowed for example.com")), decisions.join("\n"));
+  log("egress: gateway, metadata, LAN and port 22 refused; a placeholder sent elsewhere denied");
+
+  // Runner SIGKILL: QEMU goes with it; the next start boots the same disk.
+  await run(probes, lease.token, "marker", "echo kept > marker && sync");
+  await probes.release(lease.token);
+  runner!.kill("SIGKILL");
+  await new Promise(resolve => runner!.once("exit", resolve));
+  runner = (await startRunner()).child;
+  const record = (await client.vmInspect({ threadId: thread.id, vmId: thread.vm!.vmId })).vm;
+  assert.equal(record.state, "stopped");
+  assert.equal(record.interrupted, true);
+  await vms.start(thread);
+  const again = workspace("after-kill");
+  const after = await again.lease({ owner: "pi" });
+  assert.equal(Buffer.from((await again.readFile(after.token, "marker")).content).toString(), "kept\n", "/workspace survived the runner SIGKILL");
+  await again.release(after.token);
+  log("runner SIGKILL: machine interrupted, booted again from the same disk");
+
+  // Archive: the release check sees the changed workspace; the disk is retained.
+  const check = await releaseCheck(workspace("release"), "pi", thread.allocation);
+  assert.equal(check.clean, false);
+  assert.match(check.reason, /not empty/);
+  assert.deepEqual(await vms.release(thread, true), { retained: true });
+  const health = await client.health();
+  assert.equal(health.activeVms, 0);
+  assert.equal(health.retainedVms, 1);
+  log(`archive: release check "${check.reason}", disk retained (${(health.retainedBytes / 1e6).toFixed(0)} MB)`);
+  console.log(`smoke-node-adapter: PASS in ${((Date.now() - started) / 1000).toFixed(0)} s`);
+} catch (error) {
+  console.error("smoke-node-adapter: FAIL", error);
+  console.error(`logs: ${work} (kept)`);
+  process.env.CUBE_SMOKE_KEEP = "1";
+  process.exitCode = 1;
 } finally {
-  await Promise.all([...children].map(stop));
-  fs.rmSync(root, { recursive: true, force: true });
+  await vms?.close();
+  await gateway?.stop();
+  await egress?.close();
+  registry?.close();
+  for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  if (process.env.CUBE_SMOKE_KEEP === "1") console.log(`kept ${work}`);
+  else fs.rmSync(work, { recursive: true, force: true });
+  process.exit(process.exitCode ?? 0);
 }

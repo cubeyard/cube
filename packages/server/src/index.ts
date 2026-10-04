@@ -11,7 +11,10 @@ import { Registry, threadAgent, type Project, type Runner } from "./registry.ts"
 import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { Conversations } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
-import { IrohExecutionNodeClient, type TrustedRunnerHealth } from "./iroh-node.ts";
+import { IrohRunnerClient, loadRunnerConfig, type RunnerNetwork, type TrustedRunnerHealth } from "./iroh-node.ts";
+import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
+import { GatewaySupervisor, widestNetwork } from "./gateway.ts";
+import { ThreadVms, type ThreadMachines } from "./vm.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
@@ -59,9 +62,11 @@ function claudeMod(state: string): string {
   return target;
 }
 
-/** The private socket the Claude Code mod reaches the thread workspace on.
- * It serves workspace routes only; the lease token is the authorization. */
-async function workspaceSocket(state: string): Promise<{ socket: string; temporary: string | null }> {
+/** cubed's private sockets: `workspace.sock` (the Claude Code mod reaches
+ * the thread workspace on it; workspace routes only, the lease token is the
+ * authorization), `gateway.sock` (served by cube-gateway) and `egress.sock`
+ * (cubed's decision API for the gateway). All 0600 in a 0700 directory. */
+async function runDirectory(state: string): Promise<{ directory: string; socket: string; temporary: string | null }> {
   const directory = path.join(state, "run");
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   fs.chmodSync(directory, 0o700);
@@ -69,7 +74,7 @@ async function workspaceSocket(state: string): Promise<{ socket: string; tempora
   // Unix socket paths are short; a deep state directory gets a private temporary one.
   if (Buffer.byteLength(socket) > 100) {
     const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "cubed-"));
-    return { socket: path.join(temporary, "workspace.sock"), temporary };
+    return { directory: temporary, socket: path.join(temporary, "workspace.sock"), temporary };
   }
   // A socket that still answers belongs to a live cubed on this state: never
   // take it from that instance's Claude Code threads. A dead one is stale.
@@ -80,7 +85,25 @@ async function workspaceSocket(state: string): Promise<{ socket: string; tempora
   });
   if (live) throw new Error(`another cubed is serving this CUBED_STATE (${socket} answers); run one cubed per state`);
   fs.rmSync(socket, { force: true });
-  return { socket, temporary: null };
+  return { directory, socket, temporary: null };
+}
+
+/** The gateway's network mode: the widest among enrolled runners. */
+function gatewayNetwork(registry: Registry): RunnerNetwork {
+  const modes: RunnerNetwork[] = [];
+  for (const runner of registry.listRunners()) {
+    try { modes.push(loadRunnerConfig(runner.configPath).config.network); } catch { /* reported when used */ }
+  }
+  return widestNetwork(modes);
+}
+
+/** Test builds of cube-gateway only (`test-hooks`): extra serve arguments. */
+function gatewayTestArgs(env: NodeJS.ProcessEnv): string[] {
+  const raw = env.CUBED_GATEWAY_TEST_ARGS?.trim();
+  if (!raw) return [];
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed) || !parsed.every(item => typeof item === "string")) throw new Error("CUBED_GATEWAY_TEST_ARGS must be a JSON array of strings");
+  return parsed;
 }
 
 /** A JSON request body; at most 1 MiB. */
@@ -96,7 +119,8 @@ async function readJson(request: http.IncomingMessage): Promise<Record<string, u
   return body;
 }
 
-/** Private product host. No remote provisioning or implicit sandbox backend. */
+/** Private product host. Thread tools run in each thread's VM; there is no
+ * local execution fallback. */
 export async function createCubed(options: {
   state: string;
   models?: Models;
@@ -109,22 +133,45 @@ export async function createCubed(options: {
   claude?: readonly string[] | null;
   /** Claude Code process tuning, for tests. */
   claudeOptions?: { idleMs?: number; stopGraceMs?: number };
+  /** Thread machines; default: VMs on the threads' runners through a
+   * supervised cube-gateway. Offline tests pass local guests. */
+  machines?: ThreadMachines;
+  /** The cube-gateway binary (null: none); default: locateGateway(). */
+  gateway?: string | null;
+  /** Secrets the egress policy substitutes; default: the host's GitHub token. */
+  secrets?: SecretSource[];
 }) {
-  const { socket, temporary: socketDirectory } = await workspaceSocket(options.state);
+  const { directory: run, socket, temporary: socketDirectory } = await runDirectory(options.state);
   const registry = new Registry(path.join(options.state, "registry.sqlite"));
   const models = options.models ?? await createModelRuntime();
   const modelAuth = new ModelAuth(models);
   const claudeCommand = options.claude === undefined ? findClaude() : options.claude;
-  const conversations = new Conversations(registry, path.join(options.state, "threads"), models, claudeCommand ? {
-    command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
-  } : null);
   const github = new GithubAuth();
+  // Every guest request is decided here; secrets never leave the host
+  // except as the gateway's substitution for an allowed request.
+  const policy = new EgressPolicy({
+    vms: { vm: vmId => { const thread = registry.threadByVm(vmId); return thread?.vm && !thread.archived ? { threadId: thread.id, placeholders: thread.vm.placeholders } : null; } },
+    secrets: options.secrets ?? [githubSecret(() => github.token())],
+  });
+  const egress = await serveEgress(path.join(run, "egress.sock"), policy);
+  let gateway: GatewaySupervisor | null = null;
+  let machines = options.machines;
+  if (!machines) {
+    gateway = new GatewaySupervisor({ state: path.join(options.state, "gateway"), control: path.join(run, "gateway.sock"),
+      decide: path.join(run, "egress.sock"), network: gatewayNetwork(registry), extraArgs: gatewayTestArgs(process.env),
+      ...(options.gateway === undefined ? {} : { binary: options.gateway }) });
+    gateway.start();
+    machines = new ThreadVms({ registry, threads: path.join(options.state, "threads"), run, gateway });
+  }
+  const conversations = new Conversations({ registry, directory: path.join(options.state, "threads"), models, machines, claude: claudeCommand ? {
+    command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
+  } : null });
   const git = new GitService(path.join(options.state, "repositories"));
   const updates = options.updates ?? new UpdateService();
   const onboarding = path.join(options.state, "onboarding.json");
   const configuredHosts = options.allowedHosts ?? process.env.CUBED_ALLOWED_HOSTS?.split(",") ?? [];
   const allowedHosts = new Set(["localhost", "127.0.0.1", "[::1]", ...configuredHosts.map(host => host.trim()).filter(Boolean)]);
-  const runnerHealth = options.runnerHealth ?? (runner => new IrohExecutionNodeClient({ configPath: runner.configPath, configHash: runner.configHash }).health());
+  const runnerHealth = options.runnerHealth ?? (runner => new IrohRunnerClient({ configPath: runner.configPath, configHash: runner.configHash }).health());
   const runnerView = (id: string) => registry.runnerStatuses().find(runner => runner.id === id);
   const probeRunner = async (id: string) => {
     const runner = registry.getRunner(id);
@@ -184,7 +231,7 @@ export async function createCubed(options: {
         return selected;
       };
       if (url.pathname === "/api/health" && method === "GET") {
-        return json({ lifecycle: "ready", ...versionInfo() });
+        return json({ lifecycle: "ready", ...versionInfo(), gateway: gateway ? (gateway.unavailable ? "unavailable" : "ready") : "none" });
       }
       if (url.pathname === "/api/system/update") {
         if (method === "GET") return json(await updates.status());
@@ -256,8 +303,8 @@ export async function createCubed(options: {
           registry.beginRunnerRetirement(id);
           try {
             const status = await probeRunner(id);
-            if (status.contactStatus === "reachable" && (status.health?.active || status.health?.activeWorkspaces)) {
-              throw new Error("runner reports active work or an active workspace and cannot be retired");
+            if (status.contactStatus === "reachable" && status.health?.activeVms) {
+              throw new Error("runner reports an active thread machine and cannot be retired");
             }
             registry.finishRunnerRetirement(id, reason, status.lastAttemptAt!);
             return json({ runner: runnerView(id) });
@@ -303,11 +350,13 @@ export async function createCubed(options: {
       if (parts[0] === "api" && parts[1] === "threads") {
         const id = parts[2];
         if (parts.length > 4 && parts[3] !== "workspace") return json({ error: "not found" }, 404);
-        if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...thread, state: conversations.error(thread.id) ? "error" : "ready", error: conversations.error(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
+        if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...thread, state: conversations.error(thread.id) ? "error" : conversations.starting(thread.id) ? "starting" : "ready", error: conversations.error(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
         if (!id && method === "POST") {
           const model = await selection(body.model);
           const thread = registry.createThread(text("projectId"), text("requestId"), model, text("text"), model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi");
-          await conversations.activate(thread.id);
+          // The machine boots in the background (minutes the first time);
+          // the thread shows "starting" until it is up.
+          void conversations.activate(thread.id);
           return json({ id: thread.id });
         }
         const thread = registry.getThread(id);
@@ -316,7 +365,7 @@ export async function createCubed(options: {
           const result = await workspaceRoute(conversations.workspace(id), { method: method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body });
           return json(result.body, result.status);
         }
-        if (!parts[3] && method === "DELETE") { await conversations.archive(id); return json({ ok: true }); }
+        if (!parts[3] && method === "DELETE") return json({ ok: true, ...await conversations.archive(id) });
         if (!parts[3] && method === "PATCH") { registry.saveThread({ ...thread, title: text("title").slice(0, 200) }); return json({ ok: true }); }
         if (parts[3] === "history" && method === "GET") return json(await conversations.history(id));
         if (parts[3] === "stream" && method === "GET") return await conversations.stream(id, response);
@@ -359,16 +408,19 @@ export async function createCubed(options: {
   });
   await new Promise<void>((resolve, reject) => { workspaceServer.once("error", reject); workspaceServer.listen(socket, () => { workspaceServer.off("error", reject); resolve(); }); });
   fs.chmodSync(socket, 0o600);
-  await conversations.boot();
+  // Machines start in the background; a thread is used once its own is up.
+  void conversations.boot();
   const recovery = setInterval(() => { void conversations.boot(); }, 30000);
   recovery.unref();
   let closePromise: Promise<void> | undefined;
-  return { server, registry, conversations, close() {
+  return { server, registry, conversations, gateway, close() {
     closePromise ??= (async () => {
       clearInterval(recovery);
       server.closeAllConnections();
       if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
       await modelAuth.close(); await conversations.close();
+      await gateway?.stop();
+      await egress.close();
       workspaceServer.closeAllConnections();
       await new Promise<void>(resolve => workspaceServer.close(() => resolve()));
       fs.rmSync(socketDirectory ?? socket, { recursive: true, force: true });
@@ -424,14 +476,14 @@ async function runnersStatus(state: string): Promise<number> {
     }
     const results = await Promise.all(runners.map(async runner => {
       try {
-        const health = await new IrohExecutionNodeClient({ configPath: runner.configPath, configHash: runner.configHash }).health();
+        const health = await new IrohRunnerClient({ configPath: runner.configPath, configHash: runner.configHash }).health();
         return { runner, reachable: true as const, health };
       } catch (error) {
         return { runner, reachable: false as const, error: error instanceof Error ? error.message : String(error) };
       }
     }));
     for (const result of results) {
-      if (result.reachable) console.log(`${result.runner.nodeId}: reachable; lifecycle=${result.health.lifecycle}; active=${result.health.active}`);
+      if (result.reachable) console.log(`${result.runner.nodeId}: reachable; lifecycle=${result.health.lifecycle}; vms=${result.health.activeVms}/${result.health.maxActiveVms}; retained=${result.health.retainedVms}`);
       else console.log(`${result.runner.nodeId}: unreachable; ${result.error}`);
     }
     return results.some(result => !result.reachable) ? 1 : 0;

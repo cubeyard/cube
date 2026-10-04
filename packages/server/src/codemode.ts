@@ -7,8 +7,8 @@
  * The tool is replay "unsafe": a script interrupted by a crash is reported as
  * possibly partially run, never rerun. Limits are strict and checked by the
  * host, and a call whose outcome cannot be known is reported as uncertain
- * instead of as a plain failure. The worker is a fault-containment boundary,
- * not a sandbox for the runner, which stays trusted. */
+ * instead of as a plain failure. The worker is a fault-containment boundary
+ * for cubed, not a sandbox; the tools themselves act in the thread's VM. */
 import type { Context } from "@earendil-works/chord";
 import { withAbortSignal } from "@earendil-works/chord/context";
 import { Type, validateToolArguments, type ToolCall } from "@earendil-works/pi-ai";

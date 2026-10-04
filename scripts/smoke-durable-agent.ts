@@ -1,11 +1,16 @@
-/** Called by the real runner acceptance portfolio, using its disposable runner. */
+/** Four SIGKILL boundaries of a Pi thread over a local guest (the real
+ * guest helper under a temporary root): reopen, exclusive owner, one effect,
+ * same identity, SSE. Run by scripts/smoke-local.ts. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fork, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 
-export async function smokeDurableAgent(root: string, configPath: string, workspace: string) {
+export async function smokeDurableAgent(root: string) {
+  const guestRoot = path.join(root, "durable-guest");
+  const workspace = path.join(guestRoot, "workspace");
+  fs.mkdirSync(workspace, { recursive: true });
   const children = new Set<ChildProcess>();
   async function stop(child: ChildProcess) {
     if (child.exitCode === null && child.signalCode === null) {
@@ -16,7 +21,7 @@ export async function smokeDurableAgent(root: string, configPath: string, worksp
     children.delete(child);
   }
   function start(directory: string, mode: string, boundary: string) {
-    const child = fork(path.resolve("packages/server/test/durable-agent-fixture.ts"), [directory, configPath, mode, boundary], {
+    const child = fork(path.resolve("packages/server/test/durable-agent-fixture.ts"), [directory, guestRoot, mode, boundary], {
       stdio: ["ignore", "pipe", "pipe", "ipc"], env: { PATH: process.env.PATH, HOME: directory },
     });
     children.add(child);
@@ -74,7 +79,7 @@ export async function smokeDurableAgent(root: string, configPath: string, worksp
       await fetch(`${reopened.url}/drive`, { method: "POST" });
       await recovered.wait("done");
       const snapshot = await (await fetch(`${reopened.url}/snapshot`)).json();
-      assert.match(JSON.stringify(snapshot), /verified runner result: 74/);
+      assert.match(JSON.stringify(snapshot), /verified guest result: 74/);
       // Partials are committed at most every 100 ms; only the slow stream has deltas.
       assert.match(received, boundary === "model-stream" ? /text_delta/ : /"type":"message_end"/);
       assert.match(received, /run_end/);
@@ -90,7 +95,7 @@ export async function smokeDurableAgent(root: string, configPath: string, worksp
       const attempts = fs.readFileSync(path.join(directory, "attempts"), "utf8").trim().split("\n");
       assert.equal(attempts.length, boundary === "tool-result-gap" ? 2 : 1);
       assert.equal(new Set(attempts).size, 1);
-      console.log(`ok: durable agent ${boundary}: SIGKILL/reopen, exclusive owner, actual runner effect once, same identity, SSE and third reopen`);
+      console.log(`ok: durable agent ${boundary}: SIGKILL/reopen, exclusive owner, guest effect once, same identity, SSE and third reopen`);
     }
   } finally { await Promise.all([...children].map(stop)); }
 }

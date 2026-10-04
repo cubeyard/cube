@@ -16,13 +16,3 @@ export class ExecutionNodeError extends Error {
     this.completionUnknown = code === "COMPLETION_UNKNOWN";
   }
 }
-export interface EnvironmentObservation { status: string; observedAt: number }
-export interface ExecutionNodeClient {
-  /** Transport reachability does not authorize control-plane host paths. */
-  readonly locality: "local" | "remote";
-  readonly nodeId: NodeId;
-  readonly contact: NodeContact;
-  status(environmentId: number): Promise<EnvironmentObservation>;
-  /** Contact only, for an environment not yet provisioned. */
-  check(environmentId: number): Promise<void>;
-}

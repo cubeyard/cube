@@ -85,7 +85,7 @@
 
     <div class="access-note">
       <p>The host runs <code>gh auth login</code>. You approve <strong>GitHub CLI</strong> in your browser, not a separate app.</p>
-      <p>GitHub CLI keeps the credentials on the host. Trusted runners should use a separate account or machine.</p>
+      <p>GitHub CLI keeps the credentials on the host. A thread’s machine sees only a placeholder; cube’s gateway adds the token to requests to GitHub.</p>
       <p>This is standard GitHub CLI access, not per-repository access.</p>
       <details>
         <summary>before connecting work code</summary>

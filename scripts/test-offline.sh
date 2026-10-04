@@ -12,12 +12,18 @@ OFFLINE_TESTS=(
   packages/server/test/models-test.ts
   packages/server/test/model-auth-test.ts
   packages/server/test/iroh-node-test.ts
+  packages/server/test/guest-helper-test.ts
   packages/server/test/workspace-test.ts
+  packages/server/test/vm-seed-test.ts
+  packages/server/test/egress-policy-test.ts
+  packages/server/test/gateway-test.ts
+  packages/server/test/vm-workspace-test.ts
   packages/server/test/durable-agent-test.ts
   packages/server/test/codemode-test.ts
   packages/server/test/thread-events-test.ts
   packages/server/test/pi-compaction-test.ts
   packages/server/test/claude-agent-test.ts
+  scripts/smoke-local.ts
   packages/web/test/transcript-test.ts
   packages/server/test/github-auth-test.ts
   packages/server/test/github-read-test.ts

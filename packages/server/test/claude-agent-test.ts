@@ -1,6 +1,6 @@
 /** Claude Code threads, offline: ClaudeAgent starts a fake `claude` that
  * speaks stream-json and runs the Claude Code mod's own tool functions over
- * cubed's workspace socket (routes -> RunnerWorkspace -> fake runner), keyed
+ * cubed's workspace socket (routes -> VmWorkspace -> local guest), keyed
  * by tool_use_id. The real `claude` CLI is never started. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -14,20 +14,21 @@ import { ClaudeAgent, ClaudeBusy, claudeEnvironment, type ClaudeRuntime } from "
 import { ClaudeThreadEvents } from "../src/claude-thread-events.ts";
 import { ModelAuth } from "../src/model-auth.ts";
 import type { ThreadTranscript } from "../src/thread-events.ts";
-import { RunnerWorkspace, WorkspaceError } from "../src/workspace.ts";
+import { WorkspaceError } from "../src/workspace.ts";
+import { VmWorkspace } from "../src/vm-workspace.ts";
 import { workspaceRoute } from "../src/workspace-http.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
 import { WorkspaceClient } from "../../claude-mod/hooks/workspace.ts";
 import { bash, edit, read, write, workspacePath } from "../../claude-mod/hooks/tools.ts";
-import { FakeRunner } from "./workspace-fake-runner.ts";
+import { LocalGuestTransport } from "./local-guest.ts";
 import { unixTransport } from "./unix-transport.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-claude-"));
 const files = path.join(root, "workspace");
 fs.mkdirSync(files, { recursive: true });
-const runner = new FakeRunner(files);
+const guest = new LocalGuestTransport(path.dirname(files));
 const leases = new LeaseStore(path.join(root, "thread"));
-const workspace = new RunnerWorkspace({ runner, leases, owner: "claude-code" });
+const workspace = new VmWorkspace({ guest, leases, owner: "claude-code", binding: guest.binding });
 const socket = path.join(root, "workspace.sock");
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url!, "http://localhost");
@@ -55,7 +56,7 @@ const mod = path.resolve(import.meta.dirname, "../../claude-mod");
 const runtime: ClaudeRuntime = { command: [process.execPath, path.join(import.meta.dirname, "fake-claude.ts")], mod, socket, stopGraceMs: 1000, env: { FAKE_CLAUDE_LOG: log } };
 const leaseToken = (holder: ClaudeAgent) => (holder as unknown as { lease: { token: string } }).lease.token;
 async function cancelled(holder: ClaudeAgent, key: string): Promise<void> {
-  await until(async () => { const state = await workspace.operation(leaseToken(holder), key); return state.state === "failed" && state.error === "CANCELLED"; }, `${key} cancelled on the runner`);
+  await until(async () => { const state = await workspace.operation(leaseToken(holder), key).catch(e => ({ state: String(e) })); return state.state === "failed" && (state as { error?: string }).error === "CANCELLED"; }, `${key} cancelled on the guest`);
 }
 const directory = path.join(root, "thread");
 const starts = () => fs.readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line) as { args: string[]; cwd: string; session: string; apiKey: boolean; authToken: boolean; env: string[] });
@@ -82,7 +83,7 @@ try {
   assert.equal(frames[0]!.status.state, "idle");
   const settled = async (run: string) => until(async () => { const value = await events.read(); return value.status.run === run && value.status.state !== "working" && value; }, `run ${run}`);
 
-  // One prompt, every mapped tool, the runner doing the work.
+  // One prompt, every mapped tool, the guest doing the work.
   await agent.submit("r1", ["run printf hello > a.txt; printf 7", "write notes/b.txt alpha beta", "edit notes/b.txt beta gamma", "read notes/b.txt"].join("\n"));
   let transcript = await settled("r1");
   assert.equal(transcript.status.state, "completed", JSON.stringify(transcript.status));
@@ -130,14 +131,14 @@ try {
   await agent.submit("r3", "id toolu_fixed run printf x >> count; printf counted");
   transcript = await settled("r3");
   assert.equal(transcript.status.state, "completed");
-  assert.equal(fs.readFileSync(path.join(files, "count"), "utf8"), "x", "the runner executed the keyed command once");
+  assert.equal(fs.readFileSync(path.join(files, "count"), "utf8"), "x", "the guest executed the keyed command once");
   assert.match(JSON.stringify(transcript.events.at(-1)), /done with opus/);
   const second = starts()[1]!;
   assert.equal(second.args[second.args.indexOf("--resume") + 1], first!.session, "a restarted child resumes the Claude Code session");
   assert.equal(second.args[second.args.indexOf("--model") + 1], "opus");
   await assert.rejects(agent.setModel("gpt-5"), /model unavailable/);
 
-  // Stop interrupts the turn and kills the runner command.
+  // Stop interrupts the turn and kills the guest command.
   await agent.submit("r4", "slow sleep 2; touch late");
   await until(() => agent.state().messages.some(message => JSON.stringify(message.data).includes("touch late")), "the slow tool call");
   await delay(200);
@@ -148,10 +149,10 @@ try {
   assert.equal(transcript.status.state, "stopped");
   assert.ok(Date.now() - stopped < 3000, "stop does not wait for the command");
   await delay(2500);
-  assert.ok(!fs.existsSync(path.join(files, "late")), "the runner command was killed");
+  assert.ok(!fs.existsSync(path.join(files, "late")), "the guest command was killed");
 
   // A child that ignores the interrupt is killed after the grace period, and
-  // cubed cancels its runner command itself: the mod never saw an abort.
+  // cubed cancels its guest command itself: the mod never saw an abort.
   await agent.submit("r6", "ignore-interrupt\nid toolu_ignored slow sleep 3; touch late-ignored");
   await until(() => agent.state().messages.some(message => JSON.stringify(message.data).includes("toolu_ignored")), "the ignored tool call");
   await delay(200);
@@ -189,7 +190,7 @@ try {
   assert.match(transcript.status.error ?? "", /does not continue an interrupted turn/);
   assert.equal(transcript.events.length, before);
   assert.equal(agent.model, "opus", "the chosen model survives a reopen");
-  // Closing cancelled the turn's runner command: it would never be continued.
+  // Closing cancelled the turn's guest command: it would never be continued.
   await cancelled(agent, "claude:toolu_close:bash");
   assert.ok(!fs.existsSync(path.join(files, "late-ignored")), "the ignored stop's command never finished");
   await agent.submit("r10", "say back again");
@@ -197,10 +198,10 @@ try {
   assert.equal(transcript.status.state, "completed");
   assert.equal(starts().at(-1)!.args[starts().at(-1)!.args.indexOf("--resume") + 1], first!.session);
   console.log("ok: claude code thread over the fake claude: mod tools on the workspace, keyed calls once, env without api credentials, resume, model change");
-  console.log("ok: stop as interrupt with runner cancel and kill fallback, crash and api failure, interrupted turn after reopen, lease held and released");
+  console.log("ok: stop as interrupt with guest cancel and kill fallback, crash and api failure, interrupted turn after reopen, lease held and released");
 
   // cubed itself dies mid-turn (no close): the reopen finds the turn's open
-  // Bash call in the stored transcript and cancels its runner command.
+  // Bash call in the stored transcript and cancels its guest command.
   await agent.close();
   {
     const crashed = path.join(root, "crashed");
@@ -222,7 +223,7 @@ try {
     } finally { await reopened.close(); }
   }
   agent = await ClaudeAgent.open({ directory, threadId: "t1", workspace, runtime, model: "sonnet" });
-  console.log("ok: a reopen after cubed died mid-turn cancels the interrupted turn's runner commands");
+  console.log("ok: a reopen after cubed died mid-turn cancels the interrupted turn's guest commands");
 
   // The mod's workspace functions against the real routes: paths, Edit's
   // sha condition and refusals.
@@ -261,7 +262,7 @@ try {
   aborting.abort();
   assert.deepEqual(await slow, { stdout: "", stderr: "command stopped", interrupted: true });
   await delay(3200);
-  assert.ok(!fs.existsSync(path.join(files, "late-2")), "an abandoned Bash call cancels its runner command");
+  assert.ok(!fs.existsSync(path.join(files, "late-2")), "an abandoned Bash call cancels its guest command");
   console.log("ok: claude mod tools over the workspace socket: path mapping, write/edit with sha, refusals, keyed replay, conflict, cancel on abort");
 
   // Pi never offers Anthropic's Claude Pro/Max OAuth login.
@@ -277,6 +278,6 @@ try {
   await agent.close().catch(() => {});
   leases.close();
   await new Promise<void>(resolve => server.close(() => resolve()));
-  runner.close();
+  guest.stop();
   fs.rmSync(root, { recursive: true, force: true });
 }

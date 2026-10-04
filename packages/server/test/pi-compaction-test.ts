@@ -4,7 +4,7 @@
  * Pi's conversation API, as Pi's handoff control would. The model context loses
  * the hidden entries, the thread transcript keeps them, the thread keeps
  * working and a reopen from the same state shows the same history. Offline:
- * faux model, fake runner, disposable state. */
+ * faux model, local guest (the real guest helper under a temporary root), disposable state. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -16,18 +16,18 @@ import { LiveDoc, type LiveState } from "@earendil-works/pi-durable";
 import { openAgent, type Agent } from "../src/durable-agent.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 import type { ThreadTranscript } from "../src/thread-events.ts";
-import { RunnerWorkspace } from "../src/workspace.ts";
+import { VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
-import { FakeRunner } from "./workspace-fake-runner.ts";
+import { LocalGuestTransport } from "./local-guest.ts";
 
 const context = BACKGROUND_CONTEXT;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-pi-compaction-"));
 const files = path.join(root, "workspace");
 const directory = path.join(root, "thread");
 fs.mkdirSync(files, { recursive: true });
-const runner = new FakeRunner(files);
+const guest = new LocalGuestTransport(path.dirname(files));
 const leases = new LeaseStore(directory);
-const workspace = new RunnerWorkspace({ runner, leases, owner: "pi" });
+const workspace = new VmWorkspace({ guest, leases, owner: "pi", binding: guest.binding });
 
 // Pi's default policy keeps 20000 recent tokens verbatim and blocks to compact
 // above contextWindow - 16384. Two 25000-token messages (100000 characters,
@@ -53,7 +53,7 @@ function models() {
   catalog.setProvider(faux.provider);
   return { models: catalog, model: { provider: faux.getModel().provider, id: faux.getModel().id } };
 }
-const open = () => openAgent({ directory, runner: { binding: runner.binding, configHash: "fake" }, workspace, ...models() });
+const open = () => openAgent({ directory, binding: guest.binding, workspace, ...models() });
 const feed = (agent: Agent) => new PiThreadEvents({ agent, owner: () => leases.holder(), failure: () => null });
 async function turn(agent: Agent, content: string, requestId: string) {
   const submission = await agent.conversation.submit({ type: "input", content, requestId }, context);
@@ -170,7 +170,7 @@ try {
   }
 } finally {
   await agent.close();
-  runner.close();
+  guest.stop();
   leases.close();
   fs.rmSync(root, { recursive: true, force: true });
 }

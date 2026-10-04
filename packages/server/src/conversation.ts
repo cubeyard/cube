@@ -7,25 +7,29 @@ import { ConversationBusy, LiveDoc } from "@earendil-works/pi-durable";
 import { ClaudeAgent, ClaudeBusy, CLAUDE_PROVIDER, type ClaudeRuntime } from "./claude-agent.ts";
 import { ClaudeThreadEvents } from "./claude-thread-events.ts";
 import { openAgent, type Agent } from "./durable-agent.ts";
-import { IrohExecutionNodeClient } from "./iroh-node.ts";
+import { createLogger } from "./log.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
 import type { ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
-import { Registry, threadAgent } from "./registry.ts";
-import { RunnerWorkspace } from "./workspace.ts";
+import { Registry, threadAgent, type Thread } from "./registry.ts";
+import { provisioned, provisionWorkspace, releaseCheck, type ThreadMachines } from "./vm.ts";
+import { VmWorkspace } from "./vm-workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
 import type { ModelSelection } from "./models.ts";
 
 const context = BACKGROUND_CONTEXT;
+const log = createLogger("threads");
 /** The registry's first message is submitted once under this request id. */
 const INITIAL_REQUEST = "cube:initial";
 export class Conversations {
   private readonly registry: Registry;
   private readonly directory: string;
   private readonly models: Models;
+  private readonly machines: ThreadMachines;
   private readonly agents = new Map<string, Promise<Agent>>();
-  private readonly workspaces = new Map<string, { workspace: RunnerWorkspace; leases: LeaseStore }>();
+  private readonly workspaces = new Map<string, { workspace: VmWorkspace; leases: LeaseStore }>();
   private readonly failures = new Map<string, string>();
+  private readonly activations = new Map<string, Promise<void>>();
   private readonly commands = new Map<string, Promise<unknown>>();
   private readonly feeds = new WeakMap<Agent, PiThreadEvents>();
   private readonly claudes = new Map<string, Promise<ClaudeAgent>>();
@@ -33,48 +37,76 @@ export class Conversations {
   private readonly claude: ClaudeRuntime | null;
   private closing = false;
   /** `claude` is null when this host has no Claude Code to start. */
-  constructor(registry: Registry, directory: string, models: Models, claude: ClaudeRuntime | null = null) {
-    this.registry = registry; this.directory = directory; this.models = models; this.claude = claude;
+  constructor(options: { registry: Registry; directory: string; models: Models; machines: ThreadMachines; claude?: ClaudeRuntime | null }) {
+    this.registry = options.registry; this.directory = options.directory; this.models = options.models;
+    this.machines = options.machines; this.claude = options.claude ?? null;
   }
   /** Whether claude-code threads can run on this host. */
   get claudeAvailable(): boolean { return this.claude !== null; }
+  /** Activates every open thread (machines boot concurrently) and finishes
+   * releases a crash interrupted. Repeated by cubed's recovery loop; an
+   * active thread's machine is only checked, not restarted. */
   async boot(): Promise<void> {
+    const work: Promise<unknown>[] = [];
     for (const thread of this.registry.listThreads()) {
-      if (thread.archived) continue;
+      if (thread.archived || this.closing) continue;
       if (thread.workspaceState === "releasing" || (thread.workspaceState === "failed" && thread.workspaceError?.startsWith("workspace release failed:"))) {
-        await this.release(thread.id).catch(() => {});
+        work.push(this.command(thread.id, () => this.release(thread.id)).catch(() => {}));
       }
-      else await this.activate(thread.id);
+      else work.push(this.activate(thread.id));
     }
+    await Promise.all(work);
   }
   error(id: string): string | null { return this.failures.get(id) ?? null; }
-  async activate(id: string): Promise<void> {
-    try {
-      await this.ensureWorkspace(id);
-      if (this.isClaude(id)) await this.claudeAgent(id);
-      else await this.agent(id);
-      this.failures.delete(id);
-    } catch (error) { this.failures.set(id, String(error)); }
+  /** Whether the thread's machine is being started. */
+  starting(id: string): boolean { return this.activations.has(id); }
+  /** Boots the thread's machine, provisions it once and opens its agent.
+   * Concurrent calls share one activation. */
+  activate(id: string): Promise<void> {
+    const pending = this.activations.get(id);
+    if (pending) return pending;
+    const activation = (async () => {
+      try {
+        await this.ensureWorkspace(id);
+        if (this.isClaude(id)) await this.claudeAgent(id);
+        else await this.agent(id);
+        this.failures.delete(id);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (this.failures.get(id) !== message) log.warn("activation failed", { thread: id, error: message });
+        this.failures.set(id, message);
+      }
+    })().finally(() => this.activations.delete(id));
+    this.activations.set(id, activation);
+    return activation;
   }
-  private runner(id: string): IrohExecutionNodeClient {
-    const admission = this.registry.runner(id);
-    if (!admission) throw new Error("thread runner allocation is missing");
-    return new IrohExecutionNodeClient({ configPath: admission.configPath, configHash: admission.configHash, threadId: id });
-  }
+  /** Waits for a running activation; a thread is used only once its machine is up. */
+  private async settled(id: string): Promise<void> { await this.activations.get(id); }
   private isClaude(id: string): boolean {
     const thread = this.registry.getThread(id);
     return !!thread && threadAgent(thread) === "claude-code";
   }
+  private thread(id: string): Thread {
+    const thread = this.registry.getThread(id);
+    if (!thread || thread.archived) throw new Error("thread not found");
+    return thread;
+  }
+  /** The machine a thread's storage and keys are bound to. */
+  private binding(thread: Thread): string {
+    const runner = this.registry.runner(thread.id);
+    if (!runner) throw new Error("thread runner allocation is missing");
+    if (!thread.vm) throw new Error("thread has no machine");
+    return JSON.stringify({ node: runner.nodeId, environment: runner.environmentId, config: runner.configHash, vm: thread.vm.vmId });
+  }
   /** The thread's one Workspace and lease store; its owner is the agent the
    * thread was created with. */
-  workspace(id: string): RunnerWorkspace {
+  workspace(id: string): VmWorkspace {
     if (this.closing) throw new Error("host is stopping");
     const cached = this.workspaces.get(id);
     if (cached) return cached.workspace;
-    const runner = this.runner(id);
+    const thread = this.thread(id);
     const leases = new LeaseStore(path.join(this.directory, id));
-    const thread = this.registry.getThread(id);
-    const workspace = new RunnerWorkspace({ runner, leases, owner: thread ? threadAgent(thread) : "pi" });
+    const workspace = new VmWorkspace({ guest: this.machines.guest(thread), leases, owner: threadAgent(thread), binding: this.binding(thread) });
     this.workspaces.set(id, { workspace, leases });
     return workspace;
   }
@@ -82,13 +114,22 @@ export class Conversations {
     this.workspaces.get(id)?.leases.close();
     this.workspaces.delete(id);
   }
+  /** Boots (or re-attaches) the machine; the first time, checks out the
+   * project's pinned repositories in it. */
   private async ensureWorkspace(id: string): Promise<void> {
-    const thread = this.registry.getThread(id);
-    if (!thread || thread.archived) throw new Error("thread not found");
-    if (thread.workspaceState === "available") return;
+    const thread = this.thread(id);
     if (thread.workspaceState === "releasing") throw new Error("thread workspace is releasing");
+    if (thread.workspaceState === "available") { await this.machines.start(thread); return; }
     try {
-      await this.runner(id).allocateWorkspace(thread.allocation);
+      await this.machines.start(thread);
+      const owner = threadAgent(thread);
+      const workspace = this.workspace(id);
+      const last = thread.vm?.provisionAttempt ?? 0;
+      if (!(last > 0 && await provisioned(workspace, owner, last))) {
+        const attempt = last + 1;
+        this.registry.updateThreadVm(id, { provisionAttempt: attempt });
+        await provisionWorkspace(workspace, owner, thread.allocation, attempt);
+      }
       const primary = thread.allocation.repositories[0];
       this.registry.markWorkspaceAvailable(id, primary
         ? { remote: primary.url, ref: primary.base.startsWith("refs/heads/") ? primary.base : `refs/heads/${primary.base}`, oid: primary.baseOid }
@@ -101,14 +142,12 @@ export class Conversations {
   }
   async agent(id: string): Promise<Agent> {
     if (this.closing) throw new Error("host is stopping");
-    const thread = this.registry.getThread(id);
-    if (!thread || thread.archived) throw new Error("thread not found");
+    const thread = this.thread(id);
     if (threadAgent(thread) !== "pi") throw new Error("thread is not a pi thread");
     const cached = this.agents.get(id);
     if (cached) return cached;
     const loading = (async () => {
-      const runner = this.runner(id);
-      const agent = await openAgent({ directory: path.join(this.directory, id), runner, workspace: this.workspace(id), models: this.models, model: thread.model });
+      const agent = await openAgent({ directory: path.join(this.directory, id), binding: this.binding(thread), workspace: this.workspace(id), models: this.models, model: thread.model });
       try {
         // Pi deduplicates by request id: a reopen finds the first submission
         // instead of submitting it again, whatever happened since.
@@ -123,8 +162,7 @@ export class Conversations {
   }
   async claudeAgent(id: string): Promise<ClaudeAgent> {
     if (this.closing) throw new Error("host is stopping");
-    const thread = this.registry.getThread(id);
-    if (!thread || thread.archived) throw new Error("thread not found");
+    const thread = this.thread(id);
     if (threadAgent(thread) !== "claude-code") throw new Error("thread is not a claude code thread");
     if (!this.claude) throw new Error("claude code is not installed on this host — install it and log in with claude /login");
     const cached = this.claudes.get(id);
@@ -150,7 +188,7 @@ export class Conversations {
     finally { if (this.commands.get(id) === promise) this.commands.delete(id); }
   }
   submit(id: string, text: string, requestId: string): Promise<{ runId: string }> {
-    return this.command(id, () => this.accept(id, text, requestId));
+    return this.command(id, async () => { await this.settled(id); return this.accept(id, text, requestId); });
   }
   private async accept(id: string, text: string, requestId: string): Promise<{ runId: string }> {
     if (this.isClaude(id)) {
@@ -181,6 +219,7 @@ export class Conversations {
   }
   async model(id: string, selection?: ModelSelection): Promise<ModelSelection> {
     return this.command(id, async () => {
+    await this.settled(id);
     if (this.isClaude(id)) {
       const agent = await this.claudeAgent(id);
       if (selection) {
@@ -204,6 +243,7 @@ export class Conversations {
   /** The thread in the neutral event model; the same interface the SSE
    * stream serves and the browser reads. */
   async events(id: string): Promise<ThreadEvents> {
+    await this.settled(id);
     if (this.isClaude(id)) {
       const agent = await this.claudeAgent(id);
       let events = this.claudeFeeds.get(agent);
@@ -231,35 +271,45 @@ export class Conversations {
   async stream(id: string, response: ServerResponse): Promise<void> {
     await serveThreadEvents(await this.events(id), response);
   }
-  async archive(id: string): Promise<void> {
+  /** Closes the agent, checks whether the machine's work is clean and
+   * releases it: a clean machine is deleted, anything else is retained. */
+  async archive(id: string): Promise<{ retained: boolean; reason: string }> {
     return this.command(id, async () => {
+    await this.settled(id);
     const thread = this.registry.getThread(id);
     if (!thread) throw new Error("thread not found");
+    let decision: { clean: boolean; reason: string };
     if (thread.workspaceState === "failed") {
-      this.closeWorkspace(id);
-      this.registry.beginRelease(id);
-      await this.release(id);
-      return;
-    }
-    if (this.isClaude(id)) {
-      const agent = await this.claudeAgent(id);
-      if (agent.running) throw new Error("stop the current run before archiving");
-      await agent.close(); this.claudes.delete(id);
+      decision = { clean: false, reason: thread.workspaceError ?? "the thread machine failed" };
     } else {
-      const agent = await this.agent(id);
-      if ((await agent.harness.snapshot(LiveDoc, agent.conversation.id, context))?.run) throw new Error("stop the current run before archiving");
-      await agent.close(); this.agents.delete(id);
+      if (this.isClaude(id)) {
+        const agent = await this.claudeAgent(id);
+        if (agent.running) throw new Error("stop the current run before archiving");
+        await agent.close(); this.claudes.delete(id);
+      } else {
+        const agent = await this.agent(id);
+        if ((await agent.harness.snapshot(LiveDoc, agent.conversation.id, context))?.run) throw new Error("stop the current run before archiving");
+        await agent.close(); this.agents.delete(id);
+      }
+      try { decision = await releaseCheck(this.workspace(id), threadAgent(thread), thread.allocation); }
+      catch (error) { decision = { clean: false, reason: `the thread machine could not be checked: ${error instanceof Error ? error.message : String(error)}` }; }
     }
     this.closeWorkspace(id);
+    if (thread.vm) this.registry.updateThreadVm(id, { retain: !decision.clean, retainReason: decision.reason });
     this.registry.beginRelease(id);
-    await this.release(id);
+    const released = await this.release(id);
+    return { retained: released.retained, reason: decision.reason };
     });
   }
-  private async release(id: string): Promise<void> {
+  private async release(id: string): Promise<{ retained: boolean }> {
     try {
-      await this.runner(id).releaseWorkspace();
+      const thread = this.registry.getThread(id);
+      if (!thread) throw new Error("thread not found");
+      // A release a crash interrupted keeps the evidence unless the check was clean.
+      const released = await this.machines.release(thread, thread.vm?.retain ?? true);
       this.registry.finishRelease(id);
       this.failures.delete(id);
+      return released;
     } catch (error) {
       const message = `workspace release failed: ${error instanceof Error ? error.message : String(error)}`;
       this.registry.markWorkspaceFailed(id, message);
@@ -268,14 +318,19 @@ export class Conversations {
     }
   }
   async stop(id: string): Promise<void> {
+    await this.settled(id);
     if (this.isClaude(id)) { await (await this.claudeAgent(id)).stop(); return; }
     const agent = await this.agent(id);
     await agent.conversation.abort(context);
   }
+  /** cubed stops; thread machines keep running and the next cubed attaches
+   * to them again. */
   async close(): Promise<void> {
     this.closing = true;
+    // A machine still booting is left to boot; the next cubed attaches to it.
+    await this.machines.close();
     await Promise.allSettled(this.commands.values());
-    await Promise.all([...this.agents.values()].map(async promise => (await promise).close()));
+    await Promise.all([...this.agents.values()].map(async promise => (await promise.catch(() => null))?.close()));
     await Promise.all([...this.claudes.values()].map(async promise => (await promise.catch(() => null))?.close()));
     this.agents.clear(); this.claudes.clear();
     for (const id of [...this.workspaces.keys()]) this.closeWorkspace(id);

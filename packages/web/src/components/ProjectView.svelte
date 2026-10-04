@@ -363,7 +363,7 @@
 
     </section>
 
-    <p class="config-note">ready projects share one global trusted-runner pool. repository URLs and checked commit IDs are pinned per allocation. commands run with the selected runner account’s permissions, without sandboxing.</p>
+    <p class="config-note">ready projects share one global runner pool. repository URLs and checked commit IDs are pinned per thread. each thread works in its own virtual machine on a runner; its only network is cube’s gateway, which allows http and https and decides every request.</p>
 
     {#if project}<RunnerPanel onChanged={() => void refresh()} />{/if}
 

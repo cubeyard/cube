@@ -1,7 +1,8 @@
 /** Offline codemode checks: limits, nested keys, uncertain outcomes, and
  * replay. Limit checks call the tool directly with stand-in nested tools; the
- * agent checks run pi-durable with cube's real workspace tools over a fake
- * runner. Real runner acceptance stays in smoke-node-adapter.ts. */
+ * agent checks run pi-durable with cube's real workspace tools over a local
+ * guest (the real guest helper under a temporary root). Real VMs run in
+ * scripts/test-vm-e2e.ts. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -12,9 +13,10 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, Type, t
 import { defineTool, LiveDoc, type LiveState, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { CODEMODE_LIMITS, createCodemodeTool, type CodemodeDetails, type CodemodeLimits, type NestedTool } from "../src/codemode.ts";
 import { openAgent, type Agent } from "../src/durable-agent.ts";
-import { RunnerWorkspace, WorkspaceError } from "../src/workspace.ts";
+import { WorkspaceError } from "../src/workspace.ts";
+import { VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
-import { FakeRunner } from "./workspace-fake-runner.ts";
+import { LocalGuestTransport } from "./local-guest.ts";
 
 const context = BACKGROUND_CONTEXT;
 const text = (message: { content?: ReadonlyArray<{ type: string; text?: string }> }) => (message.content ?? []).map(part => part.text ?? "").join("");
@@ -55,7 +57,7 @@ async function run(code: string, tools: NestedTool[], limits: Partial<CodemodeLi
 }
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-codemode-"));
-const runners: FakeRunner[] = [];
+const guests: LocalGuestTransport[] = [];
 const stores: LeaseStore[] = [];
 try {
   {
@@ -192,10 +194,10 @@ try {
   const thread = (name: string) => {
     const files = path.join(root, name, "workspace");
     fs.mkdirSync(files, { recursive: true });
-    const runner = new FakeRunner(files);
+    const guest = new LocalGuestTransport(path.dirname(files));
     const leases = new LeaseStore(path.join(root, name, "thread"));
-    runners.push(runner); stores.push(leases);
-    return { files, directory: path.join(root, name, "thread"), runner, workspace: new RunnerWorkspace({ runner, leases, owner: "pi" }) };
+    guests.push(guest); stores.push(leases);
+    return { files, directory: path.join(root, name, "thread"), guest, workspace: new VmWorkspace({ guest, leases, owner: "pi", binding: guest.binding }) };
   };
   const model = (steps: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0]) => {
     const faux = fauxProvider({ tokensPerSecond: 10000 });
@@ -216,8 +218,8 @@ try {
   };
   const live = async (agent: Agent) => (await agent.harness.snapshot(LiveDoc, agent.conversation.id, context)) as LiveState | undefined;
   {
-    const { files, directory, runner, workspace } = thread("agent");
-    const agent = await openAgent({ directory, runner: { binding: runner.binding, configHash: "fake" }, workspace, ...model([
+    const { files, directory, guest, workspace } = thread("agent");
+    const agent = await openAgent({ directory, binding: guest.binding, workspace, ...model([
       codemode(`
         await tools.write({ path: "notes/a.txt", content: "one\\n" });
         await tools.edit({ path: "notes/a.txt", edits: [{ oldText: "one", newText: "two" }] });
@@ -250,9 +252,9 @@ try {
     console.log("ok: codemode drives write/edit/bash/read through the Workspace with stable nested keys");
   }
   {
-    // Stop reaches a nested command: it is killed on the runner.
-    const { files, directory, runner, workspace } = thread("stop");
-    const agent = await openAgent({ directory, runner: { binding: runner.binding, configHash: "fake" }, workspace, ...model([
+    // Stop reaches a nested command: it is killed on the guest.
+    const { files, directory, guest, workspace } = thread("stop");
+    const agent = await openAgent({ directory, binding: guest.binding, workspace, ...model([
       codemode(`await tools.bash({ command: "sleep 1; touch late" })`),
       fauxAssistantMessage("unreachable"),
     ]) });
@@ -264,14 +266,14 @@ try {
       await delay(1300);
       assert.equal(fs.existsSync(path.join(files, "late")), false, "the nested command was killed");
     } finally { await agent.close(); }
-    console.log("ok: stop cancels a nested runner command");
+    console.log("ok: stop cancels a nested guest command");
   }
   {
     // A crash or shutdown mid-script is never rerun: the call is reported as
     // interrupted with the nested calls that had started, and the running
     // command is not started a second time.
-    const { files, directory, runner, workspace } = thread("replay");
-    let agent = await openAgent({ directory, runner: { binding: runner.binding, configHash: "fake" }, workspace, ...model([
+    const { files, directory, guest, workspace } = thread("replay");
+    let agent = await openAgent({ directory, binding: guest.binding, workspace, ...model([
       codemode(`await tools.bash({ command: "printf x >> count; sleep 0.5; printf z >> count" }); await tools.bash({ command: "printf y >> count" }); return "finished"`),
       fauxAssistantMessage("first"),
     ]) });
@@ -280,7 +282,7 @@ try {
     await until(async () => fs.existsSync(path.join(files, "count")), "first nested command");
     await agent.close();
     await delay(800);
-    agent = await openAgent({ directory, runner: { binding: runner.binding, configHash: "fake" }, workspace, ...model([fauxAssistantMessage("recovered")]) });
+    agent = await openAgent({ directory, binding: guest.binding, workspace, ...model([fauxAssistantMessage("recovered")]) });
     try {
       const settled = await (await agent.harness.submission(submission.id, context))!.wait(context);
       assert.equal(settled.status, "done");
@@ -295,7 +297,7 @@ try {
     console.log("ok: shutdown cancels nested commands; an interrupted codemode call is reported as possibly partially run, never replayed");
   }
 } finally {
-  for (const runner of runners) runner.close();
+  for (const guest of guests) guest.stop();
   for (const store of stores) store.close();
   fs.rmSync(root, { recursive: true, force: true });
 }

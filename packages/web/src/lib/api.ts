@@ -133,7 +133,7 @@ export const checkRunner = (id: string) =>
 export const retireRunner = (id: string, confirm: string, reason: string) =>
   request<{ runner: RunnerStatus }>(`/api/runners/${encodeURIComponent(id)}/retire`, "POST", { confirm, reason }).then((r) => r.runner);
 
-/** New thread, allocated from a ready project's enrolled trusted runners.
+/** New thread, allocated from a ready project's enrolled runners.
  * `requestId` names the user action: a resend after a dropped connection
  * or a double submit with the same id gets the thread the first attempt
  * created, not a second one. Generate it once per action, not per call. */

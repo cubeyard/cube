@@ -1,5 +1,5 @@
 /** Pi's ExecutionEnv over the thread Workspace, for pi-durable's file tools.
- * The runner owns every file semantic; this only maps paths and errors.
+ * The guest helper owns every file semantic; this only maps paths and errors.
  *
  * One environment serves one tool call. Every write carries a key derived from
  * the call's task id, so a replayed call never writes twice, and a write after
@@ -37,7 +37,7 @@ export class WorkspaceEnv implements ExecutionEnv {
     return ok(resolved);
   }
   async joinPath(parts: string[]): Promise<Result<string, FileError>> { return ok(path.posix.join(...parts)); }
-  async canonicalPath(file: string): Promise<Result<string, FileError>> { return err(new FileError("not_supported", "canonical paths are resolved by the runner", file)); }
+  async canonicalPath(file: string): Promise<Result<string, FileError>> { return err(new FileError("not_supported", "canonical paths are resolved in the thread machine", file)); }
 
   async readBinaryFile(file: string, context: Context): Promise<Result<Uint8Array, FileError>> {
     return this.attempt(file, context, async relative => {

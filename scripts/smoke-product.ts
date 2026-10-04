@@ -4,15 +4,29 @@ import path from "node:path";
 import { execFileSync, fork, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 
-export async function smokeProduct(root: string, config: string) {
+/** The product API end to end over local guests (the real guest helper under
+ * temporary roots): creation, SIGKILL/startup activation, streaming, prompts,
+ * stop, models, archive and a claude · max thread through a fake `claude`.
+ * Run by scripts/smoke-local.ts; real VMs run in scripts/test-vm-e2e.ts. */
+export async function smokeProduct(root: string) {
   const state = path.join(root, "product");
+  const machines = path.join(root, "product-machines");
   fs.mkdirSync(state);
+  const repository = path.join(root, "product-repository");
+  fs.mkdirSync(repository);
+  const git = (cwd: string, args: string[]) => execFileSync("git", ["-c", "user.name=Cube Test", "-c", "user.email=cube@example.invalid", "-c", "commit.gpgsign=false", "-C", cwd, ...args], { encoding: "utf8" });
+  git(repository, ["init", "-q", "--initial-branch=develop"]);
+  fs.writeFileSync(path.join(repository, "remote-base"), "fresh base\n");
+  git(repository, ["add", "remote-base"]);
+  git(repository, ["commit", "-qm", "remote base"]);
+  const remote = path.join(root, "product-remote.git");
+  git(root, ["clone", "-q", "--bare", repository, remote]);
   const children = new Set<ChildProcess>();
   async function stop(child: ChildProcess) {
     const closed = once(child, "close"); child.kill("SIGKILL"); await closed; children.delete(child);
   }
   function start(mode: string) {
-    const child = fork(path.resolve("packages/server/test/product-fixture.ts"), [state, config, mode], {
+    const child = fork(path.resolve("packages/server/test/product-fixture.ts"), [state, machines, mode], {
       stdio: ["ignore", "pipe", "pipe", "ipc"], env: { PATH: process.env.PATH, HOME: state },
     });
     children.add(child);
@@ -33,7 +47,6 @@ export async function smokeProduct(root: string, config: string) {
   try {
     const first = start("hold");
     const ready = await first.wait("ready");
-    const remote = String(execFileSync("git", ["-C", path.join(root, "workspace"), "remote", "get-url", "origin"], { encoding: "utf8" })).trim();
     const projectResponse = await post(`${ready.url}/api/projects`, { name: "product test", repositories: [{ url: remote, base: "develop" }] });
     assert.equal(projectResponse.status, 200, await projectResponse.clone().text());
     const projectId = (await projectResponse.json()).project.id;
@@ -41,8 +54,15 @@ export async function smokeProduct(root: string, config: string) {
     const response = await post(`${ready.url}/api/threads`, input);
     assert.equal(response.status, 200, await response.clone().text());
     const { id } = await response.json();
-    const threadWorkspace = path.join(root, "state", "workspaces", id, "workspace");
-    const createdThread = (await (await fetch(`${ready.url}/api/threads`)).json()).threads.find((thread: { id: string }) => thread.id === id);
+    const threadWorkspace = path.join(machines, id, "workspace");
+    // The thread's machine starts in the background.
+    let createdThread;
+    for (const deadline = Date.now() + 20000; ;) {
+      createdThread = (await (await fetch(`${ready.url}/api/threads`)).json()).threads.find((thread: { id: string }) => thread.id === id);
+      if (createdThread.state !== "starting") break;
+      assert(Date.now() < deadline, "the thread machine did not start");
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
     assert.ok(createdThread.workspaceBase, createdThread.workspaceError ?? "workspace base was not recorded");
     assert.equal(createdThread.workspaceBase.ref, "refs/heads/develop");
     assert.match(createdThread.workspaceBase.oid, /^[0-9a-f]{40}$/);
@@ -78,7 +98,7 @@ export async function smokeProduct(root: string, config: string) {
       assert(Date.now() < deadline, JSON.stringify(history));
       await new Promise(resolve => setTimeout(resolve, 25));
     } while (history.status.state !== "completed");
-    assert.match(JSON.stringify(history), /product recovered runner result: 93/);
+    assert.match(JSON.stringify(history), /product recovered guest result: 93/);
     assert.match(frames, /"final":false/);
     assert.match(frames, /"type":"tool-result"/);
     assert.match(frames, /"type":"tool-call"/);
@@ -87,7 +107,7 @@ export async function smokeProduct(root: string, config: string) {
     controller.abort(); await consume;
     const replay = await fetch(`${base}/stream`);
     const reader = replay.body!.getReader();
-    assert.match(new TextDecoder().decode((await reader.read()).value), /product recovered runner result: 93/);
+    assert.match(new TextDecoder().decode((await reader.read()).value), /product recovered guest result: 93/);
     await reader.cancel();
     assert.equal(fs.readFileSync(path.join(threadWorkspace, "product-count"), "utf8"), "once");
     await stop(second.child);
@@ -145,7 +165,14 @@ export async function smokeProduct(root: string, config: string) {
     assert.equal(next.status, 200, await next.clone().text());
     const nextId = (await next.json()).id;
     assert.notEqual(nextId, id);
-    assert.notEqual(path.join(root, "state", "workspaces", nextId, "workspace"), threadWorkspace);
+    assert.notEqual(path.join(machines, nextId, "workspace"), threadWorkspace);
+    // Its machine and conversation start in the background; let them before the kill.
+    for (const deadline = Date.now() + 20000; ;) {
+      const row = (await (await fetch(`${missing.url}/api/threads`)).json()).threads.find((thread: { id: string }) => thread.id === nextId);
+      if (row.state !== "starting") { assert.equal(row.state, "ready", row.error); break; }
+      assert(Date.now() < deadline, "the next thread did not start");
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
     await stop(fifth.child);
 
     // A claude · max thread on the same runner, with a fake `claude` that
@@ -171,7 +198,7 @@ export async function smokeProduct(root: string, config: string) {
     assert.equal(created.status, 200, await created.clone().text());
     const claudeId = (await created.json()).id;
     const claudeBase = `${host.url}/api/threads/${claudeId}`;
-    const claudeWorkspace = path.join(root, "state", "workspaces", claudeId, "workspace");
+    const claudeWorkspace = path.join(machines, claudeId, "workspace");
     let claudeHistory = await settled(claudeId);
     assert.equal(claudeHistory.status.state, "completed", JSON.stringify(claudeHistory));
     assert.equal(claudeHistory.agent, "claude-code");
@@ -207,7 +234,7 @@ export async function smokeProduct(root: string, config: string) {
     assert.match(JSON.stringify(claudeHistory.events.at(-1)), /done with opus/);
     assert.equal((await post(`${again}/prompt`, { text: "id toolu_once run printf again >> claude-count", requestId: "claude-3" })).status, 200);
     assert.equal((await waitRun("claude-3")).status.state, "completed");
-    assert.equal(fs.readFileSync(path.join(claudeWorkspace, "claude-count"), "utf8"), "onceagain", "a tool_use_id runs once on the runner");
+    assert.equal(fs.readFileSync(path.join(claudeWorkspace, "claude-count"), "utf8"), "onceagain", "a tool_use_id runs once in the guest");
     assert.equal((await post(`${again}/prompt`, { text: "slow sleep 5; touch claude-late", requestId: "claude-4" })).status, 200);
     const slowDeadline = Date.now() + 10000;
     while (!JSON.stringify(await (await fetch(`${again}/history`)).json()).includes("claude-late")) {
@@ -219,9 +246,9 @@ export async function smokeProduct(root: string, config: string) {
     assert.equal((await waitRun("claude-4")).status.state, "stopped");
     assert.equal((await fetch(again, { method: "DELETE" })).status, 200);
     await new Promise(resolve => setTimeout(resolve, 5500));
-    assert.ok(!fs.existsSync(path.join(claudeWorkspace, "claude-late")), "stop cancelled the runner command");
-    console.log("ok: product API creation dedup/conflict, SIGKILL/startup activation, actual runner once, streaming snapshots, SSE reconnect, third reopen");
+    assert.ok(!fs.existsSync(path.join(claudeWorkspace, "claude-late")), "stop cancelled the guest command");
+    console.log("ok: product API creation dedup/conflict, SIGKILL/startup activation, guest effect once, streaming snapshots, SSE reconnect, third reopen");
     console.log("ok: concurrent followup deduplication, stop, model recovery, archive release to the global pool, cross-project reuse, dirty retention and distinct next workspace");
-    console.log("ok: claude · max thread on the actual runner through the mod's tools: lease owner, transcript, model switch, SIGKILL reopen with resume, keyed tool once, stop with runner cancel");
+    console.log("ok: claude · max thread through the mod's tools: lease owner, transcript, model switch, SIGKILL reopen with resume, keyed tool once, stop with guest cancel");
   } finally { await Promise.all([...children].map(stop)); }
 }

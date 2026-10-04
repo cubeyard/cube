@@ -13,7 +13,7 @@
  * tools are offered. Durability is weaker than Pi's: Claude Code keeps
  * its own session (resumed with --resume) but has no task checkpoints, so a
  * turn cut off by a cubed restart is not continued. Workspace keys still
- * keep the runner from executing any tool call twice.
+ * keep the thread machine from executing any tool call twice.
  *
  * What cubed keeps is the thread record only: prompts by request id, the
  * messages Claude Code printed, and its session id. */
@@ -89,7 +89,7 @@ export class ClaudeAgent {
   private child: { process: ChildProcessWithoutNullStreams; exited: Promise<void>; stderr: string[] } | undefined;
   private interrupt: { timer: NodeJS.Timeout; kill?: NodeJS.Timeout } | undefined;
   /** Bash calls Claude Code started whose results have not come back, by
-   * tool_use_id: the mod runs each as `claude:<id>:bash` on the runner. */
+   * tool_use_id: the mod runs each as `claude:<id>:bash` in the thread VM. */
   private readonly commands = new Set<string>();
   private idle: NodeJS.Timeout | undefined;
   private readonly listeners = new Set<() => void>();
@@ -124,7 +124,7 @@ export class ClaudeAgent {
         CREATE TABLE IF NOT EXISTS message(seq INTEGER PRIMARY KEY AUTOINCREMENT, submission INTEGER NOT NULL REFERENCES submission(seq), data TEXT NOT NULL);`);
       db.prepare("INSERT OR IGNORE INTO meta VALUES ('model', ?)").run(options.model);
       // A turn that was running when cubed stopped is over: Claude Code has
-      // no checkpoint to continue it from, so its open runner commands are
+      // no checkpoint to continue it from, so its open guest commands are
       // cancelled too rather than left to finish unseen.
       const interrupted = new Set((db.prepare("SELECT seq FROM submission WHERE state='running'").all() as Array<{ seq: number }>).map(row => row.seq));
       db.prepare("UPDATE submission SET state='failed', error=? WHERE state='running'").run(INTERRUPTED);
@@ -176,8 +176,8 @@ export class ClaudeAgent {
     if (!this.running || !child || this.interrupt) return;
     this.write(child.process, { type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } });
     // Claude Code answers an interrupt by rejecting the running tool use
-    // without aborting the mod's hook, so the runner command would run on.
-    // cubed cancels it itself; the runner admits one command at a time.
+    // without aborting the mod's hook, so the guest command would run on.
+    // cubed cancels it itself.
     void this.cancelCommands();
     // A child that ignores the interrupt is killed (and cancelled again).
     const interrupt: NonNullable<ClaudeAgent["interrupt"]> = { timer: setTimeout(() => {
@@ -205,7 +205,7 @@ export class ClaudeAgent {
     if (this.closing) return this.closed;
     this.closing = true;
     clearTimeout(this.idle);
-    // Claude Code does not continue a turn cut off here: its runner
+    // Claude Code does not continue a turn cut off here: its guest
     // commands are cancelled before the lease goes.
     await this.cancelCommands();
     await this.endChild();
@@ -329,7 +329,7 @@ export class ClaudeAgent {
     }
   }
 
-  /** Cancel the runner commands of Bash calls still open. A key the runner
+  /** Cancel the guest commands of Bash calls still open. A key the guest
    * never saw, or one already finished, is no harm. */
   private async cancelCommands(): Promise<void> {
     const ids = [...this.commands];

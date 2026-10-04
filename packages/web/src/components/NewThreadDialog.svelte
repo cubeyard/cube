@@ -99,7 +99,7 @@
         <p>a ready project is required. <a href="#/projects" onclick={() => dialog.close()}>configure a project</a></p>
       {:else if !ready && projects.find((project) => project.id === projectId)?.runnerCapacity.states.failed}
         <p class="error">global runner pool has a failed allocation — {projects.find((project) => project.id === projectId)?.runnerCapacity.errors[0] ?? "inspect the runner logs"}. <button type="button" class="key" onclick={load}>retry status</button></p>
-      {:else if !ready}<p>all trusted runners are in use; archive an idle thread or register another runner, then <button type="button" class="key" onclick={load}>refresh runners</button></p>
+      {:else if !ready}<p>all runners are in use; archive an idle thread or register another runner, then <button type="button" class="key" onclick={load}>refresh runners</button></p>
       {:else if !catalog?.models.length}<p>no models available — <a href="#/models" onclick={() => dialog?.close()}>connect a provider</a>, then <button type="button" class="key" onclick={load}>retry loading</button></p>
       {:else if !model}<p>choose an available model below.</p>
       {:else if isClaude(model)}<p>{CLAUDE_DURABILITY}</p>{/if}
