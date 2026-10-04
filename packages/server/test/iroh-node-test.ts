@@ -66,6 +66,15 @@ const accept = (async () => {
         : mode === "wrong-environment" ? { ...nodeBinding, environmentId: 2 } : nodeBinding;
       const capabilities = ["node.hello", "node.status", "workspace.allocate", "workspace.allocate.v2", "workspace.release", "exec.start", "exec.cancel",
         "environment.inspect", "operation.get", "fs.read", "fs.write", "fs.stat"];
+      // "old-runner" is how a real protocol-1 runner (cube-runner 0.2.x)
+      // answers a protocol-2 hello.
+      if (mode === "old-runner") {
+        await stream.send.writeAll(frame({ type: "Error", code: "INCOMPATIBLE_PROTOCOL",
+          message: "protocol version 1 required; upgrade cubed or cube-runner", completionUnknown: false }));
+        await stream.send.finish();
+        await connection.closed();
+        return;
+      }
       // "incompatible" is a protocol-1 runner (cube-runner 0.2.x and older).
       await stream.send.writeAll(frame({ type: "Hello", nodeId: binding.nodeId,
         protocolVersion: mode === "legacy" ? undefined : mode === "incompatible" ? 1 : 2,
@@ -198,6 +207,9 @@ try {
   scenario = "incompatible";
   await assert.rejects(client.check(1), error => errorCode("INCOMPATIBLE_PROTOCOL")(error)
     && (error as Error).message.includes("upgrade the older component"));
+  scenario = "old-runner";
+  await assert.rejects(client.check(1), error => errorCode("INCOMPATIBLE_PROTOCOL")(error)
+    && (error as Error).message.includes("share protocol version 2") && !(error as Error).message.includes("version 1 required"));
   scenario = "legacy";
   await assert.rejects(client.check(1), errorCode("INCOMPATIBLE_PROTOCOL"));
   scenario = "missing";

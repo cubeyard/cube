@@ -119,7 +119,9 @@ export class IrohNodeError extends ExecutionNodeError {
     super(code);
     this.operationId = operationId;
     this.remoteCode = remoteCode;
-    this.message = detail && detail !== "runner request rejected" && detail !== "runner state could not be confirmed"
+    // An older runner's own incompatibility text names its protocol, not the
+    // fix; cubed states the one it requires.
+    this.message = detail && remoteCode !== "INCOMPATIBLE_PROTOCOL" && detail !== "runner request rejected" && detail !== "runner state could not be confirmed"
       ? detail
       : `${code}${remoteCode === "INCOMPATIBLE_PROTOCOL" ? ": cubed and cube-runner do not share protocol version 2; upgrade the older component" : ""}${operationId ? `: operation ${operationId}` : ""}${this.completionUnknown ? "; inspect the saved operation before executing again; remote work was not cancelled" : ""}`;
   }
