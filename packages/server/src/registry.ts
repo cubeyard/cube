@@ -1,12 +1,15 @@
 /** Product metadata only. Pi's databases own conversations and execution. */
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type { ModelSelection } from "./models.ts";
-import type { NodeBinding } from "./iroh-node.ts";
-import type { TrustedRunnerHealth } from "./iroh-node.ts";
+import type { NodeBinding, TrustedRunnerHealth } from "./iroh-node.ts";
 import type { ThreadAgent } from "./thread-events.ts";
+import { newPlaceholder } from "./egress-policy.ts";
+
+/** The registry schema; older registries are refused (fresh CUBED_STATE). */
+export const REGISTRY_SCHEMA = 102;
 
 export const RUNNER_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -50,6 +53,19 @@ export interface Thread {
   allocation: WorkspaceAllocation;
   workspaceState: "allocating" | "available" | "releasing" | "failed"; workspaceError: string | null;
   workspaceBase?: { remote: string; ref: string; oid: string } | null;
+  /** The thread's machine, fixed at creation. */
+  vm?: ThreadVm;
+}
+export interface ThreadVm {
+  /** 16 hex characters: the runner's VM id and cloud-init instance-id. */
+  vmId: string;
+  /** Secret placeholders by name; not secret. */
+  placeholders: Record<string, string>;
+  /** The last provisioning try (its key is `cube:provision:<n>`). */
+  provisionAttempt?: number;
+  /** Decided at archive: keep the machine's disk. */
+  retain?: boolean;
+  retainReason?: string;
 }
 
 /** The thread's agent: claude-code threads are created with a claude model. */
@@ -84,8 +100,8 @@ export class Registry {
       this.db.exec("PRAGMA busy_timeout=5000");
       const tables = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all();
       const version = this.db.prepare("PRAGMA user_version").get()!.user_version;
-      if (tables.length && version !== 100 && version !== 101) throw new Error("legacy or unsupported registry: choose a fresh CUBED_STATE directory");
-      if (version === 100) this.migrate100();
+      // Protocol-2 runners, their workspaces and threads are not migrated.
+      if (tables.length && version !== REGISTRY_SCHEMA) throw new Error("legacy or unsupported registry: choose a fresh CUBED_STATE directory");
       this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
         CREATE TABLE IF NOT EXISTS project(id TEXT PRIMARY KEY, data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS runner(id TEXT PRIMARY KEY, project_id TEXT REFERENCES project(id),
@@ -94,69 +110,19 @@ export class Registry {
           runner_id TEXT NOT NULL REFERENCES runner(id), data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS creation(project_id TEXT NOT NULL, request_id TEXT NOT NULL,
           thread_id TEXT NOT NULL REFERENCES thread(id), payload TEXT NOT NULL, PRIMARY KEY(project_id, request_id));
-        CREATE TABLE IF NOT EXISTS global_pool(schema_version INTEGER PRIMARY KEY CHECK(schema_version=1));
-        PRAGMA user_version=101;`);
-      this.migrateGlobalPool();
-      this.db.exec(`CREATE TABLE IF NOT EXISTS runner_operator(runner_id TEXT PRIMARY KEY REFERENCES runner(id), enrolled_at INTEGER,
+        CREATE TABLE IF NOT EXISTS runner_operator(runner_id TEXT PRIMARY KEY REFERENCES runner(id), enrolled_at INTEGER,
           last_attempt_at INTEGER, last_contact_at INTEGER, unreachable_since INTEGER, last_error TEXT, health TEXT,
           retiring_at INTEGER, retired_at INTEGER, retirement_reason TEXT);
         CREATE TABLE IF NOT EXISTS runner_audit(id INTEGER PRIMARY KEY, runner_id TEXT NOT NULL REFERENCES runner(id),
           action TEXT NOT NULL, at INTEGER NOT NULL, evidence TEXT NOT NULL);
-        INSERT OR IGNORE INTO runner_operator(runner_id) SELECT id FROM runner;
-        UPDATE runner SET state='available',error=NULL WHERE state='failed' AND thread_id IS NULL
+        PRAGMA user_version=${REGISTRY_SCHEMA};`);
+      this.db.exec(`UPDATE runner SET state='available',error=NULL WHERE state='failed' AND thread_id IS NULL
           AND id IN (SELECT runner_id FROM runner_operator WHERE retiring_at IS NOT NULL AND retired_at IS NULL);
         UPDATE runner_operator SET retiring_at=NULL WHERE retiring_at IS NOT NULL AND retired_at IS NULL;`);
     } catch (error) { this.db.close(); throw error; }
   }
   private parse<T>(row: unknown): T | null {
     return row ? JSON.parse((row as { data: string }).data) as T : null;
-  }
-  private migrate100(): void {
-    this.db.exec(`PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;
-      ALTER TABLE runner RENAME TO runner_v100;
-      ALTER TABLE thread RENAME TO thread_v100;
-      ALTER TABLE creation RENAME TO creation_v100;
-      CREATE TABLE runner(id TEXT PRIMARY KEY, project_id TEXT REFERENCES project(id),
-        node_id TEXT NOT NULL UNIQUE, data TEXT NOT NULL, state TEXT NOT NULL, thread_id TEXT, error TEXT);
-      CREATE TABLE thread(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES project(id),
-        runner_id TEXT NOT NULL REFERENCES runner(id), data TEXT NOT NULL);
-      CREATE TABLE creation(project_id TEXT NOT NULL, request_id TEXT NOT NULL,
-        thread_id TEXT NOT NULL REFERENCES thread(id), payload TEXT NOT NULL, PRIMARY KEY(project_id, request_id));
-      INSERT INTO runner SELECT r.thread_id, r.project_id, r.node_id, r.data,
-        CASE WHEN t.id IS NULL OR json_extract(t.data, '$.archived') = 1 THEN 'available' ELSE 'busy' END,
-        CASE WHEN t.id IS NOT NULL AND json_extract(t.data, '$.archived') = 0 THEN t.id ELSE NULL END, NULL
-        FROM runner_v100 r LEFT JOIN thread_v100 t ON t.id=r.thread_id;
-      INSERT INTO thread SELECT t.id, t.project_id, t.id,
-        json_set(t.data, '$.runnerId', t.id, '$.workspaceState', 'available', '$.workspaceError', NULL)
-        FROM thread_v100 t;
-      INSERT INTO creation SELECT * FROM creation_v100;
-      DROP TABLE creation_v100; DROP TABLE thread_v100; DROP TABLE runner_v100;
-      PRAGMA user_version=101; COMMIT; PRAGMA foreign_keys=ON;`);
-  }
-  private migrateGlobalPool(): void {
-    if (this.db.prepare("SELECT 1 FROM global_pool WHERE schema_version=1").get()) return;
-    this.db.exec(`PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;
-      CREATE TABLE runner_global(id TEXT PRIMARY KEY, project_id TEXT REFERENCES project(id),
-        node_id TEXT NOT NULL UNIQUE, data TEXT NOT NULL, state TEXT NOT NULL, thread_id TEXT, error TEXT);
-      INSERT INTO runner_global SELECT * FROM runner;
-      DROP TABLE runner;
-      ALTER TABLE runner_global RENAME TO runner;`);
-    try {
-      this.db.prepare("UPDATE runner SET data=json_set(data, '$.legacyProjectId', project_id) WHERE project_id IS NOT NULL").run();
-      const rows = this.db.prepare("SELECT id,project_id AS projectId,data FROM thread").all() as Array<{ id: string; projectId: string; data: string }>;
-      const update = this.db.prepare("UPDATE thread SET data=? WHERE id=?");
-      for (const row of rows) {
-        const thread = JSON.parse(row.data) as Omit<Thread, "allocation">;
-        const project = this.parse<Project>(this.db.prepare("SELECT data FROM project WHERE id=?").get(row.projectId));
-        const repositories = project ? allocationRepositories(project, false) : [];
-        update.run(JSON.stringify({ ...thread, allocation: { projectId: row.projectId, projectRevision: project?.revision ?? 0, repositories } }), row.id);
-      }
-      this.db.prepare("INSERT INTO global_pool VALUES (1)").run();
-      this.db.exec("COMMIT; PRAGMA foreign_keys=ON");
-    } catch (error) {
-      this.db.exec("ROLLBACK; PRAGMA foreign_keys=ON");
-      throw error;
-    }
   }
   getProject(id: string): Project | null { return this.parse(this.db.prepare("SELECT data FROM project WHERE id=?").get(id)); }
   listProjects(): Project[] { return this.db.prepare("SELECT data FROM project").all().map(row => this.parse<Project>(row)!); }
@@ -272,7 +238,7 @@ export class Registry {
         throw new Error("runner global allocation changed; check it again");
       }
       if (status.lastAttemptAt !== expectedAttemptAt) throw new Error("runner status changed; check it again");
-      const idleReachable = status.contactStatus === "reachable" && status.health && !status.health.active && status.health.activeWorkspaces === 0;
+      const idleReachable = status.contactStatus === "reachable" && status.health && status.health.activeVms === 0;
       if (!idleReachable && status.contactStatus !== "stale") throw new Error("runner must be reachable and idle, or stale, before retirement");
       const retired = this.db.prepare(`UPDATE runner SET state='retired',error=NULL
         WHERE id=? AND state='failed' AND thread_id IS NULL
@@ -294,6 +260,22 @@ export class Registry {
   listThreads(): Thread[] { return this.db.prepare("SELECT data FROM thread ORDER BY rowid DESC").all().map(row => this.parse<Thread>(row)!); }
   saveThread(thread: Thread): void {
     this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify(thread), thread.id);
+  }
+  /** The thread a VM belongs to. */
+  threadByVm(vmId: string): Thread | null {
+    return this.parse(this.db.prepare("SELECT data FROM thread WHERE json_extract(data, '$.vm.vmId')=?").get(vmId));
+  }
+  /** Changes the thread's machine record (provisioning tries, retention). */
+  updateThreadVm(threadId: string, patch: Partial<Pick<ThreadVm, "provisionAttempt" | "retain" | "retainReason">>): Thread {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const thread = this.getThread(threadId);
+      if (!thread?.vm) throw new Error("thread has no machine");
+      const updated = { ...thread, vm: { ...thread.vm, ...patch } };
+      this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify(updated), threadId);
+      this.db.exec("COMMIT");
+      return updated;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   markWorkspaceAvailable(threadId: string, workspaceBase: Thread["workspaceBase"] = null): void {
     this.db.exec("BEGIN IMMEDIATE");
@@ -361,7 +343,8 @@ export class Registry {
       const thread: Thread = { id: randomUUID(), projectId, runnerId: row!.id,
         title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, agent, archived: false, createdAt: Date.now(),
         allocation: { projectId, projectRevision: project.revision, repositories },
-        workspaceState: "allocating", workspaceError: null, workspaceBase: null };
+        workspaceState: "allocating", workspaceError: null, workspaceBase: null,
+        vm: { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") } } };
       this.db.prepare("INSERT INTO thread VALUES (?,?,?,?)").run(thread.id, projectId, row!.id, JSON.stringify(thread));
       const claimed = this.db.prepare("UPDATE runner SET state='allocating',thread_id=?,error=NULL WHERE id=? AND state='available'").run(thread.id, row!.id);
       if (claimed.changes !== 1) throw new Error("runner allocation conflict");

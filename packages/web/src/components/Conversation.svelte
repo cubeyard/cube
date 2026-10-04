@@ -108,7 +108,7 @@
   <div class="transcript" bind:this={scroller} aria-live="polite" aria-busy={working}>
     {#if notice}<p class="conversation-notice" role="note">{notice}</p>{/if}
     {#if loading}
-      <p class="conversation-empty">reading thread…</p>
+      <p class="conversation-empty">{waitingText ?? "reading thread…"}</p>
     {:else if rows.length === 0}
       <div class="conversation-empty">
         <span class="lamp on-green" aria-hidden="true"></span>

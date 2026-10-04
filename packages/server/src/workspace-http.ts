@@ -21,7 +21,7 @@ import { DEFAULT_LEASE_TTL_MS } from "./workspace-lease.ts";
 import {
   WorkspaceError, type Workspace, type WorkspaceErrorCode, type WorkspaceExecSpec, type WorkspaceFile, type WorkspaceLease,
   type WorkspaceLeaseRequest, type WorkspaceLimits, type WorkspaceOperation, type WorkspaceOwner, type WorkspaceStat,
-  type WorkspaceWrite, type WorkspaceWriteResult,
+  type WorkspaceOperationOptions, type WorkspaceWrite, type WorkspaceWriteResult,
 } from "./workspace.ts";
 
 export interface WorkspaceResponse { status: number; body: unknown }
@@ -70,10 +70,12 @@ export async function workspaceRoute(workspace: Workspace, request: {
     }
     if (parts[0] === "operations" && parts.length === 2 && method === "GET") {
       const cursor = query.get("cursor"), wait = query.get("wait");
-      const read = () => workspace.operation(token(), parts[1], cursor === null ? {} : { cursor: integer(cursor) });
       // A long poll is transport only: callers that cannot sleep cheaply (a
-      // Claude Code hook's own time is budgeted) wait here instead.
+      // Claude Code hook's own time is budgeted) wait here instead. The
+      // workspace may hold the wait itself (the guest helper does).
       const deadline = Date.now() + (wait === null ? 0 : Math.min(integer(wait), MAX_OPERATION_WAIT_MS));
+      const read = () => workspace.operation(token(), parts[1], { ...(cursor === null ? {} : { cursor: integer(cursor) }),
+        ...(wait === null ? {} : { waitMs: Math.max(0, deadline - Date.now()) }) });
       let state = await read();
       while (state.state === "running" && Date.now() < deadline) {
         await delay(Math.min(WAIT_POLL_MS, Math.max(1, deadline - Date.now())));
@@ -141,8 +143,9 @@ export class HttpWorkspace implements Workspace {
   exec(token: string, key: string, spec: WorkspaceExecSpec): Promise<WorkspaceOperation> {
     return translate(() => this.client.exec(token, key, spec)) as Promise<WorkspaceOperation>;
   }
-  operation(token: string, key: string, options: { cursor?: number } = {}): Promise<WorkspaceOperation> {
-    return translate(() => this.client.operation(token, key, options)) as Promise<WorkspaceOperation>;
+  operation(token: string, key: string, options: WorkspaceOperationOptions = {}): Promise<WorkspaceOperation> {
+    return translate(() => this.client.operation(token, key, { ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
+      ...(options.waitMs === undefined ? {} : { waitMs: Math.min(options.waitMs, MAX_OPERATION_WAIT_MS) }) })) as Promise<WorkspaceOperation>;
   }
   cancel(token: string, key: string): Promise<WorkspaceOperation> {
     return translate(() => this.client.cancel(token, key)) as Promise<WorkspaceOperation>;

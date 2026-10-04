@@ -67,8 +67,9 @@
     }
   }
 
+  const bytes = (value: number) => value >= 1e9 ? `${(value / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(value / 1e6))} MB`;
   const canRetire = (runner: RunnerStatus) => runner.allocationState === "available" &&
-    (runner.contactStatus === "stale" || (runner.contactStatus === "reachable" && !runner.health?.active && runner.health?.activeWorkspaces === 0));
+    (runner.contactStatus === "stale" || (runner.contactStatus === "reachable" && runner.health?.activeVms === 0));
   const lampClass = (runner: RunnerStatus) => runner.contactStatus === "reachable" ? "on-green"
     : runner.contactStatus === "unreachable" || runner.contactStatus === "stale" ? "on-red"
     : "off";
@@ -100,7 +101,7 @@
   {#if !loaded}
     <p class="hint">reading runner bindings…</p>
   {:else if !runners.length}
-    <div class="runner-board well"><p class="hint">no trusted runners are registered for this installation</p></div>
+    <div class="runner-board well"><p class="hint">no runners are registered for this installation</p></div>
   {:else}
     <div class="runner-board well">
       {#each runners as runner (runner.id)}
@@ -119,7 +120,7 @@
               {#if runner.lastContactAt}
                 <time datetime={new Date(runner.lastContactAt).toISOString()} title={new Date(runner.lastContactAt).toLocaleString()}>{relTime(runner.lastContactAt)} ago</time>
               {:else}never observed{/if}
-              {#if runner.health} · active commands {runner.health.active ? 1 : 0} · active workspaces {runner.health.activeWorkspaces}{/if}
+              {#if runner.health} · machines {runner.health.activeVms} of {runner.health.maxActiveVms} · running {runner.health.runningVms} · retained {runner.health.retainedVms}{#if runner.health.retainedVms} ({bytes(runner.health.retainedBytes)}){/if}{/if}
             </span>
             {#if runner.error}<span class="error">{runner.error}</span>{/if}
             {#if runner.retiredAt}
@@ -134,14 +135,14 @@
           </div>
           {#if !runner.retiredAt && !canRetire(runner)}
             <p class="runner-blocked">{runner.allocationState !== "available" || runner.allocationProjectId
-              ? "retirement is blocked while the global allocation snapshot records a thread or workspace"
-              : runner.contactStatus === "reachable" && (runner.health?.active || runner.health?.activeWorkspaces)
-                ? "retirement is blocked while the runner reports active work or workspace"
+              ? "retirement is blocked while the global allocation snapshot records a thread"
+              : runner.contactStatus === "reachable" && runner.health?.activeVms
+                ? "retirement is blocked while the runner reports an active thread machine"
                 : "an unavailable runner must remain unreachable for 7 days before retirement"}</p>
           {/if}
           {#if retiring === runner.id}
             <form class="runner-retire" onsubmit={(event) => { event.preventDefault(); void retire(runner); }}>
-              <p><strong>retirement is permanent.</strong> cube stops scheduling this binding and removes its capacity. host audit, thread records, runner journal, operations and retained workspaces are not deleted.</p>
+              <p><strong>retirement is permanent.</strong> cube stops scheduling this binding and removes its capacity. host audit, thread records, the runner journal and retained machine disks are not deleted.</p>
               <label class="config-field">
                 <span class="silk">reason for audit</span>
                 <input class="compose-input" bind:value={reason} maxlength="500" placeholder="why this binding is being retired" />

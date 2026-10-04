@@ -13,7 +13,8 @@ const state = fs.mkdtempSync(path.join(os.tmpdir(), "cube-api-"));
 const models = createModels();
 const faux = fauxProvider(); models.setProvider(faux.provider);
 const runnerHealth = new Map<string, TrustedRunnerHealth>();
-const app = await createCubed({ state, models, claude: null, runnerHealth: async runner => {
+// No cube-gateway: thread machines must fail visibly, never fall back.
+const app = await createCubed({ state, models, claude: null, gateway: null, runnerHealth: async runner => {
   const health = runnerHealth.get(runner.nodeId);
   if (!health) throw new Error("NODE_UNAVAILABLE");
   return health;
@@ -35,10 +36,10 @@ try {
   assert.equal((await fetch(`${base}/api/state`, { headers: { origin: "http://untrusted.example" } })).status, 403);
   assert.equal((await write("/api/models", {})).status, 404);
   assert.deepEqual(await (await fetch(`${base}/api/health`)).json(), {
-    lifecycle: "ready", version: "dev", commit: "unknown", stateSchema: 101,
+    lifecycle: "ready", version: "dev", commit: "unknown", stateSchema: 102, gateway: "unavailable",
   });
   // A second cubed on the same state never takes the live workspace socket.
-  await assert.rejects(createCubed({ state, models, claude: null }), /another cubed is serving this CUBED_STATE/);
+  await assert.rejects(createCubed({ state, models, claude: null, gateway: null }), /another cubed is serving this CUBED_STATE/);
   assert.ok(fs.existsSync(path.join(state, "run/workspace.sock")), "the live instance keeps its workspace socket");
   const unmanagedUpdate = await (await fetch(`${base}/api/system/update`)).json();
   assert.equal(unmanagedUpdate.installation, "unmanaged");
@@ -68,20 +69,28 @@ try {
   assert.equal(typeof acceptedBody.id, "string");
   assert.notEqual(acceptedBody.id, "broken-thread");
   assert.deepEqual(await (await write("/api/threads", input)).json(), acceptedBody);
-  const { threads } = await (await fetch(`${base}/api/threads`)).json();
+  // The machine starts in the background; the thread reports starting, then the failure.
+  const settledThreads = async () => {
+    for (let attempt = 0; ; attempt++) {
+      const { threads } = await (await fetch(`${base}/api/threads`)).json();
+      if (!threads.some((thread: { state: string }) => thread.state === "starting")) return threads;
+      assert.ok(attempt < 200, "activation settles");
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  };
+  const threads = await settledThreads();
   assert.equal(threads.length, 1); assert.equal(threads[0].state, "error");
   assert.match(threads[0].error, /workspace allocation failed.*IO_ERROR/);
-  const idleHealth: TrustedRunnerHealth = { lifecycle: "ready", active: false, operationRecords: 2, operationCapacity: 100,
-    error: null, softwareVersion: "test", protocolVersion: 2, activeWorkspaces: 0, retainedWorkspaces: 1,
-    workspaceBytes: 1024, workspaceCapacity: 1, workspaceByteLimit: 2048 };
+  const idleHealth: TrustedRunnerHealth = { lifecycle: "ready", draining: false, error: null, activeVms: 0, runningVms: 0, maxActiveVms: 1,
+    retainedVms: 1, retainedBytes: 1024, softwareVersion: "test", protocolVersion: 3 };
   app.registry.enrollRunner({ nodeId: "node-operator", threadId: "operator-binding", environmentId: 2,
     configPath: path.join(state, "operator.json"), configHash: "operator" });
-  runnerHealth.set("node-operator", { ...idleHealth, active: true });
+  runnerHealth.set("node-operator", { ...idleHealth, activeVms: 1, runningVms: 1 });
   const runnerCheck = await write("/api/runners/operator-binding/check", {});
   assert.equal(runnerCheck.status, 200);
   const checkedRunner = (await runnerCheck.json()).runner;
   assert.equal(checkedRunner.contactStatus, "reachable");
-  assert.equal(checkedRunner.health.active, true);
+  assert.equal(checkedRunner.health.activeVms, 1);
   assert.equal(checkedRunner.allocationProjectId, null);
   assert.equal(Object.hasOwn(checkedRunner, "projectId"), false, "runner lifecycle is installation-global, never project-owned");
   assert.equal(JSON.stringify(checkedRunner).includes("configPath"), false, "runner API must not expose private adapter paths");
@@ -89,7 +98,7 @@ try {
     "retirement requires exact node confirmation");
   const activeRetire = await write("/api/runners/operator-binding/retire", { confirm: "node-operator", reason: "test" });
   assert.equal(activeRetire.status, 409);
-  assert.match((await activeRetire.json()).error, /active work/);
+  assert.match((await activeRetire.json()).error, /active thread machine/);
   runnerHealth.set("node-operator", idleHealth);
   const retired = await write("/api/runners/operator-binding/retire", { confirm: "node-operator", reason: "replacement enrolled" });
   assert.equal(retired.status, 200);
@@ -99,6 +108,19 @@ try {
   assert.equal((await write("/api/runners/broken-thread/retire", { confirm: "broken-node", reason: "still allocated" })).status, 409,
     "host allocation blocks retirement before a runner probe");
   assert.equal((await fetch(`${base}/api/threads/broken-thread/history/extra`)).status, 404);
+  // A well-formed runner, but no cube-gateway on this host: the thread fails visibly.
+  const controlKey = path.join(state, "control.key");
+  fs.writeFileSync(controlKey, Buffer.alloc(32, 7), { mode: 0o600 });
+  const validConfig = path.join(state, "valid-runner.json");
+  fs.writeFileSync(validConfig, JSON.stringify({ version: 2, binding: { nodeId: "node-valid", threadId: "valid-binding", environmentId: 3 },
+    controlKey, serverPeer: "c".repeat(64), address: "127.0.0.1:9", network: "loopback" }), { mode: 0o600 });
+  const { createHash } = await import("node:crypto");
+  app.registry.enrollRunner({ nodeId: "node-valid", threadId: "valid-binding", environmentId: 3, configPath: validConfig,
+    configHash: createHash("sha256").update(fs.readFileSync(validConfig)).digest("hex") });
+  const gatewayless = await (await write("/api/threads", { ...input, requestId: "no-gateway" })).json();
+  const failed = (await settledThreads()).find((thread: { id: string }) => thread.id === gatewayless.id);
+  assert.equal(failed.state, "error");
+  assert.match(failed.error, /gateway unavailable: cube-gateway was not found/);
   assert.equal((await fetch(`${base}/api/threads/missing-thread/workspace/operations/key`)).status, 404);
   const cli = path.resolve("packages/server/src/index.ts");
   const help = spawnSync(process.execPath, [cli, "--help"], { encoding: "utf8" });
@@ -177,6 +199,6 @@ try {
   flagChild.kill("SIGTERM"); assert.equal((await flagClosed)[0], 0);
   console.log("ok: actual CLI loopback default and all-IPv4 opt-in; explicit private hosts allowed, unknown hosts/cross-origin rejected");
   console.log("ok: CLI help/version/flag precedence/live unreachable status and idempotent SIGINT/SIGTERM shutdown");
-  console.log("ok: host/origin and JSON guards, method/path routing, repository validation, durable allocation despite failed activation");
+  console.log("ok: host/origin and JSON guards, method/path routing, repository validation, durable allocation despite failed activation, no gateway fails visibly");
   console.log("ok: runner status privacy, exact confirmation, active-work/allocation guards, retirement audit path and capacity exclusion");
 } finally { await app.close(); fs.rmSync(state, { recursive: true, force: true }); }

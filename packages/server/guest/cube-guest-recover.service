@@ -1,0 +1,11 @@
+[Unit]
+Description=cube: mark thread commands cut off by the last shutdown interrupted
+After=local-fs.target
+Before=ssh.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cube-guest recover
+
+[Install]
+WantedBy=multi-user.target

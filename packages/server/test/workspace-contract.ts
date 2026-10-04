@@ -1,7 +1,7 @@
-/** The one Workspace contract suite. It runs against RunnerWorkspace and
- * against HttpWorkspace -> routes -> RunnerWorkspace, offline over a fake
- * runner (workspace-test.ts) and over the real Rust runner and Iroh
- * (smoke-node-adapter.ts). */
+/** The one Workspace contract suite. It runs against VmWorkspace and
+ * against HttpWorkspace -> routes -> VmWorkspace, offline over the guest
+ * helper under a temporary root (workspace-test.ts) and over a real VM
+ * through the runner and the gateway (smoke-node-adapter.ts). */
 import assert from "node:assert/strict";
 import http from "node:http";
 import { randomUUID } from "node:crypto";
@@ -17,7 +17,7 @@ const code = (expected: string) => (error: unknown) => {
 
 export async function workspaceContract(name: string, workspace: Workspace, owner: WorkspaceOwner): Promise<void> {
   const other: WorkspaceOwner = owner === "pi" ? "claude-code" : "pi";
-  // Runner journals keep every key and file; keep each run's identities fresh.
+  // Guest journals keep every key and file; keep each run's identities fresh.
   const run = `contract-${randomUUID()}`;
   const dir = run;
   const text = (bytes: Uint8Array) => Buffer.from(bytes).toString("utf8");

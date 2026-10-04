@@ -1,5 +1,6 @@
-/** Process-crash fixture using production session/tool code and a real runner.
- * Only the model is controlled; no credentials or paid requests are involved. */
+/** Process-crash fixture using production session/tool code over a local
+ * guest (the real guest helper under a temporary root). Only the model is
+ * controlled; no credentials or paid requests are involved. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -8,11 +9,11 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { defineExtension, GenerationTask, hook, ToolTask, watchEvents, type SubmissionId } from "@earendil-works/pi-durable";
 import { openAgent } from "../src/durable-agent.ts";
-import { IrohExecutionNodeClient } from "../src/iroh-node.ts";
-import { RunnerWorkspace } from "../src/workspace.ts";
+import { VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
+import { LocalGuestTransport } from "./local-guest.ts";
 
-const [directory, configPath, mode, boundary] = process.argv.slice(2);
+const [directory, guestRoot, mode, boundary] = process.argv.slice(2);
 const context = BACKGROUND_CONTEXT;
 const REQUEST = "smoke-prompt";
 const checkpoint = async (name: string) => {
@@ -20,8 +21,8 @@ const checkpoint = async (name: string) => {
   process.send!({ type: "checkpoint", name });
   await new Promise<void>(() => {});
 };
-const runner = new IrohExecutionNodeClient({ configPath });
-const workspace = new RunnerWorkspace({ runner, leases: new LeaseStore(directory), owner: "pi" });
+const guest = new LocalGuestTransport(guestRoot);
+const workspace = new VmWorkspace({ guest, leases: new LeaseStore(directory), owner: "pi", binding: guest.binding });
 const exec = workspace.exec.bind(workspace);
 workspace.exec = async (...args) => {
   const result = await exec(...args);
@@ -39,11 +40,11 @@ faux.setResponses(Array.from({ length: 4 }, () => async request => {
   if (result) {
     assert.equal(result.isError, false);
     assert.deepEqual(result.content, [{ type: "text", text: "74\n[exit=0; exited]" }]);
-    return fauxAssistantMessage("verified runner result: 74");
+    return fauxAssistantMessage("verified guest result: 74");
   }
   await checkpoint("accepted");
   return fauxAssistantMessage([
-    { type: "text", text: "checking runner output" },
+    { type: "text", text: "checking guest output" },
     fauxToolCall("bash", { command: `printf once >> ${boundary}-count; printf 74` }, { id: "provider-call" }),
   ], { stopReason: "toolUse" });
 }));
@@ -59,7 +60,7 @@ const boundaries = defineExtension({
     } }),
   ],
 });
-const options = { directory, runner, workspace, models, model: { provider: faux.getModel().provider, id: faux.getModel().id }, extensions: [boundaries] };
+const options = { directory, binding: guest.binding, workspace, models, model: { provider: faux.getModel().provider, id: faux.getModel().id }, extensions: [boundaries] };
 if (mode === "contend") {
   await assert.rejects(openAgent(options), /already has a writable owner/);
   process.send!({ type: "blocked" });
@@ -68,12 +69,7 @@ if (mode === "contend") {
 let agent = await openAgent(options);
 if (mode === "inspect") {
   await agent.close();
-  const changedPath = path.join(directory, "changed-runner.json");
-  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-  config.binding.threadId = "different-thread";
-  fs.writeFileSync(changedPath, JSON.stringify(config), { mode: 0o600 });
-  await assert.rejects(openAgent({ ...options, runner: new IrohExecutionNodeClient({ configPath: changedPath }) }), /runner binding changed/);
-  fs.unlinkSync(changedPath);
+  await assert.rejects(openAgent({ ...options, binding: `${guest.binding}:different` }), /thread machine binding changed/);
   // Clean close and failed reopen must both relinquish the lease.
   agent = await openAgent(options);
 }

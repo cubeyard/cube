@@ -13,7 +13,6 @@ import { NodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/no
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
 import { createCodemodeTool, type CodemodeLimits, type NestedTool } from "./codemode.ts";
-import type { NodeBinding } from "./iroh-node.ts";
 import { settleOperation, WorkspaceError, type Workspace } from "./workspace.ts";
 import { WORKSPACE_ROOT, WorkspaceEnv } from "./workspace-env.ts";
 
@@ -27,8 +26,9 @@ const bashParameters = Type.Object({
   timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: BASH_MAX_TIMEOUT_MS })),
 });
 
-/** The runner this thread's storage belongs to, plus a random storage
- * identity that scopes every workspace key Pi derives from task ids. */
+/** The machine this thread's storage belongs to (runner and VM), plus a
+ * random storage identity that scopes every workspace key Pi derives from
+ * task ids. */
 export const RunnerDoc = defineDoc<{ binding: string; instance: string }>({
   kind: "cube.runner", version: 1, scope: "session", initial: () => ({ binding: "", instance: "" }),
 });
@@ -52,14 +52,15 @@ const LEGACY_STORE = ["session", "owner.sqlite"];
 export const LEGACY_THREAD = "this thread was created by an older cube and is not migrated — reset to a new CUBED_STATE (see DEVELOPING.md)";
 
 /** Refuses a thread directory with the old Pi store: opening it would start
- * an empty conversation and submit the first message again on its runner. */
+ * an empty conversation and submit the first message again in its machine. */
 export function assertCurrentThreadStore(directory: string): void {
   if (LEGACY_STORE.some(name => fs.existsSync(path.join(directory, name)))) throw new Error(LEGACY_THREAD);
 }
 
 export async function openAgent(options: {
   directory: string;
-  runner: { binding: Readonly<NodeBinding>; configHash: string };
+  /** The thread's machine binding (runner and VM); fixed for the storage. */
+  binding: string;
   /** The thread workspace; Pi holds its lease for the whole Harness lifetime. */
   workspace: Workspace;
   models: Models;
@@ -71,7 +72,7 @@ export async function openAgent(options: {
 }) {
   // The lease is the single writable owner of the thread: a competing holder,
   // in this process or another, is refused, and process death releases it.
-  // Its epoch fences runner mutations of any older holder. pi-durable has no
+  // Its epoch fences guest mutations of any older holder. pi-durable has no
   // cross-process storage lock; the lease is that lock.
   assertCurrentThreadStore(options.directory);
   const lease = await options.workspace.lease({ owner: "pi" });
@@ -84,7 +85,7 @@ export async function openAgent(options: {
     storage = await openStorage(path.join(options.directory, "pi.sqlite"));
     const registry = createRegistry();
     // Keys are bound in each tool call; replay of the same task finds the
-    // same runner operation instead of executing again. A direct call's key is
+    // same guest operation instead of executing again. A direct call's key is
     // its task's; a codemode call's nested calls extend the codemode task's
     // key with their sequence number.
     let instance = "";
@@ -98,9 +99,9 @@ export async function openAgent(options: {
     const bashTool: NestedTool = {
       registration: defineTool({
         name: "bash",
-        description: `Execute a shell command in the thread runner workspace and return combined stdout and stderr. Output is bounded to ${BASH_OUTPUT_BYTES / 1024} KiB. cwd is relative to the workspace root, which is also the default. Timeout defaults to ${BASH_DEFAULT_TIMEOUT_MS / 1000} seconds, at most ${BASH_MAX_TIMEOUT_MS / 1000}.`,
+        description: `Execute a shell command in the thread's VM and return combined stdout and stderr. Output is bounded to ${BASH_OUTPUT_BYTES / 1024} KiB. cwd is relative to the workspace root, which is also the default. Timeout defaults to ${BASH_DEFAULT_TIMEOUT_MS / 1000} seconds, at most ${BASH_MAX_TIMEOUT_MS / 1000}.`,
         parameters: bashParameters,
-        // The task id is the runner operation key: a rerun after a crash
+        // The task id is the guest operation key: a rerun after a crash
         // reattaches to the same command and never starts it twice.
         replay: "safe",
         executionMode: "sequential",
@@ -128,7 +129,7 @@ export async function openAgent(options: {
             + `\n[exit=${state.exitCode}; ${state.termination}${state.truncated ? "; output truncated" : ""}]` }],
         };
       } catch (error) {
-        // A stop aborts the call: kill the runner command. A host shutdown
+        // A stop aborts the call: kill the guest command. A host shutdown
         // also aborts it, but then a direct command keeps running and the
         // next process reattaches to it.
         if (signal?.aborted && (!closing || !reattached)) await options.workspace.cancel(lease.token, key).catch(() => {});
@@ -146,8 +147,8 @@ export async function openAgent(options: {
     registry.install(defineExtension({
       name: "cube",
       tools: [direct(read), direct(write), direct(edit), bashTool.registration, codemode],
-      sections: [section("preamble", () => `You are a coding agent working in a thread runner workspace. File tools address the workspace root as ${WORKSPACE_ROOT}; bash runs commands with the workspace root as its working directory. codemode runs one JavaScript script that calls these tools, for batching, chaining or filtering their results. The runner executes trusted commands under its own account; it is not a sandbox. Never assume access to control-plane files or credentials.`, { tag: false }),
-        // The repository's own instructions live on the runner, as they do
+      sections: [section("preamble", () => `You are a coding agent working in this thread's own Debian virtual machine. File tools address the workspace root as ${WORKSPACE_ROOT}; bash runs commands as the user agent (with passwordless sudo) with the workspace root as its working directory. codemode runs one JavaScript script that calls these tools, for batching, chaining or filtering their results. The machine reaches the internet over HTTP and HTTPS only, through cube's gateway, which decides every request; other connections are refused. git and gh are installed and authenticated for GitHub where the host allows it (GH_TOKEN holds a placeholder the gateway replaces; never print or copy it elsewhere). Never assume access to control-plane files or credentials.`, { tag: false }),
+        // The repository's own instructions live in the VM, as they do
         // for Claude Code threads; rendered each generation, so edits apply.
         section("repository", async () => {
           const parts: string[] = [];
@@ -160,10 +161,10 @@ export async function openAgent(options: {
     }));
     for (const extension of options.extensions ?? []) registry.install(extension);
     harness = await Harness.open(storage, { models: options.models, registry, settings: { toolExecution: "sequential" } }, context);
-    const expected = JSON.stringify([options.runner.binding, options.runner.configHash]);
+    const expected = options.binding;
     instance = await harness.commit(async tx => {
       const runner = await tx.doc(RunnerDoc);
-      if (runner.binding && runner.binding !== expected) throw new Error("thread runner binding changed");
+      if (runner.binding && runner.binding !== expected) throw new Error("thread machine binding changed");
       if (!runner.binding) { runner.binding = expected; runner.instance = randomUUID(); }
       return runner.instance;
     }, context);

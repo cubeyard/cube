@@ -9,7 +9,7 @@ export type AuthState =
   | { state: "ok"; provider: string; credentialType: string; expiresAt?: number }
   | { state: "missing"; provider: string };
 export interface DaemonState { auth: AuthState; onboardingComplete: boolean }
-export type ThreadState = "ready" | "error";
+export type ThreadState = "starting" | "ready" | "error";
 export interface ThreadSummary {
   id: string;
   title: string | null;

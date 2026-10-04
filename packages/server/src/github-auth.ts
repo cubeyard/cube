@@ -163,6 +163,14 @@ export class GithubAuth {
     }
   }
 
+  /** The stored github.com token, for the egress policy's secret
+   * substitution only (it never enters a VM). Null when none is stored. */
+  async token(): Promise<string | null> {
+    if (this.disconnecting) return null;
+    try { return (await this.gh(["auth", "token", "--hostname", "github.com"])).trim() || null; }
+    catch { return null; }
+  }
+
   async ensureFresh(): Promise<void> {
     if (this.child || this.disconnecting) return;
     if (!this.refreshing) {

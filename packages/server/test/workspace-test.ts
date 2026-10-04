@@ -1,38 +1,42 @@
-/** Offline Workspace checks: the shared contract over a fake runner, both in
- * process and through the HTTP routes, plus the lease across processes. The
- * same contract runs against the real runner in smoke-node-adapter.ts. */
+/** Offline Workspace checks: the shared contract over VmWorkspace and the
+ * real guest helper under a temporary root (local guest), both in process and
+ * through the HTTP routes, plus the lease across processes. The same contract
+ * runs against a real VM in smoke-node-adapter.ts. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fork } from "node:child_process";
 import { once } from "node:events";
-import { RunnerWorkspace, WorkspaceError } from "../src/workspace.ts";
+import { WorkspaceError } from "../src/workspace.ts";
 import { HttpWorkspace } from "../src/workspace-http.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
-import { FakeRunner } from "./workspace-fake-runner.ts";
+import { VmWorkspace } from "../src/vm-workspace.ts";
+import type { GuestTransport } from "../src/guest-ssh.ts";
+import { LocalGuestTransport } from "./local-guest.ts";
 import { serveWorkspace, workspaceContract } from "./workspace-contract.ts";
 
 if (process.argv[2] === "hold") {
   // Child: hold a lease until killed.
-  const lease = new LeaseStore(process.argv[3]).acquire("pi");
+  // Keep the store referenced: a collected lock connection would end the lease.
+  const store = new LeaseStore(process.argv[3]);
+  const lease = store.acquire("pi");
   process.send!({ epoch: lease.epoch });
-  setInterval(() => {}, 1000);
+  setInterval(() => store.holder(), 1000);
 } else {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-workspace-"));
-  const runners: FakeRunner[] = [];
+  const guests: LocalGuestTransport[] = [];
   const stores: LeaseStore[] = [];
-  const open = (name: string, owner: "pi" | "claude-code" = "pi") => {
-    fs.mkdirSync(path.join(root, name, "workspace"), { recursive: true });
-    const runner = new FakeRunner(path.join(root, name, "workspace"));
+  const open = (name: string, owner: "pi" | "claude-code" = "pi", wrap?: (guest: GuestTransport) => GuestTransport) => {
+    const guest = new LocalGuestTransport(path.join(root, name, "guest"));
     const leases = new LeaseStore(path.join(root, name, "thread"));
-    runners.push(runner); stores.push(leases);
-    return { runner, leases, workspace: new RunnerWorkspace({ runner, leases, owner }) };
+    guests.push(guest); stores.push(leases);
+    return { guest, leases, workspace: new VmWorkspace({ guest: wrap ? wrap(guest) : guest, leases, owner, binding: `test-${name}` }) };
   };
   try {
-    await workspaceContract("RunnerWorkspace", open("direct").workspace, "pi");
+    await workspaceContract("VmWorkspace", open("direct").workspace, "pi");
     const served = await serveWorkspace(open("http", "claude-code").workspace);
-    try { await workspaceContract("HttpWorkspace -> routes -> RunnerWorkspace", new HttpWorkspace({ url: served.url }), "claude-code"); }
+    try { await workspaceContract("HttpWorkspace -> routes -> VmWorkspace", new HttpWorkspace({ url: served.url }), "claude-code"); }
     finally { await served.close(); }
 
     // The routes are a thin transport: the token is the authorization.
@@ -53,13 +57,33 @@ if (process.argv[2] === "hold") {
         error instanceof WorkspaceError && error.code === "NODE_UNAVAILABLE" && error.completionUnknown);
     } finally { await server.close(); }
 
-    // A runner without the workspace capabilities is incompatible: no fallback.
-    const old = open("old");
-    old.runner.capabilities = old.runner.capabilities.filter(capability => capability !== "fs.write");
+    // A guest without the workspace capabilities is incompatible: no fallback.
+    const old = open("old", "pi", guest => ({
+      close: () => guest.close(),
+      call: async (op, header, options) => {
+        const answer = await guest.call(op, header, options);
+        if (op === "hello") answer.header.capabilities = (answer.header.capabilities as string[]).filter(capability => capability !== "fs.write");
+        return answer;
+      },
+    }));
     const oldLease = await old.workspace.lease({ owner: "pi" });
     await assert.rejects(old.workspace.writeFile(oldLease.token, "k", "a", Buffer.from("x")), (error: unknown) =>
       error instanceof WorkspaceError && error.code === "OPERATION_UNSUPPORTED");
-    assert.ok(!fs.existsSync(path.join(old.runner.root, "a")));
+    assert.ok(!fs.existsSync(path.join(old.guest.workspace, "a")));
+
+    // An unreachable machine: a read is unavailable, a mutation's outcome unknown.
+    const gone = open("gone");
+    const goneLease = await gone.workspace.lease({ owner: "pi" });
+    await gone.workspace.capabilities();
+    gone.guest.offline = true;
+    await assert.rejects(gone.workspace.stat(goneLease.token, "."), (error: unknown) =>
+      error instanceof WorkspaceError && error.code === "NODE_UNAVAILABLE" && !error.completionUnknown);
+    await assert.rejects(gone.workspace.writeFile(goneLease.token, "k", "a", Buffer.from("x")), (error: unknown) =>
+      error instanceof WorkspaceError && error.code === "COMPLETION_UNKNOWN" && error.completionUnknown);
+    await assert.rejects(gone.workspace.exec(goneLease.token, "e", { command: "true", timeoutMs: 1000 }), (error: unknown) =>
+      error instanceof WorkspaceError && error.code === "COMPLETION_UNKNOWN");
+    gone.guest.offline = false;
+    assert.ok(!fs.existsSync(path.join(gone.guest.workspace, "a")));
 
     // One writable owner across processes and instances; process death
     // releases the lease at once and the next holder gets a newer epoch.
@@ -82,9 +106,9 @@ if (process.argv[2] === "hold") {
     assert.ok(next.epoch > taken.epoch);
     sibling.release(next.token);
     assert.throws(() => sibling.acquire("claude-code"), (error: unknown) => error instanceof WorkspaceError && error.code === "CONFLICT", "the owner is fixed for the thread");
-    console.log("ok: workspace lease across processes and instances, routes, incompatible runner");
+    console.log("ok: workspace lease across processes and instances, routes, incompatible guest, unreachable machine");
   } finally {
-    for (const runner of runners) runner.close();
+    for (const guest of guests) guest.stop();
     for (const store of stores) store.close();
     fs.rmSync(root, { recursive: true, force: true });
   }

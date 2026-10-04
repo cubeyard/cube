@@ -1,7 +1,7 @@
 /** The neutral thread event model: the Pi adapter renders pi-durable's view
  * into user messages, assistant text, tool calls and results, status, owner
  * and agent; the same `ThreadEvents` interface answers in-process and over
- * SSE through `HttpThreadEvents`. Offline: faux model and a fake runner. */
+ * SSE through `HttpThreadEvents`. Offline: faux model and a local guest. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
@@ -14,17 +14,17 @@ import { openAgent } from "../src/durable-agent.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 import { HttpThreadEvents, type ThreadEvents, type ThreadTranscript } from "../src/thread-events.ts";
 import { serveThreadEvents } from "../src/thread-events-http.ts";
-import { RunnerWorkspace } from "../src/workspace.ts";
+import { VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
-import { FakeRunner } from "./workspace-fake-runner.ts";
+import { LocalGuestTransport } from "./local-guest.ts";
 
 const context = BACKGROUND_CONTEXT;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-thread-events-"));
 const files = path.join(root, "workspace");
 fs.mkdirSync(files, { recursive: true });
-const runner = new FakeRunner(files);
+const guest = new LocalGuestTransport(path.dirname(files));
 const leases = new LeaseStore(path.join(root, "thread"));
-const workspace = new RunnerWorkspace({ runner, leases, owner: "pi" });
+const workspace = new VmWorkspace({ guest, leases, owner: "pi", binding: guest.binding });
 const long = Array.from({ length: 80 }, (_, index) => `word${index}`).join(" ");
 const faux = fauxProvider({ tokensPerSecond: 200, tokenSize: { min: 1, max: 1 } });
 faux.setResponses([
@@ -42,7 +42,7 @@ async function until(check: () => boolean, what: string) {
   while (!check()) { assert(Date.now() < deadline, `waiting for ${what}`); await delay(20); }
 }
 
-const agent = await openAgent({ directory: path.join(root, "thread"), runner: { binding: runner.binding, configHash: "fake" }, workspace, models, model: { provider: faux.getModel().provider, id: faux.getModel().id } });
+const agent = await openAgent({ directory: path.join(root, "thread"), binding: guest.binding, workspace, models, model: { provider: faux.getModel().provider, id: faux.getModel().id } });
 const events: ThreadEvents = new PiThreadEvents({ agent, owner: () => leases.holder(), failure: () => null });
 const server = http.createServer((request, response) => {
   const route = request.url?.replace(/^\/api\/threads\/t1/, "");
