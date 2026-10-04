@@ -42,28 +42,48 @@ preserve the external state and credential directories, but only the exact
 state-schema/rollback contract in a signed manifest is supported. Runner
 software is outside this update mechanism.
 
-The trusted runner is not a sandbox. Its dedicated unprivileged account is an
-explicit trust boundary and must carry no control-plane, provider, cloud or
-unrelated credentials. A private repository necessarily requires a
-repository-scoped, preferably read-only Git credential or deploy key in that
-account so allocation can fetch a fresh base. Agent commands run as the same UID
-and can access that credential; Cube does not claim otherwise. Cube does not
-enforce trusted-runner egress;
-operators must enforce network policy at the OS/network layer. See the
-[trusted-runner security and operations runbook](docs/trusted-runner-operations.md).
-Workspace-relative cwd validation prevents traversal and symlink races on both
-Linux and macOS, but commands retain all filesystem authority of that account.
-Per-thread Git worktrees or copied directories reduce accidental workspace
-collisions only. They do not prevent a command from reading or modifying another
-workspace through an absolute path. Container/VM or native process isolation is
-separate future work.
-Fresh-base fetches use validated remote/ref inputs, a runner-owned bare control
-repository and an exact fetched commit OID. They do not checkout or rewrite the
-operator's template worktree. Fetch failures fail closed rather than using stale
-template state. This is workspace freshness and collision isolation, not
-sandboxing or protection from malicious same-UID Git configuration.
-Process-group cancellation is not a cgroup: especially on macOS, a hostile
-command can deliberately create a new session and escape descendant cleanup.
+Thread machines: a runner runs no command of its own for a thread. Each active
+thread gets a QEMU virtual machine on its runner, and the agent's commands run
+as user `agent` inside that guest (with passwordless sudo in the guest). The
+guest is the isolation boundary between a thread and the runner host. QEMU
+itself runs as the runner account and is hardened only by
+`-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`
+on Linux (nothing on macOS); a guest escape through a QEMU bug has that
+account's authority, so the runner host as a whole is not a sandbox. Give the
+runner account no control-plane, provider, GitHub, SSH or cloud credentials,
+no sudo and no privileged group other than `kvm`. A retained machine disk
+(a thread archived with changes) stays readable by the runner account.
+
+A guest's only network is raw Ethernet frames, carried by the runner over Iroh
+to `cube-gateway` next to cubed. The gateway gives each VM a private LAN and
+terminates every TCP connection: only ports 80 and 443 are served, other TCP
+is reset, and an upstream is refused unless every address it resolves to is
+public unicast (no loopback, RFC 1918, link-local/metadata, CGNAT, ULA or
+mapped forms), so a guest cannot reach cubed, the runner, the LAN or a cloud
+metadata service. HTTPS is intercepted with a per-installation CA
+(`CUBED_STATE/gateway/ca.key`, 0600, never leaves that directory; treat it as
+an installation credential and back it up with the state). cubed decides every
+request (method, host, path, thread) on a 0600 socket; a deny, a timeout or a
+malformed answer is a 403. Clients that pin certificates or ignore the system
+CA bundle fail against the interception.
+
+Secrets never enter a guest, its seed or the runner. The guest sees a
+placeholder (`GH_TOKEN=cube_ph_github_…`); the gateway substitutes the host's
+GitHub token only when cubed's policy returns it, and the policy returns it
+only for that VM's own placeholder, over HTTPS, to github.com and
+api.github.com. The token is the host's `gh auth token` (or
+`CUBED_GITHUB_TOKEN`), so the agent acts with that account's GitHub authority
+on those hosts, including pushes; use an account whose repository access you
+accept for agents. The gateway keeps no secret beyond the request it serves.
+
+cubed reaches the guest with the system OpenSSH client through the gateway; it
+generates each VM's host key and pins it, and its per-VM client key may only
+run the guest helper (`restrict,command=`). Nothing listens on the runner for
+the guest. The runner's frame channel is authorized per VM by the latest
+epoch-fenced `vm.start` (gateway peer and a per-start token). See the
+[runner security and operations runbook](docs/trusted-runner-operations.md).
+Snapshots, finer per-request policy (macaroons) and a separate download exit
+are later work.
 
 Claude Code threads run the unmodified `claude` binary on the cubed host, as the
 cubed user, with that user's own Claude login. cubed never stores Claude
@@ -74,7 +94,7 @@ variable, no Bedrock/Vertex/Foundry switch, and none of cubed's provider, Git or
 cloud credentials. Claude Code starts with `--setting-sources ""`,
 `--strict-mcp-config` and an empty MCP configuration, so the user's settings
 hooks and MCP servers do not load, and `--tools` limits it to the mod's
-allow-list. The mod sends Bash, Read, Write and Edit to the trusted runner and
+allow-list. The mod sends Bash, Read, Write and Edit to the thread's machine and
 refuses every other tool not on that list (MCP tools and unknown built-ins
 included), isolated subagents and agent types that are not Claude Code's
 built-ins. Claude Code itself still runs on the cubed host with the cubed user's

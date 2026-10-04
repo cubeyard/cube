@@ -8,13 +8,11 @@ installation/environment binding, speaks runner protocol 3, belongs to the
 global Cube pool, hosts at most one active VM at a time, and uses Iroh's public
 N0 discovery/relay transport.
 
-> Status (branch `feat/vm-runner`): the runner side is built and verified on
-> Linux/KVM with a real Debian guest and the real gateway
-> (`scripts/smoke-runner-vm.ts`). cubed's protocol-3 client, enrollment
-> (`scripts/enroll-runner.ts`, runner config version 2), the egress policy and
-> SSH tool execution are the SERVER work package of
-> [the plan](plans/2026-10-04-vm-runner.md); until then a current cubed cannot
-> drive a protocol-3 runner. macOS (HVF) has code paths only and is unverified.
+> Status (branch `feat/vm-runner`): built and verified on Linux/KVM with a
+> real Debian guest, the real gateway and cubed (`scripts/smoke-runner-vm.ts`,
+> `scripts/smoke-node-adapter.ts`, `scripts/test-vm-e2e.ts`). macOS (HVF) has
+> code paths only and is unverified; runner and cubed on separate machines
+> (direct or relay mode) are not verified yet.
 
 | Platform | Lifecycle | Profile |
 |---|---|---|
@@ -109,6 +107,24 @@ unit. The unit runs `runner-serve` with `SupplementaryGroups=kvm`,
 `TimeoutStopSec=60` and `KillMode=mixed`. `initialize.sh` copies the base image
 into the state (it must be readable by the runner account), enrolls the
 immutable binding and starts the service. It prints only the public Iroh peer.
+
+On the cubed host, write the runner's private connection config (version 2,
+mode 0600, next to a control key whose public peer you passed as
+`CONTROL_PEER`) and enroll it:
+
+```json
+{"version":2,"binding":{"nodeId":"NODE_ID","threadId":"THREAD_ID","environmentId":ENVIRONMENT_ID},
+ "controlKey":"/abs/control.key","serverPeer":"<printed runner peer>","network":"relay"}
+```
+
+```sh
+node scripts/enroll-runner.ts --state "$CUBED_STATE" --config /abs/runner.json --trusted-runner
+```
+
+(`"network":"direct"` or `"loopback"` add `"address":"host:port"`.) The script
+makes an authenticated protocol-3 hello first and refuses a protocol-2 runner.
+cubed runs its gateway in the widest network mode among enrolled runners; a
+wider runner enrolled while cubed runs restarts the gateway at its first use.
 
 | Path | Owner/mode | Purpose |
 |---|---|---|

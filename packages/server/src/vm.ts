@@ -230,6 +230,8 @@ export class ThreadVms implements ThreadMachines, EgressVms {
   }
 
   private async reattach(client: GatewayClient): Promise<void> {
+    // SSH masters ran through the old gateway's dial; the next call opens a new one.
+    await Promise.allSettled([...this.transports.values()].map(transport => transport.close()));
     for (const [vmId, spec] of this.attached) {
       try { await client.attach(vmId, spec); this.log.info("reattached", { vm: vmId }); }
       catch (error) { this.log.error("reattach failed", { vm: vmId, error }); }

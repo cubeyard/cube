@@ -9,8 +9,16 @@
   allocation, access boundary, HTTP/SSE and activation of Pi's open operations.
   For a claude-code thread, the Claude Code child process and the thread record
   (accepted prompts, printed messages, session ID); Claude Code owns its session.
-- **runner:** workspace execution and durable deduplication/result retention for
-  commands. It cannot read Pi sessions or model credentials through the protocol.
+- **runner:** one QEMU VM per active thread (allocate, start, stop, inspect,
+  release; protocol 3) and the frame pump that carries the VM's Ethernet frames
+  to the gateway. It runs no command of its own and cannot read Pi sessions or
+  model credentials through the protocol.
+- **thread VM:** the workspace (`/workspace`) and, in its guest helper
+  `cube-guest`, durable deduplication and result retention for commands and
+  writes.
+- **cube-gateway:** started and supervised by cubed; each VM's only network
+  (DHCP, DNS, TCP termination, HTTP/HTTPS egress with TLS interception and a
+  per-request decision from cubed's egress policy, secret substitution).
 - **web:** rendering and user actions, from the neutral thread event model
   only. SSE reconnect starts with a complete transcript; the browser is never a
   workflow owner.
@@ -37,8 +45,8 @@ candidate's offline self-check, drains cubed, then atomically swaps `current` an
 retains `previous`. Readiness checks require the signed version and commit, followed
 by a probation interval. Startup recovery and failed readiness restore `previous`.
 State and credentials live outside release directories and are never copied or
-migrated by the updater. Schema 100 is currently accepted only by releases that
-declare exact, rollback-safe schema 100 compatibility.
+migrated by the updater. Schema 102 is currently accepted only by releases that
+declare exact, rollback-safe schema 102 compatibility.
 
 ## Action, result, resume
 
@@ -50,21 +58,22 @@ cubed opens nonarchived threads and resumes Pi's unfinished tasks. Followup
 request IDs are Pi submission request IDs, committed atomically with admission,
 so a repeated HTTP action does not append another turn; a busy thread rejects a
 new prompt instead of queueing it. The product registry stores no model or tool
-progress. The thread's runner binding and a random storage identity live in a
-session-scoped Pi document, `cube.runner`; a changed binding refuses to open.
+progress. The thread's machine binding (runner and VM) and a random storage
+identity live in a session-scoped Pi document, `cube.runner`; a changed binding
+refuses to open.
 
 Cube opens pi-durable's `SqliteStorage` on its own `node:sqlite` connection in
 WAL mode and sets and checks `synchronous=FULL` on every open. pi-durable has no
 cross-process storage lock; the thread's workspace lease is that lock.
 
-Pi's tools reach the runner only through the thread `Workspace`. `read`,
+Pi's tools reach the thread's VM only through the thread `Workspace`. `read`,
 `write` and `edit` are pi-durable's own file tools over an `ExecutionEnv`
 (`workspace-env.ts`) that maps the virtual root `/workspace` to workspace-relative
-runner paths; a write after a read in the same call carries the read content's
+guest paths; a write after a read in the same call carries the read content's
 `expectedSha`. `bash` is cube's own tool. Every mutation key is derived from the
 storage identity and the Pi tool task ID, so a replayed task finds the same
-runner operation: a repeated `exec.start` retrieves retained work; changed
-arguments conflict. `read`, `write` and `bash` are replay-safe; `edit` is not and
+guest operation: a repeated exec retrieves retained work; changed arguments
+conflict. `read`, `write` and `bash` are replay-safe; `edit` is not and
 is reported as interrupted after a crash. The file tools read whole files of at
 most 2 MiB, as the Claude Code mod does; a larger file is refused after its
 first page with a hint to use bash.
@@ -80,23 +89,21 @@ call has a stable identity. The host enforces strict limits modelled on cube's
 earlier codemode: 64 KiB source, 64 MiB VM memory, a 15-minute wall deadline,
 64 nested calls, 1 MiB arguments per call (both stop the script), 4 MiB per
 nested result handed to the script and a 256 KiB final result, cut with a
-notice. A mutating call stopped while running, or one whose runner outcome is
+notice. A mutating call stopped while running, or one whose guest outcome is
 unknown, makes the result an error that lists it as uncertain; a call that does
 not settle within 10 seconds of the script ending blocks the next script until
-it does. Nothing is retried automatically. The worker is fault containment, not
-a sandbox, and the runner stays trusted.
+it does. Nothing is retried automatically. The worker is fault containment for
+cubed, not a sandbox; the tools themselves act in the thread's VM.
 
-Stop aborts Pi's tasks and cancels a
-running runner command; a host shutdown leaves a direct `bash` command running
-and the next process reattaches to it. Codemode's nested commands are cancelled
-on shutdown too, because codemode is never rerun. The runner never silently reexecutes Interrupted operations or evicts
-IDs to create room. A lost response therefore does not imply a second effect.
-Diagnostic runner CLI intents remain separate from Pi's production call path.
-Runner protocol 2 adds paged command output, `exec.cancel` (process-group
-SIGKILL), `fs.read`/`fs.write`/`fs.stat` beneath the workspace, idempotency keys
-for writes and per-thread lease-epoch fencing of mutations. A protocol-1 runner
-is incompatible and must be upgraded; see
-[RUNNER.md](packages/node-transport/RUNNER.md).
+Stop aborts Pi's tasks and cancels a running guest command; a host shutdown
+leaves a direct `bash` command running in its transient systemd unit and the
+next process reattaches to it. Codemode's nested commands are cancelled on
+shutdown too, because codemode is never rerun. The guest helper never silently
+reexecutes Interrupted operations or evicts IDs to create room. A lost response
+therefore does not imply a second effect. Runner protocol 3 is VM lifecycle
+only; a protocol-2 runner is incompatible and must be re-enrolled; see
+[RUNNER.md](packages/node-transport/RUNNER.md) and the
+[VM runner plan](docs/plans/2026-10-04-vm-runner.md).
 
 Pi recovery is a durable task state machine, not complete-history replay. Partial
 model responses can be interrupted and retried under Pi policy; a provider may
@@ -106,10 +113,16 @@ bill both attempts. SIGKILL tests are not proof of power-loss durability.
 
 `Workspace` (`packages/server/src/workspace.ts`) is the one contract for a
 thread's workspace: `lease`, `exec`, `operation`, `cancel`, `readFile`,
-`writeFile`, `stat`, `capabilities()` and `limits()`. `RunnerWorkspace`
-implements it over the Iroh runner client; workspace semantics stay on the
-runner and cubed only translates, checks capabilities and limits, and enforces
-the lease. The HTTP routes under `/api/threads/:id/workspace` are a thin
+`writeFile`, `stat`, `capabilities()` and `limits()`. `VmWorkspace`
+(`vm-workspace.ts`) implements it over the guest helper `cube-guest` in the
+thread's VM, reached with the system OpenSSH client through `cube-gateway dial`
+(`guest-ssh.ts`: one ControlMaster per VM, host keys cubed generated and pins,
+a client key that may only run the helper). Workspace semantics stay in the
+helper (a journal under `/var/lib/cube/ops`, commands in transient systemd units
+running as `agent`, atomic writes); cubed only translates, checks capabilities
+and limits, and enforces the lease. Every helper operation is idempotent by key,
+so a transport failure (a gateway restart) is retried for a bounded time before
+it becomes `NODE_UNAVAILABLE` or `COMPLETION_UNKNOWN`. The HTTP routes under `/api/threads/:id/workspace` are a thin
 transport over the same interface, and `HttpWorkspace` implements it again for
 out-of-process agents. One contract suite runs against both.
 
@@ -122,13 +135,15 @@ instance cannot take it, and process death releases it at once without stale PID
 files. Pi holds the lease for its whole Harness lifetime. The epoch is the only
 durable lease state: it never decreases and is at least the wall-clock time in
 milliseconds, so it stays increasing even if the thread directory is lost. Every
-runner mutation carries it, and the runner refuses an older epoch than the
-newest it has seen for the thread.
+guest mutation carries it, and the guest helper refuses an older epoch than the
+newest it has seen. Runner requests carry a separate per-thread VM epoch
+(`threads/<id>/vm/epoch`), which the runner fences the same way.
 
-Mutations carry a caller-chosen idempotency key, scoped to the runner binding
-and hashed into the runner operation ID. A key already seen is never executed
-again; the same key with a different request is `CONFLICT`. No shell fallback
-exists: a runner lacking a workspace capability is incompatible.
+Mutations carry a caller-chosen idempotency key, scoped to the thread's machine
+binding and hashed into the guest operation ID. A key already seen is never
+executed again; the same key with a different request is `CONFLICT`; a cancel
+that overtakes its command records the key cancelled so it never runs. No shell
+fallback exists: a guest lacking a workspace capability is incompatible.
 
 ## Thread event model
 
@@ -168,9 +183,9 @@ directory, with `--resume <session-id>` once Claude Code has reported a session.
 Prompts go to stdin under their request ID (a repeated ID is accepted once), stop
 is a stream-json `interrupt` control request; a child that ignores it is sent
 SIGTERM, then SIGKILL. cubed follows the Bash calls in Claude Code's messages
-and cancels their runner commands (`claude:<tool_use_id>:bash`) itself when it
+and cancels their guest commands (`claude:<tool_use_id>:bash`) itself when it
 kills the child, when the child dies mid-turn and on close, because the mod
-never sees an abort then and the runner admits one command at a time. A model
+never sees an abort then. A model
 change closes the idle child so the next prompt resumes with the new
 `--model`. An idle child is closed after ten minutes. cubed never stores Claude
 credentials; the child gets an allow-listed environment without any
@@ -198,94 +213,98 @@ contract suite covers both.
 
 Durability is weaker than Pi's, and the UI says so: Claude Code keeps its own
 session but has no task checkpoints, so a turn cut off by a cubed restart is
-marked failed and not continued. Workspace keys still keep the runner from
+marked failed and not continued. Workspace keys still keep the guest from
 executing any tool call twice. Repository skills reach Claude Code only as text.
 
 ## Product state and limitations
 
 `CUBED_STATE/registry.sqlite` contains projects, globally registered runners,
-operator contact observations and retirement audit, thread metadata and creation
-request keys. `CUBED_STATE/threads/<id>/pi.sqlite` is
-the thread's pi-durable storage (`claude.sqlite` and the `claude/` working
-directory for a claude-code thread); `threads/<id>/lease.sqlite` keeps the thread's lease epoch and
-owner, and `lease.lock` is only held while a lease is. Registry v100/v101 receives the rollback-compatible global-pool extension in place; older execution stacks are
-not migrated. See the reset workflow in README. The state schema is 101: the
-supervisor refuses to update a schema 100 installation in place, and cubed
-refuses to open a thread directory that still holds the old Pi store
-(`session/` or `owner.sqlite`) instead of starting it again empty. One cubed
-serves one `CUBED_STATE`: a second refuses to start while the first's
-workspace socket answers.
+operator contact observations and retirement audit, thread metadata (with each
+thread's machine: its VM id, fixed at creation, and its secret placeholders) and
+creation request keys. `CUBED_STATE/threads/<id>/pi.sqlite` is the thread's
+pi-durable storage (`claude.sqlite` and the `claude/` working directory for a
+claude-code thread); `threads/<id>/lease.sqlite` keeps the thread's lease epoch
+and owner, `lease.lock` is only held while a lease is, and `threads/<id>/vm/`
+holds the VM's SSH client key, its pinned host key and the VM epoch.
+`CUBED_STATE/gateway/` holds the gateway's Iroh key and the installation CA;
+`CUBED_STATE/run/` the private sockets (`workspace.sock`, `gateway.sock`,
+`egress.sock`) and SSH ControlMaster sockets. The state schema is 102 and older
+registries are refused, not migrated (see the reset workflow in DEVELOPING.md);
+cubed also refuses to open a thread directory that still holds the old Pi store
+(`session/` or `owner.sqlite`). One cubed serves one `CUBED_STATE`: a second
+refuses to start while the first's workspace socket answers.
 
-A runner has one permanent node/environment admission and belongs to the Cube
-installation, not a project. It admits one active thread workspace at a time. Cubed
-persists `available/allocating/busy/releasing/failed`; the runner journal persists
-the physical allocation and reconciles interrupted transitions without deleting
-the tree. Thread creation captures the checked project revision and each repository's
-normalized URL, resolved branch and exact base OID. `workspace.allocate.v2` sends that
-immutable plan to the authenticated runner, which creates `/workspace` plus reference
-checkouts under `../repos`. The runner fetches only each declared branch, verifies the
-supplied OID is an available commit, and checks out that immutable OID; it never
-rediscovers the default branch or substitutes a newer tip. Git prompts and
-command-running transports are disabled.
-Projects without repositories receive a fresh empty workspace rather than the
-installation's legacy template, preventing state carryover during project switches.
-Archive releases logical capacity; checkouts still clean at every pinned OID are
-removed, while changed, independently committed or transition-interrupted trees are
-retained under runner state. Empty legacy project plans continue through the immutable
-installation template so migrated evidence remains usable.
+A runner has one permanent node/environment admission (runner config version 2)
+and belongs to the Cube installation, not a project. It hosts one active thread
+machine at a time. Cubed persists `available/allocating/busy/releasing/failed`;
+the runner journal persists each VM record and reconciles interrupted
+transitions without deleting a disk. Thread creation captures the checked
+project revision and each repository's normalized URL, resolved branch and exact
+base OID, allocates a runner and returns; `ThreadVms` (`vm.ts`) then allocates
+the VM, starts it with a cloud-init seed (`vm-seed.ts`: the pinned host key,
+the restricted client key, the CA, the placeholders and the guest helper),
+attaches it to the gateway and waits until the guest helper answers ready (the
+thread is `starting` meanwhile). The first activation provisions the pinned
+checkouts with an ordinary workspace command under `cube:provision:<n>`:
+`/workspace` plus references in `/repos`, fetching only each declared branch
+through the gateway, verifying the pinned commit and checking it out detached;
+an empty project gets an empty `/workspace`. A failed try is never rerun under
+its key, and a force-pushed branch that no longer holds the pinned commit fails
+closed. Archive runs the release check (every checkout at its pinned commit, no
+changes, branches, stashes or commits of its own, no other command running):
+a clean machine is released and its disk deleted; anything else, an unreachable
+machine, a failed one or an interrupted one is retained on the runner.
 
-Registry allocation uses `BEGIN IMMEDIATE` and a conditional `available` update, so
-two project requests cannot claim one runner. v100/v101 project bindings become
-`legacyProjectId` audit metadata; runner IDs, node admission, thread rows, creation
-keys and archived evidence are preserved. Numeric environment IDs need only be unique
-inside their immutable node binding, so collisions across runners are preserved rather
-than rewritten. Existing active threads keep their runner and pinned allocation.
-Project deletion never owns or deletes a runner and remains blocked while any thread
-history references the project. Runner contact is authenticated `node.status`
-evidence. A failed latest check is `unreachable`; it becomes `stale` only after seven
-continuous days without a successful check. Success clears that interval.
-Retirement is installation-global and first reserves the runner against allocation.
-Both reservation and commit read the global runner/thread allocation snapshot and
-require no active allocation. A reachable runner must also report no active command
-or workspace; an unreachable runner must be stale. Changed status or allocation fails
-closed. The permanent tombstone removes global capacity while retaining immutable
-identity, thread links, reason, probe evidence, runner journals, operation records and
-retained workspaces.
-The extension preserves the v101 runner column order and stores an idempotent marker;
-an older rollback release can still open the registry. Its scheduler ignores newly
-enrolled global runners rather than rebinding or deleting them.
+On a cubed restart machines keep running; activation starts each again (which
+rotates its frame token), attaches it and Pi reattaches to running commands by
+key. On a gateway restart cubed re-attaches every VM and the SSH masters
+reconnect; running commands survive in their units. On a runner restart the VM
+is stopped and marked interrupted; the next activation (or the 30 s recovery
+loop) boots it again from the same disk and the guest marks unfinished
+operations interrupted.
 
-The repository plan is the integration boundary for fresh-remote-default-branch work:
-`GitService.prepareRepository` must resolve the remote branch and OID before allocation,
-and future changes must keep emitting `resolvedBase` + `baseOid`. The scheduler does not
-depend on unpublished branch-selection work and never asks a runner to rediscover a
-moving default branch. If a force-push makes the pinned object unavailable when the
-runner fetches the declared branch, allocation fails closed rather than using stale state.
+Registry allocation uses `BEGIN IMMEDIATE` and a conditional `available` update,
+so two project requests cannot claim one runner. Project deletion never owns or
+deletes a runner and remains blocked while any thread history references the
+project. Runner contact is authenticated `node.status` evidence. A failed latest
+check is `unreachable`; it becomes `stale` only after seven continuous days
+without a successful check. Success clears that interval. Retirement is
+installation-global and first reserves the runner against allocation. Both
+reservation and commit read the global runner/thread allocation snapshot and
+require no active allocation. A reachable runner must also report no active
+machine; an unreachable runner must be stale. Changed status or allocation fails
+closed. The permanent tombstone removes global capacity while retaining
+immutable identity, thread links, reason, probe evidence, runner journals and
+retained disks.
 
-The original `workspace.allocate` remains a metadata-free compatibility operation.
-Cubed requires the separately advertised `workspace.allocate.v2` capability for new
-global allocations, so an older runner fails with `UNSUPPORTED` before request bytes
-or filesystem mutation. Upgrade runner binaries before relying on the global pool;
-existing active work and retained evidence remain inspectable during a rolling upgrade.
-
-These directories prevent active threads from colliding by default; they do not
-constrain an absolute path or a command running as the runner UID. Current
-Linux/macOS runners are trusted same-account execution, **not sandboxes**.
-Platform-specific sandbox technology remains undecided. The supported operation
-is bounded shell execution; remote file transfer, portals and authenticated Git
-mutation are not implemented. Keep host Git/model credentials out of runner
-accounts. Browser access is loopback, an access-controlled private network, or
-an authenticated private proxy; Iroh authenticates runner communication, not
-browser users.
+The guest is the isolation boundary between a thread and its runner; the
+runner host as a whole is not a sandbox: QEMU runs as the runner account,
+hardened only by `-sandbox on` on Linux. The guest's only network is the
+gateway: HTTP and HTTPS to public addresses, each request decided by cubed
+(`egress-policy.ts`), the GitHub placeholder replaced by the host's token only
+for github.com and api.github.com over HTTPS. Keep host Git/model credentials
+out of runner accounts. Browser access is loopback, an access-controlled
+private network, or an authenticated private proxy; Iroh authenticates runner
+and gateway communication, not browser users.
 
 ## Verification
 
-`scripts/test-node-transport.sh` runs Rust checks and actual Node/Iroh/runner
-integration. `smoke-durable-agent.ts` covers four SIGKILL boundaries; `smoke-product.ts`
-covers ordinary API creation, startup activation, streaming/reconnect and prompt
-deduplication, and a claude · max thread through a fake `claude` that runs the
-mod's tool functions over the workspace socket. `scripts/check-claude-mod.sh`
-validates and tests the mod with the installed `claude` CLI without calling a
-model; the real CLI is never started by tests. These use controlled models and disposable data, never live users.
-Separate-machine Linux/macOS lifecycle and paid-model acceptance remain separate
-release checks. The pinned reference snapshots are under `repos/`.
+`pnpm test` runs the offline suites, among them the guest helper's own tests,
+the Workspace contract over `VmWorkspace` with the real helper under a
+temporary root (a "local guest" with a process launcher instead of systemd),
+seed, egress policy and gateway supervision tests, and the process-level smokes
+(`scripts/smoke-local.ts`: four Pi SIGKILL boundaries, the product API with
+restarts and a claude · max thread through a fake `claude`).
+`scripts/test-node-transport.sh` runs the Rust checks and, where KVM, QEMU and a
+Debian image (`CUBE_TEST_VM_IMAGE`) are available, the real pieces: the runner
+with a guest (`smoke-runner-vm.ts`), cubed's side of it
+(`smoke-node-adapter.ts`: protocol-3 client, gateway supervision, the Workspace
+contract over SSH, egress, runner SIGKILL, retained release) and the product
+end to end (`test-vm-e2e.ts`: Pi tools in the guest, cubed and gateway SIGKILL
+mid-command, egress, `gh`/`git push` with secret substitution against a local
+GitHub fake, a Claude Code thread, clean and retained archives). Mocks are not
+runner acceptance. `scripts/check-claude-mod.sh` validates and tests the mod
+with the installed `claude` CLI without calling a model; the real CLI is never
+started by tests. These use controlled models and disposable data, never live
+users. Separate-machine Linux/macOS lifecycle and paid-model acceptance remain
+separate release checks. The pinned reference snapshots are under `repos/`.

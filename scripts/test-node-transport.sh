@@ -22,9 +22,6 @@ cargo build --locked --offline -p cube-runner -p cube-gateway -j 2
 node scripts/runner-production-test.ts
 for script in scripts/runner/*.sh; do bash -n "$script"; done
 
-# The in-process Node adapter smoke (scripts/smoke-node-adapter.ts) spoke
-# protocol 2; it returns with cubed's protocol-3 client (SERVER work package).
-
 target="${CARGO_TARGET_DIR:-target}/debug"
 missing=()
 [ "$(uname -s)" = Linux ] || missing+=("Linux (macOS HVF is not verified yet)")
@@ -40,3 +37,8 @@ if [ "${#missing[@]}" -gt 0 ]; then
   exit 0
 fi
 node scripts/smoke-runner-vm.ts "$target/cube-runner" "$target/cube-gateway" "$CUBE_TEST_VM_IMAGE"
+# cubed's side with the same real pieces: protocol-3 client, gateway
+# supervision, egress policy, ThreadVms, the Workspace contract over SSH.
+node scripts/smoke-node-adapter.ts "$target/cube-runner" "$target/cube-gateway" "$CUBE_TEST_VM_IMAGE"
+# The product end to end: a disposable cubed with real VMs (scripts/test-vm-e2e.ts).
+node scripts/test-vm-e2e.ts "$target/cube-runner" "$CUBE_TEST_VM_IMAGE"

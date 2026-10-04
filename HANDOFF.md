@@ -1,128 +1,85 @@
 # Handoff
 
-Architecture replacement is implemented in this working tree. The ordinary
-HTTP conversation path now uses an in-process pi-durable 1.0.1 Harness + SQLite,
-with startup activation and snapshot SSE. Pi's tools reach the runner only
-through the thread `Workspace` and its lease. The old execution stack has been removed.
-Current runner execution is trusted, not sandboxed; native sandboxing remains
-undecided. No migration of old data is required or implemented.
+The ordinary HTTP conversation path uses an in-process pi-durable 1.0.1 Harness
++ SQLite, with startup activation and snapshot SSE. On branch `feat/vm-runner`
+every thread now works in its own QEMU virtual machine on a runner
+([plan](docs/plans/2026-10-04-vm-runner.md)):
 
-Verified locally on Linux:
+- **Runner (protocol 3):** one VM per active thread (Debian 13 genericcloud
+  overlay, cloud-init seed written by the runner as a FAT `CIDATA` image),
+  VM lifecycle only; same-UID command execution, runner file operations and
+  runner-side Git are gone.
+- **cube-gateway:** started and supervised by cubed; each VM's only network.
+  Frames travel runner → Iroh datagrams → gateway; per VM a smoltcp LAN with
+  DHCP and DNS; only HTTP/HTTPS to public addresses; TLS interception with the
+  installation CA; a decision from cubed's egress policy per request; the
+  GitHub placeholder replaced by the host's token for github.com and
+  api.github.com only.
+- **Tools:** Pi's read/write/edit/bash/codemode and the Claude Code mod keep
+  calling the thread `Workspace`; `VmWorkspace` implements it over the guest
+  helper `cube-guest` (journaled keys, epoch fencing, commands in transient
+  systemd units as user `agent`), reached with the system OpenSSH client
+  through `cube-gateway dial` with pinned host keys.
 
-- `pnpm typecheck`: zero TypeScript/Svelte errors or warnings; `pnpm lint` passed.
-- `pnpm test`: all offline suites, including Pi over the Workspace with a fake
-  runner (`durable-agent-test.ts`) and Pi's own threshold compactions and a
-  reset through the thread history, across a reopen (`pi-compaction-test.ts`,
-  faux model with a small context window); `pnpm build` passed.
-- `scripts/test-node-transport.sh`: fmt, clippy, Rust tests, actual Iroh shell
-  calls, four SIGKILL recovery boundaries, single writer exclusion, stable
-  invocation identity and one effect, product startup activation, SSE snapshots,
-  reconnect, concurrent followup dedup/conflict, stop and model-choice persistence,
-  one codemode script whose nested write/edit/bash/read reach the runner under
-  their nested keys, a claude · max thread through a fake `claude`, and the
-  Workspace contract in loopback and direct mode. All of it runs on one Linux
-  machine against a disposable local runner; a runner on a separate machine
-  (Linux or macOS) has not been accepted on this branch.
-- `bash scripts/check-claude-mod.sh` with Claude Code 2.1.288: strict
-  validation, 8/8 mod tests against the engine (allow-listed tools, MCP and
-  unknown tools refused, built-in subagents only) and tsc. No model call.
-- Chromium: ordinary new-thread submission produced runner output 93; host
-  stop/restart reconnected with one user message and one tool result. Desktop,
-  390×844 layout and the no-available-runner dialog were inspected.
-- Provider auth: real Pi credential store with a controlled provider; key,
-  OAuth browser/device/callback, cancellation, safe errors, stale prompt rejection,
-  live catalog updates, login/logout persistence and cleared pending login on restart.
-  Chromium exercised key entry/error/success/disconnect, browser-code completion,
-  device-code presentation and cancellation at desktop and 390px widths.
+The guest is the isolation boundary between a thread and the runner; QEMU runs
+as the runner account and is hardened only by `-sandbox on`, so the runner host
+as a whole is not a sandbox. State schema 102 and runner config version 2: no
+migration; a fresh `CUBED_STATE` and re-enrolled runners (DEVELOPING.md).
 
-These tests use a controlled model and disposable state. Paid-model integration,
-power-loss durability and separate-machine Linux/macOS lifecycle acceptance are
-not established by them. Newer macOS runner support remains intact.
+Verified on server1 (Linux, KVM, QEMU 8.2, Debian 13 genericcloud, disposable
+state, loopback Iroh, 2026-10-04):
 
-Operators prepare a repository template and enroll immutable runners. Each runner
-leases one separate active-thread workspace at a time and is reusable after
-archive; Git allocations fetch the checked primary branch into runner-owned
-state, pin and journal its exact OID, and never use stale template HEAD as an
-offline fallback. Dirty worktrees are retained. This is collision isolation, not a
-security sandbox. Workspace transfer, authenticated Git mutation, portals and
-thread-to-thread tools are not exposed. Pi's saved model choice now controls
-reopening even when the registry's initial model or the selected model disappears
-from the catalog; unavailable models are not silently replaced.
-Stop aborts Pi's run and cancels a running runner command (process-group
-SIGKILL through `exec.cancel`). A host shutdown does not cancel a direct `bash`
-command; the next process reattaches to the same runner operation. Codemode's
-nested commands are cancelled on shutdown, since codemode is never rerun.
+- `pnpm typecheck`, `pnpm lint`, `pnpm test` (offline suites, including the
+  guest helper's unit tests, the Workspace contract over the real helper under a
+  temporary root, gateway supervision with a fake gateway, egress policy, seed,
+  thread machine lifecycle and the process-level smokes over local guests).
+- `scripts/smoke-runner-vm.ts` (runner + gateway + guest).
+- `scripts/smoke-node-adapter.ts` (cubed's side, 50 s): protocol-3 client,
+  gateway supervision, `ThreadVms` boot to a ready guest helper in ~25 s
+  (packages installed through the gateway), the Workspace contract over real SSH
+  in process and over HTTP, egress probes, runner SIGKILL → interrupted → boot
+  again from the same disk, a retained release.
+- `scripts/test-vm-e2e.ts` (the product, 151 s): a disposable cubed with a faux
+  model and a fake `claude`; Pi write/read/edit/bash/codemode in the guest;
+  cubed SIGKILL mid-command (the gateway exits with its lifeline, the next
+  cubed reattaches, the command ran once); gateway SIGKILL mid-command (restart,
+  re-attach, SSH back, result retrieved); egress (public HTTPS 200; cubed's port,
+  the gateway, RFC 1918, metadata and outbound ssh refused); `gh api user` and
+  `git clone`/`git push` against a local GitHub fake through placeholder
+  substitution (a foreign placeholder and another host denied; the token absent
+  from the guest file system and process environments, the seed, the runner
+  state and the logs); a Claude Code thread's Write/Read/Edit/Bash in the guest
+  and a stop that cancelled the guest command; clean archive deletes the disk,
+  changed ones are retained; every process stopped.
 
-State schema is 101. The supervisor refuses to update a schema 100 installation
-in place, and cubed refuses to open a thread directory that still holds the old
-Pi store (`session/`, `owner.sqlite`) instead of running its first message
-again; existing installations need the fresh `CUBED_STATE` reset in
-DEVELOPING.md. A second cubed on the same state refuses to start while the
-first one's workspace socket answers. The file tools (Pi and the Claude Code mod
-alike) read whole files up to 2 MiB; larger files are for bash.
-Do not equate these constraints with a native sandbox implementation.
+Not verified: macOS (HVF, arm64 guest), runner and cubed on separate machines
+(direct and relay modes), more than one active VM per runner (by design one),
+many VMs and flows under load, a real `gh auth token` against github.com from a
+guest with a real model (manual check, only with the maintainer's consent), a
+guest that ignores ACPI power-down, the web UI's "starting the thread's
+machine" state in a browser at desktop and 390 px, and the release tarball
+built by CI with `bin/cube-gateway`. HTTP/2, WebSocket and CONNECT are refused
+by the gateway this round; clients that pin certificates fail against the
+interception. Snapshots, `.agents/setup`/resume and macaroons are next round.
 
-A thread can run on Claude Code instead ("claude · max" at creation): cubed
-starts the unmodified `claude` binary with the user's own login and cube's mod
-(`packages/claude-mod`), which sends Bash, Read, Write and Edit to the thread
-Workspace keyed by `tool_use_id`. The child gets an allow-listed environment
-(no `ANTHROPIC_*`, Bedrock/Vertex switch or cubed provider/Git/cloud
-credentials), no user settings or MCP servers (`--setting-sources ""`,
-`--strict-mcp-config`), and only the mod's allow-listed tools (`--tools` and the
-mod's own `tool.call` allow-list; non-built-in and isolated subagents are
-refused). A stop sends the stream-json interrupt and cubed cancels the turn's
-open Bash commands on the runner at once: Claude Code answers an interrupt by
-rejecting the tool use without aborting the mod's hook. cubed also cancels when a
-stop has to kill the child, when it dies mid-turn and on close, and a child that
-ignores SIGTERM gets SIGKILL. cubed hands Claude Code a private copy of the mod
-under `CUBED_STATE/run/claude-mod`, because Claude Code writes type declarations
-into a plugin folder it loads. cubed's own lease cannot be renewed or released
-over the workspace routes. A turn cut off by a cubed restart is not continued.
-
-Live run on 2026-10-03 (Linux, disposable state, a local cube-runner 0.3.0,
-the real `claude` 2.1.288 with the maintainer's Max login): a claude · max
-thread used Write, Read, Edit and Bash in the runner workspace, a
-general-purpose subagent's Bash ran there too, AGENTS.md was read from the
-runner, nothing was written into Claude Code's host directory, and Claude Code
-reported `apiKeySource: "none"` (subscription login, no API key). A follow-up
-after a model change resumed the session on the new model (sonnet, then opus).
-Stop rejected a running `sleep 90` and cancelled it on the runner (its later
-write never happened). The automated suites still use a fake `claude`; this
-live run is a manual script, not part of `pnpm test`. A second live run on 2026-10-04 (two local runners, disposable state,
-Pi on `openai-codex`/`gpt-6-luna` from the host Pi store, Claude Code on Max)
-passed 16/16 checks: Pi used write, read, edit, bash and codemode in the runner
-workspace and read the repository's AGENTS.md; a Pi bash command survived a
-cubed SIGKILL mid-command, the turn resumed and the command ran exactly once;
-a Pi and a Claude thread ran concurrently on separate runners, a third thread
-got 409 and archiving freed a runner; Claude Code resumed its session after an
-idle cubed restart; a cubed SIGKILL mid Claude turn left the turn honestly
-failed, the reopen cancelled its runner command, and the thread kept working;
-background Bash and a worktree-isolated subagent were refused. A separate-machine run the same day (cubed on Linux, cube-runner 0.3.0 built
-from this branch in the foreground profile on a macOS arm64 laptop, N0 relay,
-a public GitHub project): Pi and Claude Code threads used their file tools,
-bash and codemode on the Mac, a Pi bash command survived a cubed SIGKILL and
-ran once, a Claude stop left its command's write undone, and archive freed the
-runner. Not verified live: the SIGTERM/SIGKILL fallback for a child that ignores
-the interrupt, and the macOS launchd service profile.
-
-GUI provider settings use Pi's public Models login/logout/refresh APIs and the
-existing host credential store. Browser/device login, key entry, cancellation,
-status and disconnect are supported wherever Pi exposes that interaction, except
-Anthropic's Claude Pro/Max OAuth, which is not offered to Pi.
-Providers with ambient-only auth still require host configuration. A host restart
-discards unfinished login interactions, not saved credentials. Live provider
-OAuth acceptance remains distinct from controlled-provider integration tests.
+Earlier evidence that still holds for the parts this branch did not change:
+provider auth (Pi's Models login/logout/refresh, key entry, OAuth
+browser/device flows, cancellation) and Claude Code thread handling (the
+unmodified `claude` with the user's own login, the mod's tool allow-list,
+interrupt, resume, model switch) were exercised live on 2026-10-03/04 against
+the protocol-2 runner; their workspace side now runs in VMs and is covered by
+the e2e with a fake `claude` only.
 
 Known gaps: pi-codemode 1.0.1 has no stack or CPU-slice limit, so a spinning
 script holds a cubed CPU core until its wall deadline (15 minutes by default);
 cube exposes no reset or manual compaction (Pi's reset is covered through its
 API only), and an overflow compaction has no test; pi-durable's `onReport` is
-not wired to any log; macOS runner file paths and the launchd stop timeout against
-the 600-second command bound are untested; runner output is only available
-after a command finishes. AGENTS.md still describes Pi as an AgentHarness and
-needs the maintainer's update to pi-durable; docs/architecture-tour-notes.md is
-marked historical.
+not wired to any log; the first boot of every thread machine installs packages
+through the gateway (about 25 s on server1; the known 30 s `apt-get update`
+stall applies) until snapshots exist. AGENTS.md still describes Pi as an
+AgentHarness and needs the maintainer's update to pi-durable;
+docs/architecture-tour-notes.md is marked historical.
 
-The fresh-start workflow is in DEVELOPING.md. No push, deployment, release or
-destruction of an existing installation was performed. Review the local diff
-before shipping; this is implementation evidence, not production sign-off.
+No push, deployment, release or destruction of an existing installation was
+performed. Review the diff before shipping; this is implementation evidence, not
+production sign-off.
