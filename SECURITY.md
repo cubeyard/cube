@@ -45,7 +45,8 @@ software is outside this update mechanism.
 Thread machines: a runner runs no command of its own for a thread. Each active
 thread gets a QEMU virtual machine on its runner, and the agent's commands run
 as user `agent` inside that guest (with passwordless sudo in the guest). The
-guest is the isolation boundary between a thread and the runner host. QEMU
+guest is the thread's sandbox, the isolation boundary between a thread and the
+runner host. QEMU
 itself runs as the runner account and is hardened only by
 `-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`
 on Linux (nothing on macOS); a guest escape through a QEMU bug has that
@@ -59,8 +60,12 @@ to `cube-gateway` next to cubed. The gateway gives each VM a private LAN and
 terminates every TCP connection: only ports 80 and 443 are served, other TCP
 is reset, and an upstream is refused unless every address it resolves to is
 public unicast (no loopback, RFC 1918, link-local/metadata, CGNAT, ULA or
-mapped forms), so a guest cannot reach cubed, the runner, the LAN or a cloud
-metadata service. HTTPS is intercepted with a per-installation CA
+mapped forms) and none of the gateway host's own interface addresses, so a
+guest cannot reach cubed, the runner, the LAN or a cloud metadata service. A
+request with more than one Host header is refused before any decision.
+This round the policy allows every public host: the boundary does not stop
+an agent sending what it can read (its workspace, the project's repositories)
+to a public HTTPS server. HTTPS is intercepted with a per-installation CA
 (`CUBED_STATE/gateway/ca.key`, 0600, never leaves that directory; treat it as
 an installation credential and back it up with the state). cubed decides every
 request (method, host, path, thread) on a 0600 socket; a deny, a timeout or a
@@ -81,7 +86,7 @@ generates each VM's host key and pins it, and its per-VM client key may only
 run the guest helper (`restrict,command=`). Nothing listens on the runner for
 the guest. The runner's frame channel is authorized per VM by the latest
 epoch-fenced `vm.start` (gateway peer and a per-start token). See the
-[runner security and operations runbook](docs/trusted-runner-operations.md).
+[runner security and operations runbook](docs/runner-operations.md).
 Snapshots, finer per-request policy (macaroons) and a separate download exit
 are later work.
 

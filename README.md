@@ -7,11 +7,14 @@ virtual machine on an explicitly enrolled Iroh runner, and that machine's only
 network is cube's gateway next to cubed. Closing the tab or restarting cubed
 does not discard accepted work.
 
-**Experimental software.** A thread's commands run as user `agent` inside a
-QEMU guest (Debian 13). QEMU itself runs as the runner account and is hardened
-only by its `-sandbox on` option; a guest escape through a QEMU bug would have
-that account's authority, so the runner host as a whole is not a sandbox. Use a
-dedicated runner account or machine without valuable credentials.
+**Experimental software.** A thread's commands run as user `agent` (with sudo)
+inside a QEMU guest (Debian 13). That guest is the thread's sandbox: its files,
+processes and network are its own, it holds no real credential, and it can
+only make HTTP and HTTPS requests through cube's gateway. It is not a
+boundary against a QEMU escape: QEMU runs as the runner account, hardened only
+by its `-sandbox on` option, so use a dedicated runner account or machine
+without valuable credentials. Nor does it stop the agent sending what it can
+read to a public HTTPS host, or acting on GitHub with the host's token.
 
 ## Laptop-first quickstart
 
@@ -61,16 +64,16 @@ runners. Source checkouts and externally managed installations remain read-only;
 see [the cubed update runbook](docs/cubed-updates.md).
 
 Create a project and enroll runners using
-[the operator runbook](docs/trusted-runner-operations.md). Runners form one
+[the operator runbook](docs/runner-operations.md). Runners form one
 global pool for every project in the installation. A new thread gets its own
 machine on an available runner: a fresh overlay disk on the runner's base
 image, booted with a cloud-init seed from cubed (the first boot installs `git`,
 `gh` and `curl` through the gateway and takes a minute or two). The thread
 shows "starting the thread's machine" until it is up; then the project's
 pinned repositories are checked out at their exact commit IDs. A runner
-serves one active thread at a time. Archiving checks the machine: a clean one
-is deleted, one with changes, commits of its own or an unknown state is kept
-on the runner. There is no automatic fleet provisioning. The global runner
+serves one active thread at a time. Archiving deletes a machine only when the
+agent never ran a command or wrote a file in it and it checks clean; any other
+machine is kept on the runner as evidence. There is no automatic fleet provisioning. The global runner
 panel records authenticated contact and machine counts, distinguishes a current
 failure from seven days of continuous unreachability, and can permanently
 retire an idle or stale installation binding without deleting audit or retained

@@ -8,11 +8,11 @@ installation/environment binding, speaks runner protocol 3, belongs to the
 global Cube pool, hosts at most one active VM at a time, and uses Iroh's public
 N0 discovery/relay transport.
 
-> Status (branch `feat/vm-runner`): built and verified on Linux/KVM with a
-> real Debian guest, the real gateway and cubed (`scripts/smoke-runner-vm.ts`,
-> `scripts/smoke-node-adapter.ts`, `scripts/test-vm-e2e.ts`). macOS (HVF) has
-> code paths only and is unverified; runner and cubed on separate machines
-> (direct or relay mode) are not verified yet.
+> Status: built and verified on Linux/KVM with a real Debian guest, the real
+> gateway and cubed (`scripts/smoke-runner-vm.ts`,
+> `scripts/smoke-node-adapter.ts`, `scripts/test-vm-e2e.ts`, and a live run
+> against GitHub). macOS (HVF) has code paths only and is unverified; runner
+> and cubed on separate machines (direct or relay mode) are not verified yet.
 
 | Platform | Lifecycle | Profile |
 |---|---|---|
@@ -40,14 +40,16 @@ QEMU, and refuse a base image whose size, mode or sha256 changed.
 
 ## Trust and security model
 
-The guest is the isolation boundary. A thread's commands run as user `agent`
-inside its VM; they cannot see the runner account, its key or its journal,
-and they have no network of their own: the VM's only network device is a
+The guest is the thread's sandbox. A thread's commands run as user `agent`
+(with sudo in the guest) inside its VM; they cannot see the runner account,
+its key or its journal, and they have no network of their own: the VM's only network device is a
 `-netdev dgram` unix socket pair inside the VM directory. The runner pumps
 those Ethernet frames to `cube-gateway` over Iroh (ALPN `cube/l2/1`) and opens
 no other socket for the guest. All guest traffic leaves through cubed's
 gateway, which allows HTTP/HTTPS to public addresses only and asks cubed's
-policy about every request.
+policy about every request. The guest holds no real credential: the GitHub
+token is a placeholder that the gateway replaces for github.com and
+api.github.com, so it never reaches the runner either.
 
 QEMU itself runs **as the runner account** and is not hardened beyond
 `-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`
@@ -55,7 +57,8 @@ QEMU itself runs **as the runner account** and is not hardened beyond
 have the runner account's authority. Keep giving that account no
 control-plane, provider, GitHub, SSH, cloud or login credentials, sudo, or
 privileged groups other than `kvm`. Do not call the runner host as a whole a
-sandbox.
+sandbox. The runner account can read every VM disk it hosts, including
+retained ones, so the workspace contents are only as private as that account.
 
 The frame channel is authorized per VM by the latest accepted `vm.start`: it
 names the gateway's Iroh peer and a frame token (the runner keeps only its
@@ -167,8 +170,9 @@ console is in `vms/<n>/console.log`; `vm.inspect` returns its last 16 KiB.
 ## Retained VMs
 
 Releasing a VM deletes its directory only when cubed found the thread clean
-(`retain: false`) and the VM was never interrupted. A changed thread
-(`retain: true`), an interrupted VM and a failed transition keep the disk as
+(`retain: false`: the agent never ran a command or wrote a file there, and
+the guest's release check is clean) and the VM was never interrupted. Any
+other thread (`retain: true`), an interrupted VM and a failed transition keep the disk as
 evidence (`retained` / `failed`); they no longer hold the VM slot.
 `retainedBytes` shows their size. Inspect a retained disk offline, for
 example with `qemu-img info` or by booting a copy; delete it only under the
@@ -241,7 +245,7 @@ are admission bounds, not host resource quotas.
 |---|---|
 | `DRAINING` | wait, or resume/restart after maintenance |
 | `CAPACITY_EXCEEDED` | another thread's VM is active; release it first |
-| `CONFLICT` | the vmId belongs to another thread, or its fixed config/seed differs |
+| `CONFLICT` | the vmId exists for another thread or with another disk size, the thread already has another active VM, a start names a different mac, or the VM is in a state that cannot start |
 | `INCOMPATIBLE_PROTOCOL` | upgrade the older cubed/cube-runner component |
 | `UNSUPPORTED` | a protocol-2 method (`exec.*`, `fs.*`, `workspace.*`) reached a protocol-3 runner |
 | `LEASE_STALE` | a newer thread lease owns the VM; never retry with the old epoch |

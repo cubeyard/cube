@@ -192,7 +192,7 @@ describe('workspace tools', () => {
     expect(context.blocks[0]!.name).toBe('currentDate')
     expect(context.blocks[1]!.name).toBe('cubeWorkspace')
     expect(context.blocks[1]!.text).toMatch(/run the tests/)
-    expect(context.blocks[1]!.text).toMatch(/not a sandbox/)
+    expect(context.blocks[1]!.text).toMatch(/virtual machine/)
   })
 })
 

@@ -8,8 +8,8 @@ profile](RUNNER.md) adds a permanent local binding, a durable VM journal, the
 `vm.*` lifecycle (protocol 3) and the `cube/l2/1` frame channel to
 `cube-gateway` (`src/l2.rs`, shared with `packages/gateway`). cubed's adapter
 (`packages/server/src/iroh-node.ts`) calls pinned `@number0/iroh` inside Node,
-directly over this protocol; its protocol-3 client is the SERVER work package
-of the VM-runner plan. The CLI is enrollment, diagnostic and operator tooling.
+directly over this protocol with its protocol-3 client (`IrohRunnerClient`).
+The CLI is enrollment, diagnostic and operator tooling.
 
 ## Run locally
 

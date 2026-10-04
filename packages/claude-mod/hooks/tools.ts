@@ -1,5 +1,5 @@
 /** Claude Code's Bash, Read, Write and Edit over the thread Workspace. Each
- * call is keyed by its tool_use_id, so the runner never executes the same
+ * call is keyed by its tool_use_id, so the machine never executes the same
  * call twice: a repeated key returns the original outcome, and the same key
  * with a different request is CONFLICT. Results take each built-in tool's own
  * output shape, so Claude Code renders them for the model as its own.
@@ -79,7 +79,7 @@ export async function bash(scope: ToolScope, toolUseId: string, input: BashInput
     while (state.state === "running") {
       const next = await abortable(scope.client.operation(scope.token, operationKey, { waitMs: POLL_WAIT_MS }), scope.signal);
       if (!next) {
-        // A stop kills the runner command at once; its key stays spent.
+        // A stop kills the guest command at once; its key stays spent.
         await scope.client.cancel(scope.token, operationKey).catch(() => {});
         return { stdout: "", stderr: "command stopped", interrupted: true };
       }
@@ -88,7 +88,7 @@ export async function bash(scope: ToolScope, toolUseId: string, input: BashInput
     if (state.state === "failed") {
       return { deny: state.completionUnknown ? `the command's outcome is unknown (${state.error}); inspect the workspace before running it again` : `command failed: ${state.error}` };
     }
-    if (state.state !== "succeeded") return { deny: "the command's outcome is unknown (the runner restarted while it ran); inspect the workspace before running it again" };
+    if (state.state !== "succeeded") return { deny: "the command's outcome is unknown (the thread's machine or cubed restarted while it ran); inspect the workspace before running it again" };
     const pages = [state.output];
     let received = state.output.length;
     while (state.outputOffset + received < state.retainedBytes) {
@@ -99,7 +99,7 @@ export async function bash(scope: ToolScope, toolUseId: string, input: BashInput
     }
     let stdout = new TextDecoder().decode(concat(pages));
     if (stdout.length > BASH_OUTPUT_CHARS) stdout = `${stdout.slice(0, BASH_OUTPUT_CHARS)}\n[output cut at ${BASH_OUTPUT_CHARS} characters]`;
-    else if (state.truncated) stdout += `\n[output cut by the runner at ${state.retainedBytes} bytes]`;
+    else if (state.truncated) stdout += `\n[output cut by the machine at ${state.retainedBytes} bytes]`;
     const stderr = state.termination === "timedOut" ? `command timed out after ${timeoutMs} ms`
       : state.termination === "signalled" ? "command was terminated by a signal"
       : state.exitCode ? `exit code ${state.exitCode}` : "";
