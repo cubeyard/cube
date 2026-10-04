@@ -82,7 +82,8 @@ it through a self dev-dependency.
 ## Manual run with a real guest
 
 `dev/run-vm.sh` boots a Debian 13 genericcloud image whose only NIC goes
-through `examples/dev-pump.rs` (stands in for the runner's pump) to the
+through `examples/dev-pump.rs` (stands in for the runner's pump, to look at
+the gateway alone; `scripts/smoke-runner-vm.ts` uses the real runner) to the
 gateway, with `examples/dev-decide.rs` allowing everything. It needs KVM,
 QEMU ≥ 7.2, genisoimage and OpenSSH, and keeps all state in its work directory.
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Manual end-to-end run of cube-gateway with a real QEMU guest, before the
-# runner speaks protocol 3: dev-pump stands in for the runner's frame pump
-# and dev-decide for cubed's egress policy (allow everything).
+# Manual end-to-end run of cube-gateway with a real QEMU guest but without
+# the runner, to look at the gateway alone: dev-pump stands in for the
+# runner's frame pump and dev-decide for cubed's egress policy (allow
+# everything). The runner itself is exercised by scripts/smoke-runner-vm.ts.
 #
 # Needs Linux/KVM, QEMU >= 7.2, genisoimage, ssh/ssh-keygen and a Debian 13
 # genericcloud image at <workdir>/debian.qcow2. Disposable state only: every
