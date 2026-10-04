@@ -1,6 +1,6 @@
 {
   "name": "cube",
-  "description": "Self-hosted durable coding-agent threads and trusted runners",
+  "description": "Self-hosted durable coding-agent threads, each in its own virtual machine",
   "private": true,
   "license": "Apache-2.0",
   "repository": {

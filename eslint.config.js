@@ -11,7 +11,6 @@ export default defineConfig([
   globalIgnores([
     "**/node_modules/",
     "**/dist/",
-    "spikes/",
     "repos/",
     ".claude/",
     ".agents/",

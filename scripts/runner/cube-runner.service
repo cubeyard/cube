@@ -1,6 +1,6 @@
 [Unit]
 Description=Cube runner (one QEMU VM per thread; QEMU runs as this account, not hardened beyond -sandbox)
-Documentation=https://github.com/cubeyard/cube/blob/main/docs/trusted-runner-operations.md
+Documentation=https://github.com/cubeyard/cube/blob/main/docs/runner-operations.md
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/var/lib/cube-runner/identity/node.key

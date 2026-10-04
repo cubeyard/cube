@@ -1,8 +1,8 @@
 # cube-gateway
 
-The central network for runner VMs. cubed starts and supervises it (that part
-is the SERVER work package of
-[the VM runner plan](../../docs/plans/2026-10-04-vm-runner.md), not built yet).
+The central network for runner VMs. cubed starts and supervises it
+(`packages/server/src/gateway.ts`; design in
+[the VM runner plan](../../docs/plans/2026-10-04-vm-runner.md)).
 A guest's only network is raw Ethernet frames carried over Iroh from its
 runner; the gateway gives each VM a small LAN and is its only way out.
 
@@ -25,7 +25,8 @@ What it does per VM:
   reset, other UDP dropped, no IPv6. Frames from a foreign MAC are dropped.
 - HTTPS is intercepted with a leaf for the SNI name, signed by the
   installation CA (`state/ca.key` 0600, `state/ca.pem` 0644, created once,
-  never rotated). No SNI closes the connection; `Host` must equal SNI (421).
+  never rotated). No SNI closes the connection; `Host` must equal SNI (421);
+  more than one `Host` header is refused (400) before any decision.
 - Every request goes to cubed's decision API. Deny, timeout (5 s), socket
   error or malformed answer: `403` with `x-cube-denied: <reason>`.
 - Placeholder secrets (`cube_ph_<name>_<22 base62>`) in header values,
@@ -34,7 +35,10 @@ What it does per VM:
 - The upstream is the SNI/Host name, never the address the guest dialled. It
   is resolved by the gateway and refused unless every address is public
   unicast (no loopback, RFC 1918, link-local/metadata, CGNAT, ULA, mapped or
-  NAT64 forms, documentation ranges). Upstream TLS uses the system roots.
+  NAT64 forms, documentation ranges) and none of the gateway host's own
+  interface addresses (read at every connect; if they cannot be read, the
+  connection is refused). DNS answers drop the same addresses. Upstream TLS
+  uses the system roots.
 - `CONNECT` and `Upgrade` (WebSocket, HTTP/2 upgrade) are refused.
 - cubed reaches the guest's sshd with `POST /v1/vms/{vmId}/dial?port=22`
   (`Upgrade: cube-tcp`), which the `dial` subcommand wraps for OpenSSH's
@@ -72,7 +76,8 @@ it through a self dev-dependency.
 - `tests/lan.rs`: a smoltcp test guest on an in-memory frame pipe: DHCP lease
   and MTU, DNS, HTTPS through an allow decision with Bearer and Basic
   substitution, deny/timeout/malformed decisions, RST for other ports, Host ≠
-  SNI, no SNI, private upstreams refused while allowed, no secrets over HTTP,
+  SNI, duplicate Host, no SNI, private upstreams and the host's own public
+  address refused while allowed, no secrets over HTTP,
   upgrades refused, dial into the guest, 4 MiB both ways;
 - `tests/link.rs`: the whole gateway over Iroh loopback with a fake runner
   that authorizes the frame hello: attach, lease, `dial` over the control

@@ -1,12 +1,13 @@
 /** cube's Claude Code mod. cubed starts `claude -p --plugin-dir <this
  * folder>` for a claude-code thread; this module sends Claude Code's Bash,
- * Read, Write and Edit to the thread Workspace on its trusted runner, keyed
+ * Read, Write and Edit to the thread Workspace in its virtual machine, keyed
  * by tool_use_id, and refuses what would act on the cubed host instead.
  *
  * cubed passes the workspace through the environment: a Unix socket that
  * serves only workspace routes, the thread's route path, the lease token it
  * holds for this process, and the local directory Claude Code runs in. The
- * runner is trusted, not a sandbox. */
+ * machine is the thread's sandbox; Claude Code itself runs on the cubed host
+ * and is not sandboxed. */
 import type { EngineInterface, Register } from 'claude-code'
 import { WorkspaceClient } from './workspace.ts'
 import { ALLOWED_TOOLS, bash, edit, instructions, read, write, VIRTUAL_ROOT, type ToolScope } from './tools.ts'
@@ -81,16 +82,16 @@ export const register: Register = on => {
     return 'deny' in result ? result : { result }
   })
 
-  // The repository's own instructions live on the runner, not beside the
+  // The repository's own instructions live in the thread's machine, not beside the
   // local directory Claude Code runs in.
   on('prompt.context', async ($, e, next) => {
     const context = await next(e)
     const scope = await workspace($)
     if (!scope) return context
     const sections = [
-      `You are working in a cube thread. ${scope.root} (also ${VIRTUAL_ROOT}) is the thread workspace on cube's trusted runner: ` +
+      `You are working in a cube thread. ${scope.root} (also ${VIRTUAL_ROOT}) is the thread workspace in the thread's own virtual machine: ` +
       'Read, Write and Edit address files there, and Bash runs commands there with the workspace root as its working directory. ' +
-      'The runner executes trusted commands under its own account; it is not a sandbox. Background commands, notebooks, worktrees and host-local tools are not available.',
+      'Commands run there as user agent (with sudo); the machine reaches the internet over HTTP and HTTPS only, and GH_TOKEN is a placeholder that works for gh and git with GitHub. Background commands, notebooks, worktrees and host-local tools are not available.',
     ]
     for (const file of INSTRUCTION_FILES) {
       const text = await instructions(scope, file).catch(() => null)

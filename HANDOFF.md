@@ -21,9 +21,10 @@ every thread now works in its own QEMU virtual machine on a runner
   systemd units as user `agent`), reached with the system OpenSSH client
   through `cube-gateway dial` with pinned host keys.
 
-The guest is the isolation boundary between a thread and the runner; QEMU runs
-as the runner account and is hardened only by `-sandbox on`, so the runner host
-as a whole is not a sandbox. State schema 102 and runner config version 2: no
+The guest is the thread's sandbox, the isolation boundary between a thread and
+the runner; QEMU runs as the runner account and is hardened only by
+`-sandbox on`, so the runner host as a whole is not a sandbox (ARCHITECTURE.md
+lists what the boundary covers and what it does not). State schema 102 and runner config version 2: no
 migration; a fresh `CUBED_STATE` and re-enrolled runners (DEVELOPING.md).
 
 Verified on server1 (Linux, KVM, QEMU 8.2, Debian 13 genericcloud, disposable
@@ -72,6 +73,18 @@ state, loopback Iroh, 2026-10-04):
   guest (root `grep` of `/` and `/proc/*/environ` for token-shaped values) nor
   in the VM disk, seed, gateway state, Pi transcripts or logs on the host. The
   runner held only UDP and unix sockets, QEMU only unix sockets.
+
+A review round (2026-10-05) then fixed: the gateway refuses the gateway
+host's own interface addresses and requests with more than one Host header; a
+VM's first `vm.start` fixes its sizes, mac and seed and later starts reuse
+them (a missing seed is rewritten); a runner mutation finishes even when its
+control connection times out; a disk is deleted at archive only if cubed
+recorded no agent command or write in the machine and the guest's check is
+clean (so most used threads now keep their disk; there is no discard action
+yet); activation and recovery do not reopen a thread while it is archived.
+Each fix has a test, and the full `test-node-transport.sh` with a real guest
+passed afterwards. The spike under `spikes/l2-gateway` was removed; its
+results are in the plan.
 
 Not verified: macOS (HVF, arm64 guest), runner and cubed on separate machines
 (direct and relay modes), more than one active VM per runner (by design one),

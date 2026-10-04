@@ -251,9 +251,14 @@ through the gateway, verifying the pinned commit and checking it out detached;
 an empty project gets an empty `/workspace`. A failed try is never rerun under
 its key, and a force-pushed branch that no longer holds the pinned commit fails
 closed. Archive runs the release check (every checkout at its pinned commit, no
-changes, branches, stashes or commits of its own, no other command running):
-a clean machine is released and its disk deleted; anything else, an unreachable
-machine, a failed one or an interrupted one is retained on the runner.
+changes, branches, stashes or commits of its own, no other command running).
+The guest is agent-controlled, so its answer alone never deletes a disk:
+`VmWorkspace` records in the thread's lease store that the agent ran a command
+or wrote a file before sending it (cubed's own provisioning and checks do not
+count). A machine is released and its disk deleted only when that record is
+empty and the check is clean; anything else, an unreachable machine, a failed
+one or an interrupted one is retained on the runner. While an archive runs,
+activation and the recovery loop do not reopen the thread.
 
 On a cubed restart machines keep running; activation starts each again (which
 rotates its frame token), attaches it and Pi reattaches to running commands by
@@ -277,13 +282,20 @@ closed. The permanent tombstone removes global capacity while retaining
 immutable identity, thread links, reason, probe evidence, runner journals and
 retained disks.
 
-The guest is the isolation boundary between a thread and its runner; the
-runner host as a whole is not a sandbox: QEMU runs as the runner account,
-hardened only by `-sandbox on` on Linux. The guest's only network is the
-gateway: HTTP and HTTPS to public addresses, each request decided by cubed
-(`egress-policy.ts`), the GitHub placeholder replaced by the host's token only
-for github.com and api.github.com over HTTPS. Keep host Git/model credentials
-out of runner accounts. Browser access is loopback, an access-controlled
+The thread's VM is its sandbox, and the boundary is precise. It covers the
+agent's processes and files (they live in the guest, as `agent` with sudo
+there, and cannot see the runner account, its keys or journal, or another
+thread), its network (raw frames to the gateway only: HTTP and HTTPS to public
+addresses, never cubed, the runner, the gateway host's own addresses, a LAN or
+a metadata service, each request decided by cubed in `egress-policy.ts`) and
+its credentials (placeholders only; the gateway replaces the GitHub
+placeholder with the host's token only for github.com and api.github.com over
+HTTPS). It does not cover a QEMU escape (QEMU runs as the runner account,
+hardened only by `-sandbox on` on Linux, nothing on macOS), so the runner host
+as a whole is not a sandbox. It does not stop the agent sending what it can
+read to any public HTTPS host, or using the host's GitHub authority on GitHub.
+Pi, codemode's worker and Claude Code run on the cubed host, outside any VM.
+Keep host Git/model credentials out of runner accounts. Browser access is loopback, an access-controlled
 private network, or an authenticated private proxy; Iroh authenticates runner
 and gateway communication, not browser users.
 

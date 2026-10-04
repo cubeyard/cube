@@ -1,7 +1,7 @@
 # Runner (protocol 3)
 
 The production boundary is documented in the
-[operator runbook](../../docs/trusted-runner-operations.md); the design is
+[operator runbook](../../docs/runner-operations.md); the design is
 [docs/plans/2026-10-04-vm-runner.md](../../docs/plans/2026-10-04-vm-runner.md).
 This file describes the daemon, the wire and the development loop.
 
@@ -13,9 +13,10 @@ image written by the runner from documents cubed sends) and a frame pump. It
 runs no command for a thread and has no file or Git operations. The agent's
 tools run in the guest over SSH, which cubed reaches through `cube-gateway`.
 
-The guest is the isolation boundary. QEMU runs as the runner account and is
-not hardened beyond `-sandbox on` (Linux), so the runner host as a whole is not
-a sandbox. Root is refused.
+The guest is the thread's sandbox: the agent's commands, files and network
+stay inside it. QEMU runs as the runner account and is not hardened beyond
+`-sandbox on` (Linux), so a QEMU escape has that account's authority and the
+runner host as a whole is not a sandbox. Root is refused.
 
 The runner accepts one enrolled Iroh control peer and one persisted
 installation binding (`nodeId`, `threadId`, `environmentId`). Iroh `peerId`

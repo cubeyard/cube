@@ -1,7 +1,7 @@
 # Developing cube
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) for ownership and
-[docs/trusted-runner-operations.md](docs/trusted-runner-operations.md) for runner
+[docs/runner-operations.md](docs/runner-operations.md) for runner
 operations. No deployment is necessary for the local development loop.
 
 ## Checks
