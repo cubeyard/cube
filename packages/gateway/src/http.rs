@@ -122,7 +122,11 @@ impl Upstream {
                 if resolved.is_empty() {
                     return Err(UpstreamError::Failed(anyhow!("{host} has no address")));
                 }
-                if resolved.iter().any(|a| !addr::is_public(a.ip())) {
+                // Read per connection: the host's addresses can change, and
+                // failing to read them refuses rather than guesses.
+                let local = addr::local_addresses()
+                    .map_err(|e| UpstreamError::Failed(anyhow!("reading local addresses: {e}")))?;
+                if resolved.iter().any(|a| !addr::is_upstream(a.ip(), &local)) {
                     return Err(UpstreamError::NotPublic);
                 }
                 resolved
@@ -168,11 +172,13 @@ impl Resolver for HostResolver {
         Box::pin(async move {
             match tokio::net::lookup_host((name.as_str(), 0)).await {
                 Ok(addresses) => {
-                    // Private addresses are never useful to the guest (the
-                    // gateway refuses them) and would leak the host's network.
+                    // Private and host-local addresses are never useful to
+                    // the guest (the gateway refuses them) and would leak the
+                    // host's network.
+                    let local = addr::local_addresses().unwrap_or_default();
                     let v4: Vec<_> = addresses
                         .filter_map(|a| match a.ip() {
-                            IpAddr::V4(v4) if addr::is_public(a.ip()) => Some(v4),
+                            IpAddr::V4(v4) if addr::is_upstream(a.ip(), &local) => Some(v4),
                             _ => None,
                         })
                         .collect();
@@ -377,6 +383,11 @@ impl Connection {
         &self,
         request: &Request<Incoming>,
     ) -> Result<(String, u16), (StatusCode, &'static str)> {
+        // RFC 9112 section 3.2: more than one Host is a 400. Otherwise a
+        // second Host could route a substituted secret past the SNI check.
+        if request.headers().get_all(header::HOST).iter().count() > 1 {
+            return Err((StatusCode::BAD_REQUEST, "more than one Host header"));
+        }
         let from_header = request
             .headers()
             .get(header::HOST)
