@@ -2,14 +2,18 @@
 
 ## Ownership
 
-- **Pi AgentHarness + SQLite:** accepted prompts, transcript, model stream
-  checkpoints, tool invocations/results, operation status and resumption policy.
+- **pi-durable Harness + SQLite:** accepted prompts and their request IDs,
+  transcript, model stream checkpoints, tool tasks/results, run status and
+  resumption policy.
 - **cubed:** projects, immutable runner admission, thread metadata, request
   allocation, access boundary, HTTP/SSE and activation of Pi's open operations.
+  For a claude-code thread, the Claude Code child process and the thread record
+  (accepted prompts, printed messages, session ID); Claude Code owns its session.
 - **runner:** workspace execution and durable deduplication/result retention for
   commands. It cannot read Pi sessions or model credentials through the protocol.
-- **web:** rendering and user actions. SSE reconnect starts with a complete Pi
-  snapshot; the browser is never a workflow owner.
+- **web:** rendering and user actions, from the neutral thread event model
+  only. SSE reconnect starts with a complete transcript; the browser is never a
+  workflow owner.
 
 There is one execution core, in process. No worker transcript hydration, second
 agent-run journal or fallback backend. The old virtual-machine/container stack
@@ -39,34 +43,178 @@ declare exact, rollback-safe schema 100 compatibility.
 ## Action, result, resume
 
 Thread allocation and its first message are committed in the product registry
-before activation. The host accepts that first message into an empty Pi lane;
-afterwards Pi owns execution. On startup cubed opens nonarchived threads and
-drives Pi's current operations. Followup request IDs are stored in their Pi user
-messages, atomically with admission, so a repeated HTTP action does not append
-another turn. The product registry stores no model or tool progress.
+before activation. Each thread is one pi-durable Harness over its own storage;
+the thread transcript is the Harness's root conversation. The host submits the
+first message under a fixed request ID; afterwards Pi owns execution. On startup
+cubed opens nonarchived threads and resumes Pi's unfinished tasks. Followup
+request IDs are Pi submission request IDs, committed atomically with admission,
+so a repeated HTTP action does not append another turn; a busy thread rejects a
+new prompt instead of queueing it. The product registry stores no model or tool
+progress. The thread's runner binding and a random storage identity live in a
+session-scoped Pi document, `cube.runner`; a changed binding refuses to open.
 
-The published `@earendil-works/pi-session-backend-sqlite-node` backend uses WAL.
-Cube sets and checks `synchronous=FULL` on creation and reopening. A separate
-SQLite connection holds a lifetime write lock for each session owner. It stores
-no execution state. Process death releases the lock; competing writers fail.
+Cube opens pi-durable's `SqliteStorage` on its own `node:sqlite` connection in
+WAL mode and sets and checks `synchronous=FULL` on every open. pi-durable has no
+cross-process storage lock; the thread's workspace lease is that lock.
 
-Pi's stable session/invocation identity maps deterministically to an Iroh runner
-operation ID. A repeated `exec.start` retrieves retained work; changed arguments
-conflict. The runner never silently reexecutes Interrupted operations or evicts
+Pi's tools reach the runner only through the thread `Workspace`. `read`,
+`write` and `edit` are pi-durable's own file tools over an `ExecutionEnv`
+(`workspace-env.ts`) that maps the virtual root `/workspace` to workspace-relative
+runner paths; a write after a read in the same call carries the read content's
+`expectedSha`. `bash` is cube's own tool. Every mutation key is derived from the
+storage identity and the Pi tool task ID, so a replayed task finds the same
+runner operation: a repeated `exec.start` retrieves retained work; changed
+arguments conflict. `read`, `write` and `bash` are replay-safe; `edit` is not and
+is reported as interrupted after a crash. The file tools read whole files of at
+most 2 MiB, as the Claude Code mod does; a larger file is refused after its
+first page with a hint to use bash.
+
+`codemode` (`codemode.ts`) runs one model-written JavaScript script in
+pi-codemode's QuickJS VM, a fresh worker per script whose only capabilities are
+the same four tools. It is one pi-durable tool with replay `unsafe`: a script
+interrupted by a crash is reported as possibly partially run and never rerun;
+its running output names each nested call that had started. Nested calls run one
+at a time in call order, and each reaches the Workspace under the codemode task
+key plus its sequence number (`pi:<instance>:<task>:code:<n>`), so every nested
+call has a stable identity. The host enforces strict limits modelled on cube's
+earlier codemode: 64 KiB source, 64 MiB VM memory, a 15-minute wall deadline,
+64 nested calls, 1 MiB arguments per call (both stop the script), 4 MiB per
+nested result handed to the script and a 256 KiB final result, cut with a
+notice. A mutating call stopped while running, or one whose runner outcome is
+unknown, makes the result an error that lists it as uncertain; a call that does
+not settle within 10 seconds of the script ending blocks the next script until
+it does. Nothing is retried automatically. The worker is fault containment, not
+a sandbox, and the runner stays trusted.
+
+Stop aborts Pi's tasks and cancels a
+running runner command; a host shutdown leaves a direct `bash` command running
+and the next process reattaches to it. Codemode's nested commands are cancelled
+on shutdown too, because codemode is never rerun. The runner never silently reexecutes Interrupted operations or evicts
 IDs to create room. A lost response therefore does not imply a second effect.
 Diagnostic runner CLI intents remain separate from Pi's production call path.
+Runner protocol 2 adds paged command output, `exec.cancel` (process-group
+SIGKILL), `fs.read`/`fs.write`/`fs.stat` beneath the workspace, idempotency keys
+for writes and per-thread lease-epoch fencing of mutations. A protocol-1 runner
+is incompatible and must be upgraded; see
+[RUNNER.md](packages/node-transport/RUNNER.md).
 
-Pi recovery is a durable state machine, not complete-history replay. Partial
+Pi recovery is a durable task state machine, not complete-history replay. Partial
 model responses can be interrupted and retried under Pi policy; a provider may
 bill both attempts. SIGKILL tests are not proof of power-loss durability.
+
+## Workspace and lease
+
+`Workspace` (`packages/server/src/workspace.ts`) is the one contract for a
+thread's workspace: `lease`, `exec`, `operation`, `cancel`, `readFile`,
+`writeFile`, `stat`, `capabilities()` and `limits()`. `RunnerWorkspace`
+implements it over the Iroh runner client; workspace semantics stay on the
+runner and cubed only translates, checks capabilities and limits, and enforces
+the lease. The HTTP routes under `/api/threads/:id/workspace` are a thin
+transport over the same interface, and `HttpWorkspace` implements it again for
+out-of-process agents. One contract suite runs against both.
+
+Each thread has one writable owner, `pi` or `claude-code`, fixed for the thread.
+The lease (`workspace-lease.ts`) has a random token, which is the authorization
+for every lease-scoped call, the owner, a fencing epoch and, for remote holders,
+a heartbeat deadline. While a lease is held, a dedicated SQLite connection keeps
+a write transaction open on the thread's `lease.lock`; a competing process or
+instance cannot take it, and process death releases it at once without stale PID
+files. Pi holds the lease for its whole Harness lifetime. The epoch is the only
+durable lease state: it never decreases and is at least the wall-clock time in
+milliseconds, so it stays increasing even if the thread directory is lost. Every
+runner mutation carries it, and the runner refuses an older epoch than the
+newest it has seen for the thread.
+
+Mutations carry a caller-chosen idempotency key, scoped to the runner binding
+and hashed into the runner operation ID. A key already seen is never executed
+again; the same key with a different request is `CONFLICT`. No shell fallback
+exists: a runner lacking a workspace capability is incompatible.
+
+## Thread event model
+
+`thread-events.ts` defines what a thread shows, whatever agent runs it: a
+`ThreadTranscript` with the thread's `agent`, the workspace's current writable
+`owner`, a `status` (`idle`, `working`, `completed`, `failed`, `stopped`) and an
+ordered list of events: user message, assistant text (with a reasoning flag),
+tool call and tool result (paired by `callId`). An event still streaming carries
+`final: false`: the in-flight model partial and a running tool's output.
+
+`ThreadEvents` has the same interface in-process and over HTTP: `read()` and a
+serialized, coalescing `watch()`. `PiThreadEvents` renders pi-durable's
+conversation view (entries plus `pi.live`); `GET …/history` returns `read()` and
+`GET …/stream` (`thread-events-http.ts`) sends one transcript per SSE frame and
+ends the stream when the source closes. `HttpThreadEvents` is the client; it is
+browser-safe and the web UI uses it directly. An agent adapter is the only code
+that knows its agent's shapes; the UI never reads Pi messages.
+`ClaudeThreadEvents` renders a claude-code thread into the same transcript.
+
+## Claude Code threads
+
+Claude Code is an alternative thread agent for one purpose: to use the person's
+own Claude Max subscription through the unmodified `claude` binary and its own
+login (`claude /login` or `claude setup-token`). Choosing a model under
+"claude · max" at thread creation makes a `claude-code` thread; the agent is
+fixed for the thread, and within it only Claude Code's own models (`opus`,
+`sonnet`, `haiku`) can be chosen. Claude Code is not a provider in cube's model
+settings, and Pi does not offer Anthropic's Claude Pro/Max OAuth login: Pi
+reaches Anthropic models with an API key.
+
+`ClaudeAgent` (`claude-agent.ts`) takes the thread's `claude-code` lease for its
+lifetime and starts `claude -p --input-format stream-json --output-format
+stream-json --verbose --include-partial-messages --setting-sources ""
+--strict-mcp-config --mcp-config '{"mcpServers":{}}' --tools <allow-list>
+--plugin-dir packages/claude-mod --model <model>` on the first prompt, in a stable per-thread
+directory, with `--resume <session-id>` once Claude Code has reported a session.
+Prompts go to stdin under their request ID (a repeated ID is accepted once), stop
+is a stream-json `interrupt` control request; a child that ignores it is sent
+SIGTERM, then SIGKILL. cubed follows the Bash calls in Claude Code's messages
+and cancels their runner commands (`claude:<tool_use_id>:bash`) itself when it
+kills the child, when the child dies mid-turn and on close, because the mod
+never sees an abort then and the runner admits one command at a time. A model
+change closes the idle child so the next prompt resumes with the new
+`--model`. An idle child is closed after ten minutes. cubed never stores Claude
+credentials; the child gets an allow-listed environment without any
+`ANTHROPIC_*` variable or Bedrock/Vertex switch, so the subscription is used
+instead of API billing, and without cubed's other credentials. The user's
+settings files and MCP servers are not loaded. `findClaude()` locates the binary (`CUBED_CLAUDE` names
+it, or `off`); without one, claude · max is not offered.
+
+The mod (`packages/claude-mod`) is a Claude Code plugin of function hooks. Its
+`tool.call` hooks answer Bash, Read, Write and Edit from the thread Workspace,
+keyed by `tool_use_id`, in each tool's own output shape; Edit is read, replace,
+then a write conditional on the sha it read. Tools are an allow-list
+(`ALLOWED_TOOLS` in `hooks/tools.ts`, also passed as `--tools`): everything else,
+MCP tools and built-ins the list does not know included, is refused because it
+would act on the cubed host. It also refuses background Bash, subagents with
+worktree or remote isolation and agent types that are not Claude Code's
+built-ins, and its
+`prompt.context` hook adds the workspace's `AGENTS.md` and `CLAUDE.md`. The mod
+reaches cubed on a private Unix socket (`CUBED_STATE/run/workspace.sock`, mode
+0600) that serves only workspace routes; the lease token cubed holds for the
+child is the authorization. A Claude Code hook's own time is budgeted, so it
+waits on a running command with the route's long poll (`?wait=`) instead of
+sleeping. `HttpWorkspace` wraps the mod's portable client, so the shared
+contract suite covers both.
+
+Durability is weaker than Pi's, and the UI says so: Claude Code keeps its own
+session but has no task checkpoints, so a turn cut off by a cubed restart is
+marked failed and not continued. Workspace keys still keep the runner from
+executing any tool call twice. Repository skills reach Claude Code only as text.
 
 ## Product state and limitations
 
 `CUBED_STATE/registry.sqlite` contains projects, globally registered runners,
 operator contact observations and retirement audit, thread metadata and creation
-request keys. `CUBED_STATE/threads/<id>/session` contains
-Pi's databases. Registry v100/v101 receives the rollback-compatible global-pool extension in place; older execution stacks are
-not migrated. See the reset workflow in README.
+request keys. `CUBED_STATE/threads/<id>/pi.sqlite` is
+the thread's pi-durable storage (`claude.sqlite` and the `claude/` working
+directory for a claude-code thread); `threads/<id>/lease.sqlite` keeps the thread's lease epoch and
+owner, and `lease.lock` is only held while a lease is. Registry v100/v101 receives the rollback-compatible global-pool extension in place; older execution stacks are
+not migrated. See the reset workflow in README. The state schema is 101: the
+supervisor refuses to update a schema 100 installation in place, and cubed
+refuses to open a thread directory that still holds the old Pi store
+(`session/` or `owner.sqlite`) instead of starting it again empty. One cubed
+serves one `CUBED_STATE`: a second refuses to start while the first's
+workspace socket answers.
 
 A runner has one permanent node/environment admission and belongs to the Cube
 installation, not a project. It admits one active thread workspace at a time. Cubed
@@ -135,6 +283,9 @@ browser users.
 `scripts/test-node-transport.sh` runs Rust checks and actual Node/Iroh/runner
 integration. `smoke-durable-agent.ts` covers four SIGKILL boundaries; `smoke-product.ts`
 covers ordinary API creation, startup activation, streaming/reconnect and prompt
-deduplication. These use controlled models and disposable data, never live users.
+deduplication, and a claude · max thread through a fake `claude` that runs the
+mod's tool functions over the workspace socket. `scripts/check-claude-mod.sh`
+validates and tests the mod with the installed `claude` CLI without calling a
+model; the real CLI is never started by tests. These use controlled models and disposable data, never live users.
 Separate-machine Linux/macOS lifecycle and paid-model acceptance remain separate
 release checks. The pinned reference snapshots are under `repos/`.

@@ -1,5 +1,5 @@
 import http from "node:http";
-import type { AddressInfo } from "node:net";
+import net, { type AddressInfo } from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -7,12 +7,13 @@ import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import type { Models } from "@earendil-works/pi-ai";
 import { GitService, normalizeRepoUrl } from "@cube/git";
-import { Registry, type Project, type Runner } from "./registry.ts";
+import { Registry, threadAgent, type Project, type Runner } from "./registry.ts";
+import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { Conversations } from "./conversation.ts";
+import { workspaceRoute } from "./workspace-http.ts";
 import { IrohExecutionNodeClient, type TrustedRunnerHealth } from "./iroh-node.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
-import { JevSettings } from "./jev-settings.ts";
 import { ModelAuth } from "./model-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { UpdateService } from "./update-service.ts";
@@ -34,6 +35,67 @@ options:
 cubed stays in the foreground. It has no application-level user authentication;
 keep it on loopback or behind an authenticated, access-controlled private network.`;
 
+/** The `claude` binary for claude-code threads: CUBED_CLAUDE names it (or
+ * `off`), otherwise the first `claude` on PATH. Null when there is none. */
+export function findClaude(env: NodeJS.ProcessEnv = process.env): string[] | null {
+  const configured = env.CUBED_CLAUDE?.trim();
+  if (configured === "off") return null;
+  const candidates = configured ? [configured] : (env.PATH ?? "").split(path.delimiter).filter(Boolean).map(directory => path.join(directory, "claude"));
+  for (const candidate of candidates) {
+    try { fs.accessSync(candidate, fs.constants.X_OK); if (fs.statSync(candidate).isFile()) return [candidate]; } catch { /* next */ }
+  }
+  return null;
+}
+
+/** A private copy of the Claude Code mod under the state directory. Claude
+ * Code writes type declarations into a plugin folder it loads, so the
+ * application tree is never handed to it. Copied afresh at every start. */
+function claudeMod(state: string): string {
+  const target = path.join(state, "run", "claude-mod");
+  fs.rmSync(target, { recursive: true, force: true });
+  fs.cpSync(path.resolve(import.meta.dirname, "../../claude-mod"), target, {
+    recursive: true, filter: source => !source.includes(`${path.sep}.claude-plugin${path.sep}types`),
+  });
+  return target;
+}
+
+/** The private socket the Claude Code mod reaches the thread workspace on.
+ * It serves workspace routes only; the lease token is the authorization. */
+async function workspaceSocket(state: string): Promise<{ socket: string; temporary: string | null }> {
+  const directory = path.join(state, "run");
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  fs.chmodSync(directory, 0o700);
+  const socket = path.join(directory, "workspace.sock");
+  // Unix socket paths are short; a deep state directory gets a private temporary one.
+  if (Buffer.byteLength(socket) > 100) {
+    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "cubed-"));
+    return { socket: path.join(temporary, "workspace.sock"), temporary };
+  }
+  // A socket that still answers belongs to a live cubed on this state: never
+  // take it from that instance's Claude Code threads. A dead one is stale.
+  const live = await new Promise<boolean>(resolve => {
+    const probe = net.connect(socket);
+    probe.once("connect", () => { probe.destroy(); resolve(true); });
+    probe.once("error", () => resolve(false));
+  });
+  if (live) throw new Error(`another cubed is serving this CUBED_STATE (${socket} answers); run one cubed per state`);
+  fs.rmSync(socket, { force: true });
+  return { socket, temporary: null };
+}
+
+/** A JSON request body; at most 1 MiB. */
+async function readJson(request: http.IncomingMessage): Promise<Record<string, unknown>> {
+  let body: Record<string, unknown> = {};
+  if (!["POST", "PUT", "PATCH"].includes(request.method!)) return body;
+  if (request.headers["content-type"]?.split(";")[0] !== "application/json") throw Object.assign(new Error("json body required"), { status: 415 });
+  let raw = "";
+  request.setEncoding("utf8");
+  for await (const chunk of request) { raw += chunk; if (Buffer.byteLength(raw) > 1024 * 1024) throw new Error("request too large"); }
+  try { if (raw) body = JSON.parse(raw); } catch { throw new Error("invalid json body"); }
+  if (!body || Array.isArray(body) || typeof body !== "object") throw new Error("invalid request");
+  return body;
+}
+
 /** Private product host. No remote provisioning or implicit sandbox backend. */
 export async function createCubed(options: {
   state: string;
@@ -42,12 +104,20 @@ export async function createCubed(options: {
   allowedHosts?: string[];
   updates?: UpdateService;
   runnerHealth?: (runner: Runner) => Promise<TrustedRunnerHealth>;
+  /** The argv that starts Claude Code; null disables claude-code threads.
+   * Default: findClaude(). */
+  claude?: readonly string[] | null;
+  /** Claude Code process tuning, for tests. */
+  claudeOptions?: { idleMs?: number; stopGraceMs?: number };
 }) {
+  const { socket, temporary: socketDirectory } = await workspaceSocket(options.state);
   const registry = new Registry(path.join(options.state, "registry.sqlite"));
   const models = options.models ?? await createModelRuntime();
   const modelAuth = new ModelAuth(models);
-  const jev = new JevSettings(options.state);
-  const conversations = new Conversations(registry, path.join(options.state, "threads"), models, jev);
+  const claudeCommand = options.claude === undefined ? findClaude() : options.claude;
+  const conversations = new Conversations(registry, path.join(options.state, "threads"), models, claudeCommand ? {
+    command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
+  } : null);
   const github = new GithubAuth();
   const git = new GitService(path.join(options.state, "repositories"));
   const updates = options.updates ?? new UpdateService();
@@ -69,6 +139,8 @@ export async function createCubed(options: {
     return runnerView(id)!;
   };
   const catalog = async () => (await models.getAvailable()).map(({ provider, id }) => ({ provider, id }));
+  /** What a new thread may start with: Pi's models, then claude · max. */
+  const threadCatalog = async () => [...await catalog(), ...(conversations.claudeAvailable ? CLAUDE_MODELS : [])];
   const projectView = (project: Project) => ({ ...project,
     availableRunnerCount: registry.availableRunners().length,
     runnerCount: registry.runnerCount(),
@@ -100,18 +172,12 @@ export async function createCubed(options: {
       const method = request.method;
       if (!allowedHosts.has(new URL(`http://${request.headers.host}`).hostname)) return json({ error: "host rejected" }, 403);
       if (request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) return json({ error: "origin rejected" }, 403);
-      let body: Record<string, unknown> = {};
-      if (["POST", "PUT", "PATCH"].includes(method!)) {
-        if (request.headers["content-type"]?.split(";")[0] !== "application/json") return json({ error: "json body required" }, 415);
-        let raw = "";
-        request.setEncoding("utf8");
-        for await (const chunk of request) { raw += chunk; if (Buffer.byteLength(raw) > 1024 * 1024) throw new Error("request too large"); }
-        try { if (raw) body = JSON.parse(raw); } catch { throw new Error("invalid json body"); }
-        if (!body || Array.isArray(body) || typeof body !== "object") throw new Error("invalid request");
-      }
+      let body: Record<string, unknown>;
+      try { body = await readJson(request); }
+      catch (error) { if ((error as { status?: number }).status === 415) return json({ error: "json body required" }, 415); throw error; }
       const text = (key: string) => { const value = body[key]; if (typeof value !== "string" || !value.trim() || value.length > 100000) throw new Error(`${key} is required and must be at most 100000 characters`); return value; };
-      const selection = async (input: unknown): Promise<ModelSelection> => {
-        const available = await catalog();
+      const selection = async (input: unknown, available?: ModelSelection[]): Promise<ModelSelection> => {
+        available ??= await threadCatalog();
         const candidate = input as ModelSelection | undefined;
         const selected = candidate ? available.find(model => model.provider === candidate.provider && model.id === candidate.id) : preferredModel(available);
         if (!selected) throw new Error("connect a model provider first");
@@ -135,24 +201,14 @@ export async function createCubed(options: {
       }
       if (url.pathname === "/api/state" && method === "GET") {
         const available = await catalog();
-        return json({ onboardingComplete: isOnboardingComplete(onboarding), auth: available.length ? { state: "ok", provider: available[0].provider, credentialType: "host" } : { state: "missing", provider: "model" } });
+        // With no Pi provider, Claude Code on this host still runs threads on
+        // its own login (which cubed cannot see); do not point to providers.
+        const auth = available.length ? { state: "ok", provider: available[0].provider, credentialType: "host" }
+          : conversations.claudeAvailable ? { state: "ok", provider: CLAUDE_PROVIDER, credentialType: "claude code login" }
+          : { state: "missing", provider: "model" };
+        return json({ onboardingComplete: isOnboardingComplete(onboarding), auth });
       }
       if (url.pathname === "/api/onboarding" && method === "POST") { completeOnboarding(onboarding); return json({ onboardingComplete: true }); }
-      if (url.pathname === "/api/jev") {
-        if (method === "GET") return json(jev.status());
-        if (method === "PUT") {
-          if (typeof body.apiKey !== "string") throw new Error("JEV key is required");
-          jev.save(body.apiKey);
-          await conversations.syncMemory();
-          return json(jev.status());
-        }
-        if (method === "DELETE") {
-          jev.remove();
-          await conversations.syncMemory();
-          return json(jev.status());
-        }
-        return json({ error: "not found" }, 404);
-      }
       if (parts[0] === "api" && parts[1] === "providers") {
         const id = parts[2];
         if (parts.length === 2 && method === "GET") return json({ providers: await modelAuth.list() });
@@ -179,7 +235,11 @@ export async function createCubed(options: {
         return json({ github: github.status() });
       }
       if (url.pathname === "/api/github/repositories" && method === "GET") return json({ repositories: await github.repositories() });
-      if (url.pathname === "/api/models" && method === "GET") { const available = await catalog(); return json({ models: available, selected: preferredModel(available) }); }
+      if (url.pathname === "/api/models" && method === "GET") {
+        const available = await catalog();
+        const all = await threadCatalog();
+        return json({ models: all, selected: preferredModel(available) ?? all[0] ?? null });
+      }
       if (parts[0] === "api" && parts[1] === "runners") {
         const id = parts[2];
         if (!id && parts.length === 2 && method === "GET") {
@@ -242,22 +302,30 @@ export async function createCubed(options: {
       }
       if (parts[0] === "api" && parts[1] === "threads") {
         const id = parts[2];
-        if (parts.length > 5 || (parts.length === 5 && parts[3] !== "tool-output")) return json({ error: "not found" }, 404);
+        if (parts.length > 4 && parts[3] !== "workspace") return json({ error: "not found" }, 404);
         if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...thread, state: conversations.error(thread.id) ? "error" : "ready", error: conversations.error(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
         if (!id && method === "POST") {
-          const thread = registry.createThread(text("projectId"), text("requestId"), await selection(body.model), text("text"));
+          const model = await selection(body.model);
+          const thread = registry.createThread(text("projectId"), text("requestId"), model, text("text"), model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi");
           await conversations.activate(thread.id);
           return json({ id: thread.id });
         }
         const thread = registry.getThread(id);
         if (!thread || thread.archived) return json({ error: "thread not found" }, 404);
+        if (parts[3] === "workspace") {
+          const result = await workspaceRoute(conversations.workspace(id), { method: method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body });
+          return json(result.body, result.status);
+        }
         if (!parts[3] && method === "DELETE") { await conversations.archive(id); return json({ ok: true }); }
         if (!parts[3] && method === "PATCH") { registry.saveThread({ ...thread, title: text("title").slice(0, 200) }); return json({ ok: true }); }
         if (parts[3] === "history" && method === "GET") return json(await conversations.history(id));
-        if (parts[3] === "tool-output" && parts[4] && method === "GET") return json(await conversations.toolOutput(id, parts[4]));
         if (parts[3] === "stream" && method === "GET") return await conversations.stream(id, response);
         if (parts[3] === "stop" && method === "POST") { await conversations.stop(id); return json({ ok: true }); }
-        if (parts[3] === "model" && (method === "GET" || method === "PATCH")) return json({ models: await catalog(), selected: await conversations.model(id, method === "PATCH" ? await selection(body) : undefined) });
+        if (parts[3] === "model" && (method === "GET" || method === "PATCH")) {
+          // The agent is fixed for the thread; only its own models are offered.
+          const available = threadAgent(thread) === "claude-code" ? [...CLAUDE_MODELS] : await catalog();
+          return json({ models: available, selected: await conversations.model(id, method === "PATCH" ? await selection(body, available) : undefined) });
+        }
         if (parts[3] === "prompt" && method === "POST") return json(await conversations.submit(id, text("text"), text("requestId")));
       }
       if (parts[0] === "api") return json({ error: "not found" }, 404);
@@ -273,6 +341,24 @@ export async function createCubed(options: {
       else json({ error: error instanceof Error ? error.message : String(error) }, 409);
     }
   });
+  const workspaceServer = http.createServer(async (request, response) => {
+    const json = (body: unknown, status = 200) => { response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); response.end(JSON.stringify(body)); };
+    try {
+      const url = new URL(request.url!, "http://localhost");
+      const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+      if (parts[0] !== "api" || parts[1] !== "threads" || !parts[2] || parts[3] !== "workspace") return json({ error: "not found" }, 404);
+      const thread = registry.getThread(parts[2]);
+      if (!thread || thread.archived) return json({ error: "thread not found", code: "NOT_FOUND", completionUnknown: false }, 404);
+      const body = await readJson(request);
+      const result = await workspaceRoute(conversations.workspace(thread.id), { method: request.method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body });
+      return json(result.body, result.status);
+    } catch (error) {
+      if (response.headersSent) response.destroy();
+      else json({ error: error instanceof Error ? error.message : String(error), code: "IO_ERROR", completionUnknown: false }, 409);
+    }
+  });
+  await new Promise<void>((resolve, reject) => { workspaceServer.once("error", reject); workspaceServer.listen(socket, () => { workspaceServer.off("error", reject); resolve(); }); });
+  fs.chmodSync(socket, 0o600);
   await conversations.boot();
   const recovery = setInterval(() => { void conversations.boot(); }, 30000);
   recovery.unref();
@@ -282,7 +368,11 @@ export async function createCubed(options: {
       clearInterval(recovery);
       server.closeAllConnections();
       if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
-      await modelAuth.close(); await conversations.close(); registry.close();
+      await modelAuth.close(); await conversations.close();
+      workspaceServer.closeAllConnections();
+      await new Promise<void>(resolve => workspaceServer.close(() => resolve()));
+      fs.rmSync(socketDirectory ?? socket, { recursive: true, force: true });
+      registry.close();
     })();
     return closePromise;
   } };

@@ -1,0 +1,7 @@
+{
+  "name": "@cube/claude-mod",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "The Claude Code mod cubed loads with --plugin-dir for claude-code threads"
+}

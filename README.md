@@ -1,8 +1,8 @@
 # cube
 
 Self-hosted coding-agent threads. The browser talks to cubed; an in-process
-[Pi AgentHarness](https://github.com/earendil-works/pi) owns the agent loop and
-durable SQLite session. Tools run on an explicitly enrolled Iroh runner.
+[pi-durable](https://github.com/earendil-works/pi) Harness owns the agent loop
+and the durable SQLite conversation. Tools run on an explicitly enrolled Iroh runner.
 Closing the tab or restarting cubed does not discard accepted work.
 
 **Experimental software. Current runners execute trusted commands under their
@@ -52,9 +52,6 @@ Managed binary installations also expose **system**, where an operator can check
 for and install signed cubed releases. Browser updates are opt-in and never update
 runners. Source checkouts and externally managed installations remain read-only;
 see [the cubed update runbook](docs/cubed-updates.md).
-Optional JEV memory is configured separately at the top of **models**. It is
-strictly off until a JEV key is saved there; Cube then uses JEV to retain useful
-thread notes and select compact, recallable views of large tool output.
 
 Create a project and enroll trusted runners using
 [the operator runbook](docs/trusted-runner-operations.md). Runners form one
@@ -68,7 +65,16 @@ stale installation binding without deleting audit or runner-side evidence. The U
 streamed results, reconnect, model selection, stop, rename and archive.
 
 This is workspace collision isolation only, not process or security isolation.
-The current tool is bounded `bash`. Workspace transfer, authenticated Git writes,
+The current tools are `read`, `write`, `edit`, bounded `bash` and `codemode`,
+which runs one model-written JavaScript script that calls those tools.
+A thread can instead run on Claude Code with your own Claude Max login: choose
+a model under "claude · max" when you start it. cubed starts the unmodified
+`claude` binary with cube's mod, which sends Claude Code's Bash, Read, Write and
+Edit to the thread workspace on the runner. Install Claude Code on the cubed
+host and log in there (`claude /login`); cubed never stores Claude credentials
+and starts it without `ANTHROPIC_API_KEY`. These threads are less durable than
+Pi's: a turn cut off by a host restart is not continued, though no tool call
+runs twice. Workspace transfer, authenticated Git writes,
 service links, thread-to-thread tasks and native sandboxing are not yet exposed
 by this implementation. Project repository checks remain host-side and pin the
 metadata used for runner-side checkout; host credentials never cross that boundary.

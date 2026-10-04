@@ -60,18 +60,6 @@ transcript remains readable. Use **refresh models** after a catalog fetch error.
 Offline auth acceptance uses a controlled provider and real Pi credential storage
 in disposable state; it never signs in to a live account.
 
-JEV memory is a separate optional host capability at the top of **models**.
-Saving its key writes `CUBED_STATE/jev-key.json` with mode `0600`; API responses
-expose only whether it is configured. With no saved key, the recall tool is
-inactive and Cube makes no JEV requests. When enabled, selected prompts,
-responses and tool-output excerpts are sent to TypeSafe AI. Durable notes use
-Pi's thread session values, while full compressed tool output stays in the Pi
-tool-result details for exact recall. Ordinary history/SSE omits that retained
-original; opening a compressed tool result fetches it on demand so the inspector
-can switch between **sent to model** and **original**. Removing the key disables
-new classification and compression immediately without deleting prior session
-evidence.
-
 For direct Tailscale access, set `CUBED_HOST` to the host's Tailscale IP and list
 its exact MagicDNS name/IP in comma-separated `CUBED_ALLOWED_HOSTS`. Binding
 `0.0.0.0` listens on every IPv4 interface: use it only when firewall/network
@@ -94,11 +82,33 @@ repositories therefore need credential-free runner access. The initialization
 workspace remains the compatibility template for empty legacy plans.
 
 Useful reads: `/api/threads`, `/api/projects`, `/api/threads/<id>/history`,
-`/api/threads/<id>/stream`. The last endpoint is SSE and starts with a full
-snapshot on every connection. Stop uses `POST /api/threads/<id>/stop`; DELETE
+`/api/threads/<id>/stream`. Both return the neutral `ThreadTranscript`
+(`packages/server/src/thread-events.ts`); the stream is SSE and starts with the
+full transcript on every connection. Stop uses `POST /api/threads/<id>/stop`; DELETE
 archives an idle thread and releases runner capacity. Changed or independently
 committed Git worktrees and fallback copies are retained; a clean Git worktree
 still at the template HEAD is removed.
+
+`/api/threads/<id>/workspace` exposes the thread's `Workspace` (capabilities,
+limits, lease, exec, operations, file and stat; see
+`packages/server/src/workspace-http.ts`). Every route except reading
+capabilities and acquiring the lease requires `authorization: Bearer <lease
+token>`. A Pi thread's lease is held by Pi itself, so these routes admit no second
+writable owner. `node packages/server/test/workspace-test.ts` runs the shared
+contract offline; `scripts/test-node-transport.sh` runs it against the real
+runner and Iroh. A running operation can be long-polled with `?wait=<ms>` (at
+most 30000).
+
+A claude-code thread holds its lease in cubed for the Claude Code child, which
+reaches the same routes on `CUBED_STATE/run/workspace.sock` through the mod in
+`packages/claude-mod`. cubed finds `claude` on `PATH`; `CUBED_CLAUDE=<path>`
+names another binary and `CUBED_CLAUDE=off` disables claude · max. Tests never
+start the real CLI: `packages/server/test/claude-agent-test.ts` and the product
+smoke use `packages/server/test/fake-claude.ts`, which speaks stream-json and
+runs the mod's tool functions over the socket. `bash scripts/check-claude-mod.sh`
+runs `claude plugin validate`, `claude plugin test` (the mod's tests against the
+engine with the routes answered in memory; no model call) and, with
+`CLAUDE_CODE_TYPES` pointing at Claude Code's `claude-code.d.ts`, tsc.
 
 Runner operations are installation-global. `GET /api/runners` returns persisted
 contact and the current global allocation snapshot without private adapter paths;
@@ -137,10 +147,14 @@ runbook](docs/cubed-updates.md) for the manifest and supervisor contracts.
 Registry v100/v101 receives the rollback-compatible global-pool extension in place. There is no adoption of older registries or
 terminal sessions. Stop cubed and set `CUBED_STATE` to a new empty directory to reset the product. Create
 projects and enroll fresh runner identities. Do not delete an unspecified live
-installation. Archive recycles runner capacity, not the archived Pi session or
-retained user changes.
+installation. Archive recycles runner capacity, not the archived Pi storage or
+retained user changes. Threads created before the move to pi-durable 1.0.1 are
+not migrated: reset to a new `CUBED_STATE` as above. cubed refuses to open such a
+thread (its directory still has `session/` or `owner.sqlite`) rather than run its
+first message again, and the state schema is 101, so a managed schema 100
+installation is not updated in place.
 
-Restart cubed against the same state to resume accepted Pi operations. Do not
+Restart cubed against the same state to resume accepted Pi tasks. Do not
 run two writable owners for a session. Backups of the host must be taken with
 cubed stopped; keep Pi databases and product metadata together. Runner backup,
 restore quarantine, drain and recovery acknowledgement follow the runbook.

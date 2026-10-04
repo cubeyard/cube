@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{io::AsyncRead, io::AsyncReadExt, task::JoinSet, time::timeout};
 
 pub const ALPN: &[u8] = b"cubeyard/node/1";
-pub const PROTOCOL_VERSION: u32 = 1;
-pub const MIN_COMPATIBLE_PROTOCOL_VERSION: u32 = 1;
+/// Protocol 2 adds paged output, `exec.cancel`, `fs.read`, `fs.write`,
+/// `fs.stat` and lease-epoch fencing. There is no protocol-1 fallback.
+pub const PROTOCOL_VERSION: u32 = 2;
+pub const MIN_COMPATIBLE_PROTOCOL_VERSION: u32 = 2;
 pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
-const RUNNER_CAPABILITIES: [&str; 8] = [
+const RUNNER_CAPABILITIES: [&str; 12] = [
     "node.status",
     "environment.inspect",
     "workspace.allocate",
@@ -21,9 +23,13 @@ const RUNNER_CAPABILITIES: [&str; 8] = [
     "workspace.allocate.v2",
     "workspace.release",
     "exec.start",
+    "exec.cancel",
     "operation.get",
+    "fs.read",
+    "fs.write",
+    "fs.stat",
 ];
-pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const RELAY_READY_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_CONNECTIONS: usize = 16;
@@ -65,13 +71,66 @@ pub enum Request {
         env: u64,
         #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
         spec: runner::ExecSpec,
+    },
+    #[serde(rename = "exec.cancel")]
+    ExecCancel {
+        env: u64,
+        #[serde(rename = "operationId")]
+        operation_id: String,
+        #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
     },
     #[serde(rename = "operation.get")]
     OperationGet {
         env: u64,
         #[serde(rename = "operationId")]
         operation_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<u64>,
+    },
+    #[serde(rename = "fs.read")]
+    FsRead {
+        env: u64,
+        #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
+    },
+    #[serde(rename = "fs.write")]
+    FsWrite {
+        env: u64,
+        #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u64>,
+        #[serde(rename = "idempotencyKey")]
+        idempotency_key: String,
+        path: String,
+        #[serde(with = "runner::base64_bytes")]
+        content: Vec<u8>,
+        #[serde(
+            rename = "expectedSha",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        expected_sha: Option<String>,
+        #[serde(rename = "createParents", default)]
+        create_parents: bool,
+    },
+    #[serde(rename = "fs.stat")]
+    FsStat {
+        env: u64,
+        #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        path: String,
     },
 }
 
@@ -121,6 +180,19 @@ pub enum Response {
     Workspace {
         workspace: runner::WorkspaceStatus,
     },
+    File {
+        path: String,
+        file: runner::FileContent,
+    },
+    Written {
+        #[serde(rename = "idempotencyKey")]
+        idempotency_key: String,
+        result: runner::WriteResult,
+    },
+    Stat {
+        path: String,
+        stat: runner::FileStat,
+    },
     Error {
         code: String,
         message: String,
@@ -140,6 +212,29 @@ pub enum Response {
 pub struct Limits {
     pub max_frame_bytes: usize,
     pub request_timeout_ms: u64,
+    pub max_command_bytes: usize,
+    pub max_path_bytes: usize,
+    pub max_exec_timeout_ms: u64,
+    pub max_output_bytes: u32,
+    pub output_page_bytes: usize,
+    pub max_read_bytes: u64,
+    pub max_write_bytes: usize,
+}
+
+impl Limits {
+    pub fn current() -> Self {
+        Self {
+            max_frame_bytes: MAX_FRAME_BYTES,
+            request_timeout_ms: REQUEST_TIMEOUT.as_millis() as u64,
+            max_command_bytes: runner::MAX_COMMAND_BYTES,
+            max_path_bytes: runner::MAX_PATH_BYTES,
+            max_exec_timeout_ms: runner::MAX_TIMEOUT_MS,
+            max_output_bytes: runner::MAX_OUTPUT,
+            output_page_bytes: runner::OUTPUT_PAGE_BYTES,
+            max_read_bytes: runner::MAX_READ_BYTES,
+            max_write_bytes: runner::MAX_WRITE_BYTES,
+        }
+    }
 }
 
 impl Response {
@@ -291,21 +386,18 @@ fn hello(node_id: &str, query: Request) -> Response {
             protocol_version: PROTOCOL_VERSION,
         } => Response::Hello {
             node_id: node_id.into(),
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             // The plain serve probe never enables trusted-runner execution.
             profiles: vec![],
             capabilities: vec!["node.hello".into()],
-            limits: Limits {
-                max_frame_bytes: MAX_FRAME_BYTES,
-                request_timeout_ms: REQUEST_TIMEOUT.as_millis() as u64,
-            },
+            limits: Limits::current(),
             minimum_protocol_version: MIN_COMPATIBLE_PROTOCOL_VERSION,
             software_version: SOFTWARE_VERSION.into(),
             binding: None,
         },
         _ => Response::error(
             "INCOMPATIBLE_PROTOCOL",
-            "protocol version 1 required; upgrade cubed or cube-runner",
+            "protocol version 2 required; upgrade cubed or cube-runner",
         ),
     }
 }
@@ -333,15 +425,20 @@ fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>)
         return Response::error("UNSUPPORTED", "runner execution is not enabled");
     };
     let operation_id = match &query {
-        Request::ExecStart { operation_id, .. } | Request::OperationGet { operation_id, .. } => {
-            Some(operation_id.clone())
-        }
+        Request::ExecStart { operation_id, .. }
+        | Request::ExecCancel { operation_id, .. }
+        | Request::OperationGet { operation_id, .. } => Some(operation_id.clone()),
+        Request::FsWrite {
+            idempotency_key, ..
+        } => Some(idempotency_key.clone()),
         _ => None,
     }
     .filter(|id| runner::valid_id(id));
     let mutation = matches!(
         query,
         Request::ExecStart { .. }
+            | Request::ExecCancel { .. }
+            | Request::FsWrite { .. }
             | Request::WorkspaceAllocate { .. }
             | Request::WorkspaceAllocateV2 { .. }
             | Request::WorkspaceRelease { .. }
@@ -380,22 +477,83 @@ fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>)
             env,
             operation_id,
             thread_id,
+            epoch,
             spec,
         } => runner
-            .start_in_workspace(env, thread_id.as_deref(), &operation_id, spec)
+            .start_fenced(env, thread_id.as_deref(), &operation_id, epoch, spec)
             .map(|()| Response::Accepted { operation_id }),
-        Request::OperationGet { env, operation_id } => {
-            runner
-                .get(env, &operation_id)
-                .map(|operation| Response::Operation {
-                    operation_id,
-                    operation,
-                })
-        }
+        Request::ExecCancel {
+            env,
+            operation_id,
+            thread_id,
+            epoch,
+        } => runner
+            .cancel(env, thread_id.as_deref(), &operation_id, epoch)
+            .map(|operation| Response::Operation {
+                operation_id,
+                operation,
+            }),
+        Request::OperationGet {
+            env,
+            operation_id,
+            cursor,
+        } => runner
+            .get_page(env, &operation_id, cursor)
+            .map(|operation| Response::Operation {
+                operation_id,
+                operation,
+            }),
+        Request::FsRead {
+            env,
+            thread_id,
+            path,
+            offset,
+            limit,
+        } => runner
+            .read_file(env, thread_id.as_deref(), &path, offset, limit)
+            .map(|file| Response::File { path, file }),
+        Request::FsWrite {
+            env,
+            thread_id,
+            epoch,
+            idempotency_key,
+            path,
+            content,
+            expected_sha,
+            create_parents,
+        } => runner
+            .write_file(
+                env,
+                thread_id.as_deref(),
+                epoch,
+                &idempotency_key,
+                &path,
+                &content,
+                expected_sha.as_deref(),
+                create_parents,
+            )
+            .map(|result| Response::Written {
+                idempotency_key,
+                result,
+            }),
+        Request::FsStat {
+            env,
+            thread_id,
+            path,
+        } => runner
+            .stat_path(env, thread_id.as_deref(), &path)
+            .map(|stat| Response::Stat { path, stat }),
         Request::Hello { .. } => unreachable!(),
     };
     result.unwrap_or_else(|error| {
-        if let Some(error) = error.downcast_ref::<runner::RunnerError>() {
+        if error.is::<runner::OutcomeUnknown>() {
+            Response::Error {
+                code: "OUTCOME_UNKNOWN".into(),
+                message: "retained mutation outcome is unknown; never repeat it".into(),
+                completion_unknown: true,
+                operation_id: operation_id.clone(),
+            }
+        } else if let Some(error) = error.downcast_ref::<runner::RunnerError>() {
             Response::Error {
                 code: error.0.into(),
                 message: "runner request rejected".into(),
@@ -564,7 +722,12 @@ async fn call_inner(
     );
     let bytes = encode(query)?;
     let operation_id = match query {
-        Request::ExecStart { operation_id, .. } => Some(operation_id.clone()),
+        Request::ExecStart { operation_id, .. } | Request::ExecCancel { operation_id, .. } => {
+            Some(operation_id.clone())
+        }
+        Request::FsWrite {
+            idempotency_key, ..
+        } => Some(idempotency_key.clone()),
         _ => None,
     };
     let mut possible_delivery = false;
@@ -608,8 +771,21 @@ async fn call_inner(
                 Response::Operation {
                     operation_id: got, ..
                 },
-                Request::OperationGet { operation_id, .. },
+                Request::OperationGet { operation_id, .. }
+                | Request::ExecCancel { operation_id, .. },
             ) if got == operation_id => {}
+            (Response::File { path: got, .. }, Request::FsRead { path, .. })
+            | (Response::Stat { path: got, .. }, Request::FsStat { path, .. })
+                if got == path => {}
+            (
+                Response::Written {
+                    idempotency_key: got,
+                    ..
+                },
+                Request::FsWrite {
+                    idempotency_key, ..
+                },
+            ) if got == idempotency_key => {}
             (Response::Environment { binding, .. }, Request::Inspect { env })
                 if binding.environment_id == *env && binding.node_id == expected_node_id => {}
             (
@@ -715,7 +891,7 @@ mod tests {
         );
         for value in [
             serde_json::json!({"method":"exec.start"}),
-            serde_json::json!({"method":"node.hello", "protocolVersion":1, "nodeId":"spoof"}),
+            serde_json::json!({"method":"node.hello", "protocolVersion":2, "nodeId":"spoof"}),
             serde_json::json!({"method":"node.hello", "protocolVersion":-1}),
         ] {
             assert!(
@@ -730,7 +906,10 @@ mod tests {
     #[test]
     fn version_and_identity_validation() {
         assert!(
-            matches!(hello("node-test", Request::Hello { protocol_version: 2 }), Response::Error { code, .. } if code == "INCOMPATIBLE_PROTOCOL")
+            matches!(hello("node-test", Request::Hello { protocol_version: 1 }), Response::Error { code, .. } if code == "INCOMPATIBLE_PROTOCOL")
+        );
+        assert!(
+            matches!(hello("node-test", Request::Hello { protocol_version: 3 }), Response::Error { code, .. } if code == "INCOMPATIBLE_PROTOCOL")
         );
         for id in ["", "node-", "other-node", "node-../etc", "node-é"] {
             assert!(validate_node_id(id).is_err());
@@ -742,7 +921,7 @@ mod tests {
         assert_eq!(
             (SOFTWARE_VERSION, RUNNER_CAPABILITIES),
             (
-                "0.2.2",
+                "0.3.0",
                 [
                     "node.status",
                     "environment.inspect",
@@ -751,7 +930,11 @@ mod tests {
                     "workspace.allocate.v2",
                     "workspace.release",
                     "exec.start",
+                    "exec.cancel",
                     "operation.get",
+                    "fs.read",
+                    "fs.write",
+                    "fs.stat",
                 ]
             ),
             "capability changes require a new immutable software version"

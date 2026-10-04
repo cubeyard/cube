@@ -16,7 +16,9 @@ contains its own Node runtime, production server dependencies, built web UI,
 foreground supervisor and launcher. A release also has a platform manifest and
 detached Ed25519 signature. The manifest binds the Git commit, platform, byte
 length, SHA-256, minimum supervisor version and state-schema rollback range, and
-must say `includesRunner: false`.
+must say `includesRunner: false`. The bundled Linux Node runtime links
+`libatomic.so.1`; minimal images such as the `ubuntu:24.04` container need the
+`libatomic1` package before `install.sh` can run the candidate self-check.
 
 For an initial installation, obtain these four files from one reviewed release:
 
@@ -121,9 +123,13 @@ its inherited lifeline and the next supervisor start rolls back before launch.
 `update.json` is status/recovery metadata, not an execution journal. Product and
 Pi state remain in `CUBED_STATE`; model credentials remain in Pi's configured
 credential directory. The current migration contract is deliberately narrow:
-state schema 100 may update only to a release declaring minimum 100, maximum 100
-and rollback-safe-from 100, whose own metadata and self-check also report 100.
-No other migration compatibility is implied.
+state schema 101 may update only to a release declaring minimum 101, maximum 101
+and rollback-safe-from 101, whose own metadata and self-check also report 101.
+No other migration compatibility is implied. Schema 101 is the move to
+pi-durable 1.0.1 and the thread Workspace: a schema 100 installation is refused
+an in-place update and must be reinstalled on a fresh `CUBED_STATE` (see
+DEVELOPING.md); cubed also refuses to open a thread directory that still holds
+the old Pi session store.
 
 For manual recovery, stop the foreground process or user service, inspect
 `current`, `previous`, `update.json` and the service logs, then atomically repoint

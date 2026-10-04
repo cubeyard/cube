@@ -173,7 +173,7 @@ async fn real_wire_rejection_and_no_hello_before_authorization() {
     for (bytes, expected) in [
         (
             encode(&Request::Hello {
-                protocol_version: 2,
+                protocol_version: 1,
             })
             .unwrap(),
             "INCOMPATIBLE_PROTOCOL",

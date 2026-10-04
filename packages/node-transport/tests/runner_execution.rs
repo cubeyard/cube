@@ -183,6 +183,7 @@ fn start(id: &str, spec: ExecSpec) -> Request {
         operation_id: id.into(),
         env: 1,
         thread_id: None,
+        epoch: None,
         spec,
     }
 }
@@ -198,6 +199,7 @@ async fn get(client: &Endpoint, addr: &EndpointAddr, id: &str) -> Operation {
         &Request::OperationGet {
             env: 1,
             operation_id: id.into(),
+            cursor: None,
         },
     )
     .await
@@ -741,7 +743,7 @@ async fn real_exec_dedup_capacity_binding_and_restart() {
     );
     assert!(matches!(
         request(&client, &address, &Request::Status).await,
-        Response::Status { status, protocol_version: 1, minimum_protocol_version: 1, .. }
+        Response::Status { status, protocol_version: 2, minimum_protocol_version: 2, .. }
             if status.lifecycle == "draining" && !status.active
     ));
     unsafe { libc::kill(daemon.id().unwrap() as i32, libc::SIGUSR2) };
@@ -759,10 +761,10 @@ async fn real_exec_dedup_capacity_binding_and_restart() {
         matches!(request(&client, &address, &start("op-once", spec("echo changed"))).await, Response::Error { code, .. } if code == "CONFLICT")
     );
     assert!(
-        matches!(request(&client, &address, &Request::ExecStart { operation_id: "wrong-env".into(), env: 2, thread_id: None, spec: spec("touch wrong-env") }).await, Response::Error { code, .. } if code == "ENVIRONMENT_MISSING")
+        matches!(request(&client, &address, &Request::ExecStart { operation_id: "wrong-env".into(), env: 2, thread_id: None, epoch: None, spec: spec("touch wrong-env") }).await, Response::Error { code, .. } if code == "ENVIRONMENT_MISSING")
     );
     assert!(
-        matches!(request(&client, &address, &Request::OperationGet { operation_id: "op-once".into(), env: 2 }).await, Response::Error { code, .. } if code == "ENVIRONMENT_MISSING")
+        matches!(request(&client, &address, &Request::OperationGet { operation_id: "op-once".into(), env: 2, cursor: None }).await, Response::Error { code, .. } if code == "ENVIRONMENT_MISSING")
     );
     assert!(
         matches!(request(&client, &address, &Request::Inspect { env: 1 }).await, Response::Environment { binding, .. } if binding.thread_id == "thread-test")
@@ -960,22 +962,19 @@ async fn lost_accepted_response_does_not_cancel_work() {
             assert!(matches!(
                 read_frame::<Request>(&mut recv).await.unwrap(),
                 Request::Hello {
-                    protocol_version: 1
+                    protocol_version: 2
                 }
             ));
             send.write_all(
                 &encode(&Response::Hello {
                     node_id: "node-test".into(),
-                    protocol_version: 1,
-                    minimum_protocol_version: 1,
+                    protocol_version: 2,
+                    minimum_protocol_version: 2,
                     software_version: env!("CARGO_PKG_VERSION").into(),
                     binding: Some(host.installation().binding.clone()),
                     profiles: vec!["runner".into(), "host".into()],
                     capabilities: vec!["exec.start".into()],
-                    limits: Limits {
-                        max_frame_bytes: 65536,
-                        request_timeout_ms: 5000,
-                    },
+                    limits: Limits::current(),
                 })
                 .unwrap(),
             )
@@ -1169,7 +1168,7 @@ async fn journal_immutability_no_identity_replacement_and_accepted_cutpoint() {
     assert!(db.execute("UPDATE operation SET request='{}'", []).is_err());
     // Fill the retained journal to its documented limit; no expiry or queue.
     db.execute_batch("BEGIN").unwrap();
-    for index in 1..10_000 {
+    for index in 1..cube_node_transport::runner::MAX_RECORDS {
         db.execute(
             "INSERT INTO operation VALUES(?1,'{}','fixture',?2)",
             rusqlite::params![
@@ -1558,4 +1557,410 @@ async fn restored_workspace_requires_explicit_identity_preserving_recovery() {
             .is_err(),
         "recovery must restore the immutable installation trigger"
     );
+}
+
+fn code(error: anyhow::Error) -> String {
+    error.to_string()
+}
+
+async fn finished(host: &Arc<Runner>, id: &str) -> Operation {
+    timeout(BUDGET, async {
+        loop {
+            let operation = host.get(1, id).unwrap();
+            if !matches!(operation, Operation::Accepted | Operation::Running) {
+                break operation;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn protocol_two_pages_output_and_moves_files_over_the_wire() {
+    let _case = CASE.lock().await;
+    let fixture = Fixture::new();
+    let (mut daemon, address, _) = fixture.start().await;
+    let client = fixture.client().await;
+    let mut long = spec("head -c 200000 /dev/zero | tr '\\0' a; printf end");
+    long.output_limit = cube_node_transport::runner::MAX_OUTPUT;
+    long.timeout_ms = cube_node_transport::runner::MAX_TIMEOUT_MS;
+    assert!(matches!(
+        request(&client, &address, &start("op-long", long)).await,
+        Response::Accepted { .. }
+    ));
+    done(&client, &address, "op-long").await;
+    let mut output = Vec::new();
+    loop {
+        let Response::Operation {
+            operation: Operation::Succeeded { result },
+            ..
+        } = request(
+            &client,
+            &address,
+            &Request::OperationGet {
+                env: 1,
+                operation_id: "op-long".into(),
+                cursor: Some(output.len() as u64),
+            },
+        )
+        .await
+        else {
+            panic!("expected a result page")
+        };
+        assert_eq!(result.output_offset, Some(output.len() as u64));
+        assert_eq!(result.retained_bytes, Some(200_003));
+        assert!(result.output.len() <= cube_node_transport::runner::OUTPUT_PAGE_BYTES);
+        assert!(!result.truncated);
+        output.extend_from_slice(&result.output);
+        if output.len() as u64 == result.retained_bytes.unwrap() {
+            break;
+        }
+    }
+    assert!(output.ends_with(b"aend"));
+    assert!(matches!(
+        request(&client, &address, &Request::OperationGet { env: 1, operation_id: "op-long".into(), cursor: Some(200_004) }).await,
+        Response::Error { code, .. } if code == "INVALID_REQUEST"
+    ));
+
+    let binary: Vec<u8> = (0..=255).collect();
+    let write = Request::FsWrite {
+        env: 1,
+        thread_id: None,
+        epoch: Some(1),
+        idempotency_key: "write-binary".into(),
+        path: "nested/dir/blob.bin".into(),
+        content: binary.clone(),
+        expected_sha: None,
+        create_parents: true,
+    };
+    let Response::Written { result, .. } = request(&client, &address, &write).await else {
+        panic!("expected write")
+    };
+    assert_eq!(result.size, 256);
+    assert_eq!(
+        fs::read(fixture.workspace.join("nested/dir/blob.bin")).unwrap(),
+        binary
+    );
+    assert!(matches!(
+        request(&client, &address, &write).await,
+        Response::Written { result: again, .. } if again == result
+    ));
+    let Response::File { file, .. } = request(
+        &client,
+        &address,
+        &Request::FsRead {
+            env: 1,
+            thread_id: None,
+            path: "nested/dir/blob.bin".into(),
+            offset: Some(250),
+            limit: Some(100),
+        },
+    )
+    .await
+    else {
+        panic!("expected file")
+    };
+    assert_eq!(file.content, (250..=255).collect::<Vec<u8>>());
+    assert!(file.eof);
+    assert_eq!(file.size, 256);
+    assert_eq!(file.sha256.as_deref(), Some(result.sha256.as_str()));
+    assert!(matches!(
+        request(&client, &address, &Request::FsStat { env: 1, thread_id: None, path: "nested".into() }).await,
+        Response::Stat { stat, .. } if stat.kind == "directory" && stat.sha256.is_none()
+    ));
+    assert!(matches!(
+        request(&client, &address, &Request::FsWrite { env: 1, thread_id: None, epoch: None, idempotency_key: "write-unfenced".into(), path: "unfenced".into(), content: vec![1], expected_sha: None, create_parents: false }).await,
+        Response::Error { code, .. } if code == "LEASE_STALE"
+    ));
+    daemon.kill().await.unwrap();
+    daemon.wait().await.unwrap();
+    client.close().await;
+}
+
+#[tokio::test]
+async fn exec_cancel_kills_the_process_group_and_respects_the_fence() {
+    let _case = CASE.lock().await;
+    let fixture = Fixture::new();
+    let host = fixture.open();
+    let mut command = spec("sleep 30 & printf %s $! > child.pid; wait");
+    command.timeout_ms = 60_000;
+    host.start_fenced(1, None, "op-cancel", Some(3), command)
+        .unwrap();
+    timeout(BUDGET, async {
+        while fs::read_to_string(fixture.workspace.join("child.pid"))
+            .map_or(true, |pid| pid.is_empty())
+        {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(code(host.cancel(1, None, "op-cancel", Some(2)).unwrap_err()).contains("LEASE_STALE"));
+    assert!(matches!(
+        host.get(1, "op-cancel").unwrap(),
+        Operation::Running
+    ));
+    host.cancel(1, None, "op-cancel", Some(3)).unwrap();
+    assert_eq!(
+        finished(&host, "op-cancel").await,
+        Operation::Failed {
+            error: "CANCELLED".into(),
+            completion_unknown: false
+        }
+    );
+    let pid: i32 = fs::read_to_string(fixture.workspace.join("child.pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    timeout(BUDGET, async {
+        // The background child was in the cancelled process group.
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Cancelling a finished or unknown operation is an inspection, not an error.
+    assert!(matches!(
+        host.cancel(1, None, "op-cancel", Some(3)).unwrap(),
+        Operation::Failed { .. }
+    ));
+    assert_eq!(
+        host.cancel(1, None, "op-never", Some(3)).unwrap(),
+        Operation::Unknown
+    );
+    // The same identity is never re-run after cancellation.
+    host.start_fenced(1, None, "op-cancel", Some(3), {
+        let mut command = spec("sleep 30 & printf %s $! > child.pid; wait");
+        command.timeout_ms = 60_000;
+        command
+    })
+    .unwrap();
+    assert!(matches!(
+        host.get(1, "op-cancel").unwrap(),
+        Operation::Failed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn lease_epochs_fence_mutations_durably() {
+    let _case = CASE.lock().await;
+    let fixture = Fixture::new();
+    let host = fixture.open();
+    host.start_fenced(1, None, "op-epoch-five", Some(5), spec("true"))
+        .unwrap();
+    finished(&host, "op-epoch-five").await;
+    for epoch in [None, Some(4)] {
+        assert!(
+            code(
+                host.start_fenced(1, None, "op-stale", epoch, spec("touch must-not-run"))
+                    .unwrap_err()
+            )
+            .contains("LEASE_STALE")
+        );
+        assert!(
+            code(
+                host.write_file(1, None, epoch, "write-stale", "stale", b"x", None, false)
+                    .unwrap_err()
+            )
+            .contains("LEASE_STALE")
+        );
+    }
+    assert!(
+        code(
+            host.start_fenced(1, None, "op-invalid", Some(0), spec("true"))
+                .unwrap_err()
+        )
+        .contains("INVALID_REQUEST")
+    );
+    // A stale holder cannot even replay its own retained identity.
+    assert!(
+        code(
+            host.start_fenced(1, None, "op-epoch-five", Some(4), spec("true"))
+                .unwrap_err()
+        )
+        .contains("LEASE_STALE")
+    );
+    host.write_file(1, None, Some(6), "write-six", "six", b"6", None, false)
+        .unwrap();
+    drop(host);
+    let host = fixture.open();
+    assert!(
+        code(
+            host.write_file(1, None, Some(5), "write-five", "five", b"5", None, false)
+                .unwrap_err()
+        )
+        .contains("LEASE_STALE")
+    );
+    assert_eq!(host.get(1, "op-stale").unwrap(), Operation::Unknown);
+    assert!(!fixture.workspace.join("must-not-run").exists());
+    assert!(!fixture.workspace.join("stale").exists());
+    let db = Connection::open(fixture.state.join("journal.db")).unwrap();
+    assert!(db.execute("UPDATE lease_epoch SET epoch=1", []).is_err());
+    assert!(db.execute("DELETE FROM lease_epoch", []).is_err());
+}
+
+#[tokio::test]
+async fn file_operations_are_beneath_atomic_and_idempotent() {
+    let _case = CASE.lock().await;
+    let fixture = Fixture::new();
+    let host = fixture.open();
+    let write = |key: &str, path: &str, content: &[u8], expected: Option<&str>| {
+        host.write_file(1, None, Some(1), key, path, content, expected, false)
+    };
+    let first = write("w-1", "a.txt", b"one\n", None).unwrap();
+    assert_eq!(fs::read(fixture.workspace.join("a.txt")).unwrap(), b"one\n");
+    // A repeated key returns the original result and never writes again.
+    fs::write(fixture.workspace.join("a.txt"), b"changed elsewhere").unwrap();
+    assert_eq!(write("w-1", "a.txt", b"one\n", None).unwrap(), first);
+    assert_eq!(
+        fs::read(fixture.workspace.join("a.txt")).unwrap(),
+        b"changed elsewhere"
+    );
+    assert!(code(write("w-1", "a.txt", b"two\n", None).unwrap_err()).contains("CONFLICT"));
+    assert!(code(write("w-1", "b.txt", b"one\n", None).unwrap_err()).contains("CONFLICT"));
+    // expectedSha is the whole current file; a mismatch is retained too.
+    assert!(
+        code(write("w-2", "a.txt", b"two\n", Some(&first.sha256)).unwrap_err())
+            .contains("PRECONDITION_FAILED")
+    );
+    fs::write(fixture.workspace.join("a.txt"), b"one\n").unwrap();
+    assert!(
+        code(write("w-2", "a.txt", b"two\n", Some(&first.sha256)).unwrap_err())
+            .contains("PRECONDITION_FAILED")
+    );
+    let second = write("w-3", "a.txt", b"two\n", Some(&first.sha256)).unwrap();
+    assert_eq!(fs::read(fixture.workspace.join("a.txt")).unwrap(), b"two\n");
+    assert_eq!(
+        host.get(1, "w-3").unwrap(),
+        Operation::Written {
+            result: second.clone()
+        }
+    );
+    assert!(
+        code(write("w-4", "missing.txt", b"x", Some(&second.sha256)).unwrap_err())
+            .contains("PRECONDITION_FAILED")
+    );
+    fs::set_permissions(
+        fixture.workspace.join("a.txt"),
+        fs::Permissions::from_mode(0o750),
+    )
+    .unwrap();
+    write("w-5", "a.txt", b"three\n", None).unwrap();
+    assert_eq!(
+        fs::metadata(fixture.workspace.join("a.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o750,
+        "replacement preserves the file mode"
+    );
+    // Keys share the operation namespace with commands.
+    host.start_fenced(1, None, "shared-key", Some(1), spec("true"))
+        .unwrap();
+    finished(&host, "shared-key").await;
+    assert!(code(write("shared-key", "c.txt", b"x", None).unwrap_err()).contains("CONFLICT"));
+    assert!(code(write("w-6", "no/parent.txt", b"x", None).unwrap_err()).contains("NOT_FOUND"));
+    for path in [
+        "../escape",
+        "/etc/passwd",
+        "",
+        ".",
+        "a/../../b",
+        "nul\0byte",
+    ] {
+        assert!(
+            code(write("w-7", path, b"x", None).unwrap_err()).contains("INVALID_REQUEST"),
+            "{path:?}"
+        );
+        assert!(
+            code(host.read_file(1, None, path, None, None).unwrap_err())
+                .contains("INVALID_REQUEST"),
+            "{path:?}"
+        );
+    }
+    let outside = fixture.root.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("secret"), b"secret").unwrap();
+    symlink(&outside, fixture.workspace.join("escape")).unwrap();
+    symlink(
+        outside.join("secret"),
+        fixture.workspace.join("leaf-escape"),
+    )
+    .unwrap();
+    symlink("a.txt", fixture.workspace.join("alias")).unwrap();
+    assert!(
+        code(
+            host.read_file(1, None, "escape/secret", None, None)
+                .unwrap_err()
+        )
+        .contains("INVALID_REQUEST")
+    );
+    assert!(
+        code(
+            host.read_file(1, None, "leaf-escape", None, None)
+                .unwrap_err()
+        )
+        .contains("INVALID_REQUEST")
+    );
+    assert!(code(write("w-8", "escape/new", b"x", None).unwrap_err()).contains("INVALID_REQUEST"));
+    assert!(code(write("w-9", "alias", b"x", None).unwrap_err()).contains("INVALID_REQUEST"));
+    assert_eq!(fs::read(outside.join("secret")).unwrap(), b"secret");
+    assert!(!outside.join("new").exists());
+    // In-workspace symlinks are readable on Linux; stat reports the link.
+    if cfg!(target_os = "linux") {
+        assert_eq!(
+            host.read_file(1, None, "alias", None, None)
+                .unwrap()
+                .content,
+            b"three\n"
+        );
+    }
+    assert_eq!(host.stat_path(1, None, "alias").unwrap().kind, "symlink");
+    let stat = host.stat_path(1, None, "a.txt").unwrap();
+    assert_eq!(
+        (stat.kind.as_str(), stat.size, stat.mode & 0o777),
+        ("file", 6, 0o750)
+    );
+    assert_eq!(
+        stat.sha256,
+        host.read_file(1, None, "a.txt", None, None).unwrap().sha256
+    );
+    assert_eq!(host.stat_path(1, None, ".").unwrap().kind, "directory");
+    assert!(code(host.stat_path(1, None, "missing").unwrap_err()).contains("NOT_FOUND"));
+    assert!(
+        code(host.read_file(1, None, "missing", None, None).unwrap_err()).contains("NOT_FOUND")
+    );
+    assert!(
+        code(host.read_file(1, None, ".", None, None).unwrap_err()).contains("INVALID_REQUEST")
+    );
+    let page = host.read_file(1, None, "a.txt", Some(1), Some(2)).unwrap();
+    assert_eq!((page.content.as_slice(), page.eof), (&b"hr"[..], false));
+    assert!(
+        code(
+            host.write_file(
+                1,
+                None,
+                Some(1),
+                "w-10",
+                "big",
+                &vec![0; cube_node_transport::runner::MAX_WRITE_BYTES + 1],
+                None,
+                false
+            )
+            .unwrap_err()
+        )
+        .contains("INVALID_REQUEST")
+    );
+    // No temporary files are left behind.
+    assert!(fs::read_dir(&fixture.workspace).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".cube-write-")
+    }));
 }

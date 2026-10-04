@@ -13,7 +13,7 @@ const state = fs.mkdtempSync(path.join(os.tmpdir(), "cube-api-"));
 const models = createModels();
 const faux = fauxProvider(); models.setProvider(faux.provider);
 const runnerHealth = new Map<string, TrustedRunnerHealth>();
-const app = await createCubed({ state, models, runnerHealth: async runner => {
+const app = await createCubed({ state, models, claude: null, runnerHealth: async runner => {
   const health = runnerHealth.get(runner.nodeId);
   if (!health) throw new Error("NODE_UNAVAILABLE");
   return health;
@@ -35,21 +35,16 @@ try {
   assert.equal((await fetch(`${base}/api/state`, { headers: { origin: "http://untrusted.example" } })).status, 403);
   assert.equal((await write("/api/models", {})).status, 404);
   assert.deepEqual(await (await fetch(`${base}/api/health`)).json(), {
-    lifecycle: "ready", version: "dev", commit: "unknown", stateSchema: 100,
+    lifecycle: "ready", version: "dev", commit: "unknown", stateSchema: 101,
   });
+  // A second cubed on the same state never takes the live workspace socket.
+  await assert.rejects(createCubed({ state, models, claude: null }), /another cubed is serving this CUBED_STATE/);
+  assert.ok(fs.existsSync(path.join(state, "run/workspace.sock")), "the live instance keeps its workspace socket");
   const unmanagedUpdate = await (await fetch(`${base}/api/system/update`)).json();
   assert.equal(unmanagedUpdate.installation, "unmanaged");
   assert.equal(unmanagedUpdate.enabled, false);
   assert.equal(unmanagedUpdate.runnersUpdated, false);
   assert.equal((await write("/api/system/update", { action: "check" })).status, 409);
-  assert.deepEqual(await (await fetch(`${base}/api/jev`)).json(), { configured: false });
-  const jevSecret = "jev-secret-not-for-responses";
-  const savedJev = await write("/api/jev", { apiKey: jevSecret }, "PUT");
-  const savedJevText = await savedJev.text();
-  assert.equal(savedJev.status, 200); assert(!savedJevText.includes(jevSecret));
-  assert.deepEqual(JSON.parse(savedJevText), { configured: true });
-  assert.equal(fs.statSync(path.join(state, "jev-key.json")).mode & 0o777, 0o600);
-  assert.deepEqual(await (await write("/api/jev", {}, "DELETE")).json(), { configured: false });
   assert.equal((await write("/api/github/auth", {}, "PUT")).status, 404);
   assert.equal((await fetch(`${base}/api/projects`, { method: "POST", body: "{}" })).status, 415);
   for (const repositories of [[null], [{ url: "org/repo", base: {} }], [{ url: "org/repo", checkoutName: "../outside" }],
@@ -77,7 +72,7 @@ try {
   assert.equal(threads.length, 1); assert.equal(threads[0].state, "error");
   assert.match(threads[0].error, /workspace allocation failed.*IO_ERROR/);
   const idleHealth: TrustedRunnerHealth = { lifecycle: "ready", active: false, operationRecords: 2, operationCapacity: 100,
-    error: null, softwareVersion: "test", protocolVersion: 1, activeWorkspaces: 0, retainedWorkspaces: 1,
+    error: null, softwareVersion: "test", protocolVersion: 2, activeWorkspaces: 0, retainedWorkspaces: 1,
     workspaceBytes: 1024, workspaceCapacity: 1, workspaceByteLimit: 2048 };
   app.registry.enrollRunner({ nodeId: "node-operator", threadId: "operator-binding", environmentId: 2,
     configPath: path.join(state, "operator.json"), configHash: "operator" });
@@ -104,6 +99,7 @@ try {
   assert.equal((await write("/api/runners/broken-thread/retire", { confirm: "broken-node", reason: "still allocated" })).status, 409,
     "host allocation blocks retirement before a runner probe");
   assert.equal((await fetch(`${base}/api/threads/broken-thread/history/extra`)).status, 404);
+  assert.equal((await fetch(`${base}/api/threads/missing-thread/workspace/operations/key`)).status, 404);
   const cli = path.resolve("packages/server/src/index.ts");
   const help = spawnSync(process.execPath, [cli, "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0); assert.match(help.stdout, /--allowed-host/); assert.match(help.stdout, /runners status/);

@@ -19,7 +19,8 @@ ExecReload=/bin/kill -USR1 $MAINPID
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=30
-TimeoutStopSec=75
+# Graceful drain waits for the 600-second command bound.
+TimeoutStopSec=615
 KillMode=mixed
 NoNewPrivileges=yes
 PrivateTmp=yes

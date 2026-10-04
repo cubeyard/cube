@@ -1,7 +1,8 @@
 # Trusted runner operations
 
 This is the operations boundary for Cube **trusted runners**. One installation
-has one immutable protocol-v1 installation/environment binding, belongs to the
+has one immutable installation/environment binding, speaks runner protocol 2,
+belongs to the
 global Cube pool, leases one active thread workspace at a time across all projects,
 and uses Iroh's public N0 discovery/relay
 transport. A trusted runner executes under its account without sandboxing and
@@ -140,11 +141,13 @@ Archive returns capacity without deleting dirty or uncertain evidence.
 No restart is needed after enrollment. Registry v100/v101 receives the rollback-compatible global-pool extension; older
 execution stacks are not migrated.
 
-Upgrade runner binaries before creating threads through the global pool. New Cubed
-uses the separately advertised `workspace.allocate.v2` capability for the immutable
-per-allocation repository plan. An older runner remains enrolled and its existing
-evidence is untouched, but new allocation fails safely as unsupported before Cubed
-sends mutation bytes.
+Upgrade runner binaries before creating threads through the global pool. Cubed
+requires protocol 2 and uses `workspace.allocate.v2` for the immutable
+per-allocation repository plan. Enrolling a protocol-1 runner (cube-runner 0.2.x)
+fails with `INCOMPATIBLE_PROTOCOL`. An already enrolled runner rolled back to
+protocol 1 stays enrolled with its evidence untouched, but every check and call
+fails closed with `INCOMPATIBLE_PROTOCOL` (shown as unreachable) after
+authenticated hello and before any mutation bytes; upgrade it with `upgrade.sh`.
 
 ### Unreachable and retired bindings
 
@@ -243,11 +246,15 @@ sudo bash scripts/runner/rollback-legacy.sh
 ```
 
 Rollback stops the runner service and starts the untouched `cube-host.service`
-against the same state. It does not convert new protocol or journal formats;
-protocol v1 and journal schema v1 therefore remain frozen throughout this phase.
+against the same state. It does not convert journal formats, so journal schema
+v1 remains frozen throughout this phase; protocol-2 additions are additive
+tables. A rolled-back runner speaks protocol 1, which current cubed reports as
+`INCOMPATIBLE_PROTOCOL`.
 Remove the legacy layout only in a later explicit migration after `cube-host`
 rollback support leaves the supported release window.
 
+Install and upgrade accept only protocol-2 binaries (cube-runner 0.3.0 or
+newer); cubed requires protocol 2 and never falls back to an older runner.
 Native runner upgrades on both platforms use the same `upgrade.sh`: stage an
 immutable native release, confirm drain, switch `current`, require matching
 readiness, and restore the previous target and service definition on failure.
@@ -308,9 +315,10 @@ Never delete old evidence to make an ambiguous command retryable.
 ## Capacity and diagnostics
 
 One operation and one active thread workspace run at a time. Commands are capped
-at 8 KiB, cwd at 4 KiB, runtime at 60 seconds, output at 8 KiB, connections at
-16, immutable journal records at 10,000, and new workspace admission at 50 GiB
-of managed workspace data. `node.status` reports active/retained counts and
+at 8 KiB, cwd and file paths at 4 KiB, runtime at 600 seconds, retained output
+at 256 KiB (read in 64-KiB pages), file reads and writes at 512 KiB per call,
+connections at 16, immutable journal records (commands and file writes) at
+100,000, and new workspace admission at 50 GiB of managed workspace data. `node.status` reports active/retained counts and
 managed bytes. Records do not expire because they are no-replay evidence.
 These protocol limits are not CPU, memory, process-count, network, or disk
 quotas; the byte threshold is admission/observability, not enforcement. Apply
@@ -325,6 +333,7 @@ addresses, IDs, and paths.
 | `DRAINING` | wait or explicitly resume/restart after maintenance |
 | `CAPACITY_EXCEEDED` | wait for active work; replace before journal exhaustion |
 | `INCOMPATIBLE_PROTOCOL` | upgrade the older cubed/cube-runner component |
+| `LEASE_STALE` | a newer thread lease owns the workspace; never retry with the old epoch |
 | `recoveryRequired` | reconcile uncertainty, then acknowledge while stopped |
 | `COMPLETION_UNKNOWN` / `Interrupted` | inspect the saved ID; never resubmit |
 | `WRONG_NODE` | verify Iroh peers and the full immutable binding out of band |
@@ -332,9 +341,12 @@ addresses, IDs, and paths.
 
 ## Compatibility window
 
-Protocol v1 still accepts the wire profile `host`; native daemons advertise both
-`runner` and `host`. Native runner CLI aliases and Linux package rollback remain
-supported. The packaged `cube-node-transport` name is a symlink to `cube-runner`.
+Protocol 2 is the only accepted wire version in both directions; there is no
+protocol-1 fallback. Daemons still advertise the historical `host` profile name
+beside `runner`, and the deprecated `host-init`/`host-serve` CLI aliases remain.
+Linux rollback to `cube-host` 0.1.1 or a native 0.2.x release keeps state intact
+but speaks protocol 1, which current cubed refuses until the runner is upgraded
+again. The packaged `cube-node-transport` name is a symlink to `cube-runner`.
 These are runner transport/package compatibility, not a second product backend.
 Cubed has no backend selector, legacy execution routes or admission tables.
 Its fresh registry and Pi sessions are not compatible with old host databases.

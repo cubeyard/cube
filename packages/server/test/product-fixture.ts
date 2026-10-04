@@ -1,5 +1,6 @@
 /** Actual product HTTP server, published Pi storage and real runner; controlled model only. */
 import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import path from "node:path";
 import { createCubed } from "../src/index.ts";
 import { IrohExecutionNodeClient } from "../src/iroh-node.ts";
 
@@ -11,15 +12,12 @@ faux.setResponses(Array.from({ length: 10 }, () => async request => {
     await new Promise<void>(() => {});
   }
   const tool = request.messages.at(-1)?.role === "toolResult";
-  if (tool) return fauxAssistantMessage(mode === "jev" ? "jev observed the compact tool context" : "product recovered runner result: 93");
-  const command = mode === "jev"
-    ? "i=1; while [ $i -le 220 ]; do if [ $i -eq 111 ]; then printf 'line %s ERROR acceptance marker\\n' \"$i\"; else printf 'line %s ordinary acceptance output with repeated detail\\n' \"$i\"; fi; i=$((i+1)); done"
-    : "printf once >> product-count; printf 93";
-  return fauxAssistantMessage([fauxToolCall("bash", { command })], { stopReason: "toolUse" });
+  if (tool) return fauxAssistantMessage("product recovered runner result: 93");
+  return fauxAssistantMessage([fauxToolCall("bash", { command: "printf once >> product-count; printf 93" })], { stopReason: "toolUse" });
 }));
 const models = createModels();
 models.setProvider(faux.provider);
-const app = await createCubed({ state, models });
+const app = await createCubed({ state, models, claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], claudeOptions: { stopGraceMs: 2000 } });
 if (app.registry.runnerCount() === 0) {
   const runner = new IrohExecutionNodeClient({ configPath });
   app.registry.enrollRunner({ ...runner.binding, configPath, configHash: runner.configHash });

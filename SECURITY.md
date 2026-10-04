@@ -65,12 +65,24 @@ sandboxing or protection from malicious same-UID Git configuration.
 Process-group cancellation is not a cgroup: especially on macOS, a hostile
 command can deliberately create a new session and escape descendant cleanup.
 
-JEV memory is opt-in. When configured, Cube sends selected conversation text,
-tool arguments, and deterministic tool-output excerpts to TypeSafe AI. These
-may contain repository content or secrets printed by tools. The JEV key is kept
-only on the control-plane host in a mode-`0600` state file and is never returned
-by the API, forwarded to a runner, or included in session data. Full outputs
-retained for recall remain part of the local Pi session and are withheld from
-ordinary browser history; a permitted private-network Cube client can request an
-original explicitly from the tool inspector. Do not enable JEV for repositories
-whose disclosure policy does not permit this processing.
+Claude Code threads run the unmodified `claude` binary on the cubed host, as the
+cubed user, with that user's own Claude login. cubed never stores Claude
+credentials. The child's environment is an allow-list (home, path, locale,
+temporary and XDG directories, proxies and certificates, `CLAUDE_CONFIG_DIR` and
+`CLAUDE_CODE_OAUTH_TOKEN`) plus the workspace variables: no `ANTHROPIC_*`
+variable, no Bedrock/Vertex/Foundry switch, and none of cubed's provider, Git or
+cloud credentials. Claude Code starts with `--setting-sources ""`,
+`--strict-mcp-config` and an empty MCP configuration, so the user's settings
+hooks and MCP servers do not load, and `--tools` limits it to the mod's
+allow-list. The mod sends Bash, Read, Write and Edit to the trusted runner and
+refuses every other tool not on that list (MCP tools and unknown built-ins
+included), isolated subagents and agent types that are not Claude Code's
+built-ins. Claude Code itself still runs on the cubed host with the cubed user's
+authority and reads its own login from its config directory: it is not
+sandboxed either, and these guards depend on Claude Code honouring its flags
+and hooks, which no real session has verified yet. The mod reaches the
+thread workspace on a mode-0600 Unix socket under `CUBED_STATE/run` that serves
+only workspace routes; the thread's lease token, passed in the child's
+environment, is the authorization, and it stops working when the thread's lease
+is released. That token cannot renew or release cubed's own lease over the
+routes; only cubed does.

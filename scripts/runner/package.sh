@@ -17,7 +17,7 @@ install -m 0755 "$binary" "$stage/cube-runner/bin/cube-runner"
 ln -s cube-runner "$stage/cube-runner/bin/cube-node-transport"
 cp -a "$repo_root/scripts/runner" "$stage/cube-runner/scripts/runner"
 cp -a "$repo_root/scripts/host" "$stage/cube-runner/scripts/host"
-printf '%s\n' "softwareVersion=$version" "protocolVersion=1" "product=trusted-runner" \
+printf '%s\n' "softwareVersion=$version" "protocolVersion=2" "product=trusted-runner" \
   "os=$PLATFORM" "arch=$ARCH" > "$stage/cube-runner/MANIFEST"
 (cd "$stage" && tar -czf "$destination.tmp" cube-runner)
 chmod 0644 "$destination.tmp"; mv "$destination.tmp" "$destination"

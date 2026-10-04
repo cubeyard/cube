@@ -13,17 +13,24 @@ import { Endpoint, EndpointAddr, EndpointId, SecretKey, type Connection, type Bi
 import { ExecutionNodeError, type ExecutionNodeClient, type EnvironmentObservation, type NodeContact, type NodeErrorCode } from "./execution-node-contract.ts";
 import type { WorkspaceAllocation } from "./registry.ts";
 
-const MAX_FRAME = 65536;
+const MAX_FRAME = 1024 * 1024;
+const PROTOCOL = 2;
+const MAX_TIMEOUT_MS = 600000;
+const MAX_OUTPUT = 262144;
+const MAX_WRITE = 524288;
+const SHA = /^[0-9a-f]{64}$/;
 const RPC_TIMEOUT_MS = 5000;
 const WORKSPACE_RPC_TIMEOUT_MS = 30000;
 const ALPN = Array.from(Buffer.from("cubeyard/node/1"));
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const NODE_ID = /^node-[a-zA-Z0-9-]{1,123}$/;
 const PEER = /^[0-9a-f]{64}$/;
-const CODES = new Set(["NODE_UNAVAILABLE", "OUTCOME_UNKNOWN", "UNSUPPORTED", "UNAUTHORIZED", "WRONG_NODE", "INVALID_REQUEST", "CONFLICT", "CAPACITY_EXCEEDED", "DRAINING", "CANCELLED", "INCOMPATIBLE_PROTOCOL", "ENVIRONMENT_MISSING", "ENVIRONMENT_STOPPED", "IO_ERROR"]);
+const CODES = new Set(["NODE_UNAVAILABLE", "OUTCOME_UNKNOWN", "UNSUPPORTED", "UNAUTHORIZED", "WRONG_NODE", "INVALID_REQUEST", "CONFLICT", "CAPACITY_EXCEEDED", "DRAINING", "CANCELLED", "INCOMPATIBLE_PROTOCOL", "ENVIRONMENT_MISSING", "ENVIRONMENT_STOPPED", "IO_ERROR",
+  "LEASE_STALE", "PRECONDITION_FAILED", "NOT_FOUND"]);
+const FAILURES = new Set(["IO_ERROR", "CANCELLED", "PRECONDITION_FAILED", "NOT_FOUND", "INVALID_REQUEST", "UNSUPPORTED"]);
 const ProtocolCompatibility = Schema.Struct({
-  protocolVersion: Schema.Literal(1),
-  minimumProtocolVersion: Schema.Literal(1),
+  protocolVersion: Schema.Literal(PROTOCOL),
+  minimumProtocolVersion: Schema.Literal(PROTOCOL),
   softwareVersion: Schema.String,
 });
 export interface NodeBinding { nodeId: string; environmentId: number; threadId: string }
@@ -31,9 +38,34 @@ export interface RunnerExecSpec { command: string; guestCwd: string; timeoutMs: 
 export interface RunnerExecResult {
   exitCode: number | null;
   termination: "exited" | "signalled" | "timedOut";
+  /** One page of retained output starting at outputOffset. */
   output: number[];
   outputBytes: number;
   truncated: boolean;
+  outputOffset: number;
+  retainedBytes: number;
+}
+/** Advertised in node.hello; every bound is enforced by the runner. */
+export interface RunnerLimits {
+  maxFrameBytes: number;
+  requestTimeoutMs: number;
+  maxCommandBytes: number;
+  maxPathBytes: number;
+  maxExecTimeoutMs: number;
+  maxOutputBytes: number;
+  outputPageBytes: number;
+  maxReadBytes: number;
+  maxWriteBytes: number;
+}
+export interface RunnerDescription { softwareVersion: string; capabilities: string[]; limits: RunnerLimits }
+export interface RunnerFile { content: Buffer; offset: number; size: number; eof: boolean; sha256: string | null }
+export interface RunnerWriteResult { sha256: string; size: number }
+export interface RunnerFileStat {
+  kind: "file" | "directory" | "symlink" | "other";
+  size: number;
+  mode: number;
+  modifiedMs: number;
+  sha256: string | null;
 }
 export interface TrustedRunnerHealth {
   lifecycle: "ready" | "draining" | "faulted" | "recoveryRequired";
@@ -42,7 +74,7 @@ export interface TrustedRunnerHealth {
   operationCapacity: number;
   error: "ENVIRONMENT_MISSING" | "IO_ERROR" | "UNSUPPORTED" | null;
   softwareVersion: string;
-  protocolVersion: 1;
+  protocolVersion: 2;
   activeWorkspaces: number;
   retainedWorkspaces: number;
   workspaceBytes: number;
@@ -62,6 +94,7 @@ export interface RunnerWorkspace {
 export type RunnerOperation =
   | { state: "Accepted" | "Running" | "Unknown" }
   | { state: "Succeeded"; result: RunnerExecResult }
+  | { state: "Written"; result: RunnerWriteResult }
   | { state: "Failed"; error: string; completionUnknown: boolean }
   | { state: "Interrupted"; completionUnknown: true };
 interface IrohConfig {
@@ -86,9 +119,11 @@ export class IrohNodeError extends ExecutionNodeError {
     super(code);
     this.operationId = operationId;
     this.remoteCode = remoteCode;
-    this.message = detail && detail !== "runner request rejected" && detail !== "runner state could not be confirmed"
+    // An older runner's own incompatibility text names its protocol, not the
+    // fix; cubed states the one it requires.
+    this.message = detail && remoteCode !== "INCOMPATIBLE_PROTOCOL" && detail !== "runner request rejected" && detail !== "runner state could not be confirmed"
       ? detail
-      : `${code}${remoteCode === "INCOMPATIBLE_PROTOCOL" ? ": cubed and cube-runner do not share protocol version 1; upgrade the older component" : ""}${operationId ? `: operation ${operationId}` : ""}${this.completionUnknown ? "; inspect the saved operation before executing again; remote work was not cancelled" : ""}`;
+      : `${code}${remoteCode === "INCOMPATIBLE_PROTOCOL" ? ": cubed and cube-runner do not share protocol version 2; upgrade the older component" : ""}${operationId ? `: operation ${operationId}` : ""}${this.completionUnknown ? "; inspect the saved operation before executing again; remote work was not cancelled" : ""}`;
   }
 }
 class ValidationError extends IrohNodeError { constructor() { super("INVALID_REQUEST"); } }
@@ -117,7 +152,7 @@ function validateSpec(spec: RunnerExecSpec): RunnerExecSpec {
   const row = shape(spec, ["command", "guestCwd", "timeoutMs", "outputLimit"]);
   if (typeof row.command !== "string" || !row.command || row.command.includes("\0") || Buffer.byteLength(row.command) > 8192
     || typeof row.guestCwd !== "string" || !row.guestCwd || row.guestCwd.includes("\0") || path.posix.isAbsolute(row.guestCwd) || Buffer.byteLength(row.guestCwd) > 4096
-    || !integer(row.timeoutMs, 1, 60000) || !integer(row.outputLimit, 0, 8192)) invalid();
+    || !integer(row.timeoutMs, 1, MAX_TIMEOUT_MS) || !integer(row.outputLimit, 0, MAX_OUTPUT)) invalid();
   return { command: row.command, guestCwd: row.guestCwd, timeoutMs: row.timeoutMs, outputLimit: row.outputLimit };
 }
 function operation(value: unknown): RunnerOperation {
@@ -130,21 +165,55 @@ function operation(value: unknown): RunnerOperation {
       return { state: "Interrupted", completionUnknown: true };
     case "Failed":
       shape(row, ["state", "error", "completionUnknown"]);
-      if (!["IO_ERROR", "CANCELLED"].includes(String(row.error)) || typeof row.completionUnknown !== "boolean") invalid();
+      if (!FAILURES.has(String(row.error)) || typeof row.completionUnknown !== "boolean") invalid();
       return { state: "Failed", error: String(row.error), completionUnknown: row.completionUnknown };
+    case "Written": {
+      shape(row, ["state", "result"]);
+      return { state: "Written", result: writeResult(row.result) };
+    }
     case "Succeeded": {
       shape(row, ["state", "result"]);
-      const result = shape(row.result, ["exitCode", "termination", "output", "outputBytes", "truncated"]);
+      const result = shape(row.result, ["exitCode", "termination", "output", "outputBytes", "truncated", "outputOffset", "retainedBytes"]);
       if (!(result.exitCode === null || integer(result.exitCode, 0, 255))
         || !["exited", "signalled", "timedOut"].includes(String(result.termination))
-        || !Array.isArray(result.output) || result.output.length > 8192 || !result.output.every(b => integer(b, 0, 255))
-        || !integer(result.outputBytes, result.output.length) || typeof result.truncated !== "boolean"
+        || !Array.isArray(result.output) || result.output.length > MAX_OUTPUT || !result.output.every(b => integer(b, 0, 255))
+        || !integer(result.retainedBytes, 0, MAX_OUTPUT) || !integer(result.outputOffset, 0, result.retainedBytes)
+        || result.outputOffset + result.output.length > result.retainedBytes
+        || !integer(result.outputBytes, result.retainedBytes) || typeof result.truncated !== "boolean"
         || (result.termination === "exited") !== (result.exitCode !== null)
-        || (!result.truncated && result.outputBytes !== result.output.length)) invalid();
+        || (!result.truncated && result.outputBytes !== result.retainedBytes)) invalid();
       return { state: "Succeeded", result: result as unknown as RunnerExecResult };
     }
     default: return invalid();
   }
+}
+function writeResult(value: unknown): RunnerWriteResult {
+  const row = shape(value, ["sha256", "size"]);
+  if (typeof row.sha256 !== "string" || !SHA.test(row.sha256) || !integer(row.size, 0, MAX_WRITE)) invalid();
+  return { sha256: row.sha256, size: row.size };
+}
+function limits(value: unknown): RunnerLimits {
+  const keys = ["maxFrameBytes", "requestTimeoutMs", "maxCommandBytes", "maxPathBytes", "maxExecTimeoutMs", "maxOutputBytes",
+    "outputPageBytes", "maxReadBytes", "maxWriteBytes"] as const;
+  const row = shape(value, [...keys]);
+  if (row.maxFrameBytes !== MAX_FRAME || !integer(row.requestTimeoutMs, 1, RPC_TIMEOUT_MS)
+    || keys.some(key => !integer(row[key], 1))) invalid();
+  return Object.fromEntries(keys.map(key => [key, row[key]])) as unknown as RunnerLimits;
+}
+function workspacePath(value: unknown): string {
+  if (typeof value !== "string" || !value || value.includes("\0") || path.posix.isAbsolute(value) || Buffer.byteLength(value) > 4096) invalid();
+  return value;
+}
+function epochField(epoch: number | undefined): { epoch?: number } {
+  if (epoch === undefined) return {};
+  if (!integer(epoch, 1)) invalid();
+  return { epoch };
+}
+function base64(value: unknown, limit: number): Buffer {
+  if (typeof value !== "string" || value.length > Math.ceil(limit / 3) * 4) invalid();
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.toString("base64") !== value) invalid();
+  return bytes;
 }
 function localIO<T>(action: () => T): T {
   try { return action(); } catch (error) {
@@ -248,6 +317,11 @@ function remoteError(result: Record<string, unknown>, id?: string): IrohNodeErro
   return new IrohNodeError(result.code, id, result.completionUnknown, result.message);
 }
 
+function requestId(query?: Record<string, unknown>): string | undefined {
+  return typeof query?.operationId === "string" ? query.operationId
+    : typeof query?.idempotencyKey === "string" ? query.idempotencyKey : undefined;
+}
+
 export class IrohExecutionNodeClient implements ExecutionNodeClient {
   readonly locality = "remote" as const;
   readonly nodeId: string;
@@ -311,8 +385,7 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     if (!Array.isArray(hello.profiles) || (!hello.profiles.includes("runner") && !hello.profiles.includes("host"))
       || !hello.profiles.every(x => typeof x === "string")
       || !Array.isArray(hello.capabilities) || !hello.capabilities.every(x => typeof x === "string")) invalid();
-    const limits = shape(hello.limits, ["maxFrameBytes", "requestTimeoutMs"]);
-    if (limits.maxFrameBytes !== MAX_FRAME || !integer(limits.requestTimeoutMs, 1, RPC_TIMEOUT_MS)) invalid();
+    hello.limits = limits(hello.limits);
     return hello;
   }
   /** A native endpoint per RPC, in THIS process. Calls are serialized because
@@ -322,7 +395,7 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     let release!: () => void;
     const turn = new Promise<void>(resolve => { release = resolve; });
     this.requestTail = previous.then(() => turn, () => turn);
-    const id = typeof query?.operationId === "string" ? query.operationId : undefined;
+    const id = requestId(query);
     let onAbort: (() => void) | undefined;
     const interrupted = signal && new Promise<never>((_resolve, reject) => {
       onAbort = () => reject(new IrohNodeError("NODE_UNAVAILABLE", id));
@@ -340,10 +413,10 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
   /** Owning the endpoint per call lets a deadline close pending connect/read
    * operations. Late bind/connect completions are closed too; no retry task. */
   private async requestOne(key: SecretKey, query?: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
-    const id = typeof query?.operationId === "string" ? query.operationId : undefined;
+    const id = requestId(query);
     if (signal?.aborted) throw new IrohNodeError("NODE_UNAVAILABLE", id);
     this.assertConfig();
-    const mutating = ["exec.start", "workspace.allocate", "workspace.allocate.v2", "workspace.release"].includes(String(query?.method));
+    const mutating = ["exec.start", "exec.cancel", "fs.write", "workspace.allocate", "workspace.allocate.v2", "workspace.release"].includes(String(query?.method));
     const requestBytes = query ? frame(query) : undefined;
     const builder = Endpoint.builder();
     if (this.config.network === "relay") builder.applyN0();
@@ -393,7 +466,7 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
       if (finished || combined.aborted) { close(); throw new Error("request ended before connect"); }
       if (!connection.remoteId().equals(peer)) throw new IrohNodeError("WRONG_NODE", id);
       let stream = await connection.openBi();
-      await stream.send.writeAll(frame({ method: "node.hello", protocolVersion: 1 }));
+      await stream.send.writeAll(frame({ method: "node.hello", protocolVersion: PROTOCOL }));
       await stream.send.finish();
       const response = await readFrame(stream);
       const error = remoteError(response);
@@ -453,11 +526,35 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
           shape(result, ["type", "operationId"]);
           if (result.type !== "Accepted" || result.operationId !== id) invalid();
           break;
-        case "operation.get":
+        case "operation.get": case "exec.cancel":
           shape(result, ["type", "operationId", "operation"]);
           if (result.type !== "Operation" || result.operationId !== id) invalid();
           result.operation = operation(result.operation);
           break;
+        case "fs.read": {
+          shape(result, ["type", "path", "file"]);
+          if (result.type !== "File" || result.path !== query.path) invalid();
+          const file = shape(result.file, ["content", "offset", "size", "eof", "sha256"]);
+          const content = base64(file.content, (hello.limits as RunnerLimits).maxReadBytes);
+          if (!integer(file.offset, 0) || file.offset !== (query.offset ?? 0) || !integer(file.size, 0) || typeof file.eof !== "boolean"
+            || content.length > ((query.limit as number | undefined) ?? (hello.limits as RunnerLimits).maxReadBytes)
+            || !(file.sha256 === null || (typeof file.sha256 === "string" && SHA.test(file.sha256)))) invalid();
+          result.file = { content, offset: file.offset, size: file.size, eof: file.eof, sha256: file.sha256 } satisfies RunnerFile;
+          break;
+        }
+        case "fs.write":
+          shape(result, ["type", "idempotencyKey", "result"]);
+          if (result.type !== "Written" || result.idempotencyKey !== id) invalid();
+          result.result = writeResult(result.result);
+          break;
+        case "fs.stat": {
+          shape(result, ["type", "path", "stat"]);
+          if (result.type !== "Stat" || result.path !== query.path) invalid();
+          const stat = shape(result.stat, ["kind", "size", "mode", "modifiedMs", "sha256"]);
+          if (!["file", "directory", "symlink", "other"].includes(String(stat.kind)) || !integer(stat.size, 0) || !integer(stat.mode, 0, 0o7777)
+            || !Number.isSafeInteger(stat.modifiedMs) || !(stat.sha256 === null || (typeof stat.sha256 === "string" && SHA.test(stat.sha256)))) invalid();
+          break;
+        }
         default: invalid();
       }
       return result;
@@ -502,7 +599,78 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     this.assertConfig();
     const result = await this.request(this.identity().key, { method: "node.status" });
     const status = result.status as Omit<TrustedRunnerHealth, "softwareVersion" | "protocolVersion">;
-    return { ...status, softwareVersion: result.softwareVersion as string, protocolVersion: 1 };
+    return { ...status, softwareVersion: result.softwareVersion as string, protocolVersion: PROTOCOL };
+  }
+  /** Authenticated hello only: capabilities and limits of the pinned runner. */
+  async describe(signal?: AbortSignal): Promise<RunnerDescription> {
+    signal?.throwIfAborted(); this.assertConfig();
+    const hello = await this.request(this.identity().key, undefined, signal);
+    return { softwareVersion: hello.softwareVersion as string, capabilities: [...hello.capabilities as string[]], limits: hello.limits as RunnerLimits };
+  }
+  private threadField(): { threadId?: string } {
+    return this.binding.threadId === this.installationBinding.threadId ? {} : { threadId: this.binding.threadId };
+  }
+  /** Dispatch under a caller-owned stable identity. The runner deduplicates:
+   * a repeated ID with the same spec is a no-op, a changed spec is CONFLICT. */
+  async startOperation(operationId: string, spec: RunnerExecSpec, options: { epoch?: number; signal?: AbortSignal } = {}): Promise<void> {
+    options.signal?.throwIfAborted(); this.assertConfig();
+    if (typeof operationId !== "string" || !ID.test(operationId)) invalid();
+    spec = validateSpec(spec);
+    await this.request(this.identity().key, { method: "exec.start", operationId, env: this.binding.environmentId,
+      ...this.threadField(), ...epochField(options.epoch), spec }, options.signal);
+  }
+  /** Read-only. A terminal result carries one output page from `cursor`. */
+  async inspectOperation(operationId: string, options: { cursor?: number; signal?: AbortSignal } = {}): Promise<RunnerOperation> {
+    options.signal?.throwIfAborted(); this.assertConfig();
+    if (typeof operationId !== "string" || !ID.test(operationId) || !(options.cursor === undefined || integer(options.cursor, 0))) invalid();
+    return (await this.request(this.identity().key, { method: "operation.get", env: this.binding.environmentId, operationId,
+      ...(options.cursor ? { cursor: options.cursor } : {}) }, options.signal)).operation as RunnerOperation;
+  }
+  /** Real cancellation: the runner SIGKILLs the command's process group.
+   * Returns the state seen right after the request; poll for the outcome. */
+  async cancelOperation(operationId: string, options: { epoch?: number; signal?: AbortSignal } = {}): Promise<RunnerOperation> {
+    options.signal?.throwIfAborted(); this.assertConfig();
+    if (typeof operationId !== "string" || !ID.test(operationId)) invalid();
+    return (await this.request(this.identity().key, { method: "exec.cancel", env: this.binding.environmentId, operationId,
+      ...this.threadField(), ...epochField(options.epoch) }, options.signal)).operation as RunnerOperation;
+  }
+  /** The complete retained output of a Succeeded result, page by page. */
+  async collectOutput(operationId: string, result: RunnerExecResult, signal?: AbortSignal): Promise<RunnerExecResult> {
+    const output = [...result.output];
+    while (result.outputOffset + output.length < result.retainedBytes) {
+      const page = await this.inspectOperation(operationId, { cursor: result.outputOffset + output.length, signal });
+      if (page.state !== "Succeeded" || page.result.outputOffset !== result.outputOffset + output.length || !page.result.output.length) invalid();
+      output.push(...page.result.output);
+    }
+    return { ...result, output };
+  }
+  async readFile(file: string, options: { offset?: number; limit?: number; signal?: AbortSignal } = {}): Promise<RunnerFile> {
+    options.signal?.throwIfAborted(); this.assertConfig();
+    if (!(options.offset === undefined || integer(options.offset, 0)) || !(options.limit === undefined || integer(options.limit, 1))) invalid();
+    const result = await this.request(this.identity().key, { method: "fs.read", env: this.binding.environmentId, ...this.threadField(),
+      path: workspacePath(file), ...(options.offset === undefined ? {} : { offset: options.offset }),
+      ...(options.limit === undefined ? {} : { limit: options.limit }) }, options.signal);
+    return result.file as RunnerFile;
+  }
+  /** Atomic replacement under an idempotency key. The same key and request
+   * returns the original result without writing; a changed request is CONFLICT.
+   * `expectedSha` is the SHA-256 of the whole current file. */
+  async writeFile(file: string, content: Uint8Array, options: { idempotencyKey: string; expectedSha?: string; createParents?: boolean; epoch?: number; signal?: AbortSignal }): Promise<RunnerWriteResult> {
+    options.signal?.throwIfAborted(); this.assertConfig();
+    if (!(content instanceof Uint8Array) || content.length > MAX_WRITE || typeof options.idempotencyKey !== "string" || !ID.test(options.idempotencyKey)
+      || !(options.expectedSha === undefined || (typeof options.expectedSha === "string" && SHA.test(options.expectedSha)))
+      || !(options.createParents === undefined || typeof options.createParents === "boolean")) invalid();
+    const result = await this.request(this.identity().key, { method: "fs.write", env: this.binding.environmentId, ...this.threadField(),
+      ...epochField(options.epoch), idempotencyKey: options.idempotencyKey, path: workspacePath(file),
+      content: Buffer.from(content).toString("base64"), ...(options.expectedSha === undefined ? {} : { expectedSha: options.expectedSha }),
+      createParents: options.createParents ?? false }, options.signal);
+    return result.result as RunnerWriteResult;
+  }
+  async stat(file: string, options: { signal?: AbortSignal } = {}): Promise<RunnerFileStat> {
+    options.signal?.throwIfAborted(); this.assertConfig();
+    const result = await this.request(this.identity().key, { method: "fs.stat", env: this.binding.environmentId, ...this.threadField(),
+      path: workspacePath(file) }, options.signal);
+    return result.stat as RunnerFileStat;
   }
   async check(environmentId: number): Promise<void> {
     this.environment(environmentId); this.assertConfig();
@@ -522,22 +690,20 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
    * Repeated dispatch uses exactly the same session-scoped identity; the runner
    * rejects changed arguments and never re-executes a retained operation,
    * including Interrupted. Runner journals do not evict operation identities. */
-  async resumeExec(sessionId: string, invocationId: string, spec: RunnerExecSpec, signal?: AbortSignal): Promise<RunnerExecResult & { operationId: string }> {
+  async resumeExec(sessionId: string, invocationId: string, spec: RunnerExecSpec, signal?: AbortSignal, epoch?: number): Promise<RunnerExecResult & { operationId: string }> {
     signal?.throwIfAborted(); this.assertConfig();
     if (!sessionId || !invocationId) invalid();
     spec = validateSpec(spec);
     const operationId = `pi-${createHash("sha256").update(JSON.stringify([this.binding, sessionId, invocationId])).digest("hex")}`;
-    const { key } = this.identity();
-    const env = this.binding.environmentId;
     // Unlike the legacy prepare/submit API, Pi has already committed the
     // intent. No second local operation journal or sent marker is necessary.
-    await this.request(key, { method: "exec.start", operationId, env,
-      ...(this.binding.threadId === this.installationBinding.threadId ? {} : { threadId: this.binding.threadId }), spec }, signal);
+    await this.startOperation(operationId, spec, { epoch, signal });
     for (;;) {
-      const state = (await this.request(key, { method: "operation.get", operationId, env }, signal)).operation as RunnerOperation;
-      if (state.state === "Succeeded") return { ...state.result, operationId };
+      const state = await this.inspectOperation(operationId, { signal });
+      if (state.state === "Succeeded") return { ...await this.collectOutput(operationId, state.result, signal), operationId };
       if (state.state === "Failed") throw new IrohNodeError(state.error, operationId, state.completionUnknown);
       if (state.state === "Interrupted" || state.state === "Unknown") throw new IrohNodeError("OUTCOME_UNKNOWN", operationId, true);
+      if (state.state === "Written") throw new IrohNodeError("CONFLICT", operationId);
       await delay(100, undefined, { signal });
     }
   }
@@ -580,12 +746,12 @@ export class IrohExecutionNodeClient implements ExecutionNodeClient {
     try {
       while (true) {
         const state = await this.operation(environmentId, operationId, combined);
-        if (state.state === "Succeeded") return { ...state.result, operationId };
+        if (state.state === "Succeeded") return { ...await this.collectOutput(operationId, state.result, combined), operationId };
         if (state.state === "Failed") {
           terminalFailure = new IrohNodeError(state.error, operationId, state.completionUnknown);
           throw terminalFailure;
         }
-        if (state.state === "Interrupted" || state.state === "Unknown") throw new IrohNodeError("OUTCOME_UNKNOWN", operationId, true);
+        if (state.state !== "Accepted" && state.state !== "Running") throw new IrohNodeError("OUTCOME_UNKNOWN", operationId, true);
         await delay(100, undefined, { signal: combined });
       }
     } catch (error) {

@@ -4,34 +4,44 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { createServer } from "node:http";
-import { BACKGROUND_CONTEXT } from "@earendil-works/pi-agent-core";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { defineExtension, GenerationTask, hook, ToolTask, watchEvents, type SubmissionId } from "@earendil-works/pi-durable";
 import { openAgent } from "../src/durable-agent.ts";
 import { IrohExecutionNodeClient } from "../src/iroh-node.ts";
+import { RunnerWorkspace } from "../src/workspace.ts";
+import { LeaseStore } from "../src/workspace-lease.ts";
 
 const [directory, configPath, mode, boundary] = process.argv.slice(2);
 const context = BACKGROUND_CONTEXT;
+const REQUEST = "smoke-prompt";
 const checkpoint = async (name: string) => {
   if (mode !== "create" || boundary !== name) return;
   process.send!({ type: "checkpoint", name });
   await new Promise<void>(() => {});
 };
 const runner = new IrohExecutionNodeClient({ configPath });
-const execute = runner.resumeExec.bind(runner);
-runner.resumeExec = async (...args) => {
-  const result = await execute(...args);
-  fs.appendFileSync(path.join(directory, "attempts"), `${result.operationId}\n`);
-  await checkpoint("tool-result-gap");
+const workspace = new RunnerWorkspace({ runner, leases: new LeaseStore(directory), owner: "pi" });
+const exec = workspace.exec.bind(workspace);
+workspace.exec = async (...args) => {
+  const result = await exec(...args);
+  fs.appendFileSync(path.join(directory, "attempts"), `${args[1]}\n`);
   return result;
 };
-const faux = fauxProvider({ tokensPerSecond: 1000, tokenSize: { min: 1, max: 1 } });
-faux.setResponses(Array.from({ length: 4 }, () => request => {
+// Recovery starts when the agent opens; the model waits for /drive so the
+// event stream observes the recovered run.
+let drive!: () => void;
+const driven = mode === "recover" ? new Promise<void>(resolve => { drive = resolve; }) : Promise.resolve();
+const faux = fauxProvider({ tokensPerSecond: boundary === "model-stream" ? 40 : 1000, tokenSize: { min: 1, max: 1 } });
+faux.setResponses(Array.from({ length: 4 }, () => async request => {
+  await driven;
   const result = request.messages.findLast(message => message.role === "toolResult");
   if (result) {
     assert.equal(result.isError, false);
     assert.deepEqual(result.content, [{ type: "text", text: "74\n[exit=0; exited]" }]);
     return fauxAssistantMessage("verified runner result: 74");
   }
+  await checkpoint("accepted");
   return fauxAssistantMessage([
     { type: "text", text: "checking runner output" },
     fauxToolCall("bash", { command: `printf once >> ${boundary}-count; printf 74` }, { id: "provider-call" }),
@@ -39,7 +49,17 @@ faux.setResponses(Array.from({ length: 4 }, () => request => {
 }));
 const models = createModels();
 models.setProvider(faux.provider);
-const options = { directory, runner, models, model: faux.getModel() };
+const boundaries = defineExtension({
+  name: "boundaries",
+  hooks: [
+    hook(ToolTask, { afterTool: async () => { await checkpoint("tool-result-gap"); return undefined; } }),
+    hook(GenerationTask, { beforeRequest: async request => {
+      if (request.messages.some(message => message.role === "toolResult")) await checkpoint("after-tool");
+      return undefined;
+    } }),
+  ],
+});
+const options = { directory, runner, workspace, models, model: { provider: faux.getModel().provider, id: faux.getModel().id }, extensions: [boundaries] };
 if (mode === "contend") {
   await assert.rejects(openAgent(options), /already has a writable owner/);
   process.send!({ type: "blocked" });
@@ -54,52 +74,40 @@ if (mode === "inspect") {
   fs.writeFileSync(changedPath, JSON.stringify(config), { mode: 0o600 });
   await assert.rejects(openAgent({ ...options, runner: new IrohExecutionNodeClient({ configPath: changedPath }) }), /runner binding changed/);
   fs.unlinkSync(changedPath);
-  // Clean close and failed reopen must both relinquish the writer lock.
+  // Clean close and failed reopen must both relinquish the lease.
   agent = await openAgent(options);
 }
-agent.harness.hooks.on("before_request", async () => {
-  const watch = await agent.lane.watch(context);
-  watch.unsubscribe();
-  if (watch.snapshot.transcript.some(entry => entry.type === "message" && entry.message.role === "toolResult")) await checkpoint("after-tool");
-  return undefined;
-});
-let streamed = 0;
-agent.harness.events.on("message_update", async event => {
-  if (event.event.type !== "text_delta" || mode !== "create" || boundary !== "model-stream") return;
-  streamed += event.event.delta.length;
-  if (streamed >= 8) {
-    const watch = await agent.lane.watch(context);
-    watch.unsubscribe();
-    await checkpoint("model-stream");
-  }
-});
-let operationId: string | undefined;
-if (mode === "create") {
-  const accepted = await agent.lane.accept({ kind: "prompt", prompt: "Calculate 7 times ten plus 4 with bash." }, context);
-  assert(accepted.ok);
-  operationId = accepted.value.operationId;
-} else if (mode === "recover") {
-  assert.equal(agent.open.length, 1);
-  operationId = agent.open[0].operationId;
-} else assert.equal(agent.open.length, 0);
+const { conversation, harness } = agent;
+if (mode === "create" && boundary === "model-stream") {
+  const watch = await conversation.watch(context);
+  watch.start(async value => {
+    const partial = (value.docs["pi.live"] as { generation?: { message?: { content: Array<{ type: string; text?: string }> } } }).generation?.message;
+    if ((partial?.content.find(part => part.type === "text")?.text?.length ?? 0) >= 8) await checkpoint("model-stream");
+  });
+}
+const submitted = await conversation.commit(tx => tx.submissionByRequest(conversation.id, REQUEST), context);
+if (mode === "create") assert.equal(submitted, undefined);
+else if (mode === "recover") assert.equal(submitted?.status, "placed");
+else assert.equal(submitted?.status, "done");
+let submission: SubmissionId | undefined = submitted?.id;
 const server = createServer((request, response) => {
   void (async () => {
     if (request.url === "/events") {
-      const watch = await agent.lane.watch(context);
+      const stream = await watchEvents(harness, conversation.id, context);
       response.writeHead(200, { "content-type": "text/event-stream" });
-      response.write(`data: ${JSON.stringify({ type: "snapshot", snapshot: watch.snapshot })}\n\n`);
-      watch.start(event => { response.write(`data: ${JSON.stringify(event)}\n\n`); });
-      response.on("close", () => watch.unsubscribe());
+      response.write(`data: ${JSON.stringify({ type: "snapshot", snapshot: stream.snapshot })}\n\n`);
+      stream.start(async events => { for (const event of events) response.write(`data: ${JSON.stringify(event)}\n\n`); });
+      response.on("close", () => { void stream.stop(); });
     } else if (request.url === "/snapshot") {
-      const watch = await agent.lane.watch(context);
-      watch.unsubscribe();
-      response.end(JSON.stringify(watch.snapshot));
-    } else if (request.url === "/drive" && operationId) {
-      response.writeHead(202).end();
-      await checkpoint("accepted");
-      const result = await agent.lane.drive({ operationId, waitForRetry: true }, context);
-      assert(result.ok);
-      assert.equal(result.value.kind, "settled");
+      const watch = await conversation.watch(context);
+      await watch.stop();
+      response.end(JSON.stringify(watch.value));
+    } else if (request.url === "/drive") {
+      if (mode === "create") submission = (await conversation.submit({ type: "input", content: "Calculate 7 times ten plus 4 with bash.", requestId: REQUEST }, context)).id;
+      response.writeHead(200).end(JSON.stringify({ submission }));
+      drive?.();
+      const settled = await (await harness.submission(submission!, context))!.wait(context);
+      assert.equal(settled.status, "done");
       process.send!({ type: "done" });
     } else response.writeHead(404).end();
   })().catch(error => {
@@ -110,4 +118,4 @@ const server = createServer((request, response) => {
 await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
 const address = server.address();
 assert(address && typeof address !== "string");
-process.send!({ type: "ready", url: `http://127.0.0.1:${address.port}`, operationId });
+process.send!({ type: "ready", url: `http://127.0.0.1:${address.port}`, submission });

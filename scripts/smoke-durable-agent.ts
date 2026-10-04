@@ -20,15 +20,15 @@ export async function smokeDurableAgent(root: string, configPath: string, worksp
       stdio: ["ignore", "pipe", "pipe", "ipc"], env: { PATH: process.env.PATH, HOME: directory },
     });
     children.add(child);
-    const events: Array<Record<string, string>> = [];
+    const events: Array<Record<string, string | number>> = [];
     let failure = "";
     child.stderr!.on("data", chunk => { failure += String(chunk); });
-    child.on("message", event => events.push(event as Record<string, string>));
-    async function wait(type: string) {
+    child.on("message", event => events.push(event as Record<string, string | number>));
+    async function wait(type: string): Promise<Record<string, string | number>> {
       const deadline = Date.now() + 30000;
       for (;;) {
         const fatal = events.find(event => event.type === "failure");
-        if (fatal) throw new Error(fatal.error);
+        if (fatal) throw new Error(String(fatal.error));
         const found = events.find(event => event.type === type);
         if (found) return found;
         if (child.exitCode !== null || child.signalCode !== null || Date.now() > deadline) throw new Error(`waiting for ${type}: ${failure}`);
@@ -46,13 +46,14 @@ export async function smokeDurableAgent(root: string, configPath: string, worksp
       const contender = start(directory, "contend", boundary);
       await contender.wait("blocked");
       await stop(contender.child);
-      await fetch(`${ready.url}/drive`, { method: "POST" });
+      const { submission } = await (await fetch(`${ready.url}/drive`, { method: "POST" })).json();
+      assert.equal(typeof submission, "number");
       await original.wait("checkpoint");
       await stop(original.child);
 
       const recovered = start(directory, "recover", boundary);
       const reopened = await recovered.wait("ready");
-      assert.equal(reopened.operationId, ready.operationId);
+      assert.equal(reopened.submission, submission);
       const controller = new AbortController();
       const stream = await fetch(`${reopened.url}/events`, { signal: controller.signal });
       const reader = stream.body!.getReader();
@@ -68,11 +69,14 @@ export async function smokeDurableAgent(root: string, configPath: string, worksp
           }
         } catch (error) { if (!controller.signal.aborted) throw error; }
       })();
+      // A broken stream is reported after the fixture's own failure, if any.
+      consume.catch(() => {});
       await fetch(`${reopened.url}/drive`, { method: "POST" });
       await recovered.wait("done");
       const snapshot = await (await fetch(`${reopened.url}/snapshot`)).json();
       assert.match(JSON.stringify(snapshot), /verified runner result: 74/);
-      assert.match(received, /text_delta/);
+      // Partials are committed at most every 100 ms; only the slow stream has deltas.
+      assert.match(received, boundary === "model-stream" ? /text_delta/ : /"type":"message_end"/);
       assert.match(received, /run_end/);
       controller.abort();
       await consume;

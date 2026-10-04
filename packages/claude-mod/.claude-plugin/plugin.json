@@ -1,0 +1,7 @@
+{
+  "name": "cube",
+  "version": "0.1.0",
+  "description": "Runs Claude Code's file and shell tools in a cube thread workspace on its trusted runner",
+  "author": { "name": "cube" },
+  "license": "Apache-2.0"
+}

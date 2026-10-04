@@ -475,6 +475,17 @@ header .spacer { margin-left: auto; }
 .thread-navigation header nav a.active { display: none; }
 .thread-navigation .auth-missing .auth-full { display: none; }
 .thread-navigation .auth-missing .auth-short { display: inline; }
+/* the docked sidebar is too narrow for the full panel: the glyph stands
+   for the name and the auth lamp keeps its label in its title */
+@media (min-width: 52.001rem) {
+  .thread-navigation header nav { gap: 0.7rem; }
+  .thread-navigation .name-text {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap;
+  }
+  .thread-navigation :is(.auth-ok, .auth-missing) :is(.auth-full, .auth-short) { display: none; }
+  .thread-navigation .auth-missing { padding: 0; background: none; border: 0; }
+}
 .thread-strip {
   flex: none; min-width: 0; min-height: 2.5rem;
   display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem;
@@ -897,6 +908,10 @@ header .spacer { margin-left: auto; }
 }
 .conversation-empty p { margin: 0; color: var(--ink); font-size: 15.5px; }
 .conversation-empty > span:last-child { max-width: 30rem; font-size: 13px; }
+.conversation-notice {
+  flex: none; margin: 0; max-width: 42rem; padding-left: 0.65rem;
+  border-left: 2px solid var(--line); color: var(--ink-3); font-size: 12.5px; line-height: 1.5;
+}
 .conversation-message { max-width: min(42rem, 92%); }
 .conversation-message.user {
   align-self: flex-end; min-width: min(12rem, 70%);
@@ -914,6 +929,8 @@ header .spacer { margin-left: auto; }
   white-space: pre-wrap; overflow-wrap: anywhere;
   font-size: 15.5px; line-height: 1.6;
 }
+.message-copy.reasoning { color: var(--ink-3); font-size: 13.5px; }
+.conversation-message.continued { margin-top: -0.5rem; }
 .tool-strip {
   border: 1px solid var(--line); border-radius: var(--r-key);
   background: var(--s3); color: var(--ink-2);
@@ -924,6 +941,12 @@ header .spacer { margin-left: auto; }
 }
 .tool-strip summary::-webkit-details-marker { display: none; }
 .tool-strip code { font: 600 12px/1.4 var(--font-mono); }
+.tool-strip summary > code { flex: none; }
+.tool-summary {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ink-3); font: 12px/1.4 var(--font-mono);
+}
+.tool-strip pre.tool-input { max-height: 10rem; color: var(--ink-3); }
 .tool-strip pre {
   max-height: 16rem; overflow: auto; margin: 0; padding: 0.65rem;
   border-top: 1px solid var(--line); background: var(--s1);

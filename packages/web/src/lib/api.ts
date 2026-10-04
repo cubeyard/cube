@@ -1,5 +1,4 @@
 import type {
-  ConversationHistory,
   DaemonState,
   GithubAuthStatus,
   ModelSelection,
@@ -11,17 +10,14 @@ import type {
   UpdateStatus,
 } from "./types.ts";
 import { uid } from "./uid.ts";
+import { HttpThreadEvents } from "../../../server/src/thread-events.ts";
 import type { ModelAuth } from "../../../server/src/model-auth.ts";
-import type { JevOutputComparison } from "../../../server/src/jev-memory.ts";
 
 export const fetchProviders = () => request<{ providers: Awaited<ReturnType<ModelAuth["list"]>> }>("/api/providers").then(result => result.providers);
 export const providerAction = (id: string, operation: "login" | "answer" | "cancel" | "disconnect" | "refresh", body?: unknown) => {
   const suffix = operation === "disconnect" ? "" : `/${operation === "cancel" ? "login" : operation}`;
   return request<{ ok?: true }>(`/api/providers/${encodeURIComponent(id)}${suffix}`, operation === "disconnect" || operation === "cancel" ? "DELETE" : "POST", body);
 };
-export const fetchJevStatus = () => request<{ configured: boolean }>("/api/jev");
-export const saveJevKey = (apiKey: string) => request<{ configured: boolean }>("/api/jev", "PUT", { apiKey });
-export const removeJevKey = () => request<{ configured: boolean }>("/api/jev", "DELETE");
 export const fetchUpdateStatus = () => request<UpdateStatus>("/api/system/update");
 export const checkForUpdate = () => request<UpdateStatus>("/api/system/update", "POST", { action: "check" });
 export const installUpdate = (targetVersion: string, expectedCurrentVersion: string, requestId: string) =>
@@ -153,11 +149,8 @@ export const deleteThread = (id: string) => request<{ ok: true }>(threadBase(id)
 export const renameThread = (id: string, title: string) =>
   request<{ ok: true }>(threadBase(id), "PATCH", { title });
 
-export const fetchConversation = (id: string) =>
-  request<ConversationHistory>(`${threadBase(id)}/history`);
-
-export const fetchJevToolOutput = (id: string, toolCallId: string) =>
-  request<JevOutputComparison>(`${threadBase(id)}/tool-output/${encodeURIComponent(toolCallId)}`);
+/** The thread in the neutral event model: history and the live stream. */
+export const threadEvents = (id: string) => new HttpThreadEvents({ base: threadBase(id) });
 
 export const fetchThreadModels = (id: string) =>
   request<ThreadModels>(`${threadBase(id)}/model`);

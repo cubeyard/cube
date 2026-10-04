@@ -5,6 +5,7 @@
     "packages/git/test",
     "packages/server/src",
     "packages/server/test",
+    "packages/web/test",
     "scripts"
   ]
 }

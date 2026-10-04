@@ -7,6 +7,7 @@
     fetchThreadModels,
     setThreadModel,
   } from "../lib/api.ts";
+  import { CLAUDE_DURABILITY, isClaude, providerLabel } from "../lib/agent.ts";
   import { createArmed } from "../lib/armed.svelte.ts";
   import type { Command } from "../lib/command.ts";
   import { lampClass, stateLabel } from "../lib/thread-state.ts";
@@ -206,7 +207,7 @@
             <option value={modelKey}>{modelState.selected.id} · unavailable</option>
           {/if}
           {#each providers as provider}
-            <optgroup label={provider}>
+            <optgroup label={providerLabel(provider)}>
               {#each modelState?.models.filter((model) => model.provider === provider) ?? [] as model}
                 <option value={JSON.stringify(model)}>{model.id}</option>
               {/each}
@@ -303,6 +304,7 @@
 {#if summary?.error}
   <div class="strip-note bad"><span class="strip-note-text">{summary.error}</span></div>
 {/if}
+
 {#if note}
   <div class="strip-note" class:bad={note.bad} role={note.bad ? "alert" : "status"}>
     <span class="strip-note-text">
@@ -321,7 +323,8 @@
     {#if gone}
       <div class="conversation-gone"><p>this thread is no longer active.</p><a class="key" href="#/threads">back to threads</a></div>
     {:else}
-      <Conversation {threadId} model={selectedModel} {changingModel} bind:busy={conversationBusy} />
+      <Conversation {threadId} model={selectedModel} {changingModel} bind:busy={conversationBusy}
+        notice={summary?.agent === "claude-code" || isClaude(modelState?.selected) ? `claude · max — ${CLAUDE_DURABILITY}` : null} />
     {/if}
   </section>
 

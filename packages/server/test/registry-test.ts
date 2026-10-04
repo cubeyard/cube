@@ -7,7 +7,7 @@ import { Worker } from "node:worker_threads";
 import { Registry, RUNNER_STALE_AFTER_MS } from "../src/registry.ts";
 
 const idleHealth = { lifecycle: "ready" as const, active: false, operationRecords: 0, operationCapacity: 100,
-  error: null, softwareVersion: "test", protocolVersion: 1 as const, activeWorkspaces: 0, retainedWorkspaces: 0,
+  error: null, softwareVersion: "test", protocolVersion: 2 as const, activeWorkspaces: 0, retainedWorkspaces: 0,
   workspaceBytes: 0, workspaceCapacity: 1, workspaceByteLimit: 1024 };
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-registry-"));

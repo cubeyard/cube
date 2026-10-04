@@ -28,6 +28,9 @@ const config = { version: 1, binding: nodeBinding, controlKey: path.join(root, "
 const spec: RunnerExecSpec = { command: "printf '; $(touch not-local)'", guestCwd: ".", timeoutMs: 1000, outputLimit: 8 };
 fs.writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
 const calls: Array<Record<string, unknown>> = [];
+const limits = { maxFrameBytes: 1048576, requestTimeoutMs: 5000, maxCommandBytes: 8192, maxPathBytes: 4096, maxExecTimeoutMs: 600000,
+  maxOutputBytes: 262144, outputPageBytes: 65536, maxReadBytes: 524288, maxWriteBytes: 524288 };
+const paged = Buffer.alloc(150000, 97);
 let scenario = "normal";
 let onCall: ((request: Record<string, unknown>) => void) | undefined;
 const tasks = new Set<Promise<void>>();
@@ -39,7 +42,7 @@ const frame = (value: unknown) => {
   return Array.from(Buffer.concat([header, payload]));
 };
 async function receive(stream: BiStream): Promise<Record<string, unknown>> {
-  const bytes = Buffer.from(await stream.recv.readToEnd(65540));
+  const bytes = Buffer.from(await stream.recv.readToEnd(1048580));
   assert.equal(bytes.readUInt32BE(), bytes.length - 4);
   const request = JSON.parse(bytes.subarray(4).toString());
   calls.push(request);
@@ -56,19 +59,31 @@ const accept = (async () => {
       const mode = scenario;
       let stream = await connection.acceptBi();
       const hello = await receive(stream);
-      assert.deepEqual(hello, { method: "node.hello", protocolVersion: 1 });
+      assert.deepEqual(hello, { method: "node.hello", protocolVersion: 2 });
       if (mode === "hello-hold") { await connection.closed(); return; }
       const binding = mode === "wrong-thread" ? { ...nodeBinding, threadId: "other" }
         : mode === "wrong-node" ? { ...nodeBinding, nodeId: "node-other" }
         : mode === "wrong-environment" ? { ...nodeBinding, environmentId: 2 } : nodeBinding;
-      const capabilities = ["node.hello", "node.status", "workspace.allocate", "workspace.allocate.v2", "workspace.release", "exec.start", "environment.inspect", "operation.get"];
+      const capabilities = ["node.hello", "node.status", "workspace.allocate", "workspace.allocate.v2", "workspace.release", "exec.start", "exec.cancel",
+        "environment.inspect", "operation.get", "fs.read", "fs.write", "fs.stat"];
+      // "old-runner" is how a real protocol-1 runner (cube-runner 0.2.x)
+      // answers a protocol-2 hello.
+      if (mode === "old-runner") {
+        await stream.send.writeAll(frame({ type: "Error", code: "INCOMPATIBLE_PROTOCOL",
+          message: "protocol version 1 required; upgrade cubed or cube-runner", completionUnknown: false }));
+        await stream.send.finish();
+        await connection.closed();
+        return;
+      }
+      // "incompatible" is a protocol-1 runner (cube-runner 0.2.x and older).
       await stream.send.writeAll(frame({ type: "Hello", nodeId: binding.nodeId,
-        protocolVersion: mode === "legacy" ? undefined : mode === "incompatible" ? 2 : 1,
-        minimumProtocolVersion: mode === "legacy" ? undefined : mode === "incompatible" ? 2 : 1,
+        protocolVersion: mode === "legacy" ? undefined : mode === "incompatible" ? 1 : 2,
+        minimumProtocolVersion: mode === "legacy" ? undefined : mode === "incompatible" ? 1 : 2,
         softwareVersion: mode === "legacy" ? undefined : "1.0.0", binding,
         profiles: ["host"], capabilities: mode === "unsupported" ? ["node.hello"]
-          : mode === "old-allocation" ? capabilities.filter(capability => capability !== "workspace.allocate.v2") : capabilities,
-        limits: { maxFrameBytes: 65536, requestTimeoutMs: 5000 } }));
+          : mode === "old-allocation" ? capabilities.filter(capability => capability !== "workspace.allocate.v2")
+          : mode === "no-files" ? capabilities.filter(capability => !capability.startsWith("fs.")) : capabilities,
+        limits: mode === "old-limits" ? { maxFrameBytes: 65536, requestTimeoutMs: 5000 } : limits }));
       await stream.send.finish();
       stream = await connection.acceptBi();
       const query = await receive(stream);
@@ -77,11 +92,15 @@ const accept = (async () => {
       if (mode === "oversized") { await stream.send.writeAll([0, 1, 0, 1]); await stream.send.finish(); return; }
       if (mode === "truncated") { await stream.send.writeAll([0, 0]); await stream.send.finish(); return; }
       if (mode === "garbage") { await stream.send.writeAll([0, 0, 0, 1, 255]); await stream.send.finish(); return; }
-      const id = mode === "wrong-id" ? "op-other" : query.operationId;
+      const id = mode === "wrong-id" ? "op-other" : query.operationId ?? query.idempotencyKey;
+      const page = (cursor: number) => {
+        const output = paged.subarray(cursor, cursor + limits.outputPageBytes);
+        return { exitCode: 0, termination: "exited", output: Array.from(output), outputBytes: paged.length, truncated: false, outputOffset: cursor, retainedBytes: paged.length };
+      };
       const result = mode === "reject" ? { type: "Error", code: "INVALID_REQUEST", message: "bad cwd", completionUnknown: false, operationId: id }
         : mode === "missing" && query.method === "environment.inspect" ? { type: "Error", code: "ENVIRONMENT_MISSING", message: "gone", completionUnknown: false }
-        : query.method === "node.status" ? { type: "Status", nodeId: binding.nodeId, protocolVersion: 1,
-          minimumProtocolVersion: 1, softwareVersion: "1.0.0", binding: mode === "wrong-binding" ? { ...binding, threadId: "other" } : binding,
+        : query.method === "node.status" ? { type: "Status", nodeId: binding.nodeId, protocolVersion: 2,
+          minimumProtocolVersion: 2, softwareVersion: "1.0.0", binding: mode === "wrong-binding" ? { ...binding, threadId: "other" } : binding,
           status: { lifecycle: mode === "draining" ? "draining" : ["missing", "unsupported-status"].includes(mode) ? "faulted" : "ready", active: false,
             operationRecords: 2, operationCapacity: 10000, error: mode === "missing" ? "ENVIRONMENT_MISSING" : mode === "unsupported-status" ? "UNSUPPORTED" : null,
             activeWorkspaces: 0, retainedWorkspaces: 0, workspaceBytes: 0, workspaceCapacity: 1, workspaceByteLimit: 53687091200 } }
@@ -89,9 +108,17 @@ const accept = (async () => {
         : query.method === "workspace.release" ? { type: "Workspace", workspace: { threadId: query.threadId, state: "released", kind: "git", retained: true } }
         : query.method === "environment.inspect" ? { type: "Environment", binding: mode === "wrong-binding" ? { ...binding, threadId: "other" } : binding, state: "ready" }
         : query.method === "exec.start" ? { type: "Accepted", operationId: id }
+        : query.method === "fs.read" ? { type: "File", path: query.path, file: { content: mode === "bad-base64" ? "not base64!" : Buffer.from("hello").toString("base64"),
+          offset: query.offset ?? 0, size: 5, eof: true, sha256: "a".repeat(64) } }
+        : query.method === "fs.write" ? mode === "precondition" ? { type: "Error", code: "PRECONDITION_FAILED", message: "runner request rejected", completionUnknown: false, operationId: id }
+          : mode === "stale" ? { type: "Error", code: "LEASE_STALE", message: "runner request rejected", completionUnknown: false, operationId: id }
+          : { type: "Written", idempotencyKey: id, result: { sha256: "b".repeat(64), size: Buffer.from(query.content as string, "base64").length } }
+        : query.method === "fs.stat" ? { type: "Stat", path: query.path, stat: { kind: "file", size: 5, mode: 0o644, modifiedMs: 1, sha256: null } }
+        : query.method === "exec.cancel" ? { type: "Operation", operationId: id, operation: { state: "Failed", error: "CANCELLED", completionUnknown: false } }
+        : mode === "paged" ? { type: "Operation", operationId: id, operation: { state: "Succeeded", result: page((query.cursor as number | undefined) ?? 0) } }
         : { type: "Operation", operationId: id, operation: mode === "running" ? { state: "Running" } : mode === "unknown" ? { state: "Unknown" }
           : mode === "interrupted" ? { state: "Interrupted", completionUnknown: true } : mode === "failed" ? { state: "Failed", error: "IO_ERROR", completionUnknown: false }
-          : { state: "Succeeded", result: { exitCode: 0, termination: "exited", output: [111, 107], outputBytes: 2, truncated: false } } };
+          : { state: "Succeeded", result: { exitCode: 0, termination: "exited", output: [111, 107], outputBytes: 2, truncated: false, outputOffset: 0, retainedBytes: 2 } } };
       await stream.send.writeAll(mode === "trailing" ? [...frame(result), 1] : frame(result));
       if (mode === "no-fin") { await connection.closed(); return; }
       await stream.send.finish();
@@ -131,9 +158,58 @@ try {
   await client.check(1);
   scenario = "draining";
   await assert.rejects(client.status(1), errorCode("DRAINING"));
+  scenario = "old-limits";
+  await assert.rejects(client.check(1), errorCode("NODE_UNAVAILABLE"));
+
+  // Protocol 2 workspace operations: limits, paging, cancel, files and fencing.
+  scenario = "normal";
+  const described = await allocated.describe();
+  assert.deepEqual(described.limits, limits);
+  assert.ok(["exec.cancel", "fs.read", "fs.write", "fs.stat"].every(capability => described.capabilities.includes(capability)));
+  await allocated.startOperation("op-workspace", spec, { epoch: 7 });
+  assert.deepEqual(calls.at(-1), { method: "exec.start", operationId: "op-workspace", env: 1, threadId: "allocated-thread", epoch: 7, spec });
+  await client.startOperation("op-installation", spec);
+  assert.ok(!("threadId" in calls.at(-1)!) && !("epoch" in calls.at(-1)!), "the installation thread keeps its protocol-1 request identity");
+  assert.equal((await allocated.cancelOperation("op-workspace", { epoch: 7 })).state, "Failed");
+  assert.deepEqual(calls.at(-1), { method: "exec.cancel", env: 1, operationId: "op-workspace", threadId: "allocated-thread", epoch: 7 });
+  await assert.rejects(allocated.startOperation("op-workspace", spec, { epoch: 0 }), errorCode("INVALID_REQUEST"));
+  scenario = "paged";
+  const pagedResult = await allocated.resumeExec("session-paged", "invocation-paged", { ...spec, outputLimit: 262144 });
+  assert.equal(pagedResult.output.length, paged.length);
+  assert.deepEqual(calls.filter(row => row.method === "operation.get").slice(-3).map(row => row.cursor), [undefined, 65536, 131072]);
+  scenario = "normal";
+  const read = await allocated.readFile("src/a.txt", { offset: 0, limit: 10 });
+  assert.equal(read.content.toString(), "hello");
+  assert.equal(read.sha256, "a".repeat(64));
+  const written = await allocated.writeFile("src/a.txt", Buffer.from("hi"), { idempotencyKey: "write-1", expectedSha: "a".repeat(64), epoch: 7 });
+  assert.deepEqual(written, { sha256: "b".repeat(64), size: 2 });
+  assert.deepEqual(calls.at(-1), { method: "fs.write", env: 1, threadId: "allocated-thread", epoch: 7, idempotencyKey: "write-1", path: "src/a.txt",
+    content: Buffer.from("hi").toString("base64"), expectedSha: "a".repeat(64), createParents: false });
+  assert.equal((await allocated.stat("src/a.txt")).kind, "file");
+  const beforeLocalRejects = calls.length;
+  for (const bad of ["", "/etc/passwd", "nul "]) {
+    await assert.rejects(allocated.readFile(bad), errorCode("INVALID_REQUEST"));
+    await assert.rejects(allocated.writeFile(bad, Buffer.from("x"), { idempotencyKey: "write-bad" }), errorCode("INVALID_REQUEST"));
+  }
+  await assert.rejects(allocated.writeFile("a", Buffer.alloc(524289), { idempotencyKey: "write-big" }), errorCode("INVALID_REQUEST"));
+  await assert.rejects(allocated.writeFile("a", Buffer.from("x"), { idempotencyKey: "write-sha", expectedSha: "XYZ" }), errorCode("INVALID_REQUEST"));
+  assert.equal(calls.length, beforeLocalRejects, "invalid file requests never reach the runner");
+  scenario = "precondition";
+  await assert.rejects(allocated.writeFile("a", Buffer.from("x"), { idempotencyKey: "write-2", expectedSha: "c".repeat(64) }), errorCode("PRECONDITION_FAILED"));
+  scenario = "stale";
+  await assert.rejects(allocated.writeFile("a", Buffer.from("x"), { idempotencyKey: "write-3", epoch: 1 }), errorCode("LEASE_STALE"));
+  scenario = "bad-base64";
+  await assert.rejects(allocated.readFile("a"), errorCode("NODE_UNAVAILABLE"));
+  scenario = "no-files";
+  const beforeNoFiles = calls.length;
+  await assert.rejects(allocated.writeFile("a", Buffer.from("x"), { idempotencyKey: "write-4" }), errorCode("OPERATION_UNSUPPORTED"));
+  assert.equal(calls.length, beforeNoFiles + 1, "a runner without fs.write is rejected after hello, before mutation bytes");
   scenario = "incompatible";
   await assert.rejects(client.check(1), error => errorCode("INCOMPATIBLE_PROTOCOL")(error)
     && (error as Error).message.includes("upgrade the older component"));
+  scenario = "old-runner";
+  await assert.rejects(client.check(1), error => errorCode("INCOMPATIBLE_PROTOCOL")(error)
+    && (error as Error).message.includes("share protocol version 2") && !(error as Error).message.includes("version 1 required"));
   scenario = "legacy";
   await assert.rejects(client.check(1), errorCode("INCOMPATIBLE_PROTOCOL"));
   scenario = "missing";
@@ -188,7 +264,7 @@ try {
   fs.writeFileSync(corruptedPath, JSON.stringify({ ...foreignIntent, controlPeer: "0".repeat(64) }));
   await assert.rejects(client.submitExec(1, corrupted.operationId), errorCode("WRONG_NODE"));
   assert.ok(!fs.existsSync(`${corruptedPath}.sent`));
-  for (const bad of [{ ...spec, timeoutMs: 60001 }, { ...spec, outputLimit: 8193 }, { ...spec, address: "203.0.113.1:443" }]) {
+  for (const bad of [{ ...spec, timeoutMs: 600001 }, { ...spec, outputLimit: 262145 }, { ...spec, address: "203.0.113.1:443" }]) {
     await assert.rejects(client.prepareExec(1, bad), errorCode("INVALID_REQUEST"));
   }
   await assert.rejects(client.submitExec(1, "../escape"), errorCode("INVALID_REQUEST"));

@@ -1,125 +1,220 @@
-/** In-process Pi execution. The host owns activation and the exclusive writer
- * lock; Pi owns every conversation entry and execution checkpoint. */
+/** In-process Pi execution on pi-durable. The host owns activation and the
+ * thread's workspace lease; Pi owns every conversation entry, task checkpoint
+ * and document. There is no second workflow journal. */
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { AgentHarness, BACKGROUND_CONTEXT, value, type AgentHarnessOptions, type AgentHarnessTool, type LaneConfiguration } from "@earendil-works/pi-agent-core";
-import { createNodeSqliteFactory, SqliteSessionRepo } from "@earendil-works/pi-session-backend-sqlite-node";
-import { Type } from "typebox";
-import type { IrohExecutionNodeClient } from "./iroh-node.ts";
-import { installJevMemory, JevMemory } from "./jev-memory.ts";
+import type { Context } from "@earendil-works/chord";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { Type, type Models, type Static } from "@earendil-works/pi-ai";
+import { createRegistry, defineDoc, defineExtension, defineTool, Harness, ROOT_CONVERSATION_ID, section, type Extension, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
+import { NodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
+import { createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
+import { createCodemodeTool, type CodemodeLimits, type NestedTool } from "./codemode.ts";
+import type { NodeBinding } from "./iroh-node.ts";
+import { settleOperation, WorkspaceError, type Workspace } from "./workspace.ts";
+import { WORKSPACE_ROOT, WorkspaceEnv } from "./workspace-env.ts";
 
 const context = BACKGROUND_CONTEXT;
+const BASH_OUTPUT_BYTES = 50 * 1024;
+const BASH_DEFAULT_TIMEOUT_MS = 120_000;
+const BASH_MAX_TIMEOUT_MS = 600_000;
+const bashParameters = Type.Object({
+  command: Type.String({ description: "Bash command to execute" }),
+  cwd: Type.Optional(Type.String({ description: "Directory relative to the workspace root" })),
+  timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: BASH_MAX_TIMEOUT_MS })),
+});
+
+/** The runner this thread's storage belongs to, plus a random storage
+ * identity that scopes every workspace key Pi derives from task ids. */
+export const RunnerDoc = defineDoc<{ binding: string; instance: string }>({
+  kind: "cube.runner", version: 1, scope: "session", initial: () => ({ binding: "", instance: "" }),
+});
+
+/** pi-durable's SQLite storage on cubed's own connection: WAL with
+ * synchronous=FULL, so a committed checkpoint survives power loss too. */
+async function openStorage(file: string): Promise<SqliteStorage> {
+  const database = new DatabaseSync(file, { timeout: 5000 });
+  try {
+    database.exec("PRAGMA journal_mode=WAL");
+    database.exec("PRAGMA synchronous=FULL");
+    if ((database.prepare("PRAGMA synchronous").get() as { synchronous: number } | undefined)?.synchronous !== 2) {
+      throw new Error("session storage requires synchronous=FULL");
+    }
+  } catch (error) { database.close(); throw error; }
+  return SqliteStorage.open(new NodeSqliteDatabase(database));
+}
+
+/** Files the Pi store before pi-durable 1.0.1 left in a thread directory. */
+const LEGACY_STORE = ["session", "owner.sqlite"];
+export const LEGACY_THREAD = "this thread was created by an older cube and is not migrated — reset to a new CUBED_STATE (see DEVELOPING.md)";
+
+/** Refuses a thread directory with the old Pi store: opening it would start
+ * an empty conversation and submit the first message again on its runner. */
+export function assertCurrentThreadStore(directory: string): void {
+  if (LEGACY_STORE.some(name => fs.existsSync(path.join(directory, name)))) throw new Error(LEGACY_THREAD);
+}
 
 export async function openAgent(options: {
   directory: string;
-  runner: IrohExecutionNodeClient;
-  models: AgentHarnessOptions["models"];
+  runner: { binding: Readonly<NodeBinding>; configHash: string };
+  /** The thread workspace; Pi holds its lease for the whole Harness lifetime. */
+  workspace: Workspace;
+  models: Models;
   model: { provider: string; id: string };
-  getJevApiKey?: () => string | null;
+  /** Tests lower these; production uses CODEMODE_LIMITS. */
+  codemodeLimits?: Partial<CodemodeLimits>;
+  /** Installed after cube's own extension; tests use this for hooks. */
+  extensions?: readonly Extension[];
 }) {
-  fs.mkdirSync(options.directory, { recursive: true, mode: 0o700 });
-  // A dedicated SQLite connection holds an OS-backed writer lock for the
-  // entire Session lifetime. Process death releases it without stale PID files.
-  // It contains no workflow state and never contends with Pi's transactions.
-  const owner = new DatabaseSync(path.join(options.directory, "owner.sqlite"));
-  try { owner.exec("PRAGMA busy_timeout=0; BEGIN IMMEDIATE"); }
-  catch (cause) {
-    owner.close();
-    throw new Error("thread session already has a writable owner", { cause });
-  }
-  const databaseFactory = createNodeSqliteFactory();
-  for (const method of ["open", "openExisting"] as const) {
-    const open = databaseFactory[method];
-    databaseFactory[method] = async filename => {
-      const db = await open(filename);
-      db.exec("PRAGMA synchronous=FULL");
-      if (db.prepare("PRAGMA synchronous").get<{ synchronous: number }>()?.synchronous !== 2) {
-        throw new Error("session storage requires synchronous=FULL");
-      }
-      return db;
-    };
-  }
-  const repo = new SqliteSessionRepo({ directory: path.join(options.directory, "session"), databaseFactory });
-  let session: Awaited<ReturnType<typeof repo.create>> | undefined;
+  // The lease is the single writable owner of the thread: a competing holder,
+  // in this process or another, is refused, and process death releases it.
+  // Its epoch fences runner mutations of any older holder. pi-durable has no
+  // cross-process storage lock; the lease is that lock.
+  assertCurrentThreadStore(options.directory);
+  const lease = await options.workspace.lease({ owner: "pi" });
+  const release = () => options.workspace.release(lease.token).catch(() => {});
+  let storage: SqliteStorage | undefined;
+  let harness: Harness | undefined;
+  let closing = false;
   try {
-    const existing = await repo.list(undefined, context);
-    if (existing.length > 1) throw new Error("thread has multiple sessions");
-    session = existing.length ? await repo.open(existing[0], context) : await repo.create({}, context);
-    const sessionId = session.metadata.id;
-    const binding = value<string>("cube.runner");
-    const expected = JSON.stringify([options.runner.binding, options.runner.configHash]);
-    const saved = await session.getValue(binding, context);
-    if (saved && saved.value !== expected) throw new Error("thread runner binding changed");
-    if (!saved) await session.setValue(binding, expected, context);
-    // Pi 0.85.1 exposes typed values, but no pre-create lane-config accessor.
-    // Existing lane configuration, not the registry's initial choice, is truth.
-    const configured = await session.getValue(value<LaneConfiguration>("pi.lane.config", "main"), context);
-    const identity = configured?.value.model;
-    const model = identity ? options.models.getModel(identity.provider, identity.modelId) ?? options.models.getModels()[0]
-      : options.models.getModel(options.model.provider, options.model.id);
-    if (!model) throw new Error("model catalog unavailable — connect a provider before starting this thread");
-    const memory = await JevMemory.create(session, options.getJevApiKey ?? (() => null), context);
-    const bashParameters = Type.Object({ command: Type.String(), cwd: Type.Optional(Type.String()), timeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: 60000 })) });
-    const bash: AgentHarnessTool<object | undefined, typeof bashParameters, { operationId: string; exitCode: number | null; termination: string }> = {
-      name: "bash",
-      label: "bash",
-      description: "Execute a shell command in the thread runner workspace. Results are bounded to 8192 bytes. Relative cwd defaults to the workspace root. Timeout is at most 60 seconds.",
-      parameters: bashParameters,
-      replay: "safe" as const,
-      async execute(_id, args, _update, _toolContext, invocation, callContext) {
-        // AgentHarness validates tool arguments against parameters first.
-        const input = args as { command: string; cwd?: string; timeoutMs?: number };
-        const result = await options.runner.resumeExec(sessionId, invocation.invocationId, {
-          command: input.command,
-          guestCwd: input.cwd ?? ".",
-          timeoutMs: input.timeoutMs ?? 60000,
-          outputLimit: 8192,
-        }, callContext.abortSignal);
+    fs.mkdirSync(options.directory, { recursive: true, mode: 0o700 });
+    storage = await openStorage(path.join(options.directory, "pi.sqlite"));
+    const registry = createRegistry();
+    // Keys are bound in each tool call; replay of the same task finds the
+    // same runner operation instead of executing again. A direct call's key is
+    // its task's; a codemode call's nested calls extend the codemode task's
+    // key with their sequence number.
+    let instance = "";
+    const taskKey = (api: ToolExecutionApi) => `pi:${instance}:${api.taskId}`;
+    const fileTool = (tool: ToolRegistration, mutates: boolean): NestedTool => ({
+      registration: tool, mutates,
+      run: (args, api, callContext, key) => tool.execute(args, {
+        ...api, env: new WorkspaceEnv({ workspace: options.workspace, token: lease.token, id: `cube-workspace:${instance}`, key }),
+      }, callContext),
+    });
+    const bashTool: NestedTool = {
+      registration: defineTool({
+        name: "bash",
+        description: `Execute a shell command in the thread runner workspace and return combined stdout and stderr. Output is bounded to ${BASH_OUTPUT_BYTES / 1024} KiB. cwd is relative to the workspace root, which is also the default. Timeout defaults to ${BASH_DEFAULT_TIMEOUT_MS / 1000} seconds, at most ${BASH_MAX_TIMEOUT_MS / 1000}.`,
+        parameters: bashParameters,
+        // The task id is the runner operation key: a rerun after a crash
+        // reattaches to the same command and never starts it twice.
+        replay: "safe",
+        executionMode: "sequential",
+        execute: (args, api, callContext) => runBash(args, api, callContext, taskKey(api)),
+      }),
+      mutates: true,
+      // Codemode is replay "unsafe": its nested commands are never reattached,
+      // so a host shutdown cancels them too.
+      run: (args: Static<typeof bashParameters>, api, callContext, key) => runBash(args, api, callContext, key, false),
+    };
+    async function runBash(args: Static<typeof bashParameters>, api: ToolExecutionApi, callContext: Context, base: string, reattached = true) {
+      const key = `${base}:bash`;
+      const signal = callContext.abortSignal;
+      try {
+        await options.workspace.exec(lease.token, key, {
+          command: args.command, timeoutMs: args.timeoutMs ?? BASH_DEFAULT_TIMEOUT_MS, outputLimit: BASH_OUTPUT_BYTES,
+          ...(args.cwd === undefined ? {} : { cwd: relative(args.cwd) }),
+        });
+        const state = await settleOperation(options.workspace, lease.token, key, signal ? { signal } : {});
+        if (state.state === "failed") throw new WorkspaceError(state.error, `command failed: ${state.error}`, { completionUnknown: state.completionUnknown });
+        if (state.state !== "succeeded") throw new WorkspaceError("COMPLETION_UNKNOWN", "command outcome is unknown; inspect the workspace before retrying");
+        await api.details({ operationKey: key, exitCode: state.exitCode, termination: state.termination }, callContext);
         return {
-          content: [{ type: "text" as const, text: Buffer.from(result.output).toString("utf8")
-            + `\n[exit=${result.exitCode}; ${result.termination}${result.truncated ? "; output truncated" : ""}]` }],
-          details: { operationId: result.operationId, exitCode: result.exitCode, termination: result.termination },
+          content: [{ type: "text" as const, text: Buffer.from(state.output).toString("utf8")
+            + `\n[exit=${state.exitCode}; ${state.termination}${state.truncated ? "; output truncated" : ""}]` }],
         };
-      },
-    };
-    // On an existing lane Pi ignores this seed entirely, even if the configured
-    // model disappeared. History and explicit model selection must still work.
-    const { harness, open } = await AgentHarness.create({
-      session,
-      models: options.models,
-      model,
-      toolExecution: "sequential",
-      activeToolNames: memory.enabled() ? ["bash", "recall"] : ["bash"],
-      systemPrompt: "You are a coding agent. Use bash to inspect and edit the runner workspace. The runner executes trusted commands under its own account; it is not a sandbox. Never assume access to control-plane files or credentials.",
-      tools: [bash, memory.recallTool()],
+      } catch (error) {
+        // A stop aborts the call: kill the runner command. A host shutdown
+        // also aborts it, but then a direct command keeps running and the
+        // next process reattaches to it.
+        if (signal?.aborted && (!closing || !reattached)) await options.workspace.cancel(lease.token, key).catch(() => {});
+        throw error;
+      }
+    }
+    const direct = (tool: NestedTool): ToolRegistration => ({
+      ...tool.registration,
+      execute: (args, api, callContext) => tool.run(args as never, api, callContext, taskKey(api)),
+    });
+    const read = fileTool({ ...createReadTool(), replay: "safe" }, false);
+    const write = fileTool({ ...createWriteTool(), replay: "safe" }, true);
+    const edit = fileTool(createEditTool(), true);
+    const codemode = createCodemodeTool({ tools: [read, write, edit, bashTool], key: taskKey, ...(options.codemodeLimits ? { limits: options.codemodeLimits } : {}) });
+    registry.install(defineExtension({
+      name: "cube",
+      tools: [direct(read), direct(write), direct(edit), bashTool.registration, codemode],
+      sections: [section("preamble", () => `You are a coding agent working in a thread runner workspace. File tools address the workspace root as ${WORKSPACE_ROOT}; bash runs commands with the workspace root as its working directory. codemode runs one JavaScript script that calls these tools, for batching, chaining or filtering their results. The runner executes trusted commands under its own account; it is not a sandbox. Never assume access to control-plane files or credentials.`, { tag: false }),
+        // The repository's own instructions live on the runner, as they do
+        // for Claude Code threads; rendered each generation, so edits apply.
+        section("repository", async () => {
+          const parts: string[] = [];
+          for (const file of INSTRUCTION_FILES) {
+            const text = await instructionFile(options.workspace, lease.token, file);
+            if (text) parts.push(`Contents of ${file} in the thread workspace (project instructions, checked into the codebase):\n\n${text}`);
+          }
+          return parts.length ? parts.join("\n\n") : undefined;
+        }, { tag: false })],
+    }));
+    for (const extension of options.extensions ?? []) registry.install(extension);
+    harness = await Harness.open(storage, { models: options.models, registry, settings: { toolExecution: "sequential" } }, context);
+    const expected = JSON.stringify([options.runner.binding, options.runner.configHash]);
+    instance = await harness.commit(async tx => {
+      const runner = await tx.doc(RunnerDoc);
+      if (runner.binding && runner.binding !== expected) throw new Error("thread runner binding changed");
+      if (!runner.binding) { runner.binding = expected; runner.instance = randomUUID(); }
+      return runner.instance;
     }, context);
-    installJevMemory(harness, memory);
-    const lane = await harness.lane("main", context);
-    const entries = await lane.findEntries({ type: "message" }, context);
-    memory.restore(entries.flatMap(entry => entry.type === "message" ? [entry.message] : []));
-    const syncMemory = async () => {
-      const enabled = (options.getJevApiKey?.() ?? null) !== null;
-      try { await lane.setActiveTools(enabled ? ["bash", "recall"] : ["bash"], context); memory.setActive(enabled); }
-      catch { memory.setActive(false); }
-    };
-    await syncMemory();
+    const existing = await harness.conversation(ROOT_CONVERSATION_ID, context);
+    // On an existing conversation its stored agent is the truth, even when the
+    // selected model left the catalog; history and explicit selection still work.
+    if (!existing && !options.models.getModel(options.model.provider, options.model.id)) {
+      throw new Error("model catalog unavailable — connect a provider before starting this thread");
+    }
+    const conversation = existing ?? await harness.root(context, { agent: { model: { provider: options.model.provider, modelId: options.model.id } } });
+    // Continue any run the last process left unfinished.
+    harness.resume();
+    const opened = harness;
     let closed = false;
     return {
-      harness, lane, open, syncMemory,
+      harness: opened, conversation, storage,
       async close() {
         if (closed) return;
-        closed = true;
-        try { await harness.close(context); }
-        finally {
-          try { await session!.close(context); }
-          finally { owner.close(); }
-        }
+        closed = true; closing = true;
+        try { await opened.close(context); }
+        finally { await release(); }
       },
     };
   } catch (error) {
-    try { await session?.close(context); }
-    finally { owner.close(); }
+    closing = true;
+    // A Harness closes its storage; storage without a Harness closes alone.
+    try { await (harness ?? storage)?.close(context); }
+    finally { await release(); }
     throw error;
   }
+}
+export type Agent = Awaited<ReturnType<typeof openAgent>>;
+
+const INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"];
+const INSTRUCTION_BYTES = 64 * 1024;
+
+/** A repository instruction file from the workspace root, or null when absent. */
+async function instructionFile(workspace: Workspace, token: string, file: string): Promise<string | null> {
+  try {
+    const read = await workspace.readFile(token, file, { limit: INSTRUCTION_BYTES });
+    const text = Buffer.from(read.content).toString("utf8").trim();
+    if (!text) return null;
+    return !read.eof ? `${text}\n\n[truncated at ${INSTRUCTION_BYTES / 1024} KiB]` : text;
+  } catch (error) {
+    if (error instanceof WorkspaceError && error.code === "NOT_FOUND") return null;
+    throw error;
+  }
+}
+
+function relative(cwd: string): string {
+  const resolved = path.posix.resolve(WORKSPACE_ROOT, cwd);
+  if (resolved !== WORKSPACE_ROOT && !resolved.startsWith(`${WORKSPACE_ROOT}/`)) throw new Error("cwd must be inside the workspace");
+  return path.posix.relative(WORKSPACE_ROOT, resolved) || ".";
 }

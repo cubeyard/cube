@@ -1,5 +1,10 @@
 # Architecture tour notes
 
+> **Historical.** These notes describe cube before the move to pi-durable
+> 1.0.1 (Pi 0.85.1, AgentHarness, lanes and the owner.sqlite lock). They are
+> kept as a record of the decisions taken then. ARCHITECTURE.md describes the
+> current Harness, thread Workspace and lease.
+
 Notes and decisions collected during the guided architecture walkthrough.
 These distinguish the current implementation from the intended direction;
 they are not an implementation plan.
