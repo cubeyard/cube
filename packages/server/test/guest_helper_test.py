@@ -13,6 +13,8 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# No __pycache__ next to the shipped helper.
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location("cube_guest", os.path.join(HERE, "..", "guest", "cube-guest.py"))
 guest = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guest)
