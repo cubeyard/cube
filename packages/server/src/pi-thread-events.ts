@@ -111,8 +111,14 @@ function messageEvents(message: Message, id: string): ThreadEvent[] {
   if (message.role !== "toolResult") return [];
   return [{
     type: "tool-result", id, callId: message.toolCallId, name: message.toolName, isError: message.isError, final: true,
-    output: message.content.map(part => part.type === "text" ? part.text : "[image]").join("\n"),
+    output: message.content.map(part => part.type === "text" ? harnessNote(part.text) : "[image]").join("\n"),
   }];
+}
+
+/** pi-durable appends a tool's diagnostics for the model as one
+ * `<harness>` block; the thread shows the diagnostic lines themselves. */
+function harnessNote(text: string): string {
+  return /^<harness>\n([\s\S]*)\n<\/harness>$/.exec(text)?.[1] ?? text;
 }
 
 function assistantEvents(message: AssistantMessage, id: string, final: boolean): ThreadEvent[] {

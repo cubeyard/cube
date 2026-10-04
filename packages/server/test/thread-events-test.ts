@@ -122,6 +122,8 @@ try {
     await agent.conversation.abort(context);
     await until(() => latest?.status.state === "stopped", "stopped status");
     assert.deepEqual(latest!.status, { state: "stopped", run: "third", error: null });
+    const aborted = latest!.events.findLast(event => event.type === "tool-result");
+    assert(aborted?.type === "tool-result" && aborted.final && /aborted/.test(aborted.output) && !aborted.output.includes("<harness>"), JSON.stringify(aborted));
     // Closing the agent ends every watch; the SSE transport ends its stream.
     let ended = 0;
     let frames = 0;
