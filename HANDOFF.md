@@ -29,7 +29,10 @@ migration; a fresh `CUBED_STATE` and re-enrolled runners (DEVELOPING.md).
 Verified on server1 (Linux, KVM, QEMU 8.2, Debian 13 genericcloud, disposable
 state, loopback Iroh, 2026-10-04):
 
-- `pnpm typecheck`, `pnpm lint`, `pnpm test` (offline suites, including the
+- `CUBE_TEST_VM_IMAGE=… CUBE_TEST_VM=required bash scripts/test-node-transport.sh`
+  (fmt, clippy, both crates' tests, runner packaging, and the three live
+  smokes below in one run).
+- `pnpm typecheck`, `pnpm lint`, `pnpm build`, `pnpm test` (offline suites, including the
   guest helper's unit tests, the Workspace contract over the real helper under a
   temporary root, gateway supervision with a fake gateway, egress policy, seed,
   thread machine lifecycle and the process-level smokes over local guests).
@@ -56,9 +59,12 @@ Not verified: macOS (HVF, arm64 guest), runner and cubed on separate machines
 (direct and relay modes), more than one active VM per runner (by design one),
 many VMs and flows under load, a real `gh auth token` against github.com from a
 guest with a real model (manual check, only with the maintainer's consent), a
-guest that ignores ACPI power-down, the web UI's "starting the thread's
-machine" state in a browser at desktop and 390 px, and the release tarball
-built by CI with `bin/cube-gateway`. HTTP/2, WebSocket and CONNECT are refused
+guest that ignores ACPI power-down, and the release tarball built by CI (a
+local build with a disposable key carries `bin/cube-gateway`, and its
+`--self-check` fails without it). The web UI's "starting the thread's machine"
+state and the runner panel's machine counts were inspected in headless
+Chromium at 1440×900 and 390×844 against a disposable cubed with local guests,
+not with a real VM. HTTP/2, WebSocket and CONNECT are refused
 by the gateway this round; clients that pin certificates fail against the
 interception. Snapshots, `.agents/setup`/resume and macaroons are next round.
 
