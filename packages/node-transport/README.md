@@ -1,15 +1,15 @@
-# Node transport bootstrap
+# Node transport and runner
 
-**Trusted-runner execution is the product's only execution path. It is not sandboxing.**
+**A runner hosts one QEMU VM per active thread; the guest is the isolation
+boundary, QEMU runs as the runner account (see [RUNNER.md](RUNNER.md)).**
 Real iroh 1.2.0, pinned in Cargo.lock, using Rust 1.91.0. The `serve` command
-remains a hello-only probe and advertises no execution profiles. The separate,
-explicitly opted-in [trusted runner profile](RUNNER.md) adds a permanent local
-binding, durable operation journal, bounded runner exec and result retrieval.
-Operator-enrolled runners serve ordinary Pi (pi-durable) threads through cubed's `Workspace`. The control-plane adapter in
-`packages/server/src/iroh-node.ts` now calls pinned `@number0/iroh` 1.1.0 **inside
-Node**, directly over this protocol. There is no Rust subprocess/stdio bridge
-between TypeScript and the runner; the CLI remains independent diagnostic
-and enrollment tooling. See [RUNNER.md](RUNNER.md).
+remains a hello-only probe and advertises no profiles. The [runner
+profile](RUNNER.md) adds a permanent local binding, a durable VM journal, the
+`vm.*` lifecycle (protocol 3) and the `cube/l2/1` frame channel to
+`cube-gateway` (`src/l2.rs`, shared with `packages/gateway`). cubed's adapter
+(`packages/server/src/iroh-node.ts`) calls pinned `@number0/iroh` inside Node,
+directly over this protocol; its protocol-3 client is the SERVER work package
+of the VM-runner plan. The CLI is enrollment, diagnostic and operator tooling.
 
 ## Run locally
 
@@ -51,18 +51,16 @@ not the durable node registry/enrollment or an environment allocation mechanism.
   four-byte big-endian payload length, then exactly that
   many UTF-8 JSON bytes and FIN. Empty, oversized, truncated, trailing or unknown
   request fields fail closed. Unsupported methods are not executed.
-- Request: `{"method":"node.hello","protocolVersion":2}`. Any other version is
+- Request: `{"method":"node.hello","protocolVersion":3}`. Any other version is
   `INCOMPATIBLE_PROTOCOL`.
-- Response: `{"type":"Hello","nodeId":"node-development","protocolVersion":2,
-  "minimumProtocolVersion":2,"profiles":[],"capabilities":["node.hello"],
+- Response: `{"type":"Hello","nodeId":"node-development","protocolVersion":3,
+  "minimumProtocolVersion":3,"profiles":[],"capabilities":["node.hello"],
   "limits":{"maxFrameBytes":1048576,"requestTimeoutMs":5000,...}}`; see
   [RUNNER.md](RUNNER.md) for every advertised limit.
-- Rejections use `type: Error`, `code`, a bounded static `message`,
-  `completionUnknown` and optional `operationId`. Hello-only errors have no
-  mutation uncertainty; runner commands distinguish possible delivery and journal
-  uncertainty. See [RUNNER.md](RUNNER.md) for the durable command contract. The Node
-  adapter maps `OUTCOME_UNKNOWN` to `COMPLETION_UNKNOWN`, retaining the operation
-  ID. No retry and no offline execution queue.
+- Rejections use `type: Error`, `code`, a bounded `message` and
+  `completionUnknown`. A lost answer to a `vm.*` mutation is `OUTCOME_UNKNOWN`;
+  every mutation is idempotent by content, so the caller repeats it or inspects
+  the VM. No automatic retry and no offline queue.
 - At most 16 active handshake/request tasks; each has a five-second deadline.
   Frames are bounded to 1 MiB before allocation. Slow/missing FIN also times out.
 
@@ -82,33 +80,23 @@ network-policy exception is added. Loopback/direct tests remain offline. The
 opt-in relay smoke uses the public N0 service; separate-machine acceptance is
 still required before calling the runner profile production-ready.
 
-## Tests and next boundary
+## Tests
 
 ```sh
-pnpm install --frozen-lockfile       # includes the native npm addon
 cargo fetch --locked                 # setup also does this
-bash scripts/test-node-transport.sh  # fmt, clippy, Rust tests + real Node/Rust smoke
-CUBE_TEST_IROH_RELAY=1 node scripts/smoke-node-adapter.ts target/debug/cube-runner
+bash scripts/test-node-transport.sh  # fmt, clippy, Rust tests, packaging, real VM
+CUBE_TEST_VM_IMAGE=/path/debian-13-genericcloud-amd64.qcow2 CUBE_TEST_VM=required \
+  bash scripts/test-node-transport.sh
 ```
 
-The separate transport CI job installs Node 26, pinned pnpm and Rust, then runs
-these checks. The ordinary Node offline list additionally tests the in-process
-adapter against a real npm iroh protocol fixture, without building Rust. The
-trusted-runner binary is packaged with `scripts/runner/package.sh`.
+The CI transport job runs the same script on Linux and macOS; without KVM and an
+image it skips the real-VM part with a notice. The runner is packaged with
+`scripts/runner/package.sh`.
 
-Tests exercise strict framing, unknown versions/methods, loopback-only binding,
-separate CLI processes, authenticated hello, key persistence across restart,
-wrong client and server keys, wrong logical identity, key file restrictions,
-auth rejection before any application message, and idle-connection expiry.
-
-The [runner tests](RUNNER.md) additionally exercise the durable operation/binding
-boundary and bounded real shell execution, including crashes and response loss.
-The opt-in N0 smoke additionally exercises discovery/relay bootstrap, control-plane
-enrollment, registered pi tools, disconnect, runner restart and read-only operation
-reconciliation. Next: separate-NAT connectivity acceptance and file/repository
-transfer. The production profile adds local drain/cancel lifecycle, systemd or
-launchd packaging, rollback and restore quarantine. Supported native targets
-are Linux x86-64 and macOS arm64/x86-64; packages remain
-OS/architecture-specific. File/repository transfer and portal streams remain
-unsupported for trusted runners. Separate-machine acceptance on both production
-service profiles is required for each release.
+Tests exercise strict framing, unknown versions and methods, loopback-only
+binding, separate CLI processes, authenticated hello, key persistence across
+restart, wrong client and server keys, wrong logical identity, key file
+restrictions and auth rejection before any application message. The [runner
+tests](RUNNER.md) add the VM lifecycle with a fake QEMU, and
+`scripts/smoke-runner-vm.ts` a real Debian guest with the real gateway.
+Separate-machine (direct/relay) acceptance and macOS remain to be done.

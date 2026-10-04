@@ -1,251 +1,130 @@
-# Trusted runner execution
+# Runner (protocol 3)
 
 The production boundary is documented in the
-[operator runbook](../../docs/trusted-runner-operations.md). This file describes
-the lower-level daemon, wire, and development contract.
+[operator runbook](../../docs/trusted-runner-operations.md); the design is
+[docs/plans/2026-10-04-vm-runner.md](../../docs/plans/2026-10-04-vm-runner.md).
+This file describes the daemon, the wire and the development loop.
 
-## Trust boundary
+## What a runner does
 
-The runner and commands execute as the same
-dedicated, unprivileged Unix account. This is **not a sandbox**: there is no
-same-UID filesystem protection, per-job UID, egress enforcement, or protection
-of the journal/key from a hostile command running as that UID. Root is refused.
+A runner hosts one QEMU VM per active thread: a qcow2 overlay on the operator's
+Debian 13 genericcloud base image, a cloud-init NoCloud seed (a FAT `CIDATA`
+image written by the runner from documents cubed sends) and a frame pump. It
+runs no command for a thread and has no file or Git operations. The agent's
+tools run in the guest over SSH, which cubed reaches through `cube-gateway`.
 
-The runner accepts one enrolled Iroh control peer and one persisted installation
-binding. Enrollment is global to the Cube installation; it leases at most one
-active thread workspace across all projects. The historical
-`threadId` in the installation binding remains the protocol-v1 identity and
-legacy-workspace key; new product thread IDs are allocated separately. Iroh
-`peerId` authenticates transport; Cube `nodeId` is domain identity and is not
-authentication.
+The guest is the isolation boundary. QEMU runs as the runner account and is
+not hardened beyond `-sandbox on` (Linux), so the runner host as a whole is not
+a sandbox. Root is refused.
 
-## Foreground laptop loop
+The runner accepts one enrolled Iroh control peer and one persisted
+installation binding (`nodeId`, `threadId`, `environmentId`). Iroh `peerId`
+authenticates transport; `nodeId` is domain identity, not authentication.
 
-`init` creates a private home, identity key, immutable state and a small network
-manifest. `run` reopens that home as a normal foreground process:
+## Development loop
+
+Needs Linux with a usable `/dev/kvm`, QEMU ≥ 7.2 with `qemu-img`, and a Debian
+13 genericcloud image.
 
 ```sh
+cargo build --locked -j 2 -p cube-runner -p cube-gateway
 bin="$PWD/target/debug/cube-runner"
-mkdir -p "$HOME/work/cube-workspace" "$HOME/.cube/control-intents"
-chmod 700 "$HOME/.cube/control-intents"
-"$bin" keygen --key "$HOME/.cube/control.key"
-# Read the public control peer from that JSON output.
-"$bin" init --home "$HOME/.cube/runner" \
-  --workspace "$HOME/work/cube-workspace" --allow-peer CONTROL_PEER \
-  --node-id node-laptop --thread-id thread-laptop --env 1
+"$bin" keygen --key "$HOME/.cube/control.key"   # public control peer on stdout
+"$bin" init --home "$HOME/.cube/runner" --image /path/debian-13-genericcloud-amd64.qcow2 \
+  --allow-peer CONTROL_PEER --node-id node-laptop --thread-id thread-laptop --env 1
 "$bin" run --home "$HOME/.cube/runner"
 ```
 
-`run` prints human lifecycle status to stderr and leaves stdout quiet.
-`network ready / waiting for cubed` means the authenticated Iroh endpoint is
-listening; it does not claim a permanent cubed connection. Its peer and current
-addresses are shown so the private cubed adapter configuration can be created and enrolled.
-Use relay mode at initialization when the runner is not directly reachable.
+`run` prints human status on stderr. First Ctrl-C refuses new VMs and powers
+the running guest down (30 s); a second Ctrl-C makes QEMU quit at once.
 
-First Ctrl-C enters drain, rejects new operation IDs, and waits up to the active
-command's 600-second bound. Second Ctrl-C cancels and reaps the active
-process group, then durably records `CANCELLED`. An idle Ctrl-C exits immediately.
-SIGTERM follows the same drain-first path. Restart with the same home; do not
-reinitialize it.
+Service form: `runner-init --key K --state S --image …` and
+`runner-serve --key K --state S [--listen] [--ready-file F] [--stop-policy wait|cancel]`
+(one JSON ready line on stdout: peer, addresses, versions, lifecycle,
+`platform`, `baseImageSha256`). `call --key CONTROL --peer RUNNER
+--expect-node N [--address A] --request '<json>'` sends one protocol-3
+request and prints the response. `runner-acknowledge-recovery --key K --state S`
+ends a restore quarantine.
 
-## Low-level automation interface
+The whole loop with a real guest and the real gateway is automated in
+`scripts/smoke-runner-vm.ts`, run by `scripts/test-node-transport.sh` when
+`CUBE_TEST_VM_IMAGE` points at the image.
 
-```sh
-cargo build --locked -j 2 -p cube-runner
-bin="$PWD/target/debug/cube-runner"
-scratch=$(mktemp -d)
-mkdir "$scratch/workspace"
-control_peer=$("$bin" keygen --key "$scratch/control.key" | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).peerId')
-runner_peer=$("$bin" keygen --key "$scratch/runner.key" | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).peerId')
-"$bin" runner-init --key "$scratch/runner.key" --state "$scratch/state" \
-  --workspace "$scratch/workspace" --allow-peer "$control_peer" \
-  --node-id node-development --thread-id thread-development --env 1
-"$bin" runner-serve --key "$scratch/runner.key" --state "$scratch/state"
-```
+## Wire
 
-The existing `runner-init`, `runner-serve`, recovery, intent and diagnostic
-commands remain the automation boundary. Their one-line JSON stdout is
-unchanged; bounded lifecycle diagnostics use stderr. `host-init` and
-`host-serve` remain deprecated protocol-v1 compatibility aliases.
+ALPN `cubeyard/node/1`, framing as in [README.md](README.md): a successful
+`node.hello` with `protocolVersion: 3`, then one request per connection. Any
+other version is `INCOMPATIBLE_PROTOCOL` and the connection ends before a
+request is read. After hello, a method protocol 3 does not have (for example
+`exec.start`, `fs.read`, `workspace.allocate.v2`) is `UNSUPPORTED`.
 
-Prepare/submit from another terminal with the control key and pinned runner peer.
-Preparation fsyncs a create-only intent. Submit fsyncs its consumed marker before
-the first network dispatch. A failed dial stays consumed; never remove `.sent`.
+Hello (runner profile) adds `binding`, `platform` (`linux-x86_64`,
+`macos-aarch64`), `baseImageSha256`, capabilities `node.status vm.allocate
+vm.start vm.stop vm.inspect vm.release`, and `limits {maxFrameBytes,
+requestTimeoutMs, maxVcpus, maxMemoryMiB, maxDiskGiB, maxSeedBytes,
+maxActiveVms}`.
 
-## Permanent state and no replay
-
-- `runner-init` requires a new state directory and existing repository template.
-  It saves immutable binding, both peer identities, and template path/device/inode.
-- `runner-serve` opens existing state only. Wrong key, corrupt metadata, missing
-  journal/lock, unsupported schema, or replaced workspace fails closed.
-- SQLite uses FULL synchronous durability and rollback journal. One process owns
-  the state through a kernel-released file lock.
-- Operation IDs and canonical request hashes are immutable. Same ID/content
-  resolves the existing record; changed content is `CONFLICT`. `fs.write`
-  idempotency keys share this namespace, so a key is never executed twice and
-  never reused by a command.
-- `Accepted` commits before dispatch and `Running` before spawn. Startup changes
-  unfinished records to `Interrupted { completionUnknown: true }`; it never
-  queues, retries, signals restored PIDs, or reruns them.
-- `Unknown` means no retained record, not permission to repeat a possibly
-  delivered mutation. Keep the journal for the installation's lifetime.
-
-Commands run through `/bin/bash --noprofile --norc -c` with closed stdin and a
-cleared environment containing only bounded `PATH`, workspace `HOME`, and
-`LANG=C.UTF-8`. Cwd is relative to the identity-checked workspace. Linux opens
-it with `openat2` beneath/no-symlink resolution. macOS walks each component with
-descriptor-relative `openat(O_DIRECTORY|O_NOFOLLOW)`; absolute paths, `..`,
-symlink components and workspace replacement fail closed. Neither mechanism
-sandboxes arbitrary command filesystem access from the runner UID.
-
-`workspace.allocate.v2` carries a project/revision and normalized repository list
-with resolved branches and exact checked OIDs. After strict validation it creates
-a new allocation root, fetches each declared branch without interactive prompts or
-command-running transports, verifies the supplied commit is available from that
-fetch, and checks out that exact OID (primary `workspace`, references under
-`repos/`). A v2 allocation without repositories creates a fresh empty `workspace`;
-it never copies the installation template. Only the legacy v1 allocation uses that
-template via `git worktree add --detach`, or recursively copies a non-Git template. The journal
-commits `allocating/available/releasing/released/failed` with path device/inode
-anchors. Startup changes interrupted transitions to `failed` and preserves the
-tree. Release removes checkouts still clean at every pinned OID (or a clean legacy
-Git worktree still at the template HEAD), but
-retains changed or independently committed Git worktrees and
-all copy fallbacks because there is no trustworthy clean oracle for a plain
-directory. A retained tree does not consume the one active-workspace slot.
-This prevents accidental active-thread collisions; it is not filesystem or
-process confinement.
-
-Commands run in a new process group. Timeout/cancel reaps normal descendants.
-On macOS a hostile descendant can escape by creating a new session/process
-group, and a hard daemon crash cannot provide cgroup-style cleanup.
-
-Limits: 8-KiB command, 4-KiB cwd and file paths, 600-second runtime, 256-KiB
-retained output read in 64-KiB pages, 512-KiB file read pages and writes,
-1-MiB frames, one active job, one active workspace, 16 connections, 100,000
-immutable operation records (commands and file writes), and a 50-GiB
-managed-workspace admission threshold. `node.hello` advertises these bounds in
-`limits`. Status reports
-active/retained workspace counts and bytes. Busy/capacity rejects new work;
-existing IDs remain inspectable.
-
-## Control-plane adapter
-
-`packages/server/src/iroh-node.ts` uses pinned `@number0/iroh` directly in the
-Node process. No Rust subprocess, stdio bridge, fallback, reconnect queue, or
-automatic command resubmission exists. The private config schema is version 1
-(independent of the wire protocol version):
+Every `vm.*` request carries `threadId` and `vmId` (16 lowercase hex); every
+mutation carries `epoch` ≥ 1, fenced per thread (`LEASE_STALE` below the newest
+seen). Requests are idempotent by content: repeating one returns the current
+record.
 
 ```json
-{
-  "version": 1,
-  "binding": { "nodeId": "node-development", "threadId": "thread-development", "environmentId": 17 },
-  "controlKey": "/absolute/private/control.key",
-  "serverPeer": "64_CHARACTER_LOWERCASE_HEX_IROH_PEER",
-  "network": "relay",
-  "intentDirectory": "/absolute/private/intents"
-}
+{"method":"vm.allocate","threadId":"t1","vmId":"0123456789abcdef","epoch":1,"diskGiB":16}
+{"method":"vm.start","threadId":"t1","vmId":"0123456789abcdef","epoch":1,
+ "vcpus":2,"memoryMiB":2048,"mac":"02:12:34:56:78:9a",
+ "seed":{"metaData":"…","userData":"#cloud-config\n…","networkConfig":"…"},
+ "gateway":{"peer":"<gateway endpoint id>","frameToken":"<64 hex>"}}
+{"method":"vm.stop","threadId":"t1","vmId":"0123456789abcdef","epoch":1}
+{"method":"vm.inspect","threadId":"t1","vmId":"0123456789abcdef"}
+{"method":"vm.release","threadId":"t1","vmId":"0123456789abcdef","epoch":1,"retain":false}
+{"method":"node.status"}
 ```
 
-Loopback/direct configs also include an explicit unicast `address`. Relay omits
-it and uses the pinned peer through public N0 discovery/relay. N0 can observe IPs
-and traffic metadata. The npm binding's minimal mode does not disable its built-in
-NAT portmapper; do not claim packet-level loopback confinement.
+Answers are `{"type":"Vm","vm":{vmId, threadId, state, interrupted, error?,
+diskBytes, seedSha256?, startedAt?},"consoleTail"?}` (console only for
+`vm.inspect`), `Status`, or `{"type":"Error","code","message","completionUnknown"}`.
+States: `allocating allocated starting running stopping stopped releasing
+released retained failed`. `running` means QEMU answered QMP, not that the
+guest is ready. `vm.stop` and `vm.release` of a live VM are asynchronous (ACPI
+power-down, 30 s, QMP `quit`, SIGKILL); poll `vm.inspect`. The method table
+with every rule is in the plan.
 
-Every RPC checks config bytes, peer, protocol version 2, the advertised limits,
-the method's capability, and the full immutable binding before request bytes.
-`prepareExec` persists only; `submitExec` dispatches once; `operation` is read-only.
-`describe`, `startOperation`, `inspectOperation`, `cancelOperation`,
-`collectOutput`, `readFile`, `writeFile` and `stat` are the protocol-2 calls a
-workspace layer builds on. Caller cancellation or malformed/lost replies after
-possible delivery return `COMPLETION_UNKNOWN` with the saved ID; only
-`cancelOperation` cancels remote work. Wake, sleep, portals, repositories,
-services, and remote provisioning remain unsupported.
+## Frame channel `cube/l2/1`
 
-## Wire contract
+The same endpoint accepts ALPN `cube/l2/1` from the gateway named by the latest
+`vm.start` of a VM. The gateway opens one bi-stream and sends
+`{vmId, threadId, frameToken}`; the runner compares the token's sha256 in
+constant time and answers `{ok: true, mtu: 1500}` or `{ok: false, mtu, error}`.
+Unknown peers are closed with `UNAUTHORIZED` before any byte is read. After
+that, datagrams in both directions are Ethernet frames split with a 3-byte
+fragment header (`cube_node_transport::l2`). One frame connection per VM; a new
+grant or a stop closes it. Frames are dropped while none exists.
 
-ALPN remains `cubeyard/node/1`. This is transport terminology and is not renamed.
-Frames are four-byte big-endian length plus bounded UTF-8 JSON and FIN. A
-connection performs hello then at most one request. Protocol version 2 is the
-only accepted version in both directions (`protocolVersion` and
-`minimumProtocolVersion` are 2): a protocol-1 peer is answered with
-`INCOMPATIBLE_PROTOCOL` and must be upgraded. There is no shell or protocol-1
-fallback. New daemons advertise profiles `["runner", "host"]`; `host` is the
-historical compatibility alias. Capabilities, one per operation, are
-`node.status`, `environment.inspect`, `workspace.allocate`,
-`workspace.fresh-base`, `workspace.allocate.v2`, `workspace.release`,
-`exec.start`, `exec.cancel`, `operation.get`, `fs.read`, `fs.write`, and
-`fs.stat`. Hello `limits` carries `maxFrameBytes`, `requestTimeoutMs`,
-`maxCommandBytes`, `maxPathBytes`, `maxExecTimeoutMs`, `maxOutputBytes`,
-`outputPageBytes`, `maxReadBytes`, and `maxWriteBytes`.
+## State and no replay
 
-Protocol-2 operations (all take `env` and an optional `threadId`; without it the
-installation workspace is used):
-
-| Operation | Contract |
-|---|---|
-| `exec.start` | `operationId`, `spec`, optional `epoch`; up to `maxExecTimeoutMs` |
-| `operation.get` | optional byte `cursor`; a `Succeeded` result carries one page of `output` from `outputOffset` plus `retainedBytes` |
-| `exec.cancel` | `operationId`, optional `epoch`; SIGKILLs the active command's process group, which ends `Failed { CANCELLED }`; returns the state seen right after the request |
-| `fs.read` | `path`, optional `offset`/`limit`; base64 `content`, `size`, `eof`, whole-file `sha256` up to 16 MiB |
-| `fs.write` | `idempotencyKey`, `path`, base64 `content`, optional `expectedSha` and `createParents`, optional `epoch`; temporary file, fsync, rename, directory fsync |
-| `fs.stat` | `path` (`.` is the workspace root); `kind`, `size`, `mode`, `modifiedMs`, `sha256` for regular files up to 16 MiB |
-
-File paths are relative; absolute paths, `..`, NUL and paths outside the
-workspace fail with `INVALID_REQUEST`. Linux resolves them with
-`openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` below the identity-checked
-workspace descriptor, so a symlink may be read only while it stays beneath the
-workspace; macOS walks components with `openat(O_NOFOLLOW)` and refuses every
-symlink. `fs.write` never follows or replaces a symlink at the final component,
-preserves an existing file's mode, and leaves no temporary file on failure.
-`expectedSha` is the SHA-256 of the whole current file; a mismatch, a missing
-file or a file over 16 MiB (which reports no sha) is `PRECONDITION_FAILED`.
-The filesystem work runs outside the journal lock, so a slow write never
-delays `operation.get` or `exec.cancel`; a duplicate of a key still being
-written reports `OUTCOME_UNKNOWN`. Missing files are `NOT_FOUND`.
-
-`fs.write` is retained under its idempotency key exactly like a command: the
-same key and request returns the original result without touching the file, a
-different request is `CONFLICT`, and a recorded failure replays the same code.
-The record commits before the first filesystem change; a crash leaves it
-`Interrupted`, replayed as `OUTCOME_UNKNOWN` with `completionUnknown: true`.
-
-Lease epochs fence `exec.start`, `exec.cancel` and `fs.write` per thread. The
-runner durably keeps the newest epoch it has seen for each thread and rejects a
-lower one with `LEASE_STALE` before deduplication; a call without `epoch` counts
-as 0, so it is refused once any epoch has been seen for that thread. The epoch
-is not part of the request identity. Epochs never decrease and are retained for
-the journal's lifetime.
-
-Journal schema stays version 1. Retained output and epochs live in additive
-tables, and command records keep the protocol-1 result shape, so a rolled-back
-binary can still open the journal (it shows empty output for newer records and
-speaks protocol 1, which current cubed reports as incompatible).
-The original `workspace.allocate` has no allocation metadata and remains only for
-wire compatibility. Cubed uses v2 for every new global allocation. A protocol-1
-runner is refused as `INCOMPATIBLE_PROTOCOL` at authenticated hello, before any
-mutation bytes; a protocol-2 peer that lacks a method's capability is refused as
-`UNSUPPORTED`. Upgrade runner binaries before allocating new threads; existing requests
-without `threadId` continue to use the legacy template workspace and preserve their
-operation hashes. `nodeId` and existing field names remain stable on wire.
-
-Product threads reach the enrolled runner through cubed's `Workspace`
-(`RunnerWorkspace` over `IrohExecutionNodeClient`): Pi's `bash`, `read`, `write`
-and `edit` tools. Keys derived from Pi's durable tool task IDs become runner
-operation IDs and write idempotency keys; every mutation carries the thread
-lease epoch, and stop is `exec.cancel`. There is no
-standalone HTTP runner-exec endpoint or legacy host-exec alias. Operator canaries
-use `IrohExecutionNodeClient` directly with the private pinned configuration;
-ordinary users submit prompts through the thread UI/API.
+- `init`/`runner-init` require a NEW state directory. The installation
+  (binding, peers, platform, base image hash and size, QEMU and `qemu-img`
+  paths, firmware, limits) is immutable in SQLite (`user_version` 3); a
+  protocol-2 journal (version 1) is refused with a clear message.
+- One process owns the state through a kernel-released lock. The base image is
+  re-hashed at every start; a changed image refuses to serve.
+- Startup reconciliation: `allocating`/`releasing` → `failed` (tree kept);
+  `starting`/`running`/`stopping` → QMP `quit` if the old QEMU still answers
+  with the vmId (macOS), then `stopped` with `interrupted: true`. The runner
+  never signals a process it did not spawn. On Linux QEMU has
+  `PR_SET_PDEATHSIG(SIGKILL)` from a long-lived spawner thread, so it dies
+  with the runner.
+- Released VM directories are deleted; retained, interrupted and failed ones
+  are kept. Records are never deleted (a vmId is never reused), except an
+  allocation whose `qemu-img create` failed before any disk existed.
 
 ## Tests
 
-```sh
-bash scripts/test-node-transport.sh
-CUBE_TEST_IROH_RELAY=1 node scripts/smoke-node-adapter.ts target/debug/cube-runner
-```
-
-The suite runs fmt, clippy, Rust tests, real Node↔Rust loopback/direct smoke, and
-operator enrollment/cubed/Pi routing. Relay is opt-in because it uses public N0.
-Release sign-off still requires the separate-machine acceptance matrix from the
-operator runbook.
+`cargo test -p cube-runner`: unit tests (QEMU command line, seed round trip,
+qcow2 header checks, wire shapes) and integration tests with a fake QEMU
+(`tests/support/fake-qemu.py`: QMP, frame echo) over the real Iroh wire:
+idempotency, conflicts, capacity, epochs, frame authorization and token
+rotation, failures, retained evidence, quarantine, reconciliation, and a
+process test (runner SIGKILL takes QEMU down; restart marks the VM
+interrupted; SIGTERM powers it down) that runs where `/dev/kvm` is usable.
