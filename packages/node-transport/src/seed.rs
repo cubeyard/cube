@@ -41,7 +41,8 @@ impl Seed {
         Ok(())
     }
 
-    /// Fixed for the VM's life after its first start.
+    /// The first start's seed is kept for the VM's life; later seeds are
+    /// ignored (cloud-init does not rerun for the same instance-id anyway).
     pub fn sha256(&self) -> String {
         let mut hasher = Sha256::new();
         for document in [&self.meta_data, &self.user_data, &self.network_config] {

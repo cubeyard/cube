@@ -87,8 +87,12 @@ diskBytes, seedSha256?, startedAt?},"consoleTail"?}` (console only for
 States: `allocating allocated starting running stopping stopped releasing
 released retained failed`. `running` means QEMU answered QMP, not that the
 guest is ready. `vm.stop` and `vm.release` of a live VM are asynchronous (ACPI
-power-down, 30 s, QMP `quit`, SIGKILL); poll `vm.inspect`. The method table
-with every rule is in the plan.
+power-down, 30 s, QMP `quit`, SIGKILL); poll `vm.inspect`. The first
+`vm.start` fixes vcpus, memory, mac and seed; later starts reuse them and
+ignore the request's sizes and seed (a different mac is `CONFLICT`). A
+mutation runs to completion even when its control connection times out, so a
+caller that lost the answer inspects or repeats. The method table with every
+rule is in the plan.
 
 ## Frame channel `cube/l2/1`
 

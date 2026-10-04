@@ -638,11 +638,13 @@ impl Runner {
         let _ops = self.ops.lock().await;
         self.journal.lock().unwrap().fence(thread_id, epoch)?;
         let row = self.row_for(thread_id, vm_id)?;
-        if row.config.as_ref().is_some_and(|c| *c != config) {
-            return detail(
-                "CONFLICT",
-                "vcpus, memory, mac and seed are fixed at the vm's first start",
-            );
+        // The first start fixes vcpus, memory, mac and seed. Later starts
+        // reuse them and ignore the request's sizes and seed: cubed rebuilds
+        // its seed and sizes from its current release and settings, which
+        // must never strand an existing VM. The mac names the VM on the
+        // gateway's LAN, so a different one is a real conflict.
+        if row.config.as_ref().is_some_and(|c| c.mac != config.mac) {
+            return detail("CONFLICT", "the mac is fixed at the vm's first start");
         }
         match row.state {
             VmState::Starting | VmState::Running => {
@@ -663,10 +665,22 @@ impl Runner {
             return reject("DRAINING");
         }
         let paths = self.paths(row.slot);
-        if row.config.is_none() || !paths.seed.is_file() {
-            spec.seed.write(&paths.seed)?;
-            self.journal.lock().unwrap().set_config(vm_id, &config)?;
-        }
+        let config = match row.config.clone() {
+            None => {
+                spec.seed.write(&paths.seed)?;
+                self.journal.lock().unwrap().set_config(vm_id, &config)?;
+                config
+            }
+            Some(mut fixed) => {
+                if !paths.seed.is_file() {
+                    // A lost seed image is rewritten from this request.
+                    spec.seed.write(&paths.seed)?;
+                    fixed.seed_sha256 = config.seed_sha256;
+                    self.journal.lock().unwrap().replace_config(vm_id, &fixed)?;
+                }
+                fixed
+            }
+        };
         if paths.console.exists() {
             let _ = fs::rename(&paths.console, paths.dir.join("console.prev.log"));
         }
@@ -678,9 +692,9 @@ impl Runner {
             platform: &self.installation.platform,
             firmware: self.installation.firmware.as_deref(),
             vm_id,
-            vcpus: spec.vcpus,
-            memory_mib: spec.memory_mib,
-            mac: &spec.mac,
+            vcpus: config.vcpus,
+            memory_mib: config.memory_mib,
+            mac: &config.mac,
             paths: &paths,
         })?;
         self.journal.lock().unwrap().set_started(vm_id, now_ms())?;

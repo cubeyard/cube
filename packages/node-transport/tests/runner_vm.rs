@@ -96,16 +96,24 @@ async fn lifecycle_is_idempotent_fenced_and_bounded() {
         running,
         "same start, same record"
     );
+    // A newer cubed rebuilds its seed and may size VMs differently: a
+    // running VM is re-authorized and keeps its first seed and sizes.
     let mut changed = start("t1", VM, 2, gw, TOKEN);
     changed["seed"]["userData"] = json!("#cloud-config\npackages: [git]\n");
+    changed["vcpus"] = json!(3);
+    changed["memoryMiB"] = json!(2048);
+    assert_eq!(
+        served.vm(changed).await,
+        running,
+        "seed and sizes are fixed for the vm's life"
+    );
+    let mut changed = start("t1", VM, 2, gw, TOKEN);
+    changed["mac"] = json!("02:00:00:00:00:43");
     assert_eq!(
         served.code(changed).await,
         "CONFLICT",
-        "seed fixed for the vm's life"
+        "the mac is fixed for the vm's life"
     );
-    let mut changed = start("t1", VM, 2, gw, TOKEN);
-    changed["vcpus"] = json!(3);
-    assert_eq!(served.code(changed).await, "CONFLICT");
     let mut changed = start("t1", VM, 2, gw, TOKEN);
     changed["vcpus"] = json!(5);
     assert_eq!(
@@ -161,11 +169,23 @@ async fn lifecycle_is_idempotent_fenced_and_bounded() {
     assert!(!alive(pid));
     assert_eq!(served.vm(stop("t1", VM, 2)).await.state, VmState::Stopped);
 
-    // A stopped VM boots again from the same disk and seed.
-    let again = served.vm(start("t1", VM, 3, gw, TOKEN2)).await;
+    // A stopped VM boots again from the same disk, seed and sizes, even
+    // when the request carries another seed and other sizes.
+    let seed_before = std::fs::read(vm_dir(&fx, 1).join("seed.img")).unwrap();
+    let mut again = start("t1", VM, 3, gw, TOKEN2);
+    again["seed"]["userData"] = json!("#cloud-config\npackages: [jq]\n");
+    again["vcpus"] = json!(1);
+    again["memoryMiB"] = json!(2048);
+    let again = served.vm(again).await;
     assert_eq!(again.state, VmState::Running);
     assert_eq!(again.seed_sha256, running.seed_sha256);
     assert_ne!(pid_of(&fx, 1), pid);
+    assert_eq!(
+        std::fs::read(vm_dir(&fx, 1).join("seed.img")).unwrap(),
+        seed_before
+    );
+    let qemu_args = std::fs::read_to_string(vm_dir(&fx, 1).join("fake.args")).unwrap();
+    assert!(qemu_args.contains("-smp\n2\n-m\n1024\n"), "{qemu_args}");
 
     let releasing = served.vm(release("t1", VM, 3, false)).await;
     assert!(matches!(
@@ -536,4 +556,23 @@ async fn protocol_two_state_is_refused_with_a_clear_message() {
         .err()
         .unwrap();
     assert!(format!("{error:#}").contains("protocol-2"), "{error:#}");
+}
+
+#[tokio::test]
+async fn a_mutation_outliving_its_connection_still_completes() {
+    // qemu-img takes longer than the control connection may live: the
+    // caller times out, the allocation still finishes instead of being
+    // cancelled half way and left `allocating`.
+    let fx = fixture();
+    std::fs::write(fx.bin.join("slow-create"), "7").unwrap();
+    let served = serve(&fx).await;
+    let request: cube_node_transport::Request =
+        serde_json::from_value(allocate("t1", VM, 1, 8)).unwrap();
+    let outcome =
+        cube_node_transport::call(&served.client, served.address.clone(), NODE, &request).await;
+    assert!(outcome.is_err(), "{outcome:?}");
+    let allocated = served.wait_state("t1", VM, VmState::Allocated).await;
+    assert!(vm_dir(&fx, 1).join("disk.qcow2").is_file());
+    assert!(allocated.error.is_none(), "{allocated:?}");
+    served.close().await;
 }

@@ -133,7 +133,7 @@ impl VmState {
     }
 }
 
-/// Fixed at the first `vm.start` for the VM's life.
+/// Fixed at the first `vm.start` for the VM's life; later starts reuse it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VmConfig {
@@ -528,6 +528,15 @@ impl Journal {
     pub fn set_config(&self, vm_id: &str, config: &VmConfig) -> Result<()> {
         self.db.execute(
             "UPDATE vm SET config=?1 WHERE vm_id=?2 AND config IS NULL",
+            params![serde_json::to_string(config)?, vm_id],
+        )?;
+        Ok(())
+    }
+
+    /// Overwrites a VM's fixed config; only for rewriting a lost seed image.
+    pub fn replace_config(&self, vm_id: &str, config: &VmConfig) -> Result<()> {
+        self.db.execute(
+            "UPDATE vm SET config=?1 WHERE vm_id=?2",
             params![serde_json::to_string(config)?, vm_id],
         )?;
         Ok(())
