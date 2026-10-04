@@ -154,7 +154,7 @@ Claude Code is an alternative thread agent for one purpose: to use the person's
 own Claude Max subscription through the unmodified `claude` binary and its own
 login (`claude /login` or `claude setup-token`). Choosing a model under
 "claude · max" at thread creation makes a `claude-code` thread; the agent is
-fixed for the thread, and within it only Claude Code's own models (`opus`,
+fixed for the thread, and within it only Claude Code's own models (`fable`, `opus`,
 `sonnet`, `haiku`) can be chosen. Claude Code is not a provider in cube's model
 settings, and Pi does not offer Anthropic's Claude Pro/Max OAuth login: Pi
 reaches Anthropic models with an API key.

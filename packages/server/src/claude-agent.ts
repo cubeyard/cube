@@ -29,7 +29,7 @@ import type { Workspace, WorkspaceLease } from "./workspace.ts";
 
 export const CLAUDE_PROVIDER = "claude-code";
 /** Claude Code's own model aliases; it resolves them to current models. */
-export const CLAUDE_MODELS: readonly ModelSelection[] = ["opus", "sonnet", "haiku"].map(id => ({ provider: CLAUDE_PROVIDER, id }));
+export const CLAUDE_MODELS: readonly ModelSelection[] = ["fable", "opus", "sonnet", "haiku"].map(id => ({ provider: CLAUDE_PROVIDER, id }));
 /** The only variables the child inherits from cubed: locale, home and
  * config, proxies and certificates, and Claude Code's own login token. */
 const CLAUDE_ENV = /^(HOME|PATH|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_[A-Z_]+|TERM|TZ|TMPDIR|XDG_[A-Z_]+|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR)$/;
