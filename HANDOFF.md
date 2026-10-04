@@ -11,7 +11,9 @@ Verified locally on Linux:
 
 - `pnpm typecheck`: zero TypeScript/Svelte errors or warnings; `pnpm lint` passed.
 - `pnpm test`: all offline suites, including Pi over the Workspace with a fake
-  runner (`durable-agent-test.ts`); `pnpm build` passed.
+  runner (`durable-agent-test.ts`) and Pi's own threshold compactions and a
+  reset through the thread history, across a reopen (`pi-compaction-test.ts`,
+  faux model with a small context window); `pnpm build` passed.
 - `scripts/test-node-transport.sh`: fmt, clippy, Rust tests, actual Iroh shell
   calls, four SIGKILL recovery boundaries, single writer exclusion, stable
   invocation identity and one effect, product startup activation, SSE snapshots,
@@ -100,8 +102,9 @@ OAuth acceptance remains distinct from controlled-provider integration tests.
 
 Known gaps: pi-codemode 1.0.1 has no stack or CPU-slice limit, so a spinning
 script holds a cubed CPU core until its wall deadline (15 minutes by default);
-Pi's compaction/reset history path is untested; pi-durable's `onReport` is not
-wired to any log; macOS runner file paths and the launchd stop timeout against
+cube exposes no reset or manual compaction (Pi's reset is covered through its
+API only), and an overflow compaction has no test; pi-durable's `onReport` is
+not wired to any log; macOS runner file paths and the launchd stop timeout against
 the 600-second command bound are untested; runner output is only available
 after a command finishes. AGENTS.md still describes Pi as an AgentHarness and
 needs the maintainer's update to pi-durable; docs/architecture-tour-notes.md is
