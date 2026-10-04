@@ -88,9 +88,18 @@ reported `apiKeySource: "none"` (subscription login, no API key). A follow-up
 after a model change resumed the session on the new model (sonnet, then opus).
 Stop rejected a running `sleep 90` and cancelled it on the runner (its later
 write never happened). The automated suites still use a fake `claude`; this
-live run is a manual script, not part of `pnpm test`. Not verified live:
-`--resume` after a cubed restart, the SIGTERM/SIGKILL fallback, isolated or
-plugin subagents being refused, and runners on separate machines.
+live run is a manual script, not part of `pnpm test`. A second live run on 2026-10-04 (two local runners, disposable state,
+Pi on `openai-codex`/`gpt-6-luna` from the host Pi store, Claude Code on Max)
+passed 16/16 checks: Pi used write, read, edit, bash and codemode in the runner
+workspace and read the repository's AGENTS.md; a Pi bash command survived a
+cubed SIGKILL mid-command, the turn resumed and the command ran exactly once;
+a Pi and a Claude thread ran concurrently on separate runners, a third thread
+got 409 and archiving freed a runner; Claude Code resumed its session after an
+idle cubed restart; a cubed SIGKILL mid Claude turn left the turn honestly
+failed, the reopen cancelled its runner command, and the thread kept working;
+background Bash and a worktree-isolated subagent were refused. Not verified
+live: the SIGTERM/SIGKILL fallback for a child that ignores the interrupt, and
+runners on separate machines.
 
 GUI provider settings use Pi's public Models login/logout/refresh APIs and the
 existing host credential store. Browser/device login, key entry, cancellation,
