@@ -146,7 +146,17 @@ export async function openAgent(options: {
     registry.install(defineExtension({
       name: "cube",
       tools: [direct(read), direct(write), direct(edit), bashTool.registration, codemode],
-      sections: [section("preamble", () => `You are a coding agent working in a thread runner workspace. File tools address the workspace root as ${WORKSPACE_ROOT}; bash runs commands with the workspace root as its working directory. codemode runs one JavaScript script that calls these tools, for batching, chaining or filtering their results. The runner executes trusted commands under its own account; it is not a sandbox. Never assume access to control-plane files or credentials.`, { tag: false })],
+      sections: [section("preamble", () => `You are a coding agent working in a thread runner workspace. File tools address the workspace root as ${WORKSPACE_ROOT}; bash runs commands with the workspace root as its working directory. codemode runs one JavaScript script that calls these tools, for batching, chaining or filtering their results. The runner executes trusted commands under its own account; it is not a sandbox. Never assume access to control-plane files or credentials.`, { tag: false }),
+        // The repository's own instructions live on the runner, as they do
+        // for Claude Code threads; rendered each generation, so edits apply.
+        section("repository", async () => {
+          const parts: string[] = [];
+          for (const file of INSTRUCTION_FILES) {
+            const text = await instructionFile(options.workspace, lease.token, file);
+            if (text) parts.push(`Contents of ${file} in the thread workspace (project instructions, checked into the codebase):\n\n${text}`);
+          }
+          return parts.length ? parts.join("\n\n") : undefined;
+        }, { tag: false })],
     }));
     for (const extension of options.extensions ?? []) registry.install(extension);
     harness = await Harness.open(storage, { models: options.models, registry, settings: { toolExecution: "sequential" } }, context);
@@ -186,6 +196,22 @@ export async function openAgent(options: {
   }
 }
 export type Agent = Awaited<ReturnType<typeof openAgent>>;
+
+const INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"];
+const INSTRUCTION_BYTES = 64 * 1024;
+
+/** A repository instruction file from the workspace root, or null when absent. */
+async function instructionFile(workspace: Workspace, token: string, file: string): Promise<string | null> {
+  try {
+    const read = await workspace.readFile(token, file, { limit: INSTRUCTION_BYTES });
+    const text = Buffer.from(read.content).toString("utf8").trim();
+    if (!text) return null;
+    return !read.eof ? `${text}\n\n[truncated at ${INSTRUCTION_BYTES / 1024} KiB]` : text;
+  } catch (error) {
+    if (error instanceof WorkspaceError && error.code === "NOT_FOUND") return null;
+    throw error;
+  }
+}
 
 function relative(cwd: string): string {
   const resolved = path.posix.resolve(WORKSPACE_ROOT, cwd);

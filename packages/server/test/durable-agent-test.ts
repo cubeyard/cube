@@ -80,6 +80,24 @@ try {
     console.log("ok: pi-durable read/write/edit through the WorkspaceEnv, keyed bash, outside paths refused, request ids, fixed binding");
   }
   {
+    // The repository's AGENTS.md/CLAUDE.md on the runner reach the model, and an edit applies to the next generation.
+    const { files, directory, runner, workspace } = thread("instructions");
+    fs.writeFileSync(path.join(files, "AGENTS.md"), "The secret word is PAPAYA.\n");
+    const seen: string[] = [];
+    const agent = await openAgent({ directory, runner: { binding: runner.binding, configHash: "fake" }, workspace, ...model([
+      async request => { seen.push(JSON.stringify(request)); return call("write", { path: "CLAUDE.md", content: "Answer in haiku.\n" }); },
+      async request => { seen.push(JSON.stringify(request)); return fauxAssistantMessage("done"); },
+    ]) });
+    try {
+      const submission = await agent.conversation.submit({ type: "input", content: "go", requestId: "instructions" }, context);
+      assert.equal((await submission.wait(context)).status, "done");
+      assert.match(seen[0]!, /Contents of AGENTS\.md in the thread workspace[^"]*PAPAYA/);
+      assert.doesNotMatch(seen[0]!, /Answer in haiku/);
+      assert.match(seen[1]!, /Contents of CLAUDE\.md in the thread workspace[^"]*Answer in haiku/);
+    } finally { await agent.close(); }
+    console.log("ok: repository AGENTS.md and CLAUDE.md come from the runner workspace and follow edits");
+  }
+  {
     // Keys and expectedSha: a replayed write is not written twice, and a
     // write after a read is conditional on what was read.
     const { files, workspace } = thread("env");
