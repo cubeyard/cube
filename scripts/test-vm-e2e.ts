@@ -229,6 +229,8 @@ try {
   const booted = Date.now();
   const piRow = await ready(pi);
   vmIds.push(piRow.vm!.vmId);
+  // The creation text is the first turn; a prompt during it is refused with 409.
+  assert.equal((await settled(pi, "cube:initial")).status.state, "completed");
   log(`1: pi thread machine ready in ${((Date.now() - booted) / 1000).toFixed(0)} s`);
   assert.equal((await prompt(pi, tool("write", { path: "notes/a.txt", content: "one\n" }))).state, "completed");
   assert.match((await prompt(pi, tool("read", { path: "notes/a.txt" }))).text, /one/);
