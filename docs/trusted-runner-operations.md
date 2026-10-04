@@ -1,364 +1,245 @@
-# Trusted runner operations
+# Runner operations
 
-This is the operations boundary for Cube **trusted runners**. One installation
-has one immutable installation/environment binding, speaks runner protocol 2,
-belongs to the
-global Cube pool, leases one active thread workspace at a time across all projects,
-and uses Iroh's public N0 discovery/relay
-transport. A trusted runner executes under its account without sandboxing and
-is not a general scheduler.
+This is the operations boundary for Cube **runners**. A runner hosts one QEMU
+virtual machine per active thread. It runs no command of its own for a thread:
+the agent's tools run inside the thread's VM, reached over SSH through
+`cube-gateway` next to cubed. One installation has one immutable
+installation/environment binding, speaks runner protocol 3, belongs to the
+global Cube pool, hosts at most one active VM at a time, and uses Iroh's public
+N0 discovery/relay transport.
+
+> Status (branch `feat/vm-runner`): the runner side is built and verified on
+> Linux/KVM with a real Debian guest and the real gateway
+> (`scripts/smoke-runner-vm.ts`). cubed's protocol-3 client, enrollment
+> (`scripts/enroll-runner.ts`, runner config version 2), the egress policy and
+> SSH tool execution are the SERVER work package of
+> [the plan](plans/2026-10-04-vm-runner.md); until then a current cubed cannot
+> drive a protocol-3 runner. macOS (HVF) has code paths only and is unverified.
 
 | Platform | Lifecycle | Profile |
 |---|---|---|
-| Linux x86-64, macOS arm64/x86-64 | foreground `cube-runner run` | laptop/direct default |
-| Linux x86-64 | explicit systemd service, dedicated `cube-runner` account | optional always-on server |
-| macOS arm64/x86-64 | explicit LaunchDaemon, pre-created dedicated `_cube-runner` account | optional always-on server |
-| macOS arm64/x86-64 | explicit per-user LaunchAgent | disposable; safe only when that login is credential-free |
+| Linux x86-64 (KVM) | foreground `cube-runner run` | laptop/direct default |
+| Linux x86-64 (KVM) | explicit systemd service, dedicated `cube-runner` account in group `kvm` | always-on server |
+| macOS arm64 (HVF, unverified) | foreground, LaunchDaemon or per-user LaunchAgent | later |
 
-Packages are native to their manifest's OS and architecture; they are not
-cross-platform binaries. Linux and macOS each require release acceptance.
+Packages are native to their manifest's OS and architecture.
+
+## Requirements
+
+- Linux x86-64 with KVM (`/dev/kvm` readable and writable by the runner
+  account), or macOS arm64 with Hypervisor.framework (`kern.hv_support` 1).
+- QEMU 7.2 or newer (`-netdev dgram`) with `qemu-img`; on Debian/Ubuntu
+  `qemu-system-x86` and `qemu-utils`. macOS also needs the arm64 UEFI firmware
+  (`edk2-aarch64-code.fd`, shipped with Homebrew QEMU).
+- A Debian 13 genericcloud qcow2 image (`debian-13-genericcloud-amd64.qcow2`
+  or `-arm64`) supplied by the operator. The runner downloads nothing; it
+  copies the image into its state at init and identifies it by sha256.
+- Disk for the base image, one qcow2 overlay per VM (up to `--max-disk-gib`,
+  default 64 GiB) and retained VM disks.
+
+`runner-serve`/`run` refuse to start without the accelerator or with an older
+QEMU, and refuse a base image whose size, mode or sha256 changed.
 
 ## Trust and security model
 
-The runner is trusted and **not sandboxed**. Agent commands run as the dedicated
-runner account and can read, change, execute, or delete anything that user can
-access. Give that account no control-plane, provider, GitHub, SSH, cloud or login
-credentials, sudo, or privileged groups. Service-manager restrictions are host
-hygiene, not an adversarial same-UID filesystem boundary.
+The guest is the isolation boundary. A thread's commands run as user `agent`
+inside its VM; they cannot see the runner account, its key or its journal,
+and they have no network of their own: the VM's only network device is a
+`-netdev dgram` unix socket pair inside the VM directory. The runner pumps
+those Ethernet frames to `cube-gateway` over Iroh (ALPN `cube/l2/1`) and opens
+no other socket for the guest. All guest traffic leaves through cubed's
+gateway, which allows HTTP/HTTPS to public addresses only and asks cubed's
+policy about every request.
 
-Linux validates cwd with `openat2` using `RESOLVE_BENEATH`,
-`RESOLVE_NO_SYMLINKS`, and `RESOLVE_NO_MAGICLINKS`. macOS instead walks every
-relative path component from
-the identity-checked workspace descriptor with
-`openat(O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)`; absolute paths, `..`, symlinked
-components and replaced workspaces fail closed. This prevents cwd traversal and
-canonicalize/open races. It does **not** confine arbitrary command filesystem
-access: a command retains all authority of the runner UID.
+QEMU itself runs **as the runner account** and is not hardened beyond
+`-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny`
+(Linux; no seccomp sandbox on macOS). A guest escape through a QEMU bug would
+have the runner account's authority. Keep giving that account no
+control-plane, provider, GitHub, SSH, cloud or login credentials, sudo, or
+privileged groups other than `kvm`. Do not call the runner host as a whole a
+sandbox.
 
-Per-thread Git worktrees (or copied-directory fallback) isolate workspace names
-and ordinary edits from other active threads. They are **not a security
-sandbox**: every command can still use absolute paths and has all authority of
-the runner account. Container/VM or native process isolation is later work.
+The frame channel is authorized per VM by the latest accepted `vm.start`: it
+names the gateway's Iroh peer and a frame token (the runner keeps only its
+sha256). A peer that is no VM's gateway is closed before any byte is read; a
+wrong token, VM or thread is refused; a newer start rotates the token and drops
+the old frame connection.
 
-Each job starts a new Unix process group. Timeout, explicit cancel and orderly
-daemon stop signal and reap that group, including ordinary descendants. macOS
-has no cgroup equivalent: a hostile command can deliberately escape with a new
-session/process group, and an uncatchable daemon or machine crash cannot reap
-descendants. Do not describe this as a complete hostile process-tree boundary.
-
-Iroh authenticates the pinned peer IDs and encrypts QUIC end to end. `peerId` is
-transport identity; persisted `nodeId` is Cube's logical execution-node identity.
-N0 operators can observe endpoint IPs and traffic metadata. Cube does not enforce
-runner egress; enforce it at the OS/network boundary. Relay mode requires no
+Iroh authenticates the pinned peer IDs and encrypts QUIC end to end. `peerId`
+is transport identity; persisted `nodeId` is Cube's logical node identity. N0
+operators can observe endpoint IPs and traffic metadata. Relay mode requires no
 inbound public listener.
 
 ## Foreground install and operation
 
-The normal install only copies the binary. It does not inspect, create, enable,
-or start systemd/launchd state:
-
 ```sh
 bash scripts/setup-dev.sh
 bash scripts/runner/package.sh /absolute/private-output/cube-runner.tar.gz
 cd /absolute/private-output
-sha256sum -c cube-runner.tar.gz.sha256 # shasum -a 256 -c ... on macOS
+sha256sum -c cube-runner.tar.gz.sha256
 tar -xzf cube-runner.tar.gz
 cd cube-runner
 bash scripts/runner/install.sh "$PWD/bin/cube-runner"
 "$HOME/.local/bin/cube-runner" init --home "$HOME/.cube/runner" \
-  --workspace /absolute/prepared-workspace --allow-peer CONTROL_PEER \
+  --image /absolute/debian-13-genericcloud-amd64.qcow2 --allow-peer CONTROL_PEER \
   --node-id NODE_ID --thread-id THREAD_ID --env ENVIRONMENT_ID --network relay
 "$HOME/.local/bin/cube-runner" run --home "$HOME/.cube/runner"
 ```
 
-Set `CUBE_RUNNER_PREFIX` to another absolute prefix if needed. The foreground
-process reports `network ready / waiting for cubed`, not `connected`. First
-Ctrl-C drains and waits; a second Ctrl-C performs controlled cancellation and
-persists `CANCELLED`. Closing the terminal, logging out, sleeping, or powering
-off provides no always-on execution or automatic restart. Restart with the same
-home. Unfinished work after an uncontrolled stop becomes completion-unknown and
-is never replayed.
+`init` also takes `--qemu PATH`, `--firmware PATH`, `--max-vcpus` (default 4),
+`--max-memory-mib` (8192) and `--max-disk-gib` (64); they are recorded in the
+immutable installation. The foreground process reports `network ready /
+waiting for cubed`. First Ctrl-C refuses new VMs and powers the running guest
+down (ACPI, up to 30 seconds); a second Ctrl-C makes QEMU quit at once and
+marks the VM `interrupted`. Restart with the same home. A VM that was running
+when the runner died is recorded `stopped` and `interrupted` at the next start;
+cubed boots it again from the same disk.
 
-Human `run` status is on stderr and stdout stays quiet. Existing low-level
-commands retain JSON stdout. From the cubed machine,
-`cubed runners status --state ...` performs an authenticated live `node.status`
-probe and reports `reachable` or `unreachable`; there is intentionally no
-heartbeat or permanent connection claim.
-
-## Optional always-on service profile
-
-Linux production:
+## Always-on service (Linux)
 
 ```sh
-bash scripts/setup-dev.sh
-bash scripts/runner/package.sh /absolute/private-output/cube-runner.tar.gz
-cd /absolute/private-output
-sha256sum -c cube-runner.tar.gz.sha256 # use: shasum -a 256 -c ... on macOS
-tar -xzf cube-runner.tar.gz
-cd cube-runner
 sudo bash scripts/runner/install.sh --service "$PWD/bin/cube-runner"
-sudo bash scripts/runner/initialize.sh CONTROL_PEER NODE_ID THREAD_ID ENVIRONMENT_ID
+sudo bash scripts/runner/initialize.sh CONTROL_PEER NODE_ID THREAD_ID ENVIRONMENT_ID \
+  /absolute/debian-13-genericcloud-amd64.qcow2
 ```
 
-`--service` is the explicit opt-in that installs a unit/plist. `initialize.sh`
-then creates the service-profile identity and state and enables/starts that
-service. The supervised command is still the same foreground `runner-serve`
-runtime; it never daemonizes itself.
-
-macOS production uses the same package and scripts, but first provision a
-hidden, passwordless, non-admin `_cube-runner` account and dedicated group with
-no login credentials or inherited keychain data. Account creation is deliberately
-outside the bundle and must follow local fleet policy. Then run as root with
-`CUBE_RUNNER_MODE=system`; the installer creates
-`/Library/LaunchDaemons/com.cubeyard.cube-runner.plist`, validates it with
-`plutil`, and launchd drops execution to `_cube-runner`. Never pass credentials
-from the interactive operator account to that account.
-
-For an explicit disposable rootless macOS service test, omit `sudo` and set
-`CUBE_RUNNER_MODE=user`; this installs a LaunchAgent under the current login
-session. It deliberately has that user's full same-UID authority and is not the
-preferred production profile.
-
-Transfer the archive and checksum over an authenticated operator channel.
-`initialize.sh` prints only the public Iroh peer ID. Create the private adapter
-config from [RUNNER.md](../packages/node-transport/RUNNER.md), then:
-
-```sh
-node scripts/enroll-runner.ts \
-  --state /absolute/host-state \
-  --config /absolute/private-runner.json \
-  --trusted-runner
-```
-
-Enrollment authenticates the full binding and pins the config hash. It never
-executes work. Existing IDs cannot be adopted or rebound. The next new thread in
-any ready project leases the runner and sends normalized repository metadata plus
-the exact host-checked commit OIDs. Host credentials are never transferred; runner
-Git is noninteractive and only `file`, `https` and `ssh` transports are allowed.
-The runner fetches the declared branch only to transfer and verify the pinned object;
-it does not resolve a second branch tip. An unavailable pinned OID fails closed.
-Archive returns capacity without deleting dirty or uncertain evidence.
-No restart is needed after enrollment. Registry v100/v101 receives the rollback-compatible global-pool extension; older
-execution stacks are not migrated.
-
-Upgrade runner binaries before creating threads through the global pool. Cubed
-requires protocol 2 and uses `workspace.allocate.v2` for the immutable
-per-allocation repository plan. Enrolling a protocol-1 runner (cube-runner 0.2.x)
-fails with `INCOMPATIBLE_PROTOCOL`. An already enrolled runner rolled back to
-protocol 1 stays enrolled with its evidence untouched, but every check and call
-fails closed with `INCOMPATIBLE_PROTOCOL` (shown as unreachable) after
-authenticated hello and before any mutation bytes; upgrade it with `upgrade.sh`.
-
-### Unreachable and retired bindings
-
-The project switchboard's global-runner panel uses authenticated `node.status`
-checks. **Unreachable** means the latest check failed. **Stale** means every
-check has failed for at least seven continuous days; one successful check clears
-the interval. The panel shows the last successful contact, current global
-allocation, latest error, and active command/workspace counts when reachable.
-An unknown binding has no observation yet and is not stale.
-
-Use **retire binding** only after deciding that the immutable installation
-admission will not return. Cube requires an exact node-ID confirmation and an
-audit reason. It reserves the runner against every project, checks it again, and
-fails closed if the global allocation snapshot contains a thread/workspace or if
-a reachable runner reports active work. An unreachable runner cannot be retired
-until stale. A restart during the read-only check returns the reservation to the
-installation-wide pool.
-
-Retirement is permanent and is not remote uninstall: Cube keeps the binding,
-thread references, reason and status evidence, excludes it from global capacity,
-and never asks the runner to delete journals, operation records or retained
-workspaces. Project deletion cannot remove this global evidence. Enroll a fresh
-identity for replacement capacity; do not reuse or edit the retired binding.
-
-Fresh Linux layout:
+`install.sh --service` creates the `cube-runner` system account (QEMU/KVM must
+already be installed so the `kvm` group exists), the layout below and the
+unit. The unit runs `runner-serve` with `SupplementaryGroups=kvm`,
+`TimeoutStopSec=60` and `KillMode=mixed`. `initialize.sh` copies the base image
+into the state (it must be readable by the runner account), enrolls the
+immutable binding and starts the service. It prints only the public Iroh peer.
 
 | Path | Owner/mode | Purpose |
 |---|---|---|
 | `/opt/cube-runner/releases/<version>` | root, 0755 | immutable daemon release |
-| `/opt/cube-runner/current` | root symlink | atomically selected release |
+| `/opt/cube-runner/current` | root symlink | selected release |
 | `/etc/systemd/system/cube-runner.service` | root, 0644 | service boundary |
 | `/var/lib/cube-runner/identity/node.key` | cube-runner, 0600 | Iroh identity secret |
-| `/var/lib/cube-runner/state/` | cube-runner, 0700 | immutable binding and SQLite journal |
-| `/var/lib/cube-runner/workspace/` | cube-runner, 0700 | repository template and legacy workspace |
-| `/var/lib/cube-runner/state/workspaces/` | cube-runner, 0700 | allocated and retained thread workspaces |
-| `/run/cube-runner/ready.json` | runtime only | bounded readiness/version state |
+| `/var/lib/cube-runner/state/journal.db` | cube-runner, 0600 | immutable installation, VM records, lease epochs |
+| `/var/lib/cube-runner/state/images/<sha256>.qcow2` | cube-runner, 0400 | base image |
+| `/var/lib/cube-runner/state/vms/<n>/` | cube-runner, 0700 | `disk.qcow2`, `seed.img`, `console.log`, `qemu.log`, QMP and frame sockets |
+| `/run/cube-runner/ready.json` | runtime only | readiness, version, platform, base image hash |
 
-Fresh macOS system layout uses `/Library/Application Support/CubeRunner` for
-root-owned immutable releases and `_cube-runner`-owned `data`, `logs`, and
-runtime state. The plist is root-owned at
-`/Library/LaunchDaemons/com.cubeyard.cube-runner.plist`. The user profile uses
-`~/Library/Application Support/CubeRunner` and
-`~/Library/LaunchAgents/com.cubeyard.cube-runner.plist`.
+macOS uses `/Library/Application Support/CubeRunner` (system) or
+`~/Library/Application Support/CubeRunner` (user) with the same `data/state`
+structure; it is unverified this round.
 
-## Service status, drain, and stop
+## Status, drain and stop
 
 ```sh
 sudo systemctl start cube-runner
 sudo bash scripts/runner/status.sh
 sudo bash scripts/runner/drain.sh
-sudo systemctl restart cube-runner
 journalctl -u cube-runner --since today --no-pager
 ```
 
-On macOS use the lifecycle scripts for status and drain. `initialize.sh` and
-`upgrade.sh` bootstrap the launchd job; `launchctl print
-system/com.cubeyard.cube-runner` inspects the production daemon (use
-`gui/$UID/...` for a rootless LaunchAgent). Structured events have bounded,
-redacted fields; launchd stdout/stderr files live under the software root's
-`logs/` directory and require the operator's normal log retention/rotation.
+Drain (SIGUSR1, `systemctl reload`) is local operator authority: `vm.allocate`
+and `vm.start` fail with `DRAINING`, running VMs keep running and stay
+inspectable. SIGUSR2 resumes. Stop (SIGTERM) refuses new work, powers every
+running guest down (30 seconds, then QMP `quit`, then SIGKILL of the QEMU the
+runner spawned) and exits. With `CUBE_RUNNER_STOP_POLICY=cancel` QEMU is told
+to quit at once. On Linux QEMU also dies with the runner (`PR_SET_PDEATHSIG`),
+so a killed runner never leaves a guest running.
 
-Drain is local operator authority. New operation IDs fail with `DRAINING`;
-existing IDs remain inspectable. The default stop policy waits for the one
-active job's bounded deadline and process-group reap. For incident cancellation,
-install a root-owned Linux drop-in with
-`Environment=CUBE_RUNNER_STOP_POLICY=cancel`, or regenerate the macOS plist with
-`CUBE_RUNNER_STOP_POLICY=cancel` during install/upgrade.
-Cancellation persists `CANCELLED`; hard process/machine loss instead persists
-unfinished work as `Interrupted { completionUnknown: true }` on startup. Neither
-case replays a command.
+`node.status` reports `lifecycle`, `draining`, `activeVms`, `runningVms`,
+`maxActiveVms`, `retainedVms` and `retainedBytes`. Logs carry bounded runner
+events (`runner_starting`, `runner_ready`, `runner_draining`,
+`runner_stopping`) without keys, tokens, seeds or guest output. Each VM's serial
+console is in `vms/<n>/console.log`; `vm.inspect` returns its last 16 KiB.
 
-## Upgrade from cube-host 0.1.1
+## Retained VMs
 
-Do not copy, rename, chown, reinitialize, or regenerate legacy state. From the
-new bundle run:
+Releasing a VM deletes its directory only when cubed found the thread clean
+(`retain: false`) and the VM was never interrupted. A changed thread
+(`retain: true`), an interrupted VM and a failed transition keep the disk as
+evidence (`retained` / `failed`); they no longer hold the VM slot.
+`retainedBytes` shows their size. Inspect a retained disk offline, for
+example with `qemu-img info` or by booting a copy; delete it only under the
+operator's retention procedure. The runner never deletes a retained disk.
+
+## Upgrade
 
 ```sh
 sudo bash scripts/runner/upgrade.sh "$PWD/bin/cube-runner"
 ```
 
-This legacy migration applies only to Linux. The phase-1 migration:
+`install.sh` and `upgrade.sh` accept only protocol-3 binaries (cube-runner
+0.4.0 or newer). An upgrade drains, stops (guests power down; cubed boots them
+again), switches `current`, requires readiness of the new version and restores
+the previous release and unit on failure.
 
-1. detects `/opt/cube-host/current` and the existing `cube-host.service`;
-2. drains and stops that service;
-3. installs `cube-runner` under `/opt/cube-runner` and starts
-   `cube-runner.service`;
-4. deliberately keeps `/var/lib/cube-host`, its numeric owner, key, workspace,
-   immutable installation row, and journal in place;
-5. records `/etc/cube-runner/legacy-layout` and disables, but does not delete,
-   the old unit.
+**From protocol 2.** A protocol-2 runner executed commands as its own account;
+its state cannot be carried over and `upgrade.sh` refuses it. Re-enroll:
+archive or finish the runner's threads in cubed, back up the old state, run
+`uninstall.sh --keep-state`, move `/var/lib/cube-runner` aside, install the new
+release with `--service`, run `initialize.sh` with the base image, and enroll
+the new peer in cubed. Opening old state fails with "this state belongs to a
+protocol-2 runner". The cube-host (protocol 1) layout and its rollback scripts
+are gone.
 
-This avoids an identity/journal reset and keeps rollback possible:
-
-```sh
-sudo bash scripts/runner/rollback-legacy.sh
-```
-
-Rollback stops the runner service and starts the untouched `cube-host.service`
-against the same state. It does not convert journal formats, so journal schema
-v1 remains frozen throughout this phase; protocol-2 additions are additive
-tables. A rolled-back runner speaks protocol 1, which current cubed reports as
-`INCOMPATIBLE_PROTOCOL`.
-Remove the legacy layout only in a later explicit migration after `cube-host`
-rollback support leaves the supported release window.
-
-Install and upgrade accept only protocol-2 binaries (cube-runner 0.3.0 or
-newer); cubed requires protocol 2 and never falls back to an older runner.
-Native runner upgrades on both platforms use the same `upgrade.sh`: stage an
-immutable native release, confirm drain, switch `current`, require matching
-readiness, and restore the previous target and service definition on failure.
-Never initialize over a failed state directory.
-
-## Backup, restore, no-replay, and clean uninstall
+## Backup, restore and quarantine
 
 ```sh
 sudo bash scripts/runner/backup.sh /secure/runner-DATE.tar.gz
 sudo bash scripts/runner/restore.sh /secure/runner-DATE.tar.gz
-sudo bash scripts/runner/acknowledge-recovery.sh --i-reviewed-unknown-operations
+sudo bash scripts/runner/acknowledge-recovery.sh --i-reviewed-retained-vms
 sudo systemctl start cube-runner
 ```
 
-On macOS run the same scripts with the installation's `CUBE_RUNNER_MODE`; start
-is intentionally withheld after restore until quarantine has been reviewed and
-acknowledged. Archives contain the Iroh private key and durable journal; keep
-the archive and adjacent checksum private and together. A macOS `data/` archive
-cannot be restored as a Linux state layout, or vice versa.
+Backup stops the service first (guests power down) and archives the whole state
+root: the Iroh private key, the journal, the base image and every VM disk with
+the guest's files. Keep the archive and its checksum private and together; it
+can be large. Restore never starts the service and creates
+`restore-quarantine`: while it exists the runner reports `recoveryRequired` and
+refuses `vm.allocate`/`vm.start`. VMs that were running at backup time come
+back `stopped`; a guest's own journal marks its unfinished commands
+interrupted when it boots. Acknowledgement runs in the runner account, opens the
+journal with the restored key, verifies the base image hash and removes the
+quarantine. Overlays name their base image by a relative path, so a restored
+state directory may live at another path.
 
-Backup auto-detects native or phase-1 legacy state and stores that path exactly.
-Restore accepts either layout, never starts a service, and creates
-`restore-quarantine`. Reconcile every operation accepted after the snapshot as
-unknown. Never recreate an intent, remove a `.sent` marker, resubmit an old ID,
-or repeat a side effect because restored state says `Unknown`. Only acknowledge
-an identity-preserving recovery after that review. On a replacement host,
-install the runner software before acknowledgment; restore contains durable
-state, not release binaries or service definitions.
-
-Acknowledgment runs in the runner account and requires exclusive ownership of
-the journal, the restored private key, a private quarantine marker, and the
-same canonical workspace path. Archive extraction cannot preserve a directory
-inode, so acknowledgment transactionally refreshes only the workspace device
-and inode and reinstates the journal's immutable-installation trigger before it
-removes quarantine. It cannot change the node/thread/environment binding,
-runner or control peer, or workspace path. Outside this explicit offline
-recovery boundary, replacing the workspace directory remains fail-closed.
-
-Software-only uninstall is intentionally explicit and non-destructive:
+Software-only uninstall preserves state:
 
 ```sh
 sudo bash scripts/runner/uninstall.sh --keep-state
 ```
 
-It removes the service definition and release software, but preserves durable
-state and any Linux legacy rollback unit. State destruction is outside this
-script and must follow the operator's approved retention procedure.
-
 ## Replacement and re-enrollment
 
-There is no in-place key, peer, node, thread, environment, or admission rotation.
-If either side's key is lost without a matched backup, archive the old thread,
-retain its journal/intents for result inspection, and enroll a fresh runner with
-new identities. Copy workspace content only through an authenticated offline
-operator process. Run a harmless canary before accepting new work.
-Never delete old evidence to make an ambiguous command retryable.
+There is no in-place key, peer, node, thread, environment or admission
+rotation. If a key is lost without a matched backup, archive the old threads,
+keep the old state for inspection and enroll a fresh runner with new
+identities.
 
-## Capacity and diagnostics
+## Limits and diagnostics
 
-One operation and one active thread workspace run at a time. Commands are capped
-at 8 KiB, cwd and file paths at 4 KiB, runtime at 600 seconds, retained output
-at 256 KiB (read in 64-KiB pages), file reads and writes at 512 KiB per call,
-connections at 16, immutable journal records (commands and file writes) at
-100,000, and new workspace admission at 50 GiB of managed workspace data. `node.status` reports active/retained counts and
-managed bytes. Records do not expire because they are no-replay evidence.
-These protocol limits are not CPU, memory, process-count, network, or disk
-quotas; the byte threshold is admission/observability, not enforcement. Apply
-host-level controls where required; macOS has no cgroup-equivalent
-per-job resource boundary in this profile.
-Logs use bounded runner events (`runner_starting`, `runner_ready`,
-`runner_draining`, `runner_resume_refused`) and omit commands, output, keys,
-addresses, IDs, and paths.
+One active VM per runner. Per VM: `vcpus` up to `maxVcpus`, memory from 256 MiB
+to `maxMemoryMiB`, a disk at least the base image's virtual size and at most
+`maxDiskGiB`, a seed of at most 64 KiB. Control requests are bounded to 1 MiB
+frames and 5 seconds; `vm.stop` and `vm.release` therefore complete
+asynchronously (poll `vm.inspect`). Frame connections are limited to 32. These
+are admission bounds, not host resource quotas.
 
 | State/error | Action |
 |---|---|
-| `DRAINING` | wait or explicitly resume/restart after maintenance |
-| `CAPACITY_EXCEEDED` | wait for active work; replace before journal exhaustion |
+| `DRAINING` | wait, or resume/restart after maintenance |
+| `CAPACITY_EXCEEDED` | another thread's VM is active; release it first |
+| `CONFLICT` | the vmId belongs to another thread, or its fixed config/seed differs |
 | `INCOMPATIBLE_PROTOCOL` | upgrade the older cubed/cube-runner component |
-| `LEASE_STALE` | a newer thread lease owns the workspace; never retry with the old epoch |
-| `recoveryRequired` | reconcile uncertainty, then acknowledge while stopped |
-| `COMPLETION_UNKNOWN` / `Interrupted` | inspect the saved ID; never resubmit |
+| `UNSUPPORTED` | a protocol-2 method (`exec.*`, `fs.*`, `workspace.*`) reached a protocol-3 runner |
+| `LEASE_STALE` | a newer thread lease owns the VM; never retry with the old epoch |
+| `recoveryRequired` | review retained VMs, then acknowledge while stopped |
+| `interrupted` on a VM | the runner died or the guest was killed; the next boot clears it, a release keeps the disk |
+| `error` on a stopped VM | QEMU exited unexpectedly; see `vms/<n>/qemu.log` and `console.log` |
 | `WRONG_NODE` | verify Iroh peers and the full immutable binding out of band |
 | `faulted` / `IO_ERROR` | stop, preserve state, inspect disk/journal ownership |
 
-## Compatibility window
-
-Protocol 2 is the only accepted wire version in both directions; there is no
-protocol-1 fallback. Daemons still advertise the historical `host` profile name
-beside `runner`, and the deprecated `host-init`/`host-serve` CLI aliases remain.
-Linux rollback to `cube-host` 0.1.1 or a native 0.2.x release keeps state intact
-but speaks protocol 1, which current cubed refuses until the runner is upgraded
-again. The packaged `cube-node-transport` name is a symlink to `cube-runner`.
-These are runner transport/package compatibility, not a second product backend.
-Cubed has no backend selector, legacy execution routes or admission tables.
-Its fresh registry and Pi sessions are not compatible with old host databases.
-
 ## Production acceptance
 
-Release sign-off requires separate Linux x86-64/systemd and macOS production
-profiles over N0 relay: fresh install/enrollment, product prompts and runner exec,
-drain, cancellation/stop, upgrade/induced rollback,
-daemon/control loss, matched backup/restore quarantine, and
-replacement/re-enrollment. Rootless macOS LaunchAgent acceptance proves the
-portable scripts and daemon but does not prove the dedicated-account
-LaunchDaemon boundary. The 0.1.1 Linux host baseline was completed before this
-rename. Loopback/public-relay smokes and one platform's acceptance are regression
-evidence, not cross-platform sign-off.
+`scripts/test-node-transport.sh` runs the runner acceptance with a real guest
+when `/dev/kvm`, QEMU and `CUBE_TEST_VM_IMAGE` are present (and skips loudly
+otherwise; `CUBE_TEST_VM=required` makes that a failure). Release sign-off also
+needs the service profile over N0 relay: install, enrollment, a real thread,
+drain and stop, upgrade with induced rollback, runner loss, backup/restore
+quarantine and re-enrollment, on each platform separately.
