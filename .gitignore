@@ -21,7 +21,7 @@ github-auth.json
 *.sqlite
 *.sqlite-*
 coverage/
-/target/
+target/
 
 # OS and editor-local files.
 .DS_Store
