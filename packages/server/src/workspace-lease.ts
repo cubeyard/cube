@@ -35,6 +35,7 @@ export class LeaseStore {
     try {
       this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
         CREATE TABLE IF NOT EXISTS lease(id INTEGER PRIMARY KEY CHECK(id = 1), epoch INTEGER NOT NULL CHECK(epoch >= 1), owner TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS agent_change(id INTEGER PRIMARY KEY CHECK(id = 1), first_at INTEGER NOT NULL);
         CREATE TRIGGER IF NOT EXISTS monotonic_lease_epoch BEFORE UPDATE OF epoch ON lease WHEN NEW.epoch <= OLD.epoch
           BEGIN SELECT RAISE(ABORT, 'lease epoch must increase'); END;`);
     } catch (error) { this.db.close(); throw error; }
@@ -81,6 +82,20 @@ export class LeaseStore {
       throw new WorkspaceError("LEASE_STALE", "workspace lease is not held by this token");
     }
     return current;
+  }
+
+  /** Durably notes that the agent asked the workspace to change something
+   * (a command or a file write). Recorded before the request is sent, so a
+   * lost answer still counts; never cleared. */
+  recordAgentChange(): void {
+    this.open();
+    this.db.prepare("INSERT OR IGNORE INTO agent_change(id, first_at) VALUES(1, ?)").run(Date.now());
+  }
+  /** Whether the agent ever asked to change the workspace. cubed's own
+   * record, so it holds whatever the machine itself reports. */
+  agentChanged(): boolean {
+    this.open();
+    return this.db.prepare("SELECT 1 FROM agent_change WHERE id = 1").get() !== undefined;
   }
 
   /** The owner holding the lease now, if any. */

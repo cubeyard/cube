@@ -1,7 +1,8 @@
 /** A thread's machine: one QEMU VM on the thread's runner, reached only
  * through cube-gateway. `ThreadVms` allocates and boots it, attaches it to
  * the gateway, waits until its guest helper answers ready, and releases it at
- * archive (retaining the disk of a thread whose work is not clean).
+ * archive (retaining the disk of a thread whose agent changed anything or
+ * whose work is not clean).
  *
  * Provisioning (the pinned repository checkouts) and the release check are
  * ordinary workspace commands under the thread's lease and fixed keys, so
@@ -18,9 +19,9 @@ import { IrohNodeError, IrohRunnerClient, type VmRecord, type VmRef } from "./ir
 import { createLogger, type Logger } from "./log.ts";
 import type { Registry, Thread, WorkspaceAllocation } from "./registry.ts";
 import type { EgressVms } from "./egress-policy.ts";
-import { guestDescription } from "./vm-workspace.ts";
+import { guestDescription, type VmWorkspace } from "./vm-workspace.ts";
 import { vmMac, vmSeed } from "./vm-seed.ts";
-import { settleOperation, WorkspaceError, type Workspace, type WorkspaceOwner } from "./workspace.ts";
+import { settleOperation, WorkspaceError, type WorkspaceOwner } from "./workspace.ts";
 
 const run = promisify(execFile);
 
@@ -351,19 +352,20 @@ export function releaseCheckScript(allocation: WorkspaceAllocation): string {
 }
 
 /** Runs one of cubed's own commands in the thread workspace under a fresh
- * lease and a fixed key; reattaches to it when the key already ran. */
-async function own(workspace: Workspace, owner: WorkspaceOwner, key: string | ((epoch: number) => string), command: string, timeoutMs: number) {
+ * lease and a fixed key; reattaches to it when the key already ran. These
+ * are not the agent's changes. */
+async function own(workspace: VmWorkspace, owner: WorkspaceOwner, key: string | ((epoch: number) => string), command: string, timeoutMs: number) {
   const lease = await workspace.lease({ owner });
   try {
     if (typeof key !== "string") key = key(lease.epoch);
-    await workspace.exec(lease.token, key, { command, timeoutMs });
+    await workspace.execOwn(lease.token, key, { command, timeoutMs });
     return await settleOperation(workspace, lease.token, key);
   } finally { await workspace.release(lease.token).catch(() => {}); }
 }
 
 /** Checks out the thread's pinned repositories once. `attempt` numbers the
  * try: a failed one is never rerun under its key, a new try gets a new key. */
-export async function provisionWorkspace(workspace: Workspace, owner: WorkspaceOwner, allocation: WorkspaceAllocation, attempt: number): Promise<void> {
+export async function provisionWorkspace(workspace: VmWorkspace, owner: WorkspaceOwner, allocation: WorkspaceAllocation, attempt: number): Promise<void> {
   const state = await own(workspace, owner, `cube:provision:${attempt}`, provisionScript(allocation), 600000);
   if (state.state === "succeeded" && state.exitCode === 0) return;
   const output = state.state === "succeeded" ? Buffer.from(state.output).toString("utf8").trim().split("\n").slice(-4).join("; ") : state.state;
@@ -371,7 +373,7 @@ export async function provisionWorkspace(workspace: Workspace, owner: WorkspaceO
 }
 
 /** Whether a provisioning try already succeeded (or still runs: wait for it). */
-export async function provisioned(workspace: Workspace, owner: WorkspaceOwner, attempt: number): Promise<boolean | null> {
+export async function provisioned(workspace: VmWorkspace, owner: WorkspaceOwner, attempt: number): Promise<boolean | null> {
   const lease = await workspace.lease({ owner });
   try {
     const state = await settleOperation(workspace, lease.token, `cube:provision:${attempt}`);
@@ -382,8 +384,10 @@ export async function provisioned(workspace: Workspace, owner: WorkspaceOwner, a
   } finally { await workspace.release(lease.token).catch(() => {}); }
 }
 
-/** Whether the thread's machine may be deleted at archive. */
-export async function releaseCheck(workspace: Workspace, owner: WorkspaceOwner, allocation: WorkspaceAllocation): Promise<{ clean: boolean; reason: string }> {
+/** What the machine reports about its work at archive. The guest is
+ * agent-controlled: `clean` alone never decides deletion (see
+ * Conversations.archive), any other answer keeps the disk. */
+export async function releaseCheck(workspace: VmWorkspace, owner: WorkspaceOwner, allocation: WorkspaceAllocation): Promise<{ clean: boolean; reason: string }> {
   const state = await own(workspace, owner, epoch => `cube:release-check:${epoch}`, releaseCheckScript(allocation), 120000);
   if (state.state !== "succeeded" || state.exitCode !== 0) return { clean: false, reason: `the release check did not finish (${state.state})` };
   const output = Buffer.from(state.output).toString("utf8").trim();

@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
 import { provisionScript, releaseCheckScript } from "../src/vm.ts";
 import { LocalMachines } from "./local-guest.ts";
@@ -89,6 +89,37 @@ try {
   assert.equal(machines.released.get(clean), false);
   assert.equal(app.registry.getThread(clean)?.archived, true);
 
+  // The guest is agent-controlled: a machine reporting clean is still kept
+  // when cubed's records show the agent ran a command in it.
+  faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command: "true" })], { stopReason: "toolUse" }),
+    ...Array.from({ length: 20 }, () => fauxAssistantMessage("ready"))]);
+  const ran = await create(project.id, "ran");
+  await thread(ran, row => row.state === "ready");
+  await idle(ran);
+  const ranArchive = await (await fetch(`${base}/api/threads/${ran}`, { method: "DELETE" })).json();
+  assert.deepEqual(ranArchive, { ok: true, retained: true, reason: "the agent ran commands or wrote files in the machine" });
+  assert.equal(machines.released.get(ran), true);
+
+  // While an archive runs, nothing reopens the thread's agent or workspace.
+  const raced = await create(project.id, "raced");
+  await thread(raced, row => row.state === "ready");
+  await idle(raced);
+  let finished = false;
+  const archiving = app.conversations.archive(raced).finally(() => { finished = true; });
+  let refused = "";
+  while (!finished && !refused) {
+    try { await app.conversations.agent(raced); }
+    catch (error) { refused = (error as Error).message; }
+    void app.conversations.activate(raced);
+    void app.conversations.boot();
+    await delay(1);
+  }
+  assert.deepEqual(await archiving, { retained: false, reason: "clean" });
+  assert.equal(refused, "thread is being archived");
+  await app.conversations.boot();
+  assert.equal(app.conversations.owner(raced), null, "no lease was taken for the archived thread");
+  assert.equal(app.conversations.error(raced), null);
+
   // Changed work is retained, with the reason.
   const dirty = await create(project.id, "dirty");
   await thread(dirty, row => row.state === "ready");
@@ -140,7 +171,7 @@ try {
   assert.match(provisionScript({ projectId: "p", projectRevision: 1, repositories: [{ url: "https://example.com/a'b.git", base: "main", baseOid: "a".repeat(40), checkoutName: "workspace" }] }),
     /checkout '\.' 'https:\/\/example\.com\/a'\\''b\.git' 'refs\/heads\/main'/);
   assert.match(releaseCheckScript({ projectId: "p", projectRevision: 1, repositories: [] }), /the workspace is not empty/);
-  console.log("ok: thread machines: background activation, pinned checkouts provisioned once, release check (clean deleted; changes, own commits, leftovers and failures retained with reasons), failed provisioning retried under a new key");
+  console.log("ok: thread machines: background activation, pinned checkouts provisioned once, release check (clean deleted; agent commands, changes, own commits, leftovers and failures retained with reasons), no reopening while archiving, failed provisioning retried under a new key");
 } finally {
   await app.close();
   await machines.close();
