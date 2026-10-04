@@ -36,6 +36,13 @@ try {
   for (const entry of [".claude-plugin/plugin.json", "hooks", "package.json"]) {
     fs.cpSync(path.join("packages/claude-mod", entry), path.join(root, "app/packages/claude-mod", entry), { recursive: true });
   }
+  // cube-gateway: every thread VM's network, supervised by cubed (bin/cube-gateway).
+  execFileSync("cargo", ["build", "--release", "--locked", "-p", "cube-gateway"], { stdio: "inherit" });
+  const gateway = path.join(process.env.CARGO_TARGET_DIR ?? "target", "release", "cube-gateway");
+  fs.copyFileSync(gateway, path.join(root, "bin/cube-gateway"));
+  fs.chmodSync(path.join(root, "bin/cube-gateway"), 0o755);
+  const gatewayVersion = execFileSync(path.join(root, "bin/cube-gateway"), ["--version"], { encoding: "utf8" }).trim();
+  if (!/^cube-gateway \d+\.\d+\.\d+/.test(gatewayVersion)) throw new Error(`unexpected cube-gateway --version: ${gatewayVersion}`);
   fs.copyFileSync("scripts/cubed-supervisor.ts", path.join(root, "supervisor.ts"));
   fs.copyFileSync("scripts/cubed/cubed", path.join(root, "bin/cubed"));
   fs.chmodSync(path.join(root, "bin/cubed"), 0o755);

@@ -14,8 +14,8 @@ const bytes = fs.readFileSync(manifestPath), manifest = JSON.parse(bytes);
 const platform = process.platform === "linux" ? `linux-${process.arch}-gnu` : `${process.platform}-${process.arch}`;
 if (manifest.schema !== 1 || manifest.product !== "cubed" || manifest.includesRunner !== false ||
     !/^v\d+\.\d+\.\d+$/.test(manifest.version) || !/^[0-9a-f]{40}$/.test(manifest.commit) || manifest.platform !== platform ||
-    !Number.isSafeInteger(manifest.minimumSupervisor) || manifest.minimumSupervisor > 1 || manifest.stateSchema?.minimum !== 101 ||
-    manifest.stateSchema?.maximum !== 101 || manifest.stateSchema?.rollbackSafeFrom !== 101 ||
+    !Number.isSafeInteger(manifest.minimumSupervisor) || manifest.minimumSupervisor > 1 || manifest.stateSchema?.minimum !== 102 ||
+    manifest.stateSchema?.maximum !== 102 || manifest.stateSchema?.rollbackSafeFrom !== 102 ||
     !Number.isSafeInteger(manifest.artifact?.bytes) || manifest.artifact.bytes <= 0 || !/^[0-9a-f]{64}$/.test(manifest.artifact?.sha256)) {
   throw Error("incompatible cubed manifest");
 }
@@ -50,12 +50,12 @@ try {
   cp.execFileSync("tar", ["-xzf", archive, "--no-same-owner", "-C", temporary]);
   const unpacked = path.join(temporary, "cubed"); validateTree(unpacked);
   const record = JSON.parse(fs.readFileSync(path.join(unpacked, "release.json"), "utf8"));
-  if (record.version !== manifest.version || record.commit !== manifest.commit || record.stateSchema !== 101 || record.entry !== "app/packages/server/src/index.ts") throw Error("release metadata does not match its signed manifest");
+  if (record.version !== manifest.version || record.commit !== manifest.commit || record.stateSchema !== 102 || record.entry !== "app/packages/server/src/index.ts") throw Error("release metadata does not match its signed manifest");
   const selfCheck = JSON.parse(cp.execFileSync(path.join(unpacked, "bin/node"), [path.join(unpacked, record.entry), "--self-check"], {
     encoding: "utf8", timeout: 20000, env: { ...process.env, CUBED_VERSION: manifest.version, CUBED_COMMIT: manifest.commit,
       CUBED_SUPERVISOR_SOCKET: "", CUBED_UPDATE_TOKEN: "" },
   }).trim());
-  if (selfCheck.version !== manifest.version || selfCheck.commit !== manifest.commit || selfCheck.stateSchema !== 101) throw Error("candidate self-check reported different build metadata");
+  if (selfCheck.version !== manifest.version || selfCheck.commit !== manifest.commit || selfCheck.stateSchema !== 102) throw Error("candidate self-check reported different build metadata");
   const release = path.join(root, "releases", manifest.version);
   if (!fs.existsSync(release)) fs.renameSync(unpacked, release);
   else if (JSON.parse(fs.readFileSync(path.join(release, "release.json"), "utf8")).commit !== manifest.commit) throw Error("release directory contains different bytes");

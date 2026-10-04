@@ -42,9 +42,9 @@ async function firstLine(child: ChildProcess): Promise<Record<string, unknown>> 
   });
   return JSON.parse(line);
 }
-async function startRunner(): Promise<{ child: ChildProcess; ready: Record<string, unknown> }> {
+async function startRunner(listen = "127.0.0.1:0"): Promise<{ child: ChildProcess; ready: Record<string, unknown> }> {
   const child = spawn(runnerBin, ["runner-serve", "--key", path.join(work, "runner.key"), "--state", path.join(work, "runner-state"),
-    "--listen", "127.0.0.1:0"], { stdio: ["ignore", "pipe", "pipe"] });
+    "--listen", listen], { stdio: ["ignore", "pipe", "pipe"] });
   child.stderr!.pipe(fs.createWriteStream(path.join(work, "runner.log"), { flags: "a" }));
   children.push(child);
   return { child, ready: await firstLine(child) };
@@ -107,6 +107,24 @@ try {
   const thread = registry.createThread("empty", "adapter", { provider: "faux", id: "faux" }, "adapter smoke");
   await vms.start(thread);
   log("thread machine booted; guest helper ready over ssh through the gateway");
+  if (process.env.CUBE_SMOKE_PAUSE) {
+    // Debugging: run commands in the guest through the workspace while this file exists.
+    const pause = process.env.CUBE_SMOKE_PAUSE;
+    const debug = new VmWorkspace({ guest: vms.guest(thread), leases: new LeaseStore(path.join(work, "lease-debug")), owner: "pi", binding: "adapter:debug" });
+    const debugLease = await debug.lease({ owner: "pi" });
+    fs.writeFileSync(pause, "");
+    let index = 0;
+    while (fs.existsSync(pause)) {
+      const command = fs.readFileSync(pause, "utf8").trim();
+      if (command) {
+        fs.writeFileSync(pause, "");
+        try { fs.writeFileSync(`${pause}.out`, (await run(debug, debugLease.token, `debug-${index++}`, command)).output); }
+        catch (error) { fs.writeFileSync(`${pause}.out`, String(error)); }
+      }
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    await debug.release(debugLease.token);
+  }
   assert.equal((await client.health()).activeVms, 1);
 
   // The Workspace contract over the real VM, in process and over HTTP.
@@ -141,7 +159,8 @@ try {
   await probes.release(lease.token);
   runner!.kill("SIGKILL");
   await new Promise(resolve => runner!.once("exit", resolve));
-  runner = (await startRunner()).child;
+  // The same address: the runner config names it.
+  runner = (await startRunner((first.ready.addresses as string[])[0])).child;
   const record = (await client.vmInspect({ threadId: thread.id, vmId: thread.vm!.vmId })).vm;
   assert.equal(record.state, "stopped");
   assert.equal(record.interrupted, true);

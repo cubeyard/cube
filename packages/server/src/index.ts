@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import type { Models } from "@earendil-works/pi-ai";
 import { GitService, normalizeRepoUrl } from "@cube/git";
@@ -13,7 +14,7 @@ import { Conversations } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
 import { IrohRunnerClient, loadRunnerConfig, type RunnerNetwork, type TrustedRunnerHealth } from "./iroh-node.ts";
 import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
-import { GatewaySupervisor, widestNetwork } from "./gateway.ts";
+import { GatewaySupervisor, locateGateway, widestNetwork } from "./gateway.ts";
 import { ThreadVms, type ThreadMachines } from "./vm.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
@@ -534,7 +535,13 @@ async function main(argv: string[]): Promise<void> {
 
 if (import.meta.main) {
   if (process.argv.includes("--self-check")) {
-    process.stdout.write(`${JSON.stringify(versionInfo())}\n`);
+    // A release must carry a working cube-gateway; a source checkout may not have built one.
+    const binary = locateGateway();
+    const release = fs.existsSync(path.resolve(import.meta.dirname, "../../../../release.json"));
+    let gateway: string | null = null;
+    try { if (binary) gateway = execFileSync(binary, ["--version"], { encoding: "utf8", timeout: 10000 }).trim(); } catch { gateway = null; }
+    if (release && !gateway) { console.error("cubed: self-check: bin/cube-gateway is missing or does not run"); process.exitCode = 1; }
+    else process.stdout.write(`${JSON.stringify({ ...versionInfo(), gateway })}\n`);
   } else {
     try { await main(process.argv.slice(2)); }
     catch (error) { console.error(`cubed: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }

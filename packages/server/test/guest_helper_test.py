@@ -167,6 +167,12 @@ class GuestHelperTest(unittest.TestCase):
         self.launcher.running.discard("s1")
         self.assertEqual(call("get", {"id": "s1"})[0], {"state": "Interrupted", "completionUnknown": True})
 
+    def test_cancel_whose_stop_post_was_killed_too(self):
+        call("exec", self.exec_header("k9"))
+        call("cancel", {"id": "k9", "epoch": 10})
+        self.launcher.running.discard("k9")  # the unit is gone and finish never ran
+        self.assertEqual(call("get", {"id": "k9"})[0], {"state": "Failed", "error": "CANCELLED", "completionUnknown": False})
+
     def test_cancel_overtaking_its_command(self):
         self.assertEqual(call("cancel", {"id": "o1", "epoch": 10})[0], {"state": "Failed", "error": "CANCELLED", "completionUnknown": False})
         self.assertEqual(call("exec", self.exec_header("o1"))[0]["error"], "CANCELLED")

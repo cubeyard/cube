@@ -77,7 +77,8 @@ export function vmSeed(input: SeedInput): VmSeed {
     disable_root: false,
     ssh_pwauth: false,
     ssh_deletekeys: true,
-    ssh_genkeytypes: [],
+    // Only the provided key: generation skips a type whose key exists.
+    ssh_genkeytypes: ["ed25519"],
     ssh_keys: { ed25519_private: `${input.hostKey.privateKey.trim()}\n`, ed25519_public: hostPublic },
     ca_certs: { trusted: [input.caPem.trim()] },
     package_update: true,

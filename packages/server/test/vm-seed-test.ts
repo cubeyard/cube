@@ -31,7 +31,7 @@ try {
 
   // What it holds: the pinned host key, the CA, the restricted client key, the placeholder, the helper.
   assert.equal(config.ssh_keys.ed25519_private.trim(), hostKey.privateKey.trim());
-  assert.deepEqual(config.ssh_genkeytypes, [], "the guest generates no host key of its own");
+  assert.deepEqual(config.ssh_genkeytypes, ["ed25519"], "only the provided key type, which exists, so nothing is generated");
   assert.equal(config.ssh_deletekeys, true);
   assert.deepEqual(config.ca_certs.trusted, [caPem.trim()]);
   const file = (name: string) => config.write_files.find((entry: { path: string }) => entry.path === name);

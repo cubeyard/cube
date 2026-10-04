@@ -292,6 +292,9 @@ def count_records():
 
 # --- operation state -----------------------------------------------------
 
+CANCELLED = {"state": "Failed", "error": "CANCELLED", "completionUnknown": False}
+
+
 def state_of(op, cursor=0):
     """The protocol-2 operation state of a key; call with the lock held.
     Returns (header, body)."""
@@ -302,9 +305,11 @@ def state_of(op, cursor=0):
     if result is None:
         if request["kind"] == "exec" and CONFIG.launcher.active(op):
             return {"state": "Running"}, b""
-        # Nothing runs this key and nothing recorded an end: the helper or
-        # the VM stopped in between. Never run it again.
-        result = {"state": "Interrupted", "completionUnknown": True}
+        # Nothing runs this key and nothing recorded an end. A cancel's
+        # SIGKILL to the unit's cgroup can also kill its ExecStopPost; then
+        # the marker is the record. Otherwise the helper or the VM stopped in
+        # between: never run it again.
+        result = CANCELLED if os.path.exists(op_path(op, "cancel")) else {"state": "Interrupted", "completionUnknown": True}
         write_json(op_path(op, "result.json"), result)
     if result["state"] != "Succeeded":
         return result, b""
@@ -375,9 +380,6 @@ def op_get(header, body):
         # Running: wait cheaply for the unit's ExecStopPost to record an end.
         while time.monotonic() < deadline and not os.path.exists(op_path(op, "result.json")):
             time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-
-
-CANCELLED = {"state": "Failed", "error": "CANCELLED", "completionUnknown": False}
 
 
 def op_cancel(header, body):
