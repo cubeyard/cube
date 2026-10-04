@@ -1,5 +1,5 @@
 [workspace]
-members = ["packages/node-transport"]
+members = ["packages/node-transport", "packages/gateway"]
 resolver = "3"
 
 [workspace.package]

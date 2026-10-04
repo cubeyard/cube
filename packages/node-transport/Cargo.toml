@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
+bytes = "1"
 libc = "0.2"
 rusqlite = { version = "0.38", features = ["bundled"] }
 sha2 = "0.11"
