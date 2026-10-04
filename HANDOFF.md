@@ -97,9 +97,13 @@ a Pi and a Claude thread ran concurrently on separate runners, a third thread
 got 409 and archiving freed a runner; Claude Code resumed its session after an
 idle cubed restart; a cubed SIGKILL mid Claude turn left the turn honestly
 failed, the reopen cancelled its runner command, and the thread kept working;
-background Bash and a worktree-isolated subagent were refused. Not verified
-live: the SIGTERM/SIGKILL fallback for a child that ignores the interrupt, and
-runners on separate machines.
+background Bash and a worktree-isolated subagent were refused. A separate-machine run the same day (cubed on Linux, cube-runner 0.3.0 built
+from this branch in the foreground profile on a macOS arm64 laptop, N0 relay,
+a public GitHub project): Pi and Claude Code threads used their file tools,
+bash and codemode on the Mac, a Pi bash command survived a cubed SIGKILL and
+ran once, a Claude stop left its command's write undone, and archive freed the
+runner. Not verified live: the SIGTERM/SIGKILL fallback for a child that ignores
+the interrupt, and the macOS launchd service profile.
 
 GUI provider settings use Pi's public Models login/logout/refresh APIs and the
 existing host credential store. Browser/device login, key entry, cancellation,
