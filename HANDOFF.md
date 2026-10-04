@@ -1,6 +1,32 @@
 # Handoff
 
-Architecture replacement is implemented in this working tree. The ordinary
+## Status (2026-10-04)
+
+**Released.** v0.2.0 is released from `main` (PR #71, merge commit `22ffce83b`). It requires a fresh `CUBED_STATE` and cube-runner 0.3.0 (protocol 2). Release acceptance passed in disposable systemd containers:
+
+- fresh install
+- refusal of in-place updates from schema 100
+- the runner going 0.2.2 → 0.3.0, plus drain, rollback and re-enrollment
+
+**In use.** The maintainer's development host now runs only:
+
+- the managed cubed v0.2.0 (systemd user service, fresh state, port 7777)
+- one system-profile cube-runner 0.3.0 enrolled over relay
+- the project `cube` (this repository, `main`)
+
+Everything older on that host was removed: the launcher VM, the older states, the v0.1.x releases, runner 0.2.2 and the September macOS runner. cube is now developed with cube.
+
+**Next:**
+
+- Update AGENTS.md from "Pi AgentHarness" to pi-durable.
+- The macOS CI product smoke failed once with `workspace allocation failed: COMPLETION_UNKNOWN` and passed on rerun. Find the cause.
+- `cubed runners status` through the managed `cubed` wrapper fails while the supervisor runs ("another cubed supervisor is already running"). Use the runner panel or `/api/runners` until it is fixed.
+- Add a second runner for concurrent threads. Use a fresh identity; see `docs/trusted-runner-operations.md`.
+- Still unverified: the Claude Code SIGTERM/SIGKILL fallback, the macOS launchd service profile, runner backup/restore/uninstall, and compaction after a provider context overflow.
+
+## Implementation evidence
+
+The architecture replacement is implemented. The ordinary
 HTTP conversation path now uses an in-process pi-durable 1.0.1 Harness + SQLite,
 with startup activation and snapshot SSE. Pi's tools reach the runner only
 through the thread `Workspace` and its lease. The old execution stack has been removed.
@@ -20,9 +46,8 @@ Verified locally on Linux:
   reconnect, concurrent followup dedup/conflict, stop and model-choice persistence,
   one codemode script whose nested write/edit/bash/read reach the runner under
   their nested keys, a claude · max thread through a fake `claude`, and the
-  Workspace contract in loopback and direct mode. All of it runs on one Linux
-  machine against a disposable local runner; a runner on a separate machine
-  (Linux or macOS) has not been accepted on this branch.
+  Workspace contract in loopback and direct mode, on one Linux machine against
+  a disposable local runner (the separate-machine run is described below).
 - `bash scripts/check-claude-mod.sh` with Claude Code 2.1.288: strict
   validation, 8/8 mod tests against the engine (allow-listed tools, MCP and
   unknown tools refused, built-in subagents only) and tsc. No model call.
@@ -123,6 +148,6 @@ after a command finishes. AGENTS.md still describes Pi as an AgentHarness and
 needs the maintainer's update to pi-durable; docs/architecture-tour-notes.md is
 marked historical.
 
-The fresh-start workflow is in DEVELOPING.md. No push, deployment, release or
-destruction of an existing installation was performed. Review the local diff
-before shipping; this is implementation evidence, not production sign-off.
+The fresh-start workflow is in DEVELOPING.md. The status section at the top
+records the release and deployment; the rest is implementation evidence, not a
+cross-platform production sign-off.
