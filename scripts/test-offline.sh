@@ -26,7 +26,7 @@ OFFLINE_TESTS=(
   packages/git/test/git-service-test.ts
 )
 # shellcheck disable=SC2034
-RUST_OFFLINE_PACKAGES=(cube-runner)
+RUST_OFFLINE_PACKAGES=(cube-runner cube-gateway)
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -uo pipefail
   cd "$(dirname "$0")/.." || exit 1

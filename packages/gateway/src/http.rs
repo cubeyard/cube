@@ -210,38 +210,55 @@ pub struct VmEgress {
 }
 
 impl VmEgress {
-    pub fn new(egress: Arc<Egress>, vm_id: String, thread_id: String) -> Self {
-        Self {
+    pub fn new(egress: Arc<Egress>, vm_id: String, thread_id: String) -> Arc<Self> {
+        Arc::new(Self {
             egress,
             vm_id,
             thread_id,
-        }
+        })
     }
 }
 
-impl FlowHandler for VmEgress {
-    fn spawn(&self, info: FlowInfo, stream: FlowStream) {
-        let connection = Arc::new(Connection {
+impl VmEgress {
+    fn connection(&self, scheme: Scheme) -> Arc<Connection> {
+        Arc::new(Connection {
             egress: self.egress.clone(),
             vm_id: self.vm_id.clone(),
             thread_id: self.thread_id.clone(),
-            scheme: if info.destination.port() == 443 {
-                Scheme::Https(String::new())
-            } else {
-                Scheme::Http
-            },
+            scheme,
             upstream: Mutex::new(None),
-        });
+        })
+    }
+
+    /// Terminates TLS with a leaf for the ClientHello's SNI. Without SNI
+    /// there is nothing to name the upstream by, so the flow is closed.
+    async fn serve_tls(self: Arc<Self>, stream: FlowStream) -> Result<()> {
+        let acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
+        let start = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor).await??;
+        let Some(name) = start
+            .client_hello()
+            .server_name()
+            .map(str::to_ascii_lowercase)
+        else {
+            return Ok(());
+        };
+        let config = self.egress.ca.server_config(&name)?;
+        let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, start.into_stream(config)).await??;
+        self.connection(Scheme::Https(name)).serve(tls).await
+    }
+}
+
+impl FlowHandler for Arc<VmEgress> {
+    fn spawn(&self, info: FlowInfo, stream: FlowStream) {
+        let this = self.clone();
         tokio::spawn(async move {
-            let result = match info.destination.port() {
-                443 => connection.serve_tls(stream).await,
-                80 => connection.serve(stream).await,
+            // Guest-side failures (bad TLS, resets, timeouts) are routine and
+            // only end this flow.
+            let _ = match info.destination.port() {
+                443 => this.serve_tls(stream).await,
+                80 => this.connection(Scheme::Http).serve(stream).await,
                 _ => Ok(()),
             };
-            if let Err(error) = result {
-                // Guest-side failures (bad TLS, resets) are routine.
-                let _ = error;
-            }
         });
     }
 }
@@ -263,29 +280,6 @@ struct Connection {
 }
 
 impl Connection {
-    async fn serve_tls(self: Arc<Self>, stream: FlowStream) -> Result<()> {
-        let acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
-        let start = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor).await??;
-        let Some(name) = start
-            .client_hello()
-            .server_name()
-            .map(str::to_ascii_lowercase)
-        else {
-            // No SNI: nothing to name the upstream by.
-            return Ok(());
-        };
-        let config = self.egress.ca.server_config(&name)?;
-        let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, start.into_stream(config)).await??;
-        let connection = Arc::new(Connection {
-            egress: self.egress.clone(),
-            vm_id: self.vm_id.clone(),
-            thread_id: self.thread_id.clone(),
-            scheme: Scheme::Https(name),
-            upstream: Mutex::new(None),
-        });
-        connection.serve(tls).await
-    }
-
     async fn serve<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         self: Arc<Self>,
         io: S,
