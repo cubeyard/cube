@@ -2,15 +2,13 @@
 # shellcheck disable=SC2034 # Shared library exports are consumed by caller scripts.
 set -euo pipefail
 
-ROOT="${CUBE_RUNNER_ROOT:-${CUBE_HOST_ROOT:-}}"
+ROOT="${CUBE_RUNNER_ROOT:-}"
 PLATFORM="${CUBE_RUNNER_PLATFORM:-$(uname -s)}"
 ARCH="${CUBE_RUNNER_ARCH:-$(uname -m)}"
 RUNNER_MODE="${CUBE_RUNNER_MODE:-$([ "$PLATFORM" = Darwin ] && printf user || printf system)}"
 RUNNER_USER="${CUBE_RUNNER_USER:-$([ "$PLATFORM" = Darwin ] && printf _cube-runner || printf cube-runner)}"
 RUNNER_GROUP="${CUBE_RUNNER_GROUP:-$RUNNER_USER}"
-LEGACY_USER="${CUBE_HOST_USER:-cube-host}"
-LEGACY_GROUP="${CUBE_HOST_GROUP:-$LEGACY_USER}"
-SYSTEMCTL="${CUBE_RUNNER_SYSTEMCTL:-${CUBE_HOST_SYSTEMCTL:-systemctl}}"
+SYSTEMCTL="${CUBE_RUNNER_SYSTEMCTL:-systemctl}"
 LAUNCHCTL="${CUBE_RUNNER_LAUNCHCTL:-launchctl}"
 LABEL="com.cubeyard.cube-runner"
 STOP_POLICY="${CUBE_RUNNER_STOP_POLICY:-wait}"
@@ -51,13 +49,12 @@ software_root() {
   else printf '%s' "${CUBE_RUNNER_HOME:-$HOME/Library/Application Support/CubeRunner}"
   fi
 }
-native_state_root() {
+state_root() {
   if [ "$PLATFORM" = Linux ]; then at /var/lib/cube-runner
   else printf '%s/data' "$(software_root)"
   fi
 }
 identity_root() { printf '%s/identity' "$(state_root)"; }
-workspace_root() { printf '%s/workspace' "$(state_root)"; }
 journal_root() { printf '%s/state' "$(state_root)"; }
 release_root() { printf '%s/releases' "$(software_root)"; }
 current_link() { printf '%s/current' "$(software_root)"; }
@@ -86,10 +83,10 @@ require_binary() {
   [ -f "$binary" ] && [ -x "$binary" ] && [ ! -L "$binary" ] \
     || fail 'binary must be an executable regular file, not a symlink'
   metadata="$($binary version 2>/dev/null)" || fail 'binary version check failed'
-  # Protocol 2 only: older runners lack exec.cancel, files and lease fencing.
-  printf '%s' "$metadata" | grep -q '"protocolVersion":2' \
-    || fail 'binary does not support runner protocol 2; use cube-runner 0.3.0 or newer'
-  printf '%s' "$metadata" | grep -q '"minimumProtocolVersion":2' \
+  # Protocol 3 only: the runner hosts VMs; protocol 2 executed commands itself.
+  printf '%s' "$metadata" | grep -q '"protocolVersion":3' \
+    || fail 'binary does not support runner protocol 3 (VM threads); use cube-runner 0.4.0 or newer'
+  printf '%s' "$metadata" | grep -q '"minimumProtocolVersion":3' \
     || fail 'binary does not report protocol compatibility'
   version="$(printf '%s' "$metadata" | sed -n 's/.*"softwareVersion":"\([^"]*\)".*/\1/p')"
   printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$' \
@@ -120,12 +117,6 @@ switch_release() {
   if [ "$(uname -s)" = Darwin ]; then mv -hf "$tmp" "$current"
   else mv -Tf "$tmp" "$current"; fi
 }
-is_legacy_layout() {
-  [ "$PLATFORM" = Linux ] && { [ -f "$(at /etc/cube-runner/legacy-layout)" ] \
-    || { [ -f "$(at /var/lib/cube-host/state/journal.db)" ] && [ ! -e "$(at /var/lib/cube-runner/state/journal.db)" ]; }; }
-}
-state_root() { if is_legacy_layout; then at /var/lib/cube-host; else native_state_root; fi; }
-
 xml_escape() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\\&apos;/g"; }
 render_launchd_plist() {
   local destination="$1" binary key state ready stdout stderr user_block=""

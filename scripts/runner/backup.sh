@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Offline backup. The archive contains the runner identity key; keep it private.
+# Offline backup. The archive contains the runner identity key and every VM
+# disk (guest files, possibly large); keep it private.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 require_platform

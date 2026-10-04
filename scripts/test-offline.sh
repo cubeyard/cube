@@ -5,7 +5,6 @@ OFFLINE_TESTS=(
   scripts/cubed-service-test.ts
   scripts/cubed-signing-key-test.ts
   scripts/cubed-update-test.ts
-  scripts/host-production-test.ts
   scripts/runner-production-test.ts
   packages/server/test/log-test.ts
   packages/server/test/registry-test.ts

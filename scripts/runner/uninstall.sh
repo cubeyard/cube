@@ -8,4 +8,4 @@ service_remove
 if [ "$PLATFORM" = Linux ]; then "$SYSTEMCTL" disable cube-runner.service >/dev/null 2>&1 || true; fi
 if [ "$PLATFORM" = Linux ]; then rm -rf "$(software_root)"
 else rm -rf "$(release_root)" "$(current_link)" "$(previous_link)"; fi
-note "removed cube-runner software; preserved $(state_root) and any legacy cube-host rollback unit"
+note "removed cube-runner software; preserved $(state_root) (identity, journal, base image, VM disks)"
