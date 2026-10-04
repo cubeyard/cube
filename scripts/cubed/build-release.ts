@@ -24,6 +24,7 @@ try {
   fs.chmodSync(path.join(root, "bin/node"), 0o755);
   execFileSync("pnpm", ["--filter", "@cube/server", "deploy", "--prod", "--legacy", path.join(root, "app/packages/server")], { stdio: "inherit" });
   fs.rmSync(path.join(root, "app/packages/server/test"), { recursive: true, force: true });
+  fs.rmSync(path.join(root, "app/packages/server/guest/__pycache__"), { recursive: true, force: true });
   fs.rmSync(path.join(root, "app/packages/server/node_modules/.pnpm/node_modules/@cube/server"), { force: true });
   fs.rmSync(path.join(root, "app/packages/server/node_modules/@cube/git"), { force: true });
   fs.mkdirSync(path.join(root, "app/packages/git/node_modules"), { recursive: true });

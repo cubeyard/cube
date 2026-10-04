@@ -120,7 +120,7 @@
               {#if runner.lastContactAt}
                 <time datetime={new Date(runner.lastContactAt).toISOString()} title={new Date(runner.lastContactAt).toLocaleString()}>{relTime(runner.lastContactAt)} ago</time>
               {:else}never observed{/if}
-              {#if runner.health} · machines {runner.health.activeVms} of {runner.health.maxActiveVms} · running {runner.health.runningVms} · retained {runner.health.retainedVms}{#if runner.health.retainedVms} ({bytes(runner.health.retainedBytes)}){/if}{/if}
+              {#if runner.health} · machines {runner.health.activeVms} of {runner.health.maxActiveVms} · running {runner.health.runningVms} · retained {runner.health.retainedVms ? `${runner.health.retainedVms} (${bytes(runner.health.retainedBytes)})` : 0}{/if}
             </span>
             {#if runner.error}<span class="error">{runner.error}</span>{/if}
             {#if runner.retiredAt}
