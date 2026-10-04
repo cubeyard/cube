@@ -190,7 +190,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     const frameToken = randomBytes(32).toString("hex");
     const mac = vmMac(vm.vmId, data => createHash("sha256").update(data).digest());
     const seed = vmSeed({ vmId: vm.vmId, hostKey: keys.host, clientKeyPub: keys.clientPub, caPem: hello.caPem, placeholders: vm.placeholders });
-    record = await runner.vmStart(ref, epoch, { ...sizes, mac, seed, gateway: { peer: hello.peer, frameToken } });
+    record = await runner.vmStart(ref, epoch, { vcpus: sizes.vcpus, memoryMiB: sizes.memoryMiB, mac, seed, gateway: { peer: hello.peer, frameToken } });
     if (!MACHINE_STATES_LIVE.has(record.state)) {
       throw new Error(`the thread machine did not start${record.error ? `: ${record.error.trim().split("\n").slice(-3).join("; ")}` : ""}`);
     }
