@@ -141,11 +141,13 @@ Archive returns capacity without deleting dirty or uncertain evidence.
 No restart is needed after enrollment. Registry v100/v101 receives the rollback-compatible global-pool extension; older
 execution stacks are not migrated.
 
-Upgrade runner binaries before creating threads through the global pool. New Cubed
-uses the separately advertised `workspace.allocate.v2` capability for the immutable
-per-allocation repository plan. An older runner remains enrolled and its existing
-evidence is untouched, but new allocation fails safely as unsupported before Cubed
-sends mutation bytes.
+Upgrade runner binaries before creating threads through the global pool. Cubed
+requires protocol 2 and uses `workspace.allocate.v2` for the immutable
+per-allocation repository plan. Enrolling a protocol-1 runner (cube-runner 0.2.x)
+fails with `INCOMPATIBLE_PROTOCOL`. An already enrolled runner rolled back to
+protocol 1 stays enrolled with its evidence untouched, but every check and call
+fails closed with `INCOMPATIBLE_PROTOCOL` (shown as unreachable) after
+authenticated hello and before any mutation bytes; upgrade it with `upgrade.sh`.
 
 ### Unreachable and retired bindings
 
@@ -339,9 +341,12 @@ addresses, IDs, and paths.
 
 ## Compatibility window
 
-Protocol v1 still accepts the wire profile `host`; native daemons advertise both
-`runner` and `host`. Native runner CLI aliases and Linux package rollback remain
-supported. The packaged `cube-node-transport` name is a symlink to `cube-runner`.
+Protocol 2 is the only accepted wire version in both directions; there is no
+protocol-1 fallback. Daemons still advertise the historical `host` profile name
+beside `runner`, and the deprecated `host-init`/`host-serve` CLI aliases remain.
+Linux rollback to `cube-host` 0.1.1 or a native 0.2.x release keeps state intact
+but speaks protocol 1, which current cubed refuses until the runner is upgraded
+again. The packaged `cube-node-transport` name is a symlink to `cube-runner`.
 These are runner transport/package compatibility, not a second product backend.
 Cubed has no backend selector, legacy execution routes or admission tables.
 Its fresh registry and Pi sessions are not compatible with old host databases.

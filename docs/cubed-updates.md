@@ -16,7 +16,9 @@ contains its own Node runtime, production server dependencies, built web UI,
 foreground supervisor and launcher. A release also has a platform manifest and
 detached Ed25519 signature. The manifest binds the Git commit, platform, byte
 length, SHA-256, minimum supervisor version and state-schema rollback range, and
-must say `includesRunner: false`.
+must say `includesRunner: false`. The bundled Linux Node runtime links
+`libatomic.so.1`; minimal images such as the `ubuntu:24.04` container need the
+`libatomic1` package before `install.sh` can run the candidate self-check.
 
 For an initial installation, obtain these four files from one reviewed release:
 

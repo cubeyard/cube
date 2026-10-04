@@ -133,7 +133,8 @@ existing IDs remain inspectable.
 
 `packages/server/src/iroh-node.ts` uses pinned `@number0/iroh` directly in the
 Node process. No Rust subprocess, stdio bridge, fallback, reconnect queue, or
-automatic command resubmission exists. Private config schema remains protocol v1:
+automatic command resubmission exists. The private config schema is version 1
+(independent of the wire protocol version):
 
 ```json
 {
@@ -221,9 +222,10 @@ tables, and command records keep the protocol-1 result shape, so a rolled-back
 binary can still open the journal (it shows empty output for newer records and
 speaks protocol 1, which current cubed reports as incompatible).
 The original `workspace.allocate` has no allocation metadata and remains only for
-wire compatibility. Cubed uses v2 for every new global allocation and rejects an
-older runner as `UNSUPPORTED` after authenticated hello but before sending mutation
-bytes. Upgrade runner binaries before allocating new threads; existing requests
+wire compatibility. Cubed uses v2 for every new global allocation. A protocol-1
+runner is refused as `INCOMPATIBLE_PROTOCOL` at authenticated hello, before any
+mutation bytes; a protocol-2 peer that lacks a method's capability is refused as
+`UNSUPPORTED`. Upgrade runner binaries before allocating new threads; existing requests
 without `threadId` continue to use the legacy template workspace and preserve their
 operation hashes. `nodeId` and existing field names remain stable on wire.
 
