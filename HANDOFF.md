@@ -54,12 +54,30 @@ state, loopback Iroh, 2026-10-04):
   state and the logs); a Claude Code thread's Write/Read/Edit/Bash in the guest
   and a stop that cancelled the guest command; clean archive deletes the disk,
   changed ones are retained; every process stopped.
+- The product by hand (2026-10-05): `pnpm cubed` on disposable state at
+  127.0.0.1:7787 with release `cube-runner`/`cube-gateway`, a project on
+  `https://github.com/cubeyard/cube.git` and a Pi thread on a real model
+  (openai-codex gpt-5.5; an unexpired copy of the host's Pi credentials, deleted
+  afterwards). The machine was ready in ~29 s with `/workspace` checked out at
+  the project's OID; the model's bash ran as `agent` in `/workspace`.
+  `https://example.com` 200 with the leaf issued by the installation CA; TCP 22,
+  53 and 8443 and `ssh git@github.com` refused. With the host's real
+  `gh auth token`: the guest's `GH_TOKEN` was the placeholder, `gh api user`
+  returned the maintainer's login, a private repository's `git ls-remote` and
+  `git push --dry-run` of `cubeyard/cube` to a throwaway branch authenticated
+  (both fail without the credential helper; no branch was created). The
+  placeholder in a header to postman-echo.com/httpbin.org and to
+  `http://api.github.com` was denied (403, `x-cube-denied`); in a query string it
+  reached the echo host unchanged. The real token was found nowhere in the
+  guest (root `grep` of `/` and `/proc/*/environ` for token-shaped values) nor
+  in the VM disk, seed, gateway state, Pi transcripts or logs on the host. The
+  runner held only UDP and unix sockets, QEMU only unix sockets.
 
 Not verified: macOS (HVF, arm64 guest), runner and cubed on separate machines
 (direct and relay modes), more than one active VM per runner (by design one),
-many VMs and flows under load, a real `gh auth token` against github.com from a
-guest with a real model (manual check, only with the maintainer's consent), a
-guest that ignores ACPI power-down, and the release tarball built by CI (a
+many VMs and flows under load, a real model driving `gh`/`git` on its own
+initiative (the live run gave it exact commands), a real `git push` (only
+`--dry-run`), a guest that ignores ACPI power-down, and the release tarball built by CI (a
 local build with a disposable key carries `bin/cube-gateway`, and its
 `--self-check` fails without it). The web UI's "starting the thread's machine"
 state and the runner panel's machine counts were inspected in headless
