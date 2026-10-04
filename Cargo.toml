@@ -9,3 +9,8 @@ license = "Apache-2.0"
 
 [profile.dev]
 debug = 1
+
+# The runner hashes the base VM image (hundreds of MB) at every start; an
+# unoptimized sha2 makes development builds take tens of seconds for that.
+[profile.dev.package.sha2]
+opt-level = 3
