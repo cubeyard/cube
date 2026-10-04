@@ -10,5 +10,6 @@ for arg; do
   disk="$arg"
 done
 [ ! -e "$(dirname "$0")/fail-create" ] || { echo "no space left on device" >&2; exit 1; }
+[ ! -e "$(dirname "$0")/slow-create" ] || sleep "$(cat "$(dirname "$0")/slow-create")"
 printf 'QFI\373' > "$disk"
 printf '%s\n' "$*" > "$disk.args"

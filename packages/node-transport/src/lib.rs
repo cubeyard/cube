@@ -532,6 +532,28 @@ fn parse_request(
 /// Authenticate before application data. A successful hello is required on
 /// this SAME connection before any other request. Each connection gets at
 /// most two streams: hello and one request; the client never retries.
+/// Runs a request in its own task. The control connection is bounded by
+/// REQUEST_TIMEOUT; a runner mutation must not be cancelled half way (a VM
+/// left `starting` or `allocating`), so it finishes even when the caller's
+/// connection is gone. The caller learns the outcome from `vm.inspect`.
+async fn dispatch_detached(
+    node_id: &str,
+    query: Request,
+    runner: Option<&Arc<runner::Runner>>,
+) -> Response {
+    let node_id = node_id.to_owned();
+    let runner = runner.cloned();
+    let mutation = query.mutation();
+    match tokio::spawn(async move { dispatch(&node_id, query, runner.as_ref()).await }).await {
+        Ok(response) => response,
+        Err(_) => Response::Error {
+            code: "IO_ERROR".into(),
+            message: "runner state could not be confirmed".into(),
+            completion_unknown: mutation,
+        },
+    }
+}
+
 async fn accept_control(
     connection: iroh::endpoint::Connection,
     allowed_peer: EndpointId,
@@ -564,7 +586,7 @@ async fn accept_control(
                 Ok(Request::Hello { .. }) => {
                     Response::error("INVALID_REQUEST", "hello already completed")
                 }
-                Ok(query) => dispatch(&node_id, query, runner.as_ref()).await,
+                Ok(query) => dispatch_detached(&node_id, query, runner.as_ref()).await,
                 Err((code, message)) => Response::error(code, message),
             },
             Err(_) => Response::error("INVALID_REQUEST", "invalid request frame"),
