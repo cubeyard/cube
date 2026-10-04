@@ -475,6 +475,17 @@ header .spacer { margin-left: auto; }
 .thread-navigation header nav a.active { display: none; }
 .thread-navigation .auth-missing .auth-full { display: none; }
 .thread-navigation .auth-missing .auth-short { display: inline; }
+/* the docked sidebar is too narrow for the full panel: the glyph stands
+   for the name and the auth lamp keeps its label in its title */
+@media (min-width: 52.001rem) {
+  .thread-navigation header nav { gap: 0.7rem; }
+  .thread-navigation .name-text {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap;
+  }
+  .thread-navigation :is(.auth-ok, .auth-missing) :is(.auth-full, .auth-short) { display: none; }
+  .thread-navigation .auth-missing { padding: 0; background: none; border: 0; }
+}
 .thread-strip {
   flex: none; min-width: 0; min-height: 2.5rem;
   display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem;

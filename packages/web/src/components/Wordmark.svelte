@@ -12,7 +12,7 @@
       <path d="M3 7 L12 12 21 7 M12 12 V22" />
     </svg>
   </span>
-  cube
+  <span class="name-text">cube</span>
 {/snippet}
 
 {#if href}
