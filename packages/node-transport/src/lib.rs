@@ -1,8 +1,12 @@
-//! Authenticated node protocol (loopback by default); optional trusted runner execution.
-//! Bounded frames, no retries, no 0-RTT; commands outlive their connection.
-pub mod intent;
+//! Authenticated node protocol (loopback by default) and the trusted runner
+//! that hosts one QEMU VM per active thread (protocol 3).
+//! Bounded frames, no retries, no 0-RTT; VMs outlive their connection.
+pub mod journal;
 pub mod l2;
+pub mod pump;
 pub mod runner;
+pub mod seed;
+pub mod vm;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -11,31 +15,34 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{io::AsyncRead, io::AsyncReadExt, task::JoinSet, time::timeout};
 
 pub const ALPN: &[u8] = b"cubeyard/node/1";
-/// Protocol 2 adds paged output, `exec.cancel`, `fs.read`, `fs.write`,
-/// `fs.stat` and lease-epoch fencing. There is no protocol-1 fallback.
-pub const PROTOCOL_VERSION: u32 = 2;
-pub const MIN_COMPATIBLE_PROTOCOL_VERSION: u32 = 2;
+/// Protocol 3 replaces runner command execution, file operations and Git
+/// with VM lifecycle (`vm.*`). Older peers get `INCOMPATIBLE_PROTOCOL`.
+pub const PROTOCOL_VERSION: u32 = 3;
+pub const MIN_COMPATIBLE_PROTOCOL_VERSION: u32 = 3;
 pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
-const RUNNER_CAPABILITIES: [&str; 12] = [
+const RUNNER_CAPABILITIES: [&str; 6] = [
     "node.status",
-    "environment.inspect",
-    "workspace.allocate",
-    "workspace.fresh-base",
-    "workspace.allocate.v2",
-    "workspace.release",
-    "exec.start",
-    "exec.cancel",
-    "operation.get",
-    "fs.read",
-    "fs.write",
-    "fs.stat",
+    "vm.allocate",
+    "vm.start",
+    "vm.stop",
+    "vm.inspect",
+    "vm.release",
+];
+const KNOWN_METHODS: [&str; 7] = [
+    "node.hello",
+    "node.status",
+    "vm.allocate",
+    "vm.start",
+    "vm.stop",
+    "vm.inspect",
+    "vm.release",
 ];
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 pub const RELAY_READY_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_CONNECTIONS: usize = 16;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "method", deny_unknown_fields)]
 pub enum Request {
     #[serde(rename = "node.hello")]
@@ -43,96 +50,78 @@ pub enum Request {
         #[serde(rename = "protocolVersion")]
         protocol_version: u32,
     },
-    #[serde(rename = "environment.inspect")]
-    Inspect { env: u64 },
-    #[serde(rename = "workspace.allocate")]
-    WorkspaceAllocate {
-        #[serde(rename = "threadId")]
-        thread_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        repository: Option<runner::RepositorySource>,
-    },
-    #[serde(rename = "workspace.allocate.v2")]
-    WorkspaceAllocateV2 {
-        #[serde(rename = "threadId")]
-        thread_id: String,
-        allocation: runner::WorkspaceAllocation,
-    },
-    #[serde(rename = "workspace.release")]
-    WorkspaceRelease {
-        #[serde(rename = "threadId")]
-        thread_id: String,
-    },
     #[serde(rename = "node.status")]
     Status,
-    #[serde(rename = "exec.start")]
-    ExecStart {
-        #[serde(rename = "operationId")]
-        operation_id: String,
-        env: u64,
-        #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
-        thread_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        epoch: Option<u64>,
-        spec: runner::ExecSpec,
+    #[serde(rename = "vm.allocate")]
+    VmAllocate {
+        #[serde(rename = "threadId")]
+        thread_id: String,
+        #[serde(rename = "vmId")]
+        vm_id: String,
+        epoch: u64,
+        #[serde(rename = "diskGiB")]
+        disk_gib: u32,
     },
-    #[serde(rename = "exec.cancel")]
-    ExecCancel {
-        env: u64,
-        #[serde(rename = "operationId")]
-        operation_id: String,
-        #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
-        thread_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        epoch: Option<u64>,
+    #[serde(rename = "vm.start")]
+    VmStart {
+        #[serde(rename = "threadId")]
+        thread_id: String,
+        #[serde(rename = "vmId")]
+        vm_id: String,
+        epoch: u64,
+        vcpus: u32,
+        #[serde(rename = "memoryMiB")]
+        memory_mib: u32,
+        mac: String,
+        seed: seed::Seed,
+        gateway: runner::GatewayGrant,
     },
-    #[serde(rename = "operation.get")]
-    OperationGet {
-        env: u64,
-        #[serde(rename = "operationId")]
-        operation_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cursor: Option<u64>,
+    #[serde(rename = "vm.stop")]
+    VmStop {
+        #[serde(rename = "threadId")]
+        thread_id: String,
+        #[serde(rename = "vmId")]
+        vm_id: String,
+        epoch: u64,
     },
-    #[serde(rename = "fs.read")]
-    FsRead {
-        env: u64,
-        #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
-        thread_id: Option<String>,
-        path: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        offset: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        limit: Option<u64>,
+    #[serde(rename = "vm.inspect")]
+    VmInspect {
+        #[serde(rename = "threadId")]
+        thread_id: String,
+        #[serde(rename = "vmId")]
+        vm_id: String,
     },
-    #[serde(rename = "fs.write")]
-    FsWrite {
-        env: u64,
-        #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
-        thread_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        epoch: Option<u64>,
-        #[serde(rename = "idempotencyKey")]
-        idempotency_key: String,
-        path: String,
-        #[serde(with = "runner::base64_bytes")]
-        content: Vec<u8>,
-        #[serde(
-            rename = "expectedSha",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
-        expected_sha: Option<String>,
-        #[serde(rename = "createParents", default)]
-        create_parents: bool,
+    #[serde(rename = "vm.release")]
+    VmRelease {
+        #[serde(rename = "threadId")]
+        thread_id: String,
+        #[serde(rename = "vmId")]
+        vm_id: String,
+        epoch: u64,
+        retain: bool,
     },
-    #[serde(rename = "fs.stat")]
-    FsStat {
-        env: u64,
-        #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
-        thread_id: Option<String>,
-        path: String,
-    },
+}
+
+impl Request {
+    fn vm_id(&self) -> Option<&str> {
+        match self {
+            Self::VmAllocate { vm_id, .. }
+            | Self::VmStart { vm_id, .. }
+            | Self::VmStop { vm_id, .. }
+            | Self::VmInspect { vm_id, .. }
+            | Self::VmRelease { vm_id, .. } => Some(vm_id),
+            _ => None,
+        }
+    }
+    fn mutation(&self) -> bool {
+        matches!(
+            self,
+            Self::VmAllocate { .. }
+                | Self::VmStart { .. }
+                | Self::VmStop { .. }
+                | Self::VmRelease { .. }
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -152,6 +141,14 @@ pub enum Response {
         software_version: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         binding: Option<runner::Binding>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        platform: Option<String>,
+        #[serde(
+            rename = "baseImageSha256",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        base_image_sha256: Option<String>,
     },
     Status {
         #[serde(rename = "nodeId")]
@@ -165,46 +162,21 @@ pub enum Response {
         binding: runner::Binding,
         status: runner::RunnerStatus,
     },
-    Accepted {
-        #[serde(rename = "operationId")]
-        operation_id: String,
-    },
-    Operation {
-        #[serde(rename = "operationId")]
-        operation_id: String,
-        operation: runner::Operation,
-    },
-    Environment {
-        binding: runner::Binding,
-        state: String,
-    },
-    Workspace {
-        workspace: runner::WorkspaceStatus,
-    },
-    File {
-        path: String,
-        file: runner::FileContent,
-    },
-    Written {
-        #[serde(rename = "idempotencyKey")]
-        idempotency_key: String,
-        result: runner::WriteResult,
-    },
-    Stat {
-        path: String,
-        stat: runner::FileStat,
+    Vm {
+        vm: runner::VmRecord,
+        /// Last 16 KiB of the serial console; `vm.inspect` only.
+        #[serde(
+            rename = "consoleTail",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        console_tail: Option<String>,
     },
     Error {
         code: String,
         message: String,
         #[serde(rename = "completionUnknown")]
         completion_unknown: bool,
-        #[serde(
-            rename = "operationId",
-            default,
-            skip_serializing_if = "Option::is_none"
-        )]
-        operation_id: Option<String>,
     },
 }
 
@@ -213,27 +185,25 @@ pub enum Response {
 pub struct Limits {
     pub max_frame_bytes: usize,
     pub request_timeout_ms: u64,
-    pub max_command_bytes: usize,
-    pub max_path_bytes: usize,
-    pub max_exec_timeout_ms: u64,
-    pub max_output_bytes: u32,
-    pub output_page_bytes: usize,
-    pub max_read_bytes: u64,
-    pub max_write_bytes: usize,
+    pub max_vcpus: u32,
+    #[serde(rename = "maxMemoryMiB")]
+    pub max_memory_mib: u32,
+    #[serde(rename = "maxDiskGiB")]
+    pub max_disk_gib: u32,
+    pub max_seed_bytes: usize,
+    pub max_active_vms: u64,
 }
 
 impl Limits {
-    pub fn current() -> Self {
+    pub fn current(limits: &runner::VmLimits) -> Self {
         Self {
             max_frame_bytes: MAX_FRAME_BYTES,
             request_timeout_ms: REQUEST_TIMEOUT.as_millis() as u64,
-            max_command_bytes: runner::MAX_COMMAND_BYTES,
-            max_path_bytes: runner::MAX_PATH_BYTES,
-            max_exec_timeout_ms: runner::MAX_TIMEOUT_MS,
-            max_output_bytes: runner::MAX_OUTPUT,
-            output_page_bytes: runner::OUTPUT_PAGE_BYTES,
-            max_read_bytes: runner::MAX_READ_BYTES,
-            max_write_bytes: runner::MAX_WRITE_BYTES,
+            max_vcpus: limits.max_vcpus,
+            max_memory_mib: limits.max_memory_mib,
+            max_disk_gib: limits.max_disk_gib,
+            max_seed_bytes: seed::MAX_SEED_BYTES,
+            max_active_vms: runner::MAX_ACTIVE_VMS,
         }
     }
 }
@@ -244,7 +214,6 @@ impl Response {
             code: code.into(),
             message: message.into(),
             completion_unknown: false,
-            operation_id: None,
         }
     }
 }
@@ -281,10 +250,14 @@ pub fn validate_target(address: SocketAddr, mode: NetworkMode) -> Result<()> {
     );
     Ok(())
 }
-async fn bind_transport(key: SecretKey, listen: SocketAddr) -> Result<Endpoint> {
+async fn bind_transport(
+    key: SecretKey,
+    listen: SocketAddr,
+    alpns: Vec<Vec<u8>>,
+) -> Result<Endpoint> {
     Ok(Endpoint::builder(presets::Minimal)
         .secret_key(key)
-        .alpns(vec![ALPN.to_vec()])
+        .alpns(alpns)
         .clear_ip_transports()
         .clear_relay_transports()
         .clear_address_lookup()
@@ -306,10 +279,30 @@ async fn bind_relay_transport(key: SecretKey, alpns: Vec<Vec<u8>>) -> Result<End
 pub async fn bind_relay_node(key: SecretKey) -> Result<Endpoint> {
     bind_relay_transport(key, vec![ALPN.to_vec()]).await
 }
+/// A runner accepts control (`cubeyard/node/1`) and frame (`cube/l2/1`)
+/// connections on one endpoint.
+pub async fn bind_relay_runner(key: SecretKey) -> Result<Endpoint> {
+    bind_relay_transport(key, runner_alpns()).await
+}
+fn runner_alpns() -> Vec<Vec<u8>> {
+    vec![ALPN.to_vec(), l2::L2_ALPN.to_vec()]
+}
 pub async fn bind_relay_client(key: SecretKey) -> Result<Endpoint> {
     bind_relay_transport(key, vec![]).await
 }
 pub async fn bind_node(key: SecretKey, listen: SocketAddr, mode: NetworkMode) -> Result<Endpoint> {
+    check_listener(listen, mode)?;
+    bind_transport(key, listen, vec![ALPN.to_vec()]).await
+}
+pub async fn bind_runner(
+    key: SecretKey,
+    listen: SocketAddr,
+    mode: NetworkMode,
+) -> Result<Endpoint> {
+    check_listener(listen, mode)?;
+    bind_transport(key, listen, runner_alpns()).await
+}
+fn check_listener(listen: SocketAddr, mode: NetworkMode) -> Result<()> {
     ensure!(
         mode != NetworkMode::Relay,
         "relay mode does not take a listener address"
@@ -322,7 +315,7 @@ pub async fn bind_node(key: SecretKey, listen: SocketAddr, mode: NetworkMode) ->
         mode == NetworkMode::Direct || listen.ip().to_canonical().is_loopback(),
         "non-loopback listener requires explicit direct mode"
     );
-    bind_transport(key, listen).await
+    Ok(())
 }
 pub async fn bind_loopback(key: SecretKey, listen: SocketAddr) -> Result<Endpoint> {
     bind_node(key, listen, NetworkMode::Loopback).await
@@ -342,7 +335,7 @@ pub async fn bind_client(
     };
     // A direct caller needs routing-selected local source addresses. There is
     // no application accept loop on this ephemeral client endpoint.
-    bind_transport(key, local.parse()?).await
+    bind_transport(key, local.parse()?, vec![ALPN.to_vec()]).await
 }
 
 pub fn validate_node_id(node_id: &str) -> Result<()> {
@@ -381,69 +374,68 @@ pub async fn read_frame<T: DeserializeOwned>(reader: &mut (impl AsyncRead + Unpi
     Ok(serde_json::from_slice(&payload)?)
 }
 
-fn hello(node_id: &str, query: Request) -> Response {
+fn hello(node_id: &str, query: &Request) -> Response {
     match query {
         Request::Hello {
             protocol_version: PROTOCOL_VERSION,
         } => Response::Hello {
             node_id: node_id.into(),
             protocol_version: PROTOCOL_VERSION,
-            // The plain serve probe never enables trusted-runner execution.
+            // The plain serve probe never enables the runner.
             profiles: vec![],
             capabilities: vec!["node.hello".into()],
-            limits: Limits::current(),
+            limits: Limits::current(&runner::VmLimits::default()),
             minimum_protocol_version: MIN_COMPATIBLE_PROTOCOL_VERSION,
             software_version: SOFTWARE_VERSION.into(),
             binding: None,
+            platform: None,
+            base_image_sha256: None,
         },
         _ => Response::error(
             "INCOMPATIBLE_PROTOCOL",
-            "protocol version 2 required; upgrade cubed or cube-runner",
+            "protocol version 3 required; upgrade cubed or cube-runner",
         ),
     }
 }
 
-fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>) -> Response {
+fn runner_hello(node_id: &str, query: &Request, runner: &runner::Runner) -> Response {
+    let mut result = hello(node_id, query);
+    if let Response::Hello {
+        profiles,
+        capabilities,
+        binding,
+        limits,
+        platform,
+        base_image_sha256,
+        ..
+    } = &mut result
+    {
+        let installation = runner.installation();
+        *binding = Some(installation.binding.clone());
+        *profiles = vec!["runner".into()];
+        capabilities.extend(RUNNER_CAPABILITIES.map(String::from));
+        *limits = Limits::current(&installation.limits);
+        *platform = Some(installation.platform.clone());
+        *base_image_sha256 = Some(installation.image.sha256.clone());
+    }
+    result
+}
+
+async fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>) -> Response {
     if matches!(query, Request::Hello { .. }) {
-        let mut result = hello(node_id, query);
-        if let Some(runner) = runner
-            && let Response::Hello {
-                profiles,
-                capabilities,
-                binding,
-                ..
-            } = &mut result
-        {
-            *binding = Some(runner.installation().binding.clone());
-            // `host` is the protocol-v1 compatibility profile. New peers use
-            // `runner`; both names describe the same immutable binding.
-            *profiles = vec!["runner".into(), "host".into()];
-            capabilities.extend(RUNNER_CAPABILITIES.map(String::from));
-        }
-        return result;
+        return match runner {
+            Some(runner) => runner_hello(node_id, &query, runner),
+            None => hello(node_id, &query),
+        };
     }
     let Some(runner) = runner else {
-        return Response::error("UNSUPPORTED", "runner execution is not enabled");
+        return Response::error("UNSUPPORTED", "this node does not host VMs");
     };
-    let operation_id = match &query {
-        Request::ExecStart { operation_id, .. }
-        | Request::ExecCancel { operation_id, .. }
-        | Request::OperationGet { operation_id, .. } => Some(operation_id.clone()),
-        Request::FsWrite {
-            idempotency_key, ..
-        } => Some(idempotency_key.clone()),
-        _ => None,
-    }
-    .filter(|id| runner::valid_id(id));
-    let mutation = matches!(
-        query,
-        Request::ExecStart { .. }
-            | Request::ExecCancel { .. }
-            | Request::FsWrite { .. }
-            | Request::WorkspaceAllocate { .. }
-            | Request::WorkspaceAllocateV2 { .. }
-            | Request::WorkspaceRelease { .. }
-    );
+    let mutation = query.mutation();
+    let vm = |vm| Response::Vm {
+        vm,
+        console_tail: None,
+    };
     let result = match query {
         Request::Status => runner.status().map(|status| Response::Status {
             node_id: node_id.into(),
@@ -453,120 +445,66 @@ fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>)
             binding: runner.installation().binding.clone(),
             status,
         }),
-        Request::Inspect { env } => runner
-            .inspect(env)
-            .map(|installation| Response::Environment {
-                binding: installation.binding.clone(),
-                state: "ready".into(),
-            }),
-        Request::WorkspaceAllocate {
+        Request::VmAllocate {
             thread_id,
-            repository,
-        } => runner
-            .allocate(&thread_id, repository.as_ref())
-            .map(|workspace| Response::Workspace { workspace }),
-        Request::WorkspaceAllocateV2 {
-            thread_id,
-            allocation,
-        } => runner
-            .allocate_with(&thread_id, &allocation)
-            .map(|workspace| Response::Workspace { workspace }),
-        Request::WorkspaceRelease { thread_id } => runner
-            .release(&thread_id)
-            .map(|workspace| Response::Workspace { workspace }),
-        Request::ExecStart {
-            env,
-            operation_id,
-            thread_id,
+            vm_id,
             epoch,
-            spec,
+            disk_gib,
         } => runner
-            .start_fenced(env, thread_id.as_deref(), &operation_id, epoch, spec)
-            .map(|()| Response::Accepted { operation_id }),
-        Request::ExecCancel {
-            env,
-            operation_id,
+            .allocate(&thread_id, &vm_id, epoch, disk_gib)
+            .await
+            .map(vm),
+        Request::VmStart {
             thread_id,
+            vm_id,
             epoch,
+            vcpus,
+            memory_mib,
+            mac,
+            seed,
+            gateway,
         } => runner
-            .cancel(env, thread_id.as_deref(), &operation_id, epoch)
-            .map(|operation| Response::Operation {
-                operation_id,
-                operation,
-            }),
-        Request::OperationGet {
-            env,
-            operation_id,
-            cursor,
-        } => runner
-            .get_page(env, &operation_id, cursor)
-            .map(|operation| Response::Operation {
-                operation_id,
-                operation,
-            }),
-        Request::FsRead {
-            env,
-            thread_id,
-            path,
-            offset,
-            limit,
-        } => runner
-            .read_file(env, thread_id.as_deref(), &path, offset, limit)
-            .map(|file| Response::File { path, file }),
-        Request::FsWrite {
-            env,
-            thread_id,
-            epoch,
-            idempotency_key,
-            path,
-            content,
-            expected_sha,
-            create_parents,
-        } => runner
-            .write_file(
-                env,
-                thread_id.as_deref(),
+            .start(
+                &thread_id,
+                &vm_id,
                 epoch,
-                &idempotency_key,
-                &path,
-                &content,
-                expected_sha.as_deref(),
-                create_parents,
+                runner::StartSpec {
+                    vcpus,
+                    memory_mib,
+                    mac,
+                    seed,
+                    gateway,
+                },
             )
-            .map(|result| Response::Written {
-                idempotency_key,
-                result,
-            }),
-        Request::FsStat {
-            env,
+            .await
+            .map(vm),
+        Request::VmStop {
             thread_id,
-            path,
+            vm_id,
+            epoch,
+        } => runner.stop(&thread_id, &vm_id, epoch).await.map(vm),
+        Request::VmInspect { thread_id, vm_id } => runner
+            .inspect(&thread_id, &vm_id)
+            .map(|(vm, console_tail)| Response::Vm { vm, console_tail }),
+        Request::VmRelease {
+            thread_id,
+            vm_id,
+            epoch,
+            retain,
         } => runner
-            .stat_path(env, thread_id.as_deref(), &path)
-            .map(|stat| Response::Stat { path, stat }),
+            .release(&thread_id, &vm_id, epoch, retain)
+            .await
+            .map(vm),
         Request::Hello { .. } => unreachable!(),
     };
     result.unwrap_or_else(|error| {
-        if error.is::<runner::OutcomeUnknown>() {
-            Response::Error {
-                code: "OUTCOME_UNKNOWN".into(),
-                message: "retained mutation outcome is unknown; never repeat it".into(),
-                completion_unknown: true,
-                operation_id: operation_id.clone(),
-            }
-        } else if let Some(error) = error.downcast_ref::<runner::RunnerError>() {
-            Response::Error {
-                code: error.0.into(),
-                message: "runner request rejected".into(),
-                completion_unknown: false,
-                operation_id: operation_id.clone(),
-            }
+        if let Some(error) = error.downcast_ref::<runner::RunnerError>() {
+            Response::error(error.0, "runner request rejected")
         } else if let Some(error) = error.downcast_ref::<runner::RunnerErrorDetail>() {
             Response::Error {
                 code: error.0.into(),
                 message: error.1.clone(),
                 completion_unknown: false,
-                operation_id: operation_id.clone(),
             }
         } else {
             // A journal commit may have happened. Do not assert no side effects.
@@ -574,22 +512,32 @@ fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Runner>>)
                 code: "IO_ERROR".into(),
                 message: "runner state could not be confirmed".into(),
                 completion_unknown: mutation,
-                operation_id,
             }
         }
     })
 }
 
+/// Parses a request frame. A well-formed frame naming a method this
+/// protocol does not have is `UNSUPPORTED`, not `INVALID_REQUEST`.
+fn parse_request(
+    value: serde_json::Value,
+) -> std::result::Result<Request, (&'static str, &'static str)> {
+    let method = value.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    if !method.is_empty() && !KNOWN_METHODS.contains(&method) {
+        return Err(("UNSUPPORTED", "unknown method"));
+    }
+    serde_json::from_value(value).map_err(|_| ("INVALID_REQUEST", "invalid request frame"))
+}
+
 /// Authenticate before application data. A successful hello is required on
-/// this SAME connection before any environment operation. Each connection gets
-/// at most two streams: hello and one request; the client never retries.
-async fn accept(
-    incoming: iroh::endpoint::Incoming,
+/// this SAME connection before any other request. Each connection gets at
+/// most two streams: hello and one request; the client never retries.
+async fn accept_control(
+    connection: iroh::endpoint::Connection,
     allowed_peer: EndpointId,
     node_id: String,
     runner: Option<Arc<runner::Runner>>,
 ) -> Result<()> {
-    let connection = incoming.await?;
     if connection.remote_id() != allowed_peer {
         connection.close(1u32.into(), b"UNAUTHORIZED");
         bail!("unauthorized peer");
@@ -597,24 +545,28 @@ async fn accept(
     let mut negotiated = false;
     for _ in 0..2 {
         let (mut send, mut recv) = connection.accept_bi().await?;
-        let response = match read_frame::<Request>(&mut recv).await {
-            Ok(query) => {
-                if !negotiated && !matches!(query, Request::Hello { .. }) {
-                    Response::error("INVALID_REQUEST", "hello required before environment work")
-                } else {
-                    let response = dispatch(&node_id, query, runner.as_ref());
-                    if matches!(
+        let response = match read_frame::<serde_json::Value>(&mut recv).await {
+            Ok(value) if !negotiated => match serde_json::from_value::<Request>(value) {
+                Ok(query @ Request::Hello { .. }) => {
+                    let response = dispatch(&node_id, query, runner.as_ref()).await;
+                    negotiated = matches!(
                         response,
                         Response::Hello {
                             protocol_version: PROTOCOL_VERSION,
                             ..
                         }
-                    ) {
-                        negotiated = true;
-                    }
+                    );
                     response
                 }
-            }
+                _ => Response::error("INVALID_REQUEST", "hello required before other requests"),
+            },
+            Ok(value) => match parse_request(value) {
+                Ok(Request::Hello { .. }) => {
+                    Response::error("INVALID_REQUEST", "hello already completed")
+                }
+                Ok(query) => dispatch(&node_id, query, runner.as_ref()).await,
+                Err((code, message)) => Response::error(code, message),
+            },
             Err(_) => Response::error("INVALID_REQUEST", "invalid request frame"),
         };
         send.write_all(&encode(&response)?).await?;
@@ -631,8 +583,9 @@ pub async fn serve(endpoint: &Endpoint, allowed_peer: EndpointId, node_id: &str)
     serve_runner(endpoint, allowed_peer, node_id, None).await
 }
 
-/// Dropping connection tasks does not drop accepted runner jobs. Graceful daemon
-/// shutdown closes the endpoint then waits through Runner::shutdown().
+/// Control connections are bounded and short; frame connections (`cube/l2/1`,
+/// runner only) live as long as the gateway keeps them. Dropping connection
+/// tasks never stops a VM: graceful shutdown goes through Runner::shutdown().
 pub async fn serve_runner(
     endpoint: &Endpoint,
     allowed_peer: EndpointId,
@@ -648,7 +601,9 @@ pub async fn serve_runner(
             "WRONG_NODE: runner installation mismatch"
         );
     }
+    let pumps = runner.as_ref().map(|runner| runner.pumps());
     let mut tasks = JoinSet::new();
+    let mut frames = JoinSet::new();
     loop {
         tokio::select! {
             incoming = endpoint.accept() => {
@@ -659,15 +614,40 @@ pub async fn serve_runner(
                 }
                 let node_id = node_id.to_owned();
                 let runner = runner.clone();
+                let pumps = pumps.clone();
                 tasks.spawn(async move {
-                    timeout(REQUEST_TIMEOUT, accept(incoming, allowed_peer, node_id, runner)).await
+                    let Ok(Ok(connection)) = timeout(REQUEST_TIMEOUT, incoming).await else {
+                        return None;
+                    };
+                    if connection.alpn() == l2::L2_ALPN {
+                        return match pumps {
+                            Some(pumps) => Some((pumps, connection)),
+                            None => {
+                                connection.close(1u32.into(), b"UNSUPPORTED");
+                                None
+                            }
+                        };
+                    }
+                    let _ = timeout(
+                        REQUEST_TIMEOUT,
+                        accept_control(connection, allowed_peer, node_id, runner),
+                    )
+                    .await;
+                    None
                 });
             }
-            Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+            Some(done) = tasks.join_next(), if !tasks.is_empty() => {
+                if let Ok(Some((pumps, connection))) = done {
+                    frames.spawn(pumps.serve(connection));
+                }
+            }
+            Some(_) = frames.join_next(), if !frames.is_empty() => {}
         }
     }
     tasks.abort_all();
+    frames.abort_all();
     while tasks.join_next().await.is_some() {}
+    while frames.join_next().await.is_some() {}
     Ok(())
 }
 
@@ -675,22 +655,21 @@ pub async fn serve_runner(
 pub struct DeliveryError {
     pub code: &'static str,
     pub completion_unknown: bool,
-    pub operation_id: Option<String>,
 }
 impl std::fmt::Display for DeliveryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}: operation={:?}; completionUnknown={}",
-            self.code, self.operation_id, self.completion_unknown
+            "{}: completionUnknown={}",
+            self.code, self.completion_unknown
         )
     }
 }
 impl std::error::Error for DeliveryError {}
 
-/// Call exactly once, negotiating identity on the same connection before work.
-/// COMMAND callers must persist intent before calling; after possible delivery,
-/// reconcile operation.get, never invoke the command automatically again.
+/// Call exactly once, negotiating identity on the same connection before
+/// work. Every `vm.*` mutation is idempotent by content, so after a possible
+/// delivery the caller inspects (`vm.inspect`) or repeats the same request.
 pub async fn call(
     endpoint: &Endpoint,
     address: EndpointAddr,
@@ -722,15 +701,7 @@ async fn call_inner(
         "use query_hello for contact probes"
     );
     let bytes = encode(query)?;
-    let operation_id = match query {
-        Request::ExecStart { operation_id, .. } | Request::ExecCancel { operation_id, .. } => {
-            Some(operation_id.clone())
-        }
-        Request::FsWrite {
-            idempotency_key, ..
-        } => Some(idempotency_key.clone()),
-        _ => None,
-    };
+    let mutation = query.mutation();
     let mut possible_delivery = false;
     let mut connection_to_close = None;
     let result = timeout(REQUEST_TIMEOUT, async {
@@ -755,40 +726,17 @@ async fn call_inner(
                 return Err(DeliveryError {
                     code: "WRONG_NODE",
                     completion_unknown: false,
-                    operation_id: operation_id.clone(),
                 }
                 .into());
             }
         }
         let (mut send, mut recv) = connection.open_bi().await?;
-        possible_delivery = operation_id.is_some();
+        possible_delivery = mutation;
         send.write_all(&bytes).await?;
         send.finish()?;
         let response: Response = read_frame(&mut recv).await?;
         match (&response, query) {
-            (Response::Accepted { operation_id: got }, Request::ExecStart { operation_id, .. })
-                if got == operation_id => {}
-            (
-                Response::Operation {
-                    operation_id: got, ..
-                },
-                Request::OperationGet { operation_id, .. }
-                | Request::ExecCancel { operation_id, .. },
-            ) if got == operation_id => {}
-            (Response::File { path: got, .. }, Request::FsRead { path, .. })
-            | (Response::Stat { path: got, .. }, Request::FsStat { path, .. })
-                if got == path => {}
-            (
-                Response::Written {
-                    idempotency_key: got,
-                    ..
-                },
-                Request::FsWrite {
-                    idempotency_key, ..
-                },
-            ) if got == idempotency_key => {}
-            (Response::Environment { binding, .. }, Request::Inspect { env })
-                if binding.environment_id == *env && binding.node_id == expected_node_id => {}
+            (Response::Vm { vm, .. }, query) if Some(vm.vm_id.as_str()) == query.vm_id() => {}
             (
                 Response::Status {
                     node_id,
@@ -817,7 +765,6 @@ async fn call_inner(
                 "NODE_UNAVAILABLE"
             },
             completion_unknown: possible_delivery,
-            operation_id,
         }
         .into()),
     }
@@ -825,7 +772,7 @@ async fn call_inner(
 
 /// `address.id` is the pinned, enrolled server peer key, not an unauthenticated
 /// value learned from hello. Expected logical identity is checked separately.
-/// This read-only probe never retries; it does not allocate or wake an environment.
+/// This read-only probe never retries and never starts a VM.
 pub async fn query_hello(
     endpoint: &Endpoint,
     address: EndpointAddr,
@@ -891,8 +838,8 @@ mod tests {
                 .is_err()
         );
         for value in [
-            serde_json::json!({"method":"exec.start"}),
-            serde_json::json!({"method":"node.hello", "protocolVersion":2, "nodeId":"spoof"}),
+            serde_json::json!({"method":"vm.start"}),
+            serde_json::json!({"method":"node.hello", "protocolVersion":3, "nodeId":"spoof"}),
             serde_json::json!({"method":"node.hello", "protocolVersion":-1}),
         ] {
             assert!(
@@ -906,15 +853,55 @@ mod tests {
 
     #[test]
     fn version_and_identity_validation() {
-        assert!(
-            matches!(hello("node-test", Request::Hello { protocol_version: 1 }), Response::Error { code, .. } if code == "INCOMPATIBLE_PROTOCOL")
-        );
-        assert!(
-            matches!(hello("node-test", Request::Hello { protocol_version: 3 }), Response::Error { code, .. } if code == "INCOMPATIBLE_PROTOCOL")
-        );
+        for version in [1, 2, 4] {
+            assert!(
+                matches!(hello("node-test", &Request::Hello { protocol_version: version }), Response::Error { code, .. } if code == "INCOMPATIBLE_PROTOCOL")
+            );
+        }
         for id in ["", "node-", "other-node", "node-../etc", "node-é"] {
             assert!(validate_node_id(id).is_err());
         }
+    }
+
+    #[test]
+    fn unknown_methods_are_unsupported() {
+        for method in [
+            "exec.start",
+            "fs.read",
+            "workspace.allocate.v2",
+            "vm.snapshot",
+        ] {
+            assert!(
+                matches!(
+                    parse_request(serde_json::json!({"method": method})),
+                    Err(("UNSUPPORTED", _))
+                ),
+                "{method}"
+            );
+        }
+        assert!(matches!(
+            parse_request(serde_json::json!({"method": "vm.stop"})),
+            Err(("INVALID_REQUEST", _))
+        ));
+        assert!(matches!(
+            parse_request(serde_json::json!({"nothing": 1})),
+            Err(("INVALID_REQUEST", _))
+        ));
+    }
+
+    #[test]
+    fn vm_start_wire_shape() {
+        let value = serde_json::json!({
+            "method": "vm.start", "threadId": "t1", "vmId": "0123456789abcdef", "epoch": 2,
+            "vcpus": 2, "memoryMiB": 2048, "mac": "02:00:00:00:00:01",
+            "seed": {"metaData": "m", "userData": "u", "networkConfig": ""},
+            "gateway": {"peer": "p", "frameToken": "t"},
+        });
+        let request: Request = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&request).unwrap(), value);
+        let mut extra = value;
+        extra["workspace"] = serde_json::json!("/x");
+        assert!(serde_json::from_value::<Request>(extra).is_err());
     }
 
     #[test]
@@ -922,20 +909,14 @@ mod tests {
         assert_eq!(
             (SOFTWARE_VERSION, RUNNER_CAPABILITIES),
             (
-                "0.3.0",
+                "0.4.0",
                 [
                     "node.status",
-                    "environment.inspect",
-                    "workspace.allocate",
-                    "workspace.fresh-base",
-                    "workspace.allocate.v2",
-                    "workspace.release",
-                    "exec.start",
-                    "exec.cancel",
-                    "operation.get",
-                    "fs.read",
-                    "fs.write",
-                    "fs.stat",
+                    "vm.allocate",
+                    "vm.start",
+                    "vm.stop",
+                    "vm.inspect",
+                    "vm.release",
                 ]
             ),
             "capability changes require a new immutable software version"
