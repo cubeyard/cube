@@ -181,7 +181,7 @@ export async function smokeProduct(root: string, config: string) {
     assert.equal((await (await post(`${claudeBase}/workspace/lease`, { owner: "pi" })).json()).code, "CONFLICT");
     assert.equal((await (await post(`${claudeBase}/workspace/lease`, { owner: "claude-code" })).json()).code, "LEASE_HELD");
     const claudeModels = await (await fetch(`${claudeBase}/model`)).json();
-    assert.deepEqual(claudeModels.models.map((model: { provider: string }) => model.provider), ["claude-code", "claude-code", "claude-code"]);
+    assert.deepEqual(claudeModels.models.map((model: { provider: string; id: string }) => `${model.provider}/${model.id}`), ["claude-code/fable", "claude-code/opus", "claude-code/sonnet", "claude-code/haiku"]);
     assert.deepEqual(claudeModels.selected, { provider: "claude-code", id: "sonnet" });
     const toOpus = await fetch(`${claudeBase}/model`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "claude-code", id: "opus" }) });
     assert.equal(toOpus.status, 200, await toOpus.clone().text());
