@@ -67,11 +67,26 @@ export class VmWorkspace implements Workspace {
   async capabilities(): Promise<string[]> { return [...(await this.describe()).capabilities]; }
   async limits(): Promise<WorkspaceLimits> { return { ...(await this.describe()).limits }; }
 
+  /** The agent's commands; each one marks the workspace as changed by the
+   * agent, which keeps its disk at archive (see `agentChanged`). */
   async exec(token: string, key: string, spec: WorkspaceExecSpec): Promise<WorkspaceOperation> {
+    return this.start(token, key, spec, true);
+  }
+  /** cubed's own commands (provisioning, the release check): they do not
+   * count as the agent's changes. */
+  async execOwn(token: string, key: string, spec: WorkspaceExecSpec): Promise<WorkspaceOperation> {
+    return this.start(token, key, spec, false);
+  }
+  /** Whether the agent ever ran a command or wrote a file here, from cubed's
+   * own records. The guest is agent-controlled (root via sudo), so its own
+   * report can keep a disk but never alone justify deleting one. */
+  agentChanged(): boolean { return this.leases.agentChanged(); }
+  private async start(token: string, key: string, spec: WorkspaceExecSpec, agent: boolean): Promise<WorkspaceOperation> {
     const { epoch } = this.leases.verify(token);
     const limits = await this.require("exec.start");
     const checked = execSpec(spec, limits);
     const id = this.operationId(key);
+    if (agent) this.leases.recordAgentChange();
     return operation(key, await this.state("exec", { id, epoch, ...checked }, true));
   }
   async operation(token: string, key: string, options: WorkspaceOperationOptions = {}): Promise<WorkspaceOperation> {
@@ -107,6 +122,7 @@ export class VmWorkspace implements Workspace {
     if (!(content instanceof Uint8Array)) throw invalid("file content must be bytes");
     if (content.length > limits.maxWriteBytes) throw invalid(`file content is at most ${limits.maxWriteBytes} bytes`);
     if (options.expectedSha !== undefined && (typeof options.expectedSha !== "string" || !SHA.test(options.expectedSha))) throw invalid("expectedSha must be a sha256");
+    this.leases.recordAgentChange();
     const { header } = await this.call("write", { id: this.operationId(key), epoch, path: file,
       ...(options.expectedSha === undefined ? {} : { expectedSha: options.expectedSha }), createParents: options.createParents ?? false },
     true, undefined, content);

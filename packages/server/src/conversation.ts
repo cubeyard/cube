@@ -30,6 +30,9 @@ export class Conversations {
   private readonly workspaces = new Map<string, { workspace: VmWorkspace; leases: LeaseStore }>();
   private readonly failures = new Map<string, string>();
   private readonly activations = new Map<string, Promise<void>>();
+  /** Threads whose archive is under way: nothing reopens their agent or
+   * workspace meanwhile (the recovery loop runs beside commands). */
+  private readonly archiving = new Set<string>();
   private readonly commands = new Map<string, Promise<unknown>>();
   private readonly feeds = new WeakMap<Agent, PiThreadEvents>();
   private readonly claudes = new Map<string, Promise<ClaudeAgent>>();
@@ -49,7 +52,7 @@ export class Conversations {
   async boot(): Promise<void> {
     const work: Promise<unknown>[] = [];
     for (const thread of this.registry.listThreads()) {
-      if (thread.archived || this.closing) continue;
+      if (thread.archived || this.closing || this.archiving.has(thread.id)) continue;
       if (thread.workspaceState === "releasing" || (thread.workspaceState === "failed" && thread.workspaceError?.startsWith("workspace release failed:"))) {
         work.push(this.command(thread.id, () => this.release(thread.id)).catch(() => {}));
       }
@@ -65,6 +68,7 @@ export class Conversations {
   activate(id: string): Promise<void> {
     const pending = this.activations.get(id);
     if (pending) return pending;
+    if (this.archiving.has(id)) return Promise.resolve();
     const activation = (async () => {
       try {
         await this.ensureWorkspace(id);
@@ -102,6 +106,10 @@ export class Conversations {
    * thread was created with. */
   workspace(id: string): VmWorkspace {
     if (this.closing) throw new Error("host is stopping");
+    this.notArchiving(id);
+    return this.openWorkspace(id);
+  }
+  private openWorkspace(id: string): VmWorkspace {
     const cached = this.workspaces.get(id);
     if (cached) return cached.workspace;
     const thread = this.thread(id);
@@ -109,6 +117,9 @@ export class Conversations {
     const workspace = new VmWorkspace({ guest: this.machines.guest(thread), leases, owner: threadAgent(thread), binding: this.binding(thread) });
     this.workspaces.set(id, { workspace, leases });
     return workspace;
+  }
+  private notArchiving(id: string): void {
+    if (this.archiving.has(id)) throw new Error("thread is being archived");
   }
   private closeWorkspace(id: string): void {
     this.workspaces.get(id)?.leases.close();
@@ -144,6 +155,7 @@ export class Conversations {
     if (this.closing) throw new Error("host is stopping");
     const thread = this.thread(id);
     if (threadAgent(thread) !== "pi") throw new Error("thread is not a pi thread");
+    this.notArchiving(id);
     const cached = this.agents.get(id);
     if (cached) return cached;
     const loading = (async () => {
@@ -165,6 +177,7 @@ export class Conversations {
     const thread = this.thread(id);
     if (threadAgent(thread) !== "claude-code") throw new Error("thread is not a claude code thread");
     if (!this.claude) throw new Error("claude code is not installed on this host — install it and log in with claude /login");
+    this.notArchiving(id);
     const cached = this.claudes.get(id);
     if (cached) return cached;
     const runtime = this.claude;
@@ -271,35 +284,50 @@ export class Conversations {
   async stream(id: string, response: ServerResponse): Promise<void> {
     await serveThreadEvents(await this.events(id), response);
   }
-  /** Closes the agent, checks whether the machine's work is clean and
-   * releases it: a clean machine is deleted, anything else is retained. */
+  /** Closes the agent and releases the machine. Its disk is deleted only
+   * when cubed's own records show the agent never ran a command or wrote a
+   * file in it and the machine's release check also reports clean; the
+   * guest is agent-controlled, so its report alone never deletes a disk. */
   async archive(id: string): Promise<{ retained: boolean; reason: string }> {
     return this.command(id, async () => {
     await this.settled(id);
     const thread = this.registry.getThread(id);
     if (!thread) throw new Error("thread not found");
-    let decision: { clean: boolean; reason: string };
-    if (thread.workspaceState === "failed") {
-      decision = { clean: false, reason: thread.workspaceError ?? "the thread machine failed" };
-    } else {
+    const failed = thread.workspaceState === "failed";
+    if (!failed) {
       if (this.isClaude(id)) {
-        const agent = await this.claudeAgent(id);
-        if (agent.running) throw new Error("stop the current run before archiving");
-        await agent.close(); this.claudes.delete(id);
+        if ((await this.claudeAgent(id)).running) throw new Error("stop the current run before archiving");
       } else {
         const agent = await this.agent(id);
         if ((await agent.harness.snapshot(LiveDoc, agent.conversation.id, context))?.run) throw new Error("stop the current run before archiving");
-        await agent.close(); this.agents.delete(id);
       }
-      try { decision = await releaseCheck(this.workspace(id), threadAgent(thread), thread.allocation); }
-      catch (error) { decision = { clean: false, reason: `the thread machine could not be checked: ${error instanceof Error ? error.message : String(error)}` }; }
     }
-    this.closeWorkspace(id);
-    if (thread.vm) this.registry.updateThreadVm(id, { retain: !decision.clean, retainReason: decision.reason });
-    this.registry.beginRelease(id);
-    const released = await this.release(id);
-    return { retained: released.retained, reason: decision.reason };
+    // From here until the release ends nothing reopens the thread.
+    return this.withArchiving(id, async () => {
+      let decision: { clean: boolean; reason: string };
+      if (failed) decision = { clean: false, reason: thread.workspaceError ?? "the thread machine failed" };
+      else {
+        const claude = this.claudes.get(id), pi = this.agents.get(id);
+        this.claudes.delete(id); this.agents.delete(id);
+        await (await claude)?.close(); await (await pi)?.close();
+        const workspace = this.openWorkspace(id);
+        try { decision = await releaseCheck(workspace, threadAgent(thread), thread.allocation); }
+        catch (error) { decision = { clean: false, reason: `the thread machine could not be checked: ${error instanceof Error ? error.message : String(error)}` }; }
+        if (decision.clean && workspace.agentChanged()) decision = { clean: false, reason: "the agent ran commands or wrote files in the machine" };
+      }
+      this.closeWorkspace(id);
+      if (thread.vm) this.registry.updateThreadVm(id, { retain: !decision.clean, retainReason: decision.reason });
+      this.registry.beginRelease(id);
+      const released = await this.release(id);
+      return { retained: released.retained, reason: decision.reason };
     });
+    });
+  }
+  /** Runs `action` with the thread marked as archiving. */
+  private async withArchiving<T>(id: string, action: () => Promise<T>): Promise<T> {
+    this.archiving.add(id);
+    try { return await action(); }
+    finally { this.archiving.delete(id); }
   }
   private async release(id: string): Promise<{ retained: boolean }> {
     try {
