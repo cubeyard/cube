@@ -1,6 +1,7 @@
 //! Authenticated node protocol (loopback by default); optional trusted runner execution.
 //! Bounded frames, no retries, no 0-RTT; commands outlive their connection.
 pub mod intent;
+pub mod l2;
 pub mod runner;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
