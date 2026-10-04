@@ -1,5 +1,6 @@
-//! Development stand-in for the runner's frame pump, for manual runs before
-//! the runner speaks protocol 3. It accepts `cube/l2/1` from one gateway
+//! Development stand-in for the runner's frame pump, for manual runs of the
+//! gateway without a runner (the runner's own pump is
+//! `cube_node_transport::pump`). It accepts `cube/l2/1` from one gateway
 //! peer, checks the hello like the runner will, and bridges frames to a QEMU
 //! `-netdev dgram` unix socket. Prints its endpoint id and address.
 //!
