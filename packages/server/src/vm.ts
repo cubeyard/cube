@@ -317,6 +317,13 @@ export function provisionScript(allocation: WorkspaceAllocation): string {
     "  git -C \"$dir\" -c advice.detachedHead=false checkout -q --detach \"$oid\"",
     "}",
     ...checkouts(allocation).map(item => `checkout ${quote(item.dir)} ${quote(item.url)} ${quote(item.ref)} ${quote(item.oid)}`),
+    // The repository's own environment setup (the .agents/setup convention).
+    // A failure leaves the thread usable: the agent can read the log and fix it.
+    "if [ -x .agents/setup ]; then",
+    "  log=\"${HOME:-/tmp}/.cache/cube/setup.log\"",
+    "  mkdir -p \"$(dirname \"$log\")\"",
+    "  if .agents/setup >\"$log\" 2>&1; then echo \"setup done\"; else echo \"setup failed (exit $?); see $log\"; tail -n 5 \"$log\"; fi",
+    "fi",
     "echo provisioned",
   ];
   return lines.join("\n");
@@ -366,7 +373,8 @@ async function own(workspace: VmWorkspace, owner: WorkspaceOwner, key: string | 
 /** Checks out the thread's pinned repositories once. `attempt` numbers the
  * try: a failed one is never rerun under its key, a new try gets a new key. */
 export async function provisionWorkspace(workspace: VmWorkspace, owner: WorkspaceOwner, allocation: WorkspaceAllocation, attempt: number): Promise<void> {
-  const state = await own(workspace, owner, `cube:provision:${attempt}`, provisionScript(allocation), 600000);
+  // Checkouts plus the repository's .agents/setup, which may install toolchains.
+  const state = await own(workspace, owner, `cube:provision:${attempt}`, provisionScript(allocation), 1800000);
   if (state.state === "succeeded" && state.exitCode === 0) return;
   const output = state.state === "succeeded" ? Buffer.from(state.output).toString("utf8").trim().split("\n").slice(-4).join("; ") : state.state;
   throw new Error(`checking out the project failed${output ? `: ${output}` : ""}`);
