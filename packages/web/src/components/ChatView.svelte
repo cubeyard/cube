@@ -134,7 +134,7 @@
     {#if modelState}
       <Conversation base={CHAT_BASE} steer model={selectedModel} {changingModel} bind:busy
         placeholder="message optchat"
-        empty={{ title: "one chat, every thread", hint: "Say what you want done: the chat starts threads in your projects, follows their reports and remembers everything you said." }} />
+        empty={{ title: "one chat, every thread", hint: "Say what you want done: the chat starts threads in your projects, follows their reports and remembers everything you said. A thread needs a project; add one under projects." }} />
     {:else}
       <p class="conversation-empty">{modelError ? "connect a model provider to start the chat" : "opening the chat…"}</p>
     {/if}
