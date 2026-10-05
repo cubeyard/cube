@@ -17,9 +17,6 @@ if (!values.state || !values.config || !values["trusted-runner"]
   throw new Error("usage: node scripts/enroll-runner.ts --state /abs/host-state --config /abs/private-runner.json --trusted-runner");
 }
 const client = new IrohRunnerClient({ configPath: values.config });
-// An authenticated protocol-3 hello: a protocol-2 runner is refused here.
-const described = await client.describe();
-const health = await client.health();
 const registry = new Registry(path.join(values.state, "registry.sqlite"));
 try {
   // Each runner needs its own control identity: cubed serializes calls per
@@ -33,6 +30,9 @@ try {
   const shared = registry.listRunners().find(runner => runner.nodeId !== client.binding.nodeId && !retired.has(runner.threadId)
     && mine && controlKey(runner.configPath)?.equals(mine));
   if (shared) throw new Error(`control key already used by runner ${shared.nodeId}; create a separate control key for each runner`);
+  // An authenticated protocol-3 hello: a protocol-2 runner is refused here.
+  const described = await client.describe();
+  const health = await client.health();
   registry.enrollRunner({ ...client.binding, configPath: values.config, configHash: client.configHash });
   console.log(JSON.stringify({ ...client.binding, profile: "vm-runner", admitted: true, softwareVersion: described.softwareVersion,
     platform: described.platform, baseImageSha256: described.baseImageSha256, maxActiveVms: health.maxActiveVms,
