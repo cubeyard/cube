@@ -35,7 +35,7 @@ export const RunnerDoc = defineDoc<{ binding: string; instance: string }>({
 
 /** pi-durable's SQLite storage on cubed's own connection: WAL with
  * synchronous=FULL, so a committed checkpoint survives power loss too. */
-async function openStorage(file: string): Promise<SqliteStorage> {
+export async function openStorage(file: string): Promise<SqliteStorage> {
   const database = new DatabaseSync(file, { timeout: 5000 });
   try {
     database.exec("PRAGMA journal_mode=WAL");

@@ -4,6 +4,7 @@
   import ProjectView from "./components/ProjectView.svelte";
   import ThreadList from "./components/ThreadList.svelte";
   import ThreadView from "./components/ThreadView.svelte";
+  import ChatView from "./components/ChatView.svelte";
   import Onboarding from "./components/Onboarding.svelte";
   import ModelProviders from "./components/ModelProviders.svelte";
   import SystemSettings from "./components/SystemSettings.svelte";
@@ -18,6 +19,8 @@
   let hash = $state(location.hash);
   const threadId = $derived(hash.match(/^#\/t\/([^/?]+)/)?.[1] ?? null);
   const projectId = $derived(hash.match(/^#\/projects\/([^/?]+)/)?.[1] ?? null);
+  // The chat is home: an empty hash lands there.
+  const chatRoute = $derived(hash === "#/chat" || hash === "" || hash === "#/");
   const projectsRoute = $derived(/^#\/projects(?:[/?]|$)/.test(hash));
   const projectFilter = $derived(
     new URLSearchParams(hash.includes("?") ? hash.slice(hash.indexOf("?") + 1) : "").get("project"),
@@ -121,7 +124,7 @@
     void focusHeading();
   }
 
-  // Keyboard: `n` new thread, `g t` threads, `g p` projects — only while
+  // Keyboard: `n` new thread, `g c` chat, `g t` threads, `g p` projects — only while
   // focus is on the panel itself, never inside an editable field.
   let pendingG = 0;
   function onKeydown(event: KeyboardEvent): void {
@@ -138,6 +141,9 @@
     if (chord && event.key === "t") {
       event.preventDefault();
       location.hash = "#/threads";
+    } else if (chord && event.key === "c") {
+      event.preventDefault();
+      location.hash = "#/chat";
     } else if (chord && event.key === "p") {
       event.preventDefault();
       location.hash = "#/projects";
@@ -156,6 +162,7 @@
     document.title =
       threadId ? `${current?.title ?? "untitled"} · cube`
       : projectsRoute ? "projects · cube"
+      : chatRoute ? "chat · cube"
       : hash === "#/models" ? "models · cube"
       : hash === "#/system" ? "system · cube"
       : "threads · cube";
@@ -189,7 +196,9 @@
   {#if offline}
     <div class="conn-strip" role="status">not connected to the host — retrying</div>
   {/if}
-  {#if threadId && threadsLoaded}
+  {#if chatRoute}
+    <ChatView />
+  {:else if threadId && threadsLoaded}
     {#key threadId}
       <ThreadView {threadId} threads={activeThreads} {command} onConsume={consume} {onNewThread} />
     {/key}

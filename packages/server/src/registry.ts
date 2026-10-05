@@ -324,6 +324,11 @@ export class Registry {
     const row = this.db.prepare("SELECT payload FROM creation WHERE thread_id=?").get(threadId);
     return row ? (JSON.parse(String(row.payload)) as { text: string }).text : "";
   }
+  /** The thread a creation request made, whatever it asked for. */
+  threadByRequest(projectId: string, requestId: string): Thread | null {
+    const row = this.db.prepare("SELECT thread_id FROM creation WHERE project_id=? AND request_id=?").get(projectId, requestId);
+    return row ? this.getThread(String(row.thread_id)) : null;
+  }
   createThread(projectId: string, requestId: string, model: ModelSelection, text: string, agent: ThreadAgent = "pi"): Thread {
     const payload = JSON.stringify({ model, text });
     this.db.exec("BEGIN IMMEDIATE");

@@ -19,6 +19,11 @@
 - **cube-gateway:** started and supervised by cubed; each VM's only network
   (DHCP, DNS, TCP termination, HTTP/HTTPS egress with TLS interception and a
   per-request decision from cubed's egress policy, secret substitution).
+- **OptChat:** the user's one endless chat (`optchat*.ts`). A second
+  in-process pi-durable Harness on `CUBED_STATE/optchat/pi.sqlite`: its
+  entries are the chat's log, a model-free conversation holds the summary tree,
+  and each turn starts at a head entry. It has no machine and no code tools; it
+  starts and tells ordinary threads. See [docs/optchat.md](docs/optchat.md).
 - **web:** rendering and user actions, from the neutral thread event model
   only. SSE reconnect starts with a complete transcript; the browser is never a
   workflow owner.
@@ -215,6 +220,20 @@ Durability is weaker than Pi's, and the UI says so: Claude Code keeps its own
 session but has no task checkpoints, so a turn cut off by a cubed restart is
 marked failed and not continued. Workspace keys still keep the guest from
 executing any tool call twice. Repository skills reach Claude Code only as text.
+
+## OptChat
+
+OptChat implements Victor Taelin's OptChat memory over Pi, with cube threads
+as its only way to act. A turn waits until every line of the view is a summary,
+writes an `optchat.turn` head entry and the turn's view parts, then submits
+the waiting messages; a `beforeRequest` hook puts the rendered view in front of it. The
+compactor runs beside it in cubed, with cheap model calls that carry no tools
+and no ids, and appends each node as an entry. A spawned thread is created
+through the registry with a request ID derived from the tool call, so a replayed
+`spawn` finds the same thread. Its settled runs come back as `[id] ` messages:
+every accepted message waits in a Pi document until Pi has placed it, under its
+own request ID. The details, deviations and gaps are in
+[docs/optchat.md](docs/optchat.md).
 
 ## Product state and limitations
 

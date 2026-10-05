@@ -145,7 +145,9 @@ export const createUserThread = (projectId: string, requestId: string = uid(), f
 
 export const fetchModels = () => request<ThreadModels>("/api/models");
 
-const threadBase = (id: string) => `/api/threads/${encodeURIComponent(id)}`;
+export const threadBase = (id: string) => `/api/threads/${encodeURIComponent(id)}`;
+/** OptChat, the one endless chat: the same event model and prompt shape as a thread. */
+export const CHAT_BASE = "/api/optchat";
 
 export const deleteThread = (id: string) => request<{ ok: true }>(threadBase(id), "DELETE");
 
@@ -153,7 +155,7 @@ export const renameThread = (id: string, title: string) =>
   request<{ ok: true }>(threadBase(id), "PATCH", { title });
 
 /** The thread in the neutral event model: history and the live stream. */
-export const threadEvents = (id: string) => new HttpThreadEvents({ base: threadBase(id) });
+export const threadEvents = (base: string) => new HttpThreadEvents({ base });
 
 export const fetchThreadModels = (id: string) =>
   request<ThreadModels>(`${threadBase(id)}/model`);
@@ -161,7 +163,14 @@ export const fetchThreadModels = (id: string) =>
 export const setThreadModel = (id: string, model: ModelSelection) =>
   request<ThreadModels>(`${threadBase(id)}/model`, "PATCH", model);
 
-export const sendPrompt = (id: string, text: string, model: ModelSelection, requestId: string) =>
-  request<{ runId: string }>(`${threadBase(id)}/prompt`, "POST", { text, model, requestId });
+export const sendPrompt = (base: string, text: string, model: ModelSelection, requestId: string) =>
+  request<{ runId: string }>(`${base}/prompt`, "POST", { text, model, requestId });
 
-export const stopThread = (id: string) => request<{ ok: true }>(`${threadBase(id)}/stop`, "POST");
+export const stopThread = (base: string) => request<{ ok: true }>(`${base}/stop`, "POST");
+
+export const fetchChatModels = () => request<ThreadModels>(`${CHAT_BASE}/model`);
+
+export const setChatModel = (model: ModelSelection) => request<ThreadModels>(`${CHAT_BASE}/model`, "PATCH", model);
+
+/** What OptChat sees: the view of the whole chat, as one-line summaries. */
+export const fetchChatView = () => request<{ view: string; messages: number; failure: string | null }>(`${CHAT_BASE}/view`);

@@ -111,6 +111,33 @@ thread.
 
   Guest MTU 1140 was measured 6 % slower than 1500 and was not adopted.
 
+## OptChat (branch `feat/optchat`)
+
+The user's one endless chat at
+`#/chat`, built on a second pi-durable store under `CUBED_STATE/optchat`. It
+follows the OptChat spec's log, tree, view, compactor and turn loop. Its only
+actions are spawning and telling ordinary threads; their reports come back as
+`[id] ` messages. Verified offline only: `optchat-memory-test.ts` (fold,
+order, zoom, log mapping), `optchat-test.ts` (Pi turns with a faux model:
+fresh context, compactor feedback, report turns, zoom/tell, reopen) and
+`optchat-product-test.ts` (cubed's routes, a real thread on a local guest
+running bash, its report back in the chat). The chat strip and memory panel
+were measured in headless Chromium at 1440×900 and 390×844 (no overflow, one
+strip row on the phone). Not verified: a real model as chat or compactor, a
+real VM thread. Two review rounds then made delivery
+durable and idempotent. It now has a persisted pending queue, one turn for
+everything waiting with each message its own Pi submission, steering of every
+waiting message only during a tool round, a lock across steer, submit and
+stop, and unanswered messages on stop. The rounds also stopped logging failed
+attempts, restored the view on reopen and made spawn replay find its thread.
+These are tested offline, except a restart in the middle of a turn's
+submission, which is idempotent by construction but untested. Prompt caching follows spec §8 through pi-ai's
+`onPayload` and `sessionId`: three Anthropic marks in the view and a stable
+OpenAI `prompt_cache_key`. It is checked against pi-ai's real request builders
+offline, but hit rates on a live provider are not measured. Deviations (no
+OpenAI breakpoint field, a small steering window, threads do not get the view)
+are listed in docs/optchat.md.
+
 ## Known gaps and next steps
 
 - **Machine templates (snapshots):** not built. The proposal is in

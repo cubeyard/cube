@@ -1319,3 +1319,25 @@ select.compose-input {
   .workspace-pane-head { padding-inline: 0.7rem; }
   .change-file { padding-inline: 0.45rem; }
 }
+
+/* ============================================================ chat memory
+   The view OptChat reads each turn, behind a key on the chat strip. */
+.chat-memory {
+  flex: none; max-height: 40vh; display: flex; flex-direction: column;
+  background: var(--s1); border-bottom: 1px solid var(--line-2);
+  box-shadow: var(--shadow-well);
+}
+.chat-memory-head {
+  display: flex; align-items: center; gap: 0.6rem; padding: 0.35rem 0.7rem;
+  color: var(--ink-3); font-size: 11px; font-weight: 550; letter-spacing: 0.05em;
+}
+.chat-memory-head .key { margin-left: auto; }
+.chat-memory pre {
+  margin: 0; padding: 0.2rem 0.7rem 0.6rem; overflow: auto;
+  color: var(--ink-2); font: 11px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+@media (max-width: 52rem) {
+  .thread-strip .chat-title { display: block; }
+  .chat-tagline { display: none; }
+}
+.chat-memory-error { margin: 0; padding: 0 0.7rem 0.5rem; color: var(--bad); font-size: 12px; }

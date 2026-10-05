@@ -8,6 +8,9 @@ DEVELOPING.md before changing behavior.
 - `packages/server`: product API, projects, runner admission and activation.
 - `packages/server/src/durable-agent.ts`: in-process Pi AgentHarness + published
   SQLite backend. Pi owns execution state; never add a second workflow journal.
+- `packages/server/src/optchat*.ts`: OptChat, the user's endless chat; a
+  second Pi store whose entries are its log and summary tree. It only starts
+  and tells threads (docs/optchat.md).
 - `packages/server/src/vm*.ts`, `guest-ssh.ts`, `egress-policy.ts`, `guest/`:
   thread machines, tool execution over SSH, the egress policy and the guest
   helper `cube-guest`.

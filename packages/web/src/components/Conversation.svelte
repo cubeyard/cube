@@ -1,14 +1,21 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { errorText, sendPrompt, stopThread, threadEvents } from "../lib/api.ts";
+  import { errorText, sendPrompt, stopThread, threadBase, threadEvents } from "../lib/api.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
   import { transcriptRows, type ToolState } from "../lib/transcript.ts";
   import { uid } from "../lib/uid.ts";
   import type { ModelSelection, ThreadStatus, ThreadTranscript } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
 
-  let { threadId, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null }: {
-    threadId: string;
+  let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null, empty = null, placeholder = "message this thread" }: {
+    threadId?: string;
+    /** Messages may be sent while the agent works; they reach it between tool calls. */
+    steer?: boolean;
+    /** The routes this conversation reads and writes; default: the thread's. */
+    base?: string;
+    /** Replaces the empty transcript's hint. */
+    empty?: { title: string; hint: string } | null;
+    placeholder?: string;
     model: ModelSelection | null;
     changingModel?: boolean;
     busy?: boolean;
@@ -17,7 +24,7 @@
     notice?: string | null;
   } = $props();
   // The neutral thread event model is the only input; no agent shapes here.
-  const events = $derived(threadEvents(threadId));
+  const events = $derived(threadEvents(base));
   let transcript = $state<Pick<ThreadTranscript, "events" | "status">>({ events: [], status: { state: "idle", run: null, error: null } });
   const rows = $derived(transcriptRows(transcript));
   const status = $derived<ThreadStatus>(transcript.status);
@@ -36,7 +43,7 @@
   $effect(() => { busy = working || sending; });
   // The draft is always the user's to edit: a run, a reconnect or a booting
   // machine only hold the send key, never the text field.
-  const canSend = $derived(!!prompt.trim() && !working && !sending && !changingModel && !!model && !waitingText);
+  const canSend = $derived(!!prompt.trim() && (!working || steer) && !sending && !changingModel && !!model && !waitingText);
 
   // Follow the newest output while the reader is at the bottom; leave them
   // where they are once they scroll up. Layout that settles later (fonts,
@@ -123,7 +130,7 @@
     error = null;
     try {
       if (pending?.text !== text) pending = { text, requestId: uid() };
-      await sendPrompt(threadId, text, model, pending.requestId);
+      await sendPrompt(base, text, model, pending.requestId);
       pending = null;
       // Only the sent text leaves the field; anything typed meanwhile stays.
       const draft = prompt.trimStart();
@@ -143,7 +150,7 @@
     if (stopping) return;
     stopping = true;
     try {
-      await stopThread(threadId);
+      await stopThread(base);
     } catch (cause) {
       if (!disposed) error = errorText(cause);
     } finally {
@@ -171,8 +178,8 @@
       {:else if rows.length === 0}
         <div class="conversation-empty">
           <span class="lamp on-green" aria-hidden="true"></span>
-          <p>ready when you are</p>
-          <span>Ask for a change, paste an error, or describe what you want to understand.</span>
+          <p>{empty?.title ?? "ready when you are"}</p>
+          <span>{empty?.hint ?? "Ask for a change, paste an error, or describe what you want to understand."}</span>
         </div>
       {:else}
         {#each rows as row (row.id)}
@@ -217,8 +224,8 @@
       bind:value={prompt}
       oninput={resizeComposer}
       onkeydown={onComposerKeydown}
-      placeholder={waitingText ?? (working ? "agent is working…" : "message this thread")}
-      aria-label="message this thread"
+      placeholder={waitingText ?? (working ? (steer ? "agent is working — a message reaches it between steps" : "agent is working…") : placeholder)}
+      aria-label={placeholder}
       aria-describedby="composer-hint"
       title="enter to send · shift enter for a new line"
       rows="1"
