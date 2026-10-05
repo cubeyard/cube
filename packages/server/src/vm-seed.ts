@@ -94,6 +94,12 @@ export function vmSeed(input: SeedInput): VmSeed {
         content: "PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\nMatch User root\n\tAuthorizedKeysFile /etc/cube/authorized_keys\n" },
       { path: "/etc/cube/env", permissions: "0644", owner: "root:root", content: `${env}\n` },
       { path: "/etc/gitconfig", permissions: "0644", owner: "root:root", content: gitconfig },
+      // Tools with their own CA list (Node, Python) trust the installation CA
+      // through these; sudo would otherwise drop them (`sudo npm install -g`).
+      { path: "/etc/sudoers.d/cube-ca", permissions: "0440", owner: "root:root",
+        content: "Defaults env_keep += \"NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE SSL_CERT_FILE CURL_CA_BUNDLE\"\n" },
+      { path: "/etc/environment", append: true, permissions: "0644", owner: "root:root",
+        content: `NODE_EXTRA_CA_CERTS=${CA_BUNDLE}\nREQUESTS_CA_BUNDLE=${CA_BUNDLE}\nSSL_CERT_FILE=${CA_BUNDLE}\n` },
       // cloud-init installs `packages` once; this retries on every boot.
       { path: "/var/lib/cloud/scripts/per-boot/cube-packages", permissions: "0755", owner: "root:root",
         content: `#!/bin/sh\nexec ${GUEST_HELPER_PATH} packages\n` },
