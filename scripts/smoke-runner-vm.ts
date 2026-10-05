@@ -132,7 +132,7 @@ try {
   assert.equal(runnerReady.lifecycle, "ready");
   const runnerHello = JSON.parse(execFileSync(runnerBin, ["hello", "--key", path.join(work, "control.key"), "--peer", runnerReady.peerId,
     "--address", runnerReady.addresses[0], "--expect-node", node], { encoding: "utf8" }));
-  assert.deepEqual(runnerHello.capabilities, ["node.hello", "node.status", "vm.allocate", "vm.start", "vm.stop", "vm.inspect", "vm.release"]);
+  assert.deepEqual(runnerHello.capabilities, ["node.hello", "node.status", "vm.allocate", "vm.start", "vm.stop", "vm.inspect", "vm.release", "vm.discard"]);
   assert.equal(runnerHello.baseImageSha256, init.baseImageSha256);
 
   // Guest identity: cubed generates and pins the host key (SERVER does this for real).

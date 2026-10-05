@@ -371,6 +371,11 @@ try {
   assert.equal(checkedRunner.health.retainedVms, 2);
   assert.equal(checkedRunner.health.activeVms, 0);
   log("7: a clean archive deleted the disk; two retained disks reported by the runner");
+  // The operator discards a retained disk.
+  await api(`/api/threads/${pi}/discard`, "POST", {});
+  assert.equal(vmDirs().length, 1, "the discarded disk is gone");
+  assert.equal((await api(`/api/runners/${runnerStatus.id}/check`, "POST", {})).runner.health.retainedVms, 1);
+  log("7: the operator discarded one retained disk on the runner");
 
   // 8. Stop everything this run started.
   await kill(cubed.child, "SIGTERM");
