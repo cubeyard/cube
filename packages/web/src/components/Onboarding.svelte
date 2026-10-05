@@ -94,10 +94,10 @@
     </div>
   {:else}
     <h1 bind:this={heading} tabindex="-1">make yourself at home.</h1>
-    <p class="intro">Start with a project. Choose a repository and check access, then give an agent a task in its own isolated environment.</p>
+    <p class="intro">Tell the chat what you want done. It starts threads in your projects, each an agent in its own isolated environment, and reports back. Add a project first: choose a repository and check access.</p>
     <p class="account">{github.state === "connected" ? `github connected as ${github.login}` : "github skipped — connect whenever you need it"}</p>
     <div class="choices">
-      <button class="key primary" onclick={finish} disabled={saving}>{saving ? "saving…" : "open projects"}</button>
+      <button class="key primary" onclick={finish} disabled={saving}>{saving ? "saving…" : "open the chat"}</button>
       <button class="key" onclick={back} disabled={saving}>back</button>
     </div>
     <div class="access-note">

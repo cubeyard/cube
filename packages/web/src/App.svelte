@@ -189,7 +189,8 @@
 {:else if !daemon.onboardingComplete}
   <Onboarding onComplete={() => {
     daemon = { ...daemon!, onboardingComplete: true };
-    location.hash = "#/projects";
+    // The chat is cube's home; its empty state points to projects.
+    location.hash = "#/chat";
   }} />
 {:else}
   <NewThreadDialog bind:this={newThreadDialog} />
