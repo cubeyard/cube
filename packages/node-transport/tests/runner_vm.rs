@@ -288,13 +288,8 @@ async fn failures_are_recorded_not_hidden() {
         "{error}"
     );
     std::fs::remove_file(fx.bin.join("exit-at-once")).unwrap();
-    assert_eq!(
-        served
-            .vm(start("t1", VM, 1, &fx.gateway, TOKEN))
-            .await
-            .state,
-        VmState::Running
-    );
+    let restarted = served.vm(start("t1", VM, 1, &fx.gateway, TOKEN)).await;
+    assert_eq!(restarted.state, VmState::Running, "{restarted:?}");
     served.runner.shutdown(true).await;
     served.close().await;
 }
