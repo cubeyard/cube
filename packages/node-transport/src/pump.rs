@@ -10,7 +10,6 @@
 //! grant closes the current connection.
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -21,6 +20,7 @@ use std::{
 use anyhow::Result;
 use iroh::{EndpointId, endpoint::Connection};
 use sha2::{Digest, Sha256};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use tokio::{net::UnixDatagram, task::JoinHandle};
 
 use crate::l2::{
@@ -61,8 +61,6 @@ struct Pump {
     grant: Mutex<FrameGrant>,
     current: Slot,
     socket: Arc<UnixDatagram>,
-    qemu: PathBuf,
-    net: PathBuf,
     reader: JoinHandle<()>,
 }
 
@@ -70,7 +68,6 @@ impl Drop for Pump {
     fn drop(&mut self) {
         self.reader.abort();
         replace(&self.current, None);
-        let _ = std::fs::remove_file(&self.net);
     }
 }
 
@@ -81,21 +78,28 @@ pub struct Pumps {
 }
 
 impl Pumps {
-    /// Binds `net` and starts relaying the frames QEMU sends from `qemu`.
-    /// Must run inside a Tokio runtime.
-    pub fn open(
-        &self,
-        vm_id: &str,
-        thread_id: &str,
-        net: &Path,
-        qemu: &Path,
-        grant: FrameGrant,
-    ) -> Result<()> {
+    /// Creates the frame socket pair and starts relaying what QEMU sends.
+    /// Returns QEMU's end, inheritable across exec, for
+    /// `-netdev dgram,local.type=fd`. Must run inside a Tokio runtime.
+    pub fn open(&self, vm_id: &str, thread_id: &str, grant: FrameGrant) -> Result<OwnedFd> {
         self.close(vm_id);
-        let _ = std::fs::remove_file(net);
-        let socket = UnixDatagram::bind(net)?;
-        enlarge_buffers(&socket);
-        let socket = Arc::new(socket);
+        let (ours, theirs) = std::os::unix::net::UnixDatagram::pair()?;
+        // Both ends are ours to size: QEMU's default receive space is 4 KiB
+        // on macOS, which held only two or three frames of a burst.
+        enlarge_buffers(ours.as_raw_fd());
+        enlarge_buffers(theirs.as_raw_fd());
+        ours.set_nonblocking(true)?;
+        let theirs = OwnedFd::from(theirs);
+        // SAFETY: fcntl on a descriptor this process owns.
+        unsafe {
+            let flags = libc::fcntl(theirs.as_raw_fd(), libc::F_GETFD);
+            if flags < 0
+                || libc::fcntl(theirs.as_raw_fd(), libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
+        let socket = Arc::new(UnixDatagram::from_std(ours)?);
         let current: Slot = Arc::default();
         let reader = tokio::spawn(relay_from_qemu(socket.clone(), current.clone()));
         let pump = Arc::new(Pump {
@@ -103,12 +107,10 @@ impl Pumps {
             grant: Mutex::new(grant),
             current,
             socket,
-            qemu: qemu.into(),
-            net: net.into(),
             reader,
         });
         self.pumps.lock().unwrap().insert(vm_id.into(), pump);
-        Ok(())
+        Ok(theirs)
     }
 
     /// Replaces the grant. A different token or peer closes the current
@@ -208,7 +210,7 @@ impl Pumps {
         let mut reassembler = Reassembler::default();
         while let Ok(datagram) = connection.read_datagram().await {
             if let Some(frame) = reassembler.push(datagram) {
-                send_to_qemu(&pump.socket, &frame, &pump.qemu).await;
+                send_to_qemu(&pump.socket, &frame).await;
             }
         }
         let mut current = pump.current.lock().unwrap();
@@ -222,16 +224,14 @@ impl Pumps {
 }
 
 /// Unix datagram buffers are tiny on macOS (`net.local.dgram.recvspace` is
-/// 4 KiB): a burst from the gateway overflowed them and most frames were lost.
-/// Ask for more; the kernel caps it at its own limit.
-fn enlarge_buffers(socket: &UnixDatagram) {
-    use std::os::fd::AsRawFd;
+/// 4 KiB). Ask for 4 MiB; the kernel caps it at its own limit.
+fn enlarge_buffers(fd: RawFd) {
     const SIZE: libc::c_int = 4 << 20;
     for option in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
         // SAFETY: plain setsockopt on a socket this process owns.
         unsafe {
             libc::setsockopt(
-                socket.as_raw_fd(),
+                fd,
                 libc::SOL_SOCKET,
                 option,
                 (&SIZE as *const libc::c_int).cast(),
@@ -241,17 +241,20 @@ fn enlarge_buffers(socket: &UnixDatagram) {
     }
 }
 
-/// QEMU's receive buffer belongs to QEMU. When it is full macOS answers
-/// ENOBUFS instead of blocking, so wait briefly and retry: that is
-/// backpressure, not loss. A frame that still does not fit within 50 ms
-/// (or while QEMU has not bound its socket yet during boot) is dropped,
-/// which the guest's TCP treats as packet loss.
-async fn send_to_qemu(socket: &UnixDatagram, frame: &[u8], qemu: &Path) {
-    for attempt in 0..50u64 {
-        match socket.send_to(frame, qemu).await {
+/// When QEMU's receive buffer is still full macOS answers ENOBUFS instead of
+/// blocking. Retry as backpressure: first by yielding (timer sleeps are at
+/// least 1 ms, which capped a guest at ~3 MB/s), then briefly sleeping. A
+/// frame that still does not fit is dropped; the guest's TCP retransmits.
+async fn send_to_qemu(socket: &UnixDatagram, frame: &[u8]) {
+    for attempt in 0..300u32 {
+        match socket.send(frame).await {
             Ok(_) => return,
             Err(e) if e.raw_os_error() == Some(libc::ENOBUFS) => {
-                tokio::time::sleep(Duration::from_micros(100 * (attempt + 1).min(10))).await;
+                if attempt < 250 {
+                    tokio::task::yield_now().await;
+                } else {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
             }
             Err(_) => return,
         }
