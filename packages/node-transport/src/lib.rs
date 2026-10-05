@@ -4,6 +4,7 @@
 pub mod journal;
 pub mod l2;
 pub mod pump;
+pub mod release;
 pub mod runner;
 pub mod seed;
 pub mod vm;
@@ -949,7 +950,7 @@ mod tests {
         assert_eq!(
             (SOFTWARE_VERSION, RUNNER_CAPABILITIES),
             (
-                "0.5.0",
+                "0.6.0",
                 [
                     "node.status",
                     "vm.allocate",

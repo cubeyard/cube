@@ -39,6 +39,7 @@ install -d -m 0700 -o "$owner" -g "$group" \
   "$(state_root)" "$(identity_root)" "$(log_root)" "$(dirname "$(ready_file)")"
 if [ "$PLATFORM" = Linux ]; then install -d -m 0755 "$(at /etc/cube-runner)" "$(at /etc/systemd/system)"; fi
 install_unit "$repo_root/scripts/runner/cube-runner.service"
+install_updater
 if [ "$PLATFORM:$RUNNER_MODE" = Darwin:user ]; then
   note 'installed per-user LaunchAgent profile; this is production-safe only in a dedicated credential-free login account'
 fi

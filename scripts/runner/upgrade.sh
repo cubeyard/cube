@@ -52,6 +52,7 @@ if [ "$PLATFORM" = Darwin ]; then
     ln -sfn "$old" "$(previous_link)"
     needs_rollback=0
     note "upgraded $old_version -> $version"
+    install_updater || note 'self-update refresh failed; the upgrade itself succeeded'
     exit 0
   fi
   note "new runner failed readiness; restoring $old_version"
@@ -105,6 +106,7 @@ if "$SYSTEMCTL" start cube-runner.service && wait_ready "$version"; then
   ln -sfn "$old" "$(at /opt/cube-runner/previous)"
   note "upgraded $old_version -> $version"
   needs_rollback=0
+  install_updater || note 'self-update refresh failed; the upgrade itself succeeded'
   exit 0
 fi
 

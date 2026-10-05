@@ -24,6 +24,8 @@ const USAGE: &str = "usage:
   cube-runner init --home <NEW-directory> --image <debian-genericcloud.qcow2> --allow-peer <public-key> --node-id <node-id> --thread-id <thread-id> --env <integer> [--network loopback|direct|relay] [--listen <ip:port>] [--qemu <path>] [--firmware <path>] [--max-vcpus 4] [--max-memory-mib 8192] [--max-disk-gib 64]
   cube-runner run --home <directory> [--network loopback|direct|relay]
   cube-runner version
+  cube-runner verify-release --key <public-key.pem> --manifest <file> --signature <file>
+  cube-runner idle --state <journal-directory>
   cube-runner keygen --key <new-private-file>
   cube-runner serve --key <private-file> --allow-peer <public-key> --node-id <node-id> [--listen 127.0.0.1:0]
   cube-runner hello --key <private-file> --peer <pinned-public-key> --expect-node <node-id> [--address <ip:port>]
@@ -258,6 +260,31 @@ async fn main() -> Result<()> {
                 "minimumProtocolVersion": MIN_COMPATIBLE_PROTOCOL_VERSION,
             })
         );
+        return Ok(());
+    }
+    if command == "verify-release" {
+        let key = std::fs::read_to_string(take(&mut options, "--key")?)?;
+        let manifest = std::fs::read(take(&mut options, "--manifest")?)?;
+        let signature = std::fs::read_to_string(take(&mut options, "--signature")?)?;
+        no_extra(&options)?;
+        let verified = cube_node_transport::release::verify(&key, &manifest, &signature)?;
+        println!(
+            "{}",
+            json!({
+                "version": verified.version,
+                "newer": cube_node_transport::release::newer(&verified.version, SOFTWARE_VERSION),
+                "url": verified.artifact.url,
+                "sha256": verified.artifact.sha256,
+                "bytes": verified.artifact.bytes,
+            })
+        );
+        return Ok(());
+    }
+    if command == "idle" {
+        let state = PathBuf::from(take(&mut options, "--state")?);
+        no_extra(&options)?;
+        let active = cube_node_transport::journal::active_vm_count(&state)?;
+        println!("{}", json!({"activeVms": active, "idle": active == 0}));
         return Ok(());
     }
     let network_option = match options.remove("--network").as_deref() {

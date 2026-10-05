@@ -10,7 +10,9 @@ RUNNER_USER="${CUBE_RUNNER_USER:-$([ "$PLATFORM" = Darwin ] && printf _cube-runn
 RUNNER_GROUP="${CUBE_RUNNER_GROUP:-$RUNNER_USER}"
 SYSTEMCTL="${CUBE_RUNNER_SYSTEMCTL:-systemctl}"
 LAUNCHCTL="${CUBE_RUNNER_LAUNCHCTL:-launchctl}"
+CURL="${CUBE_RUNNER_CURL:-curl}"
 LABEL="com.cubeyard.cube-runner"
+UPDATE_LABEL="com.cubeyard.cube-runner-update"
 STOP_POLICY="${CUBE_RUNNER_STOP_POLICY:-wait}"
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -71,6 +73,24 @@ ready_file() {
   fi
 }
 log_root() { printf '%s/logs' "$(software_root)"; }
+updater_root() { printf '%s/updater' "$(software_root)"; }
+# The release platform names of the signed manifests.
+platform_tag() {
+  case "$PLATFORM:$ARCH" in
+    Linux:x86_64) printf linux-x64-gnu ;;
+    Darwin:arm64) printf darwin-arm64 ;;
+    *) fail "no signed runner releases for $PLATFORM $ARCH" ;;
+  esac
+}
+# The pinned release key: beside the updater (installed), at the bundle root,
+# or in a repository checkout.
+update_key() {
+  local candidate
+  for candidate in "$repo_root/update-public-key.pem" "$repo_root/scripts/cubed/update-public-key.pem"; do
+    [ -f "$candidate" ] && { printf '%s' "$candidate"; return 0; }
+  done
+  return 0
+}
 service_domain() {
   if [ "$RUNNER_MODE" = system ]; then printf system
   else printf 'gui/%s' "$(id -u)"
@@ -158,6 +178,63 @@ install_unit() {
     render_launchd_plist "$unit"; chmod 0644 "$unit"
     if [ "$RUNNER_MODE" = system ] && [ -z "$ROOT" ]; then chown root:wheel "$unit"; fi
   fi
+}
+
+# Installs (or refreshes) the self-updater from this bundle: its scripts and
+# the pinned key under updater_root, plus an hourly root systemd timer on
+# Linux or a launchd agent on macOS. CUBE_RUNNER_SELF_UPDATE=0 skips it.
+install_updater() {
+  local root tmp key
+  [ "${CUBE_RUNNER_SELF_UPDATE:-1}" != 0 ] || { note 'self-update disabled (CUBE_RUNNER_SELF_UPDATE=0)'; return 0; }
+  key="$(update_key)"
+  [ -n "$key" ] || { note 'no pinned update key in this bundle; self-update not installed'; return 0; }
+  case "$PLATFORM:$ARCH" in Linux:x86_64|Darwin:arm64) ;; *) note 'no signed releases for this platform; self-update not installed'; return 0 ;; esac
+  root="$(updater_root)"; tmp="${root}.new.$$"
+  rm -rf -- "$tmp"
+  install -d -m 0755 "$tmp/scripts/runner"
+  install -m 0755 "$repo_root"/scripts/runner/*.sh "$tmp/scripts/runner/"
+  install -m 0644 "$repo_root"/scripts/runner/*.service "$repo_root"/scripts/runner/*.timer "$tmp/scripts/runner/"
+  install -m 0644 "$key" "$tmp/update-public-key.pem"
+  if [ "$PLATFORM" = Linux ] || [ "$RUNNER_MODE" = system ]; then
+    chown -R root:wheel "$tmp" 2>/dev/null || chown -R root:root "$tmp" 2>/dev/null || [ -n "$ROOT" ]
+  fi
+  rm -rf -- "$root.old"
+  if [ -e "$root" ]; then mv "$root" "$root.old"; fi
+  mv "$tmp" "$root"
+  rm -rf -- "$root.old"
+  if [ "$PLATFORM" = Linux ]; then
+    install -m 0644 "$root/scripts/runner/cube-runner-update.service" "$(at /etc/systemd/system/cube-runner-update.service)"
+    install -m 0644 "$root/scripts/runner/cube-runner-update.timer" "$(at /etc/systemd/system/cube-runner-update.timer)"
+    if [ -z "$ROOT" ]; then
+      "$SYSTEMCTL" daemon-reload
+      "$SYSTEMCTL" enable --now cube-runner-update.timer >/dev/null
+    fi
+  else
+    local plist
+    # Beside the runner's own plist (LaunchDaemons or the user's LaunchAgents).
+    plist="$(dirname "$(service_file)")/$UPDATE_LABEL.plist"
+    mkdir -p "$(dirname "$plist")"
+    cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>$UPDATE_LABEL</string>
+<key>ProgramArguments</key><array>
+<string>/bin/bash</string><string>$(printf '%s' "$root/scripts/runner/update.sh" | xml_escape)</string>
+</array>
+<key>StartInterval</key><integer>3600</integer>
+<key>ProcessType</key><string>Background</string>
+<key>StandardOutPath</key><string>$(printf '%s' "$(log_root)/update.log" | xml_escape)</string>
+<key>StandardErrorPath</key><string>$(printf '%s' "$(log_root)/update.log" | xml_escape)</string>
+</dict></plist>
+PLIST
+    plutil -lint "$plist" >/dev/null
+    if [ -z "$ROOT" ]; then
+      "$LAUNCHCTL" bootout "$(service_domain)/$UPDATE_LABEL" >/dev/null 2>&1 || true
+      "$LAUNCHCTL" bootstrap "$(service_domain)" "$plist" >/dev/null 2>&1 || true
+    fi
+  fi
+  note "self-update installed: hourly, only while idle"
 }
 
 service_active() {
