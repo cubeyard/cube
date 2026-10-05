@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 use tokio::{net::UnixDatagram, task::JoinHandle};
 
 use crate::l2::{
-    Fragmenter, FrameReady, Reassembler, accept_hello, answer_hello, constant_time_eq,
+    Fragmenter, FrameReady, Reassembler, accept_hello, answer_hello, constant_time_eq, send_frame,
 };
 
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -229,13 +229,9 @@ async fn relay_from_qemu(socket: Arc<UnixDatagram>, current: Slot) {
             return;
         };
         let connection = current.lock().unwrap().clone();
-        if let Some(connection) = connection
-            && let Some(max) = connection.max_datagram_size()
-        {
-            for datagram in fragmenter.split(&buffer[..n], max) {
-                // Congested: the datagram is dropped; the guest retransmits.
-                let _ = connection.send_datagram(datagram);
-            }
+        if let Some(connection) = connection {
+            // Congested: this frame is dropped whole; the guest retransmits.
+            let _ = send_frame(&connection, &mut fragmenter, &buffer[..n]);
         }
     }
 }

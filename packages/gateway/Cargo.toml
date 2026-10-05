@@ -36,7 +36,7 @@ rustls-native-certs = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "proto-dhcpv4"] }
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-tcp-cubic", "socket-udp", "proto-dhcpv4"] }
 time = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "time", "net", "sync", "signal"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
@@ -44,5 +44,5 @@ tokio-util = "0.7"
 
 [dev-dependencies]
 cube-gateway = { path = ".", features = ["test-hooks"] }
-smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp", "socket-dhcpv4", "proto-dhcpv4", "async"] }
+smoltcp = { version = "0.14", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-tcp-cubic", "socket-udp", "socket-dhcpv4", "proto-dhcpv4", "async"] }
 tempfile = "3"
