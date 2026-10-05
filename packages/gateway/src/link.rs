@@ -87,6 +87,21 @@ pub struct LinkStatus {
 pub struct Slot {
     tx: watch::Sender<Option<Connection>>,
     generation: AtomicU64,
+    /// Frames the LAN dropped because the datagram queue was full.
+    pub dropped: Arc<AtomicU64>,
+}
+
+/// The selected Iroh path of a VM's frame connection, for diagnostics.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathReport {
+    pub relay: bool,
+    pub rtt_ms: u64,
+    pub cwnd: u64,
+    pub mtu: u16,
+    pub lost_packets: u64,
+    pub congestion_events: u64,
+    pub sent_datagrams: u64,
 }
 
 impl Slot {
@@ -94,6 +109,22 @@ impl Slot {
         Arc::new(Self {
             tx: watch::channel(None).0,
             generation: AtomicU64::new(0),
+            dropped: Arc::new(AtomicU64::new(0)),
+        })
+    }
+    pub fn path(&self) -> Option<PathReport> {
+        let connection = self.tx.borrow().clone()?;
+        let paths = connection.paths();
+        let path = paths.iter().find(|p| p.is_selected())?;
+        let stats = path.stats();
+        Some(PathReport {
+            relay: path.is_relay(),
+            rtt_ms: stats.rtt.as_millis() as u64,
+            cwnd: stats.cwnd,
+            mtu: stats.current_mtu,
+            lost_packets: stats.lost_packets,
+            congestion_events: stats.congestion_events,
+            sent_datagrams: stats.udp_tx.datagrams,
         })
     }
     fn install(&self, generation: u64, connection: Option<Connection>) -> bool {
@@ -266,6 +297,7 @@ pub struct IrohSink {
     slot: watch::Receiver<Option<Connection>>,
     current: Option<Connection>,
     fragmenter: Fragmenter,
+    dropped: Arc<AtomicU64>,
 }
 
 impl IrohSink {
@@ -274,6 +306,7 @@ impl IrohSink {
             slot: slot.tx.subscribe(),
             current: None,
             fragmenter: Fragmenter::default(),
+            dropped: slot.dropped.clone(),
         }
     }
 }
@@ -287,7 +320,9 @@ impl FrameSink for IrohSink {
             return;
         };
         // Congested: this frame is dropped whole; the guest's TCP retransmits.
-        let _ = cube_node_transport::l2::send_frame(connection, &mut self.fragmenter, frame);
+        if !cube_node_transport::l2::send_frame(connection, &mut self.fragmenter, frame) {
+            self.dropped.fetch_add(1, SeqCst);
+        }
     }
 }
 
