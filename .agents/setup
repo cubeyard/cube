@@ -56,7 +56,16 @@ if [ "$installed_pnpm" != "$pnpm_version" ]; then
   step "Install pnpm $pnpm_version" sudo npm install --global "pnpm@$pnpm_version"
 fi
 
-printf '\nToolchain: Node.js %s, pnpm %s\n' "$(node --version)" "$(pnpm --version)"
+# Rust for packages/node-transport and packages/gateway, pinned by
+# rust-toolchain.toml. rustup lives in this account; its proxies are linked
+# into /usr/local/bin so every shell finds cargo without a profile.
+if ! command -v cargo >/dev/null 2>&1; then
+  step "Install rustup" sh -c 'curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none'
+  sudo ln -sf "$HOME"/.cargo/bin/* /usr/local/bin/
+fi
+step "Install the pinned Rust toolchain" rustup toolchain install
+
+printf '\nToolchain: Node.js %s, pnpm %s, %s\n' "$(node --version)" "$(pnpm --version)" "$(cargo --version)"
 step "Install workspace dependencies" env CI=1 pnpm install --frozen-lockfile
 step "Build the web application" pnpm build
 

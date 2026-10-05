@@ -41,7 +41,7 @@ LIMITS = {
     "requestTimeoutMs": 30000,
     "maxCommandBytes": 8192,
     "maxPathBytes": 4096,
-    "maxExecTimeoutMs": 600000,
+    "maxExecTimeoutMs": 1800000,
     "maxOutputBytes": 262144,
     "outputPageBytes": 65536,
     "maxReadBytes": 524288,
