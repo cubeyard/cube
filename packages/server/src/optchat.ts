@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Type, type Message, type Models } from "@earendil-works/pi-ai";
+import { cleanupSessionResources, Type, type Message, type Models } from "@earendil-works/pi-ai";
 import { createRegistry, defineDoc, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, ROOT_CONVERSATION_ID, section, type LiveState, type Conversation, type ConversationId, type Cursor, type Page, type EntryId, type EntryRecord } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openStorage } from "./durable-agent.ts";
@@ -286,7 +286,9 @@ export class OptChat {
     const total = stored && stored.total <= messages.length && this.memory.restore(messages.slice(0, stored.total), toParts(stored.parts)) ? stored.total : 0;
     for (const message of messages.slice(total)) this.memory.append(message);
     const watch = await this.conversation.watch(context);
-    watch.start(async () => { void this.sync(); this.notify(); });
+    // Delivery runs again on every change too: a steered message is
+    // forgotten once Pi has placed it, which happens after the steer.
+    watch.start(async () => { void this.sync(); this.notify(); void this.drain(); });
     this.stopWatch = async () => { await watch.stop(); };
     this.harness.resume();
     this.pump();
@@ -702,6 +704,11 @@ export class OptChat {
     await this.stopWatch?.().catch(() => {});
     await this.syncing;
     await (this.harness ?? this.storage)?.close(context).catch(() => {});
+    // pi-ai keeps a provider connection per cache key open for minutes
+    // (Codex's WebSocket); it would hold cubed's exit that long.
+    for (const key of [this.cacheKey, `${this.cacheKey}-compact`]) {
+      try { cleanupSessionResources(key); } catch (error) { log.warn("session resources not released", { error }); }
+    }
   }
 }
 
