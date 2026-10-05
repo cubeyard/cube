@@ -10,8 +10,9 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, registerSessionResourceCleanup, type Message } from "@earendil-works/pi-ai";
 import { OptChat, OptChatEvents, type OptThreads } from "../src/optchat.ts";
+import { COMPACT, SCALE } from "../src/optchat-compactor.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 import type { ThreadEvents, ThreadTranscript } from "../src/thread-events.ts";
 
@@ -24,6 +25,7 @@ const userBlocks = (message: Message) => typeof message.content === "string" ? [
 type Turn = { system: string; messages: Message[]; tools: string[] };
 const turns: Turn[] = [];
 const compactions: string[] = [];
+const compactorSystems = new Set<string>();
 type Reply = ReturnType<typeof fauxAssistantMessage>;
 let script: Array<(turn: Turn) => Reply | Promise<Reply>> = [];
 // Closed: the compactor waits, so the next turn waits for it.
@@ -33,6 +35,8 @@ let inProjects = false;
 const gate = () => { let open!: () => void; const promise = new Promise<void>(resolve => { open = resolve; }); return { promise, open }; };
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
 const cacheKeys = new Set<string>();
+const released: string[] = [];
+registerSessionResourceCleanup(sessionId => { if (sessionId) released.push(sessionId); });
 faux.setResponses(Array.from({ length: 200 }, () => async (request, options) => {
   const system = request.messages.find(message => message.role === "system");
   assert.equal(options?.cacheRetention, "short", "short cache entries only");
@@ -41,6 +45,7 @@ faux.setResponses(Array.from({ length: 200 }, () => async (request, options) => 
     await compactorGate;
     const step = userBlocks(request.messages.find(message => message.role === "user")!).at(-1)!;
     compactions.push(step);
+    compactorSystems.add(textOf(system));
     assert.ok(!/\d+\+\d+\|/.test(userBlocks(request.messages[1]!)[0]!), "no ids in the compactor's context");
     // Too long once, so the size feedback is exercised.
     if (request.messages.length === 2 && compactions.length === 1) return fauxAssistantMessage("w".repeat(600));
@@ -140,7 +145,12 @@ try {
   ] });
   await idle(chat);
   assert.deepEqual(told, [`${THREAD}:also add a test`]);
-  assert.ok(compactions.some(step => step.startsWith("For scale")), "the compactor sees the scale line");
+  // SCALE beside the step was merged into real lines; it lives in the system
+  // prompt, marked as an invented example, and never in a step.
+  assert.deepEqual([...compactorSystems], [COMPACT], "one constant compactor system prompt");
+  assert.ok(COMPACT.includes(`<example>\n${SCALE}\n</example>`), "the scale line is an invented example in the system prompt");
+  assert.ok(compactions.every(step => !step.includes(SCALE) && !step.includes("For scale")), "no step carries the scale line");
+  assert.ok(compactions.every(step => /^(Compress this message|Merge these two lines) .* covers (this message|these two lines) only:\n/.test(step)), "a step says its line covers its input only");
   assert.ok(compactions.length >= 2, "the oversized line was retried");
   const [chatKey, ...others] = [...cacheKeys].sort();
   assert.match(chatKey!, /^optchat-[0-9a-f-]{36}$/, "the chat has its own cache key");
@@ -185,6 +195,11 @@ try {
   await delay(100);
   projectsCall.open();
   await idle(chat);
+  // Once Pi has placed the steered messages, nothing waits and the chat is idle.
+  await delay(200);
+  assert.deepEqual(await chat.pending(), [], "steered messages are forgotten once placed");
+  const steeredTurn = await new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => null })).read();
+  assert.equal(steeredTurn.status.state, "completed", "a steered turn ends idle, not working");
 
   // Messages that wait for the compactor go into one turn together.
   const compacting = gate();
@@ -231,6 +246,10 @@ try {
   await delay(100);
   viewBeforeClose = chat.memory.render();
 } finally { await chat.close(); }
+// Close releases the provider sessions of both cache keys (Codex keeps a
+// WebSocket per key open for minutes, which held cubed's exit).
+const [chatKey] = [...cacheKeys].sort();
+assert.deepEqual(released.filter(key => key.startsWith("optchat-")).sort(), [chatKey, `${chatKey}-compact`], "close releases the chat's and the compactor's sessions");
 
 // A reopen goes on from the same view and sees the same history.
 const before = turns.at(-1)!;
