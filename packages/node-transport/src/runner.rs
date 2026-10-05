@@ -685,9 +685,10 @@ impl Runner {
             let _ = fs::rename(&paths.console, paths.dir.join("console.prev.log"));
         }
         let _ = fs::remove_file(&paths.qmp);
+        // Sockets of runners before the socket pair.
+        let _ = fs::remove_file(&paths.net);
         let _ = fs::remove_file(&paths.qemu_net);
-        self.pumps
-            .open(vm_id, thread_id, &paths.net, &paths.qemu_net, grant)?;
+        let net_fd = self.pumps.open(vm_id, thread_id, grant)?;
         let args = vm::qemu_args(&vm::Launch {
             platform: &self.installation.platform,
             firmware: self.installation.firmware.as_deref(),
@@ -696,10 +697,13 @@ impl Runner {
             memory_mib: config.memory_mib,
             mac: &config.mac,
             paths: &paths,
+            net_fd: std::os::fd::AsRawFd::as_raw_fd(&net_fd),
         })?;
         self.journal.lock().unwrap().set_started(vm_id, now_ms())?;
         let spawned = vm::qemu_command(&self.installation.qemu, args, &paths.qemu_log)
             .and_then(|command| self.spawner.spawn(command));
+        // QEMU holds its own copy now (or failed to start).
+        drop(net_fd);
         let child = match spawned {
             Ok(child) => child,
             Err(error) => {

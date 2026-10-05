@@ -90,6 +90,8 @@ pub struct Launch<'a> {
     pub memory_mib: u32,
     pub mac: &'a str,
     pub paths: &'a VmPaths,
+    /// QEMU's inherited end of the frame socket pair.
+    pub net_fd: i32,
 }
 
 fn path_arg(prefix: &str, path: &Path, suffix: &str) -> OsString {
@@ -103,14 +105,7 @@ fn path_arg(prefix: &str, path: &Path, suffix: &str) -> OsString {
 /// because QEMU option syntax would split them.
 pub fn qemu_args(launch: &Launch<'_>) -> Result<Vec<OsString>> {
     let paths = launch.paths;
-    for path in [
-        &paths.disk,
-        &paths.seed,
-        &paths.console,
-        &paths.qmp,
-        &paths.net,
-        &paths.qemu_net,
-    ] {
+    for path in [&paths.disk, &paths.seed, &paths.console, &paths.qmp] {
         ensure!(path.is_absolute(), "VM paths must be absolute");
         ensure!(
             !path.to_string_lossy().contains(','),
@@ -159,15 +154,8 @@ pub fn qemu_args(launch: &Launch<'_>) -> Result<Vec<OsString>> {
         &paths.seed,
         "",
     ));
-    let mut netdev = path_arg(
-        "dgram,id=n0,local.type=unix,local.path=",
-        &paths.qemu_net,
-        "",
-    );
-    netdev.push(",remote.type=unix,remote.path=");
-    netdev.push(paths.net.as_os_str());
     args.push("-netdev".into());
-    args.push(netdev);
+    args.push(format!("dgram,id=n0,local.type=fd,local.str={}", launch.net_fd).into());
     args.push("-device".into());
     args.push(format!("virtio-net-pci,netdev=n0,mac={}", launch.mac).into());
     args.push("-device".into());
@@ -452,6 +440,7 @@ mod tests {
             memory_mib: 2048,
             mac: "02:aa:bb:cc:dd:ee",
             paths: &paths,
+            net_fd: 7,
         })
         .unwrap();
         let line: Vec<String> = args
@@ -467,7 +456,7 @@ mod tests {
             "-qmp unix:/var/lib/cube-runner/state/vms/3/qmp.sock,server=on,wait=off",
             "file=/var/lib/cube-runner/state/vms/3/disk.qcow2",
             "if=virtio,format=raw,readonly=on,file=/var/lib/cube-runner/state/vms/3/seed.img",
-            "-netdev dgram,id=n0,local.type=unix,local.path=/var/lib/cube-runner/state/vms/3/qemu-net.sock,remote.type=unix,remote.path=/var/lib/cube-runner/state/vms/3/net.sock",
+            "-netdev dgram,id=n0,local.type=fd,local.str=7",
             "-device virtio-net-pci,netdev=n0,mac=02:aa:bb:cc:dd:ee",
             "-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny",
         ] {
@@ -494,6 +483,7 @@ mod tests {
             memory_mib: 1024,
             mac: "02:00:00:00:00:01",
             paths: &paths,
+            net_fd: 7,
         })
         .unwrap();
         let line = args
@@ -519,6 +509,7 @@ mod tests {
                     memory_mib: 512,
                     mac: "02:00:00:00:00:01",
                     paths: &paths,
+                    net_fd: 7,
                 })
                 .is_err()
             );

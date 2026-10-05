@@ -41,15 +41,14 @@ if os.path.exists(os.path.join(here, "exit-at-once")):
     sys.stderr.write("fake qemu refused to start\n")
     sys.exit(3)
 
-net = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-net.bind(netdev["local.path"])
+net = socket.socket(fileno=int(netdev["local.str"]))
 
 
 def echo():
     while True:
         frame = net.recv(65536)
         try:
-            net.sendto(frame, netdev["remote.path"])
+            net.send(frame)
         except OSError:
             pass
 
