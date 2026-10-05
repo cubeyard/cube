@@ -150,7 +150,7 @@ try {
   assert.deepEqual([...compactorSystems], [COMPACT], "one constant compactor system prompt");
   assert.ok(COMPACT.includes(`<example>\n${SCALE}\n</example>`), "the scale line is an invented example in the system prompt");
   assert.ok(compactions.every(step => !step.includes(SCALE) && !step.includes("For scale")), "no step carries the scale line");
-  assert.ok(compactions.every(step => /^(Compress this message|Merge these two lines) .* covers (this message|these two lines) only:\n/.test(step)), "a step says its line covers its input only");
+  assert.ok(compactions.every(step => /^(Compress this message|Merge these two lines) into one( line)?\. Your line covers (this message|these two lines) only\. Write three versions of it, of about \d+, \d+ and \d+ words/.test(step)), "a step says its line covers its input only");
   assert.ok(compactions.length >= 2, "the oversized line was retried");
   const [chatKey, ...others] = [...cacheKeys].sort();
   assert.match(chatKey!, /^optchat-[0-9a-f-]{36}$/, "the chat has its own cache key");
