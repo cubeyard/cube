@@ -88,6 +88,12 @@ placeholder, and the gateway puts the host's GitHub token (`gh auth token` on
 the cubed host, or `CUBED_GITHUB_TOKEN`) into requests to github.com and
 api.github.com. The token never enters the machine, its seed or the runner.
 
+The UI opens on **chat**: OptChat, one endless chat that remembers everything
+said in it ([docs/optchat.md](docs/optchat.md)). It never runs code itself; it
+starts threads in your projects, follows their reports and tells them what to
+do next. Each turn sees the whole chat as a fixed-size view of one-line summaries
+and can zoom into any line, down to the original message.
+
 The current tools are `read`, `write`, `edit`, bounded `bash` and `codemode`,
 which runs one model-written JavaScript script that calls those tools.
 A thread can instead run on Claude Code with your own Claude Max login: choose

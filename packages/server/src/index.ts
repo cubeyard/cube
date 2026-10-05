@@ -22,6 +22,11 @@ import { ModelAuth } from "./model-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { UpdateService } from "./update-service.ts";
 import { versionInfo } from "./version.ts";
+import { OptChat, OptChatEvents } from "./optchat.ts";
+import { createLogger } from "./log.ts";
+import { cubeThreads } from "./optchat-threads.ts";
+import { PiThreadEvents } from "./pi-thread-events.ts";
+import { serveThreadEvents } from "./thread-events-http.ts";
 
 const CUBED_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
 const HELP = `usage: cubed [options]
@@ -189,6 +194,22 @@ export async function createCubed(options: {
   const catalog = async () => (await models.getAvailable()).map(({ provider, id }) => ({ provider, id }));
   /** What a new thread may start with: Pi's models, then claude · max. */
   const threadCatalog = async () => [...await catalog(), ...(conversations.claudeAvailable ? CLAUDE_MODELS : [])];
+  // OptChat, the user's one endless chat: opened once a model exists,
+  // retried by the recovery loop until then.
+  const optchatThreads = cubeThreads({ registry, conversations, catalog: threadCatalog });
+  let optchat: Promise<{ chat: OptChat; events: OptChatEvents }> | null = null;
+  let optchatError = "";
+  const openOptchat = () => optchat ??= OptChat.open({
+    directory: path.join(options.state, "optchat"), models, threads: optchatThreads,
+    model: async () => preferredModel(await catalog()), compactor: compactorModel(process.env.CUBED_OPTCHAT_COMPACTOR),
+  }).then(chat => ({ chat, events: new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => chat.failure() })) }))
+    .catch(error => {
+      optchat = null;
+      const message = error instanceof Error ? error.message : String(error);
+      if (message !== optchatError) createLogger("optchat").warn("chat unavailable", { error: message });
+      optchatError = message;
+      throw error;
+    });
   const projectView = (project: Project) => ({ ...project,
     availableRunnerCount: registry.availableRunners().length,
     runnerCount: registry.runnerCount(),
@@ -348,6 +369,19 @@ export async function createCubed(options: {
         if (parts[3] === "check" && method === "POST") return json({ project: await check(project) });
         if (method === "GET") return json({ project: projectView(project) });
       }
+      if (parts[0] === "api" && parts[1] === "optchat") {
+        const { chat, events } = await openOptchat();
+        if (parts[2] === "history" && method === "GET") return json(await events.read());
+        if (parts[2] === "stream" && method === "GET") return await serveThreadEvents(events, response);
+        if (parts[2] === "view" && method === "GET") return json({ view: chat.memory.render(), messages: chat.memory.length, failure: chat.failure() });
+        if (parts[2] === "stop" && method === "POST") { await chat.stop(); return json({ ok: true }); }
+        if (parts[2] === "prompt" && method === "POST") { const requestId = text("requestId"); await chat.send(text("text"), requestId); return json({ runId: requestId }); }
+        if (parts[2] === "model" && (method === "GET" || method === "PATCH")) {
+          const available = await catalog();
+          return json({ models: available, selected: await chat.selectModel(method === "PATCH" ? await selection(body, available) : undefined) });
+        }
+        return json({ error: "not found" }, 404);
+      }
       if (parts[0] === "api" && parts[1] === "threads") {
         const id = parts[2];
         if (parts.length > 4 && parts[3] !== "workspace") return json({ error: "not found" }, 404);
@@ -413,7 +447,8 @@ export async function createCubed(options: {
   fs.chmodSync(socket, 0o600);
   // Machines start in the background; a thread is used once its own is up.
   void conversations.boot();
-  const recovery = setInterval(() => { void conversations.boot(); }, 30000);
+  void openOptchat().catch(() => {});
+  const recovery = setInterval(() => { void conversations.boot(); void openOptchat().catch(() => {}); }, 30000);
   recovery.unref();
   let closePromise: Promise<void> | undefined;
   return { server, registry, conversations, gateway, close() {
@@ -421,7 +456,9 @@ export async function createCubed(options: {
       clearInterval(recovery);
       server.closeAllConnections();
       if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
-      await modelAuth.close(); await conversations.close();
+      await modelAuth.close();
+      await (await optchat?.catch(() => null))?.chat.close();
+      await conversations.close();
       await gateway?.stop();
       await egress.close();
       workspaceServer.closeAllConnections();
@@ -431,6 +468,14 @@ export async function createCubed(options: {
     })();
     return closePromise;
   } };
+}
+
+/** CUBED_OPTCHAT_COMPACTOR=provider/model picks OptChat's compactor; default: the chat's own model. */
+function compactorModel(value: string | undefined): ModelSelection | null {
+  if (!value?.trim()) return null;
+  const slash = value.indexOf("/");
+  if (slash <= 0 || slash === value.length - 1) throw new Error("CUBED_OPTCHAT_COMPACTOR must be provider/model");
+  return { provider: value.slice(0, slash), id: value.slice(slash + 1) };
 }
 
 interface CubedCli {

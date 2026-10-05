@@ -11,12 +11,12 @@ const SHOWN = new Set(["pi.user", "pi.assistant", "pi.tool-result"]);
 type Live = { run?: { taskId: number; inputs: number[] }; generation?: { message?: AssistantMessage }; tools?: ToolSlot[] };
 
 export class PiThreadEvents implements ThreadEvents {
-  private readonly agent: Agent;
+  private readonly agent: Pick<Agent, "conversation" | "storage">;
   private readonly owner: () => ThreadAgent | null;
   private readonly failure: () => string | null;
   private earlier: { head: number; events: ThreadEvent[] } | undefined;
   private settled: { key: string; status: ThreadStatus } | undefined;
-  constructor(options: { agent: Agent; owner: () => ThreadAgent | null; failure: () => string | null }) {
+  constructor(options: { agent: Pick<Agent, "conversation" | "storage">; owner: () => ThreadAgent | null; failure: () => string | null }) {
     this.agent = options.agent; this.owner = options.owner; this.failure = options.failure;
   }
 

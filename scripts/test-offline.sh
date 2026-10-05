@@ -22,6 +22,10 @@ OFFLINE_TESTS=(
   packages/server/test/codemode-test.ts
   packages/server/test/thread-events-test.ts
   packages/server/test/pi-compaction-test.ts
+  packages/server/test/optchat-memory-test.ts
+  packages/server/test/optchat-test.ts
+  packages/server/test/optchat-product-test.ts
+  packages/server/test/optchat-cache-test.ts
   packages/server/test/claude-agent-test.ts
   scripts/smoke-local.ts
   packages/web/test/transcript-test.ts
