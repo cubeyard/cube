@@ -29,7 +29,7 @@ const NODE_ID = /^node-[a-zA-Z0-9-]{1,123}$/;
 const PEER = /^[0-9a-f]{64}$/;
 const CODES = new Set(["NODE_UNAVAILABLE", "OUTCOME_UNKNOWN", "UNSUPPORTED", "UNAUTHORIZED", "WRONG_NODE", "INVALID_REQUEST", "CONFLICT",
   "CAPACITY_EXCEEDED", "DRAINING", "CANCELLED", "INCOMPATIBLE_PROTOCOL", "ENVIRONMENT_MISSING", "IO_ERROR", "LEASE_STALE", "NOT_FOUND"]);
-const MUTATIONS = new Set(["vm.allocate", "vm.start", "vm.stop", "vm.release"]);
+const MUTATIONS = new Set(["vm.allocate", "vm.start", "vm.stop", "vm.release", "vm.discard"]);
 export const RUNNER_CAPABILITIES = ["node.status", "vm.allocate", "vm.start", "vm.stop", "vm.inspect", "vm.release"] as const;
 export const VM_STATES = ["allocating", "allocated", "starting", "running", "stopping", "stopped", "releasing", "released", "retained", "failed"] as const;
 const ProtocolCompatibility = Schema.Struct({

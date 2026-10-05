@@ -77,7 +77,7 @@ try {
   // The protocol-3 client in process: hello, status, a version-1 config refused.
   const client = new IrohRunnerClient({ configPath: path.join(work, "runner.json") });
   const described = await client.describe();
-  assert.deepEqual(described.capabilities, ["node.hello", "node.status", "vm.allocate", "vm.start", "vm.stop", "vm.inspect", "vm.release"]);
+  assert.deepEqual(described.capabilities, ["node.hello", "node.status", "vm.allocate", "vm.start", "vm.stop", "vm.inspect", "vm.release", "vm.discard"]);
   assert.match(described.baseImageSha256, /^[0-9a-f]{64}$/);
   assert.equal(described.platform, "linux-x86_64");
   assert.equal((await client.health()).activeVms, 0);
