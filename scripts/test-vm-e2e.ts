@@ -236,6 +236,8 @@ try {
   assert.match((await prompt(pi, tool("read", { path: "notes/a.txt" }))).text, /one/);
   assert.equal((await prompt(pi, tool("edit", { path: "notes/a.txt", edits: [{ oldText: "one", newText: "two" }] }))).state, "completed");
   assert.equal(await bash(pi, "cat notes/a.txt; id -un; pwd; hostname | cut -c1-5"), "two\nagent\n/workspace\ncube-");
+  // Node and Python bring their own CA lists; the installation CA reaches them, also under sudo.
+  assert.equal(await bash(pi, "echo $NODE_EXTRA_CA_CERTS; sudo printenv NODE_EXTRA_CA_CERTS"), "/etc/ssl/certs/ca-certificates.crt\n/etc/ssl/certs/ca-certificates.crt");
   const coded = await prompt(pi, tool("codemode", { code: "const out = await tools.bash({ command: \"echo from-codemode > cm.txt; cat cm.txt\" }); return out;" }));
   assert.match(coded.text, /from-codemode/);
   const leaked = execFileSync("find", [work, "(", "-name", "a.txt", "-o", "-name", "cm.txt", ")", "-not", "-path", `${work}/github/*`], { encoding: "utf8" }).trim();
