@@ -242,6 +242,19 @@ try {
   assert.equal(leaked, "", "nothing the agent wrote appears outside the VM disk");
   log("1: write, read, edit, bash and codemode ran in the guest; nothing on the runner outside the VM disk");
 
+  // 1b. A guest that lost its packages (e.g. a first boot whose apt step
+  // failed) reinstalls them on the next boot instead of staying broken.
+  const bootedAt = await bash(pi, "uptime -s");
+  assert.equal(await bash(pi, "sudo apt-get remove -y -q git >/dev/null 2>&1; command -v git || echo gone"), "gone");
+  // Outside this command's unit: the helper stops a command's whole cgroup when it ends.
+  await bash(pi, "sudo systemd-run --quiet --on-active=3 systemctl reboot; echo scheduled");
+  await sleep(15000);
+  const repaired = await until("git back after the reboot", 300, async () => {
+    try { const out = await bash(pi, "command -v git; uptime -s", 60); return out.startsWith("/usr/bin/git") ? out : undefined; } catch { return undefined; }
+  });
+  assert.notEqual(repaired.split("\n")[1], bootedAt, "the guest really rebooted");
+  log(`1b: git removed and the guest rebooted; the per-boot script reinstalled it (${repaired.split("\n")[0]})`);
+
   // 2. cubed SIGKILL while a command runs: the next cubed reattaches; it ran once.
   const longRun = `e2e-${++requests}`;
   await api(`/api/threads/${pi}/prompt`, "POST", { text: tool("bash", { command: "sleep 20; echo done >> f.txt", timeoutMs: 120000 }), requestId: longRun });
