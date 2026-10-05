@@ -70,7 +70,11 @@ impl Default for LanLimits {
     fn default() -> Self {
         Self {
             max_flows: 256,
-            buffer: 256 * 1024,
+            // Each direction's window: it has to cover bandwidth x RTT to a
+            // remote runner (50 MB/s at 20 ms is 1 MB). 256 KiB capped a Mac
+            // runner 17 ms away at ~10 MB/s. Pages are only touched as the
+            // ring fills, so idle flows cost little resident memory.
+            buffer: 2 * 1024 * 1024,
             idle: Duration::from_secs(600),
             handshake: Duration::from_secs(30),
             dial: Duration::from_secs(10),
