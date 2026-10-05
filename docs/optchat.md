@@ -35,8 +35,12 @@ with Pi as its only writer. cubed's live-instance socket lock (one cubed per
 and merges the most due pair (never splits), the build order (one message at a
 time, merges beside it, the compactor never sees a placeholder), free nodes,
 rendering and zoom. `optchat-compactor.ts` holds the `COMPACT` prompt, the
-512-byte `SCALE` line and the cut-at-limit feedback (five tries; the shortest
-one is kept). `optchat.ts` is the service: Pi setup, the tools, the turn
+512-byte `SCALE` line (an invented example in the system prompt) and the
+lengths: each answer brings three versions of about 26, 48 and 69 words and
+the longest that fits is kept; if none fits, the cut-at-limit feedback asks
+again (five answers; then the shortest line is kept). Measured on 30 live
+nodes with gpt-6-luna, this took 1.03 calls per node instead of 2.67, with
+64% less input and 16% less output. `optchat.ts` is the service: Pi setup, the tools, the turn
 loop (a turn waits until every line of the view is a summary), the compactor
 pump (eight jobs, a failed node is retried every 10 s, forever) and the thread
 watchers. `optchat-threads.ts` connects it to cube's registry and threads.

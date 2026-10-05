@@ -3,7 +3,8 @@
  * and the compactor only ever gets summaries. */
 import assert from "node:assert/strict";
 import { bytes, capText, cutBytes, end, Memory, PLACEHOLDER, start, type Part } from "../src/optchat-memory.ts";
-import { SCALE } from "../src/optchat-compactor.ts";
+import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { candidates, compactNode, lengths, SCALE } from "../src/optchat-compactor.ts";
 import { entryMessages, threadReport } from "../src/optchat.ts";
 
 assert.equal(bytes(SCALE), 512, "the scale line is exactly NODE bytes");
@@ -124,6 +125,27 @@ function drain(memory: Memory, seen: string[][] = []): void {
   assert.equal(reopened.render(), live.render(), "and goes on the same way");
   const gap = new Memory({ view: 600, node: 60 });
   assert.equal(gap.restore(log.slice(0, 30), parts), false, "unbuilt parts are refused");
+}
+
+// One compactor answer brings three lengths; the longest that fits is kept
+// without another call. Word counts, not bytes: Luna overshot byte limits
+// on 2.7 calls per node, and one call per node with three lengths.
+assert.deepEqual(lengths(512), [26, 48, 69], "about 26, 48 and 69 words around 512 bytes");
+assert.deepEqual(candidates("1. user: a\n\n- user: b\nuser: c"), ["user: a", "user: b", "user: c"], "list markers and blank lines go");
+{
+  const replies: string[][] = [];
+  const faux = fauxProvider({ tokensPerSecond: 100_000 });
+  faux.setResponses([
+    () => fauxAssistantMessage(["user: short", `user: middle ${"m".repeat(40)}`, `user: long ${"l".repeat(80)}`].join("\n")),
+    () => fauxAssistantMessage(["user: ".concat("a".repeat(70)), "user: ".concat("b".repeat(80)), "user: ".concat("c".repeat(90))].join("\n")),
+    request => { replies.push(request.messages.map(message => JSON.stringify(message.content))); return fauxAssistantMessage(["user: tiny", "user: fits now"].join("\n")); },
+  ]);
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const model = { provider: faux.getModel().provider, id: faux.getModel().id };
+  assert.equal(await compactNode({ models, model, context: [], source: { message: "x".repeat(200) }, node: 64 }), `user: middle ${"m".repeat(40)}`, "the longest line that fits");
+  assert.equal(await compactNode({ models, model, context: [], source: { merge: ["a", "b"] }, node: 64 }), "user: fits now", "none fits: told, then the longest that fits");
+  assert.match(replies[0]!.at(-1)!, /All three are over 64 bytes; the shortest is 76 bytes/, "the feedback names the shortest");
 }
 
 console.log("optchat memory: ok");
