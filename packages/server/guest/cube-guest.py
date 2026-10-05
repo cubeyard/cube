@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -113,6 +114,11 @@ class Config:
         # Commands and files belong to this account; None keeps the caller's.
         self.user = "agent"
         self.ready_files = ["/var/lib/cloud/instance/boot-finished", "/var/lib/cube/initialized"]
+        # Same list as GUEST_PACKAGES in vm-seed.ts. boot-finished survives a
+        # reboot, so readiness also needs the commands themselves: a first boot
+        # whose package install failed must not count as ready forever.
+        self.packages = ["git", "gh", "curl", "ca-certificates"]
+        self.commands = ["git", "gh", "curl"]
         self.launcher = SystemdLauncher()
 
 
@@ -328,7 +334,8 @@ def state_of(op, cursor=0):
 # --- operations ----------------------------------------------------------
 
 def ready():
-    return all(os.path.exists(path) for path in CONFIG.ready_files)
+    return all(os.path.exists(path) for path in CONFIG.ready_files) \
+        and all(shutil.which(command) for command in CONFIG.commands)
 
 
 def op_hello(header, body):
@@ -616,6 +623,21 @@ def recover():
     return 0
 
 
+def packages(attempts=5):
+    """Every boot (cloud-init per-boot script): install the guest packages a
+    failed first boot left out. cloud-init's own package step runs once."""
+    if all(shutil.which(command) for command in CONFIG.commands):
+        return 0
+    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+    for attempt in range(attempts):
+        if subprocess.run(["apt-get", "update", "-q"], env=env).returncode == 0 \
+                and subprocess.run(["apt-get", "install", "-y", "-q"] + CONFIG.packages, env=env).returncode == 0 \
+                and all(shutil.which(command) for command in CONFIG.commands):
+            return 0
+        time.sleep(min(60, 10 * (attempt + 1)))
+    return 1
+
+
 def init():
     """First boot (cloud-init runcmd): the journal and the agent's directories."""
     os.makedirs(ops_dir(), mode=0o700, exist_ok=True)
@@ -677,10 +699,12 @@ def main(argv):
         return recover()
     if command == "init":
         return init()
+    if command == "packages":
+        return packages()
     if command == "--version":
         print("cube-guest %s" % VERSION)
         return 0
-    sys.stderr.write("usage: cube-guest ssh | call OP | wrap ID | finish ID | recover | init | --version\n")
+    sys.stderr.write("usage: cube-guest ssh | call OP | wrap ID | finish ID | recover | init | packages | --version\n")
     return 2
 
 

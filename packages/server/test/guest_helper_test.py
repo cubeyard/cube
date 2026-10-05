@@ -64,7 +64,7 @@ class GuestHelperTest(unittest.TestCase):
         os.mkdir(self.workspace)
         self.launcher = FakeLauncher()
         guest.configure(state=os.path.join(self.root, "state"), workspace=self.workspace, env_file=os.path.join(self.root, "env"),
-                        user=None, ready_files=[], launcher=self.launcher)
+                        user=None, ready_files=[], commands=[], launcher=self.launcher)
 
     def tearDown(self):
         shutil.rmtree(self.root)
@@ -87,7 +87,9 @@ class GuestHelperTest(unittest.TestCase):
         self.assertTrue(answer["ready"])
         self.assertEqual(answer["limits"]["maxWriteBytes"], 524288)
         self.assertIn("fs.write", answer["capabilities"])
-        guest.configure(ready_files=[os.path.join(self.root, "boot-finished")])
+        guest.configure(commands=["cube-no-such-command"])
+        self.assertFalse(call("hello", {})[0]["ready"], "a missing guest package is not ready")
+        guest.configure(commands=[], ready_files=[os.path.join(self.root, "boot-finished")])
         self.assertFalse(call("hello", {})[0]["ready"])
         call("exec", self.exec_header("e1", epoch=42))
         self.assertEqual(call("hello", {})[0]["epoch"], 42)

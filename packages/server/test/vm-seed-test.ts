@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
 import { newPlaceholder } from "../src/egress-policy.ts";
-import { GUEST_HELPER_PATH, MAX_SEED_BYTES, guestHelper, vmMac, vmSeed } from "../src/vm-seed.ts";
+import { GUEST_HELPER_PATH, GUEST_PACKAGES, MAX_SEED_BYTES, guestHelper, vmMac, vmSeed } from "../src/vm-seed.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-seed-"));
 try {
@@ -77,3 +77,8 @@ try {
   assert.throws(() => vmSeed({ vmId, hostKey, clientKeyPub, caPem, placeholders: { github: realToken } }), /invalid placeholder/);
   console.log("ok: vm seed holds the pinned host key, CA, restricted client key, placeholder and helper; no secret value or address; valid cloud-config");
 } finally { fs.rmSync(root, { recursive: true, force: true }); }
+
+// The helper retries the same packages on every boot that cloud-init installs once.
+const helperPackages = /self\.packages = (\[[^\]]*\])/.exec(guestHelper().helper)?.[1];
+assert.deepEqual(JSON.parse(helperPackages!.replaceAll("'", "\"")), GUEST_PACKAGES);
+console.log("ok: guest helper retries the seed's packages");

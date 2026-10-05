@@ -2,6 +2,7 @@
  * The runner config is version 2 (protocol 3, VM runners):
  * {"version":2,"binding":{"nodeId","threadId","environmentId"},"controlKey":"/abs/control.key",
  *  "serverPeer":"<runner peer>","network":"loopback|direct|relay","address":"host:port"} (no address for relay), mode 0600. */
+import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { Registry } from "../packages/server/src/registry.ts";
@@ -21,6 +22,17 @@ const described = await client.describe();
 const health = await client.health();
 const registry = new Registry(path.join(values.state, "registry.sqlite"));
 try {
+  // Each runner needs its own control identity: cubed serializes calls per
+  // runner, and two endpoints publishing one Iroh identity break each other
+  // (relay especially).
+  const controlKey = (configPath: string) => {
+    try { return fs.readFileSync(JSON.parse(fs.readFileSync(configPath, "utf8")).controlKey); } catch { return undefined; }
+  };
+  const mine = controlKey(values.config);
+  const retired = new Set(registry.runnerStatuses().filter(status => status.retiredAt).map(status => status.id));
+  const shared = registry.listRunners().find(runner => runner.nodeId !== client.binding.nodeId && !retired.has(runner.threadId)
+    && mine && controlKey(runner.configPath)?.equals(mine));
+  if (shared) throw new Error(`control key already used by runner ${shared.nodeId}; create a separate control key for each runner`);
   registry.enrollRunner({ ...client.binding, configPath: values.config, configHash: client.configHash });
   console.log(JSON.stringify({ ...client.binding, profile: "vm-runner", admitted: true, softwareVersion: described.softwareVersion,
     platform: described.platform, baseImageSha256: described.baseImageSha256, maxActiveVms: health.maxActiveVms,
