@@ -94,6 +94,9 @@ export function vmSeed(input: SeedInput): VmSeed {
         content: "PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\nMatch User root\n\tAuthorizedKeysFile /etc/cube/authorized_keys\n" },
       { path: "/etc/cube/env", permissions: "0644", owner: "root:root", content: `${env}\n` },
       { path: "/etc/gitconfig", permissions: "0644", owner: "root:root", content: gitconfig },
+      // cloud-init installs `packages` once; this retries on every boot.
+      { path: "/var/lib/cloud/scripts/per-boot/cube-packages", permissions: "0755", owner: "root:root",
+        content: `#!/bin/sh\nexec ${GUEST_HELPER_PATH} packages\n` },
     ],
     runcmd: [
       [GUEST_HELPER_PATH, "init"],

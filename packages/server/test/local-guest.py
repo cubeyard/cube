@@ -70,7 +70,7 @@ class ProcessLauncher:
 
 def configure(root):
     guest.configure(state=os.path.join(root, "state"), workspace=os.path.join(root, "workspace"),
-                    env_file=os.path.join(root, "env"), user=None, ready_files=[], launcher=ProcessLauncher(root))
+                    env_file=os.path.join(root, "env"), user=None, ready_files=[], commands=[], launcher=ProcessLauncher(root))
 
 
 def supervise(root, op_id, timeout_ms):
