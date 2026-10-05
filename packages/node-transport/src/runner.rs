@@ -716,6 +716,7 @@ impl Runner {
                 return self.current(vm_id);
             }
         };
+        let pid = child.id();
         let exited = self.watch(vm_id, child, paths.qemu_log.clone());
         let ready =
             Self::wait_for_qmp(paths.qmp.clone(), vm_id.into(), exited.clone(), START_WAIT).await;
@@ -735,7 +736,9 @@ impl Runner {
                 if ready {
                     let _ = runner.mark_running(&vm_id);
                 } else {
-                    runner.kill(&vm_id);
+                    // Only this start's QEMU: by the time QMP gave up, it may
+                    // have exited and a later start may run under the same id.
+                    runner.kill_pid(&vm_id, pid);
                 }
             });
         }
@@ -844,7 +847,16 @@ impl Runner {
 
     /// SIGKILL for a QEMU this process spawned and has not reaped yet.
     fn kill(&self, vm_id: &str) {
+        let pid = self.live.lock().unwrap().get(vm_id).map(|live| live.pid);
+        if let Some(pid) = pid {
+            self.kill_pid(vm_id, pid);
+        }
+    }
+
+    /// SIGKILL `vm_id`'s QEMU only if it is still the process `pid`.
+    fn kill_pid(&self, vm_id: &str, pid: u32) {
         if let Some(live) = self.live.lock().unwrap().get(vm_id)
+            && live.pid == pid
             && !*live.exited.borrow()
         {
             // The entry is removed before the reaper reaps, so while we hold
