@@ -128,7 +128,7 @@ export function entryMessages(entry: EntryRecord): LogMessage[] {
       if (message.stopReason === "error") continue;
       for (const part of message.content) {
         if (part.type === "text" && part.text.trim()) out.push({ kind: "talk", text: part.text, date });
-        else if (part.type === "toolCall" && message.stopReason !== "aborted") out.push({ kind: "tool", text: `${part.name} ${JSON.stringify(part.arguments ?? {})}`, date });
+        else if (part.type === "toolCall" && message.stopReason !== "aborted") out.push({ kind: "tool", text: capText(`${part.name} ${JSON.stringify(part.arguments ?? {})}`), date });
       }
     } else if (entry.kind === "pi.tool-result" && message.role === "toolResult") {
       // A zoom result copies lines of this chat: logged as a pointer, so the

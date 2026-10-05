@@ -92,6 +92,10 @@ function drain(memory: Memory, seen: string[][] = []): void {
   const result = { id: 3, conversationId: 1, kind: "pi.tool-result", model: [{ role: "toolResult", toolCallId: "c", toolName: "threads", isError: false, timestamp: 6,
     content: [{ type: "text", text: "x".repeat(40_000) }] }] } as never;
   assert.ok(entryMessages(result)[0]!.text.length <= 30_000, "tool results are capped");
+  const bigCall = { id: 7, conversationId: 1, kind: "pi.assistant", model: [{ role: "assistant", timestamp: 5, content: [
+    { type: "toolCall", id: "d", name: "spawn", arguments: { tasks: [{ project: "cube", task: "y".repeat(40_000) }] } },
+  ] }] } as never;
+  assert.ok(entryMessages(bigCall)[0]!.text.length <= 30_000, "tool call arguments are capped too");
   // A zoom result copies the chat: its ids and "user:" tags must not reach
   // the compactor as new words of the user, nor be summarized again.
   const zoomed = (text: string) => entryMessages({ id: 6, conversationId: 1, kind: "pi.tool-result", model: [{ role: "toolResult", toolCallId: "c", toolName: "zoom", isError: false, timestamp: 6,
