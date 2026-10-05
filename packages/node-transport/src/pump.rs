@@ -93,7 +93,9 @@ impl Pumps {
     ) -> Result<()> {
         self.close(vm_id);
         let _ = std::fs::remove_file(net);
-        let socket = Arc::new(UnixDatagram::bind(net)?);
+        let socket = UnixDatagram::bind(net)?;
+        enlarge_buffers(&socket);
+        let socket = Arc::new(socket);
         let current: Slot = Arc::default();
         let reader = tokio::spawn(relay_from_qemu(socket.clone(), current.clone()));
         let pump = Arc::new(Pump {
@@ -206,9 +208,7 @@ impl Pumps {
         let mut reassembler = Reassembler::default();
         while let Ok(datagram) = connection.read_datagram().await {
             if let Some(frame) = reassembler.push(datagram) {
-                // QEMU may not have bound its socket yet during boot; a lost
-                // frame is packet loss to the guest.
-                let _ = pump.socket.send_to(&frame, &pump.qemu).await;
+                send_to_qemu(&pump.socket, &frame, &pump.qemu).await;
             }
         }
         let mut current = pump.current.lock().unwrap();
@@ -217,6 +217,43 @@ impl Pumps {
             .is_some_and(|c| c.stable_id() == connection.stable_id())
         {
             *current = None;
+        }
+    }
+}
+
+/// Unix datagram buffers are tiny on macOS (`net.local.dgram.recvspace` is
+/// 4 KiB): a burst from the gateway overflowed them and most frames were lost.
+/// Ask for more; the kernel caps it at its own limit.
+fn enlarge_buffers(socket: &UnixDatagram) {
+    use std::os::fd::AsRawFd;
+    const SIZE: libc::c_int = 4 << 20;
+    for option in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
+        // SAFETY: plain setsockopt on a socket this process owns.
+        unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                option,
+                (&SIZE as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+}
+
+/// QEMU's receive buffer belongs to QEMU. When it is full macOS answers
+/// ENOBUFS instead of blocking, so wait briefly and retry: that is
+/// backpressure, not loss. A frame that still does not fit within 50 ms
+/// (or while QEMU has not bound its socket yet during boot) is dropped,
+/// which the guest's TCP treats as packet loss.
+async fn send_to_qemu(socket: &UnixDatagram, frame: &[u8], qemu: &Path) {
+    for attempt in 0..50u64 {
+        match socket.send_to(frame, qemu).await {
+            Ok(_) => return,
+            Err(e) if e.raw_os_error() == Some(libc::ENOBUFS) => {
+                tokio::time::sleep(Duration::from_micros(100 * (attempt + 1).min(10))).await;
+            }
+            Err(_) => return,
         }
     }
 }

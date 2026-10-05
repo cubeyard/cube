@@ -58,6 +58,8 @@ pub struct VmStatus {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     pub last_error: Option<String>,
+    pub dropped_frames: u64,
+    pub path: Option<crate::link::PathReport>,
 }
 
 struct Vm {
@@ -270,6 +272,8 @@ fn status(vm_id: &str, vm: &Vm) -> VmStatus {
         rx_bytes: stats.rx_bytes.load(Relaxed),
         tx_bytes: stats.tx_bytes.load(Relaxed),
         last_error: link.last_error.clone(),
+        dropped_frames: vm.slot.dropped.load(Relaxed),
+        path: vm.slot.path(),
     }
 }
 
