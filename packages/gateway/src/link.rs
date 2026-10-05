@@ -286,14 +286,8 @@ impl FrameSink for IrohSink {
         let Some(connection) = &self.current else {
             return;
         };
-        let Some(max) = connection.max_datagram_size() else {
-            return;
-        };
-        for datagram in self.fragmenter.split(frame, max) {
-            // Congested: the oldest datagram is dropped, the guest's TCP
-            // retransmits.
-            let _ = connection.send_datagram(datagram);
-        }
+        // Congested: this frame is dropped whole; the guest's TCP retransmits.
+        let _ = cube_node_transport::l2::send_frame(connection, &mut self.fragmenter, frame);
     }
 }
 

@@ -148,6 +148,29 @@ impl Fragmenter {
     }
 }
 
+/// Sends one frame or drops all of it. `send_datagram` would instead evict
+/// the oldest queued datagrams when the connection is congested, which
+/// silently tears earlier frames apart. Dropping the newest whole frame is
+/// what a full router queue does; the guest's TCP sees ordinary loss.
+/// Returns false when the frame was dropped.
+pub fn send_frame(
+    connection: &iroh::endpoint::Connection,
+    fragmenter: &mut Fragmenter,
+    frame: &[u8],
+) -> bool {
+    let Some(max) = connection.max_datagram_size() else {
+        return false;
+    };
+    let datagrams = fragmenter.split(frame, max);
+    let total: usize = datagrams.iter().map(Bytes::len).sum();
+    if connection.datagram_send_buffer_space() < total {
+        return false;
+    }
+    datagrams
+        .into_iter()
+        .all(|datagram| connection.send_datagram(datagram).is_ok())
+}
+
 /// Keeps a few partial frames; datagrams may arrive reordered or not at all.
 #[derive(Default)]
 pub struct Reassembler {

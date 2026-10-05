@@ -521,6 +521,9 @@ impl Stack {
         );
         s.set_nagle_enabled(false);
         s.set_ack_delay(None);
+        // Without congestion control smoltcp sends its whole window at once;
+        // across a slower Iroh path that overflows the datagram queue.
+        s.set_congestion_control(tcp::CongestionControl::Cubic);
         s.set_timeout(Some(limits.tcp_timeout.into()));
         s
     }
