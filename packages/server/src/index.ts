@@ -199,10 +199,12 @@ export async function createCubed(options: {
   const optchatThreads = cubeThreads({ registry, conversations, catalog: threadCatalog });
   let optchat: Promise<{ chat: OptChat; events: OptChatEvents }> | null = null;
   let optchatError = "";
-  const openOptchat = () => optchat ??= OptChat.open({
+  // Inside the promise: a bad CUBED_OPTCHAT_COMPACTOR must reject here,
+  // not throw out of startup or the recovery timer and end cubed.
+  const openOptchat = () => optchat ??= (async () => OptChat.open({
     directory: path.join(options.state, "optchat"), models, threads: optchatThreads,
     model: async () => preferredModel(await catalog()), compactor: compactorModel(process.env.CUBED_OPTCHAT_COMPACTOR),
-  }).then(chat => ({ chat, events: new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => chat.failure() })) }))
+  }))().then(chat => ({ chat, events: new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => chat.failure() })) }))
     .catch(error => {
       optchat = null;
       const message = error instanceof Error ? error.message : String(error);
