@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { bytes, capText, cutBytes, end, Memory, PLACEHOLDER, start, type Part } from "../src/optchat-memory.ts";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { candidates, compactNode, lengths, SCALE } from "../src/optchat-compactor.ts";
-import { entryMessages, threadReport } from "../src/optchat.ts";
+import { entryMessages, threadReport, ZOOM_ECHO } from "../src/optchat.ts";
 
 assert.equal(bytes(SCALE), 512, "the scale line is exactly NODE bytes");
 assert.equal(cutBytes("aé", 2), "a", "a cut never splits a character");
@@ -89,9 +89,15 @@ function drain(memory: Memory, seen: string[][] = []): void {
     { type: "thinking", thinking: "secret plan" }, { type: "text", text: "on it" }, { type: "toolCall", id: "c", name: "zoom", arguments: { id: 0, n: 1 } },
   ] }] } as never;
   assert.deepEqual(entryMessages(assistant), [{ kind: "talk", text: "on it", date: 5 }, { kind: "tool", text: 'zoom {"id":0,"n":1}', date: 5 }]);
-  const result = { id: 3, conversationId: 1, kind: "pi.tool-result", model: [{ role: "toolResult", toolCallId: "c", toolName: "zoom", isError: false, timestamp: 6,
+  const result = { id: 3, conversationId: 1, kind: "pi.tool-result", model: [{ role: "toolResult", toolCallId: "c", toolName: "threads", isError: false, timestamp: 6,
     content: [{ type: "text", text: "x".repeat(40_000) }] }] } as never;
   assert.ok(entryMessages(result)[0]!.text.length <= 30_000, "tool results are capped");
+  // A zoom result copies the chat: its ids and "user:" tags must not reach
+  // the compactor as new words of the user, nor be summarized again.
+  const zoomed = (text: string) => entryMessages({ id: 6, conversationId: 1, kind: "pi.tool-result", model: [{ role: "toolResult", toolCallId: "c", toolName: "zoom", isError: false, timestamp: 6,
+    content: [{ type: "text", text }] }] } as never);
+  assert.deepEqual(zoomed("2+0|user: here are my notes\n...6 KB..."), [{ kind: "echo", text: ZOOM_ECHO, date: 6 }], "a zoom result is logged as a pointer");
+  assert.deepEqual(zoomed("No line 5+2."), [{ kind: "echo", text: "No line 5+2.", date: 6 }], "a refused zoom stays as it was");
   assert.deepEqual(entryMessages({ id: 4, conversationId: 1, kind: "optchat.turn" } as never), [], "turn markers are not messages");
   const attempt = (stopReason: string) => ({ id: 5, conversationId: 1, kind: "pi.assistant", model: [{ role: "assistant", timestamp: 7, stopReason, content: [
     { type: "text", text: "half a reply" }, { type: "toolCall", id: "d", name: "spawn", arguments: {} },

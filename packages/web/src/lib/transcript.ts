@@ -3,7 +3,8 @@ import type { ThreadTranscript } from "./types.ts";
 /** One rendered row of a thread transcript. A tool call and its result
  * share one row. */
 export type TranscriptRow =
-  | { kind: "user"; id: string; text: string }
+  /** `from`: a thread's report (its short id), shown as the thread's, without the "[id] " prefix. */
+  | { kind: "user"; id: string; text: string; from?: string }
   | { kind: "assistant"; id: string; text: string; reasoning: boolean; labelled: boolean }
   | { kind: "tool"; id: string; name: string; summary: string; input: string | null; output: string; state: ToolState };
 /** `waiting`: called, no result yet while the thread works; `open`: the run
@@ -24,7 +25,10 @@ export function transcriptRows(transcript: Pick<ThreadTranscript, "events" | "st
   }
   const rows: TranscriptRow[] = [];
   for (const event of transcript.events) {
-    if (event.type === "user-message") rows.push({ kind: "user", id: event.id, text: event.text });
+    if (event.type === "user-message") {
+      const from = event.from;
+      rows.push(from ? { kind: "user", id: event.id, text: event.text.replace(`[${from}] `, ""), from } : { kind: "user", id: event.id, text: event.text });
+    }
     else if (event.type === "assistant-text") {
       rows.push({ kind: "assistant", id: event.id, text: event.text, reasoning: event.reasoning, labelled: rows.at(-1)?.kind !== "assistant" });
     } else if (event.type === "tool-call") {

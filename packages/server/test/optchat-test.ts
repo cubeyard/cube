@@ -145,6 +145,11 @@ try {
   ] });
   await idle(chat);
   assert.deepEqual(told, [`${THREAD}:also add a test`]);
+  // The report is shown as the thread's, the user's own messages as theirs.
+  const shown = (await new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => null })).read()).events
+    .filter(event => event.type === "user-message");
+  assert.equal(shown.find(event => event.text.startsWith("[abcdef12] done"))?.from, "abcdef12", "a report is marked as its thread's");
+  assert.ok(shown.filter(event => !event.text.startsWith("[")).every(event => event.from === undefined), "the user's messages are theirs");
   // SCALE beside the step was merged into real lines; it lives in the system
   // prompt, marked as an invented example, and never in a step.
   assert.deepEqual([...compactorSystems], [COMPACT], "one constant compactor system prompt");

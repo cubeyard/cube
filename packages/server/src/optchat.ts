@@ -103,6 +103,9 @@ const TURN = "optchat.turn";
 const NODE_ENTRY = "optchat.node";
 
 const short = (id: string) => id.slice(0, 8);
+/** A zoom result's lines start with their ids. */
+const ZOOMED = /^\d+\+\d+\|/;
+export const ZOOM_ECHO = "(the zoomed lines: a copy of earlier messages of this chat, not repeated here)";
 const userEntry = (text: string) => ({ kind: "pi.user", model: [{ role: "user" as const, content: text, timestamp: Date.now() }] });
 const flatParts = (parts: readonly Part[]) => parts.flatMap(part => [part.l, part.i]);
 const toParts = (flat: readonly number[]) => {
@@ -128,7 +131,11 @@ export function entryMessages(entry: EntryRecord): LogMessage[] {
         else if (part.type === "toolCall" && message.stopReason !== "aborted") out.push({ kind: "tool", text: `${part.name} ${JSON.stringify(part.arguments ?? {})}`, date });
       }
     } else if (entry.kind === "pi.tool-result" && message.role === "toolResult") {
-      out.push({ kind: "echo", text: capText(textOf(message.content)), date });
+      // A zoom result copies lines of this chat: logged as a pointer, so the
+      // compactor neither summarizes the copy again nor reads its ids and
+      // "user:" tags as new words of the user.
+      const text = textOf(message.content);
+      out.push({ kind: "echo", text: message.toolName === "zoom" && ZOOMED.test(text) ? ZOOM_ECHO : capText(text), date });
     }
   }
   return out;
@@ -383,6 +390,11 @@ export class OptChat {
     this.notify();
     this.pendingChanged();
     void this.drain();
+  }
+
+  /** The short ids of the threads this chat started. */
+  async threadPrefixes(): Promise<Set<string>> {
+    return new Set(Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {}).map(short));
   }
 
   /** Messages accepted but not yet shown in the chat, oldest first. */
@@ -752,7 +764,14 @@ export class OptChatEvents implements ThreadEvents {
     } catch (error) { unsubscribe(); throw error; }
   }
 
-  private async merge(transcript: ThreadTranscript): Promise<ThreadTranscript> {
+  private async merge(input: ThreadTranscript): Promise<ThreadTranscript> {
+    // A report of a thread this chat started is marked as the thread's.
+    const threads = await this.chat.threadPrefixes();
+    const report = (text: string) => /^\[([0-9a-f]{8})\] /.exec(text)?.[1];
+    const transcript = { ...input, events: input.events.map(event => {
+      const from = event.type === "user-message" ? report(event.text) : undefined;
+      return from && threads.has(from) ? { ...event, from } : event;
+    }) };
     const pending = await this.chat.pending();
     const failure = this.chat.failure();
     if (!pending.length) return transcript;
@@ -760,7 +779,10 @@ export class OptChatEvents implements ThreadEvents {
     const placed = (item: PendingItem) => transcript.events.some(event => event.type === "user-message" && event.text === item.text && Number.parseInt(event.id, 10) > item.after);
     return {
       ...transcript,
-      events: [...transcript.events, ...pending.filter(item => !placed(item)).map(item => ({ type: "user-message" as const, id: `pending.${item.requestId}`, text: item.text }))],
+      events: [...transcript.events, ...pending.filter(item => !placed(item)).map(item => {
+        const from = report(item.text);
+        return { type: "user-message" as const, id: `pending.${item.requestId}`, text: item.text, ...(from && threads.has(from) ? { from } : {}) };
+      })],
       status: transcript.status.state === "working" ? { ...transcript.status, error: transcript.status.error ?? failure } : { state: "working", run: "pending", error: failure },
     };
   }
