@@ -112,7 +112,8 @@
   .setup-header { padding: 1.8rem 2.4rem; border: 0; box-shadow: none; }
   .setup-label { display: flex; gap: 1.4rem; color: var(--ink-3); font-size: 12px; }
   .step-count { font-variant-numeric: tabular-nums; }
-  .onboarding { width: min(100%, 37rem); margin: auto; padding: 3rem 1.5rem 7rem; }
+  /* centred in the viewport, scrolling only when it must */
+  .onboarding { flex: 0 1 auto; width: min(100%, 37rem); margin: auto; padding: 3rem 1.5rem 7rem; }
   /* the app's headline scale (DESIGN.md: 20px / 650 / −0.01em), not a
      display face of its own — the welcome is the same instrument */
   h1 { font-size: 20px; font-weight: 650; line-height: 1.3; letter-spacing: -0.01em; margin: 0 0 0.9rem; text-wrap: balance; }

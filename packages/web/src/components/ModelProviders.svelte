@@ -12,14 +12,20 @@
   let disposed = false;
   let polling = false;
   const visible = $derived(providers.filter(provider => `${provider.name} ${provider.id}`.toLowerCase().includes(search.toLowerCase())));
+  // A failed poll says so until the next poll answers; an action's own
+  // error stays until the next action.
+  const POLL_ERROR = "could not check providers — retry";
   function link(url: string): string | undefined {
     try { const parsed = new URL(url); return ["https:", "http:"].includes(parsed.protocol) ? url : undefined; } catch { return undefined; }
   }
   async function refresh() {
     if (polling) return;
     polling = true;
-    try { const next = await fetchProviders(); if (!disposed) { providers = next; loaded = true; } }
-    catch { if (!disposed) error = "could not check providers — retry"; }
+    try {
+      const next = await fetchProviders();
+      if (!disposed) { providers = next; loaded = true; if (error === POLL_ERROR) error = null; }
+    }
+    catch { if (!disposed) error = POLL_ERROR; }
     finally { polling = false; }
   }
   async function action(id: string, operation: "login" | "answer" | "cancel" | "disconnect" | "refresh", body?: unknown) {
