@@ -178,8 +178,11 @@ the guest's release check is clean) and the VM was never interrupted. Any
 other thread (`retain: true`), an interrupted VM and a failed transition keep the disk as
 evidence (`retained` / `failed`); they no longer hold the VM slot.
 `retainedBytes` shows their size. Inspect a retained disk offline, for
-example with `qemu-img info` or by booting a copy; delete it only under the
-operator's retention procedure. The runner never deletes a retained disk.
+example with `qemu-img info` or by booting a copy. The runner never deletes a
+retained disk on its own: the operator discards it from the project page
+("retained machines", which lists archived threads with a kept disk) or with
+`POST /api/threads/<id>/discard`, which sends `vm.discard` (cube-runner 0.5.0
+or newer; an older runner answers `UNSUPPORTED`).
 
 ## Upgrade
 

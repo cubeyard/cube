@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { checkRunner, errorText, fetchRunners, retireRunner } from "../lib/api.ts";
+  import { checkRunner, discardThreadMachine, errorText, fetchRunners, fetchThreads, retireRunner } from "../lib/api.ts";
   import { relTime } from "../lib/time.ts";
-  import type { RunnerStatus } from "../lib/types.ts";
+  import type { RunnerStatus, ThreadSummary } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
 
   let { onChanged = () => {} }: { onChanged?: () => void } = $props();
@@ -13,14 +13,35 @@
   let retiring = $state<string | null>(null);
   let confirm = $state("");
   let reason = $state("");
+  let retained = $state<ThreadSummary[]>([]);
+  let discarding = $state<string | null>(null);
+  let confirmDiscard = $state<string | null>(null);
 
   const replace = (runner: RunnerStatus) => {
     runners = runners.map((item) => item.id === runner.id ? runner : item);
   };
 
+  async function loadRetained(): Promise<void> {
+    retained = (await fetchThreads(true)).filter((thread) => thread.archived && thread.vm?.retain && !thread.vm.discarded);
+  }
+
+  async function discard(thread: ThreadSummary): Promise<void> {
+    discarding = thread.id;
+    try {
+      await discardThreadMachine(thread.id);
+      confirmDiscard = null;
+      error = null;
+      await Promise.all([loadRetained(), checkAll()]);
+    } catch (cause) {
+      error = errorText(cause);
+    } finally {
+      discarding = null;
+    }
+  }
+
   async function load(): Promise<void> {
     try {
-      runners = await fetchRunners();
+      [runners] = await Promise.all([fetchRunners(), loadRetained()]);
       error = null;
     } catch (cause) {
       error = errorText(cause);
@@ -157,6 +178,39 @@
               </div>
             </form>
           {/if}
+        </article>
+      {/each}
+    </div>
+  {/if}
+
+  {#if retained.length}
+    <div class="board-head">
+      <div>
+        <h2 id="retained-heading">retained machines</h2>
+        <p>archived threads whose disk was kept as evidence; discarding deletes the disk on its runner</p>
+      </div>
+    </div>
+    <div class="runner-board well" aria-labelledby="retained-heading">
+      {#each retained as thread (thread.id)}
+        <article class="runner-row">
+          <div class="runner-identity">
+            <span class="lamp off" aria-hidden="true"></span>
+            <span>
+              <strong>{thread.title ?? thread.id.slice(0, 8)}</strong>
+              <small>{thread.project.name}{thread.createdAt ? ` · created ${relTime(thread.createdAt)} ago` : ""}</small>
+            </span>
+          </div>
+          <div class="runner-evidence">
+            <span>{thread.vm?.retainReason ?? "kept"}</span>
+          </div>
+          <div class="runner-controls">
+            {#if confirmDiscard === thread.id}
+              <button class="key" onclick={() => (confirmDiscard = null)} disabled={discarding === thread.id}>keep</button>
+              <button class="key danger-text" onclick={() => discard(thread)} disabled={discarding === thread.id}>{discarding === thread.id ? "discarding…" : "delete disk"}</button>
+            {:else}
+              <button class="key danger-text" onclick={() => (confirmDiscard = thread.id)}>discard</button>
+            {/if}
+          </div>
         </article>
       {/each}
     </div>

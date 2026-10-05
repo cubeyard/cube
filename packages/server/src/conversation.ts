@@ -323,6 +323,18 @@ export class Conversations {
     });
     });
   }
+  /** Deletes an archived thread's retained machine disk: the operator
+   * decided its evidence is no longer needed. */
+  async discard(id: string): Promise<void> {
+    return this.command(id, async () => {
+      const thread = this.registry.getThread(id);
+      if (!thread) throw new Error("thread not found");
+      if (!thread.archived) throw new Error("archive the thread before discarding its machine");
+      if (!thread.vm || thread.vm.discarded) return;
+      await this.machines.discard(thread);
+      this.registry.updateThreadVm(id, { discarded: true });
+    });
+  }
   /** Runs `action` with the thread marked as archiving. */
   private async withArchiving<T>(id: string, action: () => Promise<T>): Promise<T> {
     this.archiving.add(id);

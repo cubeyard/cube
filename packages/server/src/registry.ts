@@ -66,6 +66,8 @@ export interface ThreadVm {
   /** Decided at archive: keep the machine's disk. */
   retain?: boolean;
   retainReason?: string;
+  /** The retained disk was deleted on the operator's request. */
+  discarded?: boolean;
 }
 
 /** The thread's agent: claude-code threads are created with a claude model. */
@@ -266,7 +268,7 @@ export class Registry {
     return this.parse(this.db.prepare("SELECT data FROM thread WHERE json_extract(data, '$.vm.vmId')=?").get(vmId));
   }
   /** Changes the thread's machine record (provisioning tries, retention). */
-  updateThreadVm(threadId: string, patch: Partial<Pick<ThreadVm, "provisionAttempt" | "retain" | "retainReason">>): Thread {
+  updateThreadVm(threadId: string, patch: Partial<Pick<ThreadVm, "provisionAttempt" | "retain" | "retainReason" | "discarded">>): Thread {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const thread = this.getThread(threadId);

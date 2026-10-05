@@ -361,6 +361,8 @@ export async function createCubed(options: {
           return json({ id: thread.id });
         }
         const thread = registry.getThread(id);
+        // An archived thread's retained machine disk can still be discarded.
+        if (thread?.archived && parts[3] === "discard" && method === "POST") { await conversations.discard(id); return json({ ok: true }); }
         if (!thread || thread.archived) return json({ error: "thread not found" }, 404);
         if (parts[3] === "workspace") {
           const result = await workspaceRoute(conversations.workspace(id), { method: method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body });

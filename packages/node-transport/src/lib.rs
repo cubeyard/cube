@@ -20,15 +20,16 @@ pub const ALPN: &[u8] = b"cubeyard/node/1";
 pub const PROTOCOL_VERSION: u32 = 3;
 pub const MIN_COMPATIBLE_PROTOCOL_VERSION: u32 = 3;
 pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
-const RUNNER_CAPABILITIES: [&str; 6] = [
+const RUNNER_CAPABILITIES: [&str; 7] = [
     "node.status",
     "vm.allocate",
     "vm.start",
     "vm.stop",
     "vm.inspect",
     "vm.release",
+    "vm.discard",
 ];
-const KNOWN_METHODS: [&str; 7] = [
+const KNOWN_METHODS: [&str; 8] = [
     "node.hello",
     "node.status",
     "vm.allocate",
@@ -36,6 +37,7 @@ const KNOWN_METHODS: [&str; 7] = [
     "vm.stop",
     "vm.inspect",
     "vm.release",
+    "vm.discard",
 ];
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -100,6 +102,15 @@ pub enum Request {
         epoch: u64,
         retain: bool,
     },
+    /// Deletes a retained VM's disk on the operator's request.
+    #[serde(rename = "vm.discard")]
+    VmDiscard {
+        #[serde(rename = "threadId")]
+        thread_id: String,
+        #[serde(rename = "vmId")]
+        vm_id: String,
+        epoch: u64,
+    },
 }
 
 impl Request {
@@ -109,7 +120,8 @@ impl Request {
             | Self::VmStart { vm_id, .. }
             | Self::VmStop { vm_id, .. }
             | Self::VmInspect { vm_id, .. }
-            | Self::VmRelease { vm_id, .. } => Some(vm_id),
+            | Self::VmRelease { vm_id, .. }
+            | Self::VmDiscard { vm_id, .. } => Some(vm_id),
             _ => None,
         }
     }
@@ -120,6 +132,7 @@ impl Request {
                 | Self::VmStart { .. }
                 | Self::VmStop { .. }
                 | Self::VmRelease { .. }
+                | Self::VmDiscard { .. }
         )
     }
 }
@@ -495,6 +508,11 @@ async fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Run
             .release(&thread_id, &vm_id, epoch, retain)
             .await
             .map(vm),
+        Request::VmDiscard {
+            thread_id,
+            vm_id,
+            epoch,
+        } => runner.discard(&thread_id, &vm_id, epoch).map(vm),
         Request::Hello { .. } => unreachable!(),
     };
     result.unwrap_or_else(|error| {
@@ -931,7 +949,7 @@ mod tests {
         assert_eq!(
             (SOFTWARE_VERSION, RUNNER_CAPABILITIES),
             (
-                "0.4.0",
+                "0.5.0",
                 [
                     "node.status",
                     "vm.allocate",
@@ -939,6 +957,7 @@ mod tests {
                     "vm.stop",
                     "vm.inspect",
                     "vm.release",
+                    "vm.discard",
                 ]
             ),
             "capability changes require a new immutable software version"
