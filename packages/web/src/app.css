@@ -934,6 +934,12 @@ header .spacer { margin-left: auto; }
   box-shadow: var(--shadow-key);
 }
 .conversation-message.assistant { align-self: stretch; }
+/* A thread's report: the agent's side, set apart from OptChat's own replies. */
+.conversation-message.report {
+  align-self: flex-start; max-width: min(42rem, 85%); min-width: min(12rem, 70%);
+  padding: 0.6rem 0.9rem; border: 1px solid var(--line); border-left: 2px solid var(--ink-3);
+  border-radius: var(--r-key); background: var(--s2);
+}
 .message-label {
   display: block; margin-bottom: 0.22rem;
   color: var(--ink-3); font-size: 10px; font-weight: 550;

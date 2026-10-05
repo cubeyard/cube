@@ -193,6 +193,12 @@
               {#if row.input}<pre class="tool-input">{row.input}</pre>{/if}
               {#if row.output}<pre>{row.output}</pre>{/if}
             </details>
+          {:else if row.kind === "user" && row.from}
+            <article class="conversation-message report" aria-label="thread report">
+              <span class="message-label">thread {row.from}</span>
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text and allows only http(s)/mailto links -->
+              <div class="message-copy markdown">{@html renderMarkdown(row.text)}</div>
+            </article>
           {:else if row.kind === "user"}
             <article class="conversation-message user" aria-label="user message">
               <span class="message-label">you</span>

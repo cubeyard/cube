@@ -13,7 +13,8 @@ export type ThreadAgent = "pi" | "claude-code";
  * frames for committed events; an event still streaming (`final: false`) gets
  * a new id once committed. */
 export type ThreadEvent =
-  | { type: "user-message"; id: string; text: string }
+  /** `from` marks a report from a thread the chat started: its short id. */
+  | { type: "user-message"; id: string; text: string; from?: string }
   /** Assistant text; `reasoning` marks the model's visible thinking. */
   | { type: "assistant-text"; id: string; text: string; reasoning: boolean; final: boolean }
   /** A tool call; its result, if any, carries the same `callId`. */

@@ -31,4 +31,12 @@ assert.equal(transcriptRows({ events, status: status("stopped") }).filter(row =>
 const longCommand = "x".repeat(400);
 const summary = transcriptRows({ events: [{ type: "tool-call", id: "1", callId: "a", name: "bash", input: { command: longCommand }, final: true }], status: status("idle") })[0]!;
 assert(summary.kind === "tool" && summary.summary.length === 160 && summary.input === longCommand);
-console.log("ok: transcript rows pair calls with results, group agent text, and summarize tool input");
+const report = transcriptRows({ events: [
+  { type: "user-message", id: "1", text: "[abcdef12] done: PR #212", from: "abcdef12" },
+  { type: "user-message", id: "2", text: "[abcdef12] typed by the user" },
+], status: status("idle") });
+assert.deepEqual(report, [
+  { kind: "user", id: "1", text: "done: PR #212", from: "abcdef12" },
+  { kind: "user", id: "2", text: "[abcdef12] typed by the user" },
+], "a thread's report is the thread's; the user's own text stays theirs");
+console.log("ok: transcript rows pair calls with results, group agent text, summarize tool input, and mark thread reports");
