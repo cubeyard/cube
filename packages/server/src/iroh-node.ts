@@ -458,6 +458,10 @@ export class IrohRunnerClient {
     if (typeof retain !== "boolean") invalid();
     return this.vm({ method: "vm.release", ...vmRef(ref), epoch: epochField(epoch), retain });
   }
+  /** Deletes a retained VM's disk (runner 0.5.0+; older runners: UNSUPPORTED). */
+  async vmDiscard(ref: VmRef, epoch: number): Promise<VmRecord> {
+    return this.vm({ method: "vm.discard", ...vmRef(ref), epoch: epochField(epoch) });
+  }
   private async vm(query: Record<string, unknown>): Promise<VmRecord> {
     return (await this.request(query)).vm as VmRecord;
   }

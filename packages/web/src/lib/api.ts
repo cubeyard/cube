@@ -106,6 +106,9 @@ export const fetchThreads = (includeArchived = false) =>
     (r) => r.threads,
   );
 
+export const discardThreadMachine = (id: string) =>
+  request<{ ok: true }>(`/api/threads/${encodeURIComponent(id)}/discard`, "POST", {});
+
 export const fetchProjects = () =>
   request<{ projects: Project[] }>("/api/projects").then((r) => r.projects);
 

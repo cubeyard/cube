@@ -254,7 +254,22 @@ async fn release_keeps_evidence() {
     assert!(kept.interrupted);
     assert!(vm_dir(&fx, 2).exists());
     assert_eq!(status(&served).await["retainedVms"], 2);
+
+    // The operator discards retained evidence; a live VM cannot be discarded.
+    let discarded = served.vm(discard("t1", VM, 1)).await;
+    assert_eq!(discarded.state, VmState::Released);
+    assert!(!vm_dir(&fx, 1).exists());
+    assert_eq!(
+        served.vm(discard("t1", VM, 1)).await.state,
+        VmState::Released,
+        "repeatable"
+    );
+    assert_eq!(status(&served).await["retainedVms"], 1);
     served.close().await;
+}
+
+fn discard(thread: &str, vm: &str, epoch: u64) -> serde_json::Value {
+    json!({"method": "vm.discard", "threadId": thread, "vmId": vm, "epoch": epoch})
 }
 
 #[tokio::test]

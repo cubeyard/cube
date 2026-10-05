@@ -34,6 +34,8 @@ export interface ThreadMachines {
   /** Release the machine; `retain` keeps its disk. The runner always keeps
    * an interrupted or failed one. */
   release(thread: Thread, retain: boolean): Promise<{ retained: boolean }>;
+  /** Deletes an archived thread's retained disk. */
+  discard(thread: Thread): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -142,6 +144,15 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     if (record.state === "released") fs.rmSync(this.keyDirectory(thread), { recursive: true, force: true });
     this.log.info("released", { thread: thread.id, vm: vm.vmId, retained: record.state === "retained" });
     return { retained: record.state === "retained" };
+  }
+
+  async discard(thread: Thread): Promise<void> {
+    const vm = machine(thread);
+    const ref: VmRef = { threadId: thread.id, vmId: vm.vmId };
+    const record = await this.runner(thread).vmDiscard(ref, this.epoch(thread));
+    if (record.state !== "released") throw new Error(`the runner did not discard the machine (${record.state})`);
+    fs.rmSync(this.keyDirectory(thread), { recursive: true, force: true });
+    this.log.info("discarded", { thread: thread.id, vm: vm.vmId });
   }
 
   async close(): Promise<void> {

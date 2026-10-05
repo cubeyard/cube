@@ -21,6 +21,8 @@ export interface ThreadSummary {
   agent?: import("../../../server/src/thread-events.ts").ThreadAgent;
   workspaceBase?: { remote: string; ref: string; oid: string } | null;
   project: { id: string; name: string };
+  /** The thread's machine; after archive, whether its disk was kept. */
+  vm?: { vmId: string; retain?: boolean; retainReason?: string; discarded?: boolean };
 }
 export type Project = ProjectRecord & { threadCount: number; retainedThreadCount: number; runnerCount: number; availableRunnerCount: number;
   runnerCapacity: { states: Record<"available" | "allocating" | "busy" | "releasing" | "failed" | "retiring" | "retired", number>; errors: string[] };

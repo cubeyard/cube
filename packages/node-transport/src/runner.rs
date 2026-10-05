@@ -972,6 +972,38 @@ impl Runner {
         self.current(vm_id)
     }
 
+    /// Deletes a retained (or failed) VM's directory: the operator decided
+    /// the evidence is no longer needed. A released VM is already gone.
+    pub fn discard(&self, thread_id: &str, vm_id: &str, epoch: u64) -> Result<VmRecord> {
+        Self::check_ids(thread_id, vm_id)?;
+        self.journal.lock().unwrap().fence(thread_id, epoch)?;
+        let row = self.row_for(thread_id, vm_id)?;
+        match row.state {
+            VmState::Released => return Ok(self.record(&row)),
+            VmState::Retained | VmState::Failed => {}
+            state => {
+                return detail(
+                    "CONFLICT",
+                    format!(
+                        "vm is {}; only a retained vm can be discarded",
+                        state.as_str()
+                    ),
+                );
+            }
+        }
+        let dir = self.paths(row.slot).dir;
+        let journal = self.journal.lock().unwrap();
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => journal.set_state(vm_id, VmState::Released, None)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                journal.set_state(vm_id, VmState::Released, None)?
+            }
+            Err(error) => return Err(error).context("deleting the retained vm directory"),
+        }
+        drop(journal);
+        self.current(vm_id)
+    }
+
     fn finish_release(&self, vm_id: &str, slot: u32) {
         let journal = self.journal.lock().unwrap();
         let Ok(Some(row)) = journal.get(vm_id) else {

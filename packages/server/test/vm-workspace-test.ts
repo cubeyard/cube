@@ -99,6 +99,11 @@ try {
   const ranArchive = await (await fetch(`${base}/api/threads/${ran}`, { method: "DELETE" })).json();
   assert.deepEqual(ranArchive, { ok: true, retained: true, reason: "the agent ran commands or wrote files in the machine" });
   assert.equal(machines.released.get(ran), true);
+  // The operator discards the retained disk; only archived threads, once.
+  assert.equal((await post(`/api/threads/${ran}/discard`, {})).status, 200);
+  assert.ok(machines.discarded.has(ran));
+  assert.equal(app.registry.getThread(ran)!.vm!.discarded, true);
+  assert.equal((await post(`/api/threads/${ran}/discard`, {})).status, 200, "repeatable");
 
   // While an archive runs, nothing reopens the thread's agent or workspace.
   const raced = await create(project.id, "raced");

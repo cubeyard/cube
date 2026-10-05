@@ -62,11 +62,16 @@ export class LocalMachines implements ThreadMachines {
     return guest;
   }
   async start(thread: Thread): Promise<void> { this.starts++; this.guest(thread); }
+  readonly discarded = new Set<string>();
   async release(thread: Thread, retain: boolean): Promise<{ retained: boolean }> {
     this.guest(thread).stop();
     this.released.set(thread.id, retain);
     if (!retain) fs.rmSync(path.join(this.root, thread.id), { recursive: true, force: true });
     return { retained: retain };
+  }
+  async discard(thread: Thread): Promise<void> {
+    this.discarded.add(thread.id);
+    fs.rmSync(path.join(this.root, thread.id), { recursive: true, force: true });
   }
   async close(): Promise<void> { for (const guest of this.guests.values()) guest.stop(); }
 }
