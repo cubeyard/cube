@@ -113,7 +113,10 @@ immutable binding and starts the service. It prints only the public Iroh peer.
 
 On the cubed host, write the runner's private connection config (version 2,
 mode 0600, next to a control key whose public peer you passed as
-`CONTROL_PEER`) and enroll it:
+`CONTROL_PEER`) and enroll it. Create a separate control key
+(`cube-runner keygen`) for every runner; enrollment refuses a key another runner
+already uses, because two endpoints publishing one Iroh identity break each
+other's calls:
 
 ```json
 {"version":2,"binding":{"nodeId":"NODE_ID","threadId":"THREAD_ID","environmentId":ENVIRONMENT_ID},
