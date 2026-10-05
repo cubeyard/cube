@@ -146,7 +146,11 @@ body {
   color: var(--ink);
   -webkit-font-smoothing: antialiased;
 }
+/* the app is the viewport: panes scroll inside it, the page never does, so
+   the composer and the rails cannot be scrolled out of view */
+html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
 #app { display: flex; flex-direction: column; height: 100dvh; }
+:where(#app) > main { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 
 button { font: inherit; cursor: pointer; }
 button:disabled { opacity: 0.45; cursor: default; }
@@ -327,9 +331,11 @@ header .spacer { margin-left: auto; }
 /* ============================================================ thread list
    A recessed well holding one module per thread: lamp, title, meta —
    and the actions live INSIDE the module, on its right edge. */
+/* the reading measure is padding, not a max-width, so the scrollbar sits
+   at the window edge rather than beside the column */
 .thread-list {
-  max-width: var(--col); margin: 0 auto; padding: 2.1rem 1rem 3rem;
   width: 100%; overflow-y: auto;
+  padding: 2.1rem max(1rem, calc((100% - var(--col)) / 2 + 1rem)) 3rem;
 }
 .thread-list .list-head {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem;
@@ -400,7 +406,7 @@ header .spacer { margin-left: auto; }
 }
 .module-title.untitled { color: var(--ink-3); font-weight: 450; }
 .module-meta {
-  display: flex; gap: 0.7rem; align-items: center;
+  display: flex; flex-wrap: wrap; gap: 0.1rem 0.7rem; align-items: center;
   font-size: 12px; color: var(--ink-3);
   font-variant-numeric: tabular-nums;
 }
@@ -488,7 +494,7 @@ header .spacer { margin-left: auto; }
 }
 .thread-strip {
   flex: none; min-width: 0; min-height: 2.5rem;
-  display: flex; align-items: center; flex-wrap: wrap; gap: 0.6rem;
+  display: flex; align-items: center; flex-wrap: nowrap; gap: 0.6rem;
   padding: 0.25rem 0.7rem;
   background: var(--s2); border-bottom: 1px solid var(--line-2);
 }
@@ -497,7 +503,7 @@ header .spacer { margin-left: auto; }
 .strip-title {
   margin: 0; font-size: 14.5px; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  min-width: 0;
+  flex: 0 1 auto; min-width: 3rem;
 }
 .strip-title.untitled { color: var(--ink-3); font-weight: 450; }
 .mobile-thread-switch { display: none; }
@@ -507,12 +513,13 @@ header .spacer { margin-left: auto; }
 }
 .strip-state.error { color: var(--bad); }
 .strip-project {
-  flex: none; color: var(--ink-3); font-size: 11px; font-weight: 550;
+  flex: 0 1 auto; min-width: 0; max-width: 14rem; overflow: hidden; text-overflow: ellipsis;
+  color: var(--ink-3); font-size: 11px; font-weight: 550;
   letter-spacing: 0.05em; text-decoration: none; white-space: nowrap;
 }
 .strip-project:hover { color: var(--signal); }
 .strip-base {
-  min-width: 0; max-width: 14rem; overflow: hidden; text-overflow: ellipsis;
+  flex: 0 20 auto; min-width: 0; max-width: 14rem; overflow: hidden; text-overflow: ellipsis;
   color: var(--ink-3); font: 10px var(--font-mono); white-space: nowrap;
 }
 
@@ -710,6 +717,8 @@ header .spacer { margin-left: auto; }
   flex: 1; min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  /* the row is the viewport's leftover height, never the transcript's */
+  grid-template-rows: minmax(0, 1fr);
   background: var(--s2);
 }
 .thread-workspace.resizing { cursor: col-resize; user-select: none; }
@@ -896,10 +905,15 @@ header .spacer { margin-left: auto; }
   background: var(--s4);
 }
 .transcript {
-  flex: 1; min-height: 0; overflow: auto;
-  display: flex; flex-direction: column; gap: 1rem;
+  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
   padding: 1.15rem clamp(0.85rem, 3vw, 2rem) 1.5rem;
   scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+/* the reading measure, centred in the pane */
+.transcript-column {
+  min-height: 100%; max-width: var(--col); margin: 0 auto;
+  display: flex; flex-direction: column; gap: 1rem;
 }
 .conversation-empty {
   flex: 1; margin: 0; display: flex; flex-direction: column;
@@ -912,9 +926,9 @@ header .spacer { margin-left: auto; }
   flex: none; margin: 0; max-width: 42rem; padding-left: 0.65rem;
   border-left: 2px solid var(--line); color: var(--ink-3); font-size: 12.5px; line-height: 1.5;
 }
-.conversation-message { max-width: min(42rem, 92%); }
+.conversation-message { min-width: 0; }
 .conversation-message.user {
-  align-self: flex-end; min-width: min(12rem, 70%);
+  align-self: flex-end; max-width: min(42rem, 85%); min-width: min(12rem, 70%);
   padding: 0.6rem 0.9rem; border: 1px solid var(--line);
   border-radius: var(--r-key); background: var(--s3);
   box-shadow: var(--shadow-key);
@@ -929,7 +943,49 @@ header .spacer { margin-left: auto; }
   white-space: pre-wrap; overflow-wrap: anywhere;
   font-size: 15.5px; line-height: 1.6;
 }
-.message-copy.reasoning { color: var(--ink-3); font-size: 13.5px; }
+.message-copy.markdown { white-space: normal; }
+.message-copy.reasoning { color: var(--ink-3); font-size: 14px; font-style: italic; }
+/* agent prose: markdown in the enclosure's own voice; code is dark glass */
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown :is(p, ul, ol, blockquote, pre, table) { margin: 0 0 0.85rem; }
+.markdown :is(h1, h2, h3, h4, h5, h6) { margin: 1.4rem 0 0.55rem; line-height: 1.3; font-weight: 650; }
+.markdown h1 { font-size: 19px; }
+.markdown h2 { font-size: 17px; }
+.markdown h3 { font-size: 15.5px; }
+.markdown :is(h4, h5, h6) { font-size: 14.5px; color: var(--ink-2); }
+.markdown :is(ul, ol) { padding-left: 1.4rem; }
+.markdown li + li { margin-top: 0.25rem; }
+.markdown li > :is(ul, ol) { margin: 0.25rem 0 0; }
+.markdown li > p { margin: 0 0 0.4rem; }
+.markdown li::marker { color: var(--ink-3); }
+.markdown input[type="checkbox"] { margin: 0 0.4rem 0 0; vertical-align: -1px; accent-color: var(--signal); }
+.markdown a { color: var(--signal); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.markdown strong { font-weight: 650; }
+.markdown hr { margin: 1.2rem 0; border: 0; border-top: 1px solid var(--line); }
+.markdown blockquote { padding-left: 0.85rem; border-left: 2px solid var(--line-2); color: var(--ink-2); }
+.markdown code {
+  padding: 0.08rem 0.3rem; border-radius: var(--r-xs);
+  background: var(--s1); border: 1px solid var(--line);
+  font: 12.5px/1.45 var(--font-mono); overflow-wrap: anywhere;
+}
+.markdown pre {
+  overflow-x: auto; padding: 0.75rem 0.9rem;
+  border-radius: var(--r-key); background: var(--glass); color: var(--glass-ink);
+  border: 1px solid var(--glass-line);
+}
+.markdown pre code {
+  padding: 0; border: 0; background: none; color: inherit;
+  font-size: 12.5px; line-height: 1.55; white-space: pre; overflow-wrap: normal;
+}
+.markdown pre::-webkit-scrollbar { height: 8px; }
+.markdown table {
+  display: block; max-width: 100%; overflow-x: auto;
+  border-collapse: collapse; font-size: 13.5px; font-variant-numeric: tabular-nums;
+}
+.markdown :is(th, td) { padding: 0.35rem 0.7rem; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+.markdown th { background: var(--s3); font-weight: 600; }
+.markdown img { max-width: 100%; }
 .conversation-message.continued { margin-top: -0.5rem; }
 .tool-strip {
   border: 1px solid var(--line); border-radius: var(--r-key);
@@ -938,7 +994,11 @@ header .spacer { margin-left: auto; }
 .tool-strip summary {
   display: flex; align-items: center; gap: 0.5rem;
   padding: 0.45rem 0.65rem; cursor: pointer; list-style: none;
+  border-radius: var(--r-key);
 }
+.tool-strip summary:hover { background: var(--s4); }
+.tool-chevron { flex: none; display: flex; margin-left: auto; color: var(--ink-3); transition: transform 120ms ease; }
+.tool-strip[open] .tool-chevron { transform: rotate(180deg); }
 .tool-strip summary::-webkit-details-marker { display: none; }
 .tool-strip code { font: 600 12px/1.4 var(--font-mono); }
 .tool-strip summary > code { flex: none; }
@@ -947,6 +1007,7 @@ header .spacer { margin-left: auto; }
   color: var(--ink-3); font: 12px/1.4 var(--font-mono);
 }
 .tool-strip pre.tool-input { max-height: 10rem; color: var(--ink-3); }
+.tool-strip > pre:last-child { border-radius: 0 0 var(--r-key) var(--r-key); }
 .tool-strip pre {
   max-height: 16rem; overflow: auto; margin: 0; padding: 0.65rem;
   border-top: 1px solid var(--line); background: var(--s1);
@@ -956,6 +1017,11 @@ header .spacer { margin-left: auto; }
 .working-line {
   display: flex; align-items: center; gap: 0.5rem;
   color: var(--ink-3); font-size: 12px; letter-spacing: 0.06em;
+}
+.conversation-note {
+  flex: none; display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.4rem 0.85rem; border-top: 1px solid var(--note-line);
+  background: var(--note-soft); color: var(--ink-2); font-size: 12.5px;
 }
 .conversation-error {
   flex: none; padding: 0.45rem 0.85rem;
@@ -984,7 +1050,8 @@ header .spacer { margin-left: auto; }
 }
 .composer textarea {
   flex: 1; min-width: 0; min-height: 2.55rem; max-height: 11rem; resize: none;
-  padding: 0.58rem 0.75rem; border: 1px solid var(--line); border-radius: var(--r-key);
+  /* one line of 14px/1.5 text is exactly as tall as the send key */
+  padding: calc((2.55rem - 23px) / 2) 0.75rem; border: 1px solid var(--line); border-radius: var(--r-key);
   background: var(--s4); color: var(--ink); caret-color: var(--signal);
   box-shadow: inset 0 1px 2px rgba(38, 32, 18, 0.1);
   font: 14px/1.5 var(--font-ui); overflow-y: auto;
@@ -999,6 +1066,7 @@ header .spacer { margin-left: auto; }
 }
 .send-key:active:not(:disabled) { transform: translateY(1px); box-shadow: var(--shadow-key-down); }
 .send-key:disabled { opacity: 0.42; cursor: default; }
+.composer .stop-key { height: 2.55rem; }
 .conversation-gone {
   flex: 1; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 0.9rem;
@@ -1150,7 +1218,7 @@ select.compose-input {
 .runner-evidence .error, .runner-blocked { color: var(--bad); }
 .runner-controls { display: flex; gap: 0.35rem; }
 .runner-blocked { grid-column: 2 / -1; margin: 0; font-size: 11px; }
-.runner-retire { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; padding: 0.8rem; background: var(--s2); border: 1px solid var(--bad-line); border-radius: var(--r-chip); }
+.runner-retire { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; padding: 0.8rem; background: var(--s2); border: 1px solid var(--bad-line); border-radius: var(--r-key); }
 .runner-retire p { grid-column: 1 / -1; margin: 0; color: var(--ink-2); font-size: 12px; overflow-wrap: anywhere; }
 .runner-retire-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 0.45rem; }
 
@@ -1160,8 +1228,10 @@ select.compose-input {
      the keys keep their places */
   .thread-strip .bank-note { flex: 1 1 100%; order: 10; text-align: left; max-width: none; }
   .strip-title { display: none; }
+  /* first line: lamp, the thread switch and the archive key; the project,
+     base, state and model wrap beneath, under the title */
   .mobile-thread-switch {
-    min-width: 0; max-width: calc(100% - 1.2rem); flex: 1 1 15rem;
+    order: 1; min-width: 0; flex: 1 1 calc(100% - 5rem);
     display: flex; align-items: center; gap: 0.3rem;
     margin: -0.15rem 0; padding: 0.2rem 0.35rem;
     border: 0; border-radius: var(--r-xs);
@@ -1169,6 +1239,9 @@ select.compose-input {
     font-size: 14.5px; font-weight: 600; line-height: 1.4;
     box-shadow: var(--shadow-key);
   }
+  .thread-strip .key-bank { order: 2; }
+  .thread-strip > :is(.strip-project, .strip-base, .strip-state, .spacer, .strip-model) { order: 3; }
+  .thread-strip > .strip-project { margin-left: calc(8px + 0.6rem); }
   .mobile-thread-switch span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mobile-thread-switch svg { flex: none; transform: rotate(-90deg); }
   .mobile-thread-switch.untitled { color: var(--ink-3); font-weight: 450; }
@@ -1239,8 +1312,10 @@ select.compose-input {
   .task-bank li { grid-template-columns: minmax(0, 1fr) auto; }
   .task-bank li span:last-child { grid-column: 1 / -1; white-space: normal; overflow-wrap: anywhere; }
   .composer { padding-bottom: max(0.55rem, env(safe-area-inset-bottom)); }
-  .composer textarea { font-size: 16px; }
-  .send-key { width: 2.75rem; height: 2.75rem; }
+  .composer textarea { font-size: 16px; min-height: 2.75rem; padding-block: calc((2.75rem - 26px) / 2); }
+  .strip-base { display: none; }
+  .send-key, .composer .stop-key { height: 2.75rem; }
+  .send-key { width: 2.75rem; }
   .workspace-pane-head { padding-inline: 0.7rem; }
   .change-file { padding-inline: 0.45rem; }
 }

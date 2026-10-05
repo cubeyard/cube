@@ -268,23 +268,23 @@
                 onclick={() => onNewThread(group.project.id)}
               ><Icon name="plus" size={14} /></button>
             </div>
-        {#each group.threads as thread (thread.id)}
-          <a
-            class="thread-sidebar-row"
-            class:current={thread.id === threadId}
-            href="#/t/{thread.id}"
-            aria-current={thread.id === threadId ? "page" : undefined}
-          >
-            <span class="lamp {lampClass(thread)}" aria-hidden="true"></span>
-            {#if !stateLabel(thread)}<span class="sr-only">ready</span>{/if}
-            <span class="thread-sidebar-copy">
-              <span class="thread-sidebar-title" class:untitled={!thread.title}>{thread.title ?? "untitled"}</span>
-              {#if stateLabel(thread)}
-                <span class="thread-sidebar-meta"><span class:error={thread.state === "error"}>{stateLabel(thread)}</span></span>
-              {/if}
-            </span>
-          </a>
-        {/each}
+            {#each group.threads as thread (thread.id)}
+              <a
+                class="thread-sidebar-row"
+                class:current={thread.id === threadId}
+                href="#/t/{thread.id}"
+                aria-current={thread.id === threadId ? "page" : undefined}
+              >
+                <span class="lamp {lampClass(thread)}" aria-hidden="true"></span>
+                {#if !stateLabel(thread)}<span class="sr-only">ready</span>{/if}
+                <span class="thread-sidebar-copy">
+                  <span class="thread-sidebar-title" class:untitled={!thread.title}>{thread.title ?? "untitled"}</span>
+                  {#if stateLabel(thread)}
+                    <span class="thread-sidebar-meta"><span class:error={thread.state === "error"}>{stateLabel(thread)}</span></span>
+                  {/if}
+                </span>
+              </a>
+            {/each}
           </section>
         {/each}
       </nav>
@@ -294,41 +294,38 @@
   </aside>
 
   <div class="thread-stage">
-{#if modelError || (modelState && !selectedModel)}
-  <div class="strip-note bad" role="alert">
-    <span class="strip-note-text">{modelError ?? (modelState?.models.length ? "selected model is unavailable — choose another model" : "no models available — sign in to a provider")}</span>
-    <a class="key" href="#/models">providers</a>
-    <button class="key" onclick={loadModels}>retry models</button>
-  </div>
-{/if}
-{#if summary?.error}
-  <div class="strip-note bad"><span class="strip-note-text">{summary.error}</span></div>
-{/if}
-
-{#if note}
-  <div class="strip-note" class:bad={note.bad} role={note.bad ? "alert" : "status"}>
-    <span class="strip-note-text">
-      {note.text}
-      {#if note.href}<a href={note.href} target="_blank" rel="noopener noreferrer">{note.href}</a>{/if}
-    </span>
-    <button class="key icon note-dismiss" title="dismiss" aria-label="dismiss note" onclick={() => setNote(null)}>
-      <Icon name="close" size={12} />
-    </button>
-  </div>
-{/if}
-
-<main class="thread-workspace">
-  <section class="workspace-pane thread-pane" aria-label="thread">
-    {@render threadControls()}
-    {#if gone}
-      <div class="conversation-gone"><p>this thread is no longer active.</p><a class="key" href="#/threads">back to threads</a></div>
-    {:else}
-      <Conversation {threadId} model={selectedModel} {changingModel} bind:busy={conversationBusy}
-        waitingText={summary?.state === "starting" ? STARTING_TEXT : null}
-        notice={summary?.agent === "claude-code" || isClaude(modelState?.selected) ? `claude · max — ${CLAUDE_DURABILITY}` : null} />
-    {/if}
-  </section>
-
-</main>
+    <main class="thread-workspace">
+      <section class="workspace-pane thread-pane" aria-label="thread">
+        {@render threadControls()}
+        {#if modelError || (modelState && !selectedModel)}
+          <div class="strip-note bad" role="alert">
+            <span class="strip-note-text">{modelError ?? (modelState?.models.length ? "selected model is unavailable — choose another model" : "no models available — sign in to a provider")}</span>
+            <a class="key" href="#/models">providers</a>
+            <button class="key" onclick={loadModels}>retry models</button>
+          </div>
+        {/if}
+        {#if summary?.error}
+          <div class="strip-note bad"><span class="strip-note-text">{summary.error}</span></div>
+        {/if}
+        {#if note}
+          <div class="strip-note" class:bad={note.bad} role={note.bad ? "alert" : "status"}>
+            <span class="strip-note-text">
+              {note.text}
+              {#if note.href}<a href={note.href} target="_blank" rel="noopener noreferrer">{note.href}</a>{/if}
+            </span>
+            <button class="key icon note-dismiss" title="dismiss" aria-label="dismiss note" onclick={() => setNote(null)}>
+              <Icon name="close" size={12} />
+            </button>
+          </div>
+        {/if}
+        {#if gone}
+          <div class="conversation-gone"><p>this thread is no longer active.</p><a class="key" href="#/threads">back to threads</a></div>
+        {:else}
+          <Conversation {threadId} model={selectedModel} {changingModel} bind:busy={conversationBusy}
+            waitingText={summary?.state === "starting" ? STARTING_TEXT : null}
+            notice={summary?.agent === "claude-code" || isClaude(modelState?.selected) ? `claude · max — ${CLAUDE_DURABILITY}` : null} />
+        {/if}
+      </section>
+    </main>
   </div>
 </div>

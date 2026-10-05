@@ -409,7 +409,6 @@
 {/if}
 
 <style>
-  .project-view { overflow: visible; }
   .github-login-link { font-family: var(--font-ui); }
   .draft { margin: -0.6rem 0 1.3rem; font-size: 12px; color: var(--ink-3); overflow-wrap: anywhere; }
   .draft code { font-family: var(--font-mono); color: var(--ink-2); }
