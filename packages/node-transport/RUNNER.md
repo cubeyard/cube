@@ -61,7 +61,8 @@ request is read. After hello, a method protocol 3 does not have (for example
 
 Hello (runner profile) adds `binding`, `platform` (`linux-x86_64`,
 `macos-aarch64`), `baseImageSha256`, capabilities `node.status vm.allocate
-vm.start vm.stop vm.inspect vm.release`, and `limits {maxFrameBytes,
+vm.start vm.stop vm.inspect vm.release vm.discard` (`vm.discard` since
+0.5.0), and `limits {maxFrameBytes,
 requestTimeoutMs, maxVcpus, maxMemoryMiB, maxDiskGiB, maxSeedBytes,
 maxActiveVms}`.
 
@@ -79,6 +80,7 @@ record.
 {"method":"vm.stop","threadId":"t1","vmId":"0123456789abcdef","epoch":1}
 {"method":"vm.inspect","threadId":"t1","vmId":"0123456789abcdef"}
 {"method":"vm.release","threadId":"t1","vmId":"0123456789abcdef","epoch":1,"retain":false}
+{"method":"vm.discard","threadId":"t1","vmId":"0123456789abcdef","epoch":1}
 {"method":"node.status"}
 ```
 
@@ -88,7 +90,9 @@ diskBytes, seedSha256?, startedAt?},"consoleTail"?}` (console only for
 States: `allocating allocated starting running stopping stopped releasing
 released retained failed`. `running` means QEMU answered QMP, not that the
 guest is ready. `vm.stop` and `vm.release` of a live VM are asynchronous (ACPI
-power-down, 30 s, QMP `quit`, SIGKILL); poll `vm.inspect`. The first
+power-down, 30 s, QMP `quit`, SIGKILL); poll `vm.inspect`. `vm.discard`
+deletes a `retained` or `failed` VM's directory (`released` afterwards, and
+repeatable); any other state is `CONFLICT`. The first
 `vm.start` fixes vcpus, memory, mac and seed; later starts reuse them and
 ignore the request's sizes and seed (a different mac is `CONFLICT`). A
 mutation runs to completion even when its control connection times out, so a
