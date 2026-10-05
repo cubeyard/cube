@@ -17,6 +17,8 @@ missing_packages=()
 command -v curl >/dev/null 2>&1 || missing_packages+=(curl)
 command -v git >/dev/null 2>&1 || missing_packages+=(git)
 command -v xz >/dev/null 2>&1 || missing_packages+=(xz-utils)
+# A C toolchain for Rust crates that build C (rusqlite's bundled SQLite).
+command -v cc >/dev/null 2>&1 || missing_packages+=(build-essential)
 [ -r /etc/ssl/certs/ca-certificates.crt ] || missing_packages+=(ca-certificates)
 
 if ((${#missing_packages[@]})); then
