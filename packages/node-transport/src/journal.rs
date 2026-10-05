@@ -115,6 +115,7 @@ impl VmState {
         ))?)
     }
     /// Holds the one VM slot: everything between allocation and release.
+    /// (Also used by `active_vm_count`, which reads a live runner's journal.)
     pub fn active(self) -> bool {
         matches!(
             self,
@@ -597,6 +598,24 @@ impl Journal {
             .optional()?
             .map_or(0, |epoch| epoch as u64))
     }
+}
+
+/// Active VMs in a journal another process may own, read without its owner
+/// lock (SQLite allows concurrent readers). For the self-updater's idle check.
+pub fn active_vm_count(state: &Path) -> Result<u64> {
+    let db = Connection::open_with_flags(
+        state.join("journal.db"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
+    let mut statement = db.prepare("SELECT state FROM vm")?;
+    let mut active = 0;
+    for state in statement.query_map([], |row| row.get::<_, String>(0))? {
+        if VmState::parse(&state?)?.active() {
+            active += 1;
+        }
+    }
+    Ok(active)
 }
 
 #[cfg(test)]

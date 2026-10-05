@@ -1,0 +1,9 @@
+[Unit]
+Description=Cube runner self-update (signed latest release, only while idle)
+Documentation=https://github.com/cubeyard/cube/blob/main/docs/runner-operations.md
+After=network-online.target cube-runner.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/cube-runner/updater/scripts/runner/update.sh

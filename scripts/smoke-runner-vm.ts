@@ -190,6 +190,9 @@ ${indent(caPem, 6)}
   });
   assert.ok(leased);
   log(`cloud-init finished: ${consoleTail.match(/Cloud-init v\. .* finished at[^\n]*/)![0].trim()}`);
+  // The self-updater's idle check reads the journal the running runner owns.
+  const busy = JSON.parse(execFileSync(runnerBin, ["idle", "--state", path.join(work, "state")], { encoding: "utf8" }));
+  assert.deepEqual(busy, { activeVms: 1, idle: false });
   await until("sshd through cube-gateway dial", 120, () => { try { return ssh("echo ready").trim() === "ready" ? true : undefined; } catch { return undefined; } });
   ssh("echo kept-on-disk > ~/marker && sync");
   log("ssh through the gateway works; host key pinned");
@@ -301,6 +304,8 @@ ${indent(caPem, 6)}
   status = call({ method: "node.status" }).status;
   assert.equal(status.retainedVms, 1);
   log(`release: retained ${(status.retainedBytes / 1e6).toFixed(0)} MB kept, clean release deleted`);
+  assert.deepEqual(JSON.parse(execFileSync(runnerBin, ["idle", "--state", path.join(work, "state")], { encoding: "utf8" })),
+    { activeVms: 0, idle: true }, "released machines leave the runner idle for self-update");
   assert.ok(decided.length > 0 || traffic.startsWith("skipped"), "guest https went through the decision server");
 
   runner.kill("SIGTERM");

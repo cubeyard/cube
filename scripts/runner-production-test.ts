@@ -14,6 +14,10 @@ const binary = (version: string, protocol = 3) => {
 set -eu
 if [ "$1" = version ]; then
   printf '%s\\n' '{"softwareVersion":"${version}","protocolVersion":${protocol},"minimumProtocolVersion":${protocol}}'
+elif [ "$1" = verify-release ]; then
+  printf '%s\n' "$CUBE_TEST_VERIFY"
+elif [ "$1" = idle ]; then
+  printf '{"activeVms":%s,"idle":%s}\n' "\${CUBE_TEST_ACTIVE:-0}" "$([ "\${CUBE_TEST_ACTIVE:-0}" = 0 ] && echo true || echo false)"
 elif [ "$1" = runner-acknowledge-recovery ]; then
   shift; state=""
   while [ "$#" -gt 0 ]; do
@@ -143,6 +147,55 @@ esac
   assert.deepEqual(fs.readFileSync(path.join(native, "etc/systemd/system/cube-runner.service")), unitBeforeFailure,
     "failed native upgrade restores its systemd unit");
   assert.match(fs.readFileSync(path.join(native, "run/cube-runner/ready.json"), "utf8"), /"softwareVersion":"0.3.0"/);
+
+  // Self-update: install placed the updater, its pinned key and an hourly timer.
+  const updaterScript = path.join(native, "opt/cube-runner/updater/scripts/runner/update.sh");
+  assert.ok(fs.existsSync(updaterScript), "install places the updater");
+  assert.ok(fs.existsSync(path.join(native, "opt/cube-runner/updater/update-public-key.pem")), "with the pinned key");
+  assert.match(fs.readFileSync(path.join(native, "etc/systemd/system/cube-runner-update.timer"), "utf8"), /OnUnitActiveSec=1h/);
+  assert.match(fs.readFileSync(path.join(native, "etc/systemd/system/cube-runner-update.service"), "utf8"),
+    /ExecStart=\/bin\/bash \/opt\/cube-runner\/updater\/scripts\/runner\/update.sh/);
+  // A signed bundle in a local "feed"; curl is replaced by a copy from it.
+  const feed = path.join(root, "feed");
+  const bundleStage = path.join(root, "bundle-stage/cube-runner");
+  fs.mkdirSync(path.join(bundleStage, "bin"), { recursive: true });
+  fs.copyFileSync(binary("0.6.0"), path.join(bundleStage, "bin/cube-runner"));
+  fs.chmodSync(path.join(bundleStage, "bin/cube-runner"), 0o755);
+  fs.cpSync(path.join(repo, "scripts/runner"), path.join(bundleStage, "scripts/runner"), { recursive: true });
+  fs.copyFileSync(path.join(repo, "scripts/cubed/update-public-key.pem"), path.join(bundleStage, "update-public-key.pem"));
+  fs.mkdirSync(feed);
+  spawnSync("tar", ["-czf", path.join(feed, "bundle.tar.gz"), "-C", path.dirname(bundleStage), "cube-runner"]);
+  fs.writeFileSync(path.join(feed, "cube-runner-linux-x64-gnu.json"), "{}\n");
+  fs.writeFileSync(path.join(feed, "cube-runner-linux-x64-gnu.json.sig"), "sig\n");
+  const bundleBytes = fs.statSync(path.join(feed, "bundle.tar.gz")).size;
+  const bundleSha = spawnSync("sha256sum", [path.join(feed, "bundle.tar.gz")], { encoding: "utf8" }).stdout.split(" ")[0];
+  const curl = path.join(root, "curl");
+  fs.writeFileSync(curl, `#!/bin/sh
+out=""; url=""
+while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; --proto|--max-time) shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac; done
+cp "${feed}/$(basename "$url")" "$out"
+`, { mode: 0o755 });
+  const verify = (version: string, newer: boolean, sha = bundleSha) =>
+    JSON.stringify({ version, newer, url: "https://example.invalid/bundle.tar.gz", sha256: sha, bytes: bundleBytes });
+  const updateEnv = { ...env, CUBE_RUNNER_CURL: curl };
+  const update = (extra: NodeJS.ProcessEnv) => spawnSync("bash", [updaterScript], { encoding: "utf8",
+    env: { ...process.env, PATH: platformPath, CUBE_RUNNER_ROOT: native, CUBE_RUNNER_USER: user, CUBE_RUNNER_GROUP: group,
+      CUBE_RUNNER_PLATFORM: "Linux", CUBE_RUNNER_ARCH: "x86_64", ...updateEnv, ...extra } });
+  let result = update({ CUBE_TEST_VERIFY: verify("0.3.0", false) });
+  assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /up to date/);
+  result = update({ CUBE_TEST_VERIFY: verify("0.6.0", true), CUBE_TEST_ACTIVE: "1" });
+  assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /waits: the runner has an active thread machine/);
+  assert.match(fs.readlinkSync(path.join(native, "opt/cube-runner/current")), /0\.3\.0$/, "a busy runner is not updated");
+  result = update({ CUBE_TEST_VERIFY: verify("0.6.0", true, "0".repeat(64)) });
+  assert.notEqual(result.status, 0); assert.match(result.stderr, /checksum does not match/);
+  assert.match(fs.readlinkSync(path.join(native, "opt/cube-runner/current")), /0\.3\.0$/, "a bad artifact changes nothing");
+  result = update({ CUBE_TEST_VERIFY: verify("0.6.0", true) });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(fs.readlinkSync(path.join(native, "opt/cube-runner/current")), /0\.6\.0$/, "idle runner updated to the signed release");
+  assert.match(fs.readFileSync(path.join(native, "run/cube-runner/ready.json"), "utf8"), /"softwareVersion":"0.6.0"/);
+  // Roll the test installation back to 0.3.0 for the checks below.
+  fs.rmSync(path.join(native, "opt/cube-runner/current"));
+  fs.symlinkSync(path.join(native, "opt/cube-runner/releases/0.3.0"), path.join(native, "opt/cube-runner/current"));
 
   // A protocol-2 installation (same-UID execution) is not upgraded in place.
   const old = path.join(root, "protocol-two-installed");

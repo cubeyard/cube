@@ -184,7 +184,36 @@ retained disk on its own: the operator discards it from the project page
 `POST /api/threads/<id>/discard`, which sends `vm.discard` (cube-runner 0.5.0
 or newer; an older runner answers `UNSUPPORTED`).
 
+## Self-update
+
+`install.sh --service` (and every upgrade) installs a self-updater beside the
+release: `updater/` under the software root, holding the runner scripts and
+the pinned release public key (the same Ed25519 key that signs cubed
+updates). On Linux a root `cube-runner-update.timer` runs it hourly; on macOS
+a launchd job `com.cubeyard.cube-runner-update` does, beside the runner's own
+plist. Each run:
+
+1. fetches `cube-runner-<platform>.json` and its `.sig` from the published
+   `latest` release (`linux-x64-gnu`, `darwin-arm64`);
+2. verifies the signature with the pinned key using the installed runner
+   (`cube-runner verify-release`) and stops unless the version is newer;
+3. waits (exits, to retry next hour) while the runner has an active thread
+   machine (`cube-runner idle` reads the journal read-only);
+4. downloads the bundle, checks its size and sha256 against the signed
+   manifest and the binary's version, and runs that bundle's `upgrade.sh`
+   (drain, switch, readiness, rollback on failure), which also refreshes the
+   updater.
+
+The runner account never writes its own binaries; the updater runs as root
+on Linux (as the runner's user on macOS). Set `CUBE_RUNNER_SELF_UPDATE=0`
+when installing to skip it; `systemctl disable --now cube-runner-update.timer`
+or `launchctl bootout gui/$(id -u)/com.cubeyard.cube-runner-update` turns it
+off later. Logs: `journalctl -u cube-runner-update` or `logs/update.log`.
+
 ## Upgrade
+
+Runners with the self-updater (cube-runner 0.6.0 or newer) upgrade
+themselves. To upgrade by hand, or to install the updater the first time:
 
 ```sh
 sudo bash scripts/runner/upgrade.sh "$PWD/bin/cube-runner"

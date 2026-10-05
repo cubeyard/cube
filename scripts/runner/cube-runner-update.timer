@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for a cube runner update every hour
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
