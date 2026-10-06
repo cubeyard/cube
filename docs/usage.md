@@ -45,8 +45,9 @@ aborted partials included, compaction summaries too. So each response is
 counted once, and a restart or a replayed task does not add it again.
 `Harness.usage()` sums every conversation. cubed reads it from the open agent;
 when the agent closes (archive, shutdown, a machine reboot) its last reading
-is kept. An archived thread's store is read again directly (nothing else may
-open it then). A thread that is open but whose agent is not (its machine is
+is kept. An archived thread's store is read again from a private copy (nothing
+else may open it then, and opening pi-durable storage would migrate and
+checkpoint the retained original). A thread that is open but whose agent is not (its machine is
 starting or failed) shows its last reading (`read: "snapshot"`) or, if it never
 had one, `unavailable`: only the agent may open its store, whose lease is
 its lock.
@@ -61,21 +62,28 @@ same process. Results are counted once by `uuid`. Subagent calls are inside
 `modelUsage` already, so assistant messages, which also carry per-call usage
 (not final while streaming), are never added to it.
 
-A process started with `--resume` (after a model change, the idle timeout or
-a cubed restart) may begin from the totals the session's transcript saved, or
-from zero. cube decides from the first result of such a process: it continued
-the session's totals if it holds at least them in every counter and its
-increase covers the turn's own main-loop usage (`result.usage`); otherwise
-it started from zero. The choice is recorded in `notes`. A running total that
-goes down is counted from zero after it. A turn that ended without a result
-(stopped and killed, the child crashed, cubed stopped mid-turn) or with a
-zeroed error result has unknown usage and counts in `unknownTurns`.
+Every process after a thread's first is started with `--resume` (after a
+model change, the idle timeout or a cubed restart) and may begin from the
+totals the session's transcript saved, or from zero. cube decides from the
+first result of such a process, whatever session id it reports: of the
+candidates "every earlier turn's totals" and "the previous process's last
+totals", it takes the largest that the result holds in every counter and whose
+increase still covers the turn's own main-loop usage (`result.usage`);
+otherwise the process started from zero. A wrong choice undercounts, never
+overcounts. The choice is recorded in `notes`. A running total that goes down
+is counted from zero after it. A turn that ended without a result (stopped and
+killed, the child crashed, cubed stopped mid-turn) or with zeroed totals after
+a failure has unknown usage and counts in `unknownTurns`; if the next resumed
+process carried that turn's calls in its saved totals, they are counted with
+the next turn and the unknown count overstates the gap.
 
 **OptChat.** The chat's own model calls are in its Pi store's `pi.usage`
 (source `optchat`). The compactor's calls run beside Pi, so OptChat counts
 each reply, failed ones included, in its `cube.optchat.usage` document (source
-`optchat-compactor`, with a call count). A chat whose tree already had nodes
-when this was added has `incomplete` set: those earlier calls are unknown.
+`optchat-compactor`, with a call count), counting from the first open of a
+cube that does this (`since`). A chat whose tree already held nodes the
+compactor built then (not ones whose text fit as it was) has `incomplete`
+set: those earlier calls are unknown.
 The threads OptChat started are ordinary threads; a global report shows their
 sum (`optchatThreads`) but adds it to the total only once, under the threads.
 
@@ -114,6 +122,14 @@ network or an authenticated proxy).
 - **Mixed pricing in one Pi model line.** Pi's ledger sums per model: if the
   catalog priced some of a model's responses and not others, the line counts
   as priced and the unpriced responses add $0 to it.
+- **Free models.** A catalog price of $0 (a local model) cannot be told from
+  a missing price in Pi's ledger; its tokens count as unpriced. The usage
+  panel shows when the catalog lists no price for a model now.
+- **Claude Code's basis per turn.** `costBasis` is the basis of a model's
+  latest request, so a turn mixing priced and unpriced requests of one model
+  takes the basis of its last.
+- **Model names** are the strings each agent reports: Claude Code's raw model
+  ids (not its `canonicalModel`), so one model may show under two names.
 - **Pi tool usage** (`pi.usage.tools`): no cube tool reports usage today; it
   is not shown.
 - **Claude Code internals** outside its query pipeline (its permission
