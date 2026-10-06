@@ -166,10 +166,11 @@ async function snapshot<T>(file: string, read: (db: DatabaseSync, identity: stri
   const db = new DatabaseSync(file, { readOnly: true, timeout: 5000 });
   try {
     // The file opened is the one whose identity the index is kept under.
-    const opened = fs.statSync(file);
-    if (opened.dev !== stat.dev || opened.ino !== stat.ino) throw new Error("the stored history was replaced while it was read");
+    // An inode can be reused by a new file; its birth time tells them apart.
+    const identity = (of: fs.Stats) => `${of.dev}:${of.ino}:${of.birthtimeMs}`;
+    if (identity(fs.statSync(file)) !== identity(stat)) throw new Error("the stored history was replaced while it was read");
     db.exec("BEGIN");
-    try { return await read(db, `${stat.dev}:${stat.ino}`); }
+    try { return await read(db, identity(stat)); }
     finally { db.exec("ROLLBACK"); }
   } finally { db.close(); }
 }
