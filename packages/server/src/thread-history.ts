@@ -2,12 +2,15 @@
  * OptChat's history tool. Messages are numbered from the first, so a page
  * needs to know how many messages each stored row shows: an index of that
  * is kept per store and extended by the rows written since it was last read
- * (stored rows are only ever appended). A page then parses and renders only
- * its own rows and the newest answer's, never the whole history again.
+ * (stored rows are only ever appended), with Claude Code's tool names by
+ * call. A page then parses and renders only its own rows and the newest
+ * answer's, never the whole history again.
  *
  * Stores are read through a read-only connection inside one read
  * transaction: a consistent snapshot of the store that never writes it,
- * migrates it, checkpoints it or waits for its writer, and needs no copy. */
+ * migrates it or checkpoints it, and needs no copy. In WAL a reader never
+ * waits for a write transaction; it may wait briefly for a checkpoint or a
+ * recovery. */
 import fs from "node:fs";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import type { EntryRecord, SubmissionRecord } from "@earendil-works/pi-durable";
@@ -64,8 +67,10 @@ export const historyIndexed = { rows: 0 };
 
 /** How many messages each stored row shows, for the rows that show any. */
 class Index {
-  /** Row keys, in transcript order, and the running count through each. */
+  /** Row keys, in transcript order, each row's place among all rows read,
+   * and the running count through each. */
   readonly keys: number[] = [];
+  readonly at: number[] = [];
   readonly ends: number[] = [];
   /** Rows read, including those that show nothing. */
   rows = 0;
@@ -83,6 +88,7 @@ class Index {
     const asked = shown.findLastIndex(event => event.type === "user-message");
     if (asked >= 0) this.asked = total + asked;
     this.keys.push(key);
+    this.at.push(this.rows - 1);
     this.ends.push(total + shown.length);
   }
   /** The position of the row that shows message `index`. */
@@ -97,12 +103,12 @@ class Index {
   begin(row: number): number { return row ? this.ends[row - 1]! : 0; }
 }
 
-/** The page from an index; `shownOf` renders one row's shown events. */
-function assemble(index: Index, base: Pick<HistoryPage, "agent" | "owner" | "status">, request: HistoryRequest, shownOf: (key: number) => ThreadEvent[]): HistoryPage {
+/** The page from an index; `shownOf` renders the shown events of the row at a position. */
+function assemble(index: Index, base: Pick<HistoryPage, "agent" | "owner" | "status">, request: HistoryRequest, shownOf: (row: number) => ThreadEvent[]): HistoryPage {
   const { start, end } = pageRange(index.total, request);
   const events: ThreadEvent[] = [];
   for (let row = start < end ? index.row(start) : index.keys.length; row < index.keys.length && index.begin(row) < end; row++) {
-    const shown = shownOf(index.keys[row]!);
+    const shown = shownOf(row);
     const begin = index.begin(row);
     if (shown.length !== index.ends[row]! - begin) throw new Error("the stored history changed under its index");
     events.push(...shown.slice(Math.max(0, start - begin), end - begin));
@@ -110,7 +116,7 @@ function assemble(index: Index, base: Pick<HistoryPage, "agent" | "owner" | "sta
   let answer: HistoryPage["answer"] = null;
   if (index.answer) {
     const { index: number, row } = index.answer;
-    const event = shownOf(index.keys[row]!)[number - index.begin(row)];
+    const event = shownOf(row)[number - index.begin(row)];
     if (event?.type !== "assistant-text") throw new Error("the stored history changed under its index");
     answer = { index: number, text: event.text };
   }
@@ -155,10 +161,13 @@ function keep(file: string, identity: string, state: unknown): void {
 
 /** Opens `file` read-only and runs `read` inside one read transaction. */
 async function snapshot<T>(file: string, read: (db: DatabaseSync, identity: string) => Promise<T>): Promise<T | null> {
-  if (!fs.existsSync(file)) return null;
+  const stat = fs.statSync(file, { throwIfNoEntry: false });
+  if (!stat) return null;
   const db = new DatabaseSync(file, { readOnly: true, timeout: 5000 });
   try {
-    const stat = fs.statSync(file);
+    // The file opened is the one whose identity the index is kept under.
+    const opened = fs.statSync(file);
+    if (opened.dev !== stat.dev || opened.ino !== stat.ino) throw new Error("the stored history was replaced while it was read");
     db.exec("BEGIN");
     try { return await read(db, `${stat.dev}:${stat.ino}`); }
     finally { db.exec("ROLLBACK"); }
@@ -212,15 +221,29 @@ export async function readPiHistory(file: string, owner: ThreadAgent | null, fai
       : { run: last.requestId ?? String(last.id), ...settlement(last) };
     const entry = db.prepare("SELECT record FROM entries WHERE id = ?");
     return assemble(growing, { agent: "pi", owner, status }, request,
-      id => entryEvents([parse((entry.get(id) as { record: string }).record)]).filter(historyShows));
+      row => entryEvents([parse((entry.get(growing.keys[row]!) as { record: string }).record)]).filter(historyShows));
   }));
 }
 
 // --- Claude Code -------------------------------------------------------------
 
-/** Rows are a submission (key -seq), then its messages (key seq), as render orders them. */
-type ClaudeIndex = Index & { submission: number; message: number; names: Map<string, string> };
-const claudeIndex = (): ClaudeIndex => Object.assign(new Index(), { submission: 0, message: 0, names: new Map<string, string>() });
+/** Rows are a submission (key -seq), then its messages (key seq), as render
+ * orders them. `names` holds each tool use id's names by the row that named
+ * it: a result shows the name of the newest call before it, as in render. */
+type ClaudeIndex = Index & { submission: number; message: number; names: Map<string, Array<{ at: number; name: string }>> };
+const claudeIndex = (): ClaudeIndex => Object.assign(new Index(), { submission: 0, message: 0, names: new Map<string, Array<{ at: number; name: string }>>() });
+
+/** The tool names the calls before row `at` gave; while indexing, the row being read adds its own. */
+function namesBefore(index: ClaudeIndex, at: number, indexing = false): Pick<Map<string, string>, "get" | "set"> {
+  const names = {
+    get: (id: string) => index.names.get(id)?.findLast(entry => entry.at < at)?.name,
+    set: (id: string, name: string) => {
+      if (indexing) index.names.set(id, [...index.names.get(id) ?? [], { at, name }]);
+      return names as unknown as Map<string, string>;
+    },
+  };
+  return names;
+}
 
 /** Extends `index` by the submissions and messages after it, in render's
  * order; false when a message joins a submission before the newest one
@@ -240,7 +263,7 @@ async function extend(db: DatabaseSync, index: ClaudeIndex, sorted = false): Pro
     if (message.submission < index.submission) { ordered = false; return; }
     submit(message.submission);
     // A message of no stored submission is not shown, as in render.
-    if (message.submission === index.submission) index.add(message.seq, messageEvents(message.seq, JSON.parse(message.data) as Record<string, unknown>, index.names));
+    if (message.submission === index.submission) index.add(message.seq, messageEvents(message.seq, JSON.parse(message.data) as Record<string, unknown>, namesBefore(index, index.rows, true)));
     index.message = Math.max(index.message, message.seq);
   });
   if (ordered) submit(Infinity);
@@ -263,11 +286,13 @@ export async function readClaudeHistory(file: string, root: string, owner: Threa
     }
     keep(file, identity, index);
     const shown = virtualize(root);
-    const names = index.names;
     const message = db.prepare("SELECT data FROM message WHERE seq = ?");
     const submission = db.prepare("SELECT seq, text FROM submission WHERE seq = ?");
-    return assemble(index, { agent: "claude-code", owner, status: claudeStatus(newest, failure) }, request, key => (key < 0
-      ? [submissionEvent(submission.get(-key) as { seq: number; text: string })]
-      : messageEvents(key, JSON.parse((message.get(key) as { data: string }).data) as Record<string, unknown>, names, shown)).filter(historyShows));
+    const read = index;
+    return assemble(read, { agent: "claude-code", owner, status: claudeStatus(newest, failure) }, request, row => {
+      const key = read.keys[row]!;
+      return (key < 0 ? [submissionEvent(submission.get(-key) as { seq: number; text: string })]
+        : messageEvents(key, JSON.parse((message.get(key) as { data: string }).data) as Record<string, unknown>, namesBefore(read, read.at[row]!), shown)).filter(historyShows);
+    });
   }));
 }

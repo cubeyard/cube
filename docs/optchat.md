@@ -72,13 +72,15 @@ is refused as unknown, like `tell`'s. It changes nothing in the thread: it does 
 thread's agent, take its workspace lease or wait for its machine
 (`Conversations.storedHistory`, `thread-history.ts`). Each store is read
 through a read-only connection inside one read transaction: a consistent
-snapshot, a WAL read that never waits for the running writer, with no copy.
+snapshot with no copy, a WAL read that never waits for a write transaction
+(it may wait briefly for a checkpoint or a recovery).
 The store is never created, migrated, checkpointed or locked for writing; a Pi
 store of another pi-durable schema version than the one the reader knows is
 refused, and there is no size bound. A read-only connection to a store closed
 cleanly can recreate its empty `-wal` and `-shm` files; nothing is written to
 them. Pages are numbered from the first message, so cubed keeps, per store
-(the last 32 read), an index of how many messages each stored row shows: the
+(the last 32 read), an index of how many messages each stored row shows (and
+a Claude Code store's tool names by call): the
 first read of a store parses each row once to build it (pausing every 20 ms so
 other threads go on), and later reads index only the rows written since. A
 page then parses and renders only its own rows and the latest answer's. Rows
@@ -229,7 +231,10 @@ model), `POST /api/optchat/prompt {text, requestId}`, `POST /api/optchat/stop`,
 - `history`'s first read of a store after cubed starts (or after the store
   falls out of the last 32) parses every row once to number the messages; on
   a store of hundreds of MiB that takes a few hundred milliseconds, in slices.
-  The index lives in memory only.
+  The index lives in memory only. Its read transaction is held for the
+  build: the writer goes on, but its WAL is not truncated meanwhile, so an
+  agent closing then (archive, shutdown) waits for its final checkpoint up to
+  its 5-second busy timeout.
 - `archive` handles its ids one after another, and each release waits for the
   runner, so a call with many ids holds the chat's turn until the last is
   released.

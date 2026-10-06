@@ -60,6 +60,30 @@ try {
     console.log(`pi ${(fs.statSync(file).size / 2 ** 20).toFixed(1)} MiB, ${whole.events.length} messages: first page ${first.ms.toFixed(0)} ms, again ${again.ms.toFixed(1)} ms`);
     assert.deepEqual(before, { bytes: fs.readFileSync(file), files: files(directory) }, "reads leave the store and its directory as they were");
 
+    // Reads of one store at once queue: the store is indexed once.
+    const copy = path.join(root, "pi-copy");
+    fs.mkdirSync(copy);
+    fs.copyFileSync(file, path.join(copy, "pi.sqlite"));
+    const copied = path.join(copy, "pi.sqlite");
+    let mark = historyIndexed.rows;
+    const together = await Promise.all([{}, { before: 9 }, { limit: 1 }].map(request => readPiHistory(copied, null, "boom", request)));
+    assert.deepEqual(together, [{}, { before: 9 }, { limit: 1 }].map(request => pageOf(whole, request)));
+    assert.equal(historyIndexed.rows - mark, built, "indexed once");
+    // A failed read drops the index; another file under the same name is indexed anew.
+    fs.writeFileSync(copied, "not a database");
+    await assert.rejects(readPiHistory(copied, null, null, {}));
+    fs.rmSync(copied);
+    fs.copyFileSync(file, copied);
+    mark = historyIndexed.rows;
+    assert.deepEqual(await readPiHistory(copied, null, "boom", {}), pageOf(whole, {}));
+    assert.equal(historyIndexed.rows - mark, built, "indexed again");
+    fs.rmSync(copied);
+    fs.copyFileSync(file, `${copied}.new`);
+    fs.renameSync(`${copied}.new`, copied);
+    mark = historyIndexed.rows;
+    assert.deepEqual(await readPiHistory(copied, null, "boom", {}), pageOf(whole, {}));
+    assert.equal(historyIndexed.rows - mark, built, "a replaced file is indexed again");
+
     // More runs: only the new rows are indexed.
     await piStore(directory, { runs: 1, calls: 5, bytes: 100, from: 6 });
     const more = await piWhole(file);
@@ -119,18 +143,25 @@ try {
     insert.run(8, json({ type: "assistant", message: { content: "plain text content" } }));
     insert.run(8, json({ type: "system", subtype: "init", tools: ["Bash"] }));
     insert.run(8, json({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t0.0", content: [{ type: "text", text: "late" }, { type: "image" }] }] } }));
+    // A result before its call is named "tool", and a reused call id shows the newest name before each result, as render does.
+    insert.run(8, json({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "early", content: "before its call" }] } }));
+    insert.run(8, json({ type: "assistant", message: { content: [{ type: "tool_use", id: "early", name: "Grep", input: {} }] } }));
+    insert.run(8, json({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "early", content: "after it" }] } }));
+    insert.run(8, json({ type: "assistant", message: { content: [{ type: "tool_use", id: "early", name: "Glob", input: {} }] } }));
+    insert.run(8, json({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "early", content: "after the second" }] } }));
     db.close();
     const stored = () => render(ClaudeAgent.stored(directory)!, null, null, path.join(directory, "claude"));
     const file = path.join(directory, "claude.sqlite");
     const read = (request: HistoryRequest) => readClaudeHistory(file, path.join(directory, "claude"), null, null, request);
     const whole = stored();
     assert.ok(whole.events.length > 600);
+    assert.deepEqual(whole.events.filter(event => event.type === "tool-result" && event.callId === "early").map(event => event.type === "tool-result" && event.name), ["tool", "Grep", "Glob"]);
     const before = { bytes: fs.readFileSync(file), files: files(directory) };
     const first = await timed(() => read({}));
     for (const request of requests(whole.events.length)) assert.deepEqual(await read(request), pageOf(whole, request), JSON.stringify(request));
     const again = await timed(() => read({}));
     console.log(`claude ${(fs.statSync(file).size / 2 ** 20).toFixed(1)} MiB, ${whole.events.length} messages: first page ${first.ms.toFixed(0)} ms, again ${again.ms.toFixed(1)} ms`);
-    assert.match(JSON.stringify(await read({ limit: 3 })), /\/workspace\/out/, "host paths show as /workspace");
+    assert.match(JSON.stringify(await read({ before: 600, limit: 3 })), /\/workspace\/out/, "host paths show as /workspace");
     assert.ok(!JSON.stringify(await read({ limit: HISTORY_MAX })).includes(path.join(directory, "claude")));
     assert.deepEqual(before, { bytes: fs.readFileSync(file), files: files(directory) }, "reads leave the store and its directory as they were");
 

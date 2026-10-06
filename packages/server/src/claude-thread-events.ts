@@ -72,8 +72,9 @@ export function render(state: ClaudeState, owner: ThreadAgent | null, failure: s
 export const submissionEvent = (submission: Pick<ClaudeSubmission, "seq" | "text">): ThreadEvent => ({ type: "user-message", id: `s${submission.seq}`, text: submission.text });
 
 /** The events of one stored stream-json message. `names` maps tool use ids
- * to tool names: the message's calls are added, its results look theirs up. */
-export function messageEvents(seq: number, data: Record<string, unknown>, names: Map<string, string>, shown: <T>(value: T) => T = value => value): ThreadEvent[] {
+ * to tool names: the message's calls are added, its results look up the
+ * calls before them. */
+export function messageEvents(seq: number, data: Record<string, unknown>, names: Pick<Map<string, string>, "get" | "set">, shown: <T>(value: T) => T = value => value): ThreadEvent[] {
   if (data.parent_tool_use_id != null) return [];
   const events: ThreadEvent[] = [];
   const message = data.message as { content?: unknown } | undefined;
