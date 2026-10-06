@@ -902,12 +902,14 @@ header .spacer { margin-left: auto; }
    machinery behind it. The composer is ordinary browser text, so selection,
    paste and multiline editing keep their native behavior. */
 .conversation {
+  /* the transcript's side padding; the composer repeats it to line up */
+  --pane-gutter: clamp(0.85rem, 3vw, 2rem);
   flex: 1; min-height: 0; display: flex; flex-direction: column;
   background: var(--s4);
 }
 .transcript {
   flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
-  padding: 1.15rem clamp(0.85rem, 3vw, 2rem) 1.5rem;
+  padding: 1.15rem var(--pane-gutter) 1.5rem;
   scrollbar-gutter: stable;
   overscroll-behavior: contain;
 }
@@ -1050,10 +1052,17 @@ header .spacer { margin-left: auto; }
 .task-bank strong { color: var(--ink-3); font-weight: 600; }
 .task-bank strong.bad { color: var(--bad); }
 .task-bank li span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A full-bleed deck whose row has the transcript column's geometry (same
+   padding, scrollbar gutter and measure), so the field sits under the text. */
 .composer {
-  flex: none; display: flex; align-items: flex-end; gap: 0.55rem;
-  padding: 0.55rem 0.7rem; border-top: 1px solid var(--line-2);
+  flex: none; padding: 0.55rem var(--pane-gutter);
+  overflow: hidden; scrollbar-gutter: stable;
+  border-top: 1px solid var(--line-2);
   background: var(--s2); box-shadow: 0 -1px 0 color-mix(in srgb, var(--s4) 55%, transparent);
+}
+.composer-row {
+  max-width: var(--col); margin: 0 auto;
+  display: flex; align-items: flex-end; gap: 0.55rem;
 }
 .composer textarea {
   flex: 1; min-width: 0; min-height: 2.55rem; max-height: 11rem; resize: none;

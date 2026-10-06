@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
+  import { SvelteMap } from "svelte/reactivity";
   import { errorText, sendPrompt, stopThread, threadBase, threadEvents } from "../lib/api.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
-  import { transcriptRows, type ToolState } from "../lib/transcript.ts";
+  import { toolOpen, transcriptRows, type ToolState, type TranscriptRow } from "../lib/transcript.ts";
   import { uid } from "../lib/uid.ts";
   import type { ModelSelection, ThreadStatus, ThreadTranscript } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
@@ -165,6 +166,14 @@
     }
   }
 
+  // Strips the reader opened or closed stay that way while frames arrive.
+  const chosen = new SvelteMap<string, boolean>();
+  function onToolToggle(event: Event, row: Extract<TranscriptRow, { kind: "tool" }>): void {
+    const open = (event.currentTarget as HTMLDetailsElement).open;
+    // A toggle the render caused (a strip opening as it runs) is no choice.
+    if (open !== toolOpen(row, chosen)) chosen.set(row.callId, open);
+  }
+
   const toolLamp: Record<ToolState, string> = { waiting: "on-amber", running: "on-amber blink", done: "on-green", error: "on-red", open: "" };
   const toolStateLabel: Record<ToolState, string> = { waiting: "waiting", running: "running", done: "done", error: "error", open: "no result" };
 </script>
@@ -184,7 +193,7 @@
       {:else}
         {#each rows as row (row.id)}
           {#if row.kind === "tool"}
-            <details class="tool-strip" open={row.state === "running" || row.state === "waiting" || row.state === "error"}>
+            <details class="tool-strip" open={toolOpen(row, chosen)} ontoggle={(event) => onToolToggle(event, row)}>
               <summary title={row.summary || row.name}>
                 <span class="lamp mini {toolLamp[row.state]}" aria-hidden="true"></span><span class="sr-only">{toolStateLabel[row.state]}</span>
                 <code>{row.name}</code>{#if row.summary}<span class="tool-summary">{row.summary}</span>{/if}
@@ -225,20 +234,23 @@
   {#if error || historyError || status.state === "failed"}<div class="conversation-error" role="alert">{error ?? historyError ?? status.error ?? "the run failed"}</div>{/if}
   <form class="composer" aria-busy={busy} onsubmit={(event) => { event.preventDefault(); void submit(); }}>
     <span class="sr-only" id="composer-hint">enter to send · shift enter for a new line</span>
-    <textarea
-      bind:this={composer}
-      bind:value={prompt}
-      oninput={resizeComposer}
-      onkeydown={onComposerKeydown}
-      placeholder={waitingText ?? (working ? (steer ? "agent is working — a message reaches it between steps" : "agent is working…") : placeholder)}
-      aria-label={placeholder}
-      aria-describedby="composer-hint"
-      title="enter to send · shift enter for a new line"
-      rows="1"
-    ></textarea>
-    <button class="send-key" type="submit" title="send · enter" aria-label="send message" disabled={!canSend}>
-      <Icon name="arrow" size={16} />
-    </button>
-    {#if working}<button class="key stop-key" type="button" disabled={stopping} onclick={stop}>{stopping ? "stopping…" : "stop"}</button>{/if}
+    <!-- the deck is full-bleed; the field sits in the transcript's measure -->
+    <div class="composer-row">
+      <textarea
+        bind:this={composer}
+        bind:value={prompt}
+        oninput={resizeComposer}
+        onkeydown={onComposerKeydown}
+        placeholder={waitingText ?? (working ? (steer ? "agent is working — a message reaches it between steps" : "agent is working…") : placeholder)}
+        aria-label={placeholder}
+        aria-describedby="composer-hint"
+        title="enter to send · shift enter for a new line"
+        rows="1"
+      ></textarea>
+      <button class="send-key" type="submit" title="send · enter" aria-label="send message" disabled={!canSend}>
+        <Icon name="arrow" size={16} />
+      </button>
+      {#if working}<button class="key stop-key" type="button" disabled={stopping} onclick={stop}>{stopping ? "stopping…" : "stop"}</button>{/if}
+    </div>
   </form>
 </div>

@@ -6,7 +6,8 @@ export type TranscriptRow =
   /** `from`: a thread's report (its short id), shown as the thread's, without the "[id] " prefix. */
   | { kind: "user"; id: string; text: string; from?: string }
   | { kind: "assistant"; id: string; text: string; reasoning: boolean; labelled: boolean }
-  | { kind: "tool"; id: string; name: string; summary: string; input: string | null; output: string; state: ToolState };
+  /** `callId` outlives `id`: a streamed call is renumbered once its message is saved. */
+  | { kind: "tool"; id: string; callId: string; name: string; summary: string; input: string | null; output: string; state: ToolState };
 /** `waiting`: called, no result yet while the thread works; `open`: the run
  * ended without a result. */
 export type ToolState = "waiting" | "running" | "done" | "error" | "open";
@@ -35,14 +36,21 @@ export function transcriptRows(transcript: Pick<ThreadTranscript, "events" | "st
       const result = results.get(event.callId);
       const { summary, input } = describeInput(event.input);
       rows.push({
-        kind: "tool", id: event.id, name: event.name, summary, input, output: result?.output ?? "",
+        kind: "tool", id: event.id, callId: event.callId, name: event.name, summary, input, output: result?.output ?? "",
         state: result ? (!result.final ? "running" : result.isError ? "error" : "done") : working ? "waiting" : "open",
       });
     } else if (!calls.has(event.callId)) {
-      rows.push({ kind: "tool", id: event.id, name: event.name, summary: "", input: null, output: event.output, state: !event.final ? "running" : event.isError ? "error" : "done" });
+      rows.push({ kind: "tool", id: event.id, callId: event.callId, name: event.name, summary: "", input: null, output: event.output, state: !event.final ? "running" : event.isError ? "error" : "done" });
     }
   }
   return rows;
+}
+
+/** Whether a tool strip is unfolded: the reader's own choice, kept by
+ * call id, else open while it runs, waits or failed. Every streamed frame
+ * renders the strip again, so a choice that is not kept is undone. */
+export function toolOpen(row: Extract<TranscriptRow, { kind: "tool" }>, chosen: ReadonlyMap<string, boolean>): boolean {
+  return chosen.get(row.callId) ?? (row.state === "running" || row.state === "waiting" || row.state === "error");
 }
 
 /** A one-line summary of the call's input and, when that line cannot hold
