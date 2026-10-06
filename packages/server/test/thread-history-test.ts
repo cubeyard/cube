@@ -77,7 +77,7 @@ try {
     mark = historyIndexed.rows;
     assert.deepEqual(await readPiHistory(copied, null, "boom", {}), pageOf(whole, {}));
     assert.equal(historyIndexed.rows - mark, built, "indexed again");
-    fs.rmSync(copied);
+    // Made while the old file exists, the new one cannot take its inode.
     fs.copyFileSync(file, `${copied}.new`);
     fs.renameSync(`${copied}.new`, copied);
     mark = historyIndexed.rows;
