@@ -93,8 +93,9 @@ export interface OptThreads {
   tell(id: string, text: string, requestId: string): Promise<void>;
   /** One line per thread: its state and title. */
   describe(ids: readonly string[]): Promise<string>;
-  /** The thread's events; null once it is archived or gone. */
-  events(id: string): Promise<ThreadEvents | null>;
+  /** The thread's events; null once it is archived or gone; "archiving"
+   * while its archive (or a release left unfinished) goes on. */
+  events(id: string): Promise<ThreadEvents | null | "archiving">;
   /** What cubed has of a thread, read only: its own record beside a page of
    * the agent's stored transcript, which may disagree. null: no such thread. */
   history(id: string, request?: HistoryRequest): Promise<ThreadRecord | null>;
@@ -723,7 +724,7 @@ export class OptChat {
     for (const id of Object.keys(settings?.threads ?? {})) {
       if (this.watchers.has(id)) continue;
       const watching = (async () => {
-        let events: ThreadEvents | null;
+        let events: ThreadEvents | null | "archiving";
         try { events = await this.options.threads.events(id); }
         catch (error) {
           // cubed retries a machine that failed to start (a lost guest, a
@@ -741,10 +742,12 @@ export class OptChat {
           this.watchers.delete(id);
           return null;
         }
+        // Started (or gone): a later failure's grace starts again. Its report
+        // keeps the request id, so a thread reports a failure to start once.
         this.startFailing.delete(id);
-        // Archived or being archived: the next round finds it gone or watches it again.
-        if (!events) { this.watchers.delete(id); return null; }
-        if (this.closing) return null;
+        // An archive may still be refused: the next round looks again.
+        if (events === "archiving") { this.watchers.delete(id); return null; }
+        if (!events || this.closing) return null;
         const watch = await events.watch(transcript => this.observe(id, transcript), { onEnd: () => { this.watchers.delete(id); } });
         // An archived thread's source closes; the next round finds it gone.
         void watch.closed.then(() => { if (!this.closing) this.watchers.delete(id); });

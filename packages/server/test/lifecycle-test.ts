@@ -18,7 +18,8 @@ import { LocalMachines } from "./local-guest.ts";
 
 /** Local machines whose next starts or releases fail, or wait for the test. */
 class HeldMachines extends LocalMachines {
-  failStarts: string[] = [];
+  /** By thread: the errors its next starts fail with. */
+  readonly failStarts = new Map<string, string[]>();
   failReleases: string[] = [];
   startGate: Promise<void> | null = null;
   releaseGate: Promise<void> | null = null;
@@ -29,7 +30,7 @@ class HeldMachines extends LocalMachines {
     this.attempts.set(thread.id, (this.attempts.get(thread.id) ?? 0) + 1);
     this.startsWaiting++;
     try { await this.startGate; } finally { this.startsWaiting--; }
-    const failure = this.failStarts.shift();
+    const failure = this.failStarts.get(thread.id)?.shift();
     if (failure) throw new Error(failure);
     return super.start(thread);
   }
@@ -55,6 +56,10 @@ const state = path.join(root, "state");
 fs.mkdirSync(state);
 const app = await createCubed({ state, models, claude: null, machines });
 const conversations = app.conversations;
+await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
+const address = app.server.address();
+assert(address && typeof address === "object");
+const base = `http://127.0.0.1:${address.port}`;
 const adapter = cubeThreads({ registry: app.registry, conversations, catalog: async () => [], runners: () => { throw new Error("unused"); } });
 async function until<T>(read: () => T | Promise<T>, check: (value: T) => boolean, what: string): Promise<T> {
   for (let k = 0; ; k++) {
@@ -76,7 +81,7 @@ async function meanwhile(id: string, done: () => boolean) {
     const during = conversations.archivingNow(id);
     void conversations.activate(id);
     void conversations.boot();
-    const events = adapter.events(id).then(value => value ? "events" : "gone", (error: Error) => `error: ${error.message}`);
+    const events = adapter.events(id).then(value => value === "archiving" ? value : value ? "events" : "gone", (error: Error) => `error: ${error.message}`);
     if (during) seen.push(events);
     await delay(2);
   }
@@ -87,10 +92,7 @@ try {
     app.registry.enrollRunner({ nodeId: `node-${index}`, threadId: `runner-${index}`, environmentId: index + 1,
       configPath: `/private/runner-${index}.json`, configHash: `hash-${index}` });
   }
-  await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
-  const address = app.server.address();
-  assert(address && typeof address === "object");
-  const project = (await (await fetch(`http://127.0.0.1:${address.port}/api/projects`, { method: "POST", headers: { "content-type": "application/json" },
+  const project = (await (await fetch(`${base}/api/projects`, { method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ name: "empty", repositories: [] }) })).json()).project;
   assert.equal(project.status, "ready");
   const create = (requestId: string) => {
@@ -101,8 +103,8 @@ try {
   // A try that fails (the guest not reachable yet) is shown as failed, the
   // next try starts the machine again and the thread comes up: the failure
   // is gone from cubed's record and from what OptChat reads.
-  machines.failStarts = ["ssh: the guest is unreachable"];
   const late = create("late");
+  machines.failStarts.set(late, ["ssh: the guest is unreachable"]);
   await conversations.activate(late);
   assert.equal(conversations.error(late), "workspace allocation failed: ssh: the guest is unreachable");
   assert.equal(workspaceState(late), "failed");
@@ -127,26 +129,52 @@ try {
 
   // A later check of the machine that fails while the agent runs on it: the
   // agent stays open and OptChat still watches it.
-  machines.failStarts = ["ssh: the guest is unreachable"];
+  machines.failStarts.set(late, ["ssh: the guest is unreachable"]);
   await conversations.activate(late);
   assert.match(conversations.error(late) ?? "", /unreachable/);
   assert.equal(conversations.agentOpen(late), true);
   assert.match(await adapter.describe([late]), /ready \(a later check of its machine failed: ssh: the guest is unreachable\), completed$/);
-  machines.failStarts = ["ssh: the guest is unreachable"];
+  machines.failStarts.set(late, ["ssh: the guest is unreachable"]);
   assert.ok(await adapter.events(late), "an open agent is watched whatever a later check found");
   await conversations.activate(late);
   assert.equal(conversations.error(late), null);
 
+  // The recovery loop's check of a running machine under an open agent is
+  // not a start: cubed and OptChat keep calling the thread ready. A check
+  // that finds the machine booted again is one: the agent closes for the
+  // resume hooks and the thread is starting until it reopens.
+  const checking = gate();
+  machines.startGate = checking.promise;
+  const check = conversations.boot();
+  await until(() => machines.startsWaiting, value => value >= 1, "the check waits in its start");
+  assert.equal(conversations.starting(late), false, "a check is not a start");
+  const listed = (await (await fetch(`${base}/api/threads`)).json()).threads.find((row: { id: string }) => row.id === late);
+  assert.equal(listed.state, "ready");
+  machines.startGate = null;
+  checking.open();
+  await check;
+  assert.match(await adapter.describe([late]), /· ready, completed$/);
+  machines.reboot(app.registry.getThread(late)!);
+  let sawStarting = false;
+  const rebooting = conversations.activate(late);
+  for (let done = false; !done;) {
+    sawStarting ||= conversations.starting(late);
+    done = await Promise.race([rebooting.then(() => true), delay(1).then(() => false)]);
+  }
+  assert.ok(sawStarting, "a machine that booted again is starting");
+  assert.equal(conversations.error(late), null);
+  assert.equal(conversations.agentOpen(late), true);
+
   // An archive asked while a retry is starting the machine waits for it;
   // meanwhile no reader or recovery round starts the machine again, and the
   // archive is not reported as a failure.
-  machines.failStarts = ["ssh: the guest is unreachable"];
   const raced = create("raced");
+  machines.failStarts.set(raced, ["ssh: the guest is unreachable"]);
   await conversations.activate(raced);
   assert.equal(workspaceState(raced), "failed");
   const racing = gate();
   machines.startGate = racing.promise;
-  machines.failStarts = ["ssh: the guest is unreachable"];
+  machines.failStarts.set(raced, ["ssh: the guest is unreachable"]);
   void conversations.activate(raced);
   await until(() => machines.startsWaiting, value => value === 1, "the retry waits in its start");
   const starts = machines.attempts.get(raced);
@@ -166,7 +194,7 @@ try {
   assert.equal(app.registry.getThread(raced)!.archived, true);
   assert.equal(conversations.error(raced), null, "no failure is left on the archived thread");
   assert.equal(conversations.owner(raced), null);
-  assert.ok(seen.every(value => value === "gone"), `OptChat saw ${JSON.stringify(seen)}`);
+  assert.ok(seen.every(value => value === "archiving" || value === "gone"), `OptChat saw ${JSON.stringify(seen)}`);
 
   // An archive of a ready thread: while its release check and release run,
   // readers and recovery rounds start nothing, take no lease and record no
@@ -188,7 +216,7 @@ try {
   releasing.open();
   assert.deepEqual(await archiveReady, { retained: false, reason: "clean" });
   const readySeen = await watchingReady;
-  assert.ok(readySeen.length > 0 && readySeen.every(value => value === "gone"), `OptChat saw ${JSON.stringify(readySeen)}`);
+  assert.ok(readySeen.length > 0 && readySeen.every(value => value === "archiving" || value === "gone"), `OptChat saw ${JSON.stringify(readySeen)}`);
   assert.equal(machines.attempts.get(ready), before, "no start beside the archive");
   assert.equal(conversations.error(ready), null);
   assert.equal(conversations.owner(ready), null);
@@ -213,14 +241,15 @@ try {
   await assert.rejects(conversations.archive(stuck), /workspace release failed: the runner is unreachable/);
   const startsBefore = machines.attempts.get(stuck);
   await conversations.activate(stuck);
-  await adapter.events(stuck).catch(() => null);
+  assert.equal(await adapter.events(stuck), "archiving", "an unfinished archive is not a failure to start");
+  await assert.rejects(conversations.history(stuck), /workspace release failed/, "a reader is told the release failed");
   assert.equal(machines.attempts.get(stuck), startsBefore, "a release to finish is never a start");
   assert.equal(conversations.error(stuck), "workspace release failed: the runner is unreachable");
   await conversations.boot();
   assert.equal(app.registry.getThread(stuck)!.archived, true, "the recovery round finishes the release");
   assert.equal(conversations.error(stuck), null);
 
-  console.log("lifecycle: failed try then ready, later check failure beside an open agent, archive beside a start under way, no restart or failure during an archive, concurrent archives, release retried as a release: ok");
+  console.log("lifecycle: failed try then ready, later check failure beside an open agent, a check is not a start but a reboot is, archive beside a start under way, no restart or failure during an archive, concurrent archives, release retried as a release: ok");
 } finally {
   await app.close();
   await machines.close();

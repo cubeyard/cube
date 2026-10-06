@@ -1,7 +1,7 @@
 /** OptChat's threads are cube's own: started in a project like any thread
  * from the UI, on a runner from the global pool, with its own machine. */
 import { CLAUDE_PROVIDER } from "./claude-agent.ts";
-import { ThreadArchiving, ThreadWorking, type Conversations } from "./conversation.ts";
+import { releaseUnfinished, ThreadArchiving, ThreadWorking, type Conversations } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
 import { THREAD_NOTE, type OptThreads } from "./optchat.ts";
 import { threadAgent, type Registry, type Thread } from "./registry.ts";
@@ -16,6 +16,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
   // agent still open on the machine goes on with its run.
   const state = (id: string) => {
     const error = conversations.error(id);
+    if (conversations.archivingNow(id)) return "being archived";
     if (!error) return conversations.starting(id) ? "starting its machine" : "ready";
     if (conversations.starting(id)) return `starting its machine again (the last try failed: ${error})`;
     return conversations.agentOpen(id) ? `ready (a later check of its machine failed: ${error})` : `error: ${error}`;
@@ -109,19 +110,27 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       return { already: !!archived.already, disk: disk(registry.getThread(id)?.vm), free: free() };
     },
     async events(id) {
-      const gone = () => { const thread = registry.getThread(id); return !thread || thread.archived || conversations.archivingNow(id); };
-      // An archive under way ends the thread; it is not a failure to start.
-      if (gone()) return null;
+      // An archive under way (or its release left unfinished) is not a
+      // failure to start; the archive tool answers for it.
+      const gone = () => {
+        const thread = registry.getThread(id);
+        return !thread || thread.archived ? null : conversations.archivingNow(id) || releaseUnfinished(thread) ? "archiving" as const : false;
+      };
+      const left = gone();
+      if (left !== false) return left;
       await conversations.activate(id);
       const failure = conversations.error(id);
       // An agent open on the machine runs on whatever a later check found.
       if (failure && !conversations.agentOpen(id)) {
-        if (gone()) return null;
+        const now = gone();
+        if (now !== false) return now;
         throw new Error(failure);
       }
       try { return await conversations.events(id); }
       catch (error) {
-        if (error instanceof ThreadArchiving || gone()) return null;
+        const now = gone();
+        if (now !== false) return now;
+        if (error instanceof ThreadArchiving) return "archiving";
         throw error;
       }
     },
