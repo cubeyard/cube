@@ -23,7 +23,7 @@
   in-process pi-durable Harness on `CUBED_STATE/optchat/pi.sqlite`: its
   entries are the chat's log, a model-free conversation holds the summary tree,
   and each turn starts at a head entry. It has no machine and no code tools; it
-  starts and tells ordinary threads. See [docs/optchat.md](docs/optchat.md).
+  starts, tells and archives ordinary threads. See [docs/optchat.md](docs/optchat.md).
 - **web:** rendering and user actions, from the neutral thread event model
   only. SSE reconnect starts with a complete transcript; the browser is never a
   workflow owner.
@@ -232,7 +232,9 @@ and no ids, and appends each node as an entry. A spawned thread is created
 through the registry with a request ID derived from the tool call, so a replayed
 `spawn` finds the same thread. Its settled runs come back as `[id] ` messages:
 every accepted message waits in a Pi document until Pi has placed it, under its
-own request ID. The details, deviations and gaps are in
+own request ID. Its `archive` tool calls the same `Conversations.archive` as
+the UI, for its own threads only, and refuses a working one. The details,
+deviations and gaps are in
 [docs/optchat.md](docs/optchat.md).
 
 ## Usage and cost

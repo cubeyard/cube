@@ -126,7 +126,8 @@ thread.
 The user's one endless chat at
 `#/chat`, built on a second pi-durable store under `CUBED_STATE/optchat`. It
 follows the OptChat spec's log, tree, view, compactor and turn loop. Its only
-actions are spawning and telling ordinary threads; their reports come back as
+actions are spawning, telling and archiving its own ordinary threads (archive
+refuses a working thread and never stops one); their reports come back as
 `[id] ` messages. Verified offline only: `optchat-memory-test.ts` (fold,
 order, zoom, log mapping), `optchat-test.ts` (Pi turns with a faux model:
 fresh context, compactor feedback, report turns, zoom/tell, reopen) and

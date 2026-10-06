@@ -29,6 +29,8 @@ git(repository, ["add", "README"]);
 git(repository, ["commit", "-qm", "base"]);
 
 const chatTurns: string[][] = [];
+let release!: () => void;
+const held = new Promise<void>(resolve => { release = resolve; });
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
 faux.setResponses(Array.from({ length: 100 }, () => async request => {
   const system = JSON.stringify(request.messages.filter(message => message.role === "system"));
@@ -45,6 +47,8 @@ faux.setResponses(Array.from({ length: 100 }, () => async request => {
     }
     return fauxAssistantMessage(`noted: ${said}`);
   }
+  // A thread that works until the test lets it finish.
+  if (JSON.stringify(request.messages).includes("hold until released")) { await held; return fauxAssistantMessage("released"); }
   // The spawned thread: one command in its own machine, then the report.
   if (last.role === "toolResult") return fauxAssistantMessage(`the repository has ${textOf(last).trim().split("\n")[0]} file`);
   assert.match(textOf(last), new RegExp(`count the files in the repository with bash\\n\\n${THREAD_NOTE.replace(/[().]/g, "\\$&")}`));
@@ -121,8 +125,19 @@ try {
   assert.equal(diverged.failure, failure);
   assert.match(formatHistory(thread.id, diverged, "delivered"), /\nnote: cubed records a failure \(workspace allocation failed: thread workspace already has a writable owner\) while the stored history shows the agent ran \(run completed\);/);
   app.registry.markWorkspaceAvailable(thread.id, workspaceBase);
-  const archive = await fetch(`${base}/api/threads/${thread.id}`, { method: "DELETE" });
-  assert.equal(archive.status, 200, await archive.clone().text());
+  // OptChat's archive is the UI's: the agent closes, the machine is
+  // released, its slot is free again; history still reads the thread.
+  const before = app.registry.runnerSlots().free;
+  assert.deepEqual(await adapter.archive!(thread.id), { already: false, disk: `machine disk retained (${app.registry.getThread(thread.id)!.vm!.retainReason})`, free: `${before + 1} of ${app.registry.runnerSlots().total}` });
+  assert.equal(app.registry.getThread(thread.id)!.archived, true);
+  assert.equal(app.conversations.agentOpen(thread.id), false);
+  // Archiving again changes nothing: not the slots, not the retained disk.
+  const vm = app.registry.getThread(thread.id)!.vm;
+  assert.equal((await adapter.archive!(thread.id))?.already, true);
+  assert.equal(app.registry.runnerSlots().free, before + 1, "a repeated archive frees no second slot");
+  assert.deepEqual(app.registry.getThread(thread.id)!.vm, vm);
+  assert.equal((await fetch(`${base}/api/threads/${thread.id}`, { method: "DELETE" })).status, 404, "the UI's archive finds it archived");
+  assert.equal(await adapter.archive!("no-such-thread"), null);
   const archived = (await adapter.history(thread.id))!;
   assert.deepEqual([archived.archived, archived.machine, archived.agentOpen], [true, null, false]);
   assert.ok(archived.facts.some(fact => fact.startsWith("machine disk retained")), archived.facts.join("; "));
@@ -133,6 +148,31 @@ try {
   assert.deepEqual([none.machine, none.transcript, none.unreadable], ["not started", null, null], "no agent, no history");
   assert.ok(!fs.existsSync(path.join(state, "threads", quiet.id, "pi.sqlite")), "reading created no store");
   assert.equal(await adapter.history("no-such-thread"), null);
+
+  // A thread whose machine failed is archived too, its disk kept; that
+  // frees the slot the next thread takes.
+  app.registry.markWorkspaceFailed(quiet.id, "workspace allocation failed: boom");
+  const failed = (await adapter.archive!(quiet.id))!;
+  assert.equal(failed.already, false);
+  assert.equal(failed.disk, "machine disk retained (workspace allocation failed: boom)");
+  assert.equal(app.registry.getThread(quiet.id)!.archived, true);
+
+  // A working thread is refused and keeps working; once it finishes it can
+  // be archived, and two archives at once archive it once.
+  const busy = app.registry.createThread(project.project.id, "busy", { provider: faux.getModel().provider, id: faux.getModel().id }, "hold until released");
+  void app.conversations.activate(busy.id);
+  await until(async () => app.conversations.starting(busy.id) || app.registry.getThread(busy.id)!.workspaceState !== "available" ? null
+    : (await app.conversations.history(busy.id)).status.state, value => value === "working", "the busy thread works");
+  await assert.rejects(adapter.archive!(busy.id), /^Error: it is working; nothing was stopped$/);
+  assert.equal(app.registry.getThread(busy.id)!.archived, false);
+  assert.equal((await app.conversations.history(busy.id)).status.state, "working", "nothing was stopped");
+  release();
+  await until(async () => (await app.conversations.history(busy.id)).status.state, value => value === "completed", "the busy thread finishes");
+  const free = app.registry.runnerSlots().free;
+  const both = await Promise.all([adapter.archive!(busy.id), adapter.archive!(busy.id)]);
+  assert.deepEqual(both.map(result => result?.already).sort(), [false, true], "one archives, the other finds it archived");
+  assert.equal(app.registry.runnerSlots().free, free + 1);
+  assert.equal((await adapter.history(busy.id))?.transcript?.status.state, "completed", "its history stays");
 
   const { view, messages } = await (await fetch(`${base}/api/optchat/view`)).json();
   assert.ok(messages >= 5, `the log holds the turns (${messages})`);
