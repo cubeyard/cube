@@ -91,10 +91,10 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       const thread = registry.getThread(id);
       if (!thread) return null;
       if (thread.archived) return { already: true, disk: disk(thread.vm), free: free() };
-      // A machine still coming up (not one retried after a failure) would
-      // hold this call for minutes; its first run starts once it is up.
+      // A machine still coming up or reattaching (not one retried after a
+      // failure) would hold this call for minutes; its run may start once it is up.
       if (conversations.starting(id) && !conversations.error(id) && thread.workspaceState !== "failed") {
-        throw new Error("its machine is still starting");
+        throw new Error("its machine is still starting or reattaching; try again shortly");
       }
       const archived = await conversations.archive(id).catch((error: unknown) => {
         throw error instanceof ThreadWorking ? new Error("it is working; nothing was stopped", { cause: error }) : error;

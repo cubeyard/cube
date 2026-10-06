@@ -411,16 +411,27 @@ export class Conversations {
     await this.settled(id);
     const thread = this.registry.getThread(id);
     if (!thread) throw new Error("thread not found");
-    // Archives queue behind each other: the second finds the first's result.
+    // Archives queue behind each other: the second finds the first's result
+    // (cubed's record; the first answers what the runner did).
     if (thread.archived) return { retained: !!thread.vm?.retain && !thread.vm.discarded, reason: thread.vm?.retainReason ?? "already archived", already: true };
     // A machine that is not ready has no agent to stop or ask (see ready()).
     const failed = thread.workspaceState !== "available";
+    // A release that failed or was cut short already decided the disk's fate.
+    const again = thread.workspaceState === "releasing" || !!thread.workspaceError?.startsWith("workspace release failed:");
+    // An agent that cannot open (its runtime missing, its store refused) runs
+    // nothing: the thread is archived, its disk kept.
+    let unopened: string | null = null;
     if (!failed) {
-      if (this.isClaude(id)) {
-        if ((await this.claudeAgent(id)).running) throw new ThreadWorking();
-      } else {
-        const agent = await this.agent(id);
-        if ((await agent.harness.snapshot(LiveDoc, agent.conversation.id, context))?.run) throw new ThreadWorking();
+      try {
+        if (this.isClaude(id)) {
+          if ((await this.claudeAgent(id)).running) throw new ThreadWorking();
+        } else {
+          const agent = await this.agent(id);
+          if ((await agent.harness.snapshot(LiveDoc, agent.conversation.id, context))?.run) throw new ThreadWorking();
+        }
+      } catch (error) {
+        if (error instanceof ThreadWorking || this.closing) throw error;
+        unopened = error instanceof Error ? error.message : String(error);
       }
     }
     // From here until the release ends nothing reopens the thread.
@@ -430,15 +441,17 @@ export class Conversations {
       else {
         const claude = this.claudes.get(id), pi = this.agents.get(id);
         this.claudes.delete(id); this.agents.delete(id);
-        await (await claude)?.close(); await this.closePi(id, pi);
+        await (await claude?.catch(() => null))?.close(); await this.closePi(id, pi);
         const workspace = this.openWorkspace(id);
         try { decision = await releaseCheck(workspace, threadAgent(thread), thread.allocation); }
         catch (error) { decision = { clean: false, reason: `the thread machine could not be checked: ${error instanceof Error ? error.message : String(error)}` }; }
         if (decision.clean && workspace.agentChanged()) decision = { clean: false, reason: "the agent ran commands or wrote files in the machine" };
+        if (unopened) decision = { clean: false, reason: `the agent could not open: ${unopened}` };
       }
       this.closeWorkspace(id);
       this.resumed.delete(id);
-      if (thread.vm) this.registry.updateThreadVm(id, { retain: !decision.clean, retainReason: decision.reason });
+      if (again) decision = { clean: thread.vm?.retain === false, reason: thread.vm?.retainReason ?? decision.reason };
+      else if (thread.vm) this.registry.updateThreadVm(id, { retain: !decision.clean, retainReason: decision.reason });
       this.registry.beginRelease(id);
       const released = await this.release(id);
       return { retained: released.retained, reason: decision.reason };

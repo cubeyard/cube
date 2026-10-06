@@ -122,10 +122,16 @@ it, and usage stays readable too.
   working; nothing was stopped`. A Pi thread with a live run, or a Claude
   Code thread whose turn is running, counts as working. There is no force:
   OptChat has no way to stop a thread, and the user stops one in the UI.
-- **A machine still starting is refused** (`its machine is still starting`)
-  rather than waited for, which could hold the chat's turn for minutes; its
-  first run starts once it is up. A machine that failed and is being retried
-  by the recovery loop is archived after that attempt, its disk retained.
+- **A machine still starting or reattaching is refused** (`its machine is
+  still starting or reattaching; try again shortly`) rather than waited for,
+  which could hold the chat's turn for minutes. A machine that failed and is
+  being retried by the recovery loop is archived after that attempt, its disk
+  retained.
+- **Threads that cannot run are archived.** A thread whose machine failed, or
+  whose agent cannot open on a ready machine (Claude Code not installed on the
+  host, a store cubed refuses), runs nothing; it is archived with its disk
+  retained and that reason. Archiving a thread whose release failed or was
+  cut short releases it again and keeps the first decision about its disk.
 - **Repeats and races.** Archives of one thread run one after another in
   `Conversations` (the same per-thread queue as messages and releases), and
   the second finds the thread archived and changes nothing: not the slots and
@@ -218,6 +224,9 @@ model), `POST /api/optchat/prompt {text, requestId}`, `POST /api/optchat/stop`,
   afterwards; the copy is synchronous and holds cubed's event loop for its
   length (stores over 64 MiB are refused). A copy a crash left behind
   (`.read-*` in the thread directory) is not removed.
+- `archive` handles its ids one after another, and each release waits for the
+  runner, so a call with many ids holds the chat's turn until the last is
+  released.
 - `archive` reads the archived thread's store once more to find a report the
   watcher did not send (the same copy as `history`).
 - No HTML browser of the tree and no import of older chats yet.
