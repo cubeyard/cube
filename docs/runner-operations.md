@@ -154,7 +154,7 @@ on its runner from creation until its archive finishes, also while its machine
 is failed or releasing. A new thread goes to the runner with the lowest share
 of used slots, runners with a failed machine last; the count and the new
 thread are one `BEGIN IMMEDIATE` registry transaction. If the runner refuses a machine anyway (a lowered bound, the disk floor, a
-VM cubed does not know), a new thread whose agent has not opened yet moves to
+VM cubed does not know), a new thread whose agent and workspace have not opened yet moves to
 another runner with a free slot and starts there; otherwise it shows the
 reason and cubed's recovery loop tries again every 30 seconds while it holds
 its slot. Runners before 0.7.0 report 1 and keep one thread at a time,
