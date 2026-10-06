@@ -18,7 +18,7 @@ import { EgressPolicy, serveEgress, type SecretSource } from "../packages/server
 import { GatewaySupervisor } from "../packages/server/src/gateway.ts";
 import { IrohNodeError, IrohRunnerClient } from "../packages/server/src/iroh-node.ts";
 import { Registry } from "../packages/server/src/registry.ts";
-import { ThreadVms, releaseCheck } from "../packages/server/src/vm.ts";
+import { machineFor, ThreadVms, releaseCheck } from "../packages/server/src/vm.ts";
 import { VmWorkspace } from "../packages/server/src/vm-workspace.ts";
 import { HttpWorkspace } from "../packages/server/src/workspace-http.ts";
 import { LeaseStore } from "../packages/server/src/workspace-lease.ts";
@@ -78,7 +78,8 @@ try {
   // The protocol-3 client in process: hello, status, a version-1 config refused.
   const client = new IrohRunnerClient({ configPath: path.join(work, "runner.json") });
   const described = await client.describe();
-  assert.deepEqual(described.capabilities, ["node.hello", "node.status", "vm.allocate", "vm.start", "vm.stop", "vm.inspect", "vm.release", "vm.discard"]);
+  assert.deepEqual(described.capabilities, ["node.hello", "node.status", "vm.allocate", "vm.start", "vm.stop", "vm.inspect", "vm.release", "vm.discard",
+    "vm.publish", "template.list", "template.remove"]);
   assert.match(described.baseImageSha256, /^[0-9a-f]{64}$/);
   assert.equal(described.platform, "linux-x86_64");
   assert.equal((await client.health()).activeVms, 0);
@@ -96,7 +97,7 @@ try {
   registry.enrollRunner({ ...client.binding, configPath: path.join(work, "runner.json"), configHash: client.configHash });
   const github: SecretSource = { name: "github", hosts: ["github.com", "api.github.com"], value: async () => fakeToken };
   const decisions: string[] = [];
-  const policy = new EgressPolicy({ vms: { vm: vmId => { const thread = registry!.threadByVm(vmId); return thread?.vm ? { threadId: thread.id, placeholders: thread.vm.placeholders } : null; } },
+  const policy = new EgressPolicy({ vms: { vm: vmId => machineFor(registry!, vmId) },
     secrets: [github], log: { ...quiet, info: (msg: string, fields?: object) => decisions.push(`${msg} ${JSON.stringify(fields)}`) } });
   egress = await serveEgress(path.join(runDir, "egress.sock"), policy);
   gateway = new GatewaySupervisor({ state: path.join(state, "gateway"), control: path.join(runDir, "gateway.sock"), decide: path.join(runDir, "egress.sock"),
@@ -104,7 +105,9 @@ try {
   gateway.start();
   const { hello } = await gateway.ready();
   log(`gateway ${hello.version} ready, peer ${hello.peer.slice(0, 12)}`);
-  vms = new ThreadVms({ registry, threads: path.join(state, "threads"), run: runDir, gateway, sizes: { vcpus: 2, memoryMiB: 2048, diskGiB: 8 }, log: quiet });
+  vms = new ThreadVms({ registry, threads: path.join(state, "threads"), run: runDir, gateway, sizes: { vcpus: 2, memoryMiB: 2048, diskGiB: 8 }, log: quiet,
+    // Machines from the base image here; templates have scripts/test-vm-templates.ts.
+    templates: { enabled: false, ttlMs: 0 } });
   const thread = registry.createThread("empty", "adapter", { provider: "faux", id: "faux" }, "adapter smoke");
   await vms.start(thread);
   log("thread machine booted; guest helper ready over ssh through the gateway");

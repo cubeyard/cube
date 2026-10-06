@@ -334,7 +334,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
    * and the build machine is deleted. */
   private async build(thread: Thread, runner: IrohRunnerClient, sizes: VmSizes, caPem: string, key: string): Promise<{ id: string; meta: TemplateMeta }> {
     const started = Date.now();
-    const build = { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") }, key };
+    const build = { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") }, key, runnerId: thread.runnerId };
     this.options.registry.updateThreadVm(thread.id, { build });
     const ref: VmRef = { threadId: thread.id, vmId: build.vmId };
     const directory = this.buildDirectory(thread);
@@ -379,7 +379,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       phases["build-prepare"] = Date.now() - since;
 
       since = Date.now();
-      const sealed = await own(workspace, owner, "cube:build:seal", `sudo -n ${GUEST_HELPER_PATH} seal`, 120000);
+      const sealed = await own(workspace, owner, "cube:build:seal", `sudo -n ${GUEST_HELPER_PATH} seal`, 900000);
       const sealOutput = sealed.state === "succeeded" ? Buffer.from(sealed.output).toString("utf8") : "";
       if (sealed.state !== "succeeded" || sealed.exitCode !== 0 || !sealOutput.includes("sealed at power-off")) {
         throw new Error(`sealing the build machine failed (${sealed.state === "succeeded" ? sealOutput.trim().slice(-200) : sealed.state})`);
@@ -402,7 +402,13 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       since = Date.now();
       const meta: TemplateMeta = { format: TEMPLATE_FORMAT, projectId: thread.allocation.projectId, setupBlob: outcome.setupBlob ?? "none",
         commit: thread.allocation.repositories[0]?.baseOid ?? null };
-      const template = await runner.vmPublish(ref, this.epoch(thread), key, JSON.stringify(meta));
+      let template: RunnerTemplate;
+      try { template = await runner.vmPublish(ref, this.epoch(thread), key, JSON.stringify(meta)); }
+      catch (error) {
+        // The answer was lost: publishing is idempotent, so ask again once.
+        if (!(error instanceof IrohNodeError && error.completionUnknown)) throw error;
+        template = await runner.vmPublish(ref, this.epoch(thread), key, JSON.stringify(meta));
+      }
       published = true;
       phases["build-publish"] = Date.now() - since;
       this.log.info("template published", { thread: thread.id, runner: runner.nodeId, template: template.id, bytes: template.bytes,
@@ -427,9 +433,12 @@ export class ThreadVms implements ThreadMachines, EgressVms {
 
   /** Deletes a template build machine of the thread that did not publish
    * (a failure, or a crash in between). It held only cubed's own work. */
-  private async abandonBuild(thread: Thread, runner: IrohRunnerClient): Promise<void> {
+  private async abandonBuild(thread: Thread, current: IrohRunnerClient): Promise<void> {
     const build = this.options.registry.getThread(thread.id)?.vm?.build;
     if (!build) return;
+    // The runner the build machine was made on (the thread may have moved since).
+    const admission = build.runnerId && build.runnerId !== thread.runnerId ? this.options.registry.getRunner(build.runnerId) : null;
+    const runner = admission ? (this.options.runnerClient ?? runnerClient)(admission) : current;
     const ref: VmRef = { threadId: thread.id, vmId: build.vmId };
     this.attached.delete(build.vmId);
     try { await (await this.options.gateway.ready(5000)).client.detach(build.vmId); } catch { /* not attached */ }

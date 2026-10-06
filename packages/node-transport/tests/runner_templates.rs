@@ -230,3 +230,54 @@ async fn an_interrupted_vm_is_not_published_and_templates_survive_restarts() {
     );
     served.close().await;
 }
+
+#[tokio::test]
+async fn a_publish_cut_off_by_a_crash_is_finished_or_undone_on_open() {
+    let fx = fixture();
+    let served = serve(&fx).await;
+    served.runner.set_max_active_vms(4).unwrap();
+    built(&served, &fx, "t1", VM).await;
+    built(&served, &fx, "t2", VM2).await;
+    assert_eq!(
+        served.code(allocate_on("t3", VM3, 1, 8, VM3)).await,
+        "INVALID_REQUEST",
+        "a vm is not its own template"
+    );
+    served.close().await;
+
+    // Both crashed while publishing; VM's disk had been moved, VM2's not.
+    let db = rusqlite::Connection::open(fx.state.join("journal.db")).unwrap();
+    for id in [VM, VM2] {
+        db.execute(
+            "INSERT INTO template(id,key,meta,state,disk_gib,created_at) VALUES(?1,?2,?3,'publishing',8,1)",
+            [id, KEY, META],
+        )
+        .unwrap();
+    }
+    drop(db);
+    let moved = fx.state.join("templates").join(VM);
+    std::fs::create_dir_all(&moved).unwrap();
+    for dir in [moved.parent().unwrap(), moved.as_path()] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::rename(fx.state.join("vms/1/disk.qcow2"), moved.join("disk.qcow2")).unwrap();
+
+    let served = serve(&fx).await;
+    let listed = templates(&served).await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        (listed[0].id.as_str(), listed[0].state),
+        (VM, TemplateState::Ready)
+    );
+    assert_eq!(served.vm(inspect("t1", VM)).await.state, VmState::Released);
+    assert!(
+        !fx.state.join("vms/1").exists(),
+        "the released vm's directory went"
+    );
+    // Undone: VM2 is still a stopped vm with its disk, and can be published now.
+    assert_eq!(served.vm(inspect("t2", VM2)).await.state, VmState::Stopped);
+    assert!(!fx.state.join("templates").join(VM2).exists());
+    let published = template(&served, publish("t2", VM2, 2, KEY, META)).await;
+    assert_eq!(published.state, TemplateState::Ready);
+    served.close().await;
+}

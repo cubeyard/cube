@@ -90,7 +90,7 @@ export interface ThreadVm {
   preparation?: MachinePreparation;
   /** A template build machine of this thread that has not finished (see
    * vm-template.ts); it is cubed's own and released if it outlives a crash. */
-  build?: { vmId: string; placeholders: Record<string, string>; key: string };
+  build?: { vmId: string; placeholders: Record<string, string>; key: string; runnerId?: string };
   /** The hooks' latest outcomes, by hook (`pre-setup`, `setup`, `pre-resume`, `resume`). */
   hooks?: Record<string, HookOutcome>;
   /** How long the machine took to become ready for the agent, by phase (ms). */
@@ -106,8 +106,9 @@ export interface MachinePreparation {
   reason?: string;
 }
 export interface HookOutcome {
-  /** `ok`, `failed`, `skipped` (prepared by a template) or `absent`. */
-  status: "ok" | "failed" | "skipped" | "absent";
+  /** `ok`, `failed`, `skipped` (prepared by a template), `notrun` (an
+   * earlier hook of its phase failed) or `absent`. */
+  status: "ok" | "failed" | "skipped" | "notrun" | "absent";
   exitCode?: number; ms: number; at: number;
 }
 

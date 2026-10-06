@@ -261,7 +261,12 @@ building one first allocates a VM. Backups include `templates/`. Rolling back to
 0.7.0 is possible: it ignores the template records, and machines already on a
 template keep booting, but it never deletes a template; remove
 `state/templates/<id>` by hand only when `sqlite3 journal.db "SELECT vm_id FROM vm
-WHERE template='<id>' AND state<>'released'"` prints nothing.
+WHERE template='<id>' AND state<>'released'"` prints nothing. Rolling cubed back
+below the templates release while machines on templates exist is not
+supported: an older cubed refuses the `template` field in their records;
+archive (and discard) those threads first, or roll back cubed and runner
+together with `CUBED_TEMPLATES=off` set beforehand long enough for them to be
+gone.
 
 ## Retained VMs
 
