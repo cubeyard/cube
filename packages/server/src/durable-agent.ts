@@ -47,6 +47,8 @@ export async function openStorage(file: string): Promise<SqliteStorage> {
   return SqliteStorage.open(new NodeSqliteDatabase(database));
 }
 
+const READ_BYTES = 64 * 2 ** 20;
+
 /** Reads a Pi store, beside its Harness or without one, from a snapshot;
  * null when there is none. The store is only read, through a read-only
  * connection (a WAL reader never waits for the writer): it is never created,
@@ -63,6 +65,9 @@ export async function readStorage<T>(file: string, read: (storage: SqliteStorage
     try {
       const row = source.prepare("SELECT version FROM durable_schema WHERE singleton = 1").get() as { version: number } | undefined;
       if (row?.version !== CURRENT_SQLITE_SCHEMA_VERSION) throw new Error(`the stored history has schema version ${row?.version ?? "none"}, not ${CURRENT_SQLITE_SCHEMA_VERSION}`);
+      // The copy is synchronous: a store too large to copy at once is refused.
+      const { size } = source.prepare("SELECT page_count * page_size AS size FROM pragma_page_count(), pragma_page_size()").get() as { size: number };
+      if (size > READ_BYTES) throw new Error(`the stored history is too large to read here (${Math.ceil(size / 2 ** 20)} MiB)`);
       source.prepare("VACUUM INTO ?").run(copy);
     } finally { source.close(); }
     const storage = await SqliteStorage.open(new NodeSqliteDatabase(new DatabaseSync(copy)));
