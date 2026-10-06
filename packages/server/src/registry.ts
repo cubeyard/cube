@@ -25,6 +25,9 @@ export interface Project {
 }
 export interface Runner extends NodeBinding {
   configPath: string; configHash: string;
+  /** The most thread machines the runner last said it hosts at once
+   * (`maxActiveVms`); absent means one, as every runner before 0.7.0. */
+  maxActiveVms?: number;
   /** The project this installation template belonged to before runners became
    * global. It is migration/audit context, never a scheduling constraint. */
   legacyProjectId?: string;
@@ -39,7 +42,11 @@ export type RunnerAllocationState = "available" | "allocating" | "busy" | "relea
 export type RunnerContactStatus = "unknown" | "reachable" | "unreachable" | "stale" | "retired";
 export interface RunnerStatus {
   id: string; nodeId: string; environmentId: number;
-  allocationState: RunnerAllocationState; threadId: string | null;
+  allocationState: RunnerAllocationState;
+  /** The latest open thread on the runner; `threadIds` lists all of them. */
+  threadId: string | null; threadIds: string[];
+  /** Thread machines the runner hosts at once, and how many are taken. */
+  maxActiveVms: number; activeThreads: number;
   allocationProjectId: string | null; allocationProjectName: string | null;
   contactStatus: RunnerContactStatus; enrolledAt: number | null; lastAttemptAt: number | null;
   lastContactAt: number | null; unreachableSince: number | null; error: string | null;
@@ -72,6 +79,16 @@ export interface ThreadVm {
 
 /** The thread's agent: claude-code threads are created with a claude model. */
 export function threadAgent(thread: Pick<Thread, "agent">): ThreadAgent { return thread.agent ?? "pi"; }
+
+/** The machines a runner hosts at once, as cubed last learned it. */
+export function runnerSlots(runner: Pick<Runner, "maxActiveVms">): number {
+  return Number.isSafeInteger(runner.maxActiveVms) && runner.maxActiveVms! >= 1 ? runner.maxActiveVms! : 1;
+}
+
+/** Every open (unarchived) thread holds one machine slot on its runner from
+ * creation until its release finishes, whatever its workspace state: a failed
+ * or releasing machine may still exist on the runner. */
+const OPEN_THREAD = "json_extract(data, '$.archived')=0";
 
 function allocationRepositories(project: Project, strict: boolean): WorkspaceRepository[] {
   const repositories: WorkspaceRepository[] = [];
@@ -155,19 +172,74 @@ export class Registry {
     return this.db.prepare("SELECT data FROM runner ORDER BY rowid").all().map(row => this.parse<Runner>(row)!);
   }
   getRunner(id: string): Runner | null { return this.parse(this.db.prepare("SELECT data FROM runner WHERE id=?").get(id)); }
+  /** Runners that can take a thread now, in allocation order. */
   availableRunners(): Runner[] {
-    return this.db.prepare(`SELECT r.data FROM runner r JOIN runner_operator o ON o.runner_id=r.id
-      WHERE r.state='available' AND o.retired_at IS NULL`).all().map(row => this.parse<Runner>(row)!);
+    return this.runnerLoads().filter(load => load.active < load.slots).map(load => load.runner);
+  }
+  /** Free and total thread machine slots of the allocatable pool. */
+  runnerSlots(): { free: number; total: number } {
+    const loads = this.runnerLoads();
+    return { free: loads.reduce((sum, load) => sum + Math.max(0, load.slots - load.active), 0),
+      total: loads.reduce((sum, load) => sum + load.slots, 0) };
+  }
+  /** Allocatable runners with their open threads: runners with a failed
+   * machine last, then the least loaded, then enrollment order. */
+  private runnerLoads(): Array<{ id: string; runner: Runner; slots: number; active: number; failed: number }> {
+    const rows = this.db.prepare(`SELECT r.id,r.data,
+        (SELECT count(*) FROM thread WHERE runner_id=r.id AND ${OPEN_THREAD}) AS active,
+        (SELECT count(*) FROM thread WHERE runner_id=r.id AND ${OPEN_THREAD} AND json_extract(data, '$.workspaceState')='failed') AS failed
+      FROM runner r JOIN runner_operator o ON o.runner_id=r.id
+      WHERE o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired' ORDER BY r.rowid`).all() as Array<{ id: string; data: string; active: number; failed: number }>;
+    return rows.map(row => {
+      const runner = JSON.parse(row.data) as Runner;
+      return { id: row.id, runner, slots: runnerSlots(runner), active: Number(row.active), failed: Number(row.failed) };
+    }).sort((a, b) => Number(a.failed > 0) - Number(b.failed > 0) || a.active / a.slots - b.active / b.slots);
+  }
+  /** Records the runner's advertised `maxActiveVms` (enrollment, a status
+   * check, a machine start). A bound below its open threads only stops new
+   * allocations; the runner itself refuses machines beyond it. */
+  recordRunnerSlots(id: string, maxActiveVms: number): void {
+    if (!Number.isSafeInteger(maxActiveVms) || maxActiveVms < 1) throw new Error("maxActiveVms must be a positive integer");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const runner = this.getRunner(id);
+      if (!runner) throw new Error("runner not found");
+      if (runner.maxActiveVms !== maxActiveVms) {
+        this.db.prepare("UPDATE runner SET data=? WHERE id=?").run(JSON.stringify({ ...runner, maxActiveVms }), id);
+        this.syncRunner(id);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  /** Keeps the runner row's `state`, `thread_id` and `error` a summary of its
+   * open threads in the shape a one-machine runner always had: `available`
+   * while a slot is free, otherwise the latest thread's state. Allocation
+   * counts the threads themselves; the summary keeps retirement guards and a
+   * registry reopened by an older cubed consistent. Inside a transaction. */
+  private syncRunner(id: string): void {
+    const runner = this.getRunner(id);
+    if (!runner) return;
+    const open = this.db.prepare(`SELECT data FROM thread WHERE runner_id=? AND ${OPEN_THREAD} ORDER BY rowid`).all(id).map(row => this.parse<Thread>(row)!);
+    const latest = open.at(-1);
+    const state: RunnerAllocationState = !latest || open.length < runnerSlots(runner) ? "available"
+      : latest.workspaceState === "available" ? "busy" : latest.workspaceState;
+    this.db.prepare(`UPDATE runner SET state=?,thread_id=?,error=? WHERE id=? AND state<>'retired'
+        AND id NOT IN (SELECT runner_id FROM runner_operator WHERE retiring_at IS NOT NULL OR retired_at IS NOT NULL)`)
+      .run(state, latest?.id ?? null, state === "failed" ? latest?.workspaceError ?? null : null, id);
   }
   runnerCount(): number {
     return Number(this.db.prepare("SELECT count(*) AS n FROM runner").get()!.n);
   }
-  runnerCapacity(): { states: Record<RunnerAllocationState, number>; errors: string[] } {
+  /** Runner states, thread machine slots and the errors of failed machines
+   * that still hold a slot. */
+  runnerCapacity(): { states: Record<RunnerAllocationState, number>; slots: { free: number; total: number }; errors: string[] } {
     const states: Record<RunnerAllocationState, number> = { available: 0, allocating: 0, busy: 0, releasing: 0, failed: 0, retiring: 0, retired: 0 };
-    const rows = this.db.prepare(`SELECT CASE WHEN o.retiring_at IS NOT NULL AND o.retired_at IS NULL THEN 'retiring' ELSE r.state END AS state,r.error
-      FROM runner r JOIN runner_operator o ON o.runner_id=r.id`).all() as Array<{ state: RunnerAllocationState; error: string | null }>;
+    const rows = this.db.prepare(`SELECT CASE WHEN o.retiring_at IS NOT NULL AND o.retired_at IS NULL THEN 'retiring' ELSE r.state END AS state
+      FROM runner r JOIN runner_operator o ON o.runner_id=r.id`).all() as Array<{ state: RunnerAllocationState }>;
     for (const row of rows) states[row.state]++;
-    return { states, errors: rows.flatMap(row => row.error ? [row.error] : []) };
+    const failed = this.db.prepare(`SELECT json_extract(data, '$.workspaceError') AS error FROM thread
+      WHERE ${OPEN_THREAD} AND json_extract(data, '$.workspaceState')='failed' ORDER BY rowid DESC`).all() as Array<{ error: string | null }>;
+    return { states, slots: this.runnerSlots(), errors: failed.flatMap(row => row.error ? [String(row.error)] : []) };
   }
   runnerStatuses(now = Date.now()): RunnerStatus[] {
     const rows = this.db.prepare(`SELECT r.id,r.node_id,r.data,r.state,r.thread_id,
@@ -175,8 +247,10 @@ export class Registry {
       o.enrolled_at,o.last_attempt_at,o.last_contact_at,o.unreachable_since,o.last_error,o.health,o.retiring_at,o.retired_at,o.retirement_reason
       FROM runner r JOIN runner_operator o ON o.runner_id=r.id
       LEFT JOIN thread t ON t.id=r.thread_id LEFT JOIN project p ON p.id=t.project_id ORDER BY r.rowid`).all() as Array<Record<string, unknown>>;
+    const open = this.db.prepare(`SELECT id,runner_id FROM thread WHERE ${OPEN_THREAD} ORDER BY rowid`).all() as Array<{ id: string; runner_id: string }>;
     return rows.map(row => {
       const runner = JSON.parse(String(row.data)) as Runner;
+      const threadIds = open.filter(thread => thread.runner_id === row.id).map(thread => thread.id);
       const retiringAt = row.retiring_at == null ? null : Number(row.retiring_at);
       const retiredAt = row.retired_at == null ? null : Number(row.retired_at);
       const lastAttemptAt = row.last_attempt_at == null ? null : Number(row.last_attempt_at);
@@ -190,7 +264,8 @@ export class Registry {
         : "unreachable";
       return { id: String(row.id), nodeId: String(row.node_id), environmentId: runner.environmentId,
         allocationState: retiringAt && !retiredAt ? "retiring" : String(row.state) as RunnerAllocationState,
-        threadId: row.thread_id == null ? null : String(row.thread_id),
+        threadId: row.thread_id == null ? null : String(row.thread_id), threadIds,
+        maxActiveVms: runnerSlots(runner), activeThreads: threadIds.length,
         allocationProjectId: row.allocation_project_id == null ? null : String(row.allocation_project_id),
         allocationProjectName: row.allocation_project_name == null ? null : String(row.allocation_project_name),
         contactStatus, enrolledAt: row.enrolled_at == null ? null : Number(row.enrolled_at), lastAttemptAt, lastContactAt,
@@ -207,6 +282,7 @@ export class Registry {
       at, success ? 1 : 0, at, success ? 1 : 0, at, success ? null : result.error,
       success ? JSON.stringify(result.health) : null, id);
     if (updated.changes !== 1) throw new Error("runner not found or already retired");
+    if (success) this.recordRunnerSlots(id, result.health.maxActiveVms);
   }
   beginRunnerRetirement(id: string): void {
     this.db.exec("BEGIN IMMEDIATE");
@@ -285,7 +361,7 @@ export class Registry {
       const thread = this.getThread(threadId);
       if (!thread) throw new Error("thread not found");
       this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, workspaceState: "available", workspaceError: null, workspaceBase }), threadId);
-      this.db.prepare("UPDATE runner SET state='busy', error=NULL WHERE id=? AND thread_id=?").run(thread.runnerId, threadId);
+      this.syncRunner(thread.runnerId);
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
@@ -295,7 +371,7 @@ export class Registry {
       const thread = this.getThread(threadId);
       if (!thread) throw new Error("thread not found");
       this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, workspaceState: "failed", workspaceError: error }), threadId);
-      this.db.prepare("UPDATE runner SET state='failed', error=? WHERE id=? AND thread_id=?").run(error, thread.runnerId, threadId);
+      this.syncRunner(thread.runnerId);
       this.db.exec("COMMIT");
     } catch (cause) { this.db.exec("ROLLBACK"); throw cause; }
   }
@@ -305,7 +381,7 @@ export class Registry {
       const thread = this.getThread(threadId);
       if (!thread) throw new Error("thread not found");
       this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, workspaceState: "releasing", workspaceError: null }), threadId);
-      this.db.prepare("UPDATE runner SET state='releasing' WHERE id=? AND thread_id=?").run(thread.runnerId, threadId);
+      this.syncRunner(thread.runnerId);
       this.db.exec("COMMIT");
       return thread;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
@@ -316,7 +392,8 @@ export class Registry {
       const thread = this.getThread(threadId);
       if (!thread) throw new Error("thread not found");
       this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, archived: true }), threadId);
-      this.db.prepare("UPDATE runner SET state='available', thread_id=NULL, error=NULL WHERE id=? AND thread_id=?").run(thread.runnerId, threadId);
+      // Frees the thread's machine slot.
+      this.syncRunner(thread.runnerId);
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
@@ -343,18 +420,18 @@ export class Registry {
       if (this.getProject(projectId)?.status !== "ready") throw new Error("check the project before starting a thread");
       const project = this.getProject(projectId)!;
       const repositories = allocationRepositories(project, true);
-      const row = this.db.prepare(`SELECT r.id,r.data FROM runner r JOIN runner_operator o ON o.runner_id=r.id
-        WHERE r.state='available' AND o.retired_at IS NULL ORDER BY r.rowid LIMIT 1`).get() as { id: string; data: string } | undefined;
-      const runner = row ? JSON.parse(row.data) as Runner : null;
-      if (!runner) throw new Error("no runner available in the global pool — archive an idle thread or register another trusted runner");
-      const thread: Thread = { id: randomUUID(), projectId, runnerId: row!.id,
+      // Counting open threads and inserting this one in one IMMEDIATE
+      // transaction is the slot reservation: no two creations, in this or
+      // another process, can take a runner's last slot.
+      const load = this.runnerLoads().find(candidate => candidate.active < candidate.slots);
+      if (!load) throw new Error("no free thread machine in the global runner pool — archive an idle thread, register another trusted runner or raise a runner's --max-active-vms");
+      const thread: Thread = { id: randomUUID(), projectId, runnerId: load.id,
         title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, agent, archived: false, createdAt: Date.now(),
         allocation: { projectId, projectRevision: project.revision, repositories },
         workspaceState: "allocating", workspaceError: null, workspaceBase: null,
         vm: { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") } } };
-      this.db.prepare("INSERT INTO thread VALUES (?,?,?,?)").run(thread.id, projectId, row!.id, JSON.stringify(thread));
-      const claimed = this.db.prepare("UPDATE runner SET state='allocating',thread_id=?,error=NULL WHERE id=? AND state='available'").run(thread.id, row!.id);
-      if (claimed.changes !== 1) throw new Error("runner allocation conflict");
+      this.db.prepare("INSERT INTO thread VALUES (?,?,?,?)").run(thread.id, projectId, load.id, JSON.stringify(thread));
+      this.syncRunner(load.id);
       this.db.prepare("INSERT INTO creation VALUES (?,?,?,?)").run(projectId, requestId, thread.id, payload);
       this.db.exec("COMMIT");
       return thread;

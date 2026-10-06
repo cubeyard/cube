@@ -13,7 +13,7 @@ use cube_node_transport::{
     MIN_COMPATIBLE_PROTOCOL_VERSION, NetworkMode, PROTOCOL_VERSION, Request, Response,
     SOFTWARE_VERSION, bind_client, bind_node, bind_relay_client, bind_relay_runner, bind_runner,
     call, query_hello,
-    runner::{Binding, InitOptions, Runner, VmLimits},
+    runner::{Binding, InitOptions, MAX_ACTIVE_VMS_LIMIT, Runner, VmLimits, auto_max_active_vms},
     serve, serve_runner, validate_node_id,
 };
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
@@ -22,7 +22,7 @@ use serde_json::json;
 
 const USAGE: &str = "usage:
   cube-runner init --home <NEW-directory> --image <debian-genericcloud.qcow2> --allow-peer <public-key> --node-id <node-id> --thread-id <thread-id> --env <integer> [--network loopback|direct|relay] [--listen <ip:port>] [--qemu <path>] [--firmware <path>] [--max-vcpus 4] [--max-memory-mib 8192] [--max-disk-gib 64]
-  cube-runner run --home <directory> [--network loopback|direct|relay]
+  cube-runner run --home <directory> [--network loopback|direct|relay] [--max-active-vms auto|N]
   cube-runner version
   cube-runner verify-release --key <public-key.pem> --manifest <file> --signature <file>
   cube-runner idle --state <journal-directory>
@@ -32,8 +32,9 @@ const USAGE: &str = "usage:
   cube-runner call --key <control-key> --peer <runner-key> --expect-node <node-id> [--address <ip:port>] --request <json>
   cube-runner runner-init --key <private-file> --state <NEW-directory> --image <qcow2> --allow-peer <public-key> --node-id <node-id> --thread-id <thread-id> --env <integer> [--qemu <path>] [--firmware <path>] [--max-vcpus N] [--max-memory-mib N] [--max-disk-gib N]
   cube-runner runner-acknowledge-recovery --key <private-file> --state <directory>
-  cube-runner runner-serve --key <private-file> --state <directory> [--listen 127.0.0.1:0] [--ready-file <absolute-file>] [--stop-policy wait|cancel]
-network commands accept --network loopback|direct|relay (default loopback); direct requires explicit addresses; relay uses N0 discovery and relays";
+  cube-runner runner-serve --key <private-file> --state <directory> [--listen 127.0.0.1:0] [--ready-file <absolute-file>] [--stop-policy wait|cancel] [--max-active-vms auto|N]
+network commands accept --network loopback|direct|relay (default loopback); direct requires explicit addresses; relay uses N0 discovery and relays
+--max-active-vms (or CUBE_RUNNER_MAX_ACTIVE_VMS) bounds concurrent thread VMs; auto (default) fits every VM at the installation's --max-vcpus and --max-memory-mib, 1 to 4";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -430,6 +431,10 @@ async fn main() -> Result<()> {
                 .or_else(|| manifest.as_ref().map(|manifest| manifest.network))
                 .unwrap_or_default();
             let ready_file = options.remove("--ready-file").map(PathBuf::from);
+            let max_active_vms = options
+                .remove("--max-active-vms")
+                .or_else(|| std::env::var("CUBE_RUNNER_MAX_ACTIVE_VMS").ok())
+                .filter(|value| !value.trim().is_empty());
             let quit_on_stop = match options.remove("--stop-policy").as_deref() {
                 None | Some("wait") => false,
                 Some("cancel") => true,
@@ -445,6 +450,20 @@ async fn main() -> Result<()> {
             no_extra(&options)?;
             let key = read_key(&key_path)?;
             let runner = Runner::open(&state, key.public())?;
+            runner.set_max_active_vms(match max_active_vms.as_deref().map(str::trim) {
+                None | Some("auto") => auto_max_active_vms(&runner.installation().limits),
+                Some(value) => {
+                    value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|n| *n >= 1)
+                        .with_context(|| {
+                            format!(
+                                "--max-active-vms must be auto or 1 through {MAX_ACTIVE_VMS_LIMIT}"
+                            )
+                        })?
+                }
+            })?;
             runner.preflight()?;
             let allowed = runner.installation().allowed_peer.parse()?;
             let node_id = runner.installation().binding.node_id.clone();
@@ -456,6 +475,7 @@ async fn main() -> Result<()> {
             readiness["lifecycle"] = json!(runner.status()?.lifecycle);
             readiness["platform"] = json!(runner.installation().platform);
             readiness["baseImageSha256"] = json!(runner.installation().image.sha256);
+            readiness["maxActiveVms"] = json!(runner.max_active_vms());
             if human {
                 eprintln!("cube-runner {SOFTWARE_VERSION}");
                 eprintln!("node: {node_id}");
@@ -478,6 +498,7 @@ async fn main() -> Result<()> {
                     "lifecycle: {}",
                     readiness["lifecycle"].as_str().unwrap_or("unknown")
                 );
+                eprintln!("thread VMs: at most {}", runner.max_active_vms());
                 eprintln!("press Ctrl-C to stop the VMs and exit");
             } else {
                 println!("{readiness}");
@@ -521,8 +542,8 @@ async fn main() -> Result<()> {
             let running = runner.has_running_vms();
             if human {
                 if running {
-                    eprintln!("stopping: powering down the running VM (up to 30 seconds)");
-                    eprintln!("press Ctrl-C again to stop it at once");
+                    eprintln!("stopping: powering down the running VMs (up to 30 seconds)");
+                    eprintln!("press Ctrl-C again to stop them at once");
                 } else {
                     eprintln!("stopping: no running VM");
                 }
@@ -539,7 +560,7 @@ async fn main() -> Result<()> {
                 tokio::select! {
                     _ = &mut graceful => {},
                     _ = interrupt.recv() => {
-                        if human { eprintln!("stopping the VM at once"); }
+                        if human { eprintln!("stopping the VMs at once"); }
                         else { eprintln!("{{\"level\":\"warn\",\"event\":\"runner_quitting_vms\"}}"); }
                         runner.shutdown(false).await;
                     },

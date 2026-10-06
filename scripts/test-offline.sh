@@ -8,6 +8,7 @@ OFFLINE_TESTS=(
   scripts/runner-production-test.ts
   packages/server/test/log-test.ts
   packages/server/test/registry-test.ts
+  packages/server/test/runner-slots-test.ts
   packages/server/test/api-test.ts
   packages/server/test/models-test.ts
   packages/server/test/model-auth-test.ts

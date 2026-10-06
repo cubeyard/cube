@@ -586,3 +586,124 @@ async fn a_mutation_outliving_its_connection_still_completes() {
     assert!(allocated.error.is_none(), "{allocated:?}");
     served.close().await;
 }
+
+#[tokio::test]
+async fn concurrent_vms_are_isolated_and_bounded() {
+    const VM3: &str = "00000000000000aa";
+    const VM4: &str = "00000000000000bb";
+    let fx = fixture();
+    let served = serve(&fx).await;
+    let gw = &fx.gateway;
+    assert_eq!(
+        status(&served).await["maxActiveVms"],
+        1,
+        "one until configured"
+    );
+    assert!(served.runner.set_max_active_vms(0).is_err());
+    assert!(served.runner.set_max_active_vms(33).is_err());
+    served.runner.set_max_active_vms(2).unwrap();
+    assert_eq!(status(&served).await["maxActiveVms"], 2);
+
+    // Two threads allocate at once; a third finds the runner full.
+    let (one, two) = tokio::join!(
+        served.vm(allocate("t1", VM, 1, 8)),
+        served.vm(allocate("t2", VM2, 1, 8))
+    );
+    assert_eq!(
+        (one.state, two.state),
+        (VmState::Allocated, VmState::Allocated)
+    );
+    assert_eq!(
+        served.code(allocate("t3", VM3, 1, 8)).await,
+        "CAPACITY_EXCEEDED"
+    );
+
+    let mut second = start("t2", VM2, 1, gw, TOKEN2);
+    second["mac"] = json!("02:00:00:00:00:43");
+    let (one, two) = tokio::join!(served.vm(start("t1", VM, 1, gw, TOKEN)), served.vm(second));
+    assert_eq!((one.state, two.state), (VmState::Running, VmState::Running));
+    let st = status(&served).await;
+    assert_eq!(
+        (st["activeVms"].clone(), st["runningVms"].clone()),
+        (json!(2), json!(2))
+    );
+    // Each VM has its own slot directory, disk, seed and QEMU.
+    let (slot1, slot2) = (one_slot(&fx, VM), one_slot(&fx, VM2));
+    assert_ne!(slot1, slot2);
+    let (pid1, pid2) = (pid_of(&fx, slot1), pid_of(&fx, slot2));
+    assert!(alive(pid1) && alive(pid2) && pid1 != pid2);
+    // A VM is only reachable under its own thread, and its frame channel
+    // only with its own token.
+    assert_eq!(served.code(inspect("t1", VM2)).await, "CONFLICT");
+    assert_eq!(served.code(stop("t1", VM2, 2)).await, "CONFLICT");
+    let gateway = gateway_endpoint(gw).await;
+    let (_, ready) = frame_hello(&gateway, &served.address, VM2, "t2", TOKEN).await;
+    assert!(
+        !ready.unwrap().ok,
+        "one VM's token never opens another's channel"
+    );
+    let (_c1, ready) = frame_hello(&gateway, &served.address, VM, "t1", TOKEN).await;
+    assert!(ready.unwrap().ok);
+    let (_c2, ready) = frame_hello(&gateway, &served.address, VM2, "t2", TOKEN2).await;
+    assert!(ready.unwrap().ok);
+    assert!(served.runner.pumps().has_connection(VM) && served.runner.pumps().has_connection(VM2));
+
+    // Stopping one leaves the other running.
+    served.vm(stop("t1", VM, 2)).await;
+    served.wait_state("t1", VM, VmState::Stopped).await;
+    assert!(!alive(pid1) && alive(pid2));
+    assert!(served.runner.pumps().has_connection(VM2));
+    assert_eq!(
+        served.code(allocate("t3", VM3, 1, 8)).await,
+        "CAPACITY_EXCEEDED",
+        "a stopped VM still holds its slot until release"
+    );
+
+    // Releasing frees exactly one slot; two racing allocations get one.
+    served.vm(release("t1", VM, 3, false)).await;
+    served.wait_state("t1", VM, VmState::Released).await;
+    let (three, four) = tokio::join!(
+        served.rpc(allocate("t3", VM3, 1, 8)),
+        served.rpc(allocate("t4", VM4, 1, 8))
+    );
+    let won = [&three, &four]
+        .iter()
+        .filter(|response| matches!(response, Response::Vm { .. }))
+        .count();
+    let full = [&three, &four]
+        .iter()
+        .filter(|response| matches!(response, Response::Error { code, .. } if code == "CAPACITY_EXCEEDED"))
+        .count();
+    assert_eq!((won, full), (1, 1), "{three:?} {four:?}");
+    assert_eq!(status(&served).await["activeVms"], 2);
+
+    // Lowering the bound below the active VMs only refuses new ones.
+    served.runner.set_max_active_vms(1).unwrap();
+    assert!(alive(pid2));
+    served.vm(release("t2", VM2, 2, false)).await;
+    served.wait_state("t2", VM2, VmState::Released).await;
+    let loser = if won == 1 && matches!(three, Response::Vm { .. }) {
+        ("t4", VM4)
+    } else {
+        ("t3", VM3)
+    };
+    assert_eq!(
+        served.code(allocate(loser.0, loser.1, 1, 8)).await,
+        "CAPACITY_EXCEEDED"
+    );
+    gateway.close().await;
+    served.runner.shutdown(false).await;
+    served.close().await;
+}
+
+fn one_slot(fx: &Fixture, vm: &str) -> u32 {
+    std::fs::read_dir(fx.state.join("vms"))
+        .unwrap()
+        .flatten()
+        .find(|entry| {
+            std::fs::read_to_string(entry.path().join("fake.args"))
+                .is_ok_and(|args| args.contains(&format!("guest={vm}")))
+        })
+        .and_then(|entry| entry.file_name().to_str()?.parse().ok())
+        .unwrap()
+}

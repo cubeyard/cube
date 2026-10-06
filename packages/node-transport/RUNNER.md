@@ -7,7 +7,9 @@ This file describes the daemon, the wire and the development loop.
 
 ## What a runner does
 
-A runner hosts one QEMU VM per active thread: a qcow2 overlay on the operator's
+A runner hosts one QEMU VM per active thread, up to `--max-active-vms` at once
+(see [thread machines per runner](../../docs/runner-operations.md#thread-machines-per-runner)):
+a qcow2 overlay on the operator's
 Debian 13 genericcloud base image, a cloud-init NoCloud seed (a FAT `CIDATA`
 image written by the runner from documents cubed sends) and a frame pump. It
 runs no command for a thread and has no file or Git operations. The agent's
@@ -37,12 +39,14 @@ bin="$PWD/target/debug/cube-runner"
 ```
 
 `run` prints human status on stderr. First Ctrl-C refuses new VMs and powers
-the running guest down (30 s); a second Ctrl-C makes QEMU quit at once.
+the running guests down (30 s); a second Ctrl-C makes QEMU quit at once.
+`run` and `runner-serve` take `--max-active-vms auto|N` (or
+`CUBE_RUNNER_MAX_ACTIVE_VMS`); `auto` is the default.
 
 Service form: `runner-init --key K --state S --image …` and
-`runner-serve --key K --state S [--listen] [--ready-file F] [--stop-policy wait|cancel]`
+`runner-serve --key K --state S [--listen] [--ready-file F] [--stop-policy wait|cancel] [--max-active-vms auto|N]`
 (one JSON ready line on stdout: peer, addresses, versions, lifecycle,
-`platform`, `baseImageSha256`). `call --key CONTROL --peer RUNNER
+`platform`, `baseImageSha256`, `maxActiveVms`). `call --key CONTROL --peer RUNNER
 --expect-node N [--address A] --request '<json>'` sends one protocol-3
 request and prints the response. `runner-acknowledge-recovery --key K --state S`
 ends a restore quarantine.
@@ -64,7 +68,8 @@ Hello (runner profile) adds `binding`, `platform` (`linux-x86_64`,
 vm.start vm.stop vm.inspect vm.release vm.discard` (`vm.discard` since
 0.5.0), and `limits {maxFrameBytes,
 requestTimeoutMs, maxVcpus, maxMemoryMiB, maxDiskGiB, maxSeedBytes,
-maxActiveVms}`.
+maxActiveVms}`. `maxActiveVms` is the process's bound on active VMs (1 before
+0.7.0); `vm.allocate` beyond it is `CAPACITY_EXCEEDED`.
 
 Every `vm.*` request carries `threadId` and `vmId` (16 lowercase hex); every
 mutation carries `epoch` ≥ 1, fenced per thread (`LEASE_STALE` below the newest

@@ -33,7 +33,7 @@ try {
   // An authenticated protocol-3 hello: a protocol-2 runner is refused here.
   const described = await client.describe();
   const health = await client.health();
-  registry.enrollRunner({ ...client.binding, configPath: values.config, configHash: client.configHash });
+  registry.enrollRunner({ ...client.binding, configPath: values.config, configHash: client.configHash, maxActiveVms: health.maxActiveVms });
   console.log(JSON.stringify({ ...client.binding, profile: "vm-runner", admitted: true, softwareVersion: described.softwareVersion,
     platform: described.platform, baseImageSha256: described.baseImageSha256, maxActiveVms: health.maxActiveVms,
     next: "restart cubed if this runner's network mode is wider than the others; start a thread in any ready project" }));

@@ -15,7 +15,7 @@ import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import { GatewayUnavailable, type GatewayAttach, type GatewayClient, type GatewaySupervisor } from "./gateway.ts";
 import { SshGuestTransport, controlDirectory, type GuestTransport } from "./guest-ssh.ts";
-import { IrohNodeError, IrohRunnerClient, type VmRecord, type VmRef } from "./iroh-node.ts";
+import { IrohNodeError, runnerClient, type IrohRunnerClient, type VmRecord, type VmRef } from "./iroh-node.ts";
 import { createLogger, type Logger } from "./log.ts";
 import type { Registry, Thread, WorkspaceAllocation } from "./registry.ts";
 import type { EgressVms } from "./egress-policy.ts";
@@ -176,6 +176,8 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       this.log.warn("machine is not running; starting it again", { thread: thread.id, vm: vm.vmId, state: current.state });
     }
     const description = await runner.describe();
+    // The runner's bound may have changed since cubed last asked.
+    this.options.registry.recordRunnerSlots(thread.runnerId, description.limits.maxActiveVms);
     const keys = await this.keys(thread);
     const epoch = this.epoch(thread);
     const sizes = {
@@ -187,7 +189,14 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     try { record = (await runner.vmInspect(ref)).vm; }
     catch (error) {
       if (!(error instanceof IrohNodeError && error.code === "NOT_FOUND")) throw error;
-      record = await runner.vmAllocate(ref, epoch, sizes.diskGiB);
+      try { record = await runner.vmAllocate(ref, epoch, sizes.diskGiB); }
+      catch (cause) {
+        if (!(cause instanceof IrohNodeError && cause.remoteCode === "CAPACITY_EXCEEDED")) throw cause;
+        // cubed's count said a slot was free; the runner (a lowered bound,
+        // or a machine cubed does not know) disagrees. Nothing was created;
+        // the recovery loop tries again while the thread is open.
+        throw new Error(`the runner has no free machine slot (it hosts at most ${description.limits.maxActiveVms}); cube tries again every 30 seconds`, { cause });
+      }
       this.log.info("allocated", { thread: thread.id, vm: vm.vmId, diskGiB: sizes.diskGiB });
     }
     const deadline = Date.now() + SETTLE_TIMEOUT_MS;
@@ -253,7 +262,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
   private runner(thread: Thread): IrohRunnerClient {
     const admission = this.options.registry.runner(thread.id);
     if (!admission) throw new Error("thread runner allocation is missing");
-    return new IrohRunnerClient({ configPath: admission.configPath, configHash: admission.configHash });
+    return runnerClient(admission);
   }
   private controlSocket(): string { return this.options.gateway.control; }
   private keyDirectory(thread: Thread): string { return path.join(this.options.threads, thread.id, "vm"); }

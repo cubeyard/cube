@@ -89,7 +89,7 @@
   }
 
   const bytes = (value: number) => value >= 1e9 ? `${(value / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(value / 1e6))} MB`;
-  const canRetire = (runner: RunnerStatus) => runner.allocationState === "available" &&
+  const canRetire = (runner: RunnerStatus) => runner.allocationState === "available" && runner.activeThreads === 0 &&
     (runner.contactStatus === "stale" || (runner.contactStatus === "reachable" && runner.health?.activeVms === 0));
   const lampClass = (runner: RunnerStatus) => runner.contactStatus === "reachable" ? "on-green"
     : runner.contactStatus === "unreachable" || runner.contactStatus === "stale" ? "on-red"
@@ -131,7 +131,9 @@
             <span class="lamp {lampClass(runner)}" aria-hidden="true"></span>
             <span>
               <strong>{runner.nodeId}</strong>
-              <small>environment {runner.environmentId} · {runner.allocationState}{runner.allocationProjectName ? ` · ${runner.allocationProjectName}` : " · unallocated"}</small>
+              <small>environment {runner.environmentId} · {runner.allocationState} · {runner.activeThreads
+                ? `${runner.activeThreads} of ${runner.maxActiveVms} thread machines in use`
+                : `unallocated · ${runner.maxActiveVms} thread ${runner.maxActiveVms === 1 ? "machine" : "machines"}`}</small>
             </span>
           </div>
           <div class="runner-evidence">
@@ -155,7 +157,7 @@
             {/if}
           </div>
           {#if !runner.retiredAt && !canRetire(runner)}
-            <p class="runner-blocked">{runner.allocationState !== "available" || runner.allocationProjectId
+            <p class="runner-blocked">{runner.activeThreads || runner.allocationState !== "available" || runner.allocationProjectId
               ? "retirement is blocked while the global allocation snapshot records a thread"
               : runner.contactStatus === "reachable" && runner.health?.activeVms
                 ? "retirement is blocked while the runner reports an active thread machine"

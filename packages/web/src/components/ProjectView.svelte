@@ -191,7 +191,7 @@
     : dirty ? "save your changes first"
     : checking || project.status === "checking" ? "checking the repositories…"
     : project.status === "error" ? "new thread waits for a passing check"
-    : !project.availableRunnerCount ? "the global runner pool is full"
+    : !project.availableRunnerCount ? "every thread machine in the runner pool is in use"
     : null,
   );
   const deleteDisabled = $derived(!project || project.retainedThreadCount > 0 || project.status === "checking" || deleting);

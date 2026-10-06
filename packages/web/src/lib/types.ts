@@ -25,7 +25,10 @@ export interface ThreadSummary {
   vm?: { vmId: string; retain?: boolean; retainReason?: string; discarded?: boolean };
 }
 export type Project = ProjectRecord & { threadCount: number; retainedThreadCount: number; runnerCount: number; availableRunnerCount: number;
-  runnerCapacity: { states: Record<"available" | "allocating" | "busy" | "releasing" | "failed" | "retiring" | "retired", number>; errors: string[] };
+  /** Free thread machine slots over the pool; a runner hosts `maxActiveVms`. */
+  availableSlotCount: number;
+  runnerCapacity: { states: Record<"available" | "allocating" | "busy" | "releasing" | "failed" | "retiring" | "retired", number>;
+    slots: { free: number; total: number }; errors: string[] };
   runners: import("../../../server/src/registry.ts").RunnerStatus[] };
 export type ProjectStatus = Project["status"];
 export interface ProjectInput {

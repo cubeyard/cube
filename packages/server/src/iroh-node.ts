@@ -234,6 +234,20 @@ function remoteError(result: Record<string, unknown>): IrohNodeError | undefined
   return new IrohNodeError(result.code, result.completionUnknown, result.message);
 }
 
+const clients = new Map<string, IrohRunnerClient>();
+/** This process's one client for a runner admission. Several threads share a
+ * runner; their calls must queue on one client, because two endpoints
+ * publishing the same Iroh identity at once break each other. */
+export function runnerClient(admission: { configPath: string; configHash: string }): IrohRunnerClient {
+  const key = `${admission.configPath}\0${admission.configHash}`;
+  let client = clients.get(key);
+  if (!client) {
+    client = new IrohRunnerClient({ configPath: admission.configPath, configHash: admission.configHash });
+    clients.set(key, client);
+  }
+  return client;
+}
+
 export class IrohRunnerClient {
   readonly nodeId: string;
   readonly binding: Readonly<NodeBinding>;

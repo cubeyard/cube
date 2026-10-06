@@ -71,7 +71,8 @@ image, booted with a cloud-init seed from cubed (the first boot installs `git`,
 `gh` and `curl` through the gateway and takes a minute or two). The thread
 shows "starting the thread's machine" until it is up; then the project's
 pinned repositories are checked out at their exact commit IDs. A runner
-serves one active thread at a time. Archiving deletes a machine only when the
+serves several active threads at once, each in its own VM, up to its
+`--max-active-vms`. Archiving deletes a machine only when the
 agent never ran a command or wrote a file in it and it checks clean; any other
 machine is kept on the runner as evidence. There is no automatic fleet provisioning. The global runner
 panel records authenticated contact and machine counts, distinguishes a current

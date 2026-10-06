@@ -20,7 +20,7 @@ try {
   registry.saveProject({ id: "disposable", name: "disposable", status: "ready", error: null, revision: 1,
     checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
   const model = { provider: "fixture", id: "selected" };
-  assert.throws(() => registry.createThread("project", "request", model, "one"), /no runner available/);
+  assert.throws(() => registry.createThread("project", "request", model, "one"), /no free thread machine/);
   registry.enrollRunner({ nodeId: "node-test", environmentId: 7, threadId: "thread-test", configPath: "/private/config.json", configHash: "hash" });
   registry.deleteProject("disposable");
   assert.equal(registry.getProject("disposable"), null, "global runners do not block project deletion");
@@ -33,7 +33,7 @@ try {
   assert.equal(registry.updateThreadVm(thread.id, { provisionAttempt: 2 }).vm?.provisionAttempt, 2);
   registry.saveThread(thread);
   assert.equal(registry.availableRunners().length, 0);
-  assert.throws(() => registry.createThread("other", "racing-project", model, "race"), /global pool/);
+  assert.throws(() => registry.createThread("other", "racing-project", model, "race"), /no free thread machine/);
   registry.close(); registry = new Registry(filename);
   assert.deepEqual(registry.createThread("project", "request", model, "one"), thread);
   assert.throws(() => registry.createThread("project", "request", model, "two"), /conflicts/);
@@ -136,7 +136,7 @@ try {
   const raceResults = await Promise.all(competitors.map(competitor => competitor.finished));
   await Promise.all(competitors.map(competitor => competitor.worker.terminate()));
   assert.equal(raceResults.filter(result => result.ok).length, 1, "simultaneous projects cannot double-allocate one runner");
-  assert.match(raceResults.find(result => !result.ok)?.error ?? "", /global pool/);
+  assert.match(raceResults.find(result => !result.ok)?.error ?? "", /no free thread machine/);
   const raced = new Registry(raceFile);
   assert.equal(raced.listThreads().length, 1);
   assert.equal(raced.availableRunners().length, 0);

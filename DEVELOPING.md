@@ -28,13 +28,15 @@ tests use disposable state, keys and VMs; do not point them at an operator's
 installation. With Linux, a usable `/dev/kvm`, QEMU 7.2+ and a Debian 13
 genericcloud image, `CUBE_TEST_VM_IMAGE=/path/debian-13-genericcloud-amd64.qcow2
 bash scripts/test-node-transport.sh` also runs the real-VM acceptance
-(`smoke-runner-vm.ts`, `smoke-node-adapter.ts`, `test-vm-e2e.ts`); without them
+(`smoke-runner-vm.ts`, `smoke-node-adapter.ts`, `test-vm-e2e.ts`,
+`test-vm-concurrency.ts`: two thread VMs on one runner); without them
 it prints a SKIP notice, and `CUBE_TEST_VM=required` makes that a failure. To
 run one of them after building:
 `node scripts/smoke-node-adapter.ts target/debug/cube-runner target/debug/cube-gateway <image>` or
 `node scripts/test-vm-e2e.ts target/debug/cube-runner <image>` (it builds a
 `test-hooks` gateway under `target/test-hooks`). `CUBE_SMOKE_KEEP=1` keeps their
-work directories.
+work directories. Where `/tmp` is a small tmpfs, set `TMPDIR` for
+`test-vm-concurrency.ts`: its two VM disks grow in its work directory.
 
 ## Product development
 
