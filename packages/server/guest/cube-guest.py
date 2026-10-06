@@ -805,7 +805,7 @@ def init():
         write_atomic(os.path.join(CONFIG.state, "template-seal"), outcome)
         remove(os.path.dirname(marker))
     os.makedirs(ops_dir(), mode=0o700, exist_ok=True)
-    for directory in (CONFIG.workspace, "/repos"):
+    for directory in (CONFIG.workspace, rooted("/repos")):
         os.makedirs(directory, mode=0o755, exist_ok=True)
         give(directory)
     write_atomic(os.path.join(CONFIG.state, "initialized"), b"")

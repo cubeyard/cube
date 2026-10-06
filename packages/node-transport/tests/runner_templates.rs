@@ -42,6 +42,8 @@ async fn templates(served: &Served) -> Vec<TemplateRecord> {
 async fn built(served: &Served, fx: &Fixture, thread: &str, vm: &str) {
     served.vm(allocate(thread, vm, 1, 8)).await;
     served.vm(start(thread, vm, 1, &fx.gateway, TOKEN)).await;
+    // Stopped once QMP answers: a slow fake QEMU (macOS) would miss the power-down.
+    served.wait_state(thread, vm, VmState::Running).await;
     served.vm(stop(thread, vm, 1)).await;
     let stopped = served.wait_state(thread, vm, VmState::Stopped).await;
     assert!(!stopped.interrupted);
@@ -61,6 +63,7 @@ async fn templates_are_published_shared_read_only_and_collected() {
         "never started"
     );
     served.vm(start("t1", VM, 1, &fx.gateway, TOKEN)).await;
+    served.wait_state("t1", VM, VmState::Running).await;
     assert_eq!(
         served.code(publish("t1", VM, 1, KEY, META)).await,
         "CONFLICT",
@@ -155,6 +158,7 @@ async fn templates_are_published_shared_read_only_and_collected() {
     assert_eq!(templates(&served).await[0].users, 2);
     // A template-backed VM cannot become a template itself (no chains).
     served.vm(start("t3", VM3, 1, &fx.gateway, TOKEN2)).await;
+    served.wait_state("t3", VM3, VmState::Running).await;
     served.vm(stop("t3", VM3, 1)).await;
     served.wait_state("t3", VM3, VmState::Stopped).await;
     assert_eq!(
