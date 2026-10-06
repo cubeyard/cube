@@ -26,6 +26,14 @@ const INITIAL_REQUEST = "cube:initial";
 export class ThreadWorking extends Error {
   constructor() { super("stop the current run before archiving"); this.name = "ThreadWorking"; }
 }
+/** The thread's archive is under way: nothing reopens it meanwhile. Not a
+ * failure of the thread; once the archive ends the thread is gone. */
+export class ThreadArchiving extends Error {
+  constructor() { super("thread is being archived"); this.name = "ThreadArchiving"; }
+}
+/** A release that failed or was cut short: only the release is retried. */
+const releaseUnfinished = (thread: Thread) => thread.workspaceState === "releasing"
+  || (thread.workspaceState === "failed" && !!thread.workspaceError?.startsWith("workspace release failed:"));
 export class Conversations {
   private readonly registry: Registry;
   private readonly directory: string;
@@ -41,6 +49,10 @@ export class Conversations {
   /** Threads whose archive is under way: nothing reopens their agent or
    * workspace meanwhile (the recovery loop runs beside commands). */
   private readonly archiving = new Set<string>();
+  /** Threads an archive is deciding about (waiting for their activation,
+   * asking their agent whether it runs) or archiving: no activation starts,
+   * so none overlaps the release check or the release. */
+  private readonly archiveHolds = new Set<string>();
   private readonly commands = new Map<string, Promise<unknown>>();
   private readonly feeds = new WeakMap<Agent, PiThreadEvents>();
   private readonly claudes = new Map<string, Promise<ClaudeAgent>>();
@@ -63,8 +75,8 @@ export class Conversations {
   async boot(): Promise<void> {
     const work: Promise<unknown>[] = [];
     for (const thread of this.registry.listThreads()) {
-      if (thread.archived || this.closing || this.archiving.has(thread.id)) continue;
-      if (thread.workspaceState === "releasing" || (thread.workspaceState === "failed" && thread.workspaceError?.startsWith("workspace release failed:"))) {
+      if (thread.archived || this.closing || this.archiveHolds.has(thread.id)) continue;
+      if (releaseUnfinished(thread)) {
         work.push(this.command(thread.id, () => this.release(thread.id)).catch(() => {}));
       }
       else work.push(this.activate(thread.id));
@@ -74,12 +86,17 @@ export class Conversations {
   error(id: string): string | null { return this.failures.get(id) ?? null; }
   /** Whether the thread's machine is being started. */
   starting(id: string): boolean { return this.activations.has(id); }
+  /** Whether an archive of the thread is under way (or deciding). */
+  archivingNow(id: string): boolean { return this.archiveHolds.has(id); }
   /** Boots the thread's machine, provisions it once and opens its agent.
    * Concurrent calls share one activation. */
   activate(id: string): Promise<void> {
     const pending = this.activations.get(id);
     if (pending) return pending;
-    if (this.archiving.has(id)) return Promise.resolve();
+    if (this.archiveHolds.has(id)) return Promise.resolve();
+    // A release to finish is the recovery loop's (boot), never a new start.
+    const current = this.registry.getThread(id);
+    if (current && releaseUnfinished(current)) return Promise.resolve();
     const activation = (async () => {
       try {
         await this.ensureWorkspace(id);
@@ -87,6 +104,8 @@ export class Conversations {
         else await this.agent(id);
         this.failures.delete(id);
       } catch (error) {
+        // An archive that began meanwhile, or ended, is not this thread's failure.
+        if (error instanceof ThreadArchiving || this.archiveHolds.has(id) || this.registry.getThread(id)?.archived !== false) return;
         const message = error instanceof Error ? error.message : String(error);
         if (this.failures.get(id) !== message) log.warn("activation failed", { thread: id, error: message });
         this.failures.set(id, message);
@@ -130,7 +149,7 @@ export class Conversations {
     return workspace;
   }
   private notArchiving(id: string): void {
-    if (this.archiving.has(id)) throw new Error("thread is being archived");
+    if (this.archiving.has(id)) throw new ThreadArchiving();
   }
   private closeWorkspace(id: string): void {
     this.workspaces.get(id)?.leases.close();
@@ -142,7 +161,8 @@ export class Conversations {
    * once per machine boot, the resume hooks run before the agent opens. */
   private async ensureWorkspace(id: string): Promise<void> {
     let thread = this.thread(id);
-    if (thread.workspaceState === "releasing") throw new Error("thread workspace is releasing");
+    // Its machine is being released: starting it again would race the release.
+    if (releaseUnfinished(thread)) throw new Error("thread workspace is releasing");
     if (thread.workspaceState === "available") {
       const started = await this.machines.start(thread);
       await this.resume(id, started?.booted ?? false);
@@ -245,7 +265,7 @@ export class Conversations {
   private async closeAgents(id: string): Promise<void> {
     const claude = this.claudes.get(id), pi = this.agents.get(id);
     this.claudes.delete(id); this.agents.delete(id);
-    await (await claude)?.close(); await this.closePi(id, pi);
+    await (await claude?.catch(() => null))?.close(); await this.closePi(id, pi);
   }
   /** Closes a Pi agent, keeping its usage first. */
   private async closePi(id: string, loading: Promise<Agent> | undefined): Promise<void> {
@@ -408,6 +428,15 @@ export class Conversations {
    * thread an earlier archive already archived is left as it is (`already`). */
   async archive(id: string): Promise<{ retained: boolean; reason: string; already?: true }> {
     return this.command(id, async () => {
+    // No activation starts from here on; the one under way is waited for.
+    // An activation beside the release check or the release would start the
+    // machine or take its lease while it is being released.
+    this.archiveHolds.add(id);
+    try { return await this.archiveHeld(id); }
+    finally { this.archiveHolds.delete(id); }
+    });
+  }
+  private async archiveHeld(id: string): Promise<{ retained: boolean; reason: string; already?: true }> {
     await this.settled(id);
     const thread = this.registry.getThread(id);
     if (!thread) throw new Error("thread not found");
@@ -417,7 +446,7 @@ export class Conversations {
     // A machine that is not ready has no agent to stop or ask (see ready()).
     const failed = thread.workspaceState !== "available";
     // A release that failed or was cut short already decided the disk's fate.
-    const again = thread.workspaceState === "releasing" || !!thread.workspaceError?.startsWith("workspace release failed:");
+    const again = releaseUnfinished(thread);
     // An agent that cannot open (its runtime missing, its store refused) runs
     // nothing: the thread is archived, its disk kept.
     let unopened: string | null = null;
@@ -451,7 +480,6 @@ export class Conversations {
       this.registry.beginRelease(id);
       const released = await this.release(id);
       return { retained: released.retained, reason: decision.reason };
-    });
     });
   }
   /** Deletes an archived thread's retained machine disk: the operator
