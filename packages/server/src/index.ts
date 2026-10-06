@@ -25,6 +25,7 @@ import { versionInfo } from "./version.ts";
 import { OptChat, OptChatEvents } from "./optchat.ts";
 import { createLogger } from "./log.ts";
 import { cubeThreads } from "./optchat-threads.ts";
+import { observeRunners } from "./runner-observe.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
 
@@ -198,7 +199,8 @@ export async function createCubed(options: {
   const threadCatalog = async () => [...await catalog(), ...(conversations.claudeAvailable ? CLAUDE_MODELS : [])];
   // OptChat, the user's one endless chat: opened once a model exists,
   // retried by the recovery loop until then.
-  const optchatThreads = cubeThreads({ registry, conversations, catalog: threadCatalog });
+  const probeIntervalMs = options.runnerProbeIntervalMs ?? 5 * 60_000;
+  const optchatThreads = cubeThreads({ registry, conversations, catalog: threadCatalog, runners: () => observeRunners(registry, probeIntervalMs) });
   let optchat: Promise<{ chat: OptChat; events: OptChatEvents }> | null = null;
   let optchatError = "";
   // Inside the promise: a bad CUBED_OPTCHAT_COMPACTOR must reject here,
@@ -320,6 +322,8 @@ export async function createCubed(options: {
         if (!id && parts.length === 2 && method === "GET") {
           return json({ runners: registry.runnerStatuses() });
         }
+        // Read-only: the last reports and what they do not say; contacts no runner.
+        if (id === "observed" && parts.length === 3 && method === "GET") return json(observeRunners(registry, probeIntervalMs));
         if (!id || parts.length !== 4 || method !== "POST") return json({ error: "not found" }, 404);
         if (parts[3] === "check") return json({ runner: await probeRunner(id) });
         if (parts[3] === "retire") {
@@ -471,7 +475,7 @@ export async function createCubed(options: {
       }
     } finally { probing = false; }
   };
-  const probes = setInterval(() => void probeRunners(), options.runnerProbeIntervalMs ?? 5 * 60_000);
+  const probes = setInterval(() => void probeRunners(), probeIntervalMs);
   probes.unref();
   let closePromise: Promise<void> | undefined;
   return { server, registry, conversations, gateway, close() {

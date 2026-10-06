@@ -13,6 +13,7 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Me
 import { createCubed } from "../src/index.ts";
 import { THREAD_NOTE } from "../src/optchat.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
+import { observeRunners } from "../src/runner-observe.ts";
 import { LocalMachines } from "./local-guest.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-product-"));
@@ -97,7 +98,9 @@ try {
   assert.ok(!reportTurn[0]!.includes("not summarized yet"));
 
   // A replayed spawn finds its thread, even with another model or none left.
-  const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [] });
+  const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [],
+    runners: () => observeRunners(app.registry, 60_000) });
+  assert.match(await adapter.runners(), /^runners as cubed last heard from them[^]*unknown for every runner/, "OptChat's runners tool reads cubed's registry");
   assert.deepEqual(await adapter.spawn({ project: "demo", task: "count the files in the repository with bash" }, "optchat:call-spawn:0"), { id: thread.id, title: thread.title });
 
   const { view, messages } = await (await fetch(`${base}/api/optchat/view`)).json();

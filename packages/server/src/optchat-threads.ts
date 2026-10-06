@@ -5,8 +5,9 @@ import type { Conversations } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
 import { THREAD_NOTE, type OptThreads } from "./optchat.ts";
 import type { Registry } from "./registry.ts";
+import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
 
-export function cubeThreads(options: { registry: Registry; conversations: Conversations; catalog: () => Promise<ModelSelection[]> }): OptThreads {
+export function cubeThreads(options: { registry: Registry; conversations: Conversations; catalog: () => Promise<ModelSelection[]>; runners: () => RunnersObservation }): OptThreads {
   const { registry, conversations } = options;
   const state = (id: string) => conversations.error(id) ? `error: ${conversations.error(id)}` : conversations.starting(id) ? "starting its machine" : "ready";
   return {
@@ -18,9 +19,12 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         + project.repositories.map(repository => `${repository.url}@${repository.base ?? "default"}`).join(", "));
       return [
         lines.length ? `projects:\n${lines.join("\n")}` : "no projects: the user creates them under projects",
-        `free thread machines: ${slots.free} of ${slots.total} (an open thread holds one until it is archived)`,
+        `free thread machines: ${slots.free} of ${slots.total} (an open thread holds one until it is archived; runners has each runner's version and state)`,
         `models: ${models.map(model => `${model.provider}/${model.id}`).join(", ") || "none connected"}`,
       ].join("\n");
+    },
+    async runners() {
+      return describeRunners(options.runners());
     },
     async spawn(task, requestId) {
       const project = registry.listProjects().find(candidate => candidate.id === task.project)

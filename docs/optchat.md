@@ -4,7 +4,9 @@ OptChat is the user's one endless chat with cube, at `#/chat` (the UI's home).
 It is an interface, not a worker: it has no machine and no code, file or shell
 tools. It starts threads in projects (`spawn`), gives a thread that has reported
 more to do (`tell`), lists its threads (`threads`) and what it can start
-(`projects`), and reads its own memory (`zoom`, `date`). Threads do all the
+(`projects`), reports the runners as cubed last heard from them (`runners`,
+read-only; see docs/runner-operations.md, "Observing runners"), and reads its
+own memory (`zoom`, `date`). Threads do all the
 work, each in its own VM, exactly like a thread started from the UI.
 
 The memory follows Victor Taelin's OptChat spec

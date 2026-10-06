@@ -37,6 +37,9 @@ export interface Runner extends NodeBinding {
   /** The most thread machines the runner last said it hosts at once
    * (`maxActiveVms`); absent means one, as every runner before 0.7.0. */
   maxActiveVms?: number;
+  /** The runner's last successful status report, kept when later probes
+   * fail so a stale report can be shown as stale (runner-observe.ts). */
+  report?: { at: number; health: TrustedRunnerHealth };
   /** The project this installation template belonged to before runners became
    * global. It is migration/audit context, never a scheduling constraint. */
   legacyProjectId?: string;
@@ -355,13 +358,19 @@ export class Registry {
   }
   recordRunnerProbe(id: string, result: { health: TrustedRunnerHealth } | { error: string }, at = Date.now()): void {
     const success = "health" in result;
-    const updated = this.db.prepare(`UPDATE runner_operator SET last_attempt_at=?,
-      last_contact_at=CASE WHEN ? THEN ? ELSE last_contact_at END,
-      unreachable_since=CASE WHEN ? THEN NULL ELSE coalesce(unreachable_since,?) END,
-      last_error=?, health=? WHERE runner_id=? AND retired_at IS NULL`).run(
-      at, success ? 1 : 0, at, success ? 1 : 0, at, success ? null : result.error,
-      success ? JSON.stringify(result.health) : null, id);
-    if (updated.changes !== 1) throw new Error("runner not found or already retired");
+    // The probe and its kept report land together (runner-observe.ts).
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const updated = this.db.prepare(`UPDATE runner_operator SET last_attempt_at=?,
+        last_contact_at=CASE WHEN ? THEN ? ELSE last_contact_at END,
+        unreachable_since=CASE WHEN ? THEN NULL ELSE coalesce(unreachable_since,?) END,
+        last_error=?, health=? WHERE runner_id=? AND retired_at IS NULL`).run(
+        at, success ? 1 : 0, at, success ? 1 : 0, at, success ? null : result.error,
+        success ? JSON.stringify(result.health) : null, id);
+      if (updated.changes !== 1) throw new Error("runner not found or already retired");
+      if (success) this.db.prepare("UPDATE runner SET data=json_set(data,'$.report',json(?)) WHERE id=?").run(JSON.stringify({ at, health: result.health }), id);
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     if (success) this.recordRunnerSlots(id, result.health.maxActiveVms);
   }
   beginRunnerRetirement(id: string): void {

@@ -171,6 +171,53 @@ quiet, as before. Draining and the
 self-updater still wait until no VM is active, so a busier runner updates less
 often; drain it to make room for an update.
 
+## Observing runners
+
+`GET /api/runners/observed` (the operator's API, behind the same network
+access control as the rest of cubed) and OptChat's `runners` tool show each
+runner as cubed last heard from it. Both are read-only and contact no runner.
+The background probe (`node.status` every 5 minutes) keeps them current, and
+`POST /api/runners/<id>/check` probes one runner now. Per runner:
+
+- `contact`: `reachable`, `unreachable`, `stale` (unreachable for 7 days) or
+  `unknown` (never probed), the last attempt, the last answer and the last error.
+- `report`: the last successful status report, kept when later probes fail.
+  `fresh` is true only if the latest probe returned it and it is younger than
+  three probe intervals; otherwise it is the last known state, not the current
+  one. The report holds the runner's own `softwareVersion` and
+  `protocolVersion`, its `lifecycle` (`ready`, `draining`, `faulted`,
+  `recoveryRequired`) and `draining`, the machines it hosts now (`activeVms`,
+  `runningVms`), its effective bound `maxActiveVms`, and its retained disks.
+  It also holds `platform` (`linux-x86_64`, `macos-aarch64`) with `os`, `arch`
+  and the `accelerator` the runner checks before it serves (KVM or HVF), its
+  `capabilities`, and the largest machine it accepts (`vmLimits`).
+- `slots`: cubed's admission count. `reserved` counts the open threads, each
+  of which holds a slot until it is archived. `total` is the runner's last
+  advertised bound (`totalSource: reported`), or 1 when it never advertised one
+  (`assumed`). `free` is 0 while the runner is retiring.
+- `unknown`: what this runner's data does not say, for example a stale report.
+
+The version shown is the one the runner itself reported. Nothing is inferred
+from a published release: a runner with an active VM postpones its update. A
+full runner does not show a lower bound either: two threads on a runner with
+`maxActiveVms` 2 is a full runner, not a missing feature.
+
+The platform, capabilities and limits come from the `node.hello` that starts
+every status exchange. Every protocol 3 runner sends them, so they appear after
+the first probe by a cubed with this change, without a runner update. A report
+recorded by an older cubed lists them as unknown until the next probe.
+Protocol 3 does not report the following, so they are always unknown:
+
+- whether `--max-active-vms` is `auto` or an explicit number (only the
+  effective bound);
+- the self-updater's state (its last run, what it found, a pending upgrade);
+- nested virtualization: whether the runner host is itself a VM, and whether
+  thread machines get KVM or HVF.
+
+Adding any of these to `node.status` would break cubed releases that refuse
+unknown status fields, so they stay out of the protocol until cubed accepts
+optional fields first.
+
 ## Always-on service (Linux)
 
 ```sh

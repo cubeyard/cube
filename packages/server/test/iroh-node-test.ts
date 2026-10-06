@@ -115,7 +115,9 @@ try {
   assert.deepEqual(described, { softwareVersion: "0.4.0", capabilities, limits, platform: "linux-x86_64", baseImageSha256: sha });
   const health = await client.health();
   assert.deepEqual(health, { lifecycle: "ready", draining: false, error: null, activeVms: 1, runningVms: 1, maxActiveVms: 1, retainedVms: 2,
-    retainedBytes: 4096, softwareVersion: "0.4.0", protocolVersion: 3 });
+    retainedBytes: 4096, softwareVersion: "0.4.0", protocolVersion: 3,
+    // From the hello the same exchange starts with: no newer runner needed.
+    platform: "linux-x86_64", capabilities, limits });
 
   // The VM lifecycle, request shapes as the runner expects them.
   assert.equal((await client.vmAllocate(ref, 7, 16)).state, "allocated");
