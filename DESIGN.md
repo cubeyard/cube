@@ -461,7 +461,9 @@ worker's scoped host tools; the web UI has no publication panel, fixed runbook,
 or push-all control.
 
 ### Composer
-Full-bleed `--s2` deck with the answering seam. Textarea: `--s4` field, 9px
+Full-bleed `--s2` deck with the answering seam. Its field and keys sit in the
+transcript's reading measure, centred under the text with the same side
+padding, so a draft starts where the conversation does. Textarea: `--s4` field, 9px
 radius, shallow inset shadow, auto-growing to 11rem; focus swaps the border to
 `--signal` (the one sanctioned replacement of the global 2px signal focus
 ring). Send is the round signal key. Enter sends; Shift+Enter inserts a new
@@ -484,7 +486,9 @@ lamp + mono tool name + plain primary argument (the command or path — raw
 JSON only as fallback, truncated at 300 chars) + chevron (rotates −90° when
 closed). Output sits in a recessed `--s1` window underneath (12px mono,
 16rem max-height), visible by default; collapse animates via CSS grid rows
-(1fr ↔ 0fr at 120ms), so the output stays in the DOM.
+(1fr ↔ 0fr at 120ms), so the output stays in the DOM. A strip opens while it runs,
+waits or failed; once the reader opens or folds one, that choice holds through
+streamed frames and the run's end.
 
 ### Banners
 Printed notices, 7px radius, one per tone: error is red ink on `--bad-soft`

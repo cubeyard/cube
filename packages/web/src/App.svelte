@@ -12,6 +12,7 @@
   import NewThreadDialog from "./components/NewThreadDialog.svelte";
   import { errorText, fetchState, fetchThreads, isUnreachable } from "./lib/api.ts";
   import { COMMAND_TTL_MS, type Command } from "./lib/command.ts";
+  import { createOrdered } from "./lib/ordered.ts";
   import type { DaemonState, ThreadSummary } from "./lib/types.ts";
 
   // Global threads, project setup, and one thread's terminal. Cubes never
@@ -63,6 +64,10 @@
     if (command?.id === id) command = null;
   }
 
+  // Polls overlap (the timer, a navigation, a rename): a slow older answer
+  // must not put back thread states the host has moved past.
+  const threadPolls = createOrdered();
+
   /** One poll: cubed's state until it answers, then the thread list. */
   async function refresh(): Promise<void> {
     if (!daemon) {
@@ -76,8 +81,10 @@
       }
     }
     if (!daemon.onboardingComplete) return;
+    const ticket = threadPolls.ask();
     try {
       const fresh = await fetchThreads(true);
+      if (!threadPolls.accept(ticket)) return;
       threads = fresh;
       threadsLoaded = true;
       failedPolls = 0;
@@ -86,6 +93,7 @@
         location.hash = "#/threads";
       }
     } catch {
+      if (!threadPolls.current(ticket)) return;
       // Keep the last good navigation state during transient connectivity
       // loss; the strip above the panel says so once it persists.
       failedPolls += 1;

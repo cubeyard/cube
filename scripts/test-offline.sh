@@ -38,6 +38,7 @@ OFFLINE_TESTS=(
   scripts/smoke-local.ts
   packages/web/test/transcript-test.ts
   packages/web/test/markdown-test.ts
+  packages/web/test/ordered-test.ts
   packages/server/test/github-auth-test.ts
   packages/server/test/github-read-test.ts
   packages/server/test/onboarding-test.ts
