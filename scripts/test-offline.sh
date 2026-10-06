@@ -35,6 +35,7 @@ OFFLINE_TESTS=(
   packages/server/test/optchat-history-test.ts
   packages/server/test/thread-history-test.ts
   packages/server/test/optchat-archive-test.ts
+  packages/server/test/optchat-tasks-test.ts
   packages/server/test/optchat-start-test.ts
   packages/server/test/claude-agent-test.ts
   packages/server/test/usage-test.ts

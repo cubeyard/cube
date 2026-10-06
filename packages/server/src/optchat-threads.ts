@@ -4,6 +4,7 @@ import { agents, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { releaseUnfinished, ThreadArchiving, ThreadWorking, type Conversations } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
 import { THREAD_NOTE, type OptThreads } from "./optchat.ts";
+import type { ObservedThread } from "./optchat-tasks.ts";
 import { threadAgent, type Registry, type Thread } from "./registry.ts";
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
 
@@ -76,6 +77,28 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         lines.push(`[${id.slice(0, 8)}] ${project} · ${thread.title ?? "untitled"} · ${thread.archived ? "archived" : state(id)}${run}`);
       }
       return lines.join("\n") || "no threads";
+    },
+    async observe(ids) {
+      // Read only, like history: the stored run state, never an agent opened
+      // or a machine waited for.
+      const observed = new Map<string, ObservedThread | null>();
+      for (const id of ids) {
+        const thread = registry.getThread(id);
+        if (!thread) { observed.set(id, null); continue; }
+        const project = registry.getProject(thread.projectId)?.name ?? thread.projectId;
+        let run = thread.archived ? "archived" : conversations.archivingNow(id) ? "being archived"
+          : conversations.starting(id) ? "starting" : conversations.error(id) && !conversations.agentOpen(id) ? "machine error" : null;
+        if (!run) {
+          try {
+            const status = (await conversations.storedHistory(id, { limit: 1 }))?.status;
+            // Background agents run on only while the agent is open.
+            run = !status ? "not started" : status.waiting?.length && conversations.agentOpen(id) ? "waiting on a background agent" : status.state;
+          }
+          catch { run = "unknown"; }
+        }
+        observed.set(id, { id, title: thread.title, project, state: run });
+      }
+      return observed;
     },
     async history(id, request) {
       const thread = registry.getThread(id);

@@ -6,6 +6,7 @@ import type {
   ProjectInput,
   RunnerStatus,
   SubjectUsage,
+  TaskList,
   ThreadModels,
   ThreadSummary,
   UpdateStatus,
@@ -183,3 +184,6 @@ export const setChatModel = (model: ModelSelection) => request<ThreadModels>(`${
 
 /** What OptChat sees: the view of the whole chat, as one-line summaries. */
 export const fetchChatView = () => request<{ view: string; messages: number; failure: string | null }>(`${CHAT_BASE}/view`);
+
+/** OptChat's task list, the "now" panel: its intent beside each thread's state as cubed records it. */
+export const fetchChatTasks = () => request<TaskList>(`${CHAT_BASE}/tasks`);
