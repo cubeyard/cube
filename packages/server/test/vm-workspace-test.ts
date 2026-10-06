@@ -169,6 +169,15 @@ try {
   const attempts = app.registry.getThread(gone)?.vm?.provisionAttempt ?? 0;
   await app.conversations.activate(gone);
   assert.equal(app.registry.getThread(gone)?.vm?.provisionAttempt, attempts + 1, "a failed try is never rerun under its key");
+  // A reader of a machine that is not ready gets the failure. It never opens
+  // the agent, which would take the lease the next try needs (LEASE_HELD).
+  const unready = await fetch(`${base}/api/threads/${gone}/history`);
+  assert.notEqual(unready.status, 200);
+  assert.match((await unready.json()).error, /workspace allocation failed/);
+  assert.equal(app.conversations.owner(gone), null, "no agent holds a failed machine's lease");
+  await app.conversations.activate(gone);
+  assert.doesNotMatch(app.conversations.error(gone) ?? "", /writable owner/);
+  assert.equal(app.registry.getThread(gone)?.vm?.provisionAttempt, attempts + 2, "the next try runs");
   const failedArchive = await (await fetch(`${base}/api/threads/${gone}`, { method: "DELETE" })).json();
   assert.equal(failedArchive.retained, true, "a failed machine is retained");
 
@@ -205,7 +214,7 @@ try {
   assert.match(provisionScript({ projectId: "p", projectRevision: 1, repositories: [{ url: "https://example.com/a'b.git", base: "main", baseOid: "a".repeat(40), checkoutName: "workspace" }] }),
     /checkout '\.' 'https:\/\/example\.com\/a'\\''b\.git' 'refs\/heads\/main'/);
   assert.match(releaseCheckScript({ projectId: "p", projectRevision: 1, repositories: [] }), /the workspace is not empty/);
-  console.log("ok: thread machines: background activation, pinned checkouts provisioned once, release check (clean deleted; agent commands, changes, own commits, leftovers and failures retained with reasons), no reopening while archiving, failed provisioning retried under a new key");
+  console.log("ok: thread machines: background activation, pinned checkouts provisioned once, release check (clean deleted; agent commands, changes, own commits, leftovers and failures retained with reasons), no reopening while archiving, failed provisioning retried under a new key, no agent on a machine that is not ready");
 } finally {
   await app.close();
   await machines.close();
