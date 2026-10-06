@@ -106,6 +106,8 @@ export class Conversations {
     const activation = (async () => {
       try {
         await this.ensureWorkspace(id);
+        // An agent that was still opening and failed meanwhile opens again here: a start.
+        if (!this.agentOpen(id)) this.checks.delete(id);
         if (this.isClaude(id)) await this.claudeAgent(id);
         else await this.agent(id);
         this.failures.delete(id);
@@ -170,7 +172,8 @@ export class Conversations {
     // Its machine is being released: starting it again would race the release.
     if (releaseUnfinished(thread)) throw new Error("thread workspace is releasing");
     if (thread.workspaceState === "available") {
-      const started = await this.machines.start(thread);
+      // A check that finds the machine down boots it: from then it is a start.
+      const started = await this.machines.start(thread, { onBoot: () => this.checks.delete(id) });
       await this.resume(id, started?.booted ?? false);
       return;
     }

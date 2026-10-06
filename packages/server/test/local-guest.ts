@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { encodeGuestRequest, runGuestProcess, type GuestAnswer, type GuestCallOptions, type GuestOp, type GuestTransport } from "../src/guest-ssh.ts";
-import type { ThreadMachines } from "../src/vm.ts";
+import type { StartOptions, ThreadMachines } from "../src/vm.ts";
 import type { Thread } from "../src/registry.ts";
 
 const LAUNCHER = path.join(import.meta.dirname, "local-guest.py");
@@ -63,9 +63,10 @@ export class LocalMachines implements ThreadMachines {
   }
   /** Like a real machine's seed: the project's hooks as executable files,
    * and where the scripts find them and their per-boot marker. */
-  async start(thread: Thread): Promise<{ booted: boolean }> {
+  async start(thread: Thread, options: StartOptions = {}): Promise<{ booted: boolean }> {
     this.starts++;
     const fresh = !this.guests.has(thread.id) || this.rebooted.delete(thread.id);
+    if (fresh) options.onBoot?.();
     const guest = this.guest(thread);
     const hooks = path.join(guest.root, "hooks");
     fs.mkdirSync(hooks, { recursive: true });
