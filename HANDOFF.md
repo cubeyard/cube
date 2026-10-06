@@ -132,7 +132,9 @@ refuses a working thread and never stops one); their reports come back as
 order, zoom, log mapping), `optchat-test.ts` (Pi turns with a faux model:
 fresh context, compactor feedback, report turns, zoom/tell, reopen) and
 `optchat-product-test.ts` (cubed's routes, a real thread on a local guest
-running bash, its report back in the chat). The chat strip and memory panel
+running bash, its report back in the chat, and the archive tool against real
+threads), `optchat-history-test.ts` and `optchat-archive-test.ts` (the
+history and archive tools: ownership, busy refusal, repeats, reports). The chat strip and memory panel
 were measured in headless Chromium at 1440×900 and 390×844 (no overflow, one
 strip row on the phone). Not verified: a real model as chat or compactor, a
 real VM thread. Two review rounds then made delivery

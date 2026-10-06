@@ -56,7 +56,8 @@ faux.setResponses(Array.from({ length: 100 }, () => async request => {
 }));
 const models = createModels();
 models.setProvider(faux.provider);
-const app = await createCubed({ state, models, machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null });
+const machines = new LocalMachines(path.join(root, "machines"));
+const app = await createCubed({ state, models, machines, claude: null, gateway: null });
 app.registry.enrollRunner({ nodeId: "node-optchat", environmentId: 1, threadId: "runner-optchat", configPath: "/private/optchat.json", configHash: "optchat" });
 await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
 const address = app.server.address();
@@ -173,6 +174,20 @@ try {
   assert.deepEqual(both.map(result => result?.already).sort(), [false, true], "one archives, the other finds it archived");
   assert.equal(app.registry.runnerSlots().free, free + 1);
   assert.equal((await adapter.history(busy.id))?.transcript?.status.state, "completed", "its history stays");
+
+  // An agent that cannot open runs nothing: its thread is archived, its disk kept.
+  const stuck = app.registry.createThread(project.project.id, "stuck", { provider: "claude-code", id: "opus" }, "never runs", "claude-code");
+  await app.conversations.activate(stuck.id);
+  assert.match(app.conversations.error(stuck.id) ?? "", /claude code is not installed/);
+  assert.equal(app.registry.getThread(stuck.id)!.workspaceState, "available");
+  // Its release fails once: archiving again releases it and keeps the
+  // first decision about the disk, not the release's error.
+  const releaseMachine = machines.release.bind(machines);
+  machines.release = async () => { machines.release = releaseMachine; throw new Error("runner unreachable"); };
+  await assert.rejects(adapter.archive!(stuck.id), /workspace release failed: runner unreachable/);
+  assert.equal(app.registry.getThread(stuck.id)!.archived, false, "a failed release archives nothing");
+  assert.match((await adapter.archive!(stuck.id))!.disk, /^machine disk retained \(the agent could not open: claude code is not installed/);
+  assert.equal(app.registry.getThread(stuck.id)!.archived, true);
 
   const { view, messages } = await (await fetch(`${base}/api/optchat/view`)).json();
   assert.ok(messages >= 5, `the log holds the turns (${messages})`);

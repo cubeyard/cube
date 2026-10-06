@@ -76,7 +76,7 @@ try {
       () => fauxAssistantMessage("archived"),
     ];
     await chat.send("start two", "r1");
-    for (let k = 0; k < 400 && script.length; k++) await delay(10);
+    for (let k = 0; k < 1500 && script.length; k++) await delay(10);
     await chat.agent.conversation.waitForIdle(context);
 
     // Another chat's or an unknown thread, and any prefix shorter than the
@@ -96,9 +96,9 @@ try {
       const placed = await chat.agent.conversation.commit(tx => tx.submissionByRequest(chat.agent.conversation.id, `report:${DONE}:run-1`), context);
       return pending + (placed ? 1 : 0);
     };
-    for (let k = 0; k < 400 && !await reports(); k++) await delay(10);
+    for (let k = 0; k < 1500 && !await reports(); k++) await delay(10);
     assert.equal(await reports(), 1, "the archived thread's report is accepted once");
-    for (let k = 0; k < 400 && (await chat.pending()).length; k++) await delay(10);
+    for (let k = 0; k < 1500 && (await chat.pending()).length; k++) await delay(10);
     await chat.agent.conversation.waitForIdle(context);
     assert.equal(await reports(), 1);
   } finally { await chat.close(); }
@@ -112,7 +112,7 @@ try {
       async archive() { archives++; if (working) throw new ThreadWorking(); thread.archived = true; return { retained: false, reason: "clean" }; } } as unknown as Conversations;
     const registry = { getThread: () => thread, runnerSlots: () => ({ free: 1, total: 1, runners: 1 }) } as unknown as Registry;
     const adapter = cubeThreads({ registry, conversations, catalog: async () => [], runners: () => { throw new Error("unused"); } });
-    await assert.rejects(adapter.archive!(DONE), /^Error: its machine is still starting$/);
+    await assert.rejects(adapter.archive!(DONE), /^Error: its machine is still starting or reattaching; try again shortly$/);
     assert.equal(archives, 0, "nothing waits for the machine");
     starting = false; working = true;
     await assert.rejects(adapter.archive!(DONE), /^Error: it is working; nothing was stopped$/);

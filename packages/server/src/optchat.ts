@@ -882,6 +882,8 @@ export class OptChat {
       // Archiving again finds the thread archived and says so.
       replay: "safe",
       execute: async args => {
+        const archiveThread = this.options.threads.archive;
+        if (!archiveThread) return text("archiving is not available");
         const lines: string[] = [];
         let free: string | undefined;
         for (const given of args.ids) {
@@ -891,8 +893,7 @@ export class OptChat {
             if (given.replace(/^\[|\]$/g, "").length < 8) throw new Error("name a thread by its whole 8-character id");
             const id = await this.resolve(given);
             name = `[${short(id)}]`;
-            if (!this.options.threads.archive) throw new Error("archiving is not available");
-            const result = await this.options.threads.archive(id);
+            const result = await archiveThread(id);
             if (!result) { lines.push(`${name} is gone: cubed has no record of it`); continue; }
             free = result.free;
             lines.push(`${name} ${result.already ? "was already archived" : "archived"}: ${result.disk}; history still reads it`);
