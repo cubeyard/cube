@@ -464,11 +464,28 @@ async fn main() -> Result<()> {
                         })?
                 }
             })?;
+            if let Some(value) = std::env::var("CUBE_RUNNER_MIN_FREE_DISK_GIB")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+            {
+                runner.set_min_free_disk_gib(value.trim().parse().context(
+                    "CUBE_RUNNER_MIN_FREE_DISK_GIB must be a whole number of GiB (0 turns the check off)",
+                )?);
+            }
             runner.preflight()?;
             let allowed = runner.installation().allowed_peer.parse()?;
             let node_id = runner.installation().binding.node_id.clone();
             eprintln!(
-                "{{\"level\":\"info\",\"event\":\"runner_starting\",\"execution\":\"qemu-guest\",\"qemu\":\"runs-as-runner-account\"}}"
+                "{{\"level\":\"info\",\"event\":\"runner_starting\",\"execution\":\"qemu-guest\",\"qemu\":\"runs-as-runner-account\",\"maxActiveVms\":{},\"maxActiveVmsSource\":\"{}\"}}",
+                runner.max_active_vms(),
+                if max_active_vms
+                    .as_deref()
+                    .is_none_or(|value| value.trim() == "auto")
+                {
+                    "auto"
+                } else {
+                    "explicit"
+                }
             );
             let endpoint = endpoint(key, network, listen, true).await?;
             let mut readiness = ready(&endpoint, &node_id, network);

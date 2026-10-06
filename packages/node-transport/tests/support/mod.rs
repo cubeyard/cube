@@ -90,6 +90,8 @@ pub struct Served {
 
 pub async fn serve(fx: &Fixture) -> Served {
     let runner = Runner::open(&fx.state, fx.key.public()).unwrap();
+    // Test state may live on a small tmpfs.
+    runner.set_min_free_disk_gib(0);
     let server = bind_runner(
         fx.key.clone(),
         "127.0.0.1:0".parse().unwrap(),

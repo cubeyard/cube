@@ -14,6 +14,9 @@ import { Worker } from "node:worker_threads";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
 import { Registry, type Project, type Thread } from "../src/registry.ts";
+import type { GatewaySupervisor } from "../src/gateway.ts";
+import { IrohNodeError, type IrohRunnerClient } from "../src/iroh-node.ts";
+import { ThreadVms } from "../src/vm.ts";
 import { LocalMachines } from "./local-guest.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-runner-slots-"));
@@ -31,7 +34,8 @@ try {
   registry.saveProject(project("p"));
   registry.enrollRunner(runner("wide", 2));
   const status = () => registry.runnerStatuses().find(row => row.id === "wide")!;
-  assert.deepEqual(registry.runnerSlots(), { free: 2, total: 2 });
+  const slots = () => { const { free, total } = registry.runnerSlots(); return { free, total }; };
+  assert.deepEqual(slots(), { free: 2, total: 2 });
   const a = registry.createThread("p", "a", model, "a");
   assert.equal(status().allocationState, "available", "a runner with a free slot stays allocatable");
   assert.equal(status().threadId, a.id);
@@ -41,7 +45,7 @@ try {
   assert.deepEqual([status().activeThreads, status().maxActiveVms, status().allocationState], [2, 2, "allocating"]);
   assert.deepEqual(status().threadIds, [a.id, b.id]);
   assert.throws(() => registry.createThread("p", "c", model, "c"), /no free thread machine/);
-  assert.deepEqual(registry.runnerSlots(), { free: 0, total: 2 });
+  assert.deepEqual(slots(), { free: 0, total: 2 });
 
   // A failed machine keeps its slot (its disk may exist) until archived.
   registry.markWorkspaceAvailable(a.id);
@@ -50,7 +54,7 @@ try {
   assert.equal(status().allocationState, "failed");
   assert.throws(() => registry.createThread("p", "c", model, "c"), /no free thread machine/);
   archive(registry, b.id);
-  assert.deepEqual(registry.runnerSlots(), { free: 1, total: 2 }, "archive returns exactly one slot");
+  assert.deepEqual(slots(), { free: 1, total: 2 }, "archive returns exactly one slot");
   assert.deepEqual(registry.runnerCapacity().errors, []);
   const c = registry.createThread("p", "c", model, "c");
   assert.equal(c.runnerId, "wide");
@@ -117,6 +121,53 @@ try {
   assert.equal(raced.listThreads().length, 2);
   raced.close();
 
+  // --- a full runner: an unbound thread moves to a runner with room ---
+  {
+    const file = path.join(root, "relocate.sqlite");
+    const moving = new Registry(file);
+    moving.saveProject(project("m"));
+    moving.enrollRunner(runner("full", 2));
+    moving.enrollRunner(runner("roomy", 1));
+    const first = moving.createThread("m", "first", model, "first");
+    assert.equal(first.runnerId, "full", "enrollment order breaks the tie");
+    const calls: string[] = [];
+    const vmRecord = (ref: { threadId: string; vmId: string }, state: string) => ({ vmId: ref.vmId, threadId: ref.threadId, state, interrupted: false, diskBytes: 0 });
+    const fake = (name: string) => ({
+      target: { peer: "0".repeat(64), network: "loopback" as const, address: "127.0.0.1:1" },
+      nodeId: `node-${name}`,
+      describe: async () => ({ softwareVersion: "0.7.0", capabilities: [], platform: "linux-x86_64", baseImageSha256: "0".repeat(64),
+        limits: { maxFrameBytes: 1048576, requestTimeoutMs: 5000, maxVcpus: 2, maxMemoryMiB: 4096, maxDiskGiB: 32, maxSeedBytes: 65536, maxActiveVms: name === "full" ? 2 : 1 } }),
+      vmInspect: async () => { throw new IrohNodeError("NOT_FOUND"); },
+      vmAllocate: async (ref: { threadId: string; vmId: string }) => {
+        calls.push(`${name}:allocate`);
+        if (name === "full") throw new IrohNodeError("CAPACITY_EXCEEDED", false, "the runner's disk has less than 4 GiB free");
+        return vmRecord(ref, "allocated");
+      },
+      vmStart: async () => { calls.push(`${name}:start`); throw new Error("fixture stops here"); },
+    });
+    const gateway = { binary: "/bin/false", unavailable: null, control: "/nonexistent", onRestart: () => {},
+      ensureNetwork: async () => {}, ready: async () => ({ client: {}, hello: { peer: "0".repeat(64), caPem: "" } }) };
+    const vms = new ThreadVms({ registry: moving, threads: path.join(root, "relocate-threads"), run: path.join(root, "relocate-run"),
+      gateway: gateway as unknown as GatewaySupervisor, runnerClient: admission => fake(admission.configHash) as unknown as IrohRunnerClient });
+    await assert.rejects(vms.start(first), /fixture stops here/);
+    assert.deepEqual(calls, ["full:allocate", "roomy:allocate", "roomy:start"]);
+    assert.equal(moving.getThread(first.id)!.runnerId, "roomy", "the thread moved to the runner with room");
+    assert.equal(moving.runner(first.id)!.threadId, "roomy");
+    assert.deepEqual(moving.runnerStatuses().map(row => [row.id, row.activeThreads]), [["full", 0], ["roomy", 1]]);
+
+    // Bound to its runner (the agent's storage exists): it stays and says why.
+    const second = moving.createThread("m", "second", model, "second");
+    assert.equal(second.runnerId, "full");
+    fs.mkdirSync(path.join(root, "relocate-threads", second.id), { recursive: true });
+    fs.writeFileSync(path.join(root, "relocate-threads", second.id, "pi.sqlite"), "");
+    calls.length = 0;
+    await assert.rejects(vms.start(second), /no room for this thread's machine \(the runner's disk has less than 4 GiB free\); cube tries again/);
+    assert.deepEqual(calls, ["full:allocate"]);
+    assert.equal(moving.getThread(second.id)!.runnerId, "full");
+    await vms.close();
+    moving.close();
+  }
+
   // --- product: two threads on one runner at once ---
   const textOf = (message: Message) => typeof message.content === "string" ? message.content
     : message.content.map(part => part.type === "text" ? part.text : "").join("\n");
@@ -125,8 +176,8 @@ try {
     const last = request.messages.findLast(message => message.role !== "system")!;
     if (last.role === "toolResult") return fauxAssistantMessage(`listing: ${textOf(last).trim().replace(/\n/g, " ")}`);
     const name = /work as (\w+)/.exec(textOf(last))![1];
-    // Each command takes two seconds and records when it ran.
-    return fauxAssistantMessage([fauxToolCall("bash", { command: `touch mine-${name}; s=$(date +%s%N); sleep 2; echo "$s $(date +%s%N)" > span; ls` })], { stopReason: "toolUse" });
+    // Each command takes four seconds and records when it ran.
+    return fauxAssistantMessage([fauxToolCall("bash", { command: `touch mine-${name}; s=$(date +%s%N); sleep 4; echo "$s $(date +%s%N)" > span; ls` })], { stopReason: "toolUse" });
   }));
   const models = createModels();
   models.setProvider(faux.provider);
@@ -199,5 +250,5 @@ try {
     await app.close();
     await machines.close();
   }
-  console.log("ok: runner slots (spread, bound, failed machines, archive, one-machine runners, process race) and two concurrent threads on one runner over local guests");
+  console.log("ok: runner slots (spread, bound, failed machines, archive, one-machine runners, process race, full-runner relocation) and two concurrent threads on one runner over local guests");
 } finally { fs.rmSync(root, { recursive: true, force: true }); }

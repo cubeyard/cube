@@ -42,6 +42,11 @@ pub const MAX_ACTIVE_VMS_LIMIT: u64 = 32;
 pub const AUTO_MAX_ACTIVE_VMS: u64 = 4;
 /// Host memory `auto` leaves to the host itself (runner, QEMU overhead, page cache).
 const HOST_RESERVE_MIB: u64 = 2048;
+/// By default `vm.allocate` refuses a new VM while the state directory's
+/// filesystem has less free space than this: overlays grow as guests write,
+/// and a full disk would fail every running VM on the runner, not only the
+/// new one.
+pub const MIN_FREE_DISK_GIB: u64 = 4;
 /// `vm.stop`: time the guest gets after ACPI power-down before `quit`.
 pub const STOP_GRACE: Duration = Duration::from_secs(30);
 const QUIT_GRACE: Duration = Duration::from_secs(10);
@@ -185,6 +190,8 @@ pub struct Runner {
     /// Active VMs (`VmState::active`) this process admits; 1 until the
     /// operator's choice is applied with `set_max_active_vms`.
     max_active_vms: AtomicU64,
+    /// Free space `vm.allocate` requires on the state filesystem; 0 is off.
+    min_free_disk_gib: AtomicU64,
     /// Serializes mutations; inspection and status do not take it.
     ops: tokio::sync::Mutex<()>,
     live: Mutex<HashMap<String, Live>>,
@@ -207,6 +214,17 @@ fn capacity_for(host_memory_mib: u64, cpus: u64, limits: &VmLimits) -> u64 {
         host_memory_mib.saturating_sub(HOST_RESERVE_MIB) / u64::from(limits.max_memory_mib).max(1);
     let by_cpu = cpus / u64::from(limits.max_vcpus).max(1);
     by_memory.min(by_cpu).clamp(1, AUTO_MAX_ACTIVE_VMS)
+}
+
+/// Free space for this user on the filesystem holding `path`.
+#[allow(clippy::unnecessary_cast)] // statvfs field types differ on macOS
+fn free_disk_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: a zeroed statvfs owned by this frame and a valid C string.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(path.as_ptr(), &mut stat) } == 0)
+        .then(|| (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
 }
 
 fn host_memory_mib() -> u64 {
@@ -405,6 +423,7 @@ impl Runner {
             accepting: AtomicBool::new(!quarantined),
             faulted: AtomicBool::new(false),
             max_active_vms: AtomicU64::new(1),
+            min_free_disk_gib: AtomicU64::new(MIN_FREE_DISK_GIB),
             ops: tokio::sync::Mutex::new(()),
             live: Mutex::new(HashMap::new()),
             pumps: Arc::new(Pumps::default()),
@@ -524,6 +543,12 @@ impl Runner {
         Ok(())
     }
 
+    /// Free space on the state filesystem below which `vm.allocate` refuses
+    /// a new VM (`CUBE_RUNNER_MIN_FREE_DISK_GIB`); 0 turns the check off.
+    pub fn set_min_free_disk_gib(&self, gib: u64) {
+        self.min_free_disk_gib.store(gib, Ordering::SeqCst);
+    }
+
     pub fn max_active_vms(&self) -> u64 {
         self.max_active_vms.load(Ordering::SeqCst)
     }
@@ -615,6 +640,13 @@ impl Runner {
             {
                 return reject("CAPACITY_EXCEEDED");
             }
+            let floor = self.min_free_disk_gib.load(Ordering::SeqCst);
+            if free_disk_bytes(&self.state).is_some_and(|free| free < floor.saturating_mul(GIB)) {
+                return detail(
+                    "CAPACITY_EXCEEDED",
+                    format!("the runner's disk has less than {floor} GiB free"),
+                );
+            }
             journal.insert_allocating(vm_id, thread_id, disk_gib)?
         };
         let paths = self.paths(slot);
@@ -691,7 +723,7 @@ impl Runner {
             mac: spec.mac.clone(),
             seed_sha256: spec.seed.sha256(),
         };
-        let _ops = self.ops.lock().await;
+        let ops = self.ops.lock().await;
         self.journal.lock().unwrap().fence(thread_id, epoch)?;
         let row = self.row_for(thread_id, vm_id)?;
         // The first start fixes vcpus, memory, mac and seed. Later starts
@@ -774,6 +806,9 @@ impl Runner {
         };
         let pid = child.id();
         let exited = self.watch(vm_id, child, paths.qemu_log.clone());
+        // The VM is `starting` and watched: other VMs' mutations need not
+        // wait for its QMP (mark_running only moves `starting` on).
+        drop(ops);
         let ready =
             Self::wait_for_qmp(paths.qmp.clone(), vm_id.into(), exited.clone(), START_WAIT).await;
         if ready {

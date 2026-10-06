@@ -69,6 +69,8 @@ export interface ThreadVmsOptions {
   sizes?: VmSizes;
   readyTimeoutMs?: number;
   log?: Logger;
+  /** Tests: the runner client for an admission (default: the shared one). */
+  runnerClient?: (admission: { configPath: string; configHash: string }) => IrohRunnerClient;
 }
 
 export class ThreadVms implements ThreadMachines, EgressVms {
@@ -161,7 +163,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     this.transports.clear();
   }
 
-  private async boot(thread: Thread): Promise<void> {
+  private async boot(thread: Thread, relocated = false): Promise<void> {
     const vm = machine(thread);
     const runner = this.runner(thread);
     const target = runner.target;
@@ -192,10 +194,17 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       try { record = await runner.vmAllocate(ref, epoch, sizes.diskGiB); }
       catch (cause) {
         if (!(cause instanceof IrohNodeError && cause.remoteCode === "CAPACITY_EXCEEDED")) throw cause;
-        // cubed's count said a slot was free; the runner (a lowered bound,
-        // or a machine cubed does not know) disagrees. Nothing was created;
-        // the recovery loop tries again while the thread is open.
-        throw new Error(`the runner has no free machine slot (it hosts at most ${description.limits.maxActiveVms}); cube tries again every 30 seconds`, { cause });
+        // cubed's count said a slot was free; the runner (a lowered bound, a
+        // full disk, a machine cubed does not know) disagrees. Nothing was
+        // created there, so a thread whose agent has not bound its storage
+        // to this runner yet moves to one with room, once.
+        const moved = !relocated && this.unbound(thread) ? this.options.registry.relocateThread(thread.id) : null;
+        if (moved) {
+          this.log.warn("runner full; thread moved", { thread: thread.id, from: thread.runnerId, to: moved });
+          return this.boot(this.options.registry.getThread(thread.id)!, true);
+        }
+        const why = cause.message === "CAPACITY_EXCEEDED" ? `it hosts at most ${description.limits.maxActiveVms} machines` : cause.message;
+        throw new Error(`the runner has no room for this thread's machine (${why}); cube tries again every 30 seconds`, { cause });
       }
       this.log.info("allocated", { thread: thread.id, vm: vm.vmId, diskGiB: sizes.diskGiB });
     }
@@ -262,7 +271,12 @@ export class ThreadVms implements ThreadMachines, EgressVms {
   private runner(thread: Thread): IrohRunnerClient {
     const admission = this.options.registry.runner(thread.id);
     if (!admission) throw new Error("thread runner allocation is missing");
-    return runnerClient(admission);
+    return (this.options.runnerClient ?? runnerClient)(admission);
+  }
+  /** No agent storage exists yet, so nothing is bound to the thread's runner. */
+  private unbound(thread: Thread): boolean {
+    const directory = path.join(this.options.threads, thread.id);
+    return !fs.existsSync(path.join(directory, "pi.sqlite")) && !fs.existsSync(path.join(directory, "claude.sqlite"));
   }
   private controlSocket(): string { return this.options.gateway.control; }
   private keyDirectory(thread: Thread): string { return path.join(this.options.threads, thread.id, "vm"); }

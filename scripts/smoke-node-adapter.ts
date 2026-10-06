@@ -3,7 +3,7 @@
 // real cube-gateway, its egress policy, ThreadVms booting a real Debian VM,
 // and the Workspace contract over VmWorkspace (system OpenSSH through
 // `cube-gateway dial`) in process and through the HTTP routes. Disposable
-// state under /tmp; every process started is stopped. No model is contacted.
+// state under $TMPDIR (/tmp); every process started is stopped. No model is contacted.
 //
 //   node scripts/smoke-node-adapter.ts <cube-runner> <cube-gateway> <image.qcow2>
 //
@@ -11,6 +11,7 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { EgressPolicy, serveEgress, type SecretSource } from "../packages/server/src/egress-policy.ts";
@@ -26,7 +27,7 @@ import { serveWorkspace, workspaceContract } from "../packages/server/test/works
 
 const [runnerBin, gatewayBin, image] = process.argv.slice(2).map(p => path.resolve(p));
 if (!runnerBin || !gatewayBin || !image) throw new Error("usage: smoke-node-adapter.ts <cube-runner> <cube-gateway> <image.qcow2>");
-const work = fs.mkdtempSync(path.join("/tmp", "cube-adapter-"));
+const work = fs.mkdtempSync(path.join(os.tmpdir(), "cube-adapter-"));
 fs.chmodSync(work, 0o700);
 const children: ChildProcess[] = [];
 const started = Date.now();

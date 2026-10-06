@@ -6,6 +6,7 @@ writes a console line. Behaviour switches are files next to this script
 
   ignore-powerdown  system_powerdown is acknowledged but ignored
   exit-at-once      exits with status 3 before opening QMP
+  slow-qmp          waits 2 s before opening QMP
 """
 import json
 import os
@@ -40,6 +41,9 @@ with open(console, "a") as f:
 if os.path.exists(os.path.join(here, "exit-at-once")):
     sys.stderr.write("fake qemu refused to start\n")
     sys.exit(3)
+
+if os.path.exists(os.path.join(here, "slow-qmp")):
+    time.sleep(2)
 
 net = socket.socket(fileno=int(netdev["local.str"]))
 

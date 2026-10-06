@@ -134,6 +134,7 @@ export class Registry {
           retiring_at INTEGER, retired_at INTEGER, retirement_reason TEXT);
         CREATE TABLE IF NOT EXISTS runner_audit(id INTEGER PRIMARY KEY, runner_id TEXT NOT NULL REFERENCES runner(id),
           action TEXT NOT NULL, at INTEGER NOT NULL, evidence TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS thread_open ON thread(json_extract(data, '$.archived'), runner_id);
         PRAGMA user_version=${REGISTRY_SCHEMA};`);
       this.db.exec(`UPDATE runner SET state='available',error=NULL WHERE state='failed' AND thread_id IS NULL
           AND id IN (SELECT runner_id FROM runner_operator WHERE retiring_at IS NOT NULL AND retired_at IS NULL);
@@ -176,24 +177,49 @@ export class Registry {
   availableRunners(): Runner[] {
     return this.runnerLoads().filter(load => load.active < load.slots).map(load => load.runner);
   }
-  /** Free and total thread machine slots of the allocatable pool. */
-  runnerSlots(): { free: number; total: number } {
+  /** Free and total thread machine slots of the allocatable pool, and how
+   * many runners have a free one. */
+  runnerSlots(): { free: number; total: number; runners: number } {
     const loads = this.runnerLoads();
     return { free: loads.reduce((sum, load) => sum + Math.max(0, load.slots - load.active), 0),
-      total: loads.reduce((sum, load) => sum + load.slots, 0) };
+      total: loads.reduce((sum, load) => sum + load.slots, 0), runners: loads.filter(load => load.active < load.slots).length };
   }
   /** Allocatable runners with their open threads: runners with a failed
    * machine last, then the least loaded, then enrollment order. */
   private runnerLoads(): Array<{ id: string; runner: Runner; slots: number; active: number; failed: number }> {
-    const rows = this.db.prepare(`SELECT r.id,r.data,
-        (SELECT count(*) FROM thread WHERE runner_id=r.id AND ${OPEN_THREAD}) AS active,
-        (SELECT count(*) FROM thread WHERE runner_id=r.id AND ${OPEN_THREAD} AND json_extract(data, '$.workspaceState')='failed') AS failed
+    // One pass over the open threads (index thread_open), not per runner.
+    const rows = this.db.prepare(`SELECT r.id,r.data,coalesce(t.active,0) AS active,coalesce(t.failed,0) AS failed
       FROM runner r JOIN runner_operator o ON o.runner_id=r.id
+      LEFT JOIN (SELECT runner_id,count(*) AS active,sum(json_extract(data, '$.workspaceState')='failed') AS failed
+        FROM thread WHERE ${OPEN_THREAD} GROUP BY runner_id) t ON t.runner_id=r.id
       WHERE o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired' ORDER BY r.rowid`).all() as Array<{ id: string; data: string; active: number; failed: number }>;
     return rows.map(row => {
       const runner = JSON.parse(row.data) as Runner;
       return { id: row.id, runner, slots: runnerSlots(runner), active: Number(row.active), failed: Number(row.failed) };
-    }).sort((a, b) => Number(a.failed > 0) - Number(b.failed > 0) || a.active / a.slots - b.active / b.slots);
+    }).sort((a, b) => Number(a.failed > 0) - Number(b.failed > 0) || a.active / a.slots - b.active / b.slots
+      || (b.slots - b.active) - (a.slots - a.active));
+  }
+  /** Moves an open thread to another runner with a free slot, for a thread
+   * whose runner refused to create its machine. The caller guarantees that
+   * nothing of the thread exists on the old runner and nothing is bound to
+   * it yet. Returns the new runner's id, or null when no other runner has
+   * room. */
+  relocateThread(threadId: string): string | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const thread = this.getThread(threadId);
+      if (!thread || thread.archived || thread.workspaceState === "available" || thread.workspaceState === "releasing") {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const load = this.runnerLoads().find(candidate => candidate.id !== thread.runnerId && candidate.active < candidate.slots);
+      if (!load) { this.db.exec("COMMIT"); return null; }
+      this.db.prepare("UPDATE thread SET runner_id=?,data=? WHERE id=?").run(load.id, JSON.stringify({ ...thread, runnerId: load.id }), threadId);
+      this.syncRunner(thread.runnerId);
+      this.syncRunner(load.id);
+      this.db.exec("COMMIT");
+      return load.id;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   /** Records the runner's advertised `maxActiveVms` (enrollment, a status
    * check, a machine start). A bound below its open threads only stops new
@@ -232,14 +258,14 @@ export class Registry {
   }
   /** Runner states, thread machine slots and the errors of failed machines
    * that still hold a slot. */
-  runnerCapacity(): { states: Record<RunnerAllocationState, number>; slots: { free: number; total: number }; errors: string[] } {
+  runnerCapacity(slots = this.runnerSlots()): { states: Record<RunnerAllocationState, number>; slots: { free: number; total: number }; errors: string[] } {
     const states: Record<RunnerAllocationState, number> = { available: 0, allocating: 0, busy: 0, releasing: 0, failed: 0, retiring: 0, retired: 0 };
     const rows = this.db.prepare(`SELECT CASE WHEN o.retiring_at IS NOT NULL AND o.retired_at IS NULL THEN 'retiring' ELSE r.state END AS state
       FROM runner r JOIN runner_operator o ON o.runner_id=r.id`).all() as Array<{ state: RunnerAllocationState }>;
     for (const row of rows) states[row.state]++;
     const failed = this.db.prepare(`SELECT json_extract(data, '$.workspaceError') AS error FROM thread
       WHERE ${OPEN_THREAD} AND json_extract(data, '$.workspaceState')='failed' ORDER BY rowid DESC`).all() as Array<{ error: string | null }>;
-    return { states, slots: this.runnerSlots(), errors: failed.flatMap(row => row.error ? [String(row.error)] : []) };
+    return { states, slots: { free: slots.free, total: slots.total }, errors: failed.flatMap(row => row.error ? [String(row.error)] : []) };
   }
   runnerStatuses(now = Date.now()): RunnerStatus[] {
     const rows = this.db.prepare(`SELECT r.id,r.node_id,r.data,r.state,r.thread_id,

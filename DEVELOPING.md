@@ -35,8 +35,9 @@ run one of them after building:
 `node scripts/smoke-node-adapter.ts target/debug/cube-runner target/debug/cube-gateway <image>` or
 `node scripts/test-vm-e2e.ts target/debug/cube-runner <image>` (it builds a
 `test-hooks` gateway under `target/test-hooks`). `CUBE_SMOKE_KEEP=1` keeps their
-work directories. Where `/tmp` is a small tmpfs, set `TMPDIR` for
-`test-vm-concurrency.ts`: its two VM disks grow in its work directory.
+work directories. The real-VM scripts keep their state under `TMPDIR` (`/tmp`
+by default); where that is a small tmpfs, point `TMPDIR` at a disk: VM disks
+grow there and the runner refuses a new VM below 4 GiB free.
 
 ## Product development
 
