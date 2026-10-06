@@ -122,7 +122,7 @@ function drain(memory: Memory, seen: string[][] = []): void {
   assert.equal(runReport(status("completed", { waiting: ["fable review"] }), "PR #3 is open; waiting for the review"),
     "ended its turn, waiting on its background agent \"fable review\"; another report comes when it finishes: PR #3 is open; waiting for the review");
   assert.match(runReport(status("completed", { waiting: ["a", "b"] }), ""), /waiting on its 2 background agents \("a", "b"\); another report comes when they finish without a reply$/);
-  for (const reply of ["PR #3 is open. Waiting for CI to finish.", "pushed; the checks are still running", "I'll report back once CI is green"]) {
+  for (const reply of ["PR #3 is open, awaiting review.", "PR #3 is open. Waiting for CI to finish.", "pushed; the checks are still running", "I'll report back once CI is green"]) {
     assert.match(runReport(status("completed"), reply), /^ended its turn; nothing of it runs now and nothing wakes it, though its reply speaks of waiting: it goes on only when told: /, reply);
   }
   assert.equal(runReport(status("completed"), "merged as abc123; nothing left"), "ended its turn; nothing of it runs now: merged as abc123; nothing left");

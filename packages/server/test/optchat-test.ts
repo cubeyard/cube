@@ -74,7 +74,7 @@ const threads: OptThreads = {
   async projects() { inProjects = true; await projectsGate; inProjects = false; return "projects:\ncube (id p1; ready): https://github.com/cubeyard/cube.git@main"; },
   async runners() { return "runners as cubed last heard from them:\n- node-a (id r1)"; },
   async spawn(task, requestId) { spawned.push({ task: task.task, requestId }); return { id: THREAD, title: task.task.slice(0, 20) }; },
-  async tell(id, text) { told.push(`${id}:${text}`); },
+  async tell(id, text) { if (text === "refused") throw new Error("thread is already working or message is invalid"); told.push(`${id}:${text}`); },
   async describe(ids) { return ids.map(id => `[${id.slice(0, 8)}] cube · ready`).join("\n"); },
   async history() { return null; },
   async events(id): Promise<ThreadEvents> {
@@ -282,10 +282,13 @@ try {
   // do not count as the user's); the user's next message renews them.
   const toldBefore = told.length;
   script = [
-    () => fauxAssistantMessage(Array.from({ length: TELLS + 1 }, (_, k) => fauxToolCall("tell", { id: "abcdef12", message: `go on ${k}` }, { id: `call-budget-${k}` })), { stopReason: "toolUse" }),
+    // A tell the thread refused does not count.
+    () => fauxAssistantMessage([fauxToolCall("tell", { id: "abcdef12", message: "refused" }, { id: "call-budget-refused" }),
+      ...Array.from({ length: TELLS + 1 }, (_, k) => fauxToolCall("tell", { id: "abcdef12", message: `go on ${k}` }, { id: `call-budget-${k}` }))], { stopReason: "toolUse" }),
     turn => {
       const results = turn.messages.filter(message => message.role === "toolResult").map(textOf);
-      assert.equal(results.length, TELLS + 1);
+      assert.equal(results.length, TELLS + 2);
+      assert.match(results[0]!, /already working/);
       assert.match(results.at(-1)!, new RegExp(`^not sent: \\[abcdef12\\] had ${TELLS} tells from you since the user's last message`));
       return fauxAssistantMessage("it needs you now");
     },

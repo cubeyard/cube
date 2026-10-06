@@ -11,7 +11,9 @@
  * finishes after ms: Claude Code's task_started and task_notification
  * messages, then the turn it takes by itself, or none when a turn is
  * running, which sees the notification), `background-quiet …` (finishes
- * without a turn of its own).
+ * without a turn of its own), `background-later …` (started in the
+ * foreground, then backgrounded by task_updated), `monitor <task_id>` (a
+ * backgrounded task of another kind that never notifies).
  * FAKE_CLAUDE_LOG names a file that receives one JSON line per start.
  *
  * Every result carries `modelUsage` as Claude Code's does: running totals
@@ -115,9 +117,10 @@ async function tool(id: string, name: string, toolInput: Record<string, unknown>
 
 /** A background Agent: launched within the turn, its own messages carry
  * its tool use id, and its notification comes when it finishes. */
-function background(toolUseId: string, task: string, ms: number, description: string, goOn: boolean): void {
+function background(toolUseId: string, task: string, ms: number, description: string, goOn: boolean, later = false): void {
   emit({ type: "assistant", parent_tool_use_id: null, message: { id: `msg_${randomUUID()}`, role: "assistant", model, content: [{ type: "tool_use", id: toolUseId, name: "Agent", input: { description, prompt: description } }] } });
-  emit({ type: "system", subtype: "task_started", task_id: task, tool_use_id: toolUseId, description, task_type: "local_agent", is_backgrounded: true });
+  emit({ type: "system", subtype: "task_started", task_id: task, tool_use_id: toolUseId, description, ...(later ? {} : { task_type: "local_agent" }), is_backgrounded: !later });
+  if (later) emit({ type: "system", subtype: "task_updated", task_id: task, patch: { is_backgrounded: true } });
   emit({ type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: toolUseId, content: `Async agent launched: ${task}` }] } });
   setTimeout(() => emit({ type: "assistant", parent_tool_use_id: toolUseId, message: { id: `msg_${randomUUID()}`, role: "assistant", model, content: [{ type: "text", text: `${task} working` }] } }), Math.min(50, ms / 2));
   setTimeout(() => {
@@ -149,7 +152,8 @@ async function turn(text: string, prompted = true): Promise<void> {
       else if (verb === "edit") await tool(id, "Edit", { file_path: `${env.CUBE_WORKSPACE_ROOT}/${rest[0]}`, old_string: rest[1], new_string: rest[2] }, controller.signal);
       else if (verb === "read") await tool(id, "Read", { file_path: `${env.CUBE_WORKSPACE_ROOT}/${rest[0]}` }, controller.signal);
       else if (verb === "hang") await new Promise(() => {});
-      else if (verb === "background" || verb === "background-quiet") background(id, rest[0]!, Number(rest[1]), rest.slice(2).join(" "), verb === "background");
+      else if (verb === "background" || verb === "background-quiet" || verb === "background-later") background(id, rest[0]!, Number(rest[1]), rest.slice(2).join(" "), verb !== "background-quiet", verb === "background-later");
+      else if (verb === "monitor") emit({ type: "system", subtype: "task_started", task_id: rest[0], description: "watch a log", task_type: "monitor", is_backgrounded: true });
       else if (verb) await say(`unknown step ${verb}`);
     }
     if (controller.signal.aborted) {

@@ -255,7 +255,7 @@ try {
     assert.deepEqual((await ran("b2")).status.waiting, ["quiet check"]);
     shown = await ran("cube:background:task_b");
     assert.equal(shown.status.state, "failed");
-    assert.match(shown.status.error ?? "", /did not go on by itself — send a message to go on/);
+    assert.match(shown.status.error ?? "", /but did not — send a message to go on/);
 
     // Stop between turns ends the background agents, recorded as stopped;
     // a model change would end them too and is refused.
@@ -294,6 +294,26 @@ try {
     shown = await ran("cube:background:task_f:lost");
     assert.equal(shown.status.state, "failed");
     assert.match(shown.status.error ?? "", /still running 1 s after it started; cubed ended claude code/);
+
+    // Backgrounded later (task_updated): waited for, and its turn is a run.
+    await bg.submit("b6", "background-later task_g 300 slow review");
+    assert.deepEqual((await ran("b6")).status.waiting, ["slow review"]);
+    assert.equal((await ran("cube:background:task_g")).status.state, "completed");
+    // A notification during a running turn is taken in by that turn: no run of its own.
+    await bg.submit("b7", "background task_h 150 quick look\nslow sleep 1");
+    shown = await ran("b7");
+    assert.equal(shown.status.state, "completed");
+    assert.equal(shown.status.waiting, undefined);
+    await delay(300);
+    assert.ok(!bg.state().submissions.some(submission => submission.requestId === "cube:background:task_h"));
+    // Another kind of backgrounded task (it may never notify) is not waited for.
+    await bg.submit("b8", "monitor task_k");
+    assert.equal((await ran("b8")).status.waiting, undefined);
+    // Two lost together are one run that names both.
+    await bg.submit("b9", "background task_i 30000 one\nbackground task_j 30000 two");
+    assert.deepEqual((await ran("b9")).status.waiting, ["one", "two"]);
+    shown = await ran("cube:background:task_i:lost");
+    assert.match(shown.status.error ?? "", /^2 background agents \("one", "two"\) did not finish: .*claude code does not continue them/);
     await bg.close();
   }
   agent = await ClaudeAgent.open({ directory, threadId: "t1", workspace, runtime, model: "sonnet" });

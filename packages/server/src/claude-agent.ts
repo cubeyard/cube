@@ -115,6 +115,8 @@ export class ClaudeAgent {
   /** The top-level tasks Claude Code started (by task_id), and the background
    * ones still running, which the thread is not done with. */
   private readonly tasks = new Map<string, string>();
+  /** Agent tool calls by tool_use_id: only an agent's task is waited for. */
+  private readonly agentCalls = new Set<string>();
   private readonly background = new Map<string, string>();
   private deadline: NodeJS.Timeout | undefined;
   private grace: NodeJS.Timeout | undefined;
@@ -311,12 +313,12 @@ export class ClaudeAgent {
       void this.cancelCommands();
       const detail = stderr.join("").trim().split("\n").slice(-3).join(" ").trim();
       const exit = `claude code exited${child.exitCode === null ? "" : ` (${child.exitCode})`}${detail ? `: ${detail}` : ""}`;
-      if (this.closing) this.settle("failed", INTERRUPTED);
-      else if (this.interrupt) this.settle("stopped", null);
-      else this.settle("failed", exit);
-      // Claude Code's background agents end with it.
       const ending = this.ending;
       this.ending = undefined;
+      if (this.closing) this.settle("failed", INTERRUPTED);
+      else if (this.interrupt || ending?.state === "stopped") this.settle("stopped", null);
+      else this.settle("failed", exit);
+      // Claude Code's background agents end with it.
       this.lose(ending?.reason ?? (this.closing ? CLOSED : exit), ending?.state);
       this.changed();
     });
@@ -331,9 +333,9 @@ export class ClaudeAgent {
     // A turn nobody sent (Claude Code going on after a background agent's
     // notification) is a run of its own.
     const main = data.parent_tool_use_id == null;
-    if (main && data.type !== "system") this.heard = Date.now();
+    if (main && (data.type === "assistant" || data.type === "stream_event" || data.type === "result")) this.heard = Date.now();
     if (main && !this.running && (data.type === "assistant" || (data.type === "stream_event" && (data.event as StreamEvent | undefined)?.type === "message_start"))) {
-      this.continued(`cube:continued:${randomUUID()}`, "cube: claude code went on by itself");
+      this.continued(`cube:continued:${randomUUID()}`, "cube: claude code went on by itself", this.heard);
     }
     if (data.type === "stream_event") { if (main) this.stream(data.event as StreamEvent); return; }
     if (data.type === "system") this.task(data);
@@ -390,12 +392,14 @@ export class ClaudeAgent {
     clearTimeout(this.grace);
   }
 
-  /** A run nobody sent: Claude Code going on by itself. */
-  private continued(requestId: string, text: string): void {
+  /** A run nobody sent: Claude Code going on by itself. `since`: when its
+   * turn showed (now, for a notification whose turn has yet to show). */
+  private continued(requestId: string, text: string, since = Date.now()): void {
     if (this.running || this.submissions.some(submission => submission.requestId === requestId)) return;
     const seq = Number(this.db.prepare("INSERT INTO submission(request_id, text, state, created_at) VALUES (?, ?, 'running', ?)").run(requestId, text, Date.now()).lastInsertRowid);
     this.submissions.push({ seq, requestId, text, state: "running", error: null });
     clearTimeout(this.idle);
+    this.armGrace(since);
   }
 
   /** Claude Code's task messages: a backgrounded top-level task is waited
@@ -409,6 +413,9 @@ export class ClaudeAgent {
       if (data.owned_by_subagent || data.parent_task_id || data.ambient) return;
       const description = [data.description, data.subagent_type, data.task_type].find(value => typeof value === "string" && value.trim()) as string | undefined;
       this.tasks.set(id, description?.trim() ?? "task");
+      // Only an agent's task: other kinds (monitors, shells) may never notify.
+      const agent = data.task_type === "local_agent" || (typeof data.tool_use_id === "string" && this.agentCalls.has(data.tool_use_id));
+      if (!agent) { this.tasks.delete(id); return; }
       if (data.is_backgrounded === true) this.wait(id);
     } else if (data.subtype === "task_updated") {
       const patch = data.patch as { is_backgrounded?: unknown; description?: unknown } | undefined;
@@ -419,6 +426,7 @@ export class ClaudeAgent {
       const description = this.background.get(id);
       if (description === undefined) return;
       this.background.delete(id);
+      this.tasks.delete(id);
       const detail = [data.status, data.summary].filter(value => typeof value === "string" && value).join(": ");
       this.db.prepare("UPDATE background SET state='ended', detail=?, ended_at=? WHERE task_id=?").run(detail || null, Date.now(), id);
       this.armDeadline();
@@ -426,7 +434,6 @@ export class ClaudeAgent {
       // Claude Code takes a turn for the notification; a prompt is refused
       // meanwhile, as during any turn.
       this.continued(`cube:background:${id}`, `cube: ${agents([description])} finished; claude code goes on`);
-      this.armGrace();
     }
   }
 
@@ -435,19 +442,21 @@ export class ClaudeAgent {
     if (this.background.has(id) || !current) return;
     const description = this.tasks.get(id) ?? "task";
     this.background.set(id, description);
-    this.db.prepare("INSERT OR IGNORE INTO background(task_id, submission, description, state, started_at) VALUES (?, ?, ?, 'running', ?)").run(id, current.seq, description, Date.now());
+    this.db.prepare(`INSERT INTO background(task_id, submission, description, state, started_at) VALUES (?, ?, ?, 'running', ?)
+      ON CONFLICT(task_id) DO UPDATE SET submission=excluded.submission, description=excluded.description, state='running', detail=NULL, started_at=excluded.started_at, ended_at=NULL`)
+      .run(id, current.seq, description, Date.now());
     this.armDeadline();
   }
 
-  /** A follow-up turn that never starts is a failed run, not a silent wait. */
-  private armGrace(): void {
+  /** A follow-up turn that never shows is a failed run, not a silent wait. */
+  private armGrace(since: number): void {
     clearTimeout(this.grace);
-    const since = Date.now();
     const current = this.submissions.at(-1);
     this.grace = setTimeout(() => {
       if (this.submissions.at(-1) !== current || !this.running || this.heard >= since) return;
-      this.settle("failed", "a background agent finished, but claude code did not go on by itself — send a message to go on");
+      this.settle("failed", "claude code was to go on by itself (a background agent finished), but did not — send a message to go on");
       this.scheduleIdle();
+      this.armDeadline();
       this.changed();
     }, this.runtime.continueGraceMs ?? CONTINUE_GRACE_MS);
     this.grace.unref();
@@ -461,8 +470,10 @@ export class ClaudeAgent {
     const limit = this.runtime.backgroundMs ?? BACKGROUND_MS;
     const oldest = (this.db.prepare("SELECT MIN(started_at) AS at FROM background WHERE state='running'").get() as { at: number | null }).at ?? Date.now();
     this.deadline = setTimeout(() => {
-      // A running turn is never cut off here; its result arms this again.
-      if (!this.background.size || this.closing || this.running) return;
+      if (!this.background.size || this.closing) return;
+      // A running turn is never cut off here: look again in a minute (its
+      // result arms this again too).
+      if (this.running) { this.deadline = setTimeout(() => this.armDeadline(), 60_000); this.deadline.unref(); return; }
       this.ending = { state: "failed", reason: `it was still running ${duration(limit)} after it started; cubed ended claude code, which ends it` };
       void this.endChild();
     }, Math.max(0, oldest + limit - Date.now()));
@@ -495,6 +506,7 @@ export class ClaudeAgent {
     if (!Array.isArray(content)) return;
     for (const block of content as Array<{ type?: string; id?: string; name?: string; tool_use_id?: string }>) {
       if (data.type === "assistant" && block.type === "tool_use" && block.name === "Bash" && block.id) this.commands.add(block.id);
+      if (data.type === "assistant" && block.type === "tool_use" && block.name === "Agent" && block.id && data.parent_tool_use_id == null) this.agentCalls.add(block.id);
       if (data.type === "user" && block.type === "tool_result" && block.tool_use_id) this.commands.delete(block.tool_use_id);
     }
   }

@@ -64,7 +64,8 @@ before its task is done (it waits for CI, a review or a command nothing
 tracks, or it was interrupted) and the next step is clear and within
 what the user asked, tell it to go on and to wait for such things
 itself; otherwise tell the user what it needs. Between two messages of
-the user a thread takes at most ${TELLS} tells from you.
+the user a thread takes at most ${TELLS} tells from you; once they are
+spent, ask the user, and do not start another thread to go on instead.
 tell(id, message) gives a thread that has reported more to do.
 history(id) reads one of your threads without changing it: cubed's state
 for it beside its latest answer and conversation. Use it when a report is
@@ -279,7 +280,7 @@ export function threadReport(transcript: ThreadTranscript): string {
 }
 
 /** A reply that says its thread waits for something. */
-const WAITS = /\b(wait(s|ing)? (for|on|until)|once (the )?(ci|checks?|reviews?|builds?|tests?|pipeline)\b|(ci|checks?|reviews?|builds?|tests?|pipeline) (is|are) (still )?(running|pending|queued|in progress)|will (report|follow up|check back|get back|let you know)|still (running|pending|in progress))/i;
+const WAITS = /\b((a)?wait(s|ing)? (for|on|until)|awaiting|once (the )?(ci|checks?|reviews?|builds?|tests?|pipeline)\b|(ci|checks?|reviews?|builds?|tests?|pipeline) (is|are) (still )?(running|pending|queued|in progress)|will (report|follow up|check back|get back|let you know)|still (running|pending|in progress))/i;
 
 /** The report of a run that ended with `status`, whose reply (after the
  * newest message) is `reply`. It says how the turn ended and what of the
@@ -890,18 +891,15 @@ export class OptChat {
       replay: "safe",
       execute: async (args, api, callContext) => {
         const id = await this.resolve(args.id);
-        // Counted once per call, so a replayed call is not refused.
-        const allowed = await api.commit(async tx => {
-          const thread = (await tx.doc(SettingsDoc)).threads[id];
-          if (!thread) return true;
-          const tells = thread.tells ?? [];
-          if (tells.includes(api.callId)) return true;
-          if (tells.length >= TELLS) return false;
-          thread.tells = [...tells, api.callId];
-          return true;
-        }, callContext);
-        if (!allowed) return text(`not sent: [${short(id)}] had ${TELLS} tells from you since the user's last message; tell the user what it needs instead`);
+        // Only a tell the thread accepted counts, once per call: a replayed
+        // call is not refused (the thread takes its request id once).
+        const tells = (await this.harness.snapshot(SettingsDoc, context))?.threads[id]?.tells ?? [];
+        if (!tells.includes(api.callId) && tells.length >= TELLS) return text(`not sent: [${short(id)}] had ${TELLS} tells from you since the user's last message; tell the user what it needs instead`);
         await this.options.threads.tell(id, args.message, `optchat:${api.callId}`);
+        await api.commit(async tx => {
+          const thread = (await tx.doc(SettingsDoc)).threads[id];
+          if (thread && !thread.tells?.includes(api.callId)) thread.tells = [...thread.tells ?? [], api.callId];
+        }, callContext);
         return text(`sent to [${short(id)}]; its report comes back as a message starting "[${short(id)}] "`);
       },
     });

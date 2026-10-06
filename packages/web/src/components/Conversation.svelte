@@ -227,7 +227,7 @@
         {#if working}
           <div class="working-line" role="status"><span class="lamp on-amber blink" aria-hidden="true"></span>working</div>
         {:else if waiting}
-          <div class="working-line" role="status"><span class="lamp on-amber" aria-hidden="true"></span>waiting on {status.waiting!.length === 1 ? "a background agent" : `${status.waiting!.length} background agents`}: {status.waiting!.join(", ")}</div>
+          <div class="working-line" role="status"><span class="lamp on-amber" aria-hidden="true"></span>waiting on {status.waiting!.length === 1 ? "a background agent" : `${status.waiting!.length} background agents`}: {status.waiting!.map(description => description.length > 80 ? `${description.slice(0, 79)}…` : description).join(", ")}</div>
         {:else if status.state === "stopped"}
           <div class="working-line" role="status"><span class="lamp" aria-hidden="true"></span>stopped</div>
         {/if}

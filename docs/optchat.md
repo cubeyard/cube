@@ -73,7 +73,7 @@ task, and only the thread's reply says what is left. The forms:
 
 | report | meaning | what comes next |
 | --- | --- | --- |
-| `ended its turn, waiting on its background agent "…"; another report comes when it finishes: <reply>` | a Claude Code thread ended its turn with a background agent (the Agent tool's default) still running; cubed tracks it | Claude Code takes a turn of its own when it finishes; that turn is a new run (`cube:background:<task>`) and reports again |
+| `ended its turn, waiting on its background agent "…"; another report comes when it finishes: <reply>` | a Claude Code thread ended its turn with a background agent (the Agent tool's default) still running; cubed tracks it | Claude Code takes a turn of its own when it finishes; that turn is a new run (`cube:background:<task>`) and reports again. If the agent finishes before the watcher saw the first run settle, only the new run reports |
 | `ended its turn; nothing of it runs now: <reply>` | nothing of the thread runs or is tracked | nothing, until someone tells it |
 | `ended its turn; nothing of it runs now and nothing wakes it, though its reply speaks of waiting: it goes on only when told: <reply>` | as above, but the reply mentions waiting (for CI, a review, a command): cube tracks none of those | nothing; it needs a tell to go on |
 | `failed: <why>; last reply: …` | the turn failed (provider error, Claude Code exited, cubed restarted mid-turn, its machine failed) or background work was lost | nothing; it needs a tell |
@@ -95,16 +95,20 @@ outside the thread. Two things keep such work going overnight:
 
 Bounds, so unattended work does not loop or spend without end:
 
-- `tell` takes at most `TELLS` (8) calls per thread between two messages of
-  the user (reports do not count as the user's); the ninth answers
-  `not sent: … tell the user what it needs instead`. A replayed call is
-  counted once.
-- A background agent gets at most 4 hours from its start
-  (`ClaudeRuntime.backgroundMs`). Then cubed ends Claude Code between turns,
-  which ends the agent, and records it as lost.
+- `tell` sends at most `TELLS` (8) messages per thread between two messages
+  of the user (reports do not count as the user's); then it answers `not
+  sent: … tell the user what it needs instead`, and the prompt forbids
+  starting another thread to get around that. Only a tell the thread
+  accepted counts, and a replayed call counts once.
+- Background agents get at most 4 hours from the start of the oldest still
+  running (`ClaudeRuntime.backgroundMs`). Then cubed ends Claude Code
+  between turns, which ends all of them, and records them as one lost run.
+  A running turn is never cut off; the limit is checked again after it.
+- Only an agent's task (`task_type` `local_agent`, or an Agent tool call's)
+  is waited for; other backgrounded kinds may never notify.
 - A finished background agent whose follow-up turn does not start within
-  2 minutes fails that run (`… did not go on by itself — send a message to
-  go on`) rather than leaving it working.
+  2 minutes fails that run (`claude code was to go on by itself …, but did
+  not — send a message to go on`) rather than leaving it working.
 - Nothing is auto-resumed by cube besides the turn Claude Code takes for
   its own background agent. A thread interrupted by a cubed restart, a
   provider error or a failed machine reports `failed`, once, and waits for
@@ -116,8 +120,11 @@ Restarts and failures:
   recorded as failed when the agent opens again (`cubed stopped during this
   turn; …`) and reported once (`report:<thread>:<run>`). Background agents
   end with the Claude Code process: a clean stop records them as a lost run
-  at close, a crash at the next open (`cube:background:<task>:lost`); both
-  report once. A Pi run goes on after the restart on its own.
+  at close, a crash at the next open (`cube:background:<task>:lost`). Only
+  the newest run of a thread is observed, so when several settle while
+  cubed is down (an interrupted turn, then its lost agents) the chat gets
+  the newest one's report, once. A Pi run goes on after the restart on its
+  own.
 - **Duplicate events**: every report has the request id
   `report:<thread>:<run>` and every run its own request id, so a watch
   reconnect, a restart or an archive sends a report once.
