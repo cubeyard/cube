@@ -6,16 +6,16 @@
  * from the thread's own store, which archive keeps. It serves what cannot be
  * read now (a Pi thread whose agent is not open: only its owner may open its
  * store) and spares re-reading an unchanged archived store. Nothing here
- * writes to an agent's store: an archived Pi store is read from a copy,
- * because opening pi-durable storage migrates and checkpoints it. */
+ * writes to an agent's store: an archived Pi store is read from a read-only
+ * snapshot (durable-agent.ts readStorage). */
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Usage } from "@earendil-works/pi-ai";
 import { UsageDoc, type ConversationId, type Cursor, type UsageState } from "@earendil-works/pi-durable";
-import { openStorage } from "./durable-agent.ts";
+import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
+import { readStorage } from "./durable-agent.ts";
 import { createLogger } from "./log.ts";
 import { threadAgent, type Registry, type Thread } from "./registry.ts";
 import {
@@ -165,7 +165,8 @@ export class UsageService {
     const key = fileKey(file);
     if (prior && prior.key === key) return { ...prior.usage, ...this.base(thread), read: "store" };
     const usage = this.piThread(thread, await readPiStore(file), "store", readAt);
-    this.store(usage, key);
+    // A read-only reader may leave an empty log beside the store: key it as it is now.
+    this.store(usage, fileKey(file));
     return usage;
   }
 
@@ -252,41 +253,34 @@ function fileKey(file: string): string {
 }
 
 /** Every conversation's `pi.usage` in a store no agent has open (an
- * archived thread's), summed as Harness.usage() does. Read from a private
- * copy: opening pi-durable storage migrates and checkpoints it, and an
- * archived store is retained evidence. */
+ * archived thread's), summed as Harness.usage() does. Read through
+ * durable-agent's readStorage: a read-only snapshot, so the retained store is
+ * never migrated or checkpointed. */
 async function readPiStore(file: string): Promise<UsageState> {
-  const copy = fs.mkdtempSync(path.join(os.tmpdir(), "cube-usage-"));
-  try {
-    for (const suffix of ["", "-wal"]) {
-      if (fs.existsSync(`${file}${suffix}`)) fs.copyFileSync(`${file}${suffix}`, path.join(copy, `pi.sqlite${suffix}`));
-    }
-    return await readStorage(path.join(copy, "pi.sqlite"));
-  } finally { fs.rmSync(copy, { recursive: true, force: true }); }
+  const state = await readStorage(file, sumUsage);
+  if (!state) throw new Error("the store is gone");
+  return state;
 }
 
-async function readStorage(file: string): Promise<UsageState> {
-  const storage = await openStorage(file);
+async function sumUsage(storage: SqliteStorage): Promise<UsageState> {
   const sum: { models: Record<string, Usage>; tools: Record<string, Usage> } = { models: {}, tools: {} };
-  try {
-    let cursor: Cursor | undefined;
-    do {
-      const page = await storage.scanConversations({}, 256, cursor, context);
-      for (const conversation of page.items) {
-        const record = await storage.findDocument({ kind: UsageDoc.definition.kind, scope: { kind: "conversation", conversationId: conversation.id as ConversationId } }, "current", context);
-        if (!record) continue;
-        const state = (await storage.document(record.id, "current", context))?.value as UsageState | undefined;
-        for (const bucket of ["models", "tools"] as const) {
-          for (const [key, usage] of Object.entries(state?.[bucket] ?? {})) {
-            const total = Object.hasOwn(sum[bucket], key) ? sum[bucket][key] : undefined;
-            if (!total) Object.defineProperty(sum[bucket], key, { value: structuredClone(usage), enumerable: true, writable: true });
-            else addUsage(total, usage);
-          }
+  let cursor: Cursor | undefined;
+  do {
+    const page = await storage.scanConversations({}, 256, cursor, context);
+    for (const conversation of page.items) {
+      const record = await storage.findDocument({ kind: UsageDoc.definition.kind, scope: { kind: "conversation", conversationId: conversation.id as ConversationId } }, "current", context);
+      if (!record) continue;
+      const state = (await storage.document(record.id, "current", context))?.value as UsageState | undefined;
+      for (const bucket of ["models", "tools"] as const) {
+        for (const [key, usage] of Object.entries(state?.[bucket] ?? {})) {
+          const total = Object.hasOwn(sum[bucket], key) ? sum[bucket][key] : undefined;
+          if (!total) Object.defineProperty(sum[bucket], key, { value: structuredClone(usage), enumerable: true, writable: true });
+          else addUsage(total, usage);
         }
       }
-      cursor = page.next;
-    } while (cursor);
-  } finally { await storage.close(context); }
+    }
+    cursor = page.next;
+  } while (cursor);
   return sum as UsageState;
 }
 

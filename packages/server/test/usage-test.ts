@@ -178,6 +178,13 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
   // The faux provider reports no cost: Pi's ledger holds tokens without a price.
   assert.equal(costState(reading.spend), "unknown");
   assert.match(threadUsageText(reading), /cost unknown/);
+  // Concurrent reads of one thread share one reading.
+  let reads = 0;
+  const counting = new UsageService({ file: path.join(root, "usage-shared.sqlite"), registry, threads,
+    live: async id => { reads++; await new Promise(resolve => setTimeout(resolve, 20)); return live.get(id)!.usage(context) as Promise<UsageState>; } });
+  await Promise.all([counting.thread("open"), counting.thread("open")]);
+  assert.equal(reads, 1);
+  counting.close();
   // The agent closes (archive or shutdown): its reading is kept.
   usage.remember("open", await harness.usage(context) as UsageState);
   await harness.close(context);
@@ -185,12 +192,20 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
   const kept = await usage.thread("open");
   assert.equal(kept.read, "snapshot", "an unopened thread's store is never opened beside its owner");
   assert.deepEqual(kept.spend, reading.spend);
+  // A reading taken before the close never replaces the one taken at it.
+  const ledger = new (await import("node:sqlite")).DatabaseSync(path.join(root, "usage.sqlite"));
+  const keptAt = (ledger.prepare("SELECT read_at AS at FROM snapshot WHERE subject='open'").get() as { at: number }).at;
+  ledger.close();
+  (usage as unknown as { store(usage: unknown, key: null): void }).store({ ...kept, readAt: keptAt - 1, notes: ["older"] }, null);
+  assert.deepEqual((await usage.thread("open")).notes, kept.notes, "an older reading is not kept over a newer one");
   // Archived: its store is read again (nothing else may open it now).
   records.set("open", thread("open", true));
   const stat = (name: string) => { try { const value = fs.statSync(path.join(threads, "open", name)); return `${value.size}:${value.mtimeMs}`; } catch { return "-"; } };
   const before = [stat("pi.sqlite"), stat("pi.sqlite-wal")];
   const archived = await usage.thread("open");
-  assert.deepEqual([stat("pi.sqlite"), stat("pi.sqlite-wal")], before, "an archived store is read from a copy, never changed");
+  // A read-only WAL reader may leave an empty log beside it; the store itself is unchanged.
+  assert.equal(stat("pi.sqlite"), before[0], "an archived store is read from a snapshot, never changed");
+  assert.ok(stat("pi.sqlite-wal") === before[1] || stat("pi.sqlite-wal").startsWith("0:"));
   assert.equal(archived.read, "store");
   assert.equal(archived.archived, true);
   assert.deepEqual(archived.spend, reading.spend);
