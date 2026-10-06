@@ -111,6 +111,8 @@ export async function compactNode(options: {
   source: CompactSource;
   node?: number;
   signal?: AbortSignal;
+  /** Every model reply, failed ones included, before it is used: its usage. */
+  onReply?: (reply: AssistantMessage) => void | Promise<void>;
 }): Promise<string> {
   const limit = options.node ?? NODE;
   const model = options.models.getModel(options.model.provider, options.model.id);
@@ -137,6 +139,7 @@ export async function compactNode(options: {
       ...(model.reasoning ? { reasoning: "medium" as const } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
     });
+    await options.onReply?.(reply);
     const lines = candidates(replyText(reply));
     if (!lines.length) throw new Error("compactor returned an empty line");
     seen.push(...lines);

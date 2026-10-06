@@ -235,6 +235,20 @@ every accepted message waits in a Pi document until Pi has placed it, under its
 own request ID. The details, deviations and gaps are in
 [docs/optchat.md](docs/optchat.md).
 
+## Usage and cost
+
+Usage is read, never metered: Pi's per-conversation `pi.usage` ledger (written
+in the commit that records each response), the `modelUsage` running totals in
+the Claude Code results cubed keeps, and OptChat's count of its compactor's
+calls. `usage-service.ts` turns them into tokens and estimated cost per thread,
+project and model, keeps each one's provenance and pricing basis, and marks
+unpriced tokens and unrecorded usage as unknown rather than zero. Billed amounts
+are not available. `CUBED_STATE/usage.sqlite` keeps the last reading of each
+thread as a derived cache, so an archived thread's usage stays readable and a
+Pi store is only opened by its own agent while the thread is open. Routes:
+`GET /api/usage`, `GET /api/threads/<id>/usage`; OptChat has a read-only
+`usage` tool. See [docs/usage.md](docs/usage.md).
+
 ## Product state and limitations
 
 `CUBED_STATE/registry.sqlite` contains projects, globally registered runners,
@@ -245,6 +259,8 @@ pi-durable storage (`claude.sqlite` and the `claude/` working directory for a
 claude-code thread); `threads/<id>/lease.sqlite` keeps the thread's lease epoch
 and owner, `lease.lock` is only held while a lease is, and `threads/<id>/vm/`
 holds the VM's SSH client key, its pinned host key and the VM epoch.
+`CUBED_STATE/usage.sqlite` caches the last usage reading of each thread and
+of OptChat (derived, rebuildable from the stores above).
 `CUBED_STATE/gateway/` holds the gateway's Iroh key and the installation CA;
 `CUBED_STATE/run/` the private sockets (`workspace.sock`, `gateway.sock`,
 `egress.sock`) and SSH ControlMaster sockets. The state schema is 102 and older

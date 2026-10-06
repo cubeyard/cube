@@ -115,7 +115,8 @@ repositories authenticate with the placeholder the gateway replaces by the
 host's token. Git prompting is disabled.
 
 Useful reads: `/api/threads`, `/api/projects`, `/api/threads/<id>/history`,
-`/api/threads/<id>/stream`. Both return the neutral `ThreadTranscript`
+`/api/threads/<id>/stream`, `/api/usage` and `/api/threads/<id>/usage`
+(tokens and estimated cost; see [docs/usage.md](docs/usage.md)). Both return the neutral `ThreadTranscript`
 (`packages/server/src/thread-events.ts`); the stream is SSE and starts with the
 full transcript on every connection. `/api/threads` reports a thread `starting`
 while its machine boots. Stop uses `POST /api/threads/<id>/stop`; DELETE archives

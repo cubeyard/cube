@@ -244,11 +244,39 @@ export async function smokeProduct(root: string) {
     await new Promise(resolve => setTimeout(resolve, 300));
     assert.equal((await post(`${again}/stop`, {})).status, 200);
     assert.equal((await waitRun("claude-4")).status.state, "stopped");
+    // Usage: Claude Code's running totals per process, counted once per turn
+    // across the restart (the resumed process continued the saved totals).
+    const claudeUsage = async () => (await (await fetch(`${again}/usage`)).json()).usage;
+    const checkClaude = (usage: { lines: Array<{ model: string; spend: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; estimatedUsd: number; unpricedTokens: number } }>; unknownTurns: number; coverage: string }) => {
+      const line = (model: string) => usage.lines.find(item => item.model === model)!;
+      assert.deepEqual({ ...line("claude-sonnet").spend.tokens, reasoning: undefined }, { input: 100, output: 20, cacheRead: 50, cacheWrite: 10, total: 180, reasoning: undefined }, JSON.stringify(usage));
+      assert.deepEqual({ ...line("claude-opus").spend.tokens, reasoning: undefined }, { input: 300, output: 60, cacheRead: 150, cacheWrite: 30, total: 540, reasoning: undefined }, JSON.stringify(usage));
+      assert.ok(Math.abs(line("claude-opus").spend.estimatedUsd - 0.03) < 1e-9 && line("claude-opus").spend.unpricedTokens === 0);
+      assert.equal(usage.unknownTurns, 0);
+      assert.equal(usage.coverage, "complete");
+    };
+    checkClaude(await claudeUsage());
     assert.equal((await fetch(again, { method: "DELETE" })).status, 200);
+    checkClaude(await claudeUsage());
+    // The archived Pi thread: its store is read again. The faux model has no
+    // price, so its tokens are unpriced, never $0.
+    const piUsage = (await (await fetch(`${restarted.url}/api/threads/${id}/usage`)).json()).usage;
+    assert.equal(piUsage.archived, true);
+    assert.equal(piUsage.read, "store");
+    assert.ok(piUsage.spend.tokens.total > 0 && piUsage.spend.unpricedTokens === piUsage.spend.tokens.total && piUsage.spend.estimatedUsd === 0, JSON.stringify(piUsage));
+    const report = await (await fetch(`${restarted.url}/api/usage`)).json();
+    assert.equal(report.billed.usd, null);
+    assert.ok(report.threads.some((item: { subject: string }) => item.subject === claudeId) && report.threads.some((item: { subject: string }) => item.subject === id));
+    assert.ok(Math.abs(report.totals.spend.estimatedUsd - 0.04) < 1e-9, JSON.stringify(report.totals));
+    assert.ok(report.totals.spend.unpricedTokens > 0);
+    assert.ok(report.models.some((line: { provider: string; model: string }) => line.provider === "claude-code" && line.model === "claude-opus"));
+    const scoped = await (await fetch(`${restarted.url}/api/usage?project=${otherProject.id}`)).json();
+    assert.ok(scoped.threads.every((item: { projectId: string }) => item.projectId === otherProject.id) && scoped.optchat === null);
     await new Promise(resolve => setTimeout(resolve, 5500));
     assert.ok(!fs.existsSync(path.join(claudeWorkspace, "claude-late")), "stop cancelled the guest command");
     console.log("ok: product API creation dedup/conflict, SIGKILL/startup activation, guest effect once, streaming snapshots, SSE reconnect, third reopen");
     console.log("ok: concurrent followup deduplication, stop, model recovery, archive release to the global pool, cross-project reuse, dirty retention and distinct next workspace");
     console.log("ok: claude · max thread through the mod's tools: lease owner, transcript, model switch, SIGKILL reopen with resume, keyed tool once, stop with guest cancel");
+    console.log("ok: usage: claude code totals counted once across a resumed process, archived thread stores read again, unpriced tokens never $0, project scope");
   } finally { await Promise.all([...children].map(stop)); }
 }

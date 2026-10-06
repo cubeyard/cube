@@ -5,9 +5,11 @@ import type {
   Project,
   ProjectInput,
   RunnerStatus,
+  SubjectUsage,
   ThreadModels,
   ThreadSummary,
   UpdateStatus,
+  UsageReport,
 } from "./types.ts";
 import { uid } from "./uid.ts";
 import { HttpThreadEvents } from "../../../server/src/thread-events.ts";
@@ -156,6 +158,13 @@ export const renameThread = (id: string, title: string) =>
 
 /** The thread in the neutral event model: history and the live stream. */
 export const threadEvents = (base: string) => new HttpThreadEvents({ base });
+
+/** Usage and estimated cost: everything, or one project's threads. */
+export const fetchUsage = (projectId: string | null = null) =>
+  request<UsageReport>(`/api/usage${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`);
+
+export const fetchThreadUsage = (id: string) =>
+  request<{ usage: SubjectUsage }>(`${threadBase(id)}/usage`).then((r) => r.usage);
 
 export const fetchThreadModels = (id: string) =>
   request<ThreadModels>(`${threadBase(id)}/model`);

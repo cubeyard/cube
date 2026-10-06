@@ -148,6 +148,19 @@ offline, but hit rates on a live provider are not measured. Deviations (no
 OpenAI breakpoint field, a small steering window, threads do not get the view)
 are listed in docs/optchat.md.
 
+## Usage and cost (branch `feat/usage-accounting`)
+
+Read-only usage accounting over the agents' own records: Pi's `pi.usage`
+ledger, Claude Code's `modelUsage` totals per turn (counted once across
+resumed processes), OptChat's chat and compactor. Tokens and estimated cost
+per thread, project and model at `GET /api/usage`, per thread at
+`/api/threads/<id>/usage`, in OptChat's `usage` tool, on the thread strip and
+in usage panels on the project and system pages. Estimates only; billed
+amounts are not available; unpriced or unrecorded usage is reported as
+unknown. Verified offline (`usage-test.ts`, the product smoke with the fake
+`claude`); not verified against a real provider or a real Claude Code's
+stream. Details and gaps: docs/usage.md.
+
 ## Known gaps and next steps
 
 - **Machine templates:** built on `vm-snapshots`, verified on Linux/KVM only

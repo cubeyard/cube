@@ -7,7 +7,12 @@
  * Steps, one per line: `run <command>`, `slow <command>`, `write <file> <text>`,
  * `edit <file> <old> <new>`, `read <file>`, `say <text>`, `crash`, `fail`,
  * `id <tool_use_id> run <command>`, `ignore-interrupt`, `ignore-term`.
- * FAKE_CLAUDE_LOG names a file that receives one JSON line per start. */
+ * FAKE_CLAUDE_LOG names a file that receives one JSON line per start.
+ *
+ * Every result carries `modelUsage` as Claude Code's does: running totals
+ * per model for the process, each turn adding TURN_USAGE under
+ * `claude-<model>`; a process started with --resume continues the totals
+ * the session saved (in its working directory). */
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
@@ -36,6 +41,26 @@ const env = process.env;
 if (!env.CUBE_WORKSPACE_SOCKET || !env.CUBE_WORKSPACE_PATH || !env.CUBE_WORKSPACE_TOKEN || !env.CUBE_WORKSPACE_ROOT) fail("expected the cube workspace environment");
 const client = new WorkspaceClient({ base: env.CUBE_WORKSPACE_PATH!, transport: unixTransport(env.CUBE_WORKSPACE_SOCKET!) });
 
+const TURN_USAGE = { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 50, cacheCreationInputTokens: 10, costUSD: 0.01 };
+type Totals = Record<string, typeof TURN_USAGE & { webSearchRequests: number; contextWindow: number; maxOutputTokens: number; costBasis: string }>;
+const saved = `.fake-usage-${session}.json`;
+const totals: Totals = fs.existsSync(saved) ? JSON.parse(fs.readFileSync(saved, "utf8")) as Totals : {};
+/** One turn's model calls: added to the running totals, which the session saves. */
+function spend(): Totals {
+  const key = `claude-${model}`;
+  const prior = totals[key] ?? { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0, webSearchRequests: 0, contextWindow: 200000, maxOutputTokens: 32000, costBasis: "list" };
+  totals[key] = { ...prior, inputTokens: prior.inputTokens + TURN_USAGE.inputTokens, outputTokens: prior.outputTokens + TURN_USAGE.outputTokens,
+    cacheReadInputTokens: prior.cacheReadInputTokens + TURN_USAGE.cacheReadInputTokens, cacheCreationInputTokens: prior.cacheCreationInputTokens + TURN_USAGE.cacheCreationInputTokens,
+    costUSD: prior.costUSD + TURN_USAGE.costUSD };
+  fs.writeFileSync(saved, JSON.stringify(totals));
+  return totals;
+}
+const usage = () => {
+  const modelUsage = spend();
+  return { modelUsage, total_cost_usd: Object.values(modelUsage).reduce((sum, item) => sum + item.costUSD, 0),
+    usage: { input_tokens: TURN_USAGE.inputTokens, output_tokens: TURN_USAGE.outputTokens, cache_read_input_tokens: TURN_USAGE.cacheReadInputTokens, cache_creation_input_tokens: TURN_USAGE.cacheCreationInputTokens },
+    uuid: randomUUID() };
+};
 const emit = (message: Record<string, unknown>) => process.stdout.write(`${JSON.stringify({ ...message, session_id: session })}\n`);
 emit({ type: "system", subtype: "init", model, cwd: process.cwd(), tools: ["Bash", "Read", "Write", "Edit"], plugins: [{ name: "cube", path: mod }] });
 
@@ -96,7 +121,7 @@ async function turn(text: string): Promise<void> {
       if (fixed) { id = fixed[1]!; line = fixed[2]!; }
       const [verb, ...rest] = line.split(" ");
       if (verb === "crash") { process.stderr.write("fake claude crashed\n"); process.exit(3); }
-      if (verb === "fail") { emit({ type: "result", subtype: "success", is_error: true, result: "API Error: 401 · Please run /login", duration_ms: Date.now() - started }); return; }
+      if (verb === "fail") { emit({ type: "result", subtype: "success", is_error: true, result: "API Error: 401 · Please run /login", duration_ms: Date.now() - started, ...usage() }); return; }
       if (verb === "ignore-interrupt") { ignoreInterrupt = true; continue; }
       if (verb === "ignore-term") { process.on("SIGTERM", () => {}); continue; }
       if (verb === "say") await say(rest.join(" "));
@@ -109,10 +134,10 @@ async function turn(text: string): Promise<void> {
     }
     if (controller.signal.aborted) {
       emit({ type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user]" }] } });
-      emit({ type: "result", subtype: "error_during_execution", is_error: true, duration_ms: Date.now() - started });
+      emit({ type: "result", subtype: "error_during_execution", is_error: true, duration_ms: Date.now() - started, ...usage() });
       return;
     }
     await say(`done with ${model}`);
-    emit({ type: "result", subtype: "success", is_error: false, result: `done with ${model}`, duration_ms: Date.now() - started });
+    emit({ type: "result", subtype: "success", is_error: false, result: `done with ${model}`, duration_ms: Date.now() - started, ...usage() });
   } finally { if (current === controller) current = undefined; }
 }
