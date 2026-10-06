@@ -294,41 +294,51 @@ esac
 };
 
 // launchd kills a booted-out job's processes, so an upgrade run by the update
-// agent must leave that agent loaded rather than reload it from inside.
+// agent must never boot that agent out. launchd's environment is not relied
+// on: an unchanged loaded agent is left alone, a changed one is reloaded only
+// from outside the agent's own run.
 const testUpdateAgentReload = () => {
   const loaded = path.join(root, "update-agent-loaded");
   const calls = path.join(root, "update-agent-calls");
+  const agentPid = path.join(root, "update-agent-pid");
   const launchctl = path.join(root, "update-agent-launchctl");
   fs.writeFileSync(launchctl, `#!/bin/sh
 printf '%s\\n' "$1" >> ${JSON.stringify(calls)}
 case "$1" in
-  print) [ -f ${JSON.stringify(loaded)} ] ;;
+  print)
+    [ -f ${JSON.stringify(loaded)} ] || exit 113
+    printf '\\tstate = running\\n\\tpid = %s\\n' "$(cat ${JSON.stringify(agentPid)})" ;;
   bootout)
     [ -f ${JSON.stringify(loaded)} ] || exit 113
     rm -f ${JSON.stringify(loaded)}
-    [ "\${XPC_SERVICE_NAME:-}" != com.cubeyard.cube-runner-update ] || kill -KILL "$PPID" ;;
+    [ "$(cat ${JSON.stringify(agentPid)})" != "$PPID" ] || kill -KILL "$PPID" ;;
   bootstrap) touch ${JSON.stringify(loaded)} ;;
 esac
 `, { mode: 0o755 });
-  const reload = (extra: NodeJS.ProcessEnv) => {
+  // pid "self": the agent's run is the calling shell (an upgrade it started).
+  const reload = (changed: 0 | 1, pid: "self" | "other") => {
     fs.rmSync(calls, { force: true });
-    return spawnSync("bash", ["-c", `source ${JSON.stringify(path.join(repo, "scripts/runner/lib.sh"))}; reload_update_agent /x.plist; echo reloaded`],
+    return spawnSync("bash", ["-c", `${pid === "self" ? `echo $$ > ${JSON.stringify(agentPid)}` : `echo 999999 > ${JSON.stringify(agentPid)}`}
+source ${JSON.stringify(path.join(repo, "scripts/runner/lib.sh"))}; reload_update_agent /x.plist ${changed}; echo reloaded`],
       { encoding: "utf8", env: { ...process.env, CUBE_RUNNER_PLATFORM: "Darwin", CUBE_RUNNER_ARCH: "arm64",
-        CUBE_RUNNER_MODE: "user", CUBE_RUNNER_LAUNCHCTL: launchctl, XPC_SERVICE_NAME: "", ...extra } });
+        CUBE_RUNNER_MODE: "user", CUBE_RUNNER_LAUNCHCTL: launchctl, XPC_SERVICE_NAME: "0" } });
   };
+  const callLog = () => fs.readFileSync(calls, "utf8");
   fs.writeFileSync(loaded, "");
-  let result = reload({ XPC_SERVICE_NAME: "com.cubeyard.cube-runner-update" });
+  let result = reload(0, "self");
   assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /reloaded/);
-  assert.ok(fs.existsSync(loaded), "the update agent stays loaded after an upgrade it ran");
-  assert.equal(fs.readFileSync(calls, "utf8"), "print\n", "no bootout from inside the update agent");
+  assert.equal(callLog(), "print\n", "an unchanged loaded agent is left alone, even from inside its own run");
+  result = reload(1, "self");
+  assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /keeps its loaded plist/);
+  assert.ok(fs.existsSync(loaded), "the agent is never booted out from inside its own run");
+  assert.doesNotMatch(callLog(), /bootout/);
+  result = reload(1, "other");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(callLog(), "print\nprint\nbootout\nbootstrap\n", "a changed plist is reloaded from outside the agent");
   fs.rmSync(loaded);
-  result = reload({ XPC_SERVICE_NAME: "com.cubeyard.cube-runner-update" });
+  result = reload(0, "self");
   assert.equal(result.status, 0, result.stderr);
-  assert.ok(fs.existsSync(loaded), "an unloaded update agent is loaded again");
-  assert.equal(fs.readFileSync(calls, "utf8"), "print\nbootstrap\n");
-  result = reload({});
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(fs.readFileSync(calls, "utf8"), "bootout\nbootstrap\n", "outside the agent it is reloaded");
+  assert.equal(callLog(), "print\nbootstrap\n", "a missing agent is loaded");
   assert.ok(fs.existsSync(loaded));
 };
 

@@ -181,18 +181,35 @@ install_unit() {
 }
 
 # launchd kills every process of a job it boots out, so an upgrade started by
-# the update agent must not reload that agent: it would die before bootstrap
-# and leave the agent unloaded. Inside the job a loaded agent is kept; its
-# plist names the same update.sh, so the refreshed scripts run next hour.
+# the update agent must never boot that agent out: it dies before bootstrap
+# and, depending on timing, leaves the agent unloaded. launchd's environment
+# is no reliable sign of running inside the job, so a loaded agent whose plist
+# did not change is left alone (an upgrade only replaces the scripts its plist
+# names). A changed plist is reloaded unless this process descends from the
+# agent's own run; then the next load (login or reboot) reads it.
 reload_update_agent() {
-  local plist="$1" ref
+  local plist="$1" changed="$2" ref pid
   ref="$(service_domain)/$UPDATE_LABEL"
-  if [ "${XPC_SERVICE_NAME:-}" = "$UPDATE_LABEL" ]; then
-    "$LAUNCHCTL" print "$ref" >/dev/null 2>&1 || "$LAUNCHCTL" bootstrap "$(service_domain)" "$plist" >/dev/null 2>&1 || true
+  if ! "$LAUNCHCTL" print "$ref" >/dev/null 2>&1; then
+    "$LAUNCHCTL" bootstrap "$(service_domain)" "$plist" >/dev/null 2>&1 || true
+    return 0
+  fi
+  [ "$changed" = 1 ] || return 0
+  pid="$("$LAUNCHCTL" print "$ref" 2>/dev/null | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)$/\1/p' | head -n 1)"
+  if [ -n "$pid" ] && descends_from "$pid"; then
+    note 'the update agent keeps its loaded plist until it is next loaded'
     return 0
   fi
   "$LAUNCHCTL" bootout "$ref" >/dev/null 2>&1 || true
   "$LAUNCHCTL" bootstrap "$(service_domain)" "$plist" >/dev/null 2>&1 || true
+}
+descends_from() {
+  local ancestor="$1" pid="$$"
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
+    [ "$pid" = "$ancestor" ] && return 0
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+  done
+  return 1
 }
 
 # Installs (or refreshes) the self-updater from this bundle: its scripts and
@@ -229,7 +246,7 @@ install_updater() {
     # Beside the runner's own plist (LaunchDaemons or the user's LaunchAgents).
     plist="$(dirname "$(service_file)")/$UPDATE_LABEL.plist"
     mkdir -p "$(dirname "$plist")"
-    cat > "$plist" <<PLIST
+    cat > "$plist.new" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -243,8 +260,11 @@ install_updater() {
 <key>StandardErrorPath</key><string>$(printf '%s' "$(log_root)/update.log" | xml_escape)</string>
 </dict></plist>
 PLIST
-    plutil -lint "$plist" >/dev/null
-    if [ -z "$ROOT" ]; then reload_update_agent "$plist"; fi
+    plutil -lint "$plist.new" >/dev/null
+    local changed=1
+    if cmp -s "$plist.new" "$plist"; then changed=0; fi
+    mv "$plist.new" "$plist"
+    if [ -z "$ROOT" ]; then reload_update_agent "$plist" "$changed"; fi
   fi
   note "self-update installed: hourly, only while idle"
 }
