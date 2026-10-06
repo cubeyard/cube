@@ -21,6 +21,7 @@ OFFLINE_TESTS=(
   packages/server/test/egress-policy-test.ts
   packages/server/test/gateway-test.ts
   packages/server/test/vm-workspace-test.ts
+  packages/server/test/lifecycle-test.ts
   packages/server/test/vm-template-test.ts
   packages/server/test/vm-prepare-test.ts
   packages/server/test/durable-agent-test.ts
@@ -34,6 +35,7 @@ OFFLINE_TESTS=(
   packages/server/test/optchat-history-test.ts
   packages/server/test/thread-history-test.ts
   packages/server/test/optchat-archive-test.ts
+  packages/server/test/optchat-start-test.ts
   packages/server/test/claude-agent-test.ts
   packages/server/test/usage-test.ts
   scripts/smoke-local.ts

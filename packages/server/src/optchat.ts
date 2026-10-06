@@ -28,6 +28,9 @@ const context = BACKGROUND_CONTEXT;
 const log = createLogger("optchat");
 export const JOBS = 8;
 export const RETRY_MS = 10_000;
+/** How long a thread's machine must keep failing to start before the chat
+ * hears of it: cubed's recovery loop retries every 30 s. */
+export const START_GRACE_MS = 2 * 60_000;
 
 export const MASTER = `You are OptChat, an AI agent that works for one user in a single chat that
 never ends. You are the user's interface to cube. You never write code,
@@ -270,7 +273,7 @@ export type OptChatOptions = {
   compactor?: { provider: string; id: string } | null;
   threads: OptThreads;
   /** Tests lower these. */
-  limits?: { view?: number; node?: number; jobs?: number; retryMs?: number; watchMs?: number };
+  limits?: { view?: number; node?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number };
 };
 
 export class OptChat {
@@ -286,6 +289,8 @@ export class OptChat {
   private readonly watchers = new Map<string, Promise<ThreadWatch | null>>();
   private readonly reported = new Map<string, string>();
   private readonly startReported = new Set<string>();
+  /** When each thread's machine was first seen failing to start, until it starts. */
+  private readonly startFailing = new Map<string, number>();
   private lock: Promise<unknown> = Promise.resolve();
   private cacheKey = "optchat";
   private compactorModels!: Models;
@@ -721,16 +726,25 @@ export class OptChat {
         let events: ThreadEvents | null;
         try { events = await this.options.threads.events(id); }
         catch (error) {
-          // A thread whose machine failed to start reports that once; the
-          // next round watches it again.
-          // Reported once per thread; it is watched again later.
+          // cubed retries a machine that failed to start (a lost guest, a
+          // lease not yet let go), and most come up on a later try: only a
+          // failure that lasts is reported, once per thread, as one cubed
+          // still retries. The next round watches it again.
           const message = error instanceof Error ? error.message : String(error);
-          if (!this.startReported.has(id)) void this.send(`[${short(id)}] failed to start: ${message}`, `report:${id}:start`).catch(() => {});
-          this.startReported.add(id);
+          const since = this.startFailing.get(id) ?? Date.now();
+          this.startFailing.set(id, since);
+          const lasted = Date.now() - since;
+          if (lasted >= (this.options.limits?.startGraceMs ?? START_GRACE_MS) && !this.startReported.has(id) && !this.closing) {
+            this.startReported.add(id);
+            void this.send(`[${short(id)}] failed to start for ${Math.round(lasted / 1000)} s; cubed keeps retrying: ${message}`, `report:${id}:start`).catch(() => {});
+          }
           this.watchers.delete(id);
           return null;
         }
-        if (!events || this.closing) return null;
+        this.startFailing.delete(id);
+        // Archived or being archived: the next round finds it gone or watches it again.
+        if (!events) { this.watchers.delete(id); return null; }
+        if (this.closing) return null;
         const watch = await events.watch(transcript => this.observe(id, transcript), { onEnd: () => { this.watchers.delete(id); } });
         // An archived thread's source closes; the next round finds it gone.
         void watch.closed.then(() => { if (!this.closing) this.watchers.delete(id); });
