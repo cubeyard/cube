@@ -165,7 +165,7 @@ export function formatHistory(id: string, record: ThreadRecord, report: ReportSt
   const limit = Math.min(Math.max(page.limit ?? HISTORY_PAGE, 1), HISTORY_MAX);
   const end = Math.min(Math.max(page.before ?? total, 0), total);
   const start = Math.max(0, end - limit);
-  const cap = Math.min(HISTORY_TEXT, Math.floor(HISTORY_BUDGET / limit));
+  const cap = Math.min(HISTORY_TEXT, Math.floor(HISTORY_BUDGET / Math.max(1, end - start)));
   if (!total) lines.push("messages: none");
   else if (start === end) lines.push(`messages: none before #${end} (${total} in all)`);
   else {

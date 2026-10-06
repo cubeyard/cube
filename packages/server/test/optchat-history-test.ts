@@ -68,6 +68,7 @@ try {
     const long = record({ transcript: transcript("completed", Array.from({ length: 50 }, (_, k): ThreadEvent => ({ type: "assistant-text", id: `${k}`, text: "y".repeat(5000), reasoning: false, final: true }))) });
     assert.ok(formatHistory(ID, long, "none", { limit: HISTORY_MAX }).length < 30_000, "a full page stays within its budget");
     assert.match(formatHistory(ID, long, "none", { limit: 1 }), /\n#49 thread: y{900}/, "a short page gives each message more");
+    assert.match(formatHistory(ID, record({ transcript: transcript("completed", long.transcript!.events.slice(0, 2)) }), "none", { limit: HISTORY_MAX }), /\n#1 thread: y{900}/, "the budget is shared by the messages shown");
     assert.match(formatHistory(ID, full, "none", { before: 0 }), /\nmessages: none before #0 \(62 in all\)$/);
     assert.match(formatHistory(ID, full, "none", { before: 1000, limit: 1 }), /\nmessages #61–#61 of 62/, "before past the end shows the end");
     assert.match(formatHistory(ID, full, "none"), /\nreport of this run to this chat: not sent yet\n/);
@@ -129,6 +130,7 @@ try {
     const harness = await Harness.open(await openStorage(file), { models, registry: createRegistry() }, context);
     try {
       const conversation = await harness.root(context, { agent: { model: { provider: faux.getModel().provider, modelId: faux.getModel().id } } });
+      assert.deepEqual((await read("a failure cubed records"))!.status, { state: "idle", run: null, error: null }, "an idle run carries no failure");
       await conversation.submit({ type: "input", content: "the question", requestId: "cube:initial" }, context);
       let working: ThreadTranscript | null = null;
       for (let k = 0; k < 200 && working?.status.state !== "working"; k++) {
@@ -158,6 +160,14 @@ try {
       writing = false;
       await writes;
       assert.ok(slowest < 1000, `a read never waits for the writer (slowest ${slowest} ms)`);
+      // A writer holding its transaction open: the read neither waits nor sees it.
+      const writer = new DatabaseSync(file, { timeout: 0 });
+      writer.exec("BEGIN IMMEDIATE; UPDATE durable_schema SET version = version WHERE singleton = 1");
+      try {
+        const started = Date.now();
+        assert.equal((await read())?.status.state, "completed");
+        assert.ok(Date.now() - started < 1000, "the read does not wait for an open write transaction");
+      } finally { writer.exec("ROLLBACK"); writer.close(); }
       assert.deepEqual(fs.readdirSync(directory).filter(name => name.startsWith(".read-")), [], "no snapshot is left behind");
       assert.ok(fs.statSync(file).mtimeMs >= before);
       assert.equal((await read())!.events.at(-1)?.type === "user-message", true, "the writer's entries are readable");
@@ -246,6 +256,7 @@ try {
         call("history", { id: "abcdef12" }, "call-own"),
         call("history", { id: "99999999" }, "call-other"),
         call("history", { id: OTHER }, "call-other-full"),
+        call("history", { id: "[]" }, "call-empty"),
         () => fauxAssistantMessage("read"),
       ];
       await chat.send("start one", "r1");
@@ -255,6 +266,7 @@ try {
       assert.match(results[1]!, /^\[abcdef12\] cube · fix the gateway\n[\s\S]*\nreport of this run to this chat: not sent yet\n/);
       assert.match(results[2]!, /no thread 99999999/);
       assert.match(results[3]!, new RegExp(`no thread ${OTHER}`));
+      assert.match(results[4]!, /name a thread by its id/, "an empty id names no thread");
       // The run's report reaches the chat; history then says so.
       script = [() => fauxAssistantMessage("noted"), call("history", { id: "abcdef12", before: 1 }, "call-again"), () => fauxAssistantMessage("read again")];
       await chat.send("[abcdef12] PR #9", `report:${ID}:run-1`);

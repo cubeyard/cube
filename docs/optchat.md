@@ -71,7 +71,7 @@ read-only connection (`VACUUM INTO`, a WAL read that never waits for the
 running Harness) into a private directory beside it, which pi-durable opens and
 which is deleted after the read (`readStorage`); the store itself is never
 created, migrated or locked for writing, and one of another schema version is
-refused. A Claude Code thread's `claude.sqlite` is read through a read-only
+refused, as is one over 64 MiB, since the copy is synchronous. A Claude Code thread's `claude.sqlite` is read through a read-only
 connection. So archived threads, whose stores stay in
 `<CUBED_STATE>/threads/<id>`, and threads whose machine failed can be read too.
 
@@ -87,7 +87,7 @@ Pi run goes on when its agent opens again; a Claude Code turn does not). It
 shows both sides and settles nothing; it does not fix the activation race that
 can produce such a failure. Then a page of messages, numbered from the first,
 newest last: 12 by default, at most 40, `before` pages back. Thinking and
-unfinished output are left out; a page's messages share 24,000 characters (at
+unfinished output are left out; the messages shown share 24,000 characters (at
 most 2,000 each, tool calls and results at most 400), the latest answer is cut
 at 4,000. No store: `history: none stored`; a store that cannot be read:
 `history: unreadable: <why>`. A stored run read without its agent is the
@@ -168,9 +168,9 @@ model), `POST /api/optchat/prompt {text, requestId}`, `POST /api/optchat/stop`,
   makes the transcript slow; the model's side does not grow.
 - The `threads` tool reads each thread's transcript to give its run state.
 - `history` copies and reads a thread's whole Pi store on each call and pages
-  afterwards; the copy is synchronous, so a very large store holds cubed's
-  event loop for the copy's length. A copy a crash left behind (`.read-*` in the
-  thread directory) is not removed.
+  afterwards; the copy is synchronous and holds cubed's event loop for its
+  length (stores over 64 MiB are refused). A copy a crash left behind
+  (`.read-*` in the thread directory) is not removed.
 - No HTML browser of the tree and no import of older chats yet.
 - Verified offline with faux models and a local guest only
   (`packages/server/test/optchat-*-test.ts`), never against a real model or VM.
