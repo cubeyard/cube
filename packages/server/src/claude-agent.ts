@@ -101,9 +101,18 @@ export class ClaudeAgent {
   private constructor(options: { threadId: string; db: DatabaseSync; workspace: Workspace; lease: WorkspaceLease; runtime: ClaudeRuntime; cwd: string }) {
     this.threadId = options.threadId; this.db = options.db; this.workspace = options.workspace;
     this.lease = options.lease; this.runtime = options.runtime; this.cwd = options.cwd;
-    this.submissions = (this.db.prepare("SELECT seq, request_id AS requestId, text, state, error FROM submission ORDER BY seq").all() as unknown as ClaudeSubmission[]);
-    this.messages = (this.db.prepare("SELECT seq, submission, data FROM message ORDER BY seq").all() as Array<{ seq: number; submission: number; data: string }>)
-      .map(row => ({ seq: row.seq, submission: row.submission, data: JSON.parse(row.data) as Record<string, unknown> }));
+    ({ submissions: this.submissions, messages: this.messages } = record(this.db));
+  }
+
+  /** The thread record from a thread directory alone, without the agent or
+   * its lease; null when there is none. A turn it shows as running goes on
+   * only while the agent is open. */
+  static stored(directory: string): ClaudeState | null {
+    const file = path.join(directory, "claude.sqlite");
+    if (!fs.existsSync(file)) return null;
+    const db = new DatabaseSync(file, { readOnly: true, timeout: 5000 });
+    try { return { ...record(db), partial: [] }; }
+    finally { db.close(); }
   }
 
   /** Takes the thread's `claude-code` lease for the agent's lifetime: the
@@ -362,6 +371,14 @@ export class ClaudeAgent {
       try { listener(); } catch { /* a listener failure does not stop the agent */ }
     }
   }
+}
+
+function record(db: DatabaseSync): Pick<ClaudeState, "submissions" | "messages"> {
+  return {
+    submissions: db.prepare("SELECT seq, request_id AS requestId, text, state, error FROM submission ORDER BY seq").all() as unknown as ClaudeSubmission[],
+    messages: (db.prepare("SELECT seq, submission, data FROM message ORDER BY seq").all() as Array<{ seq: number; submission: number; data: string }>)
+      .map(row => ({ seq: row.seq, submission: row.submission, data: JSON.parse(row.data) as Record<string, unknown> })),
+  };
 }
 
 type StreamEvent = {

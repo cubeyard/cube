@@ -5,8 +5,8 @@ It is an interface, not a worker: it has no machine and no code, file or shell
 tools. It starts threads in projects (`spawn`), gives a thread that has reported
 more to do (`tell`), lists its threads (`threads`) and what it can start
 (`projects`), reports the runners as cubed last heard from them (`runners`,
-read-only; see docs/runner-operations.md, "Observing runners"), and reads its
-own memory (`zoom`, `date`). Threads do all the
+read-only; see docs/runner-operations.md, "Observing runners"), reads one of
+its threads (`history`), and reads its own memory (`zoom`, `date`). Threads do all the
 work, each in its own VM, exactly like a thread started from the UI.
 
 The memory follows Victor Taelin's OptChat spec
@@ -60,6 +60,33 @@ a restart goes on where it stopped and a resend is refused. Steering, a turn's
 submission and stop never run at the same time. The transcript shows waiting
 messages as `working` with the compactor's failure, if any, and
 `POST /api/optchat/prompt` answers as soon as the message is accepted.
+
+## Reading a thread
+
+`history(id, before?, limit?)` reads one thread the chat started; any other id
+is refused as unknown, like `tell`'s. It changes nothing: it does not open the
+thread's agent, take its workspace lease or wait for its machine
+(`Conversations.storedHistory`). A Pi thread's `pi.sqlite` is opened beside its
+Harness, never created or migrated, with `query_only` set
+(`readStorage`); a Claude Code thread's `claude.sqlite` is opened read-only. So
+archived threads, whose stores stay in `<CUBED_STATE>/threads/<id>`, and threads
+whose machine failed can be read too.
+
+The answer starts with cubed's own record (archived or the machine's state,
+the workspace, a retained disk, whether the agent is open in cubed, the
+workspace's writer), then the stored run state and the latest answer, whether
+the run's report (`report:<thread>:<run>`) is in the chat, waiting, or not sent,
+and a `note:` for each disagreement it sees: a failure cubed records beside a
+run the store shows (such as `thread workspace already has a writable owner`
+after the agent finished), a run unfinished at archive, or a run unfinished
+with no agent open. It shows both sides and settles nothing; it does not fix
+the activation race that can produce such a failure. Then a page of messages,
+numbered from the first, newest last: 12 by default, at most 40, `before`
+pages back. Thinking and unfinished output are left out; text is cut at 2,000
+characters, tool calls and results at 400, the latest answer at 4,000. No
+store: `history: none stored`; a store that cannot be read: `history:
+unreadable: <why>`. A stored run read without its agent is the committed state:
+a Pi run still streaming shows as `working` without its partial reply.
 
 ## Caching
 
@@ -134,6 +161,7 @@ model), `POST /api/optchat/prompt {text, requestId}`, `POST /api/optchat/stop`,
   and the run status scans every submission on each SSE frame. A long chat
   makes the transcript slow; the model's side does not grow.
 - The `threads` tool reads each thread's transcript to give its run state.
+- `history` reads a thread's whole store on each call and pages afterwards.
 - No HTML browser of the tree and no import of older chats yet.
 - Verified offline with faux models and a local guest only
   (`packages/server/test/optchat-*-test.ts`), never against a real model or VM.

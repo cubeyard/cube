@@ -2,7 +2,7 @@
  * conversation view (entries plus `pi.live`) into `ThreadTranscript`s. */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
-import type { ConversationView, EntryRecord, SubmissionRecord, ToolSlot } from "@earendil-works/pi-durable";
+import { ROOT_CONVERSATION_ID, type ConversationView, type EntryRecord, type Storage, type SubmissionRecord, type ToolSlot } from "@earendil-works/pi-durable";
 import type { Agent } from "./durable-agent.ts";
 import type { ThreadAgent, ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
 
@@ -86,6 +86,30 @@ export class PiThreadEvents implements ThreadEvents {
     this.settled = { key, status };
     return status;
   }
+}
+
+/** A Pi thread's transcript from its store alone, without its Harness: every
+ * committed entry and the newest input's state. A run the store shows as
+ * working goes on only while the thread's agent is open. */
+export async function storedPiTranscript(storage: Pick<Storage, "scanEntries" | "scanSubmissions">, owner: ThreadAgent | null, failure: string | null): Promise<ThreadTranscript> {
+  const entries: EntryRecord[] = [];
+  let cursor;
+  do {
+    const page = await storage.scanEntries({ conversationId: ROOT_CONVERSATION_ID }, 256, cursor, context);
+    entries.push(...page.items);
+    cursor = page.next;
+  } while (cursor);
+  let last: SubmissionRecord | undefined;
+  cursor = undefined;
+  do {
+    const page = await storage.scanSubmissions({ conversationId: ROOT_CONVERSATION_ID }, 256, cursor, context);
+    last = page.items.findLast(submission => submission.type === "input") ?? last;
+    cursor = page.next;
+  } while (cursor);
+  const status: ThreadStatus = !last ? { state: "idle", run: null, error: failure }
+    : last.status === "queued" || last.status === "placed" ? { state: "working", run: last.requestId ?? String(last.id), error: failure }
+    : { run: last.requestId ?? String(last.id), ...settlement(last) };
+  return { agent: "pi", owner, status, events: entryEvents(entries.sort((a, b) => a.id - b.id)) };
 }
 
 function settlement(submission: SubmissionRecord): Pick<ThreadStatus, "state" | "error"> {

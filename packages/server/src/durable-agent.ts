@@ -10,7 +10,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type, type Models, type Static } from "@earendil-works/pi-ai";
 import { createRegistry, defineDoc, defineExtension, defineTool, Harness, ROOT_CONVERSATION_ID, section, type Extension, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import { NodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
+import { CURRENT_SQLITE_SCHEMA_VERSION, SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
 import { createCodemodeTool, type CodemodeLimits, type NestedTool } from "./codemode.ts";
 import { settleOperation, WorkspaceError, type Workspace } from "./workspace.ts";
@@ -45,6 +45,25 @@ export async function openStorage(file: string): Promise<SqliteStorage> {
     }
   } catch (error) { database.close(); throw error; }
   return SqliteStorage.open(new NodeSqliteDatabase(database));
+}
+
+/** A Pi store opened to read it only, beside its Harness or without one; null
+ * when there is none. It is never created or migrated: a store of another
+ * schema version is refused, and after the open every write is refused by
+ * SQLite (`query_only`). The open itself takes the write lock for an instant,
+ * as pi-durable checks its schema in a transaction that changes nothing. */
+export async function readStorage(file: string): Promise<SqliteStorage | null> {
+  if (!fs.existsSync(file)) return null;
+  const check = new DatabaseSync(file, { readOnly: true, timeout: 5000 });
+  try {
+    const row = check.prepare("SELECT version FROM durable_schema WHERE singleton = 1").get() as { version: number } | undefined;
+    if (row?.version !== CURRENT_SQLITE_SCHEMA_VERSION) throw new Error(`the stored history has schema version ${row?.version ?? "none"}, not ${CURRENT_SQLITE_SCHEMA_VERSION}`);
+  } finally { check.close(); }
+  const database = new DatabaseSync(file, { timeout: 5000 });
+  const storage = await SqliteStorage.open(new NodeSqliteDatabase(database));
+  try { database.exec("PRAGMA query_only=ON"); }
+  catch (error) { await storage.close(context); throw error; }
+  return storage;
 }
 
 /** Files the Pi store before pi-durable 1.0.1 left in a thread directory. */
