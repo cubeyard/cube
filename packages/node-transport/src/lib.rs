@@ -21,7 +21,7 @@ pub const ALPN: &[u8] = b"cubeyard/node/1";
 pub const PROTOCOL_VERSION: u32 = 3;
 pub const MIN_COMPATIBLE_PROTOCOL_VERSION: u32 = 3;
 pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
-const RUNNER_CAPABILITIES: [&str; 7] = [
+const RUNNER_CAPABILITIES: [&str; 10] = [
     "node.status",
     "vm.allocate",
     "vm.start",
@@ -29,8 +29,12 @@ const RUNNER_CAPABILITIES: [&str; 7] = [
     "vm.inspect",
     "vm.release",
     "vm.discard",
+    // Templates (0.8.0): `vm.allocate` takes `template`.
+    "vm.publish",
+    "template.list",
+    "template.remove",
 ];
-const KNOWN_METHODS: [&str; 8] = [
+const KNOWN_METHODS: [&str; 11] = [
     "node.hello",
     "node.status",
     "vm.allocate",
@@ -39,6 +43,9 @@ const KNOWN_METHODS: [&str; 8] = [
     "vm.inspect",
     "vm.release",
     "vm.discard",
+    "vm.publish",
+    "template.list",
+    "template.remove",
 ];
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -64,6 +71,9 @@ pub enum Request {
         epoch: u64,
         #[serde(rename = "diskGiB")]
         disk_gib: u32,
+        /// Back the disk by this template instead of the base image.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        template: Option<String>,
     },
     #[serde(rename = "vm.start")]
     VmStart {
@@ -112,6 +122,21 @@ pub enum Request {
         vm_id: String,
         epoch: u64,
     },
+    /// Turns a cleanly stopped VM's disk into a template and releases it.
+    #[serde(rename = "vm.publish")]
+    VmPublish {
+        #[serde(rename = "threadId")]
+        thread_id: String,
+        #[serde(rename = "vmId")]
+        vm_id: String,
+        epoch: u64,
+        key: String,
+        meta: String,
+    },
+    #[serde(rename = "template.list")]
+    TemplateList,
+    #[serde(rename = "template.remove")]
+    TemplateRemove { id: String },
 }
 
 impl Request {
@@ -134,6 +159,8 @@ impl Request {
                 | Self::VmStop { .. }
                 | Self::VmRelease { .. }
                 | Self::VmDiscard { .. }
+                | Self::VmPublish { .. }
+                | Self::TemplateRemove { .. }
         )
     }
 }
@@ -185,6 +212,12 @@ pub enum Response {
             skip_serializing_if = "Option::is_none"
         )]
         console_tail: Option<String>,
+    },
+    Template {
+        template: runner::TemplateRecord,
+    },
+    Templates {
+        templates: Vec<runner::TemplateRecord>,
     },
     Error {
         code: String,
@@ -464,8 +497,9 @@ async fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Run
             vm_id,
             epoch,
             disk_gib,
+            template,
         } => runner
-            .allocate(&thread_id, &vm_id, epoch, disk_gib)
+            .allocate(&thread_id, &vm_id, epoch, disk_gib, template.as_deref())
             .await
             .map(vm),
         Request::VmStart {
@@ -514,6 +548,23 @@ async fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Run
             vm_id,
             epoch,
         } => runner.discard(&thread_id, &vm_id, epoch).map(vm),
+        Request::VmPublish {
+            thread_id,
+            vm_id,
+            epoch,
+            key,
+            meta,
+        } => runner
+            .publish(&thread_id, &vm_id, epoch, &key, &meta)
+            .await
+            .map(|template| Response::Template { template }),
+        Request::TemplateList => runner
+            .templates()
+            .map(|templates| Response::Templates { templates }),
+        Request::TemplateRemove { id } => runner
+            .remove_template(&id)
+            .await
+            .map(|template| Response::Template { template }),
         Request::Hello { .. } => unreachable!(),
     };
     result.unwrap_or_else(|error| {
@@ -787,6 +838,11 @@ async fn call_inner(
                 },
                 Request::Status,
             ) if node_id == expected_node_id => {}
+            (Response::Template { template }, Request::VmPublish { vm_id, .. })
+                if &template.id == vm_id => {}
+            (Response::Template { template }, Request::TemplateRemove { id })
+                if &template.id == id => {}
+            (Response::Templates { .. }, Request::TemplateList) => {}
             (Response::Error { .. }, _) => {}
             _ => bail!("invalid response for request"),
         }
@@ -950,7 +1006,7 @@ mod tests {
         assert_eq!(
             (SOFTWARE_VERSION, RUNNER_CAPABILITIES),
             (
-                "0.7.0",
+                "0.8.0",
                 [
                     "node.status",
                     "vm.allocate",
@@ -959,6 +1015,9 @@ mod tests {
                     "vm.inspect",
                     "vm.release",
                     "vm.discard",
+                    "vm.publish",
+                    "template.list",
+                    "template.remove",
                 ]
             ),
             "capability changes require a new immutable software version"

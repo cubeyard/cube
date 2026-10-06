@@ -193,7 +193,7 @@ try {
   models.setProvider(faux.provider);
   class FlakyMachines extends LocalMachines {
     failing = new Set<string>();
-    override async start(thread: Thread): Promise<void> {
+    override async start(thread: Thread): Promise<{ booted: boolean }> {
       if (this.failing.has(thread.title ?? "")) throw new Error("the thread machine did not start: fixture");
       return super.start(thread);
     }

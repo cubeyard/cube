@@ -518,10 +518,11 @@ header .spacer { margin-left: auto; }
   letter-spacing: 0.05em; text-decoration: none; white-space: nowrap;
 }
 .strip-project:hover { color: var(--signal); }
-.strip-base {
+.strip-base, .strip-machine {
   flex: 0 20 auto; min-width: 0; max-width: 14rem; overflow: hidden; text-overflow: ellipsis;
   color: var(--ink-3); font: 10px var(--font-mono); white-space: nowrap;
 }
+.strip-machine.error { color: var(--bad); }
 
 .strip-model {
   position: relative; display: inline-flex; align-items: center;
@@ -1246,7 +1247,7 @@ select.compose-input {
     box-shadow: var(--shadow-key);
   }
   .thread-strip .key-bank { order: 2; }
-  .thread-strip > :is(.strip-project, .strip-base, .strip-state, .spacer, .strip-model) { order: 3; }
+  .thread-strip > :is(.strip-project, .strip-base, .strip-machine, .strip-state, .spacer, .strip-model) { order: 3; }
   .thread-strip > .strip-project { margin-left: calc(8px + 0.6rem); }
   .mobile-thread-switch span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mobile-thread-switch svg { flex: none; transform: rotate(-90deg); }
@@ -1319,7 +1320,7 @@ select.compose-input {
   .task-bank li span:last-child { grid-column: 1 / -1; white-space: normal; overflow-wrap: anywhere; }
   .composer { padding-bottom: max(0.55rem, env(safe-area-inset-bottom)); }
   .composer textarea { font-size: 16px; min-height: 2.75rem; padding-block: calc((2.75rem - 26px) / 2); }
-  .strip-base { display: none; }
+  .strip-base, .strip-machine:not(.error) { display: none; }
   .send-key, .composer .stop-key { height: 2.75rem; }
   .send-key { width: 2.75rem; }
   .workspace-pane-head { padding-inline: 0.7rem; }

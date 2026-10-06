@@ -1,6 +1,39 @@
-# Machine templates (snapshots), proposal
+# Machine templates (snapshots)
 
-Status: proposal, not built. Follows docs/plans/2026-10-04-vm-runner.md.
+Status: built on branch `vm-snapshots` (cube-runner 0.8.0), not released. The
+shipped design is in ARCHITECTURE.md, "Machine templates and hooks"; this
+file keeps the proposal and records where the build differs from it.
+
+## Decisions taken when building
+
+- **Setup goes into the template** (Amp style), with the agreed hook model:
+  external pre-setup, then `.agents/setup`; a template is published only
+  after both succeeded. Resume hooks (external pre-resume, then
+  `.agents/resume`) run on every machine boot and are never cached.
+- **A thread from a template does not run setup again.** It refreshes the
+  checkout to its pinned commit; if the pinned `.agents/setup` blob differs
+  from the template's, setup runs in that thread and the template is removed.
+  (The proposal reran setup every time.)
+- **24 hours**, not 72 (`CUBED_TEMPLATE_TTL_HOURS`): reuse skips setup, so
+  the TTL bounds how stale dependencies may get; rebuilding costs one extra
+  boot for one thread a day.
+- **Builds use the triggering thread's slot**, before its own machine
+  exists, instead of idle runners: no capacity is taken from waiting
+  threads and nothing schedules background work. The first thread of a
+  project on a runner waits for the build plus a template boot (measured
+  below); a thread that arrives during a build starts fresh.
+- **No template manager or internal machine registry**: the build machine is
+  recorded on its thread (`vm.build`) so a crash leaves nothing behind that
+  the next activation or archive does not delete.
+- **Runner protocol**: `vm.publish` (not `vm.template`), `template.list`,
+  `template.remove`, and `vm.allocate {template}`; templates live in
+  `templates/<id>/` (not `images/`), so the overlay's relative backing path
+  stays valid without a rebase. `node.status` is unchanged, because cubed
+  0.3.x validates its exact shape.
+- **Disk budget**: one live template per project and runner; superseded ones
+  are deleted once their last machine is gone.
+
+Follows docs/plans/2026-10-04-vm-runner.md.
 
 ## Why
 

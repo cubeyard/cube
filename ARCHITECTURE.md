@@ -334,6 +334,82 @@ Keep host Git/model credentials out of runner accounts. Browser access is loopba
 private network, or an authenticated private proxy; Iroh authenticates runner
 and gateway communication, not browser users.
 
+## Machine templates and hooks
+
+**Hooks.** A project has two optional external hooks (`hooks.preSetup`,
+`hooks.preResume`, at most 16 KiB each, edited on the project page and kept in
+the project record). A thread captures them at creation, like its pinned
+commits, and its machine's seed writes them to `/etc/cube/hooks/`. Each hook
+runs as `agent` in `/workspace` with its output in `~/.cache/cube/<hook>.log`.
+The repository's own `.agents/setup` and `.agents/resume` run too; neither
+replaces the other:
+
+- **preparation**, once per machine: checkout, then pre-setup, then
+  `.agents/setup` (only if pre-setup succeeded);
+- **resume**, once per machine boot, before the agent uses the machine:
+  pre-resume, then `.agents/resume` (only if pre-resume succeeded). A marker
+  on a tmpfs records that the boot resumed; a cubed restart that finds the
+  machine running does not resume it again. A machine that boots again under
+  an open agent (a runner restart) closes the agent first, as a cubed restart
+  would, and reopens it after the hooks.
+
+A failing hook stops its phase but never the thread: the outcome (`ok`,
+`failed` with its exit code, `skipped`, `notrun`, `absent`) is recorded in
+`thread.vm.hooks` and the thread strip shows failures. A failing checkout
+fails the thread as before. Hooks are not secret storage: the agent can read
+them and the guest holds only placeholders.
+
+**Templates.** A new thread's machine starts from its project's template on
+its runner when there is one: a read-only qcow2 (`templates/<id>/disk.qcow2`,
+cube-runner 0.8.0) under the machine's own overlay. Then the machine skips
+preparation: the template's checkouts are moved to the thread's pinned
+commits (fetch, `checkout -f`, reflogs expired), pre-setup and setup are
+`skipped`, and resume runs as on every boot. If the pinned `.agents/setup`
+blob differs from the one the template ran (its metadata), pre-setup and
+setup run in this machine and the template is removed so the next thread
+builds a new one. Without a template the thread's slot is first used by a
+**build machine**: the base image, a throwaway identity (its own VM id, keys
+and GitHub placeholder, registered so the gateway serves it), the thread's
+pinned checkouts, pre-setup and `.agents/setup`. Only if all of that succeeds
+does cubed run `cube-guest seal` and power it off: at shutdown the guest
+removes its SSH host keys, machine id, cloud-init instance state, the
+helper's journal and epoch, `/etc/cube` (keys, placeholders, hooks), DHCP
+leases, the random seed, `/tmp`, shell history and the system journal, and
+discards the freed blocks. A clean power-off (not `interrupted`) is required
+for the runner to publish the disk (`vm.publish` moves it, read-only); then
+the thread's own machine is allocated on it. Anything else deletes the build
+machine and the thread starts fresh (a build that failed is not retried for
+the same key on that runner for an hour). Toolchains, package caches and the
+prepared checkout stay; that is the point.
+
+Isolation: no agent ever runs in a build machine; every machine writes only
+its own overlay; each gets a new VM id, MAC, host key, client key,
+placeholder, machine id, hostname and instance from its own seed, and the
+first boot of a template's machine starts the helper's journal empty. A
+template is per project and runner, never shared between projects. Its
+content is what the project's pre-setup and setup produced, so it is as
+trusted as they are; a deleted file's bytes may survive in a partly used
+qcow2 cluster of the template, which is why only the build machine's
+throwaway identity (useless after its release) was ever in it. Agent
+sessions live on the cubed host and never enter a guest.
+
+**Key and lifetime.** A template is reused when its key matches: the
+project, its repositories (URL, branch, checkout name), the pre-setup hook,
+the guest packages and helper, the runner's base image and platform and the
+disk size. The commit is not in it (the checkout is refreshed) and neither
+are resume hooks (they always run). It is reused for 24 hours
+(`CUBED_TEMPLATE_TTL_HOURS`), which bounds how stale dependencies that
+`.agents/setup` installed can be while the setup file itself is unchanged;
+put what must be fresh per thread in a resume hook. Publishing a template
+removes the project's older ones on that runner; expired templates and those
+of deleted projects are removed when the next machine is allocated there.
+The runner deletes a removed template once no VM depends on it (retained
+ones included). One build per runner and key runs at a time: a thread that
+comes meanwhile starts fresh. `CUBED_TEMPLATES=off` or a runner before 0.8.0
+means every machine starts fresh. The startup phases (`allocate`,
+`build-*`, `boot`, `prepare`, `resume`) and the total from creation to ready
+are logged ("machine ready for the agent") and kept in `thread.vm.startup`.
+
 ## Verification
 
 `pnpm test` runs the offline suites, among them the guest helper's own tests,
@@ -351,7 +427,13 @@ end to end (`test-vm-e2e.ts`: Pi tools in the guest, cubed and gateway SIGKILL
 mid-command, egress, `gh`/`git push` with secret substitution against a local
 GitHub fake, a Claude Code thread, clean and retained archives) and two thread
 VMs on one runner (`test-vm-concurrency.ts`: the bound, side-by-side boots and
-commands, separate machines, slots returned at archive). Mocks are not
+commands, separate machines, slots returned at archive) and machine templates
+(`test-vm-templates.ts`: a build machine, publication, identity and
+isolation of machines on one template, invalidation by a changed pre-setup,
+resume after a runner restart, a failed build falling back to a fresh
+machine). Hook order and failure rules, the template checkout refresh and
+stale setup, keys and selection run offline in `vm-template-test.ts` with the
+real guest helper. Mocks are not
 runner acceptance. `scripts/check-claude-mod.sh` validates and tests the mod
 with the installed `claude` CLI without calling a model; the real CLI is never
 started by tests. These use controlled models and disposable data, never live

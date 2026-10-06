@@ -11,8 +11,8 @@ import { createLogger } from "./log.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
 import type { ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
-import { Registry, threadAgent, type Thread } from "./registry.ts";
-import { provisioned, provisionWorkspace, releaseCheck, type ThreadMachines } from "./vm.ts";
+import { Registry, threadAgent, type HookOutcome, type Thread } from "./registry.ts";
+import { provisioned, provisionWorkspace, releaseCheck, resumeWorkspace, type ThreadMachines } from "./vm.ts";
 import { VmWorkspace } from "./vm-workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
 import type { ModelSelection } from "./models.ts";
@@ -30,6 +30,9 @@ export class Conversations {
   private readonly workspaces = new Map<string, { workspace: VmWorkspace; leases: LeaseStore }>();
   private readonly failures = new Map<string, string>();
   private readonly activations = new Map<string, Promise<void>>();
+  /** Threads whose machine ran its resume hooks since this process started
+   * (or since it last booted the machine). */
+  private readonly resumed = new Set<string>();
   /** Threads whose archive is under way: nothing reopens their agent or
    * workspace meanwhile (the recovery loop runs beside commands). */
   private readonly archiving = new Set<string>();
@@ -126,21 +129,44 @@ export class Conversations {
     this.workspaces.delete(id);
   }
   /** Boots (or re-attaches) the machine; the first time, checks out the
-   * project's pinned repositories in it. */
+   * project's pinned repositories in it and prepares it (pre-setup and
+   * `.agents/setup`, or nothing when its disk came from a template); then,
+   * once per machine boot, the resume hooks run before the agent opens. */
   private async ensureWorkspace(id: string): Promise<void> {
-    const thread = this.thread(id);
+    let thread = this.thread(id);
     if (thread.workspaceState === "releasing") throw new Error("thread workspace is releasing");
-    if (thread.workspaceState === "available") { await this.machines.start(thread); return; }
+    if (thread.workspaceState === "available") {
+      const started = await this.machines.start(thread);
+      await this.resume(id, started?.booted ?? false);
+      return;
+    }
     try {
       await this.machines.start(thread);
+      // The machine's start recorded what its disk was made from.
+      thread = this.thread(id);
       const owner = threadAgent(thread);
       const workspace = this.workspace(id);
+      const preparation = thread.vm?.preparation;
+      const preparing = Date.now();
       const last = thread.vm?.provisionAttempt ?? 0;
-      if (!(last > 0 && await provisioned(workspace, owner, last))) {
+      let outcome = last > 0 ? await provisioned(workspace, owner, last) : null;
+      if (!outcome || outcome.error) {
         const attempt = last + 1;
         this.registry.updateThreadVm(id, { provisionAttempt: attempt });
-        await provisionWorkspace(workspace, owner, thread.allocation, attempt);
+        outcome = await provisionWorkspace(workspace, owner, thread.allocation, attempt,
+          preparation?.source === "template" && preparation.setupBlob ? { kind: "template", setupBlob: preparation.setupBlob } : { kind: "fresh" });
       }
+      this.recordHooks(id, outcome.hooks, "prepare", preparing);
+      if (outcome.stale && preparation?.templateId) {
+        log.info("template is stale: the pinned .agents/setup changed", { thread: id, template: preparation.templateId });
+        await this.machines.invalidateTemplate?.(thread, preparation.templateId).catch(error => log.warn("invalidating the template failed", { thread: id, error }));
+      }
+      await this.resume(id, true);
+      const startup = this.thread(id).vm?.startup;
+      const totalMs = Date.now() - thread.createdAt;
+      if (thread.vm) this.registry.updateThreadVm(id, { startup: { source: preparation?.source ?? "fresh", phases: startup?.phases ?? {}, totalMs } });
+      log.info("machine ready for the agent", { thread: id, source: preparation?.source ?? "fresh", ...(preparation?.templateId ? { template: preparation.templateId } : {}),
+        totalMs, phases: startup?.phases ?? {}, hooks: Object.fromEntries(Object.entries(this.thread(id).vm?.hooks ?? {}).map(([name, hook]) => [name, hook.status])) });
       const primary = thread.allocation.repositories[0];
       this.registry.markWorkspaceAvailable(id, primary
         ? { remote: primary.url, ref: primary.base.startsWith("refs/heads/") ? primary.base : `refs/heads/${primary.base}`, oid: primary.baseOid }
@@ -150,6 +176,31 @@ export class Conversations {
       this.registry.markWorkspaceFailed(id, message);
       throw new Error(message, { cause: error });
     }
+  }
+  /** The resume hooks, once per machine boot. A machine that booted again
+   * under an open agent (a runner restart) closes the agent first, as a
+   * cubed restart would, and the activation reopens it afterwards. */
+  private async resume(id: string, booted: boolean): Promise<void> {
+    if (!booted && this.resumed.has(id)) return;
+    if (this.agents.has(id) || this.claudes.has(id)) {
+      if (!booted) { this.resumed.add(id); return; }
+      const claude = this.claudes.get(id), pi = this.agents.get(id);
+      this.claudes.delete(id); this.agents.delete(id);
+      await (await claude?.catch(() => null))?.close(); await (await pi?.catch(() => null))?.close();
+      log.warn("the machine booted again; the agent reopens after the resume hooks", { thread: id });
+    }
+    const thread = this.thread(id);
+    const started = Date.now();
+    const { hooks, already } = await resumeWorkspace(this.workspace(id), threadAgent(thread));
+    this.resumed.add(id);
+    if (!already) this.recordHooks(id, hooks, "resume", started);
+  }
+  private recordHooks(id: string, hooks: Record<string, HookOutcome>, phase: string, since: number): void {
+    const vm = this.thread(id).vm;
+    if (!vm) return;
+    const startup = vm.startup ?? { source: vm.preparation?.source ?? "fresh", totalMs: 0, phases: {} };
+    this.registry.updateThreadVm(id, { hooks: { ...vm.hooks, ...hooks }, startup: { ...startup, phases: { ...startup.phases, [phase]: Date.now() - since } } });
+    for (const [name, hook] of Object.entries(hooks)) if (hook.status === "failed") log.warn("hook failed", { thread: id, hook: name, exitCode: hook.exitCode ?? null });
   }
   async agent(id: string): Promise<Agent> {
     if (this.closing) throw new Error("host is stopping");
@@ -316,6 +367,7 @@ export class Conversations {
         if (decision.clean && workspace.agentChanged()) decision = { clean: false, reason: "the agent ran commands or wrote files in the machine" };
       }
       this.closeWorkspace(id);
+      this.resumed.delete(id);
       if (thread.vm) this.registry.updateThreadVm(id, { retain: !decision.clean, retainReason: decision.reason });
       this.registry.beginRelease(id);
       const released = await this.release(id);

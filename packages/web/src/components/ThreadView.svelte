@@ -10,7 +10,7 @@
   import { CLAUDE_DURABILITY, isClaude, providerLabel } from "../lib/agent.ts";
   import { createArmed } from "../lib/armed.svelte.ts";
   import type { Command } from "../lib/command.ts";
-  import { lampClass, stateLabel, STARTING_TEXT } from "../lib/thread-state.ts";
+  import { lampClass, machineLabel, stateLabel, STARTING_TEXT } from "../lib/thread-state.ts";
   import type {
     ThreadModels,
     ThreadSummary,
@@ -191,6 +191,9 @@
         <span class="strip-base" title={`${summary.workspaceBase.remote}\n${summary.workspaceBase.ref}\n${summary.workspaceBase.oid}`}>
           base / {summary.workspaceBase.ref.replace("refs/heads/", "")} @ {summary.workspaceBase.oid.slice(0, 8)}
         </span>
+      {/if}
+      {#if machineLabel(summary)}
+        <span class="strip-machine" class:error={machineLabel(summary)?.failed} title={machineLabel(summary)?.title}>{machineLabel(summary)?.text}</span>
       {/if}
       {#if stateLabel(summary)}
         <span class="strip-state" class:error={summary.state === "error"}>{stateLabel(summary)}</span>

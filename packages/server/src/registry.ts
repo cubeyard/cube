@@ -18,10 +18,19 @@ export interface ProjectRepository {
   checkoutName: string; status: "checking" | "ready" | "error"; error: string | null;
   resolvedBase: string | null; baseOid: string | null; checkedAt: number | null;
 }
+/** The project's external hooks: scripts cube runs in every thread machine
+ * before the repository's own `.agents/setup` and `.agents/resume`. Both run;
+ * neither replaces the other. Not secret storage: a guest can read them. */
+export interface ProjectHooks { preSetup: string; preResume: string }
+export const NO_HOOKS: ProjectHooks = Object.freeze({ preSetup: "", preResume: "" });
+/** Each hook is written into the machine's cloud-init seed. */
+export const MAX_HOOK_BYTES = 16384;
 export interface Project {
   id: string; name: string; status: "checking" | "ready" | "error"; error: string | null;
   revision: number; checkedAt: number | null; createdAt: number; updatedAt: number;
   repositories: ProjectRepository[];
+  /** Absent: no hooks (projects saved before hooks existed). */
+  hooks?: ProjectHooks;
 }
 export interface Runner extends NodeBinding {
   configPath: string; configHash: string;
@@ -37,6 +46,8 @@ export interface WorkspaceRepository {
 }
 export interface WorkspaceAllocation {
   projectId: string; projectRevision: number; repositories: WorkspaceRepository[];
+  /** The project's hooks when the thread was created; fixed for the thread. */
+  hooks?: ProjectHooks;
 }
 export type RunnerAllocationState = "available" | "allocating" | "busy" | "releasing" | "failed" | "retiring" | "retired";
 export type RunnerContactStatus = "unknown" | "reachable" | "unreachable" | "stale" | "retired";
@@ -75,6 +86,46 @@ export interface ThreadVm {
   retainReason?: string;
   /** The retained disk was deleted on the operator's request. */
   discarded?: boolean;
+  /** What the machine's disk was made from, decided before it was allocated. */
+  preparation?: MachinePreparation;
+  /** A template build machine of this thread that has not finished (see
+   * vm-template.ts); it is cubed's own and released if it outlives a crash. */
+  build?: { vmId: string; placeholders: Record<string, string>; key: string };
+  /** The hooks' latest outcomes, by hook (`pre-setup`, `setup`, `pre-resume`, `resume`). */
+  hooks?: Record<string, HookOutcome>;
+  /** How long the machine took to become ready for the agent, by phase (ms). */
+  startup?: { source: MachinePreparation["source"]; totalMs: number; phases: Record<string, number> };
+}
+export interface MachinePreparation {
+  /** `template`: the disk is backed by a prepared template; `fresh`: by the base image. */
+  source: "template" | "fresh";
+  templateId?: string;
+  /** The template's `.agents/setup` blob, compared after the checkout. */
+  setupBlob?: string;
+  /** Why the machine started fresh (no template, templates off, a failed build). */
+  reason?: string;
+}
+export interface HookOutcome {
+  /** `ok`, `failed`, `skipped` (prepared by a template) or `absent`. */
+  status: "ok" | "failed" | "skipped" | "absent";
+  exitCode?: number; ms: number; at: number;
+}
+
+/** Validates hooks from the API; absent fields keep `previous`. */
+export function projectHooks(input: unknown, previous: ProjectHooks = NO_HOOKS): ProjectHooks {
+  if (input === undefined || input === null) return { ...previous };
+  if (typeof input !== "object" || Array.isArray(input)) throw new Error("hooks must be an object");
+  const value = input as Record<string, unknown>;
+  const hook = (name: "preSetup" | "preResume") => {
+    const text = value[name];
+    if (text === undefined) return previous[name];
+    if (typeof text !== "string" || text.includes("\0") || Buffer.byteLength(text) > MAX_HOOK_BYTES) {
+      throw new Error(`hooks.${name} must be a script of at most ${MAX_HOOK_BYTES} bytes`);
+    }
+    return text.trim() ? text.replace(/\r\n/g, "\n") : "";
+  };
+  if (Object.keys(value).some(key => key !== "preSetup" && key !== "preResume")) throw new Error("hooks has only preSetup and preResume");
+  return { preSetup: hook("preSetup"), preResume: hook("preResume") };
 }
 
 /** The thread's agent: claude-code threads are created with a claude model. */
@@ -369,13 +420,20 @@ export class Registry {
   threadByVm(vmId: string): Thread | null {
     return this.parse(this.db.prepare("SELECT data FROM thread WHERE json_extract(data, '$.vm.vmId')=?").get(vmId));
   }
+  /** The thread whose unfinished template build machine this is. */
+  threadByBuildVm(vmId: string): Thread | null {
+    return this.parse(this.db.prepare("SELECT data FROM thread WHERE json_extract(data, '$.vm.build.vmId')=?").get(vmId));
+  }
   /** Changes the thread's machine record (provisioning tries, retention). */
-  updateThreadVm(threadId: string, patch: Partial<Pick<ThreadVm, "provisionAttempt" | "retain" | "retainReason" | "discarded">>): Thread {
+  updateThreadVm(threadId: string, patch: Partial<Pick<ThreadVm, "provisionAttempt" | "retain" | "retainReason" | "discarded" | "preparation" | "build" | "hooks" | "startup">>): Thread {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const thread = this.getThread(threadId);
       if (!thread?.vm) throw new Error("thread has no machine");
-      const updated = { ...thread, vm: { ...thread.vm, ...patch } };
+      const vm: ThreadVm = { ...thread.vm, ...patch };
+      // `undefined` removes a field (a finished build).
+      for (const key of Object.keys(patch) as Array<keyof typeof patch>) if (patch[key] === undefined) delete vm[key];
+      const updated = { ...thread, vm };
       this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify(updated), threadId);
       this.db.exec("COMMIT");
       return updated;
@@ -453,7 +511,7 @@ export class Registry {
       if (!load) throw new Error("no free thread machine in the global runner pool — archive an idle thread, register another trusted runner or raise a runner's --max-active-vms");
       const thread: Thread = { id: randomUUID(), projectId, runnerId: load.id,
         title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, agent, archived: false, createdAt: Date.now(),
-        allocation: { projectId, projectRevision: project.revision, repositories },
+        allocation: { projectId, projectRevision: project.revision, repositories, hooks: { ...NO_HOOKS, ...project.hooks } },
         workspaceState: "allocating", workspaceError: null, workspaceBase: null,
         vm: { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") } } };
       this.db.prepare("INSERT INTO thread VALUES (?,?,?,?)").run(thread.id, projectId, load.id, JSON.stringify(thread));

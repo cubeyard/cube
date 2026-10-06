@@ -31,6 +31,13 @@ in `docs/plans/` hold the reasoning and the detailed evidence.
   For cube that installs Node 26, pnpm, Rust and build-essential, then runs
   `pnpm install` and builds the web app. The log is `~/.cache/cube/setup.log`
   in the guest. A failed setup still leaves the thread usable.
+- **Machine templates and hooks** (branch `vm-snapshots`, cube-runner 0.8.0,
+  not released): a project has external pre-setup and pre-resume hooks; a
+  project's first thread on a runner builds a template in a build machine
+  (checkout, pre-setup, `.agents/setup`, seal, power-off, publish) and later
+  threads start from it, skipping setup; resume hooks run on every machine
+  boot. Semantics and defaults: ARCHITECTURE.md, "Machine templates and
+  hooks"; decisions: `docs/plans/2026-10-05-machine-templates.md`.
 - **Archive keeps the disk** of any thread whose agent ran a command or wrote
   a file. The operator deletes retained disks from the project page
   ("retained machines") or with `POST /api/threads/<id>/discard`
@@ -143,10 +150,12 @@ are listed in docs/optchat.md.
 
 ## Known gaps and next steps
 
-- **Machine templates (snapshots):** not built. The proposal is in
-  `docs/plans/2026-10-05-machine-templates.md` and needs three decisions:
-  whether `.agents/setup` goes into the template, 72 h or per push, and a disk
-  budget. They would save about 45 s per new thread.
+- **Machine templates:** built on `vm-snapshots`, verified on Linux/KVM only
+  (`scripts/test-vm-templates.ts`); macOS/HVF templates are not verified. Not
+  done: building in the background on idle capacity, adopting a failed build
+  machine as the thread's machine (a failed build costs a second cold boot),
+  a template's checkout refresh against a real remote in a VM test (covered
+  offline), per-project TTLs.
 - Macaroons for finer GitHub authorization, and a separate download exit, need
   design decisions.
 - **Gateway limits:** HTTP/2, WebSocket and CONNECT are refused. Clients that

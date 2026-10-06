@@ -22,7 +22,7 @@ export interface ThreadSummary {
   workspaceBase?: { remote: string; ref: string; oid: string } | null;
   project: { id: string; name: string };
   /** The thread's machine; after archive, whether its disk was kept. */
-  vm?: { vmId: string; retain?: boolean; retainReason?: string; discarded?: boolean };
+  vm?: Pick<import("../../../server/src/registry.ts").ThreadVm, "vmId" | "retain" | "retainReason" | "discarded" | "preparation" | "hooks" | "startup">;
 }
 export type Project = ProjectRecord & { threadCount: number; retainedThreadCount: number; runnerCount: number; availableRunnerCount: number;
   /** Free thread machine slots over the pool; a runner hosts `maxActiveVms`. */
@@ -34,6 +34,7 @@ export type ProjectStatus = Project["status"];
 export interface ProjectInput {
   name: string;
   repositories: Array<{ url: string; base?: string | null; checkoutName?: string }>;
+  hooks?: { preSetup: string; preResume: string };
 }
 export type { ThreadEvent, ThreadStatus, ThreadTranscript } from "../../../server/src/thread-events.ts";
 export interface ThreadModels {

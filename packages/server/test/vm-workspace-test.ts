@@ -172,6 +172,35 @@ try {
   const failedArchive = await (await fetch(`${base}/api/threads/${gone}`, { method: "DELETE" })).json();
   assert.equal(failedArchive.retained, true, "a failed machine is retained");
 
+  // Project hooks: kept with the project, fixed for each thread at creation,
+  // run in order; resume hooks again when the machine boots again, with the
+  // open agent closed first and reopened afterwards.
+  const hooked = (await (await post(`/api/projects/${empty.id}`, { name: "empty", repositories: [],
+    hooks: { preSetup: "echo pre-setup >> \"$HOME/order\"", preResume: "echo pre-resume >> \"$HOME/order\"" } }, "PUT")).json()).project;
+  assert.deepEqual(hooked.hooks, { preSetup: "echo pre-setup >> \"$HOME/order\"", preResume: "echo pre-resume >> \"$HOME/order\"" });
+  const kept2 = (await (await post(`/api/projects/${empty.id}`, { name: "empty", repositories: [] }, "PUT")).json()).project;
+  assert.deepEqual(kept2.hooks, hooked.hooks, "a save without hooks keeps them");
+  assert.equal((await post(`/api/projects/${empty.id}`, { name: "empty", repositories: [], hooks: { preSetup: 3 } }, "PUT")).status, 409);
+  const withHooks = await create(empty.id, "hooks");
+  await thread(withHooks, row => row.state === "ready");
+  await idle(withHooks);
+  const order = () => fs.readFileSync(path.join(machines.guests.get(withHooks)!.root, "home", "order"), "utf8").trim().split("\n");
+  assert.deepEqual(order(), ["pre-setup", "pre-resume"]);
+  const hooksRecord = app.registry.getThread(withHooks)!.vm!;
+  assert.deepEqual(Object.fromEntries(Object.entries(hooksRecord.hooks!).map(([name, hook]) => [name, hook.status])),
+    { "pre-setup": "ok", setup: "absent", "pre-resume": "ok", resume: "absent" });
+  assert.equal(hooksRecord.startup?.source, "fresh");
+  assert.ok(hooksRecord.startup!.totalMs > 0 && hooksRecord.startup!.phases.prepare >= 0 && hooksRecord.startup!.phases.resume >= 0);
+  await app.conversations.activate(withHooks);
+  assert.deepEqual(order(), ["pre-setup", "pre-resume"], "an activation of the same boot resumes nothing");
+  const before = await app.conversations.agent(withHooks);
+  machines.reboot(app.registry.getThread(withHooks)!);
+  await app.conversations.activate(withHooks);
+  assert.deepEqual(order(), ["pre-setup", "pre-resume", "pre-resume"], "a new boot resumes again, setup does not run again");
+  assert.notEqual(await app.conversations.agent(withHooks), before, "the agent was closed for the hooks and reopened");
+  assert.equal(app.conversations.error(withHooks), null);
+  await (await fetch(`${base}/api/threads/${withHooks}/history`)).json();
+
   // The scripts quote what they are given.
   assert.match(provisionScript({ projectId: "p", projectRevision: 1, repositories: [{ url: "https://example.com/a'b.git", base: "main", baseOid: "a".repeat(40), checkoutName: "workspace" }] }),
     /checkout '\.' 'https:\/\/example\.com\/a'\\''b\.git' 'refs\/heads\/main'/);
