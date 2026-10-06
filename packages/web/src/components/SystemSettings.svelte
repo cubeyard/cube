@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import Header from "./Header.svelte";
+  import UsagePanel from "./UsagePanel.svelte";
   import { checkForUpdate, errorText, fetchUpdateStatus, installUpdate } from "../lib/api.ts";
   import type { UpdateStatus } from "../lib/types.ts";
   import { uid } from "../lib/uid.ts";
@@ -54,7 +55,7 @@
 <main class="system-settings">
   <div class="intro">
     <h1>system</h1>
-    <p>inspect and update the cubed control plane on this host. runner software is separate and is never changed here.</p>
+    <p>inspect and update the cubed control plane on this host, and read what its agents have used. runner software is separate and is never changed here.</p>
   </div>
 
   {#if error}<p class="error" role="alert">{error} <button class="key" onclick={() => void refresh()}>retry</button></p>{/if}
@@ -101,6 +102,7 @@
       </div>
     </section>
   {/if}
+  <div class="usage-board"><UsagePanel /></div>
 </main>
 
 <style>
@@ -126,6 +128,7 @@
   .notice { padding: 0.65rem 0.75rem; margin-top: 1rem; background: var(--bad-soft); border: 1px solid var(--bad-line); border-radius: var(--r-key); }
   .actions { display: flex; flex-wrap: wrap; gap: 0.55rem; margin-top: 1rem; }
   .error { color: var(--bad); overflow-wrap: anywhere; }
+  .usage-board { max-width: 52rem; }
   @media (max-width: 40rem) {
     .system-settings { padding: 1.4rem 1rem; }
     .update-board { padding: 0.85rem; }

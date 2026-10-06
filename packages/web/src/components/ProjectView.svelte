@@ -21,6 +21,7 @@
   import Icon from "./Icon.svelte";
   import RepositoryInput from "./RepositoryInput.svelte";
   import RunnerPanel from "./RunnerPanel.svelte";
+  import UsagePanel from "./UsagePanel.svelte";
 
   let { projectId, githubLogin = false, command = null, onConsume = () => {}, onNewThread }: {
     projectId: string;
@@ -407,6 +408,7 @@
     <p class="config-note">ready projects share one global runner pool. repository URLs and checked commit IDs are pinned per thread. each thread works in its own virtual machine on a runner; its only network is cube’s gateway, which allows http and https and decides every request.</p>
 
     {#if project}<RunnerPanel onChanged={() => void refresh()} />{/if}
+    {#if project}<UsagePanel projectId={project.id} />{/if}
 
     <div class="project-actions">
       <button class="key primary" onclick={save} disabled={saving || !dirty}>

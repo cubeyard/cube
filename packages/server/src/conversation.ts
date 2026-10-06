@@ -3,7 +3,7 @@ import path from "node:path";
 import type { ServerResponse } from "node:http";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message, Models } from "@earendil-works/pi-ai";
-import { ConversationBusy, LiveDoc } from "@earendil-works/pi-durable";
+import { ConversationBusy, LiveDoc, type UsageState } from "@earendil-works/pi-durable";
 import { ClaudeAgent, ClaudeBusy, CLAUDE_PROVIDER, type ClaudeRuntime } from "./claude-agent.ts";
 import { ClaudeThreadEvents, render as renderClaude } from "./claude-thread-events.ts";
 import { assertCurrentThreadStore, openAgent, readStorage, type Agent } from "./durable-agent.ts";
@@ -42,6 +42,9 @@ export class Conversations {
   private readonly claudeFeeds = new WeakMap<ClaudeAgent, ClaudeThreadEvents>();
   private readonly claude: ClaudeRuntime | null;
   private closing = false;
+  /** Told a Pi agent's usage just before the agent closes (usage-service.ts):
+   * until it opens again, nothing else may read its store. */
+  onUsage: ((id: string, state: UsageState) => void) | null = null;
   /** `claude` is null when this host has no Claude Code to start. */
   constructor(options: { registry: Registry; directory: string; models: Models; machines: ThreadMachines; claude?: ClaudeRuntime | null }) {
     this.registry = options.registry; this.directory = options.directory; this.models = options.models;
@@ -237,7 +240,21 @@ export class Conversations {
   private async closeAgents(id: string): Promise<void> {
     const claude = this.claudes.get(id), pi = this.agents.get(id);
     this.claudes.delete(id); this.agents.delete(id);
-    await (await claude?.catch(() => null))?.close(); await (await pi?.catch(() => null))?.close();
+    await (await claude?.catch(() => null))?.close(); await this.closePi(id, pi);
+  }
+  /** Closes a Pi agent, keeping its usage first. */
+  private async closePi(id: string, loading: Promise<Agent> | undefined): Promise<void> {
+    const agent = await loading?.catch(() => null);
+    if (!agent) return;
+    try { if (this.onUsage) this.onUsage(id, await agent.harness.usage(context)); }
+    catch (error) { log.warn("usage not kept at close", { thread: id, error }); }
+    await agent.close();
+  }
+  /** The open Pi agent's usage (every conversation's `pi.usage`), or null
+   * when its agent is not open. Never opens one. */
+  async liveUsage(id: string): Promise<UsageState | null> {
+    const agent = await this.agents.get(id)?.catch(() => null);
+    return agent ? agent.harness.usage(context) : null;
   }
   /** An agent opens only on a machine that finished preparing: it takes the
    * workspace lease for its lifetime, which preparing the machine needs, and
@@ -405,7 +422,7 @@ export class Conversations {
       else {
         const claude = this.claudes.get(id), pi = this.agents.get(id);
         this.claudes.delete(id); this.agents.delete(id);
-        await (await claude)?.close(); await (await pi)?.close();
+        await (await claude)?.close(); await this.closePi(id, pi);
         const workspace = this.openWorkspace(id);
         try { decision = await releaseCheck(workspace, threadAgent(thread), thread.allocation); }
         catch (error) { decision = { clean: false, reason: `the thread machine could not be checked: ${error instanceof Error ? error.message : String(error)}` }; }
@@ -467,7 +484,7 @@ export class Conversations {
     // A machine still booting is left to boot; the next cubed attaches to it.
     await this.machines.close();
     await Promise.allSettled(this.commands.values());
-    await Promise.all([...this.agents.values()].map(async promise => (await promise.catch(() => null))?.close()));
+    await Promise.all([...this.agents].map(([id, promise]) => this.closePi(id, promise)));
     await Promise.all([...this.claudes.values()].map(async promise => (await promise.catch(() => null))?.close()));
     this.agents.clear(); this.claudes.clear();
     for (const id of [...this.workspaces.keys()]) this.closeWorkspace(id);

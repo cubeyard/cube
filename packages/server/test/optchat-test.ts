@@ -106,7 +106,7 @@ try {
   // Turn 1: the view is empty, the message comes whole; OptChat spawns a thread.
   script = [
     turn => {
-      assert.deepEqual(turn.tools.sort(), ["date", "history", "projects", "runners", "spawn", "tell", "threads", "zoom"], "no code tools");
+      assert.deepEqual(turn.tools.sort(), ["date", "history", "projects", "runners", "spawn", "tell", "threads", "usage", "zoom"], "no code tools");
       assert.match(turn.system, /You are OptChat/);
       assert.equal(turn.messages.length, 1, "a fresh context: the view and the message only");
       assert.deepEqual(userBlocks(turn.messages[0]!), ["<chat>\n</chat>", `please fix the gateway; ${"long detail ".repeat(20)}`]);

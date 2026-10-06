@@ -5,6 +5,7 @@
     deleteThread,
     errorText,
     fetchThreadModels,
+    fetchThreadUsage,
     setThreadModel,
   } from "../lib/api.ts";
   import { CLAUDE_DURABILITY, isClaude, providerLabel } from "../lib/agent.ts";
@@ -12,9 +13,11 @@
   import type { Command } from "../lib/command.ts";
   import { lampClass, machineLabel, stateLabel, STARTING_TEXT } from "../lib/thread-state.ts";
   import type {
+    SubjectUsage,
     ThreadModels,
     ThreadSummary,
   } from "../lib/types.ts";
+  import { BILLED_NOTE, spendText, tokensText } from "../../../server/src/usage.ts";
   import Conversation from "./Conversation.svelte";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
@@ -86,6 +89,27 @@
       }
     }
   }
+
+  // ---- usage: read on open and whenever a run ends ----
+  let usage = $state<SubjectUsage | null>(null);
+  async function loadUsage(): Promise<void> {
+    try {
+      const fresh = await fetchThreadUsage(threadId);
+      if (!disposed) usage = fresh;
+    } catch {
+      // the strip simply shows nothing; the usage panels say why
+    }
+  }
+  $effect(() => {
+    if (!conversationBusy) untrack(() => void loadUsage());
+  });
+  const usageText = $derived(!usage ? null : usage.coverage === "unavailable" ? "usage unknown" : spendText(usage.spend));
+  const usageTitle = $derived(!usage ? "" : [
+    usage.coverage === "unavailable" ? usage.notes.join("\n") : tokensText(usage.spend.tokens),
+    usage.unknownTurns ? `${usage.unknownTurns} turns without a usage report are not included` : "",
+    ...usage.lines.map((line) => `${line.model}: ${spendText(line.spend)} — ${line.basis}`),
+    BILLED_NOTE,
+  ].filter(Boolean).join("\n"));
 
   // ---- the mobile thread drawer: opened from the strip, closed by its key,
   // the scrim, or Escape; focus goes in with it and back to the opener ----
@@ -197,6 +221,9 @@
       {/if}
       {#if stateLabel(summary)}
         <span class="strip-state" class:error={summary.state === "error"}>{stateLabel(summary)}</span>
+      {/if}
+      {#if usageText}
+        <span class="strip-usage" title={usageTitle} aria-label={`usage: ${usageText}`}>{usageText}</span>
       {/if}
       <span class="spacer"></span>
       <label class="strip-model" title={modelState?.selected ? `${modelState.selected.provider}/${modelState.selected.id}` : "choose a model"}>

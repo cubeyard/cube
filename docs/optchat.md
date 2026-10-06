@@ -6,7 +6,9 @@ tools. It starts threads in projects (`spawn`), gives a thread that has reported
 more to do (`tell`), lists its threads (`threads`) and what it can start
 (`projects`), reports the runners as cubed last heard from them (`runners`,
 read-only; see docs/runner-operations.md, "Observing runners"), reads one of
-its threads (`history`), and reads its own memory (`zoom`, `date`). Threads do all the
+its threads (`history`), reads usage and estimated cost (`usage`: everything,
+a project or a thread; read-only, see [usage.md](usage.md)) and reads its own
+memory (`zoom`, `date`). Threads do all the
 work, each in its own VM, exactly like a thread started from the UI.
 
 The memory follows Victor Taelin's OptChat spec
@@ -31,6 +33,7 @@ with Pi as its only writer. cubed's live-instance socket lock (one cubed per
 | view in block 1 | the turn's view parts are stored in the `cube.optchat.turn` doc; a `beforeRequest` hook renders them as the first text block of the turn's first user message, the same bytes on every request and recovery |
 | the input queue | `cube.optchat.pending`: a message or report is accepted there at once and kept until Pi has placed it; all waiting messages become one turn, each still its own user message and its own Pi submission |
 | view at load | `cube.optchat.view`, written with every node: the view over the first `total` messages. A reopen restores it and appends the rest, so it goes on from the view it had |
+| compactor usage | `cube.optchat.usage`: the compactor's calls run beside Pi, so its `pi.usage` misses them; each reply's usage (failed ones too) is added there in its own commit, by `provider/model` with a call count |
 | subagent reports | when a spawned thread's run settles, its last reply goes to the chat as `[<first 8 of the thread id>] <report>`, with request id `report:<thread>:<run>`, so a report is delivered once across restarts. The transcript marks it with `from` (the short id) and shows it as the thread's, not the user's |
 
 `packages/server/src/optchat-memory.ts` is the pure part: the fold that appends

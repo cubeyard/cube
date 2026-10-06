@@ -10,8 +10,9 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import type { JsonRepresentation } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { cleanupSessionResources, Type, type Message, type Models } from "@earendil-works/pi-ai";
+import { cleanupSessionResources, Type, type AssistantMessage, type Message, type Models, type Usage } from "@earendil-works/pi-ai";
 import { createRegistry, defineDoc, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, ROOT_CONVERSATION_ID, section, type LiveState, type Conversation, type ConversationId, type Cursor, type Page, type EntryId, type EntryRecord } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openStorage } from "./durable-agent.ts";
@@ -20,6 +21,7 @@ import { compactNode } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { capText, Memory, type LogMessage, type Part } from "./optchat-memory.ts";
 import type { ThreadEvent, ThreadEvents, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
+import { addUsage, type OptChatUsage } from "./usage-service.ts";
 
 const context = BACKGROUND_CONTEXT;
 const log = createLogger("optchat");
@@ -90,6 +92,9 @@ export interface OptThreads {
   /** What cubed has of a thread, read only: its own record beside the
    * agent's stored transcript, which may disagree. null: no such thread. */
   history(id: string): Promise<ThreadRecord | null>;
+  /** Usage and estimated cost as text: of everything, a project, or one
+   * thread (an id or its first characters). Read-only. */
+  usage?(query: { project?: string | undefined; thread?: string | undefined }): Promise<string>;
 }
 
 export type ThreadRecord = {
@@ -191,6 +196,12 @@ const PendingDoc = defineDoc<Pending>({ kind: "cube.optchat.pending", version: 1
 /** The view as of the newest node, over the first `total` messages: a reopen
  * goes on from it instead of folding a different view. */
 const ViewDoc = defineDoc<{ total: number; parts: number[] }>({ kind: "cube.optchat.view", version: 1, scope: "session", initial: () => ({ total: 0, parts: [] }) });
+/** The compactor's model calls run beside Pi, so Pi's `pi.usage` does not
+ * see them: their usage by `provider/model`, one commit per reply, failed
+ * replies included. `since` is the first one this store counted; `earlier`
+ * says the tree had nodes before that, built by calls nobody counted. */
+type CompactorUsage = { models: Record<string, JsonRepresentation<Usage>>; calls: Record<string, number>; since: number | null; earlier?: boolean };
+const CompactorUsageDoc = defineDoc<CompactorUsage>({ kind: "cube.optchat.usage", version: 1, scope: "session", initial: () => ({ models: {}, calls: {}, since: null }) });
 const TURN = "optchat.turn";
 const NODE_ENTRY = "optchat.node";
 
@@ -372,10 +383,13 @@ export class OptChat {
     // The nodes first, then the stored view over the part of the log it
     // covered, then the messages after it. A view that does not fit is
     // folded again from the log.
+    let nodes = 0;
     for (const entry of await this.scan(this.tree, 0)) {
       const node = entry.data as { l: number; i: number; text: string } | undefined;
-      if (entry.kind === NODE_ENTRY && node) this.memory.setNode(node.l, node.i, node.text);
+      if (entry.kind === NODE_ENTRY && node) { this.memory.setNode(node.l, node.i, node.text); nodes++; }
     }
+    // A chat whose tree grew before its compactor was counted: those calls are unknown.
+    if (nodes) await this.harness.commit(async tx => { const usage = await tx.doc(CompactorUsageDoc); if (usage.since === null && !usage.earlier) usage.earlier = true; }, context);
     const messages: LogMessage[] = [];
     for (const entry of await this.scan(this.conversation.id, 0)) {
       messages.push(...entryMessages(entry));
@@ -456,7 +470,8 @@ export class OptChat {
     else {
       const model = this.options.compactor ?? this.model;
       if (!model) throw new Error("the chat has no model");
-      text = await compactNode({ models: this.compactorModels, model, context: this.memory.context(l, i), source, node: this.memory.nodeLimit, signal: this.abort.signal });
+      text = await compactNode({ models: this.compactorModels, model, context: this.memory.context(l, i), source, node: this.memory.nodeLimit, signal: this.abort.signal,
+        onReply: reply => this.countCompactor(reply) });
     }
     if (this.closing) return;
     // Stored first: memory never holds a node storage lacks. The view it
@@ -466,6 +481,29 @@ export class OptChat {
     const view = { total: this.memory.length, parts: flatParts(this.memory.view) };
     await this.harness.commit(async tx => { Object.assign(await tx.doc(ViewDoc), view); }, context)
       .catch(error => { if (!this.closing) log.warn("view not stored", { error }); });
+  }
+
+  /** Adds one compactor reply's usage. Best effort: a failed commit loses
+   * that reply's usage, never the node. */
+  private async countCompactor(reply: AssistantMessage): Promise<void> {
+    const key = `${reply.provider}/${reply.model}`;
+    await this.harness.commit(async tx => {
+      const usage = await tx.doc(CompactorUsageDoc);
+      usage.since ??= Date.now();
+      const total = Object.hasOwn(usage.models, key) ? usage.models[key] : undefined;
+      // A key holds a slash, so it is never `__proto__`.
+      if (total) addUsage(total as unknown as Usage, reply.usage);
+      else usage.models[key] = JSON.parse(JSON.stringify(reply.usage)) as JsonRepresentation<Usage>;
+      usage.calls[key] = (Object.hasOwn(usage.calls, key) ? usage.calls[key]! : 0) + 1;
+    }, context).catch(error => { if (!this.closing) log.warn("compactor usage not counted", { error }); });
+  }
+
+  /** The chat's own usage (its Pi store and its compactor) and the threads it started. */
+  async usage(): Promise<OptChatUsage> {
+    const compactor = await this.harness.snapshot(CompactorUsageDoc, context);
+    const threads = Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {});
+    return { chat: await this.harness.usage(context) as OptChatUsage["chat"],
+      compactor: compactor ? JSON.parse(JSON.stringify(compactor)) as OptChatUsage["compactor"] : { models: {}, calls: {}, since: null, earlier: false }, threads };
   }
 
   /** Accepts a user message or a thread report and keeps it until it is in
@@ -806,10 +844,20 @@ export class OptChat {
         return text(formatHistory(id, record, report, args));
       },
     });
+    const usage = defineTool({
+      name: "usage",
+      description: "Token usage and estimated cost so far: of everything (by project, model and thread, and your own), of one project, or of one thread (its id). Estimates, not charges; usage without a record is reported as unknown.",
+      parameters: Type.Object({
+        project: Type.Optional(Type.String({ description: "Project name or id" })),
+        thread: Type.Optional(Type.String({ description: "Thread id or its first characters" })),
+      }),
+      replay: "safe",
+      execute: async args => text(this.options.threads.usage ? await this.options.threads.usage(args) : "usage is not available"),
+    });
     const instructions = path.join(this.options.directory, "AGENTS.md");
     return defineExtension({
       name: "optchat",
-      tools: [zoom, date, projects, runners, spawn, tell, threads, history],
+      tools: [zoom, date, projects, runners, spawn, tell, threads, history, usage],
       sections: [
         section("master", () => MASTER, { tag: false }),
         section("view", () => VIEW_DOC, { tag: false }),

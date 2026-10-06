@@ -28,6 +28,7 @@ import { cubeThreads } from "./optchat-threads.ts";
 import { observeRunners } from "./runner-observe.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
+import { threadUsageText, usageText, UsageService } from "./usage-service.ts";
 
 const CUBED_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
 const HELP = `usage: cubed [options]
@@ -197,11 +198,35 @@ export async function createCubed(options: {
   const catalog = async () => (await models.getAvailable()).map(({ provider, id }) => ({ provider, id }));
   /** What a new thread may start with: Pi's models, then claude · max. */
   const threadCatalog = async () => [...await catalog(), ...(conversations.claudeAvailable ? CLAUDE_MODELS : [])];
+  let optchat: Promise<{ chat: OptChat; events: OptChatEvents }> | null = null;
+  // Read-only usage accounting over the agents' own records.
+  const usage = new UsageService({
+    file: path.join(options.state, "usage.sqlite"), registry, threads: path.join(options.state, "threads"),
+    live: id => conversations.liveUsage(id),
+    optchat: async () => optchat ? (await optchat).chat.usage() : null,
+    optchatStore: path.join(options.state, "optchat", "pi.sqlite"),
+    pricing: (provider, id) => {
+      const cost = models.getModel(provider, id)?.cost;
+      return cost ? { input: cost.input, output: cost.output, cacheRead: cost.cacheRead, cacheWrite: cost.cacheWrite, source: "pi-ai model catalog, USD per million tokens", asOf: Date.now() } : null;
+    },
+  });
+  conversations.onUsage = (id, state) => usage.remember(id, state);
+  const usageQuery = async (query: { project?: string | undefined; thread?: string | undefined }) => {
+    if (query.thread) {
+      const prefix = query.thread.replace(/^\[|\]$/g, "").trim();
+      const matches = registry.listThreads().filter(thread => thread.id.startsWith(prefix));
+      if (!prefix || matches.length !== 1) return matches.length ? `${query.thread} names more than one thread` : `no thread ${query.thread}`;
+      return threadUsageText(await usage.thread(matches[0]!.id));
+    }
+    const project = query.project ? registry.listProjects().find(candidate => candidate.id === query.project)
+      ?? registry.listProjects().find(candidate => candidate.name.toLowerCase() === query.project!.toLowerCase()) : undefined;
+    if (query.project && !project) return `no project ${query.project}`;
+    return usageText(await usage.report({ project: project?.id ?? null }), project ? { projectName: project.name } : {});
+  };
   // OptChat, the user's one endless chat: opened once a model exists,
   // retried by the recovery loop until then.
   const probeIntervalMs = options.runnerProbeIntervalMs ?? 5 * 60_000;
-  const optchatThreads = cubeThreads({ registry, conversations, catalog: threadCatalog, runners: () => observeRunners(registry, probeIntervalMs) });
-  let optchat: Promise<{ chat: OptChat; events: OptChatEvents }> | null = null;
+  const optchatThreads = { ...cubeThreads({ registry, conversations, catalog: threadCatalog, runners: () => observeRunners(registry, probeIntervalMs) }), usage: usageQuery };
   let optchatError = "";
   // Inside the promise: a bad CUBED_OPTCHAT_COMPACTOR must reject here,
   // not throw out of startup or the recovery timer and end cubed.
@@ -381,6 +406,7 @@ export async function createCubed(options: {
         if (parts[3] === "check" && method === "POST") return json({ project: await check(project) });
         if (method === "GET") return json({ project: projectView(project) });
       }
+      if (url.pathname === "/api/usage" && method === "GET") return json(await usage.report({ project: url.searchParams.get("project") || null }));
       if (parts[0] === "api" && parts[1] === "optchat") {
         const { chat, events } = await openOptchat();
         if (parts[2] === "history" && method === "GET") return json(await events.read());
@@ -407,6 +433,8 @@ export async function createCubed(options: {
           return json({ id: thread.id });
         }
         const thread = registry.getThread(id);
+        // An archived thread's usage stays readable.
+        if (thread && parts[3] === "usage" && parts.length === 4 && method === "GET") return json({ usage: await usage.thread(id) });
         // An archived thread's retained machine disk can still be discarded.
         if (thread?.archived && parts[3] === "discard" && method === "POST") { await conversations.discard(id); return json({ ok: true }); }
         if (!thread || thread.archived) return json({ error: "thread not found" }, 404);
@@ -478,7 +506,7 @@ export async function createCubed(options: {
   const probes = setInterval(() => void probeRunners(), probeIntervalMs);
   probes.unref();
   let closePromise: Promise<void> | undefined;
-  return { server, registry, conversations, gateway, close() {
+  return { server, registry, conversations, gateway, usage, close() {
     closePromise ??= (async () => {
       clearInterval(recovery);
       clearInterval(probes);
@@ -492,6 +520,7 @@ export async function createCubed(options: {
       workspaceServer.closeAllConnections();
       await new Promise<void>(resolve => workspaceServer.close(() => resolve()));
       fs.rmSync(socketDirectory ?? socket, { recursive: true, force: true });
+      usage.close();
       registry.close();
     })();
     return closePromise;
