@@ -73,6 +73,8 @@ export const THREAD_NOTE = "(This thread was started by OptChat, the user's chat
 export interface OptThreads {
   /** Projects, models and capacity a new thread can use, as text. */
   projects(): Promise<string>;
+  /** Each runner's last report (version, platform, machines) and what is unknown, as text. */
+  runners(): Promise<string>;
   /** Starts one thread; the same request id finds the same thread again. */
   spawn(task: { project: string; task: string; model?: string | undefined }, requestId: string): Promise<{ id: string; title: string }>;
   /** A message to a thread; refused while it works. */
@@ -636,6 +638,15 @@ export class OptChat {
       replay: "safe",
       execute: async () => text(await this.options.threads.projects()),
     });
+    const runners = defineTool({
+      name: "runners",
+      description: "The runners that host thread machines, as cubed last heard from them: version, platform, contact, machines and slots, "
+        + "and what is unknown. Read-only. Report it as it says: a stale or missing report is unknown, not the runner's current state; "
+        + "a published release does not mean a runner installed it; slots in use do not mean a runner hosts only that many.",
+      parameters: Type.Object({}),
+      replay: "safe",
+      execute: async () => text(await this.options.threads.runners()),
+    });
     const spawn = defineTool({
       name: "spawn",
       description: "Start one thread per task, in parallel, and answer their ids at once. Each thread is a coding agent with its own machine and a checkout of the project; it does not see this chat. Its report comes back later as a message starting \"[id] \".",
@@ -685,7 +696,7 @@ export class OptChat {
     const instructions = path.join(this.options.directory, "AGENTS.md");
     return defineExtension({
       name: "optchat",
-      tools: [zoom, date, projects, spawn, tell, threads],
+      tools: [zoom, date, projects, runners, spawn, tell, threads],
       sections: [
         section("master", () => MASTER, { tag: false }),
         section("view", () => VIEW_DOC, { tag: false }),

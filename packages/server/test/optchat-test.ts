@@ -72,6 +72,7 @@ const told: string[] = [];
 const THREAD = "abcdef12-0000-4000-8000-000000000001";
 const threads: OptThreads = {
   async projects() { inProjects = true; await projectsGate; inProjects = false; return "projects:\ncube (id p1; ready): https://github.com/cubeyard/cube.git@main"; },
+  async runners() { return "runners as cubed last heard from them:\n- node-a (id r1)"; },
   async spawn(task, requestId) { spawned.push({ task: task.task, requestId }); return { id: THREAD, title: task.task.slice(0, 20) }; },
   async tell(id, text) { told.push(`${id}:${text}`); },
   async describe(ids) { return ids.map(id => `[${id.slice(0, 8)}] cube · ready`).join("\n"); },
@@ -104,7 +105,7 @@ try {
   // Turn 1: the view is empty, the message comes whole; OptChat spawns a thread.
   script = [
     turn => {
-      assert.deepEqual(turn.tools.sort(), ["date", "projects", "spawn", "tell", "threads", "zoom"], "no code tools");
+      assert.deepEqual(turn.tools.sort(), ["date", "projects", "runners", "spawn", "tell", "threads", "zoom"], "no code tools");
       assert.match(turn.system, /You are OptChat/);
       assert.equal(turn.messages.length, 1, "a fresh context: the view and the message only");
       assert.deepEqual(userBlocks(turn.messages[0]!), ["<chat>\n</chat>", `please fix the gateway; ${"long detail ".repeat(20)}`]);

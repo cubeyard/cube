@@ -75,6 +75,11 @@ export interface TrustedRunnerHealth {
   retainedBytes: number;
   softwareVersion: string;
   protocolVersion: 3;
+  /** From the same exchange's authenticated hello; absent in health
+   * recorded before cubed kept it. */
+  platform?: string;
+  capabilities?: string[];
+  limits?: VmLimits;
 }
 interface RunnerConfig {
   version: 2; binding: NodeBinding; controlKey: string; serverPeer: string;
@@ -314,7 +319,7 @@ export class IrohRunnerClient {
   }
   /** A native endpoint per RPC, in THIS process. Calls are serialized because
    * concurrent endpoints cannot safely publish the same Iroh identity. */
-  private async request(query?: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  private async request(query?: Record<string, unknown>, signal?: AbortSignal, onHello?: (hello: Record<string, unknown>) => void): Promise<Record<string, unknown>> {
     const previous = this.requestTail;
     let release!: () => void;
     const turn = new Promise<void>(resolve => { release = resolve; });
@@ -327,7 +332,7 @@ export class IrohRunnerClient {
     try {
       if (signal?.aborted) throw new IrohNodeError("NODE_UNAVAILABLE");
       await (interrupted ? Promise.race([previous, interrupted]) : previous);
-      return await this.requestOne(query, signal);
+      return await this.requestOne(query, signal, onHello);
     } finally {
       if (onAbort) signal!.removeEventListener("abort", onAbort);
       release();
@@ -335,7 +340,7 @@ export class IrohRunnerClient {
   }
   /** Owning the endpoint per call lets a deadline close pending connect/read
    * operations. Late bind/connect completions are closed too; no retry task. */
-  private async requestOne(query?: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  private async requestOne(query?: Record<string, unknown>, signal?: AbortSignal, onHello?: (hello: Record<string, unknown>) => void): Promise<Record<string, unknown>> {
     if (signal?.aborted) throw new IrohNodeError("NODE_UNAVAILABLE");
     this.assertConfig();
     const key = this.identity();
@@ -393,6 +398,7 @@ export class IrohRunnerClient {
       const error = remoteError(response);
       if (error) throw error;
       const hello = this.hello(response); // full immutable node binding
+      onHello?.(hello);
       if (!query) return hello;
       if (!(hello.capabilities as string[]).includes(query.method as string)) throw new IrohNodeError("UNSUPPORTED");
       combined.throwIfAborted();
@@ -464,9 +470,11 @@ export class IrohRunnerClient {
   /** Contact only. */
   async check(): Promise<void> { await this.describe(); }
   async health(): Promise<TrustedRunnerHealth> {
-    const result = await this.request({ method: "node.status" });
+    let hello: Record<string, unknown> = {};
+    const result = await this.request({ method: "node.status" }, undefined, value => { hello = value; });
     const status = result.status as Omit<TrustedRunnerHealth, "softwareVersion" | "protocolVersion" | "error"> & { error?: string };
-    return { ...status, error: status.error ?? null, softwareVersion: result.softwareVersion as string, protocolVersion: PROTOCOL };
+    return { ...status, error: status.error ?? null, softwareVersion: result.softwareVersion as string, protocolVersion: PROTOCOL,
+      platform: hello.platform as string, capabilities: [...hello.capabilities as string[]], limits: hello.limits as VmLimits };
   }
   /** `template` backs the disk by a template instead of the base image
    * (runner 0.8.0+, capability `vm.publish`). */
