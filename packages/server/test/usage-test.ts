@@ -45,7 +45,34 @@ const opus = (lines: ReturnType<typeof claudeLines>["lines"], model = "claude-op
   const records = [init(1, "s1"), result(1, "s1", totalsOf(100, 1)), init(2, "s1"), result(2, "s1", totalsOf(130, 1.3))];
   const { lines, notes } = claudeLines(records, [turn(1), turn(2)]);
   assert.equal(opus(lines).spend.tokens.input, 130, "carried totals are not counted twice");
-  assert.ok(notes.some(note => note.includes("continued the session's saved totals")));
+  assert.ok(notes.some(note => note.includes("continued the totals of every earlier turn")));
+}
+{
+  // The same with a session id that changed on resume, and reasoning
+  // tokens: the store's order decides, and reasoning is carried too.
+  const withThinking = (input: number, thinking: number) => {
+    const value = totalsOf(input, input / 100);
+    return { "claude-opus-4-7": { ...value["claude-opus-4-7"], thinkingTokens: thinking } };
+  };
+  const records = [init(1, "s1"), result(1, "s1", withThinking(100, 7)), result(2, "s1", withThinking(150, 9)),
+    init(3, "s2"), result(3, "s2", withThinking(190, 12))];
+  const { lines } = claudeLines(records, [turn(1), turn(2), turn(3)]);
+  assert.equal(opus(lines).spend.tokens.input, 190, "a new session id after --resume does not count the carried totals again");
+  assert.equal(opus(lines).spend.tokens.reasoning, 12, "reasoning carried across a resumed process is not counted twice");
+}
+{
+  // Three processes; the third carries only its predecessor's totals.
+  const records = [init(1, "s1"), result(1, "s1", totalsOf(100, 1)), init(2, "s1"), result(2, "s1", totalsOf(40, 0.4)),
+    init(3, "s1"), result(3, "s1", totalsOf(60, 0.6))];
+  const { lines, notes } = claudeLines(records, [turn(1), turn(2), turn(3)]);
+  assert.equal(opus(lines).spend.tokens.input, 160);
+  assert.ok(notes.some(note => note.includes("the previous process's totals")));
+}
+{
+  // A zeroed error_during_execution result without is_error: unknown, not zero.
+  const records = [init(1, "s1"), result(1, "s1", totalsOf(100, 1)), result(2, "s1", {}, { subtype: "error_during_execution" })];
+  const { unknownTurns } = claudeLines(records, [turn(1), turn(2, "failed")]);
+  assert.equal(unknownTurns, 1);
 }
 {
   // A resumed process that started from zero: its first result is its own.
@@ -160,7 +187,10 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
   assert.deepEqual(kept.spend, reading.spend);
   // Archived: its store is read again (nothing else may open it now).
   records.set("open", thread("open", true));
+  const stat = (name: string) => { try { const value = fs.statSync(path.join(threads, "open", name)); return `${value.size}:${value.mtimeMs}`; } catch { return "-"; } };
+  const before = [stat("pi.sqlite"), stat("pi.sqlite-wal")];
   const archived = await usage.thread("open");
+  assert.deepEqual([stat("pi.sqlite"), stat("pi.sqlite-wal")], before, "an archived store is read from a copy, never changed");
   assert.equal(archived.read, "store");
   assert.equal(archived.archived, true);
   assert.deepEqual(archived.spend, reading.spend);
@@ -168,6 +198,13 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
   // A new process: the snapshot persists, the unchanged store is a cache hit.
   const again = service();
   assert.deepEqual((await again.thread("open")).spend, reading.spend);
+  // A store that cannot be read: the last reading, saying so.
+  fs.writeFileSync(path.join(threads, "open", "pi.sqlite"), "not a database");
+  fs.rmSync(path.join(threads, "open", "pi.sqlite-wal"), { force: true });
+  const fallback = await again.thread("open");
+  assert.equal(fallback.read, "snapshot");
+  assert.deepEqual(fallback.spend, reading.spend);
+  assert.ok(fallback.notes.some(note => note.includes("could not be read now")));
   again.close();
 }
 {
@@ -243,6 +280,36 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
     assert.equal(report.optchat!.coverage, "complete");
     usage.close();
   } finally { await chat.close(); }
+  // Reopened: still counted from its first open, so nothing is unknown.
+  const reopened = await OptChat.open({ directory: path.join(root, "optchat"), models, model: async () => ({ provider: model.provider, id: model.id }),
+    threads: { projects: async () => "", spawn: async () => { throw new Error("no"); }, tell: async () => {}, describe: async () => "", events: async () => null },
+    limits: { retryMs: 50, watchMs: 60_000 } });
+  try { assert.ok(!(await reopened.usage()).compactor.earlier); }
+  finally { await reopened.close(); }
+}
+{
+  // A chat whose tree was built before the compactor was counted (an older
+  // cube): its free nodes cost nothing, its compacted ones are unknown.
+  const { OptChat } = await import("../src/optchat.ts");
+  const threads = { projects: async () => "", spawn: async () => { throw new Error("no"); }, tell: async () => {}, describe: async () => "", events: async () => null };
+  const open = (directory: string) => OptChat.open({ directory, models, model: async () => ({ provider: model.provider, id: model.id }), threads, limits: { retryMs: 50, watchMs: 60_000 } });
+  const older = async (directory: string, text: string) => {
+    let chat = await open(directory);
+    await chat.send(text, "m1");
+    for (const deadline = Date.now() + 15_000; Date.now() < deadline && !Object.keys((await chat.usage()).chat.models).length;) await new Promise(resolve => setTimeout(resolve, 50));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await chat.close();
+    // What an older cube left: no compactor count at all.
+    const harness = await Harness.open(await openStorage(path.join(directory, "pi.sqlite")), { models, registry: createRegistry() }, context);
+    const { defineDoc } = await import("@earendil-works/pi-durable");
+    const doc = defineDoc<{ models: Record<string, never>; calls: Record<string, number>; since: number | null; earlier?: boolean }>({ kind: "cube.optchat.usage", version: 1, scope: "session", initial: () => ({ models: {}, calls: {}, since: null }) });
+    await harness.commit(async tx => { const usage = await tx.doc(doc); usage.since = null; delete usage.earlier; }, context);
+    await harness.close(context);
+    chat = await open(directory);
+    try { return (await chat.usage()).compactor.earlier; } finally { await chat.close(); }
+  };
+  assert.ok(!await older(path.join(root, "optchat-free"), "hi"), "free nodes cost nothing");
+  assert.equal(await older(path.join(root, "optchat-compacted"), `long ${"words ".repeat(200)}`), true);
 }
 
 fs.rmSync(root, { recursive: true, force: true });

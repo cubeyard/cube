@@ -159,7 +159,10 @@ in usage panels on the project and system pages. Estimates only; billed
 amounts are not available; unpriced or unrecorded usage is reported as
 unknown. Verified offline (`usage-test.ts`, the product smoke with the fake
 `claude`); not verified against a real provider or a real Claude Code's
-stream. Details and gaps: docs/usage.md.
+stream. Next: capture a real `claude -p` stream across a model change and a
+`--resume` to confirm how its `modelUsage` carries totals (the resume
+inference undercounts, never overcounts, if it guesses wrong). Details and
+gaps: docs/usage.md.
 
 ## Known gaps and next steps
 

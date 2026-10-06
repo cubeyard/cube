@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync, fork, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { DatabaseSync } from "node:sqlite";
 
 /** The product API end to end over local guests (the real guest helper under
  * temporary roots): creation, SIGKILL/startup activation, streaming, prompts,
@@ -191,6 +192,12 @@ export async function smokeProduct(root: string) {
     };
     await settled(nextId);
     assert.equal((await fetch(`${host.url}/api/threads/${nextId}`, { method: "DELETE" })).status, 200);
+    // Archive kept the Pi agent's usage as it closed, before any usage read.
+    const ledger = new DatabaseSync(path.join(state, "usage.sqlite"), { readOnly: true });
+    const kept = ledger.prepare("SELECT data FROM snapshot WHERE subject=?").get(nextId) as { data: string } | undefined;
+    ledger.close();
+    // (Its run may end without any model call in this fixture, so only the reading itself is checked.)
+    assert.ok(kept && JSON.parse(kept.data).read === "live" && JSON.parse(kept.data).coverage === "complete", `usage kept at close: ${kept?.data}`);
     const catalog = (await (await fetch(`${host.url}/api/models`)).json()).models as Array<{ provider: string; id: string }>;
     assert.ok(catalog.some(model => model.provider === "claude-code" && model.id === "sonnet"), JSON.stringify(catalog));
     const claudeInput = { projectId: otherProject.id, requestId: "claude-once", text: "run printf once >> claude-count; printf 41", model: { provider: "claude-code", id: "sonnet" } };

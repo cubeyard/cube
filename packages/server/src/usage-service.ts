@@ -6,8 +6,10 @@
  * from the thread's own store, which archive keeps. It serves what cannot be
  * read now (a Pi thread whose agent is not open: only its owner may open its
  * store) and spares re-reading an unchanged archived store. Nothing here
- * writes to an agent's store. */
+ * writes to an agent's store: an archived Pi store is read from a copy,
+ * because opening pi-durable storage migrates and checkpoints it. */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -61,6 +63,8 @@ export class UsageService {
   private readonly optchat: () => Promise<OptChatUsage | null>;
   private readonly optchatStore: string | null;
   private readonly pricing: (provider: string, model: string) => Pricing | null;
+  /** Readings under way, by subject: concurrent requests share one. */
+  private readonly reading = new Map<string, Promise<SubjectUsage>>();
 
   constructor(options: {
     file: string; registry: Registry; threads: string;
@@ -90,9 +94,12 @@ export class UsageService {
     return row ? { key: row.key, usage: JSON.parse(row.data) as SubjectUsage, readAt: row.readAt } : null;
   }
 
+  /** Keeps a reading unless a newer one is kept already (a reading taken
+   * before an agent closed must not replace the one taken as it closed). */
   private store(usage: SubjectUsage, key: string | null): void {
     this.db.prepare(`INSERT INTO snapshot(subject, version, key, data, read_at) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(subject) DO UPDATE SET version=excluded.version, key=excluded.key, data=excluded.data, read_at=excluded.read_at`)
+      ON CONFLICT(subject) DO UPDATE SET version=excluded.version, key=excluded.key, data=excluded.data, read_at=excluded.read_at
+      WHERE excluded.read_at >= snapshot.read_at OR snapshot.version != excluded.version`)
       .run(usage.subject, LEDGER_VERSION, key, JSON.stringify(usage), usage.readAt ?? Date.now());
   }
 
@@ -101,7 +108,7 @@ export class UsageService {
   remember(id: string, state: UsageState): void {
     const thread = this.registry.getThread(id);
     if (!thread) return;
-    try { this.store(this.piThread(thread, state, "live"), null); }
+    try { this.store(this.piThread(thread, state, "live", Date.now()), null); }
     catch (error) { log.warn("usage snapshot not stored", { thread: id, error }); }
   }
 
@@ -109,12 +116,20 @@ export class UsageService {
     return { subject: thread.id, kind: "thread", title: thread.title, projectId: thread.projectId, agent: threadAgent(thread), archived: thread.archived };
   }
 
-  private piThread(thread: Thread, state: UsageState, read: SubjectUsage["read"], notes: string[] = []): SubjectUsage {
-    return subject({ ...this.base(thread), lines: piLines(state, "pi", this.pricing), unknownTurns: 0, read, readAt: Date.now(), notes });
+  private piThread(thread: Thread, state: UsageState, read: SubjectUsage["read"], readAt: number): SubjectUsage {
+    return subject({ ...this.base(thread), lines: piLines(state, "pi", this.pricing), unknownTurns: 0, read, readAt, notes: [] });
   }
 
   /** One thread's usage; archived threads included. */
-  async thread(id: string): Promise<SubjectUsage> {
+  thread(id: string): Promise<SubjectUsage> {
+    const pending = this.reading.get(id);
+    if (pending) return pending;
+    const reading = this.readThread(id).finally(() => this.reading.delete(id));
+    this.reading.set(id, reading);
+    return reading;
+  }
+
+  private async readThread(id: string): Promise<SubjectUsage> {
     const thread = this.registry.getThread(id);
     if (!thread) throw new Error("thread not found");
     try { return threadAgent(thread) === "claude-code" ? this.claudeThread(thread) : await this.piUsage(thread); }
@@ -128,9 +143,11 @@ export class UsageService {
   }
 
   private async piUsage(thread: Thread): Promise<SubjectUsage> {
+    // Stamped before the read: see store().
+    const readAt = Date.now();
     const live = await this.live(thread.id);
     if (live) {
-      const usage = this.piThread(thread, live, "live");
+      const usage = this.piThread(thread, live, "live", readAt);
       this.store(usage, null);
       return usage;
     }
@@ -147,9 +164,8 @@ export class UsageService {
     }
     const key = fileKey(file);
     if (prior && prior.key === key) return { ...prior.usage, ...this.base(thread), read: "store" };
-    const usage = this.piThread(thread, await readPiStore(file), "store");
-    // Opening the store may checkpoint its log: key it as it is now.
-    this.store(usage, fileKey(file));
+    const usage = this.piThread(thread, await readPiStore(file), "store", readAt);
+    this.store(usage, key);
     return usage;
   }
 
@@ -236,8 +252,20 @@ function fileKey(file: string): string {
 }
 
 /** Every conversation's `pi.usage` in a store no agent has open (an
- * archived thread's), summed as Harness.usage() does. */
+ * archived thread's), summed as Harness.usage() does. Read from a private
+ * copy: opening pi-durable storage migrates and checkpoints it, and an
+ * archived store is retained evidence. */
 async function readPiStore(file: string): Promise<UsageState> {
+  const copy = fs.mkdtempSync(path.join(os.tmpdir(), "cube-usage-"));
+  try {
+    for (const suffix of ["", "-wal"]) {
+      if (fs.existsSync(`${file}${suffix}`)) fs.copyFileSync(`${file}${suffix}`, path.join(copy, `pi.sqlite${suffix}`));
+    }
+    return await readStorage(path.join(copy, "pi.sqlite"));
+  } finally { fs.rmSync(copy, { recursive: true, force: true }); }
+}
+
+async function readStorage(file: string): Promise<UsageState> {
   const storage = await openStorage(file);
   const sum: { models: Record<string, Usage>; tools: Record<string, Usage> } = { models: {}, tools: {} };
   try {
@@ -316,6 +344,6 @@ export function threadUsageText(item: SubjectUsage): string {
     item.coverage === "unavailable" ? "usage unknown" : `total: ${spendText(item.spend)} · ${tokensText(item.spend.tokens)}`];
   for (const line of item.lines) lines.push(`- ${line.provider}/${line.model}: ${spendText(line.spend)} · ${tokensText(line.spend.tokens)}${line.calls !== null ? ` · ${line.calls} calls` : ""} · basis: ${line.basis}`);
   if (item.read === "snapshot") lines.push(`last reading: ${item.readAt ? new Date(item.readAt).toISOString() : "unknown"}`);
-  lines.push(...item.notes.map(note => `note: ${note}`), `note: ${BILLED_NOTE}`);
+  lines.push(...item.notes.map(note => `note: ${note}`), ...(item.agent === "claude-code" ? [`note: ${CLAUDE_BILLING}`] : []), `note: ${BILLED_NOTE}`);
   return lines.join("\n");
 }

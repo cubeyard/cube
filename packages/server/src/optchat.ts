@@ -198,8 +198,9 @@ const PendingDoc = defineDoc<Pending>({ kind: "cube.optchat.pending", version: 1
 const ViewDoc = defineDoc<{ total: number; parts: number[] }>({ kind: "cube.optchat.view", version: 1, scope: "session", initial: () => ({ total: 0, parts: [] }) });
 /** The compactor's model calls run beside Pi, so Pi's `pi.usage` does not
  * see them: their usage by `provider/model`, one commit per reply, failed
- * replies included. `since` is the first one this store counted; `earlier`
- * says the tree had nodes before that, built by calls nobody counted. */
+ * replies included. `since` is when this store began counting; `earlier`
+ * says its tree already had compactor-built nodes then, whose calls nobody
+ * counted. */
 type CompactorUsage = { models: Record<string, JsonRepresentation<Usage>>; calls: Record<string, number>; since: number | null; earlier?: boolean };
 const CompactorUsageDoc = defineDoc<CompactorUsage>({ kind: "cube.optchat.usage", version: 1, scope: "session", initial: () => ({ models: {}, calls: {}, since: null }) });
 const TURN = "optchat.turn";
@@ -383,13 +384,11 @@ export class OptChat {
     // The nodes first, then the stored view over the part of the log it
     // covered, then the messages after it. A view that does not fit is
     // folded again from the log.
-    let nodes = 0;
+    const nodes: Array<{ l: number; i: number }> = [];
     for (const entry of await this.scan(this.tree, 0)) {
       const node = entry.data as { l: number; i: number; text: string } | undefined;
-      if (entry.kind === NODE_ENTRY && node) { this.memory.setNode(node.l, node.i, node.text); nodes++; }
+      if (entry.kind === NODE_ENTRY && node) { this.memory.setNode(node.l, node.i, node.text); nodes.push(node); }
     }
-    // A chat whose tree grew before its compactor was counted: those calls are unknown.
-    if (nodes) await this.harness.commit(async tx => { const usage = await tx.doc(CompactorUsageDoc); if (usage.since === null && !usage.earlier) usage.earlier = true; }, context);
     const messages: LogMessage[] = [];
     for (const entry of await this.scan(this.conversation.id, 0)) {
       messages.push(...entryMessages(entry));
@@ -398,6 +397,20 @@ export class OptChat {
     const stored = await this.harness.snapshot(ViewDoc, context);
     const total = stored && stored.total <= messages.length && this.memory.restore(messages.slice(0, stored.total), toParts(stored.parts)) ? stored.total : 0;
     for (const message of messages.slice(total)) this.memory.append(message);
+    // The compactor is counted from the first open that knows how. A tree
+    // that already holds a node the compactor built (not one whose text fit
+    // as it was) had calls nobody counted.
+    const compacted = () => nodes.some(({ l, i }) => {
+      // A node whose sources are gone cannot be judged: counted as compacted.
+      if (l === 0 ? i >= this.memory.length : !this.memory.built(l - 1, 2 * i) || !this.memory.built(l - 1, 2 * i + 1)) return true;
+      try { return !("free" in this.memory.source(l, i)); } catch { return true; }
+    });
+    await this.harness.commit(async tx => {
+      const usage = await tx.doc(CompactorUsageDoc);
+      if (usage.since !== null) return;
+      usage.since = Date.now();
+      if (compacted()) usage.earlier = true;
+    }, context);
     const watch = await this.conversation.watch(context);
     // Delivery runs again on every change too: a steered message is
     // forgotten once Pi has placed it, which happens after the steer.
@@ -489,7 +502,6 @@ export class OptChat {
     const key = `${reply.provider}/${reply.model}`;
     await this.harness.commit(async tx => {
       const usage = await tx.doc(CompactorUsageDoc);
-      usage.since ??= Date.now();
       const total = Object.hasOwn(usage.models, key) ? usage.models[key] : undefined;
       // A key holds a slash, so it is never `__proto__`.
       if (total) addUsage(total as unknown as Usage, reply.usage);

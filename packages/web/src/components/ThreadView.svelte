@@ -17,7 +17,7 @@
     ThreadModels,
     ThreadSummary,
   } from "../lib/types.ts";
-  import { BILLED_NOTE, spendText, tokensText } from "../../../server/src/usage.ts";
+  import { BILLED_NOTE, CLAUDE_BILLING, spendText, tokensText } from "../../../server/src/usage.ts";
   import Conversation from "./Conversation.svelte";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
@@ -108,6 +108,7 @@
     usage.coverage === "unavailable" ? usage.notes.join("\n") : tokensText(usage.spend.tokens),
     usage.unknownTurns ? `${usage.unknownTurns} turns without a usage report are not included` : "",
     ...usage.lines.map((line) => `${line.model}: ${spendText(line.spend)} — ${line.basis}`),
+    usage.agent === "claude-code" ? CLAUDE_BILLING : "",
     BILLED_NOTE,
   ].filter(Boolean).join("\n"));
 

@@ -171,20 +171,23 @@ export interface ClaudeTurn { seq: number; state: "running" | "completed" | "fai
  * A `result` carries `modelUsage`: per model, running totals for every model
  * call of the process (main loop, subagents, compaction), cumulative across
  * the turns of one process. A turn's usage is the difference to the previous
- * result of the same process. A process started with --resume may begin from
- * the totals the session's transcript saved, or from zero: the first result
- * of such a process continues the session's totals only if it holds at least
- * them in every counter and its increase covers the turn's own main-loop
- * usage; otherwise it starts from zero. A turn that ends without a result
- * (killed, cubed stopped) or with a zeroed error result has unknown usage.
- * Results are counted once by uuid. */
+ * result of the same process. Every process after a store's first is started
+ * with --resume and may begin from the totals the session's transcript saved
+ * or from zero: its first result continues the largest earlier total it holds
+ * in every counter whose increase still covers the turn's own main-loop usage,
+ * otherwise it starts from zero (so a wrong choice undercounts). A turn that
+ * ends without a result (killed, cubed stopped) or with zeroed totals after a
+ * failure has unknown usage. Results are counted once by uuid. */
 export function claudeLines(records: readonly ClaudeRecord[], turns: readonly ClaudeTurn[]): { lines: UsageLine[]; unknownTurns: number; notes: string[] } {
   const perModel = new Map<string, { spend: Spend; bases: Set<string> }>();
   const reported = new Set<number>();
   const seen = new Set<string>();
-  const sessions = new Map<string, ModelTotals>();
   const notes = new Set<string>();
-  let child: { session: string | null; resumed: boolean; last: ModelTotals | null } | null = null;
+  /** Every counted increase in this store, and the last totals of the process before the current one. */
+  const counted: ModelTotals = new Map();
+  let previous: ModelTotals | null = null;
+  let processes = 0;
+  let child: { resumed: boolean; last: ModelTotals | null } | null = null;
   const add = (model: string, input: number, output: number, cacheRead: number, cacheWrite: number, reasoning: number | null, usd: number, basis: string) => {
     let entry = perModel.get(model);
     if (!entry) perModel.set(model, entry = { spend: zeroSpend(), bases: new Set() });
@@ -193,52 +196,60 @@ export function claudeLines(records: readonly ClaudeRecord[], turns: readonly Cl
     addSpend(entry.spend, { tokens: { input, output, cacheRead, cacheWrite, reasoning, total },
       estimatedUsd: priced ? usd : 0, pricedTokens: priced ? total : 0, unpricedTokens: priced ? 0 : total, billedUsd: null });
     entry.bases.add(basis);
+    const prior = counted.get(model);
+    counted.set(model, { input: (prior?.input ?? 0) + input, output: (prior?.output ?? 0) + output, cacheRead: (prior?.cacheRead ?? 0) + cacheRead,
+      cacheWrite: (prior?.cacheWrite ?? 0) + cacheWrite, reasoning: prior?.reasoning == null && reasoning === null ? null : (prior?.reasoning ?? 0) + (reasoning ?? 0),
+      usd: (prior?.usd ?? 0) + usd, basis });
+  };
+  // A new process: cubed starts every process after the first with --resume.
+  const start = () => {
+    if (child?.last) previous = child.last;
+    child = { resumed: processes > 0, last: null };
+    processes++;
+    return child;
   };
   for (const { submission, data } of records) {
-    if (data.type === "system" && data.subtype === "init") {
-      const session = typeof data.session_id === "string" ? data.session_id : null;
-      child = { session, resumed: session !== null && sessions.has(session), last: null };
-      continue;
-    }
+    if (data.type === "system" && data.subtype === "init") { start(); continue; }
     if (data.type !== "result") continue;
     if (typeof data.uuid === "string") { if (seen.has(data.uuid)) continue; seen.add(data.uuid); }
-    const session = typeof data.session_id === "string" ? data.session_id : child?.session ?? null;
-    if (!child) child = { session, resumed: session !== null && sessions.has(session), last: null };
+    const current = child ?? start();
     const totals = modelTotals(data.modelUsage);
-    const zeroed = !totals || (totalTokens(totals) === 0 && count(data.total_cost_usd) === 0);
-    if (!totals) notes.add("a claude code result had no modelUsage (an older claude code?); that turn's usage is unknown");
-    if (!totals || (zeroed && data.is_error === true)) continue;
-    let base: ModelTotals = child.last ?? new Map();
-    if (!child.last && child.resumed && session) {
-      const prior = sessions.get(session)!;
+    if (!totals) { notes.add("a claude code result had no modelUsage (an older claude code?); that turn's usage is unknown"); continue; }
+    // As claude-agent.ts decides a failed turn. A zeroed failure, or zeroed
+    // totals after real ones (cube never sends /clear), report nothing.
+    const failed = data.is_error === true || data.subtype !== "success";
+    const zeroed = totalTokens(totals) === 0 && count(data.total_cost_usd) === 0;
+    if (zeroed && (failed || (current.last && totalTokens(current.last) > 0))) continue;
+    let base: ModelTotals = current.last ?? new Map();
+    if (!current.last && current.resumed) {
+      // A resumed process may continue the totals its transcript saved (all
+      // earlier turns, or its predecessor's) or start from zero: take the
+      // largest base it holds in every counter whose increase still covers
+      // this turn's own main-loop usage. Larger bases undercount, never overcount.
       const main = data.usage as Record<string, unknown> | undefined;
       const turn = count(main?.input_tokens) + count(main?.output_tokens) + count(main?.cache_read_input_tokens) + count(main?.cache_creation_input_tokens);
-      if (covers(totals, prior) && totalTokens(totals) - totalTokens(prior) >= turn) {
-        base = prior;
-        notes.add("a resumed claude code process continued the session's saved totals; its first turn is the increase over them");
-      } else notes.add("a resumed claude code process started its totals from zero");
+      const candidates: Array<[ModelTotals, string]> = [[counted, "the totals of every earlier turn"], ...(previous ? [[previous, "the previous process's totals"] as [ModelTotals, string]] : [])];
+      const fits = candidates.filter(([candidate]) => totalTokens(candidate) > 0 && covers(totals, candidate) && totalTokens(totals) - totalTokens(candidate) >= turn)
+        .sort((a, b) => totalTokens(b[0]) - totalTokens(a[0]))[0];
+      if (fits) {
+        base = fits[0];
+        notes.add(`a resumed claude code process continued ${fits[1]}; its first turn is the increase over them`);
+      } else if (totalTokens(counted) > 0) notes.add("a resumed claude code process started its totals from zero");
     }
     if (!covers(totals, base)) {
       // A running total went down (a reset): count this result from zero.
       notes.add("a claude code running total went down; counted from zero after it");
       base = new Map();
     }
-    const sessionTotals = session ? sessions.get(session) ?? new Map() : null;
     for (const [model, now] of totals) {
       const before = base.get(model);
       const d = { input: now.input - (before?.input ?? 0), output: now.output - (before?.output ?? 0), cacheRead: now.cacheRead - (before?.cacheRead ?? 0),
-        cacheWrite: now.cacheWrite - (before?.cacheWrite ?? 0), reasoning: now.reasoning === null ? null : now.reasoning - (before?.reasoning ?? 0),
+        cacheWrite: now.cacheWrite - (before?.cacheWrite ?? 0), reasoning: now.reasoning === null ? null : Math.max(0, now.reasoning - (before?.reasoning ?? 0)),
         usd: Math.max(0, now.usd - (before?.usd ?? 0)) };
       if (d.input + d.output + d.cacheRead + d.cacheWrite === 0 && d.usd === 0) continue;
-      add(model, d.input, d.output, d.cacheRead, d.cacheWrite, d.reasoning === null ? null : Math.max(0, d.reasoning), d.usd, now.basis);
-      if (sessionTotals) {
-        const prior = sessionTotals.get(model);
-        sessionTotals.set(model, { input: (prior?.input ?? 0) + d.input, output: (prior?.output ?? 0) + d.output, cacheRead: (prior?.cacheRead ?? 0) + d.cacheRead,
-          cacheWrite: (prior?.cacheWrite ?? 0) + d.cacheWrite, reasoning: null, usd: (prior?.usd ?? 0) + d.usd, basis: now.basis });
-      }
+      add(model, d.input, d.output, d.cacheRead, d.cacheWrite, d.reasoning, d.usd, now.basis);
     }
-    if (session && sessionTotals) sessions.set(session, sessionTotals);
-    child.last = totals;
+    current.last = totals;
     reported.add(submission);
   }
   // A turn still running has not reported yet; that is not unknown.

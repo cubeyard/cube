@@ -214,8 +214,9 @@ export async function createCubed(options: {
   const usageQuery = async (query: { project?: string | undefined; thread?: string | undefined }) => {
     if (query.thread) {
       const prefix = query.thread.replace(/^\[|\]$/g, "").trim();
+      if (!prefix) return "give a thread id or its first characters";
       const matches = registry.listThreads().filter(thread => thread.id.startsWith(prefix));
-      if (!prefix || matches.length !== 1) return matches.length ? `${query.thread} names more than one thread` : `no thread ${query.thread}`;
+      if (matches.length !== 1) return matches.length ? `${query.thread} names more than one thread` : `no thread ${query.thread}`;
       return threadUsageText(await usage.thread(matches[0]!.id));
     }
     const project = query.project ? registry.listProjects().find(candidate => candidate.id === query.project)
@@ -406,7 +407,11 @@ export async function createCubed(options: {
         if (parts[3] === "check" && method === "POST") return json({ project: await check(project) });
         if (method === "GET") return json({ project: projectView(project) });
       }
-      if (url.pathname === "/api/usage" && method === "GET") return json(await usage.report({ project: url.searchParams.get("project") || null }));
+      if (url.pathname === "/api/usage" && method === "GET") {
+        const project = url.searchParams.get("project") || null;
+        if (project && !registry.getProject(project)) return json({ error: "project not found" }, 404);
+        return json(await usage.report({ project }));
+      }
       if (parts[0] === "api" && parts[1] === "optchat") {
         const { chat, events } = await openOptchat();
         if (parts[2] === "history" && method === "GET") return json(await events.read());
