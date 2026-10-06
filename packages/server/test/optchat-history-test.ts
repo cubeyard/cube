@@ -176,12 +176,12 @@ try {
         assert.equal((await read())?.status.state, "completed");
         assert.ok(Date.now() - started < 1000, "the read does not wait for an open write transaction");
       } finally { writer.exec("ROLLBACK"); writer.close(); }
-      assert.deepEqual(fs.readdirSync(directory).filter(name => name.startsWith(".read-")), [], "no snapshot is left behind");
       assert.ok(fs.statSync(file).mtimeMs >= before);
       assert.equal((await read())!.events.at(-1)?.type === "user-message", true, "the writer's entries are readable");
     } finally { await harness.close(context); }
     // The page is the same one the whole transcript gives.
     const all = (await whole())!;
+    assert.deepEqual(fs.readdirSync(directory).filter(name => name.startsWith(".read-")), [], "readStorage leaves no snapshot behind");
     assert.ok(all.events.length > 3);
     for (const request of [{}, { limit: HISTORY_MAX }, { before: 3, limit: 2 }, { before: 0 }]) assert.deepEqual(await readPiHistory(file, "pi", null, request), pageOf(all, request));
     const other = path.join(root, "future", "pi.sqlite");
