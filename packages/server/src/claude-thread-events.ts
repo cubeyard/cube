@@ -66,7 +66,7 @@ export function render(state: ClaudeState, owner: ThreadAgent | null, failure: s
       else if (block.type === "tool_use") events.push({ type: "tool-call", id, callId: block.id, name: block.name, input: shown(partialInput(block.json)), final: false });
     });
   }
-  return { agent: "claude-code", owner, status: status(current, failure), events };
+  return { agent: "claude-code", owner, status: status(current, failure, state.waiting), events };
 }
 
 export const submissionEvent = (submission: Pick<ClaudeSubmission, "seq" | "text">): ThreadEvent => ({ type: "user-message", id: `s${submission.seq}`, text: submission.text });
@@ -99,10 +99,12 @@ export function messageEvents(seq: number, data: Record<string, unknown>, names:
   return events;
 }
 
-export function status(current: ClaudeSubmission | undefined, failure: string | null): ThreadStatus {
-  if (!current) return { state: "idle", run: null, error: failure };
-  if (current.state === "running") return { state: "working", run: current.requestId, error: failure };
-  return { state: current.state, run: current.requestId, error: current.error ?? failure };
+/** `waiting`: the background agents running now (see claude-agent.ts). */
+export function status(current: ClaudeSubmission | undefined, failure: string | null, waiting: readonly string[] = []): ThreadStatus {
+  const background = waiting.length ? { waiting: [...waiting] } : {};
+  if (!current) return { state: "idle", run: null, error: failure, ...background };
+  if (current.state === "running") return { state: "working", run: current.requestId, error: failure, ...background };
+  return { state: current.state, run: current.requestId, error: current.error ?? failure, ...background };
 }
 
 function resultText(content: unknown): string {

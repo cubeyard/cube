@@ -35,7 +35,7 @@ with Pi as its only writer. cubed's live-instance socket lock (one cubed per
 | the input queue | `cube.optchat.pending`: a message or report is accepted there at once and kept until Pi has placed it; all waiting messages become one turn, each still its own user message and its own Pi submission |
 | view at load | `cube.optchat.view`, written with every node: the view over the first `total` messages. A reopen restores it and appends the rest, so it goes on from the view it had |
 | compactor usage | `cube.optchat.usage`: the compactor's calls run beside Pi, so its `pi.usage` misses them; each reply's usage (failed ones too) is added there in its own commit, by `provider/model` with a call count |
-| subagent reports | when a spawned thread's run settles, its last reply goes to the chat as `[<first 8 of the thread id>] <report>`, with request id `report:<thread>:<run>`, so a report is delivered once across restarts. The transcript marks it with `from` (the short id) and shows it as the thread's, not the user's |
+| subagent reports | when a spawned thread's run settles, how it ended and its last reply go to the chat as `[<first 8 of the thread id>] <report>` (see "Follow-up and unattended work"), with request id `report:<thread>:<run>`, so a report is delivered once across restarts. The transcript marks it with `from` (the short id) and shows it as the thread's, not the user's |
 
 `packages/server/src/optchat-memory.ts` is the pure part: the fold that appends
 and merges the most due pair (never splits), the build order (one message at a
@@ -64,6 +64,90 @@ a restart goes on where it stopped and a resend is refused. Steering, a turn's
 submission and stop never run at the same time. The transcript shows waiting
 messages as `working` with the compactor's failure, if any, and
 `POST /api/optchat/prompt` answers as soon as the message is accepted.
+
+## Follow-up and unattended work
+
+A report tells the chat how a thread's turn ended and what of the thread
+still runs. It never says the task is done: an ended turn is not a finished
+task, and only the thread's reply says what is left. The forms:
+
+| report | meaning | what comes next |
+| --- | --- | --- |
+| `ended its turn, waiting on its background agent "…"; another report comes when it finishes: <reply>` | a Claude Code thread ended its turn with a background agent (the Agent tool's default) still running; cubed tracks it | Claude Code takes a turn of its own when it finishes; that turn is a new run (`cube:background:<task>`) and reports again. If the agent finishes before the watcher saw the first run settle, only the new run reports |
+| `ended its turn; nothing of it runs now: <reply>` | nothing of the thread runs or is tracked | nothing, until someone tells it |
+| `ended its turn; nothing of it runs now and nothing wakes it, though its reply speaks of waiting: it goes on only when told: <reply>` | as above, but the reply mentions waiting (for CI, a review, a command): cube tracks none of those | nothing; it needs a tell to go on |
+| `failed: <why>; last reply: …` | the turn failed (provider error, Claude Code exited, cubed restarted mid-turn, its machine failed) or background work was lost | nothing; it needs a tell |
+| `stopped[: <why>]; last reply: …` | stopped in cube (a turn, or background agents between turns) | nothing |
+
+The last kind of wait cube cannot see: CI, a reviewer or a command started
+outside the thread. Two things keep such work going overnight:
+
+- **Threads are told not to end a turn to wait.** OptChat's task note
+  says nothing wakes a thread after its final reply except its own
+  background agent finishing, so it waits for CI, reviews or commands in
+  the foreground (a command runs at most 10 minutes; it repeats a bounded
+  wait such as `timeout 590 gh pr checks <n> --watch`), and says plainly
+  what is left when it stops early.
+- **OptChat follows up.** Every report starts a chat turn. The system
+  prompt tells it what each form means and to tell a thread that stopped
+  short to go on when the next step is clear and within what the user
+  asked, or else to tell the user what the thread needs.
+
+Bounds, so unattended work does not loop or spend without end:
+
+- `tell` sends at most `TELLS` (8) messages per thread between two messages
+  of the user (reports do not count as the user's); then it answers `not
+  sent: … tell the user what it needs instead`, and the prompt forbids
+  starting another thread to get around that. Only a tell the thread
+  accepted counts, and a replayed call counts once.
+- Background agents get at most 4 hours from the start of the oldest still
+  running (`ClaudeRuntime.backgroundMs`). Then cubed ends Claude Code
+  between turns, which ends all of them, and records them as one lost run.
+  A running turn is never cut off; the limit is checked again after it.
+- Only an agent's task (`task_type` `local_agent`, or an Agent tool call's)
+  is waited for; other backgrounded kinds may never notify.
+- A finished background agent whose follow-up turn does not start within
+  2 minutes fails that run (`claude code was to go on by itself …, but did
+  not — send a message to go on`) rather than leaving it working.
+- Nothing is auto-resumed by cube besides the turn Claude Code takes for
+  its own background agent. A thread interrupted by a cubed restart, a
+  provider error or a failed machine reports `failed`, once, and waits for
+  a tell.
+
+Restarts and failures:
+
+- **cubed stops or restarts** while a Claude Code turn runs: the turn is
+  recorded as failed when the agent opens again (`cubed stopped during this
+  turn; …`) and reported once (`report:<thread>:<run>`). Background agents
+  end with the Claude Code process: a clean stop records them as a lost run
+  at close, a crash at the next open (`cube:background:<task>:lost`). Only
+  the newest run of a thread is observed, so when several settle while
+  cubed is down (an interrupted turn, then its lost agents) the chat gets
+  the newest one's report, once. A Pi run goes on after the restart on its
+  own.
+- **Duplicate events**: every report has the request id
+  `report:<thread>:<run>` and every run its own request id, so a watch
+  reconnect, a restart or an archive sends a report once.
+- **A thread whose machine is unavailable** reports a failure to start
+  once, after the start grace (cubed keeps retrying); see "Archiving".
+- **Archive and model change** refuse a thread waiting on background agents
+  (archiving would end them): `not archived: it is waiting on its background
+  agents; nothing was stopped`. The user's stop in the UI ends them, as a
+  stopped run, and the thread can then be archived.
+
+`history` shows the wait (`run: completed (…); still running: background
+agent "…"`) and, when the agent is not open in cubed, notes that the agent
+ended with it. `threads` shows `completed, waiting on background agent "…"`.
+The thread page shows `waiting on a background agent: …` with its stop key.
+
+Limits: cube tracks only Claude Code's own background agents. Pi threads
+have none. CI, reviews by other threads or people, and commands outside
+the thread are not tracked; a thread must wait for them itself, or OptChat
+must tell it to look again. Claude Code's follow-up turn is a Claude Code
+behavior cube relies on (headless `-p` stream-json input takes a turn for a
+background agent's notification); it is checked against the installed
+Claude Code's messages offline only, with a fake `claude`, and a missing
+turn fails its run after the grace instead of waiting.
 
 ## Reading a thread
 

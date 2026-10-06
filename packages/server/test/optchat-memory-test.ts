@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { bytes, capText, cutBytes, end, Memory, PLACEHOLDER, start, type Part } from "../src/optchat-memory.ts";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { candidates, compactNode, lengths, SCALE } from "../src/optchat-compactor.ts";
-import { entryMessages, threadReport, ZOOM_ECHO } from "../src/optchat.ts";
+import { entryMessages, runReport, threadReport, ZOOM_ECHO } from "../src/optchat.ts";
 
 assert.equal(bytes(SCALE), 512, "the scale line is exactly NODE bytes");
 assert.equal(cutBytes("aé", 2), "a", "a cut never splits a character");
@@ -115,8 +115,19 @@ function drain(memory: Memory, seen: string[][] = []): void {
   assert.equal(threadReport(transcript("completed", [
     { type: "user-message", id: "1", text: "do it" }, { type: "assistant-text", id: "2", text: "thinking", reasoning: true, final: true },
     { type: "assistant-text", id: "3", text: "done: PR #1", reasoning: false, final: true },
-  ])), "done: PR #1");
+  ])), "ended its turn; nothing of it runs now: done: PR #1", "a report says how the turn ended, never that the task is done");
   assert.equal(threadReport(transcript("failed", [{ type: "user-message", id: "1", text: "do it" }])), "failed: boom");
+  // A tracked wait, an untracked one, an empty reply, a stop with its reason.
+  const status = (state: "completed" | "stopped", extra: object = {}) => ({ state, run: "r", error: null, ...extra });
+  assert.equal(runReport(status("completed", { waiting: ["fable review"] }), "PR #3 is open; waiting for the review"),
+    "ended its turn, waiting on its background agent \"fable review\"; another report comes when it finishes: PR #3 is open; waiting for the review");
+  assert.match(runReport(status("completed", { waiting: ["a", "b"] }), ""), /waiting on its 2 background agents \("a", "b"\); another report comes when they finish without a reply$/);
+  for (const reply of ["PR #3 is open, awaiting review.", "PR #3 is open. Waiting for CI to finish.", "pushed; the checks are still running", "I'll report back once CI is green"]) {
+    assert.match(runReport(status("completed"), reply), /^ended its turn; nothing of it runs now and nothing wakes it, though its reply speaks of waiting: it goes on only when told: /, reply);
+  }
+  assert.equal(runReport(status("completed"), "merged as abc123; nothing left"), "ended its turn; nothing of it runs now: merged as abc123; nothing left");
+  assert.equal(runReport(status("completed"), " "), "ended its turn; nothing of it runs now without a reply");
+  assert.equal(runReport(status("stopped", { error: "background agent \"x\" did not finish: stopped in cube" }), "half"), "stopped: background agent \"x\" did not finish: stopped in cube; last reply: half");
 }
 
 {

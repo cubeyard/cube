@@ -15,7 +15,7 @@ import fs from "node:fs";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import type { EntryRecord, SubmissionRecord } from "@earendil-works/pi-durable";
 import { messageEvents, status as claudeStatus, submissionEvent, virtualize } from "./claude-thread-events.ts";
-import type { ClaudeSubmission } from "./claude-agent.ts";
+import { storedBackground, type ClaudeSubmission } from "./claude-agent.ts";
 import { entryEvents, settlement } from "./pi-thread-events.ts";
 import type { ThreadAgent, ThreadEvent, ThreadStatus, ThreadTranscript } from "./thread-events.ts";
 
@@ -290,7 +290,7 @@ export async function readClaudeHistory(file: string, root: string, owner: Threa
     const message = db.prepare("SELECT data FROM message WHERE seq = ?");
     const submission = db.prepare("SELECT seq, text FROM submission WHERE seq = ?");
     const read = index;
-    return assemble(read, { agent: "claude-code", owner, status: claudeStatus(newest, failure) }, request, row => {
+    return assemble(read, { agent: "claude-code", owner, status: claudeStatus(newest, failure, storedBackground(db).map(row => row.description)) }, request, row => {
       const key = read.keys[row]!;
       return (key < 0 ? [submissionEvent(submission.get(-key) as { seq: number; text: string })]
         : messageEvents(key, JSON.parse((message.get(key) as { data: string }).data) as Record<string, unknown>, namesBefore(read, read.at[row]!), shown)).filter(historyShows);

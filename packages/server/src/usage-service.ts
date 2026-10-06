@@ -180,7 +180,7 @@ export class UsageService {
     const db = new DatabaseSync(file, { readOnly: true, timeout: 5000 });
     let turns: ClaudeTurn[], records: ClaudeRecord[];
     try {
-      turns = db.prepare("SELECT seq, state FROM submission ORDER BY seq").all() as unknown as ClaudeTurn[];
+      turns = db.prepare("SELECT seq, state FROM submission WHERE request_id NOT LIKE 'cube:background:%:lost' ORDER BY seq").all() as unknown as ClaudeTurn[];
       records = (db.prepare("SELECT submission, data FROM message WHERE json_extract(data, '$.type') IN ('system', 'result') ORDER BY seq").all() as Array<{ submission: number; data: string }>)
         .map(row => ({ submission: row.submission, data: JSON.parse(row.data) as Record<string, unknown> }));
     } finally { db.close(); }

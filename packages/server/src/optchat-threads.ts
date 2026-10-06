@@ -1,6 +1,6 @@
 /** OptChat's threads are cube's own: started in a project like any thread
  * from the UI, on a runner from the global pool, with its own machine. */
-import { CLAUDE_PROVIDER } from "./claude-agent.ts";
+import { agents, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { releaseUnfinished, ThreadArchiving, ThreadWorking, type Conversations } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
 import { THREAD_NOTE, type OptThreads } from "./optchat.ts";
@@ -68,7 +68,10 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         const project = registry.getProject(thread.projectId)?.name ?? thread.projectId;
         let run = "";
         if (!thread.archived && !conversations.starting(id) && (!conversations.error(id) || conversations.agentOpen(id))) {
-          try { run = `, ${(await conversations.history(id)).status.state}`; } catch { /* the state says enough */ }
+          try {
+            const status = (await conversations.history(id)).status;
+            run = `, ${status.state}${status.waiting?.length && status.state !== "working" ? `, waiting on ${agents(status.waiting)}` : ""}`;
+          } catch { /* the state says enough */ }
         }
         lines.push(`[${id.slice(0, 8)}] ${project} · ${thread.title ?? "untitled"} · ${thread.archived ? "archived" : state(id)}${run}`);
       }
@@ -106,7 +109,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         throw new Error("its machine is still starting or reattaching; try again shortly");
       }
       const archived = await conversations.archive(id).catch((error: unknown) => {
-        throw error instanceof ThreadWorking ? new Error("it is working; nothing was stopped", { cause: error }) : error;
+        throw error instanceof ThreadWorking ? new Error(error.waiting ? "it is waiting on its background agents; nothing was stopped" : "it is working; nothing was stopped", { cause: error }) : error;
       });
       return { already: !!archived.already, disk: disk(registry.getThread(id)?.vm), free: free() };
     },

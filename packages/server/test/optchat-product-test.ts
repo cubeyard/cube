@@ -51,7 +51,7 @@ faux.setResponses(Array.from({ length: 100 }, () => async request => {
   if (JSON.stringify(request.messages).includes("hold until released")) { await held; return fauxAssistantMessage("released"); }
   // The spawned thread: one command in its own machine, then the report.
   if (last.role === "toolResult") return fauxAssistantMessage(`the repository has ${textOf(last).trim().split("\n")[0]} file`);
-  assert.match(textOf(last), new RegExp(`count the files in the repository with bash\\n\\n${THREAD_NOTE.replace(/[().]/g, "\\$&")}`));
+  assert.match(textOf(last), new RegExp(`count the files in the repository with bash\\n\\n${THREAD_NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   return fauxAssistantMessage([fauxToolCall("bash", { command: "ls | wc -l" })], { stopReason: "toolUse" });
 }));
 const models = createModels();
@@ -91,7 +91,7 @@ try {
   await until(async () => (await (await fetch(`${base}/api/threads/${thread.id}/history`)).json()), history => history.status.state === "completed", "the thread finishes");
 
   // Its report comes back to the chat as a message and starts a turn.
-  const report = `[${thread.id.slice(0, 8)}] the repository has 1 file`;
+  const report = `[${thread.id.slice(0, 8)}] ended its turn; nothing of it runs now: the repository has 1 file`;
   const history = await until(async () => (await (await fetch(`${base}/api/optchat/history`)).json()),
     value => value.status.state === "completed" && value.events.some((event: { type: string; text?: string }) => event.type === "assistant-text" && event.text?.startsWith("noted:")),
     "the report reaches the chat");
