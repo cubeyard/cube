@@ -686,10 +686,18 @@ def seal():
         "",
     ])
     write_atomic(rooted("/etc/systemd/system/" + SEAL_UNIT), unit.encode(), 0o644)
+    # Failed until seal_final says otherwise: a power-off that never ran it
+    # still leaves machines made from this disk to clean up and report.
+    os.makedirs(os.path.dirname(rooted(SEAL_MARKER)), mode=0o700, exist_ok=True)
+    write_atomic(rooted(SEAL_MARKER), b"failed: the seal did not run at power-off", 0o600)
     subprocess.run(["apt-get", "clean"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # The bulk of the discard now, while the machine is up: the runner gives
     # a powering-off guest 30 s before it counts the stop as interrupted.
-    subprocess.run(["fstrim", "--all"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+    try:
+        subprocess.run(["fstrim", "--all"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+    except subprocess.TimeoutExpired:
+        sys.stdout.write("seal failed: fstrim timed out\n")
+        return 1
     for command in (["systemctl", "daemon-reload"], ["systemctl", "start", SEAL_UNIT]):
         result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
         if result.returncode != 0:
@@ -786,7 +794,13 @@ def init():
     if os.path.exists(marker):
         with open(marker, "rb") as handle:
             outcome = handle.read(1000)
-        remove(CONFIG.state)
+        try:
+            remove(CONFIG.state)
+        except OSError as error:
+            # Never boot on the build machine's journal: move it aside.
+            os.rename(CONFIG.state, "%s.stale-%d" % (CONFIG.state, os.getpid()))
+            if not outcome.startswith(b"failed"):
+                outcome = ("failed: %s" % (error.strerror or error)).encode()
         os.makedirs(CONFIG.state, mode=0o700, exist_ok=True)
         write_atomic(os.path.join(CONFIG.state, "template-seal"), outcome)
         remove(os.path.dirname(marker))

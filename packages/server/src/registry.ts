@@ -104,6 +104,8 @@ export interface MachinePreparation {
   setupBlob?: string;
   /** Why the machine started fresh (no template, templates off, a failed build). */
   reason?: string;
+  /** The template's seal reported a failure; the template was removed. */
+  sealFailure?: string;
 }
 export interface HookOutcome {
   /** `ok`, `failed`, `skipped` (prepared by a template), `notrun` (an

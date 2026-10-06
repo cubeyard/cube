@@ -386,8 +386,9 @@ prepared checkout stay; that is the point.
 
 A seal that could not clean something says so in a marker; the first boot
 of each machine made from the template empties the helper's journal anyway
-and its helper reports the failure, and cubed then records `template-seal`
-as failed on that thread and removes the template.
+and its helper reports the failure (also when the seal never ran), and cubed
+then records it on that thread's preparation and removes the template (checked
+once that thread's preparation succeeded).
 
 Isolation: no agent ever runs in a build machine; every machine writes only
 its own overlay; each gets a new VM id, MAC, host key, client key,
@@ -407,8 +408,8 @@ project, its repositories (URL, branch, checkout name), the pre-setup hook,
 the guest packages and helper, the runner's base image and platform and the
 disk size. The commit is not in it (the checkout is refreshed) and neither
 are resume hooks (they always run). It is reused for 24 hours
-(`CUBED_TEMPLATE_TTL_HOURS`, measured against the runner's clock at
-publication), which bounds how stale dependencies that
+(`CUBED_TEMPLATE_TTL_HOURS`; the age compares the runner's clock at
+publication with cubed's, so clock skew between the hosts shifts it), which bounds how stale dependencies that
 `.agents/setup` installed can be while the setup file itself is unchanged;
 put what must be fresh per thread in a resume hook. Publishing a template
 removes the project's older ones on that runner; expired templates and those
