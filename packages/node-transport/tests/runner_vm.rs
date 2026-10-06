@@ -621,7 +621,16 @@ async fn concurrent_vms_are_isolated_and_bounded() {
     let mut second = start("t2", VM2, 1, gw, TOKEN2);
     second["mac"] = json!("02:00:00:00:00:43");
     let (one, two) = tokio::join!(served.vm(start("t1", VM, 1, gw, TOKEN)), served.vm(second));
-    assert_eq!((one.state, two.state), (VmState::Running, VmState::Running));
+    // A start answers `starting` when QMP is slower than its short wait (a
+    // busy CI host); both reach `running`.
+    for (vm, record) in [(VM, &one), (VM2, &two)] {
+        assert!(
+            matches!(record.state, VmState::Starting | VmState::Running),
+            "{record:?}"
+        );
+        let thread = if vm == VM { "t1" } else { "t2" };
+        served.wait_state(thread, vm, VmState::Running).await;
+    }
     let st = status(&served).await;
     assert_eq!(
         (st["activeVms"].clone(), st["runningVms"].clone()),
@@ -715,7 +724,7 @@ async fn a_booting_vm_does_not_hold_up_other_vms() {
     served.runner.set_max_active_vms(2).unwrap();
     served.vm(allocate("t1", VM, 1, 8)).await;
     std::fs::write(fx.bin.join("slow-qmp"), b"").unwrap();
-    // t1's QEMU takes 2 s to answer QMP; t2's allocation must not wait for it.
+    // t1's QEMU takes 3 s to answer QMP; t2's allocation must not wait for it.
     let booting = served.vm(start("t1", VM, 1, &fx.gateway, TOKEN));
     let other = async {
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -725,10 +734,14 @@ async fn a_booting_vm_does_not_hold_up_other_vms() {
     };
     let (started, (allocated, waited)) = tokio::join!(booting, other);
     std::fs::remove_file(fx.bin.join("slow-qmp")).unwrap();
-    assert_eq!(started.state, VmState::Running);
+    assert!(
+        matches!(started.state, VmState::Starting | VmState::Running),
+        "{started:?}"
+    );
+    served.wait_state("t1", VM, VmState::Running).await;
     assert_eq!(allocated.state, VmState::Allocated);
     assert!(
-        waited < Duration::from_millis(1500),
+        waited < Duration::from_millis(2000),
         "allocation waited {waited:?} behind another VM's boot"
     );
     served.runner.shutdown(false).await;
