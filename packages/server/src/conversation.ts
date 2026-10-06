@@ -140,6 +140,9 @@ export class Conversations {
       await this.resume(id, started?.booted ?? false);
       return;
     }
+    // An agent opened on this machine before it was ready holds the lease
+    // that preparing it needs (agents now open only on ready machines).
+    await this.closeAgents(id);
     try {
       await this.machines.start(thread);
       // The machine's start recorded what its disk was made from.
@@ -193,9 +196,7 @@ export class Conversations {
     if (!booted && this.resumed.has(id)) return;
     if (this.agents.has(id) || this.claudes.has(id)) {
       if (!booted) { this.resumed.add(id); return; }
-      const claude = this.claudes.get(id), pi = this.agents.get(id);
-      this.claudes.delete(id); this.agents.delete(id);
-      await (await claude?.catch(() => null))?.close(); await (await pi?.catch(() => null))?.close();
+      await this.closeAgents(id);
       log.warn("the machine booted again; the agent reopens after the resume hooks", { thread: id });
     }
     const thread = this.thread(id);
@@ -218,6 +219,7 @@ export class Conversations {
     this.notArchiving(id);
     const cached = this.agents.get(id);
     if (cached) return cached;
+    this.ready(thread);
     const loading = (async () => {
       const agent = await openAgent({ directory: path.join(this.directory, id), binding: this.binding(thread), workspace: this.workspace(id), models: this.models, model: thread.model });
       try {
@@ -232,6 +234,20 @@ export class Conversations {
     try { return await loading; }
     catch (error) { this.agents.delete(id); throw error; }
   }
+  private async closeAgents(id: string): Promise<void> {
+    const claude = this.claudes.get(id), pi = this.agents.get(id);
+    this.claudes.delete(id); this.agents.delete(id);
+    await (await claude?.catch(() => null))?.close(); await (await pi?.catch(() => null))?.close();
+  }
+  /** An agent opens only on a machine that finished preparing: it takes the
+   * workspace lease for its lifetime, which preparing the machine needs, and
+   * its first turn must not run before the checkouts exist. A reader waiting
+   * on a failed activation gets the failure instead. */
+  private ready(thread: Thread): void {
+    if (thread.workspaceState !== "available") {
+      throw new Error(this.failures.get(thread.id) ?? thread.workspaceError ?? "the thread machine is not ready");
+    }
+  }
   async claudeAgent(id: string): Promise<ClaudeAgent> {
     if (this.closing) throw new Error("host is stopping");
     const thread = this.thread(id);
@@ -240,6 +256,7 @@ export class Conversations {
     this.notArchiving(id);
     const cached = this.claudes.get(id);
     if (cached) return cached;
+    this.ready(thread);
     const runtime = this.claude;
     const loading = (async () => {
       const agent = await ClaudeAgent.open({ directory: path.join(this.directory, id), threadId: id, workspace: this.workspace(id), runtime, model: thread.model.id });
@@ -353,7 +370,8 @@ export class Conversations {
     await this.settled(id);
     const thread = this.registry.getThread(id);
     if (!thread) throw new Error("thread not found");
-    const failed = thread.workspaceState === "failed";
+    // A machine that is not ready has no agent to stop or ask (see ready()).
+    const failed = thread.workspaceState !== "available";
     if (!failed) {
       if (this.isClaude(id)) {
         if ((await this.claudeAgent(id)).running) throw new Error("stop the current run before archiving");
@@ -365,7 +383,7 @@ export class Conversations {
     // From here until the release ends nothing reopens the thread.
     return this.withArchiving(id, async () => {
       let decision: { clean: boolean; reason: string };
-      if (failed) decision = { clean: false, reason: thread.workspaceError ?? "the thread machine failed" };
+      if (failed) decision = { clean: false, reason: thread.workspaceError ?? "the thread machine was not ready" };
       else {
         const claude = this.claudes.get(id), pi = this.agents.get(id);
         this.claudes.delete(id); this.agents.delete(id);
