@@ -134,6 +134,8 @@ export async function createCubed(options: {
   allowedHosts?: string[];
   updates?: UpdateService;
   runnerHealth?: (runner: Runner) => Promise<TrustedRunnerHealth>;
+  /** How often cubed probes every enrolled runner's health (default 5 min). */
+  runnerProbeIntervalMs?: number;
   /** The argv that starts Claude Code; null disables claude-code threads.
    * Default: findClaude(). */
   claude?: readonly string[] | null;
@@ -456,10 +458,26 @@ export async function createCubed(options: {
   void openOptchat().catch(() => {});
   const recovery = setInterval(() => { void conversations.boot(); void openOptchat().catch(() => {}); }, 30000);
   recovery.unref();
+  // Without this a runner's version and machines are only as fresh as the
+  // last manual check, and a runner that updated itself still shows its old
+  // version. One pass at a time; requests to one runner are serialized anyway.
+  let probing = false;
+  const probeRunners = async () => {
+    if (probing) return;
+    probing = true;
+    try {
+      for (const runner of registry.runnerStatuses()) {
+        if (!runner.retiredAt) await probeRunner(runner.id).catch(() => {});
+      }
+    } finally { probing = false; }
+  };
+  const probes = setInterval(() => void probeRunners(), options.runnerProbeIntervalMs ?? 5 * 60_000);
+  probes.unref();
   let closePromise: Promise<void> | undefined;
   return { server, registry, conversations, gateway, close() {
     closePromise ??= (async () => {
       clearInterval(recovery);
+      clearInterval(probes);
       server.closeAllConnections();
       if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
       await modelAuth.close();
