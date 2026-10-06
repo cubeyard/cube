@@ -273,10 +273,12 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     if (!admission) throw new Error("thread runner allocation is missing");
     return (this.options.runnerClient ?? runnerClient)(admission);
   }
-  /** No agent storage exists yet, so nothing is bound to the thread's runner. */
+  /** Nothing is bound to the thread's runner yet: no agent storage and no
+   * opened workspace. Opening the workspace creates its lease store first,
+   * and a cached workspace keys every guest operation by the runner. */
   private unbound(thread: Thread): boolean {
     const directory = path.join(this.options.threads, thread.id);
-    return !fs.existsSync(path.join(directory, "pi.sqlite")) && !fs.existsSync(path.join(directory, "claude.sqlite"));
+    return ["pi.sqlite", "claude.sqlite", "lease.sqlite"].every(name => !fs.existsSync(path.join(directory, name)));
   }
   private controlSocket(): string { return this.options.gateway.control; }
   private keyDirectory(thread: Thread): string { return path.join(this.options.threads, thread.id, "vm"); }

@@ -155,6 +155,16 @@ try {
     assert.equal(moving.runner(first.id)!.threadId, "roomy");
     assert.deepEqual(moving.runnerStatuses().map(row => [row.id, row.activeThreads]), [["full", 0], ["roomy", 1]]);
 
+    // An opened workspace (its lease store) keys operations by the runner: it stays.
+    const third = moving.createThread("m", "third", model, "third");
+    assert.equal(third.runnerId, "full");
+    fs.mkdirSync(path.join(root, "relocate-threads", third.id), { recursive: true });
+    fs.writeFileSync(path.join(root, "relocate-threads", third.id, "lease.sqlite"), "");
+    calls.length = 0;
+    await assert.rejects(vms.start(third), /no room for this thread's machine/);
+    assert.deepEqual(calls, ["full:allocate"]);
+    assert.equal(moving.getThread(third.id)!.runnerId, "full");
+
     // Bound to its runner (the agent's storage exists): it stays and says why.
     const second = moving.createThread("m", "second", model, "second");
     assert.equal(second.runnerId, "full");
