@@ -115,6 +115,14 @@ try {
       /\nnote: the store shows a run unfinished, but its agent is not open in cubed: it goes on only when the agent opens again\n/);
     assert.match(show(record({ agentOpen: false, transcript: { ...transcript("working", []), agent: "claude-code" } }), "none"),
       /\nnote: the store shows a turn unfinished, but its agent is not open in cubed: Claude Code does not continue it; it shows as failed once the agent opens again\n/);
+    // A turn that ended with a background agent running: shown as still
+    // running while the agent is open, as lost-on-open when it is not.
+    const waiting = { ...transcript("completed", [{ type: "user-message", id: "1", text: "task" }]), agent: "claude-code" as const };
+    waiting.status = { ...waiting.status, waiting: ["fable review"] };
+    assert.match(show(record({ transcript: waiting }), "delivered"), /\nrun: completed \(run-1\); still running: background agent "fable review"\n/);
+    assert.ok(!show(record({ transcript: waiting }), "delivered").includes("note:"));
+    assert.match(show(record({ agentOpen: false, transcript: waiting }), "delivered"),
+      /\nnote: the store shows background agent "fable review" running, but its agent is not open in cubed: it ended with it and shows as lost once the agent opens again\n/);
   }
 
   // Pi's store, read beside its running Harness: the run shows as working

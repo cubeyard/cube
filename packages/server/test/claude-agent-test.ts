@@ -222,8 +222,82 @@ try {
       assert.ok(!fs.existsSync(path.join(files, "late-crash")), "the interrupted turn's command never finished");
     } finally { await reopened.close(); }
   }
-  agent = await ClaudeAgent.open({ directory, threadId: "t1", workspace, runtime, model: "sonnet" });
   console.log("ok: a reopen after cubed died mid-turn cancels the interrupted turn's guest commands");
+
+  // Background agents. A turn that ends with one running leaves the thread
+  // waiting: the child stays open past the idle close, and the turn Claude
+  // Code takes for the notification is a run of its own.
+  {
+    const background = path.join(root, "background");
+    const fast: ClaudeRuntime = { ...runtime, idleMs: 200, continueGraceMs: 400 };
+    let bg = await ClaudeAgent.open({ directory: background, threadId: "t1", workspace, runtime: fast, model: "sonnet" });
+    const read = () => new ClaudeThreadEvents({ agent: bg, owner: () => leases.holder(), failure: () => null }).read();
+    const ran = (run: string) => until(async () => { const value = await read(); return value.status.run === run && value.status.state !== "working" && value; }, `run ${run}`);
+    const before = starts().length;
+    await bg.submit("b1", "background task_a 1200 fable review\nsay waiting for the review");
+    let shown = await ran("b1");
+    assert.equal(shown.status.state, "completed");
+    assert.deepEqual(shown.status.waiting, ["fable review"]);
+    assert.deepEqual(ClaudeAgent.stored(background)!.waiting, ["fable review"], "the store shows the wait too");
+    await delay(500);
+    assert.equal((await read()).status.run, "b1", "a background agent's own messages start no run");
+    shown = await ran("cube:background:task_a");
+    assert.equal(shown.status.state, "completed");
+    assert.equal(shown.status.waiting, undefined);
+    assert.ok(shown.events.some(event => event.type === "user-message" && event.text === "cube: background agent \"fable review\" finished; claude code goes on"));
+    assert.match(JSON.stringify(shown.events.at(-1)), /task_a reviewed: nothing to fix/);
+    assert.ok(!JSON.stringify(shown.events).includes("task_a working"), "the background agent's messages stay inside its call");
+    assert.equal(starts().length, before + 1, "one child: the idle close waited for the background agent");
+    assert.ok(!bg.state().submissions.some(submission => submission.requestId.startsWith("cube:continued:")));
+
+    // A notification Claude Code takes no turn for fails its run after the grace.
+    await bg.submit("b2", "background-quiet task_b 300 quiet check");
+    assert.deepEqual((await ran("b2")).status.waiting, ["quiet check"]);
+    shown = await ran("cube:background:task_b");
+    assert.equal(shown.status.state, "failed");
+    assert.match(shown.status.error ?? "", /did not go on by itself — send a message to go on/);
+
+    // Stop between turns ends the background agents, recorded as stopped;
+    // a model change would end them too and is refused.
+    await bg.submit("b3", "background task_c 30000 long audit");
+    assert.deepEqual((await ran("b3")).status.waiting, ["long audit"]);
+    await assert.rejects(bg.setModel("opus"), /background agents/);
+    await bg.stop();
+    shown = await ran("cube:background:task_c:lost");
+    assert.equal(shown.status.state, "stopped");
+    assert.match(shown.status.error ?? "", /background agent "long audit" did not finish: stopped in cube/);
+    assert.deepEqual(bg.waiting, []);
+
+    // cubed stops while one runs: the close records it as lost.
+    await bg.submit("b4", "background task_d 30000 ci watch");
+    await ran("b4");
+    await bg.close();
+    let stored = ClaudeAgent.stored(background)!;
+    assert.deepEqual(stored.waiting, []);
+    assert.equal(stored.submissions.at(-1)!.requestId, "cube:background:task_d:lost");
+    assert.equal(stored.submissions.at(-1)!.state, "failed");
+    assert.match(stored.submissions.at(-1)!.error ?? "", /cubed closed claude code while it ran.*send a message to go on/);
+    // cubed dies while one runs (no close): the next open records it.
+    const db = new DatabaseSync(path.join(background, "claude.sqlite"));
+    db.prepare("INSERT INTO background(task_id, submission, description, state, started_at) VALUES ('task_e', (SELECT MAX(seq) FROM submission), 'crashed audit', 'running', 0)").run();
+    db.close();
+    assert.deepEqual(ClaudeAgent.stored(background)!.waiting, ["crashed audit"]);
+    bg = await ClaudeAgent.open({ directory: background, threadId: "t1", workspace, runtime: { ...fast, backgroundMs: 700 }, model: "sonnet" });
+    stored = ClaudeAgent.stored(background)!;
+    assert.equal(stored.submissions.at(-1)!.requestId, "cube:background:task_e:lost");
+    assert.equal(stored.submissions.at(-1)!.state, "failed");
+    assert.deepEqual(stored.waiting, []);
+
+    // One that runs past backgroundMs is ended with Claude Code, never waited for forever.
+    await bg.submit("b5", "background task_f 30000 endless");
+    await ran("b5");
+    shown = await ran("cube:background:task_f:lost");
+    assert.equal(shown.status.state, "failed");
+    assert.match(shown.status.error ?? "", /still running 1 s after it started; cubed ended claude code/);
+    await bg.close();
+  }
+  agent = await ClaudeAgent.open({ directory, threadId: "t1", workspace, runtime, model: "sonnet" });
+  console.log("ok: background agents: waiting past the idle close, their own turn as a run, a missing turn, stop, close, crash and the time limit as lost runs");
 
   // The mod's workspace functions against the real routes: paths, Edit's
   // sha condition and refusals.

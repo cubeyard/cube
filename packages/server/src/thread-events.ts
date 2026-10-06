@@ -23,11 +23,14 @@ export type ThreadEvent =
   | { type: "tool-result"; id: string; callId: string; name: string; output: string; isError: boolean; final: boolean };
 
 /** `idle` before the first run; `working` while a run is active; otherwise
- * how the newest run ended. `error` is the failure text, if any. */
+ * how the newest run ended. `error` is the failure text, if any. `waiting`
+ * names the background work the agent left running and is told about when
+ * it finishes (Claude Code's background agents); absent when there is none. */
 export type ThreadStatus = {
   state: "idle" | "working" | "completed" | "failed" | "stopped";
   run: string | null;
   error: string | null;
+  waiting?: string[];
 };
 
 export interface ThreadTranscript {

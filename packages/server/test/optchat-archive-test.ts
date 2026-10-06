@@ -108,19 +108,22 @@ try {
   // it (one retried after a failure is archived); a working run is refused.
   {
     const thread = { id: DONE, archived: false, workspaceState: "allocating", vm: undefined };
-    let starting = true, error: string | null = null, archives = 0, working = false;
+    let starting = true, error: string | null = null, archives = 0, working = false, waiting = false;
     const conversations = { starting: () => starting, error: () => error,
-      async archive() { archives++; if (working) throw new ThreadWorking(); thread.archived = true; return { retained: false, reason: "clean" }; } } as unknown as Conversations;
+      async archive() { archives++; if (working || waiting) throw new ThreadWorking(waiting); thread.archived = true; return { retained: false, reason: "clean" }; } } as unknown as Conversations;
     const registry = { getThread: () => thread, runnerSlots: () => ({ free: 1, total: 1, runners: 1 }) } as unknown as Registry;
     const adapter = cubeThreads({ registry, conversations, catalog: async () => [], runners: () => { throw new Error("unused"); } });
     await assert.rejects(adapter.archive!(DONE), /^Error: its machine is still starting or reattaching; try again shortly$/);
     assert.equal(archives, 0, "nothing waits for the machine");
     starting = false; working = true;
     await assert.rejects(adapter.archive!(DONE), /^Error: it is working; nothing was stopped$/);
-    starting = true; working = false; error = "workspace allocation failed: boom";
+    // Archiving would end its background agents: refused the same way.
+    working = false; waiting = true;
+    await assert.rejects(adapter.archive!(DONE), /^Error: it is waiting on its background agents; nothing was stopped$/);
+    starting = true; waiting = false; error = "workspace allocation failed: boom";
     assert.deepEqual(await adapter.archive!(DONE), { already: false, disk: "no machine disk", free: "1 of 1" });
     assert.deepEqual(await adapter.archive!(DONE), { already: true, disk: "no machine disk", free: "1 of 1" });
-    assert.equal(archives, 2, "an archived thread is not archived again");
+    assert.equal(archives, 3, "an archived thread is not archived again (two refusals, one archive)");
   }
 } finally { fs.rmSync(root, { recursive: true, force: true }); }
 console.log("optchat archive: ok");

@@ -192,7 +192,7 @@ and cancels their guest commands (`claude:<tool_use_id>:bash`) itself when it
 kills the child, when the child dies mid-turn and on close, because the mod
 never sees an abort then. A model
 change closes the idle child so the next prompt resumes with the new
-`--model`. An idle child is closed after ten minutes. cubed never stores Claude
+`--model`. An idle child is closed after ten minutes, never while a background agent (Claude Code's Agent tool runs one by default) still runs: ending the child ends it. cubed follows Claude Code's `task_started`/`task_notification` messages; the turn Claude Code takes by itself for a finished background agent is recorded as a run of its own, and background agents that can no longer finish (the child ended, cubed stopped, 4 hours passed) as a failed run, so watchers hear of them once (docs/optchat.md, "Follow-up and unattended work"). cubed never stores Claude
 credentials; the child gets an allow-listed environment without any
 `ANTHROPIC_*` variable or Bedrock/Vertex switch, so the subscription is used
 instead of API billing, and without cubed's other credentials. The user's

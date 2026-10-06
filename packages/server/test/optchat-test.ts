@@ -11,7 +11,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, registerSessionResourceCleanup, type Message } from "@earendil-works/pi-ai";
-import { OptChat, OptChatEvents, type OptThreads } from "../src/optchat.ts";
+import { OptChat, OptChatEvents, TELLS, type OptThreads } from "../src/optchat.ts";
 import { COMPACT, SCALE } from "../src/optchat-compactor.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 import type { ThreadEvents, ThreadTranscript } from "../src/thread-events.ts";
@@ -128,7 +128,7 @@ try {
     turn => {
       assert.equal(turn.messages.length, 1, "the report starts a fresh turn");
       const [view, report] = userBlocks(turn.messages[0]!);
-      assert.equal(report, "[abcdef12] done: PR #212, tests pass");
+      assert.equal(report, "[abcdef12] ended its turn; nothing of it runs now: done: PR #212, tests pass");
       assert.match(view!, /^<chat>\n0\+1\|summary \d+\n/, "the long first message is summarized, not shown");
       assert.ok(!view!.includes("long detail long detail"), "no message appears in full");
       assert.ok(!view!.includes("not summarized yet"), "a turn waits for the compactor");
@@ -150,7 +150,7 @@ try {
   // The report is shown as the thread's, the user's own messages as theirs.
   const shown = (await new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => null })).read()).events
     .filter(event => event.type === "user-message");
-  assert.equal(shown.find(event => event.text.startsWith("[abcdef12] done"))?.from, "abcdef12", "a report is marked as its thread's");
+  assert.equal(shown.find(event => event.text.startsWith("[abcdef12] ended"))?.from, "abcdef12", "a report is marked as its thread's");
   assert.ok(shown.filter(event => !event.text.startsWith("[")).every(event => event.from === undefined), "the user's messages are theirs");
   // SCALE beside the step was merged into real lines; it lives in the system
   // prompt, marked as an invented example, and never in a step.
@@ -181,7 +181,7 @@ try {
     },
     turn => {
       assert.equal(turn.messages.length, 1, "the report starts a fresh turn, not a continuation");
-      assert.equal(userBlocks(turn.messages[0]!).at(-1), "[abcdef12] second report");
+      assert.equal(userBlocks(turn.messages[0]!).at(-1), "[abcdef12] ended its turn; nothing of it runs now: second report");
       return fauxAssistantMessage([fauxToolCall("projects", {}, { id: "call-projects" })], { stopReason: "toolUse" });
     },
     // A message sent during a tool round reaches the model between tool calls.
@@ -276,7 +276,37 @@ try {
   assert.notEqual(turns.at(-1), before);
   const history = await new (await import("../src/pi-thread-events.ts")).PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => null }).read();
   const users = history.events.filter(event => event.type === "user-message").map(event => event.type === "user-message" ? event.text : "");
-  assert.deepEqual(users.map(text => text.slice(0, 20)), ["please fix the gatew", "[abcdef12] done: PR ", "go on", "[abcdef12] second report", "also note the branch", "and the tag", "prepare", "first", "second", "prompt", "waiting one", "what happened?"].map(text => text.slice(0, 20)), "the transcript keeps every turn");
+  assert.deepEqual(users.map(text => text.slice(0, 20)), ["please fix the gatew", "[abcdef12] ended its turn; nothing of it runs now: done", "go on", "[abcdef12] ended its turn; nothing of it runs now: second", "also note the branch", "and the tag", "prepare", "first", "second", "prompt", "waiting one", "what happened?"].map(text => text.slice(0, 20)), "the transcript keeps every turn");
+
+  // Tells to a thread are bounded between two messages of the user (reports
+  // do not count as the user's); the user's next message renews them.
+  const toldBefore = told.length;
+  script = [
+    () => fauxAssistantMessage(Array.from({ length: TELLS + 1 }, (_, k) => fauxToolCall("tell", { id: "abcdef12", message: `go on ${k}` }, { id: `call-budget-${k}` })), { stopReason: "toolUse" }),
+    turn => {
+      const results = turn.messages.filter(message => message.role === "toolResult").map(textOf);
+      assert.equal(results.length, TELLS + 1);
+      assert.match(results.at(-1)!, new RegExp(`^not sent: \\[abcdef12\\] had ${TELLS} tells from you since the user's last message`));
+      return fauxAssistantMessage("it needs you now");
+    },
+    () => fauxAssistantMessage([fauxToolCall("tell", { id: "abcdef12", message: "one more" }, { id: "call-budget-after" })], { stopReason: "toolUse" }),
+    () => fauxAssistantMessage("sent"),
+  ];
+  await chat.send("keep it going overnight", "r-budget");
+  await until(() => script.length === 2, "the bounded tells ran");
+  await chat.agent.conversation.waitForIdle(BACKGROUND_CONTEXT);
+  assert.equal(told.length - toldBefore, TELLS, "the tell over the budget was not sent");
+  await chat.send("[abcdef12] a report is not the user", `report:${THREAD}:run-budget`);
+  await until(() => script.length === 0, "the report's turn and the user's turn ran");
+  await chat.agent.conversation.waitForIdle(BACKGROUND_CONTEXT);
+  assert.equal(told.length - toldBefore, TELLS, "a report does not renew the budget");
+  script = [
+    () => fauxAssistantMessage([fauxToolCall("tell", { id: "abcdef12", message: "one more" }, { id: "call-budget-after-2" })], { stopReason: "toolUse" }),
+    () => fauxAssistantMessage("sent"),
+  ];
+  await chat.send("yes, one more", "r-budget-2");
+  await idle(chat);
+  assert.equal(told.at(-1), `${THREAD}:one more`, "the user's message renews the budget");
 } finally { await chat.close(); fs.rmSync(root, { recursive: true, force: true }); }
 
 console.log("optchat: ok");

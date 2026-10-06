@@ -151,6 +151,17 @@ offline, but hit rates on a live provider are not measured. Deviations (no
 OpenAI breakpoint field, a small steering window, threads do not get the view)
 are listed in docs/optchat.md.
 
+Unattended follow-up (docs/optchat.md, "Follow-up and unattended work"): a
+report says how a thread's turn ended and what still runs, never that the
+task is done. Claude Code background agents are tracked: the child stays
+open for them (at most 4 h), the turn Claude Code takes when one finishes is
+its own run and report, and lost ones (restart, exit, time limit) report as
+failed once. Waits cube cannot see (CI, reviews, commands) are left to the
+thread, told to wait in the foreground, and to OptChat, told to follow up,
+with at most 8 tells per thread between two user messages. Verified offline
+with a fake `claude`; the real Claude Code's follow-up turn in headless mode
+is inferred from its bundle, not observed against a live login.
+
 ## Usage and cost (branch `feat/usage-accounting`)
 
 Read-only usage accounting over the agents' own records: Pi's `pi.usage`

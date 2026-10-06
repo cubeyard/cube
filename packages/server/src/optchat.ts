@@ -16,6 +16,7 @@ import { cleanupSessionResources, Type, type AssistantMessage, type Message, typ
 import { createRegistry, defineDoc, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, ROOT_CONVERSATION_ID, section, type LiveState, type Conversation, type ConversationId, type Cursor, type Page, type EntryId, type EntryRecord } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openStorage } from "./durable-agent.ts";
+import { agents } from "./claude-agent.ts";
 import { createLogger } from "./log.ts";
 import { compactNode } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
@@ -31,6 +32,10 @@ export const RETRY_MS = 10_000;
 /** How long a thread's machine must keep failing to start before the chat
  * hears of it: cubed's recovery loop retries every 30 s. */
 export const START_GRACE_MS = 2 * 60_000;
+
+/** Tells to one thread between two messages of the user: unattended
+ * follow-up is bounded; the user's next message allows more. */
+export const TELLS = 8;
 
 export const MASTER = `You are OptChat, an AI agent that works for one user in a single chat that
 never ends. You are the user's interface to cube. You never write code,
@@ -50,6 +55,16 @@ Threads run in the background. Each one's report reaches you as a
 message starting "[id] ": between your tool calls while you work, or as
 a new turn once yours has ended. So never wait for one (no sleep, no
 polling): go on, or end your turn and tell the user what is running.
+A report says how the thread's turn ended, never that its task is done;
+its reply says that. "ended its turn; nothing of it runs now" means it
+does nothing more until told, whatever the reply promises. "waiting on
+its background agent" means another report comes when that finishes.
+"failed" and "stopped" mean it stopped short. When a thread stopped
+before its task is done (it waits for CI, a review or a command nothing
+tracks, or it was interrupted) and the next step is clear and within
+what the user asked, tell it to go on and to wait for such things
+itself; otherwise tell the user what it needs. Between two messages of
+the user a thread takes at most ${TELLS} tells from you.
 tell(id, message) gives a thread that has reported more to do.
 history(id) reads one of your threads without changing it: cubed's state
 for it beside its latest answer and conversation. Use it when a report is
@@ -79,7 +94,10 @@ last reply said, a decision, a past attempt or where a file is, before
 you act, guess or ask. date(id) gives the date and time of message id.`;
 
 /** What a thread report says when the thread started: its final reply is the report. */
-export const THREAD_NOTE = "(This thread was started by OptChat, the user's chat agent. Your final reply is your report to it.)";
+export const THREAD_NOTE = "(This thread was started by OptChat, the user's chat agent. Your final reply is your report to it. "
+  + "Once you end your turn nothing wakes you except a background agent of yours finishing, so do not end it to wait for CI, a review or a command: "
+  + "wait for those yourself in the foreground (a command runs at most 10 minutes; repeat a bounded wait such as `timeout 590 gh pr checks <n> --watch`), then go on. "
+  + "If you stop before the task is done, say plainly what is left and what you are waiting for.)";
 
 /** Where OptChat's threads come from: cube's projects and threads. */
 export interface OptThreads {
@@ -160,7 +178,8 @@ export function formatHistory(id: string, record: ThreadRecord, report: ReportSt
     return lines.join("\n");
   }
   const { state, run, error } = transcript.status;
-  lines.push(`run: ${state}${run ? ` (${run})` : ""}${error ? `: ${error}` : ""}`);
+  const waiting = transcript.status.waiting ?? [];
+  lines.push(`run: ${state}${run ? ` (${run})` : ""}${error ? `: ${error}` : ""}${waiting.length ? `; still running: ${agents(waiting)}` : ""}`);
   const { answer, asked } = transcript;
   lines.push(!answer ? "latest answer: none" : `latest answer #${answer.index}${asked > answer.index ? ` (before the newest message #${asked}, which has none yet)` : ""}: ${capText(answer.text.trim(), HISTORY_ANSWER)}`);
   if (state !== "idle" && state !== "working" && run) lines.push(`report of this run to this chat: ${reportText(report)}`);
@@ -171,6 +190,7 @@ export function formatHistory(id: string, record: ThreadRecord, report: ReportSt
   else if (state === "working" && !record.agentOpen) notes.push(transcript.agent === "claude-code"
     ? "the store shows a turn unfinished, but its agent is not open in cubed: Claude Code does not continue it; it shows as failed once the agent opens again"
     : "the store shows a run unfinished, but its agent is not open in cubed: it goes on only when the agent opens again");
+  if (waiting.length && (record.archived || !record.agentOpen)) notes.push(`the store shows ${agents(waiting)} running, but its agent is not open in cubed: ${waiting.length === 1 ? "it ended with it and shows" : "they ended with it and show"} as lost once the agent opens again`);
   for (const note of notes) lines.push(`note: ${note}`);
   const { total, start, events } = transcript;
   const end = start + events.length;
@@ -185,7 +205,8 @@ export function formatHistory(id: string, record: ThreadRecord, report: ReportSt
 }
 
 /** `cache` names the chat for the providers' prompt caches; it never changes. */
-type Settings = { tree: number; cache: string; threads: Record<string, { at: number }> };
+/** `tells`: the tell calls to a thread since the user's last message. */
+type Settings = { tree: number; cache: string; threads: Record<string, { at: number; tells?: string[] }> };
 const SettingsDoc = defineDoc<Settings>({ kind: "cube.optchat", version: 1, scope: "session", initial: () => ({ tree: 0, cache: "", threads: {} }) });
 /** The view parts the current turn started with; the request hook renders them. */
 const TurnDoc = defineDoc<{ started: boolean; parts: number[] }>({
@@ -257,12 +278,24 @@ export function threadReport(transcript: ThreadTranscript): string {
   return runReport(transcript.status, reply?.type === "assistant-text" ? reply.text : "");
 }
 
-/** The report of a run that ended with `status`, whose reply (after the newest message) is `reply`. */
-function runReport(status: ThreadStatus, reply: string): string {
+/** A reply that says its thread waits for something. */
+const WAITS = /\b(wait(s|ing)? (for|on|until)|once (the )?(ci|checks?|reviews?|builds?|tests?|pipeline)\b|(ci|checks?|reviews?|builds?|tests?|pipeline) (is|are) (still )?(running|pending|queued|in progress)|will (report|follow up|check back|get back|let you know)|still (running|pending|in progress))/i;
+
+/** The report of a run that ended with `status`, whose reply (after the
+ * newest message) is `reply`. It says how the turn ended and what of the
+ * thread still runs, never that the task is done: only the reply says that. */
+export function runReport(status: ThreadStatus, reply: string): string {
   const text = reply.trim();
-  if (status.state === "completed") return text || "(finished without a reply)";
-  if (status.state === "stopped") return `stopped${text ? `; last reply: ${text}` : ""}`;
-  return `failed: ${status.error ?? "unknown error"}${text ? `; last reply: ${text}` : ""}`;
+  const said = text ? `: ${text}` : " without a reply";
+  const last = text ? `; last reply: ${text}` : "";
+  if (status.state === "completed") {
+    const waiting = status.waiting ?? [];
+    if (waiting.length) return `ended its turn, waiting on its ${agents(waiting)}; another report comes when ${waiting.length === 1 ? "it finishes" : "they finish"}${said}`;
+    if (WAITS.test(text)) return `ended its turn; nothing of it runs now and nothing wakes it, though its reply speaks of waiting: it goes on only when told${said}`;
+    return `ended its turn; nothing of it runs now${said}`;
+  }
+  if (status.state === "stopped") return `stopped${status.error ? `: ${status.error}` : ""}${last}`;
+  return `failed: ${status.error ?? "unknown error"}${last}`;
 }
 
 export type OptChatOptions = {
@@ -538,6 +571,8 @@ export class OptChat {
       if (pending.items.some(same) || pending.batch?.some(same) || pending.sent.some(same)) return;
       if (await tx.submissionByRequest(conversation.id, requestId) || await tx.submissionByRequest(conversation.id, `${requestId}:unanswered`)) return;
       pending.items.push({ text, requestId, after: this.lastEntry });
+      // A message of the user (not a report) renews every thread's tells.
+      if (!requestId.startsWith("report:")) for (const thread of Object.values((await tx.doc(SettingsDoc)).threads)) delete thread.tells;
     }, context);
     this.notify();
     this.pendingChanged();
@@ -850,11 +885,22 @@ export class OptChat {
     });
     const tell = defineTool({
       name: "tell",
-      description: "Send a message to a thread you started, once it has reported: more work, an answer or a correction.",
+      description: `Send a message to a thread you started, once it has reported: more work, an answer, a correction, or to go on when it stopped short. At most ${TELLS} per thread between two messages of the user.`,
       parameters: Type.Object({ id: Type.String(), message: Type.String() }),
       replay: "safe",
-      execute: async (args, api) => {
+      execute: async (args, api, callContext) => {
         const id = await this.resolve(args.id);
+        // Counted once per call, so a replayed call is not refused.
+        const allowed = await api.commit(async tx => {
+          const thread = (await tx.doc(SettingsDoc)).threads[id];
+          if (!thread) return true;
+          const tells = thread.tells ?? [];
+          if (tells.includes(api.callId)) return true;
+          if (tells.length >= TELLS) return false;
+          thread.tells = [...tells, api.callId];
+          return true;
+        }, callContext);
+        if (!allowed) return text(`not sent: [${short(id)}] had ${TELLS} tells from you since the user's last message; tell the user what it needs instead`);
         await this.options.threads.tell(id, args.message, `optchat:${api.callId}`);
         return text(`sent to [${short(id)}]; its report comes back as a message starting "[${short(id)}] "`);
       },

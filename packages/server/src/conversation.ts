@@ -24,7 +24,13 @@ const log = createLogger("threads");
 const INITIAL_REQUEST = "cube:initial";
 /** Archive refused: the thread's agent is running. Nothing is interrupted. */
 export class ThreadWorking extends Error {
-  constructor() { super("stop the current run before archiving"); this.name = "ThreadWorking"; }
+  /** `waiting`: no turn runs, but the agent's background agents do. */
+  readonly waiting: boolean;
+  constructor(waiting = false) {
+    super(waiting ? "stop the thread's background agents before archiving" : "stop the current run before archiving");
+    this.name = "ThreadWorking";
+    this.waiting = waiting;
+  }
 }
 /** The thread's archive is under way: nothing reopens it meanwhile. Not a
  * failure of the thread; once the archive ends the thread is gone. */
@@ -470,6 +476,8 @@ export class Conversations {
         return null;
       });
       if (opened instanceof ClaudeAgent ? opened.running : opened && (await opened.harness.snapshot(LiveDoc, opened.conversation.id, context))?.run) throw new ThreadWorking();
+      // Closing the agent would end its background agents.
+      if (opened instanceof ClaudeAgent && opened.waiting.length) throw new ThreadWorking(true);
     }
     // From here until the release ends nothing reopens the thread.
     return this.withArchiving(id, async () => {

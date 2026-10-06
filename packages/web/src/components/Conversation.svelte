@@ -41,6 +41,8 @@
   let sending = $state(false);
   let pending: { text: string; requestId: string } | null = null;
   const working = $derived(status.state === "working");
+  // No turn runs, but the agent's background agents do; stop ends them.
+  const waiting = $derived(!working && !!status.waiting?.length);
   $effect(() => { busy = working || sending; });
   // The draft is always the user's to edit: a run, a reconnect or a booting
   // machine only hold the send key, never the text field.
@@ -224,6 +226,8 @@
         {/each}
         {#if working}
           <div class="working-line" role="status"><span class="lamp on-amber blink" aria-hidden="true"></span>working</div>
+        {:else if waiting}
+          <div class="working-line" role="status"><span class="lamp on-amber" aria-hidden="true"></span>waiting on {status.waiting!.length === 1 ? "a background agent" : `${status.waiting!.length} background agents`}: {status.waiting!.join(", ")}</div>
         {:else if status.state === "stopped"}
           <div class="working-line" role="status"><span class="lamp" aria-hidden="true"></span>stopped</div>
         {/if}
@@ -251,7 +255,7 @@
       <button class="send-key" type="submit" title="send · enter" aria-label="send message" disabled={!canSend}>
         <Icon name="arrow" size={16} />
       </button>
-      {#if working}<button class="key stop-key" type="button" disabled={stopping} onclick={stop}>{stopping ? "stopping…" : "stop"}</button>{/if}
+      {#if working || waiting}<button class="key stop-key" type="button" disabled={stopping} onclick={stop}>{stopping ? "stopping…" : "stop"}</button>{/if}
     </div>
   </form>
 </div>
