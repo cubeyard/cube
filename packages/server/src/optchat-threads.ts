@@ -1,14 +1,17 @@
 /** OptChat's threads are cube's own: started in a project like any thread
  * from the UI, on a runner from the global pool, with its own machine. */
 import { CLAUDE_PROVIDER } from "./claude-agent.ts";
-import type { Conversations } from "./conversation.ts";
+import { ThreadWorking, type Conversations } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
 import { THREAD_NOTE, type OptThreads } from "./optchat.ts";
-import { threadAgent, type Registry } from "./registry.ts";
+import { threadAgent, type Registry, type Thread } from "./registry.ts";
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
 
 export function cubeThreads(options: { registry: Registry; conversations: Conversations; catalog: () => Promise<ModelSelection[]>; runners: () => RunnersObservation }): OptThreads {
   const { registry, conversations } = options;
+  const disk = (vm: Thread["vm"]) => !vm ? "no machine disk" : vm.discarded ? "machine disk discarded"
+    : vm.retain ? `machine disk retained${vm.retainReason ? ` (${vm.retainReason})` : ""}` : "machine disk deleted";
+  const free = () => { const slots = registry.runnerSlots(); return `${slots.free} of ${slots.total}`; };
   const state = (id: string) => conversations.error(id) ? `error: ${conversations.error(id)}` : conversations.starting(id) ? "starting its machine" : "ready";
   return {
     async projects() {
@@ -70,7 +73,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       // An archived thread's workspace state stays "releasing"; only its failure says more.
       const facts = [
         ...(!thread.archived || thread.workspaceState === "failed" ? [`workspace ${thread.workspaceState}${thread.workspaceError ? `: ${thread.workspaceError}` : ""}`] : []),
-        ...(thread.archived && vm ? [vm.discarded ? "machine disk discarded" : vm.retain ? `machine disk retained${vm.retainReason ? ` (${vm.retainReason})` : ""}` : "machine disk deleted"] : []),
+        ...(thread.archived && vm ? [disk(vm)] : []),
         `agent ${threadAgent(thread)}${conversations.agentOpen(id) ? " open in cubed" : " not open in cubed"}`,
         `workspace writer: ${conversations.owner(id) ?? "none"}`,
       ];
@@ -83,6 +86,20 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       };
       try { return { ...record, transcript: await conversations.storedHistory(id), unreadable: null }; }
       catch (error) { return { ...record, transcript: null, unreadable: error instanceof Error ? error.message : String(error) }; }
+    },
+    async archive(id) {
+      const thread = registry.getThread(id);
+      if (!thread) return null;
+      if (thread.archived) return { already: true, disk: disk(thread.vm), free: free() };
+      // A machine still coming up (not one retried after a failure) would
+      // hold this call for minutes; its first run starts once it is up.
+      if (conversations.starting(id) && !conversations.error(id) && thread.workspaceState !== "failed") {
+        throw new Error("its machine is still starting");
+      }
+      const archived = await conversations.archive(id).catch((error: unknown) => {
+        throw error instanceof ThreadWorking ? new Error("it is working; nothing was stopped", { cause: error }) : error;
+      });
+      return { already: !!archived.already, disk: disk(registry.getThread(id)?.vm), free: free() };
     },
     async events(id) {
       const thread = registry.getThread(id);

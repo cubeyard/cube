@@ -6,7 +6,8 @@ tools. It starts threads in projects (`spawn`), gives a thread that has reported
 more to do (`tell`), lists its threads (`threads`) and what it can start
 (`projects`), reports the runners as cubed last heard from them (`runners`,
 read-only; see docs/runner-operations.md, "Observing runners"), reads one of
-its threads (`history`), reads usage and estimated cost (`usage`: everything,
+its threads (`history`), archives its threads that are done to free their
+machines (`archive`), reads usage and estimated cost (`usage`: everything,
 a project or a thread; read-only, see [usage.md](usage.md)) and reads its own
 memory (`zoom`, `date`). Threads do all the
 work, each in its own VM, exactly like a thread started from the UI.
@@ -100,6 +101,46 @@ at 4,000. No store: `history: none stored`; a store that cannot be read:
 committed state: a Pi run still streaming shows as `working` without its
 partial reply.
 
+## Archiving a thread
+
+An open thread holds one of its runner's machine slots until it is archived.
+`archive(ids)` archives threads the chat started (up to 20 per call), so the
+user does not have to archive finished ones by hand. Each id must be a thread
+of this chat, named by at least its 8-character short id: another chat's,
+the UI's or an unknown thread is refused as `no thread`, and a shorter prefix
+is refused before anything is looked up.
+
+It is the UI's archive (`DELETE /api/threads/<id>`, `Conversations.archive`),
+not a second lifecycle: the agent closes, the machine's release check decides
+whether its disk is retained, the machine is released and the slot is free
+again. The tool answers one line per id (`archived` or `was already
+archived`, with the disk's fate) and the free thread machines afterwards. The
+thread's store in `<CUBED_STATE>/threads/<id>` stays, so `history` still reads
+it, and usage stays readable too.
+
+- **A working thread is refused**, nothing stopped: `not archived: it is
+  working; nothing was stopped`. A Pi thread with a live run, or a Claude
+  Code thread whose turn is running, counts as working. There is no force:
+  OptChat has no way to stop a thread, and the user stops one in the UI.
+- **A machine still starting is refused** (`its machine is still starting`)
+  rather than waited for, which could hold the chat's turn for minutes; its
+  first run starts once it is up. A machine that failed and is being retried
+  by the recovery loop is archived after that attempt, its disk retained.
+- **Repeats and races.** Archives of one thread run one after another in
+  `Conversations` (the same per-thread queue as messages and releases), and
+  the second finds the thread archived and changes nothing: not the slots and
+  not the retained disk's record. A tool call replayed after a restart says
+  `was already archived`. A message to the thread queued before the archive
+  either starts a run first (and the archive is refused) or finds the thread
+  gone.
+- **Its report is kept.** Archiving ends the thread's watch. If the watcher
+  had not sent the last settled run's report yet, the archive sends it, under
+  the same `report:<thread>:<run>` request id, so it reaches the chat once.
+
+Archived threads cannot be reopened, from OptChat or the UI; `discard` of a
+retained disk stays an operator action in the UI. Nothing is deleted besides
+what the release itself deletes (a clean machine's disk).
+
 ## Caching
 
 `optchat-cache.ts` applies spec §8 through pi-ai's published request hooks,
@@ -177,6 +218,8 @@ model), `POST /api/optchat/prompt {text, requestId}`, `POST /api/optchat/stop`,
   afterwards; the copy is synchronous and holds cubed's event loop for its
   length (stores over 64 MiB are refused). A copy a crash left behind
   (`.read-*` in the thread directory) is not removed.
+- `archive` reads the archived thread's store once more to find a report the
+  watcher did not send (the same copy as `history`).
 - No HTML browser of the tree and no import of older chats yet.
 - Verified offline with faux models and a local guest only
   (`packages/server/test/optchat-*-test.ts`), never against a real model or VM.

@@ -21,6 +21,10 @@ const context = BACKGROUND_CONTEXT;
 const log = createLogger("threads");
 /** The registry's first message is submitted once under this request id. */
 const INITIAL_REQUEST = "cube:initial";
+/** Archive refused: the thread's agent is running. Nothing is interrupted. */
+export class ThreadWorking extends Error {
+  constructor() { super("stop the current run before archiving"); this.name = "ThreadWorking"; }
+}
 export class Conversations {
   private readonly registry: Registry;
   private readonly directory: string;
@@ -399,20 +403,24 @@ export class Conversations {
   /** Closes the agent and releases the machine. Its disk is deleted only
    * when cubed's own records show the agent never ran a command or wrote a
    * file in it and the machine's release check also reports clean; the
-   * guest is agent-controlled, so its report alone never deletes a disk. */
-  async archive(id: string): Promise<{ retained: boolean; reason: string }> {
+   * guest is agent-controlled, so its report alone never deletes a disk.
+   * A thread whose run goes on is refused (ThreadWorking), never stopped. A
+   * thread an earlier archive already archived is left as it is (`already`). */
+  async archive(id: string): Promise<{ retained: boolean; reason: string; already?: true }> {
     return this.command(id, async () => {
     await this.settled(id);
     const thread = this.registry.getThread(id);
     if (!thread) throw new Error("thread not found");
+    // Archives queue behind each other: the second finds the first's result.
+    if (thread.archived) return { retained: !!thread.vm?.retain && !thread.vm.discarded, reason: thread.vm?.retainReason ?? "already archived", already: true };
     // A machine that is not ready has no agent to stop or ask (see ready()).
     const failed = thread.workspaceState !== "available";
     if (!failed) {
       if (this.isClaude(id)) {
-        if ((await this.claudeAgent(id)).running) throw new Error("stop the current run before archiving");
+        if ((await this.claudeAgent(id)).running) throw new ThreadWorking();
       } else {
         const agent = await this.agent(id);
-        if ((await agent.harness.snapshot(LiveDoc, agent.conversation.id, context))?.run) throw new Error("stop the current run before archiving");
+        if ((await agent.harness.snapshot(LiveDoc, agent.conversation.id, context))?.run) throw new ThreadWorking();
       }
     }
     // From here until the release ends nothing reopens the thread.

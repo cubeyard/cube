@@ -50,7 +50,9 @@ tell(id, message) gives a thread that has reported more to do.
 history(id) reads one of your threads without changing it: cubed's state
 for it beside its latest answer and conversation. Use it when a report is
 missing or short, or contradicts what threads shows; say what disagrees
-rather than settle it.`;
+rather than settle it. An open thread holds a machine until it is
+archived: archive(ids) archives threads of yours that are done, to free
+theirs; history still reads them. It never stops a working thread.`;
 
 export const VIEW_DOC = `The view: the whole chat between OptChat and the user, oldest first, inside
 <chat> tags, as one-line summaries. Each line is
@@ -92,6 +94,11 @@ export interface OptThreads {
   /** What cubed has of a thread, read only: its own record beside the
    * agent's stored transcript, which may disagree. null: no such thread. */
   history(id: string): Promise<ThreadRecord | null>;
+  /** Archives a thread: its agent closes and its machine is released, as
+   * the UI's archive does; its stored history stays. Refused, with nothing
+   * stopped, while the thread works or its machine starts. An archived
+   * thread is left as it is (`already`). null: no such thread. */
+  archive?(id: string): Promise<{ already: boolean; disk: string; free: string } | null>;
   /** Usage and estimated cost as text: of everything, a project, or one
    * thread (an id or its first characters). Read-only. */
   usage?(query: { project?: string | undefined; thread?: string | undefined }): Promise<string>;
@@ -744,6 +751,16 @@ export class OptChat {
       .catch(error => { if (!this.closing) log.warn("report delivery failed", { thread: id, error }); });
   }
 
+  /** After an archive: the thread's last settled run reports to the chat if
+   * its watcher had not sent that yet (archiving ends the watch). The report's
+   * request id keeps it to one delivery. */
+  private async reportArchived(id: string): Promise<void> {
+    try {
+      const record = await this.options.threads.history(id);
+      if (record?.transcript) this.observe(id, record.transcript);
+    } catch (error) { log.warn("archived thread's report not checked", { thread: id, error }); }
+  }
+
   /** The thread a short id names, among the ones this chat started. */
   private async resolve(id: string): Promise<string> {
     const threads = Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {});
@@ -856,6 +873,38 @@ export class OptChat {
         return text(formatHistory(id, record, report, args));
       },
     });
+    const archive = defineTool({
+      name: "archive",
+      description: "Archive threads you started that are done, to free their machines. Each one's agent closes and its machine is released, as the user's archive in cube does; "
+        + "its conversation stays and history still reads it. A thread that is working or whose machine is still starting is not archived and nothing is stopped: "
+        + "wait for its report. It cannot be undone from here. Name each thread by its whole 8-character id.",
+      parameters: Type.Object({ ids: Type.Array(Type.String(), { minItems: 1, maxItems: 20 }) }),
+      // Archiving again finds the thread archived and says so.
+      replay: "safe",
+      execute: async args => {
+        const lines: string[] = [];
+        let free: string | undefined;
+        for (const given of args.ids) {
+          let name = given;
+          try {
+            // A destructive call takes no shorter prefix than the ids it is shown.
+            if (given.replace(/^\[|\]$/g, "").length < 8) throw new Error("name a thread by its whole 8-character id");
+            const id = await this.resolve(given);
+            name = `[${short(id)}]`;
+            if (!this.options.threads.archive) throw new Error("archiving is not available");
+            const result = await this.options.threads.archive(id);
+            if (!result) { lines.push(`${name} is gone: cubed has no record of it`); continue; }
+            free = result.free;
+            lines.push(`${name} ${result.already ? "was already archived" : "archived"}: ${result.disk}; history still reads it`);
+            await this.reportArchived(id);
+          } catch (error) {
+            lines.push(`${name} not archived: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+        if (free) lines.push(`free thread machines: ${free}`);
+        return text(lines.join("\n"));
+      },
+    });
     const usage = defineTool({
       name: "usage",
       description: "Token usage and estimated cost so far: of everything (by project, model and thread, and your own), of one project, or of one thread (its id). Estimates, not charges; usage without a record is reported as unknown.",
@@ -869,7 +918,7 @@ export class OptChat {
     const instructions = path.join(this.options.directory, "AGENTS.md");
     return defineExtension({
       name: "optchat",
-      tools: [zoom, date, projects, runners, spawn, tell, threads, history, usage],
+      tools: [zoom, date, projects, runners, spawn, tell, threads, history, archive, usage],
       sections: [
         section("master", () => MASTER, { tag: false }),
         section("view", () => VIEW_DOC, { tag: false }),
