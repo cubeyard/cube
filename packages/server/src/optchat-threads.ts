@@ -13,11 +13,12 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
     async projects() {
       const projects = registry.listProjects();
       const models = await options.catalog();
+      const slots = registry.runnerSlots();
       const lines = projects.map(project => `${project.name} (id ${project.id}; ${project.status}${project.error ? `: ${project.error}` : ""}): `
         + project.repositories.map(repository => `${repository.url}@${repository.base ?? "default"}`).join(", "));
       return [
         lines.length ? `projects:\n${lines.join("\n")}` : "no projects: the user creates them under projects",
-        `free runners: ${registry.availableRunners().length} of ${registry.runnerCount()} (one thread per runner)`,
+        `free thread machines: ${slots.free} of ${slots.total} (an open thread holds one until it is archived)`,
         `models: ${models.map(model => `${model.provider}/${model.id}`).join(", ") || "none connected"}`,
       ].join("\n");
     },

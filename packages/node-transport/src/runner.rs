@@ -18,7 +18,7 @@ use std::{
     process::Child,
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -36,8 +36,12 @@ use crate::{
     vm::{self, Qmp, Spawner, VmPaths},
 };
 
-/// One active VM per runner this round; more is a later seam.
-pub const MAX_ACTIVE_VMS: u64 = 1;
+/// The most active VMs an operator may allow (`--max-active-vms`).
+pub const MAX_ACTIVE_VMS_LIMIT: u64 = 32;
+/// `--max-active-vms auto` never allows more than this.
+pub const AUTO_MAX_ACTIVE_VMS: u64 = 4;
+/// Host memory `auto` leaves to the host itself (runner, QEMU overhead, page cache).
+const HOST_RESERVE_MIB: u64 = 2048;
 /// `vm.stop`: time the guest gets after ACPI power-down before `quit`.
 pub const STOP_GRACE: Duration = Duration::from_secs(30);
 const QUIT_GRACE: Duration = Duration::from_secs(10);
@@ -178,12 +182,45 @@ pub struct Runner {
     journal: Mutex<Journal>,
     accepting: AtomicBool,
     faulted: AtomicBool,
+    /// Active VMs (`VmState::active`) this process admits; 1 until the
+    /// operator's choice is applied with `set_max_active_vms`.
+    max_active_vms: AtomicU64,
     /// Serializes mutations; inspection and status do not take it.
     ops: tokio::sync::Mutex<()>,
     live: Mutex<HashMap<String, Live>>,
     pumps: Arc<Pumps>,
     spawner: Spawner,
     this: Weak<Runner>,
+}
+
+/// `--max-active-vms auto`: as many VMs as fit if every one uses the
+/// installation's per-VM maximum vCPUs and memory, so a host is never
+/// oversubscribed whatever sizes cubed asks for; at least 1, at most
+/// `AUTO_MAX_ACTIVE_VMS`.
+pub fn auto_max_active_vms(limits: &VmLimits) -> u64 {
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u64);
+    capacity_for(host_memory_mib(), cpus, limits)
+}
+
+fn capacity_for(host_memory_mib: u64, cpus: u64, limits: &VmLimits) -> u64 {
+    let by_memory =
+        host_memory_mib.saturating_sub(HOST_RESERVE_MIB) / u64::from(limits.max_memory_mib).max(1);
+    let by_cpu = cpus / u64::from(limits.max_vcpus).max(1);
+    by_memory.min(by_cpu).clamp(1, AUTO_MAX_ACTIVE_VMS)
+}
+
+fn host_memory_mib() -> u64 {
+    // SAFETY: sysconf has no preconditions.
+    let (pages, size) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PHYS_PAGES),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
+    if pages <= 0 || size <= 0 {
+        return 0;
+    }
+    (pages as u64).saturating_mul(size as u64) >> 20
 }
 
 fn require_unix_user() -> Result<()> {
@@ -367,6 +404,7 @@ impl Runner {
             journal: Mutex::new(journal),
             accepting: AtomicBool::new(!quarantined),
             faulted: AtomicBool::new(false),
+            max_active_vms: AtomicU64::new(1),
             ops: tokio::sync::Mutex::new(()),
             live: Mutex::new(HashMap::new()),
             pumps: Arc::new(Pumps::default()),
@@ -466,13 +504,28 @@ impl Runner {
             error: faulted.then(|| "IO_ERROR".into()),
             active_vms: rows.iter().filter(|row| row.state.active()).count() as u64,
             running_vms: self.live.lock().unwrap().len() as u64,
-            max_active_vms: MAX_ACTIVE_VMS,
+            max_active_vms: self.max_active_vms(),
             retained_vms: retained.len() as u64,
             retained_bytes: retained
                 .iter()
                 .map(|row| dir_bytes(&self.paths(row.slot).dir))
                 .sum(),
         })
+    }
+
+    /// The operator's bound on active VMs, from `--max-active-vms`. A lower
+    /// bound than the VMs already active only refuses new allocations.
+    pub fn set_max_active_vms(&self, max: u64) -> Result<()> {
+        ensure!(
+            (1..=MAX_ACTIVE_VMS_LIMIT).contains(&max),
+            "--max-active-vms must be 1 through {MAX_ACTIVE_VMS_LIMIT}"
+        );
+        self.max_active_vms.store(max, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn max_active_vms(&self) -> u64 {
+        self.max_active_vms.load(Ordering::SeqCst)
     }
 
     /// Draining is local operator authority: `vm.allocate` and `vm.start`
@@ -556,7 +609,10 @@ impl Runner {
             {
                 return detail("CONFLICT", "thread already has an active vm");
             }
-            if rows.iter().filter(|row| row.state.active()).count() as u64 >= MAX_ACTIVE_VMS {
+            // Checked and inserted under `ops` and the journal lock: two
+            // allocations can never both take the last slot.
+            if rows.iter().filter(|row| row.state.active()).count() as u64 >= self.max_active_vms()
+            {
                 return reject("CAPACITY_EXCEEDED");
             }
             journal.insert_allocating(vm_id, thread_id, disk_gib)?
@@ -1116,5 +1172,26 @@ mod tests {
         ] {
             assert!(!valid_mac(mac), "{mac}");
         }
+    }
+
+    #[test]
+    fn auto_capacity_fits_every_vm_at_its_maximum() {
+        let limits = VmLimits::default(); // 4 vCPUs, 8 GiB
+        assert_eq!(capacity_for(8 * 1024, 64, &limits), 1, "never below one");
+        assert_eq!(
+            capacity_for(16 * 1024, 16, &limits),
+            1,
+            "14 GiB after the reserve"
+        );
+        assert_eq!(capacity_for(32 * 1024, 16, &limits), 3);
+        assert_eq!(capacity_for(32 * 1024, 8, &limits), 2, "bounded by cores");
+        assert_eq!(capacity_for(512 * 1024, 128, &limits), AUTO_MAX_ACTIVE_VMS);
+        let small = VmLimits {
+            max_vcpus: 2,
+            max_memory_mib: 4096,
+            max_disk_gib: 64,
+        };
+        assert_eq!(capacity_for(18 * 1024, 8, &small), 4);
+        assert_eq!(capacity_for(0, 0, &small), 1, "unknown host");
     }
 }

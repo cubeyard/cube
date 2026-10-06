@@ -10,7 +10,7 @@ in `docs/plans/` hold the reasoning and the detailed evidence.
   login. Both work on the thread's `Workspace`.
 - **Every thread has its own VM on a runner** (runner protocol 3; see
   `docs/plans/2026-10-04-vm-runner.md`):
-  - one QEMU VM per active thread;
+  - one QEMU VM per active thread, several per runner (`--max-active-vms`);
   - Debian 13 genericcloud, with a qcow2 overlay per thread;
   - a cloud-init seed written by the runner.
 
@@ -41,7 +41,9 @@ in `docs/plans/` hold the reasoning and the detailed evidence.
 - One cubed host: the managed launcher with a user service and the signed
   update feed (`docs/cubed-updates.md`).
 - Any number of runners, each with its own control key (enrollment refuses a
-  shared key). Each runner hosts one active VM. Runners:
+  shared key). Each runner hosts up to `--max-active-vms` thread VMs at once
+  (`auto` by default: what fits at the per-VM maximum, 1 to 4; cube-runner
+  0.7.0+, older runners host one). Runners:
   - **Linux x86-64:** `cube-runner.service`, a dedicated account in group
     `kvm`;
   - **macOS arm64:** the per-user LaunchAgent profile from
@@ -149,7 +151,9 @@ are listed in docs/optchat.md.
 - **Gateway limits:** HTTP/2, WebSocket and CONNECT are refused. Clients that
   pin certificates fail. There is no IPv6.
 - **Not verified:**
-  - more than one active VM per runner (one, by design);
+  - more than one active VM per runner on production hosts, macOS/HVF and
+    load (verified: two guests on one Linux/KVM runner in
+    `scripts/test-vm-concurrency.ts`, on a small nested-KVM host);
   - load;
   - a guest that ignores ACPI power-down;
   - a real model driving `gh`/`git` on its own initiative in a long task;

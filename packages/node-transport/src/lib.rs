@@ -209,7 +209,7 @@ pub struct Limits {
 }
 
 impl Limits {
-    pub fn current(limits: &runner::VmLimits) -> Self {
+    pub fn current(limits: &runner::VmLimits, max_active_vms: u64) -> Self {
         Self {
             max_frame_bytes: MAX_FRAME_BYTES,
             request_timeout_ms: REQUEST_TIMEOUT.as_millis() as u64,
@@ -217,7 +217,7 @@ impl Limits {
             max_memory_mib: limits.max_memory_mib,
             max_disk_gib: limits.max_disk_gib,
             max_seed_bytes: seed::MAX_SEED_BYTES,
-            max_active_vms: runner::MAX_ACTIVE_VMS,
+            max_active_vms,
         }
     }
 }
@@ -398,7 +398,7 @@ fn hello(node_id: &str, query: &Request) -> Response {
             // The plain serve probe never enables the runner.
             profiles: vec![],
             capabilities: vec!["node.hello".into()],
-            limits: Limits::current(&runner::VmLimits::default()),
+            limits: Limits::current(&runner::VmLimits::default(), 1),
             minimum_protocol_version: MIN_COMPATIBLE_PROTOCOL_VERSION,
             software_version: SOFTWARE_VERSION.into(),
             binding: None,
@@ -428,7 +428,7 @@ fn runner_hello(node_id: &str, query: &Request, runner: &runner::Runner) -> Resp
         *binding = Some(installation.binding.clone());
         *profiles = vec!["runner".into()];
         capabilities.extend(RUNNER_CAPABILITIES.map(String::from));
-        *limits = Limits::current(&installation.limits);
+        *limits = Limits::current(&installation.limits, runner.max_active_vms());
         *platform = Some(installation.platform.clone());
         *base_image_sha256 = Some(installation.image.sha256.clone());
     }
@@ -950,7 +950,7 @@ mod tests {
         assert_eq!(
             (SOFTWARE_VERSION, RUNNER_CAPABILITIES),
             (
-                "0.6.0",
+                "0.7.0",
                 [
                     "node.status",
                     "vm.allocate",

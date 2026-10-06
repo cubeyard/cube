@@ -42,3 +42,5 @@ node scripts/smoke-runner-vm.ts "$target/cube-runner" "$target/cube-gateway" "$C
 node scripts/smoke-node-adapter.ts "$target/cube-runner" "$target/cube-gateway" "$CUBE_TEST_VM_IMAGE"
 # The product end to end: a disposable cubed with real VMs (scripts/test-vm-e2e.ts).
 node scripts/test-vm-e2e.ts "$target/cube-runner" "$CUBE_TEST_VM_IMAGE"
+# Two thread VMs on one runner (--max-active-vms 2): bound, isolation, slots.
+node scripts/test-vm-concurrency.ts "$target/cube-runner" "$target/cube-gateway" "$CUBE_TEST_VM_IMAGE"

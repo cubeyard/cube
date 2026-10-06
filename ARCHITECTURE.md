@@ -9,8 +9,8 @@
   allocation, access boundary, HTTP/SSE and activation of Pi's open operations.
   For a claude-code thread, the Claude Code child process and the thread record
   (accepted prompts, printed messages, session ID); Claude Code owns its session.
-- **runner:** one QEMU VM per active thread (allocate, start, stop, inspect,
-  release; protocol 3) and the frame pump that carries the VM's Ethernet frames
+- **runner:** one QEMU VM per active thread, up to its `--max-active-vms`
+  at once (allocate, start, stop, inspect, release; protocol 3) and the frame pump that carries the VM's Ethernet frames
   to the gateway. It runs no command of its own and cannot read Pi sessions or
   model credentials through the protocol.
 - **thread VM:** the workspace (`/workspace`) and, in its guest helper
@@ -254,8 +254,16 @@ cubed also refuses to open a thread directory that still holds the old Pi store
 refuses to start while the first's workspace socket answers.
 
 A runner has one permanent node/environment admission (runner config version 2)
-and belongs to the Cube installation, not a project. It hosts one active thread
-machine at a time. Cubed persists `available/allocating/busy/releasing/failed`;
+and belongs to the Cube installation, not a project. It hosts up to
+`maxActiveVms` thread machines at once, each its own QEMU, disk, seed, frame
+channel and gateway LAN. The runner decides the bound (`--max-active-vms`,
+`auto` by default: what fits if every VM uses the installation's per-VM
+maximum, 1 to 4) and enforces it under its mutation lock; cubed records it at
+enrollment, runner checks and machine starts. An open thread holds one slot on
+its runner from creation until its archive finishes, failed or releasing
+machines included; the runner row's
+`available/allocating/busy/releasing/failed` is a summary of those threads in
+the shape a one-machine runner always had, `available` while a slot is free;
 the runner journal persists each VM record and reconciles interrupted
 transitions without deleting a disk. Thread creation captures the checked
 project revision and each repository's normalized URL, resolved branch and exact
@@ -287,8 +295,12 @@ is stopped and marked interrupted; the next activation (or the 30 s recovery
 loop) boots it again from the same disk and the guest marks unfinished
 operations interrupted.
 
-Registry allocation uses `BEGIN IMMEDIATE` and a conditional `available` update,
-so two project requests cannot claim one runner. Project deletion never owns or
+Registry allocation counts a runner's open threads and inserts the new one in
+one `BEGIN IMMEDIATE` transaction, so concurrent requests, also from another
+process, cannot take a runner's last slot. It chooses the runner with the
+lowest share of used slots, runners with a failed machine last. A runner that
+reports no bound (before 0.7.0) has one slot. cubed keeps one client per
+runner, so the threads' runner calls queue on one Iroh identity. Project deletion never owns or
 deletes a runner and remains blocked while any thread history references the
 project. Runner contact is authenticated `node.status` evidence. A failed latest
 check is `unreachable`; it becomes `stale` only after seven continuous days
@@ -296,7 +308,8 @@ without a successful check. Success clears that interval. Retirement is
 installation-global and first reserves the runner against allocation. Both
 reservation and commit read the global runner/thread allocation snapshot and
 require no active allocation. A reachable runner must also report no active
-machine; an unreachable runner must be stale. Changed status or allocation fails
+machine and cubed must have no open thread on it; an unreachable runner must be
+stale. Changed status or allocation fails
 closed. The permanent tombstone removes global capacity while retaining
 immutable identity, thread links, reason, probe evidence, runner journals and
 retained disks.
@@ -333,7 +346,9 @@ with a guest (`smoke-runner-vm.ts`), cubed's side of it
 contract over SSH, egress, runner SIGKILL, retained release) and the product
 end to end (`test-vm-e2e.ts`: Pi tools in the guest, cubed and gateway SIGKILL
 mid-command, egress, `gh`/`git push` with secret substitution against a local
-GitHub fake, a Claude Code thread, clean and retained archives). Mocks are not
+GitHub fake, a Claude Code thread, clean and retained archives) and two thread
+VMs on one runner (`test-vm-concurrency.ts`: the bound, side-by-side boots and
+commands, separate machines, slots returned at archive). Mocks are not
 runner acceptance. `scripts/check-claude-mod.sh` validates and tests the mod
 with the installed `claude` CLI without calling a model; the real CLI is never
 started by tests. These use controlled models and disposable data, never live

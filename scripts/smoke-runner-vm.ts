@@ -85,7 +85,8 @@ function call(request: Record<string, unknown>, expectError = false): any {
 const vmCall = (request: Record<string, unknown>) => call(request).vm;
 
 async function startRunner(): Promise<ChildProcess> {
-  const child = start(runnerBin, ["runner-serve", "--key", path.join(work, "runner.key"), "--state", path.join(work, "state")], "runner");
+  // One machine: this smoke checks the bound (CAPACITY_EXCEEDED) whatever `auto` gives the host.
+  const child = start(runnerBin, ["runner-serve", "--key", path.join(work, "runner.key"), "--state", path.join(work, "state"), "--max-active-vms", "1"], "runner");
   runnerReady = await firstLine(child);
   return child;
 }

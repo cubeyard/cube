@@ -12,7 +12,7 @@ import { Registry, threadAgent, type Project, type Runner } from "./registry.ts"
 import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { Conversations } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
-import { IrohRunnerClient, loadRunnerConfig, type RunnerNetwork, type TrustedRunnerHealth } from "./iroh-node.ts";
+import { IrohRunnerClient, loadRunnerConfig, runnerClient, type RunnerNetwork, type TrustedRunnerHealth } from "./iroh-node.ts";
 import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
 import { GatewaySupervisor, locateGateway, widestNetwork } from "./gateway.ts";
 import { ThreadVms, type ThreadMachines } from "./vm.ts";
@@ -177,7 +177,7 @@ export async function createCubed(options: {
   const onboarding = path.join(options.state, "onboarding.json");
   const configuredHosts = options.allowedHosts ?? process.env.CUBED_ALLOWED_HOSTS?.split(",") ?? [];
   const allowedHosts = new Set(["localhost", "127.0.0.1", "[::1]", ...configuredHosts.map(host => host.trim()).filter(Boolean)]);
-  const runnerHealth = options.runnerHealth ?? (runner => new IrohRunnerClient({ configPath: runner.configPath, configHash: runner.configHash }).health());
+  const runnerHealth = options.runnerHealth ?? (runner => runnerClient(runner).health());
   const runnerView = (id: string) => registry.runnerStatuses().find(runner => runner.id === id);
   const probeRunner = async (id: string) => {
     const runner = registry.getRunner(id);
@@ -214,6 +214,7 @@ export async function createCubed(options: {
     });
   const projectView = (project: Project) => ({ ...project,
     availableRunnerCount: registry.availableRunners().length,
+    availableSlotCount: registry.runnerSlots().free,
     runnerCount: registry.runnerCount(),
     runnerCapacity: registry.runnerCapacity(),
     runners: registry.runnerStatuses(),
@@ -533,7 +534,7 @@ async function runnersStatus(state: string): Promise<number> {
       }
     }));
     for (const result of results) {
-      if (result.reachable) console.log(`${result.runner.nodeId}: reachable; lifecycle=${result.health.lifecycle}; vms=${result.health.activeVms}/${result.health.maxActiveVms}; retained=${result.health.retainedVms}`);
+      if (result.reachable) console.log(`${result.runner.nodeId}: reachable; lifecycle=${result.health.lifecycle}; machines=${result.health.activeVms} of ${result.health.maxActiveVms}; retained=${result.health.retainedVms}`);
       else console.log(`${result.runner.nodeId}: unreachable; ${result.error}`);
     }
     return results.some(result => !result.reachable) ? 1 : 0;

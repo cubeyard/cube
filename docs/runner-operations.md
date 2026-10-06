@@ -5,12 +5,14 @@ virtual machine per active thread. It runs no command of its own for a thread:
 the agent's tools run inside the thread's VM, reached over SSH through
 `cube-gateway` next to cubed. One installation has one immutable
 installation/environment binding, speaks runner protocol 3, belongs to the
-global Cube pool, hosts at most one active VM at a time, and uses Iroh's public
-N0 discovery/relay transport.
+global Cube pool, hosts a bounded number of active VMs at once (see
+[thread machines per runner](#thread-machines-per-runner)), and uses Iroh's
+public N0 discovery/relay transport.
 
 > Status: built and verified on Linux/KVM with a real Debian guest, the real
 > gateway and cubed (`scripts/smoke-runner-vm.ts`,
-> `scripts/smoke-node-adapter.ts`, `scripts/test-vm-e2e.ts`, and a live run
+> `scripts/smoke-node-adapter.ts`, `scripts/test-vm-e2e.ts`,
+> `scripts/test-vm-concurrency.ts` for two VMs on one runner, and a live run
 > against GitHub). macOS (HVF) has code paths only and is unverified; runner
 > and cubed on separate machines (direct or relay mode) are not verified yet.
 
@@ -95,6 +97,56 @@ down (ACPI, up to 30 seconds); a second Ctrl-C makes QEMU quit at once and
 marks the VM `interrupted`. Restart with the same home. A VM that was running
 when the runner died is recorded `stopped` and `interrupted` at the next start;
 cubed boots it again from the same disk.
+
+## Thread machines per runner
+
+A runner hosts up to `--max-active-vms` thread VMs at once, each its own QEMU
+process, qcow2 overlay, seed, frame channel and gateway LAN; threads on one
+runner share nothing but the host. `run` and `runner-serve` take
+`--max-active-vms auto|N` (N from 1 to 32), or `CUBE_RUNNER_MAX_ACTIVE_VMS`
+when the flag is absent. It is a process option, not part of the immutable
+installation: restart the runner to change it.
+
+`auto`, the default, counts the VMs that fit if every one uses the
+installation's per-VM maximum (`--max-vcpus`, `--max-memory-mib`), so the host
+is never oversubscribed whatever sizes cubed asks for: host memory less 2 GiB
+divided by `--max-memory-mib`, host CPUs divided by `--max-vcpus`, the smaller
+of the two, at least 1 and at most 4. With the defaults (4 vCPUs, 8 GiB) a
+16 GiB host gets 1, a 32 GiB host with 8 cores gets 2 and a 64 GiB host with 16
+cores gets 4. cubed's default VM is 2 vCPUs and 4 GiB, so `init` with
+`--max-vcpus 2 --max-memory-mib 4096` lets `auto` count real usage instead of
+the larger default bound. Disk is not counted: each overlay grows up to
+`--max-disk-gib`, and retained disks stay until discarded, so keep free space
+for that many disks. An explicit N is the operator's decision; QEMU commits
+memory lazily, and a guest that uses all of it competes with the others.
+
+Systemd: add a drop-in instead of editing the shipped unit, then restart:
+
+```sh
+sudo systemctl edit cube-runner.service   # [Service] Environment=CUBE_RUNNER_MAX_ACTIVE_VMS=2
+sudo systemctl restart cube-runner.service
+```
+
+A drop-in survives upgrades. macOS uses `auto`: install and upgrade rewrite
+the LaunchAgent/LaunchDaemon plist, so an explicit bound added to it does not
+persist yet. A foreground `cube-runner run` takes the flag directly.
+
+The bound is enforced by the runner: `vm.allocate` beyond it is
+`CAPACITY_EXCEEDED`, decided under the runner's mutation lock, so two
+requests can never take the last slot. A VM holds its slot from allocation
+until it is released or retained; a stopped or interrupted VM still holds it.
+Lowering the bound only refuses new VMs. The ready line, `node.hello` limits
+and `node.status` report it as `maxActiveVms`.
+
+cubed records the bound at enrollment, at every runner check and at every
+machine start, and counts its open threads against it: a thread holds a slot
+on its runner from creation until its archive finishes, also while its machine
+is failed or releasing. A new thread goes to the runner with the lowest share
+of used slots, runners with a failed machine last; the count and the new
+thread are one `BEGIN IMMEDIATE` registry transaction. Runners before 0.7.0
+report 1 and keep one thread at a time, exactly as before. Draining and the
+self-updater still wait until no VM is active, so a busier runner updates less
+often; drain it to make room for an update.
 
 ## Always-on service (Linux)
 
@@ -269,7 +321,7 @@ identities.
 
 ## Limits and diagnostics
 
-One active VM per runner. Per VM: `vcpus` up to `maxVcpus`, memory from 256 MiB
+At most `maxActiveVms` active VMs per runner. Per VM: `vcpus` up to `maxVcpus`, memory from 256 MiB
 to `maxMemoryMiB`, a disk at least the base image's virtual size and at most
 `maxDiskGiB`, a seed of at most 64 KiB. Control requests are bounded to 1 MiB
 frames and 5 seconds; `vm.stop` and `vm.release` therefore complete
@@ -279,7 +331,7 @@ are admission bounds, not host resource quotas.
 | State/error | Action |
 |---|---|
 | `DRAINING` | wait, or resume/restart after maintenance |
-| `CAPACITY_EXCEEDED` | another thread's VM is active; release it first |
+| `CAPACITY_EXCEEDED` | `maxActiveVms` VMs are active; archive a thread, or restart the runner with a higher `--max-active-vms` |
 | `CONFLICT` | the vmId exists for another thread or with another disk size, the thread already has another active VM, a start names a different mac, or the VM is in a state that cannot start |
 | `INCOMPATIBLE_PROTOCOL` | upgrade the older cubed/cube-runner component |
 | `UNSUPPORTED` | a protocol-2 method (`exec.*`, `fs.*`, `workspace.*`) reached a protocol-3 runner |
