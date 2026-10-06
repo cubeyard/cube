@@ -18,9 +18,10 @@ import type { Registry } from "../src/registry.ts";
 import type { ThreadMachines } from "../src/vm.ts";
 import { render } from "../src/claude-thread-events.ts";
 import { openStorage, readStorage } from "../src/durable-agent.ts";
-import { formatHistory, HISTORY_MAX, OptChat, type OptThreads, type ThreadRecord } from "../src/optchat.ts";
+import { formatHistory, HISTORY_MAX, OptChat, type OptThreads, type ReportState, type ThreadRecord } from "../src/optchat.ts";
 import { storedPiTranscript } from "../src/pi-thread-events.ts";
 import type { ThreadEvent, ThreadTranscript } from "../src/thread-events.ts";
+import { pageOf, readPiHistory, type HistoryRequest } from "../src/thread-history.ts";
 import type { Workspace } from "../src/workspace.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -31,10 +32,15 @@ const ID = "abcdef12-0000-4000-8000-000000000001";
 const OTHER = "99999999-0000-4000-8000-000000000002";
 const transcript = (state: ThreadTranscript["status"]["state"], events: ThreadEvent[], error: string | null = null): ThreadTranscript =>
   ({ agent: "pi", owner: null, status: { state, run: state === "idle" ? null : "run-1", error }, events });
-const record = (overrides: Partial<ThreadRecord>): ThreadRecord => ({
+/** A record whose transcript is whole; `show` pages it as the reader would. */
+type Whole = Omit<ThreadRecord, "transcript"> & { transcript: ThreadTranscript | null };
+const record = (overrides: Partial<Whole>): Whole => ({
   project: "cube", title: "fix the gateway", archived: false, machine: "ready", facts: ["workspace available"], agentOpen: true,
   failure: null, transcript: null, unreadable: null, ...overrides,
 });
+const show = (whole: Whole, report: ReportState, request: HistoryRequest = {}) =>
+  formatHistory(ID, paged(whole, request), report);
+const paged = (whole: Whole, request: HistoryRequest = {}): ThreadRecord => ({ ...whole, transcript: whole.transcript && pageOf(whole.transcript, request) });
 
 const claudeThreads = path.join(root, "threads", "claude");
 let claudeConversations!: Conversations;
@@ -53,26 +59,26 @@ try {
     events.push({ type: "assistant-text", id: "a", text: "done: PR #9", reasoning: false, final: true });
     events.push({ type: "assistant-text", id: "live", text: "streaming", reasoning: false, final: false });
     const full = record({ transcript: transcript("completed", events) });
-    const last = formatHistory(ID, full, "delivered");
+    const last = show(full, "delivered");
     assert.ok(!last.includes("secret thought") && !last.includes("streaming"), "no thinking, no unfinished output");
     assert.match(last, /^\[abcdef12\] cube · fix the gateway\ncubed: machine ready; workspace available\nrun: completed \(run-1\)\nlatest answer #61: done: PR #9\nreport of this run to this chat: delivered\n/);
     assert.match(last, /\nmessages #50–#61 of 62, oldest first; earlier: history\("abcdef12", before: 50\)\n#50 result bash: 24\n\n#51 tool bash \{"command":"echo 25"\}\n/);
     assert.ok(last.endsWith("\n#61 thread: done: PR #9"));
-    const first = formatHistory(ID, full, "delivered", { before: 4, limit: 3 });
+    const first = show(full, "delivered", { before: 4, limit: 3 });
     assert.match(first, /messages #1–#3 of 62, oldest first; earlier: history\("abcdef12", before: 1\)\n#1 tool bash \{"command":"echo 0"\}\n#2 result bash: 0\n\n#3 tool bash/);
-    const capped = formatHistory(ID, full, "delivered", { before: 9, limit: 1 });
+    const capped = show(full, "delivered", { before: 9, limit: 1 });
     assert.match(capped, /#8 result bash: 3\n/);
     assert.match(capped, /characters cut/, "a long tool result is cut");
-    assert.match(formatHistory(ID, full, "none", { before: 7, limit: 2 }), /#5 tool bash \{"command":"echo 2"\}\n#6 result bash \(error\): 2/, "an error result says so");
-    assert.equal(formatHistory(ID, full, "none", { limit: 500 }).split("\n").filter(line => /^#\d+ /.test(line)).length, HISTORY_MAX, "the limit is clamped");
+    assert.match(show(full, "none", { before: 7, limit: 2 }), /#5 tool bash \{"command":"echo 2"\}\n#6 result bash \(error\): 2/, "an error result says so");
+    assert.equal(show(full, "none", { limit: 500 }).split("\n").filter(line => /^#\d+ /.test(line)).length, HISTORY_MAX, "the limit is clamped");
     const long = record({ transcript: transcript("completed", Array.from({ length: 50 }, (_, k): ThreadEvent => ({ type: "assistant-text", id: `${k}`, text: "y".repeat(5000), reasoning: false, final: true }))) });
-    assert.ok(formatHistory(ID, long, "none", { limit: HISTORY_MAX }).length < 30_000, "a full page stays within its budget");
-    assert.match(formatHistory(ID, long, "none", { limit: 1 }), /\n#49 thread: y{900}/, "a short page gives each message more");
-    assert.match(formatHistory(ID, record({ transcript: transcript("completed", long.transcript!.events.slice(0, 2)) }), "none", { limit: HISTORY_MAX }), /\n#1 thread: y{900}/, "the budget is shared by the messages shown");
-    assert.match(formatHistory(ID, full, "none", { before: 0 }), /\nmessages: none before #0 \(62 in all\)$/);
-    assert.match(formatHistory(ID, full, "none", { before: 1000, limit: 1 }), /\nmessages #61–#61 of 62/, "before past the end shows the end");
-    assert.match(formatHistory(ID, full, "none"), /\nreport of this run to this chat: not sent yet\n/);
-    assert.match(formatHistory(ID, full, "accepted"), /\nreport of this run to this chat: accepted, not in the chat yet\n/);
+    assert.ok(show(long, "none", { limit: HISTORY_MAX }).length < 30_000, "a full page stays within its budget");
+    assert.match(show(long, "none", { limit: 1 }), /\n#49 thread: y{900}/, "a short page gives each message more");
+    assert.match(show(record({ transcript: transcript("completed", long.transcript!.events.slice(0, 2)) }), "none", { limit: HISTORY_MAX }), /\n#1 thread: y{900}/, "the budget is shared by the messages shown");
+    assert.match(show(full, "none", { before: 0 }), /\nmessages: none before #0 \(62 in all\)$/);
+    assert.match(show(full, "none", { before: 1000, limit: 1 }), /\nmessages #61–#61 of 62/, "before past the end shows the end");
+    assert.match(show(full, "none"), /\nreport of this run to this chat: not sent yet\n/);
+    assert.match(show(full, "accepted"), /\nreport of this run to this chat: accepted, not in the chat yet\n/);
   }
 
   // The latest answer, and a newer message that has none yet.
@@ -82,32 +88,32 @@ try {
       { type: "assistant-text", id: "2", text: "first answer", reasoning: false, final: true },
       { type: "user-message", id: "3", text: "more" },
     ]) });
-    const shown = formatHistory(ID, asked, "none");
+    const shown = show(asked, "none");
     assert.match(shown, /\nlatest answer #1 \(before the newest message #2, which has none yet\): first answer\n/);
     assert.ok(!shown.includes("report of this run"), "a working run has no report yet");
-    assert.match(formatHistory(ID, record({ transcript: transcript("idle", []) }), "none"), /\nrun: idle\nlatest answer: none\nmessages: none$/);
+    assert.match(show(record({ transcript: transcript("idle", []) }), "none"), /\nrun: idle\nlatest answer: none\nmessages: none$/);
   }
 
   // Missing and unreadable history are said as such.
-  assert.equal(formatHistory(ID, record({ machine: "error: workspace allocation failed: ssh: connection refused", failure: "workspace allocation failed: ssh: connection refused" }), "none"),
+  assert.equal(show(record({ machine: "error: workspace allocation failed: ssh: connection refused", failure: "workspace allocation failed: ssh: connection refused" }), "none"),
     "[abcdef12] cube · fix the gateway\ncubed: machine error: workspace allocation failed: ssh: connection refused; workspace available\nhistory: none stored; the agent never opened\nfailure to start, reported to this chat: not sent yet");
-  assert.match(formatHistory(ID, record({ machine: "starting its machine" }), "none"), /history: none stored; the agent never opened \(its machine is still starting\)$/);
-  assert.match(formatHistory(ID, record({ machine: "error: boom", failure: "boom" }), "delivered"), /\nhistory: none stored; the agent never opened\nfailure to start, reported to this chat: delivered$/);
-  assert.match(formatHistory(ID, record({ unreadable: "this thread was created by an older cube" }), "none"), /\nhistory: unreadable: this thread was created by an older cube$/);
+  assert.match(show(record({ machine: "starting its machine" }), "none"), /history: none stored; the agent never opened \(its machine is still starting\)$/);
+  assert.match(show(record({ machine: "error: boom", failure: "boom" }), "delivered"), /\nhistory: none stored; the agent never opened\nfailure to start, reported to this chat: delivered$/);
+  assert.match(show(record({ unreadable: "this thread was created by an older cube" }), "none"), /\nhistory: unreadable: this thread was created by an older cube$/);
 
   // Divergence: cubed records a failure while the store shows the agent ran;
   // both are shown, nothing is settled.
   {
     const failure = "workspace allocation failed: thread workspace already has a writable owner";
-    const diverged = formatHistory(ID, record({ machine: `error: ${failure}`, failure, facts: ["workspace failed: x", "agent pi open in cubed", "workspace writer: pi"],
+    const diverged = show(record({ machine: `error: ${failure}`, failure, facts: ["workspace failed: x", "agent pi open in cubed", "workspace writer: pi"],
       transcript: transcript("completed", [{ type: "user-message", id: "1", text: "task" }, { type: "assistant-text", id: "2", text: "all tests pass", reasoning: false, final: true }]) }), "none");
     assert.match(diverged, /\ncubed: machine error: workspace allocation failed: thread workspace already has a writable owner; workspace failed: x; agent pi open in cubed; workspace writer: pi\nrun: completed \(run-1\)\nlatest answer #1: all tests pass\nreport of this run to this chat: not sent yet\nnote: cubed records a failure \(workspace allocation failed: thread workspace already has a writable owner\) while the stored history shows the agent ran \(run completed\); the history does not say whether the failure came before, during or after that run\n/);
-    const archived = formatHistory(ID, record({ archived: true, machine: null, agentOpen: false, facts: ["workspace available", "machine disk retained (the agent ran commands)"],
+    const archived = show(record({ archived: true, machine: null, agentOpen: false, facts: ["workspace available", "machine disk retained (the agent ran commands)"],
       transcript: transcript("working", [{ type: "user-message", id: "1", text: "task" }]) }), "none");
     assert.match(archived, /\ncubed: archived; workspace available; machine disk retained \(the agent ran commands\)\nrun: working \(run-1\)\nlatest answer: none\nnote: the store shows a run unfinished at archive; it does not go on\n/);
-    assert.match(formatHistory(ID, record({ agentOpen: false, transcript: transcript("working", []) }), "none"),
+    assert.match(show(record({ agentOpen: false, transcript: transcript("working", []) }), "none"),
       /\nnote: the store shows a run unfinished, but its agent is not open in cubed: it goes on only when the agent opens again\n/);
-    assert.match(formatHistory(ID, record({ agentOpen: false, transcript: { ...transcript("working", []), agent: "claude-code" } }), "none"),
+    assert.match(show(record({ agentOpen: false, transcript: { ...transcript("working", []), agent: "claude-code" } }), "none"),
       /\nnote: the store shows a turn unfinished, but its agent is not open in cubed: Claude Code does not continue it; it shows as failed once the agent opens again\n/);
   }
 
@@ -118,8 +124,10 @@ try {
     const directory = path.join(root, "pi-thread");
     fs.mkdirSync(directory);
     const file = path.join(directory, "pi.sqlite");
-    const read = (failure: string | null = null) => readStorage(file, storage => storedPiTranscript(storage, "pi", failure));
+    const read = (failure: string | null = null) => readPiHistory(file, "pi", failure, { limit: HISTORY_MAX });
+    const whole = () => readStorage(file, storage => storedPiTranscript(storage, "pi", null));
     assert.equal(await read(), null, "no store: null");
+    assert.equal(await whole(), null, "no store: null");
     assert.ok(!fs.existsSync(file), "and none is created");
     let release!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });
@@ -172,6 +180,10 @@ try {
       assert.ok(fs.statSync(file).mtimeMs >= before);
       assert.equal((await read())!.events.at(-1)?.type === "user-message", true, "the writer's entries are readable");
     } finally { await harness.close(context); }
+    // The page is the same one the whole transcript gives.
+    const all = (await whole())!;
+    assert.ok(all.events.length > 3);
+    for (const request of [{}, { limit: HISTORY_MAX }, { before: 3, limit: 2 }, { before: 0 }]) assert.deepEqual(await readPiHistory(file, "pi", null, request), pageOf(all, request));
     const other = path.join(root, "future", "pi.sqlite");
     fs.mkdirSync(path.dirname(other));
     const future = new DatabaseSync(other);
@@ -179,6 +191,7 @@ try {
     future.close();
     const bytes = fs.readFileSync(other);
     await assert.rejects(readStorage(other, async () => "read"), /schema version 999/, "another schema version is refused, not migrated");
+    await assert.rejects(readPiHistory(other, null, null, {}), /schema version 999/, "by the page reader too");
     assert.deepEqual(fs.readFileSync(other), bytes, "and left as it was");
   }
 
@@ -216,7 +229,7 @@ try {
     assert.deepEqual(shown.status, { state: "completed", run: "cube:initial", error: null });
     assert.deepEqual(shown.events.map(event => event.type === "tool-call" ? event.input : event.type === "tool-result" ? event.output : event.text),
       ["the question", { command: "ls /workspace/out.txt" }, "the answer"], "host paths are shown as /workspace");
-    assert.deepEqual(await claudeConversations.storedHistory("claude"), { ...shown, owner: null }, "a claude code thread is read from its own store");
+    assert.deepEqual(await claudeConversations.storedHistory("claude"), pageOf({ ...shown, owner: null }), "a claude code thread is read from its own store");
   }
 
   // The tool: OptChat reads its own threads only; whether a run's report
@@ -243,9 +256,9 @@ try {
       async tell() {},
       async describe(ids) { return ids.map(id => `[${id.slice(0, 8)}] cube · ready`).join("\n"); },
       async events() { return null; },
-      async history(id) {
+      async history(id, request) {
         asked.push(id);
-        return record({ transcript: transcript("completed", [{ type: "user-message", id: "1", text: "task" }, { type: "assistant-text", id: "2", text: "PR #9", reasoning: false, final: true }]) });
+        return paged(record({ transcript: transcript("completed", [{ type: "user-message", id: "1", text: "task" }, { type: "assistant-text", id: "2", text: "PR #9", reasoning: false, final: true }]) }), request);
       },
     };
     const chat = await OptChat.open({ directory: path.join(root, "optchat"), models, model: async () => ({ provider: faux.getModel().provider, id: faux.getModel().id }), threads, limits: { node: 64, retryMs: 50, watchMs: 50 } });

@@ -46,7 +46,7 @@ counted once, and a restart or a replayed task does not add it again.
 `Harness.usage()` sums every conversation. cubed reads it from the open agent;
 when the agent closes (archive, shutdown, a machine reboot) its last reading
 is kept. An archived thread's store is read again from a read-only snapshot
-(`readStorage` in durable-agent.ts, as the history tool reads it: the retained
+(`readStorage` in durable-agent.ts, a private copy pi-durable opens: the retained
 original is never migrated or checkpointed; a store of another schema version
 or over 64 MiB is refused and its last reading shown). A thread that is open but whose agent is not (its machine is
 starting or failed) shows its last reading (`read: "snapshot"`) or, if it never

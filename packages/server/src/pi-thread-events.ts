@@ -112,7 +112,7 @@ export async function storedPiTranscript(storage: Pick<Storage, "scanEntries" | 
   return { agent: "pi", owner, status, events: entryEvents(entries.sort((a, b) => a.id - b.id)) };
 }
 
-function settlement(submission: SubmissionRecord): Pick<ThreadStatus, "state" | "error"> {
+export function settlement(submission: SubmissionRecord): Pick<ThreadStatus, "state" | "error"> {
   if (submission.status === "done") return { state: "completed", error: null };
   if (submission.reason === "aborted") return { state: "stopped", error: null };
   return {
@@ -121,7 +121,7 @@ function settlement(submission: SubmissionRecord): Pick<ThreadStatus, "state" | 
   };
 }
 
-function entryEvents(entries: readonly EntryRecord[]): ThreadEvent[] {
+export function entryEvents(entries: readonly EntryRecord[]): ThreadEvent[] {
   return entries.flatMap(entry => SHOWN.has(entry.kind) ? (entry.model ?? []).flatMap((message, index) => messageEvents(message, `${entry.id}.${index}`)) : []);
 }
 
