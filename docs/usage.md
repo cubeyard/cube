@@ -45,9 +45,10 @@ aborted partials included, compaction summaries too. So each response is
 counted once, and a restart or a replayed task does not add it again.
 `Harness.usage()` sums every conversation. cubed reads it from the open agent;
 when the agent closes (archive, shutdown, a machine reboot) its last reading
-is kept. An archived thread's store is read again from a private copy (nothing
-else may open it then, and opening pi-durable storage would migrate and
-checkpoint the retained original). A thread that is open but whose agent is not (its machine is
+is kept. An archived thread's store is read again from a read-only snapshot
+(`readStorage` in durable-agent.ts, as the history tool reads it: the retained
+original is never migrated or checkpointed; a store of another schema version
+or over 64 MiB is refused and its last reading shown). A thread that is open but whose agent is not (its machine is
 starting or failed) shows its last reading (`read: "snapshot"`) or, if it never
 had one, `unavailable`: only the agent may open its store, whose lease is
 its lock.
@@ -82,7 +83,8 @@ the next turn and the unknown count overstates the gap.
 each reply, failed ones included, in its `cube.optchat.usage` document (source
 `optchat-compactor`, with a call count), counting from the first open of a
 cube that does this (`since`). A chat whose tree already held nodes the
-compactor built then (not ones whose text fit as it was) has `incomplete`
+compactor built then (not ones whose text fit as it was, judged by the
+current node limit) has `incomplete`
 set: those earlier calls are unknown.
 The threads OptChat started are ordinary threads; a global report shows their
 sum (`optchatThreads`) but adds it to the total only once, under the threads.

@@ -405,7 +405,7 @@ export class OptChat {
       if (l === 0 ? i >= this.memory.length : !this.memory.built(l - 1, 2 * i) || !this.memory.built(l - 1, 2 * i + 1)) return true;
       try { return !("free" in this.memory.source(l, i)); } catch { return true; }
     });
-    await this.harness.commit(async tx => {
+    if ((await this.harness.snapshot(CompactorUsageDoc, context))?.since == null) await this.harness.commit(async tx => {
       const usage = await tx.doc(CompactorUsageDoc);
       if (usage.since !== null) return;
       usage.since = Date.now();
