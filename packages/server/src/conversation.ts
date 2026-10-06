@@ -244,7 +244,7 @@ export class Conversations {
   private async closeAgents(id: string): Promise<void> {
     const claude = this.claudes.get(id), pi = this.agents.get(id);
     this.claudes.delete(id); this.agents.delete(id);
-    await (await claude?.catch(() => null))?.close(); await this.closePi(id, pi);
+    await (await claude)?.close(); await this.closePi(id, pi);
   }
   /** Closes a Pi agent, keeping its usage first. */
   private async closePi(id: string, loading: Promise<Agent> | undefined): Promise<void> {
@@ -422,31 +422,27 @@ export class Conversations {
     // nothing: the thread is archived, its disk kept.
     let unopened: string | null = null;
     if (!failed) {
-      try {
-        if (this.isClaude(id)) {
-          if ((await this.claudeAgent(id)).running) throw new ThreadWorking();
-        } else {
-          const agent = await this.agent(id);
-          if ((await agent.harness.snapshot(LiveDoc, agent.conversation.id, context))?.run) throw new ThreadWorking();
-        }
-      } catch (error) {
-        if (error instanceof ThreadWorking || this.closing) throw error;
+      // Only opening is caught: an open agent whose state cannot be read is not archived.
+      const opened = await (this.isClaude(id) ? this.claudeAgent(id) : this.agent(id)).catch((error: unknown) => {
+        if (this.closing) throw error;
         unopened = error instanceof Error ? error.message : String(error);
-      }
+        return null;
+      });
+      if (opened instanceof ClaudeAgent ? opened.running : opened && (await opened.harness.snapshot(LiveDoc, opened.conversation.id, context))?.run) throw new ThreadWorking();
     }
     // From here until the release ends nothing reopens the thread.
     return this.withArchiving(id, async () => {
       let decision: { clean: boolean; reason: string };
       if (failed) decision = { clean: false, reason: thread.workspaceError ?? "the thread machine was not ready" };
+      else if (unopened) decision = { clean: false, reason: `the agent could not open: ${unopened}` };
       else {
         const claude = this.claudes.get(id), pi = this.agents.get(id);
         this.claudes.delete(id); this.agents.delete(id);
-        await (await claude?.catch(() => null))?.close(); await this.closePi(id, pi);
+        await (await claude)?.close(); await this.closePi(id, pi);
         const workspace = this.openWorkspace(id);
         try { decision = await releaseCheck(workspace, threadAgent(thread), thread.allocation); }
         catch (error) { decision = { clean: false, reason: `the thread machine could not be checked: ${error instanceof Error ? error.message : String(error)}` }; }
         if (decision.clean && workspace.agentChanged()) decision = { clean: false, reason: "the agent ran commands or wrote files in the machine" };
-        if (unopened) decision = { clean: false, reason: `the agent could not open: ${unopened}` };
       }
       this.closeWorkspace(id);
       this.resumed.delete(id);
