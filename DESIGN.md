@@ -483,10 +483,9 @@ with the single `--syn-*` highlight set. Inline code is different — putty
 ### Tool Strip
 A meter strip on the reading field: `--s3`, 9px radius, hairline border, mini
 lamp + mono tool name + plain primary argument (the command or path — raw
-JSON only as fallback, truncated at 300 chars) + chevron (rotates −90° when
-closed). Output sits in a recessed `--s1` window underneath (12px mono,
-16rem max-height), visible by default; collapse animates via CSS grid rows
-(1fr ↔ 0fr at 120ms), so the output stays in the DOM. A strip opens while it runs,
+JSON only as fallback, truncated at 300 chars) + chevron (turns 180° over 120ms when
+open). Output sits in a recessed `--s1` window underneath (12px mono,
+16rem max-height) inside a native disclosure, so it stays in the DOM. A strip opens while it runs,
 waits or failed; once the reader opens or folds one, that choice holds through
 streamed frames and the run's end.
 
