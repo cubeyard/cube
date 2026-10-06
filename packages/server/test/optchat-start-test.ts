@@ -117,7 +117,7 @@ try {
       if (tries % 4 === 0) return brief;
       await delay(60);
       throw new Error("ssh: the guest is unreachable");
-    }, 400);
+    }, 1000);
     try {
       await until(async () => tries > 40, "many rounds");
       assert.deepEqual(await sent(optchat, `report:${FLAKY}:start`), [], "the grace begins again after each start");

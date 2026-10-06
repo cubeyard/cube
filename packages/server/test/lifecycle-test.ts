@@ -14,6 +14,7 @@ import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-work
 import { createCubed } from "../src/index.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
 import type { Thread } from "../src/registry.ts";
+import type { StartOptions } from "../src/vm.ts";
 import { LocalMachines } from "./local-guest.ts";
 
 /** Local machines whose next starts or releases fail, or wait for the test. */
@@ -23,16 +24,23 @@ class HeldMachines extends LocalMachines {
   failReleases: string[] = [];
   startGate: Promise<void> | null = null;
   releaseGate: Promise<void> | null = null;
+  /** Holds a start once it boots (past the check of a running machine). */
+  bootGate: Promise<void> | null = null;
+  booting = 0;
   startsWaiting = 0;
   /** Every start asked for, failed or not, by thread. */
   readonly attempts = new Map<string, number>();
-  override async start(thread: Thread): Promise<{ booted: boolean }> {
+  override async start(thread: Thread, options: StartOptions = {}): Promise<{ booted: boolean }> {
     this.attempts.set(thread.id, (this.attempts.get(thread.id) ?? 0) + 1);
     this.startsWaiting++;
     try { await this.startGate; } finally { this.startsWaiting--; }
     const failure = this.failStarts.get(thread.id)?.shift();
     if (failure) throw new Error(failure);
-    return super.start(thread);
+    const gate = this.bootGate;
+    return super.start(thread, { onBoot: () => { options.onBoot?.(); if (gate) this.booting++; } }).then(async started => {
+      if (gate) { await gate; this.booting--; }
+      return started;
+    });
   }
   override async release(thread: Thread, retain: boolean): Promise<{ retained: boolean }> {
     await this.releaseGate;
@@ -154,14 +162,19 @@ try {
   checking.open();
   await check;
   assert.match(await adapter.describe([late]), /· ready, completed$/);
+  // The check finds the machine stopped and boots it: starting from the
+  // boot on, before the start returns (a real boot takes minutes).
   machines.reboot(app.registry.getThread(late)!);
-  let sawStarting = false;
+  const booting = gate();
+  machines.bootGate = booting.promise;
   const rebooting = conversations.activate(late);
-  for (let done = false; !done;) {
-    sawStarting ||= conversations.starting(late);
-    done = await Promise.race([rebooting.then(() => true), delay(1).then(() => false)]);
-  }
-  assert.ok(sawStarting, "a machine that booted again is starting");
+  await until(() => machines.booting, value => value === 1, "the check boots the machine");
+  assert.equal(conversations.starting(late), true, "a machine that boots again is starting");
+  assert.equal((await (await fetch(`${base}/api/threads`)).json()).threads.find((row: { id: string }) => row.id === late).state, "starting");
+  machines.bootGate = null;
+  booting.open();
+  await rebooting;
+  assert.equal(conversations.starting(late), false);
   assert.equal(conversations.error(late), null);
   assert.equal(conversations.agentOpen(late), true);
 

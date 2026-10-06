@@ -100,7 +100,8 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       if (!thread) return null;
       if (thread.archived) return { already: true, disk: disk(thread.vm), free: free() };
       // A machine still coming up or reattaching (not one retried after a
-      // failure) would hold this call for minutes; its run may start once it is up.
+      // failure, nor a quick check of a running one) would hold this call for
+      // minutes; its run may start once it is up.
       if (conversations.starting(id) && !conversations.error(id) && thread.workspaceState !== "failed") {
         throw new Error("its machine is still starting or reattaching; try again shortly");
       }

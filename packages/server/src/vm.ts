@@ -34,8 +34,10 @@ export interface ThreadMachines {
   guest(thread: Thread): GuestTransport;
   /** Boot or re-attach the machine; resolves once its guest answers ready.
    * `booted` says this call started the machine (a first boot or a boot
-   * after it had stopped), not only re-attached a running one. */
-  start(thread: Thread): Promise<MachineStart | void>;
+   * after it had stopped), not only re-attached a running one. `onBoot` is
+   * called once the call goes past checking a machine this process already
+   * runs: it boots or re-attaches the machine (which may take minutes). */
+  start(thread: Thread, options?: StartOptions): Promise<MachineStart | void>;
   /** Stops new machines from using a template (its setup changed). */
   invalidateTemplate?(thread: Thread, templateId: string): Promise<void>;
   /** Release the machine; `retain` keeps its disk. The runner always keeps
@@ -47,6 +49,7 @@ export interface ThreadMachines {
 }
 
 export interface MachineStart { booted: boolean }
+export interface StartOptions { onBoot?: () => void }
 
 export interface VmSizes { vcpus: number; memoryMiB: number; diskGiB: number }
 export const DEFAULT_VM_SIZES: VmSizes = { vcpus: 2, memoryMiB: 4096, diskGiB: 32 };
@@ -126,11 +129,11 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     return transport;
   }
 
-  start(thread: Thread): Promise<MachineStart> {
+  start(thread: Thread, options: StartOptions = {}): Promise<MachineStart> {
     if (this.closed) return Promise.reject(new Error("cubed is stopping"));
     const pending = this.starting.get(thread.id);
     if (pending) return pending;
-    const starting = this.boot(thread).finally(() => this.starting.delete(thread.id));
+    const starting = this.boot(thread, false, options.onBoot).finally(() => this.starting.delete(thread.id));
     this.starting.set(thread.id, starting);
     return starting;
   }
@@ -179,7 +182,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     this.transports.clear();
   }
 
-  private async boot(thread: Thread, relocated = false): Promise<MachineStart> {
+  private async boot(thread: Thread, relocated = false, onBoot?: () => void): Promise<MachineStart> {
     const vm = machine(thread);
     const runner = this.runner(thread);
     const target = runner.target;
@@ -193,6 +196,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       this.attached.delete(vm.vmId);
       this.log.warn("machine is not running; starting it again", { thread: thread.id, vm: vm.vmId, state: current.state });
     }
+    onBoot?.();
     const description = await runner.describe();
     // The runner's bound may have changed since cubed last asked.
     this.options.registry.recordRunnerSlots(thread.runnerId, description.limits.maxActiveVms);
