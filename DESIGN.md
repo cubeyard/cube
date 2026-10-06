@@ -521,6 +521,17 @@ code scrolls inside its keyboard-focusable diff region. Opening an untracked
 text file reads it on demand and presents its complete contents as a new-file
 addition; binary and oversized files report why they cannot render.
 
+### Now Panel
+The chat's right bay: a recessed `--s1` well with a `now` head rail (open and
+blocked counts in tabular mono). Each task is a hairline `--s4` card: status
+lamp (amber active, red blocked, unlit pending, green done) beside a bold
+title and the status word, never colour alone; then the project in mono, a
+`next` or `blocked on` line, and mini lamps for linked threads with the
+thread's own state in muted mono. Links are underlined ink, not signal, and say
+nothing about a pull request's state. Recently closed tasks sit in a native
+disclosure. Under 52rem the bay stacks above the conversation, capped at 38vh
+and foldable by a chevron key, so the composer always stays on screen.
+
 ### Named Rules
 **The Actions-In-The-Module Rule.** A module's controls live inside it, on its
 right edge as a flush, hairline-divided `--s3` control bank. The bank remains

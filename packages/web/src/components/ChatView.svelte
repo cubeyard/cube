@@ -6,6 +6,7 @@
   import Conversation from "./Conversation.svelte";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
+  import NowPanel from "./NowPanel.svelte";
 
   // OptChat: the one endless chat. It starts threads and talks to them; the
   // memory panel shows the view it reads at the start of every turn.
@@ -139,4 +140,5 @@
       <p class="conversation-empty">{modelError ? "connect a model provider to start the chat" : "opening the chat…"}</p>
     {/if}
   </section>
+  {#if modelState}<NowPanel {busy} />{/if}
 </main>

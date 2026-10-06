@@ -162,6 +162,17 @@ with at most 8 tells per thread between two user messages. Verified offline
 with a fake `claude`; the real Claude Code's follow-up turn in headless mode
 is inferred from its bundle, not observed against a live login.
 
+## Now panel (OptChat's task list)
+
+The chat page shows a **now** panel: open tasks (blocked, active, pending)
+and the few closed lately, kept by OptChat with its `task`/`tasks` tools in
+its own Pi store, not rebuilt from summaries. Each task's linked threads show
+their state as cubed records it (read only); links are shown unchecked, so
+nothing reads as merged, released or installed. Every turn starts with the
+list after the view. Details: docs/optchat.md, "Tasks". Verified offline
+(`optchat-tasks-test.ts`, the product smoke's real route) and in headless
+Chromium at desktop and phone sizes; not with a real model.
+
 ## Usage and cost (branch `feat/usage-accounting`)
 
 Read-only usage accounting over the agents' own records: Pi's `pi.usage`

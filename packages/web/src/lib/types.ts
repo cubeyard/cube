@@ -39,6 +39,7 @@ export interface ProjectInput {
 export type { ThreadEvent, ThreadStatus, ThreadTranscript } from "../../../server/src/thread-events.ts";
 export type { SubjectUsage, UsageLine } from "../../../server/src/usage.ts";
 export type { UsageReport } from "../../../server/src/usage-service.ts";
+export type { TaskList, TaskView } from "../../../server/src/optchat-tasks.ts";
 export interface ThreadModels {
   models: import("../../../server/src/models.ts").ModelSelection[];
   selected: import("../../../server/src/models.ts").ModelSelection | null;

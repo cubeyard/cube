@@ -12,6 +12,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, registerSessionResourceCleanup, type Message } from "@earendil-works/pi-ai";
 import { OptChat, OptChatEvents, TELLS, type OptThreads } from "../src/optchat.ts";
+import { renderTasks } from "../src/optchat-tasks.ts";
 import { COMPACT, SCALE } from "../src/optchat-compactor.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 import type { ThreadEvents, ThreadTranscript } from "../src/thread-events.ts";
@@ -106,10 +107,10 @@ try {
   // Turn 1: the view is empty, the message comes whole; OptChat spawns a thread.
   script = [
     turn => {
-      assert.deepEqual(turn.tools.sort(), ["archive", "date", "history", "projects", "runners", "spawn", "tell", "threads", "usage", "zoom"], "no code tools");
+      assert.deepEqual(turn.tools.sort(), ["archive", "date", "history", "projects", "runners", "spawn", "task", "tasks", "tell", "threads", "usage", "zoom"], "no code tools");
       assert.match(turn.system, /You are OptChat/);
       assert.equal(turn.messages.length, 1, "a fresh context: the view and the message only");
-      assert.deepEqual(userBlocks(turn.messages[0]!), ["<chat>\n</chat>", `please fix the gateway; ${"long detail ".repeat(20)}`]);
+      assert.deepEqual(userBlocks(turn.messages[0]!), ["<chat>\n</chat>", renderTasks({ open: [], closed: [] }), `please fix the gateway; ${"long detail ".repeat(20)}`]);
       return fauxAssistantMessage([{ type: "text", text: "starting a thread" },
         fauxToolCall("spawn", { tasks: [{ project: "cube", task: "fix the gateway Host check" }] }, { id: "call-spawn" })], { stopReason: "toolUse" });
     },
@@ -127,7 +128,7 @@ try {
   script = [
     turn => {
       assert.equal(turn.messages.length, 1, "the report starts a fresh turn");
-      const [view, report] = userBlocks(turn.messages[0]!);
+      const [view, , report] = userBlocks(turn.messages[0]!);
       assert.equal(report, "[abcdef12] ended its turn; nothing of it runs now: done: PR #212, tests pass");
       assert.match(view!, /^<chat>\n0\+1\|summary \d+\n/, "the long first message is summarized, not shown");
       assert.ok(!view!.includes("long detail long detail"), "no message appears in full");
@@ -265,7 +266,7 @@ chat = reopened;
 try {
   assert.equal(chat.memory.render(), viewBeforeClose, "a reopen restores the view it had");
   script = [turn => {
-    const [view, message] = userBlocks(turn.messages[0]!);
+    const [view, , message] = userBlocks(turn.messages[0]!);
     assert.equal(message, "what happened?");
     assert.match(view!, /\|work: |\|summary|\|user: \[abcdef12\]/, "the report is in the view");
     assert.ok(view!.split("\n").length > 5);

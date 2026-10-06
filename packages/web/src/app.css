@@ -1357,3 +1357,68 @@ select.compose-input {
   .chat-tagline { display: none; }
 }
 .chat-memory-error { margin: 0; padding: 0 0.7rem 0.5rem; color: var(--bad); font-size: 12px; }
+
+/* ============================================================ now
+   The chat's task list beside the conversation: a recessed bank of lamps
+   and lines. On a narrow screen it folds above the conversation. */
+.chat-workspace:has(.now-panel) { grid-template-columns: minmax(0, 1fr) minmax(16rem, 22rem); }
+.chat-workspace > .thread-pane { grid-column: 1; grid-row: 1; }
+.now-panel {
+  grid-column: 2; grid-row: 1; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  background: var(--s1); border-left: 1px solid var(--line-2);
+  box-shadow: var(--shadow-well);
+}
+.now-head {
+  flex: none; min-height: 2.5rem;
+  display: flex; align-items: center; gap: 0.6rem;
+  padding: 0.42rem 0.85rem; border-bottom: 1px solid var(--line-2);
+  background: var(--s2);
+}
+.now-head h2 { margin: 0; font-size: 11px; font-weight: 550; letter-spacing: 0.08em; color: var(--ink-3); }
+.now-summary { margin-left: auto; font: 11px/1.5 var(--font-mono); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.now-fold { display: none; padding: 0.2rem 0.35rem; }
+.now-fold svg { transition: transform 120ms ease; }
+.now-panel:not(.folded) .now-fold svg { transform: rotate(180deg); }
+.now-body { flex: 1; min-height: 0; overflow: auto; padding: 0.5rem 0.6rem 0.7rem; }
+.now-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.now-task {
+  padding: 0.5rem 0.6rem; border: 1px solid var(--line); border-radius: var(--r-key);
+  background: var(--s4);
+}
+.now-task[data-status="blocked"] { border-color: var(--bad-line); }
+.now-task[data-status="done"], .now-task[data-status="dropped"] { background: transparent; }
+.now-task-head { display: flex; align-items: baseline; gap: 0.5rem; }
+.now-task-head .lamp { flex: none; transform: translateY(-1px); }
+.now-title { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.now-task[data-status="dropped"] .now-title { color: var(--ink-3); text-decoration: line-through; }
+.now-status { flex: none; font: 550 10.5px/1.5 var(--font-mono); color: var(--ink-2); }
+.now-task[data-status="blocked"] .now-status { color: var(--bad); }
+.now-project { margin: 0.1rem 0 0 calc(8px + 0.5rem); font: 11px/1.4 var(--font-mono); color: var(--ink-3); overflow-wrap: anywhere; }
+.now-next { margin: 0.25rem 0 0 calc(8px + 0.5rem); font-size: 12.5px; line-height: 1.45; color: var(--ink-2); overflow-wrap: anywhere; }
+.now-label { font: 550 10.5px/1.4 var(--font-mono); color: var(--ink-3); }
+.now-task[data-status="blocked"] .now-label { color: var(--bad); }
+.now-refs {
+  list-style: none; margin: 0.35rem 0 0 calc(8px + 0.5rem); padding: 0;
+  display: flex; flex-wrap: wrap; gap: 0.25rem 0.8rem; font: 11px/1.5 var(--font-mono);
+}
+.now-refs li { display: inline-flex; align-items: center; gap: 0.35rem; min-width: 0; }
+.now-refs .lamp { width: 6px; height: 6px; }
+.now-ref { color: var(--ink-2); overflow-wrap: anywhere; }
+a.now-ref { color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; }
+a.now-ref:hover { color: var(--signal); text-decoration-color: currentColor; }
+.now-observed { color: var(--ink-3); }
+.now-closed { margin-top: 0.7rem; }
+.now-closed summary { cursor: pointer; font-size: 11px; font-weight: 550; letter-spacing: 0.05em; color: var(--ink-3); padding: 0.2rem 0; }
+.now-closed .now-list { margin-top: 0.35rem; }
+.now-empty { margin: 0.4rem 0.2rem; font-size: 12.5px; color: var(--ink-3); }
+.now-error { margin: 0.2rem 0.2rem 0.5rem; font-size: 12px; color: var(--bad); display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.now-foot { margin: 0.8rem 0.2rem 0; font: 10.5px/1.4 var(--font-mono); color: var(--ink-3); }
+@media (max-width: 52rem) {
+  .chat-workspace:has(.now-panel) { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .chat-workspace > .thread-pane { grid-column: 1; grid-row: 2; }
+  .now-panel { grid-column: 1; grid-row: 1; border-left: 0; border-bottom: 1px solid var(--line-2); max-height: 38vh; }
+  .now-fold { display: inline-flex; }
+  .now-panel.folded .now-body { display: none; }
+  .now-panel.folded .now-head { border-bottom: 0; }
+}

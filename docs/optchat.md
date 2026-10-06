@@ -9,8 +9,9 @@ read-only; see docs/runner-operations.md, "Observing runners"), reads one of
 its threads (`history`), archives its threads that are done to free their
 machines (`archive`), reads usage and estimated cost (`usage`: everything,
 a project or a thread; read-only, see [usage.md](usage.md)) and reads its own
-memory (`zoom`, `date`). Threads do all the
-work, each in its own VM, exactly like a thread started from the UI.
+memory (`zoom`, `date`) and keeps the user's task list (`task`, `tasks`; see
+"Tasks"). Threads do all the work, each in its own VM, exactly like a thread
+started from the UI.
 
 The memory follows Victor Taelin's OptChat spec
 (<https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449>): the
@@ -239,6 +240,48 @@ Archived threads cannot be reopened, from OptChat or the UI; `discard` of a
 retained disk stays an operator action in the UI. Nothing is deleted besides
 what the release itself deletes (a clean machine's disk).
 
+## Tasks
+
+The chat is an archive, not the way to find what is going on. The chat
+page's **now** panel (beside the conversation on a desktop, folded above it
+on a phone) shows a small task list that OptChat keeps:
+
+- **What a task is.** A title, a status (`active`, `pending`, `blocked`,
+  `done`, `dropped`), the next action or what blocks it, an optional
+  project, up to 4 of the chat's own threads and up to 4 https links (a pull
+  request shows as `owner/repo#n`). Ids are `t1`, `t2`, … and never reused.
+- **Where it lives.** `cube.optchat.tasks`, a session doc in the chat's Pi
+  store, written word for word by the `task` tool in the tool call's own
+  commit. It is never rebuilt from the view's summaries; the log keeps every
+  `task` call as well.
+- **Bounds.** At most 20 open tasks (a 21st is refused until one closes).
+  The 30 most recently closed are kept; the panel and the model see the 5
+  closed in the last 7 days. A title has at most 100 characters, the next
+  action at most 280.
+- **Tools.** `task` adds a task (no id; a replayed call finds the task it
+  made by its call id) or changes the fields it is given (`threads` and
+  `links` replace the task's). `tasks` reads the list. Every turn also
+  shows the list after the view, inside `<now>` tags, as it was when the
+  turn started (`cube.optchat.turn-tasks`), so every request of a turn sends
+  the same bytes and the view's cache marks are unchanged. The system prompt
+  asks OptChat to keep it true as work starts, reports arrive and the user
+  decides.
+- **Intent and observation.** A status is OptChat's intent. Beside each
+  linked thread the panel shows the thread's state as cubed records it when
+  the list is read (`working`, `turn ended`, `waiting on a background
+  agent`, `failed`, `stopped`, `starting`, `machine error`, `archived`, …),
+  read like `history` from the stored run state: no agent is opened, no
+  lease taken, no machine waited for; the threads are read in parallel and
+  one slower than 2 s reads as `unknown`. A thread's ended turn is shown as `turn ended`, not as a task done.
+  A link is only a link: cube does not read any PR, merge, release or
+  install state, and the panel says so.
+- **Refresh.** The panel reads `GET /api/optchat/tasks` when the chat page
+  opens or becomes visible, every 5 s while the chat is working, and once
+  when a turn ends. An idle chat does no polling, and nothing outside cubed
+  is called.
+
+The user changes tasks by asking OptChat; the panel has no edit controls.
+
 ## Caching
 
 `optchat-cache.ts` applies spec §8 through pi-ai's published request hooks,
@@ -280,7 +323,8 @@ sent. Hit rates against a live provider are not measured.
 
 Routes: `GET /api/optchat/history`, `GET /api/optchat/stream` (the thread event
 model), `POST /api/optchat/prompt {text, requestId}`, `POST /api/optchat/stop`,
-`GET /api/optchat/view` (what the model reads: the view and the message count).
+`GET /api/optchat/view` (what the model reads: the view and the message count),
+`GET /api/optchat/tasks` (the task list with each linked thread's state).
 
 ## Deviations from the spec
 

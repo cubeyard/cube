@@ -416,6 +416,7 @@ export async function createCubed(options: {
         const { chat, events } = await openOptchat();
         if (parts[2] === "history" && method === "GET") return json(await events.read());
         if (parts[2] === "stream" && method === "GET") return await serveThreadEvents(events, response);
+        if (parts[2] === "tasks" && method === "GET") return json(await chat.tasks());
         if (parts[2] === "view" && method === "GET") return json({ view: chat.memory.render(), messages: chat.memory.length, failure: chat.failure() });
         if (parts[2] === "stop" && method === "POST") { await chat.stop(); return json({ ok: true }); }
         if (parts[2] === "prompt" && method === "POST") { const requestId = text("requestId"); await chat.send(text("text"), requestId); return json({ runId: requestId }); }

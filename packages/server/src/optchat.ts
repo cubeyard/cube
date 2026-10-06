@@ -21,6 +21,7 @@ import { createLogger } from "./log.ts";
 import { compactNode } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { capText, Memory, type LogMessage, type Part } from "./optchat-memory.ts";
+import { applyTask, LIMITS as TASK_LIMITS, linkLabel, renderTasks, shown, STATUSES, taskLine, TasksDoc, TurnTasksDoc, type ObservedThread, type Task, type TaskList, type TaskView } from "./optchat-tasks.ts";
 import type { ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
 import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { addUsage, type OptChatUsage } from "./usage-service.ts";
@@ -94,6 +95,17 @@ whenever a summary only mentions something you need, such as what your
 last reply said, a decision, a past attempt or where a file is, before
 you act, guess or ask. date(id) gives the date and time of message id.`;
 
+export const TASKS_DOC = `Now: after the view, each turn shows your task list inside <now> tags. It is
+what the user sees first in cube, instead of scrolling this chat, so keep
+it true with task(): add a task when the user asks for work that will take
+more than this turn, link the threads you start for it, and change it when
+a report or the user changes what is next, what blocks it, or whether it is
+done (the user's goal is met) or dropped. Keep titles short and say the
+next action plainly. A status is your intent; a thread's state beside it is
+cube's record. A thread whose turn ended has not necessarily done its task,
+and a merged pull request is not released or installed: say only what a
+report or the user said. tasks() reads the list with each thread's state.`;
+
 /** What a thread report says when the thread started: its final reply is the report. */
 export const THREAD_NOTE = "(This thread was started by OptChat, the user's chat agent. Your final reply is your report to it. "
   + "Once you end your turn nothing wakes you except a background agent of yours finishing, so do not end it to wait for CI, a review or a command: "
@@ -126,6 +138,8 @@ export interface OptThreads {
   /** Usage and estimated cost as text: of everything, a project, or one
    * thread (an id or its first characters). Read-only. */
   usage?(query: { project?: string | undefined; thread?: string | undefined }): Promise<string>;
+  /** Each thread's state as cubed records it now, read only; null: no such thread. */
+  observe?(ids: readonly string[]): Promise<Map<string, ObservedThread | null>>;
 }
 
 export type ThreadRecord = {
@@ -233,6 +247,8 @@ const TURN = "optchat.turn";
 const NODE_ENTRY = "optchat.node";
 
 const short = (id: string) => id.slice(0, 8);
+/** A tool's text result. */
+const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
 /** A zoom result's lines start with their ids. */
 const ZOOMED = /^\d+\+\d+\|/;
 export const ZOOM_ECHO = "(the zoomed lines: a copy of earlier messages of this chat, not repeated here)";
@@ -697,7 +713,11 @@ export class OptChat {
     if (!await this.known(last.requestId)) {
       if (!await this.known(`${batch[0]!.requestId}:turn`)) {
         const parts = flatParts(this.memory.view);
-        await conversation.commit(async tx => { Object.assign(await tx.doc(TurnDoc, conversation.id), { started: true, parts }); }, context);
+        const tasks = await this.renderTasks();
+        await conversation.commit(async tx => {
+          Object.assign(await tx.doc(TurnDoc, conversation.id), { started: true, parts });
+          (await tx.doc(TurnTasksDoc, conversation.id)).text = tasks;
+        }, context);
         await conversation.submit({ type: "write", entry: { kind: TURN, head: "self" }, requestId: `${batch[0]!.requestId}:turn` }, context);
       }
       for (const item of batch.slice(0, -1)) {
@@ -824,8 +844,77 @@ export class OptChat {
     return matches[0]!;
   }
 
+  /** Each linked thread's state as cubed records it now. */
+  private async observeThreads(tasks: readonly Task[]): Promise<Map<string, ObservedThread | null>> {
+    const ids = [...new Set(tasks.flatMap(task => task.threads))];
+    if (!ids.length || !this.options.threads.observe) return new Map();
+    try { return await this.options.threads.observe(ids); }
+    catch (error) { log.warn("threads not observed", { error }); return new Map(); }
+  }
+
+  private async renderTasks(): Promise<string> {
+    const list = shown(await this.harness.snapshot(TasksDoc, context), Date.now());
+    return renderTasks(list, await this.observeThreads([...list.open, ...list.closed]));
+  }
+
+  /** The task list as the UI shows it: open tasks, the few closed lately,
+   * and each linked thread's state as cubed records it now. */
+  async tasks(): Promise<TaskList> {
+    const list = shown(await this.harness.snapshot(TasksDoc, context), Date.now());
+    const observed = await this.observeThreads([...list.open, ...list.closed]);
+    const view = (task: Task): TaskView => ({
+      id: task.id, title: task.title, status: task.status, next: task.next, project: task.project, updated: task.updated, closed: task.closed,
+      threads: task.threads.map(id => {
+        const thread = observed.get(id);
+        return { id, title: thread?.title ?? null, project: thread?.project ?? null, state: thread?.state ?? (observed.has(id) ? "gone" : "unknown") };
+      }),
+      links: task.links.map(url => ({ url, ...linkLabel(url) })),
+    });
+    return { open: list.open.map(view), closed: list.closed.map(view), limit: TASK_LIMITS.open };
+  }
+
+  private taskTools() {
+    const task = defineTool({
+      name: "task",
+      description: "Add or change one task of your task list, the user's \"now\". Without id: a new task (title required; status active unless given). "
+        + "With id: only the fields given change; threads and links replace the task's. status is your intent: done when the user's goal is met, "
+        + "never because a thread's turn ended; a merged PR is not a release. Bounded: "
+        + `${TASK_LIMITS.open} open tasks, ${TASK_LIMITS.threads} threads and ${TASK_LIMITS.links} https links each.`,
+      parameters: Type.Object({
+        id: Type.Optional(Type.String({ description: "The task's id (t1, t2, …); leave out to add one" })),
+        title: Type.Optional(Type.String({ description: `What the work is, at most ${TASK_LIMITS.title} characters` })),
+        status: Type.Optional(Type.Union(STATUSES.map(status => Type.Literal(status)))),
+        next: Type.Optional(Type.String({ description: "The next action, or what blocks a blocked task; one line" })),
+        project: Type.Optional(Type.String({ description: "The project it is in, if one" })),
+        threads: Type.Optional(Type.Array(Type.String(), { maxItems: TASK_LIMITS.threads, description: "Ids of your threads working on it" })),
+        links: Type.Optional(Type.Array(Type.String(), { maxItems: TASK_LIMITS.links, description: "https URLs, such as a pull request" })),
+      }),
+      // A new task remembers the call that made it; a change sets the same fields again.
+      replay: "safe",
+      execute: async (args, api, callContext) => {
+        try {
+          const threads = args.threads && await Promise.all(args.threads.map(id => this.resolve(id)));
+          const { task: changed, created } = await api.commit(async tx => {
+            const result = applyTask(await tx.doc(TasksDoc), { ...args, threads }, api.callId, Date.now());
+            return { task: { ...result.task, threads: [...result.task.threads], links: [...result.task.links] }, created: result.created };
+          }, callContext);
+          return text(`${created ? "added" : "changed"}: ${taskLine(changed, await this.observeThreads([changed]))}`);
+        } catch (error) {
+          return text(`not changed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      },
+    });
+    const tasks = defineTool({
+      name: "tasks",
+      description: "Your task list: open tasks and those closed lately, with each linked thread's state as cube records it now.",
+      parameters: Type.Object({}),
+      replay: "safe",
+      execute: async () => text(await this.renderTasks()),
+    });
+    return [task, tasks];
+  }
+
   private extension() {
-    const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
     const zoom = defineTool({
       name: "zoom",
       description: "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.",
@@ -982,10 +1071,11 @@ export class OptChat {
     const instructions = path.join(this.options.directory, "AGENTS.md");
     return defineExtension({
       name: "optchat",
-      tools: [zoom, date, projects, runners, spawn, tell, threads, history, archive, usage],
+      tools: [zoom, date, projects, runners, spawn, tell, threads, history, archive, usage, ...this.taskTools()],
       sections: [
         section("master", () => MASTER, { tag: false }),
         section("view", () => VIEW_DOC, { tag: false }),
+        section("tasks", () => TASKS_DOC, { tag: false }),
         // The user's own instructions; constant unless they edit the file.
         section("user", () => {
           try { return fs.readFileSync(instructions, "utf8").trim() || undefined; }
@@ -997,7 +1087,9 @@ export class OptChat {
         if (!turn?.started) return undefined;
         const parts: Part[] = [];
         for (let k = 0; k + 1 < turn.parts.length; k += 2) parts.push({ l: turn.parts[k]!, i: turn.parts[k + 1]! });
-        return { messages: withView(request.messages, viewPieces(this.memory.render(parts))) };
+        // The task list follows the view, after its cache marks.
+        const tasks = (await api.snapshot(TurnTasksDoc, api.conversationId, callContext))?.text;
+        return { messages: withView(request.messages, [...viewPieces(this.memory.render(parts)), ...(tasks ? [tasks] : [])]) };
       } })],
     });
   }
