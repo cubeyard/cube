@@ -61,7 +61,27 @@ export class LocalMachines implements ThreadMachines {
     if (!guest) { guest = new LocalGuestTransport(path.join(this.root, thread.id)); this.guests.set(thread.id, guest); }
     return guest;
   }
-  async start(thread: Thread): Promise<void> { this.starts++; this.guest(thread); }
+  /** Like a real machine's seed: the project's hooks as executable files,
+   * and where the scripts find them and their per-boot marker. */
+  async start(thread: Thread): Promise<{ booted: boolean }> {
+    this.starts++;
+    const fresh = !this.guests.has(thread.id) || this.rebooted.delete(thread.id);
+    const guest = this.guest(thread);
+    const hooks = path.join(guest.root, "hooks");
+    fs.mkdirSync(hooks, { recursive: true });
+    for (const [name, script] of [["pre-setup", thread.allocation.hooks?.preSetup], ["pre-resume", thread.allocation.hooks?.preResume]] as const) {
+      if (script?.trim()) fs.writeFileSync(path.join(hooks, name), script.startsWith("#!") ? script : `#!/bin/bash\n${script}`, { mode: 0o755 });
+    }
+    fs.writeFileSync(path.join(guest.root, "env"), `CUBE_HOOKS=${hooks}\nCUBE_RUN=${path.join(guest.root, "run")}\nHOME=${path.join(guest.root, "home")}\n`);
+    return { booted: fresh };
+  }
+  private readonly rebooted = new Set<string>();
+  /** A reboot: the per-boot marker (a tmpfs in a real guest) is gone and
+   * the next start boots the machine. */
+  reboot(thread: Thread): void {
+    fs.rmSync(path.join(this.guest(thread).root, "run"), { recursive: true, force: true });
+    this.rebooted.add(thread.id);
+  }
   readonly discarded = new Set<string>();
   async release(thread: Thread, retain: boolean): Promise<{ retained: boolean }> {
     this.guest(thread).stop();

@@ -19,6 +19,7 @@ OFFLINE_TESTS=(
   packages/server/test/egress-policy-test.ts
   packages/server/test/gateway-test.ts
   packages/server/test/vm-workspace-test.ts
+  packages/server/test/vm-template-test.ts
   packages/server/test/durable-agent-test.ts
   packages/server/test/codemode-test.ts
   packages/server/test/thread-events-test.ts

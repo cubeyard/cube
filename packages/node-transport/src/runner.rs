@@ -28,9 +28,9 @@ use iroh::EndpointId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-pub use crate::journal::{Binding, Installation, VmConfig, VmLimits, VmState};
+pub use crate::journal::{Binding, Installation, TemplateState, VmConfig, VmLimits, VmState};
 use crate::{
-    journal::{self, Journal, VmRow},
+    journal::{self, Journal, TemplateRow, VmRow},
     pump::{FrameGrant, Pumps},
     seed::Seed,
     vm::{self, Qmp, Spawner, VmPaths},
@@ -60,6 +60,8 @@ const MIN_MEMORY_MIB: u32 = 256;
 const MAX_MEMORY_MIB: u32 = 1024 * 1024;
 const MAX_DISK_GIB: u32 = 4096;
 const GIB: u64 = 1 << 30;
+/// cubed's opaque template metadata (JSON).
+pub const MAX_TEMPLATE_META: usize = 4096;
 
 #[derive(Debug)]
 pub struct RunnerError(pub &'static str);
@@ -132,6 +134,26 @@ pub struct VmRecord {
     pub seed_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<u64>,
+    /// The template the disk is backed by (absent: the base image).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
+/// The wire record of a template: a stopped VM's disk, read-only, that new
+/// VMs' overlays are backed by.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TemplateRecord {
+    pub id: String,
+    pub key: String,
+    pub meta: String,
+    pub state: TemplateState,
+    #[serde(rename = "diskGiB")]
+    pub disk_gib: u32,
+    pub bytes: u64,
+    pub created_at: u64,
+    /// VMs whose disk still depends on it.
+    pub users: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -415,6 +437,23 @@ impl Runner {
                 _ => {}
             }
         }
+        for template in journal.templates()? {
+            if template.state != TemplateState::Publishing {
+                continue;
+            }
+            // A crash while publishing: the rename either happened or not.
+            let disk = template_dir(&state, &template.id).join("disk.qcow2");
+            if disk.is_file() {
+                journal.finish_publish(&template.id)?;
+                if let Some(row) = journal.get(&template.id)? {
+                    let _ = fs::remove_dir_all(VmPaths::new(&state, row.slot).dir);
+                }
+            } else {
+                let _ = fs::remove_dir_all(template_dir(&state, &template.id));
+                journal.delete_template(&template.id)?;
+            }
+        }
+        gc_templates(&journal, &state)?;
         let quarantined = quarantine.exists();
         Ok(Arc::new_cyclic(|this| Self {
             installation,
@@ -491,6 +530,141 @@ impl Runner {
             disk_bytes,
             seed_sha256: row.config.as_ref().map(|c| c.seed_sha256.clone()),
             started_at: row.started_at,
+            template: row.template.clone(),
+        }
+    }
+
+    fn template_record(&self, journal: &Journal, row: &TemplateRow) -> Result<TemplateRecord> {
+        Ok(TemplateRecord {
+            id: row.id.clone(),
+            key: row.key.clone(),
+            meta: row.meta.clone(),
+            state: row.state,
+            disk_gib: row.disk_gib,
+            bytes: file_bytes(&template_dir(&self.state, &row.id).join("disk.qcow2")),
+            created_at: row.created_at,
+            users: journal.template_users(&row.id)?,
+        })
+    }
+
+    pub fn templates(&self) -> Result<Vec<TemplateRecord>> {
+        let journal = self.journal.lock().unwrap();
+        journal
+            .templates()?
+            .iter()
+            .map(|row| self.template_record(&journal, row))
+            .collect()
+    }
+
+    /// Turns a VM's disk into a template and releases the VM. Only a VM
+    /// that booted from the base image and stopped cleanly qualifies: cubed
+    /// prepared it, sealed it and the guest powered itself off. The disk is
+    /// moved, not copied, and becomes read-only; VMs allocated from the
+    /// template get their own overlay on top of it. Idempotent by content.
+    pub async fn publish(
+        &self,
+        thread_id: &str,
+        vm_id: &str,
+        epoch: u64,
+        key: &str,
+        meta: &str,
+    ) -> Result<TemplateRecord> {
+        Self::check_ids(thread_id, vm_id)?;
+        if !(key.len() == 64 && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+            || meta.len() > MAX_TEMPLATE_META
+            || !serde_json::from_str::<serde_json::Value>(meta).is_ok_and(|v| v.is_object())
+        {
+            return reject("INVALID_REQUEST");
+        }
+        let _ops = self.ops.lock().await;
+        self.journal.lock().unwrap().fence(thread_id, epoch)?;
+        let row = self.row_for(thread_id, vm_id)?;
+        let journal = self.journal.lock().unwrap();
+        match journal.template(vm_id)? {
+            Some(existing) if existing.key != key || existing.meta != meta => {
+                return detail("CONFLICT", "the vm was published with a different key");
+            }
+            Some(existing) if existing.state != TemplateState::Publishing => {
+                return self.template_record(&journal, &existing);
+            }
+            Some(_) => {} // interrupted half way: finish it
+            None => {
+                if row.state != VmState::Stopped
+                    || row.interrupted
+                    || row.config.is_none()
+                    || row.template.is_some()
+                {
+                    return detail(
+                        "CONFLICT",
+                        format!(
+                            "only a vm started from the base image and stopped cleanly can become a template (it is {}{})",
+                            row.state.as_str(),
+                            if row.interrupted { ", interrupted" } else { "" }
+                        ),
+                    );
+                }
+                journal.insert_publishing(&TemplateRow {
+                    id: vm_id.into(),
+                    key: key.into(),
+                    meta: meta.into(),
+                    state: TemplateState::Publishing,
+                    disk_gib: row.disk_gib,
+                    created_at: now_ms(),
+                })?;
+            }
+        }
+        let paths = self.paths(row.slot);
+        journal::private_dir(&self.state.join("templates"))?;
+        let dir = template_dir(&self.state, vm_id);
+        journal::private_dir(&dir)?;
+        let target = dir.join("disk.qcow2");
+        if paths.disk.is_file() {
+            // Same filesystem: the overlay's relative backing path
+            // (`../../images/<sha>.qcow2`) still resolves from here.
+            fs::rename(&paths.disk, &target)?;
+        }
+        ensure!(target.is_file(), "the template disk is missing");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o400))?;
+        }
+        File::open(&dir)?.sync_all()?;
+        File::open(self.state.join("templates"))?.sync_all()?;
+        journal.finish_publish(vm_id)?;
+        let _ = fs::remove_dir_all(&paths.dir);
+        let published = journal.template(vm_id)?.context("template vanished")?;
+        self.template_record(&journal, &published)
+    }
+
+    /// No new VM may use the template; its disk is deleted at once when no
+    /// VM depends on it, otherwise when the last one is released or
+    /// discarded. Retained VMs keep it alive. A removed template is NOT_FOUND.
+    pub async fn remove_template(&self, id: &str) -> Result<TemplateRecord> {
+        if !valid_vm_id(id) {
+            return reject("INVALID_REQUEST");
+        }
+        let _ops = self.ops.lock().await;
+        let journal = self.journal.lock().unwrap();
+        let Some(row) = journal.template(id)? else {
+            return detail("NOT_FOUND", "no such template on this runner");
+        };
+        if row.state == TemplateState::Publishing {
+            return detail("CONFLICT", "the template is still being published");
+        }
+        journal.set_template_state(id, TemplateState::Removing)?;
+        let record = self.template_record(
+            &journal,
+            &journal.template(id)?.context("template vanished")?,
+        )?;
+        gc_templates(&journal, &self.state)?;
+        Ok(record)
+    }
+
+    fn gc_templates(&self) {
+        let journal = self.journal.lock().unwrap();
+        if gc_templates(&journal, &self.state).is_err() {
+            self.faulted.store(true, Ordering::SeqCst);
+            self.accepting.store(false, Ordering::SeqCst);
         }
     }
 
@@ -599,9 +773,13 @@ impl Runner {
         vm_id: &str,
         epoch: u64,
         disk_gib: u32,
+        template: Option<&str>,
     ) -> Result<VmRecord> {
         Self::check_ids(thread_id, vm_id)?;
         let limits = &self.installation.limits;
+        if template.is_some_and(|id| !valid_vm_id(id) || id == vm_id) {
+            return reject("INVALID_REQUEST");
+        }
         if disk_gib == 0
             || disk_gib > limits.max_disk_gib
             || u64::from(disk_gib) * GIB < self.installation.image.virtual_size
@@ -619,10 +797,31 @@ impl Runner {
             let journal = self.journal.lock().unwrap();
             journal.fence(thread_id, epoch)?;
             if let Some(row) = journal.get(vm_id)? {
-                if row.thread_id != thread_id || row.disk_gib != disk_gib {
-                    return detail("CONFLICT", "vm exists with a different thread or disk size");
+                if row.thread_id != thread_id
+                    || row.disk_gib != disk_gib
+                    || row.template.as_deref() != template
+                {
+                    return detail(
+                        "CONFLICT",
+                        "vm exists with a different thread, disk size or template",
+                    );
                 }
                 return Ok(self.record(&row));
+            }
+            if let Some(id) = template {
+                match journal.template(id)? {
+                    Some(row) if row.state == TemplateState::Ready => {
+                        if disk_gib < row.disk_gib {
+                            return detail(
+                                "INVALID_REQUEST",
+                                format!("diskGiB must cover the template ({} GiB)", row.disk_gib),
+                            );
+                        }
+                    }
+                    _ => {
+                        return detail("NOT_FOUND", "the template is not available on this runner");
+                    }
+                }
             }
             if !self.accepting.load(Ordering::SeqCst) {
                 return reject("DRAINING");
@@ -647,10 +846,15 @@ impl Runner {
                     format!("the runner's disk has less than {floor} GiB free"),
                 );
             }
-            journal.insert_allocating(vm_id, thread_id, disk_gib)?
+            journal.insert_allocating(vm_id, thread_id, disk_gib, template)?
         };
         let paths = self.paths(slot);
-        let created = self.create_disk(&paths, disk_gib).await;
+        // Relative backing paths: a restored state directory may live elsewhere.
+        let backing = match template {
+            Some(id) => format!("../../templates/{id}/disk.qcow2"),
+            None => format!("../../images/{}.qcow2", self.installation.image.sha256),
+        };
+        let created = self.create_disk(&paths, disk_gib, &backing).await;
         let journal = self.journal.lock().unwrap();
         match created {
             Ok(()) => {
@@ -669,13 +873,11 @@ impl Runner {
         }
     }
 
-    async fn create_disk(&self, paths: &VmPaths, disk_gib: u32) -> Result<()> {
+    async fn create_disk(&self, paths: &VmPaths, disk_gib: u32, backing: &str) -> Result<()> {
         paths.check_socket_lengths()?;
         journal::private_dir(&paths.dir)?;
-        // Relative backing path: a restored state directory may live elsewhere.
-        let backing = format!("../../images/{}.qcow2", self.installation.image.sha256);
         let output = tokio::process::Command::new(&self.installation.qemu_img)
-            .args(["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", &backing])
+            .args(["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", backing])
             .arg(&paths.disk)
             .arg(format!("{disk_gib}G"))
             .current_dir(&paths.dir)
@@ -1092,6 +1294,7 @@ impl Runner {
             Err(error) => return Err(error).context("deleting the retained vm directory"),
         }
         drop(journal);
+        self.gc_templates();
         self.current(vm_id)
     }
 
@@ -1119,6 +1322,8 @@ impl Runner {
             self.faulted.store(true, Ordering::SeqCst);
             self.accepting.store(false, Ordering::SeqCst);
         }
+        drop(journal);
+        self.gc_templates();
     }
 
     /// Daemon shutdown: refuse new work and stop every running VM. Graceful
@@ -1167,6 +1372,27 @@ fn wait_exit_unreaped(pid: u32) {
             return;
         }
     }
+}
+
+pub(crate) fn template_dir(state: &Path, id: &str) -> PathBuf {
+    state.join("templates").join(id)
+}
+
+/// Deletes every removing template no VM depends on any more. A directory
+/// that cannot be deleted keeps its row and is tried again next time.
+fn gc_templates(journal: &Journal, state: &Path) -> Result<()> {
+    for template in journal.templates()? {
+        if template.state != TemplateState::Removing || journal.template_users(&template.id)? > 0 {
+            continue;
+        }
+        match fs::remove_dir_all(template_dir(state, &template.id)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => continue,
+        }
+        journal.delete_template(&template.id)?;
+    }
+    Ok(())
 }
 
 /// Startup reconciliation for a VM a previous runner process left live. On

@@ -59,6 +59,9 @@ is used (`cargo build -p cube-gateway`). Its network mode is the widest of the
 enrolled runners' (relay > direct > loopback). `CUBED_VM_VCPUS`,
 `CUBED_VM_MEMORY_MIB` and `CUBED_VM_DISK_GIB` size new thread machines (default
 2, 4096, 32; clamped to each runner's limits; fixed for a machine's life).
+`CUBED_TEMPLATES=off` turns machine templates off (every machine starts from
+the base image); `CUBED_TEMPLATE_TTL_HOURS` sets how long a template is reused
+(default 24). See ARCHITECTURE.md, "Machine templates and hooks".
 `CUBED_GITHUB_TOKEN` gives the egress policy a GitHub token instead of
 `gh auth token`. `CUBED_GATEWAY_TEST_ARGS` (a JSON array) is for tests with a
 `test-hooks` gateway build only.

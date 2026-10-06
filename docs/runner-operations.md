@@ -245,6 +245,24 @@ events (`runner_starting`, `runner_ready`, `runner_draining`,
 `runner_stopping`) without keys, tokens, seeds or guest output. Each VM's serial
 console is in `vms/<n>/console.log`; `vm.inspect` returns its last 16 KiB.
 
+## Machine templates
+
+cube-runner 0.8.0 keeps machine templates under `state/templates/<id>/disk.qcow2`
+(read-only, mode 0400): the prepared disk of a project's build machine, which
+new thread machines of that project use as the backing of their own overlay.
+cubed builds one per project and runner when a project has none (see
+ARCHITECTURE.md), keeps the newest and asks the runner to remove expired and
+superseded ones; the runner deletes a template's directory only when no VM
+that is not released depends on it, so a retained VM keeps its template until
+it is discarded. A template is about the size of what the project's setup
+installs (for cube: toolchains and dependencies, 1-3 GB). The free-disk floor
+for new VMs (`CUBE_RUNNER_MIN_FREE_DISK_GIB`) also guards templates, because
+building one first allocates a VM. Backups include `templates/`. Rolling back to
+0.7.0 is possible: it ignores the template records, and machines already on a
+template keep booting, but it never deletes a template; remove
+`state/templates/<id>` by hand only when `sqlite3 journal.db "SELECT vm_id FROM vm
+WHERE template='<id>' AND state<>'released'"` prints nothing.
+
 ## Retained VMs
 
 Releasing a VM deletes its directory only when cubed found the thread clean

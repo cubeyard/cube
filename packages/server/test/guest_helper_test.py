@@ -237,6 +237,43 @@ class GuestHelperTest(unittest.TestCase):
         finally:
             guest.MAX_RECORDS = original
 
+    def test_seal_final_removes_the_machine_identity_and_keeps_the_preparation(self):
+        system = os.path.join(self.root, "system")
+        guest.configure(root=system, state=os.path.join(system, "var/lib/cube"))
+        try:
+            files = {
+                "var/lib/cube/ops/ws-1/request.json": "{}", "var/lib/cube/epoch": "9", "etc/cube/env": "GH_TOKEN=cube_ph_github_x",
+                "etc/cube/hooks/pre-setup": "#!/bin/sh", "etc/ssh/ssh_host_ed25519_key": "private", "etc/ssh/sshd_config": "keep",
+                "etc/machine-id": "0123456789abcdef0123456789abcdef", "var/lib/cloud/instances/a/boot-finished": "",
+                "var/lib/dhcp/dhclient.leases": "lease", "var/lib/systemd/random-seed": "seed", "tmp/socket": "",
+                "home/agent/.bash_history": "history", "home/agent/.cache/cube/setup.log": "keep",
+                "workspace/node_modules/x": "keep", "etc/systemd/system/cube-seal.service": "[Unit]",
+            }
+            for name, content in files.items():
+                os.makedirs(os.path.dirname(os.path.join(system, name)), exist_ok=True)
+                with open(os.path.join(system, name), "w") as handle:
+                    handle.write(content)
+            self.assertEqual(guest.seal_final(), 0)
+            gone = ["var/lib/cube", "etc/cube", "etc/ssh/ssh_host_ed25519_key", "var/lib/cloud/instances", "var/lib/dhcp/dhclient.leases",
+                    "var/lib/systemd/random-seed", "tmp/socket", "home/agent/.bash_history", "etc/systemd/system/cube-seal.service"]
+            for name in gone:
+                self.assertFalse(os.path.exists(os.path.join(system, name)), name)
+            for name in ["etc/ssh/sshd_config", "home/agent/.cache/cube/setup.log", "workspace/node_modules/x"]:
+                self.assertTrue(os.path.exists(os.path.join(system, name)), name)
+            self.assertEqual(os.path.getsize(os.path.join(system, "etc/machine-id")), 0, "empty: a new id at the next boot")
+            self.assertTrue(os.path.exists(os.path.join(system, guest.SEAL_MARKER)))
+            # The first boot of a machine made from it: a fresh journal, the marker consumed.
+            os.makedirs(os.path.join(system, "var/lib/cube/ops/ws-stale"))
+            self.assertEqual(guest.init(), 0)
+            self.assertEqual(os.listdir(os.path.join(system, "var/lib/cube/ops")), [])
+            self.assertFalse(os.path.exists(os.path.join(system, guest.SEAL_MARKER)))
+            # An ordinary later init keeps the journal (only a template's first boot clears it).
+            os.makedirs(os.path.join(system, "var/lib/cube/ops/ws-2"))
+            guest.init()
+            self.assertEqual(os.listdir(os.path.join(system, "var/lib/cube/ops")), ["ws-2"])
+        finally:
+            guest.configure(root="/")
+
     def test_dispatch(self):
         stdout = io.BytesIO()
         guest.call("format-disk", io.BytesIO(b"{}\n"), stdout)

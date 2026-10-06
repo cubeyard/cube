@@ -38,6 +38,8 @@
   let repositories = $state<RepositoryDraft[]>([
     { key: uid(), url: "", checkoutName: "workspace" },
   ]);
+  let preSetup = $state("");
+  let preResume = $state("");
   let dirty = $state(untrack(() => projectId === "new"));
   let loaded = $state(untrack(() => projectId === "new"));
   let error = $state<string | null>(null);
@@ -56,6 +58,8 @@
       url: repository.url,
       checkoutName: repository.checkoutName,
     }));
+    preSetup = fresh.hooks?.preSetup ?? "";
+    preResume = fresh.hooks?.preResume ?? "";
     dirty = false;
   }
 
@@ -114,6 +118,7 @@
         base: null,
         ...(index === 0 ? {} : { checkoutName: repository.checkoutName }),
       })),
+      hooks: { preSetup, preResume },
     };
   }
 
@@ -361,6 +366,42 @@
         {/each}
       </div>
 
+      <div class="board-head">
+        <div>
+          <h2>machine hooks</h2>
+          <p>bash, as agent in /workspace · logs in ~/.cache/cube</p>
+        </div>
+      </div>
+      <div class="hook-board well">
+        <label class="config-field">
+          <span class="silk">pre-setup · then .agents/setup</span>
+          <textarea
+            class="compose-input hook-script"
+            aria-label="pre-setup hook"
+            aria-describedby="hook-note"
+            placeholder="runs when a machine is prepared, before the repository's .agents/setup"
+            spellcheck="false"
+            rows="4"
+            bind:value={preSetup}
+            oninput={changed}
+          ></textarea>
+        </label>
+        <label class="config-field">
+          <span class="silk">pre-resume · then .agents/resume</span>
+          <textarea
+            class="compose-input hook-script"
+            aria-label="pre-resume hook"
+            aria-describedby="hook-note"
+            placeholder="runs at every machine boot, before the repository's .agents/resume and the agent"
+            spellcheck="false"
+            rows="4"
+            bind:value={preResume}
+            oninput={changed}
+          ></textarea>
+        </label>
+        <p class="hook-note" id="hook-note">both hooks run, and so do the repository's own. a prepared machine is kept as a template for the project's next threads; they skip setup until the template expires (24 h) or pre-setup, the repositories or .agents/setup change. new threads use these hooks; the agent can read them, so keep secrets out.</p>
+      </div>
+
     </section>
 
     <p class="config-note">ready projects share one global runner pool. repository URLs and checked commit IDs are pinned per thread. each thread works in its own virtual machine on a runner; its only network is cube’s gateway, which allows http and https and decides every request.</p>
@@ -412,4 +453,7 @@
   .github-login-link { font-family: var(--font-ui); }
   .draft { margin: -0.6rem 0 1.3rem; font-size: 12px; color: var(--ink-3); overflow-wrap: anywhere; }
   .draft code { font-family: var(--font-mono); color: var(--ink-2); }
+  .hook-board { display: grid; gap: 0.85rem; padding: 0.9rem; }
+  .hook-script { display: block; width: 100%; min-height: 5.5rem; resize: vertical; font: 12.5px/1.5 var(--font-mono); box-sizing: border-box; }
+  .hook-note { margin: 0; color: var(--ink-3); font-size: 12px; line-height: 1.5; }
 </style>

@@ -8,14 +8,14 @@ import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import type { Models } from "@earendil-works/pi-ai";
 import { GitService, normalizeRepoUrl } from "@cube/git";
-import { Registry, threadAgent, type Project, type Runner } from "./registry.ts";
+import { NO_HOOKS, projectHooks, Registry, threadAgent, type Project, type Runner } from "./registry.ts";
 import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { Conversations } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
 import { IrohRunnerClient, loadRunnerConfig, runnerClient, type RunnerNetwork, type TrustedRunnerHealth } from "./iroh-node.ts";
 import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
 import { GatewaySupervisor, locateGateway, widestNetwork } from "./gateway.ts";
-import { ThreadVms, type ThreadMachines } from "./vm.ts";
+import { machineFor, ThreadVms, type ThreadMachines } from "./vm.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
@@ -156,7 +156,7 @@ export async function createCubed(options: {
   // Every guest request is decided here; secrets never leave the host
   // except as the gateway's substitution for an allowed request.
   const policy = new EgressPolicy({
-    vms: { vm: vmId => { const thread = registry.threadByVm(vmId); return thread?.vm && !thread.archived ? { threadId: thread.id, placeholders: thread.vm.placeholders } : null; } },
+    vms: { vm: vmId => machineFor(registry, vmId) },
     secrets: options.secrets ?? [githubSecret(() => github.token())],
   });
   const egress = await serveEgress(path.join(run, "egress.sock"), policy);
@@ -353,6 +353,8 @@ export async function createCubed(options: {
           const checkoutNames = new Set<string>();
           const project: Project = { id: projectId, name: text("name"), status: "checking", error: null,
             revision: (previous?.revision ?? 0) + 1, checkedAt: null, createdAt: previous?.createdAt ?? Date.now(), updatedAt: Date.now(),
+            // New threads use these; a changed pre-setup also means a new template.
+            hooks: projectHooks(body.hooks, previous?.hooks ?? NO_HOOKS),
             repositories: body.repositories.map((item, position) => {
               if (!item || typeof item !== "object" || typeof item.url !== "string" || item.url.length > 2048 ||
                 (item.base != null && (typeof item.base !== "string" || !item.base.trim())) ||

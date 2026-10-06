@@ -29,7 +29,7 @@ const NODE_ID = /^node-[a-zA-Z0-9-]{1,123}$/;
 const PEER = /^[0-9a-f]{64}$/;
 const CODES = new Set(["NODE_UNAVAILABLE", "OUTCOME_UNKNOWN", "UNSUPPORTED", "UNAUTHORIZED", "WRONG_NODE", "INVALID_REQUEST", "CONFLICT",
   "CAPACITY_EXCEEDED", "DRAINING", "CANCELLED", "INCOMPATIBLE_PROTOCOL", "ENVIRONMENT_MISSING", "IO_ERROR", "LEASE_STALE", "NOT_FOUND"]);
-const MUTATIONS = new Set(["vm.allocate", "vm.start", "vm.stop", "vm.release", "vm.discard"]);
+const MUTATIONS = new Set(["vm.allocate", "vm.start", "vm.stop", "vm.release", "vm.discard", "vm.publish", "template.remove"]);
 export const RUNNER_CAPABILITIES = ["node.status", "vm.allocate", "vm.start", "vm.stop", "vm.inspect", "vm.release"] as const;
 export const VM_STATES = ["allocating", "allocated", "starting", "running", "stopping", "stopped", "releasing", "released", "retained", "failed"] as const;
 const ProtocolCompatibility = Schema.Struct({
@@ -52,6 +52,14 @@ export type VmState = typeof VM_STATES[number];
 export interface VmRecord {
   vmId: string; threadId: string; state: VmState; interrupted: boolean; error?: string;
   diskBytes: number; seedSha256?: string; startedAt?: number;
+  /** The template the disk is backed by (runner 0.8.0+). */
+  template?: string;
+}
+export const TEMPLATE_STATES = ["publishing", "ready", "removing"] as const;
+/** A prepared disk on a runner that new machines' overlays are backed by. */
+export interface RunnerTemplate {
+  id: string; key: string; meta: string; state: typeof TEMPLATE_STATES[number];
+  diskGiB: number; bytes: number; createdAt: number; users: number;
 }
 export interface VmSeed { metaData: string; userData: string; networkConfig: string }
 export interface VmStartSpec { vcpus: number; memoryMiB: number; mac: string; seed: VmSeed; gateway: { peer: string; frameToken: string } }
@@ -118,12 +126,20 @@ function limits(value: unknown): VmLimits {
   return Object.fromEntries(keys.map(key => [key, row[key]])) as unknown as VmLimits;
 }
 function vmRecord(value: unknown, ref: VmRef): VmRecord {
-  const row = shape(value, ["vmId", "threadId", "state", "interrupted", "diskBytes"], ["error", "seedSha256", "startedAt"]);
+  const row = shape(value, ["vmId", "threadId", "state", "interrupted", "diskBytes"], ["error", "seedSha256", "startedAt", "template"]);
   if (row.vmId !== ref.vmId || row.threadId !== ref.threadId || !VM_STATES.includes(row.state as VmState) || typeof row.interrupted !== "boolean"
     || !integer(row.diskBytes, 0) || !(row.error === undefined || (typeof row.error === "string" && row.error.length <= 65536))
     || !(row.seedSha256 === undefined || (typeof row.seedSha256 === "string" && SHA.test(row.seedSha256)))
-    || !(row.startedAt === undefined || integer(row.startedAt, 0))) invalid();
+    || !(row.startedAt === undefined || integer(row.startedAt, 0))
+    || !(row.template === undefined || (typeof row.template === "string" && VM_ID.test(row.template)))) invalid();
   return row as unknown as VmRecord;
+}
+function templateRecord(value: unknown): RunnerTemplate {
+  const row = shape(value, ["id", "key", "meta", "state", "diskGiB", "bytes", "createdAt", "users"]);
+  if (typeof row.id !== "string" || !VM_ID.test(row.id) || typeof row.key !== "string" || !SHA.test(row.key)
+    || typeof row.meta !== "string" || row.meta.length > 4096 || !TEMPLATE_STATES.includes(row.state as RunnerTemplate["state"])
+    || !integer(row.diskGiB, 1) || !integer(row.bytes, 0) || !integer(row.createdAt, 0) || !integer(row.users, 0)) invalid();
+  return row as unknown as RunnerTemplate;
 }
 function vmRef(ref: VmRef): VmRef {
   if (!ref || typeof ref.threadId !== "string" || !ID.test(ref.threadId) || typeof ref.vmId !== "string" || !VM_ID.test(ref.vmId)) invalid();
@@ -363,7 +379,7 @@ export class IrohRunnerClient {
       };
       combined.addEventListener("abort", onAbort, { once: true });
     });
-    const timer = setTimeout(() => controller.abort(), query && String(query.method).startsWith("vm.") ? VM_RPC_TIMEOUT_MS : RPC_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), query && /^(vm|template)\./.test(String(query.method)) ? VM_RPC_TIMEOUT_MS : RPC_TIMEOUT_MS);
     const work = async () => {
       endpoint = await builder.bind();
       if (finished || combined.aborted) { close(); throw new Error("request ended before bind"); }
@@ -398,6 +414,15 @@ export class IrohRunnerClient {
           || !integer(status.activeVms, 0) || !integer(status.runningVms, 0) || !integer(status.maxActiveVms, 1)
           || !integer(status.retainedVms, 0) || !integer(status.retainedBytes, 0)
           || !(status.error === undefined || (typeof status.error === "string" && status.error.length <= 4096))) invalid();
+      } else if (query.method === "vm.publish" || query.method === "template.remove") {
+        shape(result, ["type", "template"]);
+        if (result.type !== "Template") invalid();
+        result.template = templateRecord(result.template);
+        if ((result.template as RunnerTemplate).id !== (query.method === "vm.publish" ? query.vmId : query.id)) invalid();
+      } else if (query.method === "template.list") {
+        shape(result, ["type", "templates"]);
+        if (result.type !== "Templates" || !Array.isArray(result.templates)) invalid();
+        result.templates = result.templates.map(templateRecord);
       } else {
         shape(result, ["type", "vm"], ["consoleTail"]);
         if (result.type !== "Vm" || !(result.consoleTail === undefined || typeof result.consoleTail === "string")) invalid();
@@ -443,9 +468,26 @@ export class IrohRunnerClient {
     const status = result.status as Omit<TrustedRunnerHealth, "softwareVersion" | "protocolVersion" | "error"> & { error?: string };
     return { ...status, error: status.error ?? null, softwareVersion: result.softwareVersion as string, protocolVersion: PROTOCOL };
   }
-  async vmAllocate(ref: VmRef, epoch: number, diskGiB: number): Promise<VmRecord> {
-    if (!integer(diskGiB, 1, 4096)) invalid();
-    return this.vm({ method: "vm.allocate", ...vmRef(ref), epoch: epochField(epoch), diskGiB });
+  /** `template` backs the disk by a template instead of the base image
+   * (runner 0.8.0+, capability `vm.publish`). */
+  async vmAllocate(ref: VmRef, epoch: number, diskGiB: number, template?: string): Promise<VmRecord> {
+    if (!integer(diskGiB, 1, 4096) || !(template === undefined || (typeof template === "string" && VM_ID.test(template)))) invalid();
+    return this.vm({ method: "vm.allocate", ...vmRef(ref), epoch: epochField(epoch), diskGiB, ...(template ? { template } : {}) });
+  }
+  /** Turns a cleanly stopped machine's disk into a template and releases
+   * the machine. `meta` is cubed's own JSON (at most 4 KiB). */
+  async vmPublish(ref: VmRef, epoch: number, key: string, meta: string): Promise<RunnerTemplate> {
+    if (typeof key !== "string" || !SHA.test(key) || typeof meta !== "string" || Buffer.byteLength(meta) > 4096) invalid();
+    return (await this.request({ method: "vm.publish", ...vmRef(ref), epoch: epochField(epoch), key, meta })).template as RunnerTemplate;
+  }
+  async templateList(): Promise<RunnerTemplate[]> {
+    return (await this.request({ method: "template.list" })).templates as RunnerTemplate[];
+  }
+  /** No new machine may use it; the runner deletes it once none depends on
+   * it. A template already gone is NOT_FOUND. */
+  async templateRemove(id: string): Promise<RunnerTemplate> {
+    if (typeof id !== "string" || !VM_ID.test(id)) invalid();
+    return (await this.request({ method: "template.remove", id })).template as RunnerTemplate;
   }
   async vmStart(ref: VmRef, epoch: number, spec: VmStartSpec): Promise<VmRecord> {
     const row = shape(spec, ["vcpus", "memoryMiB", "mac", "seed", "gateway"]);

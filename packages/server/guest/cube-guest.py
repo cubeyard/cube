@@ -120,6 +120,8 @@ class Config:
         self.packages = ["git", "gh", "curl", "ca-certificates"]
         self.commands = ["git", "gh", "curl"]
         self.launcher = SystemdLauncher()
+        # Everything `seal_final` touches lives under this root (tests: a temporary one).
+        self.root = "/"
 
 
 CONFIG = Config()
@@ -638,8 +640,116 @@ def packages(attempts=5):
     return 1
 
 
+SEAL_UNIT = "cube-seal.service"
+SEAL_MARKER = "var/lib/cube-seal/sealed"
+SEAL_VERSION = "1"
+
+
+def rooted(path):
+    return os.path.join(CONFIG.root, path.lstrip("/"))
+
+
+def seal():
+    """Turns this build machine into a template at its next power-off (as
+    root, run by cubed after a successful preparation). The cleaning itself
+    happens at shutdown, when nothing uses the identity it removes; cubed
+    then powers the machine off and the runner publishes the disk."""
+    unit = "\n".join([
+        "[Unit]",
+        "Description=cube: clean this disk for a template at power-off",
+        "DefaultDependencies=no",
+        "Requires=local-fs.target",
+        "After=local-fs.target",
+        "Conflicts=shutdown.target",
+        "Before=shutdown.target",
+        "",
+        "[Service]",
+        "Type=oneshot",
+        "RemainAfterExit=yes",
+        "ExecStart=/bin/true",
+        "ExecStop=%s seal-final" % HELPER,
+        "TimeoutStopSec=180",
+        "",
+    ])
+    write_atomic(rooted("/etc/systemd/system/" + SEAL_UNIT), unit.encode(), 0o644)
+    subprocess.run(["apt-get", "clean"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for command in (["systemctl", "daemon-reload"], ["systemctl", "start", SEAL_UNIT]):
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+        if result.returncode != 0:
+            sys.stdout.write("seal failed: %s\n" % result.stdout.decode(errors="replace").strip()[:500])
+            return 1
+    sys.stdout.write("sealed at power-off\n")
+    return 0
+
+
+def remove(path):
+    """Removes a file, a symlink or a whole directory; absent is fine."""
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+def empty(directory):
+    try:
+        names = os.listdir(directory)
+    except FileNotFoundError:
+        return
+    for name in names:
+        remove(os.path.join(directory, name))
+
+
+def seal_final():
+    """ExecStop of the seal unit, at power-off: removes what makes this
+    machine one machine (host keys, machine id, cloud-init instance, the
+    helper's journal and epoch, cubed's per-machine files and the build's
+    placeholders), then discards the freed blocks so the deleted bytes do
+    not stay in the template file. Every later machine gets all of these
+    new from its own seed. Package caches, toolchains and the prepared
+    checkout stay: they are the point of the template."""
+    failures = []
+    steps = [
+        ("/var/lib/cube", remove), ("/etc/cube", remove),
+        ("/var/lib/cloud", empty), ("/var/log/journal", empty), ("/tmp", empty),
+        ("/var/lib/dhcp", empty), ("/var/lib/systemd/random-seed", remove),
+        ("/var/lib/dbus/machine-id", remove), ("/root/.bash_history", remove),
+        ("/home/agent/.bash_history", remove), ("/etc/systemd/system/" + SEAL_UNIT, remove),
+    ]
+    for path, action in steps:
+        try:
+            action(rooted(path))
+        except OSError as error:
+            failures.append("%s: %s" % (path, error.strerror or error))
+    for log in ("/var/log/cloud-init.log", "/var/log/cloud-init-output.log"):
+        remove(rooted(log))
+    ssh = rooted("/etc/ssh")
+    for name in (os.listdir(ssh) if os.path.isdir(ssh) else []):
+        if name.startswith("ssh_host_"):
+            remove(os.path.join(ssh, name))
+    # Empty, not absent: systemd makes a new id at the next boot.
+    with open(rooted("/etc/machine-id"), "w"):
+        pass
+    if failures:
+        sys.stderr.write("cube-guest seal: could not clean %s\n" % "; ".join(failures))
+        return 1
+    os.makedirs(os.path.dirname(rooted(SEAL_MARKER)), mode=0o700, exist_ok=True)
+    write_atomic(rooted(SEAL_MARKER), SEAL_VERSION.encode(), 0o600)
+    if CONFIG.root == "/":
+        subprocess.run(["fstrim", "--all"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["sync"])
+    return 0
+
+
 def init():
-    """First boot (cloud-init runcmd): the journal and the agent's directories."""
+    """First boot of an instance (cloud-init runcmd): the journal and the
+    agent's directories. On a machine made from a template the journal of
+    the build machine is gone already (seal_final); the marker says so."""
+    if os.path.exists(rooted(SEAL_MARKER)):
+        remove(CONFIG.state)
+        remove(rooted(SEAL_MARKER))
     os.makedirs(ops_dir(), mode=0o700, exist_ok=True)
     for directory in (CONFIG.workspace, "/repos"):
         os.makedirs(directory, mode=0o755, exist_ok=True)
@@ -699,12 +809,16 @@ def main(argv):
         return recover()
     if command == "init":
         return init()
+    if command == "seal":
+        return seal()
+    if command == "seal-final":
+        return seal_final()
     if command == "packages":
         return packages()
     if command == "--version":
         print("cube-guest %s" % VERSION)
         return 0
-    sys.stderr.write("usage: cube-guest ssh | call OP | wrap ID | finish ID | recover | init | packages | --version\n")
+    sys.stderr.write("usage: cube-guest ssh | call OP | wrap ID | finish ID | recover | init | seal | seal-final | packages | --version\n")
     return 2
 
 

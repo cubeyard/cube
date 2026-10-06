@@ -11,6 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
 import type { VmSeed } from "./iroh-node.ts";
+import type { ProjectHooks } from "./registry.ts";
 
 export const GUEST_HELPER_PATH = "/usr/local/sbin/cube-guest";
 const GUEST_DIRECTORY = path.resolve(import.meta.dirname, "../guest");
@@ -18,6 +19,8 @@ const GUEST_DIRECTORY = path.resolve(import.meta.dirname, "../guest");
 export const MAX_SEED_BYTES = 64 * 1024;
 /** Packages the agent's tools rely on, installed through the gateway at first boot. */
 export const GUEST_PACKAGES = ["git", "gh", "curl", "ca-certificates"];
+/** Where the project's external hooks are written (`pre-setup`, `pre-resume`). */
+export const GUEST_HOOKS_DIRECTORY = "/etc/cube/hooks";
 const CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt";
 
 export interface SeedInput {
@@ -30,6 +33,10 @@ export interface SeedInput {
   caPem: string;
   /** Secret placeholders by name (`github` → `cube_ph_github_…`). */
   placeholders: Record<string, string>;
+  /** The project's external hooks, written as executable files. */
+  hooks?: ProjectHooks;
+  /** The disk is a template's overlay: its packages are installed already. */
+  fromTemplate?: boolean;
   /** Overrides for tests; default: the files in packages/server/guest. */
   helper?: string;
   recoverUnit?: string;
@@ -46,6 +53,18 @@ export function guestHelper(): { helper: string; recoverUnit: string } {
 /** The MAC of a VM: locally administered, derived from its id. */
 export function vmMac(vmId: string, digest: (data: string) => Buffer): string {
   return `02:${[...digest(vmId).subarray(0, 5)].map(byte => byte.toString(16).padStart(2, "0")).join(":")}`;
+}
+
+function hookFiles(hooks: ProjectHooks | undefined): Array<Record<string, unknown>> {
+  return (["preSetup", "preResume"] as const).flatMap(name => {
+    const script = hooks?.[name] ?? "";
+    if (!script.trim()) return [];
+    const file = name === "preSetup" ? "pre-setup" : "pre-resume";
+    // Runs as the agent's account, like `.agents/setup`; without a #! line bash runs it.
+    const content = script.startsWith("#!") ? script : `#!/bin/bash\n${script}`;
+    return [{ path: `${GUEST_HOOKS_DIRECTORY}/${file}`, permissions: "0755", owner: "root:root", encoding: "gz+b64",
+      content: gzipSync(Buffer.from(content.endsWith("\n") ? content : `${content}\n`)).toString("base64") }];
+  });
 }
 
 export function vmSeed(input: SeedInput): VmSeed {
@@ -81,8 +100,9 @@ export function vmSeed(input: SeedInput): VmSeed {
     ssh_genkeytypes: ["ed25519"],
     ssh_keys: { ed25519_private: `${input.hostKey.privateKey.trim()}\n`, ed25519_public: hostPublic },
     ca_certs: { trusted: [input.caPem.trim()] },
-    package_update: true,
-    packages: GUEST_PACKAGES,
+    // A template has the packages (and fresh lists) already; the per-boot
+    // helper still installs any that went missing.
+    ...(input.fromTemplate ? { package_update: false } : { package_update: true, packages: GUEST_PACKAGES }),
     write_files: [
       { path: GUEST_HELPER_PATH, permissions: "0755", owner: "root:root", encoding: "gz+b64",
         content: gzipSync(Buffer.from(shipped.helper)).toString("base64") },
@@ -100,6 +120,7 @@ export function vmSeed(input: SeedInput): VmSeed {
         content: "Defaults env_keep += \"NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE SSL_CERT_FILE CURL_CA_BUNDLE\"\n" },
       { path: "/etc/environment", append: true, permissions: "0644", owner: "root:root",
         content: `NODE_EXTRA_CA_CERTS=${CA_BUNDLE}\nREQUESTS_CA_BUNDLE=${CA_BUNDLE}\nSSL_CERT_FILE=${CA_BUNDLE}\n` },
+      ...hookFiles(input.hooks),
       // cloud-init installs `packages` once; this retries on every boot.
       { path: "/var/lib/cloud/scripts/per-boot/cube-packages", permissions: "0755", owner: "root:root",
         content: `#!/bin/sh\nexec ${GUEST_HELPER_PATH} packages\n` },

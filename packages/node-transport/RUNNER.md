@@ -65,8 +65,9 @@ request is read. After hello, a method protocol 3 does not have (for example
 
 Hello (runner profile) adds `binding`, `platform` (`linux-x86_64`,
 `macos-aarch64`), `baseImageSha256`, capabilities `node.status vm.allocate
-vm.start vm.stop vm.inspect vm.release vm.discard` (`vm.discard` since
-0.5.0), and `limits {maxFrameBytes,
+vm.start vm.stop vm.inspect vm.release vm.discard vm.publish template.list
+template.remove` (`vm.discard` since 0.5.0, templates since 0.8.0), and
+`limits {maxFrameBytes,
 requestTimeoutMs, maxVcpus, maxMemoryMiB, maxDiskGiB, maxSeedBytes,
 maxActiveVms}`. `maxActiveVms` is the process's bound on active VMs (1 before
 0.7.0); `vm.allocate` beyond it is `CAPACITY_EXCEEDED`.
@@ -86,6 +87,10 @@ record.
 {"method":"vm.inspect","threadId":"t1","vmId":"0123456789abcdef"}
 {"method":"vm.release","threadId":"t1","vmId":"0123456789abcdef","epoch":1,"retain":false}
 {"method":"vm.discard","threadId":"t1","vmId":"0123456789abcdef","epoch":1}
+{"method":"vm.publish","threadId":"t1","vmId":"0123456789abcdef","epoch":2,"key":"<64 hex>","meta":"{…}"}
+{"method":"vm.allocate","threadId":"t2","vmId":"fedcba9876543210","epoch":1,"diskGiB":16,"template":"0123456789abcdef"}
+{"method":"template.list"}
+{"method":"template.remove","id":"0123456789abcdef"}
 {"method":"node.status"}
 ```
 
@@ -103,6 +108,33 @@ ignore the request's sizes and seed (a different mac is `CONFLICT`). A
 mutation runs to completion even when its control connection times out, so a
 caller that lost the answer inspects or repeats. The method table with every
 rule is in the plan.
+
+### Templates (0.8.0)
+
+`vm.publish` turns a VM's disk into a template and releases the VM. Only a VM
+that was started from the base image and is `stopped` without `interrupted`
+qualifies (anything else is `CONFLICT`): cubed prepared and sealed it and the
+guest powered itself off. The disk is renamed (not copied) to
+`templates/<vmId>/disk.qcow2`, mode 0400; the template's id is the VM's id.
+`key` (64 hex) and `meta` (a JSON object, at most 4 KiB) are cubed's and are
+stored as given; publishing again with the same ones returns the template, with
+others is `CONFLICT`. The answer is `{"type":"Template","template":{id, key,
+meta, state, diskGiB, bytes, createdAt, users}}`; `template.list` answers
+`{"type":"Templates","templates":[…]}`.
+
+`vm.allocate` with `template` creates the VM's overlay backed by
+`../../templates/<id>/disk.qcow2` instead of the base image; the template must
+be `ready` (else `NOT_FOUND`) and `diskGiB` at least the template's. A
+template-backed VM cannot be published (no chains), and its template is fixed
+for its life (`inspect` reports `template`). Every VM has its own overlay, so
+no two VMs ever write the same disk; QEMU opens the template read-only.
+
+`template.remove` marks a template `removing`: no new VM may use it. Its
+directory is deleted at once if no VM that is not `released` depends on it
+(retained and failed VMs count), otherwise when the last such VM is released or
+discarded. A removed template is `NOT_FOUND`. cubed decides which templates to
+keep (see `packages/server/src/vm-template.ts`); the runner never expires one
+by itself.
 
 ## Frame channel `cube/l2/1`
 
@@ -129,6 +161,11 @@ grant or a stop closes it. Frames are dropped while none exists.
   never signals a process it did not spawn. On Linux QEMU has
   `PR_SET_PDEATHSIG(SIGKILL)` from a long-lived spawner thread, so it dies
   with the runner.
+- Templates came without a journal version change: the `template` table and
+  the `vm.template` column are added on open, so a rollback to 0.7.0 opens the
+  journal again (it ignores both; its VMs on templates still boot, since the
+  backing path is in the overlay). A crash while publishing is finished or
+  undone on open, by whether the disk was already moved.
 - Released VM directories are deleted; retained, interrupted and failed ones
   are kept. Records are never deleted (a vmId is never reused), except an
   allocation whose `qemu-img create` failed before any disk existed.
@@ -142,3 +179,5 @@ idempotency, conflicts, capacity, epochs, frame authorization and token
 rotation, failures, retained evidence, quarantine, reconciliation, and a
 process test (runner SIGKILL takes QEMU down; restart marks the VM
 interrupted; SIGTERM powers it down) that runs where `/dev/kvm` is usable.
+`tests/runner_templates.rs` covers publish, allocation on a template, removal
+while VMs depend on it and collection with the last one, and restarts.

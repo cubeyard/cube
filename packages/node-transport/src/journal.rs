@@ -6,7 +6,13 @@
 //!
 //! ```text
 //! owner.lock  journal.db  images/<sha256>.qcow2 (0400)  vms/<slot>/
+//! templates/<id>/disk.qcow2 (0400)
 //! ```
+//!
+//! Templates (cube-runner 0.8.0) came without a new journal version: the
+//! `template` table and the `vm.template` column are created on open, and an
+//! older runner that opens the journal again ignores both, so rolling an
+//! upgrade back keeps working.
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -157,6 +163,47 @@ pub struct VmRow {
     pub config: Option<VmConfig>,
     pub retain: bool,
     pub started_at: Option<u64>,
+    /// The template the VM's disk is backed by, fixed at allocation.
+    pub template: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TemplateState {
+    /// The disk is moving into `templates/`; finished or dropped on open.
+    Publishing,
+    Ready,
+    /// No new VM may use it; deleted once no VM's disk depends on it.
+    Removing,
+}
+
+impl TemplateState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Publishing => "publishing",
+            Self::Ready => "ready",
+            Self::Removing => "removing",
+        }
+    }
+    fn parse(value: &str) -> Result<Self> {
+        Ok(serde_json::from_value(serde_json::Value::String(
+            value.into(),
+        ))?)
+    }
+}
+
+/// A prepared disk other VMs' overlays are backed by (read-only).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplateRow {
+    /// The id of the VM it was made from.
+    pub id: String,
+    /// cubed's cache key (sha256 hex); the runner does not interpret it.
+    pub key: String,
+    /// cubed's opaque metadata (JSON, at most `MAX_TEMPLATE_META` bytes).
+    pub meta: String,
+    pub state: TemplateState,
+    pub disk_gib: u32,
+    pub created_at: u64,
 }
 
 pub fn private_file(path: &Path, create: bool) -> Result<File> {
@@ -323,6 +370,27 @@ CREATE TRIGGER monotonic_lease_epoch BEFORE UPDATE OF epoch ON lease_epoch WHEN 
 CREATE TRIGGER retain_lease_epoch BEFORE DELETE ON lease_epoch BEGIN SELECT RAISE(ABORT, 'retain lease epoch'); END;
 ";
 
+/// Additive and idempotent, applied on every open (see the module comment).
+const TEMPLATE_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS template(id TEXT PRIMARY KEY, key TEXT NOT NULL, meta TEXT NOT NULL,
+  state TEXT NOT NULL, disk_gib INTEGER NOT NULL, created_at INTEGER NOT NULL);
+CREATE TRIGGER IF NOT EXISTS immutable_template BEFORE UPDATE OF id,key,meta,disk_gib,created_at ON template BEGIN SELECT RAISE(ABORT, 'immutable template'); END;
+";
+
+fn ensure_template_schema(db: &Connection) -> Result<()> {
+    db.execute_batch(TEMPLATE_SCHEMA)?;
+    let has_column = db
+        .prepare("SELECT 1 FROM pragma_table_info('vm') WHERE name='template'")?
+        .exists([])?;
+    if !has_column {
+        db.execute_batch("ALTER TABLE vm ADD COLUMN template TEXT")?;
+    }
+    db.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS immutable_vm_template BEFORE UPDATE OF template ON vm BEGIN SELECT RAISE(ABORT, 'immutable vm template'); END;",
+    )?;
+    Ok(())
+}
+
 fn validate_installation(installation: &Installation, peer: EndpointId) -> Result<()> {
     ensure!(
         installation.peer_id == peer.to_string(),
@@ -365,6 +433,7 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(VmRowRaw,)> {
         config: r.get(7)?,
         retain: r.get(8)?,
         started_at: r.get(9)?,
+        template: r.get(10)?,
     },))
 }
 
@@ -379,6 +448,7 @@ struct VmRowRaw {
     config: Option<String>,
     retain: i64,
     started_at: Option<i64>,
+    template: Option<String>,
 }
 
 impl VmRowRaw {
@@ -394,12 +464,40 @@ impl VmRowRaw {
             config: self.config.map(|c| serde_json::from_str(&c)).transpose()?,
             retain: self.retain != 0,
             started_at: self.started_at.map(u64::try_from).transpose()?,
+            template: self.template,
         })
     }
 }
 
 const COLUMNS: &str =
-    "vm_id,thread_id,slot,state,interrupted,error,disk_gib,config,retain,started_at";
+    "vm_id,thread_id,slot,state,interrupted,error,disk_gib,config,retain,started_at,template";
+const TEMPLATE_COLUMNS: &str = "id,key,meta,state,disk_gib,created_at";
+
+type TemplateRaw = (String, String, String, String, i64, i64);
+
+fn template_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TemplateRaw> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+    ))
+}
+
+fn parse_template(
+    (id, key, meta, state, disk_gib, created_at): TemplateRaw,
+) -> Result<TemplateRow> {
+    Ok(TemplateRow {
+        id,
+        key,
+        meta,
+        state: TemplateState::parse(&state)?,
+        disk_gib: u32::try_from(disk_gib)?,
+        created_at: u64::try_from(created_at)?,
+    })
+}
 
 impl Journal {
     /// Local operator enrollment: requires a NEW state directory.
@@ -407,7 +505,9 @@ impl Journal {
         validate_installation(installation, peer)?;
         let (db, _lock) = open_db(state, true)?;
         db.execute_batch(&format!(
-            "BEGIN IMMEDIATE; {SCHEMA} PRAGMA user_version={JOURNAL_VERSION};"
+            "BEGIN IMMEDIATE; {SCHEMA} {TEMPLATE_SCHEMA} ALTER TABLE vm ADD COLUMN template TEXT;
+             CREATE TRIGGER immutable_vm_template BEFORE UPDATE OF template ON vm BEGIN SELECT RAISE(ABORT, 'immutable vm template'); END;
+             PRAGMA user_version={JOURNAL_VERSION};"
         ))?;
         db.execute(
             "INSERT INTO installation VALUES(1, ?1)",
@@ -442,6 +542,7 @@ impl Journal {
             |r| r.get::<_, String>(0),
         )?)?;
         validate_installation(&installation, peer)?;
+        ensure_template_schema(&db)?;
         Ok((Self { db, _lock: lock }, installation))
     }
 
@@ -467,15 +568,21 @@ impl Journal {
         rows.into_iter().map(|(r,)| r.parse()).collect()
     }
 
-    pub fn insert_allocating(&self, vm_id: &str, thread_id: &str, disk_gib: u32) -> Result<u32> {
+    pub fn insert_allocating(
+        &self,
+        vm_id: &str,
+        thread_id: &str,
+        disk_gib: u32,
+        template: Option<&str>,
+    ) -> Result<u32> {
         let slot: i64 =
             self.db
                 .query_row("SELECT COALESCE(MAX(slot), 0) + 1 FROM vm", [], |r| {
                     r.get(0)
                 })?;
         self.db.execute(
-            "INSERT INTO vm(vm_id,thread_id,slot,state,disk_gib) VALUES(?1,?2,?3,'allocating',?4)",
-            params![vm_id, thread_id, slot, disk_gib],
+            "INSERT INTO vm(vm_id,thread_id,slot,state,disk_gib,template) VALUES(?1,?2,?3,'allocating',?4,?5)",
+            params![vm_id, thread_id, slot, disk_gib, template],
         )?;
         Ok(u32::try_from(slot)?)
     }
@@ -557,6 +664,84 @@ impl Journal {
             params![retain, vm_id],
         )?;
         Ok(())
+    }
+
+    pub fn template(&self, id: &str) -> Result<Option<TemplateRow>> {
+        self.db
+            .query_row(
+                &format!("SELECT {TEMPLATE_COLUMNS} FROM template WHERE id=?1"),
+                [id],
+                template_row,
+            )
+            .optional()?
+            .map(parse_template)
+            .transpose()
+    }
+
+    pub fn templates(&self) -> Result<Vec<TemplateRow>> {
+        let mut statement = self.db.prepare(&format!(
+            "SELECT {TEMPLATE_COLUMNS} FROM template ORDER BY created_at, id"
+        ))?;
+        let rows = statement
+            .query_map([], template_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter().map(parse_template).collect()
+    }
+
+    pub fn insert_publishing(&self, template: &TemplateRow) -> Result<()> {
+        self.db.execute(
+            "INSERT INTO template(id,key,meta,state,disk_gib,created_at) VALUES(?1,?2,?3,'publishing',?4,?5)",
+            params![
+                template.id,
+                template.key,
+                template.meta,
+                template.disk_gib,
+                i64::try_from(template.created_at)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The disk now lives in `templates/`: the template becomes ready and its
+    /// source VM released, in one transaction.
+    pub fn finish_publish(&self, id: &str) -> Result<()> {
+        self.db.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            ensure!(
+                self.db.execute(
+                    "UPDATE template SET state='ready' WHERE id=?1 AND state='publishing'",
+                    [id],
+                )? == 1,
+                "template is not publishing"
+            );
+            self.set_state(id, VmState::Released, None)
+        })();
+        self.db
+            .execute_batch(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
+        result
+    }
+
+    pub fn set_template_state(&self, id: &str, state: TemplateState) -> Result<()> {
+        self.db.execute(
+            "UPDATE template SET state=?1 WHERE id=?2",
+            params![state.as_str(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_template(&self, id: &str) -> Result<()> {
+        self.db.execute("DELETE FROM template WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    /// VMs whose disk is backed by the template and still exists: anything
+    /// not released (running, stopped, retained or failed).
+    pub fn template_users(&self, id: &str) -> Result<u64> {
+        Ok(self.db.query_row(
+            "SELECT count(*) FROM vm WHERE template=?1 AND state<>'released'",
+            [id],
+            |r| r.get::<_, i64>(0),
+        )? as u64)
     }
 
     /// Lease epochs fence mutations per thread: an epoch below the newest
@@ -654,6 +839,37 @@ mod tests {
         );
         fs::write(&source, b"not an image at all, but long enough to read").unwrap();
         assert!(import_image(&state, &source).is_err());
+    }
+
+    #[test]
+    fn a_journal_before_templates_gains_them_in_place() {
+        // The 0.7.0 schema: no template table, no vm.template column.
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        db.execute(
+            "INSERT INTO vm(vm_id,thread_id,slot,state,disk_gib) VALUES('0123456789abcdef','t',1,'stopped',8)",
+            [],
+        )
+        .unwrap();
+        ensure_template_schema(&db).unwrap();
+        ensure_template_schema(&db).unwrap(); // every open
+        let template: Option<String> = db
+            .query_row("SELECT template FROM vm", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(template, None, "existing VMs are backed by the base image");
+        // What 0.7.0 runs after a rollback still works on the new schema.
+        db.execute(
+            "INSERT INTO vm(vm_id,thread_id,slot,state,disk_gib) VALUES('fedcba9876543210','t2',2,'allocating',8)",
+            [],
+        )
+        .unwrap();
+        db.query_row(&format!("SELECT {COLUMNS} FROM vm WHERE slot=2"), [], row)
+            .unwrap();
+        assert!(
+            db.execute("UPDATE vm SET template='x' WHERE slot=1", [])
+                .is_err(),
+            "a VM's template is fixed"
+        );
     }
 
     #[test]

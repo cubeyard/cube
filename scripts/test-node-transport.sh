@@ -44,3 +44,6 @@ node scripts/smoke-node-adapter.ts "$target/cube-runner" "$target/cube-gateway" 
 node scripts/test-vm-e2e.ts "$target/cube-runner" "$CUBE_TEST_VM_IMAGE"
 # Two thread VMs on one runner (--max-active-vms 2): bound, isolation, slots.
 node scripts/test-vm-concurrency.ts "$target/cube-runner" "$target/cube-gateway" "$CUBE_TEST_VM_IMAGE"
+# Machine templates: a build machine, publication, machines from the template
+# side by side, invalidation, resume after a runner restart, a failed build.
+node scripts/test-vm-templates.ts "$target/cube-runner" "$target/cube-gateway" "$CUBE_TEST_VM_IMAGE"
