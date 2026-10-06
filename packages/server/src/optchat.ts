@@ -134,7 +134,7 @@ const reportText = (report: ReportState) => report === "delivered" ? "delivered"
 /** The history tool's answer: cubed's record of the thread, the run and the
  * latest answer from its stored transcript, whether this chat got the run's
  * report (or, without a transcript, the failure to start), what disagrees,
- * then one page of messages, numbered from the first (`before` pages back). */
+ * then one page of messages, numbered from the first, ending before message `before`. */
 export function formatHistory(id: string, record: ThreadRecord, report: ReportState, page: { before?: number | undefined; limit?: number | undefined } = {}): string {
   const lines = [`[${short(id)}] ${record.project} · ${record.title ?? "untitled"}`,
     `cubed: ${[record.archived ? "archived" : `machine ${record.machine}`, ...record.facts].join("; ")}`];
@@ -787,7 +787,7 @@ export class OptChat {
     });
     const history = defineTool({
       name: "history",
-      description: `Read a thread you started, read only: cubed's own state for it, its run and latest answer, whether its report reached you, what disagrees, then its stored conversation, ${HISTORY_PAGE} messages at a time, newest last (before: n pages back; limit: at most ${HISTORY_MAX}). Archived threads and threads whose machine failed keep theirs.`,
+      description: `Read a thread you started, read only: cubed's own state for it, its run and latest answer, whether its report reached you, what disagrees, then its stored conversation, ${HISTORY_PAGE} messages at a time, newest last (before: show the messages before message #before, as its "earlier:" line gives; limit: at most ${HISTORY_MAX}). Archived threads and threads whose machine failed keep theirs.`,
       parameters: Type.Object({
         id: Type.String(),
         before: Type.Optional(Type.Integer({ minimum: 0, description: "Show the messages before message #before" })),
