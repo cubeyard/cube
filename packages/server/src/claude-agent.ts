@@ -317,7 +317,7 @@ export class ClaudeAgent {
       this.ending = undefined;
       if (this.closing) this.settle("failed", INTERRUPTED);
       else if (this.interrupt || ending?.state === "stopped") this.settle("stopped", null);
-      else this.settle("failed", exit);
+      else this.settle("failed", ending?.reason ?? exit);
       // Claude Code's background agents end with it.
       this.lose(ending?.reason ?? (this.closing ? CLOSED : exit), ending?.state);
       this.changed();
@@ -488,8 +488,10 @@ export class ClaudeAgent {
     clearTimeout(this.deadline);
     if (!rows.length) return;
     this.db.prepare("UPDATE background SET state='lost', detail=?, ended_at=? WHERE state='running'").run(reason, Date.now());
-    const requestId = `cube:background:${rows[0]!.taskId}:lost`;
-    if (this.running || this.submissions.some(submission => submission.requestId === requestId)) return;
+    // A task id Claude Code used again gets a lost run of its own too.
+    const base = `cube:background:${rows[0]!.taskId}:lost`;
+    const requestId = this.submissions.some(submission => submission.requestId === base) ? `${base}:${randomUUID()}` : base;
+    if (this.running) return;
     const what = agents(rows.map(row => row.description));
     const text = `cube: ${what} did not finish`;
     const error = `${what} did not finish: ${reason}; claude code does not continue ${rows.length === 1 ? "it" : "them"} — send a message to go on`;

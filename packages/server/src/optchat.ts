@@ -893,6 +893,8 @@ export class OptChat {
         const id = await this.resolve(args.id);
         // Only a tell the thread accepted counts, once per call: a replayed
         // call is not refused (the thread takes its request id once).
+        // Checked before and counted after the tell: sound because the
+        // chat's tools run one at a time (toolExecution "sequential").
         const tells = (await this.harness.snapshot(SettingsDoc, context))?.threads[id]?.tells ?? [];
         if (!tells.includes(api.callId) && tells.length >= TELLS) return text(`not sent: [${short(id)}] had ${TELLS} tells from you since the user's last message; tell the user what it needs instead`);
         await this.options.threads.tell(id, args.message, `optchat:${api.callId}`);
