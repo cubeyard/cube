@@ -4,7 +4,7 @@ import { CLAUDE_PROVIDER } from "./claude-agent.ts";
 import type { Conversations } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
 import { THREAD_NOTE, type OptThreads } from "./optchat.ts";
-import type { Registry } from "./registry.ts";
+import { threadAgent, type Registry } from "./registry.ts";
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
 
 export function cubeThreads(options: { registry: Registry; conversations: Conversations; catalog: () => Promise<ModelSelection[]>; runners: () => RunnersObservation }): OptThreads {
@@ -62,6 +62,25 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         lines.push(`[${id.slice(0, 8)}] ${project} · ${thread.title ?? "untitled"} · ${thread.archived ? "archived" : state(id)}${run}`);
       }
       return lines.join("\n") || "no threads";
+    },
+    async history(id) {
+      const thread = registry.getThread(id);
+      if (!thread) return null;
+      const vm = thread.vm;
+      // An archived thread's workspace state stays "releasing"; only its failure says more.
+      const facts = [
+        ...(!thread.archived || thread.workspaceState === "failed" ? [`workspace ${thread.workspaceState}${thread.workspaceError ? `: ${thread.workspaceError}` : ""}`] : []),
+        ...(thread.archived && vm ? [vm.discarded ? "machine disk discarded" : vm.retain ? `machine disk retained${vm.retainReason ? ` (${vm.retainReason})` : ""}` : "machine disk deleted"] : []),
+        `agent ${threadAgent(thread)}${conversations.agentOpen(id) ? " open in cubed" : " not open in cubed"}`,
+        `workspace writer: ${conversations.owner(id) ?? "none"}`,
+      ];
+      const record = {
+        project: registry.getProject(thread.projectId)?.name ?? thread.projectId, title: thread.title, archived: thread.archived,
+        machine: thread.archived ? null : state(id), facts, agentOpen: conversations.agentOpen(id),
+        failure: conversations.error(id) ?? (thread.workspaceState === "failed" ? thread.workspaceError : null),
+      };
+      try { return { ...record, transcript: await conversations.storedHistory(id), unreadable: null }; }
+      catch (error) { return { ...record, transcript: null, unreadable: error instanceof Error ? error.message : String(error) }; }
     },
     async events(id) {
       const thread = registry.getThread(id);

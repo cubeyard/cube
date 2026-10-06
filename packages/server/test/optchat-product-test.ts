@@ -11,7 +11,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
-import { THREAD_NOTE } from "../src/optchat.ts";
+import { formatHistory, THREAD_NOTE } from "../src/optchat.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
 import { observeRunners } from "../src/runner-observe.ts";
 import { LocalMachines } from "./local-guest.ts";
@@ -102,6 +102,37 @@ try {
     runners: () => observeRunners(app.registry, 60_000) });
   assert.match(await adapter.runners(), /^runners as cubed last heard from them[^]*unknown for every runner/, "OptChat's runners tool reads cubed's registry");
   assert.deepEqual(await adapter.spawn({ project: "demo", task: "count the files in the repository with bash" }, "optchat:call-spawn:0"), { id: thread.id, title: thread.title });
+
+  // History reads the thread's stored transcript beside cubed's record,
+  // without its agent or lease: while the agent is open, with a failure
+  // recorded beside a finished run, once archived, and for a thread whose
+  // agent never opened.
+  const open = (await adapter.history(thread.id))!;
+  assert.equal(open.machine, "ready");
+  assert.equal(open.agentOpen, true);
+  assert.equal(open.failure, null);
+  assert.equal(open.transcript?.status.state, "completed");
+  assert.equal(open.transcript?.owner, "pi", "the agent still holds its workspace");
+  assert.match(formatHistory(thread.id, open, "delivered"), /\nlatest answer #3: the repository has 1 file\n/);
+  const workspaceBase = app.registry.getThread(thread.id)!.workspaceBase;
+  const failure = "workspace allocation failed: thread workspace already has a writable owner";
+  app.registry.markWorkspaceFailed(thread.id, failure);
+  const diverged = (await adapter.history(thread.id))!;
+  assert.equal(diverged.failure, failure);
+  assert.match(formatHistory(thread.id, diverged, "delivered"), /\nnote: cubed records a failure \(workspace allocation failed: thread workspace already has a writable owner\), yet the stored history shows the agent ran;/);
+  app.registry.markWorkspaceAvailable(thread.id, workspaceBase);
+  const archive = await fetch(`${base}/api/threads/${thread.id}`, { method: "DELETE" });
+  assert.equal(archive.status, 200, await archive.clone().text());
+  const archived = (await adapter.history(thread.id))!;
+  assert.deepEqual([archived.archived, archived.machine, archived.agentOpen], [true, null, false]);
+  assert.ok(archived.facts.some(fact => fact.startsWith("machine disk retained")), archived.facts.join("; "));
+  assert.deepEqual(archived.transcript?.events, open.transcript?.events, "an archived thread keeps its history");
+  assert.match(formatHistory(thread.id, archived, "delivered"), /\ncubed: archived; machine disk retained [^\n]*; agent pi not open in cubed; workspace writer: none\nrun: completed/);
+  const quiet = app.registry.createThread(project.project.id, "quiet", { provider: faux.getModel().provider, id: faux.getModel().id }, "never opened");
+  const none = (await adapter.history(quiet.id))!;
+  assert.deepEqual([none.transcript, none.unreadable], [null, null], "no agent, no history");
+  assert.ok(!fs.existsSync(path.join(state, "threads", quiet.id, "pi.sqlite")), "reading created no store");
+  assert.equal(await adapter.history("no-such-thread"), null);
 
   const { view, messages } = await (await fetch(`${base}/api/optchat/view`)).json();
   assert.ok(messages >= 5, `the log holds the turns (${messages})`);

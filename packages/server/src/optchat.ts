@@ -19,7 +19,7 @@ import { createLogger } from "./log.ts";
 import { compactNode } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { capText, Memory, type LogMessage, type Part } from "./optchat-memory.ts";
-import type { ThreadEvents, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
+import type { ThreadEvent, ThreadEvents, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
 
 const context = BACKGROUND_CONTEXT;
 const log = createLogger("optchat");
@@ -44,7 +44,11 @@ Threads run in the background. Each one's report reaches you as a
 message starting "[id] ": between your tool calls while you work, or as
 a new turn once yours has ended. So never wait for one (no sleep, no
 polling): go on, or end your turn and tell the user what is running.
-tell(id, message) gives a thread that has reported more to do.`;
+tell(id, message) gives a thread that has reported more to do.
+history(id) reads one of your threads without changing it: cubed's state
+for it beside its latest answer and conversation. Use it when a report is
+missing or short, or contradicts what threads shows; say what disagrees
+rather than settle it.`;
 
 export const VIEW_DOC = `The view: the whole chat between OptChat and the user, oldest first, inside
 <chat> tags, as one-line summaries. Each line is
@@ -83,6 +87,83 @@ export interface OptThreads {
   describe(ids: readonly string[]): Promise<string>;
   /** The thread's events; null once it is archived or gone. */
   events(id: string): Promise<ThreadEvents | null>;
+  /** What cubed has of a thread, read only: its own record beside the
+   * agent's stored transcript, which may disagree. null: no such thread. */
+  history(id: string): Promise<ThreadRecord | null>;
+}
+
+export type ThreadRecord = {
+  project: string;
+  title: string | null;
+  archived: boolean;
+  /** The machine as cubed sees it ("ready", "starting its machine",
+   * "error: …"); null once archived. */
+  machine: string | null;
+  /** Other facts of cubed's record: workspace, retained disk, agent, writer. */
+  facts: string[];
+  /** Whether the agent is open in cubed: a stored run goes on only then. */
+  agentOpen: boolean;
+  /** The machine or workspace failure cubed records, if any. */
+  failure: string | null;
+  /** The agent's stored transcript; null when it stored none or `unreadable`. */
+  transcript: ThreadTranscript | null;
+  unreadable: string | null;
+};
+
+export const HISTORY_PAGE = 12;
+export const HISTORY_MAX = 40;
+const HISTORY_TEXT = 2000;
+const HISTORY_TOOL = 400;
+const HISTORY_ANSWER = 4000;
+
+/** One event as history shows it; thinking and unfinished output are left out. */
+function historyLine(event: ThreadEvent): string | null {
+  if (event.type === "user-message") return `user: ${capText(event.text, HISTORY_TEXT)}`;
+  if (event.type === "assistant-text") return event.reasoning || !event.final ? null : `thread: ${capText(event.text, HISTORY_TEXT)}`;
+  if (!event.final) return null;
+  if (event.type === "tool-call") return `tool ${event.name} ${capText(JSON.stringify(event.input ?? {}), HISTORY_TOOL)}`;
+  return `result ${event.name}${event.isError ? " (error)" : ""}: ${capText(event.output, HISTORY_TOOL)}`;
+}
+
+/** The history tool's answer: cubed's record of the thread, the run and the
+ * latest answer from its stored transcript, whether this chat got the run's
+ * report, what disagrees, then one page of messages, numbered from the first
+ * (`before` pages back). */
+export function formatHistory(id: string, record: ThreadRecord, report: "delivered" | "accepted" | "none", page: { before?: number | undefined; limit?: number | undefined } = {}): string {
+  const tag = `[${short(id)}]`;
+  const lines = [`${tag} ${record.project} · ${record.title ?? "untitled"}`,
+    `cubed: ${[record.archived ? "archived" : `machine ${record.machine}`, ...record.facts].join("; ")}`];
+  const transcript = record.transcript;
+  if (!transcript) {
+    lines.push(record.unreadable ? `history: unreadable: ${record.unreadable}`
+      : `history: none stored; the agent never opened${record.machine === "starting its machine" ? " (its machine is still starting)" : ""}`);
+    return lines.join("\n");
+  }
+  const { state, run, error } = transcript.status;
+  lines.push(`run: ${state}${run ? ` (${run})` : ""}${error ? `: ${error}` : ""}`);
+  const shown = transcript.events.flatMap(event => { const line = historyLine(event); return line === null ? [] : [{ event, line }]; });
+  const answer = shown.findLastIndex(({ event }) => event.type === "assistant-text");
+  const asked = shown.findLastIndex(({ event }) => event.type === "user-message");
+  const text = answer < 0 ? "" : (shown[answer]!.event as { text: string }).text.trim();
+  lines.push(answer < 0 ? "latest answer: none" : `latest answer #${answer}${asked > answer ? ` (before the newest message #${asked}, which has none yet)` : ""}: ${capText(text, HISTORY_ANSWER)}`);
+  const settled = state !== "idle" && state !== "working" && run;
+  if (settled) lines.push(`report of this run to this chat: ${report === "delivered" ? "delivered" : report === "accepted" ? "accepted, not in the chat yet" : "not sent yet"}`);
+  // Disagreements are shown as cubed has them; this view does not settle them.
+  const notes: string[] = [];
+  if (record.failure && state !== "idle") notes.push(`cubed records a failure (${record.failure}), yet the stored history shows the agent ${state === "working" ? "working" : "ran"}; both are shown as cubed has them`);
+  if (state === "working" && record.archived) notes.push("the store shows a run unfinished at archive; it does not go on");
+  else if (state === "working" && !record.agentOpen) notes.push("the store shows a run unfinished, but its agent is not open in cubed: it goes on only when the agent opens again");
+  for (const note of notes) lines.push(`note: ${note}`);
+  const total = shown.length;
+  const end = Math.min(Math.max(page.before ?? total, 0), total);
+  const start = Math.max(0, end - Math.min(Math.max(page.limit ?? HISTORY_PAGE, 1), HISTORY_MAX));
+  if (!total) lines.push("messages: none");
+  else if (start === end) lines.push(`messages: none before #${end} (${total} in all)`);
+  else {
+    lines.push(`messages #${start}–#${end - 1} of ${total}, oldest first${start > 0 ? `; earlier: history("${short(id)}", before: ${start})` : ""}`);
+    for (let k = start; k < end; k++) lines.push(`#${k} ${shown[k]!.line}`);
+  }
+  return lines.join("\n");
 }
 
 /** `cache` names the chat for the providers' prompt caches; it never changes. */
@@ -693,10 +774,30 @@ export class OptChat {
         return text(ids.length ? await this.options.threads.describe(ids) : "no threads yet");
       },
     });
+    const history = defineTool({
+      name: "history",
+      description: `Read a thread you started, read only: cubed's own state for it, its run and latest answer, whether its report reached you, what disagrees, then its stored conversation, ${HISTORY_PAGE} messages at a time, newest last (before: n pages back; limit: at most ${HISTORY_MAX}). Archived threads and threads whose machine failed keep theirs.`,
+      parameters: Type.Object({
+        id: Type.String(),
+        before: Type.Optional(Type.Integer({ minimum: 0, description: "Show the messages before message #before" })),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: HISTORY_MAX })),
+      }),
+      replay: "safe",
+      execute: async args => {
+        const id = await this.resolve(args.id);
+        const record = await this.options.threads.history(id);
+        if (!record) return text(`[${short(id)}] is gone: cubed has no record of it`);
+        const run = record.transcript?.status.run;
+        const requestId = `report:${id}:${run}`;
+        const report = !run ? "none" : await this.known(requestId) ? "delivered"
+          : (await this.pending()).some(item => item.requestId === requestId) ? "accepted" : "none";
+        return text(formatHistory(id, record, report, args));
+      },
+    });
     const instructions = path.join(this.options.directory, "AGENTS.md");
     return defineExtension({
       name: "optchat",
-      tools: [zoom, date, projects, runners, spawn, tell, threads],
+      tools: [zoom, date, projects, runners, spawn, tell, threads, history],
       sections: [
         section("master", () => MASTER, { tag: false }),
         section("view", () => VIEW_DOC, { tag: false }),
