@@ -374,10 +374,7 @@ export class Conversations {
       return state && renderClaude(state, this.owner(id), failure, path.join(directory, "claude"));
     }
     assertCurrentThreadStore(directory);
-    const storage = await readStorage(path.join(directory, "pi.sqlite"));
-    if (!storage) return null;
-    try { return await storedPiTranscript(storage, this.owner(id), failure); }
-    finally { await storage.close(context); }
+    return readStorage(path.join(directory, "pi.sqlite"), storage => storedPiTranscript(storage, this.owner(id), failure));
   }
   async stream(id: string, response: ServerResponse): Promise<void> {
     await serveThreadEvents(await this.events(id), response);

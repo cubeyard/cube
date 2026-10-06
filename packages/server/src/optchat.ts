@@ -112,56 +112,65 @@ export type ThreadRecord = {
 
 export const HISTORY_PAGE = 12;
 export const HISTORY_MAX = 40;
+/** A page's messages share this many characters; one gets at most HISTORY_TEXT. */
+const HISTORY_BUDGET = 24_000;
 const HISTORY_TEXT = 2000;
 const HISTORY_TOOL = 400;
 const HISTORY_ANSWER = 4000;
 
-/** One event as history shows it; thinking and unfinished output are left out. */
-function historyLine(event: ThreadEvent): string | null {
-  if (event.type === "user-message") return `user: ${capText(event.text, HISTORY_TEXT)}`;
-  if (event.type === "assistant-text") return event.reasoning || !event.final ? null : `thread: ${capText(event.text, HISTORY_TEXT)}`;
-  if (!event.final) return null;
-  if (event.type === "tool-call") return `tool ${event.name} ${capText(JSON.stringify(event.input ?? {}), HISTORY_TOOL)}`;
-  return `result ${event.name}${event.isError ? " (error)" : ""}: ${capText(event.output, HISTORY_TOOL)}`;
+/** Whether history shows an event: thinking and unfinished output are left out. */
+const historyShows = (event: ThreadEvent) => event.type === "user-message" || (event.final && !(event.type === "assistant-text" && event.reasoning));
+function historyLine(event: ThreadEvent, cap: number): string {
+  if (event.type === "user-message") return `user: ${capText(event.text, cap)}`;
+  if (event.type === "assistant-text") return `thread: ${capText(event.text, cap)}`;
+  const tool = Math.min(cap, HISTORY_TOOL);
+  if (event.type === "tool-call") return `tool ${event.name} ${capText(JSON.stringify(event.input ?? {}), tool)}`;
+  return `result ${event.name}${event.isError ? " (error)" : ""}: ${capText(event.output, tool)}`;
 }
+
+export type ReportState = "delivered" | "accepted" | "none";
+const reportText = (report: ReportState) => report === "delivered" ? "delivered" : report === "accepted" ? "accepted, not in the chat yet" : "not sent yet";
 
 /** The history tool's answer: cubed's record of the thread, the run and the
  * latest answer from its stored transcript, whether this chat got the run's
- * report, what disagrees, then one page of messages, numbered from the first
- * (`before` pages back). */
-export function formatHistory(id: string, record: ThreadRecord, report: "delivered" | "accepted" | "none", page: { before?: number | undefined; limit?: number | undefined } = {}): string {
-  const tag = `[${short(id)}]`;
-  const lines = [`${tag} ${record.project} · ${record.title ?? "untitled"}`,
+ * report (or, without a transcript, the failure to start), what disagrees,
+ * then one page of messages, numbered from the first (`before` pages back). */
+export function formatHistory(id: string, record: ThreadRecord, report: ReportState, page: { before?: number | undefined; limit?: number | undefined } = {}): string {
+  const lines = [`[${short(id)}] ${record.project} · ${record.title ?? "untitled"}`,
     `cubed: ${[record.archived ? "archived" : `machine ${record.machine}`, ...record.facts].join("; ")}`];
   const transcript = record.transcript;
   if (!transcript) {
     lines.push(record.unreadable ? `history: unreadable: ${record.unreadable}`
       : `history: none stored; the agent never opened${record.machine === "starting its machine" ? " (its machine is still starting)" : ""}`);
+    if (record.failure) lines.push(`failure to start, reported to this chat: ${reportText(report)}`);
     return lines.join("\n");
   }
   const { state, run, error } = transcript.status;
   lines.push(`run: ${state}${run ? ` (${run})` : ""}${error ? `: ${error}` : ""}`);
-  const shown = transcript.events.flatMap(event => { const line = historyLine(event); return line === null ? [] : [{ event, line }]; });
-  const answer = shown.findLastIndex(({ event }) => event.type === "assistant-text");
-  const asked = shown.findLastIndex(({ event }) => event.type === "user-message");
-  const text = answer < 0 ? "" : (shown[answer]!.event as { text: string }).text.trim();
+  const shown = transcript.events.filter(historyShows);
+  const answer = shown.findLastIndex(event => event.type === "assistant-text");
+  const asked = shown.findLastIndex(event => event.type === "user-message");
+  const text = answer < 0 ? "" : (shown[answer] as { text: string }).text.trim();
   lines.push(answer < 0 ? "latest answer: none" : `latest answer #${answer}${asked > answer ? ` (before the newest message #${asked}, which has none yet)` : ""}: ${capText(text, HISTORY_ANSWER)}`);
-  const settled = state !== "idle" && state !== "working" && run;
-  if (settled) lines.push(`report of this run to this chat: ${report === "delivered" ? "delivered" : report === "accepted" ? "accepted, not in the chat yet" : "not sent yet"}`);
+  if (state !== "idle" && state !== "working" && run) lines.push(`report of this run to this chat: ${reportText(report)}`);
   // Disagreements are shown as cubed has them; this view does not settle them.
   const notes: string[] = [];
-  if (record.failure && state !== "idle") notes.push(`cubed records a failure (${record.failure}), yet the stored history shows the agent ${state === "working" ? "working" : "ran"}; both are shown as cubed has them`);
+  if (record.failure && state !== "idle") notes.push(`cubed records a failure (${record.failure}) while the stored history shows the agent ${state === "working" ? "working" : `ran (run ${state})`}; the history does not say whether the failure came before, during or after that run`);
   if (state === "working" && record.archived) notes.push("the store shows a run unfinished at archive; it does not go on");
-  else if (state === "working" && !record.agentOpen) notes.push("the store shows a run unfinished, but its agent is not open in cubed: it goes on only when the agent opens again");
+  else if (state === "working" && !record.agentOpen) notes.push(transcript.agent === "claude-code"
+    ? "the store shows a turn unfinished, but its agent is not open in cubed: Claude Code does not continue it; it shows as failed once the agent opens again"
+    : "the store shows a run unfinished, but its agent is not open in cubed: it goes on only when the agent opens again");
   for (const note of notes) lines.push(`note: ${note}`);
   const total = shown.length;
+  const limit = Math.min(Math.max(page.limit ?? HISTORY_PAGE, 1), HISTORY_MAX);
   const end = Math.min(Math.max(page.before ?? total, 0), total);
-  const start = Math.max(0, end - Math.min(Math.max(page.limit ?? HISTORY_PAGE, 1), HISTORY_MAX));
+  const start = Math.max(0, end - limit);
+  const cap = Math.min(HISTORY_TEXT, Math.floor(HISTORY_BUDGET / limit));
   if (!total) lines.push("messages: none");
   else if (start === end) lines.push(`messages: none before #${end} (${total} in all)`);
   else {
     lines.push(`messages #${start}–#${end - 1} of ${total}, oldest first${start > 0 ? `; earlier: history("${short(id)}", before: ${start})` : ""}`);
-    for (let k = start; k < end; k++) lines.push(`#${k} ${shown[k]!.line}`);
+    for (let k = start; k < end; k++) lines.push(`#${k} ${historyLine(shown[k]!, cap)}`);
   }
   return lines.join("\n");
 }
@@ -688,7 +697,9 @@ export class OptChat {
   /** The thread a short id names, among the ones this chat started. */
   private async resolve(id: string): Promise<string> {
     const threads = Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {});
-    const matches = threads.filter(thread => thread.startsWith(id.replace(/^\[|\]$/g, "")));
+    const prefix = id.replace(/^\[|\]$/g, "");
+    if (!prefix) throw new Error("name a thread by its id");
+    const matches = threads.filter(thread => thread.startsWith(prefix));
     if (matches.length !== 1) throw new Error(matches.length ? `${id} names more than one thread` : `no thread ${id}`);
     return matches[0]!;
   }
@@ -787,7 +798,8 @@ export class OptChat {
         const id = await this.resolve(args.id);
         const record = await this.options.threads.history(id);
         if (!record) return text(`[${short(id)}] is gone: cubed has no record of it`);
-        const run = record.transcript?.status.run;
+        // A run's report, or without a transcript the failure to start.
+        const run = record.transcript ? record.transcript.status.run : "start";
         const requestId = `report:${id}:${run}`;
         const report = !run ? "none" : await this.known(requestId) ? "delivered"
           : (await this.pending()).some(item => item.requestId === requestId) ? "accepted" : "none";

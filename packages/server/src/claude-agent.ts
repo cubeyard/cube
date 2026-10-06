@@ -104,9 +104,10 @@ export class ClaudeAgent {
     ({ submissions: this.submissions, messages: this.messages } = record(this.db));
   }
 
-  /** The thread record from a thread directory alone, without the agent or
-   * its lease; null when there is none. A turn it shows as running goes on
-   * only while the agent is open. */
+  /** The thread record from a thread directory alone, through a read-only
+   * connection, without the agent or its lease; null when there is none. A
+   * turn it shows as running runs only while the agent is open: an open
+   * marks it failed. */
   static stored(directory: string): ClaudeState | null {
     const file = path.join(directory, "claude.sqlite");
     if (!fs.existsSync(file)) return null;
