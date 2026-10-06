@@ -169,6 +169,7 @@
   // Strips the reader opened or closed stay that way while frames arrive.
   const chosen = new SvelteMap<string, boolean>();
   function onToolToggle(event: Event, row: Extract<TranscriptRow, { kind: "tool" }>): void {
+    // The element, not ToggleEvent.newState: older Safari sends a plain Event.
     const open = (event.currentTarget as HTMLDetailsElement).open;
     // A toggle the render caused (a strip opening as it runs) is no choice.
     if (open !== toolOpen(row, chosen)) chosen.set(row.callId, open);
