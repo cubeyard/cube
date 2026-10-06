@@ -439,6 +439,12 @@ impl Runner {
         }
         for template in journal.templates()? {
             if template.state != TemplateState::Publishing {
+                // A crash after publishing, before the VM directory went.
+                if let Some(row) = journal.get(&template.id)?
+                    && row.state == VmState::Released
+                {
+                    let _ = fs::remove_dir_all(VmPaths::new(&state, row.slot).dir);
+                }
                 continue;
             }
             // A crash while publishing: the rename either happened or not.

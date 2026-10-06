@@ -85,6 +85,7 @@ class GuestHelperTest(unittest.TestCase):
     def test_hello_reports_readiness_limits_and_epoch(self):
         answer, _ = call("hello", {})
         self.assertTrue(answer["ready"])
+        self.assertNotIn("templateSeal", answer, "a machine from the base image")
         self.assertEqual(answer["limits"]["maxWriteBytes"], 524288)
         self.assertIn("fs.write", answer["capabilities"])
         guest.configure(commands=["cube-no-such-command"])
@@ -255,10 +256,11 @@ class GuestHelperTest(unittest.TestCase):
                     handle.write(content)
             self.assertEqual(guest.seal_final(), 0)
             gone = ["var/lib/cube", "etc/cube", "etc/ssh/ssh_host_ed25519_key", "var/lib/cloud/instances", "var/lib/dhcp/dhclient.leases",
-                    "var/lib/systemd/random-seed", "tmp/socket", "home/agent/.bash_history", "etc/systemd/system/cube-seal.service"]
+                    "var/lib/systemd/random-seed", "tmp/socket", "home/agent/.bash_history", "etc/systemd/system/cube-seal.service",
+                    "home/agent/.cache/cube/setup.log"]
             for name in gone:
                 self.assertFalse(os.path.exists(os.path.join(system, name)), name)
-            for name in ["etc/ssh/sshd_config", "home/agent/.cache/cube/setup.log", "workspace/node_modules/x"]:
+            for name in ["etc/ssh/sshd_config", "workspace/node_modules/x"]:
                 self.assertTrue(os.path.exists(os.path.join(system, name)), name)
             self.assertEqual(os.path.getsize(os.path.join(system, "etc/machine-id")), 0, "empty: a new id at the next boot")
             self.assertTrue(os.path.exists(os.path.join(system, guest.SEAL_MARKER)))
@@ -267,10 +269,19 @@ class GuestHelperTest(unittest.TestCase):
             self.assertEqual(guest.init(), 0)
             self.assertEqual(os.listdir(os.path.join(system, "var/lib/cube/ops")), [])
             self.assertFalse(os.path.exists(os.path.join(system, guest.SEAL_MARKER)))
+            self.assertEqual(call("hello", {})[0]["templateSeal"], "ok")
             # An ordinary later init keeps the journal (only a template's first boot clears it).
             os.makedirs(os.path.join(system, "var/lib/cube/ops/ws-2"))
             guest.init()
             self.assertEqual(os.listdir(os.path.join(system, "var/lib/cube/ops")), ["ws-2"])
+            # A seal that could not clean everything says so, and the next
+            # machine still starts with an empty journal and reports it.
+            os.remove(os.path.join(system, "etc/machine-id"))
+            os.makedirs(os.path.join(system, "etc/machine-id"))
+            self.assertEqual(guest.seal_final(), 1)
+            guest.init()
+            self.assertEqual(os.listdir(os.path.join(system, "var/lib/cube/ops")), [])
+            self.assertRegex(call("hello", {})[0]["templateSeal"], r"^failed: /etc/machine-id")
         finally:
             guest.configure(root="/")
 

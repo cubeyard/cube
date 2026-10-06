@@ -340,9 +340,23 @@ def ready():
         and all(shutil.which(command) for command in CONFIG.commands)
 
 
+def template_seal():
+    """How the template this machine was made from was sealed: `ok`, the
+    seal's failure, or None for a machine from the base image."""
+    try:
+        with open(os.path.join(CONFIG.state, "template-seal"), "rb") as handle:
+            outcome = handle.read(1000).decode(errors="replace").strip()
+    except FileNotFoundError:
+        return None
+    return outcome if outcome.startswith("failed") else "ok"
+
+
 def op_hello(header, body):
-    return {"version": VERSION, "ready": ready(), "capabilities": CAPABILITIES, "limits": LIMITS,
-            "epoch": current_epoch()}, b""
+    answer = {"version": VERSION, "ready": ready(), "capabilities": CAPABILITIES, "limits": LIMITS, "epoch": current_epoch()}
+    seal = template_seal()
+    if seal is not None:
+        answer["templateSeal"] = seal
+    return answer, b""
 
 
 def op_exec(header, body):
@@ -673,6 +687,9 @@ def seal():
     ])
     write_atomic(rooted("/etc/systemd/system/" + SEAL_UNIT), unit.encode(), 0o644)
     subprocess.run(["apt-get", "clean"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # The bulk of the discard now, while the machine is up: the runner gives
+    # a powering-off guest 30 s before it counts the stop as interrupted.
+    subprocess.run(["fstrim", "--all"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
     for command in (["systemctl", "daemon-reload"], ["systemctl", "start", SEAL_UNIT]):
         result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
         if result.returncode != 0:
@@ -711,45 +728,68 @@ def seal_final():
     new from its own seed. Package caches, toolchains and the prepared
     checkout stay: they are the point of the template."""
     failures = []
+    marker = rooted(SEAL_MARKER)
     steps = [
         ("/var/lib/cube", remove), ("/etc/cube", remove),
         ("/var/lib/cloud", empty), ("/var/log/journal", empty), ("/tmp", empty),
         ("/var/lib/dhcp", empty), ("/var/lib/systemd/random-seed", remove),
         ("/var/lib/dbus/machine-id", remove), ("/root/.bash_history", remove),
         ("/home/agent/.bash_history", remove), ("/etc/systemd/system/" + SEAL_UNIT, remove),
+        # The build's hook logs: they may echo its (dead) placeholder.
+        ("/home/agent/.cache/cube", remove),
     ]
     for path, action in steps:
         try:
             action(rooted(path))
         except OSError as error:
             failures.append("%s: %s" % (path, error.strerror or error))
-    for log in ("/var/log/cloud-init.log", "/var/log/cloud-init-output.log"):
-        remove(rooted(log))
-    ssh = rooted("/etc/ssh")
-    for name in (os.listdir(ssh) if os.path.isdir(ssh) else []):
-        if name.startswith("ssh_host_"):
-            remove(os.path.join(ssh, name))
-    # Empty, not absent: systemd makes a new id at the next boot.
-    with open(rooted("/etc/machine-id"), "w"):
-        pass
+    def ssh_keys():
+        ssh = rooted("/etc/ssh")
+        for name in (os.listdir(ssh) if os.path.isdir(ssh) else []):
+            if name.startswith("ssh_host_"):
+                remove(os.path.join(ssh, name))
+
+    def machine_id():
+        # Empty, not absent: systemd makes a new id at the next boot.
+        with open(rooted("/etc/machine-id"), "w"):
+            pass
+    for name, action in (("logs", lambda: [remove(rooted(log)) for log in ("/var/log/cloud-init.log", "/var/log/cloud-init-output.log")]),
+                         ("/etc/ssh host keys", ssh_keys), ("/etc/machine-id", machine_id)):
+        try:
+            action()
+        except OSError as error:
+            failures.append("%s: %s" % (name, error.strerror or error))
+    os.makedirs(os.path.dirname(marker), mode=0o700, exist_ok=True)
     if failures:
-        sys.stderr.write("cube-guest seal: could not clean %s\n" % "; ".join(failures))
+        # The machines made from this disk report it, and cubed drops the template.
+        message = "failed: %s" % "; ".join(failures)
+        write_atomic(marker, message.encode()[:1000], 0o600)
+        sys.stderr.write("cube-guest seal: %s\n" % message)
         return 1
-    os.makedirs(os.path.dirname(rooted(SEAL_MARKER)), mode=0o700, exist_ok=True)
-    write_atomic(rooted(SEAL_MARKER), SEAL_VERSION.encode(), 0o600)
+    write_atomic(marker, SEAL_VERSION.encode(), 0o600)
     if CONFIG.root == "/":
-        subprocess.run(["fstrim", "--all"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Only what was deleted since seal(): bounded, the runner's grace is 30 s.
+        try:
+            subprocess.run(["fstrim", "--all"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        except subprocess.TimeoutExpired:
+            pass
         subprocess.run(["sync"])
     return 0
 
 
 def init():
     """First boot of an instance (cloud-init runcmd): the journal and the
-    agent's directories. On a machine made from a template the journal of
-    the build machine is gone already (seal_final); the marker says so."""
-    if os.path.exists(rooted(SEAL_MARKER)):
+    agent's directories. On a machine made from a template the seal marker
+    exists: whatever is left of the build machine's journal goes (nothing,
+    if the seal succeeded), and the seal's outcome is kept for `hello`."""
+    marker = rooted(SEAL_MARKER)
+    if os.path.exists(marker):
+        with open(marker, "rb") as handle:
+            outcome = handle.read(1000)
         remove(CONFIG.state)
-        remove(rooted(SEAL_MARKER))
+        os.makedirs(CONFIG.state, mode=0o700, exist_ok=True)
+        write_atomic(os.path.join(CONFIG.state, "template-seal"), outcome)
+        remove(os.path.dirname(marker))
     os.makedirs(ops_dir(), mode=0o700, exist_ok=True)
     for directory in (CONFIG.workspace, "/repos"):
         os.makedirs(directory, mode=0o755, exist_ok=True)

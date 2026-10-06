@@ -26,7 +26,9 @@ const DEFAULT_RETRY_MS = 90000;
 const SHA = /^[0-9a-f]{64}$/;
 const STATES = new Set(["Accepted", "Running", "Unknown", "Succeeded", "Written", "Failed", "Interrupted"]);
 
-export interface GuestDescription { version: string; ready: boolean; capabilities: string[]; limits: WorkspaceLimits; epoch: number }
+export interface GuestDescription { version: string; ready: boolean; capabilities: string[]; limits: WorkspaceLimits; epoch: number;
+  /** A machine made from a template: how that template was sealed (`ok` or the failure). */
+  templateSeal?: string }
 
 /** The helper's hello, validated. */
 export function guestDescription(header: Record<string, unknown>): GuestDescription {
@@ -38,7 +40,8 @@ export function guestDescription(header: Record<string, unknown>): GuestDescript
     throw new GuestTransportError("the guest helper's hello is malformed");
   }
   return { version: header.version, ready: header.ready, capabilities: [...header.capabilities as string[]],
-    limits: Object.fromEntries(WORKSPACE_LIMIT_KEYS.map(key => [key, limits[key]])) as unknown as WorkspaceLimits, epoch: header.epoch as number };
+    limits: Object.fromEntries(WORKSPACE_LIMIT_KEYS.map(key => [key, limits[key]])) as unknown as WorkspaceLimits, epoch: header.epoch as number,
+    ...(typeof header.templateSeal === "string" ? { templateSeal: header.templateSeal.slice(0, 1000) } : {}) };
 }
 
 export class VmWorkspace implements Workspace {

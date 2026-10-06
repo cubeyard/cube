@@ -373,14 +373,21 @@ and GitHub placeholder, registered so the gateway serves it), the thread's
 pinned checkouts, pre-setup and `.agents/setup`. Only if all of that succeeds
 does cubed run `cube-guest seal` and power it off: at shutdown the guest
 removes its SSH host keys, machine id, cloud-init instance state, the
-helper's journal and epoch, `/etc/cube` (keys, placeholders, hooks), DHCP
-leases, the random seed, `/tmp`, shell history and the system journal, and
-discards the freed blocks. A clean power-off (not `interrupted`) is required
-for the runner to publish the disk (`vm.publish` moves it, read-only); then
+helper's journal and epoch, `/etc/cube` (keys, placeholders, hooks), the
+build's hook logs, DHCP leases, the random seed, `/tmp`, shell history and the
+system journal; the freed blocks are discarded (the bulk before power-off,
+because the runner counts a stop that takes over 30 s as interrupted). A
+clean power-off (not `interrupted`) is required for the runner to publish the
+disk (`vm.publish` moves it, read-only); then
 the thread's own machine is allocated on it. Anything else deletes the build
 machine and the thread starts fresh (a build that failed is not retried for
 the same key on that runner for an hour). Toolchains, package caches and the
 prepared checkout stay; that is the point.
+
+A seal that could not clean something says so in a marker; the first boot
+of each machine made from the template empties the helper's journal anyway
+and its helper reports the failure, and cubed then records `template-seal`
+as failed on that thread and removes the template.
 
 Isolation: no agent ever runs in a build machine; every machine writes only
 its own overlay; each gets a new VM id, MAC, host key, client key,
@@ -388,7 +395,9 @@ placeholder, machine id, hostname and instance from its own seed, and the
 first boot of a template's machine starts the helper's journal empty. A
 template is per project and runner, never shared between projects. Its
 content is what the project's pre-setup and setup produced, so it is as
-trusted as they are; a deleted file's bytes may survive in a partly used
+trusted as they are (the seal itself runs inside a machine where the
+repository's setup had root through sudo, and each machine's seed rewrites
+the helper, keys and `/etc/cube` regardless); a deleted file's bytes may survive in a partly used
 qcow2 cluster of the template, which is why only the build machine's
 throwaway identity (useless after its release) was ever in it. Agent
 sessions live on the cubed host and never enter a guest.
@@ -398,7 +407,8 @@ project, its repositories (URL, branch, checkout name), the pre-setup hook,
 the guest packages and helper, the runner's base image and platform and the
 disk size. The commit is not in it (the checkout is refreshed) and neither
 are resume hooks (they always run). It is reused for 24 hours
-(`CUBED_TEMPLATE_TTL_HOURS`), which bounds how stale dependencies that
+(`CUBED_TEMPLATE_TTL_HOURS`, measured against the runner's clock at
+publication), which bounds how stale dependencies that
 `.agents/setup` installed can be while the setup file itself is unchanged;
 put what must be fresh per thread in a resume hook. Publishing a template
 removes the project's older ones on that runner; expired templates and those
