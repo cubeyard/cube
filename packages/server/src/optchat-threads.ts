@@ -76,7 +76,9 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       ];
       const record = {
         project: registry.getProject(thread.projectId)?.name ?? thread.projectId, title: thread.title, archived: thread.archived,
-        machine: thread.archived ? null : state(id), facts, agentOpen: conversations.agentOpen(id),
+        machine: thread.archived ? null : conversations.error(id) || conversations.starting(id) || thread.workspaceState === "available" ? state(id)
+          : thread.workspaceState === "allocating" ? "not started" : thread.workspaceState,
+        facts, agentOpen: conversations.agentOpen(id),
         failure: conversations.error(id) ?? (thread.workspaceState === "failed" ? thread.workspaceError : null),
       };
       try { return { ...record, transcript: await conversations.storedHistory(id), unreadable: null }; }

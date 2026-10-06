@@ -47,23 +47,28 @@ export async function openStorage(file: string): Promise<SqliteStorage> {
   return SqliteStorage.open(new NodeSqliteDatabase(database));
 }
 
-/** A Pi store opened to read it only, beside its Harness or without one; null
- * when there is none. It is never created or migrated: a store of another
- * schema version is refused, and after the open every write is refused by
- * SQLite (`query_only`). The open itself takes the write lock for an instant,
- * as pi-durable checks its schema in a transaction that changes nothing. */
-export async function readStorage(file: string): Promise<SqliteStorage | null> {
+/** Reads a Pi store, beside its Harness or without one, from a snapshot;
+ * null when there is none. The store is only read, through a read-only
+ * connection (a WAL reader never waits for the writer): it is never created,
+ * migrated or locked for writing. pi-durable's open, which checks its schema
+ * in a write transaction, and its close, which checkpoints, run on the
+ * private copy, deleted afterwards. A store of another schema version is
+ * refused. */
+export async function readStorage<T>(file: string, read: (storage: SqliteStorage) => Promise<T>): Promise<T | null> {
   if (!fs.existsSync(file)) return null;
-  const check = new DatabaseSync(file, { readOnly: true, timeout: 5000 });
+  const directory = fs.mkdtempSync(path.join(path.dirname(file), ".read-"));
   try {
-    const row = check.prepare("SELECT version FROM durable_schema WHERE singleton = 1").get() as { version: number } | undefined;
-    if (row?.version !== CURRENT_SQLITE_SCHEMA_VERSION) throw new Error(`the stored history has schema version ${row?.version ?? "none"}, not ${CURRENT_SQLITE_SCHEMA_VERSION}`);
-  } finally { check.close(); }
-  const database = new DatabaseSync(file, { timeout: 5000 });
-  const storage = await SqliteStorage.open(new NodeSqliteDatabase(database));
-  try { database.exec("PRAGMA query_only=ON"); }
-  catch (error) { await storage.close(context); throw error; }
-  return storage;
+    const copy = path.join(directory, "pi.sqlite");
+    const source = new DatabaseSync(file, { readOnly: true });
+    try {
+      const row = source.prepare("SELECT version FROM durable_schema WHERE singleton = 1").get() as { version: number } | undefined;
+      if (row?.version !== CURRENT_SQLITE_SCHEMA_VERSION) throw new Error(`the stored history has schema version ${row?.version ?? "none"}, not ${CURRENT_SQLITE_SCHEMA_VERSION}`);
+      source.prepare("VACUUM INTO ?").run(copy);
+    } finally { source.close(); }
+    const storage = await SqliteStorage.open(new NodeSqliteDatabase(new DatabaseSync(copy)));
+    try { return await read(storage); }
+    finally { await storage.close(context); }
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 }
 
 /** Files the Pi store before pi-durable 1.0.1 left in a thread directory. */

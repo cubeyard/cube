@@ -66,27 +66,33 @@ messages as `working` with the compactor's failure, if any, and
 `history(id, before?, limit?)` reads one thread the chat started; any other id
 is refused as unknown, like `tell`'s. It changes nothing: it does not open the
 thread's agent, take its workspace lease or wait for its machine
-(`Conversations.storedHistory`). A Pi thread's `pi.sqlite` is opened beside its
-Harness, never created or migrated, with `query_only` set
-(`readStorage`); a Claude Code thread's `claude.sqlite` is opened read-only. So
-archived threads, whose stores stay in `<CUBED_STATE>/threads/<id>`, and threads
-whose machine failed can be read too.
+(`Conversations.storedHistory`). A Pi thread's `pi.sqlite` is copied through a
+read-only connection (`VACUUM INTO`, a WAL read that never waits for the
+running Harness) into a private directory beside it, which pi-durable opens and
+which is deleted after the read (`readStorage`); the store itself is never
+created, migrated or locked for writing, and one of another schema version is
+refused. A Claude Code thread's `claude.sqlite` is read through a read-only
+connection. So archived threads, whose stores stay in
+`<CUBED_STATE>/threads/<id>`, and threads whose machine failed can be read too.
 
 The answer starts with cubed's own record (archived or the machine's state,
 the workspace, a retained disk, whether the agent is open in cubed, the
 workspace's writer), then the stored run state and the latest answer, whether
-the run's report (`report:<thread>:<run>`) is in the chat, waiting, or not sent,
-and a `note:` for each disagreement it sees: a failure cubed records beside a
-run the store shows (such as `thread workspace already has a writable owner`
-after the agent finished), a run unfinished at archive, or a run unfinished
-with no agent open. It shows both sides and settles nothing; it does not fix
-the activation race that can produce such a failure. Then a page of messages,
-numbered from the first, newest last: 12 by default, at most 40, `before`
-pages back. Thinking and unfinished output are left out; text is cut at 2,000
-characters, tool calls and results at 400, the latest answer at 4,000. No
-store: `history: none stored`; a store that cannot be read: `history:
-unreadable: <why>`. A stored run read without its agent is the committed state:
-a Pi run still streaming shows as `working` without its partial reply.
+the run's report (`report:<thread>:<run>`, or `report:<thread>:start` when
+nothing is stored) is in the chat, waiting, or not sent, and a `note:` for each
+disagreement it sees: a failure cubed records beside a run the store shows
+(such as `thread workspace already has a writable owner` beside a finished
+run), a run unfinished at archive, or a run unfinished with no agent open (a
+Pi run goes on when its agent opens again; a Claude Code turn does not). It
+shows both sides and settles nothing; it does not fix the activation race that
+can produce such a failure. Then a page of messages, numbered from the first,
+newest last: 12 by default, at most 40, `before` pages back. Thinking and
+unfinished output are left out; a page's messages share 24,000 characters (at
+most 2,000 each, tool calls and results at most 400), the latest answer is cut
+at 4,000. No store: `history: none stored`; a store that cannot be read:
+`history: unreadable: <why>`. A stored run read without its agent is the
+committed state: a Pi run still streaming shows as `working` without its
+partial reply.
 
 ## Caching
 
@@ -161,7 +167,10 @@ model), `POST /api/optchat/prompt {text, requestId}`, `POST /api/optchat/stop`,
   and the run status scans every submission on each SSE frame. A long chat
   makes the transcript slow; the model's side does not grow.
 - The `threads` tool reads each thread's transcript to give its run state.
-- `history` reads a thread's whole store on each call and pages afterwards.
+- `history` copies and reads a thread's whole Pi store on each call and pages
+  afterwards; the copy is synchronous, so a very large store holds cubed's
+  event loop for the copy's length. A copy a crash left behind (`.read-*` in the
+  thread directory) is not removed.
 - No HTML browser of the tree and no import of older chats yet.
 - Verified offline with faux models and a local guest only
   (`packages/server/test/optchat-*-test.ts`), never against a real model or VM.

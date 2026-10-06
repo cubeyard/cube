@@ -106,7 +106,7 @@ export async function storedPiTranscript(storage: Pick<Storage, "scanEntries" | 
     last = page.items.findLast(submission => submission.type === "input") ?? last;
     cursor = page.next;
   } while (cursor);
-  const status: ThreadStatus = !last ? { state: "idle", run: null, error: failure }
+  const status: ThreadStatus = !last ? { state: "idle", run: null, error: null }
     : last.status === "queued" || last.status === "placed" ? { state: "working", run: last.requestId ?? String(last.id), error: failure }
     : { run: last.requestId ?? String(last.id), ...settlement(last) };
   return { agent: "pi", owner, status, events: entryEvents(entries.sort((a, b) => a.id - b.id)) };

@@ -13,6 +13,9 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { ClaudeAgent } from "../src/claude-agent.ts";
+import { Conversations } from "../src/conversation.ts";
+import type { Registry } from "../src/registry.ts";
+import type { ThreadMachines } from "../src/vm.ts";
 import { render } from "../src/claude-thread-events.ts";
 import { openStorage, readStorage } from "../src/durable-agent.ts";
 import { formatHistory, HISTORY_MAX, OptChat, type OptThreads, type ThreadRecord } from "../src/optchat.ts";
@@ -33,6 +36,8 @@ const record = (overrides: Partial<ThreadRecord>): ThreadRecord => ({
   failure: null, transcript: null, unreadable: null, ...overrides,
 });
 
+const claudeThreads = path.join(root, "threads", "claude");
+let claudeConversations!: Conversations;
 try {
   // Pagination: numbered from the first message, newest last; thinking and
   // unfinished output are left out; `before` pages back; the limit is clamped.
@@ -60,6 +65,9 @@ try {
     assert.match(capped, /characters cut/, "a long tool result is cut");
     assert.match(formatHistory(ID, full, "none", { before: 7, limit: 2 }), /#5 tool bash \{"command":"echo 2"\}\n#6 result bash \(error\): 2/, "an error result says so");
     assert.equal(formatHistory(ID, full, "none", { limit: 500 }).split("\n").filter(line => /^#\d+ /.test(line)).length, HISTORY_MAX, "the limit is clamped");
+    const long = record({ transcript: transcript("completed", Array.from({ length: 50 }, (_, k): ThreadEvent => ({ type: "assistant-text", id: `${k}`, text: "y".repeat(5000), reasoning: false, final: true }))) });
+    assert.ok(formatHistory(ID, long, "none", { limit: HISTORY_MAX }).length < 30_000, "a full page stays within its budget");
+    assert.match(formatHistory(ID, long, "none", { limit: 1 }), /\n#49 thread: y{900}/, "a short page gives each message more");
     assert.match(formatHistory(ID, full, "none", { before: 0 }), /\nmessages: none before #0 \(62 in all\)$/);
     assert.match(formatHistory(ID, full, "none", { before: 1000, limit: 1 }), /\nmessages #61–#61 of 62/, "before past the end shows the end");
     assert.match(formatHistory(ID, full, "none"), /\nreport of this run to this chat: not sent yet\n/);
@@ -81,8 +89,9 @@ try {
 
   // Missing and unreadable history are said as such.
   assert.equal(formatHistory(ID, record({ machine: "error: workspace allocation failed: ssh: connection refused", failure: "workspace allocation failed: ssh: connection refused" }), "none"),
-    "[abcdef12] cube · fix the gateway\ncubed: machine error: workspace allocation failed: ssh: connection refused; workspace available\nhistory: none stored; the agent never opened");
+    "[abcdef12] cube · fix the gateway\ncubed: machine error: workspace allocation failed: ssh: connection refused; workspace available\nhistory: none stored; the agent never opened\nfailure to start, reported to this chat: not sent yet");
   assert.match(formatHistory(ID, record({ machine: "starting its machine" }), "none"), /history: none stored; the agent never opened \(its machine is still starting\)$/);
+  assert.match(formatHistory(ID, record({ machine: "error: boom", failure: "boom" }), "delivered"), /\nhistory: none stored; the agent never opened\nfailure to start, reported to this chat: delivered$/);
   assert.match(formatHistory(ID, record({ unreadable: "this thread was created by an older cube" }), "none"), /\nhistory: unreadable: this thread was created by an older cube$/);
 
   // Divergence: cubed records a failure while the store shows the agent ran;
@@ -91,22 +100,25 @@ try {
     const failure = "workspace allocation failed: thread workspace already has a writable owner";
     const diverged = formatHistory(ID, record({ machine: `error: ${failure}`, failure, facts: ["workspace failed: x", "agent pi open in cubed", "workspace writer: pi"],
       transcript: transcript("completed", [{ type: "user-message", id: "1", text: "task" }, { type: "assistant-text", id: "2", text: "all tests pass", reasoning: false, final: true }]) }), "none");
-    assert.match(diverged, /\ncubed: machine error: workspace allocation failed: thread workspace already has a writable owner; workspace failed: x; agent pi open in cubed; workspace writer: pi\nrun: completed \(run-1\)\nlatest answer #1: all tests pass\nreport of this run to this chat: not sent yet\nnote: cubed records a failure \(workspace allocation failed: thread workspace already has a writable owner\), yet the stored history shows the agent ran; both are shown as cubed has them\n/);
+    assert.match(diverged, /\ncubed: machine error: workspace allocation failed: thread workspace already has a writable owner; workspace failed: x; agent pi open in cubed; workspace writer: pi\nrun: completed \(run-1\)\nlatest answer #1: all tests pass\nreport of this run to this chat: not sent yet\nnote: cubed records a failure \(workspace allocation failed: thread workspace already has a writable owner\) while the stored history shows the agent ran \(run completed\); the history does not say whether the failure came before, during or after that run\n/);
     const archived = formatHistory(ID, record({ archived: true, machine: null, agentOpen: false, facts: ["workspace available", "machine disk retained (the agent ran commands)"],
       transcript: transcript("working", [{ type: "user-message", id: "1", text: "task" }]) }), "none");
     assert.match(archived, /\ncubed: archived; workspace available; machine disk retained \(the agent ran commands\)\nrun: working \(run-1\)\nlatest answer: none\nnote: the store shows a run unfinished at archive; it does not go on\n/);
     assert.match(formatHistory(ID, record({ agentOpen: false, transcript: transcript("working", []) }), "none"),
       /\nnote: the store shows a run unfinished, but its agent is not open in cubed: it goes on only when the agent opens again\n/);
+    assert.match(formatHistory(ID, record({ agentOpen: false, transcript: { ...transcript("working", []), agent: "claude-code" } }), "none"),
+      /\nnote: the store shows a turn unfinished, but its agent is not open in cubed: Claude Code does not continue it; it shows as failed once the agent opens again\n/);
   }
 
   // Pi's store, read beside its running Harness: the run shows as working
   // while the model streams, then completed with its answer; nothing is
-  // created, migrated or written.
+  // created, migrated or written, and reads never wait for the writer.
   {
     const directory = path.join(root, "pi-thread");
     fs.mkdirSync(directory);
     const file = path.join(directory, "pi.sqlite");
-    assert.equal(await readStorage(file), null, "no store: null");
+    const read = (failure: string | null = null) => readStorage(file, storage => storedPiTranscript(storage, "pi", failure));
+    assert.equal(await read(), null, "no store: null");
     assert.ok(!fs.existsSync(file), "and none is created");
     let release!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });
@@ -118,36 +130,67 @@ try {
     try {
       const conversation = await harness.root(context, { agent: { model: { provider: faux.getModel().provider, modelId: faux.getModel().id } } });
       await conversation.submit({ type: "input", content: "the question", requestId: "cube:initial" }, context);
-      let working: ThreadTranscript | undefined;
+      let working: ThreadTranscript | null = null;
       for (let k = 0; k < 200 && working?.status.state !== "working"; k++) {
-        const storage = (await readStorage(file))!;
-        try { working = await storedPiTranscript(storage, null, null); } finally { await storage.close(context); }
-        if (working.status.state !== "working") await delay(10);
+        working = await read();
+        if (working?.status.state !== "working") await delay(10);
       }
       assert.deepEqual(working!.status, { state: "working", run: "cube:initial", error: null });
       release();
       await conversation.waitForIdle(context);
-      const storage = (await readStorage(file))!;
-      try {
-        const done = await storedPiTranscript(storage, "pi", "a failure cubed records");
-        assert.deepEqual(done.status, { state: "completed", run: "cube:initial", error: null });
-        assert.equal(done.owner, "pi");
-        assert.deepEqual(done.events.map(event => event.type === "user-message" || event.type === "assistant-text" ? event.text : event.type), ["the question", "the answer"]);
-        await assert.rejects(storage.commit([{ table: "conversations", value: {} } as never], context), /readonly database/, "the reader cannot write");
-      } finally { await storage.close(context); }
-      // The Harness goes on writing after the reader closed.
-      await conversation.submit({ type: "write", requestId: "after", entry: { kind: "pi.user", model: [{ role: "user", content: "later", timestamp: Date.now() }] } }, context);
+      const done = (await read("a failure cubed records"))!;
+      assert.deepEqual(done.status, { state: "completed", run: "cube:initial", error: null }, "the failure is cubed's, not the run's");
+      assert.equal(done.owner, "pi");
+      assert.deepEqual(done.events.map(event => event.type === "user-message" || event.type === "assistant-text" ? event.text : event.type), ["the question", "the answer"]);
+      // Reads while the Harness commits: none fails or waits for the writer.
+      const before = fs.statSync(file).mtimeMs;
+      let writing = true;
+      const writes = (async () => {
+        for (let k = 0; writing && k < 2000; k++) await conversation.submit({ type: "write", requestId: `w${k}`, entry: { kind: "pi.user", model: [{ role: "user", content: `w${k}`, timestamp: Date.now() }] } }, context);
+      })();
+      let slowest = 0;
+      for (let k = 0; k < 30; k++) {
+        const started = Date.now();
+        const transcript = await read();
+        slowest = Math.max(slowest, Date.now() - started);
+        assert.equal(transcript?.status.state, "completed");
+      }
+      writing = false;
+      await writes;
+      assert.ok(slowest < 1000, `a read never waits for the writer (slowest ${slowest} ms)`);
+      assert.deepEqual(fs.readdirSync(directory).filter(name => name.startsWith(".read-")), [], "no snapshot is left behind");
+      assert.ok(fs.statSync(file).mtimeMs >= before);
+      assert.equal((await read())!.events.at(-1)?.type === "user-message", true, "the writer's entries are readable");
     } finally { await harness.close(context); }
-    const other = path.join(root, "future.sqlite");
+    const other = path.join(root, "future", "pi.sqlite");
+    fs.mkdirSync(path.dirname(other));
     const future = new DatabaseSync(other);
     future.exec("CREATE TABLE durable_schema (singleton INTEGER PRIMARY KEY, version INTEGER NOT NULL); INSERT INTO durable_schema VALUES (1, 999)");
     future.close();
-    await assert.rejects(readStorage(other), /schema version 999/, "another schema version is refused, not migrated");
+    const bytes = fs.readFileSync(other);
+    await assert.rejects(readStorage(other, async () => "read"), /schema version 999/, "another schema version is refused, not migrated");
+    assert.deepEqual(fs.readFileSync(other), bytes, "and left as it was");
+  }
+
+  // Conversations.storedHistory picks the thread's store by its agent and
+  // refuses a store from an older cube; it needs no machine.
+  {
+    const directory = path.join(root, "threads");
+    const threads: Record<string, { id: string; agent?: string }> = { pi: { id: "pi" }, legacy: { id: "legacy" }, quiet: { id: "quiet" }, claude: { id: "claude", agent: "claude-code" } };
+    const conversations = new Conversations({ registry: { getThread: (id: string) => threads[id] ?? null } as unknown as Registry, directory, models: createModels(), machines: {} as ThreadMachines });
+    fs.mkdirSync(path.join(directory, "legacy", "session"), { recursive: true });
+    await assert.rejects(conversations.storedHistory("legacy"), /created by an older cube/);
+    assert.equal(await conversations.storedHistory("quiet"), null);
+    await assert.rejects(conversations.storedHistory("gone"), /thread not found/);
+    fs.cpSync(path.join(root, "pi-thread"), path.join(directory, "pi"), { recursive: true });
+    assert.equal((await conversations.storedHistory("pi"))?.status.state, "completed");
+    assert.equal(conversations.agentOpen("pi"), false);
+    claudeConversations = conversations;
   }
 
   // Claude Code's store, read from its file without the agent or its lease.
   {
-    const directory = path.join(root, "claude-thread");
+    const directory = claudeThreads;
     assert.equal(ClaudeAgent.stored(directory), null, "no store: null");
     const leases: string[] = [];
     const workspace = { lease: async () => { leases.push("taken"); return { token: "t" }; }, release: async () => {}, cancel: async () => {} } as unknown as Workspace;
@@ -163,6 +206,7 @@ try {
     assert.deepEqual(shown.status, { state: "completed", run: "cube:initial", error: null });
     assert.deepEqual(shown.events.map(event => event.type === "tool-call" ? event.input : event.type === "tool-result" ? event.output : event.text),
       ["the question", { command: "ls /workspace/out.txt" }, "the answer"], "host paths are shown as /workspace");
+    assert.deepEqual(await claudeConversations.storedHistory("claude"), { ...shown, owner: null }, "a claude code thread is read from its own store");
   }
 
   // The tool: OptChat reads its own threads only; whether a run's report

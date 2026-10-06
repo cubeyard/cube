@@ -119,7 +119,7 @@ try {
   app.registry.markWorkspaceFailed(thread.id, failure);
   const diverged = (await adapter.history(thread.id))!;
   assert.equal(diverged.failure, failure);
-  assert.match(formatHistory(thread.id, diverged, "delivered"), /\nnote: cubed records a failure \(workspace allocation failed: thread workspace already has a writable owner\), yet the stored history shows the agent ran;/);
+  assert.match(formatHistory(thread.id, diverged, "delivered"), /\nnote: cubed records a failure \(workspace allocation failed: thread workspace already has a writable owner\) while the stored history shows the agent ran \(run completed\);/);
   app.registry.markWorkspaceAvailable(thread.id, workspaceBase);
   const archive = await fetch(`${base}/api/threads/${thread.id}`, { method: "DELETE" });
   assert.equal(archive.status, 200, await archive.clone().text());
@@ -130,7 +130,7 @@ try {
   assert.match(formatHistory(thread.id, archived, "delivered"), /\ncubed: archived; machine disk retained [^\n]*; agent pi not open in cubed; workspace writer: none\nrun: completed/);
   const quiet = app.registry.createThread(project.project.id, "quiet", { provider: faux.getModel().provider, id: faux.getModel().id }, "never opened");
   const none = (await adapter.history(quiet.id))!;
-  assert.deepEqual([none.transcript, none.unreadable], [null, null], "no agent, no history");
+  assert.deepEqual([none.machine, none.transcript, none.unreadable], ["not started", null, null], "no agent, no history");
   assert.ok(!fs.existsSync(path.join(state, "threads", quiet.id, "pi.sqlite")), "reading created no store");
   assert.equal(await adapter.history("no-such-thread"), null);
 
