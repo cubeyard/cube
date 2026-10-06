@@ -180,6 +180,21 @@ install_unit() {
   fi
 }
 
+# launchd kills every process of a job it boots out, so an upgrade started by
+# the update agent must not reload that agent: it would die before bootstrap
+# and leave the agent unloaded. Inside the job a loaded agent is kept; its
+# plist names the same update.sh, so the refreshed scripts run next hour.
+reload_update_agent() {
+  local plist="$1" ref
+  ref="$(service_domain)/$UPDATE_LABEL"
+  if [ "${XPC_SERVICE_NAME:-}" = "$UPDATE_LABEL" ]; then
+    "$LAUNCHCTL" print "$ref" >/dev/null 2>&1 || "$LAUNCHCTL" bootstrap "$(service_domain)" "$plist" >/dev/null 2>&1 || true
+    return 0
+  fi
+  "$LAUNCHCTL" bootout "$ref" >/dev/null 2>&1 || true
+  "$LAUNCHCTL" bootstrap "$(service_domain)" "$plist" >/dev/null 2>&1 || true
+}
+
 # Installs (or refreshes) the self-updater from this bundle: its scripts and
 # the pinned key under updater_root, plus an hourly root systemd timer on
 # Linux or a launchd agent on macOS. CUBE_RUNNER_SELF_UPDATE=0 skips it.
@@ -229,10 +244,7 @@ install_updater() {
 </dict></plist>
 PLIST
     plutil -lint "$plist" >/dev/null
-    if [ -z "$ROOT" ]; then
-      "$LAUNCHCTL" bootout "$(service_domain)/$UPDATE_LABEL" >/dev/null 2>&1 || true
-      "$LAUNCHCTL" bootstrap "$(service_domain)" "$plist" >/dev/null 2>&1 || true
-    fi
+    if [ -z "$ROOT" ]; then reload_update_agent "$plist"; fi
   fi
   note "self-update installed: hourly, only while idle"
 }

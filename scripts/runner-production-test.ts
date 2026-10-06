@@ -293,7 +293,47 @@ esac
   assert.ok(fs.existsSync(path.join(restoredHome, "data/state/recovery-command-ran")));
 };
 
+// launchd kills a booted-out job's processes, so an upgrade run by the update
+// agent must leave that agent loaded rather than reload it from inside.
+const testUpdateAgentReload = () => {
+  const loaded = path.join(root, "update-agent-loaded");
+  const calls = path.join(root, "update-agent-calls");
+  const launchctl = path.join(root, "update-agent-launchctl");
+  fs.writeFileSync(launchctl, `#!/bin/sh
+printf '%s\\n' "$1" >> ${JSON.stringify(calls)}
+case "$1" in
+  print) [ -f ${JSON.stringify(loaded)} ] ;;
+  bootout)
+    [ -f ${JSON.stringify(loaded)} ] || exit 113
+    rm -f ${JSON.stringify(loaded)}
+    [ "\${XPC_SERVICE_NAME:-}" != com.cubeyard.cube-runner-update ] || kill -KILL "$PPID" ;;
+  bootstrap) touch ${JSON.stringify(loaded)} ;;
+esac
+`, { mode: 0o755 });
+  const reload = (extra: NodeJS.ProcessEnv) => {
+    fs.rmSync(calls, { force: true });
+    return spawnSync("bash", ["-c", `source ${JSON.stringify(path.join(repo, "scripts/runner/lib.sh"))}; reload_update_agent /x.plist; echo reloaded`],
+      { encoding: "utf8", env: { ...process.env, CUBE_RUNNER_PLATFORM: "Darwin", CUBE_RUNNER_ARCH: "arm64",
+        CUBE_RUNNER_MODE: "user", CUBE_RUNNER_LAUNCHCTL: launchctl, XPC_SERVICE_NAME: "", ...extra } });
+  };
+  fs.writeFileSync(loaded, "");
+  let result = reload({ XPC_SERVICE_NAME: "com.cubeyard.cube-runner-update" });
+  assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /reloaded/);
+  assert.ok(fs.existsSync(loaded), "the update agent stays loaded after an upgrade it ran");
+  assert.equal(fs.readFileSync(calls, "utf8"), "print\n", "no bootout from inside the update agent");
+  fs.rmSync(loaded);
+  result = reload({ XPC_SERVICE_NAME: "com.cubeyard.cube-runner-update" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(fs.existsSync(loaded), "an unloaded update agent is loaded again");
+  assert.equal(fs.readFileSync(calls, "utf8"), "print\nbootstrap\n");
+  result = reload({});
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.readFileSync(calls, "utf8"), "bootout\nbootstrap\n", "outside the agent it is reloaded");
+  assert.ok(fs.existsSync(loaded));
+};
+
 try {
+  testUpdateAgentReload();
   if (process.platform === "linux") testLinux();
   if (process.platform === "darwin") testDarwin();
   console.log(process.platform === "darwin"

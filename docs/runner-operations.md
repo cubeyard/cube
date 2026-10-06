@@ -308,6 +308,14 @@ when installing to skip it; `systemctl disable --now cube-runner-update.timer`
 or `launchctl bootout gui/$(id -u)/com.cubeyard.cube-runner-update` turns it
 off later. Logs: `journalctl -u cube-runner-update` or `logs/update.log`.
 
+On macOS an upgrade started by the update job leaves that job loaded:
+launchd kills every process of a job it boots out, so the refresh only loads
+the job when it is missing. Bundles up to cube-runner 0.8.0 rebooted it from
+inside and unloaded it after their own upgrade (`launchctl print
+gui/$(id -u)/com.cubeyard.cube-runner-update` reports no such service). Load it
+again with `launchctl bootstrap gui/$(id -u)
+~/Library/LaunchAgents/com.cubeyard.cube-runner-update.plist`.
+
 ## Upgrade
 
 Runners with the self-updater (cube-runner 0.6.0 or newer) upgrade
