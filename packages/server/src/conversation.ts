@@ -32,7 +32,7 @@ export class ThreadArchiving extends Error {
   constructor() { super("thread is being archived"); this.name = "ThreadArchiving"; }
 }
 /** A release that failed or was cut short: only the release is retried. */
-const releaseUnfinished = (thread: Thread) => thread.workspaceState === "releasing"
+export const releaseUnfinished = (thread: Thread) => thread.workspaceState === "releasing"
   || (thread.workspaceState === "failed" && !!thread.workspaceError?.startsWith("workspace release failed:"));
 export class Conversations {
   private readonly registry: Registry;
@@ -43,6 +43,10 @@ export class Conversations {
   private readonly workspaces = new Map<string, { workspace: VmWorkspace; leases: LeaseStore }>();
   private readonly failures = new Map<string, string>();
   private readonly activations = new Map<string, Promise<void>>();
+  /** Activations that only check a machine already running under an open
+   * agent (the recovery loop's rounds): not a start unless the check finds
+   * the machine booted again and closes the agent. */
+  private readonly checks = new Set<string>();
   /** Threads whose machine ran its resume hooks since this process started
    * (or since it last booted the machine). */
   private readonly resumed = new Set<string>();
@@ -84,8 +88,9 @@ export class Conversations {
     await Promise.all(work);
   }
   error(id: string): string | null { return this.failures.get(id) ?? null; }
-  /** Whether the thread's machine is being started. */
-  starting(id: string): boolean { return this.activations.has(id); }
+  /** Whether the thread's machine is being started (booted, prepared or its
+   * agent opened); a check of a running machine under an open agent is not. */
+  starting(id: string): boolean { return this.activations.has(id) && !this.checks.has(id); }
   /** Whether an archive of the thread is under way (or deciding). */
   archivingNow(id: string): boolean { return this.archiveHolds.has(id); }
   /** Boots the thread's machine, provisions it once and opens its agent.
@@ -97,6 +102,7 @@ export class Conversations {
     // A release to finish is the recovery loop's (boot), never a new start.
     const current = this.registry.getThread(id);
     if (current && releaseUnfinished(current)) return Promise.resolve();
+    if (current?.workspaceState === "available" && this.agentOpen(id)) this.checks.add(id);
     const activation = (async () => {
       try {
         await this.ensureWorkspace(id);
@@ -104,13 +110,13 @@ export class Conversations {
         else await this.agent(id);
         this.failures.delete(id);
       } catch (error) {
-        // An archive that began meanwhile, or ended, is not this thread's failure.
-        if (error instanceof ThreadArchiving || this.archiveHolds.has(id) || this.registry.getThread(id)?.archived !== false) return;
+        // An archive that ended is not this thread's failure.
+        if (error instanceof ThreadArchiving || this.registry.getThread(id)?.archived !== false) return;
         const message = error instanceof Error ? error.message : String(error);
         if (this.failures.get(id) !== message) log.warn("activation failed", { thread: id, error: message });
         this.failures.set(id, message);
       }
-    })().finally(() => this.activations.delete(id));
+    })().finally(() => { this.activations.delete(id); this.checks.delete(id); });
     this.activations.set(id, activation);
     return activation;
   }
@@ -224,6 +230,8 @@ export class Conversations {
     if (!booted && this.resumed.has(id)) return;
     if (this.agents.has(id) || this.claudes.has(id)) {
       if (!booted) { this.resumed.add(id); return; }
+      // The machine booted again: from here this is a start.
+      this.checks.delete(id);
       await this.closeAgents(id);
       log.warn("the machine booted again; the agent reopens after the resume hooks", { thread: id });
     }
@@ -286,6 +294,7 @@ export class Conversations {
    * its first turn must not run before the checkouts exist. A reader waiting
    * on a failed activation gets the failure instead. */
   private ready(thread: Thread): void {
+    if (releaseUnfinished(thread)) throw new Error(this.failures.get(thread.id) ?? "thread workspace is releasing");
     if (thread.workspaceState !== "available") {
       throw new Error(this.failures.get(thread.id) ?? thread.workspaceError ?? "the thread machine is not ready");
     }
@@ -465,9 +474,7 @@ export class Conversations {
       if (failed) decision = { clean: false, reason: thread.workspaceError ?? "the thread machine was not ready" };
       else if (unopened) decision = { clean: false, reason: `the agent could not open: ${unopened}` };
       else {
-        const claude = this.claudes.get(id), pi = this.agents.get(id);
-        this.claudes.delete(id); this.agents.delete(id);
-        await (await claude)?.close(); await this.closePi(id, pi);
+        await this.closeAgents(id);
         const workspace = this.openWorkspace(id);
         try { decision = await releaseCheck(workspace, threadAgent(thread), thread.allocation); }
         catch (error) { decision = { clean: false, reason: `the thread machine could not be checked: ${error instanceof Error ? error.message : String(error)}` }; }

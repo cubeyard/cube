@@ -18,12 +18,15 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-start-"));
 const LATE = "1a7e0000-0000-4000-8000-000000000001";
 const STUCK = "57ac0000-0000-4000-8000-000000000002";
 const LEAVING = "1ea40000-0000-4000-8000-000000000003";
+const FLAKY = "f1a40000-0000-4000-8000-000000000004";
 const done: ThreadTranscript = { agent: "pi", owner: "pi", status: { state: "completed", run: "run-1", error: null },
   events: [{ type: "user-message", id: "1", text: "task" }, { type: "assistant-text", id: "2", text: "all tests pass", reasoning: false, final: true }] };
 const events: ThreadEvents = {
   async read() { return done; },
   async watch(listener) { await listener(done); return { stop: async () => {}, closed: new Promise<void>(() => {}) }; },
 };
+/** Events whose watch ends at once: the next round asks for them again. */
+const brief: ThreadEvents = { ...events, async watch(listener) { await listener(done); return { stop: async () => {}, closed: Promise.resolve() }; } };
 
 /** One chat whose model spawns `ids` and then only notes what reaches it. */
 async function chat(name: string, ids: string[], threadEvents: OptThreads["events"], startGraceMs: number) {
@@ -90,7 +93,7 @@ try {
   {
     let stuck = 0, leaving = 0;
     const optchat = await chat("stuck", [STUCK, LEAVING], async id => {
-      if (id === LEAVING) { leaving++; return null; }
+      if (id === LEAVING) { leaving++; return "archiving"; }
       stuck++;
       throw new Error("workspace allocation failed: ssh: the guest is unreachable");
     }, 100);
@@ -103,6 +106,21 @@ try {
       assert.match(report!, /^\[57ac0000\] failed to start for \d+ s; cubed keeps retrying: workspace allocation failed: ssh: the guest is unreachable$/);
       assert.deepEqual(await sent(optchat, `report:${LEAVING}:start`), [], "an archive under way is not a failure");
       assert.ok(!(await optchat.pending()).some(item => item.text.includes("being archived")));
+    } finally { await optchat.close(); }
+  }
+  // Failures that never last the grace, each ended by a start, are never
+  // reported: a start begins the grace again.
+  {
+    let tries = 0;
+    const optchat = await chat("flaky", [FLAKY], async () => {
+      tries++;
+      if (tries % 4 === 0) return brief;
+      await delay(60);
+      throw new Error("ssh: the guest is unreachable");
+    }, 400);
+    try {
+      await until(async () => tries > 40, "many rounds");
+      assert.deepEqual(await sent(optchat, `report:${FLAKY}:start`), [], "the grace begins again after each start");
     } finally { await optchat.close(); }
   }
 } finally { fs.rmSync(root, { recursive: true, force: true }); }
