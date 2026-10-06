@@ -20,7 +20,8 @@ import { createLogger } from "./log.ts";
 import { compactNode } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { capText, Memory, type LogMessage, type Part } from "./optchat-memory.ts";
-import type { ThreadEvent, ThreadEvents, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
+import type { ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
+import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { addUsage, type OptChatUsage } from "./usage-service.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -91,9 +92,9 @@ export interface OptThreads {
   describe(ids: readonly string[]): Promise<string>;
   /** The thread's events; null once it is archived or gone. */
   events(id: string): Promise<ThreadEvents | null>;
-  /** What cubed has of a thread, read only: its own record beside the
-   * agent's stored transcript, which may disagree. null: no such thread. */
-  history(id: string): Promise<ThreadRecord | null>;
+  /** What cubed has of a thread, read only: its own record beside a page of
+   * the agent's stored transcript, which may disagree. null: no such thread. */
+  history(id: string, request?: HistoryRequest): Promise<ThreadRecord | null>;
   /** Archives a thread: its agent closes and its machine is released, as
    * the UI's archive does; its stored history stays. Refused, with nothing
    * stopped, while the thread works or its machine starts. An archived
@@ -117,21 +118,18 @@ export type ThreadRecord = {
   agentOpen: boolean;
   /** The machine or workspace failure cubed records, if any. */
   failure: string | null;
-  /** The agent's stored transcript; null when it stored none or `unreadable`. */
-  transcript: ThreadTranscript | null;
+  /** A page of the agent's stored transcript; null when it stored none or `unreadable`. */
+  transcript: HistoryPage | null;
   unreadable: string | null;
 };
 
-export const HISTORY_PAGE = 12;
-export const HISTORY_MAX = 40;
+export { HISTORY_MAX, HISTORY_PAGE };
 /** A page's messages share this many characters; one gets at most HISTORY_TEXT. */
 const HISTORY_BUDGET = 24_000;
 const HISTORY_TEXT = 2000;
 const HISTORY_TOOL = 400;
 const HISTORY_ANSWER = 4000;
 
-/** Whether history shows an event: thinking and unfinished output are left out. */
-const historyShows = (event: ThreadEvent) => event.type === "user-message" || (event.final && !(event.type === "assistant-text" && event.reasoning));
 function historyLine(event: ThreadEvent, cap: number): string {
   if (event.type === "user-message") return `user: ${capText(event.text, cap)}`;
   if (event.type === "assistant-text") return `thread: ${capText(event.text, cap)}`;
@@ -146,8 +144,8 @@ const reportText = (report: ReportState) => report === "delivered" ? "delivered"
 /** The history tool's answer: cubed's record of the thread, the run and the
  * latest answer from its stored transcript, whether this chat got the run's
  * report (or, without a transcript, the failure to start), what disagrees,
- * then one page of messages, numbered from the first, ending before message `before`. */
-export function formatHistory(id: string, record: ThreadRecord, report: ReportState, page: { before?: number | undefined; limit?: number | undefined } = {}): string {
+ * then the record's page of messages, numbered from the first. */
+export function formatHistory(id: string, record: ThreadRecord, report: ReportState): string {
   const lines = [`[${short(id)}] ${record.project} · ${record.title ?? "untitled"}`,
     `cubed: ${[record.archived ? "archived" : `machine ${record.machine}`, ...record.facts].join("; ")}`];
   const transcript = record.transcript;
@@ -159,11 +157,8 @@ export function formatHistory(id: string, record: ThreadRecord, report: ReportSt
   }
   const { state, run, error } = transcript.status;
   lines.push(`run: ${state}${run ? ` (${run})` : ""}${error ? `: ${error}` : ""}`);
-  const shown = transcript.events.filter(historyShows);
-  const answer = shown.findLastIndex(event => event.type === "assistant-text");
-  const asked = shown.findLastIndex(event => event.type === "user-message");
-  const text = answer < 0 ? "" : (shown[answer] as { text: string }).text.trim();
-  lines.push(answer < 0 ? "latest answer: none" : `latest answer #${answer}${asked > answer ? ` (before the newest message #${asked}, which has none yet)` : ""}: ${capText(text, HISTORY_ANSWER)}`);
+  const { answer, asked } = transcript;
+  lines.push(!answer ? "latest answer: none" : `latest answer #${answer.index}${asked > answer.index ? ` (before the newest message #${asked}, which has none yet)` : ""}: ${capText(answer.text.trim(), HISTORY_ANSWER)}`);
   if (state !== "idle" && state !== "working" && run) lines.push(`report of this run to this chat: ${reportText(report)}`);
   // Disagreements are shown as cubed has them; this view does not settle them.
   const notes: string[] = [];
@@ -173,16 +168,14 @@ export function formatHistory(id: string, record: ThreadRecord, report: ReportSt
     ? "the store shows a turn unfinished, but its agent is not open in cubed: Claude Code does not continue it; it shows as failed once the agent opens again"
     : "the store shows a run unfinished, but its agent is not open in cubed: it goes on only when the agent opens again");
   for (const note of notes) lines.push(`note: ${note}`);
-  const total = shown.length;
-  const limit = Math.min(Math.max(page.limit ?? HISTORY_PAGE, 1), HISTORY_MAX);
-  const end = Math.min(Math.max(page.before ?? total, 0), total);
-  const start = Math.max(0, end - limit);
-  const cap = Math.min(HISTORY_TEXT, Math.floor(HISTORY_BUDGET / Math.max(1, end - start)));
+  const { total, start, events } = transcript;
+  const end = start + events.length;
+  const cap = Math.min(HISTORY_TEXT, Math.floor(HISTORY_BUDGET / Math.max(1, events.length)));
   if (!total) lines.push("messages: none");
   else if (start === end) lines.push(`messages: none before #${end} (${total} in all)`);
   else {
     lines.push(`messages #${start}–#${end - 1} of ${total}, oldest first${start > 0 ? `; earlier: history("${short(id)}", before: ${start})` : ""}`);
-    for (let k = start; k < end; k++) lines.push(`#${k} ${historyLine(shown[k]!, cap)}`);
+    events.forEach((event, k) => lines.push(`#${start + k} ${historyLine(event, cap)}`));
   }
   return lines.join("\n");
 }
@@ -257,8 +250,12 @@ export function threadReport(transcript: ThreadTranscript): string {
   const events = transcript.events;
   const lastUser = events.findLastIndex(event => event.type === "user-message");
   const reply = events.slice(lastUser + 1).findLast(event => event.type === "assistant-text" && !event.reasoning);
-  const text = reply?.type === "assistant-text" ? reply.text.trim() : "";
-  const status = transcript.status;
+  return runReport(transcript.status, reply?.type === "assistant-text" ? reply.text : "");
+}
+
+/** The report of a run that ended with `status`, whose reply (after the newest message) is `reply`. */
+function runReport(status: ThreadStatus, reply: string): string {
+  const text = reply.trim();
   if (status.state === "completed") return text || "(finished without a reply)";
   if (status.state === "stopped") return `stopped${text ? `; last reply: ${text}` : ""}`;
   return `failed: ${status.error ?? "unknown error"}${text ? `; last reply: ${text}` : ""}`;
@@ -744,10 +741,13 @@ export class OptChat {
   }
 
   private observe(id: string, transcript: ThreadTranscript): void {
-    const status = transcript.status;
+    this.settle(id, transcript.status, () => threadReport(transcript));
+  }
+
+  private settle(id: string, status: ThreadStatus, report: () => string): void {
     if (status.state === "idle" || status.state === "working" || !status.run || this.reported.get(id) === status.run) return;
     this.reported.set(id, status.run);
-    void this.send(`[${short(id)}] ${capText(threadReport(transcript))}`, `report:${id}:${status.run}`)
+    void this.send(`[${short(id)}] ${capText(report())}`, `report:${id}:${status.run}`)
       .catch(error => { if (!this.closing) log.warn("report delivery failed", { thread: id, error }); });
   }
 
@@ -756,8 +756,8 @@ export class OptChat {
    * request id keeps it to one delivery. */
   private async reportArchived(id: string): Promise<void> {
     try {
-      const record = await this.options.threads.history(id);
-      if (record?.transcript) this.observe(id, record.transcript);
+      const page: HistoryPage | null | undefined = (await this.options.threads.history(id, { limit: 1 }))?.transcript;
+      if (page) this.settle(id, page.status, () => runReport(page.status, page.answer && page.answer.index > page.asked ? page.answer.text : ""));
     } catch (error) { log.warn("archived thread's report not checked", { thread: id, error }); }
   }
 
@@ -863,14 +863,14 @@ export class OptChat {
       replay: "safe",
       execute: async args => {
         const id = await this.resolve(args.id);
-        const record = await this.options.threads.history(id);
+        const record = await this.options.threads.history(id, { before: args.before, limit: args.limit });
         if (!record) return text(`[${short(id)}] is gone: cubed has no record of it`);
         // A run's report, or without a transcript the failure to start.
         const run = record.transcript ? record.transcript.status.run : "start";
         const requestId = `report:${id}:${run}`;
         const report = !run ? "none" : await this.known(requestId) ? "delivered"
           : (await this.pending()).some(item => item.requestId === requestId) ? "accepted" : "none";
-        return text(formatHistory(id, record, report, args));
+        return text(formatHistory(id, record, report));
       },
     });
     const archive = defineTool({

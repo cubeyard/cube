@@ -5,12 +5,13 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message, Models } from "@earendil-works/pi-ai";
 import { ConversationBusy, LiveDoc, type UsageState } from "@earendil-works/pi-durable";
 import { ClaudeAgent, ClaudeBusy, CLAUDE_PROVIDER, type ClaudeRuntime } from "./claude-agent.ts";
-import { ClaudeThreadEvents, render as renderClaude } from "./claude-thread-events.ts";
-import { assertCurrentThreadStore, openAgent, readStorage, type Agent } from "./durable-agent.ts";
+import { ClaudeThreadEvents } from "./claude-thread-events.ts";
+import { assertCurrentThreadStore, openAgent, type Agent } from "./durable-agent.ts";
 import { createLogger } from "./log.ts";
-import { PiThreadEvents, storedPiTranscript } from "./pi-thread-events.ts";
+import { PiThreadEvents } from "./pi-thread-events.ts";
 import type { ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
+import { readClaudeHistory, readPiHistory, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { Registry, threadAgent, type HookOutcome, type Thread } from "./registry.ts";
 import { provisioned, provisionWorkspace, releaseCheck, resumeWorkspace, type ThreadMachines } from "./vm.ts";
 import { VmWorkspace } from "./vm-workspace.ts";
@@ -381,21 +382,20 @@ export class Conversations {
   }
   /** Whether the thread's agent is open (or opening) in this process. */
   agentOpen(id: string): boolean { return this.agents.has(id) || this.claudes.has(id); }
-  /** The thread's stored transcript, read without opening its agent, taking
-   * its workspace lease or waiting for its machine: archived threads and
-   * threads whose machine failed keep theirs. null when the agent never
-   * stored one. */
-  async storedHistory(id: string): Promise<ThreadTranscript | null> {
+  /** A page of the thread's stored transcript, read without opening its
+   * agent, taking its workspace lease or waiting for its machine: archived
+   * threads and threads whose machine failed keep theirs. null when the
+   * agent never stored one. */
+  async storedHistory(id: string, request: HistoryRequest = {}): Promise<HistoryPage | null> {
     const thread = this.registry.getThread(id);
     if (!thread) throw new Error("thread not found");
     const directory = path.join(this.directory, id);
     const failure = this.failures.get(id) ?? null;
     if (threadAgent(thread) === "claude-code") {
-      const state = ClaudeAgent.stored(directory);
-      return state && renderClaude(state, this.owner(id), failure, path.join(directory, "claude"));
+      return readClaudeHistory(path.join(directory, "claude.sqlite"), path.join(directory, "claude"), this.owner(id), failure, request);
     }
     assertCurrentThreadStore(directory);
-    return readStorage(path.join(directory, "pi.sqlite"), storage => storedPiTranscript(storage, this.owner(id), failure));
+    return readPiHistory(path.join(directory, "pi.sqlite"), this.owner(id), failure, request);
   }
   async stream(id: string, response: ServerResponse): Promise<void> {
     await serveThreadEvents(await this.events(id), response);

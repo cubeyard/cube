@@ -66,7 +66,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       }
       return lines.join("\n") || "no threads";
     },
-    async history(id) {
+    async history(id, request) {
       const thread = registry.getThread(id);
       if (!thread) return null;
       const vm = thread.vm;
@@ -84,7 +84,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         facts, agentOpen: conversations.agentOpen(id),
         failure: conversations.error(id) ?? (thread.workspaceState === "failed" ? thread.workspaceError : null),
       };
-      try { return { ...record, transcript: await conversations.storedHistory(id), unreadable: null }; }
+      try { return { ...record, transcript: await conversations.storedHistory(id, request), unreadable: null }; }
       catch (error) { return { ...record, transcript: null, unreadable: error instanceof Error ? error.message : String(error) }; }
     },
     async archive(id) {

@@ -16,6 +16,7 @@ import { OptChat, type OptThreads, type ThreadRecord } from "../src/optchat.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
 import type { Registry } from "../src/registry.ts";
 import type { ThreadTranscript } from "../src/thread-events.ts";
+import { pageOf } from "../src/thread-history.ts";
 
 const context = BACKGROUND_CONTEXT;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-archive-"));
@@ -27,7 +28,7 @@ const OTHER = "99999999-0000-4000-8000-000000000003";
 const done: ThreadTranscript = { agent: "pi", owner: null, status: { state: "completed", run: "run-1", error: null },
   events: [{ type: "user-message", id: "1", text: "task" }, { type: "assistant-text", id: "2", text: "PR #9", reasoning: false, final: true }] };
 const record = (transcript: ThreadTranscript): ThreadRecord => ({ project: "cube", title: "fix", archived: true, machine: null, facts: [], agentOpen: false,
-  failure: null, transcript, unreadable: null });
+  failure: null, transcript: pageOf(transcript), unreadable: null });
 
 try {
   const faux = fauxProvider({ tokensPerSecond: 100_000 });

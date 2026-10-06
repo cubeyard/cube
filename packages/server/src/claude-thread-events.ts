@@ -53,29 +53,8 @@ export function render(state: ClaudeState, owner: ThreadAgent | null, failure: s
     bySubmission.set(message.submission, list);
   }
   for (const submission of state.submissions) {
-    events.push({ type: "user-message", id: `s${submission.seq}`, text: submission.text });
-    for (const { seq, data } of bySubmission.get(submission.seq) ?? []) {
-      if (data.parent_tool_use_id != null) continue;
-      const message = data.message as { content?: unknown } | undefined;
-      const blocks: Block[] = Array.isArray(message?.content) ? message.content as Block[] : [];
-      if (data.type === "assistant") {
-        blocks.forEach((block, index) => {
-          const id = `m${seq}.${index}`;
-          if (block.type === "text" && block.text) events.push({ type: "assistant-text", id, text: block.text, reasoning: false, final: true });
-          else if (block.type === "thinking" && block.thinking) events.push({ type: "assistant-text", id, text: block.thinking, reasoning: true, final: true });
-          else if (block.type === "tool_use" && block.id) {
-            names.set(block.id, block.name ?? "tool");
-            events.push({ type: "tool-call", id, callId: block.id, name: block.name ?? "tool", input: shown(block.input ?? {}), final: true });
-          }
-        });
-      } else if (data.type === "user") {
-        blocks.forEach((block, index) => {
-          if (block.type !== "tool_result" || !block.tool_use_id) return;
-          events.push({ type: "tool-result", id: `m${seq}.${index}`, callId: block.tool_use_id, name: names.get(block.tool_use_id) ?? "tool",
-            output: shown(resultText(block.content)), isError: block.is_error === true, final: true });
-        });
-      }
-    }
+    events.push(submissionEvent(submission));
+    for (const { seq, data } of bySubmission.get(submission.seq) ?? []) events.push(...messageEvents(seq, data, names, shown));
   }
   const current = state.submissions.at(-1);
   if (current?.state === "running") {
@@ -90,7 +69,36 @@ export function render(state: ClaudeState, owner: ThreadAgent | null, failure: s
   return { agent: "claude-code", owner, status: status(current, failure), events };
 }
 
-function status(current: ClaudeSubmission | undefined, failure: string | null): ThreadStatus {
+export const submissionEvent = (submission: Pick<ClaudeSubmission, "seq" | "text">): ThreadEvent => ({ type: "user-message", id: `s${submission.seq}`, text: submission.text });
+
+/** The events of one stored stream-json message. `names` maps tool use ids
+ * to tool names: the message's calls are added, its results look theirs up. */
+export function messageEvents(seq: number, data: Record<string, unknown>, names: Map<string, string>, shown: <T>(value: T) => T = value => value): ThreadEvent[] {
+  if (data.parent_tool_use_id != null) return [];
+  const events: ThreadEvent[] = [];
+  const message = data.message as { content?: unknown } | undefined;
+  const blocks: Block[] = Array.isArray(message?.content) ? message.content as Block[] : [];
+  if (data.type === "assistant") {
+    blocks.forEach((block, index) => {
+      const id = `m${seq}.${index}`;
+      if (block.type === "text" && block.text) events.push({ type: "assistant-text", id, text: block.text, reasoning: false, final: true });
+      else if (block.type === "thinking" && block.thinking) events.push({ type: "assistant-text", id, text: block.thinking, reasoning: true, final: true });
+      else if (block.type === "tool_use" && block.id) {
+        names.set(block.id, block.name ?? "tool");
+        events.push({ type: "tool-call", id, callId: block.id, name: block.name ?? "tool", input: shown(block.input ?? {}), final: true });
+      }
+    });
+  } else if (data.type === "user") {
+    blocks.forEach((block, index) => {
+      if (block.type !== "tool_result" || !block.tool_use_id) return;
+      events.push({ type: "tool-result", id: `m${seq}.${index}`, callId: block.tool_use_id, name: names.get(block.tool_use_id) ?? "tool",
+        output: shown(resultText(block.content)), isError: block.is_error === true, final: true });
+    });
+  }
+  return events;
+}
+
+export function status(current: ClaudeSubmission | undefined, failure: string | null): ThreadStatus {
   if (!current) return { state: "idle", run: null, error: failure };
   if (current.state === "running") return { state: "working", run: current.requestId, error: failure };
   return { state: current.state, run: current.requestId, error: current.error ?? failure };
@@ -102,7 +110,7 @@ function resultText(content: unknown): string {
   return (content as Block[]).map(part => part.type === "text" ? part.text ?? "" : `[${part.type ?? "content"}]`).join("\n");
 }
 
-function virtualize(root: string) {
+export function virtualize(root: string) {
   const prefix = root.replace(/\/+$/, "");
   const swap = (text: string) => text.split(`${prefix}/`).join("/workspace/").split(prefix).join("/workspace");
   const walk = (value: unknown): unknown => typeof value === "string" ? swap(value)
