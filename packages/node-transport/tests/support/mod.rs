@@ -159,6 +159,12 @@ impl Served {
         let _ = self.task.await;
         self.client.close().await;
         self.server.close().await;
+        // Connection tasks may still hold the runner (and its journal lock)
+        // for a moment; the next open of the same state must find it free.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Arc::strong_count(&self.runner) > 1 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }
 
