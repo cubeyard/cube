@@ -299,7 +299,10 @@ Registry allocation counts a runner's open threads and inserts the new one in
 one `BEGIN IMMEDIATE` transaction, so concurrent requests, also from another
 process, cannot take a runner's last slot. It chooses the runner with the
 lowest share of used slots, runners with a failed machine last. A runner that
-reports no bound (before 0.7.0) has one slot. cubed keeps one client per
+reports no bound (before 0.7.0) has one slot. When a runner still refuses a
+machine (a lowered bound, its free-disk floor), a thread whose agent storage
+does not exist yet moves to another runner with room; nothing of it existed
+on the first one. cubed keeps one client per
 runner, so the threads' runner calls queue on one Iroh identity. Project deletion never owns or
 deletes a runner and remains blocked while any thread history references the
 project. Runner contact is authenticated `node.status` evidence. A failed latest

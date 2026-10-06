@@ -1,6 +1,6 @@
 // The product end to end with real thread VMs: a disposable cubed (faux
-// model, fake `claude`) on 127.0.0.1 with CUBED_STATE under /tmp, a runner
-// running as this user with state under /tmp, a cube-gateway built with
+// model, fake `claude`) on 127.0.0.1 with CUBED_STATE under $TMPDIR (/tmp), a runner
+// running as this user with state under $TMPDIR (/tmp), a cube-gateway built with
 // `test-hooks` so github.com and api.github.com reach a local HTTPS fake (with
 // `git http-backend` behind it), and a Debian genericcloud guest per thread.
 //
@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { type ChildProcess, execFileSync, fork, spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import https from "node:https";
 import path from "node:path";
 import readline from "node:readline";
@@ -22,7 +23,7 @@ import readline from "node:readline";
 const [runnerBin, image] = process.argv.slice(2).map(p => path.resolve(p));
 if (!runnerBin || !image) throw new Error("usage: test-vm-e2e.ts <cube-runner> <image.qcow2>");
 const repo = path.resolve(import.meta.dirname, "..");
-const work = fs.mkdtempSync(path.join("/tmp", "cube-e2e-"));
+const work = fs.mkdtempSync(path.join(os.tmpdir(), "cube-e2e-"));
 fs.chmodSync(work, 0o700);
 const started = Date.now();
 const log = (message: string) => console.log(`[${((Date.now() - started) / 1000).toFixed(1)}s] ${message}`);

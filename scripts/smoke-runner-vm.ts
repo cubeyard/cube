@@ -1,6 +1,6 @@
 // Runner acceptance with a real guest: the real cube-runner (protocol 3),
 // the real cube-gateway and a Debian genericcloud VM under QEMU/KVM, all
-// over Iroh loopback. No mocks; disposable state under /tmp; every process
+// over Iroh loopback. No mocks; disposable state under $TMPDIR (/tmp); every process
 // this script starts is stopped. An allow-all decision server stands in for
 // cubed's egress policy (cubed's side is the SERVER work package).
 //
@@ -11,13 +11,14 @@ import assert from "node:assert/strict";
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import http from "node:http";
 import path from "node:path";
 import readline from "node:readline";
 
 const [runnerBin, gatewayBin, image] = process.argv.slice(2).map((p) => path.resolve(p));
 if (!runnerBin || !gatewayBin || !image) throw new Error("usage: smoke-runner-vm.ts <cube-runner> <cube-gateway> <image.qcow2>");
-const work = fs.mkdtempSync(path.join("/tmp", "cube-rvm-"));
+const work = fs.mkdtempSync(path.join(os.tmpdir(), "cube-rvm-"));
 fs.chmodSync(work, 0o700);
 const run = path.join(work, "run");
 fs.mkdirSync(run, { mode: 0o700 });

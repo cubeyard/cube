@@ -42,8 +42,9 @@ in `docs/plans/` hold the reasoning and the detailed evidence.
   update feed (`docs/cubed-updates.md`).
 - Any number of runners, each with its own control key (enrollment refuses a
   shared key). Each runner hosts up to `--max-active-vms` thread VMs at once
-  (`auto` by default: what fits at the per-VM maximum, 1 to 4; cube-runner
-  0.7.0+, older runners host one). Runners:
+  (`auto` by default: what fits at the per-VM maximum, 1 to 4; a new VM
+  needs 4 GiB free disk; cube-runner 0.7.0+, older runners host one). A
+  self-update to 0.7.0 applies `auto` on its own. Runners:
   - **Linux x86-64:** `cube-runner.service`, a dedicated account in group
     `kvm`;
   - **macOS arm64:** the per-user LaunchAgent profile from

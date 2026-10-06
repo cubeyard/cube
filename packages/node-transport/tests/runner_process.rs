@@ -54,6 +54,8 @@ async fn spawn_runner(key: &Path, state: &Path) -> (Child, Value) {
             "--state",
             state.to_str().unwrap(),
         ])
+        // Test state may live on a small tmpfs.
+        .env("CUBE_RUNNER_MIN_FREE_DISK_GIB", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true)

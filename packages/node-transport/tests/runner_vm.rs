@@ -707,3 +707,30 @@ fn one_slot(fx: &Fixture, vm: &str) -> u32 {
         .and_then(|entry| entry.file_name().to_str()?.parse().ok())
         .unwrap()
 }
+
+#[tokio::test]
+async fn a_booting_vm_does_not_hold_up_other_vms() {
+    let fx = fixture();
+    let served = serve(&fx).await;
+    served.runner.set_max_active_vms(2).unwrap();
+    served.vm(allocate("t1", VM, 1, 8)).await;
+    std::fs::write(fx.bin.join("slow-qmp"), b"").unwrap();
+    // t1's QEMU takes 2 s to answer QMP; t2's allocation must not wait for it.
+    let booting = served.vm(start("t1", VM, 1, &fx.gateway, TOKEN));
+    let other = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let began = Instant::now();
+        let record = served.vm(allocate("t2", VM2, 1, 8)).await;
+        (record, began.elapsed())
+    };
+    let (started, (allocated, waited)) = tokio::join!(booting, other);
+    std::fs::remove_file(fx.bin.join("slow-qmp")).unwrap();
+    assert_eq!(started.state, VmState::Running);
+    assert_eq!(allocated.state, VmState::Allocated);
+    assert!(
+        waited < Duration::from_millis(1500),
+        "allocation waited {waited:?} behind another VM's boot"
+    );
+    served.runner.shutdown(false).await;
+    served.close().await;
+}

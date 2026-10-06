@@ -631,7 +631,7 @@ export class OptChat {
     });
     const projects = defineTool({
       name: "projects",
-      description: "The projects a thread can start in, the models it can run and how many runners are free.",
+      description: "The projects a thread can start in, the models it can run and how many thread machines are free.",
       parameters: Type.Object({}),
       replay: "safe",
       execute: async () => text(await this.options.threads.projects()),

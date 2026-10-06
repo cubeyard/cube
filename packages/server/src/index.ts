@@ -212,12 +212,13 @@ export async function createCubed(options: {
       optchatError = message;
       throw error;
     });
-  const projectView = (project: Project) => ({ ...project,
-    availableRunnerCount: registry.availableRunners().length,
-    availableSlotCount: registry.runnerSlots().free,
-    runnerCount: registry.runnerCount(),
-    runnerCapacity: registry.runnerCapacity(),
-    runners: registry.runnerStatuses(),
+  /** The global pool every project sees; read once per response. */
+  const poolView = () => {
+    const slots = registry.runnerSlots();
+    return { availableRunnerCount: slots.runners, availableSlotCount: slots.free, runnerCount: registry.runnerCount(),
+      runnerCapacity: registry.runnerCapacity(slots), runners: registry.runnerStatuses() };
+  };
+  const projectView = (project: Project, pool = poolView()) => ({ ...project, ...pool,
     threadCount: registry.listThreads().filter(thread => thread.projectId === project.id && !thread.archived).length,
     retainedThreadCount: registry.listThreads().filter(thread => thread.projectId === project.id).length });
   async function check(project: Project) {
@@ -343,7 +344,7 @@ export async function createCubed(options: {
       if (parts[0] === "api" && parts[1] === "projects") {
         const id = parts[2];
         if (parts.length > 4 || (parts[3] && !(parts[3] === "check" && method === "POST"))) return json({ error: "not found" }, 404);
-        if (!id && method === "GET") return json({ projects: registry.listProjects().map(projectView) });
+        if (!id && method === "GET") { const pool = poolView(); return json({ projects: registry.listProjects().map(project => projectView(project, pool)) }); }
         if ((!id && method === "POST") || (id && method === "PUT")) {
           const previous = id ? registry.getProject(id) : null;
           if (id && !previous) return json({ error: "project not found" }, 404);

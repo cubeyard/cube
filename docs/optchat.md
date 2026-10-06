@@ -117,8 +117,9 @@ model), `POST /api/optchat/prompt {text, requestId}`, `POST /api/optchat/stop`,
   Only a thread's latest run is observed: if two runs settle while cubed is
   down, only the second is reported. A thread whose machine fails to start
   reports that once.
-  A runner serves one thread at a time, so a spawn beyond free capacity reports
-  "no runner available" for that task.
+  Each open thread holds one of its runner's machine slots (a runner hosts up
+  to its `maxActiveVms`), so a spawn beyond the free slots reports "no free
+  thread machine" for that task.
 - **Stop** aborts a running turn and cancels the wait of every pending
   message. Those messages, and any steered one the abort withdrew before Pi
   placed it, are written to the log as unanswered user messages, as in the

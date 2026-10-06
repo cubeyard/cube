@@ -107,6 +107,10 @@ runner share nothing but the host. `run` and `runner-serve` take
 when the flag is absent. It is a process option, not part of the immutable
 installation: restart the runner to change it.
 
+The runner logs the bound and where it came from at every start
+(`runner_starting` with `maxActiveVms` and `maxActiveVmsSource` `auto` or
+`explicit`), and puts it in the ready line.
+
 `auto`, the default, counts the VMs that fit if every one uses the
 installation's per-VM maximum (`--max-vcpus`, `--max-memory-mib`), so the host
 is never oversubscribed whatever sizes cubed asks for: host memory less 2 GiB
@@ -115,9 +119,13 @@ of the two, at least 1 and at most 4. With the defaults (4 vCPUs, 8 GiB) a
 16 GiB host gets 1, a 32 GiB host with 8 cores gets 2 and a 64 GiB host with 16
 cores gets 4. cubed's default VM is 2 vCPUs and 4 GiB, so `init` with
 `--max-vcpus 2 --max-memory-mib 4096` lets `auto` count real usage instead of
-the larger default bound. Disk is not counted: each overlay grows up to
-`--max-disk-gib`, and retained disks stay until discarded, so keep free space
-for that many disks. An explicit N is the operator's decision; QEMU commits
+the larger default bound. Disk is not part of the count; instead `vm.allocate`
+refuses a new VM (`CAPACITY_EXCEEDED`, "the runner's disk has less than 4 GiB
+free") while the state filesystem has less than 4 GiB free, because a full
+disk would fail every running guest. `CUBE_RUNNER_MIN_FREE_DISK_GIB` changes
+the floor (0 turns it off). Each overlay still grows up to `--max-disk-gib`
+and retained disks stay until discarded, so size the disk for the VMs you
+expect to keep. An explicit N is the operator's decision; QEMU commits
 memory lazily, and a guest that uses all of it competes with the others.
 
 Systemd: add a drop-in instead of editing the shipped unit, then restart:
@@ -133,8 +141,10 @@ persist yet. A foreground `cube-runner run` takes the flag directly.
 
 The bound is enforced by the runner: `vm.allocate` beyond it is
 `CAPACITY_EXCEEDED`, decided under the runner's mutation lock, so two
-requests can never take the last slot. A VM holds its slot from allocation
-until it is released or retained; a stopped or interrupted VM still holds it.
+requests can never take the last slot. A start waits for QEMU's QMP
+without holding that lock, so VMs booting together do not queue behind each
+other. A VM holds its slot from allocation until it is released or retained;
+a stopped or interrupted VM still holds it.
 Lowering the bound only refuses new VMs. The ready line, `node.hello` limits
 and `node.status` report it as `maxActiveVms`.
 
@@ -143,8 +153,21 @@ machine start, and counts its open threads against it: a thread holds a slot
 on its runner from creation until its archive finishes, also while its machine
 is failed or releasing. A new thread goes to the runner with the lowest share
 of used slots, runners with a failed machine last; the count and the new
-thread are one `BEGIN IMMEDIATE` registry transaction. Runners before 0.7.0
-report 1 and keep one thread at a time, exactly as before. Draining and the
+thread are one `BEGIN IMMEDIATE` registry transaction. If the runner refuses a machine anyway (a lowered bound, the disk floor, a
+VM cubed does not know), a new thread whose agent has not opened yet moves to
+another runner with a free slot and starts there; otherwise it shows the
+reason and cubed's recovery loop tries again every 30 seconds while it holds
+its slot. Runners before 0.7.0 report 1 and keep one thread at a time,
+exactly as before.
+
+Existing runners: a self-update to 0.7.0 restarts the runner with `auto`, so a
+host with room gets more than one VM without any change, and cubed uses the
+new bound after its next runner check or machine start. Going back to an
+older cubed is safe while no runner hosts more than one open thread; with
+several, the older cubed can place a thread on a runner that already holds
+one, which the 0.7.0 runner accepts up to its bound. `cubed runners status`
+is a separate process using the runners' control keys; run it while cubed is
+quiet, as before. Draining and the
 self-updater still wait until no VM is active, so a busier runner updates less
 often; drain it to make room for an update.
 
@@ -331,7 +354,7 @@ are admission bounds, not host resource quotas.
 | State/error | Action |
 |---|---|
 | `DRAINING` | wait, or resume/restart after maintenance |
-| `CAPACITY_EXCEEDED` | `maxActiveVms` VMs are active; archive a thread, or restart the runner with a higher `--max-active-vms` |
+| `CAPACITY_EXCEEDED` | `maxActiveVms` VMs are active (archive a thread, or restart the runner with a higher `--max-active-vms`), or the message names a state disk with less than 4 GiB free (discard retained disks or free space) |
 | `CONFLICT` | the vmId exists for another thread or with another disk size, the thread already has another active VM, a start names a different mac, or the VM is in a state that cannot start |
 | `INCOMPATIBLE_PROTOCOL` | upgrade the older cubed/cube-runner component |
 | `UNSUPPORTED` | a protocol-2 method (`exec.*`, `fs.*`, `workspace.*`) reached a protocol-3 runner |
