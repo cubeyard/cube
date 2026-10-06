@@ -163,7 +163,7 @@ export class Conversations {
       const seal = preparation?.source === "template" ? (await workspace.describe()).templateSeal : undefined;
       if (seal && seal !== "ok" && preparation?.templateId) {
         log.warn("the template's seal failed; removing it", { thread: id, template: preparation.templateId, seal });
-        this.recordHooks(id, { "template-seal": { status: "failed", ms: 0, at: Date.now() } }, "seal-check", Date.now());
+        this.registry.updateThreadVm(id, { preparation: { ...preparation, sealFailure: seal } });
         await this.machines.invalidateTemplate?.(thread, preparation.templateId).catch(error => log.warn("invalidating the template failed", { thread: id, error }));
       }
       if (outcome.stale && preparation?.templateId) {

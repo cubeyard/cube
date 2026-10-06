@@ -13,6 +13,7 @@ export function machineLabel(thread: ThreadSummary): { text: string; title: stri
   const source = vm.preparation?.source === "template" ? "from template" : "fresh machine";
   const title = [
     vm.preparation?.source === "template" ? `prepared by template ${vm.preparation.templateId ?? ""}` : vm.preparation?.reason ?? "booted from the base image",
+    ...(vm.preparation?.sealFailure ? [`the template's seal failed (${vm.preparation.sealFailure}); it was removed`] : []),
     ...Object.entries(vm.hooks ?? {}).map(([name, hook]) => `${name}: ${hook.status}${hook.exitCode === undefined ? "" : ` (exit ${hook.exitCode})`}`),
     ...(failed.length ? ["logs: ~/.cache/cube/<hook>.log in the machine"] : []),
   ].join("\n");

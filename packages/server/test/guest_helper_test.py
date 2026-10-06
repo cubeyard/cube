@@ -282,6 +282,14 @@ class GuestHelperTest(unittest.TestCase):
             guest.init()
             self.assertEqual(os.listdir(os.path.join(system, "var/lib/cube/ops")), [])
             self.assertRegex(call("hello", {})[0]["templateSeal"], r"^failed: /etc/machine-id")
+            # A seal that never ran at power-off: seal() left the failure up front.
+            os.makedirs(os.path.dirname(os.path.join(system, guest.SEAL_MARKER)))
+            with open(os.path.join(system, guest.SEAL_MARKER), "w") as handle:
+                handle.write("failed: the seal did not run at power-off")
+            os.makedirs(os.path.join(system, "var/lib/cube/ops/ws-3"))
+            guest.init()
+            self.assertEqual(os.listdir(os.path.join(system, "var/lib/cube/ops")), [])
+            self.assertEqual(call("hello", {})[0]["templateSeal"], "failed: the seal did not run at power-off")
         finally:
             guest.configure(root="/")
 
