@@ -8,6 +8,9 @@ import type { ObservedThread } from "./optchat-tasks.ts";
 import { threadAgent, type Registry, type Thread } from "./registry.ts";
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
 
+/** How long a task list waits for one thread's stored state. */
+const OBSERVE_MS = 2000;
+
 export function cubeThreads(options: { registry: Registry; conversations: Conversations; catalog: () => Promise<ModelSelection[]>; runners: () => RunnersObservation }): OptThreads {
   const { registry, conversations } = options;
   const disk = (vm: Thread["vm"]) => !vm ? "no machine disk" : vm.discarded ? "machine disk discarded"
@@ -80,25 +83,28 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
     },
     async observe(ids) {
       // Read only, like history: the stored run state, never an agent opened
-      // or a machine waited for.
-      const observed = new Map<string, ObservedThread | null>();
-      for (const id of ids) {
+      // or a machine waited for. A store slower than OBSERVE_MS reads as
+      // unknown rather than holding the chat's turn.
+      const one = async (id: string): Promise<ObservedThread | null> => {
         const thread = registry.getThread(id);
-        if (!thread) { observed.set(id, null); continue; }
+        if (!thread) return null;
         const project = registry.getProject(thread.projectId)?.name ?? thread.projectId;
         let run = thread.archived ? "archived" : conversations.archivingNow(id) ? "being archived"
-          : conversations.starting(id) ? "starting" : conversations.error(id) && !conversations.agentOpen(id) ? "machine error" : null;
+          : conversations.starting(id) ? "starting" : conversations.error(id) && !conversations.agentOpen(id) ? "machine error"
+          : thread.workspaceState === "failed" ? "machine failed" : null;
         if (!run) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
           try {
-            const status = (await conversations.storedHistory(id, { limit: 1 }))?.status;
+            const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("slow")), OBSERVE_MS); });
+            const status = (await Promise.race([conversations.storedHistory(id, { limit: 1 }), late]))?.status;
             // Background agents run on only while the agent is open.
             run = !status ? "not started" : status.waiting?.length && conversations.agentOpen(id) ? "waiting on a background agent" : status.state;
-          }
-          catch { run = "unknown"; }
+          } catch { run = "unknown"; }
+          finally { clearTimeout(timer); }
         }
-        observed.set(id, { id, title: thread.title, project, state: run });
-      }
-      return observed;
+        return { id, title: thread.title, project, state: run };
+      };
+      return new Map(await Promise.all(ids.map(async id => [id, await one(id)] as const)));
     },
     async history(id, request) {
       const thread = registry.getThread(id);

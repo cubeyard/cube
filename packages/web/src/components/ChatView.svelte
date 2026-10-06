@@ -94,7 +94,6 @@
   <div class="strip-note bad" role="alert"><span class="strip-note-text">{memory.failure} — retrying</span></div>
 {/if}
 <main class="thread-workspace chat-workspace">
-  {#if modelState}<NowPanel {busy} />{/if}
   <section class="workspace-pane thread-pane" aria-label="chat">
     <section class="thread-strip" aria-label="chat controls">
       <span class="lamp {busy ? 'on-amber blink' : 'on-green'}" aria-hidden="true"></span>
@@ -141,4 +140,5 @@
       <p class="conversation-empty">{modelError ? "connect a model provider to start the chat" : "opening the chat…"}</p>
     {/if}
   </section>
+  {#if modelState}<NowPanel {busy} />{/if}
 </main>

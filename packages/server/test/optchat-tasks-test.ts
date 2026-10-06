@@ -44,7 +44,7 @@ try {
     assert.throws(() => applyTask(doc, { id: "t9", status: "done" }, "x", 0), /no task t9/);
     assert.throws(() => applyTask(doc, {}, "x", 0), /a new task needs a title/);
     assert.throws(() => applyTask(doc, { title: "  " }, "x", 0), /a task needs a title/);
-    assert.throws(() => applyTask(doc, { title: "x".repeat(LIMITS.title + 1) }, "x", 0), /keep it under/);
+    assert.throws(() => applyTask(doc, { title: "x".repeat(LIMITS.title + 1) }, "x", 0), /keep it to 100/);
     assert.throws(() => applyTask(doc, { title: "x", links: ["http://example.com"] }, "x", 0), /only https links/);
     assert.throws(() => applyTask(doc, { title: "x", links: ["not a url"] }, "x", 0), /not a URL/);
     assert.throws(() => applyTask(doc, { title: "x", threads: [ONE, TWO, "c", "d", "e"] }, "x", 0), /at most 4 threads/);
@@ -175,12 +175,13 @@ try {
 
   // cubed's side: observe reads the stored state only, and says what it cannot know.
   {
-    const threads = new Map<string, { id: string; projectId: string; title: string; archived: boolean }>([
+    const threads = new Map<string, { id: string; projectId: string; title: string; archived: boolean; workspaceState?: string }>([
       [ONE, { id: ONE, projectId: "p", title: "one", archived: false }],
       [TWO, { id: TWO, projectId: "p", title: "two", archived: true }],
       ["c", { id: "c", projectId: "p", title: "c", archived: false }],
       ["d", { id: "d", projectId: "p", title: "d", archived: false }],
       ["e", { id: "e", projectId: "p", title: "e", archived: false }],
+      ["f", { id: "f", projectId: "p", title: "f", archived: false, workspaceState: "failed" }],
     ]);
     const stored: string[] = [];
     const conversations = {
@@ -193,9 +194,9 @@ try {
     } as unknown as Conversations;
     const registry = { getThread: (id: string) => threads.get(id), getProject: () => ({ name: "cube" }) } as unknown as Registry;
     const adapter = cubeThreads({ registry, conversations, catalog: async () => [], runners: () => { throw new Error("unused"); } });
-    const seen = await adapter.observe!([ONE, TWO, "c", "d", "e", "gone"]);
+    const seen = await adapter.observe!([ONE, TWO, "c", "d", "e", "f", "gone"]);
     assert.deepEqual(Object.fromEntries([...seen].map(([id, thread]) => [id, thread?.state ?? null])),
-      { [ONE]: "working", [TWO]: "archived", c: "starting", d: "machine error", e: "waiting on a background agent", gone: null });
+      { [ONE]: "working", [TWO]: "archived", c: "starting", d: "machine error", e: "waiting on a background agent", f: "machine failed", gone: null });
     assert.deepEqual(stored, [`${ONE}:1`, "e:1"], "only a ready thread's store is read, one message");
   }
 } finally { fs.rmSync(root, { recursive: true, force: true }); }

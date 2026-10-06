@@ -256,8 +256,8 @@ on a phone) shows a small task list that OptChat keeps:
   `task` call as well.
 - **Bounds.** At most 20 open tasks (a 21st is refused until one closes).
   The 30 most recently closed are kept; the panel and the model see the 5
-  closed in the last 7 days. A title is under 100 characters, the next
-  action under 280.
+  closed in the last 7 days. A title has at most 100 characters, the next
+  action at most 280.
 - **Tools.** `task` adds a task (no id; a replayed call finds the task it
   made by its call id) or changes the fields it is given (`threads` and
   `links` replace the task's). `tasks` reads the list. Every turn also
@@ -268,10 +268,11 @@ on a phone) shows a small task list that OptChat keeps:
   decides.
 - **Intent and observation.** A status is OptChat's intent. Beside each
   linked thread the panel shows the thread's state as cubed records it when
-  the list is read (`working`, `turn ended`, `waiting on a background agent`, `failed`, `stopped`,
-  `starting`, `machine error`, `archived`, …), read like `history` from the
-  stored run state: no agent is opened, no lease taken, no machine waited
-  for. A thread's ended turn is shown as `turn ended`, not as a task done.
+  the list is read (`working`, `turn ended`, `waiting on a background
+  agent`, `failed`, `stopped`, `starting`, `machine error`, `archived`, …),
+  read like `history` from the stored run state: no agent is opened, no
+  lease taken, no machine waited for; the threads are read in parallel and
+  one slower than 2 s reads as `unknown`. A thread's ended turn is shown as `turn ended`, not as a task done.
   A link is only a link: cube does not read any PR, merge, release or
   install state, and the panel says so.
 - **Refresh.** The panel reads `GET /api/optchat/tasks` when the chat page

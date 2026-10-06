@@ -57,7 +57,7 @@ export type TaskInput = {
 const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
 function bounded(name: string, text: string, max: number): string {
   const value = oneLine(text);
-  if (value.length > max) throw new Error(`${name} is ${value.length} characters; keep it under ${max}`);
+  if (value.length > max) throw new Error(`${name} is ${value.length} characters; keep it to ${max}`);
   return value;
 }
 

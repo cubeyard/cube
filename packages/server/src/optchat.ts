@@ -247,6 +247,8 @@ const TURN = "optchat.turn";
 const NODE_ENTRY = "optchat.node";
 
 const short = (id: string) => id.slice(0, 8);
+/** A tool's text result. */
+const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
 /** A zoom result's lines start with their ids. */
 const ZOOMED = /^\d+\+\d+\|/;
 export const ZOOM_ECHO = "(the zoomed lines: a copy of earlier messages of this chat, not repeated here)";
@@ -872,7 +874,6 @@ export class OptChat {
   }
 
   private taskTools() {
-    const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
     const task = defineTool({
       name: "task",
       description: "Add or change one task of your task list, the user's \"now\". Without id: a new task (title required; status active unless given). "
@@ -881,7 +882,7 @@ export class OptChat {
         + `${TASK_LIMITS.open} open tasks, ${TASK_LIMITS.threads} threads and ${TASK_LIMITS.links} https links each.`,
       parameters: Type.Object({
         id: Type.Optional(Type.String({ description: "The task's id (t1, t2, …); leave out to add one" })),
-        title: Type.Optional(Type.String({ description: `What the work is, under ${TASK_LIMITS.title} characters` })),
+        title: Type.Optional(Type.String({ description: `What the work is, at most ${TASK_LIMITS.title} characters` })),
         status: Type.Optional(Type.Union(STATUSES.map(status => Type.Literal(status)))),
         next: Type.Optional(Type.String({ description: "The next action, or what blocks a blocked task; one line" })),
         project: Type.Optional(Type.String({ description: "The project it is in, if one" })),
@@ -914,7 +915,6 @@ export class OptChat {
   }
 
   private extension() {
-    const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
     const zoom = defineTool({
       name: "zoom",
       description: "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.",
