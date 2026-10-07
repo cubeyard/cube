@@ -642,7 +642,9 @@ def build():
 def op_install(header, body):
     """Replaces this helper (and its `cube` shim) with the one cubed ships.
     Content-addressed: the same bytes again change nothing. Commands already
-    running keep the code they started with; the journal format is shared."""
+    running keep the code they started with, but their unit's ExecStopPost
+    (`finish`) runs the new file: every helper version must keep reading and
+    writing the journal (`/var/lib/cube/ops`) in the same format."""
     expected = header.get("sha256")
     if not isinstance(expected, str) or not SHA.match(expected) or hashlib.sha256(body).hexdigest() != expected:
         raise Fail("INVALID_REQUEST", "sha256 must name the helper's content")
@@ -724,7 +726,8 @@ def registrations():
     for name in names:
         if name.endswith(".json") and SERVICE_NAME.fullmatch(name[:-5]):
             record = read_json(os.path.join(services_dir(), name))
-            if isinstance(record, dict) and record.get("name") == name[:-5]:
+            if isinstance(record, dict) and record.get("name") == name[:-5] and integer(record.get("port"), MIN_SERVICE_PORT, 65535) \
+                    and record.get("kind") in ("command", "external"):
                 found.append(record)
     return found
 

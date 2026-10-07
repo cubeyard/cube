@@ -36,7 +36,8 @@ for (const [env, message] of [[{ CUBED_PORTAL_IP: "8.8.8.8" }, /private IPv4/], 
 assert.deepEqual(["100.64.0.1", "100.127.255.1", "172.31.0.1", "127.0.0.1", "100.128.0.1", "172.32.0.1", "1.1.1.1"].map(privateIpv4),
   [true, true, true, true, false, false, false]);
 assert.deepEqual(responseHeaders(["Set-Cookie", "a=1; Domain=.sslip.io; Path=/", "Connection", "keep-alive, x-private", "X-Private", "1",
-  "Keep-Alive", "timeout=5", "Content-Type", "text/plain"]), ["Set-Cookie", "a=1; Path=/", "Content-Type", "text/plain"]);
+  "Keep-Alive", "timeout=5", "Content-Type", "text/plain", "set-cookie", "b=2; Domain =.sslip.io"]),
+  ["Set-Cookie", "a=1; Path=/", "Content-Type", "text/plain", "set-cookie", "b=2"]);
 console.log("ok: portal settings refuse public and wildcard addresses; service cookies become host-only");
 
 // A helper from before `install` gets the shipped one through ordinary
@@ -157,6 +158,8 @@ try {
   assert.doesNotMatch(echoed, /6\.6\.6\.6/);
   assert.match(echoed, /\r\ncookie: a=b\r\n/);
   assert.match(echoed, /\r\nconnection: close\r\n/);
+  // A reason phrase Node would refuse is dropped, not a crash of cubed.
+  assert.deepEqual(await get(host, "/weird").then(answer => [answer.status, answer.body]), [200, "ok"]);
   const parallel = await Promise.all(Array.from({ length: 12 }, () => get(host)));
   assert.ok(parallel.every(answer => answer.status === 200));
 

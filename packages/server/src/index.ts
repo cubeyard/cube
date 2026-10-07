@@ -526,7 +526,10 @@ export async function createCubed(options: {
         if (parts[3] === "services" && parts.length === 4 && method === "GET") {
           const running = thread.workspaceState === "available" && !conversations.archivingNow(id) && !!machines.running?.(thread);
           return json({ portal: portal.state, running,
-            services: running ? await portal.services(thread, true) : [] });
+            services: running ? await portal.services(thread, true).catch((error: unknown) => {
+              // A machine whose helper predates services (its refresh failed) or does not answer.
+              throw Object.assign(new Error(`the thread's machine did not list its services: ${error instanceof Error ? error.message : String(error)}`), { status: 502 });
+            }) : [] });
         }
         if (parts[3] === "stream" && method === "GET") return await conversations.stream(id, response);
         if (parts[3] === "stop" && method === "POST") { await conversations.stop(id); return json({ ok: true }); }
@@ -547,7 +550,7 @@ export async function createCubed(options: {
       fs.createReadStream(file).pipe(response);
     } catch (error) {
       if (response.headersSent) response.destroy();
-      else json({ error: error instanceof Error ? error.message : String(error) }, 409);
+      else json({ error: error instanceof Error ? error.message : String(error) }, (error as { status?: number }).status === 502 ? 502 : 409);
     }
   });
   const workspaceServer = http.createServer(async (request, response) => {

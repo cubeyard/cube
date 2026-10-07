@@ -1,6 +1,7 @@
 """Test only: a thread's web server for portal-test.ts, run with `cube
 service start`. GET / answers a page and a cookie with a Domain, /headers
-echoes the request head, /big streams 64 MiB, and a WebSocket upgrade is
+echoes the request head, /weird has a control character in its
+reason phrase, /big streams 64 MiB, and a WebSocket upgrade is
 answered with 101 and then echoes bytes."""
 import os
 import socket
@@ -31,6 +32,9 @@ def serve(connection):
                 if not chunk:
                     break
                 connection.sendall(chunk)
+        elif path == b"/weird":
+            # A reason phrase Node refuses to send on.
+            connection.sendall(b"HTTP/1.1 200 \x01Weird\r\ncontent-length: 2\r\n\r\nok")
         elif path == b"/big":
             connection.sendall(b"HTTP/1.1 200 OK\r\ncontent-length: %d\r\n\r\n" % (64 << 20))
             try:

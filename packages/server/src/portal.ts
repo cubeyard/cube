@@ -187,6 +187,7 @@ export class Portal {
     const thread = this.thread(match[2]!);
     if (!thread) throw unknown;
     if (thread.workspaceState !== "available" || this.options.archiving(thread.id) || !this.options.machines.running?.(thread)) {
+      this.cache.delete(thread.id);
       throw new Refusal(503, "this thread's machine is not running; open the thread in cube to start it");
     }
     let services: GuestService[];
@@ -201,6 +202,7 @@ export class Portal {
     const find = () => {
       const id = this.labels.get(label);
       const thread = id ? this.options.registry.getThread(id) : null;
+      if (thread?.archived) this.cache.delete(thread.id);
       return thread && !thread.archived ? thread : null;
     };
     const found = find();
@@ -245,7 +247,14 @@ export class Portal {
       const upstream = http.request({ method: request.method, path: request.url, headers: forwardHeaders(request, false), setHost: false,
         createConnection: () => socket });
       upstream.on("response", answer => {
-        response.writeHead(answer.statusCode ?? 502, answer.statusMessage, responseHeaders(answer.rawHeaders));
+        // The service is agent-controlled: its reason phrase is not passed on
+        // (Node refuses some), and nothing it sends may throw out of here.
+        try { response.writeHead(answer.statusCode ?? 502, responseHeaders(answer.rawHeaders)); }
+        catch (error) {
+          answer.destroy(); socket.destroy();
+          refuse(response, new Refusal(502, `service ${service.name} sent a response the portal cannot pass on: ${error instanceof Error ? error.message : String(error)}`));
+          return;
+        }
         answer.pipe(response);
         answer.on("error", () => response.destroy());
       });
@@ -333,7 +342,7 @@ export function responseHeaders(raw: string[]): string[] {
   for (let index = 0; index < raw.length; index += 2) {
     const name = raw[index]!, lower = name.toLowerCase();
     if (HOP_BY_HOP.has(lower) || named.has(lower)) continue;
-    headers.push(name, lower === "set-cookie" ? raw[index + 1]!.replace(/;\s*domain=[^;]*/gi, "") : raw[index + 1]!);
+    headers.push(name, lower === "set-cookie" ? raw[index + 1]!.replace(/;\s*domain\s*=[^;]*/gi, "") : raw[index + 1]!);
   }
   return headers;
 }
