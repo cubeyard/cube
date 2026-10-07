@@ -50,7 +50,7 @@ export function safeText(text: string, max = 4096): string {
 export const REDACTED = "[redacted]";
 export const REDACTED_KEY = "[redacted private key]";
 /** A BEGIN or END line marker of any private key armor, any case. */
-const KEY_MARKER = /(?:-+ ?|^ ?)(BEGIN|END) [A-Za-z0-9 ]*?PRIVATE KEY(?:[A-Za-z]| (?!-))*-*/gi;
+const KEY_MARKER = /(?:-+ ?|^ ?)(BEGIN|END) [A-Za-z0-9 ]{0,40}?PRIVATE KEY(?:[A-Za-z]| (?!-))*-*/gi;
 /** What the runner puts where an excerpt left bytes out: its tail may start
  * inside a key whose BEGIN line was omitted. */
 const OMITTED = " bytes omitted ...]";
@@ -68,10 +68,14 @@ function redactKeys(text: string): string {
     if (start < copied) continue;
     if (begin) {
       out += text.slice(copied, start) + REDACTED_KEY;
-      const close = markers.findIndex((m, i) => i >= next && !m.begin);
-      if (close < 0) { copied = text.length; break; }
-      copied = markers[close]!.end;
-      next = close + 1;
+      // Its END, if it is in this part of the excerpt: an END past an
+      // omission is another key's (or this one's cut tail).
+      const omitted = text.indexOf(OMITTED, end);
+      const limit = omitted < 0 ? text.length : Math.max(end, text.lastIndexOf("\n", omitted));
+      let close = next;
+      while (close < markers.length && markers[close]!.begin) close++;
+      if (close < markers.length && markers[close]!.start < limit) { copied = markers[close]!.end; next = close + 1; }
+      else copied = limit;
     } else {
       const omitted = text.slice(copied, start).lastIndexOf(OMITTED);
       out += text.slice(copied, omitted < 0 ? copied : copied + omitted + OMITTED.length) + REDACTED_KEY;
@@ -81,27 +85,56 @@ function redactKeys(text: string): string {
   return redactKeyBodies(out + text.slice(copied));
 }
 
+/** Between two key lines: one line break (as it is or escaped), then a
+ * prefix like the previous key line's (`[   12.5] cloud-init[1]: `; digits
+ * may differ), if it had one. Mirrors the runner's `next_key_line`. */
+function nextKeyLine(gap: string, prefix: string): boolean {
+  const normalized = gap.replace(/\\x0[da]/gi, "\n").replace(/\\r/g, "").replace(/\\n/g, "\n").replace(/^[ \t"',]*/, "");
+  if (!normalized.startsWith("\n")) return false;
+  const rest = normalized.replace(/^\n\n?/, "");
+  const alike = rest.length === prefix.length && [...rest].every((char, k) => char === prefix[k] || (/\d/.test(char) && /\d/.test(prefix[k]!)));
+  return alike || /^[ \t"',]*$/.test(rest);
+}
+
+/** What comes before `at` on its line (after a newline or an escaped CR),
+ * if that is at most 64 characters. */
+function linePrefix(text: string, at: number): string {
+  const window = text.slice(Math.max(0, at - 64), at);
+  const line = Math.max(window.lastIndexOf("\n") + 1, (window.toLowerCase().lastIndexOf("\\x0d") + 1 || -3) + 3);
+  return line > 0 ? window.slice(line) : "";
+}
+
 /** Key bodies whose BEGIN and END lines were both cut off: base64 runs of
  * 60+ characters in mixed case with digits (PEM and OpenSSH key lines are 64
- * and 70), the shorter runs that continue them on lines of their own, and
- * anything with the OpenSSH key magic. A public key after its type
- * (`ssh-ed25519 AAAA…`) stays. Mirrors the runner's `redact_key_bodies`. */
+ * and 70), the lines that continue them (the last one shorter), and anything
+ * with the OpenSSH key magic. A public key after its type (`ssh-ed25519
+ * AAAA…`) stays. Linear in the text's length. Mirrors the runner's
+ * `redact_key_bodies`. */
 function redactKeyBodies(text: string): string {
-  let previous = -1;
-  return text.replace(/[A-Za-z0-9+/=]+/g, (run, at: number) => {
-    const end = at + run.length;
+  let out = "";
+  let copied = 0;
+  let previous: { end: number; prefix: string } | null = null;
+  for (const match of text.matchAll(/[A-Za-z0-9+/=]+/g)) {
+    const at = match.index;
+    const end = at + match[0].length;
+    // A run right after an escape (`\x0d`, `\n`) starts after it.
+    const escape = text[at - 1] === "\\" ? /^(?:x[0-9a-fA-F]{2}|[nrt])/.exec(match[0])?.[0].length ?? 0 : 0;
+    const start = at + escape;
+    const run = text.slice(start, end);
     const long = run.length >= 60 && /[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run);
-    const word = text.slice(0, at).replace(/ +$/, "").split(/[ \n"']/).pop()!;
+    const word = text.slice(Math.max(0, at - 40), at).trimEnd().split(/[ \n"']/).pop()!;
     const isPublic = /^(?:ssh-|ecdsa-|sk-ssh-|sk-ecdsa-)/.test(word);
-    const gap = text.slice(previous, at).replace(/\\x0d|\\x0a|\\r|\\n/g, "");
-    const continued = run.length >= 4 && previous >= 0 && /^(?:$|[\n\\"'])/.test(text.slice(end, end + 1))
-      && gap.length <= 4 && /^[\s"',]*$/.test(gap);
+    // A continuation is a whole line of its own, right after a key line.
+    const continued = run.length >= 4 && /^(?:$|[\n\\"'])/.test(text.slice(end, end + 1)) && previous !== null
+      && at - previous.end <= 96 && nextKeyLine(text.slice(previous.end, start), previous.prefix);
     if ((long && !isPublic) || continued || run.includes("b3BlbnNzaC1rZXktdjE")) {
-      previous = end;
-      return REDACTED_KEY;
+      out += text.slice(copied, start) + REDACTED_KEY;
+      copied = end;
+      // A key's lines are all full but its last: a shorter one ends it.
+      previous = run.length >= 60 ? { end, prefix: linePrefix(text, start) } : null;
     }
-    return run;
-  });
+  }
+  return out + text.slice(copied);
 }
 
 /** Private keys (see `redactKeys`), well-known token formats, bearer tokens

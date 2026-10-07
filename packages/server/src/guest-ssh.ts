@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { clean } from "./vm-diagnostics.ts";
 
 export type GuestOp = "hello" | "exec" | "get" | "cancel" | "read" | "write" | "stat" | "services" | "install" | "portal";
 export interface GuestAnswer { header: Record<string, unknown>; body: Buffer }
@@ -78,7 +79,9 @@ export function runGuestProcess(argv: readonly string[], request: Buffer, option
         resolve(answer);
       } catch (cause) {
         const status = exitCode === 255 ? "ssh could not reach the guest" : `exit status ${exitCode}`;
-        reject(new GuestTransportError(`${status}${stderr.trim() ? `: ${stderr.trim().split("\n").slice(-2).join("; ")}` : ""}`, { cause }));
+        // The guest writes this stderr: escaped and redacted like its console.
+        const said = clean(stderr).trim().split("\n").slice(-2).join("; ").slice(0, 512);
+        reject(new GuestTransportError(`${status}${said ? `: ${said}` : ""}`, { cause }));
       }
     };
     const kill = () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); };

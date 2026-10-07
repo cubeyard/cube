@@ -189,9 +189,13 @@ fn key_markers(text: &str) -> Vec<(usize, usize, bool)> {
             at += 1;
             continue;
         }
-        // The key type between BEGIN/END and PRIVATE KEY: letters, digits, spaces.
+        // The key type between BEGIN/END and PRIVATE KEY: letters, digits,
+        // spaces, and never longer than an armor's (bounded: linear time).
         let mut start = at;
-        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b' ') {
+        while start > 0
+            && at - start < 48
+            && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b' ')
+        {
             start -= 1;
         }
         let words = &text[start..at];
@@ -224,61 +228,99 @@ fn base64_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='
 }
 
-/// Only line breaks, as they are or escaped, between two base64 runs.
-fn line_break_gap(gap: &str) -> bool {
+/// Between two key lines: one line break (as it is or escaped), then a
+/// prefix like the previous key line's (`[   12.5] cloud-init[1]: `; digits
+/// may differ), if it had one.
+fn next_key_line(gap: &str, prefix: &str) -> bool {
     let gap = gap
-        .replace("\\x0d", "")
-        .replace("\\x0a", "")
+        .replace("\\x0d", "\n")
+        .replace("\\x0a", "\n")
         .replace("\\r", "")
-        .replace("\\n", "");
-    gap.len() <= 4
-        && gap
+        .replace("\\n", "\n");
+    let rest = gap.trim_start_matches([' ', '\t', '"', '\'', ',']);
+    let Some(rest) = rest.strip_prefix('\n') else {
+        return false;
+    };
+    let rest = rest.strip_prefix('\n').unwrap_or(rest);
+    let alike = rest.len() == prefix.len()
+        && rest
             .bytes()
-            .all(|b| b.is_ascii_whitespace() || b == b'"' || b == b'\'' || b == b',')
+            .zip(prefix.bytes())
+            .all(|(a, b)| a == b || (a.is_ascii_digit() && b.is_ascii_digit()));
+    alike || rest.trim_matches([' ', '\t', '"', '\'', ',']).is_empty()
+}
+
+/// What comes before `at` on its line (after a newline or an escaped CR),
+/// if that is at most 64 bytes.
+fn line_prefix(text: &str, at: usize) -> &str {
+    let bytes = text.as_bytes();
+    let from = at.saturating_sub(64);
+    (from..at)
+        .rev()
+        .find_map(|k| {
+            (bytes[k] == b'\n').then_some(k + 1).or_else(|| {
+                (k >= 3 && bytes[k - 3..=k].eq_ignore_ascii_case(b"\\x0d")).then_some(k + 1)
+            })
+        })
+        .map_or("", |line| &text[line..at])
 }
 
 /// Key bodies whose BEGIN and END lines were both cut off: base64 runs of
 /// 60+ characters in mixed case with digits (PEM and OpenSSH key lines are
-/// 64 and 70), the shorter runs that continue them on the next lines, and
+/// 64 and 70), the lines that continue them (the last one shorter), and
 /// anything with the OpenSSH key magic. A public key after its type
-/// (`ssh-ed25519 AAAA…`) stays.
+/// (`ssh-ed25519 AAAA…`) stays. Linear in the text's length.
 fn redact_key_bodies(text: &str) -> String {
     const OPENSSH_MAGIC: &str = "b3BlbnNzaC1rZXktdjE";
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let (mut i, mut copied) = (0, 0);
-    // Where the last redacted run ended.
-    let mut previous: Option<usize> = None;
+    // Where the last key line ended, and what came before it on its line.
+    let mut previous: Option<(usize, &str)> = None;
     while i < bytes.len() {
         if !base64_byte(bytes[i]) || (i > 0 && base64_byte(bytes[i - 1])) {
             i += 1;
             continue;
         }
         let end = i + bytes[i..].iter().take_while(|&&b| base64_byte(b)).count();
-        let run = &text[i..end];
+        // A run right after an escape (`\x0d`, `\n`) starts after it.
+        let mut start = i;
+        if i > 0 && bytes[i - 1] == b'\\' {
+            if bytes[i] == b'x'
+                && end - i >= 3
+                && bytes[i + 1..i + 3].iter().all(u8::is_ascii_hexdigit)
+            {
+                start += 3;
+            } else if matches!(bytes[i], b'n' | b'r' | b't') {
+                start += 1;
+            }
+        }
+        let run = &text[start..end];
         let long = run.len() >= 60
             && run.bytes().any(|b| b.is_ascii_uppercase())
             && run.bytes().any(|b| b.is_ascii_lowercase())
             && run.bytes().any(|b| b.is_ascii_digit());
-        let public = text[..i]
-            .trim_end_matches(' ')
-            .rsplit([' ', '\n', '"', '\''])
-            .next()
-            .is_some_and(|word| {
-                word.starts_with("ssh-")
-                    || word.starts_with("ecdsa-")
-                    || word.starts_with("sk-ssh-")
-                    || word.starts_with("sk-ecdsa-")
-            });
-        // A continuation is a whole line of its own.
+        let before = &bytes[i.saturating_sub(40)..i];
+        let word = before.trim_ascii_end();
+        let word = &word[word
+            .iter()
+            .rposition(|b| matches!(b, b' ' | b'\n' | b'"' | b'\''))
+            .map_or(0, |n| n + 1)..];
+        let public = [&b"ssh-"[..], b"ecdsa-", b"sk-ssh-", b"sk-ecdsa-"]
+            .iter()
+            .any(|kind| word.starts_with(kind));
+        // A continuation is a whole line of its own, right after a key line.
         let line_ends = matches!(bytes.get(end), None | Some(b'\n' | b'\\' | b'"' | b'\''));
-        let continued =
-            run.len() >= 4 && line_ends && previous.is_some_and(|p| line_break_gap(&text[p..i]));
+        let continued = run.len() >= 4
+            && line_ends
+            && previous
+                .is_some_and(|(p, prefix)| i - p <= 96 && next_key_line(&text[p..start], prefix));
         if (long && !public) || continued || run.contains(OPENSSH_MAGIC) {
-            out.push_str(&text[copied..i]);
+            out.push_str(&text[copied..start]);
             out.push_str(REDACTED_KEY);
             copied = end;
-            previous = Some(end);
+            // A key's lines are all full but its last: a shorter one ends it.
+            previous = (run.len() >= 60).then(|| (end, line_prefix(text, start)));
         }
         i = end;
     }
@@ -304,15 +346,19 @@ fn redact_keys(text: &str) -> String {
         if begin {
             out.push_str(&text[copied..start]);
             out.push_str(REDACTED_KEY);
+            // Its END, if it is in this part of the excerpt: an END past an
+            // omission is another key's (or this one's cut tail).
+            let limit = text[end..].find(OMITTED).map_or(text.len(), |n| {
+                text[..end + n]
+                    .rfind('\n')
+                    .map_or(end, |line| line.max(end))
+            });
             match markers[next..].iter().position(|m| !m.2) {
-                Some(close) => {
+                Some(close) if markers[next + close].0 < limit => {
                     copied = markers[next + close].1;
                     next += close + 1;
                 }
-                None => {
-                    copied = text.len();
-                    break;
-                }
+                _ => copied = limit,
             }
         } else {
             let from = text[floor..start]
@@ -766,6 +812,64 @@ mod tests {
             let once = redact(text);
             assert_eq!(redact(&once), once, "idempotent");
         }
+    }
+
+    #[test]
+    fn key_redaction_is_bounded() {
+        let lines = body(6);
+        // A key whose END fell into the omitted middle: the tail stays.
+        let text = format!(
+            "boot\n-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n[... 5000 bytes omitted ...]\n{}\nreached login\n",
+            lines[..2].join("\n"),
+            lines[4..].join("\n")
+        );
+        let redacted = redact(&text);
+        assert_no_body(&redacted, &lines);
+        assert!(
+            redacted.contains("omitted ...]") && redacted.contains("reached login"),
+            "{redacted}"
+        );
+        // Prefixed lines with changing timestamps, cut at both ends; the
+        // short last line goes too, and so does one after an escaped CR.
+        let stamped: Vec<String> = (0..4)
+            .map(|n| format!("[   12.5{n}] cloud-init[600]: {}", lines[n]))
+            .collect();
+        let text = format!(
+            "{}\n[   12.59] cloud-init[600]: ShortTail0Ab9==\n[   12.60] ok: done",
+            stamped.join("\n")
+        );
+        let redacted = redact(&text);
+        assert_no_body(&redacted, &lines[..4]);
+        assert!(!redacted.contains("ShortTail0Ab9"), "{redacted}");
+        assert!(redacted.ends_with("ok: done"), "{redacted}");
+        let (cr, _) = safe_text(
+            format!("{}\r{}\rShortTail0Ab9==\rafter it", lines[0], lines[1]).as_bytes(),
+            4096,
+        );
+        assert!(!redact(&cr).contains("ShortTail0Ab9"), "{cr}");
+        let (prefixed_cut, _) = clean(text.as_bytes(), 120);
+        assert_no_body(&prefixed_cut, &lines[..1]);
+        // A key's lines end with its short last one: later lines stay.
+        let redacted = redact(&format!(
+            "{}\n{}\nlast0Ab9\ndone\nStarting",
+            lines[0], lines[1]
+        ));
+        assert!(redacted.ends_with("\ndone\nStarting"), "{redacted}");
+        // Linear time on a large, hostile console.
+        let hostile = format!(
+            "{}{}{}",
+            "[    1.234567] usb 1-1: new device found, idVendor=1d6b\n".repeat(4000),
+            "a".repeat(64 * 1024),
+            " -PRIVATE KEY".repeat(10_000)
+        );
+        let started = std::time::Instant::now();
+        let _ = redact(&hostile);
+        let _ = redact(&"ab cd ".repeat(40_000));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

@@ -106,6 +106,23 @@ try {
       assert.equal(redact(kept), kept);
     }
     for (const text of [CUT_KEY_CONSOLE, oneLine, KEY]) assert.equal(redact(redact(text)), redact(text), "idempotent");
+    // Bounded: an END past an omission does not swallow the tail; prefixed
+    // and CR-escaped short last lines; a key's lines end at its short one.
+    redacted = redact(`boot\n-----BEGIN OPENSSH PRIVATE KEY-----\n${BODY.slice(0, 2).join("\n")}\n[... 5000 bytes omitted ...]\n${BODY.slice(4).join("\n")}\nreached login\n`);
+    assertNoBody(redacted);
+    assert.ok(redacted.includes("omitted ...]") && redacted.includes("reached login"), redacted);
+    const stamped = BODY.slice(0, 4).map((line, n) => `[   12.5${n}] cloud-init[600]: ${line}`).join("\n");
+    redacted = redact(`${stamped}\n[   12.59] cloud-init[600]: ShortTail0Ab9==\n[   12.60] ok: done`);
+    assertNoBody(redacted, BODY.slice(0, 4));
+    assert.ok(!redacted.includes("ShortTail0Ab9") && redacted.endsWith("ok: done"), redacted);
+    assert.ok(!redact(safeText(`${BODY[0]}\r${BODY[1]}\rShortTail0Ab9==\rafter it`)).includes("ShortTail0Ab9"));
+    assertNoBody(clean(`${stamped}\n[   12.59] cloud-init[600]: ShortTail0Ab9==`, 120), BODY.slice(0, 1));
+    assert.ok(redact(`${BODY[0]}\n${BODY[1]}\nlast0Ab9\ndone\nStarting`).endsWith("\ndone\nStarting"));
+    const started = Date.now();
+    redact(`${"[    1.234567] usb 1-1: new device found, idVendor=1d6b\n".repeat(4000)}${"a".repeat(64 * 1024)}${" -PRIVATE KEY".repeat(10_000)}`);
+    redact("ab cd ".repeat(40_000));
+    redact("-----BEGIN ".repeat(20_000));
+    assert.ok(Date.now() - started < 2000, `redaction took ${Date.now() - started} ms`);
     console.log("ok: private keys are redacted when cut at either end, escaped, on one line or in other armors");
   }
 
