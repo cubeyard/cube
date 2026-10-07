@@ -1,6 +1,7 @@
 # System review, 2026-10-07 (show-me format)
 
 Reviewed: `origin/main` at 2204d7c1 (after #108), plus the urgent fix in #109.
+Line references are at 2204d7c1 unless they cite #109 (1d3289b4).
 Method: read-only code reading, unit/integration tests with the fake QEMU,
 throwaway reproductions under `/tmp`. No VM launched, no runner or cubed
 contacted, no live log read, no key retrieved. Format follows HumanLayer's
@@ -11,7 +12,7 @@ Evidence labels used throughout:
 
 | label | meaning |
 |---|---|
-| **REPRODUCED** | a test or script in this review shows it |
+| **REPRODUCED** | a test in this repo shows it, or a throwaway script during the review did (said where; such scripts are not committed) |
 | **OBSERVED** | read in the code at the cited line; not executed |
 | **INFERRED** | plausible from the code, not shown; needs real evidence |
 
@@ -83,7 +84,8 @@ OptChat tool "diagnose"                    optchat.ts:1267
       clean(bundle) -> redact                                  <- same flaw as leak 1
     formatDiagnostics: last 40 console lines -> tool result -> model provider + transcript
 ThreadVms.waitReady "stopped while booting": last 3 RAW console lines   vm.ts:785 (before #109)
-  -> workspaceError, logs, UI, OptChat thread summaries (as a user-role message)
+  -> workspaceError, logs, UI; OptChat tool results (optchat-threads.ts:120,130,161)
+     and start-failure reports as user-role messages (optchat.ts:954)
 ```
 
 ### Root cause in the redactor (REPRODUCED on synthetic input)
@@ -108,7 +110,7 @@ was deliberately not read). Note for whoever triages: cloud-init also prints
 user confirmed private material, so the keys are treated as compromised either
 way.
 
-### Fix in #109 (merged as 1d3289b4 after green CI and independent review)
+### Fix in #109 (merged as 1d3289b4 after green CI and an independent model review)
 
 ```diff
  redact(text)
@@ -121,15 +123,19 @@ way.
 +        public keys after "ssh-*"/"ecdsa-*", hex digests, fingerprints stay
  runner vm.inspect:     console tail now clean()ed            runner.rs:inspect
  runner qemu exit msg:  log tail now clean()ed                runner.rs (reaper)
- cubed waitReady error: clean(consoleTail), last 3 lines, 512 chars  vm.ts:785
- guest-ssh error:       clean(helper stderr), last 2 lines, 512 chars guest-ssh.ts:81
+ cubed waitReady error: clean(consoleTail), last 3 lines, 512 chars  vm.ts:786-787
+ guest-ssh error:       clean(helper stderr), last 2 lines, 512 chars guest-ssh.ts:83-84
 ```
 
-An independent review (Fable) took three rounds. Round 1 asked for changes,
-all fixed in 372f6914, each with a test:
+An independent review (Fable) took three rounds. They are recorded in #109's
+description and this document, not as GitHub reviews. Round 1 asked for
+changes, all fixed in 372f6914, each with a test:
 
 - **cubed's key-body pass was O(n²).** A 256 KiB console blocked the event
   loop for about 58 s, and a hostile input for 187 s. It now runs in 61–85 ms.
+  (All timings in this section were measured in throwaway scripts during the
+  review, not committed. The repo tests run 256 KiB inputs but assert only a
+  loose bound.)
 - **A BEGIN whose END fell in the omitted middle swallowed the whole tail.**
   Redaction now stops at the omission marker.
 - **A key's short last line leaked** after timestamp or cloud-init prefixes or
@@ -161,8 +167,8 @@ encoded. Redaction catches accidents. It is not a boundary.
 |---|---|---|
 | 1 | Deploy a cubed that includes #109 before anyone runs `diagnose` again | stops the chat path for old and new runners alike |
 | 2 | Treat the host keys of threads 0f4ab4a6 (Mac) and 73fe9c5a (Linux) as compromised | they were sent to the model provider as tool output and stored in OptChat's transcript |
-| 3 | Find and scrub the copies: OptChat session store and transcript for those tool results; any cubed journal lines that carry tool results (INFERRED: not verified that tool results are logged) | the bytes persist after the fix |
-| 4 | Rotate: no in-place rotation exists. The runner fixes the seed at first start and cloud-init applies `ssh_keys` once per instance id. The options are (a) discard and re-provision those machines (the workspace is kept per the retained-disk rules), or (b) add a helper operation `cube-guest rotate-host-key` plus a `known_hosts` update in cubed | the key pins the guest's identity to cubed |
+| 3 | Find and scrub the copies: OptChat session store and transcript for those tool results; any cubed journal lines that carry tool results (grep found no logging of tool results in `optchat.ts` or `durable-agent.ts`; not exhaustively verified) | the bytes persist after the fix |
+| 4 | Rotate: no in-place rotation exists. The runner fixes the seed at first start and cloud-init applies `ssh_keys` once per instance id (INFERRED from cloud-init's per-instance ssh module; not tested here). The options are (a) discard and re-provision those machines (the workspace is kept per the retained-disk rules), or (b) add a helper operation `cube-guest rotate-host-key` plus a `known_hosts` update in cubed | the key pins the guest's identity to cubed |
 | 5 | Assess the exposure: using the key means intercepting cubed→guest SSH, which runs over the gateway LAN inside the runner/cubed path (INFERRED: low exploitability). Any party with transcript access holds it | sets the urgency for #4 |
 | 6 | Release the runner with #109 | `vm.inspect` raw tails and the bounded excerpts at the source |
 
@@ -185,24 +191,27 @@ sequenceDiagram
   Note over Q,V: firmware → GRUB → kernel → cloud-init (guest frames dropped until the link is up)
   V->>G: DHCP
   loop waitReady (vm.ts:756), 2 s delay, vmInspect every 15 s
-    C->>V: ssh hello (dial timeout 10 s)
+    C->>V: ssh hello (call timeout 45 s vm.ts:764; gateway dial 10 s control.rs:41)
   end
   V-->>C: ready = boot-finished + initialized + git/gh/curl
 ```
 
 ### Mac ~40 s vs Linux ~10 s, QEMU to ready (unexplained; not conflated)
 
-The current 0f4ab4a6 boot is healthy but slow. Candidates, none proven:
+The timings and "currently healthy" are as reported by the operator and
+OptChat. This review read no live log or timeline (INFERRED input). Candidates,
+none proven:
 
 | candidate | label | how to tell from existing evidence |
 |---|---|---|
 | link attaches after vmStart answers; early DHCP frames dropped → guest DHCP backoff (1,2,4,8,16 s) | INFERRED | runner event "gateway connected" vs "first frame from the guest" vs the dropped-frame count (`frames`) |
-| hello poll granularity ~12 s before a lease (10 s dial + 2 s delay) | OBSERVED (code) | cubed "guest not ready" events |
+| hello poll granularity ~12 s before a lease: 10 s gateway dial timeout (control.rs:41) + 2 s delay (vm.ts:788); assumes the dial fails at 10 s before a lease | INFERRED | cubed "guest not ready" events |
 | EDK2 `-bios` with no varstore (vm.rs:137): boot entries rebuilt each boot, possible fallback reset | INFERRED | repeated firmware banners / `fallback:` in the console |
 | GRUB timeout on arm64 EFI | INFERRED | console |
 | per-boot package retry sleeps 10–60 s if git/gh/curl missing | OBSERVED (code) | only if packages are missing; the guest journal |
 
-The historical d63a21db HVF/firmware stall (recovered by a same-disk QMP
+The historical HVF/firmware stall of machine/thread d63a21db (an id from the
+operator's account, not a commit in this repo) (recovered by a same-disk QMP
 restart) is a **separate** event with unknown cause. Evidence missing for next
 time (OBSERVED): no timestamps on console lines; `launch.json` replaced on every
 start (runner.rs:1223); only one `console.prev.log` (overwritten); one CPU
@@ -218,9 +227,9 @@ no record of which recovery was used.
 | # | defect | label | where | minimal fix |
 |---|---|---|---|---|
 | W1 | "save for later" classified *deferred*, then refused | OBSERVED | prompt `optchat-wishes.ts:138`, refusal `:214`; test pins it `test/optchat-wishes-test.ts:70,80` | add kind `saved` ("keep/save/remember for later") and accept it alongside `wish` |
-| W2 | failed or mismatched spawn marks wish started | REPRODUCED (subagent `/tmp` script) | `handOffResult` takes the first echo within 4 messages `:74-77`; `entryMessages` drops `toolCallId` `optchat.ts:304,311`; the spawn regex matches *any* started line `:81` | match results by tool call id; for a multi-task spawn, check that task's own result line |
+| W2 | failed or mismatched spawn marks wish started | REPRODUCED in a throwaway script, not committed; no repo test | `handOffResult` takes the first echo within 4 messages `:74-77`; `entryMessages` drops `toolCallId` `optchat.ts:304,311`; the spawn regex matches *any* started line `:81` | match results by tool call id; for a multi-task spawn, check that task's own result line |
 | W3 | open wishes panel never refreshes after delayed extraction | OBSERVED | `ChatThreads.svelte:116` interval calls only `load()`; the finder runs ≥3 min after quiet (`optchat.ts:46`) | track `wishesOpen`; poll `loadWishes` while open and "catching up"; in-flight guard |
-| W4 | truncated reply (`stopReason: "length"`) lost; next chunk waits 15 min | REPRODUCED (lost) / OBSERVED (stall) | `replyText` `:267` treats length as success; parse fails → `WishAnswerError` → `through` skips the chunk (`optchat.ts` ~1109); `doc.error` makes the spacing `wishRetryMs` (~1084) | throw a truncation error; retry the same `from` with half the chunk; keep the 15 min spacing for provider errors only |
+| W4 | truncated reply (`stopReason: "length"`) lost; next chunk waits 15 min | REPRODUCED (lost) in a throwaway script, not committed; no repo test / OBSERVED (stall) | `replyText` `:267` treats length as success; parse fails → `WishAnswerError` → `through` skips the chunk (`optchat.ts` ~1109); `doc.error` makes the spacing `wishRetryMs` (~1084) | throw a truncation error; retry the same `from` with half the chunk; keep the 15 min spacing for provider errors only |
 
 Accounting of wish-finder calls is correct (counted before parsing, source
 `optchat-wishes`). OBSERVED.
@@ -231,7 +240,7 @@ Accounting of wish-finder calls is correct (counted before parsing, source
 |---|---|---|---|---|---|
 | L1 | `Pumps::close` relies on Drop while `serve_inner` holds its own `Arc`: the gateway link stays up after stop/exit | med | OBSERVED | `pump.rs:177`, `:292-305` | clear `current` and abort the reader in `close` |
 | L2 | `booted` is taken from the state *before* vmStart; a QEMU that died in between gets the 2 min re-attach wait and skips resume hooks | med | OBSERVED | `vm.ts:478`, `:499` | derive it from `startedAt` in the vmStart answer |
-| L3 | a hung guest under a live QEMU is re-attached forever, never power-cycled | med | OBSERVED | recovery loop `index.ts:598-613`, re-attach `vm.ts` | after a failed re-attach with zero guest frames, stop+start once and record it |
+| L3 | a hung guest under a live QEMU is re-attached forever, never power-cycled | med | OBSERVED | re-attach without escalation `vm.ts:259-268`; 30 s boot loop `index.ts:598-613` | after a failed re-attach with zero guest frames, stop+start once and record it |
 | L4 | stop while QMP isn't up still waits the full 30 s grace | low | OBSERVED | `runner.rs` stop_vm | skip the grace when power-down couldn't be sent |
 | L5 | `discard` takes no `ops` lock | low | OBSERVED | `runner.rs` discard | take `ops` as `release` does |
 | L6 | the late-QMP kill (f312f9c4) and epoch fencing in #102 are correct | — | OBSERVED | `runner.rs` kill_pid | none |
@@ -241,7 +250,7 @@ Accounting of wish-finder calls is correct (counted before parsing, source
 | # | finding | sev | label | where | minimal fix |
 |---|---|---|---|---|---|
 | S1 | raw console in "stopped while booting" reached `workspaceError`, logs, UI and OptChat | high | OBSERVED | `vm.ts:785` | **fixed in #109** |
-| S2 | thread errors and reports reach OptChat's model as user-role messages: guest-controlled text in a tool-bearing model's input | med | OBSERVED | `optchat-threads.ts:120,130,161`, `optchat.ts:953` | send as marked untrusted notices, not user turns |
+| S2 | thread errors reach OptChat's model as tool results (`optchat-threads.ts:120,130,161`) and, for start-failure reports, as user-role messages (`optchat.ts:954`): guest-controlled text in a tool-bearing model's input | med | OBSERVED | `optchat-threads.ts:120,130,161`, `optchat.ts:954` | send as marked untrusted notices, not user turns |
 | S3 | `log.ts` doesn't redact; every `error` field is logged verbatim | low | OBSERVED | `log.ts` formatLine | apply `redact` to string/Error values |
 | S4 | template seal output (200 chars) copied raw into an error | low | OBSERVED | `vm.ts:656` | `clean()` |
 | S5 | guest helper stderr copied raw into `GuestTransportError` (→ workspaceError, OptChat) | low | OBSERVED | `guest-ssh.ts:81` | **fixed in #109** |
@@ -256,7 +265,7 @@ Accounting of wish-finder calls is correct (counted before parsing, source
 | T1 | guest command output keeps the head only; errors at the end of long output are lost | med | OBSERVED | `cube-guest.py:1236-1238` |
 | T2 | the mod's Read caps lines, not bytes (a minified one-line file goes in whole) | med | OBSERVED | `claude-mod/hooks/tools.ts:126-131` |
 | T3 | a transport failure mid-command leaves the guest command running, so the model may start it twice | med | OBSERVED | `tools.ts:115`, `durable-agent.ts:164` |
-| C1 | Claude Code resume usage can undercount (self-documented); aborted Pi compaction not counted; usage commit errors swallowed | low | OBSERVED | `usage.ts:224-238`, `optchat.ts:701,1128` |
+| C1 | Claude Code resume usage can undercount (self-documented); an aborted OptChat compactor reply not counted (`optchat-compactor.ts:88` throws before `onReply` at `:142`); usage commit errors swallowed | low | OBSERVED | `usage.ts:224-238`, `optchat.ts:701,1128` |
 | Q1 | CI runs no real VM (no KVM image) and no macOS VM; claude-mod isn't typechecked; no Svelte component tests | — | OBSERVED | `.github/workflows`, `tsconfig.json` |
 | Q2 | On #109's first push, all three `runner_diagnose` tests failed on macOS CI with `OUTCOME_UNKNOWN` at their first RPCs (~5 s). Two of them are untouched by the change, and the same tests pass on Linux CI and locally. Possibly a flaky macOS CI environment (INFERRED); recheck if it recurs | — | OBSERVED | CI run 37669489072 |
 
