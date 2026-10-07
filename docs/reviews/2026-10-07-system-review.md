@@ -265,7 +265,7 @@ Accounting of wish-finder calls is correct (counted before parsing, source
 | T1 | guest command output keeps the head only; errors at the end of long output are lost | med | OBSERVED | `cube-guest.py:1236-1238` |
 | T2 | the mod's Read caps lines, not bytes (a minified one-line file goes in whole) | med | OBSERVED | `claude-mod/hooks/tools.ts:126-131` |
 | T3 | a transport failure mid-command leaves the guest command running, so the model may start it twice | med | OBSERVED | `tools.ts:115`, `durable-agent.ts:164` |
-| C1 | Claude Code resume usage can undercount (self-documented); an aborted OptChat compactor reply not counted (`optchat-compactor.ts:88` throws before `onReply` at `:142`); usage commit errors swallowed | low | OBSERVED | `usage.ts:224-238`, `optchat.ts:701,1128` |
+| C1 | Claude Code resume usage can undercount (self-documented); usage commit errors swallowed | low | OBSERVED | `usage.ts:224-238`, `optchat.ts:701,1128` |
 | Q1 | CI runs no real VM (no KVM image) and no macOS VM; claude-mod isn't typechecked; no Svelte component tests | — | OBSERVED | `.github/workflows`, `tsconfig.json` |
 | Q2 | On #109's first push, all three `runner_diagnose` tests failed on macOS CI with `OUTCOME_UNKNOWN` at their first RPCs (~5 s). Two of them are untouched by the change, and the same tests pass on Linux CI and locally. Possibly a flaky macOS CI environment (INFERRED); recheck if it recurs | — | OBSERVED | CI run 37669489072 |
 
