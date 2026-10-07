@@ -45,6 +45,45 @@ async function select(page: Page, text: string): Promise<void> {
     throw new Error(`no text ${wanted}`);
   }, text);
 }
+/** The comment key under a selection of `text`: it stays put while pressed
+ * (the press only sinks it a pixel), a press near its edge still opens the
+ * composer on that text, and it follows the selection when the document
+ * scrolls. Leaves no comment behind. */
+async function steadyKey(page: Page, text: string, shot: string, touch = false): Promise<void> {
+  await select(page, text);
+  const key = page.locator(".artifact-select-key");
+  await key.waitFor();
+  // The key's centring is not an animation: read it once it has settled.
+  await delay(200);
+  const at = (await key.boundingBox())!;
+  const below = await page.evaluate(() => document.getSelection()!.getRangeAt(0).getBoundingClientRect().bottom);
+  assert.ok(Math.abs(at.y - (below + 8)) <= 1, `the key sits under the selection (${at.y} vs ${below + 8})`);
+  if (touch) {
+    await shoot(page, shot);
+    await page.touchscreen.tap(at.x + at.width * 0.15, at.y + at.height / 2);
+  } else {
+    await page.mouse.move(at.x + at.width * 0.15, at.y + at.height / 2);
+    await page.mouse.down();
+    await delay(200);
+    const pressed = (await key.boundingBox())!;
+    assert.ok(Math.abs(pressed.x - at.x) <= 0.5 && pressed.y - at.y >= 0 && pressed.y - at.y <= 1.5, `the pressed key stays put: ${JSON.stringify({ at, pressed })}`);
+    assert.equal(await page.evaluate(() => document.getSelection()?.toString()), text, "pressing keeps the selection");
+    await shoot(page, shot);
+    await page.mouse.up();
+  }
+  await page.locator(".comment-composer .work-quote", { hasText: text }).waitFor({ timeout: 5_000 });
+  await page.locator(".comment-composer button", { hasText: "cancel" }).click();
+  // Scrolled, the key follows the selection.
+  await select(page, text);
+  await key.waitFor();
+  await page.locator(".artifact-scroll").evaluate(scroller => { scroller.scrollTop += 60; });
+  await until(async () => {
+    const [box, bottom] = await Promise.all([key.boundingBox(), page.evaluate(() => document.getSelection()!.getRangeAt(0).getBoundingClientRect().bottom)]);
+    return Math.abs(box!.y - (bottom + 8));
+  }, gap => gap <= 1, "the key follows the scrolled selection");
+  await page.evaluate(() => document.getSelection()?.removeAllRanges());
+  await key.waitFor({ state: "detached" });
+}
 async function comment(page: Page, text: string, body: string): Promise<void> {
   await select(page, text);
   await page.locator(".artifact-select-key").click();
@@ -93,6 +132,8 @@ try {
   await shoot(page, "02-review-desktop");
   await page.locator(".artifact-diagram").first().scrollIntoViewIfNeeded();
   await shoot(page, "03-review-diagram");
+
+  await steadyKey(page, "Threads", "03a-comment-key-pressed");
 
   // Two comments on selections, then sent to the chat as one message.
   await comment(page, "the store keeps every revision", "Say what happens to comments on an older revision.");
@@ -192,6 +233,8 @@ try {
   const overflow = await phone.evaluate(() => document.documentElement.scrollWidth - innerWidth);
   assert.ok(overflow <= 0, `no sideways scroll on a phone (${overflow}px)`);
   await shoot(phone, "12-review-phone");
+  await until(async () => phone.locator(".diagram-picture[aria-busy]").count(), count => count === 0, "every diagram drawn on the phone");
+  await steadyKey(phone, "the store keeps every revision", "12a-comment-key-phone", true);
   await phone.goto(`${url}/#/artifacts`);
   await phone.locator(".artifact-list li").first().waitFor();
   await shoot(phone, "13-list-phone");

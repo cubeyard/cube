@@ -21,6 +21,7 @@
   let shown = $state<Revision | null>(null);
   let shownError = $state<string | null>(null);
   let body = $state<HTMLElement>();
+  let scroller = $state<HTMLElement>();
   let docText = $state("");
   let placements = $state<Record<string, Placement>>({});
   // A selection waiting to become a comment, and the comment being written:
@@ -160,8 +161,9 @@
     if ("error" in anchor) { selection = null; selectionNote = anchor.error; return; }
     selectionNote = null;
     const rect = range.getBoundingClientRect();
-    // Below the selection, kept on screen (a phone's own selection menu sits above it).
-    selection = { anchor, revision: shown?.number ?? 0, x: Math.min(Math.max(rect.left + rect.width / 2, 60), innerWidth - 60), y: Math.min(Math.max(rect.bottom + 8, 8), innerHeight - 52) };
+    // Below the selection, kept in the document's view (a phone's own selection menu sits above it).
+    const field = scroller?.getBoundingClientRect() ?? { top: 0, bottom: innerHeight };
+    selection = { anchor, revision: shown?.number ?? 0, x: Math.min(Math.max(rect.left + rect.width / 2, 60), innerWidth - 60), y: Math.min(Math.max(rect.bottom + 8, field.top + 8), field.bottom - 52) };
   }
 
   async function startComment(): Promise<void> {
@@ -341,7 +343,8 @@
         </div>
       {/if}
       {#if loadError}<div class="strip-note bad" role="alert"><span class="strip-note-text">{loadError} — retrying</span></div>{/if}
-      <div class="artifact-scroll">
+      <!-- The document scrolls here, not the window: the comment key follows its selection. -->
+      <div class="artifact-scroll" bind:this={scroller} onscroll={() => { if (selection) onSelection(); }}>
         {#if meta}
           <p class="artifact-provenance">revision {meta.number} · {relTime(meta.createdAt)} · {provenance(meta)}</p>
         {/if}
