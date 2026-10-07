@@ -72,7 +72,7 @@ async fn diagnosis_reports_each_stage_and_is_scoped() {
     assert_eq!(before["logs"]["console"]["present"], false);
     assert_eq!(before["disk"]["overlay"]["backingMatches"], true);
     assert_eq!(before["disk"]["overlay"]["backingPresent"], true);
-    assert_eq!(before["runner"]["softwareVersion"], "0.8.3");
+    assert_eq!(before["runner"]["softwareVersion"], "0.8.4");
     assert_eq!(events(&before), ["allocated"]);
 
     served.vm(start("t1", VM, 2, &fx.gateway, TOKEN)).await;
