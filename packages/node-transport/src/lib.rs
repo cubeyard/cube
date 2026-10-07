@@ -1034,7 +1034,7 @@ mod tests {
         assert_eq!(
             (SOFTWARE_VERSION, RUNNER_CAPABILITIES),
             (
-                "0.8.3",
+                "0.8.4",
                 [
                     "node.status",
                     "vm.allocate",
