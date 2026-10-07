@@ -91,7 +91,8 @@ export const register: Register = on => {
     const sections = [
       `You are working in a cube thread. ${scope.root} (also ${VIRTUAL_ROOT}) is the thread workspace in the thread's own virtual machine: ` +
       'Read, Write and Edit address files there, and Bash runs commands there with the workspace root as its working directory. ' +
-      'Commands run there as user agent (with sudo); the machine reaches the internet over HTTP and HTTPS only, and GH_TOKEN is a placeholder that works for gh and git with GitHub. Background commands, notebooks, worktrees and host-local tools are not available.',
+      'Commands run there as user agent (with sudo); the machine reaches the internet over HTTP and HTTPS only, and GH_TOKEN is a placeholder that works for gh and git with GitHub. Background commands, notebooks, worktrees and host-local tools are not available. ' +
+      'A server a command starts ends with that command: to keep a web server running and give the user a URL, run `cube service start NAME --port PORT -- COMMAND` (it must listen on 0.0.0.0; `cube service --help` lists status, logs and stop).',
     ]
     for (const file of INSTRUCTION_FILES) {
       const text = await instructions(scope, file).catch(() => null)

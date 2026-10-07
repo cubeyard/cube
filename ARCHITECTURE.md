@@ -15,7 +15,8 @@
   model credentials through the protocol.
 - **thread VM:** the workspace (`/workspace`) and, in its guest helper
   `cube-guest`, durable deduplication and result retention for commands and
-  writes.
+  writes, and the agent's `cube service` (supervised web servers and their
+  registrations).
 - **cube-gateway:** started and supervised by cubed; each VM's only network
   (DHCP, DNS, TCP termination, HTTP/HTTPS egress with TLS interception and a
   per-request decision from cubed's egress policy, secret substitution).
@@ -352,7 +353,9 @@ agent's processes and files (they live in the guest, as `agent` with sudo
 there, and cannot see the runner account, its keys or journal, or another
 thread), its network (raw frames to the gateway only: HTTP and HTTPS to public
 addresses, never cubed, the runner, the gateway host's own addresses, a LAN or
-a metadata service, each request decided by cubed in `egress-policy.ts`) and
+a metadata service, each request decided by cubed in `egress-policy.ts`;
+inbound only cubed's SSH to port 22 and, through the portal, registered
+service ports) and
 its credentials (placeholders only; the gateway replaces the GitHub
 placeholder with the host's token only for github.com and api.github.com over
 HTTPS). It does not cover a QEMU escape (QEMU runs as the runner account,
@@ -450,6 +453,26 @@ comes meanwhile starts fresh. `CUBED_TEMPLATES=off` or a runner before 0.8.0
 means every machine starts fresh. The startup phases (`allocate`,
 `build-*`, `boot`, `prepare`, `resume`) and the total from creation to ready
 are logged ("machine ready for the agent") and kept in `thread.vm.startup`.
+
+## Services and the portal
+
+`cube service` (the guest helper's CLI, `/usr/local/bin/cube`) runs an
+agent's web server as a persistent systemd unit (`cube-service-NAME`)
+outside the transient unit of the command that started it, and registers
+its port under `/var/lib/cube/services`. Nothing in the guest calls cubed:
+cubed reads registrations with the helper's `services` operation. When cubed
+resumes a machine it brings the helper to the one it ships (`install`, or a
+one-time chunked replacement of a helper from before `install`) and writes
+the machine's portal URL template (`portal`).
+
+The portal (`portal.ts`, off unless `CUBED_PORTAL_IP` is set) is a second
+HTTP listener on a private address. A request's Host must be exactly
+`<service>-<thread label>.<suffix>:<port>` (label: an HMAC of the thread id
+under `CUBED_STATE/portal/key`; suffix: by default `<ip>.sslip.io`); cubed
+then dials the registered port through the gateway's dial route (which
+allows 22 and 1024-65535) and proxies HTTP/1.1 and upgrades. It only reaches
+machines cubed already runs, never starts one, serves nothing of cube's and
+strips cookie domains. Details, setup and caveats: [docs/services.md](docs/services.md).
 
 ## Verification
 
