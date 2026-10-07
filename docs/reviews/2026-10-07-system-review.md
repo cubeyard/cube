@@ -108,7 +108,7 @@ was deliberately not read). Note for whoever triages: cloud-init also prints
 user confirmed private material, so the keys are treated as compromised either
 way.
 
-### Fix in #109 (merged only when CI is green)
+### Fix in #109 (merged as 1d3289b4 after green CI and independent review)
 
 ```diff
  redact(text)
@@ -125,8 +125,8 @@ way.
  guest-ssh error:       clean(helper stderr), last 2 lines, 512 chars guest-ssh.ts:81
 ```
 
-An independent review (Fable) asked for changes in round 1. All of them were
-fixed in 372f6914, each with a test:
+An independent review (Fable) took three rounds. Round 1 asked for changes,
+all fixed in 372f6914, each with a test:
 
 - **cubed's key-body pass was O(n²).** A 256 KiB console blocked the event
   loop for about 58 s, and a hostile input for 187 s. It now runs in 61–85 ms.
@@ -137,6 +137,11 @@ fixed in 372f6914, each with a test:
 - **The Rust walk-back was quadratic.**
 - **Later short lines were over-redacted.**
 - **Raw guest stderr went into `GuestTransportError`.**
+
+Round 2 found that the new marker regex backtracked on long dash runs (66 s
+at 256 KiB), plus prefix nits. Both were fixed in 92275d62. Round 3 approved
+with nits, which were fixed before the merge. Measured on 256 KiB adversarial
+inputs: cubed 9–90 ms, runner 2–21 ms.
 
 Tests: `diagnose.rs` (`keys_cut_or_escaped_are_redacted`,
 `excerpt_cut_inside_a_key_is_redacted`), `runner_diagnose.rs` (a real file
@@ -260,7 +265,7 @@ Accounting of wish-finder calls is correct (counted before parsing, source
 ## 5. Roadmap (smallest first; each is one PR)
 
 ```
-P0  security          #109 redaction (this review)           → merge, deploy cubed, release runner
+P0  security          #109 redaction (merged)                → deploy cubed, release runner (needs approval)
 P0  incident ops      §2 table rows 1–6                       → operator approval
 P1  wishes            W4 truncation, W2 call-id matching, W1 saved kind, W3 refresh
 P1  untrusted text    S2 OptChat untrusted notices; S3 log redaction; S4 seal output
