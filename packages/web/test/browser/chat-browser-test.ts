@@ -230,6 +230,13 @@ await scenario("a message sent while the agent works shows at once and the run r
   host.set([...base, user("3.0", "first"), agent("live.1.0", "working on", false)], { state: "working" });
   await page.locator(".composer[aria-busy=true]").waitFor();
   near((await box(page, ".stop-key")).height, (await box(page, ".composer-field")).height, "the stop key is as tall as the field beside it");
+  // a longer draft grows the field, not the stop key, which stays on its last line
+  await page.locator(".composer textarea").fill("one\ntwo\nthree\nfour");
+  await page.locator(".composer textarea").dispatchEvent("input");
+  const [stopKey, grown] = [await box(page, ".stop-key"), await box(page, ".composer-field")];
+  assert.ok(grown.height > stopKey.height + 40, "the field grew past the stop key");
+  near(stopKey.bottom, grown.bottom, "the stop key stays on the field's last line");
+  await page.locator(".composer textarea").fill("");
   host.onPrompt = ({ text, requestId }) => { host.set([...host.transcript.events, user(`pending.${requestId}`, text)], { state: "working" }); };
   await send(page, watch, "also this");
   await page.locator(".conversation-message.user:not(.sending)", { hasText: "also this" }).waitFor();
