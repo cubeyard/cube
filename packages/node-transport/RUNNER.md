@@ -153,8 +153,9 @@ expected one and present, template, seed), `process` (pid, alive, CPU ms,
 resident bytes, from `/proc` or `proc_pidinfo`), `qmp` (`query-name`,
 `query-status`, `query-cpus-fast`, about 2 s at most, only for a `running`
 VM and only when the runner's own QMP use (power-down, quit) does not hold
-it: QEMU serves one QMP client at a time, so a diagnosis never delays a
-stop; `asked: false` with a note otherwise),
+it: QEMU serves one QMP client at a time, so a diagnosis delays a stop by
+about 1.5 s at most and never swallows its power-down; `asked: false` with a
+note otherwise),
 `frames` (the pump since QEMU started: gateway connected, connections,
 refusals, frames and bytes from and to the guest, first and last times),
 `logs` (`console`: first 8 KiB and last 56 KiB; `previousConsole` and `qemu`:

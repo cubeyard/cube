@@ -1455,7 +1455,10 @@ impl Runner {
             let (qmp, lock) = (qmp.clone(), lock.clone());
             tokio::task::spawn_blocking(move || {
                 // A diagnosis never holds QMP while the runner needs it.
-                let _qmp = lock.lock().unwrap();
+                // A poisoned lock still serializes: a stop must go on.
+                let _qmp = lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let mut connection = Qmp::connect(&qmp, Duration::from_secs(2))?;
                 connection.execute(command)?;
                 Ok::<_, anyhow::Error>(())
@@ -1607,8 +1610,8 @@ impl Runner {
         if row.state != VmState::Releasing {
             return;
         }
-        let result = if row.retain || row.interrupted {
-            self.event(slot, "retained", None);
+        let retained = row.retain || row.interrupted;
+        let result = if retained {
             journal.set_state(vm_id, VmState::Retained, None)
         } else {
             match fs::remove_dir_all(self.paths(slot).dir) {
@@ -1625,6 +1628,9 @@ impl Runner {
             self.accepting.store(false, Ordering::SeqCst);
         }
         drop(journal);
+        if retained {
+            self.event(slot, "retained", None);
+        }
         self.gc_templates();
     }
 
@@ -1728,8 +1734,12 @@ fn qmp_facts(live: Option<(u32, bool, Arc<Mutex<()>>)>, state: VmState, path: &P
     if state != VmState::Running {
         return json!({ "asked": false });
     }
-    let Ok(_qmp) = lock.try_lock() else {
-        return json!({ "asked": false, "note": "the runner is using qmp now" });
+    let _qmp = match lock.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            return json!({ "asked": false, "note": "the runner is using qmp now" });
+        }
     };
     let started = Instant::now();
     let mut answers = serde_json::Map::new();
