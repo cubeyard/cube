@@ -79,6 +79,8 @@ try {
   // A runner without an advertised bound (before 0.7.0) hosts one machine, as always.
   registry.saveProject(project("q"));
   registry.enrollRunner(runner("single"));
+  // Both answered ready lately; "other" holds a failed machine, so it comes last.
+  registry.recordRunnerProbe("single", { health });
   const only = registry.createThread("q", "only", model, "only");
   assert.equal(only.runnerId, "single");
   assert.equal(registry.runnerStatuses().find(row => row.id === "single")!.allocationState, "allocating",
@@ -135,6 +137,7 @@ try {
     const fake = (name: string) => ({
       target: { peer: "0".repeat(64), network: "loopback" as const, address: "127.0.0.1:1" },
       nodeId: `node-${name}`,
+      health: async () => ({ ...health, maxActiveVms: name === "full" ? 2 : 1 }),
       describe: async () => ({ softwareVersion: "0.7.0", capabilities: [], platform: "linux-x86_64", baseImageSha256: "0".repeat(64),
         limits: { maxFrameBytes: 1048576, requestTimeoutMs: 5000, maxVcpus: 2, maxMemoryMiB: 4096, maxDiskGiB: 32, maxSeedBytes: 65536, maxActiveVms: name === "full" ? 2 : 1 } }),
       vmInspect: async () => { throw new IrohNodeError("NOT_FOUND"); },

@@ -12,6 +12,36 @@ import { newPlaceholder } from "./egress-policy.ts";
 export const REGISTRY_SCHEMA = 102;
 
 export const RUNNER_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+/** A runner's report this young is trusted for placement without asking
+ * again: twice the default probe interval. */
+export const RUNNER_FRESH_MS = 2 * 60_000;
+/** After a failed contact a runner is asked again no sooner than this, the
+ * wait doubling with how long it has failed, up to RUNNER_RETRY_MAX_MS. */
+export const RUNNER_RETRY_MIN_MS = 5_000;
+export const RUNNER_RETRY_MAX_MS = 60_000;
+
+/** How placement may use a runner, from cubed's last observation of it:
+ * `ready`: it answered ready within RUNNER_FRESH_MS; `unverified`: no fresh
+ * answer (never asked, too old, or a failure whose retry is due), so it is
+ * asked before it gets a machine; `down`: its last contact failed or it was
+ * not ready (draining, faulted, recovery required) and its retry is not due. */
+export type RunnerFitness = "ready" | "unverified" | "down";
+export function runnerFitness(observed: { lastAttemptAt: number | null; lastContactAt: number | null; unreachableSince: number | null;
+  error: string | null; health: TrustedRunnerHealth | null }, now = Date.now()): { fitness: RunnerFitness; retryAt: number | null } {
+  const { lastAttemptAt, lastContactAt, unreachableSince, error, health } = observed;
+  if (!lastAttemptAt) return { fitness: "unverified", retryAt: null };
+  if (error || !health) {
+    const since = unreachableSince ?? lastAttemptAt;
+    const retryAt = lastAttemptAt + Math.min(RUNNER_RETRY_MAX_MS, Math.max(RUNNER_RETRY_MIN_MS, lastAttemptAt - since));
+    return { fitness: now < retryAt ? "down" : "unverified", retryAt };
+  }
+  if (health.lifecycle !== "ready" || health.draining) {
+    const retryAt = (lastContactAt ?? lastAttemptAt) + RUNNER_RETRY_MAX_MS;
+    return { fitness: now < retryAt ? "down" : "unverified", retryAt };
+  }
+  return { fitness: lastContactAt && now - lastContactAt <= RUNNER_FRESH_MS ? "ready" : "unverified", retryAt: null };
+}
+const FITNESS_ORDER: Record<RunnerFitness, number> = { ready: 0, unverified: 1, down: 2 };
 
 export interface ProjectRepository {
   id: string; projectId: string; position: number; url: string; base: string | null;
@@ -77,9 +107,17 @@ export interface Thread {
   /** The thread's machine, fixed at creation. */
   vm?: ThreadVm;
 }
+/** Where the thread's own machine stands on `thread.runnerId`:
+ * `provisional`: no `vm.allocate` for it ever reached that runner, so the
+ * thread may move; `requested`: one may have (written before it is sent), so
+ * it moves only once that runner, after a fenced refusal, finds no machine;
+ * `allocated`: the runner returned the machine, and the thread stays there. */
+export type ThreadPlacement = "provisional" | "requested" | "allocated";
 export interface ThreadVm {
   /** 16 hex characters: the runner's VM id and cloud-init instance-id. */
   vmId: string;
+  /** Absent in threads created before placement was kept: see `placement()`. */
+  placement?: ThreadPlacement;
   /** Secret placeholders by name; not secret. */
   placeholders: Record<string, string>;
   /** The last provisioning try (its key is `cube:provision:<n>`). */
@@ -134,6 +172,12 @@ export function projectHooks(input: unknown, previous: ProjectHooks = NO_HOOKS):
   return { preSetup: hook("preSetup"), preResume: hook("preResume") };
 }
 
+/** The thread's placement; a thread from before placement was kept counts
+ * as allocated once its machine was ready and as requested before that. */
+export function placement(thread: Pick<Thread, "vm" | "workspaceState">): ThreadPlacement {
+  return thread.vm?.placement ?? (thread.workspaceState === "available" ? "allocated" : "requested");
+}
+
 /** The thread's agent: claude-code threads are created with a claude model. */
 export function threadAgent(thread: Pick<Thread, "agent">): ThreadAgent { return thread.agent ?? "pi"; }
 
@@ -165,6 +209,13 @@ function allocationRepositories(project: Project, strict: boolean): WorkspaceRep
     repositories.push({ url: repository.url, base: repository.resolvedBase, baseOid: repository.baseOid, checkoutName });
   }
   return repositories;
+}
+
+function observation(row: Record<string, unknown>) {
+  const at = (value: unknown) => value == null ? null : Number(value);
+  return { lastAttemptAt: at(row.last_attempt_at), lastContactAt: at(row.last_contact_at), unreachableSince: at(row.unreachable_since),
+    error: row.last_error == null ? null : String(row.last_error),
+    health: row.health == null ? null : JSON.parse(String(row.health)) as TrustedRunnerHealth };
 }
 
 export class Registry {
@@ -241,37 +292,51 @@ export class Registry {
     return { free: loads.reduce((sum, load) => sum + Math.max(0, load.slots - load.active), 0),
       total: loads.reduce((sum, load) => sum + load.slots, 0), runners: loads.filter(load => load.active < load.slots).length };
   }
-  /** Allocatable runners with their open threads: runners with a failed
-   * machine last, then the least loaded, then enrollment order. */
-  private runnerLoads(): Array<{ id: string; runner: Runner; slots: number; active: number; failed: number }> {
+  /** Allocatable runners with their open threads: by fitness (ready, then
+   * unverified, then down), then runners with a failed machine last, then
+   * the least loaded, then enrollment order. */
+  private runnerLoads(now = Date.now()): Array<{ id: string; runner: Runner; slots: number; active: number; failed: number; fitness: RunnerFitness }> {
     // One pass over the open threads (index thread_open), not per runner.
-    const rows = this.db.prepare(`SELECT r.id,r.data,coalesce(t.active,0) AS active,coalesce(t.failed,0) AS failed
+    const rows = this.db.prepare(`SELECT r.id,r.data,coalesce(t.active,0) AS active,coalesce(t.failed,0) AS failed,
+        o.last_attempt_at,o.last_contact_at,o.unreachable_since,o.last_error,o.health
       FROM runner r JOIN runner_operator o ON o.runner_id=r.id
       LEFT JOIN (SELECT runner_id,count(*) AS active,sum(json_extract(data, '$.workspaceState')='failed') AS failed
         FROM thread WHERE ${OPEN_THREAD} GROUP BY runner_id) t ON t.runner_id=r.id
-      WHERE o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired' ORDER BY r.rowid`).all() as Array<{ id: string; data: string; active: number; failed: number }>;
+      WHERE o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired' ORDER BY r.rowid`).all() as Array<Record<string, unknown>>;
     return rows.map(row => {
-      const runner = JSON.parse(row.data) as Runner;
-      return { id: row.id, runner, slots: runnerSlots(runner), active: Number(row.active), failed: Number(row.failed) };
-    }).sort((a, b) => Number(a.failed > 0) - Number(b.failed > 0) || a.active / a.slots - b.active / b.slots
-      || (b.slots - b.active) - (a.slots - a.active));
+      const runner = JSON.parse(String(row.data)) as Runner;
+      const { fitness } = runnerFitness(observation(row), now);
+      return { id: String(row.id), runner, slots: runnerSlots(runner), active: Number(row.active), failed: Number(row.failed), fitness };
+    }).sort((a, b) => FITNESS_ORDER[a.fitness] - FITNESS_ORDER[b.fitness] || Number(a.failed > 0) - Number(b.failed > 0)
+      || a.active / a.slots - b.active / b.slots || (b.slots - b.active) - (a.slots - a.active));
   }
-  /** Moves an open thread to another runner with a free slot, for a thread
-   * whose runner refused to create its machine. The caller guarantees that
-   * nothing of the thread exists on the old runner and nothing is bound to
-   * it yet. Returns the new runner's id, or null when no other runner has
-   * room. */
-  relocateThread(threadId: string): string | null {
+  /** A runner's last observation and what placement may do with it. */
+  runnerFitness(id: string, now = Date.now()): { fitness: RunnerFitness; retryAt: number | null; lastContactAt: number | null; unreachableSince: number | null; error: string | null; health: TrustedRunnerHealth | null } | null {
+    const row = this.db.prepare("SELECT last_attempt_at,last_contact_at,unreachable_since,last_error,health FROM runner_operator WHERE runner_id=?").get(id);
+    if (!row) return null;
+    const observed = observation(row);
+    return { ...runnerFitness(observed, now), lastContactAt: observed.lastContactAt, unreachableSince: observed.unreachableSince, error: observed.error, health: observed.health };
+  }
+  /** Moves an open thread whose machine was never allocated to another
+   * runner with a free slot that is not down and not in `exclude`. Only a
+   * `provisional` thread moves: nothing of its own machine reached its runner
+   * (the caller also checks nothing is bound to that runner). Counting and
+   * moving in one IMMEDIATE transaction is the new slot's reservation and
+   * the old one's release. Returns the new runner's id, or null when none
+   * can take it. */
+  relocateThread(threadId: string, exclude: ReadonlySet<string> = new Set(), now = Date.now()): string | null {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const thread = this.getThread(threadId);
-      if (!thread || thread.archived || thread.workspaceState === "available" || thread.workspaceState === "releasing") {
+      if (!thread || thread.archived || thread.workspaceState === "available" || thread.workspaceState === "releasing" || placement(thread) !== "provisional") {
         this.db.exec("COMMIT");
         return null;
       }
-      const load = this.runnerLoads().find(candidate => candidate.id !== thread.runnerId && candidate.active < candidate.slots);
+      const load = this.runnerLoads(now).find(candidate => candidate.id !== thread.runnerId && !exclude.has(candidate.id)
+        && candidate.fitness !== "down" && candidate.active < candidate.slots);
       if (!load) { this.db.exec("COMMIT"); return null; }
-      this.db.prepare("UPDATE thread SET runner_id=?,data=? WHERE id=?").run(load.id, JSON.stringify({ ...thread, runnerId: load.id }), threadId);
+      const moved: Thread = { ...thread, runnerId: load.id, ...(thread.vm ? { vm: { ...thread.vm, placement: "provisional" } } : {}) };
+      this.db.prepare("UPDATE thread SET runner_id=?,data=? WHERE id=?").run(load.id, JSON.stringify(moved), threadId);
       this.syncRunner(thread.runnerId);
       this.syncRunner(load.id);
       this.db.exec("COMMIT");
@@ -451,6 +516,18 @@ export class Registry {
       return updated;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
+  /** Moves the thread's placement from one of `from` to `to` while it is
+   * on `runnerId`; false when it moved or its placement is another. */
+  markPlacement(threadId: string, runnerId: string, from: readonly ThreadPlacement[], to: ThreadPlacement): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const thread = this.getThread(threadId);
+      const changed = !!thread?.vm && !thread.archived && thread.runnerId === runnerId && from.includes(placement(thread));
+      if (changed) this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, vm: { ...thread.vm, placement: to } }), threadId);
+      this.db.exec("COMMIT");
+      return changed;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
   markWorkspaceAvailable(threadId: string, workspaceBase: Thread["workspaceBase"] = null): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -525,7 +602,7 @@ export class Registry {
         title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, agent, archived: false, createdAt: Date.now(),
         allocation: { projectId, projectRevision: project.revision, repositories, hooks: { ...NO_HOOKS, ...project.hooks } },
         workspaceState: "allocating", workspaceError: null, workspaceBase: null,
-        vm: { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") } } };
+        vm: { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") }, placement: "provisional" } };
       this.db.prepare("INSERT INTO thread VALUES (?,?,?,?)").run(thread.id, projectId, load.id, JSON.stringify(thread));
       this.syncRunner(load.id);
       this.db.prepare("INSERT INTO creation VALUES (?,?,?,?)").run(projectId, requestId, thread.id, payload);

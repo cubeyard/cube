@@ -17,9 +17,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { dialGuest, GatewayUnavailable, type GatewayAttach, type GatewayClient, type GatewaySupervisor } from "./gateway.ts";
 import { SshGuestTransport, controlDirectory, type GuestTransport } from "./guest-ssh.ts";
-import { IrohNodeError, runnerClient, type IrohRunnerClient, type RunnerDescription, type RunnerTemplate, type VmRecord, type VmRef } from "./iroh-node.ts";
+import { IrohNodeError, runnerClient, type IrohRunnerClient, type RunnerDescription, type RunnerTemplate, type TrustedRunnerHealth, type VmRecord, type VmRef } from "./iroh-node.ts";
 import { createLogger, type Logger } from "./log.ts";
-import { NO_HOOKS, threadAgent, type HookOutcome, type Registry, type Thread, type WorkspaceAllocation } from "./registry.ts";
+import { NO_HOOKS, placement, threadAgent, type HookOutcome, type Registry, type Thread, type WorkspaceAllocation } from "./registry.ts";
 import { newPlaceholder, type EgressVms } from "./egress-policy.ts";
 import { guestDescription, VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { GUEST_HELPER_PATH, shippedHelper, vmMac, vmSeed } from "./vm-seed.ts";
@@ -108,6 +108,8 @@ export class ThreadVms implements ThreadMachines, EgressVms {
   private readonly builds = new Map<string, Promise<unknown>>();
   /** When a build of a runner and key last failed. */
   private readonly failedBuilds = new Map<string, number>();
+  /** Status questions under way, by runner: one at a time, shared. */
+  private readonly probes = new Map<string, Promise<TrustedRunnerHealth>>();
   private closed = false;
 
   constructor(options: ThreadVmsOptions) {
@@ -141,7 +143,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     if (this.closed) return Promise.reject(new Error("cubed is stopping"));
     const pending = this.starting.get(thread.id);
     if (pending) return pending;
-    const starting = this.boot(thread, false, options.onBoot).finally(() => this.starting.delete(thread.id));
+    const starting = this.boot(thread, options.onBoot).finally(() => this.starting.delete(thread.id));
     this.starting.set(thread.id, starting);
     return starting;
   }
@@ -156,6 +158,9 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     this.attached.delete(vm.vmId);
     try { await (await this.options.gateway.ready(5000)).client.detach(vm.vmId); }
     catch (error) { this.log.warn("detach failed", { thread: thread.id, error }); }
+    // No allocation ever reached a runner (a thread that waited for one):
+    // nothing to release, whether or not its runner answers.
+    if (placement(thread) === "provisional") return { retained: false };
     try { await runner.vmInspect(ref); }
     catch (error) {
       // Never allocated: nothing to release.
@@ -197,21 +202,145 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     this.transports.clear();
   }
 
-  private async boot(thread: Thread, relocated = false, onBoot?: () => void): Promise<MachineStart> {
+  /** Starts the thread's machine on its runner. A thread whose machine was
+   * never allocated first checks that its runner can take it (`verify`) and
+   * moves to another when it cannot (`movable`); one whose machine is, or
+   * may be, on its runner waits for that runner (`waitFor`). */
+  private async boot(thread: Thread, onBoot?: () => void): Promise<MachineStart> {
     const vm = machine(thread);
-    const runner = this.runner(thread);
-    const target = runner.target;
-    await this.options.gateway.ensureNetwork(target.network);
-    const { client: gateway, hello } = await this.options.gateway.ready();
-    const ref: VmRef = { threadId: thread.id, vmId: vm.vmId };
-    if (this.attached.has(vm.vmId)) {
-      // Already started by this process: only check that it still runs.
-      const [{ vm: current }, status] = await Promise.all([runner.vmInspect(ref), gateway.status(vm.vmId)]);
-      if (current.state === "running" && status) return { booted: false };
-      this.attached.delete(vm.vmId);
-      this.log.warn("machine is not running; starting it again", { thread: thread.id, vm: vm.vmId, state: current.state });
+    try {
+      if (this.attached.has(vm.vmId)) {
+        // Already started by this process: only check that it still runs.
+        const runner = this.runner(thread);
+        await this.options.gateway.ensureNetwork(runner.target.network);
+        const { client: gateway } = await this.options.gateway.ready();
+        const [{ vm: current }, status] = await Promise.all([runner.vmInspect({ threadId: thread.id, vmId: vm.vmId }), gateway.status(vm.vmId)]);
+        if (current.state === "running" && status) return { booted: false };
+        this.attached.delete(vm.vmId);
+        this.log.warn("machine is not running; starting it again", { thread: thread.id, vm: vm.vmId, state: current.state });
+      }
+      onBoot?.();
+      // Each runner is tried once per start; a move commits before the next try.
+      const tried = new Set<string>();
+      for (;;) {
+        thread = this.options.registry.getThread(thread.id) ?? thread;
+        // No runner is asked anything while the gateway is unavailable.
+        const runner = this.runner(thread);
+        await this.options.gateway.ensureNetwork(runner.target.network);
+        const gateway = await this.options.gateway.ready();
+        try {
+          await this.verify(thread);
+          return await this.bootOn(thread, runner, gateway);
+        } catch (error) {
+          if (!await this.movable(thread, error)) throw error;
+          tried.add(thread.runnerId);
+          const why = unusableReason(error);
+          const moved = this.options.registry.relocateThread(thread.id, tried);
+          if (!moved) {
+            const text = `${this.nodeId(thread.runnerId)} ${why}, and no other runner with a free thread machine is ready`;
+            if (error instanceof RunnerUnusable && !error.transient) throw new Error(`runner ${text}`, { cause: error });
+            throw new RunnerWait(`waiting for a runner: ${text}; cube tries again`, { cause: error });
+          }
+          this.log.info("thread moved to another runner", { thread: thread.id, from: thread.runnerId, to: moved, why });
+        }
+      }
+    } catch (error) {
+      throw this.waitFor(this.options.registry.getThread(thread.id) ?? thread, error);
     }
-    onBoot?.();
+  }
+
+  /** Whether `error` lets the thread leave its runner: it says the runner
+   * cannot take the machine now (no answer, not ready, a refused
+   * allocation), nothing is bound to the runner, and no allocation of the
+   * machine can have reached it: none was sent (`provisional`), or the
+   * runner refused a request fenced by the thread's newest epoch and then
+   * had no machine, so no older request can still make one. */
+  private async movable(thread: Thread, error: unknown): Promise<boolean> {
+    const refused = refusal(error);
+    if (contactLost(error)) this.observe(thread.runnerId, { error: (error as Error).message });
+    if (!(refused || contactLost(error) || error instanceof RunnerUnusable) || !this.unbound(thread)) return false;
+    const current = this.options.registry.getThread(thread.id);
+    if (!current || current.runnerId !== thread.runnerId) return false;
+    if (placement(current) === "provisional") return true;
+    if (placement(current) !== "requested" || !refused) return false;
+    try { await this.runner(current).vmInspect({ threadId: current.id, vmId: machine(current).vmId }); return false; }
+    catch (cause) {
+      if (!(cause instanceof IrohNodeError && cause.code === "NOT_FOUND")) return false;
+      return this.options.registry.markPlacement(current.id, current.runnerId, ["requested"], "provisional");
+    }
+  }
+
+  /** A failure the thread waits out on its runner, said as such: a refused
+   * allocation, or a runner that does not answer or is not ready. */
+  private waitFor(thread: Thread, error: unknown): unknown {
+    if (error instanceof RunnerWait) return error;
+    if (refusal(error)) {
+      const why = (error as IrohNodeError).message;
+      return new RunnerWait(`the runner has no room for this thread's machine (${why === "CAPACITY_EXCEEDED" ? "it hosts as many machines as it can"
+        : why === "DRAINING" ? "it is draining" : why}); cube tries again every 30 seconds`, { cause: error });
+    }
+    if (!(contactLost(error) || error instanceof RunnerUnusable)) return error;
+    if (error instanceof RunnerUnusable && !error.transient) return new Error(`runner ${this.nodeId(thread.runnerId)} ${error.message}`, { cause: error });
+    const node = this.nodeId(thread.runnerId);
+    const state = placement(thread);
+    return new RunnerWait(state === "allocated" ? `waiting for runner ${node}: it ${unusableReason(error)}; this thread's machine is on it and stays there`
+      : state === "requested" ? `waiting for runner ${node}: it ${unusableReason(error)}, and a request for this thread's machine may have reached it, so the thread waits for it rather than start a second machine elsewhere`
+      : `waiting for runner ${node}: it ${unusableReason(error)}; the thread's workspace is bound to it`, { cause: error });
+  }
+
+  /** Before anything of the thread reaches its runner: a runner cubed saw
+   * ready lately is used; one it saw fail, whose retry is not due, is not
+   * asked again; any other is asked for its status first (one question per
+   * runner at a time, shared by every thread that waits on it). */
+  private async verify(thread: Thread): Promise<void> {
+    if (placement(thread) === "allocated") return;
+    const observed = this.options.registry.runnerFitness(thread.runnerId);
+    if (observed?.fitness === "ready") return;
+    if (observed?.fitness === "down") {
+      if (!observed.error) throw new RunnerUnusable(`is ${lifecycleText(observed.health)}`);
+      throw CONTACT_ERROR.test(observed.error) ? new RunnerUnusable("does not answer") : new RunnerUnusable(`could not report its status (${observed.error})`, false);
+    }
+    let health: TrustedRunnerHealth;
+    try { health = await this.probe(thread.runnerId); }
+    catch (error) {
+      if (contactLost(error)) throw error;
+      throw new RunnerUnusable(`could not report its status (${error instanceof Error ? error.message : String(error)})`, false);
+    }
+    // A requested thread goes on: the runner's answer to its allocation is final.
+    if ((health.lifecycle !== "ready" || health.draining) && placement(thread) === "provisional") throw new RunnerUnusable(`is ${lifecycleText(health)}`);
+  }
+
+  private probe(runnerId: string): Promise<TrustedRunnerHealth> {
+    let pending = this.probes.get(runnerId);
+    if (!pending) {
+      const admission = this.options.registry.getRunner(runnerId);
+      if (!admission) return Promise.reject(new Error("runner not found"));
+      pending = (async () => {
+        try {
+          const health = await (this.options.runnerClient ?? runnerClient)(admission).health();
+          this.observe(runnerId, { health });
+          return health;
+        } catch (error) {
+          this.observe(runnerId, { error: error instanceof Error ? error.message : String(error) });
+          throw error;
+        }
+      })().finally(() => this.probes.delete(runnerId));
+      this.probes.set(runnerId, pending);
+    }
+    return pending;
+  }
+
+  /** What a runner answered, or that it did not, as its probe would record it. */
+  private observe(runnerId: string, result: { health: TrustedRunnerHealth } | { error: string }): void {
+    try { this.options.registry.recordRunnerProbe(runnerId, result); }
+    catch (error) { this.log.warn("runner observation not kept", { runner: runnerId, error }); }
+  }
+  private nodeId(runnerId: string): string { return this.options.registry.getRunner(runnerId)?.nodeId ?? runnerId; }
+
+  private async bootOn(thread: Thread, runner: IrohRunnerClient, { client: gateway, hello }: Awaited<ReturnType<GatewaySupervisor["ready"]>>): Promise<MachineStart> {
+    const vm = machine(thread);
+    const target = runner.target;
+    const ref: VmRef = { threadId: thread.id, vmId: vm.vmId };
     const description = await runner.describe();
     // The runner's bound may have changed since cubed last asked.
     this.options.registry.recordRunnerSlots(thread.runnerId, description.limits.maxActiveVms);
@@ -221,29 +350,18 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       diskGiB: Math.min(this.sizes.diskGiB, description.limits.maxDiskGiB),
     };
     let record: VmRecord;
-    try { record = (await runner.vmInspect(ref)).vm; }
-    catch (error) {
+    try {
+      record = (await runner.vmInspect(ref)).vm;
+      // The runner has the machine, whatever answer was lost: it is this thread's there.
+      this.options.registry.markPlacement(thread.id, thread.runnerId, ["provisional", "requested"], "allocated");
+    } catch (error) {
       if (!(error instanceof IrohNodeError && error.code === "NOT_FOUND")) throw error;
       const allocating = Date.now();
-      try {
-        // Decide what the disk is made from (building a template first if
-        // the project has none on this runner), then allocate it.
-        thread = await this.prepare(thread, runner, description, sizes, hello.caPem);
-        record = await this.allocate(thread, runner, ref, sizes.diskGiB);
-      } catch (cause) {
-        if (!(cause instanceof IrohNodeError && cause.remoteCode === "CAPACITY_EXCEEDED")) throw cause;
-        // cubed's count said a slot was free; the runner (a lowered bound, a
-        // full disk, a machine cubed does not know) disagrees. Nothing was
-        // created there, so a thread whose agent has not bound its storage
-        // to this runner yet moves to one with room, once.
-        const moved = !relocated && this.unbound(thread) ? this.options.registry.relocateThread(thread.id) : null;
-        if (moved) {
-          this.log.warn("runner full; thread moved", { thread: thread.id, from: thread.runnerId, to: moved });
-          return this.boot(this.options.registry.getThread(thread.id)!, true);
-        }
-        const why = cause.message === "CAPACITY_EXCEEDED" ? `it hosts at most ${description.limits.maxActiveVms} machines` : cause.message;
-        throw new Error(`the runner has no room for this thread's machine (${why}); cube tries again every 30 seconds`, { cause });
-      }
+      // Decide what the disk is made from (building a template first if the
+      // project has none on this runner), then allocate it. A refusal (full,
+      // draining) created nothing; boot() moves an unbound thread elsewhere.
+      thread = await this.prepare(thread, runner, description, sizes, hello.caPem);
+      record = await this.allocate(thread, runner, ref, sizes.diskGiB);
       const preparation = this.options.registry.getThread(thread.id)!.vm!.preparation!;
       this.phase(thread, "allocate", allocating);
       this.log.info("allocated", { thread: thread.id, vm: vm.vmId, diskGiB: sizes.diskGiB, source: preparation.source,
@@ -284,12 +402,23 @@ export class ThreadVms implements ThreadMachines, EgressVms {
    * vanished meanwhile (removed, expired) falls back to the base image. */
   private async allocate(thread: Thread, runner: IrohRunnerClient, ref: VmRef, diskGiB: number): Promise<VmRecord> {
     const preparation = thread.vm!.preparation!;
-    try { return await runner.vmAllocate(ref, this.epoch(thread), diskGiB, preparation.templateId); }
+    const { registry } = this.options;
+    // Kept before the request leaves: from here the machine may exist on
+    // this runner, and the thread leaves it only on the runner's word.
+    const first = registry.markPlacement(thread.id, thread.runnerId, ["provisional"], "requested");
+    if (!first && placement(registry.getThread(thread.id) ?? thread) !== "requested") throw new Error("the thread's placement changed while its machine was being prepared");
+    const allocated = (record: VmRecord) => {
+      registry.markPlacement(thread.id, thread.runnerId, ["requested"], "allocated");
+      return record;
+    };
+    try { return allocated(await runner.vmAllocate(ref, this.epoch(thread), diskGiB, preparation.templateId)); }
     catch (error) {
+      // Not sent: the runner has nothing of it, as before this try.
+      if (first && error instanceof IrohNodeError && error.code === "NODE_UNAVAILABLE") registry.markPlacement(thread.id, thread.runnerId, ["requested"], "provisional");
       if (!(preparation.templateId && error instanceof IrohNodeError && error.remoteCode === "NOT_FOUND")) throw error;
       this.log.warn("template gone; starting fresh", { thread: thread.id, template: preparation.templateId });
-      const updated = this.options.registry.updateThreadVm(thread.id, { preparation: { source: "fresh", reason: "the template was removed before the machine was allocated" } });
-      return runner.vmAllocate(ref, this.epoch(updated), diskGiB);
+      const updated = registry.updateThreadVm(thread.id, { preparation: { source: "fresh", reason: "the template was removed before the machine was allocated" } });
+      return allocated(await runner.vmAllocate(ref, this.epoch(updated), diskGiB));
     }
   }
 
@@ -306,8 +435,18 @@ export class ThreadVms implements ThreadMachines, EgressVms {
    * thread: the newest fresh template of the project on this runner, or a
    * template built now, or the base image. Returns the updated thread. */
   private async prepare(thread: Thread, runner: IrohRunnerClient, description: RunnerDescription, sizes: VmSizes, caPem: string): Promise<Thread> {
-    await this.abandonBuild(thread, runner);
     const fresh = (reason: string) => this.options.registry.updateThreadVm(thread.id, { preparation: { source: "fresh", reason } });
+    const left = thread.vm?.build?.runnerId;
+    if (left && left !== thread.runnerId) {
+      // A build machine on the runner the thread left (cubed's own, no agent):
+      // deleted when that runner answers, at the latest at archive. Its record
+      // stays until then, so this thread builds no template meanwhile.
+      try { await this.abandonBuild(thread, runner); }
+      catch (error) {
+        this.log.warn("deleting a build machine on another runner failed", { thread: thread.id, runner: left, error });
+        return fresh("an earlier template build machine on another runner is not deleted yet");
+      }
+    } else await this.abandonBuild(thread, runner);
     if (!this.templates.enabled) return fresh("templates are off (CUBED_TEMPLATES=off)");
     if (!description.capabilities.includes(TEMPLATE_CAPABILITY)) return fresh("the runner has no machine templates (cube-runner 0.8.0+)");
     const hooks = thread.allocation.hooks ?? NO_HOOKS;
@@ -335,8 +474,9 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       this.failedBuilds.delete(flight);
       return this.options.registry.updateThreadVm(thread.id, { preparation: { source: "template", templateId: template.id, setupBlob: template.meta.setupBlob } });
     } catch (error) {
-      // No room: the caller may move the thread; cubed stopping: retried later.
-      if ((error instanceof IrohNodeError && error.remoteCode === "CAPACITY_EXCEEDED") || this.closed) throw error;
+      // No room, or the runner went away: the caller may move the thread;
+      // cubed stopping: retried later.
+      if (refusal(error) || contactLost(error) || this.closed) throw error;
       this.failedBuilds.set(flight, Date.now());
       const message = error instanceof Error ? error.message : String(error);
       this.log.warn("template build failed; starting fresh", { thread: thread.id, runner: runner.nodeId, error: message });
@@ -564,6 +704,42 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     fs.renameSync(`${file}.tmp`, file);
     return next;
   }
+}
+
+/** The thread's machine waits for a runner: none with a free slot can take
+ * it now, or the runner that has (or may have) it does not answer. Not a
+ * failure of the thread; cubed's recovery loop tries again. */
+export class RunnerWait extends Error {
+  constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "RunnerWait"; }
+}
+/** A runner placement does not use now (its message completes "the runner …").
+ * `transient`: it does not answer or is not ready, which passes; otherwise
+ * it answered wrongly (configuration, protocol), which needs the operator. */
+class RunnerUnusable extends Error {
+  readonly transient: boolean;
+  constructor(message: string, transient = true) { super(message); this.transient = transient; }
+}
+/** A recorded runner error that is a failed contact rather than a wrong answer. */
+const CONTACT_ERROR = /^(NODE_UNAVAILABLE|COMPLETION_UNKNOWN)\b/;
+
+/** The runner refused to create the machine before creating anything, after
+ * fencing the thread's older requests: it is full or not accepting. */
+function refusal(error: unknown): boolean {
+  return error instanceof IrohNodeError && !error.completionUnknown && (error.remoteCode === "CAPACITY_EXCEEDED" || error.remoteCode === "DRAINING");
+}
+/** The runner did not answer the request (NODE_UNAVAILABLE: it was not sent). */
+function contactLost(error: unknown): boolean {
+  return error instanceof IrohNodeError && (error.code === "NODE_UNAVAILABLE" || error.code === "COMPLETION_UNKNOWN");
+}
+/** Completes "the runner …". */
+function unusableReason(error: unknown): string {
+  if (error instanceof RunnerUnusable) return error.message;
+  if (refusal(error)) return (error as IrohNodeError).remoteCode === "DRAINING" ? "is draining" : "has no room";
+  return "does not answer";
+}
+function lifecycleText(health: TrustedRunnerHealth | null): string {
+  if (!health) return "not ready";
+  return health.lifecycle === "recoveryRequired" ? "waiting for operator recovery" : health.lifecycle === "ready" ? "draining" : health.lifecycle;
 }
 
 type MachineKeys = { host: { privateKey: string; publicKey: string }; clientPub: string };

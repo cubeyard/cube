@@ -185,7 +185,7 @@ try {
     ]);
     const stored: string[] = [];
     const conversations = {
-      archivingNow: () => false, starting: (id: string) => id === "c", error: (id: string) => id === "d" ? "boom" : null, agentOpen: (id: string) => id === "e",
+      archivingNow: () => false, starting: (id: string) => id === "c", error: (id: string) => id === "d" ? "boom" : null, waiting: () => null, agentOpen: (id: string) => id === "e",
       async storedHistory(id: string, request: { limit?: number }) {
         stored.push(`${id}:${request.limit}`);
         return { status: id === "e" ? { state: "completed", run: "r", error: null, waiting: ["review"] } : { state: "working", run: "r", error: null } };

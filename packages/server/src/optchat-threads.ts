@@ -20,7 +20,9 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
   // agent still open on the machine goes on with its run.
   const state = (id: string) => {
     const error = conversations.error(id);
+    const waiting = conversations.waiting(id);
     if (conversations.archivingNow(id)) return "being archived";
+    if (waiting && !error) return conversations.agentOpen(id) ? `ready (its runner does not answer now: ${waiting})` : `starting its machine, ${waiting}`;
     if (!error) return conversations.starting(id) ? "starting its machine" : "ready";
     if (conversations.starting(id)) return `starting its machine again (the last try failed: ${error})`;
     return conversations.agentOpen(id) ? `ready (a later check of its machine failed: ${error})` : `error: ${error}`;
@@ -71,7 +73,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         if (!thread) continue;
         const project = registry.getProject(thread.projectId)?.name ?? thread.projectId;
         let run = "";
-        if (!thread.archived && !conversations.starting(id) && (!conversations.error(id) || conversations.agentOpen(id))) {
+        if (!thread.archived && !conversations.starting(id) && (!(conversations.error(id) || conversations.waiting(id)) || conversations.agentOpen(id))) {
           try {
             const status = (await conversations.history(id)).status;
             run = `, ${status.state}${status.waiting?.length && status.state !== "working" ? `, waiting on ${agents(status.waiting)}` : ""}`;
@@ -90,7 +92,8 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         if (!thread) return null;
         const project = registry.getProject(thread.projectId)?.name ?? thread.projectId;
         let run = thread.archived ? "archived" : conversations.archivingNow(id) ? "being archived"
-          : conversations.starting(id) ? "starting" : conversations.error(id) && !conversations.agentOpen(id) ? "machine error"
+          : conversations.starting(id) ? "starting" : conversations.waiting(id) && !conversations.agentOpen(id) ? "waiting for a runner"
+          : conversations.error(id) && !conversations.agentOpen(id) ? "machine error"
           : thread.workspaceState === "failed" ? "machine failed" : null;
         if (!run) {
           let timer: ReturnType<typeof setTimeout> | undefined;
@@ -119,7 +122,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       ];
       const record = {
         project: registry.getProject(thread.projectId)?.name ?? thread.projectId, title: thread.title, archived: thread.archived,
-        machine: thread.archived ? null : (conversations.error(id) || conversations.starting(id) || thread.workspaceState === "available") ? state(id)
+        machine: thread.archived ? null : (conversations.error(id) || conversations.waiting(id) || conversations.starting(id) || thread.workspaceState === "available") ? state(id)
           : thread.workspaceState === "allocating" ? "not started" : thread.workspaceState,
         facts, agentOpen: conversations.agentOpen(id),
         failure: conversations.error(id) ?? (thread.workspaceState === "failed" ? thread.workspaceError : null),
@@ -152,7 +155,8 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       const left = gone();
       if (left !== false) return left;
       await conversations.activate(id);
-      const failure = conversations.error(id);
+      // A wait for a runner counts as a start not made yet: reported once it lasts.
+      const failure = conversations.error(id) ?? (conversations.agentOpen(id) ? null : conversations.waiting(id));
       // An agent open on the machine runs on whatever a later check found.
       if (failure && !conversations.agentOpen(id)) {
         const now = gone();

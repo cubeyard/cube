@@ -151,14 +151,27 @@ and `node.status` report it as `maxActiveVms`.
 cubed records the bound at enrollment, at every runner check and at every
 machine start, and counts its open threads against it: a thread holds a slot
 on its runner from creation until its archive finishes, also while its machine
-is failed or releasing. A new thread goes to the runner with the lowest share
-of used slots, runners with a failed machine last; the count and the new
-thread are one `BEGIN IMMEDIATE` registry transaction. If the runner refuses a machine anyway (a lowered bound, the disk floor, a
-VM cubed does not know), a new thread whose agent and workspace have not opened yet moves to
-another runner with a free slot and starts there; otherwise it shows the
-reason and cubed's recovery loop tries again every 30 seconds while it holds
-its slot. Runners before 0.7.0 report 1 and keep one thread at a time,
-exactly as before.
+is failed or releasing. A new thread goes to a runner that answered ready in
+the last two minutes first, then to one cubed has not heard from lately, then
+to one that failed lately; among those, to the lowest share of used slots,
+runners with a failed machine last. The count and the new thread are one
+`BEGIN IMMEDIATE` registry transaction.
+
+Before cubed sends anything for a new thread's machine it asks a runner it has
+no fresh answer from for its status. If the runner does not answer, is
+draining, faulted or waiting for recovery, or refuses the machine (a lowered
+bound, the disk floor, a VM cubed does not know), a thread whose agent and
+workspace have not opened yet moves to another runner with a free slot and
+starts there, without showing the first runner's error. Once an allocation may
+have reached a runner (its answer lost, cubed restarted), the thread stays
+with that runner until it answers: the machine it made is used, never a second
+one elsewhere. A thread whose machine was allocated never moves. With no
+runner to take it, the thread waits, starting, with the reason ("waiting for a
+runner: …"), holding its slot; cubed's recovery loop tries again every 30
+seconds and asks a runner that failed again after 5 seconds, doubling to at
+most a minute. Archiving a thread that never got a machine needs no runner.
+Runners before 0.7.0 report 1 and keep one thread at a time, exactly as
+before.
 
 Existing runners: a self-update to 0.7.0 restarts the runner with `auto`, so a
 host with room gets more than one VM without any change, and cubed uses the
@@ -176,7 +189,7 @@ often; drain it to make room for an update.
 `GET /api/runners/observed` (the operator's API, behind the same network
 access control as the rest of cubed) and OptChat's `runners` tool show each
 runner as cubed last heard from it. Both are read-only and contact no runner.
-The background probe (`node.status` every 5 minutes) keeps them current, and
+The background probe (`node.status` every minute) keeps them current, and
 `POST /api/runners/<id>/check` probes one runner now. Per runner:
 
 - `contact`: `reachable`, `unreachable`, `stale` (unreachable for 7 days) or
