@@ -250,19 +250,21 @@ fn next_key_line(gap: &str, prefix: &str) -> bool {
     alike || rest.trim_matches([' ', '\t', '"', '\'', ',']).is_empty()
 }
 
-/// What comes before `at` on its line (after a newline or an escaped CR),
-/// if that is at most 64 bytes.
+/// What comes before `at` on its line (after a newline, an escaped CR or
+/// an escaped newline, or the text's start), if that is at most 128 bytes.
 fn line_prefix(text: &str, at: usize) -> &str {
     let bytes = text.as_bytes();
-    let from = at.saturating_sub(64);
-    (from..at)
-        .rev()
-        .find_map(|k| {
-            (bytes[k] == b'\n').then_some(k + 1).or_else(|| {
-                (k >= 3 && bytes[k - 3..=k].eq_ignore_ascii_case(b"\\x0d")).then_some(k + 1)
-            })
-        })
-        .map_or("", |line| &text[line..at])
+    let from = at.saturating_sub(128);
+    let line = (from..at).rev().find(|&k| {
+        bytes[k] == b'\n'
+            || (k >= 3 && bytes[k - 3..=k].eq_ignore_ascii_case(b"\\x0d"))
+            || (k >= 1 && &bytes[k - 1..=k] == b"\\n")
+    });
+    match line {
+        Some(k) => &text[k + 1..at],
+        None if from == 0 => &text[..at],
+        None => "",
+    }
 }
 
 /// Key bodies whose BEGIN and END lines were both cut off: base64 runs of
@@ -310,11 +312,19 @@ fn redact_key_bodies(text: &str) -> String {
             .iter()
             .any(|kind| word.starts_with(kind));
         // A continuation is a whole line of its own, right after a key line.
-        let line_ends = matches!(bytes.get(end), None | Some(b'\n' | b'\\' | b'"' | b'\''));
+        let spaces = bytes[end..]
+            .iter()
+            .take(8)
+            .take_while(|&&b| b == b' ' || b == b'\t')
+            .count();
+        let line_ends = matches!(
+            bytes.get(end + spaces),
+            None | Some(b'\n' | b'\\' | b'"' | b'\'')
+        );
         let continued = run.len() >= 4
             && line_ends
             && previous
-                .is_some_and(|(p, prefix)| i - p <= 96 && next_key_line(&text[p..start], prefix));
+                .is_some_and(|(p, prefix)| i - p <= 160 && next_key_line(&text[p..start], prefix));
         if (long && !public) || continued || run.contains(OPENSSH_MAGIC) {
             out.push_str(&text[copied..start]);
             out.push_str(REDACTED_KEY);
@@ -849,6 +859,18 @@ mod tests {
         assert!(!redact(&cr).contains("ShortTail0Ab9"), "{cr}");
         let (prefixed_cut, _) = clean(text.as_bytes(), 120);
         assert_no_body(&prefixed_cut, &lines[..1]);
+        // The first line of the text, a long journal prefix, a trailing space.
+        let journal = "Oct 07 19:12:40 ip-10-0-0-123.eu-west-1.compute.internal cloud-init[600]: ";
+        for text in [
+            format!(
+                "[   12.50] cloud-init[600]: {}\n[   12.51] cloud-init[600]: ShortTail0Ab9==",
+                lines[0]
+            ),
+            format!("x\n{journal}{}\n{journal}ShortTail0Ab9==\nok", lines[0]),
+            format!("{}\nShortTail0Ab9== \nok", lines[0]),
+        ] {
+            assert!(!redact(&text).contains("ShortTail0Ab9"), "{text}");
+        }
         // A key's lines end with its short last one: later lines stay.
         let redacted = redact(&format!(
             "{}\n{}\nlast0Ab9\ndone\nStarting",
@@ -865,6 +887,7 @@ mod tests {
         let started = std::time::Instant::now();
         let _ = redact(&hostile);
         let _ = redact(&"ab cd ".repeat(40_000));
+        let _ = redact(&"-".repeat(256 * 1024));
         assert!(
             started.elapsed() < std::time::Duration::from_secs(2),
             "{:?}",

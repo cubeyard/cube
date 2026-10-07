@@ -50,7 +50,8 @@ export function safeText(text: string, max = 4096): string {
 export const REDACTED = "[redacted]";
 export const REDACTED_KEY = "[redacted private key]";
 /** A BEGIN or END line marker of any private key armor, any case. */
-const KEY_MARKER = /(?:-+ ?|^ ?)(BEGIN|END) [A-Za-z0-9 ]{0,40}?PRIVATE KEY(?:[A-Za-z]| (?!-))*-*/gi;
+// `(?<!-)`: one attempt per dash run, so a long run stays linear.
+const KEY_MARKER = /(?<!-)(?:-+ ?|^ ?)(BEGIN|END) [A-Za-z0-9 ]{0,40}?PRIVATE KEY(?:[A-Za-z]| (?!-))*-*/gi;
 /** What the runner puts where an excerpt left bytes out: its tail may start
  * inside a key whose BEGIN line was omitted. */
 const OMITTED = " bytes omitted ...]";
@@ -92,16 +93,24 @@ function nextKeyLine(gap: string, prefix: string): boolean {
   const normalized = gap.replace(/\\x0[da]/gi, "\n").replace(/\\r/g, "").replace(/\\n/g, "\n").replace(/^[ \t"',]*/, "");
   if (!normalized.startsWith("\n")) return false;
   const rest = normalized.replace(/^\n\n?/, "");
-  const alike = rest.length === prefix.length && [...rest].every((char, k) => char === prefix[k] || (/\d/.test(char) && /\d/.test(prefix[k]!)));
+  let alike = rest.length === prefix.length;
+  for (let k = 0; alike && k < rest.length; k++) alike = rest[k] === prefix[k] || (/\d/.test(rest[k]!) && /\d/.test(prefix[k]!));
   return alike || /^[ \t"',]*$/.test(rest);
 }
 
-/** What comes before `at` on its line (after a newline or an escaped CR),
- * if that is at most 64 characters. */
+/** What comes before `at` on its line (after a newline, an escaped CR or
+ * an escaped newline, or the text's start), if that is at most 128
+ * characters. */
 function linePrefix(text: string, at: number): string {
-  const window = text.slice(Math.max(0, at - 64), at);
-  const line = Math.max(window.lastIndexOf("\n") + 1, (window.toLowerCase().lastIndexOf("\\x0d") + 1 || -3) + 3);
-  return line > 0 ? window.slice(line) : "";
+  const from = Math.max(0, at - 128);
+  const window = text.slice(from, at);
+  let line = -1;
+  for (const mark of ["\n", "\\x0d", "\\n"]) {
+    const k = window.lastIndexOf(mark);
+    if (k >= 0) line = Math.max(line, k + mark.length);
+  }
+  if (line >= 0) return window.slice(line);
+  return from === 0 ? window : "";
 }
 
 /** Key bodies whose BEGIN and END lines were both cut off: base64 runs of
@@ -125,8 +134,8 @@ function redactKeyBodies(text: string): string {
     const word = text.slice(Math.max(0, at - 40), at).trimEnd().split(/[ \n"']/).pop()!;
     const isPublic = /^(?:ssh-|ecdsa-|sk-ssh-|sk-ecdsa-)/.test(word);
     // A continuation is a whole line of its own, right after a key line.
-    const continued = run.length >= 4 && /^(?:$|[\n\\"'])/.test(text.slice(end, end + 1)) && previous !== null
-      && at - previous.end <= 96 && nextKeyLine(text.slice(previous.end, start), previous.prefix);
+    const continued = run.length >= 4 && /^[ \t]{0,8}(?:$|[\n\\"'])/.test(text.slice(end, end + 9)) && previous !== null
+      && at - previous.end <= 160 && nextKeyLine(text.slice(previous.end, start), previous.prefix);
     if ((long && !isPublic) || continued || run.includes("b3BlbnNzaC1rZXktdjE")) {
       out += text.slice(copied, start) + REDACTED_KEY;
       copied = end;

@@ -117,11 +117,17 @@ try {
     assert.ok(!redacted.includes("ShortTail0Ab9") && redacted.endsWith("ok: done"), redacted);
     assert.ok(!redact(safeText(`${BODY[0]}\r${BODY[1]}\rShortTail0Ab9==\rafter it`)).includes("ShortTail0Ab9"));
     assertNoBody(clean(`${stamped}\n[   12.59] cloud-init[600]: ShortTail0Ab9==`, 120), BODY.slice(0, 1));
+    const journal = "Oct 07 19:12:40 ip-10-0-0-123.eu-west-1.compute.internal cloud-init[600]: ";
+    for (const text of [`[   12.50] cloud-init[600]: ${BODY[0]}\n[   12.51] cloud-init[600]: ShortTail0Ab9==`,
+      `x\n${journal}${BODY[0]}\n${journal}ShortTail0Ab9==\nok`, `${BODY[0]}\nShortTail0Ab9== \nok`]) {
+      assert.ok(!redact(text).includes("ShortTail0Ab9"), text);
+    }
     assert.ok(redact(`${BODY[0]}\n${BODY[1]}\nlast0Ab9\ndone\nStarting`).endsWith("\ndone\nStarting"));
     const started = Date.now();
     redact(`${"[    1.234567] usb 1-1: new device found, idVendor=1d6b\n".repeat(4000)}${"a".repeat(64 * 1024)}${" -PRIVATE KEY".repeat(10_000)}`);
     redact("ab cd ".repeat(40_000));
     redact("-----BEGIN ".repeat(20_000));
+    redact("-".repeat(256 * 1024));
     assert.ok(Date.now() - started < 2000, `redaction took ${Date.now() - started} ms`);
     console.log("ok: private keys are redacted when cut at either end, escaped, on one line or in other armors");
   }
