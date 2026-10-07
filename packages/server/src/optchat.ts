@@ -22,6 +22,7 @@ import { compactNode } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { capText, Memory, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
+import { imageNote } from "./thread-images.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
 import { applyAnswer, findWishes, initialWishes, nextChunk, WISH_LIMITS, WishAnswerError, type WishList, type Wishes } from "./optchat-wishes.ts";
 import { PENDING_ID, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
@@ -198,7 +199,9 @@ function historyLine(event: ThreadEvent, cap: number): string {
   if (event.type === "assistant-text") return `thread: ${capText(event.text, cap)}`;
   const tool = Math.min(cap, HISTORY_TOOL);
   if (event.type === "tool-call") return `tool ${event.name} ${capText(JSON.stringify(event.input ?? {}), tool)}`;
-  return `result ${event.name}${event.isError ? " (error)" : ""}: ${capText(event.output, tool)}`;
+  // The images a result shows are named, never sent: the chat sees that there were some.
+  const images = imageNote(event.images?.length ?? 0);
+  return `result ${event.name}${event.isError ? " (error)" : ""}: ${[images, capText(event.output, tool)].filter(Boolean).join(" ")}`;
 }
 
 export type ReportState = "delivered" | "accepted" | "none";

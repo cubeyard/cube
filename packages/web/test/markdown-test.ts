@@ -20,4 +20,15 @@ assert.match(renderMarkdown("[docs](https://example.com)"), /<a href="https:\/\/
 assert.equal(renderMarkdown("[x](javascript:alert(1))").includes("href"), false, "script urls lose their link");
 assert.equal(renderMarkdown("[x](data:text/html,hi)").includes("href"), false);
 assert.equal(renderMarkdown("[x](/api/threads)").includes("href"), false, "no links into cubed's own api");
-console.log("ok: agent markdown renders without raw html, script links or remote images");
+
+// An image the thread read is shown, from the source the caller resolves; every other stays a link or text.
+const resolve = (href: string) => href === "/workspace/a.png" ? "/api/threads/t/media/m7.0.0" : null;
+const shown = renderMarkdown('![a "shot" <b>](/workspace/a.png) ![other](/workspace/b.png) ![remote](https://tracker.example/p.png)', resolve);
+assert.equal((shown.match(/<img /g) ?? []).length, 1, "only the resolved image is fetched");
+assert.match(shown, /<button type="button" class="message-image markdown-image" data-image="\/api\/threads\/t\/media\/m7.0.0" data-label="a &quot;shot&quot; &lt;b&gt;" aria-label="view a &quot;shot&quot; &lt;b&gt; larger"><img src="\/api\/threads\/t\/media\/m7.0.0" alt="a &quot;shot&quot; &lt;b&gt;"/);
+assert.match(shown, /> other <a href="https:\/\/tracker.example\/p.png"/, "an unresolved path is its text");
+const linked = renderMarkdown("[![a](/workspace/a.png)](https://example.com/page)", resolve);
+assert.match(linked, /^<p><button [^]*<\/button> <a href="https:\/\/example.com\/page" target="_blank" rel="noopener noreferrer">https:\/\/example.com\/page<\/a><\/p>/, "a linked image is a key beside its link, not inside it");
+assert.doesNotMatch(renderMarkdown("![a](/workspace/a.png)"), /<img/, "no resolver, no image");
+assert.doesNotMatch(renderMarkdown("![a](/workspace/a.png)"), /media/, "the resolver of one render does not outlive it");
+console.log("ok: agent markdown renders without raw html, script links or remote images, and shows only the images the thread read");

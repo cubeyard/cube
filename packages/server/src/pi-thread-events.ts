@@ -1,10 +1,11 @@
 /** The Pi adapter of the thread event model: renders pi-durable's
  * conversation view (entries plus `pi.live`) into `ThreadTranscript`s. */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
 import { ROOT_CONVERSATION_ID, type ConversationView, type EntryRecord, type Storage, type SubmissionRecord, type ToolSlot } from "@earendil-works/pi-durable";
 import type { Agent } from "./durable-agent.ts";
 import { mediaId } from "./optchat-media.ts";
+import { imageNote, shownImage, THREAD_IMAGE_LIMITS } from "./thread-images.ts";
 import type { MessageImage, ThreadAgent, ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -129,24 +130,32 @@ export function entryEvents(entries: readonly EntryRecord[]): ThreadEvent[] {
 function messageEvents(message: Message, id: string): ThreadEvent[] {
   if (message.role === "user") {
     if (typeof message.content === "string") return [{ type: "user-message", id, text: message.content }];
-    // An image in cube's media store is shown from there (OptChat's); any
-    // other stays a mark, so no base64 reaches the browser.
-    const images: MessageImage[] = [];
-    const text = message.content.flatMap(part => {
-      if (part.type === "text") return [part.text];
-      const stored = mediaId(part.data);
-      if (!stored) return ["[image]"];
-      images.push({ id: stored, mimeType: part.mimeType });
-      return [];
-    }).join("\n");
+    const { text, images } = partsOf(id, message.content, part => part);
     return [{ type: "user-message", id, text, ...images.length ? { images } : {} }];
   }
   if (message.role === "assistant") return assistantEvents(message, id, true);
   if (message.role !== "toolResult") return [];
-  return [{
-    type: "tool-result", id, callId: message.toolCallId, name: message.toolName, isError: message.isError, final: true,
-    output: message.content.map(part => part.type === "text" ? harnessNote(part.text) : "[image]").join("\n"),
-  }];
+  const { text, images } = partsOf(id, message.content, harnessNote);
+  return [{ type: "tool-result", id, callId: message.toolCallId, name: message.toolName, isError: message.isError, final: true, output: text, ...images.length ? { images } : {} }];
+}
+
+/** A message's text and images. An image in cube's media store is shown from
+ * there (OptChat's), an inline one by its place in the thread's store
+ * (thread-images.ts); no base64 reaches the browser. One cube does not serve,
+ * or beyond the bound, stays a mark. */
+function partsOf(id: string, content: Array<TextContent | ImageContent>, text: (value: string) => string): { text: string; images: MessageImage[] } {
+  const images: MessageImage[] = [];
+  let more = 0;
+  const lines = content.flatMap((part, index) => {
+    if (part.type === "text") return [text(part.text)];
+    const stored = mediaId(part.data);
+    const image = stored ? { id: stored, mimeType: part.mimeType } : shownImage(`${id}.${index}`, part.mimeType, part.data);
+    if (!image) return ["[image]"];
+    if (images.length < THREAD_IMAGE_LIMITS.perEvent) images.push(image); else more++;
+    return [];
+  });
+  if (more) lines.push(imageNote(more, true));
+  return { text: lines.join("\n"), images };
 }
 
 /** pi-durable appends a tool's diagnostics for the model as one

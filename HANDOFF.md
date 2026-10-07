@@ -194,6 +194,23 @@ docs/optchat.md, "Images". Verified offline (`optchat-media-test.ts`,
 `images-test.ts`) and in headless Chromium with a real clipboard paste and a
 faux vision model; not with a real provider.
 
+## Images in thread transcripts
+
+A thread shows the images its tools returned: a Claude Code Read of a
+screenshot is a thumbnail in its tool strip (open by default) that opens
+larger, and agent prose that names a path it read as an image
+(`![…](/workspace/.shots/x.png)`) shows it inline. Transcripts carry
+references only; the bytes stay in the thread's store on the cubed host and
+are served by `GET /api/threads/<id>/media/<ref>` (ARCHITECTURE.md, "Thread
+event model"), for archived threads too and after the machine's disk is
+gone. Verified with the real `claude` 2.1.293 (its stream-json for a Read of a
+Chromium screenshot, recorded against a mock API, is the fixture of
+`thread-images-test.ts`), the product smoke (the mod's Read through the fake
+`claude`, archive, workspace removed), the browser suite at desktop and phone
+sizes, and in headless Chromium against a real cubed. Not verified with a
+real model or a live installation. The UI still has no page for an archived
+thread's transcript; the route keeps serving its images for one.
+
 ## Usage and cost (branch `feat/usage-accounting`)
 
 Read-only usage accounting over the agents' own records: Pi's `pi.usage`

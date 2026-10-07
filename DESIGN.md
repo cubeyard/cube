@@ -495,8 +495,13 @@ lamp + mono tool name + plain primary argument (the command or path — raw
 JSON only as fallback, truncated at 300 chars) + chevron (turns 180° over 120ms when
 open). Output sits in a recessed `--s1` window underneath (12px mono,
 16rem max-height) inside a native disclosure, so it stays in the DOM. A strip opens while it runs,
-waits or failed; once the reader opens or folds one, that choice holds through
-streamed frames and the run's end.
+waits or failed, or when it returned images; once the reader opens or folds one, that choice holds through
+streamed frames and the run's end. Images a tool returned (a screenshot it
+read) sit in the same `--s1` window as framed 7px-radius thumbnails (one
+alone up to 28rem × 18rem) that open the image viewer; one the host no
+longer has is the dashed retry placeholder. Agent prose shows an image only
+when it names a path the thread read as one, on its own line, framed the same
+way.
 
 ### Banners
 Printed notices, 7px radius, one per tone: error is red ink on `--bad-soft`

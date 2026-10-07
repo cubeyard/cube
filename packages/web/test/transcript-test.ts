@@ -1,6 +1,6 @@
 /** The web transcript reads only the neutral thread event model. */
 import assert from "node:assert/strict";
-import { toolOpen, transcriptRows } from "../src/lib/transcript.ts";
+import { picturePath, toolOpen, transcriptRows } from "../src/lib/transcript.ts";
 import type { ThreadEvent, ThreadStatus } from "../src/lib/types.ts";
 
 const status = (state: ThreadStatus["state"]): ThreadStatus => ({ state, run: null, error: null });
@@ -62,4 +62,32 @@ const running = toolRow([{ ...projectsCall, callId: "r" }], "working");
 assert.equal(toolOpen(running, chosen), true, "a waiting strip opens by default");
 chosen.set("r", false);
 assert.equal(toolOpen(running, chosen), false, "a strip the reader folded stays folded while it runs");
-console.log("ok: transcript rows pair calls with results, group agent text, summarize tool input, mark thread reports, and keep the reader's folded and unfolded strips");
+
+// Images a tool returned are its row's; such a strip opens by default, and
+// agent prose that names a path read as an image shows that image.
+const shot = { id: "m7.0.0", mimeType: "image/png" };
+const pictured = transcriptRows({ events: [
+  { type: "assistant-text", id: "1", text: "before: ![s](/workspace/.shots/a.png)", reasoning: false, final: true },
+  { type: "tool-call", id: "2", callId: "r", name: "Read", input: { file_path: "/workspace/.shots/a.png" }, final: true },
+  { type: "tool-result", id: "3", callId: "r", name: "Read", output: "", isError: false, final: true, images: [shot] },
+  { type: "tool-call", id: "4", callId: "t", name: "read", input: { path: "notes.txt" }, final: true },
+  { type: "tool-result", id: "5", callId: "t", name: "read", output: "text", isError: false, final: true },
+  { type: "assistant-text", id: "6", text: "see ![the shot](.shots/./a.png) and ![x](/workspace/notes.txt) and ![y](https://example.com/y.png)", reasoning: false, final: true },
+  { type: "tool-result", id: "7", callId: "orphan", name: "codemode", output: "", isError: false, final: true, images: [shot] },
+], status: status("idle") });
+const readRow = pictured[1]!;
+assert(readRow.kind === "tool");
+assert.deepEqual(readRow.images, [shot]);
+assert.equal(readRow.summary, "/workspace/.shots/a.png");
+assert.equal(toolOpen(readRow, new Map()), true, "a strip with images opens to show them");
+assert.equal(toolOpen(readRow, new Map([["r", false]])), false, "unless the reader folded it");
+assert.equal("images" in pictured[2]!, false);
+assert.equal("pictures" in pictured[0]!, false, "an image named before it was read is not shown");
+assert.deepEqual(pictured[3]!.kind === "assistant" && pictured[3].pictures, { "/workspace/.shots/a.png": shot }, "only paths read as images");
+assert.deepEqual(pictured[4]!.kind === "tool" && pictured[4].images, [shot], "a result without a call keeps its images");
+assert.equal(picturePath("a/../b/./c.png"), "/workspace/b/c.png");
+assert.equal(picturePath("/workspace//x%20y.png"), "/workspace/x y.png");
+assert.equal(picturePath("https://example.com/a.png"), null);
+assert.equal(picturePath("//example.com/a.png"), null);
+assert.equal(picturePath("data:image/png;base64,AAAA"), null);
+console.log("ok: transcript rows pair calls with results, group agent text, summarize tool input, mark thread reports, keep the reader's folded and unfolded strips, and carry tool images and the pictures prose names");
