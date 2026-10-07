@@ -85,6 +85,19 @@ async function steadyKey(page: Page, text: string, shot: string, touch = false):
   await page.evaluate(() => document.getSelection()?.removeAllRanges());
   await key.waitFor({ state: "detached" });
 }
+/** How far the comment key is from its place: under the selection, kept in
+ * the document's view, and gone while the selection is out of it. 9999: a
+ * key with no selection, a missing key, or one over text out of view. */
+const keyGap = (page: Page) => page.evaluate(() => {
+  const key = document.querySelector(".artifact-select-key")?.getBoundingClientRect();
+  const selection = document.getSelection();
+  if (!selection?.rangeCount || selection.isCollapsed) return 9999;
+  const field = document.querySelector(".artifact-scroll")!.getBoundingClientRect();
+  const rect = selection.getRangeAt(0).getBoundingClientRect();
+  if (rect.bottom < field.top || rect.top > field.bottom) return key ? 9999 : 0;
+  if (!key) return 9999;
+  return Math.abs(key.top - Math.min(Math.max(rect.bottom + 8, field.top + 8), field.bottom - 52));
+});
 async function comment(page: Page, text: string, body: string): Promise<void> {
   await select(page, text);
   await page.locator(".artifact-select-key").click();
@@ -242,6 +255,68 @@ try {
   await phone.goto(`${url}/#/chat`);
   await phone.locator(".composer textarea").waitFor();
   await shoot(phone, "14-chat-phone");
+
+  // The document moves under a selection without a scroll: diagrams drawn
+  // late (mermaid held back, as on a slow first load), a resized window, and
+  // the comments panel growing on a phone. The key moves with the text.
+  async function lateDiagrams(viewport: { width: number; height: number }, mobile: boolean, shot: string): Promise<Page> {
+    const late = await browser.newPage({ viewport, isMobile: mobile, hasTouch: mobile });
+    late.on("pageerror", error => errors.push(String(error)));
+    let release = () => {};
+    const held = new Promise<void>(resolve => { release = resolve; });
+    await late.route(/mermaid\.core-[^/]*\.js$/, async route => { await held; await route.continue(); });
+    await late.goto(`${url}/#/a/${reviewId}`);
+    await late.locator("article.artifact-body h1").waitFor();
+    // No scroll anchoring, so no scroll event moves the key in its stead.
+    await late.addStyleTag({ content: ".artifact-scroll { overflow-anchor: none; }" });
+    await select(late, "the store keeps every revision");
+    // The selection high in the view, so the text moved by the diagrams stays in it.
+    await late.locator(".artifact-scroll").evaluate(scroller => {
+      scroller.scrollTop += document.getSelection()!.getRangeAt(0).getBoundingClientRect().top - scroller.getBoundingClientRect().top - 60;
+    });
+    await late.locator(".artifact-select-key").waitFor();
+    assert.ok(await late.locator(".diagram-picture[aria-busy]").count() > 0, "the text is selected before the diagrams are drawn");
+    await until(() => keyGap(late), gap => gap <= 1, "the key under the selection");
+    const top = () => late.evaluate(() => document.getSelection()!.getRangeAt(0).getBoundingClientRect().top);
+    const from = await top();
+    await shoot(late, `${shot}a-diagrams-pending`);
+    release();
+    await until(async () => late.locator(".diagram-picture[aria-busy]").count(), count => count === 0, "the late diagrams drawn");
+    await until(top, at => at > from + 50, "the drawn diagrams move the selected text");
+    await until(() => keyGap(late), gap => gap <= 1, "the key follows the text the diagrams moved");
+    await shoot(late, `${shot}b-diagrams-drawn`);
+    // Back in view, the key is under it again.
+    await late.evaluate(() => document.getSelection()!.getRangeAt(0).startContainer.parentElement!.scrollIntoView({ block: "center" }));
+    await late.locator(".artifact-select-key").waitFor();
+    await until(() => keyGap(late), gap => gap <= 1, "the key under the selection scrolled back");
+    await shoot(late, `${shot}c-scrolled-back`);
+    return late;
+  }
+  const wide = await lateDiagrams({ width: 1440, height: 900 }, false, "16");
+  for (const width of [1000, 700]) {
+    await wide.setViewportSize({ width, height: 800 });
+    await until(() => keyGap(wide), gap => gap <= 1, `the key follows the text reflowed at ${width}px`);
+  }
+  await shoot(wide, "16d-resized");
+  await wide.close();
+  const narrow = await lateDiagrams({ width: 390, height: 844 }, true, "17");
+  // The selection near the foot of the document's view; then a new comment
+  // grows the comments panel below it, and the view shrinks.
+  await narrow.locator(".artifact-scroll").evaluate(scroller => {
+    const bottom = document.getSelection()!.getRangeAt(0).getBoundingClientRect().bottom;
+    scroller.scrollTop += bottom - (scroller.getBoundingClientRect().bottom - 30);
+  });
+  await until(() => keyGap(narrow), gap => gap <= 1, "the key under the scrolled selection");
+  const foot = async () => narrow.locator(".artifact-scroll").evaluate(scroller => scroller.getBoundingClientRect().bottom);
+  const before = await foot();
+  await comment(page, "newest revision only", "A draft that grows the phone's panel.");
+  await narrow.locator(".comment-item.draft").waitFor({ timeout: 15_000 });
+  assert.ok(await foot() < before - 20, "the panel grew into the document's view");
+  await until(() => keyGap(narrow), gap => gap <= 1, "the key stays in the view the panel shrank");
+  await shoot(narrow, "17d-panel-grown");
+  await page.locator(".comment-item.draft .work-dismiss").click();
+  await page.locator(".comment-item.draft").waitFor({ state: "detached" });
+  await narrow.close();
 
   // The black edition: diagrams are drawn with mermaid's dark theme.
   const night = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
