@@ -322,7 +322,10 @@ async fn attach_lease_and_ssh_dial_over_iroh() {
     let mut request = [0u8; 18];
     service.read_exact(&mut request).await.unwrap();
     assert_eq!(&request, b"GET / HTTP/1.1\r\n\r\n");
-    let closed = dial::open(&gateway.control, VM_ID, 8081).await.err().unwrap();
+    let closed = dial::open(&gateway.control, VM_ID, 8081)
+        .await
+        .err()
+        .unwrap();
     assert!(format!("{closed:#}").contains("502"), "{closed:#}");
 
     let refused = dial::open(&gateway.control, VM_ID, 23).await.err().unwrap();
