@@ -27,9 +27,11 @@ class FakeGuest implements GuestTransport {
   answers = true;
   calls = 0;
   closes = 0;
-  async call(op: GuestOp, _header: Record<string, unknown>, _options?: GuestCallOptions): Promise<GuestAnswer> {
+  readonly timeouts: Array<number | undefined> = [];
+  async call(op: GuestOp, _header: Record<string, unknown>, options?: GuestCallOptions): Promise<GuestAnswer> {
     assert.equal(op, "hello");
     this.calls++;
+    this.timeouts.push(options?.timeoutMs);
     if (!this.answers) throw new GuestTransportError("ssh could not reach the guest: Connection timed out during banner exchange");
     return { header: hello, body: Buffer.alloc(0) };
   }
@@ -119,6 +121,7 @@ try {
   assert.deepEqual(await vms.start(thread), { booted: false });
   assert.deepEqual(reached(), [], "a machine whose guest answers is not started again");
   assert.equal(guest.calls, before + 1, "the check asks the guest itself, not only the runner");
+  assert.equal(guest.timeouts.at(-1), 45000, "a busy guest gets as long as one ready poll before it counts as gone");
   console.log("ok: an attached machine whose guest answers is only checked");
 
   // The runner says running and the gateway has it, but ssh cannot reach the
@@ -127,8 +130,10 @@ try {
   runner.calls.length = 0;
   const epoch = runner.epoch;
   const closes = guest.closes;
-  const starting = vms.start(thread, { onBoot: () => { guest.answers = true; } });
-  assert.deepEqual(await starting, { booted: false }, "a running machine attached again was not booted");
+  let boots = 0;
+  const starting = vms.start(thread, { onBoot: () => { boots++; guest.answers = true; } });
+  assert.deepEqual(await starting, { booted: false }, "a running machine attached again was not booted: resume hooks do not run again");
+  assert.equal(boots, 1, "onBoot says the call went past a check: the thread shows as starting");
   assert.deepEqual(reached(), ["start"], "only vm.start (a new frame connection), no allocation, no release");
   assert.ok(runner.epoch > epoch, "the start is fenced by a newer epoch");
   assert.equal(attaches.length, 2);
@@ -174,8 +179,8 @@ try {
   assert.ok(runner.epoch > lost);
   console.log("ok: a re-attach whose answer is lost leaves the thread on its runner; the retry is fenced anew");
 
-  // A newer owner fenced the machine: this cubed's re-attach is refused and
-  // takes nothing over.
+  // While another owner holds a newer epoch on the runner, this cubed's
+  // re-attach is refused and attaches nothing (fencing is the runner's).
   guest.answers = false;
   runner.epoch = Number.MAX_SAFE_INTEGER;
   runner.calls.length = 0;
@@ -184,7 +189,7 @@ try {
   assert.deepEqual(reached(), ["start"]);
   assert.equal(registry.getThread(thread.id)!.runnerId, "mac");
   assert.equal(attaches.length, attached, "a refused start attaches nothing");
-  console.log("ok: a re-attach fenced by a newer owner is refused and changes nothing");
+  console.log("ok: a re-attach under a newer epoch on the runner is refused and attaches nothing");
 } finally {
   await vms.close();
   registry.close();

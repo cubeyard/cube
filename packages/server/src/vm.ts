@@ -77,8 +77,12 @@ export function vmSizes(env: NodeJS.ProcessEnv = process.env): VmSizes {
 
 const READY_TIMEOUT_MS = 15 * 60 * 1000;
 const SETTLE_TIMEOUT_MS = 3 * 60 * 1000;
-/** How long an attached machine's guest has to answer before it is attached again. */
-const GUEST_CHECK_TIMEOUT_MS = 20000;
+/** How long an attached machine's guest has to answer before it is attached
+ * again (as long as one ready poll: a busy guest is not a gone one). */
+const GUEST_CHECK_TIMEOUT_MS = 45000;
+/** How long a machine attached again has to answer: it was ready before, so
+ * this tells a lost link from a guest that is gone without a first boot's wait. */
+const REATTACH_READY_TIMEOUT_MS = 2 * 60 * 1000;
 const MACHINE_STATES_LIVE = new Set(["starting", "running"]);
 
 export interface ThreadVmsOptions {
@@ -221,6 +225,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       thread = this.options.registry.getThread(thread.id) ?? thread;
       await this.abandonBuildElsewhere(thread);
       if (placement(thread) === "allocated") await this.verify(thread);
+      let reattach = false;
       if (this.attached.has(vm.vmId)) {
         // Already started by this process: only check that it still runs
         // and its guest answers.
@@ -240,6 +245,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
           this.log.warn("machine runs but its guest does not answer; attaching it again", { thread: thread.id, vm: vm.vmId, error: unanswered,
             link: status.link, linkError: status.lastError });
           await this.guest(thread).close();
+          reattach = true;
         } else this.log.warn("machine is not running; starting it again", { thread: thread.id, vm: vm.vmId, state: current.state });
         this.attached.delete(vm.vmId);
       }
@@ -254,7 +260,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
         const gateway = await this.options.gateway.ready();
         try {
           await this.verify(thread);
-          return await this.bootOn(thread, runner, gateway);
+          return await this.bootOn(thread, runner, gateway, reattach);
         } catch (error) {
           if (!await this.movable(thread, error)) throw error;
           tried.add(thread.runnerId);
@@ -401,7 +407,8 @@ export class ThreadVms implements ThreadMachines, EgressVms {
   }
   private nodeId(runnerId: string): string { return this.options.registry.getRunner(runnerId)?.nodeId ?? runnerId; }
 
-  private async bootOn(thread: Thread, runner: IrohRunnerClient, { client: gateway, hello }: Awaited<ReturnType<GatewaySupervisor["ready"]>>): Promise<MachineStart> {
+  private async bootOn(thread: Thread, runner: IrohRunnerClient, { client: gateway, hello }: Awaited<ReturnType<GatewaySupervisor["ready"]>>,
+    reattach = false): Promise<MachineStart> {
     const vm = machine(thread);
     const target = runner.target;
     const ref: VmRef = { threadId: thread.id, vmId: vm.vmId };
@@ -457,7 +464,8 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     await gateway.attach(vm.vmId, spec);
     this.attached.set(vm.vmId, spec);
     this.log.info("started", { thread: thread.id, vm: vm.vmId, state: record.state, runner: runner.nodeId });
-    await this.waitReady(this.guest(thread), runner, ref);
+    const readyMs = this.options.readyTimeoutMs ?? READY_TIMEOUT_MS;
+    await this.waitReady(this.guest(thread), runner, ref, reattach && !booted ? Math.min(readyMs, REATTACH_READY_TIMEOUT_MS) : readyMs);
     if (first) this.phase(thread, "boot", booting);
     return { booted };
   }
@@ -593,7 +601,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       if (!binary) throw new GatewayUnavailable(this.options.gateway.unavailable ?? "no cube-gateway");
       transport = new SshGuestTransport({ vmId: build.vmId, keyDirectory: directory, controlDirectory: this.controls,
         gateway: { binary, control: this.controlSocket() } });
-      await this.waitReady(transport, runner, ref);
+      await this.waitReady(transport, runner, ref, this.options.readyTimeoutMs ?? READY_TIMEOUT_MS);
       phases["build-boot"] = Date.now() - since;
 
       // cubed's own commands: the build machine never has an agent.
@@ -712,8 +720,8 @@ export class ThreadVms implements ThreadMachines, EgressVms {
   /** The guest answers `hello` with ready once cloud-init (packages, the
    * helper) has finished; the first boot installs packages through the
    * gateway and takes minutes. */
-  private async waitReady(transport: GuestTransport, runner: IrohRunnerClient, ref: VmRef): Promise<void> {
-    const deadline = Date.now() + (this.options.readyTimeoutMs ?? READY_TIMEOUT_MS);
+  private async waitReady(transport: GuestTransport, runner: IrohRunnerClient, ref: VmRef, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
     let lastInspect = Date.now();
     let last: string;
     for (;;) {
