@@ -283,6 +283,7 @@ export async function createCubed(options: {
   const openOptchat = () => optchat ??= (async () => OptChat.open({
     directory: path.join(options.state, "optchat"), models, threads: optchatThreads,
     model: async () => preferredModel(await catalog()), compactor: compactorModel(process.env.CUBED_OPTCHAT_COMPACTOR),
+    wishes: wishModel(process.env.CUBED_OPTCHAT_WISHES),
   }))().then(chat => ({ chat, events: new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => chat.failure() })) }))
     .catch(error => {
       optchat = null;
@@ -489,7 +490,12 @@ export async function createCubed(options: {
         const { chat, events } = await openOptchat();
         if (parts[2] === "history" && method === "GET") return json(await events.read());
         if (parts[2] === "stream" && method === "GET") return await serveThreadEvents(events, response);
-        if (parts[2] === "tasks" && method === "GET") return json(await chat.tasks());
+        // The threads this chat started, and the wishes no thread took up.
+        if (parts[2] === "threads" && parts.length === 3 && method === "GET") return json(await chat.threadOverview());
+        if (parts[2] === "wishes" && parts.length === 3 && method === "GET") return json(await chat.wishes());
+        if (parts[2] === "wishes" && parts.length === 5 && parts[4] === "dismiss" && method === "POST") {
+          return await chat.dismissWish(parts[3]!) ? json({ ok: true }) : json({ error: "no such wish" }, 404);
+        }
         if (parts[2] === "view" && method === "GET") return json({ view: chat.memory.render(), messages: chat.memory.length, failure: chat.failure() });
         if (parts[2] === "stop" && method === "POST") { await chat.stop(); return json({ ok: true }); }
         if (parts[2] === "prompt" && method === "POST") {
@@ -630,11 +636,17 @@ export async function createCubed(options: {
 }
 
 /** CUBED_OPTCHAT_COMPACTOR=provider/model picks OptChat's compactor; default: the chat's own model. */
-function compactorModel(value: string | undefined): ModelSelection | null {
+function compactorModel(value: string | undefined, name = "CUBED_OPTCHAT_COMPACTOR"): ModelSelection | null {
   if (!value?.trim()) return null;
   const slash = value.indexOf("/");
-  if (slash <= 0 || slash === value.length - 1) throw new Error("CUBED_OPTCHAT_COMPACTOR must be provider/model");
+  if (slash <= 0 || slash === value.length - 1) throw new Error(`${name} must be provider/model`);
   return { provider: value.slice(0, slash), id: value.slice(slash + 1) };
+}
+
+/** CUBED_OPTCHAT_WISHES=provider/model picks the wish finder's model, `off`
+ * switches it off; default: the compactor's. */
+function wishModel(value: string | undefined): ModelSelection | false | null {
+  return value?.trim() === "off" ? false : compactorModel(value, "CUBED_OPTCHAT_WISHES");
 }
 
 interface CubedCli {

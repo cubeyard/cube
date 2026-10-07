@@ -346,7 +346,7 @@
               <div class="message-copy markdown">{@html renderMarkdown(row.text)}</div>
             </article>
           {:else if row.kind === "user"}
-            <article class="conversation-message user" class:sending={row.sending} aria-label="user message">
+            <article class="conversation-message user" class:sending={row.sending} aria-label="user message" data-entry={row.id.split(".")[0]}>
               <span class="message-label">you{#if row.sending}<span class="message-sending"> · sending</span>{/if}</span>
               {#if row.images}{@render messageImages(row.images)}{/if}
               {#if row.text}<div class="message-copy">{row.text}</div>{/if}

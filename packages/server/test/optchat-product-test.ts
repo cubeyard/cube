@@ -41,9 +41,6 @@ faux.setResponses(Array.from({ length: 100 }, () => async request => {
     const blocks = typeof first.content === "string" ? [first.content] : first.content.map(part => part.type === "text" ? part.text : "");
     chatTurns.push(blocks);
     const said = blocks.at(-1)!;
-    // After the spawn, the chat keeps a task for it with the thread linked.
-    const started = last.role === "toolResult" ? /^\[([0-9a-f]{8})\] started/.exec(textOf(last)) : null;
-    if (started) return fauxAssistantMessage([fauxToolCall("task", { title: "count the files", project: "demo", next: "wait for the report", threads: [started[1]!] }, { id: "call-task" })], { stopReason: "toolUse" });
     if (last.role === "toolResult") return fauxAssistantMessage(`started: ${textOf(last)}`);
     if (said.includes("count the files")) {
       return fauxAssistantMessage([fauxToolCall("spawn", { tasks: [{ project: "demo", task: "count the files in the repository with bash" }] }, { id: "call-spawn" })], { stopReason: "toolUse" });
@@ -105,12 +102,20 @@ try {
   assert.match(reportTurn[0]!, /^<chat>\n0\+1\|user: please count the files in demo\n/, "the report turn sees the view");
   assert.ok(!reportTurn[0]!.includes("not summarized yet"));
 
-  // The task list: the chat's intent beside the thread's state as cubed
-  // records it; the report turn led with it.
-  const tasks = await (await fetch(`${base}/api/optchat/tasks`)).json();
-  assert.deepEqual(tasks.open.map((task: { title: string; status: string; project: string; threads: unknown }) => [task.title, task.status, task.project, task.threads]),
-    [["count the files", "active", "demo", [{ id: thread.id, title: thread.title, project: "demo", state: "completed" }]]]);
-  assert.match(reportTurn[1]!, /^<now>\n[^]*\nt1 active · demo · count the files · next: wait for the report · thread \[[0-9a-f]{8}\] turn ended\n<\/now>$/);
+  // No task list leads a turn: the view, then the message.
+  assert.equal(reportTurn.length, 2, JSON.stringify(reportTurn));
+  assert.ok(!reportTurn.some(block => block.includes("<now>")));
+  // The overview: the spawned thread is there without anyone registering
+  // it, in its project, with its own run state as cubed records it.
+  const overview = await (await fetch(`${base}/api/optchat/threads`)).json();
+  assert.deepEqual(overview.threads.map((item: { spawned: number }) => ({ ...item, spawned: typeof item.spawned })),
+    [{ id: thread.id, title: thread.title, project: { id: project.project.id, name: "demo" }, state: "completed", archived: false, spawned: "number" }]);
+  assert.deepEqual([overview.archived, overview.unknown], [{ shown: 0, total: 0 }, 0]);
+  assert.equal((await fetch(`${base}/api/optchat/tasks`)).status, 404, "the task list is gone");
+  // Wishes are read only once the chat has been quiet a while: nothing yet, never a guess.
+  const wishes = await (await fetch(`${base}/api/optchat/wishes`)).json();
+  assert.deepEqual([wishes.state, wishes.wishes, wishes.read], ["catching up", [], 0]);
+  assert.equal((await post("/api/optchat/wishes/w1/dismiss", {})).status, 404);
 
   // A replayed spawn finds its thread, even with another model or none left.
   const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [],
@@ -199,9 +204,11 @@ try {
   assert.match((await adapter.archive!(stuck.id))!.disk, /^machine disk retained \(the agent could not open: claude code is not installed/);
   assert.equal(app.registry.getThread(stuck.id)!.archived, true);
 
-  const later = await (await fetch(`${base}/api/optchat/tasks`)).json();
-  assert.equal(later.open[0].threads[0].state, "archived", "an archived thread reads as archived; the task stays as the chat left it");
-  assert.equal(later.open[0].status, "active");
+  // Archived, the chat's thread shows how its last run ended, marked
+  // archived; the threads made outside the chat are not its own and stay out.
+  const later = await (await fetch(`${base}/api/optchat/threads`)).json();
+  assert.deepEqual(later.threads.map((item: { id: string; state: string; archived: boolean }) => [item.id, item.state, item.archived]), [[thread.id, "completed", true]]);
+  assert.deepEqual(later.archived, { shown: 1, total: 1 });
   const { view, messages } = await (await fetch(`${base}/api/optchat/view`)).json();
   assert.ok(messages >= 5, `the log holds the turns (${messages})`);
   assert.match(view, /^<chat>\n/);

@@ -11,8 +11,9 @@ its threads (`history`), diagnoses the machine of one that does not start
 that does not start"), archives its threads that are done to free their
 machines (`archive`), reads usage and estimated cost (`usage`: everything,
 a project or a thread; read-only, see [usage.md](usage.md)) and reads its own
-memory (`zoom`, `date`) and keeps the user's task list (`task`, `tasks`; see
-"Tasks"). Threads do all the work, each in its own VM, exactly like a thread
+memory (`zoom`, `date`). It keeps no task list: the chat page shows its
+threads and the wishes no thread took up, both derived (see "Threads beside
+the chat" and "Wishes not started"). Threads do all the work, each in its own VM, exactly like a thread
 started from the UI.
 
 The memory follows Victor Taelin's OptChat spec
@@ -252,47 +253,87 @@ Archived threads cannot be reopened, from OptChat or the UI; `discard` of a
 retained disk stays an operator action in the UI. Nothing is deleted besides
 what the release itself deletes (a clean machine's disk).
 
-## Tasks
+## Threads beside the chat
 
 The chat is an archive, not the way to find what is going on. The chat
-page's **now** panel (beside the conversation on a desktop, folded above it
-on a phone) shows a small task list that OptChat keeps:
+page's **threads** panel (beside the conversation on a desktop, folded above
+it on a phone) shows every thread this chat started. Nobody keeps it:
 
-- **What a task is.** A title, a status (`active`, `pending`, `blocked`,
-  `done`, `dropped`), the next action or what blocks it, an optional
-  project, up to 4 of the chat's own threads and up to 4 https links (a pull
-  request shows as `owner/repo#n`). Ids are `t1`, `t2`, … and never reused.
-- **Where it lives.** `cube.optchat.tasks`, a session doc in the chat's Pi
-  store, written word for word by the `task` tool in the tool call's own
-  commit. It is never rebuilt from the view's summaries; the log keeps every
-  `task` call as well.
-- **Bounds.** At most 20 open tasks (a 21st is refused until one closes).
-  The 30 most recently closed are kept; the panel and the model see the 5
-  closed in the last 7 days. A title has at most 100 characters, the next
-  action at most 280.
-- **Tools.** `task` adds a task (no id; a replayed call finds the task it
-  made by its call id) or changes the fields it is given (`threads` and
-  `links` replace the task's). `tasks` reads the list. Every turn also
-  shows the list after the view, inside `<now>` tags, as it was when the
-  turn started (`cube.optchat.turn-tasks`), so every request of a turn sends
-  the same bytes and the view's cache marks are unchanged. The system prompt
-  asks OptChat to keep it true as work starts, reports arrive and the user
-  decides.
-- **Intent and observation.** A status is OptChat's intent. Beside each
-  linked thread the panel shows the thread's state as cubed records it when
-  the list is read (`working`, `turn ended`, `waiting on a background
-  agent`, `failed`, `stopped`, `starting`, `machine error`, `archived`, …),
-  read like `history` from the stored run state: no agent is opened, no
-  lease taken, no machine waited for; the threads are read in parallel and
-  one slower than 2 s reads as `unknown`. A thread's ended turn is shown as `turn ended`, not as a task done.
-  A link is only a link: cube does not read any PR, merge, release or
-  install state, and the panel says so.
-- **Refresh.** The panel reads `GET /api/optchat/tasks` when the chat page
-  opens or becomes visible, every 5 s while the chat is working, and once
-  when a turn ends. An idle chat does no polling, and nothing outside cubed
-  is called.
+- **Where it comes from.** The chat's own spawn records
+  (`cube.optchat`'s `threads`, written by `spawn` in the call's commit). A
+  thread started from the UI is not the chat's and is not shown; a thread
+  the chat started needs no further step to appear.
+- **What it shows.** Grouped by project, newest first: each open thread with
+  its title and its own state as cubed records it when the panel reads
+  `GET /api/optchat/threads` (`working`, `turn ended`, `waiting on a
+  background agent`, `failed`, `stopped`, `starting`, `waiting for a
+  runner`, `machine error`, …), and the 8 newest archived threads with how
+  their last run ended (`archived · stopped`). Older archived threads are
+  counted, as are threads cubed no longer has. States are read like
+  `history`: the stored run state, no agent opened, no lease taken, no
+  machine waited for; one store slower than 2 s reads as `unknown`.
+- **What it does not say.** A turn that ended is not work done; an archived
+  thread is not a goal met; nothing reads a pull request, merge, release or
+  install. The panel says so in its foot.
+- **Refresh.** On open and when the page becomes visible, every 5 s while
+  the chat works, once when a turn ends, and every 30 s while a shown thread
+  is starting or running. An idle page with no running thread does no
+  polling.
 
-The user changes tasks by asking OptChat; the panel has no edit controls.
+OptChat's own `threads` tool lists the same threads with their state.
+
+## Wishes not started
+
+The user's main risk with an endless chat is a wish said once and never
+started. The panel's **not started** disclosure (closed by default) lists
+what the user explicitly asked for that no thread of the chat took up. It is
+inferred, not kept: no tool writes it and OptChat does not read it.
+
+- **The reader.** A cheap model call (`optchat-wishes.ts`) reads the log
+  from where it stopped, a chunk of at most 24,000 characters at a time: the
+  user's words (1,500 characters a message), OptChat's replies (400), its
+  `spawn` and `tell` calls (600) and thread reports (300, marked as reports,
+  never as the user's words); tool results, other tools and notes are left
+  out. With the chunk it gets the open wishes (at most 30) and the last 20
+  dismissed ones. It classifies each candidate as `wish`, `question`,
+  `hypothetical`, `rejected`, `deferred`, `suggestion` (OptChat's idea the
+  user did not take up) or `done`, and names wishes repeated, taken up by a
+  `spawn`/`tell` of the chunk, or withdrawn by the user.
+- **What is kept.** Only `wish` with high confidence, whose quote is found
+  word for word (spacing, case and quote marks aside) in a user message of
+  the chunk it names. A wish like a known one (open, started or dismissed:
+  the same quote or most of the same words) adds its messages to that one;
+  a repeat of a started or withdrawn wish opens it again. A start must name a
+  `spawn` or `tell` after the wish's words. Everything else is refused and
+  logged (`wishes refused`), never kept. At most 30 wishes are open.
+- **When it runs (the cost policy).** Never during a turn and never per
+  token or per message: once the chat has been quiet for 3 minutes (every
+  change of the chat moves the run), then a chunk every 20 s while it reads
+  an older backlog, and at most every 15 minutes once it has caught up. A
+  chunk with no words of the user, and no hand-off that could take up an
+  open wish, is read without a call. At most 60 calls a UTC day; a failed
+  call is retried after 15 minutes; an answer that cannot be read is not
+  asked again (its messages are passed over and the failure shown). Calls go
+  to the compactor's model (`CUBED_OPTCHAT_COMPACTOR`, default the chat's)
+  unless `CUBED_OPTCHAT_WISHES=provider/model`; `CUBED_OPTCHAT_WISHES=off`
+  switches it off. Their usage is counted beside the compactor's
+  (`optchat-wishes` in usage).
+- **What is shown.** Nothing until the whole log has been read once ("reading
+  the chat…" with the share read); then at most 7 open wishes, newest first,
+  each with the user's quote, its project if the model named one and a link
+  per message (the newest 3) that scrolls the transcript to it. An empty list
+  says nothing was found. Dismissing a wish (`POST
+  /api/optchat/wishes/<id>/dismiss`) takes it off for good; it is the user's
+  correction for a misread, a wish handled elsewhere or one no longer wanted.
+- **Where it lives.** `cube.optchat.wishes` in the chat's Pi store: how far
+  the log is read, the wishes with their message ids (the view's ids, which
+  `zoom` opens), the last failure and the call count and usage.
+- **Limits.** The model may miss a wish or misread one; there is no
+  measured precision on a real chat. A wish started outside this chat (from
+  the UI, or by an earlier, pre-chat thread) still shows until dismissed. A
+  wish taken up shows as started even if its thread failed: the panel above
+  shows the thread's state. Nothing here says a wish was done, merged,
+  released or installed.
 
 ## Images
 
@@ -407,6 +448,8 @@ sent. Hit rates against a live provider are not measured.
   a new chat starts on the host's preferred model.
 - `CUBED_OPTCHAT_COMPACTOR=provider/model` selects the compactor's model
   (default: the chat's own). The spec recommends a cheap but competent model.
+- `CUBED_OPTCHAT_WISHES=provider/model` selects the wish finder's model
+  (default: the compactor's); `off` switches it off.
 - `<CUBED_STATE>/optchat/AGENTS.md`, if present, is the user's instructions,
   appended to the system prompt. It is read on every request; keep it stable
   for the cache.
@@ -419,7 +462,9 @@ uploads; with images `text` may be empty), `POST /api/optchat/media` (the raw
 image bytes; answers `{image: {id, mimeType, width, height, bytes}}`),
 `GET /api/optchat/media/<id>`, `POST /api/optchat/stop`,
 `GET /api/optchat/view` (what the model reads: the view and the message count),
-`GET /api/optchat/tasks` (the task list with each linked thread's state).
+`GET /api/optchat/threads` (the threads the chat started, with their state),
+`GET /api/optchat/wishes` (wishes not started) and
+`POST /api/optchat/wishes/<id>/dismiss`.
 
 ## Deviations from the spec
 

@@ -251,17 +251,17 @@ await scenario("a message sent while the agent works shows at once and the run r
 for (const viewport of [{ width: 1280, height: 800 }, { width: 1024, height: 768, touch: true }, { width: 390, height: 844, touch: true }]) {
   await scenario("the chat's rails are one band and the composer's keys sit on the text's line", async page => {
     const strip = await box(page, ".thread-strip");
-    const now = await box(page, ".now-head");
-    near(now.height, strip.height, "the now head is as tall as the chat strip");
+    const work = await box(page, ".work-head");
+    near(work.height, strip.height, "the threads head is as tall as the chat strip");
     if (viewport.width <= 832) {
-      // stacked: the now bay above the strip, labels on one left edge
-      near((await textBox(page, ".now-head h2")).left, (await box(page, ".thread-strip .lamp")).left, "the now label starts where the strip's lamp does");
+      // stacked: the threads bay above the strip, labels on one left edge
+      near((await textBox(page, ".work-head h2")).left, (await box(page, ".thread-strip .lamp")).left, "the threads label starts where the strip's lamp does");
     } else {
-      near(now.top, strip.top, "the rails start on one line");
-      near(now.bottom, strip.bottom, "the rails' hairlines meet");
-      const label = await textBox(page, ".now-head h2");
-      near((await textBox(page, ".strip-toggle")).bottom, label.bottom, "memory and now share a baseline");
-      near((await textBox(page, ".chat-tagline")).bottom, label.bottom, "the tagline and now share a baseline");
+      near(work.top, strip.top, "the rails start on one line");
+      near(work.bottom, strip.bottom, "the rails' hairlines meet");
+      const label = await textBox(page, ".work-head h2");
+      near((await textBox(page, ".strip-toggle")).bottom, label.bottom, "memory and threads share a baseline");
+      near((await textBox(page, ".chat-tagline")).bottom, label.bottom, "the tagline and threads share a baseline");
     }
     // memory is a quiet rail toggle, not a raised key, and says when it is open
     const memory = page.getByRole("button", { name: "memory" });
@@ -339,6 +339,41 @@ await scenario("the + key opens the file picker from the keyboard; picked, paste
   assert.deepEqual(host.prompts[0]!.images, ["img-1", "img-2", "img-3"], "the picked, pasted and dropped images went");
   assert.deepEqual(host.prompts[0]!.images!.map(id => host.media.get(id)!.body.at(-1)), [PNG.at(-1), 1, 0], "in that order");
 });
+
+for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844, touch: true }]) {
+  await scenario("the chat's threads show by project with their own state; a wish not started links its message and can be dismissed", async (page, host) => {
+    const thread = (id: string, project: string, title: string, state: string, archived = false) =>
+      ({ id: `${id}-0000-4000-8000-000000000000`, title, project: { id: project, name: project }, state, archived, spawned: 1 });
+    host.overview = { threads: [thread("aaaaaaa1", "cube", "fix the gateway host check", "working"), thread("bbbbbbb2", "site", "a much longer thread title that has to wrap or clamp in the narrow panel without overflowing it at all", "completed"),
+      thread("ccccccc3", "cube", "old work", "stopped", true)], archived: { shown: 1, total: 3 }, unknown: 0 };
+    host.wishes = { state: "ready", more: 0, read: 2, total: 2, error: null, lastRun: 1, reason: null,
+      wishes: [{ id: "w1", text: "an export of the usage report as csv", quote: "earlier", project: "cube", sources: [{ message: 0, entry: 1, date: Date.now() - 3 * 86_400_000 }] }] };
+    await page.reload();
+    await page.locator(".work-thread").first().waitFor();
+    assert.deepEqual(await page.locator(".work-group h3").allTextContents(), ["cube", "site"], "grouped by project, newest first");
+    assert.deepEqual(await page.locator(".work-state").allTextContents(), ["aaaaaaa1 · working", "ccccccc3 · archived · stopped", "bbbbbbb2 · turn ended"]);
+    assert.equal(await page.locator(".work-thread a.work-title").first().getAttribute("href"), "#/t/aaaaaaa1-0000-4000-8000-000000000000");
+    assert.equal(await page.locator(".work-thread.archived a").count(), 0, "an archived thread has no thread page to open");
+    await page.getByText("2 older archived not shown").waitFor();
+    assert.match(await page.locator(".work-summary").textContent() ?? "", /^2 open · 1 running$/);
+    const panel = await box(page, ".work-panel");
+    assert.ok(await page.locator(".work-body").evaluate(element => element.scrollWidth <= element.clientWidth), "nothing overflows the panel sideways");
+    assert.ok(panel.right <= viewport.width + 0.5, "the panel fits the screen");
+
+    // the wishes are folded and quiet until opened
+    const wishes = page.locator(".work-wishes summary");
+    assert.equal(await wishes.textContent(), "not started · 1");
+    assert.equal(await page.locator(".work-wish").isVisible(), false);
+    await wishes.click();
+    await page.locator(".work-wish", { hasText: "an export of the usage report as csv" }).waitFor();
+    await page.locator(".work-source", { hasText: "you, 3d" }).click();
+    await page.locator(".conversation-message.user.located", { hasText: "earlier" }).waitFor();
+    await page.getByRole("button", { name: "dismiss: an export of the usage report as csv" }).click();
+    await page.getByText("nothing found that no thread took up.").waitFor();
+    assert.deepEqual(host.dismissed, ["w1"]);
+    assert.equal(await wishes.textContent(), "not started · 0");
+  }, viewport);
+}
 
 await browser.close();
 if (failed) process.exit(1);

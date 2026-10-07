@@ -530,6 +530,343 @@ code scrolls inside its keyboard-focusable diff region. Opening an untracked
 text file reads it on demand and presents its complete contents as a new-file
 addition; binary and oversized files report why they cannot render.
 
+### Threads Panel
+The chat's right bay: a recessed `--s1` well with a `threads` head rail (open
+and running counts in tabular mono). The threads OptChat started sit under
+their project's name in mono, newest project first. Each is a hairline `--s4`
+card: a lamp (amber working, starting or waiting, red failed or machine
+error, unlit otherwise) beside the bold title, linked to the thread while it
+is open, and the short id with the thread's own state in muted mono (`turn
+ended`, never `done`). An archived thread is a transparent card, its title
+muted and unlinked, its state `archived · <last run>`. Below a hairline, a
+native disclosure, closed by default, holds `not started`: dashed cards with
+the inferred wish, the user's quote behind a hairline rule, the project and
+`you, 3d` keys that scroll the transcript to the message (outlined in
+signal for a moment), and a quiet close glyph to dismiss. Empty and catching-up
+states are one muted line, never a placeholder card. The foot says states come
+from cube, archived is not done and merged is not released. Under 52rem the bay
+stacks above the conversation, capped at 38vh and foldable by a chevron rail
+toggle, so the composer always stays on screen.
+
+### Named Rules
+**The Numbered Ramp Rule.** Every background is one of `--s0`–`--s4`; nothing
+exists outside the ramp. Audit: in the light theme OKLCH lightness ascends
+monotonically s0 → s4 (88.0% → 98.5%); in the black edition the ramp inverts
+around the reading field — s4 (#101013) is darker than the enclosure s2
+(#17171b), and the order is s0 < s1 < s4 < s2 < s3. Both orderings must hold.
+
+**The One Signal Rule.** One accent. `--signal` marks only what the user can
+act on, and each theme pairs it with its own `--signal-ink`. Never use the
+signal for state, and never use a lamp pigment on a clickable affordance.
+
+**The Lamps-Not-Tints Rule.** State is a lamp, and the four states are
+structurally distinct — lit green, *blinking* amber, steady red, unlit lens —
+never four tints of one dot. The off state is a physical lens, not absence.
+
+**The One Glass Rule.** Code is one material in both themes. The `--glass*`
+and `--syn-*` tokens are defined once on `:root` and never overridden. Audit:
+grep the dark media query for `--glass` or `--syn-`; the count must be zero.
+
+## Typography
+
+**UI Font:** Archivo Variable (self-hosted via fontsource, with italic axis;
+falls back to system-ui) — the instrument's silkscreen and reading voice.
+**Mono Font:** JetBrains Mono, weights 400 and 600 (self-hosted) — machine truth.
+
+**Character:** a grotesk with enough warmth to read as printed-on-plastic
+rather than typeset-on-screen, against a crisp terminal mono. Everything is
+lowercase as written; nothing in the system uppercases.
+
+### Hierarchy
+- **Headline** (700, 20px, −0.01em): the screen title ("threads"). One per screen.
+- **Title** (600, 14.5px): thread module titles and the inline rename input;
+  truncates to one line. Untitled threads drop to weight 450 and `--ink-3`.
+- **Body** (400, 15.5px/1.6): the transcript — agent prose, user messages,
+  empty-state copy. Thinking text is 14px italic `--ink-3`.
+- **Key** (550, 13px, 0.01em): key cap labels ("new thread", "files").
+- **Label / Silkscreen** (550, 11px, 0.08em, `--ink-3`): micro-labels printed
+  on the enclosure — state labels (0.06em), files-shelf head, code-window
+  language. Header lamp-field labels go one step smaller (10px, 0.1em).
+- **Code** (400, 12–12.5px/1.45–1.55 mono): tool heads and output (12px),
+  code blocks and inline code (12.5px), the model id and language label (11px).
+  Weight 600 marks tool names and syntax `strong` only.
+
+### Named Rules
+**The Mono-Means-Machine Rule.** JetBrains Mono renders only what the machine
+produced or will consume: tool names, commands, paths, output, code, the model
+id. The enclosure's own labels are always Archivo.
+
+**The Silkscreen Rule.** Micro-labels are printed, not shouted: 11px, weight
+550, 0.08em tracking, `--ink-3`, lowercase. There is no `text-transform`
+anywhere in the system — the lowercase voice is authored into the copy itself.
+
+**The Tabular Meta Rule.** Metadata that updates in place uses
+`font-variant-numeric: tabular-nums` (module meta, files meta, markdown table
+cells). A timestamp ticking from "2m" to "12m" must not shift the row.
+
+## Layout
+
+The app is a full-height flex column (`100dvh`). The thread list keeps the
+centered **47rem** reading measure (`--col`). One thin desktop rail spans the
+sidebar, conversation and changes, with no extra global row above it.
+Global navigation lives at the top of the sidebar; `projects` remains a direct
+exit (inside the thread drawer on narrow screens). Each workspace bay owns its
+top rail: thread title, model and thread controls above the conversation,
+changes controls above changes. Rail edges match the pane below and follow
+the draggable divider. The two-bay workspace starts evenly split, then respects
+the visitor's remembered divider position. At 52rem and below, the bays stack
+in the same viewport with the conversation receiving the larger share, and
+thread controls wrap within the conversation's own rail.
+
+The thread sidebar groups active threads by project, with a small plus button
+beside each project name to start a thread in that project. It has no separate
+“all threads” heading or full-width create button. Project names appear once
+per group; thread rows carry the title and state.
+
+The quiet `+ thread` action and each project's plus open the same native
+dialog, also used by the thread list, project detail and `n` shortcut. A
+project-specific entry preselects its project; the general entry includes
+ready projects with no threads. The first message owns the surface, with
+project and actual model selectors beneath it and one start action. Enter
+starts; Shift+Enter adds a line. Escape closes without discarding the draft.
+On phones, the project selector takes its own row. Loading, missing setup and
+submission errors stay inside the dialog; uncertain submissions retain their
+exact payload for retry.
+
+Projects use that same measure rather than introducing a dashboard grid. The
+project index is a recessed module well; project detail is one vertical
+switchboard: identity, repository board, then a hairline-separated action
+bank. Each repository row reserves a fixed role/readout zone beside flexible
+fields and prints its own check evidence directly below. At the 40rem
+breakpoint, repository fields collapse to one column, evidence remains inline,
+and the action bank wraps rather than forcing horizontal overflow.
+
+User messages sit right-aligned against the column's right edge as raised
+strips capped at `min(47rem, 85%)`; below a 53rem viewport the centering
+margin collapses. The files shelf is a pulled-out tray under the header capped
+at `40dvh`. The right workspace bay scrolls independently so expanding a long
+diff never moves the conversation. Spacing rhythm is in rem with recurring
+steps of 0.55 / 0.7–0.75 / 0.85–0.9 / 1.0 / 1.4 / 2.1.
+
+At the 40rem mobile breakpoint: header and paddings tighten, the model selector
+stays in the thread rail, the busy lamp drops its label (the blinking lamp alone carries
+"working"), and the composer textarea rises to 16px. The composer form pads
+its bottom with `env(safe-area-inset-bottom)`.
+
+### Named Rules
+**The Reading Measure Rule.** 47rem remains the measure for prose and thread
+lists. Comparison workspaces may use sibling bays, but reading content inside
+them keeps its own scroll and never stretches prose across both bays.
+
+**The Sixteen Pixel Rule.** The composer textarea is 16px at mobile width so
+iOS Safari does not zoom on focus. Any new text input inherits this rule.
+
+## Elevation & Depth
+
+Depth is physical, never atmospheric. A surface is raised (key shadow), sunk
+(well shadow), or flush on the ramp — there are no floating layers and no
+ambient glows. The only "elevation" in the classic sense, `--shadow-float`, is
+declared but unused: reserved for a true overlay (menu, dialog) that does not
+yet exist.
+
+### Shadow Vocabulary
+- **Key** (`--shadow-key`: `0 1px 0 rgba(255,255,255,0.7) inset, 0 1px 2px
+  rgba(38,32,18,0.22)` light): a top inner highlight plus a short drop — a key
+  standing proud of the panel. Also on user message strips.
+- **Key down** (`--shadow-key-down`): the pressed key — highlight dimmed, drop
+  collapsed to a 1px blur. Applied with 1px `translateY` on `:active` and on
+  held toggles (`.key.held`, which also drops to `--s1`).
+- **Well** (`--shadow-well`: inset 1px 3px + inset 1px ring, light): recessed
+  surfaces — the thread-list well, the files shelf, the code window (combined
+  with its glass ring).
+- **Seams**: the header's machined double seam (1px `--line-2` border plus two
+  layered `box-shadow` lines: an `--s4` highlight over a `--line` groove) and
+  the composer's answering single inset highlight above its `--line-2` border.
+- **Micro-depth**: tool strips carry a 1px `0.06`-alpha drop; tool output and
+  the composer textarea carry a shallow inset (`0.08`–`0.1` alpha).
+
+### Named Rules
+**The Real Travel Rule.** A key press is physical: `:active` translates the
+key 1px down and swaps `--shadow-key` for `--shadow-key-down` at 80ms. Hover
+brightens the face (`--s3` → `--s4`) and never moves the key.
+
+**The Machined Seam Rule.** Seams belong to the full-width decks only — the
+header's double seam and the composer's inset highlight. In-flow components
+get hairlines and ramp steps, never seams.
+
+## Shapes
+
+Three radii carry the whole enclosure: **9px keys** (`--r-key`, also user
+message strips, tool strips, code windows, the composer textarea), **14px
+wells** (`--r-well`; module faces inside a well use `calc(--r-well − 5px)`),
+and **7px chips** (`--r-chip`: banners, the not-signed-in warning, framed
+transcript images). Small utility radii (3–5px) appear only on the focus ring,
+inline code, and hover washes. Circles are reserved for lamps (8px, 6px mini)
+and the round send key (2.4rem). There are no pills anywhere. The single
+dashed border in the system is the missing-image retry placeholder.
+
+Iconography is one authored stroke family in `Icon.svelte`: 24-box, 2px
+stroke, round caps and joins, drawn to match the cube wireframe glyph (the
+brand mark, drawn inline in the header and favicon). Eight icons ship: plus,
+send, pencil, trash, chevron, check, copy, file. No icon libraries, and no
+unicode glyphs standing in for controls.
+
+## Components
+
+Motion grammar, shared by everything below: state changes at 120ms ease, press
+travel at 80ms, entrances via `settle-in` (140ms ease-out, 2px rise — nothing
+bounces), lamps warm up once on arrival (`lamp-on` 300ms, staggered 60ms per
+module up to 300ms), `lamp-blink` at 1.2s ease-in-out (50% → 0.3 opacity), and
+a blanket `prefers-reduced-motion` guard silences all of it.
+
+### First-run onboarding
+Onboarding is a quiet welcome, not an instrument panel. This surface explicitly
+omits cards, recessed wells, lamps, glows, raised keys, and the header seam.
+Use the existing warm palette and Archivo type on an open, centered reading
+column: one question, adjacent login/skip choices, and plain text status. The
+primary action is the app's own orange key and secondary actions are plain
+keys — the same `.key` system as the rest of the product, so the first run
+looks like the app it hands over to. A small
+step count lives in the header, while access details sit below a single hairline.
+Pending codes, connected accounts, and errors use text rather than status lamps.
+GitHub login from a project uses this same full-screen treatment at the project's
+`/github` subroute, not an inline widget. It explains the underlying GitHub CLI
+login and returns to the project, rechecking access after successful login.
+Repository errors appear once beside the affected repository, not duplicated
+in a page banner. Other project and thread controls retain their treatment.
+
+### Keys (buttons)
+- **Shape:** raised key, 9px radius, 1px `--line` border, `--shadow-key`.
+- **Default:** `--s3` face, `--ink-2` label (13px/550); hover lifts to `--s4`
+  face and `--ink` label. Press: 1px travel + `--shadow-key-down`.
+- **Primary:** `--signal` face, `--signal-ink` legend, border darkened to 80%
+  signal; hover mixes 8% white in. One primary per screen: "new thread" on
+  the list and "save" in project configuration. The thread rail has no primary action.
+- **Icon key** (`.key.icon`): square-ish padding, always `title` + `aria-label`.
+- **Round key** (`.key.round`): a 2.4rem circular signal key. The composer's
+  send key (`.send-key`) is the same circle at one text line's height.
+- **Held toggle** (`.key.held`): pressed-in look (`--s1` face, down shadow) for
+  the open files-shelf key, with `aria-expanded`.
+- **Danger hover** (`.key.danger`): `--bad` ink on `--bad-soft` wash.
+- **Disabled:** 0.45 opacity, cursor default.
+
+### Lamps
+8px circles (6px `.mini` in tool strips). Base is the unlit lens (`--lamp-lens`
+with inset shadow + `--lamp-ring` rim); `.on-green` / `.on-amber` / `.on-red`
+light the lamp with a 5px `color-mix` glow; `.blink` adds the 1.2s pulse.
+Thread mapping: busy or setting-up → amber blink; error → red; sleeping →
+unlit lens; ready → green. Tool mapping: running → amber blink; done → green;
+failed → red. Header lamps ride in a `.lamp-field` with a 10px silkscreen
+label; the busy lamp exists only while working (`display: none` otherwise).
+
+### Thread Module Well
+The list is one recessed well (`--s1`, 14px radius, `--shadow-well`, 0.35rem
+padding) holding one module per thread, separated by `--line` hairlines. A
+module face is the whole link: lamp, title, tabular meta (relative time, state
+label, project attribution, error preview). The thread list is global by
+default and its compact project select writes the filter into the hash URL;
+project context never becomes a separate thread silo. Rest face is
+`--face-rest` (transparent on putty, a
+0.035 white lift on the black edition so panel anatomy survives anodizing);
+hover washes in 55% `--s3`. Rename swaps the title for an engraved input —
+borderless, 2px `--signal` bottom rule. Empty list: centered hint with the one
+primary key (the header key is suppressed so there is exactly one way to act).
+
+### Project Switchboard
+The project index reuses the module well but adds repository names, repository
+and thread counts, checked time, and a flush re-check key bank. Project errors
+wrap to their full text inside the row; they are not reduced to a generic
+status or clipped preview.
+
+Detail is a vertical repository control board. The first row is permanently
+the writable primary checkout at `/workspace`; read-only reference rows print
+`../repos/<checkout-name>`. Each row combines a state lamp, URL/base/checkout
+fields, and exact evidence: not checked, checking access and branch, resolved
+base plus abbreviated OID, or the complete repository error. Saving makes the
+configuration dirty and therefore not checked; check and thread creation stay
+disabled until the saved project is ready. The bottom action bank preserves
+the hierarchy: one orange save action, neutral check/new-thread/thread-link
+keys, and a separated red-ink delete action. Orange does not spread to every
+important-looking secondary control.
+
+### Thread Repository Control Bank
+Every thread names its project and links back to that switchboard. Repository
+review is always scoped to the thread's pinned primary checkout. There is no
+repository selector: reference checkouts exist for agent context, not as
+publish targets. The changes pane distinguishes committed, staged, and unstaged
+work. Publication is requested in the conversation and performed through the
+worker's scoped host tools; the web UI has no publication panel, fixed runbook,
+or push-all control.
+
+### Composer
+Full-bleed `--s2` deck with the answering seam. Its field and keys sit in the
+transcript's reading measure, centred under the text with the same side
+padding, so a draft starts where the conversation does. One wide `--s4` field,
+radius a key's plus its padding, shallow inset shadow: the text auto-grows to
+11rem inside it; focus in the text swaps the field's border to `--signal` (the
+one sanctioned replacement of the global 2px signal focus ring). Its keys sit
+inside, square and exactly one text line tall (2rem; 2.75rem for a fingertip),
+on the draft's last line: where images can be sent, a `+` icon key at the
+start opens the file picker (paste and drop attach too; never a worded
+"image" key), and the round signal send key at the end. Stop, while a run is
+on, is a worded key beside the field at the field's height. Enter sends; Shift+Enter inserts a new
+line. The keyboard hint lives in the field's tooltip and accessible description,
+not a permanent extra row. Model selection belongs in the conversation pane's top rail:
+the actual model id as a quiet text control, with providers grouped in the
+opened list. Toggles in a rail (the chat's `memory`, the now bay's fold) are
+quiet text controls too (`.strip-toggle`): the rail's 11px label type, no face,
+a hover wash, pressed in with a turned chevron while open. Rails beside each
+other share `--rail` height, padding and hairline, so they read as one band. Never substitute an effort label such as "high" for the model.
+
+### Code Window
+Dark glass in both themes: `--glass` body inside an inset well shadow plus a
+1px `--glass-line` ring, 9px radius. Head: `--glass-head`, lowercase mono
+language label and an icon+text copy key in glass chrome (#9aa0ad) that flips
+to `--syn-ok` with a check icon for 1.5s. Body: 12.5px mono in `--glass-ink`
+with the single `--syn-*` highlight set. Inline code is different — putty
+(`--s1` fill, `--line` border, 4px radius), not glass.
+
+### Tool Strip
+A meter strip on the reading field: `--s3`, 9px radius, hairline border, mini
+lamp + mono tool name + plain primary argument (the command or path — raw
+JSON only as fallback, truncated at 300 chars) + chevron (turns 180° over 120ms when
+open). Output sits in a recessed `--s1` window underneath (12px mono,
+16rem max-height) inside a native disclosure, so it stays in the DOM. A strip opens while it runs,
+waits or failed; once the reader opens or folds one, that choice holds through
+streamed frames and the run's end.
+
+### Banners
+Printed notices, 7px radius, one per tone: error is red ink on `--bad-soft`
+with `--bad-line` border; info is silkscreen (`--note-soft` / `--note-line`,
+`--ink-2` text). Lifecycle notices (setting up, waking) are info, never error.
+The not-signed-in state is a red-lamp chip in the header; healthy auth is a
+green lamp with a 10px "auth" label — loud is earned only by failure.
+
+### Files Shelf
+A tray pulled out under the header: full-bleed `--s1` with the well shadow,
+capped at 40dvh, rows of mono paths with tabular meta, hover washing in 60%
+`--s3`.
+
+### Workspace and Git Changes
+The thread's right bay is the primary repository's changes surface. The seam
+between the conversation and workspace bays is a draggable separator with a
+quiet physical grip. Pointer dragging and arrow keys adjust it, Enter restores
+the equal split, and the browser remembers the position. It disappears when
+the bays stack on narrow screens.
+
+Changed files are compact editor modules: disclosure chevron, strong basename,
+muted directory, tabular `+`/`−` counts, and a one-letter git status. Committed,
+staged, and unstaged groups retain Git's layers instead of flattening them; an
+untracked path belongs to unstaged, and one path may appear in both staged and
+unstaged when only part of its work is staged. Opening a file reveals a
+theme-aware inline unified view with line-number gutter, full-row add/delete
+washes, and compact `n unchanged lines` separators derived from hunk
+coordinates. Raw patch plumbing (`diff --git`, index hashes, file markers, and
+hunk headers) never reaches the rendered rows. One file is open at a time; wide
+code scrolls inside its keyboard-focusable diff region. Opening an untracked
+text file reads it on demand and presents its complete contents as a new-file
+addition; binary and oversized files report why they cannot render.
+
 ### Now Panel
 The chat's right bay: a recessed `--s1` well with a `now` head rail (open and
 blocked counts in tabular mono). Each task is a hairline `--s4` card: status

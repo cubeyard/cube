@@ -3,12 +3,11 @@
 import { agents, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { releaseUnfinished, ThreadArchiving, ThreadWorking, type Conversations } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
-import { THREAD_NOTE, type OptThreads } from "./optchat.ts";
-import type { ObservedThread } from "./optchat-tasks.ts";
+import { THREAD_NOTE, type ObservedThread, type OptThreads } from "./optchat.ts";
 import { threadAgent, type Registry, type Thread } from "./registry.ts";
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
 
-/** How long a task list waits for one thread's stored state. */
+/** How long the overview waits for one thread's stored state. */
 const OBSERVE_MS = 2000;
 
 export function cubeThreads(options: { registry: Registry; conversations: Conversations; catalog: () => Promise<ModelSelection[]>; runners: () => RunnersObservation }): OptThreads {
@@ -83,15 +82,16 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       }
       return lines.join("\n") || "no threads";
     },
-    async observe(ids) {
+    async observe(ids, options) {
       // Read only, like history: the stored run state, never an agent opened
       // or a machine waited for. A store slower than OBSERVE_MS reads as
-      // unknown rather than holding the chat's turn.
+      // unknown rather than holding the overview.
       const one = async (id: string): Promise<ObservedThread | null> => {
         const thread = registry.getThread(id);
         if (!thread) return null;
-        const project = registry.getProject(thread.projectId)?.name ?? thread.projectId;
-        let run = thread.archived ? "archived" : conversations.archivingNow(id) ? "being archived"
+        const project = { id: thread.projectId, name: registry.getProject(thread.projectId)?.name ?? thread.projectId };
+        // An archived thread's last run is read only when asked: its store is closed.
+        let run = thread.archived ? (options?.archivedRuns ? null : "archived") : conversations.archivingNow(id) ? "being archived"
           : conversations.starting(id) ? "starting" : conversations.waiting(id) && !conversations.agentOpen(id) ? "waiting for a runner"
           : conversations.error(id) && !conversations.agentOpen(id) ? "machine error"
           : thread.workspaceState === "failed" ? "machine failed" : null;
@@ -101,11 +101,13 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
             const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("slow")), OBSERVE_MS); });
             const status = (await Promise.race([conversations.storedHistory(id, { limit: 1 }), late]))?.status;
             // Background agents run on only while the agent is open.
-            run = !status ? "not started" : status.waiting?.length && conversations.agentOpen(id) ? "waiting on a background agent" : status.state;
+            run = !status ? "not started" : status.waiting?.length && conversations.agentOpen(id) ? "waiting on a background agent"
+              // A run unfinished at archive does not go on.
+              : thread.archived && status.state === "working" ? "stopped at archive" : status.state;
           } catch { run = "unknown"; }
           finally { clearTimeout(timer); }
         }
-        return { id, title: thread.title, project, state: run };
+        return { id, title: thread.title, project, state: run, archived: thread.archived };
       };
       return new Map(await Promise.all(ids.map(async id => [id, await one(id)] as const)));
     },
