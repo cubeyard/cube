@@ -1,5 +1,12 @@
 import type {
+  ActionPreview,
+  Anchor,
+  ArtifactComment,
+  ArtifactListItem,
+  ArtifactView,
+  CommentBatch,
   DaemonState,
+  Revision,
   GithubAuthStatus,
   ModelSelection,
   Project,
@@ -212,3 +219,19 @@ export const fetchChatWishes = () => request<WishList>(`${CHAT_BASE}/wishes`);
 
 /** The user's correction: the wish leaves the list and is not found again. */
 export const dismissChatWish = (id: string) => request<{ ok: true }>(`${CHAT_BASE}/wishes/${encodeURIComponent(id)}/dismiss`, "POST");
+
+// Work artifacts: agents write them; the user reads, comments and confirms actions.
+export const fetchArtifacts = () => request<{ artifacts: ArtifactListItem[] }>("/api/artifacts").then(result => result.artifacts);
+const artifactPath = (id: string) => `/api/artifacts/${encodeURIComponent(id)}`;
+export const fetchArtifact = (id: string) => request<ArtifactView>(artifactPath(id));
+export const fetchRevision = (id: string, revision: number) => request<{ revision: Revision }>(`${artifactPath(id)}/revisions/${revision}`).then(result => result.revision);
+export const addComment = (id: string, comment: { revision: number; anchor: Anchor; body: string; requestId: string }) =>
+  request<{ comment: ArtifactComment }>(`${artifactPath(id)}/comments`, "POST", comment).then(result => result.comment);
+export const deleteComment = (id: string, comment: string) => request<{ ok: true }>(`${artifactPath(id)}/comments/${encodeURIComponent(comment)}`, "DELETE");
+/** Every draft goes to the artifact's author as one message. */
+export const sendComments = (id: string, requestId: string) => request<{ batch: CommentBatch | null }>(`${artifactPath(id)}/send`, "POST", { requestId }).then(result => result.batch);
+/** The action's target and its live state, checked now. */
+export const previewAction = (id: string, action: string, revision: number) =>
+  request<{ preview: ActionPreview }>(`${artifactPath(id)}/actions/${encodeURIComponent(action)}?revision=${revision}`).then(result => result.preview);
+export const runAction = (id: string, action: string, body: { revision: number; confirm: string; requestId: string }) =>
+  request<{ preview: ActionPreview; detail: string }>(`${artifactPath(id)}/actions/${encodeURIComponent(action)}`, "POST", body);

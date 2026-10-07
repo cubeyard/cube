@@ -257,3 +257,6 @@ const commentCounts = (item: ArtifactSummary) => {
 const commentLine = (comment: ArtifactComment) => `- revision ${comment.revision}, "${comment.anchor.quote.slice(0, 200)}": ${comment.body.slice(0, 600)} (${comment.state})`;
 
 export { ARTIFACT_LIMITS };
+/** What the browser reads of one artifact. */
+export type ArtifactView = NonNullable<ReturnType<Artifacts["view"]>>;
+export type ArtifactListItem = ReturnType<Artifacts["summaryView"]>;

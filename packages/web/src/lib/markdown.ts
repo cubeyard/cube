@@ -14,9 +14,11 @@ const marked = new Marked({
     },
     link({ href, title, tokens }: Tokens.Link): string {
       const label = this.parser.parseInline(tokens);
-      const url = safeUrl(href);
+      const url = safeUrl(href, { pages: true });
       if (!url) return label;
       const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+      // cube's own pages (an artifact an agent links) open in place.
+      if (url.startsWith("#/")) return `<a href="${escapeHtml(url)}"${titleAttr}>${label}</a>`;
       return `<a href="${escapeHtml(url)}"${titleAttr} target="_blank" rel="noopener noreferrer">${label}</a>`;
     },
     image({ href, text }: Tokens.Image): string {
@@ -31,7 +33,9 @@ export function renderMarkdown(text: string): string {
   return marked.parse(text) as string;
 }
 
-function safeUrl(href: string): string | null {
+/** `pages`: also cube's own hash routes (`#/a/<id>`, `#/t/<id>`, …). */
+export function safeUrl(href: string, options: { pages?: boolean } = {}): string | null {
+  if (options.pages && /^#\/[A-Za-z0-9/_?=&.-]*$/.test(href)) return href;
   try {
     const url = new URL(href, "https://invalid.example/");
     if (url.origin === "https://invalid.example") return null;
@@ -41,6 +45,6 @@ function safeUrl(href: string): string | null {
   }
 }
 
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   return text.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
 }

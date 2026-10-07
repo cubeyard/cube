@@ -132,7 +132,9 @@ export function commentMessage(artifact: { id: string; title: string; head: numb
     const stale = comment.revision !== artifact.head ? ` (written on revision ${comment.revision}; the current one is ${artifact.head})` : "";
     lines.push("", `${index + 1}. On revision ${comment.revision}${stale}${anchor.section ? `, under "${anchor.section}"` : ""}, the user selected:`);
     lines.push(`   > ${anchor.quote.replace(/\n/g, "\n   > ")}`);
-    if (anchor.prefix || anchor.suffix) lines.push(`   in context: …${anchor.prefix}[[${anchor.quote.length > 120 ? `${anchor.quote.slice(0, 60)}…${anchor.quote.slice(-60)}` : anchor.quote}]]${anchor.suffix}…`);
+    const flat = (text: string) => text.replace(/\s+/g, " ");
+    const quoted = anchor.quote.length > 120 ? `${anchor.quote.slice(0, 60)}…${anchor.quote.slice(-60)}` : anchor.quote;
+    if (anchor.prefix || anchor.suffix) lines.push(`   in context: …${flat(anchor.prefix)}[[${flat(quoted)}]]${flat(anchor.suffix)}…`);
     lines.push(`   comment: ${comment.body.replace(/\n/g, "\n   ")}`);
   });
   lines.push("", `Answer in your reply. If the comments call for changes to the document, write a new revision of the same artifact (${hint}).`);

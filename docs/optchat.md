@@ -10,7 +10,9 @@ its threads (`history`), diagnoses the machine of one that does not start
 (`diagnose`: read only; see docs/runner-operations.md, "Diagnosing a machine
 that does not start"), archives its threads that are done to free their
 machines (`archive`), reads usage and estimated cost (`usage`: everything,
-a project or a thread; read-only, see [usage.md](usage.md)) and reads its own
+a project or a thread; read-only, see [usage.md](usage.md)), writes work
+artifacts and reads its own and its threads' (`artifact_write`,
+`artifact_read`; see [artifacts.md](artifacts.md)) and reads its own
 memory (`zoom`, `date`). It keeps no task list: the chat page shows its
 threads and the wishes no thread took up, both derived (see "Threads beside
 the chat" and "Wishes not started"). Threads do all the work, each in its own VM, exactly like a thread
@@ -472,7 +474,9 @@ image bytes; answers `{image: {id, mimeType, width, height, bytes}}`),
 `GET /api/optchat/view` (what the model reads: the view and the message count),
 `GET /api/optchat/threads` (the threads the chat started, with their state),
 `GET /api/optchat/wishes` (wishes not started) and
-`POST /api/optchat/wishes/<id>/dismiss`.
+`POST /api/optchat/wishes/<id>/dismiss`. The panel also lists the newest
+artifacts (`GET /api/artifacts`); comments on the chat's own artifacts reach
+it as messages starting `[artifact <id>]` through the same pending queue.
 
 ## Deviations from the spec
 

@@ -62,7 +62,7 @@ const SHA = "a".repeat(40), MOVED = "b".repeat(40);
     { id: "1", artifact: id, revision: 3, anchor: { quote: "a\nb", prefix: "x", suffix: "y", start: 1, end: 4, section: "" }, body: "first", createdAt: 0, state: "draft", batch: null, note: null, deliveredAt: null },
   ], "hint");
   assert.match(text, / {3}> a\n {3}> b/);
-  assert.match(text, /in context: …x\[\[a\nb\]\]y…/);
+  assert.match(text, /in context: …x\[\[a b\]\]y…/);
 }
 
 // ---- hostile action declarations are refused, field by field ----
@@ -119,7 +119,7 @@ let releaseHold!: () => void;
 const hold = new Promise<void>(resolve => { releaseHold = resolve; });
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
 faux.setResponses(Array.from({ length: 200 }, () => async request => {
-  const system = JSON.stringify(request.messages.filter(message => message.role === "system")) + (request.systemPrompt ?? "");
+  const system = JSON.stringify(request.messages.filter(message => message.role === "system"));
   if (system.includes("You write the memory of OptChat")) return fauxAssistantMessage("summarized line");
   const last = request.messages.findLast(message => message.role !== "system")!;
   const said = textOf(last);
@@ -218,7 +218,7 @@ try {
   let view = await call(`/api/artifacts/${review.id}`);
   assert.equal(view.body.revisions[0].provenance.agent, "optchat");
   assert.equal(view.body.revisions[0].provenance.call, "call-review");
-  let revision = await call(`/api/artifacts/${review.id}/revisions/1`);
+  const revision = await call(`/api/artifacts/${review.id}/revisions/1`);
   assert.equal(revision.body.revision.body, HOSTILE, "the body is kept as data, word for word");
   assert.equal(revision.body.revision.actions[0].method, "squash");
 

@@ -23,3 +23,4 @@ pnpm build
 export CUBED_CLAUDE=off
 node packages/web/test/browser/chat-browser-test.ts
 node packages/web/test/browser/cubed-browser-test.ts
+node packages/web/test/browser/artifact-browser-test.ts

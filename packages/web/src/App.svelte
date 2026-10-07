@@ -5,6 +5,8 @@
   import ThreadList from "./components/ThreadList.svelte";
   import ThreadView from "./components/ThreadView.svelte";
   import ChatView from "./components/ChatView.svelte";
+  import ArtifactView from "./components/ArtifactView.svelte";
+  import ArtifactList from "./components/ArtifactList.svelte";
   import Onboarding from "./components/Onboarding.svelte";
   import ModelProviders from "./components/ModelProviders.svelte";
   import SystemSettings from "./components/SystemSettings.svelte";
@@ -20,6 +22,9 @@
   let hash = $state(location.hash);
   const threadId = $derived(hash.match(/^#\/t\/([^/?]+)/)?.[1] ?? null);
   const projectId = $derived(hash.match(/^#\/projects\/([^/?]+)/)?.[1] ?? null);
+  const artifactId = $derived(hash.match(/^#\/a\/([^/?]+)/)?.[1] ?? null);
+  const artifactRevision = $derived(Number(hash.match(/^#\/a\/[^/?]+\?rev=(\d+)$/)?.[1] ?? "") || null);
+  const artifactsRoute = $derived(/^#\/artifacts(?:[/?]|$)/.test(hash));
   // The chat is home: an empty hash lands there.
   const chatRoute = $derived(hash === "#/chat" || hash === "" || hash === "#/");
   const projectsRoute = $derived(/^#\/projects(?:[/?]|$)/.test(hash));
@@ -165,7 +170,7 @@
   // The tab title names the place, newest first: "<thread> · cube".
   // Project routes set their own once the project's name is known.
   $effect(() => {
-    if (projectId) return;
+    if (projectId || artifactId || artifactsRoute) return;
     const current = threadId ? threads.find((thread) => thread.id === threadId) : null;
     document.title =
       threadId ? `${current?.title ?? "untitled"} · cube`
@@ -207,6 +212,12 @@
   {/if}
   {#if chatRoute}
     <ChatView />
+  {:else if artifactId}
+    {#key artifactId}
+      <ArtifactView {artifactId} revision={artifactRevision} />
+    {/key}
+  {:else if artifactsRoute}
+    <ArtifactList />
   {:else if threadId && threadsLoaded}
     {#key threadId}
       <ThreadView {threadId} threads={activeThreads} {command} onConsume={consume} {onNewThread} />

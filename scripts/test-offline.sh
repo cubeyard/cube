@@ -49,6 +49,7 @@ OFFLINE_TESTS=(
   scripts/smoke-local.ts
   packages/web/test/transcript-test.ts
   packages/web/test/markdown-test.ts
+  packages/web/test/artifact-render-test.ts
   packages/web/test/ordered-test.ts
   packages/web/test/images-test.ts
   packages/web/test/outbox-test.ts
