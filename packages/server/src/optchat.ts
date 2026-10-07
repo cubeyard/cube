@@ -25,6 +25,8 @@ import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, U
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
 import { applyAnswer, findWishes, initialWishes, nextChunk, WISH_LIMITS, WishAnswerError, type WishList, type Wishes } from "./optchat-wishes.ts";
 import { PENDING_ID, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
+import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
+import type { Artifacts } from "./artifact-service.ts";
 import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { addUsage, type OptChatUsage } from "./usage-service.ts";
 
@@ -114,6 +116,15 @@ messages it was made from; zoom(id, 1) gives message id in full. Zoom
 whenever a summary only mentions something you need, such as what your
 last reply said, a decision, a past attempt or where a file is, before
 you act, guess or ask. date(id) gives the date and time of message id.`;
+
+/** OptChat's part in work artifacts: it writes its own, reads its threads'. */
+export const ARTIFACTS_NOTE = `Artifacts: artifact_write makes a document the user reads beside the
+chat, with revisions, comments and confirmed actions; artifact_read reads
+yours and your threads'. Threads can write their own (a review of their
+pull request, say); ask for one in a thread's task when the result is worth
+reading at length. Link an artifact in your reply as [title](#/a/<id>).
+Comments the user leaves on yours come to you as a message starting
+"[artifact <id>]"; comments on a thread's go to that thread. ${ARTIFACT_GUIDE}`;
 
 /** What a thread report says when the thread started: its final reply is the report. */
 export const THREAD_NOTE = "(This thread was started by OptChat, the user's chat agent. Your final reply is your report to it. "
@@ -352,6 +363,8 @@ export type OptChatOptions = {
   /** The wish finder's model; default: the compactor's. false: off. */
   wishes?: { provider: string; id: string } | false | null;
   threads: OptThreads;
+  /** Work artifacts: the chat writes its own and reads its threads'. */
+  artifacts?: Artifacts;
   /** Tests lower these. */
   limits?: { view?: number; node?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number;
     wishQuietMs?: number; wishIntervalMs?: number; wishGapMs?: number; wishRetryMs?: number; wishChunk?: number; wishCallsPerDay?: number };
@@ -1323,11 +1336,18 @@ export class OptChat {
       execute: async args => text(this.options.threads.usage ? await this.options.threads.usage(args) : "usage is not available"),
     });
     const instructions = path.join(this.options.directory, "AGENTS.md");
+    const artifacts = this.options.artifacts ? artifactTools({
+      artifacts: this.options.artifacts, author: { kind: "optchat" }, agent: "optchat", projects: true,
+      key: api => `optchat:${api.callId}`,
+      model: () => this.model ? `${this.model.provider}/${this.model.id}` : undefined,
+      readable: async () => [{ kind: "optchat" as const }, ...Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {}).map(thread => ({ kind: "thread" as const, thread }))],
+    }) : [];
     return defineExtension({
       name: "optchat",
-      tools: [zoom, date, projects, runners, spawn, tell, threads, history, diagnose, archive, usage],
+      tools: [zoom, date, projects, runners, spawn, tell, threads, history, diagnose, archive, usage, ...artifacts],
       sections: [
         section("master", () => MASTER, { tag: false }),
+        ...artifacts.length ? [section("artifacts", () => ARTIFACTS_NOTE, { tag: false })] : [],
         section("view", () => VIEW_DOC, { tag: false }),
         // The user's own instructions; constant unless they edit the file.
         section("user", () => {

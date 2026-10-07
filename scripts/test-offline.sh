@@ -45,6 +45,7 @@ OFFLINE_TESTS=(
   packages/server/test/claude-agent-test.ts
   packages/server/test/usage-test.ts
   packages/server/test/portal-test.ts
+  packages/server/test/artifacts-test.ts
   scripts/smoke-local.ts
   packages/web/test/transcript-test.ts
   packages/web/test/markdown-test.ts

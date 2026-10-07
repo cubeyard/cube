@@ -5,7 +5,8 @@
  * Claude Code. Messages follow Claude Code's stream-json output.
  *
  * Steps, one per line: `run <command>`, `slow <command>`, `write <file> <text>`,
- * `edit <file> <old> <new>`, `read <file>`, `say <text>`, `crash`, `fail`,
+ * `edit <file> <old> <new>`, `read <file>`, `write-at <absolute path> <text>` and
+ * `read-at <absolute path>` (the mod's /cube/artifacts paths too), `say <text>`, `crash`, `fail`,
  * `id <tool_use_id> run <command>`, `ignore-interrupt`, `ignore-term`,
  * `background <task_id> <ms> <description>` (a background Agent that
  * finishes after ms: Claude Code's task_started and task_notification
@@ -25,7 +26,7 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { WorkspaceClient } from "../../claude-mod/hooks/workspace.ts";
-import { bash, edit, read, write, type ToolScope } from "../../claude-mod/hooks/tools.ts";
+import { artifactPath, bash, edit, read, readArtifact, write, writeArtifact, type ToolScope } from "../../claude-mod/hooks/tools.ts";
 import { unixTransport } from "./unix-transport.ts";
 
 const args = process.argv.slice(2);
@@ -104,13 +105,18 @@ async function say(text: string): Promise<void> {
 async function tool(id: string, name: string, toolInput: Record<string, unknown>, signal: AbortSignal): Promise<void> {
   emit({ type: "assistant", parent_tool_use_id: null, message: { id: `msg_${randomUUID()}`, role: "assistant", model, content: [{ type: "tool_use", id, name, input: toolInput }] } });
   const scope: ToolScope = { client, token: env.CUBE_WORKSPACE_TOKEN!, root: env.CUBE_WORKSPACE_ROOT!, signal };
-  const result = name === "Bash" ? await bash(scope, id, toolInput as never)
+  // As register.ts: /cube/artifacts paths are the thread's artifacts.
+  const artifact = name === "Read" || name === "Write" ? artifactPath(toolInput.file_path) : null;
+  const result = artifact && "deny" in artifact ? artifact
+    : artifact ? name === "Write" ? await writeArtifact(scope, id, artifact, toolInput as never) : await readArtifact(scope, artifact, toolInput as never)
+    : name === "Bash" ? await bash(scope, id, toolInput as never)
     : name === "Write" ? await write(scope, id, toolInput as never)
     : name === "Edit" ? await edit(scope, id, toolInput as never)
     : await read(scope, toolInput as never);
   const content = "deny" in result ? result.deny
     : name === "Bash" ? [(result as { stdout: string }).stdout, (result as { stderr: string }).stderr].filter(Boolean).join("\n")
     : name === "Read" ? (result as { file: { content: string } }).file.content
+    : artifact ? (result as { content: string }).content
     : `${name} ok: ${String(toolInput.file_path)}`;
   emit({ type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content, is_error: "deny" in result }] } });
 }
@@ -151,6 +157,9 @@ async function turn(text: string, prompted = true): Promise<void> {
       else if (verb === "write") await tool(id, "Write", { file_path: `${env.CUBE_WORKSPACE_ROOT}/${rest[0]}`, content: rest.slice(1).join(" ") }, controller.signal);
       else if (verb === "edit") await tool(id, "Edit", { file_path: `${env.CUBE_WORKSPACE_ROOT}/${rest[0]}`, old_string: rest[1], new_string: rest[2] }, controller.signal);
       else if (verb === "read") await tool(id, "Read", { file_path: `${env.CUBE_WORKSPACE_ROOT}/${rest[0]}` }, controller.signal);
+      // An absolute path (the mod's /cube/artifacts); "\n" in the text is a line break.
+      else if (verb === "write-at") await tool(id, "Write", { file_path: rest[0], content: rest.slice(1).join(" ").replace(/\\n/g, "\n") }, controller.signal);
+      else if (verb === "read-at") await tool(id, "Read", { file_path: rest[0] }, controller.signal);
       else if (verb === "hang") await new Promise(() => {});
       else if (verb === "background" || verb === "background-quiet" || verb === "background-later") background(id, rest[0]!, Number(rest[1]), rest.slice(2).join(" "), verb !== "background-quiet", verb === "background-later");
       else if (verb === "monitor") emit({ type: "system", subtype: "task_started", task_id: rest[0], description: "watch a log", task_type: "monitor", is_backgrounded: true });
