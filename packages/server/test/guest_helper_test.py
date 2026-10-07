@@ -490,7 +490,7 @@ class ServicesTest(unittest.TestCase):
         port = free_port()
         guest.save_registration({"name": "env", "port": port, "kind": "command", "cwd": self.workspace, "env": {"A": "b"},
                                  "command": "echo $PORT $HOST $CUBE_SERVICE $A; pwd"})
-        script = ("import importlib.util,sys;spec=importlib.util.spec_from_file_location('g',sys.argv[1]);g=importlib.util.module_from_spec(spec);"
+        script = ("import importlib.util,sys;sys.dont_write_bytecode=True;spec=importlib.util.spec_from_file_location('g',sys.argv[1]);g=importlib.util.module_from_spec(spec);"
                   "spec.loader.exec_module(g);g.configure(state=sys.argv[2],user=None,env_file='/nonexistent');sys.exit(g.main(['service-run',sys.argv[3]]))")
         helper = os.path.join(HERE, "..", "guest", "cube-guest.py")
         result = subprocess.run([sys.executable, "-c", script, helper, os.path.join(self.root, "state"), "env"], capture_output=True, text=True)
