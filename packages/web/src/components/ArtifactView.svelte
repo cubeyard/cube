@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { addComment, deleteComment, errorText, fetchArtifact, fetchRevision, isNotFound, previewAction, runAction, sendComments } from "../lib/api.ts";
   import { renderArtifact } from "../lib/artifact-render.ts";
   import { mark, placeAnchor, selectionAnchor, textNodes, type Anchor, type Placement } from "../lib/anchor.ts";
@@ -23,10 +23,11 @@
   let body = $state<HTMLElement>();
   let docText = $state("");
   let placements = $state<Record<string, Placement>>({});
-  // A selection waiting to become a comment.
-  let selection = $state<{ anchor: Anchor; x: number; y: number } | null>(null);
+  // A selection waiting to become a comment, and the comment being written:
+  // each keeps the revision its offsets belong to.
+  let selection = $state<{ anchor: Anchor; revision: number; x: number; y: number } | null>(null);
   let selectionNote = $state<string | null>(null);
-  let pending = $state<Anchor | null>(null);
+  let pending = $state<{ anchor: Anchor; revision: number } | null>(null);
   let draftText = $state("");
   let saving = $state(false);
   let sending = $state(false);
@@ -46,7 +47,8 @@
 
   const artifact = $derived(view?.artifact ?? null);
   const head = $derived(artifact?.head ?? 0);
-  const number = $derived(requested && requested >= 1 && requested <= head ? requested : head);
+  // While a comment is written its revision stays on screen; a newer one shows as newer.
+  const number = $derived(requested && requested >= 1 && requested <= head ? requested : pending?.revision ?? head);
   const older = $derived(!!shown && shown.number < head);
   const rendered = $derived(shown ? renderArtifact(shown.body) : null);
   const comments = $derived(view?.comments ?? []);
@@ -88,9 +90,13 @@
     if (!html || !body) return;
     void tick().then(() => drawAll(rendered!.diagrams));
   });
+  // Placed again only when a comment or its state changes, not at every poll.
+  const marksKey = $derived(comments.map((comment) => `${comment.id}:${comment.state}`).join());
   $effect(() => {
-    const current = shown, list = comments, root = body, html = rendered?.html;
+    const current = shown, root = body, html = rendered?.html;
+    void marksKey;
     if (!current || !root || !html) return;
+    const list = untrack(() => comments);
     void tick().then(() => placeMarks(root, current.number, list));
   });
 
@@ -133,8 +139,8 @@
       if (placement.state === "outdated") continue;
       mark(root, placement.start, placement.end, { class: `anchor ${comment.state}`, "data-comment": comment.id, title: comment.body.slice(0, 140) });
     }
-    if (pending && shown) {
-      const own = placeAnchor(docText, pending, true);
+    if (pending && pending.revision === revision) {
+      const own = placeAnchor(docText, pending.anchor, true);
       if (own.state !== "outdated") mark(root, own.start, own.end, { class: "anchor composing" });
     }
     placements = next;
@@ -152,12 +158,12 @@
     selectionNote = null;
     const rect = range.getBoundingClientRect();
     // Below the selection, kept on screen (a phone's own selection menu sits above it).
-    selection = { anchor, x: Math.min(Math.max(rect.left + rect.width / 2, 60), innerWidth - 60), y: Math.min(Math.max(rect.bottom + 8, 8), innerHeight - 52) };
+    selection = { anchor, revision: shown?.number ?? 0, x: Math.min(Math.max(rect.left + rect.width / 2, 60), innerWidth - 60), y: Math.min(Math.max(rect.bottom + 8, 8), innerHeight - 52) };
   }
 
   async function startComment(): Promise<void> {
     if (!selection) return;
-    pending = selection.anchor;
+    pending = { anchor: selection.anchor, revision: selection.revision };
     selection = null;
     document.getSelection()?.removeAllRanges();
     commentError = null;
@@ -174,11 +180,11 @@
   }
 
   async function saveComment(): Promise<void> {
-    if (!pending || !shown || !draftText.trim() || saving) return;
+    if (!pending || !draftText.trim() || saving) return;
     saving = true;
     commentError = null;
     try {
-      await addComment(artifactId, { revision: shown.number, anchor: pending, body: draftText.trim(), requestId: uid() });
+      await addComment(artifactId, { revision: pending.revision, anchor: pending.anchor, body: draftText.trim(), requestId: uid() });
       pending = null;
       draftText = "";
       await load();
@@ -249,11 +255,14 @@
     previewError = null;
     try {
       const result = await runAction(artifactId, confirming.id, { revision: shown.number, confirm: preview.confirm, requestId: actionRequest });
-      actionResult = result.detail;
+      actionResult = result.state === "succeeded" ? result.detail : `still running: ${result.detail}`;
       await Promise.all([load(), check()]);
     } catch (cause) {
+      // A failed try is not repeated under its id: the next press is a new
+      // attempt. The state is read again; the failure stays in view.
+      actionRequest = uid();
+      await Promise.all([load(), check()]);
       previewError = errorText(cause);
-      await check();
     } finally {
       running = false;
     }
@@ -279,7 +288,7 @@
   onMount(() => {
     void load();
     // A new revision or a comment's delivery shows without a reload.
-    const timer = setInterval(() => { if (!document.hidden && !dialog?.open) void load(); }, 4000);
+    const timer = setInterval(() => { if (!document.hidden && !dialog?.open && !gone) void load(); }, 4000);
     document.addEventListener("selectionchange", onSelection);
     return () => {
       disposed = true;
@@ -370,7 +379,7 @@
       <div class="work-body">
         {#if pending}
           <form class="comment-composer" onsubmit={(event) => { event.preventDefault(); void saveComment(); }}>
-            <blockquote class="work-quote">{pending.quote}</blockquote>
+            <blockquote class="work-quote">{pending.anchor.quote}</blockquote>
             <textarea bind:this={composer} bind:value={draftText} aria-label="comment" placeholder="what about it?" maxlength={4000} rows="3"
               onkeydown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void saveComment(); } if (event.key === "Escape") cancelComment(); }}></textarea>
             <div class="comment-keys">
@@ -430,7 +439,7 @@
       <dl class="action-facts">
         <dt>action</dt><dd>github.merge · {confirming.method}</dd>
         <dt>repository</dt><dd>{confirming.repository}{preview?.project ? ` · project ${preview.project.name}` : ""}</dd>
-        <dt>pull request</dt><dd>{#if preview?.pull}<a href={preview.pull.url} target="_blank" rel="noopener noreferrer">#{confirming.pull} {preview.pull.title}</a>{preview.pull.author ? ` · by ${preview.pull.author}` : ""}{:else}#{confirming.pull}{/if}</dd>
+        <dt>pull request</dt><dd>{#if preview?.pull}<a href={`https://github.com/${confirming.repository}/pull/${confirming.pull}`} target="_blank" rel="noopener noreferrer">#{confirming.pull} {preview.pull.title}</a>{preview.pull.author ? ` · by ${preview.pull.author}` : ""}{:else}#{confirming.pull}{/if}</dd>
         {#if preview?.pull}<dt>branches</dt><dd>{preview.pull.headRef} → {preview.pull.baseRef}</dd>{/if}
         <dt>reviewed head</dt><dd><code>{confirming.headSha}</code></dd>
         <dt>head now</dt><dd>{#if preview?.pull}<code>{preview.pull.headSha}</code>{:else}{checking ? "checking…" : "unknown"}{/if}</dd>

@@ -234,4 +234,4 @@ export const sendComments = (id: string, requestId: string) => request<{ batch: 
 export const previewAction = (id: string, action: string, revision: number) =>
   request<{ preview: ActionPreview }>(`${artifactPath(id)}/actions/${encodeURIComponent(action)}?revision=${revision}`).then(result => result.preview);
 export const runAction = (id: string, action: string, body: { revision: number; confirm: string; requestId: string }) =>
-  request<{ preview: ActionPreview; detail: string }>(`${artifactPath(id)}/actions/${encodeURIComponent(action)}`, "POST", body);
+  request<{ preview: ActionPreview; detail: string; state: "running" | "succeeded" }>(`${artifactPath(id)}/actions/${encodeURIComponent(action)}`, "POST", body);

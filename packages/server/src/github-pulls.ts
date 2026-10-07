@@ -61,7 +61,7 @@ export function githubPulls(options: { token: () => Promise<string | null>; api?
       const head = (data.head ?? {}) as Record<string, unknown>, base = (data.base ?? {}) as Record<string, unknown>;
       const user = (data.user ?? {}) as Record<string, unknown>;
       return {
-        repository, number, url: typeof data.html_url === "string" ? data.html_url : `https://github.com/${repository}/pull/${number}`,
+        repository, number, url: typeof data.html_url === "string" && data.html_url.startsWith("https://github.com/") ? data.html_url : `https://github.com/${repository}/pull/${number}`,
         title: String(data.title ?? ""), author: typeof user.login === "string" ? user.login : null,
         state: data.state === "open" ? "open" : "closed", merged: data.merged === true, draft: data.draft === true,
         headSha: String(head.sha ?? ""), headRef: String(head.ref ?? ""), baseRef: String(base.ref ?? ""),

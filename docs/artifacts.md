@@ -68,7 +68,10 @@ data (`renderArtifact`):
 - ` ```mermaid ` blocks are drawn by Mermaid 11 (loaded only on a page with a
   diagram) with `securityLevel: "strict"` and text labels, one at a time, at
   most 20,000 characters each, and shown as an `<img>` of the SVG: an image
-  document runs no script, loads nothing and has no links. The source is
+  document runs no script, loads nothing and has no links. Mermaid draws in
+  a hidden element of the page before the picture is taken, so that moment
+  relies on its `strict` level (DOMPurify, no HTML labels, no click
+  handlers); what stays on the page is only the image. The source is
   folded under the picture; a diagram that does not parse says why and opens
   its source.
 - The OptChat transcript's own Markdown now also links `#/…` pages, so an
@@ -77,7 +80,9 @@ data (`renderArtifact`):
 ## Comments
 
 Selecting text in the document shows a `comment` key (or press `c`). A comment
-is anchored to the revision on screen: the quote, up to 64 characters on each
+is anchored to the revision on screen (while one is being written that
+revision stays on screen; a newer one shows as newer rather than replacing
+the text under the selection): the quote, up to 64 characters on each
 side, its offsets in that revision's rendered text and the heading it falls
 under. Diagrams are not part of that text and cannot be commented on.
 
@@ -138,7 +143,8 @@ author, the branches, the reviewed head beside the head now, GitHub's state
 and the problems. The merge key is enabled only when there are none, and the
 request must repeat the target (`confirm: "owner/name#n"`). The run checks
 everything again, records itself once per request id (a second run of a
-succeeded action is refused) and asks GitHub to merge with `sha` set to the
+succeeded action is refused; a request id whose run failed answers that
+failure, and the page's next press is a new attempt with a new id) and asks GitHub to merge with `sha` set to the
 reviewed head, so GitHub itself refuses if the branch moved in between. The
 outcome is kept on the artifact; a run cut off by a cubed restart is marked
 failed with a note to check GitHub before trying again.
@@ -173,7 +179,8 @@ journaled there.
   workspace and an action on another project's repository refused; comments
   waiting while a thread works and delivered once after; comments to the
   chat; preview, a moved head, a wrong confirmation, an older revision, the
-  merge once and a second refused (a fake GitHub); everything across a
+  merge once and a second refused, a failed try not reported as done and a
+  new try merging (a fake GitHub); everything across a
   restart; an archived thread's comments undeliverable.
 - `packages/web/test/artifact-render-test.ts`: hostile Markdown, links,
   images, diagram sources, diff lines, fence languages; anchors exact, moved,
@@ -182,9 +189,10 @@ journaled there.
   1440×900 (light and dark) and 390×844: the review linked from the chat,
   diagrams drawn, hostile content inert (no script, no dialog, no fetch, no
   `javascript:` link), two selection comments sent to the chat, a comment to a
-  working thread waiting and then reaching it once, an older revision, the
-  merge refused for a moved head and then confirmed once, no sideways scroll on
-  the phone. `CUBE_SCREENSHOTS=<dir>` keeps the screenshots.
+  working thread waiting and then reaching it once, a comment being written
+  keeping its revision while the thread writes a newer one, an older
+  revision, the merge refused for a moved head, failing once at GitHub and
+  then confirmed once, no sideways scroll on the phone. `CUBE_SCREENSHOTS=<dir>` keeps the screenshots.
 
 Not verified: a real model writing artifacts, a real Claude Code session
 using `/cube/artifacts` (the mod's functions run offline under the fake

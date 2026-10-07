@@ -1338,7 +1338,8 @@ export class OptChat {
     const instructions = path.join(this.options.directory, "AGENTS.md");
     const artifacts = this.options.artifacts ? artifactTools({
       artifacts: this.options.artifacts, author: { kind: "optchat" }, agent: "optchat", projects: true,
-      key: api => `optchat:${api.callId}`,
+      // The durable task's id: the same on replay, unique whatever ids the provider gives tool calls.
+      key: api => `optchat:artifact:${api.taskId}`,
       model: () => this.model ? `${this.model.provider}/${this.model.id}` : undefined,
       readable: async () => [{ kind: "optchat" as const }, ...Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {}).map(thread => ({ kind: "thread" as const, thread }))],
     }) : [];

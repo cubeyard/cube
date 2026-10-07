@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
-import type { GithubPulls, PullState } from "../src/github-pulls.ts";
+import { GithubPullsError, type GithubPulls, type PullState } from "../src/github-pulls.ts";
 import { LocalMachines } from "./local-guest.ts";
 import { REVIEW, REVIEW_REVISED } from "./artifact-review.ts";
 
@@ -23,9 +23,12 @@ export async function startArtifactHost(options: { web: string }) {
   const pull: PullState = { repository: "cubeyard/demo", number: 7, url: "https://github.com/cubeyard/demo/pull/7", title: "Add work artifacts", author: "dizk",
     state: "open", merged: false, draft: false, headSha: SHA, headRef: "feat/work-artifacts", baseRef: "main", mergeable: true, mergeableState: "clean" };
   const merges: string[] = [];
+  /** The next merge fails as an unreachable GitHub would. */
+  const control = { failMerge: false };
   const github: GithubPulls = {
     async pull() { return { ...pull }; },
     async merge(_repository, _number, { sha }) {
+      if (control.failMerge) { control.failMerge = false; throw new GithubPullsError("could not reach github", 502); }
       if (sha !== pull.headSha) throw new Error("head moved");
       merges.push(sha); pull.merged = true; pull.state = "closed";
       return { merged: true, sha: "9e1d".padEnd(40, "0"), message: "merged" };
@@ -59,6 +62,10 @@ export async function startArtifactHost(options: { web: string }) {
     threadPrompts.push(said);
     if (said.includes("hold until released")) { await hold; return fauxAssistantMessage("released"); }
     if (said.includes("[artifact ")) return fauxAssistantMessage("Thanks: the guest is the thread's own VM; I will say so in the next revision.");
+    const again = /publish the notes again (\S+)/.exec(said)?.[1];
+    if (again) {
+      return fauxAssistantMessage([fauxToolCall("artifact_write", { id: again, body: "# machine notes\n\nA newer revision: the guest runs the helper as root and every command as agent." })], { stopReason: "toolUse" });
+    }
     if (said.includes("publish the notes")) {
       return fauxAssistantMessage([fauxToolCall("bash", { command: "printf '# machine notes\\n\\nThe guest runs the helper as root and every command as agent.\\n\\n```diff\\n- shell on the host\\n+ shell in the guest\\n```\\n' > notes.md" }),
         fauxToolCall("artifact_write", { path: "notes.md" })], { stopReason: "toolUse" });
@@ -91,6 +98,6 @@ export async function startArtifactHost(options: { web: string }) {
   const project = await api("/api/projects", { name: "demo", repositories: [{ url: repository, base: "main" }] });
   await api(`/api/projects/${project.project.id}/check`, {});
   await api("/api/onboarding", {});
-  return { url, api, pull, merges, threadPrompts, releaseHold, SHA,
+  return { url, api, pull, merges, control, threadPrompts, releaseHold, SHA,
     async close() { await app.close(); fs.rmSync(root, { recursive: true, force: true }); } };
 }

@@ -15,7 +15,7 @@ import { startArtifactHost } from "../../../server/test/artifact-host.ts";
 
 const shots = process.env.CUBE_SCREENSHOTS ?? null;
 if (shots) fs.mkdirSync(shots, { recursive: true });
-const { url, api, pull, merges, threadPrompts, releaseHold, SHA, close } = await startArtifactHost({ web: path.resolve(import.meta.dirname, "../../dist") });
+const { url, api, pull, merges, control, threadPrompts, releaseHold, SHA, close } = await startArtifactHost({ web: path.resolve(import.meta.dirname, "../../dist") });
 async function until<T>(read: () => Promise<T>, check: (value: T) => boolean, what: string): Promise<T> {
   let value = await read();
   for (const deadline = Date.now() + 30_000; !check(value); value = await read()) {
@@ -121,6 +121,22 @@ try {
   releaseHold();
   await page.locator(".comment-sent .comment-foot", { hasText: "sent to thread" }).waitFor({ timeout: 30_000 });
   await until(async () => threadPrompts.filter(prompt => prompt.includes("[artifact ")).length, count => count === 1, "the thread gets the comment once");
+  // A comment being written keeps its revision on screen while a newer one arrives.
+  await page.goto(`${url}/#/a/${notes.id}`);
+  await page.locator("article.artifact-body h1", { hasText: "machine notes" }).waitFor();
+  await select(page, "The guest runs the helper as root");
+  await page.locator(".artifact-select-key").click();
+  await page.locator(".comment-composer textarea").fill("Name the helper.");
+  await api(`/api/threads/${thread}/prompt`, { text: `publish the notes again ${notes.id}`, requestId: "again" });
+  await until(() => api(`/api/artifacts/${notes.id}`), value => value.artifact.head === 2, "the thread's second revision");
+  await page.locator(".strip-note", { hasText: "revision 1 of 2" }).waitFor({ timeout: 15_000 });
+  assert.equal(await page.locator("article.artifact-body", { hasText: "A newer revision" }).count(), 0, "the document did not change under the composer");
+  await shoot(page, "07a-composing-pinned");
+  await page.locator(".comment-composer button[type=submit]").click();
+  await page.locator(".comment-item.draft", { hasText: "Name the helper." }).waitFor();
+  const kept = (await api(`/api/artifacts/${notes.id}`)).comments.find((item: { body: string }) => item.body === "Name the helper.");
+  assert.equal(kept.revision, 1, "the comment keeps the revision it was written on");
+  assert.equal(kept.anchor.quote, "The guest runs the helper as root");
   await page.goto(`${url}/#/t/${thread}`);
   await page.getByText("Thanks: the guest is the thread's own VM").waitFor({ timeout: 30_000 });
   await shoot(page, "07-thread-received");
@@ -129,8 +145,9 @@ try {
   await page.goto(`${url}/#/chat`);
   await page.locator(".composer textarea").fill(`please revise the review ${(await api("/api/artifacts")).artifacts.find((item: { title: string }) => item.title.startsWith("post-merge")).id}`);
   await page.locator(".composer textarea").press("Enter");
-  const review = await until(() => api("/api/artifacts"), value => value.artifacts.some((item: { head: number }) => item.head === 2), "revision 2");
-  const reviewId = review.artifacts.find((item: { head: number }) => item.head === 2).id;
+  const isReview = (item: { title: string; head: number }) => item.title.startsWith("post-merge") && item.head === 2;
+  const review = await until(() => api("/api/artifacts"), value => value.artifacts.some(isReview), "revision 2");
+  const reviewId = review.artifacts.find(isReview).id;
   await page.goto(`${url}/#/a/${reviewId}`);
   await page.locator(".comment-foot", { hasText: "on revision 1; found here" }).first().waitFor();
   await page.goto(`${url}/#/a/${reviewId}?rev=1`);
@@ -149,6 +166,13 @@ try {
   await page.locator(".action-footer button", { hasText: "check again" }).click();
   await page.locator(".action-status", { hasText: "checked just now" }).waitFor();
   await shoot(page, "10-merge-confirm");
+  // GitHub fails once: the failure shows, nothing is marked done, and a second press merges.
+  control.failMerge = true;
+  await page.locator(".action-footer .key.primary").click();
+  await page.locator(".action-problems", { hasText: "could not reach github" }).waitFor();
+  assert.equal(await page.locator(".action-done").count(), 0);
+  await shoot(page, "10a-merge-failed");
+  await page.locator(".action-status", { hasText: "checked just now" }).waitFor();
   await page.locator(".action-footer .key.primary").click();
   await page.locator(".action-done", { hasText: "merged cubeyard/demo#7" }).waitFor();
   assert.deepEqual(merges, [SHA]);

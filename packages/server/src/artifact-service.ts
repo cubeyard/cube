@@ -159,7 +159,7 @@ export class Artifacts {
       }
       const thread = this.registry.getThread(batch.target.thread);
       if (!thread || thread.archived) {
-        this.store.settle(batch.id, "undeliverable", "the thread was archived, so nothing can reach it; say it in the chat if it still matters");
+        this.store.settle(batch.id, "undeliverable", `${thread ? "the thread was archived" : "cube no longer knows the thread"}, so nothing can reach it; say it in the chat if it still matters`);
         return;
       }
       try {
@@ -210,24 +210,30 @@ export class Artifacts {
 
   /** Runs a confirmed action: every check again, then the merge, pinned to
    * the head commit the document is about. */
-  async run(id: string, actionId: string, input: { revision: unknown; confirm: unknown; requestId: unknown }): Promise<{ preview: ActionPreview; detail: string }> {
+  async run(id: string, actionId: string, input: { revision: unknown; confirm: unknown; requestId: unknown }): Promise<{ preview: ActionPreview; detail: string; state: "running" | "succeeded" }> {
     if (typeof input.revision !== "number") throw new ArtifactError("revision is required");
     if (typeof input.requestId !== "string" || !input.requestId || input.requestId.length > 200) throw new ArtifactError("a request id is required");
     const preview = await this.preview(id, actionId, input.revision);
     if (input.confirm !== preview.confirm) throw new ArtifactError(`confirm with exactly ${preview.confirm}`);
+    // A repeated request answers what it did; one that failed is no success
+    // to repeat: a new attempt needs a new request id.
     const prior = this.store.actionRuns(id).find(run => run.requestId === input.requestId);
-    if (prior) return { preview, detail: prior.detail };
+    if (prior?.state === "failed") throw new ArtifactError(`not merged: ${prior.detail}`, 409);
+    if (prior) return { preview, detail: prior.detail, state: prior.state as "running" | "succeeded" };
     if (preview.problems.length) throw new ArtifactError(`not run: ${preview.problems.join("; ")}`, 409);
     const { action } = preview;
     const { run, fresh } = this.store.beginAction(id, input.revision, action.id, input.requestId);
-    if (!fresh) return { preview, detail: run.detail };
+    if (!fresh) {
+      if (run.state === "failed") throw new ArtifactError(`not merged: ${run.detail}`, 409);
+      return { preview, detail: run.detail, state: run.state as "running" | "succeeded" };
+    }
     try {
       const result = await this.github.merge(action.repository, action.pull, { sha: action.headSha, method: action.method });
       if (!result.merged) throw new GithubPullsError(`github did not merge: ${result.message}`, 409);
       const detail = `merged ${action.repository}#${action.pull} at ${action.headSha.slice(0, 12)} (${action.method})${result.sha ? `; merge commit ${result.sha.slice(0, 12)}` : ""}`;
       this.store.finishAction(run.id, "succeeded", detail);
       log.info("artifact action ran", { artifact: id, action: action.id, repository: action.repository, pull: action.pull });
-      return { preview, detail };
+      return { preview, detail, state: "succeeded" };
     } catch (error) {
       const detail = error instanceof GithubPullsError ? error.message : `failed: ${error instanceof Error ? error.message : String(error)}`;
       this.store.finishAction(run.id, "failed", detail);

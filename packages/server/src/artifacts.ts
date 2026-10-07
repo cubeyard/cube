@@ -190,7 +190,9 @@ export class ArtifactStore {
     if (!requestId || requestId.length > 300) throw new ArtifactError("a request id is required");
     if (input.name !== undefined && !isArtifactName(input.name)) throw new ArtifactError("a name is 1 to 64 lowercase letters, digits, dots, dashes or underscores");
     return this.transaction(() => {
-      const prior = this.db.prepare("SELECT artifact, number FROM revisions WHERE request_id = ?").get(requestId) as Row | undefined;
+      const prior = this.db.prepare("SELECT r.artifact, r.number, a.author FROM revisions r JOIN artifacts a ON a.id = r.artifact WHERE r.request_id = ?").get(requestId) as Row | undefined;
+      // Another author's request id is a clash, never that author's revision.
+      if (prior && prior.author !== authorKey(author)) throw new ArtifactError("this request id belongs to another author's write", 409);
       if (prior) return { revision: this.revision(String(prior.artifact), Number(prior.number))!, created: false, unchanged: false };
       const now = Date.now();
       const actions = JSON.stringify(input.actions);

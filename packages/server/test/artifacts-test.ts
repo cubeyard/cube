@@ -36,6 +36,7 @@ const SHA = "a".repeat(40), MOVED = "b".repeat(40);
   assert.equal(store.write(optchat, { id, title: "plan", body: "# plan\none", actions: [], projectId: null }, { agent: "optchat" }, "r2").unchanged, true, "the same content writes nothing");
   assert.equal(store.write(optchat, { id, title: "plan", body: "# plan\ntwo", actions: [], projectId: null }, { agent: "optchat" }, "r3").revision.number, 2);
   assert.throws(() => store.write({ kind: "thread", thread: "t1" }, { id, title: "x", body: "y", actions: [], projectId: null }, { agent: "pi" }, "r4"), /no artifact .* of yours/, "another author cannot revise it");
+  assert.throws(() => store.write({ kind: "thread", thread: "t1" }, { title: "x", body: "y", actions: [], projectId: null }, { agent: "pi" }, "r1"), /another author/, "another author's request id is no replay");
   assert.throws(() => store.write(optchat, { title: "", body: "", actions: [], projectId: null }, { agent: "optchat" }, "r5"), ArtifactError);
   assert.throws(() => store.write(optchat, { title: "big", body: "x".repeat(256 * 1024 + 1), actions: [], projectId: null }, { agent: "optchat" }, "r6"), /at most/);
   // Anchors: the quote must match its offsets' length and fit the bounds.
@@ -97,6 +98,7 @@ git(repository, ["commit", "-qm", "base"]);
 // A fake GitHub: one pull request whose head and state the test moves.
 const pulls = new Map<string, PullState>();
 const merges: Array<{ repository: string; number: number; sha: string; method: string }> = [];
+let failMerge = false;
 pulls.set("cubeyard/demo#7", { repository: "cubeyard/demo", number: 7, url: "https://github.com/cubeyard/demo/pull/7", title: "Add the thing", author: "someone",
   state: "open", merged: false, draft: false, headSha: SHA, headRef: "feat/thing", baseRef: "main", mergeable: true, mergeableState: "clean" });
 const github: GithubPulls = {
@@ -107,6 +109,7 @@ const github: GithubPulls = {
   },
   async merge(repo, number, { sha, method }) {
     const pull = pulls.get(`${repo}#${number}`)!;
+    if (failMerge) { failMerge = false; throw new GithubPullsError("could not reach github", 502); }
     if (pull.headSha !== sha) throw new GithubPullsError("github: Head branch was modified. Review and try the merge again.", 409);
     merges.push({ repository: repo, number, sha, method });
     pull.merged = true; pull.state = "closed";
@@ -320,9 +323,17 @@ try {
   assert.match(preview.body.preview.problems.join(), /only the newest revision's \(2\) actions run/);
   assert.equal((await call(`/api/artifacts/${review.id}/actions/merge-7`, { revision: 1, confirm: "cubeyard/demo#7", requestId: "m2" })).status, 409);
   assert.equal(merges.length, 0);
+  // A failed try is not a success to repeat: its request id answers the failure; a new one merges.
+  failMerge = true;
+  assert.equal((await call(`/api/artifacts/${review.id}/actions/merge-7`, { revision: 2, confirm: "cubeyard/demo#7", requestId: "m-fail" })).status, 409);
+  const again = await call(`/api/artifacts/${review.id}/actions/merge-7`, { revision: 2, confirm: "cubeyard/demo#7", requestId: "m-fail" });
+  assert.equal(again.status, 409, "the same request id does not report the failure as done");
+  assert.match(again.body.error, /could not reach github/);
+  assert.equal(merges.length, 0);
   // Confirmed on the newest revision: merged once, pinned to the head.
   const merged = await call(`/api/artifacts/${review.id}/actions/merge-7`, { revision: 2, confirm: "cubeyard/demo#7", requestId: "m3" });
   assert.equal(merged.status, 200, JSON.stringify(merged.body));
+  assert.equal(merged.body.state, "succeeded");
   assert.deepEqual(merges, [{ repository: "cubeyard/demo", number: 7, sha: SHA, method: "squash" }]);
   assert.equal((await call(`/api/artifacts/${review.id}/actions/merge-7`, { revision: 2, confirm: "cubeyard/demo#7", requestId: "m3" })).status, 200, "a repeated request answers again");
   assert.equal((await call(`/api/artifacts/${review.id}/actions/merge-7`, { revision: 2, confirm: "cubeyard/demo#7", requestId: "m4" })).status, 409, "a second merge is refused");
