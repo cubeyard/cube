@@ -275,5 +275,7 @@ P3  CI                macOS VM smoke behind a label; typecheck claude-mod
 Not recommended now: rewriting the event transport, the wish pipeline or the
 runner protocol. Each finding above has a local fix.
 
-Coordination: this review is markdown only. It does not build or change any
-interactive artifact or UI; the parallel artifact work owns that surface.
+Coordination: this review is markdown only. Work artifacts (#110, in
+flight) own the interactive artifact surface; this review neither builds nor
+changes it, and #109 touches none of #110's or #111's files. Once #110 lands,
+this document can be imported as an artifact.
