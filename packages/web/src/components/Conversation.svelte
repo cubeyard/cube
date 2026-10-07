@@ -4,6 +4,7 @@
   import { errorText, imageUrl, sendPrompt, stopThread, threadBase, threadEvents, uploadImage } from "../lib/api.ts";
   import { ACCEPT, MEDIA_LIMITS, pastedImages, prepareImage } from "../lib/images.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
+  import { echo, echoRows, unanswered, unlogged, type Echo } from "../lib/outbox.ts";
   import { toolOpen, transcriptRows, type ToolState, type TranscriptRow } from "../lib/transcript.ts";
   import { uid } from "../lib/uid.ts";
   import type { MessageImage, ModelSelection, ThreadStatus, ThreadTranscript } from "../lib/types.ts";
@@ -31,7 +32,12 @@
   // The neutral thread event model is the only input; no agent shapes here.
   const events = $derived(threadEvents(base));
   let transcript = $state<Pick<ThreadTranscript, "events" | "status">>({ events: [], status: { state: "idle", run: null, error: null } });
-  const rows = $derived(transcriptRows(transcript));
+  /** Sent messages not yet in the log: each is shown, from the moment it is
+   * sent, while the transcript shows no copy of it, so a send never reads as
+   * nothing, or as gone. */
+  let echoes = $state<Echo[]>([]);
+  const outgoing = $derived(unanswered(transcript, echoes));
+  const rows = $derived([...transcriptRows(transcript), ...echoRows(outgoing)]);
   const status = $derived<ThreadStatus>(transcript.status);
   let prompt = $state("");
   let loading = $state(true);
@@ -45,7 +51,7 @@
   let sending = $state(false);
   let pending: { key: string; requestId: string } | null = null;
   /** Images attached to the draft: uploaded at once, sent with the message. */
-  type Attachment = { key: string; name: string; preview: string; id: string | null; error: string | null };
+  type Attachment = { key: string; name: string; preview: string; id: string | null; mimeType: string | null; error: string | null };
   let attachments = $state<Attachment[]>([]);
   let picker = $state<HTMLInputElement>();
   let viewing = $state<{ src: string; label: string } | null>(null);
@@ -56,7 +62,9 @@
   const working = $derived(status.state === "working");
   // No turn runs, but the agent's background agents do; stop ends them.
   const waiting = $derived(!working && !!status.waiting?.length);
-  $effect(() => { busy = working || sending; });
+  // A sent message the transcript has not shown yet is busy too: the chat
+  // does not read idle between a send and its run.
+  $effect(() => { busy = working || sending || outgoing.length > 0; });
   // The draft is always the user's to edit: a run, a reconnect or a booting
   // machine only hold the send key, never the text field.
   // An image that failed holds the send until it is removed: nothing the
@@ -77,6 +85,7 @@
     if (disposed) return;
     if (follow) following = true;
     transcript = next;
+    if (echoes.length) echoes = unlogged(next, echoes);
     historyError = null;
     loading = false;
     if (following) {
@@ -159,12 +168,14 @@
     const room = Math.max(0, MEDIA_LIMITS.perMessage - attachments.length);
     if (files.length > room) attachNote = `at most ${MEDIA_LIMITS.perMessage} images a message; ${files.length - room} not attached`;
     for (const file of files.slice(0, room)) {
-      const item: Attachment = { key: uid(), name: file.name || "pasted image", preview: URL.createObjectURL(file), id: null, error: null };
+      const item: Attachment = { key: uid(), name: file.name || "pasted image", preview: URL.createObjectURL(file), id: null, mimeType: null, error: null };
       attachments.push(item);
       void (async () => {
-        let result: Pick<Attachment, "id" | "error">;
-        try { result = { id: (await uploadImage(base, await prepareImage(file))).id, error: null }; }
-        catch (cause) { result = { id: null, error: errorText(cause) }; }
+        let result: Pick<Attachment, "id" | "mimeType" | "error">;
+        try {
+          const uploaded = await uploadImage(base, await prepareImage(file));
+          result = { id: uploaded.id, mimeType: uploaded.mimeType, error: null };
+        } catch (cause) { result = { id: null, mimeType: null, error: errorText(cause) }; }
         const index = attachments.findIndex(other => other.key === item.key);
         if (index < 0 || disposed) return;
         // The same image twice goes once: the second is let go here.
@@ -234,20 +245,32 @@
     error = null;
     const sent = attachments.filter(item => item.id);
     const ids = sent.map(item => item.id!);
+    const key = JSON.stringify([text, ids]);
+    if (pending?.key !== key) pending = { key, requestId: uid() };
+    const requestId = pending.requestId;
+    // The message leaves the field for the transcript at once; a failed
+    // send puts it back, before anything typed meanwhile.
+    echoes = [...echoes, echo(transcript, echoes, requestId, text, sent.map(item => ({ id: item.id!, mimeType: item.mimeType ?? "" })))];
+    attachments = attachments.filter(item => !sent.includes(item));
+    prompt = "";
+    following = true;
+    await tick();
+    resizeComposer();
+    toBottom();
     try {
-      const key = JSON.stringify([text, ids]);
-      if (pending?.key !== key) pending = { key, requestId: uid() };
-      await sendPrompt(base, text, model, pending.requestId, ids);
+      await sendPrompt(base, text, model, requestId, ids);
       pending = null;
+      echoes = echoes.map(item => item.key === requestId ? { ...item, accepted: true } : item);
       for (const item of sent) URL.revokeObjectURL(item.preview);
-      attachments = attachments.filter(item => !sent.includes(item));
-      // Only the sent text leaves the field; anything typed meanwhile stays.
-      const draft = prompt.trimStart();
-      prompt = draft.startsWith(text) ? draft.slice(text.length).trimStart() : prompt;
-      await tick();
-      resizeComposer();
       await refresh();
     } catch (cause) {
+      echoes = echoes.filter(item => item.key !== requestId);
+      if (!disposed) {
+        prompt = prompt.trim() ? `${text}\n${prompt}` : text;
+        attachments = [...sent, ...attachments];
+        await tick();
+        resizeComposer();
+      }
       error = errorText(cause);
     } finally {
       sending = false;
@@ -318,8 +341,8 @@
               <div class="message-copy markdown">{@html renderMarkdown(row.text)}</div>
             </article>
           {:else if row.kind === "user"}
-            <article class="conversation-message user" aria-label="user message">
-              <span class="message-label">you</span>
+            <article class="conversation-message user" class:sending={row.sending} aria-label="user message">
+              <span class="message-label">you{#if row.sending}<span class="message-sending"> · sending</span>{/if}</span>
               {#if row.images}{@render messageImages(row.images)}{/if}
               {#if row.text}<div class="message-copy">{row.text}</div>{/if}
             </article>

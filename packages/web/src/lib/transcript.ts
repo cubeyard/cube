@@ -3,8 +3,9 @@ import type { MessageImage, ThreadTranscript } from "./types.ts";
 /** One rendered row of a thread transcript. A tool call and its result
  * share one row. */
 export type TranscriptRow =
-  /** `from`: a thread's report (its short id), shown as the thread's, without the "[id] " prefix. */
-  | { kind: "user"; id: string; text: string; from?: string; images?: MessageImage[] }
+  /** `from`: a thread's report (its short id), shown as the thread's, without the "[id] " prefix.
+   * `sending`: the user's own message, not yet in the transcript. */
+  | { kind: "user"; id: string; text: string; from?: string; images?: MessageImage[]; sending?: boolean }
   | { kind: "assistant"; id: string; text: string; reasoning: boolean; labelled: boolean }
   /** `callId` outlives `id`: a streamed call is renumbered once its message is saved. */
   | { kind: "tool"; id: string; callId: string; name: string; summary: string; input: string | null; output: string; state: ToolState };

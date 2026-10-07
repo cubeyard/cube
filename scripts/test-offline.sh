@@ -38,6 +38,7 @@ OFFLINE_TESTS=(
   packages/server/test/optchat-tasks-test.ts
   packages/server/test/optchat-media-test.ts
   packages/server/test/optchat-start-test.ts
+  packages/server/test/optchat-events-test.ts
   packages/server/test/claude-agent-test.ts
   packages/server/test/usage-test.ts
   scripts/smoke-local.ts
@@ -45,6 +46,7 @@ OFFLINE_TESTS=(
   packages/web/test/markdown-test.ts
   packages/web/test/ordered-test.ts
   packages/web/test/images-test.ts
+  packages/web/test/outbox-test.ts
   packages/server/test/github-auth-test.ts
   packages/server/test/github-read-test.ts
   packages/server/test/onboarding-test.ts

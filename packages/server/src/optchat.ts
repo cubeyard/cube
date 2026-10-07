@@ -23,7 +23,7 @@ import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { capText, Memory, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
 import { applyTask, LIMITS as TASK_LIMITS, linkLabel, renderTasks, shown, STATUSES, taskLine, TasksDoc, TurnTasksDoc, type ObservedThread, type Task, type TaskList, type TaskView } from "./optchat-tasks.ts";
-import type { ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
+import { PENDING_ID, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
 import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { addUsage, type OptChatUsage } from "./usage-service.ts";
 
@@ -1286,12 +1286,37 @@ export class OptChatEvents implements ThreadEvents {
   private readonly inner: ThreadEvents;
   constructor(chat: OptChat, inner: ThreadEvents) { this.chat = chat; this.inner = inner; }
 
-  async read(): Promise<ThreadTranscript> { return this.merge(await this.inner.read()); }
+  // The pending messages are read first: one that left them since is
+  // already in the log the read returns.
+  async read(): Promise<ThreadTranscript> {
+    const pending = await this.chat.pending();
+    return this.merge(await this.inner.read(), pending);
+  }
 
   async watch(listener: (transcript: ThreadTranscript) => void | Promise<void>, options?: Parameters<ThreadEvents["watch"]>[1]): Promise<ThreadWatch> {
     let latest: ThreadTranscript | undefined;
     let chain: Promise<void> = Promise.resolve();
-    const emit = () => { chain = chain.then(async () => { if (latest) await listener(await this.merge(latest)); }).catch(() => {}); return chain; };
+    // The transcript a frame merges may be older than the pending messages
+    // it is merged with: Pi renders a long chat's frame after OptChat has
+    // already taken a placed message out of the pending ones. A message a
+    // frame showed stays shown until the log has it, so it never goes and
+    // comes back, and the chat never reads idle between a send and its run.
+    const shown = new Map<string, PendingItem>();
+    const emit = () => {
+      chain = chain.then(async () => {
+        if (!latest) return;
+        const pending = await this.chat.pending();
+        const held = [...shown.values()].filter(item => !pending.some(other => other.requestId === item.requestId));
+        const merged = await this.merge(latest, [...held, ...pending]);
+        shown.clear();
+        for (const event of merged.events) {
+          const item = event.id.startsWith(PENDING_ID) ? [...held, ...pending].find(other => `${PENDING_ID}${other.requestId}` === event.id) : undefined;
+          if (item) shown.set(item.requestId, item);
+        }
+        await listener(merged);
+      }).catch(() => {});
+      return chain;
+    };
     const unsubscribe = this.chat.onPending(() => { void emit(); });
     try {
       const watch = await this.inner.watch(transcript => { latest = transcript; return emit(); }, options);
@@ -1299,7 +1324,7 @@ export class OptChatEvents implements ThreadEvents {
     } catch (error) { unsubscribe(); throw error; }
   }
 
-  private async merge(input: ThreadTranscript): Promise<ThreadTranscript> {
+  private async merge(input: ThreadTranscript, pending: readonly PendingItem[]): Promise<ThreadTranscript> {
     // A report of a thread this chat started is marked as the thread's.
     const threads = await this.chat.threadPrefixes();
     const report = (text: string) => /^\[([0-9a-f]{8})\] /.exec(text)?.[1];
@@ -1307,7 +1332,6 @@ export class OptChatEvents implements ThreadEvents {
       const from = event.type === "user-message" ? report(event.text) : undefined;
       return from && threads.has(from) ? { ...event, from } : event;
     }) };
-    const pending = await this.chat.pending();
     const failure = this.chat.failure();
     if (!pending.length) return transcript;
     // A pending message is shown until the log has it after the point it was accepted.
@@ -1318,7 +1342,7 @@ export class OptChatEvents implements ThreadEvents {
       ...transcript,
       events: [...transcript.events, ...pending.filter(item => !placed(item)).map(item => {
         const from = report(item.text);
-        return { type: "user-message" as const, id: `pending.${item.requestId}`, text: item.text, ...(from && threads.has(from) ? { from } : {}),
+        return { type: "user-message" as const, id: `${PENDING_ID}${item.requestId}`, text: item.text, ...(from && threads.has(from) ? { from } : {}),
           ...item.images?.length ? { images: item.images.map(image => ({ ...image })) } : {} };
       })],
       status: transcript.status.state === "working" ? { ...transcript.status, error: transcript.status.error ?? failure } : { state: "working", run: "pending", error: failure },
