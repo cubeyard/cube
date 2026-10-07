@@ -1036,7 +1036,11 @@ header .spacer { margin-left: auto; }
   color: var(--ink-3); font: 12px/1.4 var(--font-mono);
 }
 .tool-strip pre.tool-input { max-height: 10rem; color: var(--ink-3); }
-.tool-strip > pre:last-child { border-radius: 0 0 var(--r-key) var(--r-key); }
+.tool-strip > pre:last-child, .tool-strip > .message-images:last-child { border-radius: 0 0 var(--r-key) var(--r-key); }
+/* the images a tool returned sit in its output window, opened larger by a press */
+.tool-strip > .message-images { margin: 0; padding: 0.65rem; border-top: 1px solid var(--line); background: var(--s1); }
+.tool-strip > .message-images li:only-child { max-width: min(28rem, 100%); }
+.tool-strip > .message-images li:only-child .message-image img { max-height: 18rem; }
 .tool-strip pre {
   max-height: 16rem; overflow: auto; margin: 0; padding: 0.65rem;
   border-top: 1px solid var(--line); background: var(--s1);
@@ -1150,9 +1154,20 @@ header .spacer { margin-left: auto; }
   background: var(--s1); overflow: hidden; cursor: zoom-in;
 }
 .message-image img { display: block; width: 9rem; height: 7rem; object-fit: cover; }
-.message-images li:only-child .message-image img { width: auto; height: auto; max-width: min(18rem, 100%); max-height: 14rem; object-fit: contain; }
+/* the bound is the item's: an image's own width would follow its max-height and leave a band beside a wide one */
+.message-images li:only-child { max-width: min(18rem, 100%); }
+.message-images li:only-child .message-image img { width: auto; height: auto; max-width: 100%; max-height: 14rem; object-fit: contain; }
 .message-image:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
 .message-image-missing { display: none; }
+/* an image agent prose names, which the thread read: shown in the flow of the text */
+.markdown .markdown-image { display: block; width: fit-content; max-width: min(28rem, 100%); margin: 0.4rem 0; }
+.markdown .markdown-image img { display: block; width: auto; height: auto; max-width: 100%; max-height: 18rem; object-fit: contain; }
+.markdown .markdown-image.missing { border-style: dashed; border-color: var(--line-2); cursor: pointer; }
+.markdown .markdown-image.missing img { display: none; }
+.markdown .markdown-image.missing .message-image-missing {
+  display: flex; align-items: center; justify-content: center; width: 9rem; height: 4rem;
+  color: var(--ink-3); font-size: 12px;
+}
 /* the one dashed border: an image the host no longer has */
 .message-images li.missing .message-image { border-style: dashed; border-color: var(--line-2); cursor: pointer; }
 .message-images li.missing img { display: none; }

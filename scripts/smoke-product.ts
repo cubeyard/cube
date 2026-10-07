@@ -4,6 +4,7 @@ import path from "node:path";
 import { execFileSync, fork, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { DatabaseSync } from "node:sqlite";
+import zlib from "node:zlib";
 
 /** The product API end to end over local guests (the real guest helper under
  * temporary roots): creation, SIGKILL/startup activation, streaming, prompts,
@@ -250,6 +251,30 @@ export async function smokeProduct(root: string) {
     assert.equal((await post(`${again}/prompt`, { text: "id toolu_once run printf again >> claude-count", requestId: "claude-3" })).status, 200);
     assert.equal((await waitRun("claude-3")).status.state, "completed");
     assert.equal(fs.readFileSync(path.join(claudeWorkspace, "claude-count"), "utf8"), "onceagain", "a tool_use_id runs once in the guest");
+    // A screenshot Read through the mod: the transcript names the image, the
+    // thread's own route serves its bytes from the store on this host.
+    const shot = png(64, 40);
+    fs.mkdirSync(path.join(claudeWorkspace, ".shots"));
+    fs.writeFileSync(path.join(claudeWorkspace, ".shots", "shot.png"), shot);
+    assert.equal((await post(`${again}/prompt`, { text: "read .shots/shot.png\nsay here it is: ![the shot](/workspace/.shots/shot.png)", requestId: "claude-image" })).status, 200);
+    const pictured = await waitRun("claude-image");
+    const shown = pictured.events.find((event: { type: string; name?: string }) => event.type === "tool-result" && event.name === "Read");
+    assert.equal(shown?.output, "", JSON.stringify(shown));
+    assert.equal(shown?.images?.length, 1, JSON.stringify(shown));
+    assert.equal(shown.images[0].mimeType, "image/png");
+    assert.ok(!JSON.stringify(pictured).includes(shot.toString("base64").slice(0, 40)), "the transcript carries no base64");
+    const imageUrl = `${again}/media/${encodeURIComponent(shown.images[0].id)}`;
+    const served = await fetch(imageUrl);
+    assert.equal(served.status, 200);
+    assert.equal(served.headers.get("content-type"), "image/png");
+    assert.equal(served.headers.get("x-content-type-options"), "nosniff");
+    assert.match(served.headers.get("content-security-policy") ?? "", /sandbox/);
+    assert.deepEqual(Buffer.from(await served.arrayBuffer()), shot, "the bytes the model saw");
+    for (const ref of ["m1.0.0", "0.0.0", "..%2Fclaude.sqlite", "m999999.0.0", `${shown.images[0].id}0`]) {
+      assert.equal((await fetch(`${again}/media/${ref}`)).status, 404, ref);
+    }
+    assert.equal((await fetch(`${restarted.url}/api/threads/${id}/media/${encodeURIComponent(shown.images[0].id)}`)).status, 404, "another thread's store has no such image");
+    assert.equal((await fetch(`${restarted.url}/api/threads/no-such-thread/media/${encodeURIComponent(shown.images[0].id)}`)).status, 404);
     assert.equal((await post(`${again}/prompt`, { text: "slow sleep 5; touch claude-late", requestId: "claude-4" })).status, 200);
     const slowDeadline = Date.now() + 10000;
     while (!JSON.stringify(await (await fetch(`${again}/history`)).json()).includes("claude-late")) {
@@ -265,8 +290,8 @@ export async function smokeProduct(root: string) {
     const checkClaude = (usage: { lines: Array<{ model: string; spend: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; estimatedUsd: number; unpricedTokens: number } }>; unknownTurns: number; coverage: string }) => {
       const line = (model: string) => usage.lines.find(item => item.model === model)!;
       assert.deepEqual({ ...line("claude-sonnet").spend.tokens, reasoning: undefined }, { input: 100, output: 20, cacheRead: 50, cacheWrite: 10, total: 180, reasoning: undefined }, JSON.stringify(usage));
-      assert.deepEqual({ ...line("claude-opus").spend.tokens, reasoning: undefined }, { input: 300, output: 60, cacheRead: 150, cacheWrite: 30, total: 540, reasoning: undefined }, JSON.stringify(usage));
-      assert.ok(Math.abs(line("claude-opus").spend.estimatedUsd - 0.03) < 1e-9 && line("claude-opus").spend.unpricedTokens === 0);
+      assert.deepEqual({ ...line("claude-opus").spend.tokens, reasoning: undefined }, { input: 400, output: 80, cacheRead: 200, cacheWrite: 40, total: 720, reasoning: undefined }, JSON.stringify(usage));
+      assert.ok(Math.abs(line("claude-opus").spend.estimatedUsd - 0.04) < 1e-9 && line("claude-opus").spend.unpricedTokens === 0);
       assert.equal(usage.unknownTurns, 0);
       assert.equal(usage.coverage, "complete");
     };
@@ -282,16 +307,37 @@ export async function smokeProduct(root: string) {
     const report = await (await fetch(`${restarted.url}/api/usage`)).json();
     assert.equal(report.billed.usd, null);
     assert.ok(report.threads.some((item: { subject: string }) => item.subject === claudeId) && report.threads.some((item: { subject: string }) => item.subject === id));
-    assert.ok(Math.abs(report.totals.spend.estimatedUsd - 0.04) < 1e-9, JSON.stringify(report.totals));
+    assert.ok(Math.abs(report.totals.spend.estimatedUsd - 0.05) < 1e-9, JSON.stringify(report.totals));
     assert.ok(report.totals.spend.unpricedTokens > 0);
     assert.ok(report.models.some((line: { provider: string; model: string }) => line.provider === "claude-code" && line.model === "claude-opus"));
     const scoped = await (await fetch(`${restarted.url}/api/usage?project=${otherProject.id}`)).json();
     assert.ok(scoped.threads.every((item: { projectId: string }) => item.projectId === otherProject.id) && scoped.optchat === null);
     await new Promise(resolve => setTimeout(resolve, 5500));
     assert.ok(!fs.existsSync(path.join(claudeWorkspace, "claude-late")), "stop cancelled the guest command");
+    // The archived thread keeps its images when its machine's disk is gone.
+    fs.rmSync(claudeWorkspace, { recursive: true, force: true });
+    const afterArchive = await fetch(imageUrl);
+    assert.equal(afterArchive.status, 200);
+    assert.deepEqual(Buffer.from(await afterArchive.arrayBuffer()), shot);
     console.log("ok: product API creation dedup/conflict, SIGKILL/startup activation, guest effect once, streaming snapshots, SSE reconnect, third reopen");
     console.log("ok: concurrent followup deduplication, stop, model recovery, archive release to the global pool, cross-project reuse, dirty retention and distinct next workspace");
     console.log("ok: claude · max thread through the mod's tools: lease owner, transcript, model switch, SIGKILL reopen with resume, keyed tool once, stop with guest cancel");
+    console.log("ok: a claude read image in the transcript by reference, served from the thread's store with image headers, refused across threads, kept after archive and disk removal");
     console.log("ok: usage: claude code totals counted once across a resumed process, archived thread stores read again, unpriced tokens never $0, project scope");
   } finally { await Promise.all([...children].map(stop)); }
+}
+
+/** A small valid RGB PNG. */
+function png(width: number, height: number): Buffer {
+  const chunk = (type: string, data: Buffer) => {
+    const body = Buffer.concat([Buffer.from(type, "latin1"), data]);
+    const length = Buffer.alloc(4); length.writeUInt32BE(data.length);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(zlib.crc32(body));
+    return Buffer.concat([length, body, crc]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4);
+  header[8] = 8; header[9] = 2;
+  const rows = Buffer.concat(Array.from({ length: height }, (_, y) => Buffer.concat([Buffer.from([0]), Buffer.alloc(width * 3, y * 5)])));
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", header), chunk("IDAT", zlib.deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
 }

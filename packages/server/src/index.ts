@@ -153,8 +153,9 @@ async function readBytes(request: http.IncomingMessage, limit: number): Promise<
   return Buffer.concat(chunks);
 }
 
-/** Headers for an image a message holds: never run, sniffed, framed or
- * embedded by another site; immutable, since its id is its content's hash. */
+/** Headers for an image a message or tool result holds: never run, sniffed,
+ * framed or embedded by another site; immutable, since its id is its
+ * content's hash or its place in a store whose rows are only appended. */
 const IMAGE_HEADERS = {
   "cache-control": "private, max-age=31536000, immutable",
   "x-content-type-options": "nosniff",
@@ -586,7 +587,7 @@ export async function createCubed(options: {
       }
       if (parts[0] === "api" && parts[1] === "threads") {
         const id = parts[2];
-        if (parts.length > 4 && parts[3] !== "workspace") return json({ error: "not found" }, 404);
+        if (parts.length > 4 && parts[3] !== "workspace" && !(parts[3] === "media" && parts.length === 5)) return json({ error: "not found" }, 404);
         if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...thread, state: threadState(thread.id), error: conversations.error(thread.id), waiting: conversations.waiting(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
         if (!id && method === "POST") {
           const model = await selection(body.model);
@@ -606,6 +607,14 @@ export async function createCubed(options: {
         if (thread && parts[3] === "usage" && parts.length === 4 && method === "GET") return json({ usage: await usage.thread(id) });
         // So does the evidence about its machine (a retained disk's, say).
         if (thread && parts[3] === "diagnostics" && parts.length === 4 && method === "GET") return json({ diagnostics: await diagnostics(id) });
+        // So do the images its transcript shows: they are kept on this host,
+        // in the thread's own store, not on its machine.
+        if (thread && parts[3] === "media" && parts.length === 5 && method === "GET") {
+          const image = conversations.image(id, parts[4]!);
+          if (!image) return json({ error: "no such image" }, 404);
+          response.writeHead(200, { ...IMAGE_HEADERS, "content-type": image.mimeType, "content-length": image.bytes.byteLength });
+          return response.end(image.bytes);
+        }
         // An archived thread's retained machine disk can still be discarded.
         if (thread?.archived && parts[3] === "discard" && method === "POST") { await conversations.discard(id); return json({ ok: true }); }
         if (!thread || thread.archived) return json({ error: "thread not found" }, 404);

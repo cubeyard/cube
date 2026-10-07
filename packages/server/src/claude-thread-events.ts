@@ -3,7 +3,8 @@
  * same `ThreadTranscript` the Pi adapter produces. Subagent internals
  * (messages with a parent tool use) stay inside their Agent tool call. */
 import type { ClaudeAgent, ClaudeState, ClaudeSubmission } from "./claude-agent.ts";
-import type { ThreadAgent, ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
+import type { MessageImage, ThreadAgent, ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
+import { imageNote, shownImage, THREAD_IMAGE_LIMITS } from "./thread-images.ts";
 
 type Block = { type?: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown;
   tool_use_id?: string; content?: unknown; is_error?: boolean };
@@ -41,7 +42,9 @@ export class ClaudeThreadEvents implements ThreadEvents {
 }
 
 /** Claude Code's tools see the workspace at its host directory (`root`); the
- * transcript shows it as /workspace, as Pi threads do, never the host path. */
+ * transcript shows it as /workspace, as Pi threads do, never the host path:
+ * in tool calls and results and in the agent's own words, so a picture the
+ * agent names (`![…](path)`) is the path its Read showed. */
 export function render(state: ClaudeState, owner: ThreadAgent | null, failure: string | null, root?: string): ThreadTranscript {
   const shown = root ? virtualize(root) : <T>(value: T) => value;
   const events: ThreadEvent[] = [];
@@ -61,8 +64,8 @@ export function render(state: ClaudeState, owner: ThreadAgent | null, failure: s
     state.partial.forEach((block, index) => {
       if (!block) return;
       const id = `live.${current.seq}.${index}`;
-      if (block.type === "text" && block.text) events.push({ type: "assistant-text", id, text: block.text, reasoning: false, final: false });
-      else if (block.type === "thinking" && block.thinking) events.push({ type: "assistant-text", id, text: block.thinking, reasoning: true, final: false });
+      if (block.type === "text" && block.text) events.push({ type: "assistant-text", id, text: shown(block.text), reasoning: false, final: false });
+      else if (block.type === "thinking" && block.thinking) events.push({ type: "assistant-text", id, text: shown(block.thinking), reasoning: true, final: false });
       else if (block.type === "tool_use") events.push({ type: "tool-call", id, callId: block.id, name: block.name, input: shown(partialInput(block.json)), final: false });
     });
   }
@@ -82,8 +85,8 @@ export function messageEvents(seq: number, data: Record<string, unknown>, names:
   if (data.type === "assistant") {
     blocks.forEach((block, index) => {
       const id = `m${seq}.${index}`;
-      if (block.type === "text" && block.text) events.push({ type: "assistant-text", id, text: block.text, reasoning: false, final: true });
-      else if (block.type === "thinking" && block.thinking) events.push({ type: "assistant-text", id, text: block.thinking, reasoning: true, final: true });
+      if (block.type === "text" && block.text) events.push({ type: "assistant-text", id, text: shown(block.text), reasoning: false, final: true });
+      else if (block.type === "thinking" && block.thinking) events.push({ type: "assistant-text", id, text: shown(block.thinking), reasoning: true, final: true });
       else if (block.type === "tool_use" && block.id) {
         names.set(block.id, block.name ?? "tool");
         events.push({ type: "tool-call", id, callId: block.id, name: block.name ?? "tool", input: shown(block.input ?? {}), final: true });
@@ -92,8 +95,10 @@ export function messageEvents(seq: number, data: Record<string, unknown>, names:
   } else if (data.type === "user") {
     blocks.forEach((block, index) => {
       if (block.type !== "tool_result" || !block.tool_use_id) return;
-      events.push({ type: "tool-result", id: `m${seq}.${index}`, callId: block.tool_use_id, name: names.get(block.tool_use_id) ?? "tool",
-        output: shown(resultText(block.content)), isError: block.is_error === true, final: true });
+      const id = `m${seq}.${index}`;
+      const { output, images } = resultContent(id, block.content);
+      events.push({ type: "tool-result", id, callId: block.tool_use_id, name: names.get(block.tool_use_id) ?? "tool",
+        output: shown(output), isError: block.is_error === true, final: true, ...images.length ? { images } : {} });
     });
   }
   return events;
@@ -107,10 +112,22 @@ export function status(current: ClaudeSubmission | undefined, failure: string | 
   return { state: current.state, run: current.requestId, error: current.error ?? failure, ...background };
 }
 
-function resultText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return (content as Block[]).map(part => part.type === "text" ? part.text ?? "" : `[${part.type ?? "content"}]`).join("\n");
+/** A tool result's text and the images it shows by reference (thread-images.ts);
+ * an image beyond the bound, or one cube does not serve, stays a mark. */
+function resultContent(id: string, content: unknown): { output: string; images: MessageImage[] } {
+  if (typeof content === "string") return { output: content, images: [] };
+  if (!Array.isArray(content)) return { output: "", images: [] };
+  const images: MessageImage[] = [];
+  let more = 0;
+  const lines = (content as Array<Block & { source?: { type?: string; media_type?: unknown; data?: unknown } }>).flatMap((part, index) => {
+    if (part.type === "text") return [part.text ?? ""];
+    const image = part.type === "image" && part.source?.type === "base64" ? shownImage(`${id}.${index}`, part.source.media_type, part.source.data) : null;
+    if (!image) return [`[${part.type ?? "content"}]`];
+    if (images.length < THREAD_IMAGE_LIMITS.perEvent) images.push(image); else more++;
+    return [];
+  });
+  if (more) lines.push(imageNote(more, true));
+  return { output: lines.join("\n"), images };
 }
 
 export function virtualize(root: string) {

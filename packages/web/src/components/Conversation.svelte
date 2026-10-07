@@ -5,7 +5,7 @@
   import { ACCEPT, MEDIA_LIMITS, pastedImages, prepareImage } from "../lib/images.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
   import { echo, echoRows, unanswered, unlogged, type Echo } from "../lib/outbox.ts";
-  import { toolOpen, transcriptRows, type ToolState, type TranscriptRow } from "../lib/transcript.ts";
+  import { picturePath, toolOpen, transcriptRows, type ToolState, type TranscriptRow } from "../lib/transcript.ts";
   import { uid } from "../lib/uid.ts";
   import type { MessageImage, ModelSelection, ThreadStatus, ThreadTranscript } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
@@ -141,6 +141,13 @@
     });
     const onScroll = () => { following = atBottom(); };
     scroller.addEventListener("scroll", onScroll, { passive: true });
+    // An image in agent prose is markup, not a component: its failure is caught here.
+    const onImageError = (event: Event) => {
+      const image = event.target instanceof HTMLImageElement ? event.target.closest(".markdown-image") : null;
+      image?.classList.add("missing");
+      image?.setAttribute("aria-label", `${image.getAttribute("data-label") ?? "image"} unavailable, retry`);
+    };
+    column.addEventListener("error", onImageError, true);
     const settle = new ResizeObserver(() => { if (following) toBottom(); });
     settle.observe(column);
     settle.observe(scroller);
@@ -148,6 +155,7 @@
       disposed = true;
       for (const item of attachments) URL.revokeObjectURL(item.preview);
       scroller.removeEventListener("scroll", onScroll);
+      column.removeEventListener("error", onImageError, true);
       settle.disconnect();
       void watching.then(watch => watch.stop());
     };
@@ -232,6 +240,24 @@
   function retry(id: string): void {
     missing.delete(id);
     retries.set(id, (retries.get(id) ?? 0) + 1);
+  }
+
+  /** The source of an image agent prose names, when the thread read it. */
+  const pictureOf = (row: Extract<TranscriptRow, { kind: "assistant" }>) => row.pictures
+    ? (href: string) => { const path = picturePath(href); const image = path ? row.pictures![path] : undefined; return image ? imageUrl(base, image.id) : null; }
+    : undefined;
+
+  /** A press on an image in agent prose opens it, or asks again for one that did not load. */
+  function onProseClick(event: MouseEvent): void {
+    const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>(".markdown-image") : null;
+    const src = button?.dataset.image;
+    if (!button || !src) return;
+    const label = button.dataset.label ?? "image";
+    if (!button.classList.contains("missing")) { void inspect(src, label); return; }
+    button.classList.remove("missing");
+    button.setAttribute("aria-label", `view ${label} larger`);
+    const image = button.querySelector("img");
+    if (image) image.src = `${src}?retry=${Date.now()}`;
   }
 
   async function inspect(src: string, label: string): Promise<void> {
@@ -334,10 +360,11 @@
               <summary title={row.summary || row.name}>
                 <span class="lamp mini {toolLamp[row.state]}" aria-hidden="true"></span><span class="sr-only">{toolStateLabel[row.state]}</span>
                 <code>{row.name}</code>{#if row.summary}<span class="tool-summary">{row.summary}</span>{/if}
-                {#if row.input || row.output}<span class="tool-chevron"><Icon name="chevron" size={12} /></span>{/if}
+                {#if row.input || row.output || row.images}<span class="tool-chevron"><Icon name="chevron" size={12} /></span>{/if}
               </summary>
               {#if row.input}<pre class="tool-input">{row.input}</pre>{/if}
               {#if row.output}<pre>{row.output}</pre>{/if}
+              {#if row.images}{@render messageImages(row.images, row.summary || row.name)}{/if}
             </details>
           {:else if row.kind === "user" && row.from}
             <article class="conversation-message report" aria-label="thread report">
@@ -348,14 +375,16 @@
           {:else if row.kind === "user"}
             <article class="conversation-message user" class:sending={row.sending} aria-label="user message" data-entry={row.id.split(".")[0]}>
               <span class="message-label">you{#if row.sending}<span class="message-sending"> · sending</span>{/if}</span>
-              {#if row.images}{@render messageImages(row.images)}{/if}
+              {#if row.images}{@render messageImages(row.images, "")}{/if}
               {#if row.text}<div class="message-copy">{row.text}</div>{/if}
             </article>
           {:else}
             <article class="conversation-message assistant" class:continued={!row.labelled} aria-label={row.reasoning ? "agent reasoning" : "agent message"}>
               {#if row.labelled}<span class="message-label">agent</span>{/if}
-              <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text and allows only http(s)/mailto links -->
-              <div class="message-copy markdown" class:reasoning={row.reasoning}>{@html renderMarkdown(row.text)}</div>
+              <!-- a press on an image the thread read opens it; the keys are in the rendered markup -->
+              <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+              <!-- eslint-disable-next-line svelte/no-at-html-tags -- renderMarkdown prints raw html as text, allows only http(s)/mailto links and shows only images the thread read -->
+              <div class="message-copy markdown" class:reasoning={row.reasoning} onclick={onProseClick}>{@html renderMarkdown(row.text, pictureOf(row))}</div>
             </article>
           {/if}
         {/each}
@@ -438,10 +467,11 @@
   {/if}
 </div>
 
-{#snippet messageImages(list: MessageImage[])}
+<!-- `subject` names a tool's images (its path); a message's are numbered -->
+{#snippet messageImages(list: MessageImage[], subject: string)}
   <ul class="message-images" aria-label={list.length === 1 ? "1 image" : `${list.length} images`}>
     {#each list as image, index (index)}
-      {@const label = `image ${index + 1} of ${list.length}`}
+      {@const label = !subject ? `image ${index + 1} of ${list.length}` : list.length === 1 ? subject : `${subject} · ${index + 1} of ${list.length}`}
       <li class:missing={missing.has(image.id)}>
         <button type="button" class="message-image" aria-label={missing.has(image.id) ? `${label} unavailable, retry` : `view ${label} larger`}
           onclick={() => missing.has(image.id) ? retry(image.id) : inspect(imageUrl(base, image.id), label)}>

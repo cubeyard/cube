@@ -341,6 +341,66 @@ await scenario("the + key opens the file picker from the keyboard; picked, paste
 });
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844, touch: true }]) {
+  await scenario("a tool's images show in its strip and open larger; prose shows only an image the thread read; a missing one is a retry", async (page, host) => {
+    // A wide screenshot, as Claude Code's Read returns one: the host serves it by its reference.
+    const shot = await page.screenshot({ type: "png" });
+    host.media.set("m7.0.0", { type: "image/png", body: shot });
+    host.transcript = { ...host.transcript, events: [...host.transcript.events,
+      user("3.0", "look at the screenshots"),
+      { type: "tool-call", id: "m6.0", callId: "r1", name: "Read", input: { file_path: "/workspace/.shots/07-thread-received.png" }, final: true },
+      { type: "tool-result", id: "m7.0", callId: "r1", name: "Read", output: "", isError: false, final: true, images: [{ id: "m7.0.0", mimeType: "image/png" }] },
+      { type: "tool-call", id: "m8.0", callId: "r2", name: "Read", input: { file_path: "/workspace/.shots/12-review-phone.png" }, final: true },
+      { type: "tool-result", id: "m9.0", callId: "r2", name: "Read", output: "", isError: false, final: true, images: [{ id: "m9.0.0", mimeType: "image/png" }] },
+      agent("m10.0", "the received thread: ![thread received](.shots/07-thread-received.png) and a remote ![pixel](https://tracker.example/p.png)"),
+    ] };
+    await page.reload();
+    const strip = page.locator(".tool-strip", { hasText: "07-thread-received.png" });
+    const thumb = strip.locator(".message-images img");
+    await thumb.waitFor();
+    assert.equal(await strip.evaluate(element => (element as HTMLDetailsElement).open), true, "a strip with an image is open");
+    await page.waitForFunction(() => [...document.querySelectorAll<HTMLImageElement>(".tool-strip .message-images img")].some(image => image.complete && image.naturalWidth > 0));
+    assert.equal(await strip.locator("pre").count(), 0, "no [image] text");
+    const box = await thumb.boundingBox();
+    assert.ok(box && box.width > 40 && box.width <= viewport.width - 16, `the preview is a bounded thumbnail: ${JSON.stringify(box)}`);
+    // the missing one is the dashed retry, not a broken image
+    const lost = page.locator(".tool-strip", { hasText: "12-review-phone.png" }).locator(".message-images li");
+    await page.waitForFunction(() => document.querySelectorAll(".tool-strip .message-images li.missing").length === 1);
+    assert.equal(await lost.getByRole("button").getAttribute("aria-label"), "/workspace/.shots/12-review-phone.png unavailable, retry");
+    host.media.set("m9.0.0", { type: "image/png", body: PNG });
+    await lost.getByRole("button").click();
+    await page.waitForFunction(() => document.querySelectorAll(".tool-strip .message-images li.missing").length === 0);
+
+    await strip.getByRole("button", { name: "view /workspace/.shots/07-thread-received.png larger" }).click();
+    const viewer = page.locator("dialog.image-viewer");
+    await viewer.waitFor();
+    assert.equal(await viewer.getAttribute("aria-label"), "/workspace/.shots/07-thread-received.png");
+    const large = await viewer.locator("img").boundingBox();
+    assert.ok(large && large.width > box!.width && large.width <= viewport.width, `the viewer shows it larger and fits: ${JSON.stringify(large)}`);
+    await page.keyboard.press("Escape");
+    await viewer.waitFor({ state: "detached" });
+
+    // agent prose: the path it read is the image; a remote one stays a link
+    const prose = page.locator(".conversation-message.assistant", { hasText: "the received thread" });
+    const pictured = prose.locator("button.markdown-image img");
+    await pictured.waitFor();
+    assert.equal(await pictured.getAttribute("src"), "/api/optchat/media/m7.0.0");
+    assert.equal(await prose.locator("img").count(), 1, "only the image the thread read is fetched");
+    assert.equal(await prose.locator("a", { hasText: "pixel" }).getAttribute("href"), "https://tracker.example/p.png");
+    await prose.getByRole("button", { name: "view thread received larger" }).click();
+    await viewer.waitFor();
+    await viewer.getByRole("button", { name: "close" }).click();
+    await viewer.waitFor({ state: "detached" });
+    // a prose image the host no longer has is the dashed retry too
+    host.media.delete("m7.0.0");
+    await prose.locator("button.markdown-image").evaluate(button => { const image = button.querySelector("img")!; image.src = `${image.src}?gone`; });
+    await page.waitForFunction(() => document.querySelector(".markdown-image.missing") !== null);
+    assert.equal(await prose.locator("button.markdown-image").getAttribute("aria-label"), "thread received unavailable, retry");
+    host.media.set("m7.0.0", { type: "image/png", body: shot });
+    await prose.locator("button.markdown-image").click();
+    await page.waitForFunction(() => document.querySelector(".markdown-image.missing") === null && (document.querySelector<HTMLImageElement>(".markdown-image img")?.naturalWidth ?? 0) > 0);
+    assert.ok(await page.locator(".transcript-column").evaluate(element => element.scrollWidth <= element.clientWidth), "nothing overflows the transcript sideways");
+  }, viewport);
+
   await scenario("the chat's threads show by project with their own state; a wish not started links its message and can be dismissed", async (page, host) => {
     const thread = (id: string, project: string, title: string, state: string, archived = false) =>
       ({ id: `${id}-0000-4000-8000-000000000000`, title, project: { id: project, name: project }, state, archived, spawned: 1 });

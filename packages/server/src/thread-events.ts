@@ -9,8 +9,9 @@
 /** The agent a thread was created with; fixed for the thread. */
 export type ThreadAgent = "pi" | "claude-code";
 
-/** An image a user message carries, by its id in the conversation's media
- * store (`<base>/media/<id>`); only OptChat's messages have them. */
+/** An image an event shows, served at `<base>/media/<id>`: for OptChat's own
+ * messages its id in the chat's media store, for a thread's events its place
+ * in the thread's store (thread-images.ts). Events never carry the bytes. */
 export type MessageImage = { id: string; mimeType: string };
 
 /** One thing a thread shows, in transcript order. `id` is stable across
@@ -25,8 +26,9 @@ export type ThreadEvent =
   | { type: "assistant-text"; id: string; text: string; reasoning: boolean; final: boolean }
   /** A tool call; its result, if any, carries the same `callId`. */
   | { type: "tool-call"; id: string; callId: string; name: string; input: unknown; final: boolean }
-  /** A tool result, or with `final: false` the running output of a call. */
-  | { type: "tool-result"; id: string; callId: string; name: string; output: string; isError: boolean; final: boolean };
+  /** A tool result, or with `final: false` the running output of a call.
+   * `images`: the images it returned (a Read of a screenshot), if any. */
+  | { type: "tool-result"; id: string; callId: string; name: string; output: string; isError: boolean; final: boolean; images?: MessageImage[] };
 
 /** The id prefix of a user message accepted but not yet in the log. */
 export const PENDING_ID = "pending.";

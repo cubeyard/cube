@@ -12,6 +12,7 @@ import { PiThreadEvents } from "./pi-thread-events.ts";
 import type { ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
 import { readClaudeHistory, readPiHistory, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
+import { isThreadImageRef, readThreadImage } from "./thread-images.ts";
 import { Registry, threadAgent, type HookOutcome, type Thread } from "./registry.ts";
 import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWorkspace, RunnerWait, type ThreadMachines } from "./vm.ts";
 import { VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
@@ -466,6 +467,17 @@ export class Conversations {
     }
     assertCurrentThreadStore(directory);
     return readPiHistory(path.join(directory, "pi.sqlite"), this.owner(id), failure, request);
+  }
+  /** An image the thread's transcript shows, from the thread's own store on
+   * this host, read without its agent or its machine: an archived thread and
+   * one whose disk is gone keep theirs. null when there is no such image. */
+  image(id: string, ref: string): ReturnType<typeof readThreadImage> {
+    const thread = this.registry.getThread(id);
+    if (!thread || !isThreadImageRef(ref)) return null;
+    const directory = path.join(this.directory, id);
+    if (threadAgent(thread) === "claude-code") return readThreadImage({ agent: "claude-code", file: path.join(directory, "claude.sqlite") }, ref);
+    assertCurrentThreadStore(directory);
+    return readThreadImage({ agent: "pi", file: path.join(directory, "pi.sqlite") }, ref);
   }
   async stream(id: string, response: ServerResponse): Promise<void> {
     await serveThreadEvents(await this.events(id), response);

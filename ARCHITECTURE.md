@@ -165,6 +165,23 @@ ordered list of events: user message, assistant text (with a reasoning flag),
 tool call and tool result (paired by `callId`). An event still streaming carries
 `final: false`: the in-flight model partial and a running tool's output.
 
+Images an event shows (a tool result's, say Claude Code's Read of a
+screenshot, or a message's) are named by reference, never carried as base64
+(`thread-images.ts`): their place in the thread's own store on the cubed host
+(`m<seq>.<block>.<part>` in `claude.sqlite`, `<entry>.<message>.<part>` in
+`pi.sqlite`), at most 16 per event. `GET /api/threads/<id>/media/<ref>`
+serves one from that store, read only, for open and archived threads alike,
+so an image outlives the thread's machine and its disk. It serves only a part
+the transcript shows, whose own header is PNG, JPEG, GIF or WebP (the
+declared type is not trusted), at most 5 MiB, with the same no-sniff,
+sandboxing headers as OptChat's images; the browser never names a workspace
+path. Agent prose that names, as a markdown image, a path the thread read as
+an image shows that stored image; any other image target stays a link or text.
+Claude Code's transcript shows the workspace's host directory as `/workspace`
+in its prose too. Pi's own `read` (pi-durable 1.0.1) refuses images, so a Pi
+thread shows images only when a tool returns one. Neither agent's assistant
+messages carry images of their own.
+
 `ThreadEvents` has the same interface in-process and over HTTP: `read()` and a
 serialized, coalescing `watch()`. `PiThreadEvents` renders pi-durable's
 conversation view (entries plus `pi.live`); `GET …/history` returns `read()` and

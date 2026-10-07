@@ -113,12 +113,16 @@ async function tool(id: string, name: string, toolInput: Record<string, unknown>
     : name === "Write" ? await write(scope, id, toolInput as never)
     : name === "Edit" ? await edit(scope, id, toolInput as never)
     : await read(scope, toolInput as never);
+  // Read's image result reaches the model, and stream-json, as Claude Code
+  // 2.1.293 prints it: an image block in the tool result, the typed result beside it.
+  const image = name === "Read" && !("deny" in result) && (result as { type?: string }).type === "image" ? (result as { file: { base64: string; type: string } }).file : null;
   const content = "deny" in result ? result.deny
+    : image ? [{ type: "image", source: { type: "base64", data: image.base64, media_type: image.type } }]
     : name === "Bash" ? [(result as { stdout: string }).stdout, (result as { stderr: string }).stderr].filter(Boolean).join("\n")
     : name === "Read" ? (result as { file: { content: string } }).file.content
     : artifact ? (result as { content: string }).content
     : `${name} ok: ${String(toolInput.file_path)}`;
-  emit({ type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content, is_error: "deny" in result }] } });
+  emit({ type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content, is_error: "deny" in result }] }, ...image ? { tool_use_result: result } : {} });
 }
 
 /** A background Agent: launched within the turn, its own messages carry
