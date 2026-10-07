@@ -77,6 +77,11 @@ try {
   assert.ok(project.project?.id, JSON.stringify(project));
   const checked = await (await post(`/api/projects/${project.project.id}/check`, {})).json();
   assert.equal(checked.project.status, "ready", JSON.stringify(checked));
+  // The repository moves on after the check: the thread OptChat starts takes the new commit.
+  fs.writeFileSync(path.join(repository, "README"), "hello again\n");
+  git(repository, ["commit", "-qam", "after the check"]);
+  const latest = git(repository, ["rev-parse", "HEAD"]).trim();
+  assert.notEqual(checked.project.repositories[0].baseOid, latest);
 
   const models = await (await fetch(`${base}/api/optchat/model`)).json();
   assert.deepEqual(models.selected, { provider: faux.getModel().provider, id: faux.getModel().id });
@@ -88,6 +93,7 @@ try {
     threads => threads.length === 1 && threads[0]!.state === "ready", "the spawned thread starts"))[0]!;
   assert.equal(thread.projectId, project.project.id);
   assert.equal(thread.title, "count the files in the repository with bash", "the title is the task's, without the note");
+  assert.equal(app.registry.getThread(thread.id)!.allocation.repositories[0]!.baseOid, latest, "OptChat's thread starts at the latest commit, not the checked one");
   await until(async () => (await (await fetch(`${base}/api/threads/${thread.id}/history`)).json()), history => history.status.state === "completed", "the thread finishes");
 
   // Its report comes back to the chat as a message and starts a turn.
@@ -119,9 +125,15 @@ try {
 
   // A replayed spawn finds its thread, even with another model or none left.
   const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [],
-    runners: () => observeRunners(app.registry, 60_000) });
+    runners: () => observeRunners(app.registry, 60_000), latestCommits: () => { throw new Error("a replay resolves nothing"); } });
   assert.match(await adapter.runners(), /^runners as cubed last heard from them[^]*unknown for every runner/, "OptChat's runners tool reads cubed's registry");
   assert.deepEqual(await adapter.spawn({ project: "demo", task: "count the files in the repository with bash" }, "optchat:call-spawn:0"), { id: thread.id, title: thread.title });
+  // A new spawn whose latest commits cannot be fetched starts no thread.
+  const threadCount = app.registry.listThreads().length;
+  const unfetched = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [{ provider: faux.getModel().provider, id: faux.getModel().id }],
+    runners: () => observeRunners(app.registry, 60_000), latestCommits: async () => { throw new Error("fetching the latest main failed"); } });
+  await assert.rejects(unfetched.spawn({ project: "demo", task: "another" }, "optchat:call-spawn:1"), /fetching the latest main failed/);
+  assert.equal(app.registry.listThreads().length, threadCount);
 
   // History reads the thread's stored transcript beside cubed's record,
   // without its agent or lease: while the agent is open, with a failure

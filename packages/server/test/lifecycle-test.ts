@@ -68,7 +68,7 @@ await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
 const address = app.server.address();
 assert(address && typeof address === "object");
 const base = `http://127.0.0.1:${address.port}`;
-const adapter = cubeThreads({ registry: app.registry, conversations, catalog: async () => [], runners: () => { throw new Error("unused"); } });
+const adapter = cubeThreads({ registry: app.registry, conversations, catalog: async () => [], runners: () => { throw new Error("unused"); }, latestCommits: () => { throw new Error("unused"); } });
 async function until<T>(read: () => T | Promise<T>, check: (value: T) => boolean, what: string): Promise<T> {
   for (let k = 0; ; k++) {
     const value = await read();

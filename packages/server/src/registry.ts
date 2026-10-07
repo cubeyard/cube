@@ -77,6 +77,11 @@ export interface Runner extends NodeBinding {
 export interface WorkspaceRepository {
   url: string; base: string; baseOid: string; checkoutName: string;
 }
+/** Each of a project's repositories as resolved against its upstream for
+ * one new thread (`git.prepareRepository`), in the project's order. */
+export interface ResolvedRepositories {
+  projectRevision: number; repositories: Array<{ url: string; base: string; baseOid: string }>;
+}
 export interface WorkspaceAllocation {
   projectId: string; projectRevision: number; repositories: WorkspaceRepository[];
   /** The project's hooks when the thread was created; fixed for the thread. */
@@ -580,7 +585,11 @@ export class Registry {
     const row = this.db.prepare("SELECT thread_id FROM creation WHERE project_id=? AND request_id=?").get(projectId, requestId);
     return row ? this.getThread(String(row.thread_id)) : null;
   }
-  createThread(projectId: string, requestId: string, model: ModelSelection, text: string, agent: ThreadAgent = "pi"): Thread {
+  /** A replayed request returns the thread it made, with the commits it was
+   * pinned to then. A new thread is pinned to `resolved`, the commits just
+   * resolved against upstream for it; without it (fixtures only) to the
+   * commits of the project's last check. */
+  createThread(projectId: string, requestId: string, model: ModelSelection, text: string, agent: ThreadAgent = "pi", resolved?: ResolvedRepositories): Thread {
     const payload = JSON.stringify({ model, text });
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -591,9 +600,18 @@ export class Registry {
         this.db.exec("COMMIT");
         return thread;
       }
-      if (this.getProject(projectId)?.status !== "ready") throw new Error("check the project before starting a thread");
-      const project = this.getProject(projectId)!;
-      const repositories = allocationRepositories(project, true);
+      const project = this.getProject(projectId);
+      if (!project) throw new Error("project not found");
+      if (project.status !== "ready") throw new Error("check the project before starting a thread");
+      let repositories = allocationRepositories(project, true);
+      if (resolved) {
+        if (resolved.projectRevision !== project.revision || resolved.repositories.length !== repositories.length
+          || resolved.repositories.some((repository, index) => repository.url !== repositories[index].url)) {
+          throw new Error("the project changed while its latest commits were fetched; start the thread again");
+        }
+        repositories = repositories.map((repository, index) => ({ ...repository,
+          base: resolved.repositories[index].base, baseOid: resolved.repositories[index].baseOid }));
+      }
       // Counting open threads and inserting this one in one IMMEDIATE
       // transaction is the slot reservation: no two creations, in this or
       // another process, can take a runner's last slot.
