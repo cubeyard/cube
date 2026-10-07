@@ -16,9 +16,12 @@ const idle: ThreadTranscript["status"] = { state: "completed", run: "r0", error:
 const browser = await chromium.launch();
 let failed = false;
 
-async function scenario(name: string, run: (page: Page, host: ScriptedHost, watch: Awaited<ReturnType<typeof monitor>>) => Promise<void>, viewport = { width: 1280, height: 800 }): Promise<void> {
+/** A viewport; `touch` is a phone: a coarse pointer, touch and its keys. */
+type Viewport = { width: number; height: number; touch?: boolean };
+
+async function scenario(name: string, run: (page: Page, host: ScriptedHost, watch: Awaited<ReturnType<typeof monitor>>) => Promise<void>, viewport: Viewport = { width: 1280, height: 800 }): Promise<void> {
   const host = await ScriptedHost.start();
-  const page = await browser.newPage({ viewport });
+  const page = await browser.newPage({ viewport: { width: viewport.width, height: viewport.height }, isMobile: !!viewport.touch, hasTouch: !!viewport.touch });
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(String(error)));
   try {
@@ -44,6 +47,23 @@ async function send(page: Page, watch: Awaited<ReturnType<typeof monitor>>, text
   await watch.mark(mark);
   await page.locator(".composer textarea").press("Enter");
 }
+
+type Box = { top: number; bottom: number; left: number; right: number; height: number; width: number };
+const box = (page: Page, selector: string): Promise<Box> => page.locator(selector).first().evaluate(element => {
+  const { top, bottom, left, right, height, width } = element.getBoundingClientRect();
+  return { top, bottom, left, right, height, width };
+});
+/** The box of an element's own text: two labels of one size share a baseline when these share a bottom. */
+const textBox = (page: Page, selector: string): Promise<Box> => page.locator(selector).first().evaluate(element => {
+  const text = [...element.childNodes].find(node => node.nodeType === Node.TEXT_NODE && node.textContent!.trim())!;
+  const range = document.createRange();
+  range.selectNodeContents(text);
+  const { top, bottom, left, right, height, width } = range.getBoundingClientRect();
+  return { top, bottom, left, right, height, width };
+});
+const near = (actual: number, expected: number, what: string) => assert.ok(Math.abs(actual - expected) < 0.75, `${what}: ${actual} against ${expected}`);
+/** A 1x1 png. */
+const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
 
 /** Waits until the page has painted what the host sent. */
 const settle = (page: Page) => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -209,6 +229,14 @@ await scenario("a message sent while the agent works shows at once and the run r
   const base = host.transcript.events;
   host.set([...base, user("3.0", "first"), agent("live.1.0", "working on", false)], { state: "working" });
   await page.locator(".composer[aria-busy=true]").waitFor();
+  near((await box(page, ".stop-key")).height, (await box(page, ".composer-field")).height, "the stop key is as tall as the field beside it");
+  // a longer draft grows the field, not the stop key, which stays on its last line
+  await page.locator(".composer textarea").fill("one\ntwo\nthree\nfour");
+  await page.locator(".composer textarea").dispatchEvent("input");
+  const [stopKey, grown] = [await box(page, ".stop-key"), await box(page, ".composer-field")];
+  assert.ok(grown.height > stopKey.height + 40, "the field grew past the stop key");
+  near(stopKey.bottom, grown.bottom, "the stop key stays on the field's last line");
+  await page.locator(".composer textarea").fill("");
   host.onPrompt = ({ text, requestId }) => { host.set([...host.transcript.events, user(`pending.${requestId}`, text)], { state: "working" }); };
   await send(page, watch, "also this");
   await page.locator(".conversation-message.user:not(.sending)", { hasText: "also this" }).waitFor();
@@ -218,6 +246,98 @@ await scenario("a message sent while the agent works shows at once and the run r
   await page.locator(".composer[aria-busy=false]").waitFor();
   await settle(page);
   assertSend(await watch.since("also this"), "also this");
+});
+
+for (const viewport of [{ width: 1280, height: 800 }, { width: 1024, height: 768, touch: true }, { width: 390, height: 844, touch: true }]) {
+  await scenario("the chat's rails are one band and the composer's keys sit on the text's line", async page => {
+    const strip = await box(page, ".thread-strip");
+    const now = await box(page, ".now-head");
+    near(now.height, strip.height, "the now head is as tall as the chat strip");
+    if (viewport.width <= 832) {
+      // stacked: the now bay above the strip, labels on one left edge
+      near((await textBox(page, ".now-head h2")).left, (await box(page, ".thread-strip .lamp")).left, "the now label starts where the strip's lamp does");
+    } else {
+      near(now.top, strip.top, "the rails start on one line");
+      near(now.bottom, strip.bottom, "the rails' hairlines meet");
+      const label = await textBox(page, ".now-head h2");
+      near((await textBox(page, ".strip-toggle")).bottom, label.bottom, "memory and now share a baseline");
+      near((await textBox(page, ".chat-tagline")).bottom, label.bottom, "the tagline and now share a baseline");
+    }
+    // memory is a quiet rail toggle, not a raised key, and says when it is open
+    const memory = page.getByRole("button", { name: "memory" });
+    assert.equal(await memory.evaluate(element => element.classList.contains("key")), false);
+    await memory.click();
+    assert.equal(await memory.getAttribute("aria-expanded"), "true");
+    await page.locator("#chat-memory").waitFor();
+    await memory.click();
+    assert.equal(await memory.getAttribute("aria-expanded"), "false");
+
+    // no "image" key: a + at the field's start, send at its end, one line
+    assert.equal(await page.getByRole("button", { name: "image", exact: true }).count(), 0);
+    assert.equal(await page.locator(".composer button", { hasText: /image/ }).count(), 0);
+    const attach = page.getByRole("button", { name: "attach images" });
+    assert.equal(await attach.locator("svg").count(), 1, "the attach key is the + glyph");
+    const field = await box(page, ".composer-field");
+    const plus = await box(page, ".attach-key");
+    const sendKey = await box(page, ".send-key");
+    const text = await box(page, ".composer textarea");
+    for (const [what, key] of [["attach", plus], ["send", sendKey]] as const) {
+      near(key.height, text.height, `the ${what} key is as tall as a line of the field`);
+      near(key.bottom, text.bottom, `the ${what} key sits on the field's line`);
+      near(key.width, key.height, `the ${what} key is square`);
+      if (viewport.touch) assert.ok(key.height >= 44, `the ${what} key takes a fingertip: ${key.height}`);
+    }
+    near(plus.left - field.left, field.right - sendKey.right, "the keys are inset alike");
+    near(plus.top - field.top, field.bottom - plus.bottom, "the field pads the keys alike above and below");
+    assert.ok(plus.right <= text.left && text.right <= sendKey.left, "attach, text, send in that order");
+
+    // a longer draft grows the field; the keys stay on its last line
+    const composer = page.locator(".composer textarea");
+    await composer.fill("one\ntwo\nthree");
+    await composer.dispatchEvent("input");
+    const grown = await box(page, ".composer textarea");
+    assert.ok(grown.height > text.height + 20, "the field grew");
+    near((await box(page, ".attach-key")).bottom, grown.bottom, "the attach key stays on the last line");
+    near((await box(page, ".send-key")).bottom, grown.bottom, "the send key stays on the last line");
+    await composer.fill("");
+    await composer.dispatchEvent("input");
+    near((await box(page, ".composer textarea")).height, text.height, "an empty field is one line again");
+  }, viewport);
+}
+
+await scenario("the + key opens the file picker from the keyboard; picked, pasted and dropped images attach and send", async (page, host) => {
+  // Listening before the key press, so the chooser it opens is caught.
+  const choosing = page.waitForEvent("filechooser");
+  const composer = page.locator(".composer textarea");
+  await composer.focus();
+  await page.keyboard.press("Shift+Tab");
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("aria-label")), "attach images");
+  await page.keyboard.press("Enter");
+  const chooser = await choosing;
+  assert.ok(chooser.isMultiple(), "the picker takes several images");
+  await chooser.setFiles({ name: "picked.png", mimeType: "image/png", buffer: PNG });
+  await page.locator(".attachment", { hasText: "ready" }).waitFor();
+
+  await composer.focus();
+  await composer.evaluate((element, bytes) => {
+    const data = new DataTransfer();
+    data.items.add(new File([new Uint8Array(bytes.concat(1))], "pasted.png", { type: "image/png" }));
+    element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+  }, [...PNG]);
+  // one upload at a time, so the host's ids follow picked, pasted, dropped
+  await page.waitForFunction(() => document.querySelectorAll(".attachment").length === 2 && [...document.querySelectorAll(".attachment-state")].every(state => state.textContent === "ready"));
+  await page.locator(".composer").evaluate((element, bytes) => {
+    const data = new DataTransfer();
+    data.items.add(new File([new Uint8Array(bytes.concat(0))], "dropped.png", { type: "image/png" }));
+    element.dispatchEvent(new DragEvent("drop", { dataTransfer: data, bubbles: true, cancelable: true }));
+  }, [...PNG]);
+  await page.waitForFunction(() => document.querySelectorAll(".attachment").length === 3 && [...document.querySelectorAll(".attachment-state")].every(state => state.textContent === "ready"));
+  await composer.fill("look at these");
+  await composer.press("Enter");
+  await page.locator(".conversation-message.user", { hasText: "look at these" }).locator(".message-images li").first().waitFor();
+  assert.equal(host.prompts.length, 1);
+  assert.deepEqual(host.prompts[0]!.images, ["img-1", "img-2", "img-3"], "the picked, pasted and dropped images went");
+  assert.deepEqual(host.prompts[0]!.images!.map(id => host.media.get(id)!.body.at(-1)), [PNG.at(-1), 1, 0], "in that order");
 });
 
 await browser.close();

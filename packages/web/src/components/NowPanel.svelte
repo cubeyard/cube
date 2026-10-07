@@ -107,7 +107,7 @@
   <div class="now-head">
     <h2 id="now-heading">now</h2>
     <span class="now-summary" aria-live="polite">{summary}</span>
-    <button class="key now-fold" aria-expanded={open} aria-controls="now-body" onclick={toggle}>
+    <button class="strip-toggle now-fold" aria-expanded={open} aria-controls="now-body" onclick={toggle}>
       <span class="sr-only">{open ? "hide" : "show"} tasks</span>
       <Icon name="chevron" size={12} />
     </button>

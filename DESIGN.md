@@ -406,7 +406,8 @@ in a page banner. Other project and thread controls retain their treatment.
   signal; hover mixes 8% white in. One primary per screen: "new thread" on
   the list and "save" in project configuration. The thread rail has no primary action.
 - **Icon key** (`.key.icon`): square-ish padding, always `title` + `aria-label`.
-- **Round key** (`.key.round`): the 2.4rem circular signal send key.
+- **Round key** (`.key.round`): a 2.4rem circular signal key. The composer's
+  send key (`.send-key`) is the same circle at one text line's height.
 - **Held toggle** (`.key.held`): pressed-in look (`--s1` face, down shadow) for
   the open files-shelf key, with `aria-expanded`.
 - **Danger hover** (`.key.danger`): `--bad` ink on `--bad-soft` wash.
@@ -463,14 +464,22 @@ or push-all control.
 ### Composer
 Full-bleed `--s2` deck with the answering seam. Its field and keys sit in the
 transcript's reading measure, centred under the text with the same side
-padding, so a draft starts where the conversation does. Textarea: `--s4` field, 9px
-radius, shallow inset shadow, auto-growing to 11rem; focus swaps the border to
-`--signal` (the one sanctioned replacement of the global 2px signal focus
-ring). Send is the round signal key. Enter sends; Shift+Enter inserts a new
+padding, so a draft starts where the conversation does. One wide `--s4` field,
+radius a key's plus its padding, shallow inset shadow: the text auto-grows to
+11rem inside it; focus in the text swaps the field's border to `--signal` (the
+one sanctioned replacement of the global 2px signal focus ring). Its keys sit
+inside, square and exactly one text line tall (2rem; 2.75rem for a fingertip),
+on the draft's last line: where images can be sent, a `+` icon key at the
+start opens the file picker (paste and drop attach too; never a worded
+"image" key), and the round signal send key at the end. Stop, while a run is
+on, is a worded key beside the field at the field's height. Enter sends; Shift+Enter inserts a new
 line. The keyboard hint lives in the field's tooltip and accessible description,
 not a permanent extra row. Model selection belongs in the conversation pane's top rail:
 the actual model id as a quiet text control, with providers grouped in the
-opened list. Never substitute an effort label such as "high" for the model.
+opened list. Toggles in a rail (the chat's `memory`, the now bay's fold) are
+quiet text controls too (`.strip-toggle`): the rail's 11px label type, no face,
+a hover wash, pressed in with a turned chevron while open. Rails beside each
+other share `--rail` height, padding and hairline, so they read as one band. Never substitute an effort label such as "high" for the model.
 
 ### Code Window
 Dark glass in both themes: `--glass` body inside an inset well shadow plus a
@@ -530,7 +539,7 @@ title and the status word, never colour alone; then the project in mono, a
 thread's own state in muted mono. Links are underlined ink, not signal, and say
 nothing about a pull request's state. Recently closed tasks sit in a native
 disclosure. Under 52rem the bay stacks above the conversation, capped at 38vh
-and foldable by a chevron key, so the composer always stays on screen.
+and foldable by a chevron rail toggle, so the composer always stays on screen.
 
 ### Named Rules
 **The Actions-In-The-Module Rule.** A module's controls live inside it, on its

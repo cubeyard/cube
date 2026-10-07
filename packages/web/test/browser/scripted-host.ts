@@ -17,6 +17,8 @@ export class ScriptedHost {
   url = "";
   transcript: ThreadTranscript = { agent: "pi", owner: null, status: { state: "idle", run: null, error: null }, events: [] };
   prompts: Prompt[] = [];
+  /** Images the chat uploaded, by id. */
+  media = new Map<string, { type: string; body: Buffer }>();
   /** Answers a prompt: by default accepted at once. A thrown error is a 500. */
   onPrompt: (prompt: Prompt) => Promise<void> | void = () => {};
   private readonly streams = new Set<http.ServerResponse>();
@@ -96,7 +98,20 @@ export class ScriptedHost {
         catch (error) { return json({ error: error instanceof Error ? error.message : String(error) }, 500); }
         return json({ runId: body.requestId });
       }
-      default: return json({ error: "not found" }, 404);
+      case "POST /api/optchat/media": {
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) chunks.push(chunk as Buffer);
+        const id = `img-${this.media.size + 1}`;
+        this.media.set(id, { type: String(request.headers["content-type"]), body: Buffer.concat(chunks) });
+        return json({ image: { id, mimeType: request.headers["content-type"], width: 1, height: 1 } });
+      }
+      default: {
+        const image = request.method === "GET" && url.pathname.startsWith("/api/optchat/media/") ? this.media.get(decodeURIComponent(url.pathname.slice("/api/optchat/media/".length))) : undefined;
+        if (!image) return json({ error: "not found" }, 404);
+        response.writeHead(200, { "content-type": image.type });
+        response.end(image.body);
+        return;
+      }
     }
   }
 }

@@ -374,7 +374,7 @@
   {#if error || historyError || status.state === "failed"}<div class="conversation-error" role="alert">{error ?? historyError ?? status.error ?? "the run failed"}</div>{/if}
   <form class="composer" aria-busy={busy} onsubmit={(event) => { event.preventDefault(); void submit(); }}
     ondragover={(event) => { if (images && event.dataTransfer?.types.includes("Files")) event.preventDefault(); }} ondrop={onDrop}>
-    <span class="sr-only" id="composer-hint">enter to send · shift enter for a new line{images ? " · paste or drop images to attach them" : ""}</span>
+    <span class="sr-only" id="composer-hint">enter to send · shift enter for a new line{images ? " · attach images with the + key, or paste or drop them" : ""}</span>
     {#if images}<span class="sr-only" role="status">{!attachments.length ? "" : uploading ? "uploading images…" : failedAttachment ? "an image failed to upload" : `${attachments.length} ${attachments.length === 1 ? "image" : "images"} attached`}</span>{/if}
     {#if images && (attachments.length || attachNote)}
       <div class="composer-attachments">
@@ -396,26 +396,30 @@
     {/if}
     <!-- the deck is full-bleed; the field sits in the transcript's measure -->
     <div class="composer-row">
-      <textarea
-        bind:this={composer}
-        bind:value={prompt}
-        oninput={resizeComposer}
-        onkeydown={onComposerKeydown}
-        onpaste={onPaste}
-        placeholder={waitingText ?? (working ? (steer ? "agent is working — a message reaches it between steps" : "agent is working…") : placeholder)}
-        aria-label={placeholder}
-        aria-describedby="composer-hint"
-        title="enter to send · shift enter for a new line"
-        rows="1"
-      ></textarea>
-      {#if images}
-        <input class="sr-only" type="file" accept={ACCEPT} multiple tabindex="-1" aria-hidden="true" bind:this={picker} onchange={onPick} />
-        <button class="key attach-key" type="button" title={images.supported ? "attach images · or paste them into the field" : (images.reason ?? "this model does not take images")}
-          aria-label="attach images" disabled={!images.supported || attachments.length >= MEDIA_LIMITS.perMessage} onclick={() => picker?.click()}>image</button>
-      {/if}
-      <button class="send-key" type="submit" title="send · enter" aria-label="send message" disabled={!canSend}>
-        <Icon name="arrow" size={16} />
-      </button>
+      <!-- a press on the field's padding puts the caret in the text; the keys keep their own -->
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="composer-field" onclick={(event) => { if (event.target === event.currentTarget) composer?.focus(); }}>
+        {#if images}
+          <input class="sr-only" type="file" accept={ACCEPT} multiple tabindex="-1" aria-hidden="true" bind:this={picker} onchange={onPick} />
+          <button class="key icon attach-key" type="button" title={images.supported ? "attach images · or paste or drop them here" : (images.reason ?? "this model does not take images")}
+            aria-label="attach images" disabled={!images.supported || attachments.length >= MEDIA_LIMITS.perMessage} onclick={() => picker?.click()}><Icon name="plus" size={14} /></button>
+        {/if}
+        <textarea
+          bind:this={composer}
+          bind:value={prompt}
+          oninput={resizeComposer}
+          onkeydown={onComposerKeydown}
+          onpaste={onPaste}
+          placeholder={waitingText ?? (working ? (steer ? "agent is working — a message reaches it between steps" : "agent is working…") : placeholder)}
+          aria-label={placeholder}
+          aria-describedby="composer-hint"
+          title="enter to send · shift enter for a new line"
+          rows="1"
+        ></textarea>
+        <button class="send-key" type="submit" title="send · enter" aria-label="send message" disabled={!canSend}>
+          <Icon name="arrow" size={16} />
+        </button>
+      </div>
       {#if working || waiting}<button class="key stop-key" type="button" disabled={stopping} onclick={stop}>{stopping ? "stopping…" : "stop"}</button>{/if}
     </div>
   </form>
