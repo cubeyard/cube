@@ -198,7 +198,7 @@ partial reply.
 
 `diagnose(id)` gives the same evidence as `GET /api/threads/<id>/diagnostics`,
 for a thread the chat started only (any other id is refused as unknown), as
-text of at most 12,000 characters: cubed's record and activation, the runner's
+text of about 12,000 characters at most: cubed's record and activation, the runner's
 last report and its age, the gateway's link, one guest hello, the runner's
 process, QMP, frames, disk and launch line, its newest events, cubed's machine
 events and the last lines of the console and qemu logs. Every string is

@@ -173,6 +173,8 @@ export async function threadDiagnostics(sources: DiagnosticsSources, threadId: s
 
 /** The last `count` lines of a log, each at most 300 characters. */
 const lastLines = (text: string, count: number) => text.split("\n").slice(-count).map(line => line.length > 300 ? `${line.slice(0, 300)}...` : line);
+/** A time as ISO text; a value no Date can hold is shown as it is. */
+const iso = (at: unknown) => typeof at === "number" && Number.isFinite(at) && Math.abs(at) < 8.64e15 ? new Date(at).toISOString() : String(at);
 const ago = (at: unknown, now: number) => typeof at === "number" ? `${Math.round((now - at) / 1000)} s ago` : "never";
 
 /** A bundle as bounded text for OptChat: the facts, then the newest events
@@ -182,7 +184,7 @@ export function formatDiagnostics(bundle: Record<string, unknown>, maxChars = 12
   const get = (value: unknown, ...keys: string[]): unknown => keys.reduce<unknown>((at, key) => at && typeof at === "object" ? (at as Record<string, unknown>)[key] : undefined, value);
   const thread = get(bundle, "thread") as Record<string, unknown>;
   const machine = get(bundle, "machine") as Record<string, unknown>;
-  const lines = [`[${String(thread.id).slice(0, 8)}] diagnostics at ${new Date(now).toISOString()} (cubed ${String(get(bundle, "cubed", "version"))})`,
+  const lines = [`[${String(thread.id).slice(0, 8)}] diagnostics at ${iso(now)} (cubed ${String(get(bundle, "cubed", "version"))})`,
     `thread: workspace ${String(thread.workspaceState)}${thread.workspaceError ? ` (${String(thread.workspaceError)})` : ""}; runner ${String(thread.runnerNode)}; `
       + `machine ${String(get(thread, "machine", "vmId"))}, placement ${String(get(thread, "machine", "placement"))}`,
     `activation: ${JSON.stringify(get(bundle, "activation"))}`];
@@ -209,8 +211,8 @@ export function formatDiagnostics(bundle: Record<string, unknown>, maxChars = 12
         `qmp: ${JSON.stringify(d.qmp)}`, `frames: ${JSON.stringify(d.frames)}`, `disk: ${JSON.stringify(d.disk)}`,
         `launch (${String(get(d, "launch", "source"))}): ${(get(d, "launch", "argv") as string[] | undefined)?.join(" ") ?? String(get(d, "launch", "note"))}`);
       const events = get(d, "events", "entries") as Array<Record<string, unknown>> | undefined;
-      lines.push(events ? "runner events:" : "runner events: none recorded (a runner before 0.8.3 started this machine)",
-        ...(events ?? []).slice(-25).map(e => `  ${new Date(e.at as number).toISOString()} ${String(e.event)}${e.detail ? `: ${String(e.detail)}` : ""}`));
+      lines.push(events ? "runner events:" : "runner events: none recorded (cube-runner 0.8.3+ records them)",
+        ...(events ?? []).slice(-25).map(e => `  ${iso(e.at)} ${String(e.event)}${e.detail ? `: ${String(e.detail)}` : ""}`));
       for (const name of ["qemu", "console"]) {
         const log = get(d, "logs", name) as Record<string, unknown> | undefined;
         if (!log?.present) { lines.push(`${name} log: absent`); continue; }
@@ -219,7 +221,7 @@ export function formatDiagnostics(bundle: Record<string, unknown>, maxChars = 12
       }
     }
     const events = get(machine, "events", "entries") as MachineEvent[] | undefined;
-    lines.push(events ? "cubed events:" : "cubed events: none recorded", ...(events ?? []).slice(-25).map(e => `  ${new Date(e.at).toISOString()} ${e.event}${e.detail ? `: ${e.detail}` : ""}`));
+    lines.push(events ? "cubed events:" : "cubed events: none recorded", ...(events ?? []).slice(-25).map(e => `  ${iso(e.at)} ${e.event}${e.detail ? `: ${e.detail}` : ""}`));
   }
   // Already clean; bounded once more as a whole.
   const text = clean(lines.join("\n"), maxChars);

@@ -123,8 +123,10 @@ try {
   let attached = true;
   const gatewayClient = { status: async (vmId: string) => attached ? { vmId, threadId: "x", link: "up", leased: false, guestIp: null, flows: 0, rxBytes: 0, txBytes: 0,
     lastError: `dhcp: no lease ${ESC}[31m` } : null, attach: fail, detach: fail };
+  let gatewayRuns = true;
   const gateway = { binary: "/bin/false", unavailable: null, control: "/nonexistent", onRestart: () => {}, ensureNetwork: async () => {},
-    ready: async () => ({ client: gatewayClient, hello: { peer: "0".repeat(64), caPem: "" } }) };
+    get running() { return gatewayRuns ? { client: gatewayClient, hello: { peer: "0".repeat(64), caPem: "" } } : undefined; },
+    ready: async () => { throw new Error("a diagnosis must not start the gateway"); } };
   const hellos: string[] = [];
   const guest: GuestTransport = {
     async call(op) { hellos.push(op); throw new GuestTransportError("ssh could not reach the guest: Connection timed out during banner exchange"); },
@@ -181,6 +183,18 @@ try {
     assert.equal(evidence.guest.status, "none");
     assert.equal(hellos.length, 0, "no hello to a machine the gateway does not have");
     attached = true;
+
+    gatewayRuns = false;
+    evidence = await vms.diagnose(registry.getThread(thread.id)!);
+    assert.ok(evidence.gateway.status === "none" && /no gateway runs now/.test(evidence.gateway.reason), "a diagnosis never starts the gateway");
+    gatewayRuns = true;
+
+    // Callers at the same time share one diagnosis: one runner request.
+    asked.length = 0;
+    const [a, b] = await Promise.all([vms.diagnose(thread), vms.diagnose(thread)]);
+    assert.equal(a, b);
+    assert.equal(asked.length, 1);
+    console.log("ok: a diagnosis never starts the gateway, and concurrent ones are shared");
   }
 
   // The bundle as the route builds it, and its text form.
@@ -209,6 +223,9 @@ try {
       /qemu log: absent/, /guest hello: not ready in \d+ ms: ssh could not reach the guest/, /gateway: attached true, link up, guest ip null/]) {
       assert.match(text, fact);
     }
+    const odd = structuredClone(bundle) as { machine: { runner: { diagnosis: { events: { entries: Array<{ at: number }> } } } } };
+    odd.machine.runner.diagnosis.events.entries[0]!.at = Number.MAX_VALUE; // too large for a Date, as a u64 from the runner can be
+    assert.match(formatDiagnostics(odd), /1.7976931348623157e\+308 qemu started/, "a time no Date holds is shown, not thrown");
     const short = formatDiagnostics(bundle, 600);
     assert.ok(short.length < 800 && short.endsWith("the whole bundle is at GET /api/threads/<id>/diagnostics]"), short);
     console.log("ok: the bundle and its text are cleaned, bounded and say what is missing");

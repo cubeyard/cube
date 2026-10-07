@@ -72,8 +72,8 @@ const DIAGNOSE_QEMU_LOG: Window = Window {
     tail: 8 * 1024,
 };
 /// QMP questions of a diagnosis: per answer, and in all.
-const DIAGNOSE_QMP_WAIT: Duration = Duration::from_millis(500);
-const DIAGNOSE_QMP_BUDGET: Duration = Duration::from_millis(1500);
+const DIAGNOSE_QMP_WAIT: Duration = Duration::from_millis(300);
+const DIAGNOSE_QMP_BUDGET: Duration = Duration::from_millis(1000);
 const MAX_VCPUS: u32 = 64;
 const MIN_MEMORY_MIB: u32 = 256;
 const MAX_MEMORY_MIB: u32 = 1024 * 1024;
@@ -215,6 +215,9 @@ pub struct InitOptions {
 struct Live {
     pid: u32,
     exited: watch::Receiver<bool>,
+    /// QEMU serves one QMP client at a time: the runner's own commands hold
+    /// this while connected, and a diagnosis asks only if it is free.
+    qmp: Arc<Mutex<()>>,
 }
 
 pub struct Runner {
@@ -830,7 +833,14 @@ impl Runner {
             "argv": argv,
         });
         if let Ok(bytes) = serde_json::to_vec(&launch) {
-            let _ = fs::write(self.paths(slot).dir.join("launch.json"), bytes);
+            use std::{io::Write, os::unix::fs::OpenOptionsExt};
+            let _ = fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(self.paths(slot).dir.join("launch.json"))
+                .and_then(|mut file| file.write_all(&bytes));
         }
         self.event(
             slot,
@@ -863,7 +873,8 @@ impl Runner {
             .lock()
             .unwrap()
             .get(vm_id)
-            .map(|live| (live.pid, *live.exited.borrow()));
+            .map(|live| (live.pid, *live.exited.borrow(), live.qmp.clone()));
+        let pid = live.as_ref().map(|(pid, exited, _)| (*pid, *exited));
         let installation = &self.installation;
         let firmware = installation
             .firmware
@@ -888,7 +899,7 @@ impl Runner {
             "config": row.config,
             "launch": self.launch_facts(&row, &paths),
             "disk": self.disk_facts(&row, &paths),
-            "process": live_facts(live, row.state),
+            "process": live_facts(pid, row.state),
             "qmp": qmp_facts(live, row.state, &paths.qmp),
             "frames": self.pumps.observe(vm_id),
             "logs": {
@@ -912,6 +923,7 @@ impl Runner {
     fn launch_facts(&self, row: &VmRow, paths: &VmPaths) -> Value {
         if let Ok(bytes) = fs::read(paths.dir.join("launch.json"))
             && let Ok(mut launch) = serde_json::from_slice::<Value>(&bytes)
+            && launch.is_object()
         {
             launch["source"] = "recorded".into();
             if let Some(argv) = launch["argv"].as_array_mut() {
@@ -1070,12 +1082,14 @@ impl Runner {
         match created {
             Ok(()) => {
                 journal.set_state(vm_id, VmState::Allocated, None)?;
+                let row = journal.get(vm_id)?.context("vm record vanished")?;
+                drop(journal);
                 self.event(
                     slot,
                     "allocated",
                     Some(&format!("{disk_gib} GiB on {backing}")),
                 );
-                Ok(self.record(&journal.get(vm_id)?.context("vm record vanished")?))
+                Ok(self.record(&row))
             }
             Err(error) => {
                 // Nothing of the VM existed yet: forget it so cubed can retry.
@@ -1204,6 +1218,9 @@ impl Runner {
         if paths.console.exists() {
             let _ = fs::rename(&paths.console, paths.dir.join("console.prev.log"));
         }
+        // The last launch's record goes with its console: a start that fails
+        // to spawn must not leave it to read as this start's.
+        let _ = fs::remove_file(paths.dir.join("launch.json"));
         let _ = fs::remove_file(&paths.qmp);
         // Sockets of runners before the socket pair.
         let _ = fs::remove_file(&paths.net);
@@ -1295,6 +1312,7 @@ impl Runner {
             Live {
                 pid,
                 exited: rx.clone(),
+                qmp: Arc::default(),
             },
         );
         let runner = self.this.clone();
@@ -1336,14 +1354,6 @@ impl Runner {
             Some(VmState::Stopping) => None,
             _ => error,
         };
-        if let Some(row) = &current {
-            let after = error.map(|e| format!("; {e}")).unwrap_or_default();
-            self.event(
-                row.slot,
-                "qemu exited",
-                Some(&format!("the vm was {}{after}", row.state.as_str())),
-            );
-        }
         if journal
             .transition(
                 vm_id,
@@ -1356,6 +1366,15 @@ impl Runner {
             self.faulted.store(true, Ordering::SeqCst);
             self.accepting.store(false, Ordering::SeqCst);
         }
+        drop(journal);
+        if let Some(row) = &current {
+            let after = error.map(|e| format!("; {e}")).unwrap_or_default();
+            self.event(
+                row.slot,
+                "qemu exited",
+                Some(&format!("the vm was {}{after}", row.state.as_str())),
+            );
+        }
     }
 
     /// `starting` -> `running` once QMP answered with the VM's name. A boot
@@ -1364,8 +1383,10 @@ impl Runner {
         let journal = self.journal.lock().unwrap();
         if journal.transition(vm_id, &[VmState::Starting], VmState::Running, None)? {
             journal.set_interrupted(vm_id, false)?;
-            if let Some(row) = journal.get(vm_id)? {
-                self.event(row.slot, "running", Some("qemu answered qmp"));
+            let slot = journal.get(vm_id)?.map(|row| row.slot);
+            drop(journal);
+            if let Some(slot) = slot {
+                self.event(slot, "running", Some("qemu answered qmp"));
             }
         }
         Ok(())
@@ -1420,19 +1441,21 @@ impl Runner {
     /// Stops a live VM: ACPI power-down (when `graceful`), then QMP `quit`,
     /// then SIGKILL. A forced stop marks the VM `interrupted`.
     async fn stop_vm(&self, vm_id: &str, slot: u32, graceful: bool) {
-        let Some(mut exited) = self
+        let Some((mut exited, lock)) = self
             .live
             .lock()
             .unwrap()
             .get(vm_id)
-            .map(|live| live.exited.clone())
+            .map(|live| (live.exited.clone(), live.qmp.clone()))
         else {
             return;
         };
         let qmp = self.paths(slot).qmp;
         let command = |command: &'static str| {
-            let qmp = qmp.clone();
+            let (qmp, lock) = (qmp.clone(), lock.clone());
             tokio::task::spawn_blocking(move || {
+                // A diagnosis never holds QMP while the runner needs it.
+                let _qmp = lock.lock().unwrap();
                 let mut connection = Qmp::connect(&qmp, Duration::from_secs(2))?;
                 connection.execute(command)?;
                 Ok::<_, anyhow::Error>(())
@@ -1697,10 +1720,17 @@ fn live_facts(live: Option<(u32, bool)>, state: VmState) -> Value {
 
 /// QMP's view of a live VM: its name, run state and vCPUs. A QEMU that
 /// does not answer within the budget is reported as such.
-fn qmp_facts(live: Option<(u32, bool)>, state: VmState, path: &Path) -> Value {
-    if !matches!(live, Some((_, false))) || !matches!(state, VmState::Starting | VmState::Running) {
+fn qmp_facts(live: Option<(u32, bool, Arc<Mutex<()>>)>, state: VmState, path: &Path) -> Value {
+    // While `starting` the runner itself polls QMP; its answer is `running`.
+    let Some((_, false, lock)) = live else {
+        return json!({ "asked": false });
+    };
+    if state != VmState::Running {
         return json!({ "asked": false });
     }
+    let Ok(_qmp) = lock.try_lock() else {
+        return json!({ "asked": false, "note": "the runner is using qmp now" });
+    };
     let started = Instant::now();
     let mut answers = serde_json::Map::new();
     let mut qmp = match Qmp::connect(path, DIAGNOSE_QMP_WAIT) {

@@ -6,7 +6,7 @@ writes a console line. Behaviour switches are files next to this script
 
   ignore-powerdown  system_powerdown is acknowledged but ignored
   exit-at-once      exits with status 3 before opening QMP
-  slow-qmp          waits 3 s before opening QMP
+  slow-qmp          waits 3 s (or the seconds it holds) before opening QMP
 """
 import json
 import os
@@ -43,7 +43,8 @@ if os.path.exists(os.path.join(here, "exit-at-once")):
     sys.exit(3)
 
 if os.path.exists(os.path.join(here, "slow-qmp")):
-    time.sleep(3)
+    with open(os.path.join(here, "slow-qmp")) as f:
+        time.sleep(float(f.read().strip() or 3))
 
 net = socket.socket(fileno=int(netdev["local.str"]))
 

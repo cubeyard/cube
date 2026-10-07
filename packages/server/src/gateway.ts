@@ -191,6 +191,9 @@ export class GatewaySupervisor {
   /** Called after every restart with the new gateway, to attach VMs again. */
   onRestart(handler: (client: GatewayClient) => Promise<void>): void { this.restartHandlers.push(handler); }
 
+  /** The running gateway, if one is ready now; never starts one. */
+  get running(): { client: GatewayClient; hello: GatewayHello } | undefined { return this.current; }
+
   /** The running gateway, waiting for its ready line if it is (re)starting. */
   async ready(timeoutMs = this.options.readyTimeoutMs ?? 30000): Promise<{ client: GatewayClient; hello: GatewayHello }> {
     if (!this.binary) throw new GatewayUnavailable(this.unavailable!);

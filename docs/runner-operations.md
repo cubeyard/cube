@@ -451,9 +451,12 @@ curl -fsS "http://127.0.0.1:7777/api/threads/<thread-id>/diagnostics" -o cube-di
 ```
 
 Attach that file when you share the problem. It is read only: it starts,
-stops, attaches and moves nothing, takes about 10 s at most (8 s for the
-runner, which queues behind the runner's other calls, and 8 s for one guest
-hello, partly in parallel), and works for archived threads too. OptChat
+stops, attaches and moves nothing (not even the gateway: a gateway that is
+not running is reported as such), and works for archived threads too. It
+takes about 20 s at most: up to 8 s for the runner (its requests queue
+behind the runner's other calls) beside up to 3 s for the gateway, then up
+to 8 s for one guest hello. Requests for the same thread at the same time
+share one diagnosis. OptChat
 gives the same evidence as text for a thread it started (its `diagnose` tool:
 ask it to diagnose the thread).
 
@@ -474,7 +477,9 @@ What the bundle holds, each part either observed (with its time) or marked
   record, the QEMU command line it recorded at launch (`launch.source:
   recorded`; `reconstructed` when an older runner started the machine), disk
   overlay, backing file and template, the QEMU process (pid, alive, CPU ms,
-  resident memory), QMP's `query-status` and `query-cpus-fast`, the frame
+  resident memory), QMP's `query-status` and `query-cpus-fast` (a running
+machine only, and only while the runner itself is not using QMP, which
+serves one client at a time; otherwise `asked: false` says why), the frame
   pump (gateway connected, frames from and to the guest; zero frames from the
   guest means its kernel never brought the NIC up), the first 8 KiB and last
   56 KiB of the console, the tail of the previous boot's console and of
@@ -485,8 +490,8 @@ What the bundle holds, each part either observed (with its time) or marked
   0.8.3 answers `method: vm.inspect` only: its record and the last 16 KiB of
   the console.
 - `machine.gateway`, `machine.guest`: the gateway's link, lease, guest IP and
-  byte counts, and one bounded guest hello over SSH (only when the gateway
-  has the machine attached).
+  byte counts (when a gateway runs), and one bounded guest hello over SSH
+  (only when the gateway has the machine attached).
 
 Every string is escaped (control characters as `\x1b`, invisible or
 reordering characters as `\u{202e}`, invalid UTF-8 as `\xff`; backslashes are

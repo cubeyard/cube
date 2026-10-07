@@ -237,6 +237,24 @@ async fn diagnosis_reports_each_stage_and_is_scoped() {
 }
 
 #[tokio::test]
+async fn a_starting_vm_is_not_asked_over_qmp() {
+    let fx = fixture();
+    // QEMU opens QMP only after 6 s: the runner's own poll owns it meanwhile.
+    std::fs::write(fx.bin.join("slow-qmp"), b"6").unwrap();
+    let served = serve(&fx).await;
+    served.vm(allocate("t1", VM, 1, 8)).await;
+    let started = served.vm(start("t1", VM, 1, &fx.gateway, TOKEN)).await;
+    assert_eq!(started.state, VmState::Starting);
+    let starting = diagnosis(&served, "t1", VM).await;
+    assert_eq!(starting["vm"]["state"], "starting");
+    assert_eq!(starting["qmp"]["asked"], false);
+    assert_eq!(starting["process"]["tracked"], true);
+    served.wait_state("t1", VM, VmState::Running).await;
+    served.runner.shutdown(true).await;
+    served.close().await;
+}
+
+#[tokio::test]
 async fn a_restart_and_a_draining_runner_are_recorded() {
     let fx = fixture();
     let served = serve(&fx).await;

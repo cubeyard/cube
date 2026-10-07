@@ -151,7 +151,10 @@ VM an older runner started, the one this runner would use, `source:
 reconstructed`), `disk` (overlay header, backing file, whether it is the
 expected one and present, template, seed), `process` (pid, alive, CPU ms,
 resident bytes, from `/proc` or `proc_pidinfo`), `qmp` (`query-name`,
-`query-status`, `query-cpus-fast`, within 1.5 s, only for a live VM),
+`query-status`, `query-cpus-fast`, about 2 s at most, only for a `running`
+VM and only when the runner's own QMP use (power-down, quit) does not hold
+it: QEMU serves one QMP client at a time, so a diagnosis never delays a
+stop; `asked: false` with a note otherwise),
 `frames` (the pump since QEMU started: gateway connected, connections,
 refusals, frames and bytes from and to the guest, first and last times),
 `logs` (`console`: first 8 KiB and last 56 KiB; `previousConsole` and `qemu`:
@@ -163,8 +166,9 @@ character, invalid UTF-8 as `\xNN`) and secret-looking values are
 `[redacted]` (`diagnose.rs`); the answer stays below one frame.
 
 `vms/<n>/events.log` (JSON lines, 0600, 64 KiB then `events.prev.log`) is
-written from 0.8.3 on, best effort: allocated, qemu started (pid, epoch),
-running, qmp did not answer, qemu exited (state and error), start while live,
+written from 0.8.3 on, best effort and never under the journal lock:
+allocated, qemu started (pid, epoch), qemu did not start, running, qmp did
+not answer, qemu exited (state and error), start while live,
 start refused (draining), stop requested, power-down, quit, killed, release
 requested, retained, runner stopping, runner restarted (reconciliation), and
 from the pump gateway connected, refused (reason), disconnected and the first

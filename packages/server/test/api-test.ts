@@ -129,7 +129,7 @@ try {
   assert.equal(diagnostics.thread.runnerNode, "node-valid");
   assert.match(diagnostics.activation.error, /gateway unavailable/);
   assert.equal(diagnostics.machine.runner.status, "none", "no allocation reached the runner");
-  assert.equal(diagnostics.machine.gateway.status, "unavailable");
+  assert.equal(diagnostics.machine.gateway.status, "none", "no gateway runs, and the diagnosis does not start one");
   assert.equal(diagnostics.machine.guest.status, "none");
   assert.ok(diagnostics.machine.events.entries.some((event: { event: string; detail?: string }) => event.event === "start failed" && /gateway unavailable/.test(event.detail ?? "")));
   assert.equal(JSON.stringify(diagnostics).includes("configPath"), false, "no private adapter paths");

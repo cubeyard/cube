@@ -130,6 +130,8 @@ export class ThreadVms implements ThreadMachines, EgressVms {
   private readonly events: MachineEvents;
   /** The last guest hello of each thread's machine: when, and its answer. */
   private readonly guestProbes = new Map<string, { at: number; ready: boolean; error: string | null }>();
+  /** Diagnoses under way, by thread: callers at the same time share one. */
+  private readonly diagnoses = new Map<string, Promise<MachineEvidence>>();
   private closed = false;
 
   constructor(options: ThreadVmsOptions) {
@@ -206,6 +208,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     if (record.state === "released") fs.rmSync(this.keyDirectory(thread), { recursive: true, force: true });
     this.log.info("released", { thread: thread.id, vm: vm.vmId, retained: record.state === "retained" });
     this.events.record(thread.id, record.state);
+    this.guestProbes.delete(thread.id);
     return { retained: record.state === "retained" };
   }
 
@@ -807,7 +810,18 @@ export class ThreadVms implements ThreadMachines, EgressVms {
    * runner before 0.8.3), the gateway's link, and a guest hello when the
    * gateway has the machine attached. Each part is bounded in time and
    * reports why it is missing; nothing is started, stopped or attached. */
-  async diagnose(thread: Thread): Promise<MachineEvidence> {
+  diagnose(thread: Thread): Promise<MachineEvidence> {
+    // One at a time per thread: a client that polls never queues more than
+    // one runner request and one guest hello behind the thread's own.
+    let pending = this.diagnoses.get(thread.id);
+    if (!pending) {
+      pending = this.collect(thread).finally(() => this.diagnoses.delete(thread.id));
+      this.diagnoses.set(thread.id, pending);
+    }
+    return pending;
+  }
+
+  private async collect(thread: Thread): Promise<MachineEvidence> {
     const vm = machine(thread);
     const ref: VmRef = { threadId: thread.id, vmId: vm.vmId };
     // A timer of its own (AbortSignal.timeout's does not keep the process
@@ -844,7 +858,10 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     };
     const gatewayPart = async (): Promise<MachineEvidence["gateway"]> => {
       try {
-        const status = await timed(3000, async () => (await this.options.gateway.ready(2000)).client.status(vm.vmId));
+        // Asked only if one runs: a diagnosis never starts the gateway.
+        const running = this.options.gateway.running;
+        if (!running) return { status: "none", reason: `no gateway runs now${this.options.gateway.unavailable ? `: ${this.options.gateway.unavailable}` : ""}` };
+        const status = await timed(3000, () => running.client.status(vm.vmId));
         return status ? { status: "observed", at: Date.now(), attached: true, link: status.link, leased: status.leased, guestIp: status.guestIp,
           flows: status.flows, rxBytes: status.rxBytes, txBytes: status.txBytes, lastError: status.lastError }
           : { status: "observed", at: Date.now(), attached: false };
