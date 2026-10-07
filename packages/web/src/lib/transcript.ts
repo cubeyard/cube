@@ -1,10 +1,10 @@
-import type { ThreadTranscript } from "./types.ts";
+import type { MessageImage, ThreadTranscript } from "./types.ts";
 
 /** One rendered row of a thread transcript. A tool call and its result
  * share one row. */
 export type TranscriptRow =
   /** `from`: a thread's report (its short id), shown as the thread's, without the "[id] " prefix. */
-  | { kind: "user"; id: string; text: string; from?: string }
+  | { kind: "user"; id: string; text: string; from?: string; images?: MessageImage[] }
   | { kind: "assistant"; id: string; text: string; reasoning: boolean; labelled: boolean }
   /** `callId` outlives `id`: a streamed call is renumbered once its message is saved. */
   | { kind: "tool"; id: string; callId: string; name: string; summary: string; input: string | null; output: string; state: ToolState };
@@ -28,7 +28,8 @@ export function transcriptRows(transcript: Pick<ThreadTranscript, "events" | "st
   for (const event of transcript.events) {
     if (event.type === "user-message") {
       const from = event.from;
-      rows.push(from ? { kind: "user", id: event.id, text: event.text.replace(`[${from}] `, ""), from } : { kind: "user", id: event.id, text: event.text });
+      const images = event.images?.length ? { images: event.images } : {};
+      rows.push(from ? { kind: "user", id: event.id, text: event.text.replace(`[${from}] `, ""), from } : { kind: "user", id: event.id, text: event.text, ...images });
     }
     else if (event.type === "assistant-text") {
       rows.push({ kind: "assistant", id: event.id, text: event.text, reasoning: event.reasoning, labelled: rows.at(-1)?.kind !== "assistant" });

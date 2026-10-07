@@ -21,6 +21,7 @@ import { createLogger } from "./log.ts";
 import { compactNode } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { capText, Memory, type LogMessage, type Part } from "./optchat-memory.ts";
+import { MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
 import { applyTask, LIMITS as TASK_LIMITS, linkLabel, renderTasks, shown, STATUSES, taskLine, TasksDoc, TurnTasksDoc, type ObservedThread, type Task, type TaskList, type TaskView } from "./optchat-tasks.ts";
 import type { ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
 import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
@@ -73,7 +74,11 @@ for it beside its latest answer and conversation. Use it when a report is
 missing or short, or contradicts what threads shows; say what disagrees
 rather than settle it. An open thread holds a machine until it is
 archived: archive(ids) archives threads of yours that are done, to free
-theirs; history still reads them. It never stops a working thread.`;
+theirs; history still reads them. It never stops a working thread.
+Images the user attaches reach you only in the turn they are sent; the
+view and zoom keep only "[image]", and threads never see them. So say in
+your reply what an image shows that will matter, and put in a thread's
+task, in words, whatever it needs from one.`;
 
 export const VIEW_DOC = `The view: the whole chat between OptChat and the user, oldest first, inside
 <chat> tags, as one-line summaries. Each line is
@@ -228,7 +233,7 @@ const TurnDoc = defineDoc<{ started: boolean; parts: number[] }>({
   kind: "cube.optchat.turn", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ started: false, parts: [] }),
 });
 /** A message accepted when the log had `after` as its newest entry. */
-type PendingItem = { text: string; requestId: string; after: number };
+type PendingItem = { text: string; requestId: string; after: number; images?: MediaRef[] };
 /** Messages accepted but not yet in the chat: waiting (`items`), going into
  * the next turn (`batch`), or submitted but not placed by Pi yet (`sent`). */
 type Pending = { items: PendingItem[]; batch: PendingItem[] | null; sent: PendingItem[] };
@@ -252,7 +257,17 @@ const text = (value: string) => ({ content: [{ type: "text" as const, text: valu
 /** A zoom result's lines start with their ids. */
 const ZOOMED = /^\d+\+\d+\|/;
 export const ZOOM_ECHO = "(the zoomed lines: a copy of earlier messages of this chat, not repeated here)";
-const userEntry = (text: string) => ({ kind: "pi.user", model: [{ role: "user" as const, content: text, timestamp: Date.now() }] });
+/** A message's content for Pi: its text, then its images as references to
+ * the media store, which the request hook fills in for the model. */
+const userContent = (item: Pick<PendingItem, "text" | "images">) => !item.images?.length ? item.text
+  : [...item.text ? [{ type: "text" as const, text: item.text }] : [], ...item.images.map(image => ({ type: "image" as const, mimeType: image.mimeType, data: mediaData(image.id) }))];
+const userEntry = (item: Pick<PendingItem, "text" | "images">) => ({ kind: "pi.user", model: [{ role: "user" as const, content: userContent(item), timestamp: Date.now() }] });
+/** The store ids an entry's user messages refer to. */
+export function entryImages(entry: EntryRecord): string[] {
+  if (entry.kind !== "pi.user") return [];
+  return (entry.model ?? []).flatMap(message => message.role !== "user" || typeof message.content === "string" ? []
+    : message.content.flatMap(part => part.type === "image" ? [mediaId(part.data)].filter(id => id !== null) : []));
+}
 const flatParts = (parts: readonly Part[]) => parts.flatMap(part => [part.l, part.i]);
 const toParts = (flat: readonly number[]) => {
   const parts: Part[] = [];
@@ -357,6 +372,10 @@ export class OptChat {
   private watchTimer: ReturnType<typeof setInterval> | undefined;
   private stopWatch: (() => Promise<void>) | undefined;
   private model: { provider: string; id: string } | null = null;
+  /** The attached images; `referenced`: the ids the log's messages hold. */
+  media!: MediaStore;
+  private readonly referenced = new Set<string>();
+  private mediaLock: Promise<unknown> = Promise.resolve();
   private readonly options: OptChatOptions;
   private constructor(options: OptChatOptions) {
     this.options = options;
@@ -409,6 +428,7 @@ export class OptChat {
   private async start(): Promise<void> {
     const directory = this.options.directory;
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    this.media = new MediaStore(path.join(directory, "media"));
     this.storage = await openStorage(path.join(directory, "pi.sqlite"));
     const registry = createRegistry();
     registry.install(this.extension());
@@ -452,6 +472,7 @@ export class OptChat {
     const messages: LogMessage[] = [];
     for (const entry of await this.scan(this.conversation.id, 0)) {
       messages.push(...entryMessages(entry));
+      for (const id of entryImages(entry)) this.referenced.add(id);
       this.lastEntry = entry.id;
     }
     const stored = await this.harness.snapshot(ViewDoc, context);
@@ -482,6 +503,72 @@ export class OptChat {
     await this.watchThreads();
     this.watchTimer = setInterval(() => { void this.watchThreads(); }, this.options.limits?.watchMs ?? 15_000);
     this.watchTimer.unref();
+    await this.sweepMedia(Date.now() - UNSENT_MS);
+    const sweep = setInterval(() => { void this.sweepMedia(Date.now() - UNSENT_MS); }, 60 * 60_000);
+    sweep.unref();
+    this.timers.add(sweep);
+  }
+
+  /** Runs `action` alone among the steps that add or delete images. */
+  private withMedia<T>(action: () => Promise<T>): Promise<T> {
+    const run = this.mediaLock.catch(() => {}).then(action);
+    this.mediaLock = run;
+    return run;
+  }
+
+  /** Every image a message holds: in the log, or waiting for a turn. */
+  private async mediaInUse(): Promise<Set<string>> {
+    await this.sync();
+    const used = new Set(this.referenced);
+    for (const item of await this.pending()) for (const image of item.images ?? []) used.add(image.id);
+    return used;
+  }
+
+  /** Deletes uploads no message holds that were stored before `before`. */
+  private sweepMedia(before: number): Promise<number> {
+    return this.withMedia(async () => {
+      if (this.closing) return 0;
+      const removed = this.media.sweep(await this.mediaInUse(), before);
+      if (removed) log.info("unsent images deleted", { removed });
+      return removed;
+    }).catch(error => { if (!this.closing) log.warn("images not swept", { error }); return 0; });
+  }
+
+  /** Whether the chat's model takes images, and if not, why. */
+  imageSupport(): { supported: boolean; reason: string | null } {
+    const model = this.model && this.options.models.getModel(this.model.provider, this.model.id);
+    if (!model) return { supported: false, reason: "the chat's model is unavailable" };
+    if (!model.input.includes("image")) return { supported: false, reason: `${model.id} does not take images` };
+    return { supported: true, reason: null };
+  }
+
+  /** Stores an uploaded image for a message still to be sent. Uploads no
+   * message holds are bounded: the oldest are let go first, never one
+   * younger than ten minutes, which a draft may be about to send. */
+  upload(bytes: Uint8Array): Promise<ReturnType<MediaStore["put"]>> {
+    return this.withMedia(async () => {
+      const support = this.imageSupport();
+      if (!support.supported) throw new MediaError(support.reason!, 422);
+      const used = await this.mediaInUse();
+      const unsent = this.media.list().filter(item => !used.has(item.id));
+      if (unsent.length >= MEDIA_LIMITS.unsent) {
+        // Keeps every image in use and the newest unsent ones but one.
+        const newest = unsent.slice(unsent.length - MEDIA_LIMITS.unsent + 1).map(item => item.id);
+        this.media.sweep(new Set([...used, ...newest]), Date.now() - 10 * 60_000);
+        if (this.media.list().filter(item => !used.has(item.id)).length >= MEDIA_LIMITS.unsent) {
+          throw new MediaError(`${MEDIA_LIMITS.unsent} images are uploaded and not sent; send or remove some, then try again in a few minutes`, 429);
+        }
+      }
+      return this.media.put(bytes);
+    });
+  }
+
+  /** An image a message of this chat holds, for the transcript; null for any other id. */
+  async image(id: string): Promise<{ bytes: Buffer; mimeType: string } | null> {
+    const held = async () => this.referenced.has(id) || (await this.pending()).some(item => item.images?.some(image => image.id === id));
+    // A message Pi has just placed may not be in the log yet.
+    if (!await held()) { await this.sync(); if (!this.referenced.has(id)) return null; }
+    return this.media.get(id);
   }
 
   /** Every entry of a conversation after `after`, oldest first. */
@@ -504,6 +591,7 @@ export class OptChat {
         this.dirty = false;
         for (const entry of await this.scan(this.conversation.id, this.lastEntry)) {
           for (const message of entryMessages(entry)) this.memory.append(message);
+          for (const id of entryImages(entry)) this.referenced.add(id);
           this.lastEntry = entry.id;
         }
       } while (this.dirty && !this.closing);
@@ -580,14 +668,36 @@ export class OptChat {
 
   /** Accepts a user message or a thread report and keeps it until it is in
    * the chat. The same request id is accepted once. */
-  async send(text: string, requestId: string): Promise<void> {
+  async send(text: string, requestId: string, images: readonly string[] = []): Promise<void> {
+    if (!images.length) return this.accept(text, requestId, []);
+    // Checked and accepted under the media lock: no sweep deletes an image
+    // between its check and the message that holds it.
+    await this.withMedia(async () => {
+      if (images.length > MEDIA_LIMITS.perMessage) throw new MediaError(`at most ${MEDIA_LIMITS.perMessage} images a message`);
+      const refs = images.map(id => {
+        const image = this.media.get(id);
+        if (!image) throw new MediaError("an attached image is not on the host any more; attach it again", 404);
+        return { id, mimeType: image.mimeType };
+      });
+      await this.accept(text, requestId, refs);
+    });
+  }
+
+  private async accept(text: string, requestId: string, images: MediaRef[]): Promise<void> {
     const conversation = this.conversation;
     await this.harness.commit(async tx => {
       const pending = await tx.doc(PendingDoc);
       const same = (item: PendingItem) => item.requestId === requestId;
       if (pending.items.some(same) || pending.batch?.some(same) || pending.sent.some(same)) return;
       if (await tx.submissionByRequest(conversation.id, requestId) || await tx.submissionByRequest(conversation.id, `${requestId}:unanswered`)) return;
-      pending.items.push({ text, requestId, after: this.lastEntry });
+      if (images.length) {
+        // Refused, not dropped: the model would never see them.
+        const support = this.imageSupport();
+        if (!support.supported) throw new MediaError(`not sent: ${support.reason}; choose a model that takes images, or send without them`, 422);
+        const waiting = [...pending.sent, ...pending.batch ?? [], ...pending.items].reduce((sum, item) => sum + (item.images?.length ?? 0), 0);
+        if (waiting + images.length > MEDIA_LIMITS.waiting) throw new MediaError(`not sent: ${waiting} images are already waiting for the chat; at most ${MEDIA_LIMITS.waiting} wait at once`, 429);
+      }
+      pending.items.push({ text, requestId, after: this.lastEntry, ...images.length ? { images } : {} });
       // A message of the user (not a report) renews every thread's tells.
       if (!requestId.startsWith("report:")) for (const thread of Object.values((await tx.doc(SettingsDoc)).threads)) delete thread.tells;
     }, context);
@@ -678,7 +788,7 @@ export class OptChat {
   private async steer(): Promise<void> {
     const items = (await this.harness.snapshot(PendingDoc, context))?.items ?? [];
     for (const item of items) {
-      await this.conversation.submit({ type: "input", content: item.text, requestId: item.requestId, whenBusy: "steer" }, context);
+      await this.conversation.submit({ type: "input", content: userContent(item), requestId: item.requestId, whenBusy: "steer" }, context);
       await this.harness.commit(async tx => {
         const doc = await tx.doc(PendingDoc);
         doc.items = doc.items.filter(other => other.requestId !== item.requestId);
@@ -721,9 +831,9 @@ export class OptChat {
         await conversation.submit({ type: "write", entry: { kind: TURN, head: "self" }, requestId: `${batch[0]!.requestId}:turn` }, context);
       }
       for (const item of batch.slice(0, -1)) {
-        if (!await this.known(item.requestId)) await conversation.submit({ type: "write", requestId: item.requestId, entry: userEntry(item.text) }, context);
+        if (!await this.known(item.requestId)) await conversation.submit({ type: "write", requestId: item.requestId, entry: userEntry(item) }, context);
       }
-      await conversation.submit({ type: "input", content: last.text, requestId: last.requestId, whenBusy: "steer" }, context);
+      await conversation.submit({ type: "input", content: userContent(last), requestId: last.requestId, whenBusy: "steer" }, context);
     }
     await this.harness.commit(async tx => {
       const doc = await tx.doc(PendingDoc);
@@ -749,7 +859,7 @@ export class OptChat {
       for (const item of [...withdrawn, ...(pending?.batch ?? []), ...(pending?.items ?? [])]) {
         if (await this.known(item.requestId) && !withdrawn.includes(item)) continue;
         if (!await this.known(`${item.requestId}:unanswered`)) {
-          await this.conversation.submit({ type: "write", requestId: `${item.requestId}:unanswered`, entry: userEntry(item.text) }, context);
+          await this.conversation.submit({ type: "write", requestId: `${item.requestId}:unanswered`, entry: userEntry(item) }, context);
         }
       }
       await this.harness.commit(async tx => {
@@ -766,7 +876,9 @@ export class OptChat {
   async selectModel(selection?: { provider: string; id: string }): Promise<{ provider: string; id: string } | null> {
     if (selection) {
       if (await this.harness.snapshot(LiveDoc, this.conversation.id, context).then(live => live?.run)) throw new Error("wait for the current run before changing model");
-      if (!this.options.models.getModel(selection.provider, selection.id)) throw new Error("model unavailable");
+      const model = this.options.models.getModel(selection.provider, selection.id);
+      if (!model) throw new Error("model unavailable");
+      if (!model.input.includes("image") && (await this.pending()).some(item => item.images?.length)) throw new Error(`${model.id} does not take images, and a message with images is waiting for the chat`);
       await this.conversation.configure({ model: { provider: selection.provider, modelId: selection.id } }, context);
       this.model = selection;
     }
@@ -1083,13 +1195,16 @@ export class OptChat {
         }, { tag: false }),
       ],
       hooks: [hook(GenerationTask, { beforeRequest: async (request, api, callContext) => {
+        // The turn's images, read from the store for this request only.
+        const support = this.imageSupport();
+        const messages = withImages(request.messages, { load: id => this.media.get(id), refused: support.reason, limit: MEDIA_LIMITS.perTurn, bytes: MEDIA_LIMITS.turnBytes });
         const turn = await api.snapshot(TurnDoc, api.conversationId, callContext);
-        if (!turn?.started) return undefined;
+        if (!turn?.started) return { messages };
         const parts: Part[] = [];
         for (let k = 0; k + 1 < turn.parts.length; k += 2) parts.push({ l: turn.parts[k]!, i: turn.parts[k + 1]! });
         // The task list follows the view, after its cache marks.
         const tasks = (await api.snapshot(TurnTasksDoc, api.conversationId, callContext))?.text;
-        return { messages: withView(request.messages, [...viewPieces(this.memory.render(parts)), ...(tasks ? [tasks] : [])]) };
+        return { messages: withView(messages, [...viewPieces(this.memory.render(parts)), ...(tasks ? [tasks] : [])]) };
       } })],
     });
   }
@@ -1132,6 +1247,33 @@ export function withView(messages: readonly Message[], pieces: readonly string[]
   return out;
 }
 
+/** The turn's messages with each image reference replaced by the image
+ * itself, newest first up to `limit`; an image that cannot go (the model
+ * takes none, past the limit, missing from the store) becomes a note the
+ * model reads, never a silent gap. */
+export function withImages(messages: readonly Message[], options: { load: (id: string) => { bytes: Buffer; mimeType: string } | null; refused: string | null; limit: number; bytes?: number }): Message[] {
+  let sent = 0, size = 0;
+  const out = [...messages];
+  for (let k = out.length - 1; k >= 0; k--) {
+    const message = out[k]!;
+    if (message.role !== "user" || typeof message.content === "string" || !message.content.some(part => part.type === "image" && mediaId(part.data))) continue;
+    const parts = [...message.content];
+    for (let j = parts.length - 1; j >= 0; j--) {
+      const part = parts[j]!;
+      const id = part.type === "image" ? mediaId(part.data) : null;
+      if (!id) continue;
+      const image = options.refused || sent >= options.limit ? null : options.load(id);
+      const full = !!image && size + image.bytes.byteLength > (options.bytes ?? Infinity);
+      if (image && !full) { parts[j] = { type: "image", mimeType: image.mimeType, data: image.bytes.toString("base64") }; sent++; size += image.bytes.byteLength; continue; }
+      parts[j] = { type: "text", text: options.refused ? `(an image the user attached, not sent: ${options.refused})`
+        : sent >= options.limit || full ? `(an earlier image of this turn, not sent again: a turn's requests carry at most ${options.limit} images and ${Math.round((options.bytes ?? 0) / 1_000_000)} MB of them)`
+        : "(an image the user attached, missing from cube's store)" };
+    }
+    out[k] = { ...message, content: parts };
+  }
+  return out;
+}
+
 /** The chat in the thread event model: Pi's transcript, then the messages
  * still waiting for their turn, shown as working (with the compactor's
  * failure, if it is stuck). */
@@ -1165,12 +1307,15 @@ export class OptChatEvents implements ThreadEvents {
     const failure = this.chat.failure();
     if (!pending.length) return transcript;
     // A pending message is shown until the log has it after the point it was accepted.
-    const placed = (item: PendingItem) => transcript.events.some(event => event.type === "user-message" && event.text === item.text && Number.parseInt(event.id, 10) > item.after);
+    const ids = (images: readonly { id: string }[] | undefined) => (images ?? []).map(image => image.id).join(",");
+    const placed = (item: PendingItem) => transcript.events.some(event => event.type === "user-message" && event.text === item.text
+      && ids(event.images) === ids(item.images) && Number.parseInt(event.id, 10) > item.after);
     return {
       ...transcript,
       events: [...transcript.events, ...pending.filter(item => !placed(item)).map(item => {
         const from = report(item.text);
-        return { type: "user-message" as const, id: `pending.${item.requestId}`, text: item.text, ...(from && threads.has(from) ? { from } : {}) };
+        return { type: "user-message" as const, id: `pending.${item.requestId}`, text: item.text, ...(from && threads.has(from) ? { from } : {}),
+          ...item.images?.length ? { images: item.images.map(image => ({ ...image })) } : {} };
       })],
       status: transcript.status.state === "working" ? { ...transcript.status, error: transcript.status.error ?? failure } : { state: "working", run: "pending", error: failure },
     };

@@ -27,6 +27,12 @@ firewall/network controls must enforce the private boundary. The HTTP host
 allowlist is not a substitute for those controls. Never expose cubed directly
 to the public internet. Operators are responsible for network/access controls.
 
+Images attached to OptChat messages are kept under `CUBED_STATE/optchat/media`
+and served to every client admitted by that boundary. cubed takes only PNG,
+JPEG, GIF and WebP, recognized by their bytes, and serves a message's image
+with `nosniff`, a sandboxing content security policy and a same-origin
+resource policy; they are sent to the chat's model provider with the turn.
+
 GUI-driven cubed updates do not add an application authorization layer. Every
 client admitted by that deployment boundary can request an update when the
 operator has explicitly set `CUBED_GUI_UPDATES=1`. The HTTP process is limited to

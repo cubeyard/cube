@@ -23,6 +23,7 @@ import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { UpdateService } from "./update-service.ts";
 import { versionInfo } from "./version.ts";
 import { OptChat, OptChatEvents } from "./optchat.ts";
+import { isMediaId, MEDIA_LIMITS, MediaError } from "./optchat-media.ts";
 import { createLogger } from "./log.ts";
 import { cubeThreads } from "./optchat-threads.ts";
 import { observeRunners } from "./runner-observe.ts";
@@ -126,6 +127,30 @@ async function readJson(request: http.IncomingMessage): Promise<Record<string, u
   if (!body || Array.isArray(body) || typeof body !== "object") throw new Error("invalid request");
   return body;
 }
+
+/** A raw request body of at most `limit` bytes. */
+async function readBytes(request: http.IncomingMessage, limit: number): Promise<Buffer> {
+  const declared = Number(request.headers["content-length"]);
+  if (declared > limit) throw new MediaError(`the image is ${(declared / 1_000_000).toFixed(1)} MB; at most ${(limit / 1_000_000).toFixed(1)} MB`, 413);
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request as AsyncIterable<Buffer>) {
+    size += chunk.byteLength;
+    if (size > limit) throw new MediaError(`the image is larger than ${(limit / 1_000_000).toFixed(1)} MB`, 413);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+/** Headers for an image a message holds: never run, sniffed, framed or
+ * embedded by another site; immutable, since its id is its content's hash. */
+const IMAGE_HEADERS = {
+  "cache-control": "private, max-age=31536000, immutable",
+  "x-content-type-options": "nosniff",
+  "content-security-policy": "default-src 'none'; sandbox",
+  "cross-origin-resource-policy": "same-origin",
+  "content-disposition": "inline",
+} as const;
 
 /** Private product host. Thread tools run in each thread's VM; there is no
  * local execution fallback. */
@@ -275,6 +300,30 @@ export async function createCubed(options: {
       const method = request.method;
       if (!allowedHosts.has(new URL(`http://${request.headers.host}`).hostname)) return json({ error: "host rejected" }, 403);
       if (request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) return json({ error: "origin rejected" }, 403);
+      // The chat's images: raw bytes up, the bytes of a message's image down.
+      if (parts[0] === "api" && parts[1] === "optchat" && parts[2] === "media") {
+        try {
+          if (parts.length === 3 && method === "POST") {
+            // A cross-site form cannot send this type; the bytes decide the format.
+            if (!request.headers["content-type"]?.startsWith("image/")) return json({ error: "an image body is required" }, 415);
+            const { chat } = await openOptchat();
+            return json({ image: await chat.upload(await readBytes(request, MEDIA_LIMITS.bytes)) });
+          }
+          if (parts.length === 4 && method === "GET") {
+            const { chat } = await openOptchat();
+            const image = isMediaId(parts[3]) ? await chat.image(parts[3]) : null;
+            if (!image) return json({ error: "no such image" }, 404);
+            response.writeHead(200, { ...IMAGE_HEADERS, "content-type": image.mimeType, "content-length": image.bytes.byteLength });
+            return response.end(image.bytes);
+          }
+          return json({ error: "not found" }, 404);
+        } catch (error) {
+          if (!(error instanceof MediaError)) throw error;
+          // The rest of a refused upload is not read; the connection closes after the answer.
+          response.setHeader("connection", "close");
+          return json({ error: error.message }, error.status);
+        }
+      }
       let body: Record<string, unknown>;
       try { body = await readJson(request); }
       catch (error) { if ((error as { status?: number }).status === 415) return json({ error: "json body required" }, 415); throw error; }
@@ -419,10 +468,20 @@ export async function createCubed(options: {
         if (parts[2] === "tasks" && method === "GET") return json(await chat.tasks());
         if (parts[2] === "view" && method === "GET") return json({ view: chat.memory.render(), messages: chat.memory.length, failure: chat.failure() });
         if (parts[2] === "stop" && method === "POST") { await chat.stop(); return json({ ok: true }); }
-        if (parts[2] === "prompt" && method === "POST") { const requestId = text("requestId"); await chat.send(text("text"), requestId); return json({ runId: requestId }); }
+        if (parts[2] === "prompt" && method === "POST") {
+          const requestId = text("requestId");
+          const images = body.images ?? [];
+          if (!Array.isArray(images) || !images.every(isMediaId)) return json({ error: "images must be the ids of uploaded images" }, 400);
+          // A message of images alone needs no text.
+          const said = images.length && (body.text === undefined || body.text === "") ? "" : text("text");
+          try { await chat.send(said, requestId, images); }
+          catch (error) { if (error instanceof MediaError) return json({ error: error.message }, error.status); throw error; }
+          return json({ runId: requestId });
+        }
         if (parts[2] === "model" && (method === "GET" || method === "PATCH")) {
           const available = await catalog();
-          return json({ models: available, selected: await chat.selectModel(method === "PATCH" ? await selection(body, available) : undefined) });
+          const selected = await chat.selectModel(method === "PATCH" ? await selection(body, available) : undefined);
+          return json({ models: available, selected, images: chat.imageSupport() });
         }
         return json({ error: "not found" }, 404);
       }

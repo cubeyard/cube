@@ -173,6 +173,18 @@ list after the view. Details: docs/optchat.md, "Tasks". Verified offline
 (`optchat-tasks-test.ts`, the product smoke's real route) and in headless
 Chromium at desktop and phone sizes; not with a real model.
 
+## Images in the chat
+
+The chat's composer takes pasted, dropped or picked images (PNG, JPEG, GIF,
+WebP; checked by their bytes, 3.75 MB and 8000 px a side at most, 4 a
+message). They are stored under `CUBED_STATE/optchat/media`, referenced from
+the message, and shown as thumbnails with a larger view, after reloads too.
+The request hook gives the chat's model the images of the current turn
+only; a model whose pi-ai `input` lacks images is refused clearly. Details:
+docs/optchat.md, "Images". Verified offline (`optchat-media-test.ts`,
+`images-test.ts`) and in headless Chromium with a real clipboard paste and a
+faux vision model; not with a real provider.
+
 ## Usage and cost (branch `feat/usage-accounting`)
 
 Read-only usage accounting over the agents' own records: Pi's `pi.usage`

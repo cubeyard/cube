@@ -282,6 +282,80 @@ on a phone) shows a small task list that OptChat keeps:
 
 The user changes tasks by asking OptChat; the panel has no edit controls.
 
+## Images
+
+The user can attach images to a chat message: paste them into the composer
+(a screenshot or a copied image; a paste that carries text stays a text paste),
+drop them on it, or pick them with its `image` key. Each one shows as a preview
+with a remove key, uploads at once and goes with the next send; a failed upload
+holds the send until it is removed, so nothing attached is dropped unseen. In
+the transcript a message shows its images as bounded thumbnails; a press opens
+the larger image in a dialog, with a link to the full size. They show again
+after a reload, from the store.
+
+- **Where they live.** `<CUBED_STATE>/optchat/media/<sha256>`, written once per
+  content (whole, through a temporary file and a rename), mode 0600. A message
+  holds only references: the Pi user entry's image parts carry
+  `cube-media:<sha256>` as their data, and the pending document their ids.
+  The log, the view, the compactor and `zoom` show an image as `[image]`; the
+  transcript shows `images: [{id, mimeType}]` on the user message. No base64
+  is stored in the Pi store or sent to the browser in a transcript.
+- **What reaches the model.** The chat's `beforeRequest` hook reads the
+  referenced images from the store and puts them in, as pi-ai image parts, for
+  that request only. Every turn is a fresh context, so an image reaches the
+  model in the turn whose messages carry it (a message sent with it, or one
+  steered into that turn's tool round) and never again; the system prompt says
+  so and asks OptChat to say what an image shows that will matter later.
+  Threads never get the images; OptChat puts what a thread needs in its task,
+  in words. A turn's requests carry at most 8 images and 15 MB of them, the
+  newest; an image that cannot go becomes a note the model reads (`an earlier
+  image of this turn, not sent again`, `missing from cube's store`, `not sent:
+  <model> does not take images`), never a silent gap.
+- **Models without image input.** A model's own `input` (pi-ai's catalog)
+  decides. When the chat's model takes no images, the composer's `image` key
+  is off and says why, an upload is refused (422), a message with images is
+  refused (422, `not sent: <model> does not take images; …`), and the model
+  cannot be changed to such a model while a message with images waits. pi-ai's
+  own replacement of images for such models is never relied on.
+- **Formats and bounds.** PNG, JPEG, GIF and WebP only, recognized by their own
+  headers, whatever the request's type says; SVG, HTML and everything else is
+  refused (415), so nothing the browser would run is stored or served. At
+  most 3.75 MB an image (its base64 stays under the 5 MB providers take) and
+  8000 pixels a side; at most 4 images a message and 8 waiting for the chat at
+  once. The composer checks the type and the size first and redraws a larger
+  image at most 2048 pixels a side (PNG, or JPEG when that is still too
+  large); the host checks again. An upload body over the limit is refused
+  (413) before it is read whole.
+- **Unsent uploads.** An upload no message holds is deleted after a day (at
+  open, then hourly). At most 64 are kept: beyond that the oldest older than
+  ten minutes are let go, and if none is, the upload is refused (429). Sends,
+  sweeps and uploads take one lock, so a sweep never deletes an image between a
+  send's check and the message that holds it. Images a message holds are kept
+  as long as the chat, like the log.
+- **Serving.** `GET /api/optchat/media/<sha256>` serves an image only when a
+  message of the chat (in the log or waiting) holds it; any other id, a
+  malformed one or a path is `404`. The response's type is the one its bytes
+  were checked as, with `x-content-type-options: nosniff`,
+  `content-security-policy: default-src 'none'; sandbox`,
+  `cross-origin-resource-policy: same-origin` (another site cannot embed it)
+  and a private immutable cache. Uploads go through cubed's host and origin
+  checks and need an `image/*` body type, which a cross-site form cannot send.
+  cubed has no user authentication of its own: the media routes are as private
+  as cubed is (see SECURITY.md).
+
+`packages/server/test/optchat-media-test.ts` covers the formats, the store,
+the hook, turns with a faux model that takes images and one that does not
+(an image in its own turn only, steered into a tool round, alone, several, the
+bounds), the sweep, a reopen and the routes. The composer's paste rule and
+checks are in `packages/web/test/images-test.ts`. In headless Chromium (desktop
+1440×900 and phone 390×844) a real clipboard paste of a PNG attached it, a text
+paste stayed text, a second image was removed before send, the faux model got
+the PNG, the thumbnail showed after a reload, the viewer opened and closed, the
+layout kept one composer row without overflow, and a model without image input
+turned the key off and explained a paste. Not verified against a real
+provider: what a real model makes of the images, and providers' own size and
+count limits beyond the bounds above.
+
 ## Caching
 
 `optchat-cache.ts` applies spec §8 through pi-ai's published request hooks,
@@ -322,7 +396,10 @@ sent. Hit rates against a live provider are not measured.
   one; `claude · max` models start Claude Code threads.
 
 Routes: `GET /api/optchat/history`, `GET /api/optchat/stream` (the thread event
-model), `POST /api/optchat/prompt {text, requestId}`, `POST /api/optchat/stop`,
+model), `POST /api/optchat/prompt {text, requestId, images?}` (`images`: ids of
+uploads; with images `text` may be empty), `POST /api/optchat/media` (the raw
+image bytes; answers `{image: {id, mimeType, width, height, bytes}}`),
+`GET /api/optchat/media/<id>`, `POST /api/optchat/stop`,
 `GET /api/optchat/view` (what the model reads: the view and the message count),
 `GET /api/optchat/tasks` (the task list with each linked thread's state).
 
@@ -369,5 +446,7 @@ model), `POST /api/optchat/prompt {text, requestId}`, `POST /api/optchat/stop`,
 - `archive` reads the archived thread's store once more to find a report the
   watcher did not send (a one-message `history` page).
 - No HTML browser of the tree and no import of older chats yet.
+- An image reaches the model in its own turn only; a later turn cannot look at
+  it again (the view and `zoom` say `[image]`), and threads never get images.
 - Verified offline with faux models and a local guest only
   (`packages/server/test/optchat-*-test.ts`), never against a real model or VM.
