@@ -120,7 +120,7 @@
         </select>
         <Icon name="chevron" size={12} />
       </label>
-      <button class="key" class:held={memoryOpen} aria-expanded={memoryOpen} aria-controls="chat-memory" onclick={toggleMemory}>memory</button>
+      <button class="strip-toggle" aria-expanded={memoryOpen} aria-controls="chat-memory" onclick={toggleMemory}>memory<Icon name="chevron" size={12} /></button>
     </section>
     {#if memoryOpen}
       <section id="chat-memory" class="chat-memory" aria-label="memory">

@@ -463,14 +463,22 @@ or push-all control.
 ### Composer
 Full-bleed `--s2` deck with the answering seam. Its field and keys sit in the
 transcript's reading measure, centred under the text with the same side
-padding, so a draft starts where the conversation does. Textarea: `--s4` field, 9px
-radius, shallow inset shadow, auto-growing to 11rem; focus swaps the border to
-`--signal` (the one sanctioned replacement of the global 2px signal focus
-ring). Send is the round signal key. Enter sends; Shift+Enter inserts a new
+padding, so a draft starts where the conversation does. One wide `--s4` field,
+radius a key's plus its padding, shallow inset shadow: the text auto-grows to
+11rem inside it; focus in the text swaps the field's border to `--signal` (the
+one sanctioned replacement of the global 2px signal focus ring). Its keys sit
+inside, square and exactly one text line tall (2rem; 2.75rem for a fingertip),
+on the draft's last line: where images can be sent, a `+` icon key at the
+start opens the file picker (paste and drop attach too; never a worded
+"image" key), and the round signal send key at the end. Stop, while a run is
+on, is a worded key beside the field at the field's height. Enter sends; Shift+Enter inserts a new
 line. The keyboard hint lives in the field's tooltip and accessible description,
 not a permanent extra row. Model selection belongs in the conversation pane's top rail:
 the actual model id as a quiet text control, with providers grouped in the
-opened list. Never substitute an effort label such as "high" for the model.
+opened list. Toggles in a rail (the chat's `memory`, the now bay's fold) are
+quiet text controls too (`.strip-toggle`): the rail's 11px label type, no face,
+a hover wash, pressed in with a turned chevron while open. Rails beside each
+other share `--rail` height, padding and hairline, so they read as one band. Never substitute an effort label such as "high" for the model.
 
 ### Code Window
 Dark glass in both themes: `--glass` body inside an inset well shadow plus a
