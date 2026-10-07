@@ -25,6 +25,11 @@
   entries are the chat's log, a model-free conversation holds the summary tree,
   and each turn starts at a head entry. It has no machine and no code tools; it
   starts, tells and archives ordinary threads. See [docs/optchat.md](docs/optchat.md).
+- **work artifacts:** documents OptChat and threads write for the user
+  (`artifacts*.ts`, `CUBED_STATE/artifacts.sqlite`): revisions with
+  provenance, the user's anchored comments, delivered to the author as an
+  ordinary message, and typed actions the user confirms. Product data, not
+  a workflow journal. See [docs/artifacts.md](docs/artifacts.md).
 - **web:** rendering and user actions, from the neutral thread event model
   only. SSE reconnect starts with a complete transcript; the browser is never a
   workflow owner.
@@ -255,6 +260,23 @@ holds references, and the same hook puts the images in for that turn's
 requests only. The details, deviations and gaps are in
 [docs/optchat.md](docs/optchat.md).
 
+## Work artifacts
+
+`artifact_write` and `artifact_read` are host tools: OptChat's own, and a
+Pi thread's beside its workspace tools (`openAgent`'s `hostTools`); a Claude
+Code thread reaches the same through the mod's `/cube/artifacts/<name>.md`
+paths on the workspace socket, authorized by its lease token. Each agent
+writes and reads only its own artifacts (OptChat also reads its threads'),
+and a write's request id is the tool call's, so a replay writes once. The
+browser renders a body as data: raw HTML as text, safe links only, diffs as
+text, Mermaid diagrams as `<img>` of their SVG. Comments are drafts until
+sent; a batch goes to OptChat's pending queue or a thread's prompt, which
+refuses while it works, and waits with its reason until it is accepted once.
+The only action is `github.merge`, checked against the artifact's project,
+its newest revision and the pull request's live head before the user's
+confirmation, and merged pinned to that head with the host's GitHub token.
+Details: [docs/artifacts.md](docs/artifacts.md).
+
 ## Usage and cost
 
 Usage is read, never metered: Pi's per-conversation `pi.usage` ledger (written
@@ -281,6 +303,8 @@ and owner, `lease.lock` is only held while a lease is, and `threads/<id>/vm/`
 holds the VM's SSH client key, its pinned host key and the VM epoch.
 `CUBED_STATE/usage.sqlite` caches the last usage reading of each thread and
 of OptChat (derived, rebuildable from the stores above).
+`CUBED_STATE/artifacts.sqlite` holds work artifacts, their revisions,
+comments and action runs.
 `CUBED_STATE/gateway/` holds the gateway's Iroh key and the installation CA;
 `CUBED_STATE/run/` the private sockets (`workspace.sock`, `gateway.sock`,
 `egress.sock`) and SSH ControlMaster sockets. The state schema is 102 and older

@@ -241,6 +241,23 @@ real guest or on a real Mac. cube-runner 0.8.3 also carries the macOS NIC
 change of #105 (no x86 option ROM), which v0.3.15 (cube-runner 0.8.2) does
 not.
 
+## Work artifacts (branch `feat/work-artifacts`)
+
+OptChat and threads write documents for the user (`artifact_write`/
+`artifact_read`; Claude Code threads `Write`/`Read /cube/artifacts/<name>.md`),
+kept with revisions and provenance in `CUBED_STATE/artifacts.sqlite` and
+shown at `#/a/<id>` (list at `#/artifacts`, newest five in the chat panel).
+The body renders as data (Markdown, diffs, Mermaid drawn as images). The
+user selects text and comments; drafts are sent as one message to the author
+(OptChat's queue, or a thread's prompt once its turn ends; never an
+interruption), delivered once. The only action is `github.merge`, previewed
+against the project, the newest revision and the pull request's live head,
+confirmed by the user and merged pinned to that head with the host's token.
+Verified offline (`artifacts-test.ts`, `artifact-render-test.ts`) and in
+headless Chromium (`artifact-browser-test.ts`, desktop light/dark and phone)
+with a faux model and a fake GitHub; not with a real model, a real Claude
+Code session or GitHub itself. Details and gaps: docs/artifacts.md.
+
 ## Known gaps and next steps
 
 - **Machine templates:** built on `vm-snapshots`, verified on Linux/KVM only

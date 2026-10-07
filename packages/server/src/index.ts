@@ -31,6 +31,10 @@ import { formatDiagnostics, threadDiagnostics } from "./vm-diagnostics.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
 import { threadUsageText, usageText, UsageService } from "./usage-service.ts";
+import { ARTIFACT_LIMITS, ArtifactError, ArtifactStore, isArtifactId, isArtifactName, type ArtifactAuthor } from "./artifacts.ts";
+import { Artifacts } from "./artifact-service.ts";
+import { ARTIFACT_GUIDE, artifactTools } from "./artifact-tools.ts";
+import { githubPulls, type GithubPulls } from "./github-pulls.ts";
 import { Portal, portalSettings, type PortalSettings } from "./portal.ts";
 
 const CUBED_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
@@ -187,6 +191,10 @@ export async function createCubed(options: {
   /** The portal to `cube service` services; default: portalSettings() (off
    * without CUBED_PORTAL_IP). */
   portal?: PortalSettings | null;
+  /** Pull requests for artifact actions; default: GitHub's API with the host's token. */
+  githubPulls?: GithubPulls;
+  /** Artifact comment delivery retry, for tests. */
+  artifactRetryMs?: number;
 }) {
   const { directory: run, socket, temporary: socketDirectory } = await runDirectory(options.state);
   const registry = new Registry(path.join(options.state, "registry.sqlite"));
@@ -211,9 +219,16 @@ export async function createCubed(options: {
     machines = new ThreadVms({ registry, threads: path.join(options.state, "threads"), run, gateway });
   }
   let portal: Portal | null = null;
+  let artifacts: Artifacts | null = null;
   const conversations = new Conversations({ registry, directory: path.join(options.state, "threads"), models, machines, claude: claudeCommand ? {
     command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
-  } : null, portal: thread => portal!.guest(thread) });
+  } : null, portal: thread => portal!.guest(thread),
+  // A Pi thread writes and reads its own artifacts; a body may come from a workspace file.
+  hostTools: thread => ({ readFile, key }) => ({
+    note: `artifact_write and artifact_read keep documents for the user (work artifacts). ${ARTIFACT_GUIDE}`,
+    tools: artifactTools({ artifacts: artifacts!, author: { kind: "thread", thread: thread.id }, agent: "pi", key,
+      readable: async () => [{ kind: "thread", thread: thread.id }], readFile: file => readFile(file, ARTIFACT_LIMITS.body) }),
+  }) });
   portal = new Portal({ settings: options.portal === undefined ? portalSettings() : options.portal, directory: path.join(options.state, "portal"),
     registry, machines, archiving: id => conversations.archivingNow(id) });
   const git = new GitService(path.join(options.state, "repositories"));
@@ -277,13 +292,19 @@ export async function createCubed(options: {
     runner: runnerId => observeRunners(registry, probeIntervalMs).runners.find(runner => runner.id === runnerId) ?? null }, id);
   const optchatThreads = { ...cubeThreads({ registry, conversations, catalog: threadCatalog, runners: () => observeRunners(registry, probeIntervalMs), latestCommits }), usage: usageQuery,
     diagnose: async (id: string) => { const bundle = await diagnostics(id); return bundle && formatDiagnostics(bundle); } };
+  artifacts = new Artifacts({ store: new ArtifactStore(path.join(options.state, "artifacts.sqlite")), registry,
+    github: options.githubPulls ?? githubPulls({ token: () => github.token() }),
+    optchat: async () => optchat ? (await optchat).chat : null,
+    submit: (thread, text, requestId) => conversations.submit(thread, text, requestId),
+    ...options.artifactRetryMs ? { retryMs: options.artifactRetryMs } : {} });
+  const artifactService = artifacts;
   let optchatError = "";
   // Inside the promise: a bad CUBED_OPTCHAT_COMPACTOR must reject here,
   // not throw out of startup or the recovery timer and end cubed.
   const openOptchat = () => optchat ??= (async () => OptChat.open({
     directory: path.join(options.state, "optchat"), models, threads: optchatThreads,
     model: async () => preferredModel(await catalog()), compactor: compactorModel(process.env.CUBED_OPTCHAT_COMPACTOR),
-    wishes: wishModel(process.env.CUBED_OPTCHAT_WISHES),
+    wishes: wishModel(process.env.CUBED_OPTCHAT_WISHES), artifacts: artifactService,
   }))().then(chat => ({ chat, events: new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => chat.failure() })) }))
     .catch(error => {
       optchat = null;
@@ -533,6 +554,36 @@ export async function createCubed(options: {
         }
         return json({ error: "not found" }, 404);
       }
+      // Work artifacts: agents write them; the browser reads, comments, sends
+      // comments to the author and confirms actions.
+      if (parts[0] === "api" && parts[1] === "artifacts") {
+        const id = parts[2];
+        const store = artifactService.store;
+        try {
+          if (!id && parts.length === 2 && method === "GET") return json({ artifacts: store.list().map(artifact => artifactService.summaryView(artifact)) });
+          if (!isArtifactId(id) || !store.get(id)) return json({ error: "no such artifact" }, 404);
+          if (parts.length === 3 && method === "GET") return json(artifactService.view(id));
+          if (parts[3] === "revisions" && parts.length === 5 && method === "GET") {
+            const revision = store.revision(id, Number(parts[4]));
+            return revision ? json({ revision }) : json({ error: "no such revision" }, 404);
+          }
+          if (parts[3] === "comments" && parts.length === 4 && method === "POST") {
+            return json({ comment: store.comment(id, { revision: body.revision, anchor: body.anchor, body: body.body }, text("requestId")) });
+          }
+          if (parts[3] === "comments" && parts.length === 5 && method === "DELETE") {
+            return store.deleteDraft(id, parts[4]!) ? json({ ok: true }) : json({ error: "only an unsent comment can be deleted" }, 409);
+          }
+          if (parts[3] === "send" && parts.length === 4 && method === "POST") return json({ batch: artifactService.queue(id, text("requestId")) });
+          if (parts[3] === "actions" && parts.length === 5 && method === "GET") {
+            return json({ preview: await artifactService.preview(id, parts[4]!, Number(url.searchParams.get("revision"))) });
+          }
+          if (parts[3] === "actions" && parts.length === 5 && method === "POST") return json(await artifactService.run(id, parts[4]!, { revision: body.revision, confirm: body.confirm, requestId: body.requestId }));
+        } catch (error) {
+          if (error instanceof ArtifactError) return json({ error: error.message }, error.status);
+          throw error;
+        }
+        return json({ error: "not found" }, 404);
+      }
       if (parts[0] === "api" && parts[1] === "threads") {
         const id = parts[2];
         if (parts.length > 4 && parts[3] !== "workspace") return json({ error: "not found" }, 404);
@@ -605,6 +656,37 @@ export async function createCubed(options: {
       const thread = registry.getThread(parts[2]);
       if (!thread || thread.archived) return json({ error: "thread not found", code: "NOT_FOUND", completionUnknown: false }, 404);
       const body = await readJson(request);
+      // A Claude Code thread's artifacts (the mod's /cube/artifacts paths):
+      // the lease token cubed holds for that thread's child is the authorization.
+      if (parts[4] === "artifacts" && parts.length === 5) {
+        const token = /^Bearer ([^\s]+)$/.exec(request.headers.authorization ?? "")?.[1];
+        if (!token) return json({ error: "workspace lease token required", code: "LEASE_STALE", completionUnknown: false }, 401);
+        const lease = await conversations.workspace(thread.id).lease({ token }).catch(() => null);
+        if (!lease) return json({ error: "workspace lease is not held by this token", code: "LEASE_STALE", completionUnknown: false }, 401);
+        if (lease.owner !== "claude-code") return json({ error: "artifacts here are for claude code threads", code: "WRONG_NODE", completionUnknown: false }, 403);
+        const author: ArtifactAuthor = { kind: "thread", thread: thread.id };
+        try {
+          if (request.method === "GET") {
+            const name = url.searchParams.get("name");
+            if (!name) return json({ text: artifactService.read([author], undefined) });
+            const artifact = isArtifactName(name) ? artifactService.store.named(author, name) : null;
+            if (!artifact) return json({ error: `no artifact named ${name}; write /cube/artifacts/${name}.md to create it`, code: "NOT_FOUND", completionUnknown: false }, 404);
+            const revision = url.searchParams.get("revision");
+            return json({ text: artifactService.read([author], artifact.id, revision ? Number(revision) : undefined) });
+          }
+          if (request.method === "POST") {
+            if (!isArtifactName(body.name)) throw new ArtifactError("a name is 1 to 64 lowercase letters, digits, dots, dashes or underscores");
+            if (typeof body.requestId !== "string" || typeof body.body !== "string") throw new ArtifactError("requestId and body are required");
+            const written = artifactService.write(author, { name: body.name, title: typeof body.title === "string" ? body.title : undefined, body: body.body, actions: body.actions },
+              { agent: "claude-code", thread: thread.id, ...typeof body.call === "string" ? { call: body.call.slice(0, 200) } : {} }, body.requestId);
+            return json({ text: written.text, id: written.id, revision: written.revision });
+          }
+        } catch (error) {
+          if (error instanceof ArtifactError) return json({ error: error.message, code: error.status === 404 ? "NOT_FOUND" : "INVALID_REQUEST", completionUnknown: false }, error.status);
+          throw error;
+        }
+        return json({ error: "not found", code: "NOT_FOUND", completionUnknown: false }, 404);
+      }
       const result = await workspaceRoute(conversations.workspace(thread.id), { method: request.method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body });
       return json(result.body, result.status);
     } catch (error) {
@@ -644,6 +726,7 @@ export async function createCubed(options: {
       if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
       await portal.close();
       await modelAuth.close();
+      artifactService.close();
       await (await optchat?.catch(() => null))?.chat.close();
       await conversations.close();
       await gateway?.stop();
@@ -652,6 +735,7 @@ export async function createCubed(options: {
       await new Promise<void>(resolve => workspaceServer.close(() => resolve()));
       fs.rmSync(socketDirectory ?? socket, { recursive: true, force: true });
       usage.close();
+      artifactService.store.close();
       registry.close();
     })();
     return closePromise;

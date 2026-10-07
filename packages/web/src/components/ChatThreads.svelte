@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { dismissChatWish, errorText, fetchChatThreads, fetchChatWishes } from "../lib/api.ts";
+  import { dismissChatWish, errorText, fetchArtifacts, fetchChatThreads, fetchChatWishes } from "../lib/api.ts";
   import { relTime } from "../lib/time.ts";
-  import type { OverviewThread, ThreadOverview, WishList, WishView } from "../lib/types.ts";
+  import type { ArtifactListItem, OverviewThread, ThreadOverview, WishList, WishView } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
 
   // The threads OptChat started, found from its own spawns, each with its
@@ -14,6 +14,8 @@
   let { busy = false }: { busy?: boolean } = $props();
 
   let overview = $state<ThreadOverview | null>(null);
+  // The newest artifacts: documents to read, linked here, not tasks.
+  let artifacts = $state<ArtifactListItem[] | null>(null);
   let error = $state<string | null>(null);
   let wishes = $state<WishList | null>(null);
   let wishError = $state<string | null>(null);
@@ -45,8 +47,8 @@
     if (loading) return;
     loading = true;
     try {
-      const fresh = await fetchChatThreads();
-      if (!disposed) { overview = fresh; error = null; }
+      const [fresh, documents] = await Promise.all([fetchChatThreads(), fetchArtifacts().catch(() => artifacts)]);
+      if (!disposed) { overview = fresh; artifacts = documents; error = null; }
     } catch (cause) {
       if (!disposed) error = errorText(cause);
     } finally {
@@ -114,6 +116,8 @@
       if (document.hidden) return;
       tick++;
       if (busy || (tick % 6 === 0 && active.some((thread) => moving(thread.state)))) void load();
+      // A thread writes an artifact whenever it likes: the list is read every 30 s.
+      else if (tick % 6 === 0) void fetchArtifacts().then((fresh) => { if (!disposed) artifacts = fresh; }).catch(() => {});
     }, 5000);
     const visible = () => { if (!document.hidden) { void load(); void loadWishes(); } };
     document.addEventListener("visibilitychange", visible);
@@ -170,6 +174,22 @@
       {#if overview.unknown}
         <p class="work-note">{overview.unknown} no longer known to cube</p>
       {/if}
+    {/if}
+    {#if artifacts?.length}
+      <section class="work-group work-artifacts" aria-labelledby="artifacts-heading">
+        <h3 id="artifacts-heading"><a href="#/artifacts">artifacts</a></h3>
+        <ul class="work-list">
+          {#each artifacts.slice(0, 5) as artifact (artifact.id)}
+            <li class="work-thread">
+              <span class="lamp {artifact.comments.queued ? 'on-amber' : ''}" aria-hidden="true"></span>
+              <div class="work-thread-text">
+                <a class="work-title" href="#/a/{artifact.id}" title={artifact.title}>{artifact.title}</a>
+                <span class="work-state">{artifact.author.kind === "optchat" ? "optchat" : `[${artifact.author.thread.slice(0, 8)}]`} · revision {artifact.head} · {relTime(artifact.updatedAt)}{artifact.comments.draft ? ` · ${artifact.comments.draft} not sent` : ""}{artifact.comments.queued ? ` · ${artifact.comments.queued} waiting` : ""}</span>
+              </div>
+            </li>
+          {/each}
+        </ul>
+      </section>
     {/if}
     <details class="work-wishes" ontoggle={(event) => { if ((event.currentTarget as HTMLDetailsElement).open) void loadWishes(); }}>
       <summary>not started{wishState ? ` · ${wishState}` : ""}</summary>

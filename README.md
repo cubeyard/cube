@@ -95,6 +95,12 @@ starts threads in your projects, follows their reports and tells them what to
 do next. Each turn sees the whole chat as a fixed-size view of one-line summaries
 and can zoom into any line, down to the original message.
 
+Threads and the chat can write **artifacts**: documents (Markdown, Mermaid
+diagrams, diffs) you read beside the chat, select text in and comment on.
+Comments go back to the author as a message; a pull request merge an
+artifact offers runs only after you confirm it, checked against the pull
+request's current head ([docs/artifacts.md](docs/artifacts.md)).
+
 The current tools are `read`, `write`, `edit`, bounded `bash` and `codemode`,
 which runs one model-written JavaScript script that calls those tools.
 A thread can instead run on Claude Code with your own Claude Max login: choose

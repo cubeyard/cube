@@ -1531,3 +1531,116 @@ a.work-title:hover { color: var(--signal); }
   .work-panel.folded .work-body { display: none; }
   .work-panel.folded .work-head { border-bottom: 0; }
 }
+
+/* ============================================================ artifacts
+   A document an agent wrote, on the reading field, with the comments bank
+   beside it (below it on a narrow screen). Marks are the user's own
+   selections; actions are keys with their exact target printed beside. */
+.artifact-workspace {
+  flex: 1; min-height: 0; display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(16rem, 22rem); grid-template-rows: minmax(0, 1fr);
+  background: var(--s2);
+}
+.artifact-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.artifact-workspace > .work-panel { grid-column: 2; }
+.artifact-title { min-width: 0; }
+.artifact-strip .strip-state { flex: none; }
+.artifact-revision select { max-width: 11rem; }
+.artifact-scroll { flex: 1; min-height: 0; overflow: auto; padding: 1rem clamp(1rem, 4vw, 2.5rem) 3rem; background: var(--s4); }
+.artifact-scroll > * { max-width: 46rem; margin-inline: auto; }
+.artifact-provenance { margin: 0 auto 0.9rem; font: 11px/1.5 var(--font-mono); color: var(--ink-3); overflow-wrap: anywhere; }
+.artifact-body { font-size: 15px; line-height: 1.6; }
+.artifact-body h1 { font-size: 22px; }
+.artifact-body h2 { font-size: 18px; padding-bottom: 0.25rem; border-bottom: 1px solid var(--line); }
+.artifact-hint { margin-top: 1.4rem; font: 11px/1.5 var(--font-mono); color: var(--ink-3); }
+.artifact-missing { padding: 2rem; display: flex; gap: 0.8rem; align-items: center; flex-wrap: wrap; color: var(--ink-2); }
+/* diffs follow the enclosure theme, line by line */
+.artifact-body pre.artifact-diff { background: var(--diff-bg); color: var(--diff-ink); border-color: var(--diff-line); box-shadow: var(--shadow-well); }
+.artifact-body .diff-line { display: inline-block; min-width: calc(100% + 0.8rem); padding-inline: 0.4rem; margin-inline: -0.4rem; }
+.artifact-body .diff-line.add { background: var(--diff-add-bg); color: var(--diff-add); }
+.artifact-body .diff-line.del { background: var(--diff-del-bg); color: var(--diff-del); }
+.artifact-body .diff-line.hunk, .artifact-body .diff-line.meta { color: var(--diff-muted); }
+/* diagrams: a picture on the reading field, the source folded under it */
+.artifact-diagram { margin: 0 0 1rem; padding: 0.75rem; border: 1px solid var(--line); border-radius: var(--r-key); background: var(--s3); }
+.diagram-picture { display: flex; justify-content: center; min-height: 2rem; }
+.diagram-picture img { display: block; height: auto; max-width: 100%; }
+.diagram-note { margin: 0; font: 12px/1.5 var(--font-mono); color: var(--ink-3); }
+.diagram-note.bad { color: var(--bad); }
+.diagram-source { margin-top: 0.4rem; }
+.diagram-source summary { cursor: pointer; font: 11px/1.5 var(--font-mono); color: var(--ink-3); }
+.diagram-source pre { margin: 0.4rem 0 0; }
+/* the user's selections */
+.artifact-body mark.anchor { background: color-mix(in srgb, var(--lamp-amber) 22%, transparent); color: inherit; border-bottom: 2px solid var(--lamp-amber); cursor: pointer; }
+.artifact-body mark.anchor.delivered { background: color-mix(in srgb, var(--lamp-green) 14%, transparent); border-bottom-color: var(--lamp-green); }
+.artifact-body mark.anchor.undeliverable { background: var(--bad-soft); border-bottom-color: var(--lamp-red); }
+.artifact-body mark.anchor.composing { background: var(--signal-soft); border-bottom-color: var(--signal); }
+.artifact-select-key { position: fixed; z-index: 20; transform: translateX(-50%); }
+/* actions: a bank of keys, each with its target */
+.artifact-actions { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 1.2rem; }
+.artifact-action {
+  display: flex; align-items: center; gap: 0.7rem; padding: 0.55rem 0.75rem;
+  border: 1px solid var(--line-2); border-radius: var(--r-key); background: var(--s2); box-shadow: var(--shadow-well);
+}
+.artifact-action .lamp { flex: none; }
+.artifact-action-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
+.artifact-action-label { font-size: 13.5px; font-weight: 600; overflow-wrap: anywhere; }
+.artifact-action-target, .artifact-action-run { font: 11px/1.45 var(--font-mono); color: var(--ink-3); overflow-wrap: anywhere; }
+.artifact-action-run.failed { color: var(--bad); }
+.artifact-action-run.succeeded { color: var(--lamp-green); }
+/* comments */
+.comment-item { padding: 0.45rem 0.55rem; border: 1px solid var(--line); border-radius: var(--r-key); background: var(--s4); }
+.comment-item.draft { border-style: dashed; border-color: var(--line-2); }
+.comment-item.focused { outline: 2px solid var(--signal); outline-offset: 1px; }
+.comment-quote { width: 100%; margin: 0; padding: 0 0 0 0.5rem; border-width: 0 0 0 2px; background: none; text-align: left; font-family: inherit; cursor: pointer; }
+.comment-quote:hover { color: var(--ink); }
+.comment-body { margin: 0.3rem 0 0; font-size: 13px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.comment-foot { display: flex; align-items: center; gap: 0.4rem; margin-top: 0.3rem; font: 10.5px/1.4 var(--font-mono); color: var(--ink-3); overflow-wrap: anywhere; }
+.comment-foot > span:not(.lamp) { flex: 1; min-width: 0; }
+.comment-composer { margin-bottom: 0.7rem; padding: 0.5rem; border: 1px solid var(--signal); border-radius: var(--r-key); background: var(--s4); }
+.comment-composer .work-quote { margin-top: 0; }
+.comment-composer textarea {
+  display: block; width: 100%; margin-top: 0.45rem; padding: 0.45rem; resize: vertical;
+  border: 1px solid var(--line); border-radius: var(--r-xs); background: var(--s3); color: var(--ink); font: inherit; font-size: 13.5px;
+}
+.comment-keys { display: flex; justify-content: flex-end; gap: 0.4rem; margin-top: 0.45rem; }
+.comment-send { width: 100%; margin-top: 0.55rem; }
+.comment-hint { margin: 0.45rem 0.2rem 0; font-size: 12px; line-height: 1.45; color: var(--ink-3); }
+.comment-sent { margin-top: 0.8rem; }
+/* the action's confirmation */
+.action-body { padding: 0 1.25rem 0.9rem; font-size: 13.5px; }
+.action-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.3rem 0.9rem; margin: 0 0 0.8rem; }
+.action-facts dt { color: var(--ink-3); font-size: 12px; }
+.action-facts dd { margin: 0; overflow-wrap: anywhere; }
+.action-facts code { font: 11.5px/1.45 var(--font-mono); }
+.action-facts a { color: var(--signal); text-underline-offset: 3px; }
+.action-problems { margin: 0; padding: 0.55rem 0.75rem 0.55rem 1.6rem; border: 1px solid var(--bad-line); border-radius: var(--r-key); background: var(--bad-soft); color: var(--bad); }
+p.action-problems { padding-left: 0.75rem; }
+.action-status { margin: 0; color: var(--ink-2); }
+.action-done { margin: 0; color: var(--lamp-green); font-weight: 600; }
+.action-footer { align-items: center; }
+.action-footer .spacer { margin-left: auto; }
+/* the list */
+.artifact-list-page { flex: 1; min-height: 0; overflow: auto; padding: 1.5rem clamp(1rem, 4vw, 2.5rem); }
+.artifact-list-page > * { max-width: 52rem; margin-inline: auto; }
+.artifact-list-page h1 { margin-top: 0; margin-bottom: 0.3rem; font-size: 18px; }
+.artifact-list-lede, .artifact-list-empty { color: var(--ink-2); font-size: 13.5px; }
+.artifact-list { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.artifact-list li { display: flex; flex-direction: column; gap: 0.15rem; padding: 0.55rem 0.75rem; border: 1px solid var(--line); border-radius: var(--r-key); background: var(--s4); }
+.artifact-list-title { font-weight: 600; color: var(--ink); text-decoration: none; overflow-wrap: anywhere; }
+.artifact-list-title:hover { color: var(--signal); }
+.artifact-list-meta { font: 11px/1.5 var(--font-mono); color: var(--ink-3); overflow-wrap: anywhere; }
+.work-artifacts { margin-top: 0.9rem; border-top: 1px solid var(--line); padding-top: 0.5rem; }
+.work-artifacts h3 a { color: inherit; text-decoration: none; }
+.work-artifacts h3 a:hover { color: var(--signal); }
+@media (max-width: 52rem) {
+  .artifact-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  .artifact-workspace > .work-panel { grid-column: 1; grid-row: 2; max-height: 42vh; border-left: 0; border-top: 1px solid var(--line-2); }
+  .artifact-strip .strip-state, .artifact-strip .strip-project { display: none; }
+  .thread-strip .artifact-title { display: block; flex: 1; }
+  .artifact-workspace > .work-panel { max-height: 36vh; }
+}
+/* the docked thread sidebar has room for four destinations; artifacts are
+   a key away in the chat's panel and on every other page */
+@media (min-width: 52.001rem) {
+  .thread-navigation header nav a.nav-artifacts { display: none; }
+}

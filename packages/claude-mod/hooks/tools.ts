@@ -72,6 +72,62 @@ export function workspacePath(root: string, file: string): string | Denied {
   return parts.join("/");
 }
 
+/** How an agent should write one, after the show-me skill
+ * (https://www.humanlayer.com/blog/show-me-skill): compact visuals beside
+ * short text, never walls of prose. */
+export const ARTIFACT_GUIDE = "An artifact is a document the user reads beside the chat, selects text in and comments on; every write is a new revision and older ones stay. "
+  + "Use one for what the user will read and discuss at length (a review, a plan, a report, a design), not for a short reply. "
+  + "Write it as GitHub Markdown and show rather than tell: keep prose brief and put each visual next to the short text it supports. "
+  + "Pick the smallest view that makes the point: a call tree or file tree in a text fence, a ```mermaid sequence, state or flow diagram, "
+  + "a ```diff of the shape that changes (a component tree, a call stack, a file layout, real code), a short table, pseudocode. "
+  + "Raw HTML is shown as text, scripts never run, images are links, and only http(s) and #/ links work. "
+  + "Comments come back to you as a message starting \"[artifact <id>]\" with the exact text they are about; answer them, and write a new revision of the same artifact when they call for changes. "
+  + "actions offer the user a button; the only kind is github.merge of a pull request in the project's own repository, pinned to its exact 40-character head commit. "
+  + "Nothing runs unless the user confirms it on the artifact's page, after cube checks the pull request again; never claim an action ran.";
+
+/** Where Read and Write reach the thread's work artifacts instead of the
+ * workspace: `<name>.md` is a document, `<name>.json` is `{title?, body,
+ * actions?}`, the folder itself lists them. cubed keeps them, not the machine. */
+export const ARTIFACT_ROOT = "/cube/artifacts";
+export type ArtifactPath = { kind: "list" } | { kind: "md" | "json"; name: string };
+export function artifactPath(file: unknown): ArtifactPath | Denied | null {
+  if (typeof file !== "string" || (file !== "/cube" && !file.startsWith("/cube/"))) return null;
+  if (file === ARTIFACT_ROOT || file === `${ARTIFACT_ROOT}/`) return { kind: "list" };
+  const match = /^\/cube\/artifacts\/([a-z0-9][a-z0-9._-]{0,63})\.(md|json)$/.exec(file);
+  if (!match || match[1]!.includes("..")) return { deny: `${file} is not an artifact path: use ${ARTIFACT_ROOT}/<name>.md (or .json), the name in lowercase letters, digits, dots, dashes or underscores` };
+  return { kind: match[2] as "md" | "json", name: match[1]! };
+}
+
+export async function readArtifact(scope: ToolScope, target: ArtifactPath, input: ReadInput): Promise<ReadResult | Denied> {
+  try {
+    const { text } = await scope.client.artifact(scope.token, target.kind === "list" ? undefined : target.name);
+    const lines = text.split("\n");
+    return { type: "text", file: { filePath: input.file_path, content: text, numLines: lines.length, startLine: 1, totalLines: lines.length } };
+  } catch (error) { return denied(error, input.file_path); }
+}
+
+export async function writeArtifact(scope: ToolScope, toolUseId: string, target: ArtifactPath, input: WriteInput): Promise<WriteResult | Denied> {
+  if (target.kind === "list") return { deny: `write ${ARTIFACT_ROOT}/<name>.md, not the folder` };
+  if (typeof input.content !== "string") return { deny: "content is required" };
+  let document: { body: string; title?: string; actions?: unknown } = { body: input.content };
+  if (target.kind === "json") {
+    let parsed: unknown;
+    try { parsed = JSON.parse(input.content); } catch { return { deny: `${input.file_path} must be JSON: {"title"?: string, "body": string, "actions"?: [...]}` }; }
+    const record = parsed as Record<string, unknown> | null;
+    if (!record || typeof record !== "object" || Array.isArray(record) || typeof record.body !== "string" || (record.title !== undefined && typeof record.title !== "string")) {
+      return { deny: `${input.file_path} must be JSON: {"title"?: string, "body": string, "actions"?: [...]}` };
+    }
+    const extra = Object.keys(record).filter(name => !["title", "body", "actions"].includes(name));
+    if (extra.length) return { deny: `${input.file_path}: unknown field ${extra.join(", ")}` };
+    document = { body: record.body, ...typeof record.title === "string" ? { title: record.title } : {}, ...record.actions === undefined ? {} : { actions: record.actions } };
+  }
+  try {
+    const written = await scope.client.writeArtifact(scope.token, { name: target.name, requestId: key(toolUseId, "artifact"), call: toolUseId, ...document });
+    // The tool's own shape; what cubed said reaches the model as the content.
+    return { type: "update", filePath: input.file_path, content: written.text, structuredPatch: [], originalFile: null };
+  } catch (error) { return denied(error, input.file_path); }
+}
+
 export function key(toolUseId: string, suffix: string): string {
   return `claude:${toolUseId}:${suffix}`;
 }

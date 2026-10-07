@@ -91,6 +91,15 @@ export class WorkspaceClient {
   writeFile(token: string, key: string, file: string, content: Uint8Array, options: WorkspaceWrite = {}): Promise<WorkspaceWriteResult> {
     return this.call("PUT", "/file", { token, body: { key, path: file, content: toBase64(content), ...options } });
   }
+  /** The thread's own artifacts (cubed's work artifacts, not workspace files):
+   * one named artifact as text, or the list without a name. */
+  artifact(token: string, name?: string): Promise<{ text: string }> {
+    return this.call("GET", `/artifacts${name === undefined ? "" : `?${new URLSearchParams({ name })}`}`, { token });
+  }
+  /** Writes the named artifact's next revision; the request id makes a repeated call write it once. */
+  writeArtifact(token: string, request: { name: string; requestId: string; call: string; body: string; title?: string; actions?: unknown }): Promise<{ text: string; id: string; revision: number }> {
+    return this.call("POST", "/artifacts", { token, body: request });
+  }
   stat(token: string, file: string): Promise<WorkspaceStat> {
     return this.call("GET", `/stat?${new URLSearchParams({ path: file })}`, { token });
   }

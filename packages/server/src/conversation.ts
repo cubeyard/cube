@@ -73,14 +73,17 @@ export class Conversations {
   private readonly claude: ClaudeRuntime | null;
   /** What `cube service` in a machine shows as its URLs (portal.ts). */
   private readonly portal: (thread: Thread) => GuestPortal;
+  /** Host tools a Pi thread's agent gets (artifacts). */
+  private readonly hostTools: ((thread: Thread) => Parameters<typeof openAgent>[0]["hostTools"]) | null;
   private closing = false;
   /** Told a Pi agent's usage just before the agent closes (usage-service.ts):
    * until it opens again, nothing else may read its store. */
   onUsage: ((id: string, state: UsageState) => void) | null = null;
   /** `claude` is null when this host has no Claude Code to start. */
   constructor(options: { registry: Registry; directory: string; models: Models; machines: ThreadMachines; claude?: ClaudeRuntime | null;
-    portal?: (thread: Thread) => GuestPortal }) {
+    portal?: (thread: Thread) => GuestPortal; hostTools?: (thread: Thread) => Parameters<typeof openAgent>[0]["hostTools"] }) {
     this.registry = options.registry; this.directory = options.directory; this.models = options.models;
+    this.hostTools = options.hostTools ?? null;
     this.machines = options.machines; this.claude = options.claude ?? null;
     this.portal = options.portal ?? (() => ({ reason: "this cube installation has no portal" }));
   }
@@ -293,7 +296,9 @@ export class Conversations {
     if (cached) return cached;
     this.ready(thread);
     const loading = (async () => {
-      const agent = await openAgent({ directory: path.join(this.directory, id), binding: this.binding(thread), workspace: this.workspace(id), models: this.models, model: thread.model });
+      const hostTools = this.hostTools?.(thread);
+      const agent = await openAgent({ directory: path.join(this.directory, id), binding: this.binding(thread), workspace: this.workspace(id), models: this.models, model: thread.model,
+        ...hostTools ? { hostTools } : {} });
       try {
         // Pi deduplicates by request id: a reopen finds the first submission
         // instead of submitting it again, whatever happened since.

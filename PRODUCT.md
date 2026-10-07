@@ -39,6 +39,11 @@ Provider and GitHub credentials remain on the host: the machine sees only a
 placeholder, and `gh` and `git push` work through the gateway. A machine the
 agent touched is retained at archive.
 
+OptChat and threads can write work artifacts: documents with revisions the
+user reads, comments on (comments reach the author as a message, never
+interrupting a working thread) and acts on through confirmed, typed actions
+(a pull request merge). They are work surfaces, not tasks.
+
 A project change never reuses another project's machine. Remote workspace
 transfer, service portals, thread-to-thread tasks, machine snapshots and
 per-thread network policy are not currently exposed. Do not show controls or

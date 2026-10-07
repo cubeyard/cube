@@ -77,6 +77,24 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## Mermaid and the libraries it bundles
+
+The built web application contains code from
+[Mermaid](https://github.com/mermaid-js/mermaid) 11, loaded only on an
+artifact page that shows a diagram, and the libraries it depends on.
+
+Copyright (c) 2014-2025 Knut Sveidqvist and contributors
+
+Mermaid is licensed under the MIT License reproduced in the Svelte section
+above. The libraries it bundles retain their own licenses, reproduced in
+their packages: MIT (among them `@mermaid-js/parser`, `@braintree/sanitize-url`,
+`@iconify/utils`, `cytoscape`, `dagre-d3-es`, `dayjs`, `katex`, `khroma`,
+`marked`, `roughjs`, `stylis`, `uuid`), ISC (`d3` and its modules,
+`delaunator`, `internmap`), BSD-3-Clause (`d3-sankey`, `rw` and parts of d3),
+Apache-2.0 (`@chevrotain/types`), MPL-2.0 or Apache-2.0 at the user's choice
+(`dompurify`, used here under Apache-2.0) and the Unlicense
+(`robust-predicates`).
+
 ## Archivo and JetBrains Mono
 
 The built web application contains fonts from

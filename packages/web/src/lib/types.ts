@@ -47,3 +47,5 @@ export interface ThreadModels {
   /** The chat only: whether its selected model takes images, and why not. */
   images?: { supported: boolean; reason: string | null };
 }
+export type { ActionPreview, ArtifactListItem, ArtifactView } from "../../../server/src/artifact-service.ts";
+export type { ActionRun, Anchor, ArtifactAction, ArtifactComment, CommentBatch, Revision } from "../../../server/src/artifacts.ts";
