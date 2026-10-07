@@ -15,7 +15,7 @@ import { workspaceRoute } from "./workspace-http.ts";
 import { IrohRunnerClient, loadRunnerConfig, runnerClient, type RunnerNetwork, type TrustedRunnerHealth } from "./iroh-node.ts";
 import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
 import { GatewaySupervisor, locateGateway, widestNetwork } from "./gateway.ts";
-import { machineFor, ThreadVms, type ThreadMachines } from "./vm.ts";
+import { errorText, machineFor, ThreadVms, type ThreadMachines } from "./vm.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
@@ -167,7 +167,9 @@ export async function createCubed(options: {
   allowedHosts?: string[];
   updates?: UpdateService;
   runnerHealth?: (runner: Runner) => Promise<TrustedRunnerHealth>;
-  /** How often cubed probes every enrolled runner's health (default 5 min). */
+  /** How often cubed probes every enrolled runner's health (default 1 min:
+   * one short status exchange per runner; placement trusts a report for
+   * RUNNER_FRESH_MS, two intervals). */
   runnerProbeIntervalMs?: number;
   /** The argv that starts Claude Code; null disables claude-code threads.
    * Default: findClaude(). */
@@ -219,6 +221,10 @@ export async function createCubed(options: {
   const configuredHosts = options.allowedHosts ?? process.env.CUBED_ALLOWED_HOSTS?.split(",") ?? [];
   const allowedHosts = new Set(["localhost", "127.0.0.1", "[::1]", ...configuredHosts.map(host => host.trim()).filter(Boolean)]);
   const runnerHealth = options.runnerHealth ?? (runner => runnerClient(runner).health());
+  /** A machine that waits for a runner is still starting (`waiting` says
+   * why), unless its agent is open on it already. */
+  const threadState = (id: string) => conversations.error(id) ? "error"
+    : conversations.starting(id) || (conversations.waiting(id) && !conversations.agentOpen(id)) ? "starting" : "ready";
   const runnerView = (id: string) => registry.runnerStatuses().find(runner => runner.id === id);
   const probeRunner = async (id: string) => {
     const runner = registry.getRunner(id);
@@ -228,7 +234,7 @@ export async function createCubed(options: {
     try {
       registry.recordRunnerProbe(id, { health: await runnerHealth(runner) });
     } catch (error) {
-      registry.recordRunnerProbe(id, { error: error instanceof Error ? error.message : String(error) });
+      registry.recordRunnerProbe(id, { error: errorText(error) });
     }
     return runnerView(id)!;
   };
@@ -263,7 +269,7 @@ export async function createCubed(options: {
   };
   // OptChat, the user's one endless chat: opened once a model exists,
   // retried by the recovery loop until then.
-  const probeIntervalMs = options.runnerProbeIntervalMs ?? 5 * 60_000;
+  const probeIntervalMs = options.runnerProbeIntervalMs ?? 60_000;
   const optchatThreads = { ...cubeThreads({ registry, conversations, catalog: threadCatalog, runners: () => observeRunners(registry, probeIntervalMs) }), usage: usageQuery };
   let optchatError = "";
   // Inside the promise: a bad CUBED_OPTCHAT_COMPACTOR must reject here,
@@ -500,7 +506,7 @@ export async function createCubed(options: {
       if (parts[0] === "api" && parts[1] === "threads") {
         const id = parts[2];
         if (parts.length > 4 && parts[3] !== "workspace") return json({ error: "not found" }, 404);
-        if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...thread, state: conversations.error(thread.id) ? "error" : conversations.starting(thread.id) ? "starting" : "ready", error: conversations.error(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
+        if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...thread, state: threadState(thread.id), error: conversations.error(thread.id), waiting: conversations.waiting(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
         if (!id && method === "POST") {
           const model = await selection(body.model);
           const thread = registry.createThread(text("projectId"), text("requestId"), model, text("text"), model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi");

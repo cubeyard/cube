@@ -328,12 +328,32 @@ operations interrupted.
 
 Registry allocation counts a runner's open threads and inserts the new one in
 one `BEGIN IMMEDIATE` transaction, so concurrent requests, also from another
-process, cannot take a runner's last slot. It chooses the runner with the
-lowest share of used slots, runners with a failed machine last. A runner that
-reports no bound (before 0.7.0) has one slot. When a runner still refuses a
-machine (a lowered bound, its free-disk floor), a thread whose agent storage
-and lease store do not exist yet moves to another runner with room; nothing of it existed
-on the first one. cubed keeps one client per
+process, cannot take a runner's last slot. It chooses by the runner's last
+observation (`runnerFitness`: `ready` if it answered ready within two minutes,
+`down` if its last contact failed or it was not ready and its retry, 5 s
+doubling to 60 s, is not due, otherwise `unverified`), then the lowest share
+of used slots, runners with a failed machine last. A runner that reports no
+bound (before 0.7.0) has one slot.
+
+A thread's placement on its runner is `provisional` (no `vm.allocate` for its
+machine reached the runner), `requested` (kept before the allocation is sent)
+or `allocated` (the runner returned the machine, from `vm.allocate` or
+`vm.inspect`). Before anything of a provisional thread is sent, an
+`unverified` runner is asked `node.status` (one question per runner at a time)
+and a `down` one is not asked. A thread whose runner does not answer, is not
+ready or refuses the machine moves, in one registry transaction, to another
+runner with a free slot that is not down, provided it is provisional and its
+agent storage and lease store do not exist yet. A requested thread moves only
+after its runner refused a request fenced by the thread's newest epoch
+(`CAPACITY_EXCEEDED`, `DRAINING`) and `vm.inspect` then found no machine, so
+no older request can still make one; a lost answer or a runner that does not
+answer keeps it there. An allocated thread never moves. A thread that cannot
+start for want of a runner waits (`RunnerWait`): its workspace stays
+`allocating`, it holds its slot, it reads as starting (`waiting` in the API
+and OptChat's thread state give the reason), and the recovery loop tries
+again. A thread on a runner that is down sends it nothing until its retry is
+due; a template build machine left on a runner the thread moved away from is
+deleted once that runner answers. cubed keeps one client per
 runner, so the threads' runner calls queue on one Iroh identity. Project deletion never owns or
 deletes a runner and remains blocked while any thread history references the
 project. Runner contact is authenticated `node.status` evidence. A failed latest

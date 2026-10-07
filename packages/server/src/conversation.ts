@@ -13,7 +13,7 @@ import type { ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-event
 import { serveThreadEvents } from "./thread-events-http.ts";
 import { readClaudeHistory, readPiHistory, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { Registry, threadAgent, type HookOutcome, type Thread } from "./registry.ts";
-import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWorkspace, type ThreadMachines } from "./vm.ts";
+import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWorkspace, RunnerWait, type ThreadMachines } from "./vm.ts";
 import { VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
 import type { ModelSelection } from "./models.ts";
@@ -48,6 +48,9 @@ export class Conversations {
   private readonly agents = new Map<string, Promise<Agent>>();
   private readonly workspaces = new Map<string, { workspace: VmWorkspace; leases: LeaseStore }>();
   private readonly failures = new Map<string, string>();
+  /** Threads whose machine waits for a runner (RunnerWait): not a failure;
+   * the recovery loop tries again. */
+  private readonly waits = new Map<string, string>();
   private readonly activations = new Map<string, Promise<void>>();
   /** Activations that only check a machine already running under an open
    * agent (the recovery loop's rounds): not a start unless the check finds
@@ -98,6 +101,8 @@ export class Conversations {
     await Promise.all(work);
   }
   error(id: string): string | null { return this.failures.get(id) ?? null; }
+  /** Why the thread's machine waits for a runner, if it does. */
+  waiting(id: string): string | null { return this.waits.get(id) ?? null; }
   /** Whether the thread's machine is being started (booted, prepared or its
    * agent opened); a check of a running machine under an open agent is not. */
   starting(id: string): boolean { return this.activations.has(id) && !this.checks.has(id); }
@@ -121,10 +126,18 @@ export class Conversations {
         if (this.isClaude(id)) await this.claudeAgent(id);
         else await this.agent(id);
         this.failures.delete(id);
+        this.waits.delete(id);
       } catch (error) {
         // An archive that ended is not this thread's failure.
         if (error instanceof ThreadArchiving || this.registry.getThread(id)?.archived !== false) return;
         const message = error instanceof Error ? error.message : String(error);
+        if (error instanceof RunnerWait) {
+          if (this.waits.get(id) !== message) log.info("waiting for a runner", { thread: id, reason: message });
+          this.waits.set(id, message);
+          this.failures.delete(id);
+          return;
+        }
+        this.waits.delete(id);
         if (this.failures.get(id) !== message) log.warn("activation failed", { thread: id, error: message });
         this.failures.set(id, message);
       }
@@ -231,6 +244,8 @@ export class Conversations {
         ? { remote: primary.url, ref: primary.base.startsWith("refs/heads/") ? primary.base : `refs/heads/${primary.base}`, oid: primary.baseOid }
         : null);
     } catch (error) {
+      // Nothing failed: the machine waits for a runner, still allocating.
+      if (error instanceof RunnerWait) throw error;
       const message = `workspace allocation failed: ${error instanceof Error ? error.message : String(error)}`;
       this.registry.markWorkspaceFailed(id, message);
       throw new Error(message, { cause: error });
@@ -317,7 +332,7 @@ export class Conversations {
   private ready(thread: Thread): void {
     if (releaseUnfinished(thread)) throw new Error(this.failures.get(thread.id) ?? "thread workspace is releasing");
     if (thread.workspaceState !== "available") {
-      throw new Error(this.failures.get(thread.id) ?? thread.workspaceError ?? "the thread machine is not ready");
+      throw new Error(this.failures.get(thread.id) ?? this.waits.get(thread.id) ?? thread.workspaceError ?? "the thread machine is not ready");
     }
   }
   async claudeAgent(id: string): Promise<ClaudeAgent> {
@@ -538,6 +553,7 @@ export class Conversations {
       const released = await this.machines.release(thread, thread.vm?.retain ?? true);
       this.registry.finishRelease(id);
       this.failures.delete(id);
+      this.waits.delete(id);
       return released;
     } catch (error) {
       const message = `workspace release failed: ${error instanceof Error ? error.message : String(error)}`;

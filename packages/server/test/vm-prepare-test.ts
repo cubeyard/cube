@@ -39,6 +39,8 @@ try {
   const fake = (name: string) => ({
     target: { peer: "0".repeat(64), network: "loopback" as const, address: "127.0.0.1:1" },
     nodeId: `node-${name}`,
+    health: async () => ({ lifecycle: "ready", draining: false, error: null, activeVms: 0, runningVms: 0, maxActiveVms: 8,
+      retainedVms: 0, retainedBytes: 0, softwareVersion: "0.8.0", protocolVersion: 3 }),
     describe: async () => ({ softwareVersion: "0.8.0", capabilities, platform: "linux-x86_64", baseImageSha256: IMAGE,
       limits: { maxFrameBytes: 1048576, requestTimeoutMs: 5000, maxVcpus: 2, maxMemoryMiB: 4096, maxDiskGiB: 32, maxSeedBytes: 65536, maxActiveVms: 8 } }),
     vmInspect: async (ref: Ref) => {
