@@ -58,6 +58,9 @@
     : `thread ${artifact.thread?.title ? `“${artifact.thread.title}”` : `[${artifact.author.thread.slice(0, 8)}]`}`);
   const authorLink = $derived(artifact?.author.kind === "thread" && artifact.thread && !artifact.thread.archived ? `#/t/${artifact.author.thread}` : artifact?.author.kind === "optchat" ? "#/chat" : null);
   const meta = $derived(view?.revisions.find((item) => item.number === shown?.number) ?? null);
+  // While a comment is written, even the newest revision is named: following
+  // the newest is what the composer pins.
+  const revisionHash = (value: number) => value === head && !pending ? `#/a/${artifactId}` : `#/a/${artifactId}?rev=${value}`;
   const runs = (action: string) => view?.actionRuns.filter((run) => run.action === action) ?? [];
   const dark = () => matchMedia("(prefers-color-scheme: dark)").matches;
 
@@ -185,6 +188,8 @@
     commentError = null;
     try {
       await addComment(artifactId, { revision: pending.revision, anchor: pending.anchor, body: draftText.trim(), requestId: uid() });
+      // The page stays on the revision the comment was written on.
+      if (!requested && pending.revision !== head) location.hash = `#/a/${artifactId}?rev=${pending.revision}`;
       pending = null;
       draftText = "";
       await load();
@@ -320,7 +325,7 @@
           <span class="sr-only">revision</span>
           <select aria-label="revision" value={String(number)} onchange={(event) => {
             const value = Number((event.currentTarget as HTMLSelectElement).value);
-            location.hash = value === head ? `#/a/${artifactId}` : `#/a/${artifactId}?rev=${value}`;
+            location.hash = revisionHash(value);
           }}>
             {#each view.revisions.toReversed() as item (item.number)}
               <option value={String(item.number)}>revision {item.number}{item.number === head ? " · newest" : ""}</option>
@@ -332,7 +337,7 @@
       {#if older}
         <div class="strip-note" role="status">
           <span class="strip-note-text">revision {shown?.number} of {head}: an older version. Comments made here keep this revision; its actions do not run.</span>
-          <a class="key" href={`#/a/${artifactId}`}>newest</a>
+          <a class="key" href={revisionHash(head)}>newest</a>
         </div>
       {/if}
       {#if loadError}<div class="strip-note bad" role="alert"><span class="strip-note-text">{loadError} — retrying</span></div>{/if}

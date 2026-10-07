@@ -137,6 +137,10 @@ try {
   const kept = (await api(`/api/artifacts/${notes.id}`)).comments.find((item: { body: string }) => item.body === "Name the helper.");
   assert.equal(kept.revision, 1, "the comment keeps the revision it was written on");
   assert.equal(kept.anchor.quote, "The guest runs the helper as root");
+  // Saved, the page stays on that revision; "newest" then shows the newer one.
+  await page.locator(".strip-note", { hasText: "revision 1 of 2" }).waitFor();
+  await page.locator(".strip-note a", { hasText: "newest" }).click();
+  await page.locator("article.artifact-body", { hasText: "A newer revision" }).waitFor();
   await page.goto(`${url}/#/t/${thread}`);
   await page.getByText("Thanks: the guest is the thread's own VM").waitFor({ timeout: 30_000 });
   await shoot(page, "07-thread-received");
