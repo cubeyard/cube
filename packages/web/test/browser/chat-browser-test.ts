@@ -241,12 +241,12 @@ await scenario("a message sent while the agent works shows at once and the run r
   assertSend(await watch.since("also this"), "also this");
 });
 
-for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844, touch: true }]) {
+for (const viewport of [{ width: 1280, height: 800 }, { width: 1024, height: 768, touch: true }, { width: 390, height: 844, touch: true }]) {
   await scenario("the chat's rails are one band and the composer's keys sit on the text's line", async page => {
     const strip = await box(page, ".thread-strip");
     const now = await box(page, ".now-head");
     near(now.height, strip.height, "the now head is as tall as the chat strip");
-    if (viewport.touch) {
+    if (viewport.width <= 832) {
       // stacked: the now bay above the strip, labels on one left edge
       near((await textBox(page, ".now-head h2")).left, (await box(page, ".thread-strip .lamp")).left, "the now label starts where the strip's lamp does");
     } else {
@@ -299,7 +299,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844,
 }
 
 await scenario("the + key opens the file picker from the keyboard; picked, pasted and dropped images attach and send", async (page, host) => {
-  // Playwright takes the chooser only once it listens, which takes a round trip.
+  // Listening before the key press, so the chooser it opens is caught.
   const choosing = page.waitForEvent("filechooser");
   const composer = page.locator(".composer textarea");
   await composer.focus();
@@ -317,6 +317,8 @@ await scenario("the + key opens the file picker from the keyboard; picked, paste
     data.items.add(new File([new Uint8Array(bytes.concat(1))], "pasted.png", { type: "image/png" }));
     element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
   }, [...PNG]);
+  // one upload at a time, so the host's ids follow picked, pasted, dropped
+  await page.waitForFunction(() => document.querySelectorAll(".attachment").length === 2 && [...document.querySelectorAll(".attachment-state")].every(state => state.textContent === "ready"));
   await page.locator(".composer").evaluate((element, bytes) => {
     const data = new DataTransfer();
     data.items.add(new File([new Uint8Array(bytes.concat(0))], "dropped.png", { type: "image/png" }));
@@ -328,6 +330,7 @@ await scenario("the + key opens the file picker from the keyboard; picked, paste
   await page.locator(".conversation-message.user", { hasText: "look at these" }).locator(".message-images li").first().waitFor();
   assert.equal(host.prompts.length, 1);
   assert.deepEqual(host.prompts[0]!.images, ["img-1", "img-2", "img-3"], "the picked, pasted and dropped images went");
+  assert.deepEqual(host.prompts[0]!.images!.map(id => host.media.get(id)!.body.at(-1)), [PNG.at(-1), 1, 0], "in that order");
 });
 
 await browser.close();

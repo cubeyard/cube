@@ -406,7 +406,8 @@ in a page banner. Other project and thread controls retain their treatment.
   signal; hover mixes 8% white in. One primary per screen: "new thread" on
   the list and "save" in project configuration. The thread rail has no primary action.
 - **Icon key** (`.key.icon`): square-ish padding, always `title` + `aria-label`.
-- **Round key** (`.key.round`): the 2.4rem circular signal send key.
+- **Round key** (`.key.round`): a 2.4rem circular signal key. The composer's
+  send key (`.send-key`) is the same circle at one text line's height.
 - **Held toggle** (`.key.held`): pressed-in look (`--s1` face, down shadow) for
   the open files-shelf key, with `aria-expanded`.
 - **Danger hover** (`.key.danger`): `--bad` ink on `--bad-soft` wash.
@@ -538,7 +539,7 @@ title and the status word, never colour alone; then the project in mono, a
 thread's own state in muted mono. Links are underlined ink, not signal, and say
 nothing about a pull request's state. Recently closed tasks sit in a native
 disclosure. Under 52rem the bay stacks above the conversation, capped at 38vh
-and foldable by a chevron key, so the composer always stays on screen.
+and foldable by a chevron rail toggle, so the composer always stays on screen.
 
 ### Named Rules
 **The Actions-In-The-Module Rule.** A module's controls live inside it, on its

@@ -374,7 +374,7 @@
   {#if error || historyError || status.state === "failed"}<div class="conversation-error" role="alert">{error ?? historyError ?? status.error ?? "the run failed"}</div>{/if}
   <form class="composer" aria-busy={busy} onsubmit={(event) => { event.preventDefault(); void submit(); }}
     ondragover={(event) => { if (images && event.dataTransfer?.types.includes("Files")) event.preventDefault(); }} ondrop={onDrop}>
-    <span class="sr-only" id="composer-hint">enter to send · shift enter for a new line{images ? " · paste or drop images to attach them" : ""}</span>
+    <span class="sr-only" id="composer-hint">enter to send · shift enter for a new line{images ? " · attach images with the + key, or paste or drop them" : ""}</span>
     {#if images}<span class="sr-only" role="status">{!attachments.length ? "" : uploading ? "uploading images…" : failedAttachment ? "an image failed to upload" : `${attachments.length} ${attachments.length === 1 ? "image" : "images"} attached`}</span>{/if}
     {#if images && (attachments.length || attachNote)}
       <div class="composer-attachments">
