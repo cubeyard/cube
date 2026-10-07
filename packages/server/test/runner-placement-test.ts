@@ -391,17 +391,33 @@ try {
     assert.equal(moved.vm!.preparation?.reason, "an earlier template build machine on another runner is not deleted yet");
     assert.equal([...a.vms.values()].filter(vm => vm.state !== "released").length, 1, "a still has the build machine");
     w.registry.markWorkspaceAvailable(thread.id);
-    // a answers again; the thread's next check deletes the build machine there.
+    // A start does not wait on a, which is still down: nothing is sent to it.
+    a.calls.length = 0;
+    await assert.rejects(vms.start(w.get(thread.id)), /fixture stops here/);
+    assert.deepEqual(a.calls, []);
+    // a answers the background probe again; the thread's next check deletes the build machine there.
     a.down = false;
-    w.registry.recordRunnerProbe("a", { error: "NODE_UNAVAILABLE" }, Date.now() - 120_000);
+    w.registry.recordRunnerProbe("a", { health: ready(2) });
     await assert.rejects(vms.start(w.get(thread.id)), /fixture stops here/);
     assert.equal(w.get(thread.id).vm!.build, undefined);
     assert.deepEqual([...a.vms.values()].map(vm => vm.state), ["released"], "the build machine is gone; a's slot is free");
     assert.equal(w.get(thread.id).runnerId, "b");
     w.invariants();
+    // An archive does not wait for a runner that is gone: the record stays as evidence.
+    const again = w.create();
+    a.templates = true;
+    a.dieInBuild = true;
+    assert.equal(again.runnerId, "a");
+    await assert.rejects(vms.start(again), /fixture stops here/);
+    assert.equal(w.get(again.id).vm!.build?.runnerId, "a");
+    w.registry.beginRelease(again.id);
+    assert.deepEqual(await vms.release(w.get(again.id), false), { retained: false });
+    w.registry.finishRelease(again.id);
+    assert.equal(w.get(again.id).vm!.build?.runnerId, "a", "where the build machine is stays recorded");
+    w.invariants();
     await vms.close();
     w.registry.close();
-    console.log("ok: a runner lost during a template build: the thread moves, starts fresh, and the build machine is deleted once that runner answers");
+    console.log("ok: a runner lost during a template build: the thread moves and starts fresh; its build machine is deleted once that runner answers, without holding up starts or archives meanwhile");
   }
 
   // --- several threads leave a dead runner for one free slot at once ---

@@ -15,7 +15,7 @@ import { workspaceRoute } from "./workspace-http.ts";
 import { IrohRunnerClient, loadRunnerConfig, runnerClient, type RunnerNetwork, type TrustedRunnerHealth } from "./iroh-node.ts";
 import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
 import { GatewaySupervisor, locateGateway, widestNetwork } from "./gateway.ts";
-import { machineFor, ThreadVms, type ThreadMachines } from "./vm.ts";
+import { errorText, machineFor, ThreadVms, type ThreadMachines } from "./vm.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
@@ -234,7 +234,7 @@ export async function createCubed(options: {
     try {
       registry.recordRunnerProbe(id, { health: await runnerHealth(runner) });
     } catch (error) {
-      registry.recordRunnerProbe(id, { error: error instanceof Error ? error.message : String(error) });
+      registry.recordRunnerProbe(id, { error: errorText(error) });
     }
     return runnerView(id)!;
   };

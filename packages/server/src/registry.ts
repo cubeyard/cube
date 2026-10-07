@@ -311,11 +311,12 @@ export class Registry {
       || a.active / a.slots - b.active / b.slots || (b.slots - b.active) - (a.slots - a.active));
   }
   /** A runner's last observation and what placement may do with it. */
-  runnerFitness(id: string, now = Date.now()): { fitness: RunnerFitness; retryAt: number | null; lastContactAt: number | null; unreachableSince: number | null; error: string | null; health: TrustedRunnerHealth | null } | null {
-    const row = this.db.prepare("SELECT last_attempt_at,last_contact_at,unreachable_since,last_error,health FROM runner_operator WHERE runner_id=?").get(id);
+  runnerFitness(id: string, now = Date.now()): { fitness: RunnerFitness; retryAt: number | null; lastContactAt: number | null; unreachableSince: number | null; error: string | null; health: TrustedRunnerHealth | null; retired: boolean } | null {
+    const row = this.db.prepare("SELECT last_attempt_at,last_contact_at,unreachable_since,last_error,health,retired_at FROM runner_operator WHERE runner_id=?").get(id);
     if (!row) return null;
     const observed = observation(row);
-    return { ...runnerFitness(observed, now), lastContactAt: observed.lastContactAt, unreachableSince: observed.unreachableSince, error: observed.error, health: observed.health };
+    return { ...runnerFitness(observed, now), lastContactAt: observed.lastContactAt, unreachableSince: observed.unreachableSince, error: observed.error, health: observed.health,
+      retired: row.retired_at != null };
   }
   /** Moves an open thread whose machine was never allocated to another
    * runner with a free slot that is not down and not in `exclude`. Only a

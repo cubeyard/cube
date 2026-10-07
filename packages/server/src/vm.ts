@@ -152,7 +152,13 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     const vm = machine(thread);
     const runner = this.runner(thread);
     const ref: VmRef = { threadId: thread.id, vmId: vm.vmId };
-    await this.abandonBuild(thread, runner);
+    const left = this.options.registry.getThread(thread.id)?.vm?.build?.runnerId;
+    if (left && left !== thread.runnerId) {
+      // A build machine on a runner the thread moved away from (cubed's own,
+      // no agent) does not hold up the archive while that runner is gone; its
+      // record stays on the thread as the evidence of where it is.
+      if (!await this.abandonBuildElsewhere(thread, true)) this.log.warn("build machine left on another runner", { thread: thread.id, runner: left });
+    } else await this.abandonBuild(thread, runner);
     await this.transports.get(thread.id)?.close();
     this.transports.delete(thread.id);
     this.attached.delete(vm.vmId);
@@ -218,7 +224,10 @@ export class ThreadVms implements ThreadMachines, EgressVms {
         const runner = this.runner(thread);
         await this.options.gateway.ensureNetwork(runner.target.network);
         const { client: gateway } = await this.options.gateway.ready();
-        const [{ vm: current }, status] = await Promise.all([runner.vmInspect({ threadId: thread.id, vmId: vm.vmId }), gateway.status(vm.vmId)]);
+        const [{ vm: current }, status] = await Promise.all([runner.vmInspect({ threadId: thread.id, vmId: vm.vmId }).catch((error: unknown) => {
+          if (contactLost(error)) this.observe(thread.runnerId, { error: errorText(error) });
+          throw error;
+        }), gateway.status(vm.vmId)]);
         if (current.state === "running" && status) return { booted: false };
         this.attached.delete(vm.vmId);
         this.log.warn("machine is not running; starting it again", { thread: thread.id, vm: vm.vmId, state: current.state });
@@ -284,7 +293,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     if (refusal(error)) {
       const why = (error as IrohNodeError).message;
       return new RunnerWait(`the runner has no room for this thread's machine (${why === "CAPACITY_EXCEEDED" ? "it hosts as many machines as it can"
-        : why === "DRAINING" ? "it is draining" : why}); cube tries again every 30 seconds`, { cause: error });
+        : why === "DRAINING" ? "it is not taking new machines" : why}); cube tries again every 30 seconds`, { cause: error });
     }
     if (!(contactLost(error) || error instanceof RunnerUnusable)) return error;
     if (error instanceof RunnerUnusable && !error.transient) return new Error(`runner ${this.nodeId(thread.runnerId)} ${error.message}`, { cause: error });
@@ -352,14 +361,25 @@ export class ThreadVms implements ThreadMachines, EgressVms {
 
   /** A template build machine left on a runner the thread moved away from
    * (cubed's own, no agent) holds a slot there: it is deleted once that
-   * runner answers. Not asked while it is down; a failure only waits. */
-  private async abandonBuildElsewhere(thread: Thread): Promise<void> {
-    const left = thread.vm?.build?.runnerId;
-    if (!left || left === thread.runnerId || this.options.registry.runnerFitness(left)?.fitness === "down") return;
-    try { await this.abandonBuild(thread, this.runner(thread)); }
+   * runner answered ready lately (the background probe), so a thread's start
+   * never waits on a runner that is gone. `now`: try unless it is down (an
+   * archive). A retired runner took the machine with it: the record goes.
+   * Returns whether nothing is left. */
+  private async abandonBuildElsewhere(thread: Thread, now = false): Promise<boolean> {
+    const left = this.options.registry.getThread(thread.id)?.vm?.build?.runnerId;
+    if (!left || left === thread.runnerId) return true;
+    const observed = this.options.registry.runnerFitness(left);
+    if (!observed || observed.retired) {
+      this.log.warn("build machine record dropped: its runner is retired", { thread: thread.id, runner: left });
+      this.options.registry.updateThreadVm(thread.id, { build: undefined });
+      return true;
+    }
+    if (now ? observed.fitness === "down" : observed.fitness !== "ready") return false;
+    try { await this.abandonBuild(thread, this.runner(thread)); return true; }
     catch (error) {
       if (contactLost(error)) this.observe(left, { error: errorText(error) });
       this.log.warn("deleting a build machine on another runner failed", { thread: thread.id, runner: left, error });
+      return false;
     }
   }
 
@@ -772,14 +792,14 @@ function contactLost(error: unknown): boolean {
   return error instanceof IrohNodeError && (error.code === "NODE_UNAVAILABLE" || error.code === "COMPLETION_UNKNOWN");
 }
 /** An error as a runner observation records it: an Iroh error begins with its code. */
-function errorText(error: unknown): string {
+export function errorText(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return error instanceof IrohNodeError && !message.startsWith(error.code) ? `${error.code}: ${message}` : message;
 }
 /** Completes "the runner …". */
 function unusableReason(error: unknown): string {
   if (error instanceof RunnerUnusable) return error.message;
-  if (refusal(error)) return (error as IrohNodeError).remoteCode === "DRAINING" ? "is draining" : "has no room";
+  if (refusal(error)) return (error as IrohNodeError).remoteCode === "DRAINING" ? "is not taking new machines" : "has no room";
   return "does not answer";
 }
 function lifecycleText(health: TrustedRunnerHealth | null): string {
