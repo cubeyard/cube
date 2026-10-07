@@ -32,9 +32,9 @@ owns the product. The user-facing unit is a thread.
 
 Projects retain repository configuration and host-side access checks. A new
 thread leases one available runner from the installation-wide pool and gets
-its own virtual machine there, with `/workspace` pinned to the project's checked
-commits; an idle archived thread returns that lease. The thread supports
-streaming chat, model choice, bounded shell tools, stop, rename and archive.
+its own virtual machine there, with `/workspace` pinned to the commits its
+repositories' branches have when it starts; an idle archived thread returns
+that lease. The thread supports streaming chat, model choice, bounded shell tools, stop, rename and archive.
 Provider and GitHub credentials remain on the host: the machine sees only a
 placeholder, and `gh` and `git push` work through the gateway. A machine the
 agent touched is retained at archive.

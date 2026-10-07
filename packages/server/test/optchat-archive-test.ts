@@ -112,7 +112,7 @@ try {
     const conversations = { starting: () => starting, error: () => error,
       async archive() { archives++; if (working || waiting) throw new ThreadWorking(waiting); thread.archived = true; return { retained: false, reason: "clean" }; } } as unknown as Conversations;
     const registry = { getThread: () => thread, runnerSlots: () => ({ free: 1, total: 1, runners: 1 }) } as unknown as Registry;
-    const adapter = cubeThreads({ registry, conversations, catalog: async () => [], runners: () => { throw new Error("unused"); } });
+    const adapter = cubeThreads({ registry, conversations, catalog: async () => [], runners: () => { throw new Error("unused"); }, latestCommits: () => { throw new Error("unused"); } });
     await assert.rejects(adapter.archive!(DONE), /^Error: its machine is still starting or reattaching; try again shortly$/);
     assert.equal(archives, 0, "nothing waits for the machine");
     starting = false; working = true;

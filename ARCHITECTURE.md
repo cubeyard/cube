@@ -301,10 +301,17 @@ machines included; the runner row's
 `available/allocating/busy/releasing/failed` is a summary of those threads in
 the shape a one-machine runner always had, `available` while a slot is free;
 the runner journal persists each VM record and reconciles interrupted
-transitions without deleting a disk. Thread creation captures the checked
-project revision and each repository's normalized URL, resolved branch and exact
-base OID, allocates a runner and returns; `ThreadVms` (`vm.ts`) then allocates
-the VM, starts it with a cloud-init seed (`vm-seed.ts`: the pinned host key,
+transitions without deleting a disk. Thread creation fetches each repository
+again and resolves its configured branch, or the default branch the remote
+advertises now, to an exact base OID: a new thread starts at the latest
+commits, never at the project's last check, and a fetch that fails starts no
+thread. Project configuration names branches only, so there is no immutable
+ref to keep; the pin is the thread's, fixed at creation. Creation captures the
+project revision (a project edited meanwhile fails the creation), each
+repository's normalized URL, resolved branch and base OID, allocates a runner
+and returns. A replayed creation request returns its thread with its original
+pins, and retries, reattach and template reuse check out those pins, never a
+newer commit. `ThreadVms` (`vm.ts`) then allocates the VM, starts it with a cloud-init seed (`vm-seed.ts`: the pinned host key,
 the restricted client key, the CA, the placeholders and the guest helper),
 attaches it to the gateway and waits until the guest helper answers ready (the
 thread is `starting` meanwhile). The first activation provisions the pinned

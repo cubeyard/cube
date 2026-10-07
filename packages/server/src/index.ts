@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import type { Models } from "@earendil-works/pi-ai";
 import { GitService, normalizeRepoUrl } from "@cube/git";
-import { NO_HOOKS, projectHooks, Registry, threadAgent, type Project, type Runner } from "./registry.ts";
+import { NO_HOOKS, projectHooks, Registry, threadAgent, type Project, type ResolvedRepositories, type Runner } from "./registry.ts";
 import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { Conversations } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
@@ -275,7 +275,7 @@ export async function createCubed(options: {
   const diagnostics = (id: string) => threadDiagnostics({ registry, conversations, version: `${versionInfo().version} (${versionInfo().commit})`,
     machine: machines.diagnose ? thread => machines.diagnose!(thread) : undefined,
     runner: runnerId => observeRunners(registry, probeIntervalMs).runners.find(runner => runner.id === runnerId) ?? null }, id);
-  const optchatThreads = { ...cubeThreads({ registry, conversations, catalog: threadCatalog, runners: () => observeRunners(registry, probeIntervalMs) }), usage: usageQuery,
+  const optchatThreads = { ...cubeThreads({ registry, conversations, catalog: threadCatalog, runners: () => observeRunners(registry, probeIntervalMs), latestCommits }), usage: usageQuery,
     diagnose: async (id: string) => { const bundle = await diagnostics(id); return bundle && formatDiagnostics(bundle); } };
   let optchatError = "";
   // Inside the promise: a bad CUBED_OPTCHAT_COMPACTOR must reject here,
@@ -316,6 +316,24 @@ export async function createCubed(options: {
     if (current.revision !== project.revision) return projectView(current);
     registry.saveProject(project);
     return projectView(project);
+  }
+  /** A new thread starts at the latest commits, not at the project's last
+   * check: each repository's configured branch (or the default branch the
+   * remote advertises now) is fetched and resolved again. A failure starts
+   * no thread rather than one at older commits. */
+  async function latestCommits(projectId: string): Promise<ResolvedRepositories> {
+    const project = registry.getProject(projectId);
+    if (!project) throw new Error("project not found");
+    if (project.status !== "ready") throw new Error("check the project before starting a thread");
+    const repositories = await Promise.all(project.repositories.map(async repository => {
+      try {
+        const result = await git.prepareRepository(repository.url, repository.base);
+        return { url: repository.url, base: result.base, baseOid: result.baseOid };
+      } catch (error) {
+        throw Object.assign(new Error(`fetching the latest ${repository.base ?? "default branch"} of ${repository.url} failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
+      }
+    }));
+    return { projectRevision: project.revision, repositories };
   }
   const server = http.createServer(async (request, response) => {
     const json = (body: unknown, status = 200) => { response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); response.end(JSON.stringify(body)); };
@@ -521,7 +539,12 @@ export async function createCubed(options: {
         if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...thread, state: threadState(thread.id), error: conversations.error(thread.id), waiting: conversations.waiting(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
         if (!id && method === "POST") {
           const model = await selection(body.model);
-          const thread = registry.createThread(text("projectId"), text("requestId"), model, text("text"), model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi");
+          const projectId = text("projectId");
+          const requestId = text("requestId");
+          const prompt = text("text");
+          // A replayed request gets its thread back at the commits it started at.
+          const resolved = registry.threadByRequest(projectId, requestId) ? undefined : await latestCommits(projectId);
+          const thread = registry.createThread(projectId, requestId, model, prompt, model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi", resolved);
           // The machine boots in the background (minutes the first time);
           // the thread shows "starting" until it is up.
           void conversations.activate(thread.id);

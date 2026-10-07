@@ -4,13 +4,16 @@ import { agents, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { releaseUnfinished, ThreadArchiving, ThreadWorking, type Conversations } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
 import { THREAD_NOTE, type ObservedThread, type OptThreads } from "./optchat.ts";
-import { threadAgent, type Registry, type Thread } from "./registry.ts";
+import { threadAgent, type Registry, type ResolvedRepositories, type Thread } from "./registry.ts";
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
 
 /** How long the overview waits for one thread's stored state. */
 const OBSERVE_MS = 2000;
 
-export function cubeThreads(options: { registry: Registry; conversations: Conversations; catalog: () => Promise<ModelSelection[]>; runners: () => RunnersObservation }): OptThreads {
+/** `latestCommits` resolves a project's repositories against upstream for a
+ * new thread (index.ts); a thread is never started at the last check's. */
+export function cubeThreads(options: { registry: Registry; conversations: Conversations; catalog: () => Promise<ModelSelection[]>; runners: () => RunnersObservation;
+  latestCommits: (projectId: string) => Promise<ResolvedRepositories> }): OptThreads {
   const { registry, conversations } = options;
   const disk = (vm: Thread["vm"]) => !vm ? "no machine disk" : vm.discarded ? "machine disk discarded"
     : vm.retain ? `machine disk retained${vm.retainReason ? ` (${vm.retainReason})` : ""}` : "machine disk deleted";
@@ -55,7 +58,8 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         : preferredModel(models);
       if (!model) throw new Error(task.model ? `model ${task.model} unavailable` : "connect a model provider first");
       const text = `${task.task}\n\n${THREAD_NOTE}`;
-      let thread = registry.createThread(project.id, requestId, model, text, model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi");
+      let thread = registry.createThread(project.id, requestId, model, text, model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi",
+        await options.latestCommits(project.id));
       // The title comes from the task alone, unless the user renamed it since.
       const title = task.task.replace(/\s+/g, " ").slice(0, 80) || null;
       if (thread.title === text.replace(/\s+/g, " ").slice(0, 80) && thread.title !== title) registry.saveThread(thread = { ...thread, title });

@@ -574,7 +574,7 @@ try {
       const listed = (await (await fetch(`http://127.0.0.1:${port}/api/threads`)).json()).threads[0];
       assert.deepEqual([listed.state, listed.error], ["starting", null]);
       assert.match(listed.waiting, /waiting for a runner/);
-      const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [], runners: () => { throw new Error("unused"); } });
+      const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [], runners: () => { throw new Error("unused"); }, latestCommits: () => { throw new Error("unused"); } });
       assert.match(await adapter.describe([thread.id]), /starting its machine, waiting for a runner: node-a does not answer/);
       assert.equal((await adapter.observe!([thread.id])).get(thread.id)!.state, "waiting for a runner");
       await assert.rejects(adapter.events(thread.id), /waiting for a runner/, "OptChat's watcher counts it as a start not made yet");
