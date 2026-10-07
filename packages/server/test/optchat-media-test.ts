@@ -7,6 +7,7 @@
  * them with headers that keep them inert. Faux models, disposable state. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -81,8 +82,8 @@ console.log("ok: images are recognized by their own bytes and bounded; the store
 const user = (...ids: string[]): Message => ({ role: "user", timestamp: 0, content: [{ type: "text", text: "look" }, ...ids.map(id => ({ type: "image" as const, mimeType: "image/png", data: mediaData(id) }))] });
 const ids = ["a", "b", "c"].map(letter => letter.repeat(64));
 const load = (id: string) => id === ids[2] ? null : { bytes: Buffer.from(id.slice(0, 1)), mimeType: "image/png" };
-const hooked = withImages([user(ids[0]!), user(ids[1]!, ids[2]!)], { load, refused: null, limit: 1, bytes: 10 });
-const earlier = "(an earlier image of this turn, not sent again: a turn's requests carry at most 1 images and 0 MB of them)";
+const hooked = withImages([user(ids[0]!), user(ids[1]!, ids[2]!)], { load, refused: null, limit: 1 });
+const earlier = "(an earlier image of this turn, not sent: a turn's requests carry at most 1 images)";
 assert.deepEqual(hooked.map(message => message.content), [
   [{ type: "text", text: "look" }, { type: "text", text: earlier }],
   [{ type: "text", text: "look" }, { type: "image", mimeType: "image/png", data: Buffer.from("b").toString("base64") }, { type: "text", text: "(an image the user attached, missing from cube's store)" }],
@@ -97,9 +98,11 @@ console.log("ok: the request hook fills in the turn's images and notes what it c
 // OptChat with a faux model that sees images and one that does not.
 const faux = fauxProvider({ tokensPerSecond: 100_000, models: [{ id: "vision", input: ["text", "image"] }, { id: "blind", input: ["text"] }] });
 const requests: Message[][] = [];
-faux.setResponses(Array.from({ length: 60 }, () => async request => {
+// Closed, the compactor holds the view unsettled, so new messages wait.
+let compactorGate: Promise<void> = Promise.resolve();
+faux.setResponses(Array.from({ length: 200 }, () => async request => {
   const system = JSON.stringify(request.messages.filter(message => message.role === "system"));
-  if (system.includes("You write the memory of OptChat")) return fauxAssistantMessage("summary");
+  if (system.includes("You write the memory of OptChat")) { await compactorGate; return fauxAssistantMessage("summary"); }
   requests.push(request.messages.filter(message => message.role !== "system"));
   const last = request.messages.at(-1)!;
   if (last.role === "user" && JSON.stringify(last.content).includes("check the projects")) {
@@ -158,6 +161,10 @@ try {
   assert.ok(!JSON.stringify(shown).includes(sent));
   assert.deepEqual(shown.events.find(event => event.type === "user-message"), { type: "user-message", id: shown.events[0]!.id, text: "what is this?", images: [{ id: first.id, mimeType: "image/png" }] });
   assert.deepEqual((await chat.image(first.id))?.bytes, picture);
+  // A resend of the same request is accepted once.
+  await chat.send("what is this?", "m1", [first.id]);
+  assert.deepEqual(await chat.pending(), []);
+  assert.equal(requests.length, 1);
 
   // The next turn is a fresh context: the image is not sent again.
   await chat.send("and the weather?", "m2");
@@ -168,18 +175,46 @@ try {
   // Images alone, several, and the bounds.
   const second = await chat.upload(gif(2, 2));
   const third = await chat.upload(webp(9, 9));
-  await chat.send("", "m3", [second.id, third.id]);
+  await chat.send("", "m3", [second.id, third.id, second.id]);
   await settled(chat, 3);
   const last = requests[2]!.at(-1)!.content as Array<{ type: string; mimeType?: string }>;
-  assert.deepEqual(last.filter(part => part.type === "image").map(part => part.mimeType), ["image/gif", "image/webp"]);
+  assert.deepEqual(last.filter(part => part.type === "image").map(part => part.mimeType), ["image/gif", "image/webp"], "a repeated image goes once");
   assert.ok(!last.some(part => part.type === "text" && "text" in part && part.text === ""), "no empty text block");
-  await assert.rejects(chat.send("too many", "m4", Array(MEDIA_LIMITS.perMessage + 1).fill(first.id)), /at most 4 images a message/);
+  await assert.rejects(chat.send("too many", "m4", Array.from({ length: MEDIA_LIMITS.perMessage + 1 }, (_, k) => String(k).repeat(64))), /at most 4 images a message/);
   await assert.rejects(chat.send("gone", "m5", ["f".repeat(64)]), (error: unknown) => error instanceof MediaError && error.status === 404);
 
+  // Images waiting for the chat are bounded; a stop keeps them, unanswered.
+  let openCompactor!: () => void;
+  compactorGate = new Promise<void>(resolve => { openCompactor = resolve; });
+  await chat.send("hold the view", "w0");
+  await settled(chat, 4);
+  const fourth = await chat.upload(jpeg(8, 8));
+  const four = [first.id, second.id, third.id, fourth.id];
+  await chat.send("a", "w1", four);
+  await chat.send("b", "w2", four);
+  await assert.rejects(chat.send("c", "w3", [first.id]), (error: unknown) => error instanceof MediaError && error.status === 429 && /8 images are already waiting/.test(error.message));
+  await chat.stop();
+  openCompactor();
+  await until(async () => !(await chat.pending()).length, "nothing waits after the stop");
+  const unanswered = (await transcript(chat)).events.filter(event => event.type === "user-message" && (event.text === "a" || event.text === "b"));
+  assert.deepEqual(unanswered.map(event => event.type === "user-message" && event.images?.length), [4, 4], "unanswered messages keep their images");
+  assert.deepEqual((await chat.image(fourth.id))?.bytes, jpeg(8, 8));
+
+  // Unsent uploads are bounded; the oldest older than ten minutes goes first.
+  const before64 = chat.media.list().length;
+  const uploads: string[] = [];
+  for (let k = 0; uploads.length + before64 - 4 < MEDIA_LIMITS.unsent; k++) uploads.push((await chat.upload(png(1, 1, k))).id);
+  await assert.rejects(chat.upload(png(1, 2)), (error: unknown) => error instanceof MediaError && error.status === 429);
+  fs.utimesSync(path.join(chat.media.directory, uploads[0]!), new Date(0), new Date(0));
+  await chat.upload(png(1, 2));
+  assert.ok(!chat.media.has(uploads[0]!) && chat.media.has(uploads[1]!) && chat.media.has(first.id), "only the oldest unsent upload went");
+  for (const id of uploads.slice(1)) fs.rmSync(path.join(chat.media.directory, id));
+
   // A model that takes no images: refused at upload, send and model change.
+  const mark = requests.length;
   await chat.send("waiting with an image", "m6", [first.id]);
   await assert.rejects(chat.selectModel({ provider: vision.provider, id: "blind" }), /blind does not take images, and a message with images is waiting/);
-  await settled(chat, 4);
+  await settled(chat, mark + 1);
   await chat.selectModel({ provider: vision.provider, id: "blind" });
   assert.deepEqual(chat.imageSupport(), { supported: false, reason: "blind does not take images" });
   await assert.rejects(chat.upload(png(1, 1)), (error: unknown) => error instanceof MediaError && error.status === 422);
@@ -187,7 +222,7 @@ try {
   assert.ok(!(await chat.pending()).length, "a refused message is not kept");
   await chat.selectModel(vision);
   console.log("ok: an image reaches the model in its own turn only; the log, view, store and transcript keep a reference");
-  console.log("ok: images alone, several images, bounds, missing uploads and models without image input are refused clearly");
+  console.log("ok: images alone, repeats, resends, the waiting and unsent bounds, a stop, missing uploads and models without image input");
 
   // An unsent upload is swept on open; a sent one stays.
   const unsent = await chat.upload(png(2, 2, 9));
@@ -214,7 +249,7 @@ try {
   console.log("ok: an image steered into a tool round reaches the model");
 
   const reopened = await transcript(chat);
-  assert.deepEqual(reopened.events.filter(event => event.type === "user-message" && event.images).map(event => event.type === "user-message" && event.images!.length), [1, 2, 1, 1]);
+  assert.deepEqual(reopened.events.filter(event => event.type === "user-message" && event.images).map(event => event.type === "user-message" && event.images!.length), [1, 2, 4, 4, 1, 1]);
   assert.deepEqual((await chat.image(third.id))?.bytes, webp(9, 9));
   console.log("ok: unsent uploads are swept; images show again after a reopen");
 } finally { await chat.close(); }
@@ -252,6 +287,16 @@ try {
   assert.equal(served.headers.get("cross-origin-resource-policy"), "same-origin");
   assert.match(served.headers.get("content-security-policy") ?? "", /default-src 'none'; sandbox/);
   for (const id of ["..%2Fpi.sqlite", "%2e%2e", "0".repeat(64)]) assert.equal((await fetch(`${base}/media/${id}`)).status, 404);
+  // A body without a length is cut off at the limit, not read on.
+  const chunked = await new Promise<number>(resolve => {
+    const request = http.request(`${base}/media`, { method: "POST", headers: { "content-type": "image/png" } }, response => { response.resume(); resolve(response.statusCode!); });
+    request.on("error", () => resolve(0));
+    const chunk = Buffer.alloc(256 * 1024);
+    let written = 0;
+    const pump = () => { while (written < 2 * MEDIA_LIMITS.bytes) { written += chunk.length; if (!request.write(chunk)) return void request.once("drain", pump); } request.end(); };
+    pump();
+  });
+  assert.ok(chunked === 413 || chunked === 0, `a chunked upload over the limit is refused (${chunked})`);
   const history = await (await fetch(`${base}/history`)).json() as { events: Array<{ type: string; images?: unknown[] }> };
   assert.equal(history.events.find(event => event.type === "user-message")?.images?.length, 1);
   console.log("ok: routes take raw image bytes within bounds, refuse other origins and types, and serve a message's image inert by id");

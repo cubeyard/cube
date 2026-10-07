@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { SvelteMap } from "svelte/reactivity";
+  import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { errorText, imageUrl, sendPrompt, stopThread, threadBase, threadEvents, uploadImage } from "../lib/api.ts";
   import { ACCEPT, MEDIA_LIMITS, pastedImages, prepareImage } from "../lib/images.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
@@ -195,13 +195,17 @@
     attach(files);
   }
 
+  // Any dropped file is taken here, never opened by the browser in place of the chat.
   function onDrop(event: DragEvent): void {
-    if (!images) return;
-    const files = [...event.dataTransfer?.files ?? []].filter(file => file.type.startsWith("image/"));
-    if (!files.length) return;
+    if (!images || !event.dataTransfer?.types.includes("Files")) return;
     event.preventDefault();
-    attach(files);
+    const files = [...event.dataTransfer.files].filter(file => file.type.startsWith("image/"));
+    if (files.length) attach(files);
+    else attachNote = "only png, jpeg, gif and webp images can be attached";
   }
+
+  /** Images the host no longer has: shown as missing, not opened. */
+  const missing = new SvelteSet<string>();
 
   async function inspect(src: string, label: string): Promise<void> {
     viewing = { src, label };
@@ -336,11 +340,12 @@
             {#each attachments as item, index (item.key)}
               <li class="attachment" class:failed={item.error}>
                 <img src={item.preview} alt={`attached image ${index + 1}: ${item.name}`} />
-                <span class="attachment-state" role={item.error ? "alert" : "status"}>{item.error ?? (item.id ? "ready" : "uploading…")}</span>
-                <button class="key icon attachment-remove" type="button" aria-label={`remove image ${index + 1}`} title="remove" onclick={() => detach(item.key)}><Icon name="close" size={12} /></button>
+                <span class="attachment-state">{item.error ?? (item.id ? "ready" : "uploading…")}</span>
+                <button class="key icon attachment-remove" type="button" aria-label={`remove image ${index + 1}`} title="remove" disabled={sending} onclick={() => detach(item.key)}><Icon name="close" size={12} /></button>
               </li>
             {/each}
           </ul>
+          <span class="sr-only" role="status">{uploading ? "uploading images…" : failedAttachment ? "an image failed to upload" : `${attachments.length} ${attachments.length === 1 ? "image" : "images"} attached`}</span>
         {/if}
         {#if attachNote}<p class="attachment-note" role="alert">{attachNote}</p>
         {:else if attachments.length && !images.supported}<p class="attachment-note" role="alert">{images.reason ?? "this model does not take images"}: remove the images or choose another model</p>
@@ -391,10 +396,10 @@
   <ul class="message-images" aria-label={list.length === 1 ? "1 image" : `${list.length} images`}>
     {#each list as image, index (index)}
       {@const label = `image ${index + 1} of ${list.length}`}
-      <li>
-        <button type="button" class="message-image" aria-label={`view ${label} larger`} onclick={() => inspect(imageUrl(base, image.id), label)}>
-          <img src={imageUrl(base, image.id)} alt={label} loading="lazy" decoding="async"
-            onerror={(event) => { (event.currentTarget as HTMLImageElement).closest("li")?.classList.add("missing"); }} />
+      <li class:missing={missing.has(image.id)}>
+        <button type="button" class="message-image" aria-label={missing.has(image.id) ? `${label}, unavailable` : `view ${label} larger`}
+          disabled={missing.has(image.id)} onclick={() => inspect(imageUrl(base, image.id), label)}>
+          <img src={imageUrl(base, image.id)} alt={label} loading="lazy" decoding="async" onerror={() => missing.add(image.id)} />
           <span class="message-image-missing">image unavailable</span>
         </button>
       </li>

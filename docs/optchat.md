@@ -286,12 +286,14 @@ The user changes tasks by asking OptChat; the panel has no edit controls.
 
 The user can attach images to a chat message: paste them into the composer
 (a screenshot or a copied image; a paste that carries text stays a text paste),
-drop them on it, or pick them with its `image` key. Each one shows as a preview
+drop them on it (a dropped file that is no image is refused, never opened in
+place of the chat), or pick them with its `image` key. Each one shows as a preview
 with a remove key, uploads at once and goes with the next send; a failed upload
 holds the send until it is removed, so nothing attached is dropped unseen. In
 the transcript a message shows its images as bounded thumbnails; a press opens
 the larger image in a dialog, with a link to the full size. They show again
-after a reload, from the store.
+after a reload, from the store; one the host no longer has shows as
+`image unavailable` in the dashed placeholder.
 
 - **Where they live.** `<CUBED_STATE>/optchat/media/<sha256>`, written once per
   content (whole, through a temporary file and a rename), mode 0600. A message
@@ -309,7 +311,7 @@ after a reload, from the store.
   Threads never get the images; OptChat puts what a thread needs in its task,
   in words. A turn's requests carry at most 8 images and 15 MB of them, the
   newest; an image that cannot go becomes a note the model reads (`an earlier
-  image of this turn, not sent again`, `missing from cube's store`, `not sent:
+  image of this turn, not sent`, `missing from cube's store`, `not sent:
   <model> does not take images`), never a silent gap.
 - **Models without image input.** A model's own `input` (pi-ai's catalog)
   decides. When the chat's model takes no images, the composer's `image` key
@@ -321,8 +323,8 @@ after a reload, from the store.
   headers, whatever the request's type says; SVG, HTML and everything else is
   refused (415), so nothing the browser would run is stored or served. At
   most 3.75 MB an image (its base64 stays under the 5 MB providers take) and
-  8000 pixels a side; at most 4 images a message and 8 waiting for the chat at
-  once. The composer checks the type and the size first and redraws a larger
+  8000 pixels a side; at most 4 images a message (a repeated one counts once)
+  and 8 waiting for the chat at once. The composer checks the type and the size first and redraws a larger
   image at most 2048 pixels a side (PNG, or JPEG when that is still too
   large); the host checks again. An upload body over the limit is refused
   (413) before it is read whole.
@@ -345,14 +347,17 @@ after a reload, from the store.
 
 `packages/server/test/optchat-media-test.ts` covers the formats, the store,
 the hook, turns with a faux model that takes images and one that does not
-(an image in its own turn only, steered into a tool round, alone, several, the
-bounds), the sweep, a reopen and the routes. The composer's paste rule and
+(an image in its own turn only, steered into a tool round, alone, several, a
+resend, the bounds, a stop with images waiting), the sweep and the unsent
+bound, a reopen and the routes (with a body over the limit and no length). The composer's paste rule and
 checks are in `packages/web/test/images-test.ts`. In headless Chromium (desktop
 1440×900 and phone 390×844) a real clipboard paste of a PNG attached it, a text
-paste stayed text, a second image was removed before send, the faux model got
+paste stayed text, a dropped image attached and a dropped text file was refused
+without leaving the page, a second image was removed before send, the faux model got
 the PNG, the thumbnail showed after a reload, the viewer opened and closed, the
 layout kept one composer row without overflow, and a model without image input
-turned the key off and explained a paste. Not verified against a real
+turned the key off and explained a paste; in a fresh browser, an image the host
+had lost showed as unavailable and did not open. Not verified against a real
 provider: what a real model makes of the images, and providers' own size and
 count limits beyond the bounds above.
 

@@ -79,9 +79,7 @@ export class MediaStore {
 
   /** Checks and stores an upload; the same bytes get the same id. */
   put(bytes: Uint8Array): MediaRef & { width: number; height: number; bytes: number } {
-    if (!bytes.byteLength) throw new MediaError("the image is empty");
-    if (bytes.byteLength > MEDIA_LIMITS.bytes) throw new MediaError(`the image is ${megabytes(bytes.byteLength)}; at most ${megabytes(MEDIA_LIMITS.bytes)}`, 413);
-    const image = sniffImage(bytes);
+    const image = checkImage(bytes);
     const id = createHash("sha256").update(bytes).digest("hex");
     const file = this.file(id);
     if (fs.existsSync(file)) fs.utimesSync(file, new Date(), new Date());
@@ -133,6 +131,13 @@ export class MediaStore {
   }
 
   private file(id: string): string { return path.join(this.directory, id); }
+}
+
+/** An upload's format and size, or why it is refused. */
+export function checkImage(bytes: Uint8Array): ReturnType<typeof sniffImage> {
+  if (!bytes.byteLength) throw new MediaError("the image is empty");
+  if (bytes.byteLength > MEDIA_LIMITS.bytes) throw new MediaError(`the image is ${megabytes(bytes.byteLength)}; at most ${megabytes(MEDIA_LIMITS.bytes)}`, 413);
+  return sniffImage(bytes);
 }
 
 const megabytes = (bytes: number) => `${(bytes / 1_000_000).toFixed(1)} MB`;

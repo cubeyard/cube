@@ -21,7 +21,7 @@ import { createLogger } from "./log.ts";
 import { compactNode } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { capText, Memory, type LogMessage, type Part } from "./optchat-memory.ts";
-import { MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
+import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
 import { applyTask, LIMITS as TASK_LIMITS, linkLabel, renderTasks, shown, STATUSES, taskLine, TasksDoc, TurnTasksDoc, type ObservedThread, type Task, type TaskList, type TaskView } from "./optchat-tasks.ts";
 import type { ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
 import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
@@ -518,9 +518,11 @@ export class OptChat {
 
   /** Every image a message holds: in the log, or waiting for a turn. */
   private async mediaInUse(): Promise<Set<string>> {
+    // Pending first: a message Pi places meanwhile is in the log by the sync.
+    const pending = await this.pending();
     await this.sync();
     const used = new Set(this.referenced);
-    for (const item of await this.pending()) for (const image of item.images ?? []) used.add(image.id);
+    for (const item of pending) for (const image of item.images ?? []) used.add(image.id);
     return used;
   }
 
@@ -549,6 +551,7 @@ export class OptChat {
     return this.withMedia(async () => {
       const support = this.imageSupport();
       if (!support.supported) throw new MediaError(support.reason!, 422);
+      checkImage(bytes);
       const used = await this.mediaInUse();
       const unsent = this.media.list().filter(item => !used.has(item.id));
       if (unsent.length >= MEDIA_LIMITS.unsent) {
@@ -673,8 +676,9 @@ export class OptChat {
     // Checked and accepted under the media lock: no sweep deletes an image
     // between its check and the message that holds it.
     await this.withMedia(async () => {
-      if (images.length > MEDIA_LIMITS.perMessage) throw new MediaError(`at most ${MEDIA_LIMITS.perMessage} images a message`);
-      const refs = images.map(id => {
+      const unique = [...new Set(images)];
+      if (unique.length > MEDIA_LIMITS.perMessage) throw new MediaError(`at most ${MEDIA_LIMITS.perMessage} images a message`);
+      const refs = unique.map(id => {
         const image = this.media.get(id);
         if (!image) throw new MediaError("an attached image is not on the host any more; attach it again", 404);
         return { id, mimeType: image.mimeType };
@@ -1266,7 +1270,7 @@ export function withImages(messages: readonly Message[], options: { load: (id: s
       const full = !!image && size + image.bytes.byteLength > (options.bytes ?? Infinity);
       if (image && !full) { parts[j] = { type: "image", mimeType: image.mimeType, data: image.bytes.toString("base64") }; sent++; size += image.bytes.byteLength; continue; }
       parts[j] = { type: "text", text: options.refused ? `(an image the user attached, not sent: ${options.refused})`
-        : sent >= options.limit || full ? `(an earlier image of this turn, not sent again: a turn's requests carry at most ${options.limit} images and ${Math.round((options.bytes ?? 0) / 1_000_000)} MB of them)`
+        : sent >= options.limit || full ? `(an earlier image of this turn, not sent: a turn's requests carry at most ${options.limit} images${options.bytes ? ` and ${Math.round(options.bytes / 1_000_000)} MB of them` : ""})`
         : "(an image the user attached, missing from cube's store)" };
     }
     out[k] = { ...message, content: parts };

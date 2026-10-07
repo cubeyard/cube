@@ -128,7 +128,9 @@ async function readJson(request: http.IncomingMessage): Promise<Record<string, u
   return body;
 }
 
-/** A raw request body of at most `limit` bytes. */
+/** A raw request body of at most `limit` bytes. A client still sending
+ * when it is refused may see the closed connection rather than the answer;
+ * the composer checks the size first. */
 async function readBytes(request: http.IncomingMessage, limit: number): Promise<Buffer> {
   const declared = Number(request.headers["content-length"]);
   if (declared > limit) throw new MediaError(`the image is ${(declared / 1_000_000).toFixed(1)} MB; at most ${(limit / 1_000_000).toFixed(1)} MB`, 413);
@@ -473,7 +475,7 @@ export async function createCubed(options: {
           const images = body.images ?? [];
           if (!Array.isArray(images) || !images.every(isMediaId)) return json({ error: "images must be the ids of uploaded images" }, 400);
           // A message of images alone needs no text.
-          const said = images.length && (body.text === undefined || body.text === "") ? "" : text("text");
+          const said = images.length && (body.text === undefined || (typeof body.text === "string" && !body.text.trim())) ? "" : text("text");
           try { await chat.send(said, requestId, images); }
           catch (error) { if (error instanceof MediaError) return json({ error: error.message }, error.status); throw error; }
           return json({ runId: requestId });
