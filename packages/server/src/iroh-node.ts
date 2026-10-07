@@ -425,6 +425,12 @@ export class IrohRunnerClient {
         if (result.type !== "Template") invalid();
         result.template = templateRecord(result.template);
         if ((result.template as RunnerTemplate).id !== (query.method === "vm.publish" ? query.vmId : query.id)) invalid();
+      } else if (query.method === "vm.diagnose") {
+        shape(result, ["type", "diagnosis"]);
+        if (result.type !== "Diagnosis") invalid();
+        const diagnosis = record(result.diagnosis);
+        // The runner's record of the machine asked about, and no other.
+        vmRecord(diagnosis.vm, { threadId: query.threadId as string, vmId: query.vmId as string });
       } else if (query.method === "template.list") {
         shape(result, ["type", "templates"]);
         if (result.type !== "Templates" || !Array.isArray(result.templates)) invalid();
@@ -515,6 +521,12 @@ export class IrohRunnerClient {
   async vmInspect(ref: VmRef, signal?: AbortSignal): Promise<{ vm: VmRecord; consoleTail: string | null }> {
     const result = await this.request({ method: "vm.inspect", ...vmRef(ref) }, signal);
     return { vm: result.vm as VmRecord, consoleTail: (result.consoleTail as string | undefined) ?? null };
+  }
+  /** Read-only evidence about the machine (cube-runner 0.8.3+; older
+   * runners: OPERATION_UNSUPPORTED, before anything is sent). Every string
+   * in it is cleaned by the runner; cubed cleans it again. */
+  async vmDiagnose(ref: VmRef, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return (await this.request({ method: "vm.diagnose", ...vmRef(ref) }, signal)).diagnosis as Record<string, unknown>;
   }
   /** Asynchronous for a live VM: poll vmInspect until `released`/`retained`.
    * The runner always retains an interrupted or failed VM. */

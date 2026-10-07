@@ -6,7 +6,9 @@ tools. It starts threads in projects (`spawn`), gives a thread that has reported
 more to do (`tell`), lists its threads (`threads`) and what it can start
 (`projects`), reports the runners as cubed last heard from them (`runners`,
 read-only; see docs/runner-operations.md, "Observing runners"), reads one of
-its threads (`history`), archives its threads that are done to free their
+its threads (`history`), diagnoses the machine of one that does not start
+(`diagnose`: read only; see docs/runner-operations.md, "Diagnosing a machine
+that does not start"), archives its threads that are done to free their
 machines (`archive`), reads usage and estimated cost (`usage`: everything,
 a project or a thread; read-only, see [usage.md](usage.md)) and reads its own
 memory (`zoom`, `date`) and keeps the user's task list (`task`, `tasks`; see
@@ -193,6 +195,16 @@ at 4,000. No store: `history: none stored`; a store that cannot be read:
 `history: unreadable: <why>`. A stored run read without its agent is the
 committed state: a Pi run still streaming shows as `working` without its
 partial reply.
+
+`diagnose(id)` gives the same evidence as `GET /api/threads/<id>/diagnostics`,
+for a thread the chat started only (any other id is refused as unknown), as
+text of at most 12,000 characters: cubed's record and activation, the runner's
+last report and its age, the gateway's link, one guest hello, the runner's
+process, QMP, frames, disk and launch line, its newest events, cubed's machine
+events and the last lines of the console and qemu logs. Every string is
+escaped and redacted (`vm-diagnostics.ts`), so console output never reaches
+the model or a terminal raw. It starts, stops and attaches nothing; evidence
+it could not collect is named as unavailable, unsupported or none.
 
 ## Archiving a thread
 

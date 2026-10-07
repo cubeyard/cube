@@ -72,7 +72,10 @@ tell(id, message) gives a thread that has reported more to do.
 history(id) reads one of your threads without changing it: cubed's state
 for it beside its latest answer and conversation. Use it when a report is
 missing or short, or contradicts what threads shows; say what disagrees
-rather than settle it. An open thread holds a machine until it is
+rather than settle it. When a thread's machine does not start or its
+agent never opened, diagnose(id) collects what cube recorded and observes
+about the machine, read only; report what it shows and what it says is
+missing before proposing a fix. An open thread holds a machine until it is
 archived: archive(ids) archives threads of yours that are done, to free
 theirs; history still reads them. It never stops a working thread.
 Images the user attaches reach you only in the turn they are sent; the
@@ -145,6 +148,9 @@ export interface OptThreads {
   usage?(query: { project?: string | undefined; thread?: string | undefined }): Promise<string>;
   /** Each thread's state as cubed records it now, read only; null: no such thread. */
   observe?(ids: readonly string[]): Promise<Map<string, ObservedThread | null>>;
+  /** Evidence about the thread's machine as bounded, cleaned text
+   * (vm-diagnostics.ts); read only. null: no such thread. */
+  diagnose?(id: string): Promise<string | null>;
 }
 
 export type ThreadRecord = {
@@ -1159,6 +1165,21 @@ export class OptChat {
         return text(formatHistory(id, record, report));
       },
     });
+    const diagnose = defineTool({
+      name: "diagnose",
+      description: "Read-only evidence about the machine of a thread you started, for one that does not start or whose agent never opened: cubed's record, "
+        + "its machine events and last runner report, the runner's own evidence (state, QEMU command line, process, QMP, frames, disk, its events, "
+        + "console and qemu logs, escaped, secrets redacted), the gateway's link and a guest hello. Starts, stops and attaches nothing. "
+        + "Report it as it says: missing, unavailable or stale evidence is unknown, not success.",
+      parameters: Type.Object({ id: Type.String() }),
+      replay: "safe",
+      execute: async args => {
+        const diagnoseThread = this.options.threads.diagnose;
+        if (!diagnoseThread) return text("diagnostics are not available");
+        const id = await this.resolve(args.id);
+        return text(await diagnoseThread(id) ?? `[${short(id)}] is gone: cubed has no record of it`);
+      },
+    });
     const archive = defineTool({
       name: "archive",
       description: "Archive threads you started that are done, to free their machines. Each one's agent closes and its machine is released, as the user's archive in cube does; "
@@ -1205,7 +1226,7 @@ export class OptChat {
     const instructions = path.join(this.options.directory, "AGENTS.md");
     return defineExtension({
       name: "optchat",
-      tools: [zoom, date, projects, runners, spawn, tell, threads, history, archive, usage, ...this.taskTools()],
+      tools: [zoom, date, projects, runners, spawn, tell, threads, history, diagnose, archive, usage, ...this.taskTools()],
       sections: [
         section("master", () => MASTER, { tag: false }),
         section("view", () => VIEW_DOC, { tag: false }),

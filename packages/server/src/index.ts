@@ -27,6 +27,7 @@ import { isMediaId, MEDIA_LIMITS, MediaError } from "./optchat-media.ts";
 import { createLogger } from "./log.ts";
 import { cubeThreads } from "./optchat-threads.ts";
 import { observeRunners } from "./runner-observe.ts";
+import { formatDiagnostics, threadDiagnostics } from "./vm-diagnostics.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
 import { threadUsageText, usageText, UsageService } from "./usage-service.ts";
@@ -270,7 +271,12 @@ export async function createCubed(options: {
   // OptChat, the user's one endless chat: opened once a model exists,
   // retried by the recovery loop until then.
   const probeIntervalMs = options.runnerProbeIntervalMs ?? 60_000;
-  const optchatThreads = { ...cubeThreads({ registry, conversations, catalog: threadCatalog, runners: () => observeRunners(registry, probeIntervalMs) }), usage: usageQuery };
+  // Read-only evidence about a thread's machine (vm-diagnostics.ts).
+  const diagnostics = (id: string) => threadDiagnostics({ registry, conversations, version: `${versionInfo().version} (${versionInfo().commit})`,
+    machine: machines.diagnose ? thread => machines.diagnose!(thread) : undefined,
+    runner: runnerId => observeRunners(registry, probeIntervalMs).runners.find(runner => runner.id === runnerId) ?? null }, id);
+  const optchatThreads = { ...cubeThreads({ registry, conversations, catalog: threadCatalog, runners: () => observeRunners(registry, probeIntervalMs) }), usage: usageQuery,
+    diagnose: async (id: string) => { const bundle = await diagnostics(id); return bundle && formatDiagnostics(bundle); } };
   let optchatError = "";
   // Inside the promise: a bad CUBED_OPTCHAT_COMPACTOR must reject here,
   // not throw out of startup or the recovery timer and end cubed.
@@ -518,6 +524,8 @@ export async function createCubed(options: {
         const thread = registry.getThread(id);
         // An archived thread's usage stays readable.
         if (thread && parts[3] === "usage" && parts.length === 4 && method === "GET") return json({ usage: await usage.thread(id) });
+        // So does the evidence about its machine (a retained disk's, say).
+        if (thread && parts[3] === "diagnostics" && parts.length === 4 && method === "GET") return json({ diagnostics: await diagnostics(id) });
         // An archived thread's retained machine disk can still be discarded.
         if (thread?.archived && parts[3] === "discard" && method === "POST") { await conversations.discard(id); return json({ ok: true }); }
         if (!thread || thread.archived) return json({ error: "thread not found" }, 404);

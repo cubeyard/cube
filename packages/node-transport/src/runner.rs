@@ -17,19 +17,21 @@ use std::{
     path::{Path, PathBuf},
     process::Child,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, ensure};
 use iroh::EndpointId;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use tokio::sync::watch;
 
 pub use crate::journal::{Binding, Installation, TemplateState, VmConfig, VmLimits, VmState};
 use crate::{
+    diagnose::{self, Window, record_event},
     journal::{self, Journal, TemplateRow, VmRow},
     pump::{FrameGrant, Pumps},
     seed::Seed,
@@ -55,6 +57,23 @@ const START_WAIT: Duration = Duration::from_secs(3);
 /// After this long without QMP a starting QEMU is killed.
 const QMP_READY: Duration = Duration::from_secs(60);
 const CONSOLE_TAIL: u64 = 16 * 1024;
+/// `vm.diagnose` log excerpts. Escaped text is at most four times as long,
+/// so a diagnosis stays well within one protocol frame.
+const DIAGNOSE_CONSOLE: Window = Window {
+    head: 8 * 1024,
+    tail: 56 * 1024,
+};
+const DIAGNOSE_PREVIOUS_CONSOLE: Window = Window {
+    head: 0,
+    tail: 8 * 1024,
+};
+const DIAGNOSE_QEMU_LOG: Window = Window {
+    head: 0,
+    tail: 8 * 1024,
+};
+/// QMP questions of a diagnosis: per answer, and in all.
+const DIAGNOSE_QMP_WAIT: Duration = Duration::from_millis(500);
+const DIAGNOSE_QMP_BUDGET: Duration = Duration::from_millis(1500);
 const MAX_VCPUS: u32 = 64;
 const MIN_MEMORY_MIB: u32 = 256;
 const MAX_MEMORY_MIB: u32 = 1024 * 1024;
@@ -111,11 +130,7 @@ pub fn valid_mac(mac: &str) -> bool {
         && u8::from_str_radix(parts[0], 16).is_ok_and(|first| first & 0x03 == 0x02)
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
-}
+use diagnose::now_ms;
 
 /// The wire record of one VM.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -220,6 +235,10 @@ pub struct Runner {
     pumps: Arc<Pumps>,
     spawner: Spawner,
     this: Weak<Runner>,
+    /// When this process opened the state (ms).
+    started_at: u64,
+    /// `qemu --version`, from the preflight.
+    qemu_version: OnceLock<String>,
 }
 
 /// `--max-active-vms auto`: as many VMs as fit if every one uses the
@@ -428,11 +447,30 @@ impl Runner {
                         VmState::Failed,
                         Some("interrupted during allocation or release; disk retained"),
                     )?;
+                    record_event(
+                        &VmPaths::new(&state, row.slot).dir,
+                        "runner restarted",
+                        Some(&format!("the vm was {}; now failed", row.state.as_str())),
+                    );
                 }
                 live if live.live() => {
-                    quit_orphan(&VmPaths::new(&state, row.slot).qmp, &row.vm_id);
+                    let paths = VmPaths::new(&state, row.slot);
+                    let quit = quit_orphan(&paths.qmp, &row.vm_id);
                     journal.set_state(&row.vm_id, VmState::Stopped, None)?;
                     journal.set_interrupted(&row.vm_id, true)?;
+                    record_event(
+                        &paths.dir,
+                        "runner restarted",
+                        Some(&format!(
+                            "the vm was {}; now stopped, interrupted ({})",
+                            live.as_str(),
+                            if quit {
+                                "its qemu still ran and was told to quit"
+                            } else {
+                                "no qemu answered"
+                            }
+                        )),
+                    );
                 }
                 _ => {}
             }
@@ -474,6 +512,8 @@ impl Runner {
             pumps: Arc::new(Pumps::default()),
             spawner: Spawner::new(),
             this: this.clone(),
+            started_at: now_ms(),
+            qemu_version: OnceLock::new(),
             state,
         }))
     }
@@ -481,7 +521,8 @@ impl Runner {
     /// Run before serving: the accelerator and QEMU must be usable now.
     pub fn preflight(&self) -> Result<()> {
         vm::check_accelerator(&self.installation.platform)?;
-        vm::check_qemu(&self.installation.qemu)?;
+        let (major, minor, micro) = vm::check_qemu(&self.installation.qemu)?;
+        let _ = self.qemu_version.set(format!("{major}.{minor}.{micro}"));
         ensure!(
             self.installation.qemu_img.is_file(),
             "qemu-img {} is missing",
@@ -773,6 +814,173 @@ impl Runner {
         Ok((self.record(&row), console))
     }
 
+    /// One event in the VM's own event log (see `diagnose`).
+    fn event(&self, slot: u32, event: &str, detail: Option<&str>) {
+        record_event(&self.paths(slot).dir, event, detail);
+    }
+
+    /// Keeps the command line QEMU was started with, for `vm.diagnose`.
+    fn record_launch(&self, slot: u32, pid: u32, argv: &[String], epoch: u64) {
+        let launch = json!({
+            "at": now_ms(),
+            "pid": pid,
+            "epoch": epoch,
+            "runnerVersion": crate::SOFTWARE_VERSION,
+            "qemu": self.installation.qemu.to_string_lossy(),
+            "argv": argv,
+        });
+        if let Ok(bytes) = serde_json::to_vec(&launch) {
+            let _ = fs::write(self.paths(slot).dir.join("launch.json"), bytes);
+        }
+        self.event(
+            slot,
+            "qemu started",
+            Some(&format!("pid {pid}, epoch {epoch}")),
+        );
+    }
+
+    /// A path as a diagnosis shows it: the state directory as `$STATE` and
+    /// the runner account's home as `~`.
+    fn shown(&self, text: &str) -> String {
+        let mut text = text.replace(&*self.state.to_string_lossy(), "$STATE");
+        if let Some(home) = std::env::var_os("HOME").filter(|home| home.len() > 1) {
+            text = text.replace(&*home.to_string_lossy(), "~");
+        }
+        text
+    }
+
+    /// `vm.diagnose`: read-only evidence about one of the thread's VMs, as
+    /// the runner recorded it and observes it now. It takes no `ops` lock,
+    /// so it neither waits for nor holds up a mutation; its QMP questions
+    /// are bounded by [`DIAGNOSE_QMP_BUDGET`]. Every string is cleaned
+    /// (`diagnose::clean_value`) before it leaves the runner.
+    pub fn diagnose(&self, thread_id: &str, vm_id: &str) -> Result<Value> {
+        Self::check_ids(thread_id, vm_id)?;
+        let row = self.row_for(thread_id, vm_id)?;
+        let paths = self.paths(row.slot);
+        let live = self
+            .live
+            .lock()
+            .unwrap()
+            .get(vm_id)
+            .map(|live| (live.pid, *live.exited.borrow()));
+        let installation = &self.installation;
+        let firmware = installation
+            .firmware
+            .as_ref()
+            .map(|path| self.shown(&path.to_string_lossy()));
+        let runner = json!({
+            "softwareVersion": crate::SOFTWARE_VERSION,
+            "platform": installation.platform,
+            "processStartedAt": self.started_at,
+            "lifecycle": self.status().map(|status| status.lifecycle).ok(),
+            "qemu": self.shown(&installation.qemu.to_string_lossy()),
+            "qemuVersion": self.qemu_version.get(),
+            "firmware": firmware,
+            "baseImageSha256": installation.image.sha256,
+            "baseImageVirtualSize": installation.image.virtual_size,
+        });
+        let mut diagnosis = json!({
+            "collectedAt": now_ms(),
+            "runner": runner,
+            "vm": self.record(&row),
+            "slot": row.slot,
+            "config": row.config,
+            "launch": self.launch_facts(&row, &paths),
+            "disk": self.disk_facts(&row, &paths),
+            "process": live_facts(live, row.state),
+            "qmp": qmp_facts(live, row.state, &paths.qmp),
+            "frames": self.pumps.observe(vm_id),
+            "logs": {
+                "console": diagnose::log_excerpt(&paths.console, DIAGNOSE_CONSOLE),
+                "previousConsole": diagnose::log_excerpt(&paths.dir.join("console.prev.log"), DIAGNOSE_PREVIOUS_CONSOLE),
+                "qemu": diagnose::log_excerpt(&paths.qemu_log, DIAGNOSE_QEMU_LOG),
+            },
+            "events": diagnose::read_events(&paths.dir),
+        });
+        diagnosis = diagnose::clean_value(diagnosis, crate::MAX_FRAME_BYTES / 2);
+        // The budgets above keep a diagnosis far below one frame; if they
+        // ever do not, the logs go rather than the whole answer.
+        if serde_json::to_vec(&diagnosis)?.len() > crate::MAX_FRAME_BYTES - 4096 {
+            for log in ["console", "previousConsole", "qemu"] {
+                diagnosis["logs"][log]["text"] = "[dropped: the diagnosis was too large]".into();
+            }
+        }
+        Ok(diagnosis)
+    }
+
+    fn launch_facts(&self, row: &VmRow, paths: &VmPaths) -> Value {
+        if let Ok(bytes) = fs::read(paths.dir.join("launch.json"))
+            && let Ok(mut launch) = serde_json::from_slice::<Value>(&bytes)
+        {
+            launch["source"] = "recorded".into();
+            if let Some(argv) = launch["argv"].as_array_mut() {
+                for arg in argv {
+                    *arg = self.shown(arg.as_str().unwrap_or_default()).into();
+                }
+            }
+            launch["qemu"] = self
+                .shown(launch["qemu"].as_str().unwrap_or_default())
+                .into();
+            return launch;
+        }
+        let Some(config) = &row.config else {
+            return json!({ "source": "none", "note": "the vm was never started" });
+        };
+        let argv = vm::qemu_args(&vm::Launch {
+            platform: &self.installation.platform,
+            firmware: self.installation.firmware.as_deref(),
+            vm_id: &row.vm_id,
+            vcpus: config.vcpus,
+            memory_mib: config.memory_mib,
+            mac: &config.mac,
+            paths,
+            net_fd: 3,
+        });
+        json!({
+            "source": "reconstructed",
+            "note": "the runner that last started this vm did not record its command line; \
+                this is the one this runner would use, with an assumed net fd",
+            "qemu": self.shown(&self.installation.qemu.to_string_lossy()),
+            "argv": argv.map(|args| args
+                .iter()
+                .map(|arg| self.shown(&arg.to_string_lossy()))
+                .collect::<Vec<_>>())
+                .map_err(|error| format!("{error:#}"))
+                .unwrap_or_else(|error| vec![error]),
+        })
+    }
+
+    fn disk_facts(&self, row: &VmRow, paths: &VmPaths) -> Value {
+        let expected = backing_path(&self.installation.image.sha256, row.template.as_deref());
+        let overlay = match diagnose::qcow2_header(&paths.disk) {
+            Ok((virtual_size, backing)) => json!({
+                "present": true,
+                "allocatedBytes": file_bytes(&paths.disk),
+                "virtualSize": virtual_size,
+                "backing": backing,
+                "expectedBacking": expected,
+                "backingMatches": backing.as_deref() == Some(expected.as_str()),
+                "backingPresent": backing.as_ref().map(|b| paths.dir.join(b).is_file()),
+            }),
+            Err(error) => json!({
+                "present": paths.disk.exists(),
+                "error": format!("{error:#}"),
+                "expectedBacking": expected,
+            }),
+        };
+        let template = row.template.as_ref().map(|id| {
+            let state = self.journal.lock().unwrap().template(id).ok().flatten();
+            json!({ "id": id, "state": state.map(|t| t.state) })
+        });
+        json!({
+            "overlay": overlay,
+            "template": template,
+            "diskGiB": row.disk_gib,
+            "seed": { "present": paths.seed.is_file(), "bytes": file_bytes(&paths.seed) },
+        })
+    }
+
     pub async fn allocate(
         &self,
         thread_id: &str,
@@ -856,15 +1064,17 @@ impl Runner {
         };
         let paths = self.paths(slot);
         // Relative backing paths: a restored state directory may live elsewhere.
-        let backing = match template {
-            Some(id) => format!("../../templates/{id}/disk.qcow2"),
-            None => format!("../../images/{}.qcow2", self.installation.image.sha256),
-        };
+        let backing = backing_path(&self.installation.image.sha256, template);
         let created = self.create_disk(&paths, disk_gib, &backing).await;
         let journal = self.journal.lock().unwrap();
         match created {
             Ok(()) => {
                 journal.set_state(vm_id, VmState::Allocated, None)?;
+                self.event(
+                    slot,
+                    "allocated",
+                    Some(&format!("{disk_gib} GiB on {backing}")),
+                );
                 Ok(self.record(&journal.get(vm_id)?.context("vm record vanished")?))
             }
             Err(error) => {
@@ -946,7 +1156,20 @@ impl Runner {
             VmState::Starting | VmState::Running => {
                 // A new grant (newer epoch, restarted cubed or gateway)
                 // replaces the frame connection; the VM keeps running.
-                self.pumps.authorize(vm_id, grant);
+                let pump = self.pumps.authorize(vm_id, grant);
+                self.event(
+                    row.slot,
+                    "start while live",
+                    Some(&format!(
+                        "the vm is {}; {}",
+                        row.state.as_str(),
+                        if pump {
+                            "its gateway grant was renewed"
+                        } else {
+                            "it has no frame pump in this process"
+                        }
+                    )),
+                );
                 return Ok(self.record(&row));
             }
             VmState::Allocated | VmState::Stopped => {}
@@ -958,6 +1181,7 @@ impl Runner {
             }
         }
         if !self.accepting.load(Ordering::SeqCst) {
+            self.event(row.slot, "start refused", Some("the runner is draining"));
             return reject("DRAINING");
         }
         let paths = self.paths(row.slot);
@@ -984,7 +1208,9 @@ impl Runner {
         // Sockets of runners before the socket pair.
         let _ = fs::remove_file(&paths.net);
         let _ = fs::remove_file(&paths.qemu_net);
-        let net_fd = self.pumps.open(vm_id, thread_id, grant)?;
+        let net_fd = self
+            .pumps
+            .open(vm_id, thread_id, grant, paths.dir.clone())?;
         let args = vm::qemu_args(&vm::Launch {
             platform: &self.installation.platform,
             firmware: self.installation.firmware.as_deref(),
@@ -996,6 +1222,10 @@ impl Runner {
             net_fd: std::os::fd::AsRawFd::as_raw_fd(&net_fd),
         })?;
         self.journal.lock().unwrap().set_started(vm_id, now_ms())?;
+        let argv: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
         let spawned = vm::qemu_command(&self.installation.qemu, args, &paths.qemu_log)
             .and_then(|command| self.spawner.spawn(command));
         // QEMU holds its own copy now (or failed to start).
@@ -1004,15 +1234,17 @@ impl Runner {
             Ok(child) => child,
             Err(error) => {
                 self.pumps.close(vm_id);
-                self.journal.lock().unwrap().set_state(
-                    vm_id,
-                    row.state,
-                    Some(&format!("starting qemu failed: {error:#}")),
-                )?;
+                let message = format!("starting qemu failed: {error:#}");
+                self.journal
+                    .lock()
+                    .unwrap()
+                    .set_state(vm_id, row.state, Some(&message))?;
+                self.event(row.slot, "qemu did not start", Some(&message));
                 return self.current(vm_id);
             }
         };
         let pid = child.id();
+        self.record_launch(row.slot, pid, &argv, epoch);
         let exited = self.watch(vm_id, child, paths.qemu_log.clone());
         // The VM is `starting` and watched: other VMs' mutations need not
         // wait for its QMP (mark_running only moves `starting` on).
@@ -1035,6 +1267,14 @@ impl Runner {
                 if ready {
                     let _ = runner.mark_running(&vm_id);
                 } else {
+                    runner.event(
+                        row.slot,
+                        "qmp did not answer",
+                        Some(&format!(
+                            "no answer within {} s; qemu pid {pid} is killed if it still runs",
+                            QMP_READY.as_secs()
+                        )),
+                    );
                     // Only this start's QEMU: by the time QMP gave up, it may
                     // have exited and a later start may run under the same id.
                     runner.kill_pid(&vm_id, pid);
@@ -1092,10 +1332,18 @@ impl Runner {
         let journal = self.journal.lock().unwrap();
         let current = journal.get(vm_id).ok().flatten();
         // A requested stop records no error; an unexpected exit does.
-        let error = match current.map(|row| row.state) {
+        let error = match current.as_ref().map(|row| row.state) {
             Some(VmState::Stopping) => None,
             _ => error,
         };
+        if let Some(row) = &current {
+            let after = error.map(|e| format!("; {e}")).unwrap_or_default();
+            self.event(
+                row.slot,
+                "qemu exited",
+                Some(&format!("the vm was {}{after}", row.state.as_str())),
+            );
+        }
         if journal
             .transition(
                 vm_id,
@@ -1116,6 +1364,9 @@ impl Runner {
         let journal = self.journal.lock().unwrap();
         if journal.transition(vm_id, &[VmState::Starting], VmState::Running, None)? {
             journal.set_interrupted(vm_id, false)?;
+            if let Some(row) = journal.get(vm_id)? {
+                self.event(row.slot, "running", Some("qemu answered qmp"));
+            }
         }
         Ok(())
     }
@@ -1188,6 +1439,7 @@ impl Runner {
             })
         };
         if graceful {
+            self.event(slot, "power-down", Some("acpi power-down sent"));
             let _ = command("system_powerdown").await;
             if tokio::time::timeout(STOP_GRACE, exited.wait_for(|e| *e))
                 .await
@@ -1197,6 +1449,15 @@ impl Runner {
             }
         }
         let _ = self.journal.lock().unwrap().set_interrupted(vm_id, true);
+        self.event(
+            slot,
+            "quit",
+            Some(if graceful {
+                "the guest did not power off in time; qemu told to quit"
+            } else {
+                "qemu told to quit at once"
+            }),
+        );
         let _ = command("quit").await;
         if tokio::time::timeout(QUIT_GRACE, exited.wait_for(|e| *e))
             .await
@@ -1204,6 +1465,7 @@ impl Runner {
         {
             return;
         }
+        self.event(slot, "killed", Some("qemu did not quit; SIGKILL"));
         self.kill(vm_id);
         let _ = exited.wait_for(|e| *e).await;
     }
@@ -1218,6 +1480,7 @@ impl Runner {
                 .lock()
                 .unwrap()
                 .set_state(vm_id, VmState::Stopping, None)?;
+            self.event(row.slot, "stop requested", None);
             self.pumps.close(vm_id);
             let runner = self.arc();
             let vm_id = vm_id.to_owned();
@@ -1257,6 +1520,15 @@ impl Runner {
             journal.set_retain(vm_id, retain)?;
             journal.set_state(vm_id, VmState::Releasing, None)?;
         }
+        self.event(
+            row.slot,
+            "release requested",
+            Some(if retain {
+                "keep the disk"
+            } else {
+                "delete the disk"
+            }),
+        );
         self.pumps.close(vm_id);
         if row.state.live() {
             let runner = self.arc();
@@ -1313,6 +1585,7 @@ impl Runner {
             return;
         }
         let result = if row.retain || row.interrupted {
+            self.event(slot, "retained", None);
             journal.set_state(vm_id, VmState::Retained, None)
         } else {
             match fs::remove_dir_all(self.paths(slot).dir) {
@@ -1350,6 +1623,15 @@ impl Runner {
                 VmState::Stopping,
                 None,
             );
+            self.event(
+                slot,
+                "runner stopping",
+                Some(if graceful {
+                    "the runner shuts down; the guest is powered down"
+                } else {
+                    "the runner shuts down at once"
+                }),
+            );
             let runner = self.arc();
             stops.spawn(async move { runner.stop_vm(&vm_id, slot, graceful).await });
         }
@@ -1380,6 +1662,67 @@ fn wait_exit_unreaped(pid: u32) {
     }
 }
 
+/// A VM overlay's backing file, relative to its directory.
+fn backing_path(image_sha256: &str, template: Option<&str>) -> String {
+    match template {
+        Some(id) => format!("../../templates/{id}/disk.qcow2"),
+        None => format!("../../images/{image_sha256}.qcow2"),
+    }
+}
+
+/// The VM's QEMU as this process knows it.
+fn live_facts(live: Option<(u32, bool)>, state: VmState) -> Value {
+    match live {
+        Some((pid, exited)) => {
+            let usage = (!exited).then(|| diagnose::process_usage(pid)).flatten();
+            json!({
+                "tracked": true,
+                "pid": pid,
+                "exited": exited,
+                "exists": !exited && diagnose::process_exists(pid),
+                "cpuMs": usage.map(|(cpu, _)| cpu),
+                "residentBytes": usage.map(|(_, resident)| resident),
+            })
+        }
+        None => json!({
+            "tracked": false,
+            "note": if state.live() {
+                format!("the journal says {} but this runner process has no qemu for it", state.as_str())
+            } else {
+                format!("no qemu runs for a {} vm", state.as_str())
+            },
+        }),
+    }
+}
+
+/// QMP's view of a live VM: its name, run state and vCPUs. A QEMU that
+/// does not answer within the budget is reported as such.
+fn qmp_facts(live: Option<(u32, bool)>, state: VmState, path: &Path) -> Value {
+    if !matches!(live, Some((_, false))) || !matches!(state, VmState::Starting | VmState::Running) {
+        return json!({ "asked": false });
+    }
+    let started = Instant::now();
+    let mut answers = serde_json::Map::new();
+    let mut qmp = match Qmp::connect(path, DIAGNOSE_QMP_WAIT) {
+        Ok(qmp) => qmp,
+        Err(error) => {
+            return json!({ "asked": true, "answered": false, "error": format!("{error:#}") });
+        }
+    };
+    for command in ["query-name", "query-status", "query-cpus-fast"] {
+        if started.elapsed() > DIAGNOSE_QMP_BUDGET {
+            answers.insert(command.into(), json!({ "error": "not asked: out of time" }));
+            continue;
+        }
+        let answer = match qmp.execute(command) {
+            Ok(value) => value,
+            Err(error) => json!({ "error": format!("{error:#}") }),
+        };
+        answers.insert(command.into(), answer);
+    }
+    json!({ "asked": true, "answered": true, "ms": started.elapsed().as_millis() as u64, "answers": answers })
+}
+
 pub(crate) fn template_dir(state: &Path, id: &str) -> PathBuf {
     state.join("templates").join(id)
 }
@@ -1404,13 +1747,15 @@ fn gc_templates(journal: &Journal, state: &Path) -> Result<()> {
 /// Startup reconciliation for a VM a previous runner process left live. On
 /// Linux PDEATHSIG has already killed QEMU and nothing answers; on macOS
 /// QEMU may still run and is told to quit over its QMP socket.
-fn quit_orphan(qmp: &Path, vm_id: &str) {
+fn quit_orphan(qmp: &Path, vm_id: &str) -> bool {
     let Ok(mut connection) = Qmp::connect(qmp, Duration::from_secs(2)) else {
-        return;
+        return false;
     };
     if connection.name().is_ok_and(|name| name == vm_id) && connection.execute("quit").is_ok() {
         connection.wait_closed(QUIT_GRACE);
+        return true;
     }
+    false
 }
 
 #[cfg(test)]

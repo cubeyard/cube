@@ -214,6 +214,24 @@ helper of existing machines on resume. The gateway's dial route now allows
 headless Chromium against the offline portal; not in a real VM, on macOS or
 over Tailscale with sslip.io. Details and gaps: docs/services.md.
 
+## Machine startup diagnostics (cube-runner 0.8.3)
+
+A thread whose machine does not start has a read-only evidence bundle at
+`GET /api/threads/<id>/diagnostics` (and OptChat's `diagnose` for its own
+threads): cubed's record and its new per-thread machine events, the runner's
+last report and age, the gateway's link, one guest hello, and the runner's
+`vm.diagnose` (recorded QEMU argv, disk and backing, process CPU time, QMP
+status, frame counters, bounded console and qemu logs, and the runner's new
+per-VM event log). Every string is escaped and redacted at the runner and
+again in cubed. A runner before 0.8.3 gives only `vm.inspect` (record and
+16 KiB of console); events before this version were never recorded. How to
+use it: docs/runner-operations.md, "Diagnosing a machine that does not
+start". Verified offline and with the fake QEMU over the real Iroh wire
+(`runner_diagnose.rs`, `vm-diagnostics-test.ts`, `api-test.ts`); not with a
+real guest or on a real Mac. cube-runner 0.8.3 also carries the macOS NIC
+change of #105 (no x86 option ROM), which v0.3.15 (cube-runner 0.8.2) does
+not.
+
 ## Known gaps and next steps
 
 - **Machine templates:** built on `vm-snapshots`, verified on Linux/KVM only

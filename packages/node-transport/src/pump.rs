@@ -10,21 +10,27 @@
 //! grant closes the current connection.
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use anyhow::Result;
 use iroh::{EndpointId, endpoint::Connection};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use tokio::{net::UnixDatagram, task::JoinHandle};
 
-use crate::l2::{
-    Fragmenter, FrameReady, Reassembler, accept_hello, answer_hello, constant_time_eq, send_frame,
+use crate::{
+    diagnose::{now_ms, record_event},
+    l2::{
+        Fragmenter, FrameReady, Reassembler, accept_hello, answer_hello, constant_time_eq,
+        send_frame,
+    },
 };
 
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,12 +62,35 @@ fn replace(slot: &Slot, connection: Option<Connection>) {
     }
 }
 
+/// What one pump has carried since QEMU started, for `vm.diagnose`. A
+/// frame from the guest shows its kernel brought the NIC up.
+#[derive(Default)]
+struct FrameStats {
+    opened_at: u64,
+    from_guest: AtomicU64,
+    from_guest_bytes: AtomicU64,
+    /// Frames from the guest while no gateway was connected.
+    from_guest_dropped: AtomicU64,
+    first_from_guest_at: AtomicU64,
+    last_from_guest_at: AtomicU64,
+    to_guest: AtomicU64,
+    last_to_guest_at: AtomicU64,
+    connections: AtomicU64,
+    connected_at: AtomicU64,
+    disconnected_at: AtomicU64,
+    refusals: AtomicU64,
+    last_refusal: Mutex<Option<(u64, &'static str)>>,
+}
+
 struct Pump {
     thread_id: String,
     grant: Mutex<FrameGrant>,
     current: Slot,
     socket: Arc<UnixDatagram>,
     reader: JoinHandle<()>,
+    stats: Arc<FrameStats>,
+    /// The VM directory, for its event log.
+    dir: PathBuf,
 }
 
 impl Drop for Pump {
@@ -81,7 +110,13 @@ impl Pumps {
     /// Creates the frame socket pair and starts relaying what QEMU sends.
     /// Returns QEMU's end, inheritable across exec, for
     /// `-netdev dgram,local.type=fd`. Must run inside a Tokio runtime.
-    pub fn open(&self, vm_id: &str, thread_id: &str, grant: FrameGrant) -> Result<OwnedFd> {
+    pub fn open(
+        &self,
+        vm_id: &str,
+        thread_id: &str,
+        grant: FrameGrant,
+        dir: PathBuf,
+    ) -> Result<OwnedFd> {
         self.close(vm_id);
         let (ours, theirs) = std::os::unix::net::UnixDatagram::pair()?;
         // Both ends are ours to size: QEMU's default receive space is 4 KiB
@@ -101,13 +136,24 @@ impl Pumps {
         }
         let socket = Arc::new(UnixDatagram::from_std(ours)?);
         let current: Slot = Arc::default();
-        let reader = tokio::spawn(relay_from_qemu(socket.clone(), current.clone()));
+        let stats = Arc::new(FrameStats {
+            opened_at: now_ms(),
+            ..FrameStats::default()
+        });
+        let reader = tokio::spawn(relay_from_qemu(
+            socket.clone(),
+            current.clone(),
+            stats.clone(),
+            dir.clone(),
+        ));
         let pump = Arc::new(Pump {
             thread_id: thread_id.into(),
             grant: Mutex::new(grant),
             current,
             socket,
             reader,
+            stats,
+            dir,
         });
         self.pumps.lock().unwrap().insert(vm_id.into(), pump);
         Ok(theirs)
@@ -145,6 +191,36 @@ impl Pumps {
             .unwrap()
             .values()
             .any(|pump| pump.grant.lock().unwrap().peer == peer)
+    }
+
+    /// A VM's frame channel as `vm.diagnose` reports it; None when the VM
+    /// has no pump (its QEMU is not running under this process).
+    pub fn observe(&self, vm_id: &str) -> Option<Value> {
+        let pump = self.pumps.lock().unwrap().get(vm_id).cloned()?;
+        let stats = &pump.stats;
+        let count = |value: &AtomicU64| value.load(Ordering::Relaxed);
+        let at = |value: &AtomicU64| match value.load(Ordering::Relaxed) {
+            0 => Value::Null,
+            ms => ms.into(),
+        };
+        let refusal = *stats.last_refusal.lock().unwrap();
+        let connected = pump.current.lock().unwrap().is_some();
+        Some(json!({
+            "openedAt": stats.opened_at,
+            "gatewayConnected": connected,
+            "connections": count(&stats.connections),
+            "connectedAt": at(&stats.connected_at),
+            "disconnectedAt": at(&stats.disconnected_at),
+            "refusals": count(&stats.refusals),
+            "lastRefusal": refusal.map(|(at, reason)| json!({"at": at, "reason": reason})),
+            "framesFromGuest": count(&stats.from_guest),
+            "bytesFromGuest": count(&stats.from_guest_bytes),
+            "framesFromGuestDropped": count(&stats.from_guest_dropped),
+            "firstFrameFromGuestAt": at(&stats.first_from_guest_at),
+            "lastFrameFromGuestAt": at(&stats.last_from_guest_at),
+            "framesToGuest": count(&stats.to_guest),
+            "lastFrameToGuestAt": at(&stats.last_to_guest_at),
+        }))
     }
 
     pub fn has_connection(&self, vm_id: &str) -> bool {
@@ -196,6 +272,13 @@ impl Pumps {
             }
         };
         if let Some(reason) = refusal {
+            // Only the VM's own pump keeps the refusal; another thread's
+            // gateway learns nothing about it.
+            if let Some(pump) = pump.as_ref().filter(|p| p.thread_id == hello.thread_id) {
+                pump.stats.refusals.fetch_add(1, Ordering::Relaxed);
+                *pump.stats.last_refusal.lock().unwrap() = Some((now_ms(), reason));
+                record_event(&pump.dir, "gateway refused", Some(reason));
+            }
             let _ = answer_hello(send, &FrameReady::refused(reason)).await;
             // Give the answer a moment to reach the gateway, which closes.
             let _ = tokio::time::timeout(Duration::from_secs(2), connection.closed()).await;
@@ -207,12 +290,24 @@ impl Pumps {
             return;
         }
         replace(&pump.current, Some(connection.clone()));
+        pump.stats.connections.fetch_add(1, Ordering::Relaxed);
+        pump.stats.connected_at.store(now_ms(), Ordering::Relaxed);
+        record_event(&pump.dir, "gateway connected", None);
         let mut reassembler = Reassembler::default();
         while let Ok(datagram) = connection.read_datagram().await {
             if let Some(frame) = reassembler.push(datagram) {
+                pump.stats.to_guest.fetch_add(1, Ordering::Relaxed);
+                pump.stats
+                    .last_to_guest_at
+                    .store(now_ms(), Ordering::Relaxed);
                 send_to_qemu(&pump.socket, &frame).await;
             }
         }
+        pump.stats
+            .disconnected_at
+            .store(now_ms(), Ordering::Relaxed);
+        let reason = connection.close_reason().map(|reason| reason.to_string());
+        record_event(&pump.dir, "gateway disconnected", reason.as_deref());
         let mut current = pump.current.lock().unwrap();
         if current
             .as_ref()
@@ -261,17 +356,37 @@ async fn send_to_qemu(socket: &UnixDatagram, frame: &[u8]) {
     }
 }
 
-async fn relay_from_qemu(socket: Arc<UnixDatagram>, current: Slot) {
+async fn relay_from_qemu(
+    socket: Arc<UnixDatagram>,
+    current: Slot,
+    stats: Arc<FrameStats>,
+    dir: PathBuf,
+) {
     let mut buffer = vec![0u8; 65536];
     let mut fragmenter = Fragmenter::default();
     loop {
         let Ok(n) = socket.recv(&mut buffer).await else {
             return;
         };
+        let now = now_ms();
+        stats.from_guest.fetch_add(1, Ordering::Relaxed);
+        stats
+            .from_guest_bytes
+            .fetch_add(n as u64, Ordering::Relaxed);
+        stats.last_from_guest_at.store(now, Ordering::Relaxed);
+        if stats
+            .first_from_guest_at
+            .compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            record_event(&dir, "first frame from the guest", None);
+        }
         let connection = current.lock().unwrap().clone();
         if let Some(connection) = connection {
             // Congested: this frame is dropped whole; the guest retransmits.
             let _ = send_frame(&connection, &mut fragmenter, &buffer[..n]);
+        } else {
+            stats.from_guest_dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

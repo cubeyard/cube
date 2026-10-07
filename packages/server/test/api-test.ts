@@ -121,6 +121,19 @@ try {
   const failed = (await settledThreads()).find((thread: { id: string }) => thread.id === gatewayless.id);
   assert.equal(failed.state, "error");
   assert.match(failed.error, /gateway unavailable: cube-gateway was not found/);
+  // Its diagnostics say what happened and what could not be asked, read only.
+  const diagnosed = await fetch(`${base}/api/threads/${gatewayless.id}/diagnostics`);
+  assert.equal(diagnosed.status, 200);
+  const { diagnostics } = await diagnosed.json();
+  assert.equal(diagnostics.thread.id, gatewayless.id);
+  assert.equal(diagnostics.thread.runnerNode, "node-valid");
+  assert.match(diagnostics.activation.error, /gateway unavailable/);
+  assert.equal(diagnostics.machine.runner.status, "none", "no allocation reached the runner");
+  assert.equal(diagnostics.machine.gateway.status, "unavailable");
+  assert.equal(diagnostics.machine.guest.status, "none");
+  assert.ok(diagnostics.machine.events.entries.some((event: { event: string; detail?: string }) => event.event === "start failed" && /gateway unavailable/.test(event.detail ?? "")));
+  assert.equal(JSON.stringify(diagnostics).includes("configPath"), false, "no private adapter paths");
+  assert.equal((await fetch(`${base}/api/threads/missing-thread/diagnostics`)).status, 404);
   assert.equal((await fetch(`${base}/api/threads/missing-thread/workspace/operations/key`)).status, 404);
   const cli = path.resolve("packages/server/src/index.ts");
   const help = spawnSync(process.execPath, [cli, "--help"], { encoding: "utf8" });

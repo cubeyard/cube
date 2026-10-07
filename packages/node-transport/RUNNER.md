@@ -66,7 +66,8 @@ request is read. After hello, a method protocol 3 does not have (for example
 Hello (runner profile) adds `binding`, `platform` (`linux-x86_64`,
 `macos-aarch64`), `baseImageSha256`, capabilities `node.status vm.allocate
 vm.start vm.stop vm.inspect vm.release vm.discard vm.publish template.list
-template.remove` (`vm.discard` since 0.5.0, templates since 0.8.0), and
+template.remove vm.diagnose` (`vm.discard` since 0.5.0, templates since 0.8.0,
+`vm.diagnose` since 0.8.3), and
 `limits {maxFrameBytes,
 requestTimeoutMs, maxVcpus, maxMemoryMiB, maxDiskGiB, maxSeedBytes,
 maxActiveVms}`. `maxActiveVms` is the process's bound on active VMs (1 before
@@ -85,6 +86,7 @@ record.
  "gateway":{"peer":"<gateway endpoint id>","frameToken":"<64 hex>"}}
 {"method":"vm.stop","threadId":"t1","vmId":"0123456789abcdef","epoch":1}
 {"method":"vm.inspect","threadId":"t1","vmId":"0123456789abcdef"}
+{"method":"vm.diagnose","threadId":"t1","vmId":"0123456789abcdef"}
 {"method":"vm.release","threadId":"t1","vmId":"0123456789abcdef","epoch":1,"retain":false}
 {"method":"vm.discard","threadId":"t1","vmId":"0123456789abcdef","epoch":1}
 {"method":"vm.publish","threadId":"t1","vmId":"0123456789abcdef","epoch":2,"key":"<64 hex>","meta":"{…}"}
@@ -102,7 +104,8 @@ released retained failed`. `running` means QEMU answered QMP, not that the
 guest is ready. `vm.stop` and `vm.release` of a live VM are asynchronous (ACPI
 power-down, 30 s, QMP `quit`, SIGKILL); poll `vm.inspect`. `vm.discard`
 deletes a `retained` or `failed` VM's directory (`released` afterwards, and
-repeatable); any other state is `CONFLICT`. The first
+repeatable); any other state is `CONFLICT`. `vm.diagnose` is read only and
+answers `{"type":"Diagnosis","diagnosis":{…}}` (see "Diagnostics" below). The first
 `vm.start` fixes vcpus, memory, mac and seed; later starts reuse them and
 ignore the request's sizes and seed (a different mac is `CONFLICT`). A
 mutation runs to completion even when its control connection times out, so a
@@ -135,6 +138,37 @@ directory is deleted at once if no VM that is not `released` depends on it
 discarded. A removed template is `NOT_FOUND`. cubed decides which templates to
 keep (see `packages/server/src/vm-template.ts`); the runner never expires one
 by itself.
+
+### Diagnostics (0.8.3)
+
+`vm.diagnose` reports one VM of the requesting thread (another thread's is
+`CONFLICT`) without taking the mutation lock, so it neither waits for nor
+holds up a mutation. Its `diagnosis` has `collectedAt`, `runner` (version,
+platform, process start, lifecycle, QEMU path and version, firmware, base
+image), `vm` (the record), `slot`, `config`, `launch` (the command line
+recorded at QEMU's start in `vms/<n>/launch.json`, `source: recorded`; for a
+VM an older runner started, the one this runner would use, `source:
+reconstructed`), `disk` (overlay header, backing file, whether it is the
+expected one and present, template, seed), `process` (pid, alive, CPU ms,
+resident bytes, from `/proc` or `proc_pidinfo`), `qmp` (`query-name`,
+`query-status`, `query-cpus-fast`, within 1.5 s, only for a live VM),
+`frames` (the pump since QEMU started: gateway connected, connections,
+refusals, frames and bytes from and to the guest, first and last times),
+`logs` (`console`: first 8 KiB and last 56 KiB; `previousConsole` and `qemu`:
+last 8 KiB each; with size, change time, `omittedBytes` and `complete`) and
+`events` (the newest 200 of `vms/<n>/events.log`, or `null` when the VM has
+none). Paths show the state directory as `$STATE` and the runner account's
+home as `~`. Every string is escaped (no control, invisible or reordering
+character, invalid UTF-8 as `\xNN`) and secret-looking values are
+`[redacted]` (`diagnose.rs`); the answer stays below one frame.
+
+`vms/<n>/events.log` (JSON lines, 0600, 64 KiB then `events.prev.log`) is
+written from 0.8.3 on, best effort: allocated, qemu started (pid, epoch),
+running, qmp did not answer, qemu exited (state and error), start while live,
+start refused (draining), stop requested, power-down, quit, killed, release
+requested, retained, runner stopping, runner restarted (reconciliation), and
+from the pump gateway connected, refused (reason), disconnected and the first
+frame from the guest.
 
 ## Frame channel `cube/l2/1`
 
