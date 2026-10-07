@@ -254,10 +254,10 @@ fn next_key_line(gap: &str, prefix: &str) -> bool {
 /// an escaped newline, or the text's start), if that is at most 128 bytes.
 fn line_prefix(text: &str, at: usize) -> &str {
     let bytes = text.as_bytes();
-    let from = at.saturating_sub(128);
+    let from = at.saturating_sub(129);
     let line = (from..at).rev().find(|&k| {
         bytes[k] == b'\n'
-            || (k >= 3 && bytes[k - 3..=k].eq_ignore_ascii_case(b"\\x0d"))
+            || (k >= 3 && &bytes[k - 3..=k] == b"\\x0d")
             || (k >= 1 && &bytes[k - 1..=k] == b"\\n")
     });
     match line {

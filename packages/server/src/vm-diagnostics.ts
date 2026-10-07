@@ -90,7 +90,7 @@ function redactKeys(text: string): string {
  * prefix like the previous key line's (`[   12.5] cloud-init[1]: `; digits
  * may differ), if it had one. Mirrors the runner's `next_key_line`. */
 function nextKeyLine(gap: string, prefix: string): boolean {
-  const normalized = gap.replace(/\\x0[da]/gi, "\n").replace(/\\r/g, "").replace(/\\n/g, "\n").replace(/^[ \t"',]*/, "");
+  const normalized = gap.replace(/\\x0[da]/g, "\n").replace(/\\r/g, "").replace(/\\n/g, "\n").replace(/^[ \t"',]*/, "");
   if (!normalized.startsWith("\n")) return false;
   const rest = normalized.replace(/^\n\n?/, "");
   let alike = rest.length === prefix.length;
@@ -102,7 +102,7 @@ function nextKeyLine(gap: string, prefix: string): boolean {
  * an escaped newline, or the text's start), if that is at most 128
  * characters. */
 function linePrefix(text: string, at: number): string {
-  const from = Math.max(0, at - 128);
+  const from = Math.max(0, at - 129);
   const window = text.slice(from, at);
   let line = -1;
   for (const mark of ["\n", "\\x0d", "\\n"]) {
