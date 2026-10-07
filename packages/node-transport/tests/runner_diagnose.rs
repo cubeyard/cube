@@ -168,6 +168,23 @@ async fn diagnosis_reports_each_stage_and_is_scoped() {
         "{console}"
     );
     assert_eq!(live["logs"]["console"]["complete"], true);
+    // vm.inspect's console tail is cleaned the same way.
+    let Response::Vm { console_tail, .. } = served.rpc(inspect("t1", VM)).await else {
+        panic!()
+    };
+    let tail = console_tail.unwrap();
+    assert!(
+        tail.contains("\\x1b[2J") && tail.contains("[redacted private key]\nlogin:"),
+        "{tail}"
+    );
+    for secret in [
+        "hunter2",
+        "0123456789abcdefABCD",
+        "secretkeymaterial",
+        "\x1b",
+    ] {
+        assert!(!tail.contains(secret), "{secret:?} leaked in {tail}");
+    }
     let seen = events(&live);
     for expected in [
         "allocated",
@@ -208,6 +225,30 @@ async fn diagnosis_reports_each_stage_and_is_scoped() {
             .unwrap()
             .contains(&format!("[... {} bytes omitted ...]", 200_000 - 64 * 1024))
     );
+
+    // A key cut by the excerpt's omission, after an unrelated BEGIN line in
+    // its head: the tail starts inside the key (synthetic key lines).
+    let body: Vec<String> = (0..1000)
+        .map(|n| format!("SyntheticKeyBody{n:04}Line{}", "Ab9+/Cd8".repeat(7))[..70].to_string())
+        .collect();
+    std::fs::write(
+        vm_dir(&fx).join("console.log"),
+        format!(
+            "-----BEGIN SSH HOST KEY FINGERPRINTS-----\n{}-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\nlogin:\n",
+            "boot line\n".repeat(1000),
+            body.join("\n")
+        ),
+    )
+    .unwrap();
+    let cut = diagnosis(&served, "t1", VM).await;
+    let text = cut["logs"]["console"]["text"].as_str().unwrap();
+    assert_eq!(cut["logs"]["console"]["complete"], false);
+    assert!(!text.contains("SyntheticKeyBody"), "{text}");
+    assert!(text.contains("[redacted private key]\nlogin:"), "{text}");
+    let Response::Vm { console_tail, .. } = served.rpc(inspect("t1", VM)).await else {
+        panic!()
+    };
+    assert!(!console_tail.unwrap().contains("SyntheticKeyBody"));
 
     served.vm(stop("t1", VM, 3)).await;
     served.wait_state("t1", VM, VmState::Stopped).await;

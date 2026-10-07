@@ -48,18 +48,67 @@ export function safeText(text: string, max = 4096): string {
 }
 
 export const REDACTED = "[redacted]";
-const KEY = "PRIVATE KEY-----";
-/** PEM private keys, well-known token formats, bearer tokens and the values
- * of password/secret/token keys become `[redacted]`. A key whose end (or
- * start) was cut off is redacted to the end (or from the start). Mirrors
+export const REDACTED_KEY = "[redacted private key]";
+/** A BEGIN or END line marker of any private key armor, any case. */
+const KEY_MARKER = /(?:-+ ?|^ ?)(BEGIN|END) [A-Za-z0-9 ]*?PRIVATE KEY(?:[A-Za-z]| (?!-))*-*/gi;
+/** What the runner puts where an excerpt left bytes out: its tail may start
+ * inside a key whose BEGIN line was omitted. */
+const OMITTED = " bytes omitted ...]";
+
+/** Private key blocks become `[redacted private key]`. A key whose END was
+ * cut off is redacted to the end; one whose BEGIN was cut off, from where
+ * the text (or the excerpt's tail) starts. Mirrors the runner's
+ * `diagnose::redact_keys`. */
+function redactKeys(text: string): string {
+  const markers = [...text.matchAll(KEY_MARKER)].map(m => ({ start: m.index, end: m.index + m[0].length, begin: m[1]!.toUpperCase() === "BEGIN" }));
+  let out = "";
+  let copied = 0;
+  for (let next = 0; next < markers.length;) {
+    const { start, end, begin } = markers[next++]!;
+    if (start < copied) continue;
+    if (begin) {
+      out += text.slice(copied, start) + REDACTED_KEY;
+      const close = markers.findIndex((m, i) => i >= next && !m.begin);
+      if (close < 0) { copied = text.length; break; }
+      copied = markers[close]!.end;
+      next = close + 1;
+    } else {
+      const omitted = text.slice(copied, start).lastIndexOf(OMITTED);
+      out += text.slice(copied, omitted < 0 ? copied : copied + omitted + OMITTED.length) + REDACTED_KEY;
+      copied = end;
+    }
+  }
+  return redactKeyBodies(out + text.slice(copied));
+}
+
+/** Key bodies whose BEGIN and END lines were both cut off: base64 runs of
+ * 60+ characters in mixed case with digits (PEM and OpenSSH key lines are 64
+ * and 70), the shorter runs that continue them on lines of their own, and
+ * anything with the OpenSSH key magic. A public key after its type
+ * (`ssh-ed25519 AAAA…`) stays. Mirrors the runner's `redact_key_bodies`. */
+function redactKeyBodies(text: string): string {
+  let previous = -1;
+  return text.replace(/[A-Za-z0-9+/=]+/g, (run, at: number) => {
+    const end = at + run.length;
+    const long = run.length >= 60 && /[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run);
+    const word = text.slice(0, at).replace(/ +$/, "").split(/[ \n"']/).pop()!;
+    const isPublic = /^(?:ssh-|ecdsa-|sk-ssh-|sk-ecdsa-)/.test(word);
+    const gap = text.slice(previous, at).replace(/\\x0d|\\x0a|\\r|\\n/g, "");
+    const continued = run.length >= 4 && previous >= 0 && /^(?:$|[\n\\"'])/.test(text.slice(end, end + 1))
+      && gap.length <= 4 && /^[\s"',]*$/.test(gap);
+    if ((long && !isPublic) || continued || run.includes("b3BlbnNzaC1rZXktdjE")) {
+      previous = end;
+      return REDACTED_KEY;
+    }
+    return run;
+  });
+}
+
+/** Private keys (see `redactKeys`), well-known token formats, bearer tokens
+ * and the values of password/secret/token keys become `[redacted]`. Mirrors
  * the runner's `diagnose::redact`. */
 export function redact(text: string): string {
-  const end = text.search(/-----END [^\n]*PRIVATE KEY-----/);
-  if (end >= 0 && !text.slice(0, end).includes("-----BEGIN ")) {
-    text = `[redacted private key]${text.slice(end + text.slice(end).indexOf(KEY) + KEY.length)}`;
-  }
-  return text
-    .replace(/-----BEGIN [^\n]*PRIVATE KEY-----[^]*?(?:-----END [^\n]*PRIVATE KEY-----|$)/g, "[redacted private key]")
+  return redactKeys(text)
     .replace(/(?<![A-Za-z0-9_-])(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|sk-ant-|sk-proj-|xoxb-|xoxp-|AKIA)[A-Za-z0-9_-]{12,}/g, `$1${REDACTED}`)
     .replace(/(?<![A-Za-z0-9_-])(bearer +)[A-Za-z0-9_\-.~+/=]{8,}/gi, `$1${REDACTED}`)
     .replace(/(password|passwd|secret|token|api_key|apikey|api-key|private_key)(["']*[ \t]*[=:][ \t"']*)[^\s"',;&}<>]+/gi, `$1$2${REDACTED}`);

@@ -172,43 +172,167 @@ fn secret_at(bytes: &[u8], i: usize) -> Option<(usize, usize)> {
     None
 }
 
-/// Replaces PEM private keys, well-known token formats, bearer tokens and
-/// the values of password/secret/token keys with `[redacted]`. A key whose
-/// end (or start) was cut off is redacted to the end (or from the start).
-pub fn redact(text: &str) -> String {
-    const BEGIN: &str = "-----BEGIN ";
-    const KEY_END: &str = "PRIVATE KEY-----";
-    let mut keys = String::with_capacity(text.len());
-    let mut rest = text;
-    // An END with no BEGIN before it: the excerpt starts inside a key.
-    if let Some(end) = rest.find("-----END ")
-        && !rest[..end].contains(BEGIN)
-    {
-        let line_end = rest[end..].find('\n').map_or(rest.len(), |n| end + n);
-        if let Some(close) = rest[end..line_end].find(KEY_END) {
-            keys.push_str("[redacted private key]");
-            rest = &rest[end + close + KEY_END.len()..];
-        }
-    }
-    while let Some(start) = rest.find(BEGIN) {
-        let header_end = rest[start..].find('\n').map_or(rest.len(), |n| start + n);
-        if !rest[start..header_end].contains(KEY_END) {
-            keys.push_str(&rest[..start + BEGIN.len()]);
-            rest = &rest[start + BEGIN.len()..];
+pub const REDACTED_KEY: &str = "[redacted private key]";
+/// What `read_window` puts where it left bytes out: an excerpt's tail may
+/// start inside a key whose BEGIN line was omitted.
+const OMITTED: &str = " bytes omitted ...]";
+
+/// A `-----BEGIN … PRIVATE KEY-----` or `-----END …` line marker (any key
+/// type, PGP's `PRIVATE KEY BLOCK`, any case): (start, end, is_begin).
+fn key_markers(text: &str) -> Vec<(usize, usize, bool)> {
+    const PRIVATE: &[u8] = b"PRIVATE KEY";
+    let bytes = text.as_bytes();
+    let mut markers = Vec::new();
+    let mut at = 0;
+    while at + PRIVATE.len() <= bytes.len() {
+        if !bytes[at..at + PRIVATE.len()].eq_ignore_ascii_case(PRIVATE) {
+            at += 1;
             continue;
         }
-        keys.push_str(&rest[..start]);
-        keys.push_str("[redacted private key]");
-        let after = &rest[header_end..];
-        rest = match after.find("-----END ") {
-            Some(end) => match after[end..].find(KEY_END) {
-                Some(close) => &after[end + close + KEY_END.len()..],
-                None => "",
-            },
-            None => "",
-        };
+        // The key type between BEGIN/END and PRIVATE KEY: letters, digits, spaces.
+        let mut start = at;
+        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b' ') {
+            start -= 1;
+        }
+        let words = &text[start..at];
+        let words = words.trim_start_matches(' ');
+        let begin = words.len() >= 6 && words[..6].eq_ignore_ascii_case("BEGIN ");
+        let end_word = words.len() >= 4 && words[..4].eq_ignore_ascii_case("END ");
+        // A dash before the word, or the text starts there (cut off).
+        let dashed = start == 0 || bytes[start - 1] == b'-';
+        let mut end = at + PRIVATE.len();
+        if (begin || end_word) && dashed {
+            while end < bytes.len()
+                && (bytes[end].is_ascii_alphabetic() || bytes[end] == b' ')
+                && !bytes[end..].starts_with(b" -")
+            {
+                end += 1;
+            }
+            end += bytes[end..].iter().take_while(|&&b| b == b'-').count();
+            while start > 0 && bytes[start - 1] == b'-' {
+                start -= 1;
+            }
+            markers.push((start, end, begin));
+        }
+        at = end;
     }
-    keys.push_str(rest);
+    markers
+}
+
+/// Whether `b` can be part of a base64 run.
+fn base64_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='
+}
+
+/// Only line breaks, as they are or escaped, between two base64 runs.
+fn line_break_gap(gap: &str) -> bool {
+    let gap = gap
+        .replace("\\x0d", "")
+        .replace("\\x0a", "")
+        .replace("\\r", "")
+        .replace("\\n", "");
+    gap.len() <= 4
+        && gap
+            .bytes()
+            .all(|b| b.is_ascii_whitespace() || b == b'"' || b == b'\'' || b == b',')
+}
+
+/// Key bodies whose BEGIN and END lines were both cut off: base64 runs of
+/// 60+ characters in mixed case with digits (PEM and OpenSSH key lines are
+/// 64 and 70), the shorter runs that continue them on the next lines, and
+/// anything with the OpenSSH key magic. A public key after its type
+/// (`ssh-ed25519 AAAA…`) stays.
+fn redact_key_bodies(text: &str) -> String {
+    const OPENSSH_MAGIC: &str = "b3BlbnNzaC1rZXktdjE";
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let (mut i, mut copied) = (0, 0);
+    // Where the last redacted run ended.
+    let mut previous: Option<usize> = None;
+    while i < bytes.len() {
+        if !base64_byte(bytes[i]) || (i > 0 && base64_byte(bytes[i - 1])) {
+            i += 1;
+            continue;
+        }
+        let end = i + bytes[i..].iter().take_while(|&&b| base64_byte(b)).count();
+        let run = &text[i..end];
+        let long = run.len() >= 60
+            && run.bytes().any(|b| b.is_ascii_uppercase())
+            && run.bytes().any(|b| b.is_ascii_lowercase())
+            && run.bytes().any(|b| b.is_ascii_digit());
+        let public = text[..i]
+            .trim_end_matches(' ')
+            .rsplit([' ', '\n', '"', '\''])
+            .next()
+            .is_some_and(|word| {
+                word.starts_with("ssh-")
+                    || word.starts_with("ecdsa-")
+                    || word.starts_with("sk-ssh-")
+                    || word.starts_with("sk-ecdsa-")
+            });
+        // A continuation is a whole line of its own.
+        let line_ends = matches!(bytes.get(end), None | Some(b'\n' | b'\\' | b'"' | b'\''));
+        let continued =
+            run.len() >= 4 && line_ends && previous.is_some_and(|p| line_break_gap(&text[p..i]));
+        if (long && !public) || continued || run.contains(OPENSSH_MAGIC) {
+            out.push_str(&text[copied..i]);
+            out.push_str(REDACTED_KEY);
+            copied = end;
+            previous = Some(end);
+        }
+        i = end;
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// Private key blocks become `[redacted private key]`. A key whose END was
+/// cut off is redacted to the end; one whose BEGIN was cut off, from where
+/// the text (or the excerpt's tail) starts.
+fn redact_keys(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    // Copied up to; where a key body with no BEGIN may start.
+    let (mut copied, mut floor) = (0, 0);
+    let markers = key_markers(text);
+    let mut next = 0;
+    while next < markers.len() {
+        let (start, end, begin) = markers[next];
+        next += 1;
+        if start < copied {
+            continue;
+        }
+        if begin {
+            out.push_str(&text[copied..start]);
+            out.push_str(REDACTED_KEY);
+            match markers[next..].iter().position(|m| !m.2) {
+                Some(close) => {
+                    copied = markers[next + close].1;
+                    next += close + 1;
+                }
+                None => {
+                    copied = text.len();
+                    break;
+                }
+            }
+        } else {
+            let from = text[floor..start]
+                .rfind(OMITTED)
+                .map_or(floor, |n| floor + n + OMITTED.len());
+            out.push_str(&text[copied..from.max(copied)]);
+            out.push_str(REDACTED_KEY);
+            copied = end;
+        }
+        floor = copied;
+    }
+    out.push_str(&text[copied..]);
+    redact_key_bodies(&out)
+}
+
+/// Replaces private keys (see `redact_keys`), well-known token formats,
+/// bearer tokens and the values of password/secret/token keys with
+/// `[redacted]`.
+pub fn redact(text: &str) -> String {
+    let keys = redact_keys(text);
     let bytes = keys.as_bytes();
     let mut out = String::with_capacity(keys.len());
     let (mut i, mut copied) = (0, 0);
@@ -535,6 +659,146 @@ mod tests {
             "-----BEGIN CERTIFICATE-----\nMIIB\n",
             "certificates are public"
         );
+    }
+
+    /// Synthetic key body lines: what a key line looks like, no real key.
+    fn body(lines: usize) -> Vec<String> {
+        (0..lines)
+            .map(|n| format!("SyntheticKeyBody{n}Line{}", "Ab9+/Cd8".repeat(7))[..70].to_string())
+            .collect()
+    }
+
+    fn assert_no_body(text: &str, lines: &[String]) {
+        for line in lines {
+            for piece in [&line[..16], &line[line.len() - 16..]] {
+                assert!(!text.contains(piece), "{piece} leaked in {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn keys_cut_or_escaped_are_redacted() {
+        let lines = body(6);
+        let joined = lines.join("\n");
+        let key = format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n{joined}\n-----END OPENSSH PRIVATE KEY-----"
+        );
+        // An excerpt whose tail starts inside a key, after a head that has
+        // other BEGIN and END lines (a certificate, cloud-init's public keys).
+        let head = "boot\n-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n\
+            -----BEGIN SSH HOST KEY KEYS-----\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPublicHostKeyStaysVisible0123456789abcdefABCD root@cube\n\
+            -----END SSH HOST KEY KEYS-----\n";
+        let cut = &key[60..];
+        let text = format!("{head}\n[... 900 bytes omitted ...]\n{cut}\nlogin:");
+        let redacted = redact(&text);
+        assert_no_body(&redacted, &lines);
+        for kept in [
+            "boot",
+            "MIIB",
+            "PublicHostKeyStaysVisible",
+            "omitted ...]",
+            "login:",
+        ] {
+            assert!(redacted.contains(kept), "{kept} missing in {redacted}");
+        }
+        // A tail that starts inside a key after a whole key.
+        let text = format!("{key}\nmiddle\n[... 9 bytes omitted ...]\n{cut}\nend");
+        let redacted = redact(&text);
+        assert_no_body(&redacted, &lines);
+        assert!(redacted.contains("middle") && redacted.contains("end"));
+        // Both BEGIN and END cut off: body lines alone, the short last one too.
+        let short = "ShortLastLine0Ab9==";
+        let text = format!(
+            "x\n{}\n{short}\ncloud-init[1]: done",
+            lines[1..5].join("\n")
+        );
+        let redacted = redact(&text);
+        assert_no_body(&redacted, &lines[1..5]);
+        assert!(!redacted.contains(short), "{redacted}");
+        assert!(redacted.contains("cloud-init[1]: done"));
+        // A console that ends lines with a lone CR, escaped by safe_text.
+        let cr = key.replace('\n', "\r");
+        let (escaped, _) = safe_text(cr.as_bytes(), 1 << 16);
+        assert_no_body(&redact(&escaped), &lines);
+        // The key as a JSON or Python string: one line, escaped newlines.
+        let one_line = format!(
+            "ssh_keys: {{'ed25519_private': '{}\\n'}} next",
+            key.replace('\n', "\\n")
+        );
+        let redacted = redact(&one_line);
+        assert_no_body(&redacted, &lines);
+        assert!(redacted.ends_with(" next"), "{redacted}");
+        // Its END escaped too, cut off where the excerpt starts.
+        assert_no_body(&redact(&one_line[90..]), &lines);
+        // Other armors and cases; a prefix on every line.
+        for (begin, end) in [
+            (
+                "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+                "-----END PGP PRIVATE KEY BLOCK-----",
+            ),
+            ("-----begin private key-----", "-----end private key-----"),
+            (
+                "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+                "-----END ENCRYPTED PRIVATE KEY-----",
+            ),
+        ] {
+            let prefixed = format!(
+                "[ 12.5] ci: {begin}\n[ 12.5] ci: {}\n[ 12.5] ci: {end}\nok",
+                lines.join("\n[ 12.5] ci: ")
+            );
+            let redacted = redact(&prefixed);
+            assert_no_body(&redacted, &lines);
+            assert!(redacted.ends_with("\nok"), "{redacted}");
+        }
+        // Cut by clean's bound inside the key.
+        let (cleaned, cut) = clean(key.as_bytes(), 200);
+        assert!(cut);
+        assert_no_body(&cleaned, &lines);
+        // Fingerprints, hashes and paths stay.
+        for kept in [
+            "256 SHA256:Ab9Cd8Ef7Gh6Ij5Kl4Mn3Op2Qr1St0UvWxYz0123456 root@cube (ED25519)",
+            "sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "/opt/homebrew/share/qemu/edk2-aarch64-code.fd",
+        ] {
+            assert_eq!(redact(kept), kept);
+        }
+        for text in [&text, &one_line, &escaped] {
+            let once = redact(text);
+            assert_eq!(redact(&once), once, "idempotent");
+        }
+    }
+
+    #[test]
+    fn excerpt_cut_inside_a_key_is_redacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("console.log");
+        let lines = body(40);
+        let key = format!(
+            "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----\n",
+            lines.join("\n")
+        );
+        // A BEGIN of another kind in the head, the key's BEGIN in the omitted middle.
+        let content = format!(
+            "-----BEGIN SSH HOST KEY FINGERPRINTS-----\n{}{key}tail\n",
+            "k".repeat(2000)
+        );
+        fs::write(&log, &content).unwrap();
+        for window in [
+            Window {
+                head: 64,
+                tail: 1024,
+            },
+            Window { head: 0, tail: 700 },
+            Window {
+                head: 2100,
+                tail: 300,
+            },
+        ] {
+            let excerpt = log_excerpt(&log, window);
+            let text = excerpt["text"].as_str().unwrap();
+            assert_no_body(text, &lines);
+            assert!(text.contains("[redacted private key]"), "{text}");
+        }
     }
 
     #[test]
