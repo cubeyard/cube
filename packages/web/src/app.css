@@ -1589,7 +1589,8 @@ a.work-title:hover { color: var(--signal); }
 .artifact-body mark.anchor.delivered { background: color-mix(in srgb, var(--lamp-green) 14%, transparent); border-bottom-color: var(--lamp-green); }
 .artifact-body mark.anchor.undeliverable { background: var(--bad-soft); border-bottom-color: var(--lamp-red); }
 .artifact-body mark.anchor.composing { background: var(--signal-soft); border-bottom-color: var(--signal); }
-.artifact-select-key { position: fixed; z-index: 20; transform: translateX(-50%); }
+/* centred with translate, so a key's pressed transform does not undo it */
+.artifact-select-key { position: fixed; z-index: 20; translate: -50% 0; }
 /* actions: a bank of keys, each with its target */
 .artifact-actions { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 1.2rem; }
 .artifact-action {
