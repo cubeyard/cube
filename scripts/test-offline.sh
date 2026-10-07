@@ -25,6 +25,7 @@ OFFLINE_TESTS=(
   packages/server/test/lifecycle-test.ts
   packages/server/test/vm-template-test.ts
   packages/server/test/vm-prepare-test.ts
+  packages/server/test/vm-reattach-test.ts
   packages/server/test/durable-agent-test.ts
   packages/server/test/codemode-test.ts
   packages/server/test/thread-events-test.ts

@@ -77,6 +77,8 @@ export function vmSizes(env: NodeJS.ProcessEnv = process.env): VmSizes {
 
 const READY_TIMEOUT_MS = 15 * 60 * 1000;
 const SETTLE_TIMEOUT_MS = 3 * 60 * 1000;
+/** How long an attached machine's guest has to answer before it is attached again. */
+const GUEST_CHECK_TIMEOUT_MS = 20000;
 const MACHINE_STATES_LIVE = new Set(["starting", "running"]);
 
 export interface ThreadVmsOptions {
@@ -220,7 +222,8 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       await this.abandonBuildElsewhere(thread);
       if (placement(thread) === "allocated") await this.verify(thread);
       if (this.attached.has(vm.vmId)) {
-        // Already started by this process: only check that it still runs.
+        // Already started by this process: only check that it still runs
+        // and its guest answers.
         const runner = this.runner(thread);
         await this.options.gateway.ensureNetwork(runner.target.network);
         const { client: gateway } = await this.options.gateway.ready();
@@ -228,9 +231,17 @@ export class ThreadVms implements ThreadMachines, EgressVms {
           if (contactLost(error)) this.observe(thread.runnerId, { error: errorText(error) });
           throw error;
         }), gateway.status(vm.vmId)]);
-        if (current.state === "running" && status) return { booted: false };
+        if (current.state === "running" && status) {
+          // Running is QEMU's word, not the guest's: a guest that stopped
+          // answering over the gateway is attached again (a new frame
+          // connection to the same machine) and waited for, not trusted.
+          const unanswered = await this.unanswered(thread);
+          if (!unanswered) return { booted: false };
+          this.log.warn("machine runs but its guest does not answer; attaching it again", { thread: thread.id, vm: vm.vmId, error: unanswered,
+            link: status.link, linkError: status.lastError });
+          await this.guest(thread).close();
+        } else this.log.warn("machine is not running; starting it again", { thread: thread.id, vm: vm.vmId, state: current.state });
         this.attached.delete(vm.vmId);
-        this.log.warn("machine is not running; starting it again", { thread: thread.id, vm: vm.vmId, state: current.state });
       }
       onBoot?.();
       // Each runner is tried once per start; a move commits before the next try.
@@ -723,6 +734,15 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       }
       await delay(2000);
     }
+  }
+
+  /** Why an attached machine's guest does not answer ready now, or null. */
+  private async unanswered(thread: Thread): Promise<string | null> {
+    try {
+      const answer = await this.guest(thread).call("hello", {}, { timeoutMs: GUEST_CHECK_TIMEOUT_MS });
+      if (answer.header.error && typeof answer.header.error === "object") return String((answer.header.error as { message?: unknown }).message);
+      return guestDescription(answer.header).ready ? null : "its guest is not ready";
+    } catch (error) { return error instanceof Error ? error.message : String(error); }
   }
 
   private async reattach(client: GatewayClient): Promise<void> {
