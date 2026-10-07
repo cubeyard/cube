@@ -511,7 +511,10 @@ mod tests {
         assert!(line.contains("-bios /opt/homebrew/share/qemu/edk2-aarch64-code.fd"));
         assert!(!line.contains("-sandbox") && !line.contains("-vga"));
         // No x86 iPXE option ROM in an aarch64 guest.
-        assert!(line.contains("-device virtio-net-pci,netdev=n0,mac=02:00:00:00:00:01,romfile= "));
+        assert!(
+            args.iter()
+                .any(|a| a == "virtio-net-pci,netdev=n0,mac=02:00:00:00:00:01,romfile=")
+        );
     }
 
     #[test]
