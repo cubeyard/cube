@@ -76,6 +76,14 @@ export async function smokeProduct(root: string) {
     const second = start("resume");
     const recovered = await second.wait("ready");
     const base = `${recovered.url}/api/threads/${id}`;
+    // The restarted cubed reopens the thread in the background (its machine
+    // checked, the guest brought up to date, the resume hooks): wait for it.
+    for (const deadline = Date.now() + 20000; ;) {
+      const reopened = (await (await fetch(`${recovered.url}/api/threads`)).json()).threads.find((thread: { id: string }) => thread.id === id);
+      if (reopened.state !== "starting") break;
+      assert(Date.now() < deadline, "the thread did not reopen");
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
     // cubed mounts the workspace routes; the thread's agent is fixed and Pi
     // holds its lease, so no second writable owner can be admitted.
     const workspace = await (await fetch(`${base}/workspace`)).json();

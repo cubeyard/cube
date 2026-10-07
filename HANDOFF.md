@@ -201,6 +201,19 @@ stream. Next: capture a real `claude -p` stream across a model change and a
 inference undercounts, never overcounts, if it guesses wrong). Details and
 gaps: docs/usage.md.
 
+## Services and the portal (branch `feat/cube-service`)
+
+Thread agents run web servers with `cube service start NAME --port PORT --
+COMMAND` (supervised systemd units that outlive the command; list, status,
+logs, restart, stop) and get a URL from cubed's private HTTP portal
+(`CUBED_PORTAL_IP`, off by default; per-service hosts under
+`<ip>.sslip.io`). The CLI is part of the guest helper; cubed refreshes the
+helper of existing machines on resume. The gateway's dial route now allows
+1024-65535 besides 22. Verified offline (helper tests, gateway link test,
+`portal-test.ts` with HTTP, WebSocket, aborts, stop, archive, no wake) and in
+headless Chromium against the offline portal; not in a real VM, on macOS or
+over Tailscale with sslip.io. Details and gaps: docs/services.md.
+
 ## Known gaps and next steps
 
 - **Machine templates:** built on `vm-snapshots`, verified on Linux/KVM only
@@ -211,7 +224,7 @@ gaps: docs/usage.md.
   offline), per-project TTLs.
 - Macaroons for finer GitHub authorization, and a separate download exit, need
   design decisions.
-- **Gateway limits:** HTTP/2, WebSocket and CONNECT are refused. Clients that
+- **Gateway egress limits:** HTTP/2, WebSocket and CONNECT from the guest are refused (the portal's inbound WebSocket is separate). Clients that
   pin certificates fail. There is no IPv6.
 - **Not verified:**
   - more than one active VM per runner on production hosts, macOS/HVF and

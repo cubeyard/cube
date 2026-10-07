@@ -17,7 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export type GuestOp = "hello" | "exec" | "get" | "cancel" | "read" | "write" | "stat";
+export type GuestOp = "hello" | "exec" | "get" | "cancel" | "read" | "write" | "stat" | "services" | "install" | "portal";
 export interface GuestAnswer { header: Record<string, unknown>; body: Buffer }
 export interface GuestCallOptions { body?: Uint8Array; signal?: AbortSignal; timeoutMs?: number }
 

@@ -48,3 +48,4 @@ target/
 
 # worktrees for isolated feature work
 .worktrees/
+__pycache__/

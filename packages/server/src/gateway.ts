@@ -9,6 +9,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
+import type net from "node:net";
 import path from "node:path";
 import readline from "node:readline";
 import { createLogger, type Logger } from "./log.ts";
@@ -51,6 +52,36 @@ export function locateGateway(env: NodeJS.ProcessEnv = process.env): string | nu
     try { fs.accessSync(candidate, fs.constants.X_OK); if (fs.statSync(candidate).isFile()) return candidate; } catch { /* next */ }
   }
   return null;
+}
+
+/** A TCP connection to a guest port through the gateway's dial route (the
+ * gateway allows 22 and 1024-65535); bytes that came with the 101 are put
+ * back in front of the stream. */
+export function dialGuest(control: string, vmId: string, port: number, timeoutMs = 15000): Promise<net.Socket> {
+  if (!/^[0-9a-f]{16}$/.test(vmId)) return Promise.reject(new Error("invalid vm id"));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return Promise.reject(new Error("invalid port"));
+  return new Promise((resolve, reject) => {
+    const request = http.request({ socketPath: control, method: "POST", path: `/v1/vms/${vmId}/dial?port=${port}`,
+      headers: { host: "cube-gateway", connection: "Upgrade", upgrade: "cube-tcp", "content-length": 0 } });
+    const timer = setTimeout(() => request.destroy(new Error("the gateway did not dial in time")), timeoutMs);
+    request.on("upgrade", (_response, socket: net.Socket, head: Buffer) => {
+      clearTimeout(timer);
+      if (head.length) socket.unshift(head);
+      resolve(socket);
+    });
+    request.on("response", response => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.on("end", () => {
+        clearTimeout(timer);
+        let message = Buffer.concat(chunks).toString("utf8").slice(0, 300);
+        try { message = String((JSON.parse(message) as { error?: unknown }).error ?? message); } catch { /* as is */ }
+        reject(new GatewayRequestError(response.statusCode ?? 0, message));
+      });
+    });
+    request.on("error", error => { clearTimeout(timer); reject(error instanceof GatewayRequestError ? error : new GatewayUnavailable(error.message)); });
+    request.end();
+  });
 }
 
 /** cubed's side of the gateway's control API (HTTP on a 0600 unix socket). */

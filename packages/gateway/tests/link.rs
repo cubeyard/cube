@@ -313,8 +313,25 @@ async fn attach_lease_and_ssh_dial_over_iroh() {
     guest_side.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"client hello");
 
+    // The portal path: a guest service on an unprivileged port.
+    let listener = runner.guest.listen(8080);
+    let dialed = dial::open(&gateway.control, VM_ID, 8080).await.unwrap();
+    let mut service = runner.guest.accept(listener).await;
+    let mut stream = dialed.stream;
+    stream.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+    let mut request = [0u8; 18];
+    service.read_exact(&mut request).await.unwrap();
+    assert_eq!(&request, b"GET / HTTP/1.1\r\n\r\n");
+    let closed = dial::open(&gateway.control, VM_ID, 8081)
+        .await
+        .err()
+        .unwrap();
+    assert!(format!("{closed:#}").contains("502"), "{closed:#}");
+
     let refused = dial::open(&gateway.control, VM_ID, 23).await.err().unwrap();
     assert!(format!("{refused:#}").contains("403"), "{refused:#}");
+    let privileged = dial::open(&gateway.control, VM_ID, 80).await.err().unwrap();
+    assert!(format!("{privileged:#}").contains("403"), "{privileged:#}");
     let missing = dial::open(&gateway.control, "fedcba9876543210", 22)
         .await
         .err()

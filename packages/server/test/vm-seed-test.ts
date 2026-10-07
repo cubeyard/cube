@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
 import { newPlaceholder } from "../src/egress-policy.ts";
-import { GUEST_HELPER_PATH, GUEST_PACKAGES, MAX_SEED_BYTES, guestHelper, vmMac, vmSeed } from "../src/vm-seed.ts";
+import { GUEST_CLI_PATH, GUEST_CLI_SHIM, GUEST_HELPER_PATH, GUEST_PACKAGES, MAX_SEED_BYTES, guestHelper, vmMac, vmSeed } from "../src/vm-seed.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-seed-"));
 try {
@@ -47,6 +47,10 @@ try {
   assert.equal(helper.permissions, "0755");
   assert.equal(helper.encoding, "gz+b64");
   assert.equal(gunzipSync(Buffer.from(helper.content, "base64")).toString(), guestHelper().helper, "the shipped helper is the repository's");
+  // The agent's `cube` command, the same shim the helper's `install` writes.
+  assert.deepEqual(file(GUEST_CLI_PATH), { path: GUEST_CLI_PATH, permissions: "0755", owner: "root:root", content: GUEST_CLI_SHIM });
+  assert.equal(GUEST_CLI_SHIM, `#!/bin/sh\nexec ${GUEST_HELPER_PATH} cli "$@"\n`);
+  assert.ok(guestHelper().helper.includes('CLI_SHIM = "#!/bin/sh\\nexec %s cli \\"$@\\"\\n" % HELPER\n'), "the helper writes the same shim");
   assert.equal(file("/etc/systemd/system/cube-guest-recover.service").content, guestHelper().recoverUnit);
   assert.deepEqual(config.users.map((user: { name: string }) => user.name), ["agent"], "no default user");
   assert.equal(config.users[0].lock_passwd, true);

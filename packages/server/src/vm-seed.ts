@@ -2,11 +2,12 @@
  * by the runner as a FAT `CIDATA` image. It holds the guest's SSH host key
  * (generated and pinned by cubed), the public half of cubed's per-VM client
  * key restricted to the guest helper, the installation CA, the secret
- * placeholders and the helper itself. It holds no real secret and no cubed,
+ * placeholders and the helper itself (also the agent's `cube` command). It holds no real secret and no cubed,
  * runner or host address: the guest's only network is the gateway's LAN.
  *
  * user-data is JSON under `#cloud-config` (JSON is YAML), so no document
  * here depends on hand-made indentation. */
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { gzipSync } from "node:zlib";
@@ -14,6 +15,9 @@ import type { VmSeed } from "./iroh-node.ts";
 import type { ProjectHooks } from "./registry.ts";
 
 export const GUEST_HELPER_PATH = "/usr/local/sbin/cube-guest";
+/** The agent's `cube` command (`cube service`): a shim that runs the helper's CLI. */
+export const GUEST_CLI_PATH = "/usr/local/bin/cube";
+export const GUEST_CLI_SHIM = `#!/bin/sh\nexec ${GUEST_HELPER_PATH} cli "$@"\n`;
 const GUEST_DIRECTORY = path.resolve(import.meta.dirname, "../guest");
 /** The runner refuses a larger seed. */
 export const MAX_SEED_BYTES = 64 * 1024;
@@ -48,6 +52,13 @@ export function guestHelper(): { helper: string; recoverUnit: string } {
     helper: fs.readFileSync(path.join(GUEST_DIRECTORY, "cube-guest.py"), "utf8"),
     recoverUnit: fs.readFileSync(path.join(GUEST_DIRECTORY, "cube-guest-recover.service"), "utf8"),
   };
+}
+
+/** The helper's bytes as this cubed ships them, and their sha256 (what a
+ * current helper reports as its `build`). */
+export function shippedHelper(): { source: Buffer; sha256: string } {
+  const source = Buffer.from(guestHelper().helper);
+  return { source, sha256: createHash("sha256").update(source).digest("hex") };
 }
 
 /** The MAC of a VM: locally administered, derived from its id. */
@@ -106,6 +117,7 @@ export function vmSeed(input: SeedInput): VmSeed {
     write_files: [
       { path: GUEST_HELPER_PATH, permissions: "0755", owner: "root:root", encoding: "gz+b64",
         content: gzipSync(Buffer.from(shipped.helper)).toString("base64") },
+      { path: GUEST_CLI_PATH, permissions: "0755", owner: "root:root", content: GUEST_CLI_SHIM },
       { path: "/etc/systemd/system/cube-guest-recover.service", permissions: "0644", owner: "root:root", content: shipped.recoverUnit },
       // Only cubed's per-VM key, and it can only run the helper.
       { path: "/etc/cube/authorized_keys", permissions: "0600", owner: "root:root",

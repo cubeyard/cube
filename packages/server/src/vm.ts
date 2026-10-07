@@ -10,17 +10,19 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
+import type net from "node:net";
 import path from "node:path";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
-import { GatewayUnavailable, type GatewayAttach, type GatewayClient, type GatewaySupervisor } from "./gateway.ts";
+import { gzipSync } from "node:zlib";
+import { dialGuest, GatewayUnavailable, type GatewayAttach, type GatewayClient, type GatewaySupervisor } from "./gateway.ts";
 import { SshGuestTransport, controlDirectory, type GuestTransport } from "./guest-ssh.ts";
 import { IrohNodeError, runnerClient, type IrohRunnerClient, type RunnerDescription, type RunnerTemplate, type VmRecord, type VmRef } from "./iroh-node.ts";
 import { createLogger, type Logger } from "./log.ts";
 import { NO_HOOKS, threadAgent, type HookOutcome, type Registry, type Thread, type WorkspaceAllocation } from "./registry.ts";
 import { newPlaceholder, type EgressVms } from "./egress-policy.ts";
-import { guestDescription, VmWorkspace } from "./vm-workspace.ts";
-import { GUEST_HELPER_PATH, vmMac, vmSeed } from "./vm-seed.ts";
+import { guestDescription, VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
+import { GUEST_HELPER_PATH, shippedHelper, vmMac, vmSeed } from "./vm-seed.ts";
 import { FAILED_BUILD_BACKOFF_MS, TEMPLATE_CAPABILITY, TEMPLATE_FORMAT, obsoleteTemplates, pickTemplate, templateKey, templateSettings,
   type TemplateMeta, type TemplateSettings } from "./vm-template.ts";
 import { LeaseStore } from "./workspace-lease.ts";
@@ -46,6 +48,12 @@ export interface ThreadMachines {
   /** Deletes an archived thread's retained disk. */
   discard(thread: Thread): Promise<void>;
   close(): Promise<void>;
+  /** Whether this process has the thread's machine running and attached;
+   * never starts one (the portal must not wake a machine). */
+  running?(thread: Thread): boolean;
+  /** A TCP connection to a port of the thread's running machine, for the
+   * portal (the gateway allows 22 and 1024-65535). */
+  dial?(thread: Thread, port: number): Promise<net.Socket>;
 }
 
 export interface MachineStart { booted: boolean }
@@ -174,6 +182,13 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     if (record.state !== "released") throw new Error(`the runner did not discard the machine (${record.state})`);
     fs.rmSync(this.keyDirectory(thread), { recursive: true, force: true });
     this.log.info("discarded", { thread: thread.id, vm: vm.vmId });
+  }
+
+  running(thread: Thread): boolean { return !!thread.vm && this.attached.has(thread.vm.vmId); }
+
+  async dial(thread: Thread, port: number): Promise<net.Socket> {
+    if (!this.running(thread)) throw new Error("the thread's machine is not running");
+    return dialGuest(this.controlSocket(), machine(thread).vmId, port);
   }
 
   async close(): Promise<void> {
@@ -795,6 +810,65 @@ export async function resumeWorkspace(workspace: VmWorkspace, owner: WorkspaceOw
   const outcome = preparationOutcome(state);
   if (outcome.error) throw new Error(outcome.error.replace("checking out the project failed", "the resume hooks did not run"));
   return { hooks: outcome.hooks, already: state.state === "succeeded" && /^cube-resume already$/m.test(Buffer.from(state.output).toString("utf8")) };
+}
+
+/** Base64 per bootstrap command: the helper takes commands up to 8 KiB. */
+const BOOTSTRAP_CHUNK = 6000;
+
+/** Commands that put `source` in place of a helper from before `install`
+ * existed (and with it the `cube` command): the gzipped helper in chunks
+ * under /var/tmp, checked against its sha256, then the new helper's own
+ * `install` as root. Each is an ordinary command of cubed's. */
+export function helperBootstrapScripts(source: Buffer): string[] {
+  const sha256 = createHash("sha256").update(source).digest("hex");
+  const directory = `/var/tmp/cube-helper-${sha256.slice(0, 16)}`;
+  const encoded = gzipSync(source).toString("base64");
+  const chunks: string[] = [];
+  for (let offset = 0; offset < encoded.length; offset += BOOTSTRAP_CHUNK) chunks.push(encoded.slice(offset, offset + BOOTSTRAP_CHUNK));
+  return [
+    ...chunks.map((chunk, index) => `set -e\nmkdir -p ${directory}\nprintf '%s' '${chunk}' > ${directory}/${index}`),
+    ["set -e", `d=${directory}`,
+      `cat ${chunks.map((_, index) => `"$d/${index}"`).join(" ")} | base64 -d | gunzip > "$d/helper"`,
+      `echo "${sha256}  $d/helper" | sha256sum -c --quiet`,
+      `{ printf '{"sha256":"${sha256}","length":%d}\\n' "$(stat -c %s "$d/helper")"; cat "$d/helper"; } | sudo -n /usr/bin/python3 "$d/helper" call install`,
+      "rm -rf \"$d\""].join("\n"),
+  ];
+}
+
+/** Brings the machine's guest helper, and with it the agent's `cube`
+ * command, to the one this cubed ships, then tells it the portal's settings.
+ * A fresh machine has it from its seed already; a machine made before this
+ * cubed (a cubed update, a reused disk) gets it here. Runs with the
+ * workspace lease free (before the agent opens). */
+export async function refreshGuest(workspace: VmWorkspace, owner: WorkspaceOwner, portal: GuestPortal): Promise<"current" | "installed" | "bootstrapped"> {
+  const shipped = shippedHelper();
+  const description = await workspace.describe();
+  let outcome: "current" | "installed" | "bootstrapped" = "current";
+  if (description.build !== shipped.sha256) {
+    if (description.capabilities.includes("helper.install")) {
+      await workspace.installHelper(shipped.source);
+      outcome = "installed";
+    } else {
+      const lease = await workspace.lease({ owner });
+      try {
+        for (const [index, command] of helperBootstrapScripts(shipped.source).entries()) {
+          const key = `cube:helper:${lease.epoch}:${index}`;
+          await workspace.execOwn(lease.token, key, { command, timeoutMs: 120000 });
+          const state = await settleOperation(workspace, lease.token, key);
+          if (state.state !== "succeeded" || state.exitCode !== 0) {
+            const output = state.state === "succeeded" ? Buffer.from(state.output).toString("utf8").trim().slice(-300) : state.state;
+            throw new Error(`installing the guest helper failed: ${output}`);
+          }
+        }
+      } finally { await workspace.release(lease.token).catch(() => {}); }
+      workspace.forget();
+      outcome = "bootstrapped";
+    }
+    const after = await workspace.describe();
+    if (after.build !== shipped.sha256) throw new Error("the machine still runs another guest helper");
+  }
+  await workspace.configurePortal(portal);
+  return outcome;
 }
 
 /** What the machine reports about its work at archive. The guest is

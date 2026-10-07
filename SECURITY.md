@@ -33,6 +33,13 @@ JPEG, GIF and WebP, recognized by their bytes, and serves a message's image
 with `nosniff`, a sandboxing content security policy and a same-origin
 resource policy; they are sent to the chat's model provider with the turn.
 
+The optional service portal (`CUBED_PORTAL_IP`, off by default) is a second
+listener with the same boundary: no authentication, plain HTTP, bound only to
+a private or loopback IPv4 address. Anyone who reaches it and knows a service
+URL reaches that thread's web server. It routes only exact per-service Host
+names to ports the guest registered, serves nothing of cube's and never starts
+a machine; see [docs/services.md](docs/services.md).
+
 GUI-driven cubed updates do not add an application authorization layer. Every
 client admitted by that deployment boundary can request an update when the
 operator has explicitly set `CUBED_GUI_UPDATES=1`. The HTTP process is limited to

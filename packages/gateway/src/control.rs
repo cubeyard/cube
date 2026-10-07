@@ -8,7 +8,7 @@
 //! | `DELETE /v1/vms/{vmId}` | detach → 204 |
 //! | `GET /v1/vms/{vmId}` | status |
 //! | `GET /v1/vms` | `{vms: [status…]}` |
-//! | `POST /v1/vms/{vmId}/dial?port=22` | `Upgrade: cube-tcp` → 101, raw bytes to guest:22 |
+//! | `POST /v1/vms/{vmId}/dial?port=N` | `Upgrade: cube-tcp` → 101, raw bytes to guest:N (22 or 1024-65535) |
 use anyhow::Result;
 use bytes::Bytes;
 use cube_node_transport::{NetworkMode, l2::FrameHello, l2::valid_frame_token};
@@ -32,8 +32,11 @@ use crate::{
 };
 
 pub const UPGRADE_PROTOCOL: &str = "cube-tcp";
-/// The only guest port cubed may dial.
-pub const DIAL_PORTS: [u16; 1] = [22];
+/// The guest's sshd (cubed's tools) and the unprivileged ports its services
+/// listen on (cubed's portal, which only dials ports the guest registered).
+pub fn dial_allowed(port: u16) -> bool {
+    port == 22 || port >= 1024
+}
 const MAX_BODY: usize = 64 * 1024;
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -235,9 +238,9 @@ impl Gateway {
             .map(|vm| vm.lan.dialer())
     }
 
-    /// TCP to the guest from 10.77.0.1, for cubed's SSH.
+    /// TCP to the guest from 10.77.0.1, for cubed's SSH and portal.
     pub async fn dial(&self, vm_id: &str, port: u16) -> Result<FlowStream, ApiError> {
-        if !DIAL_PORTS.contains(&port) {
+        if !dial_allowed(port) {
             return Err(ApiError(
                 StatusCode::FORBIDDEN,
                 format!("dialling guest port {port} is not allowed"),
@@ -396,5 +399,20 @@ pub async fn serve(listener: UnixListener, gateway: Arc<Gateway>) -> Result<()> 
                 .with_upgrades()
                 .await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dial_allowed;
+
+    #[test]
+    fn dials_sshd_and_unprivileged_service_ports_only() {
+        assert!(dial_allowed(22));
+        assert!(dial_allowed(1024));
+        assert!(dial_allowed(65535));
+        for port in [0, 1, 21, 23, 80, 443, 1023] {
+            assert!(!dial_allowed(port), "{port}");
+        }
     }
 }

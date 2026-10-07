@@ -17,6 +17,13 @@ systemd unit, so it survives cubed or gateway restarts and is found again by
 its key. A reboot marks unfinished records interrupted; nothing is ever run
 twice.
 
+The same file is the `cube` command inside the guest (/usr/local/bin/cube
+is a shim that runs `cube-guest cli`): `cube service` runs the agent's web
+servers as supervised systemd services, outside the transient unit of the
+command that started them, and registers their port for cubed's portal.
+cubed reads the registrations with the `services` operation; nothing in the
+guest calls cubed.
+
 The VM is the isolation boundary: path checks are contract, not security.
 Python 3 standard library only.
 """
@@ -27,7 +34,9 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -35,7 +44,10 @@ import time
 
 VERSION = "1"
 HELPER = "/usr/local/sbin/cube-guest"
-CAPABILITIES = ["exec.start", "exec.cancel", "operation.get", "fs.read", "fs.write", "fs.stat"]
+CLI_PATH = "/usr/local/bin/cube"
+CLI_SHIM = "#!/bin/sh\nexec %s cli \"$@\"\n" % HELPER
+CAPABILITIES = ["exec.start", "exec.cancel", "operation.get", "fs.read", "fs.write", "fs.stat",
+                "services.list", "helper.install", "portal.configure"]
 LIMITS = {
     "maxFrameBytes": 1048576,
     "requestTimeoutMs": 30000,
@@ -106,6 +118,90 @@ class SystemdLauncher:
         return result.stdout.decode().strip() == "stopping"
 
 
+class SystemdServices:
+    """`cube service`'s services as persistent systemd units: enabled, so a
+    machine that boots again starts them again, restarted when they fail,
+    with their output in the journal. Each unit runs `cube-guest service-run
+    NAME`, which reads the registration; nothing the agent typed goes into
+    a unit file."""
+
+    UNIT_DIRECTORY = "/etc/systemd/system"
+
+    def unit(self, name):
+        return "cube-service-%s.service" % name
+
+    def text(self, name):
+        return "\n".join([
+            "[Unit]",
+            "Description=cube service %s" % name,
+            "After=network-online.target",
+            "Wants=network-online.target",
+            # A service that keeps failing stops being restarted; `cube service
+            # status` shows it failed and `restart` starts it again.
+            "StartLimitIntervalSec=60",
+            "StartLimitBurst=5",
+            "",
+            "[Service]",
+            "Type=simple",
+            "ExecStart=%s service-run %s" % (HELPER, name),
+            "Restart=on-failure",
+            "RestartSec=2",
+            "KillMode=control-group",
+            "TimeoutStopSec=10",
+            "StandardInput=null",
+            "StandardOutput=journal",
+            "StandardError=journal",
+            "SyslogIdentifier=cube-service-%s" % name,
+            "",
+            "[Install]",
+            "WantedBy=multi-user.target",
+            "",
+        ])
+
+    def _systemctl(self, *args):
+        result = subprocess.run(["systemctl"] + list(args), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=60)
+        return result.returncode, result.stdout.decode(errors="replace").strip()
+
+    def start(self, name):
+        """Writes the unit and (re)starts it."""
+        write_atomic(os.path.join(self.UNIT_DIRECTORY, self.unit(name)), self.text(name).encode(), 0o644)
+        for args in (["daemon-reload"], ["reset-failed", self.unit(name)], ["enable", self.unit(name)], ["restart", self.unit(name)]):
+            code, output = self._systemctl(*args)
+            if code != 0 and args[0] != "reset-failed":
+                raise Fail("IO_ERROR", "systemctl %s failed: %s" % (args[0], output[-300:]))
+
+    def restart(self, name):
+        self._systemctl("reset-failed", self.unit(name))
+        code, output = self._systemctl("restart", self.unit(name))
+        if code != 0:
+            raise Fail("IO_ERROR", "systemctl restart failed: %s" % output[-300:])
+
+    def remove(self, name):
+        """Stops the unit and removes it; absent is fine."""
+        self._systemctl("disable", "--now", self.unit(name))
+        remove(os.path.join(self.UNIT_DIRECTORY, self.unit(name)))
+        self._systemctl("daemon-reload")
+        self._systemctl("reset-failed", self.unit(name))
+
+    def state(self, name):
+        """{active: ActiveState, sub: SubState, restarts: NRestarts}."""
+        code, output = self._systemctl("show", self.unit(name), "--property=ActiveState,SubState,NRestarts,LoadState")
+        values = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+        if values.get("LoadState") == "not-found":
+            return {"active": "missing", "sub": "", "restarts": 0}
+        restarts = values.get("NRestarts", "0")
+        return {"active": values.get("ActiveState", "unknown"), "sub": values.get("SubState", ""),
+                "restarts": int(restarts) if restarts.isdigit() else 0}
+
+    def logs(self, name, lines, follow):
+        argv = ["journalctl", "--no-pager", "--output=cat", "--unit", self.unit(name), "--lines", str(lines)]
+        if follow:
+            os.execvp(argv[0], argv + ["--follow"])
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+        return result.stdout.decode(errors="replace")
+
+
 class Config:
     def __init__(self):
         self.state = "/var/lib/cube"
@@ -122,6 +218,15 @@ class Config:
         self.launcher = SystemdLauncher()
         # Everything `seal_final` touches lives under this root (tests: a temporary one).
         self.root = "/"
+        # This file and its `cube` shim (`install` replaces both).
+        self.helper = HELPER
+        self.cli = CLI_PATH
+        # Where cubed's portal settings are (`portal` writes them).
+        self.portal_file = "/etc/cube/portal.json"
+        self.services = SystemdServices()
+        # The address cubed's portal reaches services on; None: this machine's
+        # address on the gateway's LAN.
+        self.service_host = None
 
 
 CONFIG = Config()
@@ -352,7 +457,8 @@ def template_seal():
 
 
 def op_hello(header, body):
-    answer = {"version": VERSION, "ready": ready(), "capabilities": CAPABILITIES, "limits": LIMITS, "epoch": current_epoch()}
+    answer = {"version": VERSION, "ready": ready(), "capabilities": CAPABILITIES, "limits": LIMITS, "epoch": current_epoch(),
+              "build": build()}
     seal = template_seal()
     if seal is not None:
         answer["templateSeal"] = seal
@@ -524,8 +630,563 @@ def op_stat(header, body):
             "modifiedMs": info.st_mtime_ns // 1000000, "sha256": sha256_file(target) if kind == "file" else None}, b""
 
 
+def build():
+    """The sha256 of this helper as installed: cubed compares it with the
+    helper it ships and replaces an older one (`install`)."""
+    try:
+        return sha256_file(CONFIG.helper)
+    except OSError:
+        return None
+
+
+def op_install(header, body):
+    """Replaces this helper (and its `cube` shim) with the one cubed ships.
+    Content-addressed: the same bytes again change nothing. Commands already
+    running keep the code they started with, but their unit's ExecStopPost
+    (`finish`) runs the new file: every helper version must keep reading and
+    writing the journal (`/var/lib/cube/ops`) in the same format."""
+    expected = header.get("sha256")
+    if not isinstance(expected, str) or not SHA.match(expected) or hashlib.sha256(body).hexdigest() != expected:
+        raise Fail("INVALID_REQUEST", "sha256 must name the helper's content")
+    if not body.startswith(b"#!/usr/bin/python3\n"):
+        raise Fail("INVALID_REQUEST", "not a guest helper")
+    if build() != expected:
+        write_atomic(CONFIG.helper, body, 0o755)
+        os.chmod(CONFIG.helper, 0o755)
+    install_cli()
+    return {"build": build()}, b""
+
+
+def install_cli():
+    """The `cube` command: a shim that runs this helper's CLI."""
+    try:
+        with open(CONFIG.cli, "rb") as handle:
+            if handle.read() == CLI_SHIM.encode():
+                return
+    except FileNotFoundError:
+        pass
+    os.makedirs(os.path.dirname(CONFIG.cli), exist_ok=True)
+    write_atomic(CONFIG.cli, CLI_SHIM.encode(), 0o755)
+    os.chmod(CONFIG.cli, 0o755)
+
+
+PORTAL_TEMPLATE = re.compile(r"^http://\{name\}-[a-z0-9]{1,32}\.[a-z0-9.-]{1,200}(?::[0-9]{1,5})?/$")
+
+
+def op_portal(header, body):
+    """cubed's portal settings for this machine, which `cube service` shows:
+    the URL template of its services, or why there is no portal."""
+    portal = header.get("portal")
+    if not isinstance(portal, dict):
+        raise Fail("INVALID_REQUEST", "portal must be an object")
+    template, reason = portal.get("urlTemplate"), portal.get("reason")
+    if template is not None and (not isinstance(template, str) or not PORTAL_TEMPLATE.fullmatch(template)):
+        raise Fail("INVALID_REQUEST", "invalid portal url template")
+    if template is None and (not isinstance(reason, str) or not reason or len(reason) > 300):
+        raise Fail("INVALID_REQUEST", "a portal without url template needs a reason")
+    value = {"urlTemplate": template} if template else {"reason": reason}
+    os.makedirs(os.path.dirname(CONFIG.portal_file), exist_ok=True)
+    write_atomic(CONFIG.portal_file, json.dumps(value, sort_keys=True).encode(), 0o644)
+    os.chmod(CONFIG.portal_file, 0o644)
+    return value, b""
+
+
+def op_services(header, body):
+    """The registered services, for cubed's portal and the thread view."""
+    return {"services": [service_view(record, probe=header.get("probe") is True) for record in registrations()]}, b""
+
+
 OPERATIONS = {"hello": op_hello, "exec": op_exec, "get": op_get, "cancel": op_cancel, "read": op_read,
-              "write": op_write, "stat": op_stat}
+              "write": op_write, "stat": op_stat, "services": op_services, "install": op_install, "portal": op_portal}
+
+
+# --- services ------------------------------------------------------------
+
+SERVICE_NAME = re.compile(r"^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])?$")
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+MAX_SERVICES = 16
+MIN_SERVICE_PORT = 1024
+MAX_SERVICE_COMMAND = 8192
+
+
+def services_dir():
+    return os.path.join(CONFIG.state, "services")
+
+
+def registration(name):
+    return read_json(os.path.join(services_dir(), name + ".json"))
+
+
+def registrations():
+    try:
+        names = sorted(os.listdir(services_dir()))
+    except FileNotFoundError:
+        return []
+    found = []
+    for name in names:
+        if name.endswith(".json") and SERVICE_NAME.fullmatch(name[:-5]):
+            record = read_json(os.path.join(services_dir(), name))
+            if isinstance(record, dict) and record.get("name") == name[:-5] and integer(record.get("port"), MIN_SERVICE_PORT, 65535) \
+                    and record.get("kind") in ("command", "external"):
+                found.append(record)
+    return found
+
+
+def save_registration(record):
+    os.makedirs(services_dir(), mode=0o700, exist_ok=True)
+    write_json(os.path.join(services_dir(), record["name"] + ".json"), record)
+
+
+def drop_registration(name):
+    target = os.path.join(services_dir(), name + ".json")
+    if os.path.exists(target):
+        os.unlink(target)
+        fsync_dir(services_dir())
+
+
+def service_host():
+    """This machine's address on the gateway's LAN: where the portal connects."""
+    if CONFIG.service_host:
+        return CONFIG.service_host
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("10.77.0.1", 9))  # no packet is sent
+        return probe.getsockname()[0]
+    except OSError:
+        return "10.77.0.2"
+    finally:
+        probe.close()
+
+
+def listening(host, port, timeout=1.0):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def http_probe(host, port, host_header, timeout=5.0):
+    """The status line a GET / answers with, or why there is none."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as connection:
+            connection.settimeout(timeout)
+            connection.sendall(("GET / HTTP/1.1\r\nHost: %s\r\nUser-Agent: cube-service\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+                                % host_header).encode())
+            data = b""
+            while b"\r\n" not in data and len(data) < 4096:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+    except OSError as error:
+        return None, "no HTTP answer (%s)" % (error.strerror or error)
+    line = data.split(b"\r\n", 1)[0].decode(errors="replace")
+    if not re.match(r"^HTTP/1\.[01] [0-9]{3}", line):
+        return None, "it answers, but not with HTTP/1.x" if data else "it closed the connection without an answer"
+    return int(line.split()[1]), line
+
+
+def portal_settings():
+    value = read_json(CONFIG.portal_file)
+    return value if isinstance(value, dict) else {}
+
+
+def service_url(name):
+    template = portal_settings().get("urlTemplate")
+    return template.replace("{name}", name) if isinstance(template, str) else None
+
+
+def no_portal_reason():
+    return portal_settings().get("reason") or "cube has not configured a portal for this machine yet"
+
+
+def service_view(record, probe=False):
+    view = {"name": record["name"], "port": record["port"], "kind": record["kind"], "url": service_url(record["name"]),
+            "createdAt": record.get("createdAt")}
+    if record["kind"] == "command":
+        view["command"] = record["command"]
+        view["cwd"] = record["cwd"]
+        state = CONFIG.services.state(record["name"])
+        view["state"] = state["active"]
+        view["restarts"] = state["restarts"]
+    if probe:
+        view["listening"] = listening(service_host(), record["port"])
+    return view
+
+
+def service_run(name):
+    """The unit's main process: the registered command as the agent, with
+    PORT and HOST set, in its directory."""
+    record = registration(name) if SERVICE_NAME.fullmatch(name) else None
+    if not record or record.get("kind") != "command":
+        sys.stderr.write("cube service %s is not registered\n" % name)
+        return 1
+    env = environment()
+    env.update(record.get("env") or {})
+    env.update({"PORT": str(record["port"]), "HOST": "0.0.0.0", "CUBE_SERVICE": name})
+    owner = account()
+    try:
+        os.chdir(record["cwd"])
+    except OSError as error:
+        sys.stderr.write("cube service %s: cannot enter %s: %s\n" % (name, record["cwd"], error.strerror or error))
+        return 1
+    if owner is not None:
+        os.setgroups(os.getgrouplist(CONFIG.user, owner[1]))
+        os.setgid(owner[1])
+        os.setuid(owner[0])
+    os.umask(0o022)
+    os.execve("/bin/bash", ["/bin/bash", "-c", record["command"]], env)
+    return 1
+
+
+# --- the `cube` command --------------------------------------------------
+
+CLI_USAGE = """usage: cube service <command> [options]
+
+Runs web servers in this machine as supervised services that outlive the
+command that started them, and opens them in cube's portal.
+
+  cube service start NAME --port PORT [--cwd DIR] [--env KEY=VALUE]... [--wait SECONDS] [--json] -- COMMAND...
+      run COMMAND as service NAME (restarted when it fails and when the
+      machine boots again); waits until it listens on PORT and prints its URL
+  cube service open NAME --port PORT [--wait SECONDS] [--json]
+      register a server that already runs outside cube service (its own
+      systemd unit, a container) on PORT
+  cube service list [--json]
+  cube service status NAME [--json]
+  cube service logs NAME [-n LINES] [-f]
+  cube service restart NAME [--wait SECONDS] [--json]
+  cube service stop NAME [--json]
+      stop the service and remove it from the portal
+
+A service gets PORT and HOST=0.0.0.0 in its environment and must listen on
+0.0.0.0 (or this machine's address), not only on 127.0.0.1: the portal
+reaches it over the machine's network. Ports 1024-65535; plain HTTP and
+WebSocket. NAME is 1-24 lowercase letters, digits and dashes.
+"""
+
+
+class Usage(Exception):
+    pass
+
+
+def cli_options(args, flags, values, repeated=()):
+    """Parses `--flag`, `--key VALUE` / `--key=VALUE` and positionals; what
+    follows `--` is returned as is (None without `--`)."""
+    options, positionals, rest = {}, [], None
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            rest = args[index + 1:]
+            break
+        if arg.startswith("-") and arg != "-":
+            key, sep, inline = arg.partition("=")
+            if key in flags and not sep:
+                options[key] = True
+            elif key in values or key in repeated:
+                if not sep:
+                    index += 1
+                    if index >= len(args):
+                        raise Usage("%s needs a value" % key)
+                    inline = args[index]
+                if key in repeated:
+                    options.setdefault(key, []).append(inline)
+                else:
+                    options[key] = inline
+            else:
+                raise Usage("unknown option %s" % arg)
+        else:
+            positionals.append(arg)
+        index += 1
+    return options, positionals, rest
+
+
+def cli_name(positionals):
+    if len(positionals) != 1:
+        raise Usage("give one service name")
+    if not SERVICE_NAME.fullmatch(positionals[0]):
+        raise Usage("a service name is 1-24 lowercase letters, digits and dashes, starting with a letter")
+    return positionals[0]
+
+
+def cli_port(options):
+    raw = options.get("--port")
+    if raw is None:
+        raise Usage("--port is required")
+    if not raw.isdigit() or not MIN_SERVICE_PORT <= int(raw) <= 65535:
+        raise Usage("--port must be %d-65535" % MIN_SERVICE_PORT)
+    return int(raw)
+
+
+def cli_wait(options, default):
+    raw = options.get("--wait", str(default))
+    if not raw.isdigit() or int(raw) > 600:
+        raise Usage("--wait is 0-600 seconds")
+    return int(raw)
+
+
+class Out:
+    def __init__(self, as_json):
+        self.as_json = as_json
+
+    def say(self, text):
+        if not self.as_json:
+            sys.stdout.write(text + "\n")
+            sys.stdout.flush()
+
+    def result(self, value, text):
+        sys.stdout.write((json.dumps(value, sort_keys=True) if self.as_json else text) + "\n")
+
+
+def indent(text):
+    return "\n".join("  " + line for line in text.splitlines())
+
+
+def describe(view):
+    """One service in a few lines."""
+    if view["kind"] == "command":
+        state = view["state"] + (" (%d restarts)" % view["restarts"] if view.get("restarts") else "")
+    else:
+        state = "external"
+    lines = ["%s  port %d  %s" % (view["name"], view["port"], state)]
+    if "listening" in view:
+        lines.append("  listening: %s" % ("yes" if view["listening"] else "no"))
+    lines.append("  url: %s" % (view["url"] or "none (%s)" % no_portal_reason()))
+    if view["kind"] == "command":
+        lines.append("  command: %s" % view["command"])
+        lines.append("  cwd: %s" % view["cwd"])
+    return "\n".join(lines)
+
+
+def wait_healthy(name, port, kind, seconds):
+    """Waits until the service listens on the machine's LAN address.
+    Returns (ok, error, http status line)."""
+    host = service_host()
+    started = time.monotonic()
+    deadline = started + seconds
+    while True:
+        if kind == "command":
+            state = CONFIG.services.state(name)
+            # Restart=on-failure: a command that exits 0 is not restarted.
+            if state["active"] in ("failed", "missing") or (state["active"] == "inactive" and time.monotonic() - started > 3):
+                return False, "the service stopped (%s)" % (state["sub"] or state["active"]), None
+        if listening(host, port):
+            break
+        if time.monotonic() >= deadline:
+            if host != "127.0.0.1" and listening("127.0.0.1", port):
+                return False, ("port %d answers on 127.0.0.1 only, and the portal reaches the service on %s: make it "
+                               "listen on 0.0.0.0 (for example --host 0.0.0.0, or HOST and PORT from its environment)"
+                               % (port, host)), None
+            return False, "nothing listens on %s:%d after %d s" % (host, port, seconds), None
+        time.sleep(0.25)
+    url = service_url(name)
+    status, line = http_probe(host, port, url.split("/")[2] if url else "%s:%d" % (host, port))
+    return True, None, line if status is not None else "listening, but %s" % line
+
+
+def logs_tail(name, lines=20):
+    try:
+        return CONFIG.services.logs(name, lines, False).rstrip()
+    except (OSError, subprocess.SubprocessError, Fail):
+        return ""
+
+
+def report(name, ok, error, http, out, verb):
+    record = registration(name)
+    view = service_view(record) if record else {"name": name}
+    view.update({"ok": ok, "http": http, "error": error})
+    if ok:
+        text = ["service %s %s on port %d" % (name, verb, record["port"]), "  http: %s" % http,
+                "  url: %s" % (view["url"] or "none (%s)" % no_portal_reason())]
+        if record["kind"] == "command":
+            text.append("  logs: cube service logs %s" % name)
+        out.result(view, "\n".join(text))
+        return 0
+    text = ["service %s is registered but not healthy: %s" % (name, error)]
+    if record and record["kind"] == "command":
+        view["logTail"] = logs_tail(name)
+        if view["logTail"]:
+            text += ["last output:", indent(view["logTail"])]
+        text.append("fix it and run cube service restart %s, or remove it with cube service stop %s" % (name, name))
+    else:
+        text.append("start the server, or remove it with cube service stop %s" % name)
+    out.result(view, "\n".join(text))
+    return 1
+
+
+def register(record):
+    """Saves a registration under the lock; returns `started` or `replaced`."""
+    with Lock():
+        current = registrations()
+        for other in current:
+            if other["name"] != record["name"] and other["port"] == record["port"]:
+                raise Usage("port %d is already service %s" % (record["port"], other["name"]))
+        existing = any(other["name"] == record["name"] for other in current)
+        if not existing and len(current) >= MAX_SERVICES:
+            raise Usage("a machine has at most %d services; stop one first" % MAX_SERVICES)
+        save_registration(dict(record, createdAt=int(time.time() * 1000)))
+    return "replaced" if existing else "started"
+
+
+def service_start(args, caller_cwd):
+    options, positionals, rest = cli_options(args, {"--json"}, {"--port", "--cwd", "--wait"}, {"--env"})
+    name, port, out = cli_name(positionals), cli_port(options), Out("--json" in options)
+    wait = cli_wait(options, 60)
+    if not rest:
+        raise Usage("give the command after --, for example: cube service start web --port 8000 -- python3 -m http.server")
+    # One word is a shell command line; several are quoted as they are.
+    text = rest[0] if len(rest) == 1 else shlex.join(rest)
+    if len(text.encode()) > MAX_SERVICE_COMMAND or "\0" in text:
+        raise Usage("the command is at most %d bytes" % MAX_SERVICE_COMMAND)
+    cwd = os.path.normpath(os.path.join(caller_cwd, options.get("--cwd", ".")))
+    if not os.path.isdir(cwd):
+        raise Usage("no directory %s" % cwd)
+    env = {}
+    for item in options.get("--env", []):
+        key, sep, value = item.partition("=")
+        if not sep or not ENV_NAME.fullmatch(key) or "\0" in value or "\n" in value or key in ("PORT", "HOST"):
+            raise Usage("--env takes KEY=VALUE (cube sets PORT and HOST)")
+        env[key] = value
+    verb = register({"name": name, "port": port, "kind": "command", "command": text, "cwd": cwd, "env": env})
+    try:
+        CONFIG.services.start(name)
+    except Fail:
+        with Lock():
+            drop_registration(name)
+        raise
+    out.say("starting service %s on port %d ..." % (name, port))
+    ok, error, http = wait_healthy(name, port, "command", wait)
+    return report(name, ok, error, http, out, verb)
+
+
+def service_open(args):
+    options, positionals, rest = cli_options(args, {"--json"}, {"--port", "--wait"})
+    name, port, out = cli_name(positionals), cli_port(options), Out("--json" in options)
+    wait = cli_wait(options, 10)
+    if rest is not None:
+        raise Usage("open takes no command; cube service start runs one")
+    existing = registration(name)
+    verb = register({"name": name, "port": port, "kind": "external"})
+    if existing and existing["kind"] == "command":
+        CONFIG.services.remove(name)
+    ok, error, http = wait_healthy(name, port, "external", wait)
+    return report(name, ok, error, http, out, "opened" if verb == "started" else verb)
+
+
+def service_status(args):
+    options, positionals, _ = cli_options(args, {"--json"}, set())
+    name, out = cli_name(positionals), Out("--json" in options)
+    record = registration(name)
+    if not record:
+        out.result({"name": name, "error": "not registered"}, "no service %s" % name)
+        return 1
+    view = service_view(record, probe=True)
+    text = describe(view)
+    if view["kind"] == "command" and (view["state"] != "active" or not view["listening"]):
+        view["logTail"] = logs_tail(name, 10)
+        if view["logTail"]:
+            text += "\nlast output:\n" + indent(view["logTail"])
+    out.result(view, text)
+    return 0
+
+
+def service_logs(args):
+    options, positionals, _ = cli_options(args, {"-f", "--follow"}, {"-n", "--lines"})
+    name = cli_name(positionals)
+    record = registration(name)
+    if not record:
+        raise Usage("no service %s" % name)
+    if record["kind"] != "command":
+        raise Usage("%s is not run by cube service; its logs are where it runs" % name)
+    lines = options.get("-n", options.get("--lines", "100"))
+    if not lines.isdigit() or not 1 <= int(lines) <= 10000:
+        raise Usage("-n is 1-10000 lines")
+    sys.stdout.write(CONFIG.services.logs(name, int(lines), "-f" in options or "--follow" in options))
+    return 0
+
+
+def service_restart(args):
+    options, positionals, _ = cli_options(args, {"--json"}, {"--wait"})
+    name, out = cli_name(positionals), Out("--json" in options)
+    wait = cli_wait(options, 60)
+    record = registration(name)
+    if not record or record["kind"] != "command":
+        raise Usage("no service %s run by cube service" % name)
+    CONFIG.services.restart(name)
+    ok, error, http = wait_healthy(name, record["port"], "command", wait)
+    return report(name, ok, error, http, out, "restarted")
+
+
+def service_stop(args):
+    options, positionals, _ = cli_options(args, {"--json"}, set())
+    name, out = cli_name(positionals), Out("--json" in options)
+    with Lock():
+        record = registration(name)
+        # Off the portal first: nothing routes to a port being given up.
+        drop_registration(name)
+    if not record or record["kind"] == "command":
+        CONFIG.services.remove(name)
+    out.result({"name": name, "stopped": record is not None}, "service %s stopped" % name if record else "no service %s" % name)
+    return 0
+
+
+def cli_service(args, caller_cwd):
+    if not args or args[0] in ("-h", "--help", "help"):
+        sys.stdout.write(CLI_USAGE)
+        return 0 if args else 2
+    command, args = args[0], args[1:]
+    if command == "start":
+        return service_start(args, caller_cwd)
+    if command == "open":
+        return service_open(args)
+    if command == "list":
+        options, positionals, _ = cli_options(args, {"--json"}, set())
+        if positionals:
+            raise Usage("list takes no name")
+        views = [service_view(record, probe=True) for record in registrations()]
+        Out("--json" in options).result({"services": views}, "\n".join(describe(view) for view in views) or "no services")
+        return 0
+    if command == "status":
+        return service_status(args)
+    if command == "logs":
+        return service_logs(args)
+    if command == "restart":
+        return service_restart(args)
+    if command == "stop":
+        return service_stop(args)
+    raise Usage("unknown command %s (start, open, list, status, logs, restart, stop)" % command)
+
+
+def cli(argv):
+    """`cube ...`, run by the agent. Units and the registry need root, which
+    the agent has through sudo; the caller's directory travels along."""
+    try:
+        caller_cwd = os.getcwd()
+    except OSError:
+        caller_cwd = "/"
+    if argv[:1] == ["--from"] and len(argv) >= 2:
+        caller_cwd, argv = argv[1], argv[2:]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        sys.stdout.write(CLI_USAGE)
+        return 0 if argv else 2
+    if argv[0] == "--version":
+        sys.stdout.write("cube (cube-guest %s, build %s)\n" % (VERSION, (build() or "unknown")[:12]))
+        return 0
+    if argv[0] != "service":
+        sys.stderr.write("cube: unknown command %s\n%s" % (argv[0], CLI_USAGE))
+        return 2
+    if CONFIG.user is not None and os.geteuid() != 0:
+        os.execvp("sudo", ["sudo", "-n", CONFIG.helper, "cli", "--from", caller_cwd] + argv)
+    try:
+        return cli_service(argv[1:], caller_cwd)
+    except Usage as problem:
+        sys.stderr.write("cube service: %s\n" % problem)
+        return 2
+    except Fail as failure:
+        sys.stderr.write("cube service: %s\n" % failure.message)
+        return 1
 
 
 # --- inside the command's unit -------------------------------------------
@@ -727,6 +1388,15 @@ def empty(directory):
         remove(os.path.join(directory, name))
 
 
+def remove_service_units(directory):
+    """`cube service` units and their enablement links under `directory`."""
+    for sub in ("", "multi-user.target.wants"):
+        folder = os.path.join(directory, sub)
+        for name in (os.listdir(folder) if os.path.isdir(folder) else []):
+            if name.startswith("cube-service-") and name.endswith(".service"):
+                remove(os.path.join(folder, name))
+
+
 def seal_final():
     """ExecStop of the seal unit, at power-off: removes what makes this
     machine one machine (host keys, machine id, cloud-init instance, the
@@ -743,6 +1413,8 @@ def seal_final():
         ("/var/lib/dhcp", empty), ("/var/lib/systemd/random-seed", remove),
         ("/var/lib/dbus/machine-id", remove), ("/root/.bash_history", remove),
         ("/home/agent/.bash_history", remove), ("/etc/systemd/system/" + SEAL_UNIT, remove),
+        # Services a setup started: their registrations go with /var/lib/cube.
+        ("/etc/systemd/system", remove_service_units),
         # The build's hook logs: they may echo its (dead) placeholder.
         ("/home/agent/.cache/cube", remove),
     ]
@@ -804,10 +1476,14 @@ def init():
         os.makedirs(CONFIG.state, mode=0o700, exist_ok=True)
         write_atomic(os.path.join(CONFIG.state, "template-seal"), outcome)
         remove(os.path.dirname(marker))
+        # A seal that failed may have left the build's services behind.
+        remove_service_units(rooted("/etc/systemd/system"))
     os.makedirs(ops_dir(), mode=0o700, exist_ok=True)
     for directory in (CONFIG.workspace, rooted("/repos")):
         os.makedirs(directory, mode=0o755, exist_ok=True)
         give(directory)
+    if CONFIG.root == "/":
+        install_cli()
     write_atomic(os.path.join(CONFIG.state, "initialized"), b"")
     return 0
 
@@ -869,10 +1545,14 @@ def main(argv):
         return seal_final()
     if command == "packages":
         return packages()
+    if command == "cli":
+        return cli(argv[1:])
+    if command == "service-run" and len(argv) == 2:
+        return service_run(argv[1])
     if command == "--version":
         print("cube-guest %s" % VERSION)
         return 0
-    sys.stderr.write("usage: cube-guest ssh | call OP | wrap ID | finish ID | recover | init | seal | seal-final | packages | --version\n")
+    sys.stderr.write("usage: cube-guest ssh | call OP | wrap ID | finish ID | recover | init | seal | seal-final | packages | cli ... | service-run NAME | --version\n")
     return 2
 
 

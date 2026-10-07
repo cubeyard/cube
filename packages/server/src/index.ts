@@ -30,6 +30,7 @@ import { observeRunners } from "./runner-observe.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
 import { threadUsageText, usageText, UsageService } from "./usage-service.ts";
+import { Portal, portalSettings, type PortalSettings } from "./portal.ts";
 
 const CUBED_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
 const HELP = `usage: cubed [options]
@@ -45,7 +46,10 @@ options:
   --help                    show this help
 
 cubed stays in the foreground. It has no application-level user authentication;
-keep it on loopback or behind an authenticated, access-controlled private network.`;
+keep it on loopback or behind an authenticated, access-controlled private network.
+
+The portal to threads' \`cube service\` web servers is off unless CUBED_PORTAL_IP
+names cubed's private (e.g. Tailscale) address; see docs/services.md.`;
 
 /** The `claude` binary for claude-code threads: CUBED_CLAUDE names it (or
  * `off`), otherwise the first `claude` on PATH. Null when there is none. */
@@ -177,6 +181,9 @@ export async function createCubed(options: {
   gateway?: string | null;
   /** Secrets the egress policy substitutes; default: the host's GitHub token. */
   secrets?: SecretSource[];
+  /** The portal to `cube service` services; default: portalSettings() (off
+   * without CUBED_PORTAL_IP). */
+  portal?: PortalSettings | null;
 }) {
   const { directory: run, socket, temporary: socketDirectory } = await runDirectory(options.state);
   const registry = new Registry(path.join(options.state, "registry.sqlite"));
@@ -200,9 +207,12 @@ export async function createCubed(options: {
     gateway.start();
     machines = new ThreadVms({ registry, threads: path.join(options.state, "threads"), run, gateway });
   }
+  let portal: Portal | null = null;
   const conversations = new Conversations({ registry, directory: path.join(options.state, "threads"), models, machines, claude: claudeCommand ? {
     command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
-  } : null });
+  } : null, portal: thread => portal!.guest(thread) });
+  portal = new Portal({ settings: options.portal === undefined ? portalSettings() : options.portal, directory: path.join(options.state, "portal"),
+    registry, machines, archiving: id => conversations.archivingNow(id) });
   const git = new GitService(path.join(options.state, "repositories"));
   const updates = options.updates ?? new UpdateService();
   const onboarding = path.join(options.state, "onboarding.json");
@@ -338,7 +348,7 @@ export async function createCubed(options: {
         return selected;
       };
       if (url.pathname === "/api/health" && method === "GET") {
-        return json({ lifecycle: "ready", ...versionInfo(), gateway: gateway ? (gateway.unavailable ? "unavailable" : "ready") : "none" });
+        return json({ lifecycle: "ready", ...versionInfo(), gateway: gateway ? (gateway.unavailable ? "unavailable" : "ready") : "none", portal: portal.state });
       }
       if (url.pathname === "/api/system/update") {
         if (method === "GET") return json(await updates.status());
@@ -512,6 +522,15 @@ export async function createCubed(options: {
         if (!parts[3] && method === "DELETE") return json({ ok: true, ...await conversations.archive(id) });
         if (!parts[3] && method === "PATCH") { registry.saveThread({ ...thread, title: text("title").slice(0, 200) }); return json({ ok: true }); }
         if (parts[3] === "history" && method === "GET") return json(await conversations.history(id));
+        // `cube service` services in the thread's machine; never starts it.
+        if (parts[3] === "services" && parts.length === 4 && method === "GET") {
+          const running = thread.workspaceState === "available" && !conversations.archivingNow(id) && !!machines.running?.(thread);
+          return json({ portal: portal.state, running,
+            services: running ? await portal.services(thread, true).catch((error: unknown) => {
+              // A machine whose helper predates services (its refresh failed) or does not answer.
+              throw Object.assign(new Error(`the thread's machine did not list its services: ${error instanceof Error ? error.message : String(error)}`), { status: 502 });
+            }) : [] });
+        }
         if (parts[3] === "stream" && method === "GET") return await conversations.stream(id, response);
         if (parts[3] === "stop" && method === "POST") { await conversations.stop(id); return json({ ok: true }); }
         if (parts[3] === "model" && (method === "GET" || method === "PATCH")) {
@@ -531,7 +550,7 @@ export async function createCubed(options: {
       fs.createReadStream(file).pipe(response);
     } catch (error) {
       if (response.headersSent) response.destroy();
-      else json({ error: error instanceof Error ? error.message : String(error) }, 409);
+      else json({ error: error instanceof Error ? error.message : String(error) }, (error as { status?: number }).status === 502 ? 502 : 409);
     }
   });
   const workspaceServer = http.createServer(async (request, response) => {
@@ -552,6 +571,7 @@ export async function createCubed(options: {
   });
   await new Promise<void>((resolve, reject) => { workspaceServer.once("error", reject); workspaceServer.listen(socket, () => { workspaceServer.off("error", reject); resolve(); }); });
   fs.chmodSync(socket, 0o600);
+  await portal.listen();
   // Machines start in the background; a thread is used once its own is up.
   void conversations.boot();
   void openOptchat().catch(() => {});
@@ -573,12 +593,13 @@ export async function createCubed(options: {
   const probes = setInterval(() => void probeRunners(), probeIntervalMs);
   probes.unref();
   let closePromise: Promise<void> | undefined;
-  return { server, registry, conversations, gateway, usage, close() {
+  return { server, registry, conversations, gateway, usage, portal, close() {
     closePromise ??= (async () => {
       clearInterval(recovery);
       clearInterval(probes);
       server.closeAllConnections();
       if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
+      await portal.close();
       await modelAuth.close();
       await (await optchat?.catch(() => null))?.chat.close();
       await conversations.close();
