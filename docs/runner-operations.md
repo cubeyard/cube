@@ -305,6 +305,11 @@ so a killed runner never leaves a guest running.
 events (`runner_starting`, `runner_ready`, `runner_draining`,
 `runner_stopping`) without keys, tokens, seeds or guest output. Each VM's serial
 console is in `vms/<n>/console.log`; `vm.inspect` returns its last 16 KiB.
+Each start moves the previous console to `console.prev.log`. Before GRUB, a
+healthy edk2 boot prints `ArmTrngLib could not be correctly initialized`,
+`Image at ... start failed` and `Tpm2...` lines; they are noise. Older macOS
+runners also printed `Image type X64 can't be loaded on AARCH64 UEFI system`:
+that was QEMU's x86 option ROM for the NIC, not the base image or the disk.
 
 ## Machine templates
 
