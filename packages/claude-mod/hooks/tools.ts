@@ -22,7 +22,8 @@ export const BASH_DEFAULT_TIMEOUT_MS = 120000;
 export const BASH_OUTPUT_CHARS = 30000;
 /** The largest file Read and Edit load; larger files are for bash. */
 export const MAX_FILE_BYTES = 2 * 1024 * 1024;
-/** The largest image Read returns: its base64 is the model API's 5 MiB per image. */
+/** The largest image Read returns: 5 MiB as base64, the smallest per-image
+ * limit a model provider sets (Bedrock and Vertex; Anthropic's API takes 10 MB). */
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024 / 4 * 3;
 /** The largest image side Read returns, the size Claude Code's own Read resizes to. */
 export const MAX_IMAGE_SIDE = 2000;
@@ -200,21 +201,34 @@ export async function instructions(scope: Pick<ToolScope, "client" | "token">, f
 }
 
 const IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp)$/i;
-const RESIZE_HINT = `write a copy at most ${MAX_IMAGE_SIDE} pixels a side with bash (for example \`convert in.png -resize ${MAX_IMAGE_SIDE}x${MAX_IMAGE_SIDE}\\> out.png\`) and read that`;
+const CONVERT = "with bash (`sudo apt-get install -y imagemagick` if convert is missing)";
 
 /** An image in Claude Code's own Read result shape, so the model sees the
- * picture. The bytes must be the format their header claims and fit the
- * model API as they are: this module cannot resize, so a larger image is
- * refused with a way out. */
+ * picture. The bytes must be the format their header claims, look whole and
+ * fit the model API as they are: this module cannot decode or resize, so a
+ * larger image is refused with a way out. An image the API still rejects
+ * (corrupt inside, or lying about its size) Claude Code replaces with a note. */
 async function readImage(scope: ToolScope, relative: string): Promise<ReadResult | Denied> {
-  const file = await loadBytes(scope, relative, MAX_IMAGE_BYTES, size => `${relative} is ${size} bytes, over the ${MAX_IMAGE_BYTES} bytes an image may be; ${RESIZE_HINT}`);
+  const file = await loadBytes(scope, relative, MAX_IMAGE_BYTES, size => `${relative} is ${size} bytes, over the ${MAX_IMAGE_BYTES} bytes an image may be; write a smaller JPEG copy ${CONVERT}, for example \`convert in.png -resize ${MAX_IMAGE_SIDE}x${MAX_IMAGE_SIDE}\\> -quality 85 out.jpg\`, and read that`);
   if ("deny" in file) return file;
-  const image = imageInfo(file.bytes);
+  const { bytes } = file;
+  const image = imageInfo(bytes);
   if (!image) return { deny: `${relative} is not a PNG, JPEG, GIF or WebP image; inspect it with bash` };
   const { type, width, height } = image;
-  if (width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE) return { deny: `${relative} is ${width}x${height} pixels; ${RESIZE_HINT}` };
-  return { type: "image", file: { base64: toBase64(file.bytes), type, originalSize: file.bytes.length,
-    dimensions: { originalWidth: width, originalHeight: height, displayWidth: width, displayHeight: height } } };
+  if (!isWhole(type, bytes)) return { deny: `${relative} looks truncated (it may still be being written); read it again later or inspect it with bash` };
+  if (width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE) return { deny: `${relative} is ${width}x${height} pixels; write a copy at most ${MAX_IMAGE_SIDE} pixels a side ${CONVERT}, for example \`convert in.png -resize ${MAX_IMAGE_SIDE}x${MAX_IMAGE_SIDE}\\> out.png\`, and read that` };
+  const dimensions = { originalWidth: width, originalHeight: height, displayWidth: width, displayHeight: height };
+  return { type: "image", file: { base64: toBase64(bytes), type, originalSize: bytes.length, dimensions } };
+}
+
+/** Whether the file ends the way its format ends. A JPEG cut short still
+ * decodes, and some carry bytes after their end marker, so it is not checked. */
+function isWhole(type: ImageType, bytes: Uint8Array): boolean {
+  const end = bytes.length;
+  if (type === "image/png") return [0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82].every((byte, index) => bytes[end - 8 + index] === byte);
+  if (type === "image/gif") return bytes[end - 1] === 0x3b;
+  if (type === "image/webp") return end >= 8 + (bytes[4]! | (bytes[5]! << 8) | (bytes[6]! << 16)) + bytes[7]! * 0x1000000;
+  return true;
 }
 
 /** The format and pixel size an image's header declares, or null when the
