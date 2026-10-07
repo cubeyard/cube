@@ -9,7 +9,9 @@ import type { ThreadEvent, ThreadEvents, ThreadTranscript } from "../src/thread-
 type Item = Awaited<ReturnType<OptChat["pending"]>>[number];
 let pending: Item[] = [];
 let notify = () => {};
+const logged = new Map<string, number | null>();
 const chat = {
+  loggedAt(requestId: string) { return logged.get(requestId); },
   async threadPrefixes() { return new Set<string>(); },
   async pending() { return [...pending]; },
   failure() { return null; },
@@ -30,6 +32,7 @@ const transcript = (state: ThreadTranscript["status"]["state"], events: ThreadEv
   ({ agent: "pi", owner: null, status: { state, run: state === "idle" ? null : "r", error: null }, events });
 const before: ThreadEvent[] = [{ type: "user-message", id: "3.0", text: "earlier" }, { type: "assistant-text", id: "5.0.0", text: "ok", reasoning: false, final: true }];
 const placed: ThreadEvent = { type: "user-message", id: "8.0", text: "hello" };
+function agent(id: string, text: string): ThreadEvent { return { type: "assistant-text", id, text, reasoning: false, final: true }; }
 const item: Item = { text: "hello", requestId: "send-1", after: 5 };
 
 const events = new OptChatEvents(chat, inner);
@@ -48,6 +51,7 @@ assert.equal(frames.at(-1)!.status.state, "working");
 
 // Pi placed it and OptChat pruned it, but Pi's frame has not come yet: the
 // frame merged from the older transcript still shows it, still working.
+logged.set("send-1", 8);
 pending = [];
 notify();
 await settle();
@@ -74,6 +78,29 @@ const first = frames.findIndex(frame => users(frame).some(line => line.endsWith(
 assert.ok(frames.slice(first).every(frame => users(frame).filter(line => line.endsWith(":hello")).length === 1), "shown exactly once from the first frame on");
 assert.ok(frames.slice(first, -1).every(frame => frame.status.state === "working"), "working from the send until the run ends");
 await watch.stop();
+
+// The hold ends: a message that left without an entry (withdrawn) goes at
+// once; one whose entry the transcript has passed without showing it (its
+// text read otherwise) goes then. Neither holds the chat working.
+for (const [entry, until] of [[null, before], [12, [...before, agent("13.0.0", "later")]]] as const) {
+  const seen: ThreadTranscript[] = [];
+  const again = await new OptChatEvents(chat, inner).watch(frame => { seen.push(frame); });
+  pending = [{ text: "gone", requestId: "send-2", after: 5 }];
+  notify();
+  await settle();
+  assert.deepEqual(users(seen.at(-1)!), ["3.0:earlier", "pending.send-2:gone"]);
+  logged.set("send-2", entry);
+  pending = [];
+  notify();
+  await settle();
+  if (entry !== null) {
+    assert.deepEqual(users(seen.at(-1)!), ["3.0:earlier", "pending.send-2:gone"], "held while the transcript is older than its entry");
+    await push(transcript("completed", [...until]));
+  }
+  assert.deepEqual(users(seen.at(-1)!), ["3.0:earlier"], `released (${entry})`);
+  assert.equal(seen.at(-1)!.status.state, "completed");
+  await again.stop();
+}
 
 // A read takes the pending messages before the transcript: one pruned in
 // between is in the transcript it reads.

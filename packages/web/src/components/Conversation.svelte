@@ -49,7 +49,9 @@
   let composer: HTMLTextAreaElement;
   let disposed = false;
   let sending = $state(false);
-  let pending: { key: string; requestId: string } | null = null;
+  /** The send being made: a retry of the same message is the same request,
+   * counted as the first attempt was (see `echo`). */
+  let pending: { key: string; requestId: string; seen: number | null } | null = null;
   /** Images attached to the draft: uploaded at once, sent with the message. */
   type Attachment = { key: string; name: string; preview: string; id: string | null; mimeType: string | null; error: string | null };
   let attachments = $state<Attachment[]>([]);
@@ -246,11 +248,13 @@
     const sent = attachments.filter(item => item.id);
     const ids = sent.map(item => item.id!);
     const key = JSON.stringify([text, ids]);
-    if (pending?.key !== key) pending = { key, requestId: uid() };
+    if (pending?.key !== key) pending = { key, requestId: uid(), seen: null };
     const requestId = pending.requestId;
     // The message leaves the field for the transcript at once; a failed
     // send puts it back, before anything typed meanwhile.
-    echoes = [...echoes, echo(transcript, echoes, requestId, text, sent.map(item => ({ id: item.id!, mimeType: item.mimeType ?? "" })))];
+    const made = echo(transcript, echoes, requestId, text, sent.map(item => ({ id: item.id!, mimeType: item.mimeType ?? "" })), pending.seen ?? undefined);
+    pending.seen = made.seen;
+    echoes = [...echoes, made];
     attachments = attachments.filter(item => !sent.includes(item));
     prompt = "";
     following = true;
@@ -265,7 +269,8 @@
       await refresh();
     } catch (cause) {
       echoes = echoes.filter(item => item.key !== requestId);
-      if (!disposed) {
+      if (disposed) for (const item of sent) URL.revokeObjectURL(item.preview);
+      else {
         prompt = prompt.trim() ? `${text}\n${prompt}` : text;
         attachments = [...sent, ...attachments];
         await tick();

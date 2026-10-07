@@ -125,6 +125,31 @@ await scenario("a failed send puts the message back in the field, and its retry 
   assert.equal((await watch.since("retry")).at(-1)!.error, null, "the error clears on the retry");
 });
 
+await scenario("a retry of a send the host took though its answer was lost shows the message once", async (page, host, watch) => {
+  const base = host.transcript.events;
+  host.onPrompt = ({ text, requestId }) => {
+    host.set([...base, user(`pending.${requestId}`, text)], { state: "working", run: "pending" });
+    throw new Error("the host is busy or restarting — try again in a moment");
+  };
+  await send(page, watch, "only once");
+  await page.locator(".conversation-error").waitFor();
+  await settle(page);
+  // The host's copy shows, the field has the text back; the retry is the same request.
+  host.onPrompt = () => {};
+  await watch.mark("retry once");
+  await page.locator(".composer textarea").press("Enter");
+  await settle(page);
+  assert.equal(host.prompts[1]!.requestId, host.prompts[0]!.requestId);
+  host.set([...base, user("3.0", "only once")], { state: "working" });
+  await settle(page);
+  host.set([...base, user("3.0", "only once"), agent("4.0.0", "done")], { state: "completed" });
+  await page.locator(".composer[aria-busy=false]").waitFor();
+  await settle(page);
+  const record = await watch.since("only once");
+  assertAlways(record, seen => seen.users.filter(text => text.endsWith("only once")).length <= 1, "never twice");
+  assert.deepEqual(record.at(-1)!.users, ["earlier", "only once"]);
+});
+
 await scenario("tool calls and their results stream without the message or the busy state flickering", async (page, host, watch) => {
   const base = host.transcript.events;
   host.onPrompt = ({ text, requestId }) => { host.set([...base, user(`pending.${requestId}`, text)], { state: "working", run: "pending" }); };

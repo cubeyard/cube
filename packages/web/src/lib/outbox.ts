@@ -19,10 +19,13 @@ function count(transcript: Pick<ThreadTranscript, "events">, echo: Pick<Echo, "t
 }
 
 /** A new echo: counted against the transcript and the echoes still kept,
- * so the same words sent twice need two copies in the transcript. */
-export function echo(transcript: Pick<ThreadTranscript, "events" | "status">, kept: readonly Echo[], key: string, text: string, images: MessageImage[]): Echo {
+ * so the same words sent twice need two copies in the transcript. A retry
+ * of a send passes the first attempt's count: if the host did take that
+ * attempt, its copy is this one, not an earlier message. */
+export function echo(transcript: Pick<ThreadTranscript, "events" | "status">, kept: readonly Echo[], key: string, text: string, images: MessageImage[], seen?: number): Echo {
   const message = { text, images };
-  return { key, text, images, after: transcript.status.run, accepted: false, seen: Math.max(count(transcript, message), ...kept.filter(other => same(other.text, other.images, message)).map(other => other.seen + 1)) };
+  return { key, text, images, after: transcript.status.run, accepted: false,
+    seen: seen ?? Math.max(count(transcript, message), ...kept.filter(other => same(other.text, other.images, message)).map(other => other.seen + 1)) };
 }
 
 /** The echoes to show: those the transcript has no copy of, accepted or logged. */

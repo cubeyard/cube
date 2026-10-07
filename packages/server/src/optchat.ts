@@ -401,6 +401,20 @@ export class OptChat {
   }
   private pendingChanged(): void { for (const listener of [...this.pendingListeners]) listener(); }
 
+  /** Where a message that left the pending ones went: its entry in the log,
+   * null when it settled without one; undefined when not known (yet). Kept
+   * for the newest few, written before the message leaves the pending ones. */
+  loggedAt(requestId: string): number | null | undefined { return this.logged.get(requestId); }
+  private readonly logged = new Map<string, number | null>();
+  private async remember(requestIds: readonly string[], unanswered = false): Promise<void> {
+    for (const requestId of requestIds) {
+      const entry = (await this.known(requestId))?.entry ?? (unanswered ? (await this.known(`${requestId}:unanswered`))?.entry : undefined);
+      this.logged.delete(requestId);
+      this.logged.set(requestId, entry ?? null);
+    }
+    for (const key of this.logged.keys()) { if (this.logged.size <= 256) break; this.logged.delete(key); }
+  }
+
   /** Wakes every waiter: the view, the run or the pending messages changed. */
   private notify(): void { for (const waiter of [...this.waiters]) waiter(); }
   /** Resolves once `ready()` holds; rejects when the chat closes. */
@@ -808,6 +822,7 @@ export class OptChat {
     const settled: string[] = [];
     for (const item of sent) if ((await this.known(item.requestId))?.status !== "queued") settled.push(item.requestId);
     if (!settled.length) return;
+    await this.remember(settled);
     await this.harness.commit(async tx => {
       const doc = await tx.doc(PendingDoc);
       doc.sent = doc.sent.filter(item => !settled.includes(item.requestId));
@@ -839,6 +854,8 @@ export class OptChat {
       }
       await conversation.submit({ type: "input", content: userContent(last), requestId: last.requestId, whenBusy: "steer" }, context);
     }
+    // The batch's other messages leave the pending ones with this commit; the last is sent.
+    await this.remember(batch.slice(0, -1).map(item => item.requestId));
     await this.harness.commit(async tx => {
       const doc = await tx.doc(PendingDoc);
       if (doc.batch?.at(-1)?.requestId !== last.requestId) return;
@@ -866,6 +883,7 @@ export class OptChat {
           await this.conversation.submit({ type: "write", requestId: `${item.requestId}:unanswered`, entry: userEntry(item) }, context);
         }
       }
+      await this.remember([...pending?.sent ?? [], ...pending?.batch ?? [], ...pending?.items ?? []].map(item => item.requestId), true);
       await this.harness.commit(async tx => {
         const doc = await tx.doc(PendingDoc);
         doc.items = [];
@@ -1299,14 +1317,20 @@ export class OptChatEvents implements ThreadEvents {
     // The transcript a frame merges may be older than the pending messages
     // it is merged with: Pi renders a long chat's frame after OptChat has
     // already taken a placed message out of the pending ones. A message a
-    // frame showed stays shown until the log has it, so it never goes and
-    // comes back, and the chat never reads idle between a send and its run.
+    // frame showed stays shown while the transcript is older than its entry,
+    // so it never goes and comes back, and the chat never reads idle between
+    // a send and its run. One that left without an entry goes.
     const shown = new Map<string, PendingItem>();
     const emit = () => {
       chain = chain.then(async () => {
         if (!latest) return;
         const pending = await this.chat.pending();
-        const held = [...shown.values()].filter(item => !pending.some(other => other.requestId === item.requestId));
+        const newest = Math.max(0, ...latest.events.map(event => Number.parseInt(event.id, 10)).filter(Number.isFinite));
+        const held = [...shown.values()].filter(item => {
+          if (pending.some(other => other.requestId === item.requestId)) return false;
+          const entry = this.chat.loggedAt(item.requestId);
+          return entry != null && newest < entry;
+        });
         const merged = await this.merge(latest, [...held, ...pending]);
         shown.clear();
         for (const event of merged.events) {
@@ -1334,7 +1358,9 @@ export class OptChatEvents implements ThreadEvents {
     }) };
     const failure = this.chat.failure();
     if (!pending.length) return transcript;
-    // A pending message is shown until the log has it after the point it was accepted.
+    // A pending message is shown until the log has it after the point it was
+    // accepted. Two of the same words accepted at one point are both taken
+    // as placed by the first copy; the browser's own copy covers the second.
     const ids = (images: readonly { id: string }[] | undefined) => (images ?? []).map(image => image.id).join(",");
     const placed = (item: PendingItem) => transcript.events.some(event => event.type === "user-message" && event.text === item.text
       && ids(event.images) === ids(item.images) && Number.parseInt(event.id, 10) > item.after);

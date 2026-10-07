@@ -60,4 +60,11 @@ assert.deepEqual(unlogged({ ...before, status: working }, [odd]), [odd]);
 assert.deepEqual(unlogged({ ...before, status: idle }, [odd]), [odd], "an older frame");
 assert.deepEqual(unlogged({ ...before, status: { ...idle, run: "r2" } }, [{ ...odd, accepted: false }]), [{ ...odd, accepted: false }], "not before the host took it");
 assert.deepEqual(unlogged({ ...before, status: { ...idle, run: "r2" } }, [odd]), []);
+
+// A retry after a send whose answer was lost though the host took it: the
+// first attempt's count makes the host's copy this message, never a second.
+const attempt = echo(before, [], "h", "once", []);
+const retried = { ...echo(at(...before.events, said("pending.h", "once")), [], "h", "once", [], attempt.seen), accepted: true };
+assert.deepEqual(unanswered(at(...before.events, said("pending.h", "once")), [retried]), [], "not shown beside the host's copy");
+assert.deepEqual(unlogged({ ...at(...before.events, said("8.0", "once")), status: working }, [retried]), [], "retired once logged");
 console.log("outbox keep: ok");
