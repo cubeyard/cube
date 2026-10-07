@@ -28,7 +28,38 @@ const STATES = new Set(["Accepted", "Running", "Unknown", "Succeeded", "Written"
 
 export interface GuestDescription { version: string; ready: boolean; capabilities: string[]; limits: WorkspaceLimits; epoch: number;
   /** A machine made from a template: how that template was sealed (`ok` or the failure). */
-  templateSeal?: string }
+  templateSeal?: string;
+  /** The sha256 of the helper as installed (helpers before `cube service` do not say). */
+  build?: string }
+
+/** A service the agent registered with `cube service` in its machine. */
+export interface GuestService {
+  name: string; port: number; kind: "command" | "external"; url: string | null;
+  /** A command's systemd state (`active`, `failed`, …) and restarts. */
+  state?: string; restarts?: number;
+  /** Whether it accepts connections on the machine's address (asked for). */
+  listening?: boolean;
+  command?: string; cwd?: string;
+}
+/** What `cube service` shows for the portal: the URL template of the
+ * machine's services, or why there is none. */
+export type GuestPortal = { urlTemplate: string } | { reason: string };
+export const SERVICE_NAME = /^[a-z](?:[a-z0-9-]{0,22}[a-z0-9])?$/;
+
+/** The helper's `services` answer, validated; entries that do not parse are left out. */
+export function guestServices(header: Record<string, unknown>): GuestService[] {
+  if (!Array.isArray(header.services)) throw new GuestTransportError("the guest helper's services answer is malformed");
+  return header.services.flatMap((item: unknown): GuestService[] => {
+    const value = item as Record<string, unknown> | null;
+    if (!value || typeof value !== "object" || typeof value.name !== "string" || !SERVICE_NAME.test(value.name)
+      || !Number.isSafeInteger(value.port) || (value.port as number) < 1024 || (value.port as number) > 65535
+      || (value.kind !== "command" && value.kind !== "external")) return [];
+    const text = (key: string, max: number) => typeof value[key] === "string" ? { [key]: (value[key] as string).slice(0, max) } : {};
+    return [{ name: value.name, port: value.port as number, kind: value.kind, url: typeof value.url === "string" ? value.url.slice(0, 300) : null,
+      ...text("state", 40), ...(Number.isSafeInteger(value.restarts) ? { restarts: value.restarts as number } : {}),
+      ...(typeof value.listening === "boolean" ? { listening: value.listening } : {}), ...text("command", 8192), ...text("cwd", 4096) }];
+  });
+}
 
 /** The helper's hello, validated. */
 export function guestDescription(header: Record<string, unknown>): GuestDescription {
@@ -41,7 +72,8 @@ export function guestDescription(header: Record<string, unknown>): GuestDescript
   }
   return { version: header.version, ready: header.ready, capabilities: [...header.capabilities as string[]],
     limits: Object.fromEntries(WORKSPACE_LIMIT_KEYS.map(key => [key, limits[key]])) as unknown as WorkspaceLimits, epoch: header.epoch as number,
-    ...(typeof header.templateSeal === "string" ? { templateSeal: header.templateSeal.slice(0, 1000) } : {}) };
+    ...(typeof header.templateSeal === "string" ? { templateSeal: header.templateSeal.slice(0, 1000) } : {}),
+    ...(typeof header.build === "string" && SHA.test(header.build) ? { build: header.build } : {}) };
 }
 
 export class VmWorkspace implements Workspace {
@@ -143,6 +175,29 @@ export class VmWorkspace implements Workspace {
       modifiedMs: header.modifiedMs as number, sha256: header.sha256 as string | null };
   }
 
+  /** The services registered in the machine (`cube service`); read-only. */
+  async services(probe = false): Promise<GuestService[]> {
+    await this.require("services.list");
+    return guestServices((await this.call("services", probe ? { probe: true } : {}, false)).header);
+  }
+  /** Replaces the machine's helper (and its `cube` shim) with `source`;
+   * content-addressed, so a repeat changes nothing. */
+  async installHelper(source: Uint8Array): Promise<string> {
+    await this.require("helper.install");
+    const sha256 = createHash("sha256").update(source).digest("hex");
+    const { header } = await this.call("install", { sha256 }, false, undefined, source);
+    if (header.build !== sha256) throw malformed();
+    this.forget();
+    return sha256;
+  }
+  /** Tells `cube service` in the machine what its services' URLs are. */
+  async configurePortal(portal: GuestPortal): Promise<void> {
+    await this.require("portal.configure");
+    await this.call("portal", { portal }, false);
+  }
+  /** Asks the helper's hello again (its helper was replaced). */
+  forget(): void { this.description = undefined; }
+
   /** The helper's hello, once per workspace (again after a failure). */
   describe(): Promise<GuestDescription> {
     this.description ??= this.call("hello", {}, false).then(answer => guestDescription(answer.header))
@@ -150,7 +205,7 @@ export class VmWorkspace implements Workspace {
     return this.description;
   }
 
-  private async require(capability: typeof WORKSPACE_CAPABILITIES[number]): Promise<WorkspaceLimits> {
+  private async require(capability: typeof WORKSPACE_CAPABILITIES[number] | "services.list" | "helper.install" | "portal.configure"): Promise<WorkspaceLimits> {
     const description = await this.describe();
     if (!description.capabilities.includes(capability)) {
       throw new WorkspaceError("OPERATION_UNSUPPORTED", `the thread machine's guest helper lacks ${capability}`);

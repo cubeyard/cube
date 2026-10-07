@@ -5,6 +5,7 @@ launcher; this file injects the other one.
 
   local-guest.py ROOT call OP        one helper request on stdin/stdout
   local-guest.py ROOT supervise ID MS  (internal) stands in for the unit
+  local-guest.py ROOT cli service ...  the agent's `cube` command
 """
 import importlib.util
 import os
@@ -68,9 +69,79 @@ class ProcessLauncher:
         return False
 
 
+class ProcessServices:
+    """`cube service` services as detached process groups in place of
+    systemd units; their output goes to ROOT/services/NAME.log."""
+
+    def __init__(self, root):
+        self.directory = os.path.join(root, "services")
+
+    def _pid(self, name):
+        try:
+            with open(os.path.join(self.directory, name + ".pid")) as handle:
+                return int(handle.read().strip())
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def _alive(self, pid):
+        try:
+            os.kill(pid, 0)
+            with open("/proc/%d/stat" % pid) as handle:
+                return handle.read().split(") ")[-1].split()[0] != "Z"
+        except (ProcessLookupError, FileNotFoundError):
+            return False
+
+    def start(self, name):
+        self.stop(name)
+        os.makedirs(self.directory, exist_ok=True)
+        with open(os.path.join(self.directory, name + ".log"), "ab") as output:
+            child = subprocess.Popen([sys.executable, os.path.abspath(__file__), ROOT, "service-run", name],
+                                     stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        guest.write_atomic(os.path.join(self.directory, name + ".pid"), str(child.pid).encode())
+
+    def restart(self, name):
+        self.start(name)
+
+    def stop(self, name):
+        pid = self._pid(name)
+        if pid is not None:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def remove(self, name):
+        self.stop(name)
+        try:
+            os.unlink(os.path.join(self.directory, name + ".pid"))
+        except FileNotFoundError:
+            pass
+
+    def state(self, name):
+        pid = self._pid(name)
+        if pid is None:
+            return {"active": "missing", "sub": "", "restarts": 0}
+        alive = self._alive(pid)
+        return {"active": "active" if alive else "failed", "sub": "running" if alive else "exited", "restarts": 0}
+
+    def logs(self, name, lines, follow):
+        try:
+            with open(os.path.join(self.directory, name + ".log")) as handle:
+                return "".join(handle.readlines()[-lines:])
+        except FileNotFoundError:
+            return ""
+
+
+ROOT = None
+
+
 def configure(root):
+    global ROOT
+    ROOT = root
     guest.configure(state=os.path.join(root, "state"), workspace=os.path.join(root, "workspace"),
-                    env_file=os.path.join(root, "env"), user=None, ready_files=[], commands=[], launcher=ProcessLauncher(root))
+                    env_file=os.path.join(root, "env"), user=None, ready_files=[], commands=[], launcher=ProcessLauncher(root),
+                    helper=os.path.join(root, "cube-guest"), cli=os.path.join(root, "bin", "cube"),
+                    portal_file=os.path.join(root, "portal.json"), services=ProcessServices(root), service_host="127.0.0.1")
 
 
 def supervise(root, op_id, timeout_ms):
@@ -106,6 +177,8 @@ if __name__ == "__main__":
     configure(root)
     if command[0] == "supervise":
         sys.exit(supervise(root, command[1], int(command[2])))
+    if command[0] == "service-run":
+        sys.exit(guest.service_run(command[1]))
     if command[0] == "wrap":
         # Like the unit's wrapper, but the command must not inherit this
         # process group's fate beyond the group the supervisor kills.

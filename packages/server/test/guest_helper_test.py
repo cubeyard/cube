@@ -2,12 +2,17 @@
 a test launcher injected; run by guest-helper-test.ts. The workspace
 contract over the helper runs in workspace-test.ts (local guest) and against
 a real VM in smoke-node-adapter.ts."""
+import contextlib
 import hashlib
 import importlib.util
 import io
 import json
 import os
 import shutil
+import signal
+import socket
+import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -301,6 +306,234 @@ class GuestHelperTest(unittest.TestCase):
         stdout = io.BytesIO()
         guest.call("hello", io.BytesIO(b"not json\n"), stdout)
         self.assertEqual(json.loads(stdout.getvalue())["error"]["code"], "INVALID_REQUEST")
+
+
+class FakeServices:
+    """Runs each service's command as a process group in place of a unit."""
+
+    def __init__(self, root):
+        self.root = root
+        self.processes = {}
+        self.removed = []
+        self.fail = None
+
+    def log(self, name):
+        return os.path.join(self.root, "service-%s.log" % name)
+
+    def start(self, name):
+        if self.fail:
+            raise self.fail
+        self.stop(name)
+        record = guest.registration(name)
+        env = dict(os.environ, PORT=str(record["port"]), HOST="0.0.0.0", **record["env"])
+        with open(self.log(name), "ab") as output:
+            self.processes[name] = subprocess.Popen(["/bin/bash", "-c", record["command"]], cwd=record["cwd"], env=env,
+                                                    stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+                                                    start_new_session=True)
+
+    def restart(self, name):
+        self.start(name)
+
+    def stop(self, name):
+        process = self.processes.pop(name, None)
+        if process and process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+    def remove(self, name):
+        self.removed.append(name)
+        self.stop(name)
+
+    def state(self, name):
+        process = self.processes.get(name)
+        if process is None:
+            return {"active": "missing", "sub": "", "restarts": 0}
+        code = process.poll()
+        return {"active": "active" if code is None else "failed" if code else "inactive", "sub": "running" if code is None else "exited",
+                "restarts": 0}
+
+    def logs(self, name, lines, follow):
+        try:
+            with open(self.log(name), "r") as handle:
+                return "".join(handle.readlines()[-lines:])
+        except FileNotFoundError:
+            return ""
+
+
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+class ServicesTest(unittest.TestCase):
+    """`cube service` with processes in place of systemd units."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="cube-services-")
+        self.workspace = os.path.join(self.root, "workspace")
+        os.mkdir(self.workspace)
+        self.services = FakeServices(self.root)
+        guest.configure(state=os.path.join(self.root, "state"), workspace=self.workspace, env_file=os.path.join(self.root, "env"),
+                        user=None, ready_files=[], commands=[], launcher=FakeLauncher(), services=self.services,
+                        portal_file=os.path.join(self.root, "portal.json"), service_host="127.0.0.1",
+                        helper=os.path.join(self.root, "cube-guest"), cli=os.path.join(self.root, "bin", "cube"))
+
+    def tearDown(self):
+        for name in list(self.services.processes):
+            self.services.stop(name)
+        guest.configure(services=guest.SystemdServices(), portal_file="/etc/cube/portal.json", service_host=None,
+                        helper=guest.HELPER, cli=guest.CLI_PATH)
+        shutil.rmtree(self.root)
+
+    def cube(self, *argv):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = guest.cli(["--from", self.workspace] + list(argv))
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def portal(self):
+        self.assertEqual(call("portal", {"portal": {"urlTemplate": "http://{name}-0123456789.100-64-0-1.sslip.io:7780/"}})[0],
+                         {"urlTemplate": "http://{name}-0123456789.100-64-0-1.sslip.io:7780/"})
+
+    def test_start_waits_for_the_port_and_prints_the_url(self):
+        self.portal()
+        port = free_port()
+        code, out, err = self.cube("service", "start", "web", "--port", str(port), "--env", "GREETING=hi", "--json", "--",
+                                   "python3", "-m", "http.server", "--bind", "127.0.0.1", str(port))
+        self.assertEqual(code, 0, out + err)
+        view = json.loads(out)
+        self.assertTrue(view["ok"])
+        self.assertEqual(view["url"], "http://web-0123456789.100-64-0-1.sslip.io:7780/")
+        self.assertRegex(view["http"], r"^HTTP/1\.[01] 200")
+        self.assertEqual(view["command"], "python3 -m http.server --bind 127.0.0.1 %d" % port)
+        self.assertEqual(view["cwd"], self.workspace)
+        record = guest.registration("web")
+        self.assertEqual((record["kind"], record["port"], record["env"]), ("command", port, {"GREETING": "hi"}))
+        # cubed's view of it.
+        services = call("services", {"probe": True})[0]["services"]
+        self.assertEqual([(item["name"], item["port"], item["state"], item["listening"]) for item in services], [("web", port, "active", True)])
+        code, out, _ = self.cube("service", "list")
+        self.assertIn("web  port %d  active" % port, out)
+        self.assertIn("url: http://web-0123456789", out)
+        # Another name may not take the port; the same name replaces itself.
+        code, _, err = self.cube("service", "start", "other", "--port", str(port), "--", "true")
+        self.assertEqual(code, 2)
+        self.assertIn("already service web", err)
+        code, out, _ = self.cube("service", "stop", "web")
+        self.assertEqual((code, out.strip()), (0, "service web stopped"))
+        self.assertEqual(self.services.removed, ["web"])
+        self.assertEqual(call("services", {})[0], {"services": []})
+        self.assertEqual(self.cube("service", "stop", "web")[1].strip(), "no service web")
+
+    def test_a_failing_service_reports_its_output(self):
+        port = free_port()
+        code, out, err = self.cube("service", "start", "broken", "--port", str(port), "--wait", "5", "--",
+                                   "echo cannot find module; exit 3")
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("service broken is registered but not healthy: the service stopped", out)
+        self.assertIn("cannot find module", out)
+        self.assertIn("cube service restart broken", out)
+        # Without a portal the URL says why.
+        code, out, _ = self.cube("service", "status", "broken")
+        self.assertIn("url: none (cube has not configured a portal", out)
+        call("portal", {"portal": {"reason": "this cube installation has no portal (CUBED_PORTAL_IP is not set)"}})
+        self.assertIn("url: none (this cube installation has no portal", self.cube("service", "status", "broken")[1])
+
+    def test_loopback_only_listeners_are_named(self):
+        guest.configure(service_host="127.0.0.2")
+        port = free_port()
+        code, out, _ = self.cube("service", "start", "local", "--port", str(port), "--wait", "2", "--",
+                                 "exec python3 -m http.server --bind 127.0.0.1 %d" % port)
+        self.assertEqual(code, 1)
+        self.assertIn("answers on 127.0.0.1 only", out)
+
+    def test_open_registers_a_server_that_runs_elsewhere(self):
+        port = free_port()
+        code, out, _ = self.cube("service", "open", "api", "--port", str(port), "--wait", "0", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("nothing listens", json.loads(out)["error"])
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", port))
+            server.listen()
+            code, out, _ = self.cube("service", "open", "api", "--port", str(port), "--wait", "0")
+        self.assertEqual(code, 0, out)
+        self.assertIn("service api replaced on port %d" % port, out)
+        self.assertEqual(guest.registration("api")["kind"], "external")
+        self.assertEqual(self.cube("service", "logs", "api")[0], 2)
+
+    def test_usage_errors(self):
+        for argv, message in [(["service", "start", "Web", "--port", "8000", "--", "x"], "service name"),
+                              (["service", "start", "web\nExecStartPre=x", "--port", "8000", "--", "x"], "service name"),
+                              (["service", "status", "web\n"], "service name"),
+                              (["service", "start", "web", "--port", "80", "--", "x"], "--port must be 1024-65535"),
+                              (["service", "start", "web", "--port", "8000"], "give the command after --"),
+                              (["service", "start", "web", "--port", "8000", "--env", "PORT=1", "--", "x"], "--env takes"),
+                              (["service", "start", "web", "--port", "8000", "--cwd", "missing", "--", "x"], "no directory"),
+                              (["service", "frobnicate"], "unknown command"),
+                              (["service", "status"], "one service name")]:
+            code, _, err = self.cube(*argv)
+            self.assertEqual(code, 2, argv)
+            self.assertIn(message, err)
+        self.assertEqual(self.cube("deploy")[0], 2)
+        self.assertEqual(self.cube("service", "--help")[0], 0)
+        for index in range(guest.MAX_SERVICES):
+            guest.save_registration({"name": "s%d" % index, "port": 2000 + index, "kind": "external"})
+        self.assertIn("at most 16 services", self.cube("service", "open", "one-more", "--port", "3000")[2])
+        # A start systemd refuses leaves nothing registered.
+        self.services.fail = guest.Fail("IO_ERROR", "systemctl enable failed")
+        code, _, err = self.cube("service", "start", "s0", "--port", "2000", "--", "true")
+        self.assertEqual((code, err.strip()), (1, "cube service: systemctl enable failed"))
+        self.assertIsNone(guest.registration("s0"))
+
+    def test_service_run_runs_the_registration_as_its_unit(self):
+        port = free_port()
+        guest.save_registration({"name": "env", "port": port, "kind": "command", "cwd": self.workspace, "env": {"A": "b"},
+                                 "command": "echo $PORT $HOST $CUBE_SERVICE $A; pwd"})
+        script = ("import importlib.util,sys;spec=importlib.util.spec_from_file_location('g',sys.argv[1]);g=importlib.util.module_from_spec(spec);"
+                  "spec.loader.exec_module(g);g.configure(state=sys.argv[2],user=None,env_file='/nonexistent');sys.exit(g.main(['service-run',sys.argv[3]]))")
+        helper = os.path.join(HERE, "..", "guest", "cube-guest.py")
+        result = subprocess.run([sys.executable, "-c", script, helper, os.path.join(self.root, "state"), "env"], capture_output=True, text=True)
+        self.assertEqual(result.stdout.split("\n")[:2], ["%d 0.0.0.0 env b" % port, self.workspace], result.stderr)
+        result = subprocess.run([sys.executable, "-c", script, helper, os.path.join(self.root, "state"), "gone"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not registered", result.stderr)
+
+    def test_unit_text_names_only_the_service(self):
+        text = guest.SystemdServices().text("web")
+        self.assertIn("ExecStart=/usr/local/sbin/cube-guest service-run web\n", text)
+        self.assertIn("Restart=on-failure", text)
+        self.assertIn("WantedBy=multi-user.target", text)
+
+    def test_install_replaces_the_helper_and_writes_the_shim(self):
+        with open(os.path.join(HERE, "..", "guest", "cube-guest.py"), "rb") as handle:
+            source = handle.read()
+        self.assertIsNone(call("hello", {})[0]["build"])
+        digest = hashlib.sha256(source).hexdigest()
+        self.assertEqual(call("install", {"sha256": "0" * 64}, source)[0]["error"]["code"], "INVALID_REQUEST")
+        self.assertEqual(call("install", {"sha256": hashlib.sha256(b"x").hexdigest()}, b"x")[0]["error"]["code"], "INVALID_REQUEST")
+        self.assertEqual(call("install", {"sha256": digest}, source)[0], {"build": digest})
+        self.assertEqual(read(os.path.join(self.root, "cube-guest")), source)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.root, "cube-guest")).st_mode), 0o755)
+        self.assertEqual(read(os.path.join(self.root, "bin", "cube")).decode(), guest.CLI_SHIM)
+        self.assertEqual(call("hello", {})[0]["build"], digest)
+        self.assertEqual(call("install", {"sha256": digest}, source)[0], {"build": digest})
+
+    def test_portal_settings_are_checked(self):
+        for portal in [{"urlTemplate": "https://{name}-x.example/"}, {"urlTemplate": "http://evil/{name}"}, {}, None,
+                       {"urlTemplate": "http://{name}-x.example/\n"}]:
+            self.assertEqual(call("portal", {"portal": portal})[0]["error"]["code"], "INVALID_REQUEST", portal)
+
+    def test_seal_removes_service_units(self):
+        system = os.path.join(self.root, "system")
+        units = os.path.join(system, "etc/systemd/system")
+        os.makedirs(os.path.join(units, "multi-user.target.wants"))
+        for path in ("cube-service-web.service", "multi-user.target.wants/cube-service-web.service", "ssh.service"):
+            with open(os.path.join(units, path), "w") as handle:
+                handle.write("x")
+        guest.remove_service_units(units)
+        self.assertEqual(sorted(os.listdir(units)), ["multi-user.target.wants", "ssh.service"])
+        self.assertEqual(os.listdir(os.path.join(units, "multi-user.target.wants")), [])
 
 
 if __name__ == "__main__":

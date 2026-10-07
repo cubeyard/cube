@@ -36,7 +36,7 @@ try {
   assert.equal((await fetch(`${base}/api/state`, { headers: { origin: "http://untrusted.example" } })).status, 403);
   assert.equal((await write("/api/models", {})).status, 404);
   assert.deepEqual(await (await fetch(`${base}/api/health`)).json(), {
-    lifecycle: "ready", version: "dev", commit: "unknown", stateSchema: 102, gateway: "unavailable",
+    lifecycle: "ready", version: "dev", commit: "unknown", stateSchema: 102, gateway: "unavailable", portal: "off",
   });
   // A second cubed on the same state never takes the live workspace socket.
   await assert.rejects(createCubed({ state, models, claude: null, gateway: null }), /another cubed is serving this CUBED_STATE/);

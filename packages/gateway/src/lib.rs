@@ -6,7 +6,8 @@
 //! termination). The only egress is HTTP and HTTPS: HTTPS is intercepted with
 //! the installation CA, cubed decides every request over `egress.sock`, and
 //! placeholder secrets are substituted only where cubed says so. cubed reaches
-//! the guest's sshd through the control socket's dial route.
+//! the guest's sshd, and its portal the guest's registered services, through
+//! the control socket's dial route.
 pub mod addr;
 pub mod ca;
 pub mod control;

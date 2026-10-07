@@ -13,8 +13,8 @@ import type { ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-event
 import { serveThreadEvents } from "./thread-events-http.ts";
 import { readClaudeHistory, readPiHistory, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { Registry, threadAgent, type HookOutcome, type Thread } from "./registry.ts";
-import { provisioned, provisionWorkspace, releaseCheck, resumeWorkspace, type ThreadMachines } from "./vm.ts";
-import { VmWorkspace } from "./vm-workspace.ts";
+import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWorkspace, type ThreadMachines } from "./vm.ts";
+import { VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
 import type { ModelSelection } from "./models.ts";
 
@@ -68,14 +68,18 @@ export class Conversations {
   private readonly claudes = new Map<string, Promise<ClaudeAgent>>();
   private readonly claudeFeeds = new WeakMap<ClaudeAgent, ClaudeThreadEvents>();
   private readonly claude: ClaudeRuntime | null;
+  /** What `cube service` in a machine shows as its URLs (portal.ts). */
+  private readonly portal: (thread: Thread) => GuestPortal;
   private closing = false;
   /** Told a Pi agent's usage just before the agent closes (usage-service.ts):
    * until it opens again, nothing else may read its store. */
   onUsage: ((id: string, state: UsageState) => void) | null = null;
   /** `claude` is null when this host has no Claude Code to start. */
-  constructor(options: { registry: Registry; directory: string; models: Models; machines: ThreadMachines; claude?: ClaudeRuntime | null }) {
+  constructor(options: { registry: Registry; directory: string; models: Models; machines: ThreadMachines; claude?: ClaudeRuntime | null;
+    portal?: (thread: Thread) => GuestPortal }) {
     this.registry = options.registry; this.directory = options.directory; this.models = options.models;
     this.machines = options.machines; this.claude = options.claude ?? null;
+    this.portal = options.portal ?? (() => ({ reason: "this cube installation has no portal" }));
   }
   /** Whether claude-code threads can run on this host. */
   get claudeAvailable(): boolean { return this.claude !== null; }
@@ -245,6 +249,14 @@ export class Conversations {
       log.warn("the machine booted again; the agent reopens after the resume hooks", { thread: id });
     }
     const thread = this.thread(id);
+    // The machine's helper and `cube` command as this cubed ships them, and
+    // the portal's settings; a machine without them still serves its agent.
+    try {
+      const outcome = await refreshGuest(this.workspace(id), threadAgent(thread), this.portal(thread));
+      if (outcome !== "current") log.info("guest helper updated", { thread: id, how: outcome });
+    } catch (error) {
+      log.warn("the machine's cube command could not be brought up to date", { thread: id, error: error instanceof Error ? error.message : String(error) });
+    }
     const started = Date.now();
     const { hooks, already } = await resumeWorkspace(this.workspace(id), threadAgent(thread));
     this.resumed.add(id);

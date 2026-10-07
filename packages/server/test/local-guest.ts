@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import net from "node:net";
 import { encodeGuestRequest, runGuestProcess, type GuestAnswer, type GuestCallOptions, type GuestOp, type GuestTransport } from "../src/guest-ssh.ts";
 import type { StartOptions, ThreadMachines } from "../src/vm.ts";
 import type { Thread } from "../src/registry.ts";
@@ -45,8 +46,15 @@ export class LocalGuestTransport implements GuestTransport {
         try { process.kill(-Number(fs.readFileSync(path.join(ops, id, name), "utf8")), "SIGKILL"); } catch { /* gone */ }
       }
     }
+    // `cube service` services run in process groups of their own.
+    const services = path.join(this.root, "services");
+    for (const name of fs.existsSync(services) ? fs.readdirSync(services).filter(name => name.endsWith(".pid")) : []) {
+      try { process.kill(-Number(fs.readFileSync(path.join(services, name), "utf8")), "SIGKILL"); } catch { /* gone */ }
+    }
     try { execFileSync("pkill", ["-KILL", "-f", `${LAUNCHER} ${this.root} `], { stdio: "ignore" }); } catch { /* none left */ }
   }
+  /** The agent's `cube` command in this guest (its shim runs local-guest.py). */
+  cubeCommand(): string { return `python3 ${LAUNCHER} ${this.root} cli`; }
 }
 
 /** Thread machines on local guests: one temporary root per thread. */
@@ -95,4 +103,14 @@ export class LocalMachines implements ThreadMachines {
     fs.rmSync(path.join(this.root, thread.id), { recursive: true, force: true });
   }
   async close(): Promise<void> { for (const guest of this.guests.values()) guest.stop(); }
+  running(thread: Thread): boolean { return this.guests.has(thread.id) && !this.released.has(thread.id); }
+  /** A local guest's services listen on 127.0.0.1 (its service host). */
+  dial(thread: Thread, port: number): Promise<net.Socket> {
+    if (!this.running(thread)) return Promise.reject(new Error("the thread's machine is not running"));
+    return new Promise((resolve, reject) => {
+      const socket = net.connect(port, "127.0.0.1");
+      socket.once("connect", () => { socket.off("error", reject); resolve(socket); });
+      socket.once("error", reject);
+    });
+  }
 }
