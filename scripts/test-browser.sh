@@ -7,6 +7,10 @@ cd "$(dirname "$0")/.."
 if [ -n "${CI:-}" ]; then
   pnpm --filter @cube/web exec playwright install --with-deps chromium
 fi
+if ! (cd packages/web && node -e 'require.resolve("playwright")' 2>/dev/null); then
+  echo "FAIL: playwright is not installed: pnpm install --frozen-lockfile" >&2
+  exit 1
+fi
 if ! (cd packages/web && node -e 'const fs = require("node:fs"); process.exit(fs.existsSync(require("playwright").chromium.executablePath()) ? 0 : 1)'); then
   if [ "${CUBE_TEST_BROWSER:-}" = required ]; then
     echo "FAIL: Chromium for Playwright is missing: pnpm --filter @cube/web exec playwright install chromium" >&2
