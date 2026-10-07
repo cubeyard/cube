@@ -276,7 +276,7 @@ wider runner enrolled while cubed runs restarts the gateway at its first use.
 | `/var/lib/cube-runner/identity/node.key` | cube-runner, 0600 | Iroh identity secret |
 | `/var/lib/cube-runner/state/journal.db` | cube-runner, 0600 | immutable installation, VM records, lease epochs |
 | `/var/lib/cube-runner/state/images/<sha256>.qcow2` | cube-runner, 0400 | base image |
-| `/var/lib/cube-runner/state/vms/<n>/` | cube-runner, 0700 | `disk.qcow2`, `seed.img`, `console.log`, `qemu.log`, QMP and frame sockets |
+| `/var/lib/cube-runner/state/vms/<n>/` | cube-runner, 0700 | `disk.qcow2`, `seed.img`, `console.log`, `qemu.log`, `launch.json` and `events.log` (0.8.3+), QMP and frame sockets |
 | `/run/cube-runner/ready.json` | runtime only | readiness, version, platform, base image hash |
 
 macOS uses `/Library/Application Support/CubeRunner` (system) or
@@ -440,6 +440,85 @@ rotation. If a key is lost without a matched backup, archive the old threads,
 keep the old state for inspection and enroll a fresh runner with new
 identities.
 
+## Diagnosing a machine that does not start
+
+When a thread stays "starting" or its agent never opens, collect its
+diagnostics bundle before changing anything. On the cubed host (or through the
+authenticated proxy that fronts cubed), with the thread's id from its URL:
+
+```sh
+curl -fsS "http://127.0.0.1:7777/api/threads/<thread-id>/diagnostics" -o cube-diagnostics-<thread-id>.json
+```
+
+Attach that file when you share the problem. It is read only: it starts,
+stops, attaches and moves nothing (not even the gateway: a gateway that is
+not running is reported as such), and works for archived threads too. It
+takes about 20 s at most: up to 8 s for the runner (its requests queue
+behind the runner's other calls) beside up to 3 s for the gateway, then up
+to 8 s for one guest hello. Requests for the same thread at the same time
+share one diagnosis. OptChat
+gives the same evidence as text for a thread it started (its `diagnose` tool:
+ask it to diagnose the thread).
+
+What the bundle holds, each part either observed (with its time) or marked
+`none`, `unavailable` or `unsupported` with the reason:
+
+- `thread`, `activation`: cubed's record (workspace state and error, runner,
+  machine id, placement, preparation, startup phases, hooks) and whether a
+  start is under way, waits for a runner or failed.
+- `runnerObservation`: cubed's last `node.status` report of the runner, with
+  its age; `fresh: false` means it is old, not the runner's current state.
+- `machine.events`: cubed's machine events for the thread (start sent and
+  answered, gateway attached, each different "guest not ready" answer, moves,
+  waits, failures), kept in `CUBED_STATE/threads/<id>/machine-events.jsonl`
+  from this version on; `null` means none were recorded, not that nothing
+  happened.
+- `machine.runner`: the runner's `vm.diagnose` (cube-runner 0.8.3+): its VM
+  record, the QEMU command line it recorded at launch (`launch.source:
+  recorded`; `reconstructed` when an older runner started the machine), disk
+  overlay, backing file and template, the QEMU process (pid, alive, CPU ms,
+  resident memory), QMP's `query-status` and `query-cpus-fast` (a running
+machine only, and only while the runner itself is not using QMP, which
+serves one client at a time; otherwise `asked: false` says why), the frame
+  pump (gateway connected, frames from and to the guest; zero frames from the
+  guest means its kernel never brought the NIC up), the first 8 KiB and last
+  56 KiB of the console, the tail of the previous boot's console and of
+  `qemu.log`, and the runner's event log for the VM (`vms/<n>/events.log`:
+  allocated, qemu started, running, gateway connected/refused/disconnected,
+  first frame from the guest, start while live, start refused while
+  draining, power-down, quit, kill, exit, runner restarts). A runner before
+  0.8.3 answers `method: vm.inspect` only: its record and the last 16 KiB of
+  the console.
+- `machine.gateway`, `machine.guest`: the gateway's link, lease, guest IP and
+  byte counts (when a gateway runs), and one bounded guest hello over SSH
+  (only when the gateway has the machine attached).
+
+Every string is escaped (control characters as `\x1b`, invisible or
+reordering characters as `\u{202e}`, invalid UTF-8 as `\xff`; backslashes are
+kept, so escapes are not reversible) and secret-looking values (private keys,
+GitHub and Anthropic tokens, bearer tokens, `password=`/`token:` values) are
+`[redacted]`. The file is safe to print in a terminal. Redaction is by
+pattern: read the bundle before sharing it outside the operators. A thread's
+bundle never includes another thread's machine: the runner refuses a VM of
+another thread (`CONFLICT`), and OptChat diagnoses only threads it started.
+
+A runner before 0.8.3 that cubed cannot reach leaves only the runner host's
+own files. On a macOS runner with the user profile, read them without
+printing raw bytes (`cat -v` shows control characters as `^[`):
+
+```sh
+S="$HOME/Library/Application Support/CubeRunner/data/state"
+sqlite3 -readonly "$S/journal.db" "SELECT slot,state,interrupted,error,started_at,template FROM vm WHERE vm_id='<vm-id>'" | cat -v
+n=<slot>; ls -la "$S/vms/$n"
+tail -c 65536 "$S/vms/$n/console.log" | cat -v
+tail -c 16384 "$S/vms/$n/qemu.log" | cat -v
+pgrep -f "guest=<vm-id>"    # QEMU's pid, if it runs
+ps -o pid,etime,time,rss,stat -p <pid>
+```
+
+`time` is QEMU's CPU time: two readings a minute apart tell a spinning guest
+from an idle one. None of these change the VM, its disk or the journal.
+
 ## Limits and diagnostics
 
 At most `maxActiveVms` active VMs per runner. Per VM: `vcpus` up to `maxVcpus`, memory from 256 MiB
@@ -459,7 +538,7 @@ are admission bounds, not host resource quotas.
 | `LEASE_STALE` | a newer thread lease owns the VM; never retry with the old epoch |
 | `recoveryRequired` | review retained VMs, then acknowledge while stopped |
 | `interrupted` on a VM | the runner died or the guest was killed; the next boot clears it, a release keeps the disk |
-| `error` on a stopped VM | QEMU exited unexpectedly; see `vms/<n>/qemu.log` and `console.log` |
+| `error` on a stopped VM | QEMU exited unexpectedly; see the thread's diagnostics bundle (above), or `vms/<n>/qemu.log` and `console.log` |
 | `WRONG_NODE` | verify Iroh peers and the full immutable binding out of band |
 | `faulted` / `IO_ERROR` | stop, preserve state, inspect disk/journal ownership |
 

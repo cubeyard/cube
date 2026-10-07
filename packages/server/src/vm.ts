@@ -23,6 +23,7 @@ import { NO_HOOKS, placement, threadAgent, type HookOutcome, type Registry, type
 import { newPlaceholder, type EgressVms } from "./egress-policy.ts";
 import { guestDescription, VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { GUEST_HELPER_PATH, shippedHelper, vmMac, vmSeed } from "./vm-seed.ts";
+import { MachineEvents, type Evidence, type MachineEvidence } from "./vm-diagnostics.ts";
 import { FAILED_BUILD_BACKOFF_MS, TEMPLATE_CAPABILITY, TEMPLATE_FORMAT, obsoleteTemplates, pickTemplate, templateKey, templateSettings,
   type TemplateMeta, type TemplateSettings } from "./vm-template.ts";
 import { LeaseStore } from "./workspace-lease.ts";
@@ -54,6 +55,9 @@ export interface ThreadMachines {
   /** A TCP connection to a port of the thread's running machine, for the
    * portal (the gateway allows 22 and 1024-65535). */
   dial?(thread: Thread, port: number): Promise<net.Socket>;
+  /** Read-only evidence about the thread's machine (vm-diagnostics.ts);
+   * never starts, stops or attaches it. */
+  diagnose?(thread: Thread): Promise<MachineEvidence>;
 }
 
 export interface MachineStart { booted: boolean }
@@ -84,6 +88,10 @@ const GUEST_CHECK_TIMEOUT_MS = 45000;
  * this tells a lost link from a guest that is gone without a first boot's wait. */
 const REATTACH_READY_TIMEOUT_MS = 2 * 60 * 1000;
 const MACHINE_STATES_LIVE = new Set(["starting", "running"]);
+/** A diagnosis waits this long for the runner (its requests queue behind
+ * the runner's other calls) and for the guest's hello. */
+const DIAGNOSE_RUNNER_MS = 8000;
+const DIAGNOSE_GUEST_MS = 8000;
 
 export interface ThreadVmsOptions {
   registry: Registry;
@@ -99,6 +107,8 @@ export interface ThreadVmsOptions {
   runnerClient?: (admission: { configPath: string; configHash: string }) => IrohRunnerClient;
   /** Machine templates (default: from CUBED_TEMPLATES and CUBED_TEMPLATE_TTL_HOURS). */
   templates?: TemplateSettings;
+  /** Tests: how long a diagnosis waits for the runner and for the guest. */
+  diagnoseTimeoutMs?: number;
 }
 
 export class ThreadVms implements ThreadMachines, EgressVms {
@@ -116,6 +126,12 @@ export class ThreadVms implements ThreadMachines, EgressVms {
   private readonly failedBuilds = new Map<string, number>();
   /** Status questions under way, by runner: one at a time, shared. */
   private readonly probes = new Map<string, Promise<TrustedRunnerHealth>>();
+  /** cubed's machine events per thread, kept for diagnostics. */
+  private readonly events: MachineEvents;
+  /** The last guest hello of each thread's machine: when, and its answer. */
+  private readonly guestProbes = new Map<string, { at: number; ready: boolean; error: string | null }>();
+  /** Diagnoses under way, by thread: callers at the same time share one. */
+  private readonly diagnoses = new Map<string, Promise<MachineEvidence>>();
   private closed = false;
 
   constructor(options: ThreadVmsOptions) {
@@ -124,6 +140,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     this.sizes = options.sizes ?? vmSizes();
     this.controls = controlDirectory(options.run);
     this.templates = options.templates ?? templateSettings();
+    this.events = new MachineEvents(options.threads);
     options.gateway.onRestart(client => this.reattach(client));
   }
 
@@ -190,6 +207,8 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     }
     if (record.state === "released") fs.rmSync(this.keyDirectory(thread), { recursive: true, force: true });
     this.log.info("released", { thread: thread.id, vm: vm.vmId, retained: record.state === "retained" });
+    this.events.record(thread.id, record.state);
+    this.guestProbes.delete(thread.id);
     return { retained: record.state === "retained" };
   }
 
@@ -200,6 +219,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     if (record.state !== "released") throw new Error(`the runner did not discard the machine (${record.state})`);
     fs.rmSync(this.keyDirectory(thread), { recursive: true, force: true });
     this.log.info("discarded", { thread: thread.id, vm: vm.vmId });
+    this.events.record(thread.id, "discarded");
   }
 
   running(thread: Thread): boolean { return !!thread.vm && this.attached.has(thread.vm.vmId); }
@@ -244,9 +264,13 @@ export class ThreadVms implements ThreadMachines, EgressVms {
           if (!unanswered) return { booted: false };
           this.log.warn("machine runs but its guest does not answer; attaching it again", { thread: thread.id, vm: vm.vmId, error: unanswered,
             link: status.link, linkError: status.lastError });
+          this.events.record(thread.id, "guest does not answer; attaching again", `${unanswered}; link ${status.link}${status.lastError ? `: ${status.lastError}` : ""}`);
           await this.guest(thread).close();
           reattach = true;
-        } else this.log.warn("machine is not running; starting it again", { thread: thread.id, vm: vm.vmId, state: current.state });
+        } else {
+          this.log.warn("machine is not running; starting it again", { thread: thread.id, vm: vm.vmId, state: current.state });
+          this.events.record(thread.id, "machine is not running; starting it again", `runner state ${current.state}, gateway ${status ? status.link : "not attached"}`);
+        }
         this.attached.delete(vm.vmId);
       }
       onBoot?.();
@@ -272,10 +296,13 @@ export class ThreadVms implements ThreadMachines, EgressVms {
             throw new RunnerWait(`waiting for a runner: ${text}; cube tries again`, { cause: error });
           }
           this.log.info("thread moved to another runner", { thread: thread.id, from: thread.runnerId, to: moved, why });
+          this.events.record(thread.id, "moved to another runner", `${this.nodeId(thread.runnerId)} ${why}; now ${this.nodeId(moved)}`);
         }
       }
     } catch (error) {
-      throw this.waitFor(this.options.registry.getThread(thread.id) ?? thread, error);
+      const failure = this.waitFor(this.options.registry.getThread(thread.id) ?? thread, error);
+      this.events.record(thread.id, failure instanceof RunnerWait ? "waiting for a runner" : "start failed", failure);
+      throw failure;
     }
   }
 
@@ -437,6 +464,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       this.phase(thread, "allocate", allocating);
       this.log.info("allocated", { thread: thread.id, vm: vm.vmId, diskGiB: sizes.diskGiB, source: preparation.source,
         ...(preparation.templateId ? { template: preparation.templateId } : {}), ...(preparation.reason ? { reason: preparation.reason } : {}) });
+      this.events.record(thread.id, "allocated", `${sizes.diskGiB} GiB on ${runner.nodeId}, ${preparation.source}${preparation.templateId ? ` template ${preparation.templateId}` : ""}`);
     }
     const deadline = Date.now() + SETTLE_TIMEOUT_MS;
     while (record.state === "stopping") {
@@ -456,7 +484,9 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     // Only a first start writes the seed; the runner keeps it for the machine's life.
     const seed = vmSeed({ vmId: vm.vmId, hostKey: keys.host, clientKeyPub: keys.clientPub, caPem: hello.caPem, placeholders: vm.placeholders,
       hooks: thread.allocation.hooks ?? NO_HOOKS, fromTemplate: record.template !== undefined });
+    this.events.record(thread.id, "start sent", `the runner had it ${record.state}${reattach ? "; attaching again" : ""}`);
     record = await runner.vmStart(ref, this.epoch(thread), { vcpus: sizes.vcpus, memoryMiB: sizes.memoryMiB, mac, seed, gateway: { peer: hello.peer, frameToken } });
+    this.events.record(thread.id, "start answered", `${record.state}${record.interrupted ? ", interrupted" : ""}${record.error ? `: ${record.error}` : ""}`);
     if (!MACHINE_STATES_LIVE.has(record.state)) {
       throw new Error(`the thread machine did not start${record.error ? `: ${record.error.trim().split("\n").slice(-3).join("; ")}` : ""}`);
     }
@@ -464,8 +494,11 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     await gateway.attach(vm.vmId, spec);
     this.attached.set(vm.vmId, spec);
     this.log.info("started", { thread: thread.id, vm: vm.vmId, state: record.state, runner: runner.nodeId });
+    this.events.record(thread.id, "gateway attached");
     const readyMs = this.options.readyTimeoutMs ?? READY_TIMEOUT_MS;
-    await this.waitReady(this.guest(thread), runner, ref, reattach && !booted ? Math.min(readyMs, REATTACH_READY_TIMEOUT_MS) : readyMs);
+    const waitMs = reattach && !booted ? Math.min(readyMs, REATTACH_READY_TIMEOUT_MS) : readyMs;
+    this.events.record(thread.id, "waiting for the guest", `up to ${Math.round(waitMs / 1000)} s`);
+    await this.waitReady(this.guest(thread), runner, ref, waitMs);
     if (first) this.phase(thread, "boot", booting);
     return { booted };
   }
@@ -724,19 +757,31 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     const deadline = Date.now() + timeoutMs;
     let lastInspect = Date.now();
     let last: string;
+    let reported: string | undefined;
     for (;;) {
       if (this.closed) throw new Error("cubed is stopping");
       try {
         const answer = await transport.call("hello", {}, { timeoutMs: 45000 });
         if (answer.header.error && typeof answer.header.error === "object") last = String((answer.header.error as { message?: unknown }).message);
-        else if (guestDescription(answer.header).ready) { this.log.info("ready", { thread: ref.threadId, vm: ref.vmId }); return; }
-        else last = "cloud-init is still running";
+        else if (guestDescription(answer.header).ready) {
+          this.guestProbes.set(ref.threadId, { at: Date.now(), ready: true, error: null });
+          this.events.record(ref.threadId, "ready");
+          this.log.info("ready", { thread: ref.threadId, vm: ref.vmId });
+          return;
+        } else last = "cloud-init is still running";
       } catch (error) { last = error instanceof Error ? error.message : String(error); }
-      if (Date.now() > deadline) throw new Error(`the machine did not become ready: ${last}`);
+      this.guestProbes.set(ref.threadId, { at: Date.now(), ready: false, error: last });
+      // Each different answer once, not every poll.
+      if (last !== reported) { this.events.record(ref.threadId, "guest not ready", last); reported = last; }
+      if (Date.now() > deadline) {
+        this.events.record(ref.threadId, "guest never became ready", `after ${Math.round(timeoutMs / 1000)} s: ${last}`);
+        throw new Error(`the machine did not become ready: ${last}`);
+      }
       if (Date.now() - lastInspect > 15000) {
         lastInspect = Date.now();
         const { vm, consoleTail } = await runner.vmInspect(ref);
         if (!MACHINE_STATES_LIVE.has(vm.state)) {
+          this.events.record(ref.threadId, "machine stopped while booting", `${vm.state}${vm.error ? `: ${vm.error}` : ""}`);
           throw new Error(`the machine stopped while booting (${vm.state})${consoleTail ? `: ${consoleTail.trim().split("\n").slice(-3).join("; ")}` : ""}`);
         }
       }
@@ -746,19 +791,103 @@ export class ThreadVms implements ThreadMachines, EgressVms {
 
   /** Why an attached machine's guest does not answer ready now, or null. */
   private async unanswered(thread: Thread): Promise<string | null> {
+    const why = await this.hello(thread, GUEST_CHECK_TIMEOUT_MS);
+    this.guestProbes.set(thread.id, { at: Date.now(), ready: !why, error: why });
+    return why;
+  }
+
+  /** Why the machine's guest does not answer ready within `timeoutMs`, or null. */
+  private async hello(thread: Thread, timeoutMs: number): Promise<string | null> {
     try {
-      const answer = await this.guest(thread).call("hello", {}, { timeoutMs: GUEST_CHECK_TIMEOUT_MS });
+      const answer = await this.guest(thread).call("hello", {}, { timeoutMs });
       if (answer.header.error && typeof answer.header.error === "object") return String((answer.header.error as { message?: unknown }).message);
       return guestDescription(answer.header).ready ? null : "its guest is not ready";
     } catch (error) { return error instanceof Error ? error.message : String(error); }
+  }
+
+  /** Read-only evidence about the thread's machine: cubed's events and
+   * live view, the runner's evidence (`vm.diagnose`, or `vm.inspect` on a
+   * runner before 0.8.3), the gateway's link, and a guest hello when the
+   * gateway has the machine attached. Each part is bounded in time and
+   * reports why it is missing; nothing is started, stopped or attached. */
+  diagnose(thread: Thread): Promise<MachineEvidence> {
+    // One at a time per thread: a client that polls never queues more than
+    // one runner request and one guest hello behind the thread's own.
+    let pending = this.diagnoses.get(thread.id);
+    if (!pending) {
+      pending = this.collect(thread).finally(() => this.diagnoses.delete(thread.id));
+      this.diagnoses.set(thread.id, pending);
+    }
+    return pending;
+  }
+
+  private async collect(thread: Thread): Promise<MachineEvidence> {
+    const vm = machine(thread);
+    const ref: VmRef = { threadId: thread.id, vmId: vm.vmId };
+    // A timer of its own (AbortSignal.timeout's does not keep the process
+    // alive): the deadline holds even for a call that never settles.
+    const timed = async <T,>(ms: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> => {
+      const controller = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => { controller.abort(); reject(new Error(`no answer within ${Math.round(ms / 100) / 10} s`)); }, ms);
+      });
+      try { return await Promise.race([work(controller.signal), late]); }
+      finally { clearTimeout(timer); }
+    };
+    const failed = (error: unknown) => ({ status: "unavailable" as const, at: Date.now(), reason: errorText(error) });
+    const runnerMs = this.options.diagnoseTimeoutMs ?? DIAGNOSE_RUNNER_MS;
+    const runnerPart = async (): Promise<MachineEvidence["runner"]> => {
+      if (placement(this.options.registry.getThread(thread.id) ?? thread) === "provisional") {
+        return { status: "none", reason: "no allocation of this machine ever reached its runner" };
+      }
+      const started = Date.now();
+      try {
+        const client = this.runner(thread);
+        try {
+          const diagnosis = await timed(runnerMs, signal => client.vmDiagnose(ref, signal));
+          return { status: "observed", at: Date.now(), method: "vm.diagnose", ms: Date.now() - started, diagnosis };
+        } catch (error) {
+          if (!(error instanceof IrohNodeError && error.code === "OPERATION_UNSUPPORTED")) throw error;
+          const { vm: record, consoleTail } = await timed(Math.max(1, runnerMs - (Date.now() - started)), signal => client.vmInspect(ref, signal));
+          return { status: "observed", at: Date.now(), method: "vm.inspect", ms: Date.now() - started, vm: record, consoleTail,
+            note: "the runner predates vm.diagnose (cube-runner 0.8.3): only its record of the machine and the last 16 KiB of its console; "
+              + "no command line, process, QMP, frame counters, qemu log or runner events" };
+        }
+      } catch (error) { return failed(error); }
+    };
+    const gatewayPart = async (): Promise<MachineEvidence["gateway"]> => {
+      try {
+        // Asked only if one runs: a diagnosis never starts the gateway.
+        const running = this.options.gateway.running;
+        if (!running) return { status: "none", reason: `no gateway runs now${this.options.gateway.unavailable ? `: ${this.options.gateway.unavailable}` : ""}` };
+        const status = await timed(3000, () => running.client.status(vm.vmId));
+        return status ? { status: "observed", at: Date.now(), attached: true, link: status.link, leased: status.leased, guestIp: status.guestIp,
+          flows: status.flows, rxBytes: status.rxBytes, txBytes: status.txBytes, lastError: status.lastError }
+          : { status: "observed", at: Date.now(), attached: false };
+      } catch (error) { return failed(error); }
+    };
+    const [runner, gateway] = await Promise.all([runnerPart(), gatewayPart()]);
+    let guest: Evidence<{ ready: boolean; ms: number; error: string | null }>;
+    if (gateway.status !== "observed" || !gateway.attached) guest = { status: "none", reason: "not asked: the gateway does not have the machine attached" };
+    else {
+      const started = Date.now();
+      const why = await this.hello(thread, this.options.diagnoseTimeoutMs ?? DIAGNOSE_GUEST_MS);
+      guest = { status: "observed", at: Date.now(), ready: !why, ms: Date.now() - started, error: why };
+    }
+    return {
+      cubed: { startInProgress: this.starting.has(thread.id), attached: this.attached.has(vm.vmId), lastGuestProbe: this.guestProbes.get(thread.id) ?? null },
+      events: this.events.read(thread.id),
+      runner, gateway, guest,
+    };
   }
 
   private async reattach(client: GatewayClient): Promise<void> {
     // SSH masters ran through the old gateway's dial; the next call opens a new one.
     await Promise.allSettled([...this.transports.values()].map(transport => transport.close()));
     for (const [vmId, spec] of this.attached) {
-      try { await client.attach(vmId, spec); this.log.info("reattached", { vm: vmId }); }
-      catch (error) { this.log.error("reattach failed", { vm: vmId, error }); }
+      try { await client.attach(vmId, spec); this.log.info("reattached", { vm: vmId }); this.events.record(spec.threadId, "gateway restarted; attached again"); }
+      catch (error) { this.log.error("reattach failed", { vm: vmId, error }); this.events.record(spec.threadId, "gateway restarted; attaching again failed", error); }
     }
   }
 

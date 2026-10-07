@@ -1,6 +1,7 @@
 //! Authenticated node protocol (loopback by default) and the trusted runner
 //! that hosts one QEMU VM per active thread (protocol 3).
 //! Bounded frames, no retries, no 0-RTT; VMs outlive their connection.
+pub mod diagnose;
 pub mod journal;
 pub mod l2;
 pub mod pump;
@@ -21,7 +22,7 @@ pub const ALPN: &[u8] = b"cubeyard/node/1";
 pub const PROTOCOL_VERSION: u32 = 3;
 pub const MIN_COMPATIBLE_PROTOCOL_VERSION: u32 = 3;
 pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
-const RUNNER_CAPABILITIES: [&str; 10] = [
+const RUNNER_CAPABILITIES: [&str; 11] = [
     "node.status",
     "vm.allocate",
     "vm.start",
@@ -33,8 +34,10 @@ const RUNNER_CAPABILITIES: [&str; 10] = [
     "vm.publish",
     "template.list",
     "template.remove",
+    // Read-only evidence about one VM (0.8.3).
+    "vm.diagnose",
 ];
-const KNOWN_METHODS: [&str; 11] = [
+const KNOWN_METHODS: [&str; 12] = [
     "node.hello",
     "node.status",
     "vm.allocate",
@@ -46,6 +49,7 @@ const KNOWN_METHODS: [&str; 11] = [
     "vm.publish",
     "template.list",
     "template.remove",
+    "vm.diagnose",
 ];
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -104,6 +108,15 @@ pub enum Request {
         #[serde(rename = "vmId")]
         vm_id: String,
     },
+    /// Read-only evidence about one VM: recorded launch, disk, process,
+    /// QMP, frames, bounded and escaped logs and the VM's event log.
+    #[serde(rename = "vm.diagnose")]
+    VmDiagnose {
+        #[serde(rename = "threadId")]
+        thread_id: String,
+        #[serde(rename = "vmId")]
+        vm_id: String,
+    },
     #[serde(rename = "vm.release")]
     VmRelease {
         #[serde(rename = "threadId")]
@@ -146,6 +159,7 @@ impl Request {
             | Self::VmStart { vm_id, .. }
             | Self::VmStop { vm_id, .. }
             | Self::VmInspect { vm_id, .. }
+            | Self::VmDiagnose { vm_id, .. }
             | Self::VmRelease { vm_id, .. }
             | Self::VmDiscard { vm_id, .. } => Some(vm_id),
             _ => None,
@@ -215,6 +229,10 @@ pub enum Response {
     },
     Template {
         template: runner::TemplateRecord,
+    },
+    /// `vm.diagnose`; every string in it is cleaned (`diagnose::clean`).
+    Diagnosis {
+        diagnosis: serde_json::Value,
     },
     Templates {
         templates: Vec<runner::TemplateRecord>,
@@ -534,6 +552,14 @@ async fn dispatch(node_id: &str, query: Request, runner: Option<&Arc<runner::Run
         Request::VmInspect { thread_id, vm_id } => runner
             .inspect(&thread_id, &vm_id)
             .map(|(vm, console_tail)| Response::Vm { vm, console_tail }),
+        Request::VmDiagnose { thread_id, vm_id } => {
+            // File reads and short QMP questions: off the async workers.
+            let runner = runner.clone();
+            tokio::task::spawn_blocking(move || runner.diagnose(&thread_id, &vm_id))
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("diagnosis failed")))
+                .map(|diagnosis| Response::Diagnosis { diagnosis })
+        }
         Request::VmRelease {
             thread_id,
             vm_id,
@@ -843,6 +869,8 @@ async fn call_inner(
             (Response::Template { template }, Request::TemplateRemove { id })
                 if &template.id == id => {}
             (Response::Templates { .. }, Request::TemplateList) => {}
+            (Response::Diagnosis { diagnosis }, Request::VmDiagnose { vm_id, .. })
+                if diagnosis["vm"]["vmId"].as_str() == Some(vm_id) => {}
             (Response::Error { .. }, _) => {}
             _ => bail!("invalid response for request"),
         }
@@ -1006,7 +1034,7 @@ mod tests {
         assert_eq!(
             (SOFTWARE_VERSION, RUNNER_CAPABILITIES),
             (
-                "0.8.2",
+                "0.8.3",
                 [
                     "node.status",
                     "vm.allocate",
@@ -1018,6 +1046,7 @@ mod tests {
                     "vm.publish",
                     "template.list",
                     "template.remove",
+                    "vm.diagnose",
                 ]
             ),
             "capability changes require a new immutable software version"

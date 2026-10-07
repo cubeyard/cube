@@ -478,6 +478,12 @@ comes meanwhile starts fresh. `CUBED_TEMPLATES=off` or a runner before 0.8.0
 means every machine starts fresh. The startup phases (`allocate`,
 `build-*`, `boot`, `prepare`, `resume`) and the total from creation to ready
 are logged ("machine ready for the agent") and kept in `thread.vm.startup`.
+A machine that does not get there leaves evidence: cubed's machine events
+(`threads/<id>/machine-events.jsonl`) and the runner's (`vms/<n>/events.log`,
+cube-runner 0.8.3), read with the rest by `GET /api/threads/<id>/diagnostics`
+and OptChat's `diagnose` (`vm-diagnostics.ts`, `vm.diagnose`; read only,
+escaped and redacted; see docs/runner-operations.md, "Diagnosing a machine
+that does not start").
 
 ## Services and the portal
 
