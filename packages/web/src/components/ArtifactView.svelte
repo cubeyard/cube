@@ -135,6 +135,8 @@
   function placeMarks(root: HTMLElement, revision: number, list: ArtifactComment[]): void {
     // Marking replaces text nodes; a selection waiting for a comment is selected again after.
     const kept = selection?.revision === revision ? selection.anchor : null;
+    const live = document.getSelection();
+    const backward = !!live?.rangeCount && (live.anchorNode !== live.getRangeAt(0).startContainer || live.anchorOffset !== live.getRangeAt(0).startOffset);
     for (const old of root.querySelectorAll("mark.anchor")) old.replaceWith(...old.childNodes);
     root.normalize();
     docText = textNodes(root).text;
@@ -151,7 +153,8 @@
     }
     placements = next;
     const again = kept && textRange(root, kept.start, kept.end);
-    if (again) document.getSelection()?.setBaseAndExtent(again.startContainer, again.startOffset, again.endContainer, again.endOffset);
+    if (again && backward) live?.setBaseAndExtent(again.endContainer, again.endOffset, again.startContainer, again.startOffset);
+    else if (again) live?.setBaseAndExtent(again.startContainer, again.startOffset, again.endContainer, again.endOffset);
   }
 
   // A selection in the document offers a comment on it.
@@ -184,7 +187,7 @@
   // Anything in the document's scroller that changes size moves the text after it.
   $effect(() => {
     const field = scroller;
-    void body; void meta; void shown; void shownError;
+    void body; void meta?.number; void shown; void shownError;
     if (!field) return;
     const sizes = new ResizeObserver(follow);
     sizes.observe(field);

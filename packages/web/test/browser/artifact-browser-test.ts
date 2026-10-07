@@ -96,7 +96,8 @@ const keyGap = (page: Page) => page.evaluate(() => {
   const rect = selection.getRangeAt(0).getBoundingClientRect();
   if (rect.bottom < field.top || rect.top > field.bottom) return key ? 9999 : 0;
   if (!key) return 9999;
-  return Math.abs(key.top - Math.min(Math.max(rect.bottom + 8, field.top + 8), field.bottom - 52));
+  return Math.max(Math.abs(key.top - Math.min(Math.max(rect.bottom + 8, field.top + 8), field.bottom - 52)),
+    Math.abs(key.left + key.width / 2 - Math.min(Math.max(rect.left + rect.width / 2, 60), innerWidth - 60)));
 });
 async function comment(page: Page, text: string, body: string): Promise<void> {
   await select(page, text);
@@ -283,7 +284,7 @@ try {
     release();
     await until(async () => late.locator(".diagram-picture[aria-busy]").count(), count => count === 0, "the late diagrams drawn");
     await until(top, at => at > from + 50, "the drawn diagrams move the selected text");
-    await until(() => keyGap(late), gap => gap <= 1, "the key follows the text the diagrams moved");
+    await until(() => keyGap(late), gap => gap <= 1, "the key follows the text the diagrams moved, or leaves while it is out of view");
     await shoot(late, `${shot}b-diagrams-drawn`);
     // Back in view, the key is under it again.
     await late.evaluate(() => document.getSelection()!.getRangeAt(0).startContainer.parentElement!.scrollIntoView({ block: "center" }));
@@ -295,7 +296,7 @@ try {
   const wide = await lateDiagrams({ width: 1440, height: 900 }, false, "16");
   for (const width of [1000, 700]) {
     await wide.setViewportSize({ width, height: 800 });
-    await until(() => keyGap(wide), gap => gap <= 1, `the key follows the text reflowed at ${width}px`);
+    await until(() => keyGap(wide), gap => gap <= 1, `the key follows the text reflowed at ${width}px, or leaves while it is out of view`);
   }
   await shoot(wide, "16d-resized");
   await wide.close();
@@ -308,11 +309,25 @@ try {
   });
   await until(() => keyGap(narrow), gap => gap <= 1, "the key under the scrolled selection");
   const foot = async () => narrow.locator(".artifact-scroll").evaluate(scroller => scroller.getBoundingClientRect().bottom);
+  // Selected backwards, as a drag from the end does; it keeps that direction.
+  const backward = () => narrow.evaluate(() => {
+    const selection = document.getSelection()!;
+    const range = selection.getRangeAt(0);
+    return selection.toString() !== "" && selection.focusNode === range.startContainer && selection.focusOffset === range.startOffset;
+  });
+  await narrow.evaluate(() => {
+    const selection = document.getSelection()!;
+    const range = selection.getRangeAt(0);
+    selection.setBaseAndExtent(range.endContainer, range.endOffset, range.startContainer, range.startOffset);
+  });
+  assert.equal(await backward(), true);
   const before = await foot();
   await comment(page, "newest revision only", "A draft that grows the phone's panel.");
   await narrow.locator(".comment-item.draft").waitFor({ timeout: 15_000 });
   assert.ok(await foot() < before - 20, "the panel grew into the document's view");
   await until(() => keyGap(narrow), gap => gap <= 1, "the key stays in the view the panel shrank");
+  assert.equal(await narrow.evaluate(() => document.getSelection()!.toString()), "the store keeps every revision", "the new comment's marks keep the selection");
+  assert.equal(await backward(), true, "the kept selection keeps its direction");
   await shoot(narrow, "17d-panel-grown");
   await page.locator(".comment-item.draft .work-dismiss").click();
   await page.locator(".comment-item.draft").waitFor({ state: "detached" });
