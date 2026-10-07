@@ -320,7 +320,7 @@ try {
     const range = selection.getRangeAt(0);
     selection.setBaseAndExtent(range.endContainer, range.endOffset, range.startContainer, range.startOffset);
   });
-  assert.equal(await backward(), true);
+  assert.equal(await backward(), true, "selected backward");
   const before = await foot();
   await comment(page, "newest revision only", "A draft that grows the phone's panel.");
   await narrow.locator(".comment-item.draft").waitFor({ timeout: 15_000 });

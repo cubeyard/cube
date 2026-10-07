@@ -59,6 +59,8 @@
     : `thread ${artifact.thread?.title ? `“${artifact.thread.title}”` : `[${artifact.author.thread.slice(0, 8)}]`}`);
   const authorLink = $derived(artifact?.author.kind === "thread" && artifact.thread && !artifact.thread.archived ? `#/t/${artifact.author.thread}` : artifact?.author.kind === "optchat" ? "#/chat" : null);
   const meta = $derived(view?.revisions.find((item) => item.number === shown?.number) ?? null);
+  // Whether there is one, not meta itself: each poll brings a new meta object.
+  const metaShown = $derived(!!meta);
   // While a comment is written, even the newest revision is named: following
   // the newest is what the composer pins.
   const revisionHash = (value: number) => value === head && !pending ? `#/a/${artifactId}` : `#/a/${artifactId}?rev=${value}`;
@@ -136,7 +138,10 @@
     // Marking replaces text nodes; a selection waiting for a comment is selected again after.
     const kept = selection?.revision === revision ? selection.anchor : null;
     const live = document.getSelection();
-    const backward = !!live?.rangeCount && (live.anchorNode !== live.getRangeAt(0).startContainer || live.anchorOffset !== live.getRangeAt(0).startOffset);
+    const order = document.createRange();
+    if (live?.anchorNode && live.focusNode) { order.setStart(live.anchorNode, live.anchorOffset); order.setEnd(live.focusNode, live.focusOffset); }
+    // A range from a later anchor to an earlier focus collapses: the selection runs backward.
+    const backward = !!live && !live.isCollapsed && order.collapsed;
     for (const old of root.querySelectorAll("mark.anchor")) old.replaceWith(...old.childNodes);
     root.normalize();
     docText = textNodes(root).text;
@@ -187,7 +192,7 @@
   // Anything in the document's scroller that changes size moves the text after it.
   $effect(() => {
     const field = scroller;
-    void body; void meta?.number; void shown; void shownError;
+    void body; void metaShown; void shown; void shownError;
     if (!field) return;
     const sizes = new ResizeObserver(follow);
     sizes.observe(field);
