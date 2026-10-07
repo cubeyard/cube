@@ -39,6 +39,22 @@ work directories. The real-VM scripts keep their state under `TMPDIR` (`/tmp`
 by default); where that is a small tmpfs, point `TMPDIR` at a disk: VM disks
 grow there and the runner refuses a new VM below 4 GiB free.
 
+UI behavior is checked in a real browser: `scripts/test-browser.sh` (the end of
+`pnpm test`; `pnpm test:browser` alone) builds the UI and drives Chromium. CI
+installs Chromium; elsewhere install it once with `pnpm --filter @cube/web exec
+playwright install chromium`, or `pnpm test` prints a SKIP notice
+(`CUBE_TEST_BROWSER=required` makes that a failure). `packages/web/test/browser/chat-browser-test.ts` runs the
+chat against a scripted host (`scripted-host.ts`) that sets the order and
+timing of every answer and frame: a slow send, an older frame after a newer
+one, a failed send, a lost stream, a reload. `cubed-browser-test.ts` runs the
+real cubed and OptChat over a controlled model (`packages/server/test/chat-fixture.ts`)
+with Pi's render slowed as a long chat's is. `monitor.ts` records what the
+page paints after every change and checks a send's invariants over the whole
+record: the message shows at once and exactly once, never goes and comes
+back, and the chat reads busy from the send until the run ends, once. A
+change to how the UI reads, reconciles or shows the stream needs a scenario
+there; a screenshot or a unit test of a helper is not that evidence.
+
 ## Product development
 
 ```sh

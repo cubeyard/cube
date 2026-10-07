@@ -1,0 +1,225 @@
+/** The chat in a real browser against a scripted host: a send shows at once
+ * and never goes and comes back, whatever the order and timing of the
+ * host's answers; the chat reads busy from the send until the run ends,
+ * once. Needs a built UI (pnpm build) and Playwright's Chromium. */
+import assert from "node:assert/strict";
+import { setTimeout as delay } from "node:timers/promises";
+import { chromium, type Page } from "playwright";
+import type { ThreadEvent, ThreadTranscript } from "../../src/lib/types.ts";
+import { assertAlways, assertSend, monitor } from "./monitor.ts";
+import { gate, ScriptedHost } from "./scripted-host.ts";
+
+const user = (id: string, text: string): ThreadEvent => ({ type: "user-message", id, text });
+const agent = (id: string, text: string, final = true): ThreadEvent => ({ type: "assistant-text", id, text, reasoning: false, final });
+const idle: ThreadTranscript["status"] = { state: "completed", run: "r0", error: null };
+
+const browser = await chromium.launch();
+let failed = false;
+
+async function scenario(name: string, run: (page: Page, host: ScriptedHost, watch: Awaited<ReturnType<typeof monitor>>) => Promise<void>, viewport = { width: 1280, height: 800 }): Promise<void> {
+  const host = await ScriptedHost.start();
+  const page = await browser.newPage({ viewport });
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(String(error)));
+  try {
+    host.transcript = { ...host.transcript, status: idle, events: [user("1.0", "earlier"), agent("2.0.0", "an earlier answer")] };
+    const watch = await monitor(page);
+    await page.goto(`${host.url}/#/chat`);
+    await page.locator(".composer textarea").waitFor();
+    await page.getByText("an earlier answer").waitFor();
+    await run(page, host, watch);
+    assert.deepEqual(errors, [], "no script errors");
+    console.log(`ok - ${name} (${viewport.width}x${viewport.height})`);
+  } catch (error) {
+    failed = true;
+    console.error(`not ok - ${name} (${viewport.width}x${viewport.height})\n`, error);
+  } finally {
+    await page.close();
+    await host.close();
+  }
+}
+
+async function send(page: Page, watch: Awaited<ReturnType<typeof monitor>>, text: string, mark = text): Promise<void> {
+  await page.locator(".composer textarea").fill(text);
+  await watch.mark(mark);
+  await page.locator(".composer textarea").press("Enter");
+}
+
+/** Waits until the page has painted what the host sent. */
+const settle = (page: Page) => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
+for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+  await scenario("a slow send shows at once, then the host's copy, a streamed answer and the end", async (page, host, watch) => {
+    const accepted = gate();
+    host.onPrompt = async ({ text, requestId }) => {
+      await accepted.promise;
+      host.set([...host.transcript.events, user(`pending.${requestId}`, text)], { state: "working", run: "pending" });
+    };
+    await send(page, watch, "fix the gateway");
+    await delay(300);
+    await settle(page);
+    let record = await watch.since("fix the gateway");
+    assert.deepEqual(record.at(-1)!.users, ["earlier", "…fix the gateway"], "sending, before the host answered");
+    assert.equal(record.at(-1)!.draft, "");
+    accepted.open();
+    await page.locator(".conversation-message.user:not(.sending)", { hasText: "fix the gateway" }).waitFor();
+    const before = host.transcript.events.slice(0, 2);
+    host.set([...before, user("3.0", "fix the gateway")], { state: "working" });
+    await settle(page);
+    for (const text of ["on", "on it", "on it, reading the gateway"]) {
+      host.set([...before, user("3.0", "fix the gateway"), agent("live.1.0", text, false)], { state: "working" });
+      await settle(page);
+    }
+    host.set([...before, user("3.0", "fix the gateway"), agent("4.0.0", "on it, reading the gateway")], { state: "completed" });
+    await page.locator(".composer[aria-busy=false]").waitFor();
+    await settle(page);
+    record = await watch.since("fix the gateway");
+    assertSend(record, "fix the gateway");
+    assert.ok(record.at(-1)!.gap < 4, `the view follows to the end: ${record.at(-1)!.gap}`);
+  }, viewport);
+}
+
+await scenario("an older frame after the host's copy does not take the message away", async (page, host, watch) => {
+  const stale = host.transcript;
+  host.onPrompt = ({ text, requestId }) => { host.set([...stale.events, user(`pending.${requestId}`, text)], { state: "working", run: "pending" }); };
+  await send(page, watch, "check the runner");
+  await page.locator(".conversation-message.user:not(.sending)", { hasText: "check the runner" }).waitFor();
+  // A frame from before the send (a slow render of a long chat) arrives late.
+  host.frame(stale, { keep: true });
+  await settle(page);
+  await delay(100);
+  host.set([...stale.events, user("3.0", "check the runner")], { state: "working" });
+  await settle(page);
+  host.set([...stale.events, user("3.0", "check the runner"), agent("4.0.0", "the runner is fine")], { state: "completed" });
+  await page.locator(".composer[aria-busy=false]").waitFor();
+  await settle(page);
+  assertSend(await watch.since("check the runner"), "check the runner");
+});
+
+await scenario("a failed send puts the message back in the field, and its retry is the same request", async (page, host, watch) => {
+  const answered = gate();
+  host.onPrompt = async () => { await answered.promise; throw new Error("the host had a problem handling that — try again"); };
+  await send(page, watch, "deploy nothing");
+  await page.locator(".conversation-message.user.sending", { hasText: "deploy nothing" }).waitFor();
+  // Typed while the send is out: kept, after the message put back.
+  await page.locator(".composer textarea").pressSequentially("and more");
+  answered.open();
+  await page.locator(".conversation-error").waitFor();
+  await settle(page);
+  const record = await watch.since("deploy nothing");
+  const end = record.at(-1)!;
+  assert.deepEqual(end.users, ["earlier"], "no message left behind");
+  assert.equal(end.draft, "deploy nothing\nand more");
+  assert.equal(end.busy, false);
+  assert.match(end.error ?? "", /try again/);
+  assertAlways(record, seen => seen.users.filter(text => text.endsWith("deploy nothing")).length <= 1, "never twice");
+  // The retry: the same request id, so a send the host did take is not taken twice.
+  host.onPrompt = ({ text, requestId }) => { host.set([...host.transcript.events, user(`pending.${requestId}`, text)], { state: "working", run: "pending" }); };
+  await page.locator(".composer textarea").fill("deploy nothing");
+  await watch.mark("retry");
+  await page.locator(".composer textarea").press("Enter");
+  await page.locator(".conversation-message.user:not(.sending)", { hasText: "deploy nothing" }).waitFor();
+  assert.equal(host.prompts.length, 2);
+  assert.equal(host.prompts[1]!.requestId, host.prompts[0]!.requestId);
+  await settle(page);
+  assert.equal((await watch.since("retry")).at(-1)!.error, null, "the error clears on the retry");
+});
+
+await scenario("a retry of a send the host took though its answer was lost shows the message once", async (page, host, watch) => {
+  const base = host.transcript.events;
+  host.onPrompt = ({ text, requestId }) => {
+    host.set([...base, user(`pending.${requestId}`, text)], { state: "working", run: "pending" });
+    throw new Error("the host is busy or restarting — try again in a moment");
+  };
+  await send(page, watch, "only once");
+  await page.locator(".conversation-error").waitFor();
+  await settle(page);
+  // The host's copy shows, the field has the text back; the retry is the same request.
+  host.onPrompt = () => {};
+  await watch.mark("retry once");
+  await page.locator(".composer textarea").press("Enter");
+  await settle(page);
+  assert.equal(host.prompts[1]!.requestId, host.prompts[0]!.requestId);
+  host.set([...base, user("3.0", "only once")], { state: "working" });
+  await settle(page);
+  host.set([...base, user("3.0", "only once"), agent("4.0.0", "done")], { state: "completed" });
+  await page.locator(".composer[aria-busy=false]").waitFor();
+  await settle(page);
+  const record = await watch.since("only once");
+  assertAlways(record, seen => seen.users.filter(text => text.endsWith("only once")).length <= 1, "never twice");
+  assert.deepEqual(record.at(-1)!.users, ["earlier", "only once"]);
+});
+
+await scenario("tool calls and their results stream without the message or the busy state flickering", async (page, host, watch) => {
+  const base = host.transcript.events;
+  host.onPrompt = ({ text, requestId }) => { host.set([...base, user(`pending.${requestId}`, text)], { state: "working", run: "pending" }); };
+  await send(page, watch, "count the files");
+  await page.locator(".conversation-message.user:not(.sending)", { hasText: "count the files" }).waitFor();
+  const asked = [...base, user("3.0", "count the files")];
+  const call: ThreadEvent = { type: "tool-call", id: "4.0.0", callId: "c1", name: "bash", input: { command: "ls | wc -l" }, final: true };
+  host.set([...asked, call], { state: "working" });
+  await page.locator(".tool-strip[open]").waitFor();
+  host.set([...asked, call, { type: "tool-result", id: "live.tool.c1", callId: "c1", name: "bash", output: "4", isError: false, final: false }], { state: "working" });
+  await settle(page);
+  host.set([...asked, call, { type: "tool-result", id: "5.0", callId: "c1", name: "bash", output: "42", isError: false, final: true }], { state: "working" });
+  await page.locator(".tool-strip:not([open])").waitFor();
+  host.set([...asked, call, { type: "tool-result", id: "5.0", callId: "c1", name: "bash", output: "42", isError: false, final: true }, agent("6.0.0", "42 files")], { state: "completed" });
+  await page.locator(".composer[aria-busy=false]").waitFor();
+  await settle(page);
+  assertSend(await watch.since("count the files"), "count the files");
+});
+
+await scenario("a failed run shows its error with the message in place", async (page, host, watch) => {
+  const base = host.transcript.events;
+  host.onPrompt = ({ text, requestId }) => { host.set([...base, user(`pending.${requestId}`, text)], { state: "working", run: "pending" }); };
+  await send(page, watch, "please fail");
+  await page.locator(".conversation-message.user:not(.sending)", { hasText: "please fail" }).waitFor();
+  host.set([...base, user("3.0", "please fail")], { state: "working" });
+  await settle(page);
+  host.set([...base, user("3.0", "please fail")], { state: "failed", error: "the provider refused" });
+  await page.locator(".conversation-error", { hasText: "the provider refused" }).waitFor();
+  await settle(page);
+  assertSend(await watch.since("please fail"), "please fail");
+});
+
+await scenario("a lost stream mid-run reconnects; the message and the run stay, and a reload reads them back", async (page, host, watch) => {
+  const base = host.transcript.events;
+  host.onPrompt = ({ text, requestId }) => { host.set([...base, user(`pending.${requestId}`, text)], { state: "working", run: "pending" }); };
+  await send(page, watch, "keep going");
+  await page.locator(".conversation-message.user:not(.sending)", { hasText: "keep going" }).waitFor();
+  const asked = [...base, user("3.0", "keep going")];
+  host.set([...asked, agent("live.1.0", "still", false)], { state: "working" });
+  await settle(page);
+  host.drop();
+  await page.locator(".conversation-note").waitFor();
+  host.transcript = { ...host.transcript, events: [...asked, agent("live.1.0", "still going", false)] };
+  await page.locator(".conversation-note").waitFor({ state: "detached" });
+  host.set([...asked, agent("4.0.0", "still going, done")], { state: "completed" });
+  await page.locator(".composer[aria-busy=false]").waitFor();
+  await settle(page);
+  const record = await watch.since("keep going");
+  assertSend(record, "keep going");
+  assert.ok(record.some(seen => seen.reconnecting), "the lost stream was shown");
+  await page.reload();
+  await page.getByText("still going, done").waitFor();
+  assert.deepEqual(await page.locator(".conversation-message.user .message-copy").allTextContents(), ["earlier", "keep going"]);
+});
+
+await scenario("a message sent while the agent works shows at once and the run reads busy throughout", async (page, host, watch) => {
+  const base = host.transcript.events;
+  host.set([...base, user("3.0", "first"), agent("live.1.0", "working on", false)], { state: "working" });
+  await page.locator(".composer[aria-busy=true]").waitFor();
+  host.onPrompt = ({ text, requestId }) => { host.set([...host.transcript.events, user(`pending.${requestId}`, text)], { state: "working" }); };
+  await send(page, watch, "also this");
+  await page.locator(".conversation-message.user:not(.sending)", { hasText: "also this" }).waitFor();
+  host.set([...base, user("3.0", "first"), agent("4.0.0", "working on it"), user("5.0", "also this")], { state: "working" });
+  await settle(page);
+  host.set([...base, user("3.0", "first"), agent("4.0.0", "working on it"), user("5.0", "also this"), agent("6.0.0", "both done")], { state: "completed" });
+  await page.locator(".composer[aria-busy=false]").waitFor();
+  await settle(page);
+  assertSend(await watch.since("also this"), "also this");
+});
+
+await browser.close();
+if (failed) process.exit(1);
+console.log("chat browser: ok");

@@ -38,7 +38,8 @@ belong in `scripts/test-offline.sh`. Runner, gateway and VM changes also need
 `CUBE_TEST_VM_IMAGE=<debian-13-genericcloud.qcow2> CUBE_TEST_VM=required bash
 scripts/test-node-transport.sh` on Linux with KVM; mocks are not runner
 acceptance.
-Inspect rendered UI at desktop/phone sizes for appearance changes.
+Inspect rendered UI at desktop/phone sizes for appearance changes; behavior
+changes to the chat or transcript need a `pnpm test:browser` scenario.
 
 `repos/` contains pinned upstream reference snapshots, not application code.
 Use published package imports; do not modify upstream snapshots except for

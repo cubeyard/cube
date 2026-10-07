@@ -15,7 +15,8 @@ export type MessageImage = { id: string; mimeType: string };
 
 /** One thing a thread shows, in transcript order. `id` is stable across
  * frames for committed events; an event still streaming (`final: false`) gets
- * a new id once committed. */
+ * a new id once committed, and so does a user message the host accepted but
+ * has not put in its log yet (its id starts with `PENDING_ID`). */
 export type ThreadEvent =
   /** `from` marks a report from a thread the chat started: its short id.
    * `images`: the images attached to the message, if any. */
@@ -26,6 +27,9 @@ export type ThreadEvent =
   | { type: "tool-call"; id: string; callId: string; name: string; input: unknown; final: boolean }
   /** A tool result, or with `final: false` the running output of a call. */
   | { type: "tool-result"; id: string; callId: string; name: string; output: string; isError: boolean; final: boolean };
+
+/** The id prefix of a user message accepted but not yet in the log. */
+export const PENDING_ID = "pending.";
 
 /** `idle` before the first run; `working` while a run is active; otherwise
  * how the newest run ended. `error` is the failure text, if any. `waiting`

@@ -168,6 +168,16 @@ browser-safe and the web UI uses it directly. An agent adapter is the only code
 that knows its agent's shapes; the UI never reads Pi messages.
 `ClaudeThreadEvents` renders a claude-code thread into the same transcript.
 
+A send has one rule from the key to the log: once the reader sees a message,
+they see it until the log has it. The browser shows its own copy at once
+(`packages/web/src/lib/outbox.ts`), stands it aside while the transcript shows
+the host's copy, and drops it once the log has the message (an id without
+`PENDING_ID`) or a newer run than the one it was sent after has ended. OptChat's
+frames merge Pi's transcript with the messages still waiting for their turn;
+Pi's transcript can be older than that list (a long chat renders slowly), so
+`OptChatEvents` keeps a waiting message a frame showed until the transcript has
+it, and keeps the chat working meanwhile.
+
 ## Claude Code threads
 
 Claude Code is an alternative thread agent for one purpose: to use the person's
