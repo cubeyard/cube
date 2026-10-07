@@ -3,6 +3,7 @@
  * cubed's workspace socket (routes -> VmWorkspace -> local guest), keyed
  * by tool_use_id. The real `claude` CLI is never started. */
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -19,7 +20,7 @@ import { VmWorkspace } from "../src/vm-workspace.ts";
 import { workspaceRoute } from "../src/workspace-http.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
 import { WorkspaceClient } from "../../claude-mod/hooks/workspace.ts";
-import { bash, edit, read, write, workspacePath } from "../../claude-mod/hooks/tools.ts";
+import { bash, edit, imageInfo, MAX_IMAGE_BYTES, read, write, workspacePath } from "../../claude-mod/hooks/tools.ts";
 import { LocalGuestTransport } from "./local-guest.ts";
 import { unixTransport } from "./unix-transport.ts";
 
@@ -349,6 +350,41 @@ try {
   assert.match((await bash(scope, "t-b2", { command: "printf other" }) as { deny: string }).deny, /CONFLICT|conflict/i);
   fs.writeFileSync(path.join(files, "binary"), Buffer.from([0, 1, 2]));
   assert.match((await read(scope, { file_path: "binary" }) as { deny: string }).deny, /not UTF-8/);
+  // Images come back in Read's image shape, whole across pages, or refused.
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
+  fs.mkdirSync(path.join(files, ".shots"));
+  fs.writeFileSync(path.join(files, ".shots/dot.png"), png);
+  assert.deepEqual(await read(scope, { file_path: "/home/cube/thread/.shots/dot.png" }), { type: "image", file: { base64: png.toString("base64"), type: "image/png", originalSize: png.length, dimensions: { originalWidth: 1, originalHeight: 1, displayWidth: 1, displayHeight: 1 } } });
+  const paged = Buffer.concat([png.subarray(0, -12), crypto.randomBytes(1_500_000), png.subarray(-12)]);
+  assert.ok(paged.length > (await client.limits()).maxReadBytes);
+  fs.writeFileSync(path.join(files, ".shots/paged.png"), paged);
+  assert.equal((await read(scope, { file_path: ".shots/paged.png" }) as { file: { base64: string } }).file.base64, paged.toString("base64"), "an image larger than one read page arrives whole");
+  fs.writeFileSync(path.join(files, ".shots/huge.png"), Buffer.concat([png, Buffer.alloc(MAX_IMAGE_BYTES)]));
+  assert.match((await read(scope, { file_path: ".shots/huge.png" }) as { deny: string }).deny, /over the \d+ bytes an image may be/);
+  fs.writeFileSync(path.join(files, ".shots/cut.png"), png.subarray(0, -5));
+  assert.match((await read(scope, { file_path: ".shots/cut.png" }) as { deny: string }).deny, /looks truncated/);
+  fs.writeFileSync(path.join(files, ".shots/text.png"), "not a picture\n");
+  assert.match((await read(scope, { file_path: ".shots/text.png" }) as { deny: string }).deny, /not a PNG, JPEG, GIF or WebP image/);
+  assert.match((await read(scope, { file_path: "/etc/../home/cube/thread/.shots/dot.png" }) as { deny: string }).deny, /outside the thread workspace/);
+  const riff = (chunk: string, body: number[]) => Buffer.concat([Buffer.from("RIFF"), Buffer.from([22, 0, 0, 0]), Buffer.from(`WEBP${chunk}`), Buffer.from([10, 0, 0, 0, ...body])]);
+  const headers: [string, Buffer, { type: string; width: number; height: number } | null][] = [
+    ["png", png, { type: "image/png", width: 1, height: 1 }],
+    ["gif", Buffer.from([...Buffer.from("GIF89a"), 3, 0, 2, 0, 0, 0, 0, 0x3b]), { type: "image/gif", width: 3, height: 2 }],
+    ["webp lossy", riff("VP8 ", [0, 0, 0, 0x9d, 0x01, 0x2a, 0x80, 0x02, 0x90, 0x01]), { type: "image/webp", width: 640, height: 400 }],
+    ["webp lossless", riff("VP8L", [0x2f, 0, 0, 0, 0, 0, 0, 0, 0, 0]), { type: "image/webp", width: 1, height: 1 }],
+    ["webp extended", riff("VP8X", [0, 0, 0, 0, 0x7f, 0x02, 0, 0x8f, 0x01, 0]), { type: "image/webp", width: 640, height: 400 }],
+    ["jpeg with fill bytes", Buffer.from([0xff, 0xd8, 0xff, 0xff, 0xff, 0xc2, 0, 0x11, 8, 0, 10, 0, 20, 3, 1, 0x22, 0]), { type: "image/jpeg", width: 20, height: 10 }],
+    ["jpeg scan before frame", Buffer.from([0xff, 0xd8, 0xff, 0xda, 0, 8, 1, 2, 3, 4, 5, 6, 7]), null],
+    ["zero width", Buffer.from([...Buffer.from("GIF87a"), 0, 0, 2, 0]), null],
+  ];
+  for (const [name, bytes, expected] of headers) {
+    assert.deepEqual(imageInfo(bytes), expected, name);
+    // A header cut short has no size or its whole one, never a wrong one.
+    for (let cut = 0; cut < bytes.length; cut++) {
+      const prefix = imageInfo(bytes.subarray(0, cut));
+      if (prefix !== null) assert.deepEqual(prefix, expected, `${name} cut at ${cut}`);
+    }
+  }
   assert.match((await bash({ ...scope, token: "f".repeat(64) }, "t-b3", { command: "true" }) as { deny: string }).deny, /no longer holds the thread workspace/);
   const aborting = new AbortController();
   const slow = bash({ ...scope, signal: aborting.signal }, "t-b4", { command: "sleep 3; touch late-2" });
@@ -357,7 +393,7 @@ try {
   assert.deepEqual(await slow, { stdout: "", stderr: "command stopped", interrupted: true });
   await delay(3200);
   assert.ok(!fs.existsSync(path.join(files, "late-2")), "an abandoned Bash call cancels its guest command");
-  console.log("ok: claude mod tools over the workspace socket: path mapping, write/edit with sha, refusals, keyed replay, conflict, cancel on abort");
+  console.log("ok: claude mod tools over the workspace socket: path mapping, write/edit with sha, images, refusals, keyed replay, conflict, cancel on abort");
 
   // Pi never offers Anthropic's Claude Pro/Max OAuth login.
   const provider = (id: string) => ({ id, name: id, auth: { apiKey: { login: async () => ({ type: "api_key", key: "k" }) }, oauth: { loginLabel: `sign in to ${id}` } } });

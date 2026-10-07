@@ -213,7 +213,12 @@ it, or `off`); without one, claude · max is not offered.
 The mod (`packages/claude-mod`) is a Claude Code plugin of function hooks. Its
 `tool.call` hooks answer Bash, Read, Write and Edit from the thread Workspace,
 keyed by `tool_use_id`, in each tool's own output shape; Edit is read, replace,
-then a write conditional on the sha it read. Tools are an allow-list
+then a write conditional on the sha it read. Read returns a `.png`, `.jpg`,
+`.jpeg`, `.gif` or `.webp` file as an image the model sees when its header is
+that format, it does not look truncated and it fits every model provider
+unresized (at most 2000 pixels a side and 5 MiB as base64); the mod cannot
+decode or resize, so it refuses a larger image and names a bash resize instead.
+An image the API still rejects, Claude Code replaces with a note to the model. Tools are an allow-list
 (`ALLOWED_TOOLS` in `hooks/tools.ts`, also passed as `--tools`): everything else,
 MCP tools and built-ins the list does not know included, is refused because it
 would act on the cubed host. It also refuses background Bash, subagents with

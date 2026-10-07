@@ -116,6 +116,30 @@ describe('workspace tools', () => {
     expect(refusal(missing)).toMatch(/does not exist/)
   })
 
+  test('Read returns images as images, inside the workspace and within the model limits', async ($, on) => {
+    // A real 1x1 PNG; the others carry only the header a size is read from.
+    const png = atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==')
+    const wide = png.slice(0, 16) + '\x00\x00\x09\x60' + png.slice(20)
+    const jpeg = '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xc0\x00\x11\x08\x01\x90\x02\x80\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01\xff\xd9'
+    fakeWorkspace(on, {
+      '.shots/dot.png': png, '.shots/wide.png': wide, '.shots/photo.JPG': jpeg, '.shots/huge.png': png + '\x00'.repeat(4 * 1024 * 1024),
+      '.shots/cut.png': png.slice(0, -5), '.shots/text.png': 'not a picture\n', 'data.bin': '\x89PNG\x00\x01',
+    })
+    const reached = engine(on)
+    const dot = await $.tool.call({ tool: 'Read', file_path: `${ROOT}/.shots/dot.png` })
+    expect(dot.result).toEqual({ type: 'image', file: { base64: btoa(png), type: 'image/png', originalSize: png.length, dimensions: { originalWidth: 1, originalHeight: 1, displayWidth: 1, displayHeight: 1 } } })
+    const photo = await $.tool.call({ tool: 'Read', file_path: '/workspace/.shots/photo.JPG' })
+    expect(photo.result).toEqual({ type: 'image', file: { base64: btoa(jpeg), type: 'image/jpeg', originalSize: jpeg.length, dimensions: { originalWidth: 640, originalHeight: 400, displayWidth: 640, displayHeight: 400 } } })
+    expect(refusal(await $.tool.call({ tool: 'Read', file_path: `${ROOT}/.shots/wide.png` }))).toMatch(/is 2400x1 pixels; write a copy at most 2000 pixels a side/)
+    expect(refusal(await $.tool.call({ tool: 'Read', file_path: `${ROOT}/.shots/huge.png` }))).toMatch(/over the 3932160 bytes an image may be/)
+    expect(refusal(await $.tool.call({ tool: 'Read', file_path: `${ROOT}/.shots/cut.png` }))).toMatch(/looks truncated/)
+    expect(refusal(await $.tool.call({ tool: 'Read', file_path: `${ROOT}/.shots/text.png` }))).toMatch(/not a PNG, JPEG, GIF or WebP image/)
+    expect(refusal(await $.tool.call({ tool: 'Read', file_path: `${ROOT}/data.bin` }))).toMatch(/not UTF-8 text/)
+    expect(refusal(await $.tool.call({ tool: 'Read', file_path: '/home/me/.shots/dot.png' }))).toMatch(/outside the thread workspace/)
+    expect(refusal(await $.tool.call({ tool: 'Read', file_path: `${ROOT}/.shots/../../dot.png` }))).toMatch(/leaves the thread workspace/)
+    expect(reached).toEqual([])
+  })
+
   test('Write creates, Edit replaces with the sha it read', async ($, on) => {
     const workspace = fakeWorkspace(on)
     engine(on)
