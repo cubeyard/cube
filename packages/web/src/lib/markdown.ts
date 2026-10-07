@@ -20,14 +20,16 @@ const marked = new Marked({
       if (!url) return label;
       const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
       // cube's own pages (an artifact an agent links) open in place.
-      if (url.startsWith("#/")) return `<a href="${escapeHtml(url)}"${titleAttr}>${label}</a>`;
-      return `<a href="${escapeHtml(url)}"${titleAttr} target="_blank" rel="noopener noreferrer">${label}</a>`;
+      const target = url.startsWith("#/") ? "" : ' target="_blank" rel="noopener noreferrer"';
+      // A shown image is a key of its own, never inside a link; the link follows it.
+      if (label.includes(SHOWN_IMAGE)) return `${label} <a href="${escapeHtml(url)}"${titleAttr}${target}>${escapeHtml(href)}</a>`;
+      return `<a href="${escapeHtml(url)}"${titleAttr}${target}>${label}</a>`;
     },
     image({ href, text }: Tokens.Image): string {
       const shown = picture?.(href);
       if (shown) {
         const label = escapeHtml(text || "image");
-        return `<button type="button" class="message-image markdown-image" data-image="${escapeHtml(shown)}" data-label="${label}" aria-label="view ${label} larger">`
+        return `<button type="button" class="${SHOWN_IMAGE}" data-image="${escapeHtml(shown)}" data-label="${label}" aria-label="view ${label} larger">`
           + `<img src="${escapeHtml(shown)}" alt="${label}" loading="lazy" decoding="async"><span class="message-image-missing">image unavailable · retry</span></button>`;
       }
       const url = safeUrl(href);
@@ -36,6 +38,8 @@ const marked = new Marked({
     },
   },
 });
+
+const SHOWN_IMAGE = "message-image markdown-image";
 
 /** The image source a markdown image's target resolves to, during one render. */
 let picture: ((href: string) => string | null) | undefined;

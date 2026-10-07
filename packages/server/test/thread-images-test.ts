@@ -16,7 +16,7 @@ import { createRegistry, defineExtension, defineTool, Harness } from "@earendil-
 import { ClaudeAgent } from "../src/claude-agent.ts";
 import { render } from "../src/claude-thread-events.ts";
 import { openStorage } from "../src/durable-agent.ts";
-import { storedPiTranscript } from "../src/pi-thread-events.ts";
+import { entryEvents, storedPiTranscript } from "../src/pi-thread-events.ts";
 import type { ThreadEvent } from "../src/thread-events.ts";
 import { readClaudeHistory, readPiHistory } from "../src/thread-history.ts";
 import { isThreadImageRef, readThreadImage, THREAD_IMAGE_LIMITS } from "../src/thread-images.ts";
@@ -62,6 +62,9 @@ try {
     const huge = store(toolResult([image(Buffer.alloc(THREAD_IMAGE_LIMITS.bytes + 3, 1).toString("base64"))]));
     const bmp = store(toolResult([image(screenshot.toString("base64"), "image/bmp")]));
     const subagent = store(toolResult([image(screenshot.toString("base64"))], { parent_tool_use_id: "toolu_agent" }));
+    const plain = screenshot.toString("base64").replace(/=+$/, "");
+    const unpadded = store(toolResult([image(plain)]));
+    const wrapped = store(toolResult([image(plain.replace(/.{76}/g, "$&\n"))]));
     const many = store(toolResult([{ type: "text", text: "a contact sheet" }, ...Array.from({ length: THREAD_IMAGE_LIMITS.perEvent + 2 }, () => image(screenshot.toString("base64")))]));
     db.close();
     const state = { submissions: [{ seq, requestId: "r1", text: "read the screenshot", state: "completed" as const, error: null }],
@@ -93,6 +96,8 @@ try {
     assert.equal(claude(`m${svg}.0.0`), null, "svg bytes under a png type are never served");
     assert.equal(claude(`m${garbled}.0.0`), null, "malformed base64");
     assert.equal(claude(`m${huge}.0.0`), null, "over the byte limit");
+    assert.deepEqual(claude(`m${unpadded}.0.0`)?.bytes, screenshot, "base64 without its padding");
+    assert.deepEqual(claude(`m${wrapped}.0.0`)?.bytes, screenshot, "base64 wrapped in lines");
     assert.deepEqual([byRow(bmp).images, byRow(bmp).output], [undefined, "[image]"], "a type cube does not serve stays a mark");
     assert.equal(claude(`m${bmp}.0.0`), null);
     assert.ok(!results(transcript.events).some(event => event.id === `m${subagent}.0`), "subagent internals are not shown");
@@ -108,7 +113,7 @@ try {
     assert.equal(readThreadImage({ agent: "claude-code", file: path.join(root, "absent.sqlite") }, read!.images![0]!.id), null, "a thread without a store has no images");
     assert.equal(fs.existsSync(path.join(root, "absent.sqlite")), false, "and gets none created");
     assert.ok(isThreadImageRef("m3.0.1") && isThreadImageRef("12.0.3") && !isThreadImageRef("m03.0.1") && !isThreadImageRef("a".repeat(64)));
-    console.log("ok: claude code's recorded read of a screenshot shows by reference, live and stored; its bytes are served unchanged; svg, malformed, oversized, subagent and foreign references are not");
+    console.log("ok: claude code's recorded read of a screenshot shows by reference, live and stored; its bytes are served unchanged, also unpadded or wrapped; svg, malformed, oversized, subagent and foreign references are not");
   }
 
   // Pi: a tool that returns an image, through a real Harness.
@@ -148,6 +153,26 @@ try {
     assert.deepEqual(results((await readPiHistory(file, null, null, { limit: 40 }))!.events)[0], look, "stored history names the same image");
     assert.equal(readThreadImage({ agent: "pi", file }, look!.images![0]!.id.replace(/\.1$/, ".0")), null, "the text part is no image");
     assert.equal(readThreadImage({ agent: "claude-code", file }, `m${look!.images![0]!.id}`), null);
-    console.log("ok: a pi tool's image shows by reference in the transcript and stored history and is served from the thread's store");
+
+    // A user message's inline image (OptChat's are references into its media
+    // store instead), and the same message in another conversation.
+    const db = new DatabaseSync(file);
+    const top = (db.prepare("SELECT max(id) AS id, max(commit_seq) AS seq FROM entries").get() as { id: number; seq: number });
+    const record = (id: number, conversationId: number) => JSON.stringify({ id, conversationId, kind: "pi.user", model: [{ role: "user", timestamp: 0,
+      content: [{ type: "text", text: "this one" }, { type: "image", data: picture.toString("base64"), mimeType: "image/png" }, { type: "image", data: `cube-media:${"a".repeat(64)}`, mimeType: "image/png" }] }] });
+    const insert = db.prepare("INSERT INTO entries(id, conversation_id, head, commit_seq, record) VALUES (?, ?, NULL, ?, ?)");
+    insert.run(top.id + 1, 1, top.seq + 1, record(top.id + 1, 1));
+    insert.run(top.id + 2, 2, top.seq + 2, record(top.id + 2, 2));
+    db.close();
+    const [said] = entryEvents([JSON.parse(record(top.id + 1, 1))]);
+    assert.deepEqual(said, { type: "user-message", id: `${top.id + 1}.0`, text: "this one", images: [{ id: `${top.id + 1}.0.1`, mimeType: "image/png" }, { id: "a".repeat(64), mimeType: "image/png" }] });
+    assert.deepEqual(readThreadImage({ agent: "pi", file }, `${top.id + 1}.0.1`)?.bytes, picture, "a user message's inline image");
+    assert.equal(readThreadImage({ agent: "pi", file }, `${top.id + 1}.0.2`), null, "a media store reference is not the thread's");
+    assert.equal(readThreadImage({ agent: "pi", file }, `${top.id + 2}.0.1`), null, "only the root conversation is the thread's transcript");
+    // Served images are kept for the next request: their rows never change.
+    fs.rmSync(file); fs.rmSync(`${file}-wal`, { force: true }); fs.rmSync(`${file}-shm`, { force: true });
+    assert.deepEqual(readThreadImage({ agent: "pi", file }, look!.images![0]!.id)?.bytes, picture, "from the cache");
+    assert.equal(readThreadImage({ agent: "pi", file }, `${top.id + 3}.0.1`), null);
+    console.log("ok: a pi tool's image and a user message's inline image show by reference and are served from the root conversation of the thread's store, then from the cache");
   }
 } finally { fs.rmSync(root, { recursive: true, force: true }); }

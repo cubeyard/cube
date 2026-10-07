@@ -171,7 +171,9 @@ screenshot, or a message's) are named by reference, never carried as base64
 (`m<seq>.<block>.<part>` in `claude.sqlite`, `<entry>.<message>.<part>` in
 `pi.sqlite`), at most 16 per event. `GET /api/threads/<id>/media/<ref>`
 serves one from that store, read only, for open and archived threads alike,
-so an image outlives the thread's machine and its disk. It serves only a part
+so an image outlives the thread's machine and its disk (an archived thread's
+transcript itself is read through OptChat's history tool; the UI has no page
+for it yet). It serves only a part
 the transcript shows, whose own header is PNG, JPEG, GIF or WebP (the
 declared type is not trusted), at most 5 MiB, with the same no-sniff,
 sandboxing headers as OptChat's images; the browser never names a workspace

@@ -252,6 +252,7 @@
     const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>(".markdown-image") : null;
     const src = button?.dataset.image;
     if (!button || !src) return;
+    event.preventDefault();
     const label = button.dataset.label ?? "image";
     if (!button.classList.contains("missing")) { void inspect(src, label); return; }
     button.classList.remove("missing");

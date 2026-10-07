@@ -11,7 +11,9 @@
  *   root conversation entry `<entry>`.
  *
  * Stored rows are only ever appended, so a reference always names the same
- * bytes. `readThreadImage` serves one: only from a row the transcript shows,
+ * bytes. `readThreadImage` serves one: only from a row the transcript shows
+ * (for Pi, any shown entry of the root conversation, as storedPiTranscript and
+ * a compacted thread's earlier entries show them),
  * only an image whose own header is PNG, JPEG, GIF or WebP (the declared type
  * is not trusted), at most `THREAD_IMAGE_LIMITS.bytes`. Anything else is
  * absent, and the browser shows the image as unavailable. */
@@ -35,7 +37,12 @@ const PI_ROOT = 1;
 const PI_SHOWN = new Set(["pi.user", "pi.assistant", "pi.tool-result"]);
 /** The longest base64 that can decode to at most the byte limit. */
 const MAX_BASE64 = Math.ceil(THREAD_IMAGE_LIMITS.bytes / 3) * 4;
+/** Base64 as a tool may write it: wrapped in lines, padding optional. */
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+/** Images served lately, by store and reference: their rows never change. */
+const CACHE_BYTES = 32 * 1024 * 1024;
+const cache = new Map<string, { bytes: Buffer; mimeType: MediaType }>();
+let cached = 0;
 
 export const isThreadImageRef = (ref: unknown): ref is string => typeof ref === "string" && (CLAUDE_REF.test(ref) || PI_REF.test(ref));
 
@@ -57,6 +64,9 @@ export function readThreadImage(store: { agent: "pi" | "claude-code"; file: stri
   const claude = store.agent === "claude-code" ? CLAUDE_REF.exec(ref) : null;
   const pi = store.agent === "pi" ? PI_REF.exec(ref) : null;
   if (!claude && !pi) return null;
+  const key = `${store.file}\0${ref}`;
+  const hit = cache.get(key);
+  if (hit) { cache.delete(key); cache.set(key, hit); return hit; }
   if (!fs.existsSync(store.file)) return null;
   let data: unknown;
   const db = new DatabaseSync(store.file, { readOnly: true, timeout: 5000 });
@@ -70,10 +80,21 @@ export function readThreadImage(store: { agent: "pi" | "claude-code"; file: stri
     }
   } catch { return null; }
   finally { db.close(); }
-  if (typeof data !== "string" || data.length > MAX_BASE64 || data.length % 4 !== 0 || !BASE64.test(data)) return null;
-  const bytes = Buffer.from(data, "base64");
+  if (typeof data !== "string" || data.length > MAX_BASE64 * 2) return null;
+  const compact = data.replace(/\s+/g, "");
+  if (compact.length > MAX_BASE64 || compact.length % 4 === 1 || !BASE64.test(compact)) return null;
+  const bytes = Buffer.from(compact, "base64");
   if (!bytes.byteLength || bytes.byteLength > THREAD_IMAGE_LIMITS.bytes) return null;
-  try { return { bytes, mimeType: sniffImage(bytes).mimeType }; } catch { return null; }
+  let image: { bytes: Buffer; mimeType: MediaType };
+  try { image = { bytes, mimeType: sniffImage(bytes).mimeType }; } catch { return null; }
+  cache.set(key, image);
+  cached += bytes.byteLength;
+  for (const [old, value] of cache) {
+    if (cached <= CACHE_BYTES) break;
+    cache.delete(old);
+    cached -= value.bytes.byteLength;
+  }
+  return image;
 }
 
 /** The base64 of a Claude Code tool result's image, in a main-thread user
