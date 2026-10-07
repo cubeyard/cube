@@ -271,7 +271,7 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
   faux.setResponses(Array.from({ length: 50 }, () => () => fauxAssistantMessage("a short summary line")));
   const chat = await OptChat.open({ directory: path.join(root, "optchat"), models, model: async () => ({ provider: model.provider, id: model.id }),
     threads: { projects: async () => "", spawn: async () => { throw new Error("no"); }, tell: async () => {}, describe: async () => "", events: async () => null, runners: async () => "", history: async () => null },
-    limits: { retryMs: 50, watchMs: 60_000 } });
+    limits: { retryMs: 50, watchMs: 60_000, wishQuietMs: 20, wishIntervalMs: 0, wishGapMs: 0 } });
   try {
     // Longer than a node: the compactor summarizes it.
     await chat.send(`a long message for the log ${"words ".repeat(200)}`, "m1");
@@ -279,7 +279,7 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
     let counted;
     do {
       counted = await chat.usage();
-      if (Object.keys(counted.compactor.calls).length && Object.keys(counted.chat.models).length) break;
+      if (Object.keys(counted.compactor.calls).length && Object.keys(counted.chat.models).length && Object.keys(counted.wishes?.calls ?? {}).length) break;
       await new Promise(resolve => setTimeout(resolve, 50));
     } while (Date.now() < deadline);
     const key = `${model.provider}/${model.id}`;
@@ -290,7 +290,10 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
     const report = await usage.report();
     assert.ok(report.optchat!.lines.some(line => line.source === "optchat-compactor" && line.calls! >= 1));
     assert.ok(report.optchat!.lines.some(line => line.source === "optchat"));
-    assert.match(usageText(report), /optchat itself: .*compactor/);
+    assert.match(usageText(report), /optchat itself: .*compactor .*, wish finder /);
+    // The wish finder's calls run beside Pi too, an unreadable answer included.
+    assert.ok(report.optchat!.lines.some(line => line.source === "optchat-wishes" && line.calls! >= 1));
+    assert.match((await chat.wishes()).error ?? "", /not read: the wish finder's reply holds no JSON object/);
     assert.ok(!counted.compactor.earlier, "a new chat counts its compactor from its first call");
     assert.equal(report.optchat!.coverage, "complete");
     usage.close();

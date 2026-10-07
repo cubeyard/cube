@@ -32,7 +32,7 @@ means, pure) and `usage-service.ts` (reading the stores).
   subjects and unknown turns separately and never fold them in as zero.
 
 Each line keeps its provenance: `source` (`pi`, `claude-code`, `optchat`,
-`optchat-compactor`), `provider`, `model`, the pricing `basis` and, for Pi
+`optchat-compactor`, `optchat-wishes`), `provider`, `model`, the pricing `basis` and, for Pi
 models, the catalog's current rates for reference (`pricing`: the estimate used
 the rates at record time, which may differ).
 
@@ -87,6 +87,9 @@ cube that does this (`since`). A chat whose tree already held nodes the
 compactor built then (not ones whose text fit as it was, judged by the
 current node limit) has `incomplete`
 set: those earlier calls are unknown.
+The wish finder's calls (docs/optchat.md, "Wishes not started") run beside Pi
+too; each reply is counted in `cube.optchat.wishes` (source `optchat-wishes`,
+with a call count) from its first call.
 The threads OptChat started are ordinary threads; a global report shows their
 sum (`optchatThreads`) but adds it to the total only once, under the threads.
 

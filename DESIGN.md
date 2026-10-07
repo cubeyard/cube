@@ -530,16 +530,23 @@ code scrolls inside its keyboard-focusable diff region. Opening an untracked
 text file reads it on demand and presents its complete contents as a new-file
 addition; binary and oversized files report why they cannot render.
 
-### Now Panel
-The chat's right bay: a recessed `--s1` well with a `now` head rail (open and
-blocked counts in tabular mono). Each task is a hairline `--s4` card: status
-lamp (amber active, red blocked, unlit pending, green done) beside a bold
-title and the status word, never colour alone; then the project in mono, a
-`next` or `blocked on` line, and mini lamps for linked threads with the
-thread's own state in muted mono. Links are underlined ink, not signal, and say
-nothing about a pull request's state. Recently closed tasks sit in a native
-disclosure. Under 52rem the bay stacks above the conversation, capped at 38vh
-and foldable by a chevron rail toggle, so the composer always stays on screen.
+### Threads Panel
+The chat's right bay: a recessed `--s1` well with a `threads` head rail (open
+and running counts in tabular mono). The threads OptChat started sit under
+their project's name in mono, newest project first. Each is a hairline `--s4`
+card: a lamp (amber working, starting or waiting, red failed or machine
+error, unlit otherwise) beside the bold title, linked to the thread while it
+is open, and the short id with the thread's own state in muted mono (`turn
+ended`, never `done`). An archived thread is a transparent card, its title
+muted and unlinked, its state `archived · <last run>`. Below a hairline, a
+native disclosure, closed by default, holds `not started`: dashed cards with
+the inferred wish, the user's quote behind a hairline rule, the project and
+`you, 3d` keys that scroll the transcript to the message (outlined in
+signal for a moment), and a quiet close glyph to dismiss. Empty and catching-up
+states are one muted line, never a placeholder card. The foot says states come
+from cube, archived is not done and merged is not released. Under 52rem the bay
+stacks above the conversation, capped at 38vh and foldable by a chevron rail
+toggle, so the composer always stays on screen.
 
 ### Named Rules
 **The Actions-In-The-Module Rule.** A module's controls live inside it, on its

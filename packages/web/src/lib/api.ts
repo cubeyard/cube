@@ -6,7 +6,8 @@ import type {
   ProjectInput,
   RunnerStatus,
   SubjectUsage,
-  TaskList,
+  ThreadOverview,
+  WishList,
   ThreadModels,
   ThreadSummary,
   UpdateStatus,
@@ -203,5 +204,11 @@ export const setChatModel = (model: ModelSelection) => request<ThreadModels>(`${
 /** What OptChat sees: the view of the whole chat, as one-line summaries. */
 export const fetchChatView = () => request<{ view: string; messages: number; failure: string | null }>(`${CHAT_BASE}/view`);
 
-/** OptChat's task list, the "now" panel: its intent beside each thread's state as cubed records it. */
-export const fetchChatTasks = () => request<TaskList>(`${CHAT_BASE}/tasks`);
+/** The threads OptChat started, each with its own state as cubed records it. */
+export const fetchChatThreads = () => request<ThreadOverview>(`${CHAT_BASE}/threads`);
+
+/** What the user asked for in the chat that no thread took up, as the wish finder read it. */
+export const fetchChatWishes = () => request<WishList>(`${CHAT_BASE}/wishes`);
+
+/** The user's correction: the wish leaves the list and is not found again. */
+export const dismissChatWish = (id: string) => request<{ ok: true }>(`${CHAT_BASE}/wishes/${encodeURIComponent(id)}/dismiss`, "POST");

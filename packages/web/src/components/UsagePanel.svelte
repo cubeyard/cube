@@ -76,7 +76,7 @@
         <article class="runner-row">
           <div class="runner-identity">
             <span class="lamp off" aria-hidden="true"></span>
-            <span><strong>optchat</strong><small>its own model calls and compactor</small></span>
+            <span><strong>optchat</strong><small>its own model calls, compactor and wish finder</small></span>
           </div>
           <div class="runner-evidence">
             <strong>{subjectCost(report.optchat)}</strong>
