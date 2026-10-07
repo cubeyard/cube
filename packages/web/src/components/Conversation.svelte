@@ -1,14 +1,15 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { SvelteMap } from "svelte/reactivity";
-  import { errorText, sendPrompt, stopThread, threadBase, threadEvents } from "../lib/api.ts";
+  import { SvelteMap, SvelteSet } from "svelte/reactivity";
+  import { errorText, imageUrl, sendPrompt, stopThread, threadBase, threadEvents, uploadImage } from "../lib/api.ts";
+  import { ACCEPT, MEDIA_LIMITS, pastedImages, prepareImage } from "../lib/images.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
   import { toolOpen, transcriptRows, type ToolState, type TranscriptRow } from "../lib/transcript.ts";
   import { uid } from "../lib/uid.ts";
-  import type { ModelSelection, ThreadStatus, ThreadTranscript } from "../lib/types.ts";
+  import type { MessageImage, ModelSelection, ThreadStatus, ThreadTranscript } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
 
-  let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null, empty = null, placeholder = "message this thread" }: {
+  let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null, empty = null, placeholder = "message this thread", images = null }: {
     threadId?: string;
     /** Messages may be sent while the agent works; they reach it between tool calls. */
     steer?: boolean;
@@ -23,6 +24,9 @@
     waitingText?: string | null;
     /** A standing note about the thread, shown above its transcript. */
     notice?: string | null;
+    /** Messages may carry images (pasted, dropped or picked) when the model
+     * takes them; null: this conversation takes none. */
+    images?: { supported: boolean; reason: string | null } | null;
   } = $props();
   // The neutral thread event model is the only input; no agent shapes here.
   const events = $derived(threadEvents(base));
@@ -39,14 +43,26 @@
   let composer: HTMLTextAreaElement;
   let disposed = false;
   let sending = $state(false);
-  let pending: { text: string; requestId: string } | null = null;
+  let pending: { key: string; requestId: string } | null = null;
+  /** Images attached to the draft: uploaded at once, sent with the message. */
+  type Attachment = { key: string; name: string; preview: string; id: string | null; error: string | null };
+  let attachments = $state<Attachment[]>([]);
+  let picker = $state<HTMLInputElement>();
+  let viewing = $state<{ src: string; label: string } | null>(null);
+  let viewer = $state<HTMLDialogElement>();
+  let attachNote = $state<string | null>(null);
+  const uploading = $derived(attachments.some(item => !item.id && !item.error));
+  const failedAttachment = $derived(attachments.some(item => item.error));
   const working = $derived(status.state === "working");
   // No turn runs, but the agent's background agents do; stop ends them.
   const waiting = $derived(!working && !!status.waiting?.length);
   $effect(() => { busy = working || sending; });
   // The draft is always the user's to edit: a run, a reconnect or a booting
   // machine only hold the send key, never the text field.
-  const canSend = $derived(!!prompt.trim() && (!working || steer) && !sending && !changingModel && !!model && !waitingText);
+  // An image that failed holds the send until it is removed: nothing the
+  // user attached is dropped without their say.
+  const imagesHeld = $derived(attachments.length > 0 && (uploading || failedAttachment || !images?.supported));
+  const canSend = $derived((!!prompt.trim() || attachments.length > 0) && !imagesHeld && (!working || steer) && !sending && !changingModel && !!model && !waitingText);
 
   // Follow the newest output while the reader is at the bottom; leave them
   // where they are once they scroll up. Layout that settles later (fonts,
@@ -69,15 +85,23 @@
     }
   }
 
+  /** Frames shown so far: a read that a frame overtook is older than the
+   * stream, which sends a newer frame for every later change. */
+  let frames = 0;
+
   /** A frame from the live stream: the connection is back. */
   async function onFrame(next: ThreadTranscript): Promise<void> {
+    frames++;
     if (!disposed) reconnecting = false;
     await show(next);
   }
 
   async function refresh(): Promise<void> {
+    const seen = frames;
     try {
-      await show(await events.read(), true);
+      const next = await events.read();
+      if (frames !== seen && !reconnecting) { following = true; await tick(); toBottom(); return; }
+      await show(next, true);
     } catch (cause) {
       if (!disposed) {
         historyError = errorText(cause);
@@ -111,6 +135,7 @@
     settle.observe(scroller);
     return () => {
       disposed = true;
+      for (const item of attachments) URL.revokeObjectURL(item.preview);
       scroller.removeEventListener("scroll", onScroll);
       settle.disconnect();
       void watching.then(watch => watch.stop());
@@ -126,15 +151,96 @@
     composer.style.height = `${Math.min(composer.scrollHeight + border, 176)}px`;
   }
 
+  /** Attaches image files: each is checked, shrunk if large, and uploaded. */
+  function attach(files: readonly File[]): void {
+    attachNote = null;
+    if (!images || !files.length) return;
+    if (!images.supported) { attachNote = images.reason ?? "this model does not take images"; return; }
+    const room = Math.max(0, MEDIA_LIMITS.perMessage - attachments.length);
+    if (files.length > room) attachNote = `at most ${MEDIA_LIMITS.perMessage} images a message; ${files.length - room} not attached`;
+    for (const file of files.slice(0, room)) {
+      const item: Attachment = { key: uid(), name: file.name || "pasted image", preview: URL.createObjectURL(file), id: null, error: null };
+      attachments.push(item);
+      void (async () => {
+        let result: Pick<Attachment, "id" | "error">;
+        try { result = { id: (await uploadImage(base, await prepareImage(file))).id, error: null }; }
+        catch (cause) { result = { id: null, error: errorText(cause) }; }
+        const index = attachments.findIndex(other => other.key === item.key);
+        if (index < 0 || disposed) return;
+        // The same image twice goes once: the second is let go here.
+        if (result.id && attachments.some(other => other.key !== item.key && other.id === result.id)) {
+          detach(item.key);
+          attachNote = "that image is already attached";
+          return;
+        }
+        attachments[index] = { ...attachments[index]!, ...result };
+      })();
+    }
+  }
+
+  function detach(key: string): void {
+    const item = attachments.find(other => other.key === key);
+    if (item) URL.revokeObjectURL(item.preview);
+    attachments = attachments.filter(other => other.key !== key);
+    attachNote = null;
+    composer?.focus();
+  }
+
+  // Only a paste of image files without text is taken as images; every
+  // other paste is the field's own.
+  function onPaste(event: ClipboardEvent): void {
+    if (!images) return;
+    const files = pastedImages(event.clipboardData);
+    if (!files.length) return;
+    event.preventDefault();
+    attach(files);
+  }
+
+  function onPick(): void {
+    const files = [...picker?.files ?? []];
+    if (picker) picker.value = "";
+    attach(files);
+  }
+
+  // Any dropped file is taken here, never opened by the browser in place of the chat.
+  function onDrop(event: DragEvent): void {
+    if (!images || !event.dataTransfer?.types.includes("Files")) return;
+    event.preventDefault();
+    const files = [...event.dataTransfer.files].filter(file => file.type.startsWith("image/"));
+    if (files.length) attach(files);
+    else attachNote = "only png, jpeg, gif and webp images can be attached";
+  }
+
+  /** Images that did not load: shown as missing, not opened, until a retry
+   * asks the host again. */
+  const missing = new SvelteSet<string>();
+  const retries = new SvelteMap<string, number>();
+  const thumbnail = (id: string) => `${imageUrl(base, id)}${retries.get(id) ? `?retry=${retries.get(id)}` : ""}`;
+  function retry(id: string): void {
+    missing.delete(id);
+    retries.set(id, (retries.get(id) ?? 0) + 1);
+  }
+
+  async function inspect(src: string, label: string): Promise<void> {
+    viewing = { src, label };
+    await tick();
+    viewer?.showModal();
+  }
+
   async function submit(): Promise<void> {
     const text = prompt.trim();
     if (!canSend || !model) return;
     sending = true;
     error = null;
+    const sent = attachments.filter(item => item.id);
+    const ids = sent.map(item => item.id!);
     try {
-      if (pending?.text !== text) pending = { text, requestId: uid() };
-      await sendPrompt(base, text, model, pending.requestId);
+      const key = JSON.stringify([text, ids]);
+      if (pending?.key !== key) pending = { key, requestId: uid() };
+      await sendPrompt(base, text, model, pending.requestId, ids);
       pending = null;
+      for (const item of sent) URL.revokeObjectURL(item.preview);
+      attachments = attachments.filter(item => !sent.includes(item));
       // Only the sent text leaves the field; anything typed meanwhile stays.
       const draft = prompt.trimStart();
       prompt = draft.startsWith(text) ? draft.slice(text.length).trimStart() : prompt;
@@ -214,7 +320,8 @@
           {:else if row.kind === "user"}
             <article class="conversation-message user" aria-label="user message">
               <span class="message-label">you</span>
-              <div class="message-copy">{row.text}</div>
+              {#if row.images}{@render messageImages(row.images)}{/if}
+              {#if row.text}<div class="message-copy">{row.text}</div>{/if}
             </article>
           {:else}
             <article class="conversation-message assistant" class:continued={!row.labelled} aria-label={row.reasoning ? "agent reasoning" : "agent message"}>
@@ -237,8 +344,28 @@
 
   {#if reconnecting}<div class="conversation-note" role="status"><span class="lamp on-amber blink" aria-hidden="true"></span>reconnecting to the thread…</div>{/if}
   {#if error || historyError || status.state === "failed"}<div class="conversation-error" role="alert">{error ?? historyError ?? status.error ?? "the run failed"}</div>{/if}
-  <form class="composer" aria-busy={busy} onsubmit={(event) => { event.preventDefault(); void submit(); }}>
-    <span class="sr-only" id="composer-hint">enter to send · shift enter for a new line</span>
+  <form class="composer" aria-busy={busy} onsubmit={(event) => { event.preventDefault(); void submit(); }}
+    ondragover={(event) => { if (images && event.dataTransfer?.types.includes("Files")) event.preventDefault(); }} ondrop={onDrop}>
+    <span class="sr-only" id="composer-hint">enter to send · shift enter for a new line{images ? " · paste or drop images to attach them" : ""}</span>
+    {#if images}<span class="sr-only" role="status">{!attachments.length ? "" : uploading ? "uploading images…" : failedAttachment ? "an image failed to upload" : `${attachments.length} ${attachments.length === 1 ? "image" : "images"} attached`}</span>{/if}
+    {#if images && (attachments.length || attachNote)}
+      <div class="composer-attachments">
+        {#if attachments.length}
+          <ul aria-label="attached images">
+            {#each attachments as item, index (item.key)}
+              <li class="attachment" class:failed={item.error}>
+                <img src={item.preview} alt={`attached image ${index + 1}: ${item.name}`} />
+                <span class="attachment-state">{item.error ?? (item.id ? "ready" : "uploading…")}</span>
+                <button class="key icon attachment-remove" type="button" aria-label={`remove image ${index + 1}`} title="remove" disabled={sending} onclick={() => detach(item.key)}><Icon name="close" size={12} /></button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if attachNote}<p class="attachment-note" role="alert">{attachNote}</p>
+        {:else if attachments.length && !images.supported}<p class="attachment-note" role="alert">{images.reason ?? "this model does not take images"}: remove the images or choose another model</p>
+        {:else if failedAttachment}<p class="attachment-note" role="alert">remove the image that failed to send this message</p>{/if}
+      </div>
+    {/if}
     <!-- the deck is full-bleed; the field sits in the transcript's measure -->
     <div class="composer-row">
       <textarea
@@ -246,16 +373,50 @@
         bind:value={prompt}
         oninput={resizeComposer}
         onkeydown={onComposerKeydown}
+        onpaste={onPaste}
         placeholder={waitingText ?? (working ? (steer ? "agent is working — a message reaches it between steps" : "agent is working…") : placeholder)}
         aria-label={placeholder}
         aria-describedby="composer-hint"
         title="enter to send · shift enter for a new line"
         rows="1"
       ></textarea>
+      {#if images}
+        <input class="sr-only" type="file" accept={ACCEPT} multiple tabindex="-1" aria-hidden="true" bind:this={picker} onchange={onPick} />
+        <button class="key attach-key" type="button" title={images.supported ? "attach images · or paste them into the field" : (images.reason ?? "this model does not take images")}
+          aria-label="attach images" disabled={!images.supported || attachments.length >= MEDIA_LIMITS.perMessage} onclick={() => picker?.click()}>image</button>
+      {/if}
       <button class="send-key" type="submit" title="send · enter" aria-label="send message" disabled={!canSend}>
         <Icon name="arrow" size={16} />
       </button>
       {#if working || waiting}<button class="key stop-key" type="button" disabled={stopping} onclick={stop}>{stopping ? "stopping…" : "stop"}</button>{/if}
     </div>
   </form>
+  {#if viewing}
+    <!-- a click on the backdrop closes it; escape and the close key do too -->
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+    <dialog class="image-viewer" bind:this={viewer} aria-label={viewing.label} onclose={() => { viewing = null; }}
+      onclick={(event) => { if (event.target === viewer) viewer?.close(); }}>
+      <div class="image-viewer-head">
+        <span>{viewing.label}</span>
+        <a class="key" href={viewing.src} target="_blank" rel="noopener noreferrer">full size</a>
+        <button class="key icon" type="button" aria-label="close" onclick={() => viewer?.close()}><Icon name="close" size={14} /></button>
+      </div>
+      <img src={viewing.src} alt={viewing.label} />
+    </dialog>
+  {/if}
 </div>
+
+{#snippet messageImages(list: MessageImage[])}
+  <ul class="message-images" aria-label={list.length === 1 ? "1 image" : `${list.length} images`}>
+    {#each list as image, index (index)}
+      {@const label = `image ${index + 1} of ${list.length}`}
+      <li class:missing={missing.has(image.id)}>
+        <button type="button" class="message-image" aria-label={missing.has(image.id) ? `${label} unavailable, retry` : `view ${label} larger`}
+          onclick={() => missing.has(image.id) ? retry(image.id) : inspect(imageUrl(base, image.id), label)}>
+          <img src={thumbnail(image.id)} alt={label} loading="lazy" decoding="async" onerror={() => missing.add(image.id)} />
+          <span class="message-image-missing">image unavailable · retry</span>
+        </button>
+      </li>
+    {/each}
+  </ul>
+{/snippet}

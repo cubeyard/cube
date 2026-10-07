@@ -134,6 +134,7 @@
     {/if}
     {#if modelState}
       <Conversation base={CHAT_BASE} steer model={selectedModel} {changingModel} bind:busy
+        images={modelState.images ?? { supported: false, reason: "this host does not take images in the chat" }}
         placeholder="message optchat"
         empty={{ title: "one chat, every thread", hint: "Say what you want done: the chat starts threads in your projects, follows their reports and remembers everything you said. A thread needs a project; add one under projects." }} />
     {:else}

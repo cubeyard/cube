@@ -4,7 +4,8 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { ROOT_CONVERSATION_ID, type ConversationView, type EntryRecord, type Storage, type SubmissionRecord, type ToolSlot } from "@earendil-works/pi-durable";
 import type { Agent } from "./durable-agent.ts";
-import type { ThreadAgent, ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
+import { mediaId } from "./optchat-media.ts";
+import type { MessageImage, ThreadAgent, ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
 
 const context = BACKGROUND_CONTEXT;
 const SHOWN = new Set(["pi.user", "pi.assistant", "pi.tool-result"]);
@@ -127,9 +128,18 @@ export function entryEvents(entries: readonly EntryRecord[]): ThreadEvent[] {
 
 function messageEvents(message: Message, id: string): ThreadEvent[] {
   if (message.role === "user") {
-    const text = typeof message.content === "string" ? message.content
-      : message.content.map(part => part.type === "text" ? part.text : "[image]").join("\n");
-    return [{ type: "user-message", id, text }];
+    if (typeof message.content === "string") return [{ type: "user-message", id, text: message.content }];
+    // An image in cube's media store is shown from there (OptChat's); any
+    // other stays a mark, so no base64 reaches the browser.
+    const images: MessageImage[] = [];
+    const text = message.content.flatMap(part => {
+      if (part.type === "text") return [part.text];
+      const stored = mediaId(part.data);
+      if (!stored) return ["[image]"];
+      images.push({ id: stored, mimeType: part.mimeType });
+      return [];
+    }).join("\n");
+    return [{ type: "user-message", id, text, ...images.length ? { images } : {} }];
   }
   if (message.role === "assistant") return assistantEvents(message, id, true);
   if (message.role !== "toolResult") return [];

@@ -233,8 +233,10 @@ through the registry with a request ID derived from the tool call, so a replayed
 `spawn` finds the same thread. Its settled runs come back as `[id] ` messages:
 every accepted message waits in a Pi document until Pi has placed it, under its
 own request ID. Its `archive` tool calls the same `Conversations.archive` as
-the UI, for its own threads only, and refuses a working one. The details,
-deviations and gaps are in
+the UI, for its own threads only, and refuses a working one. Images the user
+attaches are kept in a content-addressed store beside the Pi store; a message
+holds references, and the same hook puts the images in for that turn's
+requests only. The details, deviations and gaps are in
 [docs/optchat.md](docs/optchat.md).
 
 ## Usage and cost

@@ -173,8 +173,26 @@ export const fetchThreadModels = (id: string) =>
 export const setThreadModel = (id: string, model: ModelSelection) =>
   request<ThreadModels>(`${threadBase(id)}/model`, "PATCH", model);
 
-export const sendPrompt = (base: string, text: string, model: ModelSelection, requestId: string) =>
-  request<{ runId: string }>(`${base}/prompt`, "POST", { text, model, requestId });
+/** `images`: ids of uploaded images (`uploadImage`), only where the conversation takes them. */
+export const sendPrompt = (base: string, text: string, model: ModelSelection, requestId: string, images: string[] = []) =>
+  request<{ runId: string }>(`${base}/prompt`, "POST", { text, model, requestId, ...(images.length ? { images } : {}) });
+
+/** Uploads one image to the conversation's media store; the host checks its
+ * format and size again and answers its id. */
+export async function uploadImage(base: string, image: Blob): Promise<{ id: string; mimeType: string; width: number; height: number }> {
+  let res: Response;
+  try {
+    res = await fetch(`${base}/media`, { method: "POST", headers: { "content-type": image.type || "application/octet-stream" }, body: image });
+  } catch {
+    throw new ApiError("can't reach the host — the image was not uploaded", 0);
+  }
+  const body = await res.json().catch(() => null) as { image?: { id: string; mimeType: string; width: number; height: number }; error?: unknown } | null;
+  if (res.ok && body?.image) return body.image;
+  throw new ApiError(typeof body?.error === "string" && body.error ? body.error : fallbackMessage(res.status), res.status);
+}
+
+/** Where a message's image is read from. */
+export const imageUrl = (base: string, id: string) => `${base}/media/${encodeURIComponent(id)}`;
 
 export const stopThread = (base: string) => request<{ ok: true }>(`${base}/stop`, "POST");
 
