@@ -79,7 +79,7 @@ try {
   const client = new IrohRunnerClient({ configPath: path.join(work, "runner.json") });
   const described = await client.describe();
   assert.deepEqual(described.capabilities, ["node.hello", "node.status", "vm.allocate", "vm.start", "vm.stop", "vm.inspect", "vm.release", "vm.discard",
-    "vm.publish", "template.list", "template.remove"]);
+    "vm.publish", "template.list", "template.remove", "vm.diagnose"]);
   assert.match(described.baseImageSha256, /^[0-9a-f]{64}$/);
   assert.equal(described.platform, "linux-x86_64");
   assert.equal((await client.health()).activeVms, 0);
