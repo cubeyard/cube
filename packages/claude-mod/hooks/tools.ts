@@ -6,7 +6,7 @@
  *
  * Plain functions over `WorkspaceClient`, with no engine imports: the hooks
  * module binds them to `$`, and cubed's offline tests drive them directly. */
-import { WorkspaceClientError, type WorkspaceClient, type WorkspaceOperation } from "./workspace.ts";
+import { toBase64, WorkspaceClientError, type WorkspaceClient, type WorkspaceOperation } from "./workspace.ts";
 
 /** The only Claude Code tools a cube thread offers: Bash, Read, Write and
  * Edit go to the workspace, the rest plan, search the web through the model
@@ -22,6 +22,10 @@ export const BASH_DEFAULT_TIMEOUT_MS = 120000;
 export const BASH_OUTPUT_CHARS = 30000;
 /** The largest file Read and Edit load; larger files are for bash. */
 export const MAX_FILE_BYTES = 2 * 1024 * 1024;
+/** The largest image Read returns: its base64 is the model API's 5 MiB per image. */
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024 / 4 * 3;
+/** The largest image side Read returns, the size Claude Code's own Read resizes to. */
+export const MAX_IMAGE_SIDE = 2000;
 const READ_DEFAULT_LINES = 2000;
 const POLL_WAIT_MS = 20000;
 
@@ -38,7 +42,10 @@ export type Denied = { deny: string };
 export interface BashInput { command: string; timeout?: number; run_in_background?: boolean }
 export interface BashResult { stdout: string; stderr: string; interrupted: boolean }
 export interface ReadInput { file_path: string; offset?: number; limit?: number; pages?: string }
-export interface ReadResult { type: "text"; file: { filePath: string; content: string; numLines: number; startLine: number; totalLines: number } }
+export type ImageType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+export type ReadResult =
+  | { type: "text"; file: { filePath: string; content: string; numLines: number; startLine: number; totalLines: number } }
+  | { type: "image"; file: { base64: string; type: ImageType; originalSize: number; dimensions: { originalWidth: number; originalHeight: number; displayWidth: number; displayHeight: number } } };
 export interface WriteInput { file_path: string; content: string }
 export interface WriteResult { type: "create" | "update"; filePath: string; content: string; structuredPatch: []; originalFile: string | null }
 export interface EditInput { file_path: string; old_string: string; new_string: string; replace_all?: boolean }
@@ -112,6 +119,7 @@ export async function read(scope: ToolScope, input: ReadInput): Promise<ReadResu
   if (typeof relative !== "string") return relative;
   if (input.pages !== undefined) return { deny: "PDF pages are not available in cube threads; use bash to inspect the file" };
   try {
+    if (IMAGE_EXTENSION.test(relative)) return await readImage(scope, relative);
     const file = await loadText(scope, relative);
     if ("deny" in file) return file;
     const lines = file.text.split("\n");
@@ -191,8 +199,70 @@ export async function instructions(scope: Pick<ToolScope, "client" | "token">, f
   }
 }
 
-/** The whole file as text, read page by page; every page must report the same whole-file sha. */
+const IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp)$/i;
+const RESIZE_HINT = `write a copy at most ${MAX_IMAGE_SIDE} pixels a side with bash (for example \`convert in.png -resize ${MAX_IMAGE_SIDE}x${MAX_IMAGE_SIDE}\\> out.png\`) and read that`;
+
+/** An image in Claude Code's own Read result shape, so the model sees the
+ * picture. The bytes must be the format their header claims and fit the
+ * model API as they are: this module cannot resize, so a larger image is
+ * refused with a way out. */
+async function readImage(scope: ToolScope, relative: string): Promise<ReadResult | Denied> {
+  const file = await loadBytes(scope, relative, MAX_IMAGE_BYTES, size => `${relative} is ${size} bytes, over the ${MAX_IMAGE_BYTES} bytes an image may be; ${RESIZE_HINT}`);
+  if ("deny" in file) return file;
+  const image = imageInfo(file.bytes);
+  if (!image) return { deny: `${relative} is not a PNG, JPEG, GIF or WebP image; inspect it with bash` };
+  const { type, width, height } = image;
+  if (width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE) return { deny: `${relative} is ${width}x${height} pixels; ${RESIZE_HINT}` };
+  return { type: "image", file: { base64: toBase64(file.bytes), type, originalSize: file.bytes.length,
+    dimensions: { originalWidth: width, originalHeight: height, displayWidth: width, displayHeight: height } } };
+}
+
+/** The format and pixel size an image's header declares, or null when the
+ * bytes do not start with a PNG, JPEG, GIF or WebP header. */
+export function imageInfo(bytes: Uint8Array): { type: ImageType; width: number; height: number } | null {
+  const at = (offset: number, text: string) => [...text].every((char, index) => bytes[offset + index] === char.charCodeAt(0));
+  const u16be = (offset: number) => (bytes[offset]! << 8) | bytes[offset + 1]!;
+  const u16le = (offset: number) => bytes[offset]! | (bytes[offset + 1]! << 8);
+  const u24le = (offset: number) => u16le(offset) + bytes[offset + 2]! * 0x10000;
+  const u32be = (offset: number) => u16be(offset) * 0x10000 + u16be(offset + 2);
+  const sized = (type: ImageType, width: number, height: number) => width > 0 && height > 0 ? { type, width, height } : null;
+  if (bytes.length >= 24 && at(0, "\x89PNG\r\n\x1a\n") && at(12, "IHDR")) return sized("image/png", u32be(16), u32be(20));
+  if (bytes.length >= 10 && (at(0, "GIF87a") || at(0, "GIF89a"))) return sized("image/gif", u16le(6), u16le(8));
+  if (bytes.length >= 30 && at(0, "RIFF") && at(8, "WEBP")) {
+    if (at(12, "VP8 ") && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) return sized("image/webp", u16le(26) & 0x3fff, u16le(28) & 0x3fff);
+    if (at(12, "VP8L") && bytes[20] === 0x2f) return sized("image/webp", 1 + (u16le(21) & 0x3fff), 1 + ((u24le(22) >> 6) & 0x3fff));
+    if (at(12, "VP8X")) return sized("image/webp", 1 + u24le(24), 1 + u24le(27));
+    return null;
+  }
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    // The size is in the first start-of-frame segment; step over the segments before it.
+    let offset = 2;
+    while (offset + 9 <= bytes.length && bytes[offset] === 0xff) {
+      const marker = bytes[offset + 1]!;
+      if (marker === 0xff) { offset++; continue; }
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) return sized("image/jpeg", u16be(offset + 7), u16be(offset + 5));
+      if (marker === 0xd9 || marker === 0xda) return null;
+      offset += 2 + u16be(offset + 2);
+    }
+  }
+  return null;
+}
+
+/** The whole file as text. */
 async function loadText(scope: ToolScope, relative: string): Promise<{ text: string; sha256: string | null } | Denied> {
+  const file = await loadBytes(scope, relative, MAX_FILE_BYTES, size => `${relative} is ${size} bytes; read and change files over ${MAX_FILE_BYTES} bytes with bash (head, sed -n, rg)`);
+  if ("deny" in file) return file;
+  const { bytes } = file;
+  const text = new TextDecoder().decode(bytes);
+  // Invalid UTF-8 decodes to U+FFFD, which re-encodes to a different length.
+  if (bytes.includes(0) || (text.includes("\uFFFD") && new TextEncoder().encode(text).length !== bytes.length)) {
+    return { deny: `${relative} is not UTF-8 text; inspect it with bash` };
+  }
+  return { text, sha256: file.sha256 };
+}
+
+/** The whole file, read page by page; every page must report the same whole-file sha. */
+async function loadBytes(scope: ToolScope, relative: string, maxBytes: number, tooLarge: (size: number) => string): Promise<{ bytes: Uint8Array; sha256: string | null } | Denied> {
   const { maxReadBytes } = await scope.client.limits();
   const pages: Uint8Array[] = [];
   let offset = 0;
@@ -200,19 +270,15 @@ async function loadText(scope: ToolScope, relative: string): Promise<{ text: str
   for (;;) {
     const page = await scope.client.readFile(scope.token, relative, { offset, limit: maxReadBytes });
     if (sha !== undefined && page.sha256 !== sha) return { deny: `${relative} changed while it was read; read it again` };
-    if (page.size > MAX_FILE_BYTES) return { deny: `${relative} is ${page.size} bytes; read and change files over ${MAX_FILE_BYTES} bytes with bash (head, sed -n, rg)` };
+    if (page.size > maxBytes) return { deny: tooLarge(page.size) };
     sha = page.sha256;
     pages.push(page.content);
     offset += page.content.length;
     if (page.eof || !page.content.length) break;
   }
   const bytes = concat(pages);
-  const text = new TextDecoder().decode(bytes);
-  // Invalid UTF-8 decodes to U+FFFD, which re-encodes to a different length.
-  if (bytes.includes(0) || (text.includes("\uFFFD") && new TextEncoder().encode(text).length !== bytes.length)) {
-    return { deny: `${relative} is not UTF-8 text; inspect it with bash` };
-  }
-  return { text, sha256: sha ?? null };
+  if (bytes.length > maxBytes) return { deny: tooLarge(bytes.length) };
+  return { bytes, sha256: sha ?? null };
 }
 
 /** The promise's value, or undefined as soon as `signal` aborts. */

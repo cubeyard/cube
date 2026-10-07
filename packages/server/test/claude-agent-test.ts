@@ -3,6 +3,7 @@
  * cubed's workspace socket (routes -> VmWorkspace -> local guest), keyed
  * by tool_use_id. The real `claude` CLI is never started. */
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -19,7 +20,7 @@ import { VmWorkspace } from "../src/vm-workspace.ts";
 import { workspaceRoute } from "../src/workspace-http.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
 import { WorkspaceClient } from "../../claude-mod/hooks/workspace.ts";
-import { bash, edit, read, write, workspacePath } from "../../claude-mod/hooks/tools.ts";
+import { bash, edit, MAX_IMAGE_BYTES, read, write, workspacePath } from "../../claude-mod/hooks/tools.ts";
 import { LocalGuestTransport } from "./local-guest.ts";
 import { unixTransport } from "./unix-transport.ts";
 
@@ -349,6 +350,20 @@ try {
   assert.match((await bash(scope, "t-b2", { command: "printf other" }) as { deny: string }).deny, /CONFLICT|conflict/i);
   fs.writeFileSync(path.join(files, "binary"), Buffer.from([0, 1, 2]));
   assert.match((await read(scope, { file_path: "binary" }) as { deny: string }).deny, /not UTF-8/);
+  // Images come back in Read's image shape, whole across pages, or refused.
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==", "base64");
+  fs.mkdirSync(path.join(files, ".shots"));
+  fs.writeFileSync(path.join(files, ".shots/dot.png"), png);
+  assert.deepEqual(await read(scope, { file_path: "/home/cube/thread/.shots/dot.png" }), { type: "image", file: { base64: png.toString("base64"), type: "image/png", originalSize: png.length, dimensions: { originalWidth: 1, originalHeight: 1, displayWidth: 1, displayHeight: 1 } } });
+  const paged = Buffer.concat([png, crypto.randomBytes(1_500_000)]);
+  assert.ok(paged.length > (await client.limits()).maxReadBytes);
+  fs.writeFileSync(path.join(files, ".shots/paged.png"), paged);
+  assert.equal((await read(scope, { file_path: ".shots/paged.png" }) as { file: { base64: string } }).file.base64, paged.toString("base64"), "an image larger than one read page arrives whole");
+  fs.writeFileSync(path.join(files, ".shots/huge.png"), Buffer.concat([png, Buffer.alloc(MAX_IMAGE_BYTES)]));
+  assert.match((await read(scope, { file_path: ".shots/huge.png" }) as { deny: string }).deny, /over the \d+ bytes an image may be/);
+  fs.writeFileSync(path.join(files, ".shots/text.png"), "not a picture\n");
+  assert.match((await read(scope, { file_path: ".shots/text.png" }) as { deny: string }).deny, /not a PNG, JPEG, GIF or WebP image/);
+  assert.match((await read(scope, { file_path: "/etc/../home/cube/thread/.shots/dot.png" }) as { deny: string }).deny, /outside the thread workspace/);
   assert.match((await bash({ ...scope, token: "f".repeat(64) }, "t-b3", { command: "true" }) as { deny: string }).deny, /no longer holds the thread workspace/);
   const aborting = new AbortController();
   const slow = bash({ ...scope, signal: aborting.signal }, "t-b4", { command: "sleep 3; touch late-2" });
