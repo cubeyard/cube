@@ -349,8 +349,11 @@ after its runner refused a request fenced by the thread's newest epoch
 no older request can still make one; a lost answer or a runner that does not
 answer keeps it there. An allocated thread never moves. A thread that cannot
 start for want of a runner waits (`RunnerWait`): its workspace stays
-`allocating`, it holds its slot, it reads as starting with the reason, and the
-recovery loop tries again. cubed keeps one client per
+`allocating`, it holds its slot, it reads as starting (`waiting` in the API
+and OptChat's thread state give the reason), and the recovery loop tries
+again. A thread on a runner that is down sends it nothing until its retry is
+due; a template build machine left on a runner the thread moved away from is
+deleted once that runner answers. cubed keeps one client per
 runner, so the threads' runner calls queue on one Iroh identity. Project deletion never owns or
 deletes a runner and remains blocked while any thread history references the
 project. Runner contact is authenticated `node.status` evidence. A failed latest

@@ -43,6 +43,10 @@ class FakeRunner {
   loseAck = false;
   /** The next allocation is lost on the way and delivered when the test says. */
   hold: Array<() => Promise<unknown>> | null = null;
+  /** Advertises machine templates (cube-runner 0.8.0+). */
+  templates = false;
+  /** The runner goes away while a template build machine starts. */
+  dieInBuild = false;
   readonly name: string;
   readonly max: number;
   constructor(name: string, max: number) { this.name = name; this.max = max; }
@@ -74,7 +78,7 @@ class FakeRunner {
       },
       describe: async () => {
         this.contact("describe");
-        return { softwareVersion: "test", capabilities: [], platform: "linux-x86_64", baseImageSha256: "0".repeat(64),
+        return { softwareVersion: "test", capabilities: this.templates ? ["vm.publish"] : [], platform: "linux-x86_64", baseImageSha256: "0".repeat(64),
           limits: { maxFrameBytes: 1048576, requestTimeoutMs: 5000, maxVcpus: 2, maxMemoryMiB: 4096, maxDiskGiB: 32, maxSeedBytes: 65536, maxActiveVms: this.max } };
       },
       vmInspect: async (ref: Ref) => {
@@ -96,6 +100,7 @@ class FakeRunner {
       },
       vmStart: async (ref: Ref, epoch: number) => {
         this.contact("start");
+        if (this.dieInBuild) { this.dieInBuild = false; this.down = true; throw new IrohNodeError("OUTCOME_UNKNOWN", true); }
         this.fence(ref.threadId, epoch);
         this.vms.get(ref.vmId)!.state = "running";
         throw new Error("fixture stops here");
@@ -126,8 +131,8 @@ function world(name: string, runners: Array<{ name: string; max: number }>) {
     fakes.set(spec.name, new FakeRunner(spec.name, spec.max));
   };
   runners.forEach(enroll);
-  const vms = () => new ThreadVms({ registry, threads: path.join(root, `${name}-threads`), run: path.join(root, `${name}-run`),
-    gateway: gateway as unknown as GatewaySupervisor, sizes: { vcpus: 1, memoryMiB: 1024, diskGiB: 8 }, templates: { enabled: false, ttlMs: 1 },
+  const vms = (templates = false) => new ThreadVms({ registry, threads: path.join(root, `${name}-threads`), run: path.join(root, `${name}-run`),
+    gateway: gateway as unknown as GatewaySupervisor, sizes: { vcpus: 1, memoryMiB: 1024, diskGiB: 8 }, templates: { enabled: templates, ttlMs: 3600000 },
     runnerClient: admission => fakes.get(admission.configHash)!.client() as unknown as IrohRunnerClient, log: silent });
   let requests = 0;
   const create = () => registry.createThread("p", `r${++requests}`, model, "hello");
@@ -208,6 +213,13 @@ try {
     await assert.rejects(vms.start(next), /fixture stops here/);
     assert.deepEqual(w.fakes.get("linux")!.calls, ["describe", "inspect", "allocate", "start"], "a runner that answered ready lately is not asked again");
     assert.deepEqual(w.fakes.get("mac")!.calls, []);
+    w.invariants();
+    // Releasing goes by the registry's placement, not a caller's stale copy.
+    assert.equal(placement(thread), "provisional", "the copy from creation");
+    w.registry.beginRelease(thread.id);
+    assert.deepEqual(await vms.release(thread, false), { retained: false });
+    w.registry.finishRelease(thread.id);
+    assert.equal(w.fakes.get("linux")!.vms.get(thread.vm!.vmId)!.state, "released", "the allocated machine was released");
     w.invariants();
     await vms.close();
     w.registry.close();
@@ -336,9 +348,60 @@ try {
     assert.equal(w.get(other.id).runnerId, "b");
     assert.equal(placement(w.get(other.id)), "allocated");
     w.invariants();
+
+    // A requested thread whose runner answers but drains: it asks for its
+    // machine (none: a fenced refusal) and moves, instead of waiting out the drain.
+    a.accepting = true;
+    w.registry.recordRunnerProbe("a", { health: ready(2) });
+    w.enroll({ name: "c", max: 1 });
+    w.registry.recordRunnerProbe("c", { health: ready(1) });
+    const drained = w.create();
+    assert.equal(drained.runnerId, "a", "b is full; a and c answered ready, a is enrolled first");
+    a.hold = [];
+    await assert.rejects(vms.start(drained), RunnerWait);
+    assert.equal(placement(w.get(drained.id)), "requested", "the allocation was lost on the way");
+    a.accepting = false;
+    w.registry.recordRunnerProbe("a", { health: { ...ready(2), lifecycle: "draining", draining: true } });
+    assert.equal(w.registry.runnerFitness("a")!.fitness, "down", "draining, as the background probe saw it");
+    a.calls.length = 0;
+    await assert.rejects(vms.start(w.get(drained.id)), /fixture stops here/);
+    assert.equal(w.get(drained.id).runnerId, "c");
+    assert.deepEqual(a.calls, ["describe", "inspect", "allocate", "health", "inspect"], "a fenced refusal, a asked how it is, then no machine");
+    w.invariants();
     await vms.close();
     w.registry.close();
-    console.log("ok: a late allocation is either adopted where it landed or fenced off after the thread moved; never two machines");
+    console.log("ok: a late allocation is either adopted where it landed or fenced off after the thread moved; never two machines; a requested thread leaves a draining runner after a fenced refusal");
+  }
+
+  // --- the runner goes away during a template build: the thread moves, the build machine is deleted later ---
+  {
+    const w = world("build", [{ name: "a", max: 2 }, { name: "b", max: 2 }]);
+    w.registry.recordRunnerProbe("a", { health: ready(2) });
+    w.registry.recordRunnerProbe("b", { health: ready(2) });
+    const a = w.fakes.get("a")!;
+    a.templates = true;
+    a.dieInBuild = true;
+    const vms = w.vms(true);
+    const thread = w.create();
+    assert.equal(thread.runnerId, "a");
+    await assert.rejects(vms.start(thread), /fixture stops here/);
+    const moved = w.get(thread.id);
+    assert.equal(moved.runnerId, "b", "the runner went away before the thread's own machine was asked for");
+    assert.equal(moved.vm!.build?.runnerId, "a", "the build machine on a is remembered");
+    assert.equal(moved.vm!.preparation?.reason, "an earlier template build machine on another runner is not deleted yet");
+    assert.equal([...a.vms.values()].filter(vm => vm.state !== "released").length, 1, "a still has the build machine");
+    w.registry.markWorkspaceAvailable(thread.id);
+    // a answers again; the thread's next check deletes the build machine there.
+    a.down = false;
+    w.registry.recordRunnerProbe("a", { error: "NODE_UNAVAILABLE" }, Date.now() - 120_000);
+    await assert.rejects(vms.start(w.get(thread.id)), /fixture stops here/);
+    assert.equal(w.get(thread.id).vm!.build, undefined);
+    assert.deepEqual([...a.vms.values()].map(vm => vm.state), ["released"], "the build machine is gone; a's slot is free");
+    assert.equal(w.get(thread.id).runnerId, "b");
+    w.invariants();
+    await vms.close();
+    w.registry.close();
+    console.log("ok: a runner lost during a template build: the thread moves, starts fresh, and the build machine is deleted once that runner answers");
   }
 
   // --- several threads leave a dead runner for one free slot at once ---

@@ -166,8 +166,9 @@ starts there, without showing the first runner's error. Once an allocation may
 have reached a runner (its answer lost, cubed restarted), the thread stays
 with that runner until it answers: the machine it made is used, never a second
 one elsewhere. A thread whose machine was allocated never moves. With no
-runner to take it, the thread waits, starting, with the reason ("waiting for a
-runner: …"), holding its slot; cubed's recovery loop tries again every 30
+runner to take it, the thread waits, holding its slot; it shows as starting,
+and the API's `waiting` field and OptChat give the reason ("waiting for a
+runner: …"); cubed's recovery loop tries again every 30
 seconds and asks a runner that failed again after 5 seconds, doubling to at
 most a minute. Archiving a thread that never got a machine needs no runner.
 Runners before 0.7.0 report 1 and keep one thread at a time, exactly as
