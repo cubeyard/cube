@@ -164,7 +164,10 @@ last 8 KiB each; with size, change time, `omittedBytes` and `complete`) and
 none). Paths show the state directory as `$STATE` and the runner account's
 home as `~`. Every string is escaped (no control, invisible or reordering
 character, invalid UTF-8 as `\xNN`) and secret-looking values are
-`[redacted]` (`diagnose.rs`); the answer stays below one frame.
+`[redacted]` (`diagnose.rs`); the answer stays below one frame. A private
+key is redacted whole even when the excerpt cut off its BEGIN line, its END
+line or both, or printed it on one line with escaped newlines. `vm.inspect`'s
+console tail and a QEMU exit's log line are cleaned the same way.
 
 `vms/<n>/events.log` (JSON lines, 0600, 64 KiB then `events.prev.log`) is
 written from 0.8.3 on, best effort and never under the journal lock:

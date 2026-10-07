@@ -497,8 +497,12 @@ Every string is escaped (control characters as `\x1b`, invisible or
 reordering characters as `\u{202e}`, invalid UTF-8 as `\xff`; backslashes are
 kept, so escapes are not reversible) and secret-looking values (private keys,
 GitHub and Anthropic tokens, bearer tokens, `password=`/`token:` values) are
-`[redacted]`. The file is safe to print in a terminal. Redaction is by
-pattern: read the bundle before sharing it outside the operators. A thread's
+`[redacted]`. A private key is redacted whole when an excerpt starts or ends
+inside it, and so are bare key-like base64 lines (60+ characters of mixed
+case and digits) whose BEGIN and END lines were both cut off. The file is
+safe to print in a terminal. Redaction is by pattern: read the bundle before
+sharing it outside the operators. A guest is root in its own machine and can
+print anything to its console, encoded so no pattern matches. A thread's
 bundle never includes another thread's machine: the runner refuses a VM of
 another thread (`CONFLICT`), and OptChat diagnoses only threads it started.
 

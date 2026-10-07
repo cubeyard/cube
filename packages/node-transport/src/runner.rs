@@ -314,14 +314,14 @@ fn dir_bytes(path: &Path) -> u64 {
         .sum()
 }
 
-fn tail(path: &Path, limit: u64) -> Option<String> {
+fn tail(path: &Path, limit: u64) -> Option<Vec<u8>> {
     let mut file = File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
     file.seek(SeekFrom::Start(size.saturating_sub(limit)))
         .ok()?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    Some(bytes)
 }
 
 impl Runner {
@@ -813,7 +813,10 @@ impl Runner {
     pub fn inspect(&self, thread_id: &str, vm_id: &str) -> Result<(VmRecord, Option<String>)> {
         Self::check_ids(thread_id, vm_id)?;
         let row = self.row_for(thread_id, vm_id)?;
-        let console = tail(&self.paths(row.slot).console, CONSOLE_TAIL);
+        // Cleaned as `vm.diagnose` cleans its logs: the console carries
+        // whatever the guest prints, its host key included if it prints it.
+        let console = tail(&self.paths(row.slot).console, CONSOLE_TAIL)
+            .map(|bytes| diagnose::clean(&bytes, 4 * CONSOLE_TAIL as usize + 64).0);
         Ok((self.record(&row), console))
     }
 
@@ -1333,7 +1336,10 @@ impl Runner {
                         Ok(status) if status.success() => None,
                         Ok(status) => Some(format!(
                             "qemu exited ({status}): {}",
-                            tail(&log, 512).unwrap_or_default().trim()
+                            tail(&log, 512)
+                                .map(|bytes| diagnose::clean(&bytes, 4 * 512 + 64).0)
+                                .unwrap_or_default()
+                                .trim()
                         )),
                         Err(error) => Some(format!("waiting for qemu failed: {error}")),
                     };

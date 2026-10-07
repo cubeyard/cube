@@ -47,6 +47,14 @@ function assertPrintable(value: unknown, where = "value"): void {
 const SECRETS = ["hunter2", "0123456789abcdefABCD", "keymaterialAAAA", "eyJhbGciOiJIUzI1NiJ9", "api03-ZZZZZZZZZZZZZZZZ"];
 const SECRET_TEXT = "password=hunter2 ghp_0123456789abcdefABCD Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.x.y sk-ant-api03-ZZZZZZZZZZZZZZZZ\n"
   + "-----BEGIN OPENSSH PRIVATE KEY-----\nkeymaterialAAAA\n-----END OPENSSH PRIVATE KEY-----\ntokens: 5 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 host";
+/** Synthetic key body lines: what a key line looks like, no real key. */
+const BODY = Array.from({ length: 6 }, (_, n) => `SyntheticKeyBody${n}Line${"Ab9+/Cd8".repeat(7)}`.slice(0, 70));
+const KEY = `-----BEGIN OPENSSH PRIVATE KEY-----\n${BODY.join("\n")}\n-----END OPENSSH PRIVATE KEY-----`;
+/** A console tail that starts inside the key, after cloud-init's own BEGIN line. */
+const CUT_KEY_CONSOLE = `-----BEGIN SSH HOST KEY FINGERPRINTS-----\n[... 900 bytes omitted ...]\n${KEY.slice(60)}\nlogin:`;
+function assertNoBody(text: string, lines = BODY): void {
+  for (const line of lines) for (const piece of [line.slice(0, 16), line.slice(-16)]) assert.ok(!text.includes(piece), `${piece} leaked in ${text}`);
+}
 
 try {
   // Cleaning.
@@ -66,6 +74,62 @@ try {
     assert.deepEqual(clean({ [`k${ESC}`]: [`v${ESC}[0m`, { note: '{"frameToken":"abc123"}' }], n: 3 }),
       { "k\\x1b": ["v\\x1b[0m", { note: '{"frameToken":"[redacted]"}' }], n: 3 });
     console.log("ok: terminal controls are escaped and secrets redacted, idempotently and bounded");
+  }
+
+  // Private keys cut off, escaped or armored otherwise (the runner's tests mirror these).
+  {
+    const head = "boot\n-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n-----BEGIN SSH HOST KEY KEYS-----\n"
+      + "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPublicHostKeyStaysVisible0123456789abcdefABCD root@cube\n-----END SSH HOST KEY KEYS-----\n";
+    let redacted = redact(`${head}\n[... 900 bytes omitted ...]\n${KEY.slice(60)}\nlogin:`);
+    assertNoBody(redacted);
+    for (const kept of ["boot", "MIIB", "PublicHostKeyStaysVisible", "omitted ...]", "login:"]) assert.ok(redacted.includes(kept), `${kept} in ${redacted}`);
+    redacted = redact(`${KEY}\nmiddle\n[... 9 bytes omitted ...]\n${KEY.slice(60)}\nend`);
+    assertNoBody(redacted);
+    assert.ok(redacted.includes("middle") && redacted.includes("end"), redacted);
+    redacted = redact(`x\n${BODY.slice(1, 5).join("\n")}\nShortLastLine0Ab9==\ncloud-init[1]: done`);
+    assertNoBody(redacted, BODY.slice(1, 5));
+    assert.ok(!redacted.includes("ShortLastLine") && redacted.includes("cloud-init[1]: done"), redacted);
+    assertNoBody(redact(safeText(KEY.replace(/\n/g, "\r"), 1 << 16)), BODY);
+    const oneLine = `ssh_keys: {'ed25519_private': '${KEY.replace(/\n/g, "\\n")}\\n'} next`;
+    assertNoBody(redact(oneLine));
+    assert.ok(redact(oneLine).endsWith(" next"));
+    assertNoBody(redact(oneLine.slice(90)));
+    for (const [begin, end] of [["-----BEGIN PGP PRIVATE KEY BLOCK-----", "-----END PGP PRIVATE KEY BLOCK-----"],
+      ["-----begin private key-----", "-----end private key-----"], ["-----BEGIN ENCRYPTED PRIVATE KEY-----", "-----END ENCRYPTED PRIVATE KEY-----"]]) {
+      redacted = redact(`[ 12.5] ci: ${begin}\n[ 12.5] ci: ${BODY.join("\n[ 12.5] ci: ")}\n[ 12.5] ci: ${end}\nok`);
+      assertNoBody(redacted);
+      assert.ok(redacted.endsWith("\nok"), redacted);
+    }
+    assertNoBody(clean(KEY, 200));
+    for (const kept of ["256 SHA256:Ab9Cd8Ef7Gh6Ij5Kl4Mn3Op2Qr1St0UvWxYz0123456 root@cube (ED25519)",
+      "sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "/opt/homebrew/share/qemu/edk2-aarch64-code.fd"]) {
+      assert.equal(redact(kept), kept);
+    }
+    for (const text of [CUT_KEY_CONSOLE, oneLine, KEY]) assert.equal(redact(redact(text)), redact(text), "idempotent");
+    // Bounded: an END past an omission does not swallow the tail; prefixed
+    // and CR-escaped short last lines; a key's lines end at its short one.
+    redacted = redact(`boot\n-----BEGIN OPENSSH PRIVATE KEY-----\n${BODY.slice(0, 2).join("\n")}\n[... 5000 bytes omitted ...]\n${BODY.slice(4).join("\n")}\nreached login\n`);
+    assertNoBody(redacted);
+    assert.ok(redacted.includes("omitted ...]") && redacted.includes("reached login"), redacted);
+    const stamped = BODY.slice(0, 4).map((line, n) => `[   12.5${n}] cloud-init[600]: ${line}`).join("\n");
+    redacted = redact(`${stamped}\n[   12.59] cloud-init[600]: ShortTail0Ab9==\n[   12.60] ok: done`);
+    assertNoBody(redacted, BODY.slice(0, 4));
+    assert.ok(!redacted.includes("ShortTail0Ab9") && redacted.endsWith("ok: done"), redacted);
+    assert.ok(!redact(safeText(`${BODY[0]}\r${BODY[1]}\rShortTail0Ab9==\rafter it`)).includes("ShortTail0Ab9"));
+    assertNoBody(clean(`${stamped}\n[   12.59] cloud-init[600]: ShortTail0Ab9==`, 120), BODY.slice(0, 1));
+    const journal = "Oct 07 19:12:40 ip-10-0-0-123.eu-west-1.compute.internal cloud-init[600]: ";
+    for (const text of [`[   12.50] cloud-init[600]: ${BODY[0]}\n[   12.51] cloud-init[600]: ShortTail0Ab9==`,
+      `x\n${journal}${BODY[0]}\n${journal}ShortTail0Ab9==\nok`, `${BODY[0]}\nShortTail0Ab9== \nok`]) {
+      assert.ok(!redact(text).includes("ShortTail0Ab9"), text);
+    }
+    assert.ok(redact(`${BODY[0]}\n${BODY[1]}\nlast0Ab9\ndone\nStarting`).endsWith("\ndone\nStarting"));
+    const started = Date.now();
+    redact(`${"[    1.234567] usb 1-1: new device found, idVendor=1d6b\n".repeat(4000)}${"a".repeat(64 * 1024)}${" -PRIVATE KEY".repeat(10_000)}`);
+    redact("ab cd ".repeat(40_000));
+    redact("-----BEGIN ".repeat(20_000));
+    redact("-".repeat(256 * 1024));
+    assert.ok(Date.now() - started < 2000, `redaction took ${Date.now() - started} ms`);
+    console.log("ok: private keys are redacted when cut at either end, escaped, on one line or in other armors");
   }
 
   // cubed's machine event log.
@@ -116,7 +180,7 @@ try {
     },
     vmInspect: async (ref: Ref) => {
       asked.push({ method: "vm.inspect", ref });
-      return { vm: record(ref), consoleTail: `UEFI firmware\n${HOSTILE}` };
+      return { vm: record(ref), consoleTail: `UEFI firmware\n${HOSTILE}\n${CUT_KEY_CONSOLE}` };
     },
     vmStart: fail, vmAllocate: fail, vmStop: fail, vmRelease: fail, vmDiscard: fail, vmPublish: fail,
   };
@@ -162,6 +226,7 @@ try {
     assert.ok(evidence.runner.status === "observed" && evidence.runner.method === "vm.inspect");
     assert.match(evidence.runner.status === "observed" ? evidence.runner.note! : "", /predates vm\.diagnose \(cube-runner 0\.8\.3\)/);
     assert.deepEqual((asked as Array<{ method: string }>).map(a => a.method), ["vm.diagnose", "vm.inspect"]);
+    assertNoBody(JSON.stringify(clean(evidence)));
     console.log("ok: a runner before vm.diagnose gives its record and console tail, and the bundle says what is missing");
 
     mode = "dead";

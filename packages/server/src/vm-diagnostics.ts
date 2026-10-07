@@ -48,18 +48,109 @@ export function safeText(text: string, max = 4096): string {
 }
 
 export const REDACTED = "[redacted]";
-const KEY = "PRIVATE KEY-----";
-/** PEM private keys, well-known token formats, bearer tokens and the values
- * of password/secret/token keys become `[redacted]`. A key whose end (or
- * start) was cut off is redacted to the end (or from the start). Mirrors
+export const REDACTED_KEY = "[redacted private key]";
+/** A BEGIN or END line marker of any private key armor, any case. */
+// `(?<!-)`: one attempt per dash run, so a long run stays linear.
+const KEY_MARKER = /(?<!-)(?:-+ ?|^ ?)(BEGIN|END) [A-Za-z0-9 ]{0,40}?PRIVATE KEY(?:[A-Za-z]| (?!-))*-*/gi;
+/** What the runner puts where an excerpt left bytes out: its tail may start
+ * inside a key whose BEGIN line was omitted. */
+const OMITTED = " bytes omitted ...]";
+
+/** Private key blocks become `[redacted private key]`. A key whose END was
+ * cut off is redacted to the end; one whose BEGIN was cut off, from where
+ * the text (or the excerpt's tail) starts. Mirrors the runner's
+ * `diagnose::redact_keys`. */
+function redactKeys(text: string): string {
+  const markers = [...text.matchAll(KEY_MARKER)].map(m => ({ start: m.index, end: m.index + m[0].length, begin: m[1]!.toUpperCase() === "BEGIN" }));
+  let out = "";
+  let copied = 0;
+  for (let next = 0; next < markers.length;) {
+    const { start, end, begin } = markers[next++]!;
+    if (start < copied) continue;
+    if (begin) {
+      out += text.slice(copied, start) + REDACTED_KEY;
+      // Its END, if it is in this part of the excerpt: an END past an
+      // omission is another key's (or this one's cut tail).
+      const omitted = text.indexOf(OMITTED, end);
+      const limit = omitted < 0 ? text.length : Math.max(end, text.lastIndexOf("\n", omitted));
+      let close = next;
+      while (close < markers.length && markers[close]!.begin) close++;
+      if (close < markers.length && markers[close]!.start < limit) { copied = markers[close]!.end; next = close + 1; }
+      else copied = limit;
+    } else {
+      const omitted = text.slice(copied, start).lastIndexOf(OMITTED);
+      out += text.slice(copied, omitted < 0 ? copied : copied + omitted + OMITTED.length) + REDACTED_KEY;
+      copied = end;
+    }
+  }
+  return redactKeyBodies(out + text.slice(copied));
+}
+
+/** Between two key lines: one line break (as it is or escaped), then a
+ * prefix like the previous key line's (`[   12.5] cloud-init[1]: `; digits
+ * may differ), if it had one. Mirrors the runner's `next_key_line`. */
+function nextKeyLine(gap: string, prefix: string): boolean {
+  const normalized = gap.replace(/\\x0[da]/g, "\n").replace(/\\r/g, "").replace(/\\n/g, "\n").replace(/^[ \t"',]*/, "");
+  if (!normalized.startsWith("\n")) return false;
+  const rest = normalized.replace(/^\n\n?/, "");
+  let alike = rest.length === prefix.length;
+  for (let k = 0; alike && k < rest.length; k++) alike = rest[k] === prefix[k] || (/\d/.test(rest[k]!) && /\d/.test(prefix[k]!));
+  return alike || /^[ \t"',]*$/.test(rest);
+}
+
+/** What comes before `at` on its line (after a newline, an escaped CR or
+ * an escaped newline, or the text's start), if that is at most 128
+ * characters. */
+function linePrefix(text: string, at: number): string {
+  const from = Math.max(0, at - 129);
+  const window = text.slice(from, at);
+  let line = -1;
+  for (const mark of ["\n", "\\x0d", "\\n"]) {
+    const k = window.lastIndexOf(mark);
+    if (k >= 0) line = Math.max(line, k + mark.length);
+  }
+  if (line >= 0) return window.slice(line);
+  return from === 0 ? window : "";
+}
+
+/** Key bodies whose BEGIN and END lines were both cut off: base64 runs of
+ * 60+ characters in mixed case with digits (PEM and OpenSSH key lines are 64
+ * and 70), the lines that continue them (the last one shorter), and anything
+ * with the OpenSSH key magic. A public key after its type (`ssh-ed25519
+ * AAAA…`) stays. Linear in the text's length. Mirrors the runner's
+ * `redact_key_bodies`. */
+function redactKeyBodies(text: string): string {
+  let out = "";
+  let copied = 0;
+  let previous: { end: number; prefix: string } | null = null;
+  for (const match of text.matchAll(/[A-Za-z0-9+/=]+/g)) {
+    const at = match.index;
+    const end = at + match[0].length;
+    // A run right after an escape (`\x0d`, `\n`) starts after it.
+    const escape = text[at - 1] === "\\" ? /^(?:x[0-9a-fA-F]{2}|[nrt])/.exec(match[0])?.[0].length ?? 0 : 0;
+    const start = at + escape;
+    const run = text.slice(start, end);
+    const long = run.length >= 60 && /[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run);
+    const word = text.slice(Math.max(0, at - 40), at).trimEnd().split(/[ \n"']/).pop()!;
+    const isPublic = /^(?:ssh-|ecdsa-|sk-ssh-|sk-ecdsa-)/.test(word);
+    // A continuation is a whole line of its own, right after a key line.
+    const continued = run.length >= 4 && /^[ \t]{0,8}(?:$|[\n\\"'])/.test(text.slice(end, end + 9)) && previous !== null
+      && at - previous.end <= 160 && nextKeyLine(text.slice(previous.end, start), previous.prefix);
+    if ((long && !isPublic) || continued || run.includes("b3BlbnNzaC1rZXktdjE")) {
+      out += text.slice(copied, start) + REDACTED_KEY;
+      copied = end;
+      // A key's lines are all full but its last: a shorter one ends it.
+      previous = run.length >= 60 ? { end, prefix: linePrefix(text, start) } : null;
+    }
+  }
+  return out + text.slice(copied);
+}
+
+/** Private keys (see `redactKeys`), well-known token formats, bearer tokens
+ * and the values of password/secret/token keys become `[redacted]`. Mirrors
  * the runner's `diagnose::redact`. */
 export function redact(text: string): string {
-  const end = text.search(/-----END [^\n]*PRIVATE KEY-----/);
-  if (end >= 0 && !text.slice(0, end).includes("-----BEGIN ")) {
-    text = `[redacted private key]${text.slice(end + text.slice(end).indexOf(KEY) + KEY.length)}`;
-  }
-  return text
-    .replace(/-----BEGIN [^\n]*PRIVATE KEY-----[^]*?(?:-----END [^\n]*PRIVATE KEY-----|$)/g, "[redacted private key]")
+  return redactKeys(text)
     .replace(/(?<![A-Za-z0-9_-])(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|sk-ant-|sk-proj-|xoxb-|xoxp-|AKIA)[A-Za-z0-9_-]{12,}/g, `$1${REDACTED}`)
     .replace(/(?<![A-Za-z0-9_-])(bearer +)[A-Za-z0-9_\-.~+/=]{8,}/gi, `$1${REDACTED}`)
     .replace(/(password|passwd|secret|token|api_key|apikey|api-key|private_key)(["']*[ \t]*[=:][ \t"']*)[^\s"',;&}<>]+/gi, `$1$2${REDACTED}`);

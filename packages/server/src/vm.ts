@@ -23,7 +23,7 @@ import { NO_HOOKS, placement, threadAgent, type HookOutcome, type Registry, type
 import { newPlaceholder, type EgressVms } from "./egress-policy.ts";
 import { guestDescription, VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { GUEST_HELPER_PATH, shippedHelper, vmMac, vmSeed } from "./vm-seed.ts";
-import { MachineEvents, type Evidence, type MachineEvidence } from "./vm-diagnostics.ts";
+import { clean, MachineEvents, type Evidence, type MachineEvidence } from "./vm-diagnostics.ts";
 import { FAILED_BUILD_BACKOFF_MS, TEMPLATE_CAPABILITY, TEMPLATE_FORMAT, obsoleteTemplates, pickTemplate, templateKey, templateSettings,
   type TemplateMeta, type TemplateSettings } from "./vm-template.ts";
 import { LeaseStore } from "./workspace-lease.ts";
@@ -782,7 +782,9 @@ export class ThreadVms implements ThreadMachines, EgressVms {
         const { vm, consoleTail } = await runner.vmInspect(ref);
         if (!MACHINE_STATES_LIVE.has(vm.state)) {
           this.events.record(ref.threadId, "machine stopped while booting", `${vm.state}${vm.error ? `: ${vm.error}` : ""}`);
-          throw new Error(`the machine stopped while booting (${vm.state})${consoleTail ? `: ${consoleTail.trim().split("\n").slice(-3).join("; ")}` : ""}`);
+          // An older runner sends its console raw; a guest may print anything there.
+          const lines = consoleTail ? clean(consoleTail).trim().split("\n").slice(-3).join("; ").slice(0, 512) : "";
+          throw new Error(`the machine stopped while booting (${vm.state})${lines ? `: ${lines}` : ""}`);
         }
       }
       await delay(2000);
