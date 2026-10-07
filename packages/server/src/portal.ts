@@ -133,6 +133,8 @@ export class Portal {
   services(thread: Thread, fresh = false): Promise<GuestService[]> {
     const cached = this.cache.get(thread.id);
     if (cached && !fresh && Date.now() - cached.at < SERVICES_TTL_MS) return cached.services;
+    // Expired entries go, so archived threads leave nothing behind.
+    for (const [id, entry] of this.cache) if (Date.now() - entry.at >= SERVICES_TTL_MS) this.cache.delete(id);
     const services = this.options.machines.guest(thread).call("services", {}, { timeoutMs: 15000 }).then(answer => {
       const failure = answer.header.error as { message?: unknown } | undefined;
       if (failure) throw new Error(typeof failure.message === "string" ? failure.message : "the guest refused");
