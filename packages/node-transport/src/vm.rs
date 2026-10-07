@@ -157,7 +157,15 @@ pub fn qemu_args(launch: &Launch<'_>) -> Result<Vec<OsString>> {
     args.push("-netdev".into());
     args.push(format!("dgram,id=n0,local.type=fd,local.str={}", launch.net_fd).into());
     args.push("-device".into());
-    args.push(format!("virtio-net-pci,netdev=n0,mac={}", launch.mac).into());
+    // QEMU's default option ROM for this NIC is x86 iPXE: aarch64 firmware
+    // refuses it ("Image type X64 can't be loaded on AARCH64 UEFI system"),
+    // which reads like a wrong-architecture disk in the console.
+    let rom = if launch.platform == PLATFORM_MACOS_AARCH64 {
+        ",romfile="
+    } else {
+        ""
+    };
+    args.push(format!("virtio-net-pci,netdev=n0,mac={}{rom}", launch.mac).into());
     args.push("-device".into());
     args.push("virtio-rng-pci".into());
     if launch.platform == PLATFORM_LINUX_X86_64 {
@@ -462,7 +470,15 @@ mod tests {
         ] {
             assert!(line.contains(expected), "missing {expected:?} in {line}");
         }
-        for absent in ["-netdev user", "hostfwd", "-nic", "vnc", "spice", "-bios"] {
+        for absent in [
+            "-netdev user",
+            "hostfwd",
+            "-nic",
+            "vnc",
+            "spice",
+            "-bios",
+            "romfile",
+        ] {
             assert!(!line.contains(absent), "unexpected {absent:?} in {line}");
         }
         assert_eq!(
@@ -494,6 +510,11 @@ mod tests {
         assert!(line.contains("-machine virt,accel=hvf -cpu host"));
         assert!(line.contains("-bios /opt/homebrew/share/qemu/edk2-aarch64-code.fd"));
         assert!(!line.contains("-sandbox") && !line.contains("-vga"));
+        // No x86 iPXE option ROM in an aarch64 guest.
+        assert!(
+            args.iter()
+                .any(|a| a == "virtio-net-pci,netdev=n0,mac=02:00:00:00:00:01,romfile=")
+        );
     }
 
     #[test]
