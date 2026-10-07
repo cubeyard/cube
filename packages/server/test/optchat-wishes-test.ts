@@ -34,10 +34,11 @@ try {
       at("user", "[abcdef12] ended its turn; nothing of it runs now: PR #12 opened"),
       at("note", "an older memory"),
     ];
-    assert.deepEqual(log.map((message, id) => chunkLine(message, id)), [
+    assert.deepEqual(log.map((message, id) => chunkLine(message, id, log)).filter((line, id) => id !== 3), [
       "#0 user: please add a csv export to the usage page", "#1 optchat: I can do that. I could also add a pdf export.",
-      "#2 optchat spawn {\"tasks\":[{\"project\":\"cube\",\"task\":\"add a csv export to the usage page\"}]}", null, null,
+      "#2 optchat spawn {\"tasks\":[{\"project\":\"cube\",\"task\":\"add a csv export to the usage page\"}]}", null,
       "#5 report [abcdef12] ended its turn; nothing of it runs now: PR #12 opened", null]);
+    assert.equal(chunkLine(log[3]!, 3, log), "#3 result: [abcdef12] started in cube", "a hand-off's result is read");
     const chunk = nextChunk(log, 0);
     assert.deepEqual([chunk.from, chunk.to, chunk.users, chunk.handOffs], [0, 7, 1, 1], "a report is not the user's words");
     const long = Array.from({ length: 10 }, (_, k) => at("user", `${k} ${"word ".repeat(100)}`));
@@ -57,6 +58,7 @@ try {
       at("user", "[abcdef12] ended its turn: please also add a confirm dialog everywhere"),
       at("user", "and make the usage page export csv please"),
       at("tool", "spawn {\"tasks\":[{\"project\":\"cube\",\"task\":\"usage csv export\"}]}"),
+      at("echo", "[abcdef12] started in cube: usage csv export"),
     ];
     const doc = initialWishes();
     const chunk = nextChunk(log, 0);
@@ -70,39 +72,44 @@ try {
       { kind: "wish", confidence: "high", text: "confirm dialog everywhere", quote: "please also add a confirm dialog everywhere", source: [3] },
       { kind: "wish", confidence: "high", text: "a made-up wish", quote: "rewrite cube in rust", source: [4] },
       { kind: "wish", confidence: "high", text: "Usage page csv export", quote: "make the usage page export csv", source: [4], project: "null", started_by: 5 },
-      { kind: "wish", confidence: "high", text: "ask before archiving a thread", quote: "the archive button to ask", source: [0] },
+      { kind: "wish", confidence: "high", text: "ask before archiving a thread", quote: "I want the archive button to ask before it archives", source: [0] },
+      { kind: "wish", confidence: "high", text: "something about want", quote: "I want", source: [0] },
     ] }, chunk, log, 5000);
     assert.deepEqual(applied.added, ["w1", "w2"]);
     assert.deepEqual(applied.repeated, ["w1"], "a twin joins the wish it repeats");
     assert.deepEqual(applied.refused.map(line => line.replace(/^[^:]*: /, "")), ["question", "suggestion", "hypothetical", "deferred", "not high confidence",
-      "no user message of this chunk named", "quote not found in its source"], "a report's words are not the user's; a quote must be theirs");
+      "no user message of this chunk named", "quote not found in its source", "quote too short to be the user's words"], "a report's words are not the user's; a quote must be theirs, and more than a word or two");
     assert.deepEqual(doc.items.map(wish => [wish.id, wish.status, wish.sources, wish.by, wish.project]),
       [["w1", "open", [0], null, "cube"], ["w2", "started", [4], 5, null]], "a spawn after the words takes the wish up");
 
     // A later chunk: a tell takes w1 up only after its words; a start the log does not show is refused.
-    const more = [...log, at("user", "the archive confirm really matters to me"), at("tool", "tell {\"id\":\"abcdef12\",\"message\":\"add the archive confirmation\"}"), at("talk", "done")];
-    const second = nextChunk(more, 6);
-    const later = applyAnswer(doc, { repeated: [{ wish: "w1", source: [6] }], started: [{ wish: "w1", by: 8 }, { wish: "w9", by: 7 }, { wish: "w2", by: 7 }] }, second, more, 6000);
-    assert.deepEqual([later.repeated, later.started], [["w1"], []], "a talk line is no hand-off; a started wish starts no second time");
-    assert.equal(later.refused.length, 3);
-    assert.deepEqual(applyAnswer(doc, { started: [{ wish: "w1", by: 7 }] }, second, more, 6000).started, ["w1"]);
-    assert.deepEqual(doc.items[0]!.sources, [0, 6], "every message that asked for it");
+    const more = [...log, at("user", "the archive confirm really matters to me"), at("tool", "tell {\"id\":\"abcdef12\",\"message\":\"add the archive confirmation\"}"),
+      at("echo", "Error: its machine is still starting"), at("tool", "tell {\"id\":\"abcdef12\",\"message\":\"add the archive confirmation\"}"),
+      at("echo", "sent to [abcdef12]; its report comes back as a message starting \"[abcdef12] \""), at("talk", "done")];
+    const second = nextChunk(more, 7);
+    const later = applyAnswer(doc, { repeated: [{ wish: "w1", source: [7] }], started: [{ wish: "w1", by: 12 }, { wish: "w1", by: 8 }, { wish: "w9", by: 10 }, { wish: "w2", by: 10 }] }, second, more, 6000);
+    assert.deepEqual([later.repeated, later.started], [["w1"], []], "a talk line is no hand-off, nor a tell that failed; a started wish starts no second time");
+    assert.equal(later.refused.length, 4);
+    assert.deepEqual(applyAnswer(doc, { started: [{ wish: "w1", by: 10 }] }, second, more, 6000).started, ["w1"]);
+    assert.deepEqual(doc.items[0]!.sources, [0, 7], "every message that asked for it");
 
     // A dismissed wish is not found again; a repeat after a start asks again.
     doc.items[0]!.status = "dismissed";
-    const third = [...more, at("user", "I want the archive button to ask before it archives"), at("user", "make the usage page export csv please, it is still missing")];
+    const third = [...more, at("user", "I want the archive button to ask before it archives"), at("user", "make the usage page export csv please, it is still missing"),
+      at("user", "and a pdf export of the usage page too"), at("tool", "spawn {\"tasks\":[{\"project\":\"nope\",\"task\":\"pdf export\"}]}"), at("echo", "task 1 (nope) not started: no project nope")];
     const again = applyAnswer(doc, { found: [
-      { kind: "wish", confidence: "high", text: "ask before archiving", quote: "I want the archive button to ask before it archives", source: [9] },
-      { kind: "wish", confidence: "high", text: "usage page csv export", quote: "make the usage page export csv please", source: [10] },
-    ] }, nextChunk(third, 9), third, 7000);
-    assert.deepEqual(again.added, [], "no new wish for one dismissed or known");
-    assert.deepEqual(doc.items.map(wish => wish.status), ["dismissed", "open"], "asked again after its start: open again");
+      { kind: "wish", confidence: "high", text: "ask before archiving", quote: "I want the archive button to ask before it archives", source: [13] },
+      { kind: "wish", confidence: "high", text: "usage page csv export", quote: "make the usage page export csv please", source: [14] },
+      { kind: "wish", confidence: "high", text: "usage page pdf export", quote: "a pdf export of the usage page", source: [15], started_by: 16 },
+    ] }, nextChunk(third, 13), third, 7000);
+    assert.deepEqual(again.added, ["w3"], "no new wish for one dismissed or known; a pdf export is not the csv one");
+    assert.deepEqual(doc.items.map(wish => wish.status), ["dismissed", "open", "open"], "asked again after its start: open again; a spawn that started nothing took nothing up");
     assert.ok(similar("Usage page csv export", "the usage page csv export") && !similar("usage csv export", "archive confirmation"));
 
     // Bounded: no more than WISH_LIMITS.open open wishes.
     const full = initialWishes();
     const many = Array.from({ length: WISH_LIMITS.open + 2 }, (_, k) => at("user", `please build feature number${k} quickly`));
-    applyAnswer(full, { found: many.map((_, k) => ({ kind: "wish", confidence: "high", text: `feature number${k} zeta${k}`, quote: `feature number${k}`, source: [k] })) }, nextChunk(many, 0), many, 0);
+    applyAnswer(full, { found: many.map((_, k) => ({ kind: "wish", confidence: "high", text: `feature number${k} zeta${k}`, quote: `build feature number${k}`, source: [k] })) }, nextChunk(many, 0), many, 0);
     assert.equal(full.items.length, WISH_LIMITS.open);
   }
 
@@ -111,6 +118,7 @@ try {
     const faux = fauxProvider({ tokensPerSecond: 100_000 });
     const finder: string[] = [];
     let answer = () => "{}";
+    let fail = false;
     let script: Array<() => ReturnType<typeof fauxAssistantMessage>> = [];
     let running = false;
     faux.setResponses(Array.from({ length: 200 }, () => async request => {
@@ -119,6 +127,7 @@ try {
       if (system.includes("Your job: find what the user explicitly asked")) {
         assert.equal(running, false, "the wish finder never runs during a turn");
         finder.push(textOf(request.messages.find(message => message.role === "user")!));
+        if (fail) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded" });
         return fauxAssistantMessage(answer());
       }
       return (script.shift() ?? (() => fauxAssistantMessage("noted")))();
@@ -145,9 +154,9 @@ try {
         return new Map(ids.map(id => [id, known(id, !!options?.archivedRuns)]));
       },
     };
-    const limits = { node: 64, retryMs: 50, watchMs: 50, wishQuietMs: 40, wishIntervalMs: 0, wishGapMs: 0, wishRetryMs: 0, wishChunk: 2000 };
-    const open = (wishes?: false) => OptChat.open({ directory: path.join(root, "optchat"), models, model: async () => ({ provider: faux.getModel().provider, id: faux.getModel().id }), threads, limits,
-      ...wishes === false ? { wishes } : {} });
+    const limits = { node: 64, retryMs: 50, watchMs: 50, wishQuietMs: 40, wishIntervalMs: 0, wishGapMs: 0, wishRetryMs: 100, wishChunk: 2000 };
+    const open = (options: { wishes?: false; calls?: number } = {}) => OptChat.open({ directory: path.join(root, "optchat"), models, model: async () => ({ provider: faux.getModel().provider, id: faux.getModel().id }), threads,
+      limits: { ...limits, ...options.calls === undefined ? {} : { wishCallsPerDay: options.calls } }, ...options.wishes === false ? { wishes: false as const } : {} });
     const call = (name: string, args: Parameters<typeof fauxToolCall>[1], id: string) => () => fauxAssistantMessage([fauxToolCall(name, args, { id })], { stopReason: "toolUse" });
     const settle = async (chat: OptChat) => {
       for (let k = 0; k < 1500 && (script.length || (await chat.pending()).length); k++) await delay(10);
@@ -196,6 +205,9 @@ try {
       assert.deepEqual(observeCalls.at(-1)!.runs, true);
       assert.equal(observeCalls.at(-1)!.ids.length, ARCHIVED_SHOWN, "only the newest archived threads' stores are read");
       assert.ok(observeCalls.flatMap(item => item.ids).every(id => spawnedIds.includes(id)), "only threads this chat started");
+      const reads = observeCalls.length;
+      assert.deepEqual((await chat.threadOverview()).threads, overview.threads);
+      assert.equal(observeCalls.length, reads + 1, "an archived thread's last run is read once, not on every look");
 
       // Messages with no user words cost no call; a report is not the user's words.
       await chat.send("[abcdef12] ended its turn; nothing of it runs now: I want a dark mode too", "report:x:1");
@@ -226,6 +238,21 @@ try {
       assert.equal(await chat.dismissWish("w2"), true);
       assert.equal(await chat.dismissWish("w99"), false);
       assert.deepEqual((await chat.wishes()).wishes, []);
+      // A provider's failure is retried, not passed over.
+      running = true;
+      script = [() => fauxAssistantMessage("ok")];
+      fail = true;
+      const failedAt = finder.length;
+      await chat.send("please add a changelog page", "r5");
+      await settle(chat);
+      await until(async () => /overloaded/.test((await chat.wishes()).error ?? ""), "the failure shows");
+      assert.ok((await chat.wishes()).read < chat.memory.length, "its messages are not passed over");
+      answer = () => JSON.stringify({ found: [{ kind: "wish", confidence: "high", text: "a changelog page", quote: "add a changelog page", source: [chat.memory.length - 2] }] });
+      fail = false;
+      await until(async () => (await chat.wishes()).wishes.length === 1, "read on a later try");
+      assert.equal((await chat.wishes()).error, null);
+      assert.ok(finder.length - failedAt >= 2);
+      assert.equal(await chat.dismissWish("w3"), true);
       const usage = await chat.usage();
       assert.ok(Object.values(usage.wishes?.calls ?? {}).reduce((sum, count) => sum + count, 0) === finder.length, "every call is counted");
     } finally { await chat.close(); }
@@ -239,7 +266,18 @@ try {
       const list = await chat.wishes();
       assert.deepEqual([list.state, list.wishes, list.read === list.total], ["ready", [], true]);
     } finally { await chat.close(); }
-    chat = await open(false);
+    // The day's calls are spent: nothing more is asked until the next day.
+    chat = await open({ calls: 0 });
+    try {
+      running = true;
+      script = [() => fauxAssistantMessage("ok")];
+      await chat.send("please add an about page", "r6");
+      await settle(chat);
+      await delay(200);
+      assert.equal(finder.length, before, "no call past the day's bound");
+      assert.ok((await chat.wishes()).read < chat.memory.length);
+    } finally { await chat.close(); }
+    chat = await open({ wishes: false });
     try {
       running = true;
       script = [() => fauxAssistantMessage("ok")];

@@ -23,7 +23,7 @@ export const WISH_LIMITS = {
   text: 160, quote: 240,
   /** Wishes the panel shows at once. */
   shown: 7,
-  /** Model calls a day, backlog included. */
+  /** Model calls a UTC day, backlog included. */
   callsPerDay: 60,
   /** Output tokens a call may use. */
   maxTokens: 2000,
@@ -70,13 +70,32 @@ export const isReport = (message: LogMessage) => message.kind === "user" && REPO
 export const isUserWords = (message: LogMessage) => message.kind === "user" && !REPORT.test(message.text);
 /** A tool call that hands work to a thread. */
 export const isHandOff = (message: LogMessage) => message.kind === "tool" && /^(spawn|tell) /.test(message.text);
+/** The result of the hand-off at `id`, if the log has it: the next tool result. */
+const handOffResult = (messages: readonly LogMessage[], id: number) => {
+  for (let k = id + 1; k < messages.length && k <= id + 4; k++) if (messages[k]!.kind === "echo") return k;
+  return -1;
+};
+/** Whether the hand-off at `id` reached a thread: a spawn that started one, a tell that was sent. */
+export function handedOff(messages: readonly LogMessage[], id: number): boolean {
+  const result = messages[handOffResult(messages, id)]?.text ?? "";
+  return messages[id]!.text.startsWith("spawn ") ? /^\[[0-9a-f]{8}\] started in /m.test(result) : /^sent to \[[0-9a-f]{8}\]/.test(result);
+}
+/** A quote long enough to be the user's words rather than any word. */
+const QUOTE_WORDS = 3;
 
 const flat = (text: string) => text.replace(/\s+/g, " ").trim();
 const cut = (text: string, max: number) => { const value = flat(text); return value.length > max ? `${value.slice(0, max - 1)}…` : value; };
 
 /** One message as a chunk line, or null when the chunk leaves it out (tool
  * results, other tool calls, notes, thinking). */
-export function chunkLine(message: LogMessage, id: number): string | null {
+export function chunkLine(message: LogMessage, id: number, messages?: readonly LogMessage[]): string | null {
+  if (message.kind === "echo") {
+    // A hand-off's result says whether it reached a thread.
+    if (!messages) return null;
+    let call = id - 1;
+    while (call >= 0 && id - call <= 4 && messages[call]!.kind !== "tool") call--;
+    return call >= 0 && isHandOff(messages[call]!) && handOffResult(messages, call) === id ? `#${id} result: ${cut(message.text, WISH_LIMITS.report)}` : null;
+  }
   if (isReport(message)) return `#${id} report ${cut(message.text, WISH_LIMITS.report)}`;
   if (message.kind === "user") return `#${id} user: ${cut(message.text, WISH_LIMITS.user)}`;
   if (message.kind === "talk") return `#${id} optchat: ${cut(message.text, WISH_LIMITS.talk)}`;
@@ -92,7 +111,7 @@ export function nextChunk(messages: readonly LogMessage[], from: number, size: n
   let used = 0, users = 0, handOffs = 0, to = from;
   for (; to < messages.length; to++) {
     const message = messages[to]!;
-    const line = chunkLine(message, to);
+    const line = chunkLine(message, to, messages);
     if (line && lines.length && used + line.length > size) break;
     if (line) { lines.push(line); used += line.length + 1; }
     if (isUserWords(message)) users++;
@@ -122,7 +141,8 @@ Classify each candidate in the user's words as one kind:
 Only wish counts; report the other kinds too so the reason is visible.
 
 A wish is started when a spawn or tell after it in this log asks a thread to
-do it; then name that line. An open wish (in <open>) is started, repeated or
+do it and its result shows it started or was sent; then name the spawn or
+tell line. An open wish (in <open>) is started, repeated or
 withdrawn by lines of this log in the same way. Never infer that something was
 done, merged, released or installed: a report says only what a thread said.
 Do not add a wish that is the same as an open or dismissed one: name the open
@@ -167,7 +187,9 @@ export function similar(a: string, b: string): boolean {
   if (!x.size || !y.size) return flat(a).toLowerCase() === flat(b).toLowerCase();
   let both = 0;
   for (const word of x) if (y.has(word)) both++;
-  return both / (x.size + y.size - both) >= 0.6;
+  // High: a csv and a pdf export of one page are two wishes. The model
+  // names a reworded repeat itself.
+  return both / (x.size + y.size - both) >= 0.8;
 }
 const loose = (text: string) => flat(text).toLowerCase().replace(/[“”"'‘’`]/g, "");
 
@@ -182,7 +204,8 @@ export function applyAnswer(doc: Wishes, answer: Answer, chunk: Chunk, messages:
   const result: Applied = { added: [], repeated: [], started: [], withdrawn: [], refused: [] };
   const inChunk = (id: unknown): id is number => Number.isInteger(id) && (id as number) >= chunk.from && (id as number) < chunk.to;
   const userIds = (value: unknown) => (Array.isArray(value) ? value : [value]).filter((id): id is number => inChunk(id) && isUserWords(messages[id]!));
-  const handOff = (value: unknown): number | null => inChunk(value) && isHandOff(messages[value]!) ? value : null;
+  // A hand-off that failed (no such project, a refused tell) took nothing up.
+  const handOff = (value: unknown): number | null => inChunk(value) && isHandOff(messages[value]!) && handedOff(messages, value) ? value : null;
   const wish = (value: unknown) => typeof value === "string" ? doc.items.find(item => item.id === value.trim()) : undefined;
   const addSources = (item: Wish, ids: readonly number[]) => { item.sources = [...new Set([...item.sources, ...ids])].sort((a, b) => a - b); item.updated = now; };
 
@@ -194,12 +217,13 @@ export function applyAnswer(doc: Wishes, answer: Answer, chunk: Chunk, messages:
     const quote = typeof found.quote === "string" ? flat(found.quote) : "";
     const sources = userIds(found.source);
     if (!text || !quote || !sources.length) { result.refused.push(`${label}: no user message of this chunk named`); continue; }
+    if (quote.split(" ").length < QUOTE_WORDS) { result.refused.push(`${label}: quote too short to be the user's words`); continue; }
     // The quote must be the user's own words, in a message it names.
     if (!sources.some(id => loose(messages[id]!.text).includes(loose(quote)))) { result.refused.push(`${label}: quote not found in its source`); continue; }
     const project = typeof found.project === "string" && found.project.trim() && found.project !== "null" ? cut(found.project, 80) : null;
     const twin = doc.items.find(item => similar(item.text, text) || loose(item.quote) === loose(quote));
     const by = handOff(found.started_by);
-    const startedBy = by !== null && by > Math.min(...sources) ? by : null;
+    const startedBy = by !== null && by > Math.max(...sources) ? by : null;
     if (twin) {
       addSources(twin, sources);
       if (startedBy !== null && twin.status === "open") Object.assign(twin, { status: "started", by: startedBy });
@@ -222,7 +246,7 @@ export function applyAnswer(doc: Wishes, answer: Answer, chunk: Chunk, messages:
   }
   for (const start of Array.isArray(answer.started) ? answer.started : []) {
     const item = wish(start.wish), by = handOff(start.by);
-    if (!item || item.status !== "open" || by === null || by < Math.max(...item.sources)) { result.refused.push(`start of ${String(start.wish)}: not borne out`); continue; }
+    if (!item || item.status !== "open" || by === null || by <= Math.max(...item.sources)) { result.refused.push(`start of ${String(start.wish)}: not borne out`); continue; }
     Object.assign(item, { status: "started", by, updated: now });
     result.started.push(item.id);
   }
@@ -235,7 +259,10 @@ export function applyAnswer(doc: Wishes, answer: Answer, chunk: Chunk, messages:
   return result;
 }
 
-/** The text of a model's reply; a failed one throws. */
+/** An answer that came back but cannot be used: asking again would cost the same. */
+export class WishAnswerError extends Error {}
+
+/** The text of a model's reply; a failed one (a provider's error, retried later) throws. */
 export function replyText(message: AssistantMessage): string {
   if (message.stopReason === "error" || message.stopReason === "aborted") throw new Error(message.errorMessage ?? `wish finder ${message.stopReason}`);
   return message.content.map(part => part.type === "text" ? part.text : "").join("").trim();
@@ -252,7 +279,9 @@ export async function findWishes(options: { models: Models; model: { provider: s
     ...(options.signal ? { signal: options.signal } : {}),
   });
   await options.onReply?.(reply);
-  return parseAnswer(replyText(reply));
+  const text = replyText(reply);
+  try { return parseAnswer(text); }
+  catch (error) { throw new WishAnswerError(error instanceof Error ? error.message : String(error)); }
 }
 
 /** A wish as the UI reads it: its words, the user's quote and where they said it. */

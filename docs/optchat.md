@@ -268,7 +268,8 @@ it on a phone) shows every thread this chat started. Nobody keeps it:
   `GET /api/optchat/threads` (`working`, `turn ended`, `waiting on a
   background agent`, `failed`, `stopped`, `starting`, `waiting for a
   runner`, `machine error`, …), and the 8 newest archived threads with how
-  their last run ended (`archived · stopped`). Older archived threads are
+  their last run ended (`archived · stopped`; read once per thread, since an
+  archived thread runs no more). Older archived threads are
   counted, as are threads cubed no longer has. States are read like
   `history`: the stored run state, no agent opened, no lease taken, no
   machine waited for; one store slower than 2 s reads as `unknown`.
@@ -292,28 +293,35 @@ inferred, not kept: no tool writes it and OptChat does not read it.
 - **The reader.** A cheap model call (`optchat-wishes.ts`) reads the log
   from where it stopped, a chunk of at most 24,000 characters at a time: the
   user's words (1,500 characters a message), OptChat's replies (400), its
-  `spawn` and `tell` calls (600) and thread reports (300, marked as reports,
-  never as the user's words); tool results, other tools and notes are left
-  out. With the chunk it gets the open wishes (at most 30) and the last 20
+  `spawn` and `tell` calls (600) with their results (300), and thread
+  reports (300, marked as reports, never as the user's words); other tool
+  calls and results and notes are left out. With the chunk it gets the open wishes (at most 30) and the last 20
   dismissed ones. It classifies each candidate as `wish`, `question`,
   `hypothetical`, `rejected`, `deferred`, `suggestion` (OptChat's idea the
   user did not take up) or `done`, and names wishes repeated, taken up by a
   `spawn`/`tell` of the chunk, or withdrawn by the user.
-- **What is kept.** Only `wish` with high confidence, whose quote is found
-  word for word (spacing, case and quote marks aside) in a user message of
-  the chunk it names. A wish like a known one (open, started or dismissed:
-  the same quote or most of the same words) adds its messages to that one;
-  a repeat of a started or withdrawn wish opens it again. A start must name a
-  `spawn` or `tell` after the wish's words. Everything else is refused and
-  logged (`wishes refused`), never kept. At most 30 wishes are open.
+- **What is kept.** Only `wish` with high confidence, whose quote (three
+  words at least) is found word for word (spacing, case and quote marks
+  aside) in a user message of the chunk it names. A wish like a known one
+  (open, started or dismissed: the same quote, or nearly all the same words;
+  a csv and a pdf export stay two wishes) adds its messages to that one; a
+  repeat of a started or withdrawn wish opens it again. A start must name a
+  `spawn` or `tell` after the wish's words whose result shows a thread
+  started (`[id] started in …`) or the message sent (`sent to [id]`); a
+  spawn refused for its project or a refused tell takes nothing up.
+  Everything else is refused and logged (`wishes refused`), never kept. At
+  most 30 wishes are open.
 - **When it runs (the cost policy).** Never during a turn and never per
   token or per message: once the chat has been quiet for 3 minutes (every
   change of the chat moves the run), then a chunk every 20 s while it reads
   an older backlog, and at most every 15 minutes once it has caught up. A
   chunk with no words of the user, and no hand-off that could take up an
-  open wish, is read without a call. At most 60 calls a UTC day; a failed
-  call is retried after 15 minutes; an answer that cannot be read is not
-  asked again (its messages are passed over and the failure shown). Calls go
+  open wish, is read without a call. At most 60 calls a UTC day. A
+  provider's failure (an error or abort, a thrown call) is retried after 15
+  minutes and its messages are read then; an answer that came back but
+  cannot be read is not asked again (its messages are passed over and the
+  failure shown). The run checks again that no turn started right before
+  each call. Calls go
   to the compactor's model (`CUBED_OPTCHAT_COMPACTOR`, default the chat's)
   unless `CUBED_OPTCHAT_WISHES=provider/model`; `CUBED_OPTCHAT_WISHES=off`
   switches it off. Their usage is counted beside the compactor's

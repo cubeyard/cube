@@ -23,7 +23,7 @@ import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { capText, Memory, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
-import { applyAnswer, findWishes, initialWishes, nextChunk, WISH_LIMITS, type WishList, type Wishes } from "./optchat-wishes.ts";
+import { applyAnswer, findWishes, initialWishes, nextChunk, WISH_LIMITS, WishAnswerError, type WishList, type Wishes } from "./optchat-wishes.ts";
 import { PENDING_ID, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
 import { HISTORY_MAX, HISTORY_PAGE, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { addUsage, type OptChatUsage } from "./usage-service.ts";
@@ -354,7 +354,7 @@ export type OptChatOptions = {
   threads: OptThreads;
   /** Tests lower these. */
   limits?: { view?: number; node?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number;
-    wishQuietMs?: number; wishIntervalMs?: number; wishGapMs?: number; wishRetryMs?: number; wishChunk?: number };
+    wishQuietMs?: number; wishIntervalMs?: number; wishGapMs?: number; wishRetryMs?: number; wishChunk?: number; wishCallsPerDay?: number };
 };
 
 export class OptChat {
@@ -391,6 +391,8 @@ export class OptChat {
   private readonly entries: number[] = [];
   private wishTimer: ReturnType<typeof setTimeout> | undefined;
   private wishRun: Promise<void> | null = null;
+  /** Archived threads' last runs, read once each. */
+  private readonly archivedRuns = new Map<string, ObservedThread>();
   /** The attached images; `referenced`: the ids the log's messages hold. */
   media!: MediaStore;
   private readonly referenced = new Set<string>();
@@ -1013,8 +1015,15 @@ export class OptChat {
     const first = await observe(ids);
     const archived = ids.filter(id => first.get(id)?.archived);
     const recent = archived.slice(0, ARCHIVED_SHOWN);
-    // Only the newest archived threads' stores are read for their last run.
-    const runs = recent.length ? await observe(recent, { archivedRuns: true }) : new Map<string, ObservedThread | null>();
+    const runs = new Map<string, ObservedThread>();
+    // Only the newest archived threads' stores are read for their last run,
+    // once: an archived thread runs no more.
+    const unread = recent.filter(id => !this.archivedRuns.has(id));
+    for (const [id, thread] of unread.length ? await observe(unread, { archivedRuns: true }) : []) {
+      if (thread?.archived && thread.state !== "unknown") this.archivedRuns.set(id, thread);
+      else if (thread) runs.set(id, thread);
+    }
+    for (const id of recent) { const thread = this.archivedRuns.get(id); if (thread) runs.set(id, thread); }
     const threads: OverviewThread[] = [];
     for (const id of ids) {
       const thread = runs.get(id) ?? first.get(id);
@@ -1061,7 +1070,7 @@ export class OptChat {
         const now = Date.now();
         const today = new Date(now).toISOString().slice(0, 10);
         const calls = doc.day === today ? doc.callsToday : 0;
-        if (calls >= WISH_LIMITS.callsPerDay) return this.scheduleWishes(Date.parse(`${today}T00:00:00Z`) + 86_400_000 - now + 60_000);
+        if (calls >= (limits.wishCallsPerDay ?? WISH_LIMITS.callsPerDay)) return this.scheduleWishes(Date.parse(`${today}T00:00:00Z`) + 86_400_000 - now + 60_000);
         const chunk = nextChunk(messages, doc.through, limits.wishChunk);
         const open = doc.items.some(wish => wish.status === "open");
         // Nothing the user asked, and nothing that could take up a wish: read without a call.
@@ -1074,6 +1083,8 @@ export class OptChat {
         }
         const spacing = doc.error ? limits.wishRetryMs ?? WISH_RETRY_MS : doc.ready ? limits.wishIntervalMs ?? WISH_INTERVAL_MS : limits.wishGapMs ?? WISH_GAP_MS;
         if (doc.lastRun !== null && now - doc.lastRun < spacing) return this.scheduleWishes(doc.lastRun + spacing - now);
+        // A turn may have started while the log was read.
+        if ((await this.live())?.run || (await this.pending()).length) return this.scheduleWishes();
         let replied = false;
         try {
           const answer = await findWishes({ models: this.compactorModels, model, doc, chunk, messages, signal: this.abort.signal,
@@ -1089,13 +1100,15 @@ export class OptChat {
           if (this.closing) return;
           const message = error instanceof Error ? error.message : String(error);
           log.warn("wish finder failed", { from: chunk.from, to: chunk.to, error: message });
-          // An answer that came back unreadable is not asked again: the chunk is passed over.
+          // An answer that came back unusable is not asked again: the chunk is
+          // passed over. A provider's failure is retried later.
+          const unusable = error instanceof WishAnswerError;
           await this.harness.commit(async tx => {
             const fresh = await tx.doc(WishesDoc);
-            Object.assign(fresh, { lastRun: Date.now(), error: replied ? `messages #${chunk.from}–#${chunk.to - 1} not read: ${message}` : message, day: today, callsToday: calls + (replied ? 1 : 0) });
-            if (replied && fresh.through === chunk.from) fresh.through = chunk.to;
+            Object.assign(fresh, { lastRun: Date.now(), error: unusable ? `messages #${chunk.from}–#${chunk.to - 1} not read: ${message}` : message, day: today, callsToday: calls + (replied ? 1 : 0) });
+            if (unusable && fresh.through === chunk.from) fresh.through = chunk.to;
           }, context);
-          return this.scheduleWishes(replied ? limits.wishGapMs ?? WISH_GAP_MS : limits.wishRetryMs ?? WISH_RETRY_MS);
+          return this.scheduleWishes(unusable ? limits.wishGapMs ?? WISH_GAP_MS : limits.wishRetryMs ?? WISH_RETRY_MS);
         }
       }
     })().catch(error => { if (!this.closing) log.warn("wish finder failed", { error }); })
