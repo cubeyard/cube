@@ -305,7 +305,7 @@
   });
 </script>
 
-<svelte:window onkeydown={onKeydown} onscroll={() => { if (selection) onSelection(); }} />
+<svelte:window onkeydown={onKeydown} />
 
 <Header section="artifacts" />
 {#if gone}

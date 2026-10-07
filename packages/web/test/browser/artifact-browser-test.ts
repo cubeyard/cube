@@ -45,15 +45,16 @@ async function select(page: Page, text: string): Promise<void> {
     throw new Error(`no text ${wanted}`);
   }, text);
 }
-/** The comment key under a selection of `text`: it stays put while pressed
- * (the press only sinks it a pixel), a press near its edge still opens the
- * composer on that text, and it follows the selection when the document
- * scrolls. Leaves no comment behind. */
+/** The comment key under a selection of `text`: a mouse press near its edge
+ * leaves it in place (it sinks a pixel), keeps the selection and opens the
+ * composer on that text; a tap does too (a tap's click reaches the key even
+ * if it moved, so only the mouse shows a jump). It follows the selection when
+ * the document scrolls. Leaves no comment behind. */
 async function steadyKey(page: Page, text: string, shot: string, touch = false): Promise<void> {
   await select(page, text);
   const key = page.locator(".artifact-select-key");
   await key.waitFor();
-  // The key's centring is not an animation: read it once it has settled.
+  // Read the key once it is drawn and the document has scrolled to the selection.
   await delay(200);
   const at = (await key.boundingBox())!;
   const below = await page.evaluate(() => document.getSelection()!.getRangeAt(0).getBoundingClientRect().bottom);
