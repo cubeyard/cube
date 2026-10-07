@@ -288,12 +288,13 @@ The user can attach images to a chat message: paste them into the composer
 (a screenshot or a copied image; a paste that carries text stays a text paste),
 drop them on it (a dropped file that is no image is refused, never opened in
 place of the chat), or pick them with its `image` key. Each one shows as a preview
-with a remove key, uploads at once and goes with the next send; a failed upload
+with a remove key, uploads at once (the same image twice is kept once) and
+goes with the next send; a failed upload
 holds the send until it is removed, so nothing attached is dropped unseen. In
 the transcript a message shows its images as bounded thumbnails; a press opens
 the larger image in a dialog, with a link to the full size. They show again
-after a reload, from the store; one the host no longer has shows as
-`image unavailable` in the dashed placeholder.
+after a reload, from the store; one that does not load shows as
+`image unavailable · retry` in the dashed placeholder, which asks again.
 
 - **Where they live.** `<CUBED_STATE>/optchat/media/<sha256>`, written once per
   content (whole, through a temporary file and a rename), mode 0600. A message
@@ -352,12 +353,12 @@ resend, the bounds, a stop with images waiting), the sweep and the unsent
 bound, a reopen and the routes (with a body over the limit and no length). The composer's paste rule and
 checks are in `packages/web/test/images-test.ts`. In headless Chromium (desktop
 1440×900 and phone 390×844) a real clipboard paste of a PNG attached it, a text
-paste stayed text, a dropped image attached and a dropped text file was refused
+paste stayed text, the same image pasted again was kept once, a dropped image attached and a dropped text file was refused
 without leaving the page, a second image was removed before send, the faux model got
 the PNG, the thumbnail showed after a reload, the viewer opened and closed, the
 layout kept one composer row without overflow, and a model without image input
 turned the key off and explained a paste; in a fresh browser, an image the host
-had lost showed as unavailable and did not open. Not verified against a real
+had lost showed as unavailable, opened nothing and asked again on a press. Not verified against a real
 provider: what a real model makes of the images, and providers' own size and
 count limits beyond the bounds above.
 

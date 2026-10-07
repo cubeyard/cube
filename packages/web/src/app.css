@@ -1114,7 +1114,7 @@ header .spacer { margin-left: auto; }
 .message-image:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
 .message-image-missing { display: none; }
 /* the one dashed border: an image the host no longer has */
-.message-images li.missing .message-image { border-style: dashed; border-color: var(--line-2); cursor: default; }
+.message-images li.missing .message-image { border-style: dashed; border-color: var(--line-2); cursor: pointer; }
 .message-images li.missing img { display: none; }
 .message-images li.missing .message-image-missing {
   display: flex; align-items: center; justify-content: center; width: 9rem; height: 4rem;

@@ -166,7 +166,14 @@
         try { result = { id: (await uploadImage(base, await prepareImage(file))).id, error: null }; }
         catch (cause) { result = { id: null, error: errorText(cause) }; }
         const index = attachments.findIndex(other => other.key === item.key);
-        if (index >= 0 && !disposed) attachments[index] = { ...attachments[index]!, ...result };
+        if (index < 0 || disposed) return;
+        // The same image twice goes once: the second is let go here.
+        if (result.id && attachments.some(other => other.key !== item.key && other.id === result.id)) {
+          detach(item.key);
+          attachNote = "that image is already attached";
+          return;
+        }
+        attachments[index] = { ...attachments[index]!, ...result };
       })();
     }
   }
@@ -204,8 +211,15 @@
     else attachNote = "only png, jpeg, gif and webp images can be attached";
   }
 
-  /** Images the host no longer has: shown as missing, not opened. */
+  /** Images that did not load: shown as missing, not opened, until a retry
+   * asks the host again. */
   const missing = new SvelteSet<string>();
+  const retries = new SvelteMap<string, number>();
+  const thumbnail = (id: string) => `${imageUrl(base, id)}${retries.get(id) ? `?retry=${retries.get(id)}` : ""}`;
+  function retry(id: string): void {
+    missing.delete(id);
+    retries.set(id, (retries.get(id) ?? 0) + 1);
+  }
 
   async function inspect(src: string, label: string): Promise<void> {
     viewing = { src, label };
@@ -333,6 +347,7 @@
   <form class="composer" aria-busy={busy} onsubmit={(event) => { event.preventDefault(); void submit(); }}
     ondragover={(event) => { if (images && event.dataTransfer?.types.includes("Files")) event.preventDefault(); }} ondrop={onDrop}>
     <span class="sr-only" id="composer-hint">enter to send · shift enter for a new line{images ? " · paste or drop images to attach them" : ""}</span>
+    {#if images}<span class="sr-only" role="status">{!attachments.length ? "" : uploading ? "uploading images…" : failedAttachment ? "an image failed to upload" : `${attachments.length} ${attachments.length === 1 ? "image" : "images"} attached`}</span>{/if}
     {#if images && (attachments.length || attachNote)}
       <div class="composer-attachments">
         {#if attachments.length}
@@ -345,7 +360,6 @@
               </li>
             {/each}
           </ul>
-          <span class="sr-only" role="status">{uploading ? "uploading images…" : failedAttachment ? "an image failed to upload" : `${attachments.length} ${attachments.length === 1 ? "image" : "images"} attached`}</span>
         {/if}
         {#if attachNote}<p class="attachment-note" role="alert">{attachNote}</p>
         {:else if attachments.length && !images.supported}<p class="attachment-note" role="alert">{images.reason ?? "this model does not take images"}: remove the images or choose another model</p>
@@ -397,10 +411,10 @@
     {#each list as image, index (index)}
       {@const label = `image ${index + 1} of ${list.length}`}
       <li class:missing={missing.has(image.id)}>
-        <button type="button" class="message-image" aria-label={missing.has(image.id) ? `${label}, unavailable` : `view ${label} larger`}
-          disabled={missing.has(image.id)} onclick={() => inspect(imageUrl(base, image.id), label)}>
-          <img src={imageUrl(base, image.id)} alt={label} loading="lazy" decoding="async" onerror={() => missing.add(image.id)} />
-          <span class="message-image-missing">image unavailable</span>
+        <button type="button" class="message-image" aria-label={missing.has(image.id) ? `${label} unavailable, retry` : `view ${label} larger`}
+          onclick={() => missing.has(image.id) ? retry(image.id) : inspect(imageUrl(base, image.id), label)}>
+          <img src={thumbnail(image.id)} alt={label} loading="lazy" decoding="async" onerror={() => missing.add(image.id)} />
+          <span class="message-image-missing">image unavailable · retry</span>
         </button>
       </li>
     {/each}

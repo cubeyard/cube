@@ -287,7 +287,7 @@ try {
   assert.equal(served.headers.get("cross-origin-resource-policy"), "same-origin");
   assert.match(served.headers.get("content-security-policy") ?? "", /default-src 'none'; sandbox/);
   for (const id of ["..%2Fpi.sqlite", "%2e%2e", "0".repeat(64)]) assert.equal((await fetch(`${base}/media/${id}`)).status, 404);
-  // A body without a length is cut off at the limit, not read on.
+  // A body without a length over the limit is refused (the connection may close first).
   const chunked = await new Promise<number>(resolve => {
     const request = http.request(`${base}/media`, { method: "POST", headers: { "content-type": "image/png" } }, response => { response.resume(); resolve(response.statusCode!); });
     request.on("error", () => resolve(0));
