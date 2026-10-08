@@ -15,7 +15,9 @@ import { Registry } from "../packages/server/src/registry.ts";
 const [runner] = process.argv.slice(2);
 if (!runner || !fs.existsSync(runner)) throw new Error("usage: node scripts/test-local-runner.ts /path/to/cube-runner");
 const repo = path.resolve(import.meta.dirname, "..");
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-local-real-"));
+// A short root: the runner refuses a state whose socket paths exceed the
+// unix limit, and macOS's TMPDIR under /var/folders is long.
+const root = fs.mkdtempSync(path.join(process.platform === "darwin" ? "/tmp" : os.tmpdir(), "cube-lr-"));
 try {
   const bin = path.join(root, "bin");
   fs.mkdirSync(bin);
