@@ -23,14 +23,16 @@
   // appear in URLs. Ids are opaque tokens (uuids, "new"), used verbatim.
   // The settings pages' older addresses, and settings' own, land on a page.
   const MOVED: Record<string, string> = { "#/models": "#/settings/providers", "#/system": "#/settings/system", "#/settings": "#/settings/providers" };
+  const SETTINGS_PAGES: readonly SettingsPage[] = ["providers", "memory", "system"];
   function settle(): string {
-    const moved = MOVED[location.hash];
+    const page = location.hash.match(/^#\/settings\/([^/?]*)/)?.[1];
+    // An address under settings that names no page lands on the first.
+    const moved = MOVED[location.hash] ?? (page !== undefined && !SETTINGS_PAGES.includes(page as SettingsPage) ? "#/settings/providers" : undefined);
     if (moved) history.replaceState(history.state, "", moved);
     return location.hash;
   }
   let hash = $state(settle());
-  const settingsPage = $derived<SettingsPage | null>(/^#\/settings\//.test(hash)
-    ? (["providers", "memory", "system"] as const).find((page) => hash === `#/settings/${page}`) ?? "providers" : null);
+  const settingsPage = $derived<SettingsPage | null>(SETTINGS_PAGES.find((page) => hash.match(/^#\/settings\/([^/?]*)/)?.[1] === page) ?? null);
   const threadId = $derived(hash.match(/^#\/t\/([^/?]+)/)?.[1] ?? null);
   const projectId = $derived(hash.match(/^#\/projects\/([^/?]+)/)?.[1] ?? null);
   const artifactId = $derived(hash.match(/^#\/a\/([^/?]+)/)?.[1] ?? null);

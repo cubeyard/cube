@@ -123,7 +123,6 @@
 
 <style>
   .intro { max-width: 65ch; margin-bottom: 1.5rem; }
-  h1 { margin: 0 0 0.8rem; }
   h2 { font-size: 15px; margin: 0 0 0.25rem; }
   p { line-height: 1.6; overflow-wrap: anywhere; }
   .hint { color: var(--ink-3); font-size: 13px; }

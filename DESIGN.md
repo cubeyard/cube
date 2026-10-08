@@ -408,8 +408,9 @@ memory, system. Beside the page sits a **selector bank**: a recessed well
 over a silkscreen hint. The open page's item stands proud as a key face
 (`--s3`, `--line` border, `--shadow-key`) with `aria-current="page"`; the
 others are flush and wash on hover. No signal colour, lamp or side stripe
-marks the selection. At 40rem and below the bank lies flat above the page as
-one row of equal keys carrying short names. Each page keeps one headline
+marks the selection. At 46rem and below the bank lies flat above the page as
+one row of equal keys carrying short names (the full name stays the link's
+accessible name). Each page keeps one headline
 (20px/650) and its own controls; one primary key per page at most.
 
 ### Keys (buttons)

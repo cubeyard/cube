@@ -307,7 +307,7 @@ reset, invalid input, an unavailable saved model, a model list that cannot
 be read, the ignored variable, a held in-flight node) and in headless
 Chromium (`settings-browser-test.ts`: navigation and old addresses, saving,
 setup, desktop, 390px and 320px); not with real provider models. Below
-24.5rem the header's destinations take their own row (they overflowed
+24rem the header's destinations take their own row (they overflowed
 narrow phones before).
 
 ## Known gaps and next steps

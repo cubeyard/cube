@@ -47,7 +47,7 @@ try {
   assert.equal(await view.title(), "chat memory · settings · cube");
   assert.equal(await view.locator("header nav a.active").textContent(), "settings");
   assert.deepEqual(await view.locator("header nav a").allTextContents(), ["chat", "threads", "artifacts", "projects", "settings"], "models and system are under settings");
-  assert.equal(await view.locator(".settings-rail [aria-current=page]").getAttribute("aria-label"), "chat memory");
+  assert.equal(await view.locator(".settings-rail [aria-current=page] .rail-long").textContent(), "chat memory");
   await view.locator(".settings-board .chat-model").filter({ hasText: "faux/faux-chat" }).waitFor();
   assert.equal(await text(view, "compactor-model"), "faux/faux-chat");
   assert.match(await view.locator(".readout").textContent() ?? "", /follows the chat model/);
@@ -103,6 +103,25 @@ try {
   await view.goto(`${host.url}/#/system`);
   await view.waitForURL(/#\/settings\/system$/);
   await view.locator("h1", { hasText: "system" }).waitFor();
+  for (const address of ["#/settings", "#/settings/nonsense"]) {
+    await view.goto(`${host.url}/${address}`);
+    await view.waitForURL(/#\/settings\/providers$/);
+    await view.locator("h1", { hasText: "model providers" }).waitFor();
+  }
+
+  // Between phone and desktop: the bank lies flat until a page's tables fit beside it.
+  for (const width of [641, 680, 740, 900]) {
+    const middle = await page({ width, height: 800 });
+    for (const route of ["system", "memory", "providers"]) {
+      await middle.goto(`${host.url}/#/settings/${route}`);
+      await middle.locator(".settings-pane h1").waitFor();
+      await middle.waitForTimeout(300);
+      assert.ok(await noSideways(middle), `no sideways scroll at ${width}px (${route})`);
+      assert.ok(await middle.locator(".settings-pane").evaluate(pane => pane.scrollWidth <= pane.clientWidth), `the ${route} page fits its pane at ${width}px`);
+    }
+    if (width === 740) await shoot(middle, "tablet-system");
+    await middle.close();
+  }
 
   for (const route of ["memory", "providers", "system"]) {
     const small = await page(phone);

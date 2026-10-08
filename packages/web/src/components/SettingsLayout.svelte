@@ -20,8 +20,8 @@
 <main class="settings-shell">
   <nav class="settings-rail" aria-label="settings">
     {#each pages as item (item.id)}
-      <a href={`#/settings/${item.id}`} class="rail-item" aria-label={item.name} aria-current={item.id === page ? "page" : undefined}>
-        <span class="rail-name"><span class="rail-long">{item.name}</span><span class="rail-short" aria-hidden="true">{item.short}</span></span>
+      <a href={`#/settings/${item.id}`} class="rail-item" aria-current={item.id === page ? "page" : undefined}>
+        <span class="rail-name"><span class="rail-long">{item.name}</span>{#if item.short !== item.name}<span class="rail-short" aria-hidden="true">{item.short}</span>{/if}</span>
         <span class="rail-hint">{item.hint}</span>
       </a>
     {/each}
@@ -54,12 +54,16 @@
   .settings-pane { min-width: 0; overflow-y: auto; padding: 2rem clamp(1rem, 4vw, 4rem) 3rem clamp(1rem, 3vw, 2.6rem); }
   /* every page's title on the instrument's headline scale (DESIGN.md) */
   .settings-pane :global(h1) { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.3; margin: 0.35rem 0 0.8rem; }
-  @media (max-width: 40rem) {
+  /* below 46rem the bank lies flat: beside it, a page's tables (usage)
+     would scroll sideways inside the pane */
+  @media (max-width: 46rem) {
     .settings-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
     /* on a phone the bank lies flat above the page: three keys in a row */
     .settings-rail { flex-direction: row; margin: 0.8rem 0.8rem 0; }
     .rail-item { flex: 1 1 0; min-width: 0; align-items: center; padding: 0.55rem 0.4rem; min-height: 2.5rem; justify-content: center; }
-    .rail-long, .rail-hint { display: none; }
+    .rail-hint { display: none; }
+    /* the short name shows; the full one stays the link's name for a screen reader */
+    .rail-name:has(.rail-short) .rail-long { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
     .rail-short { display: inline; white-space: nowrap; }
     .settings-pane { padding: 1.3rem 1rem 2.5rem; }
   }

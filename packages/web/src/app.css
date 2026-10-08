@@ -1400,7 +1400,7 @@ select.compose-input {
 
 /* the narrowest phones: the destinations take their own row under the
    wordmark and lamp, and scroll rather than push the page sideways */
-@media (max-width: 24.5rem) {
+@media (max-width: 24rem) {
   header { flex-wrap: wrap; row-gap: 0.15rem; }
   header nav { order: 3; flex-basis: 100%; min-width: 0; overflow-x: auto; scrollbar-width: none; padding-block: 2px; }
   header nav a { flex: none; }

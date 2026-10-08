@@ -117,7 +117,6 @@
 
 <style>
   .intro { max-width: 65ch; margin-bottom: 1.5rem; }
-  h1 { margin: 0 0 0.8rem; }
   p { margin: 0; }
   .intro p, .hint { line-height: 1.6; color: var(--ink-2); }
   .intro strong { color: var(--ink); font-weight: 600; }

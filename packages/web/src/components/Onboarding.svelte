@@ -45,7 +45,8 @@
         return;
       }
       step = 2;
-      void loadMemory();
+      // Loaded once: back and continue keep a choice not saved yet.
+      if (!memory) void loadMemory();
       await tick();
       heading?.focus();
     } catch (e) {
@@ -124,7 +125,8 @@
           <option value={FOLLOW}>follow the chat’s model</option>
           {#each memory.models ?? [] as model}<option value={modelKey(model)}>{model.provider}/{model.id}</option>{/each}
         </select>
-        {#if !memory.models?.length}<p class="later">Connect a model provider to choose another. You can change this any time under settings › chat memory.</p>{/if}
+        {#if !memory.models}<p class="later">{memory.error ?? "The models could not be listed."} You can choose later under settings › chat memory.</p>
+        {:else if !memory.models.length}<p class="later">Connect a model provider to choose another. You can change this any time under settings › chat memory.</p>{/if}
       </div>
     {/if}
     <div class="choices">
