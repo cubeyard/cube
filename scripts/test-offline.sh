@@ -30,6 +30,7 @@ OFFLINE_TESTS=(
   packages/server/test/thread-start-commits-test.ts
   packages/server/test/durable-agent-test.ts
   packages/server/test/codemode-test.ts
+  packages/server/test/pi-read-test.ts
   packages/server/test/thread-events-test.ts
   packages/server/test/pi-compaction-test.ts
   packages/server/test/optchat-memory-test.ts

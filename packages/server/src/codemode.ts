@@ -11,7 +11,7 @@
  * for cubed, not a sandbox; the tools themselves act in the thread's VM. */
 import type { Context } from "@earendil-works/chord";
 import { withAbortSignal } from "@earendil-works/chord/context";
-import { Type, validateToolArguments, type ToolCall } from "@earendil-works/pi-ai";
+import { Type, validateToolArguments, type ToolCall, type ImageContent } from "@earendil-works/pi-ai";
 import { CodemodeSandbox, CodemodeSourceError, parseCodemodeSource, renderDeclarations, type CodemodeJsonSchema, type CodemodeResult, type CodemodeTool } from "@earendil-works/pi-codemode";
 import { defineTool, type ToolDiagnostic, type ToolExecutionApi, type ToolExecutionResult, type ToolRegistration } from "@earendil-works/pi-durable";
 
@@ -72,6 +72,8 @@ export type CodemodeDetails = {
 
 const TEXT: CodemodeJsonSchema = { type: "string" };
 const ERROR_CHARS = 500;
+const IMAGE_BYTES = 8 * 1024 * 1024;
+const IMAGE_COUNT = 8;
 
 export function createCodemodeTool(options: {
   tools: readonly NestedTool[];
@@ -96,6 +98,7 @@ export function createCodemodeTool(options: {
       "Run JavaScript that calls the workspace tools. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS VM: top-level `await` and `return` work. There is no Node, file system, network or timers; the only capabilities are the tools below.",
       "- `await tools.<name>({ ...args })` resolves to the tool's text result and rejects with an Error on failure. Nested calls run one at a time in call order; calls still running or queued when the script ends are stopped.",
       "- `text(value)`, `console.log(...)` and `return value` produce the result. `store`/`load` values last only for one script.",
+      "- Images from successful nested reads are attached automatically as typed images to this tool result, not passed as base64 into JavaScript. At most 8 images and 8 MiB of base64 per script. Use tools.read to deliver images, not image().",
       "- Optional first line: `// @options: {\"timeout_ms\": 60000, \"max_output_tokens\": 4000}`.",
       `- Limits: ${limits.sourceBytes / 1024} KiB source, ${limits.memoryBytes / 1024 / 1024} MiB memory, ${limits.timeoutMs / 1000} s in total, ${limits.maxCalls} nested calls, ${limits.maxArgumentBytes / 1024} KiB arguments per call, ${limits.maxCallResultBytes / 1024} KiB per call result, ${limits.maxResultBytes / 1024} KiB result.`,
       "- A call stopped while running may have partially run; the result then says its outcome is uncertain. Nothing is retried automatically.",
@@ -123,6 +126,8 @@ export function createCodemodeTool(options: {
 
       const base = options.key(api);
       const calls: NestedCall[] = [];
+      const images: ImageContent[] = [];
+      let imageBytes = 0;
       const running = new Set<Promise<unknown>>();
       const stop = new AbortController();
       let limit: string | undefined;
@@ -178,7 +183,14 @@ export function createCodemodeTool(options: {
           if (result.isError) throw new Error(text || `${call.name} failed`);
           const bytes = Buffer.byteLength(text);
           if (bytes > limits.maxCallResultBytes) throw new Error(`${call.name} returned ${bytes} bytes; codemode hands at most ${limits.maxCallResultBytes} bytes of one call result to the script`);
-          return text;
+          const parts = (result.content ?? []).filter((part): part is ImageContent => part.type === "image");
+          const bytesOfImages = parts.reduce((sum, part) => sum + Buffer.byteLength(part.data), 0);
+          if (images.length + parts.length > IMAGE_COUNT || imageBytes + bytesOfImages > IMAGE_BYTES) throw new Error("codemode image budget exceeded; read fewer images per script");
+          // A late completion after the script ended must not mutate its result.
+          signal.throwIfAborted();
+          images.push(...parts);
+          imageBytes += bytesOfImages;
+          return parts.length ? `${text}${text ? "\n" : ""}${parts.length} image(s) attached to the tool result.` : text;
         })();
         running.add(work);
         unsettled.add(work);
@@ -229,7 +241,9 @@ export function createCodemodeTool(options: {
       if (limit) body.push(`Script stopped by the ${limit} limit: ${limitMessage}.`);
       else if (!result.ok) body.push(`Script failed (${result.error.kind}): ${result.error.message}`);
       else body.push(uncertain.length ? "Script completed, but the outcome of some nested calls is uncertain." : "Script completed.");
-      const output = result.output.map(item => item.type === "text" ? item.text : `[image omitted: codemode results carry text only]`).join("\n");
+      const unsupportedImage = result.output.some(item => item.type === "image");
+      if (unsupportedImage) body.push("image() output is not supported; use tools.read to deliver checked workspace images.");
+      const output = result.output.filter(item => item.type === "text").map(item => item.text).join("\n");
       if (output) body.push(output);
       if (result.ok && result.value !== undefined) body.push(`Return value:\n${JSON.stringify(result.value)}`);
       if (!result.ok && result.error.kind === "script" && result.error.stack) body.push(`Script error:\n${result.error.stack}`);
@@ -240,7 +254,7 @@ export function createCodemodeTool(options: {
         ].join("\n"));
       }
       const details: CodemodeDetails = { calls: calls.map(call => ({ ...call })), completionUnknown: uncertain.length > 0, ...(limit ? { limit } : {}) };
-      return { content: [{ type: "text", text: bound(body.join("\n\n"), resultBytes) }], isError: !result.ok || uncertain.length > 0, details };
+      return { content: [{ type: "text", text: bound(body.join("\n\n"), resultBytes) }, ...images], isError: !result.ok || uncertain.length > 0 || unsupportedImage, details };
     },
   });
 }
