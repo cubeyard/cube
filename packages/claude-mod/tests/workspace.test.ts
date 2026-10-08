@@ -180,7 +180,7 @@ describe('workspace tools', () => {
     expect(reached).toEqual([])
   })
 
-  test('host-local tools, background commands and isolated subagents are refused', async ($, on) => {
+  test('host-local tools and background commands are refused', async ($, on) => {
     const workspace = fakeWorkspace(on)
     const reached = engine(on)
     const background = await $.tool.call({ tool: 'Bash', command: 'sleep 100', run_in_background: true })
@@ -189,14 +189,38 @@ describe('workspace tools', () => {
     expect(refusal(notebook)).toMatch(/NotebookEdit is not available/)
     const worktree = await $.tool.call({ tool: 'EnterWorktree', name: 'x' })
     expect(refusal(worktree)).toMatch(/EnterWorktree is not available/)
-    const isolated = await $.tool.call({ tool: 'Agent', description: 'look', prompt: 'look around', isolation: 'worktree' })
-    expect(refusal(isolated)).toMatch(/worktree isolation/)
-    const remote = await $.tool.call({ tool: 'Agent', description: 'look', prompt: 'look around', isolation: 'remote' })
-    expect(refusal(remote)).toMatch(/remote isolation/)
-    const plain = await $.tool.call({ tool: 'Agent', description: 'look', prompt: 'look around' })
-    expect(plain.result).toBe('engine ran Agent')
-    expect(reached).toEqual(['Agent'])
+    const plan = await $.tool.call({ tool: 'EnterPlanMode' } as never)
+    expect(plan.result).toBe('engine ran EnterPlanMode')
+    expect(reached).toEqual(['EnterPlanMode'])
     expect(workspace.requests.filter(request => request.method !== 'GET').length).toBe(0)
+  })
+
+  test('no tool starts or continues a subagent, under any of its names', async ($, on) => {
+    fakeWorkspace(on)
+    const reached = engine(on)
+    const calls = [
+      { tool: 'Agent', description: 'look', prompt: 'look around' },
+      { tool: 'Agent', description: 'look', prompt: 'look around', run_in_background: true },
+      { tool: 'Agent', description: 'look', prompt: 'look around', subagent_type: 'Explore', isolation: 'worktree' },
+      { tool: 'Agent', description: 'look', prompt: 'look around', name: 'mate', team_name: 'crew' },
+      { tool: 'Task', description: 'look', prompt: 'look around', subagent_type: 'general-purpose' },
+      { tool: 'Workflow', script: 'export const meta = { name: "w", description: "w", phases: [] }' },
+      { tool: 'SendMessage', to: 'mate', message: 'go on' },
+    ]
+    const refusals = []
+    for (const call of calls) refusals.push(refusal(await $.tool.call(call as never)))
+    expect(refusals).toEqual([
+      'Agent: subagents are not available in cube threads: do the work in this thread, or ask in your reply for another cube thread, which OptChat starts with its own visible history',
+      'Agent: subagents are not available in cube threads: do the work in this thread, or ask in your reply for another cube thread, which OptChat starts with its own visible history',
+      'Agent: subagents are not available in cube threads: do the work in this thread, or ask in your reply for another cube thread, which OptChat starts with its own visible history',
+      'Agent: subagents are not available in cube threads: do the work in this thread, or ask in your reply for another cube thread, which OptChat starts with its own visible history',
+      'Task: subagents are not available in cube threads: do the work in this thread, or ask in your reply for another cube thread, which OptChat starts with its own visible history',
+      'Workflow: subagents are not available in cube threads: do the work in this thread, or ask in your reply for another cube thread, which OptChat starts with its own visible history',
+      'SendMessage: subagents are not available in cube threads: do the work in this thread, or ask in your reply for another cube thread, which OptChat starts with its own visible history',
+    ])
+    const search = await $.tool.call({ tool: 'WebSearch', query: 'cube' } as never)
+    expect(search.result).toBe('engine ran WebSearch')
+    expect(reached).toEqual(['WebSearch'])
   })
 
   test('only allow-listed tools run: MCP and unknown tools are refused', async ($, on) => {
@@ -216,15 +240,20 @@ describe('workspace tools', () => {
     expect(workspace.requests.filter(request => request.method !== 'GET').length).toBe(0)
   })
 
-  test('subagents start only as built-in types without isolation', async ($, on) => {
+  test('no subagent spawns: built-in, fork, teammate or workflow', async ($, on) => {
     fakeWorkspace(on)
     const spawned: string[] = []
     on('agent.spawn', ($, e) => { spawned.push(e.subagentType); return { model: 'haiku', agentId: `agent-${spawned.length}` } })
-    const builtin = await $.agent.spawn({ prompt: 'look around', description: 'look', subagentType: 'general-purpose' } as never)
-    expect(builtin.deny).toBe(undefined)
-    const isolated = await $.agent.spawn({ prompt: 'look around', description: 'look', subagentType: 'general-purpose', isolation: 'worktree' } as never)
-    expect(String(isolated.deny)).toMatch(/worktree isolation/)
-    expect(spawned).toEqual(['general-purpose'])
+    const spawns = [
+      { prompt: 'look around', description: 'look', subagentType: 'general-purpose' },
+      { prompt: 'look around', description: 'look', subagentType: 'fork', fork: true },
+      { prompt: 'look around', description: 'look', subagentType: 'general-purpose', isTeammate: true, name: 'mate' },
+      { prompt: 'look around', description: 'look', subagentType: 'general-purpose', workflow: { runId: 'r1' } },
+    ]
+    const denials = []
+    for (const spawn of spawns) denials.push(String((await $.agent.spawn(spawn as never)).deny))
+    expect(denials).toEqual(Array(4).fill('subagents are not available in cube threads: do the work in this thread, or ask in your reply for another cube thread, which OptChat starts with its own visible history'))
+    expect(spawned).toEqual([])
   })
 
   test('the workspace instructions join the first message context', async ($, on) => {

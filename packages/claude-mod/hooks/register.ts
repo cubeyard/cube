@@ -12,9 +12,10 @@
  * and is not sandboxed. */
 import type { EngineInterface, Register } from 'claude-code'
 import { WorkspaceClient } from './workspace.ts'
-import { ALLOWED_TOOLS, ARTIFACT_GUIDE, ARTIFACT_ROOT, PROJECT_HOOKS_NOTE, artifactPath, bash, edit, GUEST_HOME, instructions, read, readArtifact, write, writeArtifact, VIRTUAL_ROOT, type ToolScope } from './tools.ts'
+import { ALLOWED_TOOLS, ARTIFACT_GUIDE, ARTIFACT_ROOT, NO_SUBAGENTS, PROJECT_HOOKS_NOTE, SUBAGENT_TOOLS, artifactPath, bash, edit, GUEST_HOME, instructions, read, readArtifact, write, writeArtifact, VIRTUAL_ROOT, type ToolScope } from './tools.ts'
 
 const ALLOWED = new Set(ALLOWED_TOOLS)
+const SUBAGENTS = new Set(SUBAGENT_TOOLS)
 const UNCONFIGURED = 'cube: this session has no thread workspace; cubed starts Claude Code with one'
 const INSTRUCTION_FILES = ['AGENTS.md', 'CLAUDE.md']
 
@@ -42,20 +43,14 @@ export const register: Register = on => {
   // tool, a newer built-in) would run on the cubed host as the cubed user.
   on('tool.call', ($, e, next) => {
     const tool = String(e.tool)
+    if (SUBAGENTS.has(tool)) return { deny: `${tool}: ${NO_SUBAGENTS}` }
     if (!ALLOWED.has(tool)) return { deny: `${tool} is not available in cube threads: it would act on the cubed host, not the thread workspace. Use Bash, Read, Write or Edit.` }
-    if (e.tool === 'Agent' && e.isolation) return { deny: `subagents with ${e.isolation} isolation are not available in cube threads; start the subagent without isolation` }
     return next(e)
   })
 
-  // An agent definition can force isolation without the call asking for it,
-  // and a definition from elsewhere can carry its own tools and hooks: only
-  // Claude Code's built-in agent types start, never isolated.
-  on('agent.spawn', ($, e, next) => {
-    const isolation = (e as { isolation?: unknown }).isolation
-    if (isolation) return { deny: `subagents with ${String(isolation)} isolation are not available in cube threads; start the subagent without isolation` }
-    if (e.provider.plugin !== 'engine') return { deny: `the ${e.subagentType} agent is not available in cube threads; use a built-in agent type such as general-purpose` }
-    return next(e)
-  })
+  // Every spawn, whatever starts it (a fork, a teammate, a workflow, an
+  // agent definition): the tool list is not the only way in.
+  on('agent.spawn', () => ({ deny: NO_SUBAGENTS }))
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const scope = await workspace($, next.signal)

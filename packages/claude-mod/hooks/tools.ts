@@ -9,11 +9,16 @@
 import { toBase64, WorkspaceClientError, type WorkspaceClient, type WorkspaceOperation } from "./workspace.ts";
 
 /** The only Claude Code tools a cube thread offers: Bash, Read, Write and
- * Edit go to the workspace, the rest plan, search the web through the model
- * provider or delegate inside Claude Code. Everything else, MCP tools and
- * built-ins this list does not know included, would act on the cubed host as
- * the cubed user and is refused. cubed also passes this list as --tools. */
-export const ALLOWED_TOOLS: readonly string[] = ["Bash", "Read", "Write", "Edit", "Agent", "TodoWrite", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "ToolSearch", "WebSearch", "EnterPlanMode", "ExitPlanMode"];
+ * Edit go to the workspace, the rest plan or search the web through the model
+ * provider. Everything else, MCP tools and built-ins this list does not know
+ * included, would act on the cubed host as the cubed user and is refused.
+ * cubed also passes this list as --tools. */
+export const ALLOWED_TOOLS: readonly string[] = ["Bash", "Read", "Write", "Edit", "TodoWrite", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "ToolSearch", "WebSearch", "EnterPlanMode", "ExitPlanMode"];
+
+/** Claude Code's tools that start or continue its own agents (`Task` is
+ * Agent's older name), whose work the thread's transcript would not show. */
+export const SUBAGENT_TOOLS: readonly string[] = ["Agent", "Task", "Workflow", "SendMessage"];
+export const NO_SUBAGENTS = "subagents are not available in cube threads: do the work in this thread, or ask in your reply for another cube thread, which OptChat starts with its own visible history";
 
 /** The workspace root in the machine, as Pi names it; accepted here as an alias too. */
 export const VIRTUAL_ROOT = "/workspace";

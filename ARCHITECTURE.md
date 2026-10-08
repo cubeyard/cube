@@ -274,7 +274,7 @@ and cancels their guest commands (`claude:<tool_use_id>:bash`) itself when it
 kills the child, when the child dies mid-turn and on close, because the mod
 never sees an abort then. A model
 change closes the idle child so the next prompt resumes with the new
-`--model`. An idle child is closed after ten minutes, never while a background agent (Claude Code's Agent tool runs one by default) still runs: ending the child ends it. cubed follows Claude Code's `task_started`/`task_notification` messages; the turn Claude Code takes by itself for a finished background agent is recorded as a run of its own, and background agents that can no longer finish (the child ended, cubed stopped, 4 hours passed) as a failed run, so watchers hear of them once (docs/optchat.md, "Follow-up and unattended work"). cubed never stores Claude
+`--model`. An idle child is closed after ten minutes, never while a background agent still runs: ending the child ends it (threads start none now, see the mod below; the tracking keeps the records of sessions that did). cubed follows Claude Code's `task_started`/`task_notification` messages; the turn Claude Code takes by itself for a finished background agent is recorded as a run of its own, and background agents that can no longer finish (the child ended, cubed stopped, 4 hours passed) as a failed run, so watchers hear of them once (docs/optchat.md, "Follow-up and unattended work"). cubed never stores Claude
 credentials; the child gets an allow-listed environment without any
 `ANTHROPIC_*` variable or Bedrock/Vertex switch, so the subscription is used
 instead of API billing, and without cubed's other credentials. The user's
@@ -292,9 +292,17 @@ decode or resize, so it refuses a larger image and names a bash resize instead.
 An image the API still rejects, Claude Code replaces with a note to the model. Tools are an allow-list
 (`ALLOWED_TOOLS` in `hooks/tools.ts`, also passed as `--tools`): everything else,
 MCP tools and built-ins the list does not know included, is refused because it
-would act on the cubed host. It also refuses background Bash, subagents with
-worktree or remote isolation and agent types that are not Claude Code's
-built-ins, and its
+would act on the cubed host. It also refuses background Bash and every
+subagent: the tools that start or continue one (`Agent`, its older name
+`Task`, `Workflow`, `SendMessage`) are not in `--tools`, Claude Code refuses
+them for the session, and the mod refuses them again by name, while its
+`agent.spawn` hook denies every spawn (a fork, a teammate, a workflow's).
+Delegation is a cube thread OptChat starts, whose history the person sees;
+a subagent's messages would stay inside its tool call. This does not stop
+Bash in the thread's machine from running another agent CLI or calling a
+model over HTTPS with a key it has; such commands show in the transcript.
+`scripts/check-claude-subagents.ts` checks a real `claude` against a
+scripted Messages API. Its
 `prompt.context` hook adds the workspace's `AGENTS.md` and `CLAUDE.md`. The mod
 reaches cubed on a private Unix socket (`CUBED_STATE/run/workspace.sock`, mode
 0600) that serves only workspace routes; the lease token cubed holds for the

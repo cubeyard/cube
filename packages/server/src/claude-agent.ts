@@ -19,7 +19,8 @@
  * messages Claude Code printed, its session id and the background agents a
  * turn left running.
  *
- * A background agent (the Agent tool runs in the background by default) goes
+ * Threads start no subagents (the mod refuses them), but a session that
+ * started a background agent before keeps its record here. Such an agent goes
  * on after its turn's result. While one runs the child stays open, past the
  * idle close, for at most `backgroundMs`; when it finishes Claude Code takes
  * a turn of its own, which cubed records as a run (`cube:background:<task>`).
@@ -83,6 +84,15 @@ export function claudeEnvironment(source: NodeJS.ProcessEnv, extra: Readonly<Rec
   Object.assign(env, extra);
   for (const name of Object.keys(env)) if (CLAUDE_REMOVED_ENV.test(name)) delete env[name];
   return { ...env, ...workspace };
+}
+
+/** The `claude` arguments for a thread, the same on a first start and a
+ * resumed one: only cube's mod, no user or project settings (their hooks),
+ * no MCP servers, and only the tools the mod allows. */
+export function claudeArguments(mod: string, model: string, session: string | null): string[] {
+  return ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+    "--setting-sources", "", "--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: {} }), "--tools", ALLOWED_TOOLS.join(","),
+    "--plugin-dir", mod, "--model", model, ...(session ? ["--resume", session] : [])];
 }
 
 export interface ClaudeSubmission {
@@ -292,13 +302,7 @@ export class ClaudeAgent {
       // The same directory as the kernel names it (Claude Code's own cwd)
       // when the state path has a symlink in it.
       CUBE_WORKSPACE_REAL_ROOT: fs.realpathSync(this.cwd) });
-    const child = spawn(command!, [...prefix,
-      "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-      // Only cube's mod: no user or project settings (their hooks), no MCP
-      // servers, and only the tools the mod allows.
-      "--setting-sources", "", "--strict-mcp-config", "--mcp-config", JSON.stringify({ mcpServers: {} }), "--tools", ALLOWED_TOOLS.join(","),
-      "--plugin-dir", this.runtime.mod, "--model", this.model, ...(session ? ["--resume", session] : [])],
-      { cwd: this.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(command!, [...prefix, ...claudeArguments(this.runtime.mod, this.model, session)], { cwd: this.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     const stderr: string[] = [];
     child.once("error", error => stderr.push(error.message));
     const exited = new Promise<void>(resolve => { child.once("close", () => resolve()); child.once("error", () => resolve()); });
