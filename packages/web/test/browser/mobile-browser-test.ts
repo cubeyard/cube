@@ -82,8 +82,12 @@ async function assertNoSideways(page: Page): Promise<void> {
   const [scroll, width] = await page.evaluate(() => [document.documentElement.scrollWidth, innerWidth]);
   assert.ok(scroll <= width, `nothing pushes the page sideways: ${scroll} > ${width}`);
 }
-/** Pixels between the transcript's end and its view. */
-const gap = (page: Page) => page.locator(".transcript").evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight);
+/** Waits until the transcript's view is at its end: a following view is
+ * pinned again by a ResizeObserver, a frame or so after its box changes. */
+const atEnd = (page: Page, what: string) => page.waitForFunction(() => {
+  const el = document.querySelector(".transcript")!;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 4;
+}, undefined, { timeout: 5000 }).catch(() => assert.fail(what));
 
 let failed = false;
 async function scenario(browser: Browser, engine: string, name: string, size: { width: number; height: number; touch?: boolean; ios?: boolean }, route: string,
@@ -203,7 +207,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       const room = size.height - 320;
       await scenario(browser, engine, `typing in the chat: the keyboard takes the ${way}; the conversation keeps the room`, size, "chat", async page => {
         await page.locator(".work-fold").tap();
-        assert.equal(await gap(page), 0, "the view starts at the end");
+        await atEnd(page, "the view starts at the end");
         await openKeyboard(page, size, room);
         await page.waitForFunction(() => document.documentElement.dataset.keyboard === "open");
         assert.equal(await visible(page, "header"), false, "the header steps aside");
@@ -216,7 +220,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
         assert.ok(Math.abs(composer.bottom - room) <= 1, `the composer sits on the keyboard: ${composer.bottom}`);
         const transcript = await box(page, ".transcript");
         assert.ok(transcript.height >= room - 130, `the conversation keeps the room: ${transcript.height} of ${room}`);
-        assert.ok(await gap(page) < 4, "and still shows the end");
+        await atEnd(page, "and still shows the end");
         await page.keyboard.type("a draft");
         assert.ok(await page.locator(".composer textarea").evaluate(el => el === document.activeElement), "the field keeps focus");
         await shoot(page, engine, `chat-keyboard-${ios ? "ios" : "android"}-${size.width}x${size.height}`, room);
