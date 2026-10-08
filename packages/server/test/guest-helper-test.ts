@@ -9,9 +9,12 @@ const result = spawnSync("python3", ["-W", "error", path.join(import.meta.dirnam
 process.stderr.write(result.stderr);
 assert.equal(result.status, 0, "guest helper unit tests failed");
 // Reaching files outside the workspace as the agent's account needs root, as
-// in the guest; run that test as root where passwordless sudo exists (CI).
+// in the guest: CUBE_TEST_GUEST_ROOT=1 (CI) runs that test with sudo -n.
 let asRoot = "";
-if (process.platform === "linux" && process.getuid?.() !== 0 && spawnSync("sudo", ["-n", "true"]).status === 0) {
+const rootTest = process.env.CUBE_TEST_GUEST_ROOT;
+const sudo = process.platform === "linux" && process.getuid?.() !== 0 && spawnSync("sudo", ["-n", "true"]).status === 0;
+assert.ok(rootTest !== "required" || sudo, "CUBE_TEST_GUEST_ROOT=required needs Linux and passwordless sudo");
+if (rootTest && rootTest !== "0" && sudo) {
   const root = spawnSync("sudo", ["-n", "python3", "-W", "error", path.join(import.meta.dirname, "guest_helper_test.py"),
     "GuestHelperTest.test_outside_the_workspace_files_are_reached_as_the_agent"], { encoding: "utf8" });
   process.stderr.write(root.stderr);

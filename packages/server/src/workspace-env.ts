@@ -35,7 +35,8 @@ export class WorkspaceEnv implements ExecutionEnv {
 
   async absolutePath(file: string): Promise<Result<string, FileError>> {
     if (typeof file !== "string" || !file || file.includes("\0")) return err(new FileError("invalid", "a file path is required", file));
-    const expanded = file === "~" ? GUEST_HOME : file.startsWith("~/") ? `${GUEST_HOME}${file.slice(1)}` : file;
+    const expanded = expandHome(file);
+    if (expanded === null) return err(new FileError("invalid", `${file}: only ~ and ~/ name a home, the agent's (${GUEST_HOME})`, file));
     return ok(path.posix.resolve(this.cwd, expanded));
   }
   async joinPath(parts: string[]): Promise<Result<string, FileError>> { return ok(path.posix.join(...parts)); }
@@ -112,6 +113,12 @@ export class WorkspaceEnv implements ExecutionEnv {
     try { return ok(await action(workspacePath(absolute.value))); }
     catch (error) { return err(fileError(file, error)); }
   }
+}
+
+/** `~` and `~/…` in the agent's home; null for another account's (`~name`). */
+export function expandHome(file: string): string | null {
+  if (file === "~" || file.startsWith("~/")) return `${GUEST_HOME}${file.slice(1)}`;
+  return file.startsWith("~") ? null : file;
 }
 
 /** The Workspace path of an absolute one in the machine: relative to the

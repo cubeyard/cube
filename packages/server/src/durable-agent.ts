@@ -15,7 +15,7 @@ import { createEditTool, createWriteTool } from "@earendil-works/pi-durable/tool
 import { createPiReadTool } from "./pi-read.ts";
 import { createCodemodeTool, type CodemodeLimits, type NestedTool } from "./codemode.ts";
 import { settleOperation, WorkspaceError, type Workspace } from "./workspace.ts";
-import { WORKSPACE_ROOT, WorkspaceEnv, workspacePath } from "./workspace-env.ts";
+import { expandHome, WORKSPACE_ROOT, WorkspaceEnv, workspacePath } from "./workspace-env.ts";
 
 const context = BACKGROUND_CONTEXT;
 const BASH_OUTPUT_BYTES = 50 * 1024;
@@ -181,7 +181,9 @@ export async function openAgent(options: {
     const host = options.hostTools?.({
       key: taskKey,
       async readFile(file, limit) {
-        const target = workspacePath(path.posix.resolve(WORKSPACE_ROOT, file));
+        const expanded = expandHome(file);
+        if (expanded === null) throw new Error(`${file}: only ~ and ~/ name a home, the agent's`);
+        const target = workspacePath(path.posix.resolve(WORKSPACE_ROOT, expanded));
         if (target === ".") throw new Error("path must name a file");
         const read = await options.workspace.readFile(lease.token, target, { limit: limit + 1 });
         if (!read.eof || read.content.byteLength > limit) throw new Error(`${file} is larger than ${limit} bytes`);

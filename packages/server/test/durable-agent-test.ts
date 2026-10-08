@@ -65,6 +65,7 @@ try {
       call("read", { path: "/tmp/notes/../screens/note.txt" }),
       call("read", { path: "/proc/self/environ" }),
       call("read", { path: "/tmp/host/durable-agent-test.ts" }),
+      call("read", { path: "~bob/notes.md" }),
       fauxAssistantMessage("done"),
     ]) });
     fs.mkdirSync(path.join(guest.root, "tmp/screens"), { recursive: true });
@@ -74,7 +75,7 @@ try {
       const submission = await agent.conversation.submit({ type: "input", content: "use the tools", requestId: "tools" }, context);
       assert.equal((await submission.wait(context)).status, "done");
       assert.equal(fs.readFileSync(path.join(files, "notes/a.txt"), "utf8"), "hello\npi\n");
-      const [write, read, edit, outside, bash, machineWrite, machineEdit, machineRead, pseudo, host] = await results(agent);
+      const [write, read, edit, outside, bash, machineWrite, machineEdit, machineRead, pseudo, host, otherHome] = await results(agent);
       assert.match(text(write), /Successfully wrote/);
       assert.equal(text(read), "hello\nworld\n");
       assert.match(text(edit), /Successfully replaced 1 block/);
@@ -89,6 +90,7 @@ try {
       assert.match(text(pseudo), /kernel or device filesystem/);
       assert.equal(host.isError, true);
       assert.match(text(host), /leaves the machine/);
+      assert.match(text(otherHome), /only ~ and ~\/ name a home/);
       assert.equal(text(bash), "hello\npi\n\n[exit=0; exited]");
       assert.match(JSON.stringify(bash.details), /"operationKey":"pi:[0-9a-f-]+:\d+:bash"/);
       // The same request id never submits twice.

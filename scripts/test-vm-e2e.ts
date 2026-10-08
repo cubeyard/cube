@@ -245,8 +245,8 @@ try {
   const portal = "/home/agent/portal-runtime/start-portal.sh";
   assert.equal((await prompt(pi, tool("write", { path: portal, content: "#!/bin/sh\nexec node portal.js\n" }))).state, "completed");
   assert.equal((await prompt(pi, tool("edit", { path: "~/portal-runtime/start-portal.sh", edits: [{ oldText: "node", newText: "bun" }] }))).state, "completed");
-  assert.equal(await bash(pi, `cat ${portal}; stat -c %U ${portal}; mkdir -p /tmp/shots && printf shot > /tmp/shots/a.png`), "#!/bin/sh\nexec bun portal.js\nagent");
-  assert.match((await prompt(pi, tool("read", { path: "/tmp/shots/a.png" }))).text, /a\.png|PNG|image|shot/i);
+  assert.equal(await bash(pi, `cat ${portal}; stat -c %U ${portal}; mkdir -p /tmp/shots && printf shot > /tmp/shots/a.txt`), "#!/bin/sh\nexec bun portal.js\nagent");
+  assert.match((await prompt(pi, tool("read", { path: "/tmp/shots/a.txt" }))).text, /^result: shot/);
   assert.match((await prompt(pi, tool("read", { path: "/proc/self/environ" }))).text, /kernel or device filesystem/);
   const leaked = execFileSync("find", [work, "(", "-name", "a.txt", "-o", "-name", "cm.txt", "-o", "-name", "start-portal.sh", ")", "-not", "-path", `${work}/github/*`], { encoding: "utf8" }).trim();
   assert.equal(leaked, "", "nothing the agent wrote appears outside the VM disk");

@@ -84,6 +84,8 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
     const scope = await workspace($, next.signal)
     if (!scope) return { deny: UNCONFIGURED }
+    // Artifacts are cube's, not the machine's: revised whole with Write.
+    if (artifactPath(e.file_path)) return { deny: `artifacts are revised with Write ${ARTIFACT_ROOT}/<name>.md (the whole document); Edit does not reach them` }
     const result = await edit(scope, e.tool_use_id, e)
     return 'deny' in result ? result : { result }
   })

@@ -148,7 +148,7 @@ tool's `path`) take any path in the thread's machine, as bash does:
 | path | in the guest | acts as |
 | --- | --- | --- |
 | relative, `/workspace/…`, the Claude Code mod's local root `…/claude/…` | beneath `/workspace` | root, new files given to `agent` (as before) |
-| any other absolute path: `/home/agent/…`, `/tmp/…`, `~/…` | that path in the machine | the `agent` account's own permissions (`EACCES` says to use sudo in bash) |
+| any other absolute path: `/home/agent/…`, `/tmp/…`, `~/…` (not `~name`) | that path in the machine | the `agent` account's own permissions (`EACCES` says to use sudo in bash) |
 | `/proc`, `/sys`, `/dev`, or a link that resolves into them | refused (`INVALID_REQUEST`) | — use bash |
 | a path with a `..` part on the wire | refused; the agent side normalises first | — |
 
@@ -157,7 +157,10 @@ there (a workspace link may lead out of the workspace and is then reached as
 `agent`), and a final symlink is replaced by a write, never written through.
 cubed only checks the shape (`filePath`) and asks for the helper's `fs.absolute`
 capability before it sends an absolute path; an older helper is refused with
-`OPERATION_UNSUPPORTED` and updated on the next attach. No path a model gives
+`OPERATION_UNSUPPORTED` and updated on the next attach. In a real machine the
+boundary is the VM itself (the helper's root is `/`); the helper's own "leaves
+the machine" check only bites in the test guest, whose root is a temporary
+directory. `/dev/shm` is part of `/dev` and so for bash only. No path a model gives
 is ever opened on the cubed host: absolute host paths outside the mod's local
 root reach the guest as guest paths. A thread reaches only its own machine: the
 routes are mounted per thread and a lease token belongs to one thread's lease

@@ -61,6 +61,7 @@ export interface EditResult { filePath: string; oldString: string; newString: st
 export function workspacePath(root: string, file: string): string | Denied {
   if (typeof file !== "string" || !file || file.includes("\0")) return { deny: "a file path is required" };
   const base = root.replace(/\/+$/, "");
+  if (file.startsWith("~") && file !== "~" && !file.startsWith("~/")) return { deny: `${file}: only ~ and ~/ name a home, the agent's (${GUEST_HOME})` };
   const absolute = file === "~" || file.startsWith("~/") ? `${GUEST_HOME}${file.slice(1)}` : file.startsWith("/") ? file : `${VIRTUAL_ROOT}/${file}`;
   const parts: string[] = [];
   for (const part of absolute.split("/")) {

@@ -342,7 +342,7 @@ class AsAgent:
             os.seteuid(0)
             os.setegid(0)
             os.setgroups(self.groups)
-        if isinstance(error, PermissionError):
+        if self.owner is not None and isinstance(error, PermissionError):
             raise Fail("IO_ERROR", "permission denied: outside the workspace the file tools have the agent account's "
                                    "permissions; use sudo in bash for this file")
         return False
@@ -606,7 +606,13 @@ def op_read(header, body):
         if not stat.S_ISREG(info.st_mode):
             raise Fail("INVALID_REQUEST", "not a regular file")
         # Never blocks on a FIFO swapped in after the check.
-        with open(os.open(target, os.O_RDONLY | os.O_NONBLOCK), "rb") as handle:
+        fd = os.open(target, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            handle = open(fd, "rb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 raise Fail("INVALID_REQUEST", "not a regular file")
             whole = hashlib.sha256()

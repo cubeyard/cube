@@ -175,6 +175,7 @@ describe('workspace tools', () => {
     const shot = await $.tool.call({ tool: 'Read', file_path: '/tmp/screens/../screens/shot.png' })
     expect((shot.result as { type: string }).type).toBe('image')
     expect(refusal(await $.tool.call({ tool: 'Write', file_path: '/', content: 'x' }))).toMatch(/root directory, not a file/)
+    expect(refusal(await $.tool.call({ tool: 'Edit', file_path: '/cube/artifacts/plan.md', old_string: 'a', new_string: 'b' }))).toMatch(/revised with Write/)
     expect(reached).toEqual([])
   })
 

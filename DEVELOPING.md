@@ -23,7 +23,10 @@ bash scripts/test-node-transport.sh
 
 The Node test list is `scripts/test-offline.sh`. Add tests there. Offline tests
 run the real guest helper under a temporary root (`packages/server/test/local-guest.ts`)
-instead of a VM; they need `python3` and OpenSSH's `ssh-keygen`. Real runner
+instead of a VM; they need `python3` and OpenSSH's `ssh-keygen`. The helper's
+file tools act as the agent's account outside the workspace only as root;
+`CUBE_TEST_GUEST_ROOT=1` (set in CI) runs that one test with `sudo -n`, and
+`CUBE_TEST_GUEST_ROOT=required` fails without passwordless sudo. Real runner
 tests use disposable state, keys and VMs; do not point them at an operator's
 installation. With Linux, a usable `/dev/kvm`, QEMU 7.2+ and a Debian 13
 genericcloud image, `CUBE_TEST_VM_IMAGE=/path/debian-13-genericcloud-amd64.qcow2
