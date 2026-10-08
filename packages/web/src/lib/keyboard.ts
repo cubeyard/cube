@@ -4,8 +4,11 @@ export const COMPACT_MEDIA = "(max-width: 40rem), (pointer: coarse) and (max-hei
 
 /** Under this much room a keyboard leaves only the composer and a few lines. */
 const TIGHT_PX = 220;
-/** A keyboard takes at least this much; browser bars that come and go take less. */
+/** A keyboard takes at least this much; browser bars that come and go take
+ * less (Chrome on Android hides about 56px of address bar on scroll). */
 const KEYBOARD_PX = 120;
+/** Longer than a keyboard takes to go down. */
+const SETTLE_MS = 600;
 
 /** Fields that raise a keyboard. Date and time inputs open a picker on
  * Android, which leaves the viewport whole, so they never read as typing. */
@@ -86,5 +89,17 @@ export function pinToVisualViewport(app: HTMLElement): void {
   touch.addEventListener("change", sync);
   // Focus moves before the keyboard does; leaving the field ends it at once.
   document.addEventListener("focusin", sync);
-  document.addEventListener("focusout", () => queueMicrotask(sync));
+  document.addEventListener("focusout", () => {
+    queueMicrotask(sync);
+    // A carry that began with the keyboard already down never sees the room
+    // grow. Once the field is left and a keyboard would have gone, the room
+    // this width shows is its measure.
+    const carry = carried;
+    if (!carry) return;
+    setTimeout(() => {
+      if (carried !== carry || document.activeElement?.matches(EDITABLE) || Math.round(vv.width) !== carry.width) return;
+      tallest.set(carry.width, Math.max(Math.round(vv.height), window.innerHeight));
+      carried = null;
+    }, SETTLE_MS);
+  });
 }

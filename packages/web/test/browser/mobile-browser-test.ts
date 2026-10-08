@@ -367,6 +367,19 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     }
   });
 
+  await scenario(browser, engine, "turned with the keyboard up, it stays down: leaving the field measures the room, and the chrome stays", phone, "chat", async page => {
+    await openKeyboard(page, phone, 347);
+    await page.setViewportSize({ width: 667, height: 375 });
+    await settle(page);
+    assert.equal(await keyboard(page), "open", "no measure yet at this width");
+    await page.locator(".composer textarea").blur();
+    await page.waitForTimeout(800);
+    await page.locator(".composer textarea").focus();
+    await settle(page);
+    assert.equal(await keyboard(page), null, "the room it showed with no keyboard is the measure");
+    assert.ok(await visible(page, "header"));
+  });
+
   await scenario(browser, engine, "turned with the keyboard up, leaving and coming back before it drops keeps typing", phone, "chat", async page => {
     await openKeyboard(page, phone, 347);
     await page.setViewportSize({ width: 667, height: 175 });

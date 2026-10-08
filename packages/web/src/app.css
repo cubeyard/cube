@@ -1479,7 +1479,7 @@ select.compose-input {
 
   .composer {
     padding-block: 0.4rem max(0.4rem, env(safe-area-inset-bottom));
-    --composer-key: 2.25rem; --composer-pad: 0.2rem; --composer-line: 24px;
+    --composer-line: 24px;
   }
   /* 16px keeps iOS from zooming into the field */
   .composer textarea { font-size: 16px; }
@@ -1496,6 +1496,11 @@ select.compose-input {
   :root[data-keyboard] .composer { padding-bottom: 0.4rem; }
   :root[data-keyboard="tight"] .thread-strip { display: none; }
 }
+/* a phone's composer keys are smaller faces; a tablet whose keyboard
+   shortens the page to compact keeps its keys as they were */
+@media (max-width: 40rem) {
+  .composer { --composer-key: 2.25rem; --composer-pad: 0.2rem; }
+}
 /* a strip too narrow for one row: title and details key, the rest a tap
    away. Only the chat's and a thread's strips have the key; others keep theirs. */
 @media (max-width: 40rem), (pointer: coarse) and (max-height: 30rem) and (max-width: 52rem) {
@@ -1505,7 +1510,7 @@ select.compose-input {
   .thread-strip:has(> .strip-details-key) > .spacer { display: none; }
   .mobile-thread-switch { flex: 1 1 0; }
   .strip-details-key { display: inline-flex; order: 1; margin-left: auto; }
-  /* a failure stays in print, on its own line under the title */
+  /* a failure stays in print, beside the details key */
   .thread-strip:has(> .strip-details-key):not(.details-open) > :is(.strip-project, .strip-base, .strip-machine:not(.error), .strip-state:not(.error), .strip-usage, .strip-model, .bank-note, .key-bank, .strip-toggle:not(.strip-details-key)) { display: none; }
   .thread-strip.details-open { padding-bottom: 0.45rem; }
   .thread-strip.details-open::before { content: ""; order: 2; flex-basis: 100%; }

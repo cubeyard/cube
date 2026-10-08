@@ -320,9 +320,9 @@ composer takes focus; the chat's threads panel starts folded. While the
 on-screen keyboard is up (`data-keyboard` on the root, from
 `lib/keyboard.ts`), the header, threads panel and memory step aside, and with
 under ~220px left the strip too. The busy lamp drops its label (the blinking
-lamp alone carries "working"). The composer's attach and send keys are 2.25rem
-faces with a 2.75rem hit area, the textarea rises to 16px, and the form pads
-its bottom with `env(safe-area-inset-bottom)` except over a keyboard.
+lamp alone carries "working"). On a phone the composer's attach and send keys
+are 2.25rem faces with a 2.75rem hit area; the textarea rises to 16px, and the
+form pads its bottom with `env(safe-area-inset-bottom)` except over a keyboard.
 
 ### Named Rules
 **The Reading Measure Rule.** 47rem remains the measure for prose and thread
