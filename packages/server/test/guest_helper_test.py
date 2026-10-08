@@ -64,15 +64,19 @@ def call(op, header, body=b""):
 
 class GuestHelperTest(unittest.TestCase):
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="cube-guest-")
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="cube-guest-"))
         self.workspace = os.path.join(self.root, "workspace")
         os.mkdir(self.workspace)
+        # A root reached through a symlink (macOS: /var -> /private/var) is the same machine.
+        self.root_link = self.root + "-link"
+        os.symlink(self.root, self.root_link)
         self.launcher = FakeLauncher()
         # The machine's root: absolute paths land beneath it.
         guest.configure(state=os.path.join(self.root, "state"), workspace=self.workspace, env_file=os.path.join(self.root, "env"),
-                        user=None, ready_files=[], commands=[], launcher=self.launcher, root=self.root)
+                        user=None, ready_files=[], commands=[], launcher=self.launcher, root=self.root_link)
 
     def tearDown(self):
+        os.unlink(self.root_link)
         shutil.rmtree(self.root)
 
     def exec_header(self, op_id, epoch=10, command="true"):

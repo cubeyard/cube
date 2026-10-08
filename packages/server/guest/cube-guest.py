@@ -275,14 +275,14 @@ def write_atomic(target, data, mode=0o600):
     temporary = "%s.tmp-%d" % (target, os.getpid())
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     try:
-        view = memoryview(data)
-        while view:
-            written = os.write(fd, view)
-            view = view[written:]
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    try:
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         os.rename(temporary, target)
     except OSError:
         os.unlink(temporary)
@@ -352,8 +352,8 @@ class AsAgent:
             os.setegid(0)
             os.setgroups(self.groups)
         if self.owner is not None and isinstance(error, PermissionError):
-            raise Fail("IO_ERROR", "permission denied: outside the workspace the file tools have the agent account's "
-                                   "permissions; use sudo in bash for this file")
+            raise Fail("IO_ERROR", "permission denied: this path leads outside the workspace, where the file tools have the "
+                                   "agent account's permissions; use sudo in bash for this file")
         return False
 
 
@@ -434,18 +434,18 @@ def file_path(path, follow=True):
             or ".." in path.split("/"):
         raise Fail("INVALID_REQUEST", "path must be relative to the workspace or absolute, without ..")
     workspace = os.path.realpath(CONFIG.workspace)
-    full = os.path.normpath(rooted(path) if path.startswith("/") else os.path.join(workspace, path))
+    machine = os.path.realpath(CONFIG.root)
+    full = os.path.normpath(os.path.join(machine, path.lstrip("/")) if path.startswith("/") else os.path.join(workspace, path))
     resolved = os.path.realpath(full)
     # A write or stat acts on a final symlink itself, not on what it names.
     located = resolved if follow else os.path.join(os.path.realpath(os.path.dirname(full)), os.path.basename(full))
     # `full` too: /proc/self/root/… resolves elsewhere but opens through /proc.
     for where in (full, located, resolved):
         for pseudo in PSEUDO_FILESYSTEMS:
-            if within(where, os.path.realpath(rooted(pseudo))):
+            if within(where, os.path.join(machine, pseudo.lstrip("/"))):
                 raise Fail("INVALID_REQUEST", "%s is in %s, a kernel or device filesystem; use bash" % (path, pseudo))
     if within(located, workspace) and within(resolved, workspace):
         return full, False
-    machine = os.path.realpath(CONFIG.root)
     if not all(within(where, machine) for where in (full, located, resolved)):
         raise Fail("INVALID_REQUEST", "path leaves the machine")
     return full, True

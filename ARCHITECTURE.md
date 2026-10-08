@@ -147,7 +147,7 @@ tool's `path`) take any path in the thread's machine, as bash does:
 
 | path | in the guest | acts as |
 | --- | --- | --- |
-| relative, `/workspace/…`, the Claude Code mod's local root `…/claude/…` | beneath `/workspace` | root, new files given to `agent` (as before) |
+| relative (resolved against `/workspace`), `/workspace/…`, the Claude Code mod's local root `…/claude/…` (also with its symlinks resolved) | beneath `/workspace` | root, new files given to `agent` (as before) |
 | any other absolute path: `/home/agent/…`, `/tmp/…`, `~/…` (not `~name`) | that path in the machine | the `agent` account's own permissions (`EACCES` says to use sudo in bash) |
 | `/proc`, `/sys`, `/dev`, or a link that resolves into them | refused (`INVALID_REQUEST`) | — use bash |
 | a path with a `..` part on the wire | refused; the agent side normalises first | — |
