@@ -118,7 +118,7 @@ export function imageBase(configured?: string): string {
   const base = (configured?.trim() || DEBIAN_IMAGE_BASE).replace(/\/$/, "");
   let url: URL;
   try { url = new URL(`${base}/SHA512SUMS`); } catch { throw new Error(`CUBE_DEBIAN_IMAGE_BASE is not a URL: ${base}`); }
-  const loopback = url.hostname === "localhost" || url.hostname.startsWith("127.") || url.hostname === "[::1]";
+  const loopback = url.hostname === "localhost" || /^127(\.\d{1,3}){3}$/.test(url.hostname) || url.hostname === "[::1]";
   if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) throw new Error(`the image site must be https (${base}); the checksums come from the same site`);
   return base;
 }
@@ -137,8 +137,10 @@ export async function downloadDebianImage(options: { directory: string; name?: s
   const base = imageBase(options.base);
   const name = options.name ?? debianImageName();
   const target = path.join(options.directory, name);
+  // The checksums come from the site itself, never through a redirect (which
+  // could leave https or the host); the image may be redirected to a mirror.
   let sums: Response;
-  try { sums = await fetch(`${base}/SHA512SUMS`); } catch (error) { throw networkError(`fetch ${base}/SHA512SUMS`, error); }
+  try { sums = await fetch(`${base}/SHA512SUMS`, { redirect: "error" }); } catch (error) { throw networkError(`fetch ${base}/SHA512SUMS`, error); }
   if (!sums.ok) throw new Error(`could not fetch ${base}/SHA512SUMS: HTTP ${sums.status}`);
   const listed = (await sums.text()).split("\n").map(line => line.trim().split(/\s+/)).find(([, file]) => file === name || file === `*${name}`)?.[0];
   if (!listed) throw new Error(`${base}/SHA512SUMS does not list ${name}`);
@@ -207,7 +209,7 @@ export async function initLocalRunner(options: LocalRunnerOptions): Promise<Loca
   if (options.image !== undefined) {
     const given = path.resolve(options.image);
     if (!fs.existsSync(given) || !fs.statSync(given).isFile()) throw new Error(`base image not found: ${given}`);
-  } else debianImageName();
+  } else { debianImageName(); imageBase(options.imageBase); }
   const listen = options.listen.match(/^(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\]|localhost):(\d{1,5})$/);
   if (!listen || !listen[1].split(".").slice(1).every(octet => Number(octet) <= 255) || Number(listen[2]) < 1 || Number(listen[2]) > 65535) {
     throw new Error("--listen must be a loopback address with a port from 1 to 65535, for example 127.0.0.1:7778");

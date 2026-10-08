@@ -199,6 +199,7 @@ try {
   const imageName = debianImageName();
   assert.throws(() => debianImageName("linux", "arm64"), /needs an Apple Silicon Mac or Linux x86-64/);
   assert.throws(() => imageBase("http://mirror.example/images"), /must be https/);
+  assert.throws(() => imageBase("http://127.evil.example/images"), /must be https/, "a name that starts with 127. is not loopback");
   assert.throws(() => imageBase("not a url"), /not a URL/);
   assert.equal(imageBase("http://127.0.0.1:8/x/"), "http://127.0.0.1:8/x");
   assert.equal(imageBase(undefined), "https://cloud.debian.org/images/cloud/trixie/latest");
@@ -206,11 +207,14 @@ try {
   let serveBad = false;
   let dropBody = false;
   let noSums = false;
+  let redirectSums = false;
   const requests: string[] = [];
   const site = http.createServer((request, response) => {
     requests.push(request.url ?? "");
     // Debian's site lists the image in binary mode and redirects the image itself to a mirror.
-    if (request.url === "/SHA512SUMS") { if (noSums) { response.statusCode = 404; response.end(); return; } response.end(`${createHash("sha512").update(bytes).digest("hex").toUpperCase()} *${imageName}\n0123  other.qcow2\n`); }
+    if (request.url === "/SHA512SUMS") {
+      if (noSums) { response.statusCode = 404; response.end(); return; }
+      if (redirectSums) { response.statusCode = 302; response.setHeader("location", "/elsewhere/SHA512SUMS"); response.end(); return; } response.end(`${createHash("sha512").update(bytes).digest("hex").toUpperCase()} *${imageName}\n0123  other.qcow2\n`); }
     else if (request.url === `/${imageName}`) { response.statusCode = 302; response.setHeader("location", `/mirror/${imageName}`); response.end(); }
     else if (request.url === `/mirror/${imageName}`) {
       response.setHeader("content-length", bytes.length);
@@ -234,6 +238,10 @@ try {
     const unlisted = await attempt();
     assert.equal(unlisted.status, 1); assert.match(unlisted.stderr, /could not fetch .*SHA512SUMS: HTTP 404/);
     noSums = false;
+    redirectSums = true;
+    const redirected = await attempt();
+    assert.equal(redirected.status, 1); assert.match(redirected.stderr, /could not fetch .*SHA512SUMS: .*redirect/i, "the checksums are never taken through a redirect");
+    redirectSums = false;
     const closed = http.createServer();
     await new Promise<void>(resolve => closed.listen(0, "127.0.0.1", resolve));
     const closedPort = (closed.address() as { port: number }).port;
