@@ -7,12 +7,12 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AddressInfo } from "node:net";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Models } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 import { LocalMachines } from "./local-guest.ts";
 
-export async function startChatHost(options: { renderMs?: number } = {}): Promise<{ url: string; close(): Promise<void> }> {
+export async function startChatHost(options: { renderMs?: number; models?: string[]; setup?: boolean } = {}): Promise<{ url: string; models: Models; close(): Promise<void> }> {
   if (options.renderMs) {
     const prototype = PiThreadEvents.prototype as unknown as { render: (...args: unknown[]) => Promise<unknown> };
     const render = prototype.render;
@@ -23,7 +23,7 @@ export async function startChatHost(options: { renderMs?: number } = {}): Promis
     };
   }
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-chat-"));
-  const faux = fauxProvider({ tokensPerSecond: 60, tokenSize: { min: 2, max: 4 } });
+  const faux = fauxProvider({ tokensPerSecond: 60, tokenSize: { min: 2, max: 4 }, ...options.models ? { models: options.models.map(id => ({ id })) } : {} });
   const said = (message: unknown) => JSON.stringify(message) ?? "";
   faux.setResponses(Array.from({ length: 100 }, () => async request => {
     if (said(request.messages.find(message => message.role === "system")).includes("You write the memory of OptChat")) return fauxAssistantMessage("a summary");
@@ -41,9 +41,11 @@ export async function startChatHost(options: { renderMs?: number } = {}): Promis
   const app = await createCubed({ state: path.join(root, "state"), models, machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null });
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
-  await fetch(`${url}/api/onboarding`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  // `setup`: leave the first-run setup to the test.
+  if (!options.setup) await fetch(`${url}/api/onboarding`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   return {
     url,
+    models,
     async close() {
       app.server.closeAllConnections();
       await app.close();

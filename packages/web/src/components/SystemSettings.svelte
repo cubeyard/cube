@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import Header from "./Header.svelte";
   import UsagePanel from "./UsagePanel.svelte";
   import { checkForUpdate, errorText, fetchUpdateStatus, installUpdate } from "../lib/api.ts";
   import type { UpdateStatus } from "../lib/types.ts";
@@ -51,10 +50,9 @@
   });
 </script>
 
-<Header section="system" />
-<main class="system-settings">
+<section class="system-settings" aria-labelledby="system-title">
   <div class="intro">
-    <h1>system</h1>
+    <h1 id="system-title">system</h1>
     <p>inspect and update the cubed control plane on this host, and read what its agents have used. runner software is separate and is never changed here.</p>
   </div>
 
@@ -103,12 +101,10 @@
     </section>
   {/if}
   <div class="usage-board"><UsagePanel /></div>
-</main>
+</section>
 
 <style>
-  .system-settings { overflow-y: auto; padding: 2rem clamp(1rem, 4vw, 4rem); }
   .intro { max-width: 65ch; margin-bottom: 1.5rem; }
-  h1 { margin: 0 0 0.8rem; }
   h2, h3, p { margin: 0; }
   .intro p, .boundary { line-height: 1.6; color: var(--ink-2); }
   .update-board { max-width: 52rem; padding: 1rem; background: var(--s1); border-radius: var(--r-well); box-shadow: var(--shadow-well); }
@@ -130,7 +126,6 @@
   .error { color: var(--bad); overflow-wrap: anywhere; }
   .usage-board { max-width: 52rem; }
   @media (max-width: 40rem) {
-    .system-settings { padding: 1.4rem 1rem; }
     .update-board { padding: 0.85rem; }
     .readout { grid-template-columns: 1fr 1fr; }
     .readout div:nth-child(2) { border-right: 0; }

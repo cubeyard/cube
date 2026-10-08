@@ -100,7 +100,7 @@
       {:else if !ready && projects.find((project) => project.id === projectId)?.runnerCapacity.errors.length}
         <p class="error">every thread machine is in use and a failed one holds a slot until it is archived — {projects.find((project) => project.id === projectId)?.runnerCapacity.errors[0]}. <button type="button" class="key" onclick={load}>retry status</button></p>
       {:else if !ready}<p>every thread machine is in use; archive an idle thread or register another runner, then <button type="button" class="key" onclick={load}>refresh runners</button></p>
-      {:else if !catalog?.models.length}<p>no models available — <a href="#/models" onclick={() => dialog?.close()}>connect a provider</a>, then <button type="button" class="key" onclick={load}>retry loading</button></p>
+      {:else if !catalog?.models.length}<p>no models available — <a href="#/settings/providers" onclick={() => dialog?.close()}>connect a provider</a>, then <button type="button" class="key" onclick={load}>retry loading</button></p>
       {:else if !model}<p>choose an available model below.</p>
       {:else if isClaude(model)}<p>{CLAUDE_DURABILITY}</p>{/if}
       {#if error}<p class="error" role="alert">{error}{pending ? " — retry to confirm this thread; your message is kept." : ""}</p>{/if}

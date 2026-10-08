@@ -397,6 +397,21 @@ GitHub login from a project uses this same full-screen treatment at the project'
 login and returns to the project, rechecking access after successful login.
 Repository errors appear once beside the affected repository, not duplicated
 in a page banner. Other project and thread controls retain their treatment.
+The last setup step may offer one host choice in the same quiet voice (chat
+memory: a label, a sentence and a native select, defaulting to the safe
+choice); it is never required to finish.
+
+### Settings
+One header entry, `settings`, opens host-wide pages: model providers, chat
+memory, system. Beside the page sits a **selector bank**: a recessed well
+(`--s1`, `--shadow-well`) holding one item per page, each a name (key type)
+over a silkscreen hint. The open page's item stands proud as a key face
+(`--s3`, `--line` border, `--shadow-key`) with `aria-current="page"`; the
+others are flush and wash on hover. No signal colour, lamp or side stripe
+marks the selection. At 46rem and below the bank lies flat above the page as
+one row of equal keys carrying short names (the full name stays the link's
+accessible name). Each page keeps one headline
+(20px/650) and its own controls; one primary key per page at most.
 
 ### Keys (buttons)
 - **Shape:** raised key, 9px radius, 1px `--line` border, `--shadow-key`.
