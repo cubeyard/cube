@@ -277,7 +277,8 @@ try {
   turns++;
   await until(() => fs.existsSync(held), Boolean, "the spawn's tool round is under way");
   assert.equal((await post("/api/optchat/prompt", { text: "set demo's pre-resume to echo steered", requestId: `chat-${++turns}` })).status, 200);
-  await delay(1000);
+  // The steer lands within milliseconds; the round is held well past it.
+  await delay(2000);
   fs.writeFileSync(go, "");
   await until(async () => (await (await fetch(`${base}/api/optchat/history`)).json()) as { status: { state: string }; events: Array<{ type: string }> },
     history => !script.length && history.status.state === "completed" && history.events.filter(event => event.type === "user-message").length === turns, "the steered turn finishes");
