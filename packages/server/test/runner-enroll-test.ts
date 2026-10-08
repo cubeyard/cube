@@ -13,7 +13,7 @@ import http from "node:http";
 import { createHash } from "node:crypto";
 import { Endpoint, SecretKey } from "@number0/iroh/index.js";
 import { Registry } from "../src/registry.ts";
-import { localNodeId } from "../src/runner-enroll.ts";
+import { debianImageName, imageBase, localNodeId } from "../src/runner-enroll.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-local-runner-"));
 const cli = path.resolve("packages/server/src/index.ts");
@@ -196,15 +196,27 @@ try {
 
   // Without --image: the image comes from Debian's site (here a local stand-in),
   // verified against its SHA512SUMS, and goes once the runner has its copy.
-  const imageName = process.platform === "darwin" ? "debian-13-genericcloud-arm64.qcow2" : "debian-13-genericcloud-amd64.qcow2";
+  const imageName = debianImageName();
+  assert.throws(() => debianImageName("linux", "arm64"), /needs an Apple Silicon Mac or Linux x86-64/);
+  assert.throws(() => imageBase("http://mirror.example/images"), /must be https/);
+  assert.throws(() => imageBase("not a url"), /not a URL/);
+  assert.equal(imageBase("http://127.0.0.1:8/x/"), "http://127.0.0.1:8/x");
+  assert.equal(imageBase(undefined), "https://cloud.debian.org/images/cloud/trixie/latest");
   const bytes = Buffer.concat([Buffer.from("QFI\xfb", "binary"), Buffer.alloc(70000, 7)]);
   let serveBad = false;
+  let dropBody = false;
+  let noSums = false;
   const requests: string[] = [];
   const site = http.createServer((request, response) => {
     requests.push(request.url ?? "");
-    if (request.url === "/SHA512SUMS") response.end(`${createHash("sha512").update(bytes).digest("hex")}  ${imageName}\n0123  other.qcow2\n`);
-    else if (request.url === `/${imageName}`) { response.setHeader("content-length", bytes.length); response.end(serveBad ? Buffer.from(bytes.map(b => b ^ 1)) : bytes); }
-    else { response.statusCode = 404; response.end(); }
+    // Debian's site lists the image in binary mode and redirects the image itself to a mirror.
+    if (request.url === "/SHA512SUMS") { if (noSums) { response.statusCode = 404; response.end(); return; } response.end(`${createHash("sha512").update(bytes).digest("hex").toUpperCase()} *${imageName}\n0123  other.qcow2\n`); }
+    else if (request.url === `/${imageName}`) { response.statusCode = 302; response.setHeader("location", `/mirror/${imageName}`); response.end(); }
+    else if (request.url === `/mirror/${imageName}`) {
+      response.setHeader("content-length", bytes.length);
+      if (dropBody) { response.write(bytes.subarray(0, 1000)); response.destroy(); return; }
+      response.end(serveBad ? Buffer.from(bytes.map(b => b ^ 1)) : bytes);
+    } else { response.statusCode = 404; response.end(); }
   });
   await new Promise<void>(resolve => site.listen(0, "127.0.0.1", resolve));
   const siteBase = `http://127.0.0.1:${(site.address() as { port: number }).port}`;
@@ -213,24 +225,50 @@ try {
     expectedNode = "node-local-three";
     // The fake keygen hands out one key; free it from the second runner first.
     fs.writeFileSync(path.join(second, "control.key"), Buffer.from(SecretKey.generate().toBytes()), { mode: 0o600 });
+    const downloadDir = path.join(third, ".image-download");
+    const attempt = (extra: NodeJS.ProcessEnv = {}) => cubed(["runners", "init-local", "--state", state, "--home", third, "--listen", address,
+      "--node-id", "node-local-three"], { CUBE_DEBIAN_IMAGE_BASE: siteBase, ...extra });
+    const insecure = await attempt({ CUBE_DEBIAN_IMAGE_BASE: "http://mirror.example/images" });
+    assert.equal(insecure.status, 1); assert.match(insecure.stderr, /must be https/);
+    noSums = true;
+    const unlisted = await attempt();
+    assert.equal(unlisted.status, 1); assert.match(unlisted.stderr, /could not fetch .*SHA512SUMS: HTTP 404/);
+    noSums = false;
+    const closed = http.createServer();
+    await new Promise<void>(resolve => closed.listen(0, "127.0.0.1", resolve));
+    const closedPort = (closed.address() as { port: number }).port;
+    await new Promise<void>(resolve => closed.close(() => resolve()));
+    const unreachable = await attempt({ CUBE_DEBIAN_IMAGE_BASE: `http://127.0.0.1:${closedPort}` });
+    assert.equal(unreachable.status, 1); assert.match(unreachable.stderr, new RegExp(`could not fetch http://127\\.0\\.0\\.1:${closedPort}/SHA512SUMS: ECONNREFUSED`));
+    dropBody = true;
+    const dropped = await attempt();
+    assert.equal(dropped.status, 1, dropped.stdout + dropped.stderr);
+    assert.match(dropped.stderr, /could not download http:\/\/127\.0\.0\.1:\d+\/.*: (UND_ERR_SOCKET|.*\(1000 of \d+ bytes received\))/, "a dropped connection names the cause");
+    assert.ok(!fs.existsSync(path.join(downloadDir, `${imageName}.part`)), "a dropped download leaves no partial file");
+    dropBody = false;
     serveBad = true;
-    const corrupt = await cubed(["runners", "init-local", "--state", state, "--home", third, "--listen", address, "--node-id", "node-local-three"],
-      { CUBE_DEBIAN_IMAGE_BASE: siteBase });
+    const corrupt = await attempt();
     assert.equal(corrupt.status, 1, corrupt.stdout + corrupt.stderr);
-    assert.match(corrupt.stderr, /does not match Debian's SHA512SUMS/);
-    assert.ok(!fs.existsSync(path.join(third, "images", imageName)) && !fs.existsSync(path.join(third, "images", `${imageName}.part`)), "a corrupt download is discarded");
+    assert.match(corrupt.stderr, /does not match the site's SHA512SUMS .* the mirror may still be syncing/);
+    assert.ok(!fs.existsSync(path.join(downloadDir, imageName)) && !fs.existsSync(path.join(downloadDir, `${imageName}.part`)), "a corrupt download is discarded");
     assert.ok(!fs.existsSync(path.join(third, "runner")), "nothing was initialized from it");
     serveBad = false;
-    const fetched = await cubed(["runners", "init-local", "--state", state, "--home", third, "--listen", address, "--node-id", "node-local-three"],
-      { CUBE_DEBIAN_IMAGE_BASE: siteBase });
+    // A good download whose init fails stays for the retry; the retry reuses it after checking it.
+    fs.mkdirSync(downloadDir, { recursive: true });
+    fs.writeFileSync(path.join(downloadDir, "keep.txt"), "the operator's file");
+    const initFailed = await attempt({ FAKE_INIT_FAIL: "1" });
+    assert.equal(initFailed.status, 1);
+    assert.match(initFailed.stdout, new RegExp(`downloading ${imageName} \\(\\d+ MB\\) from ${siteBase}`));
+    assert.ok(fs.existsSync(path.join(downloadDir, imageName)), "the verified download is kept for the retry");
+    const fetched = await attempt();
     assert.equal(fetched.status, 0, fetched.stdout + fetched.stderr);
-    assert.match(fetched.stdout, new RegExp(`downloading ${imageName} \\(0 MB\\) from ${siteBase}`));
-    assert.match(fetched.stdout, /downloaded .* \(checksum verified\)/);
+    assert.match(fetched.stdout, /using the downloaded .* \(checksum verified\)/);
     assert.match(fetched.stdout, /removed the download: the runner holds its own copy/);
-    assert.ok(!fs.existsSync(path.join(third, "images")), "the download is gone once the runner has its copy");
+    assert.ok(!fs.existsSync(path.join(downloadDir, imageName)), "the download is gone once the runner has its copy");
+    assert.ok(fs.existsSync(path.join(downloadDir, "keep.txt")), "only the download is removed; the directory stays while it holds anything else");
     const initCall = fs.readFileSync(log, "utf8").trim().split("\n").filter(line => line.startsWith("init ")).at(-1)!;
-    assert.match(initCall, new RegExp(`--image ${path.join(third, "images", imageName)} `), "the verified download was what init copied");
-    assert.deepEqual(requests.filter(url => url === `/${imageName}`).length, 2, "one download per attempt");
+    assert.match(initCall, new RegExp(`--image ${path.join(downloadDir, imageName)} `), "the verified download was what init copied");
+    assert.equal(requests.filter(url => url === `/mirror/${imageName}`).length, 3, "the redirect was followed once per download: dropped, corrupt, good");
   } finally { site.close(); }
   console.log("ok: runners init-local sets up, enrolls and stops a local runner; runners enroll admits a running one; rebinding and shared keys are refused");
 } finally {

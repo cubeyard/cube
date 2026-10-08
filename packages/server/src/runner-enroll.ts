@@ -105,39 +105,72 @@ async function sha512Of(file: string): Promise<string> {
   return hash.digest("hex");
 }
 
-/** Downloads `<base>/<name>` into `directory` and verifies it against the
- * `SHA512SUMS` published beside it; a file already there with the right
- * digest is kept. Returns the file's path. The runner itself downloads
- * nothing: this is cubed, on the host, before `cube-runner init`. */
+function networkError(what: string, error: unknown): Error {
+  const cause = (error as { cause?: { code?: string; message?: string } }).cause;
+  const detail = cause?.code ?? cause?.message ?? (error instanceof Error ? error.message : String(error));
+  return new Error(`could not ${what}: ${detail}`);
+}
+
+/** The image site: HTTPS, or plain HTTP to this host only (tests, a local
+ * mirror); the checksums come from the same site, so an insecure transport
+ * would make them worthless. */
+export function imageBase(configured?: string): string {
+  const base = (configured?.trim() || DEBIAN_IMAGE_BASE).replace(/\/$/, "");
+  let url: URL;
+  try { url = new URL(`${base}/SHA512SUMS`); } catch { throw new Error(`CUBE_DEBIAN_IMAGE_BASE is not a URL: ${base}`); }
+  const loopback = url.hostname === "localhost" || url.hostname.startsWith("127.") || url.hostname === "[::1]";
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) throw new Error(`the image site must be https (${base}); the checksums come from the same site`);
+  return base;
+}
+
+/** Downloads `<base>/<name>` into `directory` (a directory cubed owns: it is
+ * removed afterwards) and verifies it against the `SHA512SUMS` published
+ * beside it; a file already there with the right digest is kept. Returns
+ * the file's path. What this checks: that the bytes, wherever the site's
+ * redirect sent us (Debian's mirrors), are the ones the site's checksum
+ * names, fetched over TLS. What it cannot check: the site itself, or a mirror
+ * the operator points at. Debian publishes no signature for these sums. The
+ * runner itself downloads nothing: this is cubed, on the host, before
+ * `cube-runner init`. */
 export async function downloadDebianImage(options: { directory: string; name?: string; base?: string; log?: (line: string) => void }): Promise<string> {
   const log = options.log ?? (() => {});
-  const base = (options.base ?? (process.env.CUBE_DEBIAN_IMAGE_BASE?.trim() || DEBIAN_IMAGE_BASE)).replace(/\/$/, "");
+  const base = imageBase(options.base);
   const name = options.name ?? debianImageName();
   const target = path.join(options.directory, name);
-  const sums = await fetch(`${base}/SHA512SUMS`);
+  let sums: Response;
+  try { sums = await fetch(`${base}/SHA512SUMS`); } catch (error) { throw networkError(`fetch ${base}/SHA512SUMS`, error); }
   if (!sums.ok) throw new Error(`could not fetch ${base}/SHA512SUMS: HTTP ${sums.status}`);
-  const expected = (await sums.text()).split("\n").map(line => line.trim().split(/\s+/)).find(([, file]) => file === name || file === `*${name}`)?.[0];
-  if (!expected || !/^[0-9a-f]{128}$/.test(expected)) throw new Error(`${base}/SHA512SUMS does not list ${name}`);
+  const listed = (await sums.text()).split("\n").map(line => line.trim().split(/\s+/)).find(([, file]) => file === name || file === `*${name}`)?.[0];
+  if (!listed) throw new Error(`${base}/SHA512SUMS does not list ${name}`);
+  if (!/^[0-9a-fA-F]{128}$/.test(listed)) throw new Error(`${base}/SHA512SUMS lists a malformed digest for ${name}`);
+  const expected = listed.toLowerCase();
   if (fs.existsSync(target) && await sha512Of(target) === expected) { log(`using the downloaded ${name} (checksum verified)`); return target; }
   fs.mkdirSync(options.directory, { recursive: true, mode: 0o700 });
   const partial = `${target}.part`;
-  const response = await fetch(`${base}/${name}`);
+  let response: Response;
+  try { response = await fetch(`${base}/${name}`); } catch (error) { throw networkError(`download ${base}/${name}`, error); }
   if (!response.ok || !response.body) throw new Error(`could not download ${base}/${name}: HTTP ${response.status}`);
   const total = Number(response.headers.get("content-length")) || 0;
-  log(`downloading ${name}${total ? ` (${Math.round(total / 1048576)} MB)` : ""} from ${base}`);
+  const served = response.url && response.url !== `${base}/${name}` ? ` (served by ${new URL(response.url).host})` : "";
+  log(`downloading ${name}${total ? ` (${Math.round(total / 1048576)} MB)` : ""} from ${base}${served}`);
   const hash = createHash("sha512");
   let received = 0;
   let reported = 0;
   try {
-    await pipeline(Readable.fromWeb(response.body as import("node:stream/web").ReadableStream), async function* (source) {
-      for await (const chunk of source) {
-        hash.update(chunk as Buffer); received += (chunk as Buffer).length;
-        if (total && received - reported >= total / 4) { reported = received; log(`  ${Math.round(received / total * 100)}%`); }
-        yield chunk;
-      }
-    }, fs.createWriteStream(partial, { mode: 0o600 }));
+    try {
+      await pipeline(Readable.fromWeb(response.body as import("node:stream/web").ReadableStream), async function* (source) {
+        for await (const chunk of source) {
+          hash.update(chunk as Buffer); received += (chunk as Buffer).length;
+          if (total && received - reported >= total / 4) { reported = received; log(`  ${Math.round(received / total * 100)}%`); }
+          yield chunk;
+        }
+      }, fs.createWriteStream(partial, { mode: 0o600 }));
+    } catch (error) { throw networkError(`download ${base}/${name} (${received} of ${total || "?"} bytes received)`, error); }
     const actual = hash.digest("hex");
-    if (actual !== expected) throw new Error(`${name} does not match Debian's SHA512SUMS (got ${actual.slice(0, 16)}…); the download is discarded`);
+    if (actual !== expected) {
+      throw new Error(`${name} does not match the site's SHA512SUMS (got ${actual.slice(0, 16)}…); the download is discarded. `
+        + "If Debian's latest build is newer than the mirror that served it, the mirror may still be syncing: try again later.");
+    }
   } catch (error) { fs.rmSync(partial, { force: true }); throw error; }
   fs.renameSync(partial, target);
   log(`downloaded ${name} (checksum verified)`);
@@ -193,8 +226,9 @@ export async function initLocalRunner(options: LocalRunnerOptions): Promise<Loca
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
   log(`cube-runner ${version.softwareVersion ?? "?"} at ${runner}`);
   // The runner copies the image into its state, so a download is kept only
-  // until init succeeded (a failed init keeps it for the retry).
-  const downloaded = options.image === undefined ? await downloadDebianImage({ directory: path.join(home, "images"), base: options.imageBase, log }) : null;
+  // until init succeeded (a failed init keeps it for the retry), in a
+  // directory of cubed's own.
+  const downloaded = options.image === undefined ? await downloadDebianImage({ directory: path.join(home, ".image-download"), base: options.imageBase, log }) : null;
   const image = downloaded ?? path.resolve(options.image!);
   const control = JSON.parse((await run(runner, ["keygen", "--key", controlKey], { encoding: "utf8", timeout: 10000 })).stdout) as { peerId: string };
   // The binding's thread id is the registry's runner id, so it is the node id: unique per installation by construction.
@@ -218,7 +252,7 @@ export async function initLocalRunner(options: LocalRunnerOptions): Promise<Loca
   }
   if (downloaded) {
     fs.rmSync(downloaded, { force: true });
-    fs.rmSync(path.dirname(downloaded), { recursive: true, force: true });
+    try { fs.rmdirSync(path.dirname(downloaded)); } catch { /* something else is there; leave it */ }
     log("removed the download: the runner holds its own copy");
   }
   const field = (name: string) => initOutput.match(new RegExp(`^${name}: (.+)$`, "m"))?.[1]?.trim() ?? null;

@@ -59,7 +59,7 @@ is), then move `~/.cube` aside.
 brew trust cubeyard/tap          # Homebrew asks you once to trust a third-party tap
 brew install cubeyard/tap/cube
 
-# one time: downloads Debian's cloud image (~400 MB, checksum-verified), sets up
+# one time: downloads Debian's cloud image (~340 MB, checksum-verified), sets up
 # the runner's key, state and image copy under ~/.cube, loopback on
 # 127.0.0.1:7778, and enrolls it in cubed's state (~/.cube-host)
 cubed runners init-local
@@ -69,10 +69,14 @@ brew services start cube
 open http://127.0.0.1:7777
 ```
 
-`init-local` checks QEMU, fetches `debian-13-genericcloud-arm64.qcow2` from
-[cloud.debian.org](https://cloud.debian.org/images/cloud/trixie/latest/) and
-verifies it against the `SHA512SUMS` published there (`--image` takes a file you
-already have; `CUBE_DEBIAN_IMAGE_BASE` names a mirror), hands it to the runner,
+`init-local` checks QEMU, fetches `debian-13-genericcloud-arm64.qcow2` (the
+bytes come from whichever Debian mirror
+[cloud.debian.org](https://cloud.debian.org/images/cloud/trixie/latest/) sends
+you to) and checks it against the `SHA512SUMS` fetched over HTTPS from
+cloud.debian.org itself; that catches a corrupt or tampered download, not a
+compromised cloud.debian.org, and Debian signs no checksum file for these
+images. `--image` takes a file you already have; `CUBE_DEBIAN_IMAGE_BASE` names
+another https site with the same layout. It hands the image to the runner,
 which keeps its own copy, starts the runner once to enroll it and stops it
 again; the services then keep both running and restart them
 after a crash or a login. Run it before starting the `cube-runner` service,

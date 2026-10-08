@@ -32,8 +32,9 @@ Packages are native to their manifest's OS and architecture.
   `qemu-system-x86` and `qemu-utils`. macOS also needs the arm64 UEFI firmware
   (`edk2-aarch64-code.fd`, shipped with Homebrew QEMU).
 - A Debian 13 genericcloud qcow2 image (`debian-13-genericcloud-amd64.qcow2`
-  or `-arm64`) supplied by the operator. The runner downloads nothing; it
-  copies the image into its state at init and identifies it by sha256.
+  or `-arm64`) supplied by the operator, or downloaded by `cubed runners
+  init-local` (below). The runner downloads nothing; it copies the image into
+  its state at init and identifies it by sha256.
 - Disk for the base image, one qcow2 overlay per VM (up to `--max-disk-gib`,
   default 64 GiB) and retained VM disks.
 
@@ -116,12 +117,18 @@ cubed runners init-local [--image /absolute/debian-13-genericcloud-<arch>.qcow2]
 ```
 
 Without `--image` it downloads the genericcloud image for the host (arm64 on
-an Apple Silicon Mac, amd64 on Linux x86-64) from
-`https://cloud.debian.org/images/cloud/trixie/latest/` into `<home>/images`,
-verifies it against the `SHA512SUMS` published beside it (a mismatch discards
-the download), and removes it once `cube-runner init` has copied it into the
-runner's state; `CUBE_DEBIAN_IMAGE_BASE` names a mirror with the same layout.
-The runner itself still downloads nothing. It creates a control key at
+an Apple Silicon Mac, amd64 on Linux x86-64): `SHA512SUMS` over HTTPS from
+`https://cloud.debian.org/images/cloud/trixie/latest/`, the image from
+whichever mirror that site redirects to, into `<home>/.image-download`. A
+digest mismatch discards the download (a mirror behind Debian's latest build
+gives exactly that; try again later); a network error leaves no partial file
+and names the cause; the file is removed once `cube-runner init` has copied it
+into the runner's state (kept if init fails, reused by the retry). The check
+covers transport corruption and a tampering mirror, not cloud.debian.org
+itself, and Debian publishes no signature for these sums.
+`CUBE_DEBIAN_IMAGE_BASE` names another site with the same layout; it must be
+https (plain http only to this host). There is no resume: an interrupted
+download starts over. The runner itself still downloads nothing. It creates a control key at
 `<home>/control.key`, runs `cube-runner init
 --home <home>/runner` (its own key, the base image copied in, loopback at
 `--listen`, the limits), writes the version-2 config `<home>/runner.json`

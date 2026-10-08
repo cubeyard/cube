@@ -209,7 +209,7 @@ class Cube < Formula
   def caveats
     <<~EOS
       One-time setup on this Mac (Apple Silicon); the first command downloads
-      Debian's genericcloud arm64 image (~400 MB, checksum-verified):
+      Debian's genericcloud arm64 image (~340 MB, checksum-verified):
         cubed runners init-local
         brew services start cube-runner
         brew services start cube

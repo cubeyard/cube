@@ -71,9 +71,10 @@ CUBE_RUNNER): its key, state and base image under <home>/runner (default
 ~/.cube), loopback at --listen (default ${DEFAULT_LOCAL_RUNNER_LISTEN}), the config
 <home>/runner.json, and enrolls it; the runner is then started by its service
 or by \`cube-runner run --home <home>/runner\`. Without --image it downloads
-Debian's genericcloud image for this host from ${DEBIAN_IMAGE_BASE}
-(verified against the SHA512SUMS published there; CUBE_DEBIAN_IMAGE_BASE names
-a mirror).
+Debian's genericcloud image for this host (the bytes may come from a Debian
+mirror) and checks it against the SHA512SUMS fetched over HTTPS from
+${DEBIAN_IMAGE_BASE}; CUBE_DEBIAN_IMAGE_BASE names another https site with
+the same layout.
 
 The portal to threads' \`cube service\` web servers is off unless CUBED_PORTAL_IP
 names cubed's private (e.g. Tailscale) address; see docs/services.md.`;
@@ -797,7 +798,7 @@ interface CubedCli {
   /** `runners enroll`: the runner's private config. */
   config?: string;
   /** `runners init-local`: the local runner's options. */
-  local?: { image?: string; home: string; listen: string; nodeId?: string; qemu?: string; firmware?: string;
+  local?: { image?: string; imageBase?: string; home: string; listen: string; nodeId?: string; qemu?: string; firmware?: string;
     maxVcpus?: number; maxMemoryMib?: number; maxDiskGib?: number };
 }
 
@@ -837,7 +838,7 @@ function cli(argv: string[]): CubedCli {
       if (!Number.isInteger(parsed) || parsed < 1 || String(parsed) !== raw) throw new Error(`--${name} must be a positive integer`);
       return parsed;
     };
-    local = { image: values.image === undefined ? undefined : path.resolve(values.image), home: path.resolve(values.home ?? path.join(os.homedir(), ".cube")),
+    local = { image: values.image === undefined ? undefined : path.resolve(values.image), imageBase: process.env.CUBE_DEBIAN_IMAGE_BASE, home: path.resolve(values.home ?? path.join(os.homedir(), ".cube")),
       listen: values.listen ?? DEFAULT_LOCAL_RUNNER_LISTEN, nodeId: values["node-id"], qemu: values.qemu, firmware: values.firmware,
       maxVcpus: limit("max-vcpus"), maxMemoryMib: limit("max-memory-mib"), maxDiskGib: limit("max-disk-gib") };
   }
