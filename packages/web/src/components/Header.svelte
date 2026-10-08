@@ -35,7 +35,9 @@
 
 <svelte:window onkeydown={onWindowKeydown} onpointerdown={onWindowPointerdown} onhashchange={() => closeMenu()} />
 
-<header class="main-header" bind:this={header} class:menu-open={menuOpen}>
+<!-- Tab out of the header closes the menu, as a press outside does -->
+<header class="main-header" bind:this={header} class:menu-open={menuOpen}
+  onfocusout={(event) => { if (!header.contains(event.relatedTarget as Node | null)) closeMenu(); }}>
   <Wordmark href="#/chat" />
   <button class="nav-menu-key" bind:this={menuKey} aria-expanded={menuOpen} aria-controls="main-nav" onclick={() => (menuOpen = !menuOpen)}>
     <span class="sr-only">menu, current page:</span>{section}<Icon name="chevron" size={12} />

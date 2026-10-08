@@ -1505,7 +1505,8 @@ select.compose-input {
   .thread-strip:has(> .strip-details-key) > .spacer { display: none; }
   .mobile-thread-switch { flex: 1 1 0; }
   .strip-details-key { display: inline-flex; order: 1; margin-left: auto; }
-  .thread-strip:has(> .strip-details-key):not(.details-open) > :is(.strip-project, .strip-base, .strip-machine, .strip-state, .strip-usage, .strip-model, .bank-note, .key-bank, .strip-toggle:not(.strip-details-key)) { display: none; }
+  /* a failure stays in print, on its own line under the title */
+  .thread-strip:has(> .strip-details-key):not(.details-open) > :is(.strip-project, .strip-base, .strip-machine:not(.error), .strip-state:not(.error), .strip-usage, .strip-model, .bank-note, .key-bank, .strip-toggle:not(.strip-details-key)) { display: none; }
   .thread-strip.details-open { padding-bottom: 0.45rem; }
   .thread-strip.details-open::before { content: ""; order: 2; flex-basis: 100%; }
   .thread-strip:has(> .strip-details-key) > :is(.strip-model, .key-bank, .strip-toggle:not(.strip-details-key)) { order: 3; }

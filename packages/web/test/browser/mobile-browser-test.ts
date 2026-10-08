@@ -87,10 +87,10 @@ const gap = (page: Page) => page.locator(".transcript").evaluate(el => el.scroll
 
 let failed = false;
 async function scenario(browser: Browser, engine: string, name: string, size: { width: number; height: number; touch?: boolean; ios?: boolean }, route: string,
-  run: (page: Page, host: ScriptedHost) => Promise<void>): Promise<void> {
+  run: (page: Page, host: ScriptedHost) => Promise<void>, threadState: ThreadSummary["state"] = thread.state): Promise<void> {
   const host = await ScriptedHost.start();
   host.transcript = { agent: "pi", owner: null, status: { state: "completed", run: "r", error: null }, events };
-  host.thread = thread;
+  host.thread = { ...thread, state: threadState };
   host.overview = { threads: [{ id: "t1", title: thread.title, state: "working", project: thread.project, archived: false } as never], archived: { shown: 0, total: 0 }, unknown: 0 };
   const touch = size.touch ?? true;
   // WebKit on Linux has no mobile emulation; it still has touch.
@@ -259,6 +259,12 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.equal(await visible(page, ".thread-navigation .nav-menu-key"), false);
   });
 
+  await scenario(browser, engine, "a thread's failure stays in print with the details folded", phone, "t/t1", async page => {
+    assert.ok(await visible(page, ".thread-pane .strip-state.error"), "the error label shows");
+    assert.equal(await visible(page, ".strip-model"), false, "the rest stays folded");
+    await assertNoSideways(page);
+  }, "error");
+
   await scenario(browser, engine, "an attached image shows above a compact composer, keys in reach", phone, "chat", async page => {
     await page.locator(".composer input[type=file]").setInputFiles({ name: "shot.png", mimeType: "image/png", buffer: PNG });
     await page.locator(".attachment img").waitFor();
@@ -306,6 +312,22 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     await page.locator(".composer textarea").tap();
     assert.equal(await memory.getAttribute("aria-expanded"), "false", "memory folds with its toggle");
     assert.equal(await page.locator("#chat-memory").count(), 0);
+    // and when the details key itself folds them
+    await page.locator(".chat-workspace .strip-details-key").tap();
+    await memory.tap();
+    await page.locator("#chat-memory").waitFor();
+    await page.locator(".chat-workspace .strip-details-key").tap();
+    assert.equal(await page.locator("#chat-memory").count(), 0, "folding the details folds memory");
+  });
+
+  await scenario(browser, engine, "Tab out of the open menu closes it", phone, "chat", async page => {
+    const key = page.locator(".nav-menu-key");
+    await key.tap();
+    const last = page.locator("header nav a").last();
+    await last.focus();
+    await page.keyboard.press("Tab");
+    assert.equal(await page.evaluate(() => !!document.activeElement?.closest("header")), false, "focus left the header");
+    assert.equal(await key.getAttribute("aria-expanded"), "false");
   });
 
   await scenario(browser, engine, "focus never stays on a destination the menu folded away", phone, "chat", async page => {
@@ -336,10 +358,33 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.ok(await visible(page, "header"));
   });
 
+  await scenario(browser, engine, "turned with the keyboard up, it drops for the turn and rises again; back down, the chrome returns", phone, "chat", async page => {
+    await openKeyboard(page, phone, 347);
+    for (const [width, height, expected] of [[667, 375, "open"], [667, 175, "tight"], [667, 375, null]] as const) {
+      await page.setViewportSize({ width, height });
+      await settle(page);
+      assert.equal(await keyboard(page), expected, `${width}x${height}`);
+    }
+  });
+
+  await scenario(browser, engine, "turned with the keyboard up, leaving and coming back before it drops keeps typing", phone, "chat", async page => {
+    await openKeyboard(page, phone, 347);
+    await page.setViewportSize({ width: 667, height: 175 });
+    await settle(page);
+    assert.equal(await keyboard(page), "tight");
+    await page.locator(".composer textarea").blur();
+    await settle(page);
+    assert.equal(await keyboard(page), null, "no field, no typing");
+    await page.locator(".composer textarea").focus();
+    await settle(page);
+    assert.equal(await keyboard(page), "tight", "the keyboard never went down");
+  });
+
   await scenario(browser, engine, "zoomed in with the keyboard up (iOS), leaving the field still brings the chrome back", { ...phone, ios: true }, "chat", async page => {
     await openKeyboard(page, { ...phone, ios: true }, 347);
     assert.equal(await keyboard(page), "open");
     await page.evaluate(() => (window.visualViewport as unknown as { zoom: (s: number) => void }).zoom(1.6));
+    assert.equal(await keyboard(page), "open", "zooming in alone keeps typing");
     await page.locator(".composer textarea").blur();
     await settle(page);
     assert.equal(await keyboard(page), null);

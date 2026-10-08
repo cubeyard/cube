@@ -37,8 +37,8 @@ export function pinToVisualViewport(app: HTMLElement): void {
   // A rotation is a new width, and a new tallest.
   const tallest = new Map<number, number>();
   // Turned with the keyboard up (Android shrinks innerHeight too), a new
-  // width has no measure without the keyboard: typing carries over until
-  // the field is left or the room grows by a keyboard.
+  // width has no measure without the keyboard: typing carries over, while a
+  // field has focus, until the room grows by a keyboard or the width changes.
   let carried: { width: number; height: number } | null = null;
   const sync = () => {
     const unzoomed = Math.abs(vv.scale - 1) < 0.01;
@@ -46,7 +46,13 @@ export function pinToVisualViewport(app: HTMLElement): void {
     app.style.height = keyboardOpen ? `${vv.height}px` : "";
     if (keyboardOpen && (window.scrollY !== 0 || vv.offsetTop !== 0)) window.scrollTo(0, 0);
 
-    const editing = touch.matches && !!document.activeElement?.matches(EDITABLE);
+    // A fine pointer has no on-screen keyboard (a narrow desktop window
+    // shortened by hand is not one), and its sizes need no measure.
+    if (!touch.matches) {
+      delete root.dataset.keyboard;
+      return;
+    }
+    const editing = !!document.activeElement?.matches(EDITABLE);
     // Zoomed in, the viewport's size says nothing; leaving the field still ends it.
     if (!unzoomed) {
       if (!editing) delete root.dataset.keyboard;
@@ -54,17 +60,21 @@ export function pinToVisualViewport(app: HTMLElement): void {
     }
     const width = Math.round(vv.width);
     const height = Math.round(vv.height);
-    if (carried && (carried.width !== width || !editing || height >= carried.height + KEYBOARD_PX)) {
-      // what this width shows once the keyboard is down is its measure
+    // A carry ends on another width or once the room grows by a keyboard;
+    // what this width shows then is its measure. Leaving the field does not
+    // end it: the keyboard is still up as focus goes.
+    if (carried && (carried.width !== width || height >= carried.height + KEYBOARD_PX)) {
       if (carried.width === width) tallest.set(width, Math.max(height, window.innerHeight));
       carried = null;
     }
     if (!carried && editing && root.dataset.keyboard && !tallest.has(width)) carried = { width, height };
+    // The keyboard can drop and rise again in a turn: the carry measures from its lowest.
+    if (carried && height < carried.height) carried.height = height;
     // iOS keeps the layout viewport whole under its keyboard: innerHeight
     // is the room without one even before this width has been seen open.
     const top = Math.max(tallest.get(width) ?? 0, height, window.innerHeight);
     if (!carried) tallest.set(width, top);
-    const typing = !!carried || (editing && height < top - KEYBOARD_PX);
+    const typing = editing && (!!carried || height < top - KEYBOARD_PX);
     const state = !typing ? null : height < TIGHT_PX ? "tight" : "open";
     if (state) root.dataset.keyboard = state;
     else delete root.dataset.keyboard;

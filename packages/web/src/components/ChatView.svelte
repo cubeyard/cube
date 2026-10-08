@@ -109,7 +109,7 @@
     <section class="thread-strip" class:details-open={detailsOpen} aria-label="chat controls">
       <span class="lamp {busy ? 'on-amber blink' : 'on-green'}" aria-hidden="true"></span>
       <span class="strip-title chat-title">optchat</span>
-      <button class="strip-toggle strip-details-key" bind:this={detailsKey} aria-expanded={detailsOpen} onclick={() => (detailsOpen = !detailsOpen)}>
+      <button class="strip-toggle strip-details-key" bind:this={detailsKey} aria-expanded={detailsOpen} onclick={() => { detailsOpen = !detailsOpen; if (!detailsOpen) memoryOpen = false; }}>
         details<Icon name="chevron" size={12} />
       </button>
       <span class="strip-state chat-tagline">starts threads · remembers everything</span>
