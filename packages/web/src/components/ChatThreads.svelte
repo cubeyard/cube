@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { errorText, fetchArtifacts, fetchChatThreads } from "../lib/api.ts";
+  import { COMPACT_MEDIA } from "../lib/keyboard.ts";
   import { relTime } from "../lib/time.ts";
   import type { ArtifactListItem, OverviewThread, ThreadOverview } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
@@ -17,8 +18,9 @@
   let error = $state<string | null>(null);
   let loading = false;
   let disposed = false;
-  // On a narrow screen the panel folds above the conversation.
-  let open = $state(true);
+  // On a narrow screen the panel folds above the conversation, and starts
+  // folded on a phone so the conversation keeps the screen.
+  let open = $state(!matchMedia(COMPACT_MEDIA).matches);
 
   // By project, in the order of each project's newest thread.
   const groups = $derived.by(() => {

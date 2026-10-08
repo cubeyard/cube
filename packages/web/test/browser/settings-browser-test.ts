@@ -140,14 +140,15 @@ try {
     await shoot(small, `phone-${route}`);
     await small.close();
   }
-  // The narrowest phones: every header destination on screen, nothing sideways.
+  // The narrowest phones: every header destination on screen in the menu, nothing sideways.
   const narrow = await page({ width: 320, height: 700 });
   await narrow.goto(`${host.url}/#/settings/memory`);
   await narrow.locator(".settings-pane h1").waitFor();
   await narrow.waitForTimeout(300);
   assert.ok(await noSideways(narrow), "no sideways scroll at 320px");
-  const links = await narrow.locator("header nav a").evaluateAll(items => items.map(item => item.getBoundingClientRect().right));
-  assert.ok(links.every(right => right <= 320), `every header destination is on screen at 320px: ${links}`);
+  await narrow.locator(".nav-menu-key").click();
+  const links = await narrow.locator("header nav a").evaluateAll(items => items.map(item => item.getBoundingClientRect()).map(box => ({ left: box.left, right: box.right, width: box.width })));
+  assert.ok(links.length === 5 && links.every(box => box.width > 0 && box.left >= 0 && box.right <= 320), `every header destination is on screen at 320px: ${JSON.stringify(links)}`);
   await shoot(narrow, "phone320-memory");
   await narrow.close();
   await view.close();

@@ -1441,9 +1441,6 @@ select.compose-input {
   .files-shelf { padding: 0.6rem 0.8rem; }
   .task-bank li { grid-template-columns: minmax(0, 1fr) auto; }
   .task-bank li span:last-child { grid-column: 1 / -1; white-space: normal; overflow-wrap: anywhere; }
-  .composer { padding-bottom: max(0.55rem, env(safe-area-inset-bottom)); }
-  .composer { --composer-key: 2.75rem; --composer-line: 24px; }
-  .composer textarea { font-size: 16px; }
   .strip-base, .strip-machine:not(.error) { display: none; }
 
   .message-image img { width: 7rem; height: 5.5rem; }
@@ -1451,6 +1448,82 @@ select.compose-input {
   .image-viewer, .image-viewer img { max-width: calc(100vw - 1rem); }
   .workspace-pane-head { padding-inline: 0.7rem; }
   .change-file { padding-inline: 0.45rem; }
+}
+
+/* ============================================================ compact
+   A phone, or a touch screen on its side (lib/keyboard.ts COMPACT_MEDIA):
+   the destinations fold behind one menu key, the strips into one row with
+   a details key, and while the keyboard is up (root[data-keyboard]) the
+   chrome above the strip steps aside for the conversation. Small keys keep
+   a fingertip's 2.75rem of hit area around them. */
+.nav-menu-key, .strip-details-key { display: none; -webkit-tap-highlight-color: transparent; }
+@media (max-width: 40rem), (pointer: coarse) and (max-height: 30rem) {
+  .main-header { padding-block: 0.15rem; }
+  .nav-menu-key {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    min-height: 2.75rem; padding: 0 0.55rem; margin-left: -0.2rem;
+    border: 0; border-radius: var(--r-xs); background: transparent;
+    color: var(--ink); font: 550 12px/1 var(--font-ui); letter-spacing: 0.05em;
+  }
+  .nav-menu-key svg { flex: none; transition: transform 120ms ease; }
+  .nav-menu-key[aria-expanded="true"] { background: var(--s1); box-shadow: var(--shadow-key-down); }
+  .nav-menu-key[aria-expanded="true"] svg { transform: rotate(180deg); }
+  .main-header nav { display: none; }
+  .main-header.menu-open nav {
+    display: flex; flex-direction: column; align-items: stretch; gap: 0.1rem;
+    position: absolute; top: calc(100% + 0.25rem); left: 0.5rem; z-index: 5;
+    min-width: 13rem; max-height: calc(100dvh - 5rem); overflow-y: auto; margin: 0; padding: 0.3rem;
+    background: var(--s2); border: 1px solid var(--line-2); border-radius: var(--r-key);
+    box-shadow: var(--shadow-float); animation: settle-in 140ms ease-out;
+  }
+  .main-header.menu-open nav a {
+    display: flex; align-items: center; min-height: 2.75rem; padding: 0 0.75rem;
+    border: 0; border-radius: var(--r-xs); font-size: 14px;
+  }
+  .main-header.menu-open nav a.active { background: var(--s1); box-shadow: inset 2px 0 0 var(--signal); }
+  /* the thread drawer has the width for its row of destinations */
+  .thread-navigation .nav-menu-key { display: none; }
+  .thread-navigation header nav { display: flex; }
+
+  .composer {
+    padding-block: 0.4rem max(0.4rem, env(safe-area-inset-bottom));
+    --composer-line: 24px;
+  }
+  /* 16px keeps iOS from zooming into the field */
+  .composer textarea { font-size: 16px; }
+  .composer .attach-key { border-radius: 50%; }
+  .composer :is(.attach-key, .send-key), .nav-menu-key, .strip-details-key, .mobile-thread-switch { position: relative; }
+  .composer :is(.attach-key, .send-key)::after, .nav-menu-key::after, .strip-details-key::after, .mobile-thread-switch::after {
+    content: ""; position: absolute;
+    inset: min(0px, calc((100% - 2.75rem) / 2)) min(0px, calc((100% - 2.75rem) / 2));
+  }
+
+  :root[data-keyboard] :is(.main-header, .chat-workspace > .work-panel, .chat-memory) { display: none; }
+  :root[data-keyboard] .chat-workspace { grid-template-columns: minmax(0, 1fr); }
+  /* the keyboard sits where the home indicator's inset is */
+  :root[data-keyboard] .composer { padding-bottom: 0.4rem; }
+  :root[data-keyboard="tight"] .thread-strip { display: none; }
+}
+/* a phone's composer keys, either way up, are smaller faces; a tablet
+   whose keyboard shortens the page to compact keeps its keys as they were */
+@media (max-width: 40rem), (pointer: coarse) and (max-height: 30rem) and (max-width: 52rem) {
+  .composer { --composer-key: 2.25rem; --composer-pad: 0.2rem; }
+}
+/* a strip too narrow for one row: title and details key, the rest a tap
+   away. Only the chat's and a thread's strips have the key; others keep theirs. */
+@media (max-width: 40rem), (pointer: coarse) and (max-height: 30rem) and (max-width: 52rem) {
+  /* the chat's threads head stays as tall as its strip */
+  .thread-strip:has(> .strip-details-key), .chat-workspace .work-head { --rail-pad: 0.25rem 0.8rem; }
+  .thread-strip:has(> .strip-details-key) { row-gap: 0.25rem; }
+  .thread-strip:has(> .strip-details-key) > .spacer { display: none; }
+  .mobile-thread-switch { flex: 1 1 0; }
+  .strip-details-key { display: inline-flex; order: 1; margin-left: auto; }
+  /* a failure stays in print, beside the details key */
+  .thread-strip:has(> .strip-details-key):not(.details-open) > :is(.strip-project, .strip-base, .strip-machine:not(.error), .strip-state:not(.error), .strip-usage, .strip-model, .bank-note, .key-bank, .strip-toggle:not(.strip-details-key)) { display: none; }
+  .thread-strip.details-open { padding-bottom: 0.45rem; }
+  .thread-strip.details-open::before { content: ""; order: 2; flex-basis: 100%; }
+  .thread-strip:has(> .strip-details-key) > :is(.strip-model, .key-bank, .strip-toggle:not(.strip-details-key)) { order: 3; }
+  .thread-strip:has(> .strip-details-key) > .key-bank { margin-left: auto; }
 }
 
 /* ============================================================ chat memory

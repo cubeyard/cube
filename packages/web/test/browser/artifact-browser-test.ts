@@ -262,6 +262,8 @@ try {
   await phone.locator(".diagram-picture img").first().waitFor({ timeout: 30_000 });
   const overflow = await phone.evaluate(() => document.documentElement.scrollWidth - innerWidth);
   assert.ok(overflow <= 0, `no sideways scroll on a phone (${overflow}px)`);
+  // the artifact's strip has no details key: its revision choice stays in view
+  assert.ok(await phone.locator(".artifact-revision select").isVisible(), "the revision choice shows on a phone");
   await shoot(phone, "12-review-phone");
   await until(async () => phone.locator(".diagram-picture[aria-busy]").count(), count => count === 0, "every diagram drawn on the phone");
   await steadyKey(phone, "the store keeps every revision", "12a-comment-key-phone", true);

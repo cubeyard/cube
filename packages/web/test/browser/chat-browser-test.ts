@@ -260,10 +260,13 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 1024, height: 768
       near(work.top, strip.top, "the rails start on one line");
       near(work.bottom, strip.bottom, "the rails' hairlines meet");
       const label = await textBox(page, ".work-head h2");
-      near((await textBox(page, ".strip-toggle")).bottom, label.bottom, "memory and threads share a baseline");
+      near((await textBox(page, ".strip-toggle[aria-controls=chat-memory]")).bottom, label.bottom, "memory and threads share a baseline");
       near((await textBox(page, ".chat-tagline")).bottom, label.bottom, "the tagline and threads share a baseline");
     }
-    // memory is a quiet rail toggle, not a raised key, and says when it is open
+    // memory is a quiet rail toggle, not a raised key, and says when it is open;
+    // on a phone it is behind the strip's details key
+    const phone = viewport.width <= 640;
+    if (phone) await page.getByRole("button", { name: "details" }).click();
     const memory = page.getByRole("button", { name: "memory" });
     assert.equal(await memory.evaluate(element => element.classList.contains("key")), false);
     await memory.click();
@@ -285,7 +288,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 1024, height: 768
       near(key.height, text.height, `the ${what} key is as tall as a line of the field`);
       near(key.bottom, text.bottom, `the ${what} key sits on the field's line`);
       near(key.width, key.height, `the ${what} key is square`);
-      if (viewport.touch) assert.ok(key.height >= 44, `the ${what} key takes a fingertip: ${key.height}`);
+      // a phone's keys are smaller faces with a fingertip's hit area around them
+      if (viewport.touch) assert.ok(key.height >= (phone ? 36 : 44), `the ${what} key takes a fingertip: ${key.height}`);
     }
     near(plus.left - field.left, field.right - sendKey.right, "the keys are inset alike");
     near(plus.top - field.top, field.bottom - plus.bottom, "the field pads the keys alike above and below");
@@ -407,6 +411,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844,
     host.overview = { threads: [thread("aaaaaaa1", "cube", "fix the gateway host check", "working"), thread("bbbbbbb2", "site", "a much longer thread title that has to wrap or clamp in the narrow panel without overflowing it at all", "completed"),
       thread("ccccccc3", "cube", "old work", "stopped", true)], archived: { shown: 1, total: 3 }, unknown: 0 };
     await page.reload();
+    // a phone starts with the panel folded
+    if (viewport.width <= 640) await page.getByRole("button", { name: "show threads" }).click();
     await page.locator(".work-thread").first().waitFor();
     assert.deepEqual(await page.locator(".work-group h3").allTextContents(), ["cube", "site"], "grouped by project, newest first");
     assert.deepEqual(await page.locator(".work-state").allTextContents(), ["aaaaaaa1 · working", "ccccccc3 · archived · stopped", "bbbbbbb2 · turn ended"]);
