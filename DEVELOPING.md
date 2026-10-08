@@ -195,6 +195,49 @@ publishing the draft. Publication and deployment are not CI acceptance steps.
 The workflow contains no runner artifacts. See [the operator update
 runbook](docs/cubed-updates.md) for the manifest and supervisor contracts.
 
+## Homebrew publishing
+
+The macOS tap is `cubeyard/homebrew-tap`: `Formula/cube.rb` (cubed, from the
+`darwin-arm64` release bundle, run directly without the update supervisor) and
+`Formula/cube-runner.rb` (the runner bundle, depending on Homebrew's `qemu`),
+installed with `brew install cubeyard/tap/cube`. Both are generated, never
+edited by hand:
+
+```sh
+gh release download vX.Y.Z --pattern 'cubed-darwin-arm64.json*' --pattern 'cube-runner-darwin-arm64.json*' --dir /tmp/assets
+node scripts/homebrew/formula.ts vX.Y.Z --assets /tmp/assets --out /tmp/formula
+```
+
+`scripts/homebrew/formula.ts` verifies the two manifests' Ed25519 signatures
+with the committed key (`scripts/cubed/update-public-key.pem`, fingerprint
+checked), requires the stable tag, the `darwin-arm64` platform, the state
+contract (102), protocol 3 and one commit for both, and writes formulas that pin
+each asset's release URL and sha256 (`scripts/homebrew-formula-test.ts`). The
+tap's README comes from `scripts/homebrew/tap-README.md`.
+
+`.github/workflows/homebrew.yml` runs when a release is published (or by hand
+with a `version` input): it generates the formulas on a macOS runner, installs
+them from the release, runs `brew audit --strict` and `brew test`, then commits
+them to the tap with the `HOMEBREW_TAP_TOKEN` secret (a fine-grained token with
+contents write on `cubeyard/homebrew-tap`; renew it when it expires). Drafts and
+prereleases are refused. The `homebrew` job of `ci.yml` does the same against
+the latest published release on every pull request, without the push, so a
+formula change is validated on a real Mac before it is merged; GitHub's macOS
+runners have no nested virtualization, so neither job starts a thread machine.
+The formulas' `test do` blocks run `cubed --version`, `--help`, cubed's
+`--self-check` (which runs `cube-gateway --version`) and `cube-runner version`.
+
+What the Homebrew layout changes against the managed launcher: `bin/cubed` is
+a small wrapper that sources `~/.config/cubed/environment`, sets `CUBE_RUNNER`
+to the formula's runner and runs the bundle's `bin/node` on
+`app/packages/server/src/index.ts` directly, so the **system** page reports an
+externally managed installation and `brew upgrade` is the update path; the
+runner's self-updater is not installed, for the same reason. Services are
+`brew services` user agents (`homebrew.mxcl.cube`, `homebrew.mxcl.cube-runner`)
+running `cubed` and `cube-runner run --home ~/.cube/runner`; the runner's
+state and the enrollment come from `cubed runners init-local` (see
+[runner operations](docs/runner-operations.md#local-runner)).
+
 ## Fresh start and recovery
 
 State schema 102 (thread machines) adopts no older registry (v100/v101 are
