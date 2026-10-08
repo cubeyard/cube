@@ -11,7 +11,11 @@ Release automation builds self-contained packages for:
 - Linux glibc arm64 (`linux-arm64-gnu`)
 - macOS arm64 (`darwin-arm64`)
 
-Windows, musl Linux and macOS x64 are not covered by this contract. Each package
+Windows, musl Linux and macOS x64 are not covered by this contract. On macOS
+the same `darwin-arm64` package is also installed by Homebrew
+(`brew install cubeyard/tap/cube`, [DEVELOPING.md](../DEVELOPING.md#homebrew-publishing)):
+there cubed runs without the supervisor below, **system** reports it as managed
+externally, and `brew upgrade` is the update path. Each package
 contains its own Node runtime, production server dependencies, built web UI,
 foreground supervisor and launcher. A release also has a platform manifest and
 detached Ed25519 signature. The manifest binds the Git commit, platform, byte
@@ -76,7 +80,10 @@ chmod 600 ~/.config/cubed/environment
 ```
 
 Choose the manifest suffix matching the host. `cubed` remains in the foreground,
-owns its child process and forwards termination. The environment file is sourced
+owns its child process and forwards termination; with a subcommand
+(`cubed runners status`, `runners enroll`, `runners init-local`, `--help`,
+`--version`) it runs the current release's cubed unsupervised and exits with
+its code. Serve options are not taken on its command line. The environment file is sourced
 as shell code; only the operator may write it. HTTPS is mandatory for feeds and
 artifact redirects. Leaving `CUBED_GUI_UPDATES` unset keeps status visible but
 disables browser-triggered checks and installs. Running from source remains
