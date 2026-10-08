@@ -36,7 +36,10 @@ resource policy; they are sent to the chat's model provider with the turn.
 The optional service portal (`CUBED_PORTAL_IP`, off by default) is a second
 listener with the same boundary: no authentication, plain HTTP, bound only to
 a private or loopback IPv4 address. Anyone who reaches it and knows a service
-URL reaches that thread's web server. It routes only exact per-service Host
+URL reaches that thread's web server. The Homebrew launcher turns it on by
+default on loopback under `*.localhost`: a thread's agent can then show a
+page in a browser on that Mac without further setup, in a secure context of
+the service's own origin, and any local process can reach the port. It routes only exact per-service Host
 names to ports the guest registered, serves nothing of cube's and never starts
 a machine; see [docs/services.md](docs/services.md).
 

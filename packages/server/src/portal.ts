@@ -3,9 +3,11 @@
  *
  * Every service has its own origin, `http://<service>-<thread label>.<suffix>:<port>/`,
  * where the suffix resolves to cubed's private address (by default
- * `<ip with dashes>.sslip.io`). The portal listens on its own port, apart
- * from cube's UI and API: it serves nothing of cube's, sets no cookie of its
- * own and answers only Host values of exactly that form. A request goes
+ * `<ip with dashes>.sslip.io`; `localhost` for a loopback portal, which
+ * browsers resolve themselves, so it works only on cubed's own host). The
+ * portal listens on its own port, apart from cube's UI and API: it serves
+ * nothing of cube's, sets no cookie of its own and answers only Host values
+ * of exactly that form. A request goes
  * browser → portal → the gateway's dial route → the runner's frame channel →
  * the guest's registered port; nothing else is reachable through it: the
  * service and its port come from the guest's own registrations, never from
@@ -57,8 +59,9 @@ export function privateIpv4(address: string): boolean {
 
 /** The portal's settings from CUBED_PORTAL_IP (off without it),
  * CUBED_PORTAL_PORT (7780), CUBED_PORTAL_LISTEN (the IP) and
- * CUBED_PORTAL_DOMAIN (sslip.io; nip.io, or a wildcard domain of the
- * operator's own that resolves to the IP). */
+ * CUBED_PORTAL_DOMAIN (sslip.io; nip.io, a wildcard domain of the
+ * operator's own that resolves to the IP, or `localhost` with a loopback IP:
+ * `*.localhost` names the browser's own machine, RFC 6761). */
 export function portalSettings(env: NodeJS.ProcessEnv = process.env): PortalSettings | null {
   const ip = env.CUBED_PORTAL_IP?.trim();
   if (!ip) return null;
@@ -69,7 +72,12 @@ export function portalSettings(env: NodeJS.ProcessEnv = process.env): PortalSett
   const listen = env.CUBED_PORTAL_LISTEN?.trim() || ip;
   if (!privateIpv4(listen)) throw new Error("CUBED_PORTAL_LISTEN must be a private or loopback IPv4 address; the portal never listens on every interface");
   const domain = (env.CUBED_PORTAL_DOMAIN?.trim() || "sslip.io").toLowerCase();
-  if (!DOMAIN.test(domain)) throw new Error("CUBED_PORTAL_DOMAIN must be a DNS name such as sslip.io");
+  if (domain === "localhost" || domain.endsWith(".localhost")) {
+    if (!ip.startsWith("127.") || !listen.startsWith("127.")) {
+      throw new Error(`CUBED_PORTAL_DOMAIN=${domain} needs a loopback CUBED_PORTAL_IP and CUBED_PORTAL_LISTEN such as 127.0.0.1; *.localhost reaches only the browser's own machine`);
+    }
+  }
+  if (domain !== "localhost" && !DOMAIN.test(domain)) throw new Error("CUBED_PORTAL_DOMAIN must be a DNS name such as sslip.io");
   return { ip, port, listen, domain, suffix: IP_DOMAINS.has(domain) ? `${ip.replaceAll(".", "-")}.${domain}` : domain };
 }
 
@@ -126,6 +134,8 @@ export class Portal {
   guest(thread: Thread): GuestPortal {
     const settings = this.settings;
     if (!settings) return { reason: "this cube installation has no portal (CUBED_PORTAL_IP is not set)" };
+    // A port taken by something else: no URLs that would reach it instead.
+    if (this.state.startsWith("failed")) return { reason: `cube's portal could not listen on ${settings.listen}:${settings.port}; see cubed's log` };
     return { urlTemplate: `http://{name}-${this.label(thread.id)}.${settings.suffix}${settings.port === 80 ? "" : `:${settings.port}`}/` };
   }
 

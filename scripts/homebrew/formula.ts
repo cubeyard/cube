@@ -190,6 +190,13 @@ class Cube < Formula
         . "$config"
         set +a
       fi
+      # Threads' \`cube service\` URLs work in a browser on this Mac out of
+      # the box: the portal on loopback, under *.localhost names browsers
+      # resolve themselves (no DNS). Any CUBED_PORTAL_IP, _LISTEN or _DOMAIN
+      # of the operator's is kept as it is; CUBED_PORTAL_IP= turns it off.
+      if [ -z "\${CUBED_PORTAL_IP+set}\${CUBED_PORTAL_LISTEN+set}\${CUBED_PORTAL_DOMAIN+set}" ]; then
+        export CUBED_PORTAL_IP=127.0.0.1 CUBED_PORTAL_DOMAIN=localhost
+      fi
       export CUBE_RUNNER="\${CUBE_RUNNER:-#{HOMEBREW_PREFIX}/opt/cube-runner/bin/cube-runner}"
       export CUBED_VERSION="${tag}" CUBED_COMMIT="${cubed.commit}"
       exec "#{libexec}/bin/node" "#{libexec}/app/packages/server/src/index.ts" "$@"
@@ -217,7 +224,11 @@ class Cube < Formula
       "gh auth login" for GitHub. cubed listens on loopback only and has no user
       authentication; keep it there or behind an authenticated private network.
       Settings go in ~/.config/cubed/environment (CUBED_STATE, CUBED_HOST,
-      CUBED_ALLOWED_HOSTS, CUBED_CLAUDE, ...). State: ~/.cube-host and ~/.cube;
+      CUBED_ALLOWED_HOSTS, CUBED_CLAUDE, ...). Web servers a thread runs with
+      "cube service" get URLs like http://web-<label>.localhost:7780/ that
+      open only in a browser on this Mac (loopback). CUBED_PORTAL_IP= turns
+      them off; CUBED_PORTAL_IP=<this Mac's Tailscale IPv4> serves them to your
+      tailnet instead (docs/services.md). State: ~/.cube-host and ~/.cube;
       uninstalling keeps both. After brew upgrade, restart the services:
         brew services restart cube-runner cube
       Had this tap's old v0.1 "cube" launcher? Its VM may still run and hold

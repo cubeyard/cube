@@ -14,7 +14,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
-import { portalSettings, privateIpv4, responseHeaders } from "../src/portal.ts";
+import { Portal, portalSettings, privateIpv4, responseHeaders } from "../src/portal.ts";
 import type { Thread } from "../src/registry.ts";
 import { helperBootstrapScripts } from "../src/vm.ts";
 import { GUEST_CLI_SHIM, shippedHelper } from "../src/vm-seed.ts";
@@ -27,10 +27,16 @@ assert.deepEqual(portalSettings({ CUBED_PORTAL_IP: "100.101.102.103" }),
 assert.deepEqual(portalSettings({ CUBED_PORTAL_IP: "192.168.1.5", CUBED_PORTAL_PORT: "80", CUBED_PORTAL_DOMAIN: "nip.io", CUBED_PORTAL_LISTEN: "127.0.0.1" }),
   { ip: "192.168.1.5", port: 80, listen: "127.0.0.1", domain: "nip.io", suffix: "192-168-1-5.nip.io" });
 assert.equal(portalSettings({ CUBED_PORTAL_IP: "10.0.0.2", CUBED_PORTAL_DOMAIN: "Cube.Example.ts.net" })!.suffix, "cube.example.ts.net");
+// A loopback portal under *.localhost, which browsers resolve to their own machine without DNS.
+assert.deepEqual(portalSettings({ CUBED_PORTAL_IP: "127.0.0.1", CUBED_PORTAL_DOMAIN: "LocalHost" }),
+  { ip: "127.0.0.1", port: 7780, listen: "127.0.0.1", domain: "localhost", suffix: "localhost" });
 for (const [env, message] of [[{ CUBED_PORTAL_IP: "8.8.8.8" }, /private IPv4/], [{ CUBED_PORTAL_IP: "fd00::1" }, /private IPv4/],
   [{ CUBED_PORTAL_IP: "10.0.0.2", CUBED_PORTAL_LISTEN: "0.0.0.0" }, /never listens on every interface/],
   [{ CUBED_PORTAL_IP: "10.0.0.2", CUBED_PORTAL_PORT: "08080" }, /CUBED_PORTAL_PORT/],
-  [{ CUBED_PORTAL_IP: "10.0.0.2", CUBED_PORTAL_DOMAIN: "localhost" }, /CUBED_PORTAL_DOMAIN/]] as const) {
+  [{ CUBED_PORTAL_IP: "10.0.0.2", CUBED_PORTAL_DOMAIN: "localhost" }, /CUBED_PORTAL_DOMAIN=localhost needs a loopback/],
+  [{ CUBED_PORTAL_IP: "100.101.102.103", CUBED_PORTAL_DOMAIN: "cube.localhost" }, /needs a loopback/],
+  [{ CUBED_PORTAL_IP: "127.0.0.1", CUBED_PORTAL_LISTEN: "10.0.0.2", CUBED_PORTAL_DOMAIN: "localhost" }, /needs a loopback/],
+  [{ CUBED_PORTAL_IP: "10.0.0.2", CUBED_PORTAL_DOMAIN: "local" }, /must be a DNS name/]] as const) {
   assert.throws(() => portalSettings(env), message);
 }
 assert.deepEqual(["100.64.0.1", "100.127.255.1", "172.31.0.1", "127.0.0.1", "100.128.0.1", "172.32.0.1", "1.1.1.1"].map(privateIpv4),
@@ -78,11 +84,27 @@ faux.setResponses(Array.from({ length: 4 }, () => fauxAssistantMessage("ok")));
 const models = createModels();
 models.setProvider(faux.provider);
 const portalPort = await free();
-const suffix = "127-0-0-1.sslip.io";
+
+// A port someone else holds: cubed runs on, and machines get no URLs that
+// would reach that other listener.
+{
+  const taken = net.createServer();
+  await new Promise<void>(resolve => taken.listen(0, "127.0.0.1", resolve));
+  const port = (taken.address() as net.AddressInfo).port;
+  const blocked = new Portal({ settings: portalSettings({ CUBED_PORTAL_IP: "127.0.0.1", CUBED_PORTAL_DOMAIN: "localhost", CUBED_PORTAL_PORT: String(port) }),
+    directory: path.join(root, "blocked"), registry: null as never, machines: null as never, archiving: () => false, log: { error() {}, info() {} } as never });
+  await blocked.listen();
+  assert.match(blocked.state, /^failed: .*EADDRINUSE/);
+  assert.deepEqual(blocked.guest({ id: "t" } as Thread), { reason: `cube's portal could not listen on 127.0.0.1:${port}; see cubed's log` });
+  await new Promise(resolve => taken.close(resolve));
+  console.log("ok: a portal that cannot listen gives machines a reason, not URLs");
+}
+// The Homebrew launcher's default: a loopback portal under *.localhost.
+const settings = portalSettings({ CUBED_PORTAL_IP: "127.0.0.1", CUBED_PORTAL_DOMAIN: "localhost", CUBED_PORTAL_PORT: String(portalPort) })!;
+const suffix = settings.suffix;
 const state = path.join(root, "state");
 fs.mkdirSync(state);
-const app = await createCubed({ state, models, claude: null, machines,
-  portal: { ip: "127.0.0.1", port: portalPort, listen: "127.0.0.1", domain: "sslip.io", suffix } });
+const app = await createCubed({ state, models, claude: null, machines, portal: settings });
 await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
 const base = `http://127.0.0.1:${(app.server.address() as net.AddressInfo).port}`;
 
@@ -170,6 +192,9 @@ try {
     [`app-${label}.${suffix}:${portalPort + 1}`, 404, "no cube service at this address"],
     [`app-${label}.${suffix}`, 404, "no cube service at this address"],
     [`app-${label}.evil.example:${portalPort}`, 404, "no cube service at this address"],
+    [`app-${label}.127-0-0-1.sslip.io:${portalPort}`, 404, "no cube service at this address"],
+    [`localhost:${portalPort}`, 404, "no cube service at this address"],
+    [`app-${label}.evil.localhost:${portalPort}`, 404, "no cube service at this address"],
     [`app-0123456789.${suffix}:${portalPort}`, 404, "no cube service at this address"],
     [`x.app-${label}.${suffix}:${portalPort}`, 404, "no cube service at this address"],
     [`other-${label}.${suffix}:${portalPort}`, 404, "this thread has no service other; start one with cube service start"],

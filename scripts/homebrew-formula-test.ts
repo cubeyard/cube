@@ -7,6 +7,7 @@ import path from "node:path";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { cubeFormula, readFormulaInputs, runnerFormula } from "./homebrew/formula.ts";
+import { portalSettings } from "../packages/server/src/portal.ts";
 import { publicKeyFingerprint } from "./cubed/verify-signing-key.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-homebrew-"));
@@ -64,6 +65,33 @@ try {
     assert.doesNotMatch(text, /latest\//, "never a moving URL");
     assert.doesNotMatch(text, /#\$|#@/, "no accidental Ruby interpolation in the generated text");
   }
+
+  // The launcher, run as the service would (Ruby's interpolations filled in,
+  // cubed replaced by printing its environment): the portal is on loopback
+  // under *.localhost unless the operator's environment file says otherwise.
+  const launcher = /\(bin\/"cubed"\)\.write <<~SH\n([^]*?)\n {4}SH\n/.exec(cube)![1]!.replace(/^ {6}/gm, "")
+    .replaceAll("#{HOMEBREW_PREFIX}", root).replace(/^exec "#\{libexec\}\/bin\/node" .*$/m, "exec env");
+  const launched = (environment: string | null) => {
+    const config = path.join(root, `environment-${n++}`);
+    if (environment !== null) fs.writeFileSync(config, environment);
+    const run = spawnSync("/bin/sh", ["-c", launcher], { encoding: "utf8", env: { HOME: root, PATH: "/usr/bin:/bin", CUBED_CONFIG_FILE: config } });
+    assert.equal(run.status, 0, run.stderr);
+    return Object.fromEntries(run.stdout.trim().split("\n").map(line => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
+  };
+  const portal = (environment: string | null) => {
+    const env = launched(environment);
+    return { env: Object.fromEntries(Object.entries(env).filter(([name]) => name.startsWith("CUBED_PORTAL_"))), settings: portalSettings(env) };
+  };
+  assert.deepEqual(portal(null), { env: { CUBED_PORTAL_IP: "127.0.0.1", CUBED_PORTAL_DOMAIN: "localhost" },
+    settings: { ip: "127.0.0.1", port: 7780, listen: "127.0.0.1", domain: "localhost", suffix: "localhost" } }, "no environment file: a loopback portal");
+  assert.deepEqual(portal("CUBED_HOST=127.0.0.1\nCUBED_PORTAL_PORT=7790\n").settings,
+    { ip: "127.0.0.1", port: 7790, listen: "127.0.0.1", domain: "localhost", suffix: "localhost" }, "other settings keep the default, a port of the operator's too");
+  assert.deepEqual(portal("CUBED_PORTAL_IP=100.101.102.103\n"), { env: { CUBED_PORTAL_IP: "100.101.102.103" },
+    settings: { ip: "100.101.102.103", port: 7780, listen: "100.101.102.103", domain: "sslip.io", suffix: "100-101-102-103.sslip.io" } }, "a Tailscale IP is kept as it is");
+  assert.deepEqual(portal("CUBED_PORTAL_IP=\n"), { env: { CUBED_PORTAL_IP: "" }, settings: null }, "an empty CUBED_PORTAL_IP turns the portal off");
+  assert.deepEqual(portal("CUBED_PORTAL_DOMAIN=cube.example.ts.net\n"), { env: { CUBED_PORTAL_DOMAIN: "cube.example.ts.net" }, settings: null },
+    "a partial portal configuration of the operator's is not completed with defaults");
+  assert.equal(launched(null).CUBED_VERSION, "v9.8.7");
 
   const refused = (name: string, directory: string, pattern: RegExp, tag = "v9.8.7") =>
     assert.throws(() => readFormulaInputs(tag, directory, publicPem, fingerprint), pattern, name);

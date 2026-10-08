@@ -246,7 +246,8 @@ Thread agents run web servers with `cube service start NAME --port PORT --
 COMMAND` (supervised systemd units that outlive the command; list, status,
 logs, restart, stop) and get a URL from cubed's private HTTP portal
 (`CUBED_PORTAL_IP`, off by default; per-service hosts under
-`<ip>.sslip.io`). The CLI is part of the guest helper; cubed refreshes the
+`<ip>.sslip.io`; the Homebrew launcher defaults to a loopback portal under
+`*.localhost`, same-Mac only). The CLI is part of the guest helper; cubed refreshes the
 helper of existing machines on resume. The gateway's dial route now allows
 1024-65535 besides 22. Verified offline (helper tests, gateway link test,
 `portal-test.ts` with HTTP, WebSocket, aborts, stop, archive, no wake) and in
