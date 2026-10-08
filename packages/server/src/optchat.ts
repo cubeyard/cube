@@ -135,7 +135,7 @@ trigger) can be set.`;
 
 /** What a thread report says when the thread started: its final reply is the report. */
 export const THREAD_NOTE = "(This thread was started by OptChat, the user's chat agent. Your final reply is your report to it. "
-  + "Once you end your turn nothing wakes you except a background agent of yours finishing, so do not end it to wait for CI, a review or a command: "
+  + "Once you end your turn nothing wakes you, so do not end it to wait for CI, a review or a command: "
   + "wait for those yourself in the foreground (a command runs at most 10 minutes; repeat a bounded wait such as `timeout 590 gh pr checks <n> --watch`), then go on. "
   + "If you stop before the task is done, say plainly what is left and what you are waiting for.)";
 
