@@ -11,7 +11,8 @@ import { Type, type Models, type Static } from "@earendil-works/pi-ai";
 import { createRegistry, defineDoc, defineExtension, defineTool, Harness, ROOT_CONVERSATION_ID, section, type Extension, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import { NodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CURRENT_SQLITE_SCHEMA_VERSION, SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
-import { createEditTool, createReadTool, createWriteTool } from "@earendil-works/pi-durable/tools";
+import { createEditTool, createWriteTool } from "@earendil-works/pi-durable/tools";
+import { createPiReadTool } from "./pi-read.ts";
 import { createCodemodeTool, type CodemodeLimits, type NestedTool } from "./codemode.ts";
 import { settleOperation, WorkspaceError, type Workspace } from "./workspace.ts";
 import { WORKSPACE_ROOT, WorkspaceEnv } from "./workspace-env.ts";
@@ -173,7 +174,7 @@ export async function openAgent(options: {
       ...tool.registration,
       execute: (args, api, callContext) => tool.run(args as never, api, callContext, taskKey(api)),
     });
-    const read = fileTool({ ...createReadTool(), replay: "safe" }, false);
+    const read = fileTool(createPiReadTool(options.models), false);
     const write = fileTool({ ...createWriteTool(), replay: "safe" }, true);
     const edit = fileTool(createEditTool(), true);
     const codemode = createCodemodeTool({ tools: [read, write, edit, bashTool], key: taskKey, ...(options.codemodeLimits ? { limits: options.codemodeLimits } : {}) });

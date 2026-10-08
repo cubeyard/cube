@@ -180,8 +180,25 @@ sandboxing headers as OptChat's images; the browser never names a workspace
 path. Agent prose that names, as a markdown image, a path the thread read as
 an image shows that stored image; any other image target stays a link or text.
 Claude Code's transcript shows the workspace's host directory as `/workspace`
-in its prose too. Pi's own `read` (pi-durable 1.0.1) refuses images, so a Pi
-thread shows images only when a tool returns one. Neither agent's assistant
+in its prose too. Cube wraps Pi's text-only `read` (pi-durable 1.0.1) to intercept image
+bytes before UTF-8 decoding. PNG, JPEG, GIF and WebP are delivered as typed
+image parts, only when the calling task's selected model advertises image
+input. The existing Workspace lease, path checks, paging consistency and
+2 MiB file ceiling still apply; images are limited to 2000 pixels a side.
+Headers, dimensions and end markers are checked, with PNG chunk bounds/CRCs
+and JPEG header segment bounds too (TEM/restart markers have no length).
+End markers must terminate the file and WebP's declared length must match;
+trailing JPEG/GIF bytes are conservatively refused with a re-encode hint,
+not described as definitively truncated. This is not a full raster decoder:
+corrupt compressed data may still be refused by a provider. A file without a recognized image signature is read as text regardless of
+extension, including a Git LFS pointer named `.png`. Text retains
+upstream line paging/truncation; non-UTF-8 and NUL-containing binaries are
+refused instead of decoded as text. Codemode automatically attaches successful
+nested reads' image parts to its own result, outside QuickJS and its text
+truncation budget (at most 8 images and 8 MiB of base64 per script). Its
+JavaScript calls still return strings; `image()` output is refused explicitly.
+Images read before a later script failure remain attached. Codemode images
+show in the tool strip; its nested paths are not mapped to inline prose images. Neither agent's assistant
 messages carry images of their own.
 
 `ThreadEvents` has the same interface in-process and over HTTP: `read()` and a
