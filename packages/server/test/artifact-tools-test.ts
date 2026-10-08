@@ -2,7 +2,9 @@
  * and OptChat's, with project) over a real store with a fake registry: a
  * blank id, path or body counts as left out, as models often send them, so
  * creating still creates; a real body with a real path is still refused;
- * a nonempty id still only revises the caller's own artifact. No network. */
+ * a nonempty id still only revises the caller's own artifact. A revision
+ * replaces body and actions whole, and the guide, the schema and a shrunken
+ * write's reply say so. No network. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -10,7 +12,7 @@ import path from "node:path";
 import type { ToolExecutionApi, ToolRegistration } from "@earendil-works/pi-durable";
 import { Artifacts } from "../src/artifact-service.ts";
 import { ArtifactStore, type ArtifactAuthor } from "../src/artifacts.ts";
-import { artifactTools } from "../src/artifact-tools.ts";
+import { ARTIFACT_GUIDE, artifactTools } from "../src/artifact-tools.ts";
 import type { GithubPulls } from "../src/github-pulls.ts";
 import type { Registry } from "../src/registry.ts";
 
@@ -106,6 +108,32 @@ try {
   assert.equal(await thread({ id: "not-an-id", body: "# x" }), "not written: no artifact not-an-id of yours");
   assert.equal(store.get(fromThread)!.head, 4);
   assert.equal(store.get(fromChat)!.head, 2);
+
+  // The reported loss: a review, then a revision meant only to add its merge
+  // button. A revision replaces body and actions whole (no action-only update);
+  // the guide and schema say so, and a much shorter body is told, not refused.
+  for (const phrase of ["replaces the whole document, its body and its actions", "no partial or action-only update",
+    "write the complete Markdown body again", "never replace a review with a one-line caption", "one left out is gone"]) {
+    assert.ok(ARTIFACT_GUIDE.includes(phrase), `guide: ${phrase}`);
+  }
+  const [schema] = artifactTools({ artifacts, author: { kind: "optchat" }, agent: "optchat", readable: async () => [], key: () => "k", projects: true }) as [ToolRegistration];
+  assert.ok(schema.description.includes("A revision replaces the whole document"));
+  const props = (schema.parameters as unknown as { properties: Record<string, { description?: string }> }).properties;
+  assert.match(props.body!.description!, /replaces the previous revision's.*repeats the full body/);
+  assert.match(props.actions!.description!, /omitted is none, not the previous revision's/);
+  const review = `# review of #7\n\n${"evidence and limitations. ".repeat(40)}`;
+  const merge = { kind: "github.merge", repository: "cubeyard/demo", pull: 7, headSha: "a".repeat(40) };
+  const reviewed = created(await optchat({ project: "terra", body: review }));
+  const caption = await optchat({ id: reviewed, title: "review of #7", body: "Merge cubeyard/demo#7 at its reviewed head.", actions: [merge] });
+  assert.match(caption, /wrote revision 2\..*Its body is 43 bytes; revision 1's was \d+\. A revision replaces the whole document/);
+  assert.equal(store.revision(reviewed, 1)!.body, review, "older revisions stay");
+  const kept = await optchat({ id: reviewed, body: review, actions: [merge] });
+  assert.match(kept, /wrote revision 3\..*Actions offered/);
+  assert.doesNotMatch(kept, /Its body is/);
+  assert.equal(store.revision(reviewed, 3)!.body, review);
+  assert.deepEqual(store.revision(reviewed, 3)!.actions.map(action => action.id), ["merge-7"]);
+  assert.doesNotMatch(await optchat({ id: reviewed, body: `${review}\nCI is green.` }), /Its body is/);
+  assert.deepEqual(store.revision(reviewed, 4)!.actions, [], "actions left out of a revision are gone");
 
   // The service itself treats a blank id as none, for any caller.
   const direct = artifacts.write({ kind: "optchat" }, { id: "", body: "# direct" }, { agent: "optchat" }, "direct-1");

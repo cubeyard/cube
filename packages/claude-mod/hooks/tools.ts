@@ -76,6 +76,9 @@ export function workspacePath(root: string, file: string): string | Denied {
  * (https://www.humanlayer.com/blog/show-me-skill): compact visuals beside
  * short text, never walls of prose. */
 export const ARTIFACT_GUIDE = "An artifact is a document the user reads beside the chat, selects text in and comments on; every write is a new revision and older ones stay. "
+  + "A revision replaces the whole document, its body and its actions: there is no partial or action-only update. "
+  + "To add or change an action, write the complete Markdown body again with it (read the newest revision first if you no longer have it whole); "
+  + "never replace a review with a one-line caption for its merge button, and list every action the revision should keep, since one left out is gone. "
   + "Use one for what the user will read and discuss at length (a review, a plan, a report, a design), not for a short reply. "
   + "Write it as GitHub Markdown and show rather than tell: keep prose brief and put each visual next to the short text it supports. "
   + "Pick the smallest view that makes the point: a call tree or file tree in a text fence, a ```mermaid sequence, state or flow diagram, "

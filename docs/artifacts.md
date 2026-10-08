@@ -41,7 +41,11 @@ the routes refuse a Pi thread's lease. `/cube/artifacts` is not in the
 machine: Edit and Bash do not reach it.
 
 Every write is a whole new revision; older ones stay readable at
-`#/a/<id>?rev=<n>`. A write with the same request id (a Pi task, OptChat's
+`#/a/<id>?rev=<n>`. A revision replaces both body and actions: there is no
+partial or action-only update, so offering a merge button on a review means
+writing the review's full body again with the action, and actions left out of
+a revision are gone. The guide says so, and a write whose body is under half
+the previous revision's says both sizes in its reply (it is still written). A write with the same request id (a Pi task, OptChat's
 tool call, a Claude Code `tool_use_id`) finds the revision it wrote, so a
 replayed call writes once; a write identical to the newest revision writes
 nothing. Each revision keeps its provenance: the agent (`optchat`, `pi`,

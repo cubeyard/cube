@@ -43,10 +43,10 @@ export function artifactTools(options: {
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: "An artifact of yours to revise; omit to create one" })),
       title: Type.Optional(Type.String({ description: "Default: the body's first # heading" })),
-      body: Type.Optional(Type.String({ description: "The whole Markdown document" })),
+      body: Type.Optional(Type.String({ description: "The whole Markdown document; it replaces the previous revision's, so a revision that adds actions repeats the full body" })),
       ...options.readFile ? { path: Type.Optional(Type.String({ description: "A workspace file holding the Markdown body, instead of body" })) } : {},
       ...options.projects ? { project: Type.Optional(Type.String({ description: "Project name or id; needed for actions" })) } : {},
-      actions: Type.Optional(Type.Array(actionSchema, { maxItems: 8 })),
+      actions: Type.Optional(Type.Array(actionSchema, { maxItems: 8, description: "Every action this revision offers; omitted is none, not the previous revision's" })),
     }),
     // The request id finds the revision a replayed call wrote.
     replay: "safe",

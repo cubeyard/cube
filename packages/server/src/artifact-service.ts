@@ -115,11 +115,16 @@ export class Artifacts {
     const written = this.store.write(author, { id: input.id, name: input.name, title, body: input.body, actions, projectId }, provenance, requestId);
     const { revision } = written;
     const verb = written.unchanged ? "unchanged: the same as revision" : written.created ? "created at revision" : "wrote revision";
+    // Revisions replace the whole body; a much shorter one is said, not refused.
+    const previous = written.created || written.unchanged ? null : this.store.revision(revision.artifact, revision.number - 1);
+    const bytes = Buffer.byteLength(revision.body), before = previous ? Buffer.byteLength(previous.body) : 0;
+    const shrank = previous && bytes * 2 < before ? ` Its body is ${bytes} bytes; revision ${previous.number}'s was ${before}. `
+      + "A revision replaces the whole document: if this dropped what the user was reading, write the full body again." : "";
     return {
       id: revision.artifact, revision: revision.number,
       text: `artifact ${revision.artifact} "${revision.title}" ${verb} ${revision.number}. The user opens it at #/a/${revision.artifact} `
         + `(link it in your reply as [${revision.title}](#/a/${revision.artifact})); their comments come back to you as a message starting "[artifact ${revision.artifact.slice(0, 8)}]".`
-        + (actions.length ? ` Actions offered, each run only if the user confirms it: ${actions.map(actionText).join("; ")}.` : ""),
+        + (actions.length ? ` Actions offered, each run only if the user confirms it: ${actions.map(actionText).join("; ")}.` : "") + shrank,
     };
   }
 

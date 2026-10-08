@@ -98,7 +98,7 @@ export const register: Register = on => {
       'Commands run there as user agent (with sudo); the machine reaches the internet over HTTP and HTTPS only, and GH_TOKEN is a placeholder that works for gh and git with GitHub. Background commands, notebooks, worktrees and host-local tools are not available. ' +
       'A server a command starts ends with that command: to keep a web server running and give the user a URL, run `cube service start NAME --port PORT -- COMMAND` (it must listen on 0.0.0.0; `cube service --help` lists status, logs and stop).',
       `Work artifacts: Write ${ARTIFACT_ROOT}/<name>.md to create a document for the user, or a new revision of it (the whole document each time; its title is the first # heading); ` +
-      `Write ${ARTIFACT_ROOT}/<name>.json as {"title"?, "body", "actions"?} to offer actions; Read ${ARTIFACT_ROOT}/<name>.md for the newest revision with the comments sent to you, and Read ${ARTIFACT_ROOT} for the list. ` +
+      `Write ${ARTIFACT_ROOT}/<name>.json as {"title"?, "body", "actions"?} to offer actions (body is still the whole document); Read ${ARTIFACT_ROOT}/<name>.md for the newest revision with the comments sent to you (its body follows the "--- body of revision" line), and Read ${ARTIFACT_ROOT} for the list. ` +
       'These paths are kept by cube, not in the machine; Edit and Bash do not reach them. ' + ARTIFACT_GUIDE,
     ]
     for (const file of INSTRUCTION_FILES) {
