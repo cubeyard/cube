@@ -195,6 +195,74 @@ publishing the draft. Publication and deployment are not CI acceptance steps.
 The workflow contains no runner artifacts. See [the operator update
 runbook](docs/cubed-updates.md) for the manifest and supervisor contracts.
 
+## Homebrew publishing
+
+The macOS tap is `cubeyard/homebrew-tap`: `Formula/cube.rb` (cubed, from the
+`darwin-arm64` release bundle, run directly without the update supervisor) and
+`Formula/cube-runner.rb` (the runner bundle, depending on Homebrew's `qemu`),
+installed with `brew install cubeyard/tap/cube`. Both are generated, never
+edited by hand:
+
+```sh
+gh release download vX.Y.Z --pattern 'cubed-darwin-arm64.json*' --pattern 'cube-runner-darwin-arm64.json*' --dir /tmp/assets
+node scripts/homebrew/formula.ts vX.Y.Z --assets /tmp/assets --out /tmp/formula
+```
+
+`scripts/homebrew/formula.ts` verifies the two manifests' Ed25519 signatures
+with the committed key (`scripts/cubed/update-public-key.pem`, fingerprint
+checked), requires the stable tag, the `darwin-arm64` platform, the state
+contract (102), protocol 3 and one commit for both, and writes formulas that pin
+each asset's release URL and sha256 (`scripts/homebrew-formula-test.ts`). The
+tap's README comes from `scripts/homebrew/tap-README.md`.
+
+`.github/workflows/homebrew.yml` runs when a release is published (or by hand
+with a `version` input): it generates the formulas on a macOS runner, installs
+them from the release, runs `brew audit --strict` and `brew test`, then commits
+them to the tap with the `HOMEBREW_TAP_TOKEN` secret (a fine-grained token with
+contents write on `cubeyard/homebrew-tap`; renew it when it expires). Drafts and
+prereleases are refused, and so is a version older than the latest release
+unless the `force` input says a downgrade is meant; the push runs in a second
+job on Linux so the tap token never reaches the machine that ran the release's
+binaries. The `homebrew` job of `ci.yml` does the same against the latest
+published release on every pull request, without the push, so a formula change
+is validated on a real Mac before it is merged. It checks this checkout's
+generator and tests against the latest release's binaries (which may lack
+`runners init-local`), which is why the formula tests assert only
+what every 0.3.x release has (`runners status`, `--self-check`, `cube-runner
+version`); the generator also requires the release's state schema and protocol
+to match the checkout, so a pull request that changes either fails this job
+until the next release ships. It is not a required check. GitHub's macOS
+runners have no nested virtualization, so neither job starts a thread machine.
+The tap's previous formula was a different product (the v0.1 `cube` launcher);
+the tap README tells those users how to move over.
+The formulas' `test do` blocks run `cubed --version`, `--help`, cubed's
+`--self-check` (which runs `cube-gateway --version`) and `cube-runner version`.
+The cube formula keeps the release bundle as signed except that it removes the
+prebuilt native modules a dependency (pi-tui) ships for other platforms, which
+`brew audit` refuses in an arm64 keg. A backport release published after a
+newer one fails the workflow's latest-release guard; publish it by hand with
+`force` only if the tap should go back.
+
+What the Homebrew layout changes against the managed launcher: `bin/cubed` is
+a small wrapper that sources `~/.config/cubed/environment`, sets `CUBE_RUNNER`
+to the formula's runner and runs the bundle's `bin/node` on
+`app/packages/server/src/index.ts` directly, so the **system** page reports an
+externally managed installation and `brew upgrade` is the update path; the
+runner's self-updater is not installed, for the same reason. Services are
+`brew services` user agents (`homebrew.mxcl.cube`, `homebrew.mxcl.cube-runner`)
+running `cubed` and the runner formula's `libexec/service.sh`
+(`cube-runner run --home "${CUBE_RUNNER_HOME:-$HOME/.cube/runner}"`, resolved
+for the user who starts the service); the runner's state and the enrollment
+come from `cubed runners init-local` (see
+[runner operations](docs/runner-operations.md#local-runner)). Homebrew 7 asks
+users to trust a third-party tap once (`brew trust cubeyard/tap`) before a
+formula from it, and its dependencies, load; the formulas name the runner
+dependency as `cubeyard/tap/cube-runner`. Both formulas take their version
+from the release tag in their URL, so every release upgrades both even when
+the runner's own version did not change. `brew upgrade` does not restart the
+services and removes the previous keg; the caveats and README say to restart
+them.
+
 ## Fresh start and recovery
 
 State schema 102 (thread machines) adopts no older registry (v100/v101 are

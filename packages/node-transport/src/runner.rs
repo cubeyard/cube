@@ -362,9 +362,16 @@ impl Runner {
         let qemu_name = options
             .qemu
             .unwrap_or_else(|| vm::default_qemu(platform).into());
+        // The paths are recorded as the operator gave them (made absolute,
+        // symlinks kept): a package manager's launcher such as Homebrew's
+        // `/opt/homebrew/bin/qemu-system-aarch64` or
+        // `share/qemu/edk2-aarch64-code.fd` points into a versioned directory
+        // that an upgrade replaces, so resolving it now would break the
+        // installation at the next `brew upgrade qemu`. Preflight checks the
+        // recorded path at every start.
         let qemu = vm::which(&qemu_name.to_string_lossy())
             .with_context(|| format!("QEMU not found: {}", qemu_name.display()))?;
-        let qemu = fs::canonicalize(qemu)?;
+        let qemu = std::path::absolute(qemu)?;
         vm::check_qemu(&qemu)?;
         let qemu_img = qemu
             .parent()
@@ -373,10 +380,10 @@ impl Runner {
             .or_else(|| vm::which("qemu-img"))
             .context("qemu-img not found next to QEMU or on PATH")?;
         let firmware = match (options.firmware, platform) {
-            (Some(path), _) => Some(
-                fs::canonicalize(&path)
-                    .with_context(|| format!("firmware {} not found", path.display()))?,
-            ),
+            (Some(path), _) => {
+                ensure!(path.is_file(), "firmware {} not found", path.display());
+                Some(std::path::absolute(&path)?)
+            }
             (None, vm::PLATFORM_MACOS_AARCH64) => Some(
                 [
                     "/opt/homebrew/share/qemu/edk2-aarch64-code.fd",

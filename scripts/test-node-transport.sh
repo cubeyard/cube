@@ -20,6 +20,8 @@ done
 # Build explicitly: cargo test's internal artifacts are not the smoke's binaries.
 cargo build --locked --offline -p cube-runner -p cube-gateway -j 2
 node scripts/runner-production-test.ts
+# cubed's local runner setup with the real cube-runner and the fake QEMU.
+node scripts/test-local-runner.ts "${CARGO_TARGET_DIR:-target}/debug/cube-runner"
 for script in scripts/runner/*.sh; do bash -n "$script"; done
 
 target="${CARGO_TARGET_DIR:-target}/debug"
