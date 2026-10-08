@@ -69,6 +69,9 @@ export interface Workspace {
   operation(token: string, key: string, options?: WorkspaceOperationOptions): Promise<WorkspaceOperation>;
   /** Real cancellation of a running command; poll for the final state. */
   cancel(token: string, key: string): Promise<WorkspaceOperation>;
+  /** File paths are relative to the workspace or absolute in the thread's
+   * machine (`filePath`); outside the workspace the helper acts with the
+   * agent account's permissions. */
   readFile(token: string, file: string, options?: { offset?: number; limit?: number }): Promise<WorkspaceFile>;
   writeFile(token: string, key: string, file: string, content: Uint8Array, options?: WorkspaceWrite): Promise<WorkspaceWriteResult>;
   stat(token: string, file: string): Promise<WorkspaceStat>;
@@ -113,18 +116,25 @@ export async function settleOperation(workspace: Workspace, token: string, key: 
 }
 
 export function invalid(message: string): WorkspaceError { return new WorkspaceError("INVALID_REQUEST", message); }
+/** A file operation's path: relative to the workspace, or absolute in the
+ * thread's machine. Only the guest helper resolves it, inside the machine;
+ * nothing on this host ever opens it. */
 export function filePath(file: unknown, limits: WorkspaceLimits): string {
-  if (typeof file !== "string" || !file || file.includes("\0") || file.startsWith("/") || Buffer.byteLength(file) > limits.maxPathBytes
+  if (typeof file !== "string" || !file || file.includes("\0") || Buffer.byteLength(file) > limits.maxPathBytes
     || file.split("/").includes("..")) {
-    throw invalid("path must be relative to the workspace");
+    throw invalid("path must be relative to the workspace or absolute in the thread machine, without ..");
   }
+  return file;
+}
+function relativePath(file: string, limits: WorkspaceLimits): string {
+  if (filePath(file, limits).startsWith("/")) throw invalid("path must be relative to the workspace");
   return file;
 }
 /** Validates a command against the limits; returns it with every default filled in. */
 export function execSpec(spec: WorkspaceExecSpec, limits: WorkspaceLimits): Required<WorkspaceExecSpec> {
   if (!spec || typeof spec !== "object" || typeof spec.command !== "string" || !spec.command) throw invalid("command is required");
   if (Buffer.byteLength(spec.command) > limits.maxCommandBytes) throw invalid(`command is at most ${limits.maxCommandBytes} bytes`);
-  if (spec.cwd !== undefined && spec.cwd !== ".") filePath(spec.cwd, limits);
+  if (spec.cwd !== undefined && spec.cwd !== ".") relativePath(spec.cwd, limits);
   if (!Number.isSafeInteger(spec.timeoutMs) || spec.timeoutMs < 1 || spec.timeoutMs > limits.maxExecTimeoutMs) {
     throw invalid(`timeout is 1-${limits.maxExecTimeoutMs} ms`);
   }

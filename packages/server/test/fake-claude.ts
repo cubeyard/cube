@@ -104,7 +104,8 @@ async function say(text: string): Promise<void> {
 
 async function tool(id: string, name: string, toolInput: Record<string, unknown>, signal: AbortSignal): Promise<void> {
   emit({ type: "assistant", parent_tool_use_id: null, message: { id: `msg_${randomUUID()}`, role: "assistant", model, content: [{ type: "tool_use", id, name, input: toolInput }] } });
-  const scope: ToolScope = { client, token: env.CUBE_WORKSPACE_TOKEN!, root: env.CUBE_WORKSPACE_ROOT!, signal };
+  const scope: ToolScope = { client, token: env.CUBE_WORKSPACE_TOKEN!, root: env.CUBE_WORKSPACE_ROOT!,
+    ...(env.CUBE_WORKSPACE_REAL_ROOT ? { realRoot: env.CUBE_WORKSPACE_REAL_ROOT } : {}), signal };
   // As register.ts: /cube/artifacts paths are the thread's artifacts.
   const artifact = name === "Read" || name === "Write" ? artifactPath(toolInput.file_path) : null;
   const result = artifact && "deny" in artifact ? artifact

@@ -1,5 +1,7 @@
 /** Pi's ExecutionEnv over the thread Workspace, for pi-durable's file tools.
  * The guest helper owns every file semantic; this only maps paths and errors.
+ * A path under /workspace (or relative) is a workspace path; any other
+ * absolute path is one in the thread's machine, never on this host.
  *
  * One environment serves one tool call. Every write carries a key derived from
  * the call's task id, so a replayed call never writes twice, and a write after
@@ -9,8 +11,10 @@ import type { Context } from "@earendil-works/chord";
 import { err, ExecutionError, FileError, ok, type ExecutionEnv, type FileErrorCode, type FileInfo, type Result, type ShellExecResult, type TextLineReader } from "@earendil-works/pi-durable/env";
 import { WorkspaceError, type Workspace } from "./workspace.ts";
 
-/** Paths the model sees: the workspace root is this virtual directory. */
+/** Paths the model sees: the workspace root is this directory in the machine. */
 export const WORKSPACE_ROOT = "/workspace";
+/** The agent account's home in the machine (vm-seed.ts): `~` in a path. */
+export const GUEST_HOME = "/home/agent";
 /** The largest file the file tools read whole, as the Claude Code mod does;
  * bash reads past it. */
 export const MAX_FILE_READ_BYTES = 2 * 1024 * 1024;
@@ -22,7 +26,7 @@ export class WorkspaceEnv implements ExecutionEnv {
   private readonly token: string;
   private readonly key: string;
   private writes = 0;
-  /** Whole-file sha of what this call read, per workspace-relative path. */
+  /** Whole-file sha of what this call read, per Workspace path. */
   private readonly read = new Map<string, string | null>();
 
   constructor(options: { workspace: Workspace; token: string; id: string; key: string }) {
@@ -30,24 +34,23 @@ export class WorkspaceEnv implements ExecutionEnv {
   }
 
   async absolutePath(file: string): Promise<Result<string, FileError>> {
-    const resolved = path.posix.resolve(this.cwd, file);
-    if (resolved !== WORKSPACE_ROOT && !resolved.startsWith(`${WORKSPACE_ROOT}/`)) {
-      return err(new FileError("invalid", `${file} is outside the workspace; use a path relative to the workspace root`, file));
-    }
-    return ok(resolved);
+    if (typeof file !== "string" || !file || file.includes("\0")) return err(new FileError("invalid", "a file path is required", file));
+    const expanded = expandHome(file);
+    if (expanded === null) return err(new FileError("invalid", `${file}: only ~ and ~/ name a home, the agent's (${GUEST_HOME})`, file));
+    return ok(path.posix.resolve(this.cwd, expanded));
   }
   async joinPath(parts: string[]): Promise<Result<string, FileError>> { return ok(path.posix.join(...parts)); }
   async canonicalPath(file: string): Promise<Result<string, FileError>> { return err(new FileError("not_supported", "canonical paths are resolved in the thread machine", file)); }
 
   async readBinaryFile(file: string, context: Context): Promise<Result<Uint8Array, FileError>> {
-    return this.attempt(file, context, async relative => {
+    return this.attempt(file, context, async target => {
       const { maxReadBytes } = await this.workspace.limits();
       const pages: Uint8Array[] = [];
       let offset = 0;
       let sha: string | null | undefined;
       for (;;) {
         context.abortSignal?.throwIfAborted();
-        const page = await this.workspace.readFile(this.token, relative, { offset, limit: maxReadBytes });
+        const page = await this.workspace.readFile(this.token, target, { offset, limit: maxReadBytes });
         // Each page reports the whole-file sha; a change between pages is not one file.
         if (sha !== undefined && page.sha256 !== sha) throw new FileError("unknown", `${file} changed while it was read`, file);
         if (offset === 0 && page.size > MAX_FILE_READ_BYTES) {
@@ -58,7 +61,7 @@ export class WorkspaceEnv implements ExecutionEnv {
         offset += page.content.length;
         if (page.eof || !page.content.length) break;
       }
-      this.read.set(relative, sha ?? null);
+      this.read.set(target, sha ?? null);
       return Buffer.concat(pages);
     });
   }
@@ -67,19 +70,19 @@ export class WorkspaceEnv implements ExecutionEnv {
     return bytes.ok ? ok(new TextDecoder().decode(bytes.value)) : bytes;
   }
   async writeFile(file: string, content: string | Uint8Array, context: Context): Promise<Result<void, FileError>> {
-    return this.attempt(file, context, async relative => {
+    return this.attempt(file, context, async target => {
       const bytes = typeof content === "string" ? Buffer.from(content) : content;
       const { maxWriteBytes } = await this.workspace.limits();
       if (bytes.length > maxWriteBytes) throw new FileError("invalid", `${file} would be ${bytes.length} bytes; the workspace writes at most ${maxWriteBytes} bytes at once — use bash for larger files`, file);
-      const expectedSha = this.read.get(relative) ?? undefined;
-      const written = await this.workspace.writeFile(this.token, `${this.key}:write:${++this.writes}`, relative, bytes, { createParents: true, ...(expectedSha ? { expectedSha } : {}) });
-      this.read.set(relative, written.sha256);
+      const expectedSha = this.read.get(target) ?? undefined;
+      const written = await this.workspace.writeFile(this.token, `${this.key}:write:${++this.writes}`, target, bytes, { createParents: true, ...(expectedSha ? { expectedSha } : {}) });
+      this.read.set(target, written.sha256);
     });
   }
   async fileInfo(file: string, context: Context): Promise<Result<FileInfo, FileError>> {
-    return this.attempt(file, context, async relative => {
-      const stat = await this.workspace.stat(this.token, relative);
-      return { name: path.posix.basename(relative), path: path.posix.join(WORKSPACE_ROOT, relative), kind: stat.kind === "other" ? "file" : stat.kind, size: stat.size, mtimeMs: stat.modifiedMs };
+    return this.attempt(file, context, async target => {
+      const stat = await this.workspace.stat(this.token, target);
+      return { name: path.posix.basename(target), path: path.posix.resolve(WORKSPACE_ROOT, target), kind: stat.kind === "other" ? "file" : stat.kind, size: stat.size, mtimeMs: stat.modifiedMs };
     });
   }
   async exists(file: string, context: Context): Promise<Result<boolean, FileError>> {
@@ -102,13 +105,27 @@ export class WorkspaceEnv implements ExecutionEnv {
   async exec(): Promise<Result<ShellExecResult, ExecutionError>> { return err(new ExecutionError("shell_unavailable", "use the bash tool to run commands")); }
   async cleanup(): Promise<void> {}
 
-  private async attempt<T>(file: string, context: Context, action: (relative: string) => Promise<T>): Promise<Result<T, FileError>> {
+  /** `action` gets the Workspace path: relative inside the workspace, else absolute. */
+  private async attempt<T>(file: string, context: Context, action: (target: string) => Promise<T>): Promise<Result<T, FileError>> {
     if (context.abortSignal?.aborted) return err(new FileError("aborted", "operation aborted", file));
     const absolute = await this.absolutePath(file);
     if (!absolute.ok) return absolute;
-    try { return ok(await action(path.posix.relative(WORKSPACE_ROOT, absolute.value) || ".")); }
+    try { return ok(await action(workspacePath(absolute.value))); }
     catch (error) { return err(fileError(file, error)); }
   }
+}
+
+/** `~` and `~/…` in the agent's home; null for another account's (`~name`). */
+export function expandHome(file: string): string | null {
+  if (file === "~" || file.startsWith("~/")) return `${GUEST_HOME}${file.slice(1)}`;
+  return file.startsWith("~") ? null : file;
+}
+
+/** The Workspace path of an absolute one in the machine: relative to the
+ * workspace root when beneath it, so older guest helpers take it too. */
+export function workspacePath(absolute: string): string {
+  if (absolute === WORKSPACE_ROOT) return ".";
+  return absolute.startsWith(`${WORKSPACE_ROOT}/`) ? absolute.slice(WORKSPACE_ROOT.length + 1) : absolute;
 }
 
 function unsupported<T>(file?: string): Result<T, FileError> {

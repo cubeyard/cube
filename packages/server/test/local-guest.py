@@ -138,7 +138,9 @@ ROOT = None
 def configure(root):
     global ROOT
     ROOT = root
-    guest.configure(state=os.path.join(root, "state"), workspace=os.path.join(root, "workspace"),
+    # The machine is ROOT: an absolute path in a file operation lands beneath
+    # it, never on the host running the tests.
+    guest.configure(root=root, state=os.path.join(root, "state"), workspace=os.path.join(root, "workspace"),
                     env_file=os.path.join(root, "env"), user=None, ready_files=[], commands=[], launcher=ProcessLauncher(root),
                     helper=os.path.join(root, "cube-guest"), cli=os.path.join(root, "bin", "cube"),
                     portal_file=os.path.join(root, "portal.json"), services=ProcessServices(root), service_host="127.0.0.1")

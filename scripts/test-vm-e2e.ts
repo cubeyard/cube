@@ -241,9 +241,16 @@ try {
   assert.equal(await bash(pi, "echo $NODE_EXTRA_CA_CERTS; sudo printenv NODE_EXTRA_CA_CERTS"), "/etc/ssl/certs/ca-certificates.crt\n/etc/ssl/certs/ca-certificates.crt");
   const coded = await prompt(pi, tool("codemode", { code: "const out = await tools.bash({ command: \"echo from-codemode > cm.txt; cat cm.txt\" }); return out;" }));
   assert.match(coded.text, /from-codemode/);
-  const leaked = execFileSync("find", [work, "(", "-name", "a.txt", "-o", "-name", "cm.txt", ")", "-not", "-path", `${work}/github/*`], { encoding: "utf8" }).trim();
+  // Outside the workspace: the file tools reach the machine's own files, as the agent.
+  const portal = "/home/agent/portal-runtime/start-portal.sh";
+  assert.equal((await prompt(pi, tool("write", { path: portal, content: "#!/bin/sh\nexec node portal.js\n" }))).state, "completed");
+  assert.equal((await prompt(pi, tool("edit", { path: "~/portal-runtime/start-portal.sh", edits: [{ oldText: "node", newText: "bun" }] }))).state, "completed");
+  assert.equal(await bash(pi, `cat ${portal}; stat -c %U ${portal}; mkdir -p /tmp/shots && printf shot > /tmp/shots/a.txt`), "#!/bin/sh\nexec bun portal.js\nagent");
+  assert.match((await prompt(pi, tool("read", { path: "/tmp/shots/a.txt" }))).text, /^result: shot/);
+  assert.match((await prompt(pi, tool("read", { path: "/proc/self/environ" }))).text, /kernel or device filesystem/);
+  const leaked = execFileSync("find", [work, "(", "-name", "a.txt", "-o", "-name", "cm.txt", "-o", "-name", "start-portal.sh", ")", "-not", "-path", `${work}/github/*`], { encoding: "utf8" }).trim();
   assert.equal(leaked, "", "nothing the agent wrote appears outside the VM disk");
-  log("1: write, read, edit, bash and codemode ran in the guest; nothing on the runner outside the VM disk");
+  log("1: write, read, edit, bash and codemode ran in the guest, also on /home/agent and /tmp; nothing on the runner outside the VM disk");
 
   // 1b. A guest that lost its packages (e.g. a first boot whose apt step
   // failed) reinstalls them on the next boot instead of staying broken.
@@ -344,6 +351,9 @@ try {
   const results = (transcript: { events: Array<{ type: string; output?: string }> }) => transcript.events.filter(event => event.type === "tool-result").map(event => event.output ?? "");
   const outputs = claudeFirst.events.filter((event: { type: string }) => event.type === "tool-result").map((event: { output?: string }) => event.output ?? "");
   assert.ok(outputs.some((output: string) => output.includes("bye") && output.includes("agent") && output.includes("/workspace")), JSON.stringify(outputs));
+  const machineRun = `e2e-${++requests}`;
+  await api(`/api/threads/${claude}/prompt`, "POST", { text: "write-at /home/agent/portal-runtime/start-portal.sh from-claude\nrun cat /home/agent/portal-runtime/start-portal.sh; echo; stat -c %U /home/agent/portal-runtime/start-portal.sh", requestId: machineRun });
+  assert.equal(results(await settled(claude, machineRun, 120)).at(-1)?.trim(), "from-claude\nagent", "the mod's Write reached the machine's /home/agent");
   const slowRun = `e2e-${++requests}`;
   await api(`/api/threads/${claude}/prompt`, "POST", { text: "slow sleep 30; touch late.txt", requestId: slowRun });
   await until("claude's slow command", 60, async () => JSON.stringify((await history(claude)).events).includes("late.txt"));
@@ -354,7 +364,7 @@ try {
   await api(`/api/threads/${claude}/prompt`, "POST", { text: "run systemctl list-units --plain --no-legend 'cube-op-*' --state=active,activating | wc -l; ls late.txt 2>&1 | grep -c 'No such'", requestId: checkRun });
   const checked = await settled(claude, checkRun, 120);
   assert.equal(results(checked).at(-1)?.trim(), "1\n1", "only the check itself runs; late.txt was never written");
-  log("6: claude code thread: Write, Read, Edit and Bash in the guest; stop cancelled the guest command");
+  log("6: claude code thread: Write, Read, Edit and Bash in the guest, Write also to /home/agent; stop cancelled the guest command");
   const claudeArchive = await api(`/api/threads/${claude}`, "DELETE");
   assert.equal(claudeArchive.retained, true);
 

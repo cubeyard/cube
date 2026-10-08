@@ -108,10 +108,11 @@ describe('workspace tools', () => {
     expect(all.result).toEqual({ type: 'text', file: { filePath: `${ROOT}/src/a.txt`, content: 'one\ntwo\nthree', numLines: 3, startLine: 1, totalLines: 3 } })
     const part = await $.tool.call({ tool: 'Read', file_path: '/workspace/src/a.txt', offset: 2, limit: 1 })
     expect(part.result).toEqual({ type: 'text', file: { filePath: '/workspace/src/a.txt', content: 'two', numLines: 1, startLine: 2, totalLines: 3 } })
+    // Any other absolute path is the thread machine's, asked of cubed as such.
     const outside = await $.tool.call({ tool: 'Read', file_path: '/etc/passwd' })
-    expect(refusal(outside)).toMatch(/outside the thread workspace/)
+    expect(refusal(outside)).toMatch(/does not exist/)
     const escape = await $.tool.call({ tool: 'Read', file_path: `${ROOT}/../secret` })
-    expect(refusal(escape)).toMatch(/leaves the thread workspace/)
+    expect(refusal(escape)).toMatch(/does not exist/)
     const missing = await $.tool.call({ tool: 'Read', file_path: `${ROOT}/nope` })
     expect(refusal(missing)).toMatch(/does not exist/)
   })
@@ -135,8 +136,8 @@ describe('workspace tools', () => {
     expect(refusal(await $.tool.call({ tool: 'Read', file_path: `${ROOT}/.shots/cut.png` }))).toMatch(/looks truncated/)
     expect(refusal(await $.tool.call({ tool: 'Read', file_path: `${ROOT}/.shots/text.png` }))).toMatch(/not a PNG, JPEG, GIF or WebP image/)
     expect(refusal(await $.tool.call({ tool: 'Read', file_path: `${ROOT}/data.bin` }))).toMatch(/not UTF-8 text/)
-    expect(refusal(await $.tool.call({ tool: 'Read', file_path: '/home/me/.shots/dot.png' }))).toMatch(/outside the thread workspace/)
-    expect(refusal(await $.tool.call({ tool: 'Read', file_path: `${ROOT}/.shots/../../dot.png` }))).toMatch(/leaves the thread workspace/)
+    expect(refusal(await $.tool.call({ tool: 'Read', file_path: '/home/me/.shots/dot.png' }))).toMatch(/does not exist/)
+    expect(refusal(await $.tool.call({ tool: 'Read', file_path: `${ROOT}/.shots/../../dot.png` }))).toMatch(/does not exist/)
     expect(reached).toEqual([])
   })
 
@@ -159,6 +160,24 @@ describe('workspace tools', () => {
     expect(workspace.files['notes/plan.md']).toBe('omega delta omega\n')
     const absent = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/notes/plan.md`, old_string: 'zeta', new_string: 'eta' })
     expect(refusal(absent)).toMatch(/String to replace not found/)
+  })
+
+  test('Write, Edit and Read reach the thread machine outside the workspace', async ($, on) => {
+    const workspace = fakeWorkspace(on, { '/tmp/screens/shot.png': atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==') })
+    const reached = engine(on)
+    const script = '/home/agent/portal-runtime/start-portal.sh'
+    const created = await $.tool.call({ tool: 'Write', file_path: script, content: '#!/bin/sh\nexec node portal.js\n' })
+    expect(created.result).toEqual({ type: 'create', filePath: script, content: '#!/bin/sh\nexec node portal.js\n', structuredPatch: [], originalFile: null })
+    expect(workspace.files[script]).toBe('#!/bin/sh\nexec node portal.js\n')
+    const edited = await $.tool.call({ tool: 'Edit', file_path: '~/portal-runtime/start-portal.sh', old_string: 'node', new_string: 'bun' })
+    expect(edited.deny).toBe(undefined)
+    expect(workspace.files[script]).toBe('#!/bin/sh\nexec bun portal.js\n')
+    const shot = await $.tool.call({ tool: 'Read', file_path: '/tmp/screens/../screens/shot.png' })
+    expect((shot.result as { type: string }).type).toBe('image')
+    expect(refusal(await $.tool.call({ tool: 'Write', file_path: '/', content: 'x' }))).toMatch(/root directory, not a file/)
+    expect(refusal(await $.tool.call({ tool: 'Edit', file_path: '/cube/artifacts/plan.md', old_string: 'a', new_string: 'b' }))).toMatch(/revised with Write/)
+    expect(refusal(await $.tool.call({ tool: 'Edit', file_path: '/cube/x', old_string: 'a', new_string: 'b' }))).toMatch(/not an artifact path/)
+    expect(reached).toEqual([])
   })
 
   test('host-local tools, background commands and isolated subagents are refused', async ($, on) => {

@@ -24,6 +24,12 @@ command that started them, and registers their port for cubed's portal.
 cubed reads the registrations with the `services` operation; nothing in the
 guest calls cubed.
 
+File operations take a path relative to /workspace or an absolute path in
+this machine. Inside the workspace they act as root and give what they
+create to the agent; anywhere else they act with the agent account's own
+permissions, as its commands do without sudo. /proc, /sys and /dev are not
+files to them.
+
 The VM is the isolation boundary: path checks are contract, not security.
 Python 3 standard library only.
 """
@@ -46,8 +52,11 @@ VERSION = "1"
 HELPER = "/usr/local/sbin/cube-guest"
 CLI_PATH = "/usr/local/bin/cube"
 CLI_SHIM = "#!/bin/sh\nexec %s cli \"$@\"\n" % HELPER
-CAPABILITIES = ["exec.start", "exec.cancel", "operation.get", "fs.read", "fs.write", "fs.stat",
+CAPABILITIES = ["exec.start", "exec.cancel", "operation.get", "fs.read", "fs.write", "fs.stat", "fs.absolute",
                 "services.list", "helper.install", "portal.configure"]
+# Kernel and device pseudo-filesystems: endless, blocking or live "files" a
+# file tool must not read or write whole; bash reaches them.
+PSEUDO_FILESYSTEMS = ("/proc", "/sys", "/dev")
 LIMITS = {
     "maxFrameBytes": 1048576,
     "requestTimeoutMs": 30000,
@@ -266,14 +275,18 @@ def write_atomic(target, data, mode=0o600):
     temporary = "%s.tmp-%d" % (target, os.getpid())
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     try:
-        view = memoryview(data)
-        while view:
-            written = os.write(fd, view)
-            view = view[written:]
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.rename(temporary, target)
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.rename(temporary, target)
+    except OSError:
+        os.unlink(temporary)
+        raise
     fsync_dir(os.path.dirname(target))
 
 
@@ -308,8 +321,40 @@ def account():
 def give(target):
     """Files the helper creates belong to the agent's account."""
     owner = account()
-    if owner is not None:
+    if owner is not None and os.geteuid() == 0:
         os.chown(target, owner[0], owner[1], follow_symlinks=False)
+
+
+class AsAgent:
+    """File access outside the workspace, with the agent account's
+    permissions: what it may not touch without sudo stays so here. The
+    helper's real uid stays root, so the journal is written again after."""
+
+    def __init__(self, active):
+        self.owner = account() if active and os.geteuid() == 0 else None
+
+    def __enter__(self):
+        if self.owner is not None:
+            self.groups = os.getgroups()
+            os.setgroups(os.getgrouplist(CONFIG.user, self.owner[1]))
+            try:
+                os.setegid(self.owner[1])
+                os.seteuid(self.owner[0])
+            except BaseException:
+                os.setegid(0)
+                os.setgroups(self.groups)
+                raise
+        return self
+
+    def __exit__(self, kind, error, trace):
+        if self.owner is not None:
+            os.seteuid(0)
+            os.setegid(0)
+            os.setgroups(self.groups)
+        if self.owner is not None and isinstance(error, PermissionError):
+            raise Fail("IO_ERROR", "permission denied: this path leads outside the workspace, where the file tools have the "
+                                   "agent account's permissions; use sudo in bash for this file")
+        return False
 
 
 class Lock:
@@ -374,6 +419,36 @@ def workspace_path(relative, follow=True):
     if checked != root and not checked.startswith(root + os.sep):
         raise Fail("INVALID_REQUEST", "path leaves the workspace")
     return full
+
+
+def within(path, root):
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def file_path(path, follow=True):
+    """A file operation's target: relative to the workspace or absolute in
+    this machine, never with `..`. Returns it and whether it lies outside the
+    workspace (then it is reached as the agent, see `AsAgent`), wherever its
+    symlinks lead; the workspace's own links may lead out of it."""
+    if not isinstance(path, str) or not path or "\0" in path or len(path.encode()) > LIMITS["maxPathBytes"] \
+            or ".." in path.split("/"):
+        raise Fail("INVALID_REQUEST", "path must be relative to the workspace or absolute, without ..")
+    workspace = os.path.realpath(CONFIG.workspace)
+    machine = os.path.realpath(CONFIG.root)
+    full = os.path.normpath(os.path.join(machine, path.lstrip("/")) if path.startswith("/") else os.path.join(workspace, path))
+    resolved = os.path.realpath(full)
+    # A write or stat acts on a final symlink itself, not on what it names.
+    located = resolved if follow else os.path.join(os.path.realpath(os.path.dirname(full)), os.path.basename(full))
+    # `full` too: /proc/self/root/… resolves elsewhere but opens through /proc.
+    for where in (full, located, resolved):
+        for pseudo in PSEUDO_FILESYSTEMS:
+            if within(where, os.path.join(machine, pseudo.lstrip("/"))):
+                raise Fail("INVALID_REQUEST", "%s is in %s, a kernel or device filesystem; use bash" % (path, pseudo))
+    if within(located, workspace) and within(resolved, workspace):
+        return full, False
+    if not all(within(where, machine) for where in (full, located, resolved)):
+        raise Fail("INVALID_REQUEST", "path leaves the machine")
+    return full, True
 
 
 def new_record(op, request):
@@ -528,24 +603,34 @@ def op_cancel(header, body):
 
 
 def op_read(header, body):
-    target = workspace_path(header.get("path"))
+    target, outside = file_path(header.get("path"))
     offset = header.get("offset", 0)
     limit = header.get("limit", LIMITS["maxReadBytes"])
     if not integer(offset, 0) or not integer(limit, 1, LIMITS["maxReadBytes"]):
         raise Fail("INVALID_REQUEST", "read limit is at most %d bytes" % LIMITS["maxReadBytes"])
-    try:
-        info = os.stat(target)
-    except FileNotFoundError:
-        raise Fail("NOT_FOUND", "no such file")
-    if not stat.S_ISREG(info.st_mode):
-        raise Fail("INVALID_REQUEST", "not a regular file")
-    with open(target, "rb") as handle:
-        whole = hashlib.sha256()
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            whole.update(chunk)
-        size = handle.tell()
-        handle.seek(offset)
-        content = handle.read(limit)
+    with AsAgent(outside):
+        try:
+            info = os.stat(target)
+        except FileNotFoundError:
+            raise Fail("NOT_FOUND", "no such file")
+        if not stat.S_ISREG(info.st_mode):
+            raise Fail("INVALID_REQUEST", "not a regular file")
+        # Never blocks on a FIFO swapped in after the check.
+        fd = os.open(target, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            handle = open(fd, "rb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise Fail("INVALID_REQUEST", "not a regular file")
+            whole = hashlib.sha256()
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                whole.update(chunk)
+            size = handle.tell()
+            handle.seek(offset)
+            content = handle.read(limit)
     return {"path": header["path"], "offset": offset, "size": size, "eof": offset + len(content) >= size,
             "sha256": whole.hexdigest(), "length": len(content)}, content
 
@@ -553,7 +638,7 @@ def op_read(header, body):
 def op_write(header, body):
     op = op_id(header)
     relative = header.get("path")
-    target = workspace_path(relative, follow=False)
+    target, outside = file_path(relative, follow=False)
     expected = header.get("expectedSha")
     parents = header.get("createParents", False)
     length = header.get("length")
@@ -575,7 +660,8 @@ def op_write(header, body):
                 write_json(op_path(op, "result.json"), result)
             return written(result)
         try:
-            result = {"state": "Written", "result": replace(target, body, expected, parents)}
+            with AsAgent(outside):
+                result = {"state": "Written", "result": replace(target, body, expected, parents)}
         except Fail as failure:
             result = {"state": "Failed", "error": failure.code, "completionUnknown": False, "message": failure.message}
         except OSError as error:
@@ -602,10 +688,9 @@ def replace(target, content, expected, parents):
     if not os.path.isdir(directory):
         if not parents:
             raise Fail("NOT_FOUND", "the parent directory does not exist")
-        root = os.path.realpath(CONFIG.workspace)
         missing = []
         probe = directory
-        while not os.path.isdir(probe) and probe != root:
+        while not os.path.isdir(probe) and probe != os.path.dirname(probe):
             missing.append(probe)
             probe = os.path.dirname(probe)
         for created in reversed(missing):
@@ -619,15 +704,17 @@ def replace(target, content, expected, parents):
 
 
 def op_stat(header, body):
-    target = workspace_path(header.get("path"), follow=False)
-    try:
-        info = os.lstat(target)
-    except FileNotFoundError:
-        raise Fail("NOT_FOUND", "no such file")
-    kind = "file" if stat.S_ISREG(info.st_mode) else "directory" if stat.S_ISDIR(info.st_mode) \
-        else "symlink" if stat.S_ISLNK(info.st_mode) else "other"
+    target, outside = file_path(header.get("path"), follow=False)
+    with AsAgent(outside):
+        try:
+            info = os.lstat(target)
+        except FileNotFoundError:
+            raise Fail("NOT_FOUND", "no such file")
+        kind = "file" if stat.S_ISREG(info.st_mode) else "directory" if stat.S_ISDIR(info.st_mode) \
+            else "symlink" if stat.S_ISLNK(info.st_mode) else "other"
+        sha = sha256_file(target) if kind == "file" else None
     return {"kind": kind, "size": info.st_size, "mode": stat.S_IMODE(info.st_mode),
-            "modifiedMs": info.st_mtime_ns // 1000000, "sha256": sha256_file(target) if kind == "file" else None}, b""
+            "modifiedMs": info.st_mtime_ns // 1000000, "sha256": sha}, b""
 
 
 def build():

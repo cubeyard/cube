@@ -15,7 +15,7 @@ import { createEditTool, createWriteTool } from "@earendil-works/pi-durable/tool
 import { createPiReadTool } from "./pi-read.ts";
 import { createCodemodeTool, type CodemodeLimits, type NestedTool } from "./codemode.ts";
 import { settleOperation, WorkspaceError, type Workspace } from "./workspace.ts";
-import { WORKSPACE_ROOT, WorkspaceEnv } from "./workspace-env.ts";
+import { expandHome, WORKSPACE_ROOT, WorkspaceEnv, workspacePath } from "./workspace-env.ts";
 
 const context = BACKGROUND_CONTEXT;
 const BASH_OUTPUT_BYTES = 50 * 1024;
@@ -181,18 +181,20 @@ export async function openAgent(options: {
     const host = options.hostTools?.({
       key: taskKey,
       async readFile(file, limit) {
-        const target = relative(file);
+        const expanded = expandHome(file);
+        if (expanded === null) throw new Error(`${file}: only ~ and ~/ name a home, the agent's`);
+        const target = workspacePath(path.posix.resolve(WORKSPACE_ROOT, expanded));
         if (target === ".") throw new Error("path must name a file");
         const read = await options.workspace.readFile(lease.token, target, { limit: limit + 1 });
         if (!read.eof || read.content.byteLength > limit) throw new Error(`${file} is larger than ${limit} bytes`);
         const bytes = Buffer.from(read.content);
-        return { text: bytes.toString("utf8"), path: `${WORKSPACE_ROOT}/${target}`, sha256: createHash("sha256").update(bytes).digest("hex") };
+        return { text: bytes.toString("utf8"), path: path.posix.resolve(WORKSPACE_ROOT, target), sha256: createHash("sha256").update(bytes).digest("hex") };
       },
     });
     registry.install(defineExtension({
       name: "cube",
       tools: [direct(read), direct(write), direct(edit), bashTool.registration, codemode, ...host?.tools ?? []],
-      sections: [section("preamble", () => `You are a coding agent working in this thread's own Debian virtual machine. File tools address the workspace root as ${WORKSPACE_ROOT}; bash runs commands as the user agent (with passwordless sudo) with the workspace root as its working directory. codemode runs one JavaScript script that calls these tools, for batching, chaining or filtering their results. The machine reaches the internet over HTTP and HTTPS only, through cube's gateway, which decides every request; other connections are refused. git and gh are installed and authenticated for GitHub where the host allows it (GH_TOKEN holds a placeholder the gateway replaces; never print or copy it elsewhere). Never assume access to control-plane files or credentials. A server a command starts ends with that command: to keep a web server running and give the user a URL, run "cube service start NAME --port PORT -- COMMAND" (it must listen on 0.0.0.0; "cube service --help" lists status, logs and stop).${host ? ` ${host.note}` : ""}`, { tag: false }),
+      sections: [section("preamble", () => `You are a coding agent working in this thread's own Debian virtual machine. File tools address the workspace root as ${WORKSPACE_ROOT} and take relative paths there; an absolute path elsewhere (/home/agent, /tmp) is a file in the same machine, reached with the agent's own permissions (use sudo in bash for root-owned files; /proc, /sys and /dev only through bash). bash runs commands as the user agent (with passwordless sudo) with the workspace root as its working directory. codemode runs one JavaScript script that calls these tools, for batching, chaining or filtering their results. The machine reaches the internet over HTTP and HTTPS only, through cube's gateway, which decides every request; other connections are refused. git and gh are installed and authenticated for GitHub where the host allows it (GH_TOKEN holds a placeholder the gateway replaces; never print or copy it elsewhere). Never assume access to control-plane files or credentials. A server a command starts ends with that command: to keep a web server running and give the user a URL, run "cube service start NAME --port PORT -- COMMAND" (it must listen on 0.0.0.0; "cube service --help" lists status, logs and stop).${host ? ` ${host.note}` : ""}`, { tag: false }),
         // The repository's own instructions live in the VM, as they do
         // for Claude Code threads; rendered each generation, so edits apply.
         section("repository", async () => {
