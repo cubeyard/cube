@@ -9,7 +9,9 @@
  * the browser as data: nothing in it runs. The only side effects a document
  * can name are typed actions from a fixed list (`github.merge`), stored apart
  * from the body, checked against the artifact's project when written and
- * against live state when the user confirms one (artifact-actions.ts). */
+ * against live state when the user confirms one (artifact-service.ts). A
+ * run's outcome is told to the author, and to OptChat for a thread it
+ * started, as notices recorded with the outcome itself. */
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
@@ -73,6 +75,17 @@ export interface ActionRun {
   id: string; artifact: string; revision: number; action: string; requestId: string;
   state: "running" | "succeeded" | "failed"; detail: string; createdAt: number;
 }
+/** Who hears of a finished action run: the artifact's author, or OptChat
+ * when it started the thread that wrote the artifact (checked when it goes). */
+export type NoticeTarget = ArtifactAuthor | { kind: "starter"; thread: string };
+/** One message telling a run's outcome, written with the outcome and
+ * delivered like a comment batch: the same text under the same request id
+ * on every try, accepted once. */
+export interface ActionNotice {
+  id: string; artifact: string; run: string; requestId: string; text: string; target: NoticeTarget;
+  /** `skipped`: OptChat did not start the author thread, so it is not told. */
+  state: "queued" | "delivered" | "undeliverable" | "skipped"; note: string | null; createdAt: number; deliveredAt: number | null;
+}
 
 export const isArtifactName = (value: unknown): value is string => typeof value === "string" && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(value) && !value.includes("..");
 export class ArtifactError extends Error {
@@ -84,6 +97,8 @@ const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const isArtifactId = (value: unknown): value is string => typeof value === "string" && ID.test(value);
 const authorKey = (author: ArtifactAuthor) => author.kind === "optchat" ? "optchat" : `thread:${author.thread}`;
 const parseAuthor = (key: string): ArtifactAuthor => key === "optchat" ? { kind: "optchat" } : { kind: "thread", thread: key.slice("thread:".length) };
+const targetKey = (target: NoticeTarget) => target.kind === "starter" ? `starter:${target.thread}` : authorKey(target);
+const parseTarget = (key: string): NoticeTarget => key.startsWith("starter:") ? { kind: "starter", thread: key.slice("starter:".length) } : parseAuthor(key);
 export const sameAuthor = (a: ArtifactAuthor, b: ArtifactAuthor) => authorKey(a) === authorKey(b);
 export const authorText = (author: ArtifactAuthor) => author.kind === "optchat" ? "optchat" : `thread [${author.thread.slice(0, 8)}]`;
 
@@ -141,6 +156,20 @@ export function commentMessage(artifact: { id: string; title: string; head: numb
   return lines.join("\n");
 }
 
+/** What a finished run tells `target`: the action, its exact target and
+ * what the run recorded, nothing more. */
+export function actionMessage(artifact: { id: string; title: string; author: ArtifactAuthor }, action: ArtifactAction | null,
+  run: { action: string; revision: number; state: "succeeded" | "failed"; detail: string }, target: NoticeTarget): string {
+  const what = action ? `"${action.label}" (github.merge ${action.repository}#${action.pull} at ${action.headSha.slice(0, 12)}, ${action.method})` : `action ${run.action}`;
+  const whose = target.kind === "starter" && artifact.author.kind === "thread" ? `the artifact "${artifact.title}" of thread [${artifact.author.thread.slice(0, 8)}]` : `your artifact "${artifact.title}"`;
+  const detail = run.detail.replace(/\.$/, "");
+  const outcome = run.state === "succeeded" ? `Done: ${detail}.` : `It did not succeed: ${detail}. Nothing says it merged; check the pull request on GitHub before saying otherwise.`;
+  const next = target.kind === "thread"
+    ? "Nothing more is asked of you. If the outcome calls for follow-up, say what; otherwise answer in one line."
+    : "Tell the user only what this changes for them.";
+  return `[artifact ${artifact.id.slice(0, 8)}] The user confirmed ${what} on ${whose} (${artifact.id}, revision ${run.revision}; #/a/${artifact.id}). ${outcome} ${next}`;
+}
+
 type Row = Record<string, unknown>;
 
 export class ArtifactStore {
@@ -168,6 +197,9 @@ export class ArtifactStore {
       CREATE INDEX IF NOT EXISTS comments_artifact ON comments(artifact);
       CREATE TABLE IF NOT EXISTS action_runs (id TEXT PRIMARY KEY, artifact TEXT NOT NULL REFERENCES artifacts(id), revision INTEGER NOT NULL,
         action TEXT NOT NULL, request_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL, detail TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS notices (id TEXT PRIMARY KEY, artifact TEXT NOT NULL REFERENCES artifacts(id), run TEXT NOT NULL REFERENCES action_runs(id),
+        target TEXT NOT NULL, request_id TEXT NOT NULL UNIQUE, text TEXT NOT NULL, state TEXT NOT NULL, note TEXT, created_at INTEGER NOT NULL,
+        delivered_at INTEGER, UNIQUE (run, target));
       PRAGMA user_version=${SCHEMA};`);
   }
   close(): void { this.db.close(); }
@@ -355,15 +387,52 @@ export class ArtifactStore {
       return { run, fresh: true };
     });
   }
+  /** Records a running run's outcome and, in the same transaction, the
+   * notices that tell it: a restart finds both or neither. */
   finishAction(run: string, state: "succeeded" | "failed", detail: string): void {
-    this.db.prepare("UPDATE action_runs SET state = ?, detail = ? WHERE id = ?").run(state, detail.slice(0, 2000), run);
+    this.transaction(() => this.finish(run, state, detail));
+  }
+  private finish(run: string, state: "succeeded" | "failed", detail: string): void {
+    const updated = this.db.prepare("UPDATE action_runs SET state = ?, detail = ? WHERE id = ? AND state = 'running'").run(state, detail.slice(0, 2000), run);
+    if (!updated.changes) return;
+    const finished = runOf(this.db.prepare("SELECT * FROM action_runs WHERE id = ?").get(run) as Row);
+    const artifact = this.summary(this.row(finished.artifact)!);
+    const action = this.revision(finished.artifact, finished.revision)?.actions.find(candidate => candidate.id === finished.action) ?? null;
+    const targets: NoticeTarget[] = artifact.author.kind === "optchat" ? [artifact.author] : [artifact.author, { kind: "starter", thread: artifact.author.thread }];
+    const insert = this.db.prepare("INSERT OR IGNORE INTO notices (id, artifact, run, target, request_id, text, state, note, created_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)");
+    for (const target of targets) {
+      const key = targetKey(target);
+      insert.run(randomUUID(), artifact.id, run, key, `artifact:${artifact.id}:action:${run}:${key}`,
+        actionMessage(artifact, action, { action: finished.action, revision: finished.revision, state, detail: finished.detail }, target), "waiting to be delivered", Date.now());
+    }
   }
   actionRuns(id: string): ActionRun[] {
     return (this.db.prepare("SELECT * FROM action_runs WHERE artifact = ? ORDER BY created_at").all(id) as Row[]).map(runOf);
   }
-  /** Runs a process stop left unfinished: their outcome is unknown. */
+  /** Runs a process stop left unfinished: their outcome is unknown, and is told so. */
   interruptedActions(): void {
-    this.db.prepare("UPDATE action_runs SET state = 'failed', detail = 'cubed stopped while this ran; check the pull request on GitHub before trying again' WHERE state = 'running'").run();
+    this.transaction(() => {
+      for (const row of this.db.prepare("SELECT id FROM action_runs WHERE state = 'running'").all() as Row[]) {
+        this.finish(String(row.id), "failed", "cubed stopped while this ran, so whether GitHub merged it is unknown; check the pull request on GitHub before trying again");
+      }
+    });
+  }
+
+  /** The notices of an artifact's runs, oldest first. */
+  notices(id: string): ActionNotice[] {
+    return (this.db.prepare("SELECT * FROM notices WHERE artifact = ? ORDER BY created_at, rowid").all(id) as Row[]).map(noticeOf);
+  }
+  /** Notices still waiting, oldest first. */
+  queuedNotices(): ActionNotice[] {
+    return (this.db.prepare("SELECT * FROM notices WHERE state = 'queued' ORDER BY created_at, rowid").all() as Row[]).map(noticeOf);
+  }
+  settleNotice(id: string, state: Exclude<ActionNotice["state"], "queued">, note: string | null): void {
+    this.db.prepare("UPDATE notices SET state = ?, note = ?, delivered_at = CASE WHEN ? = 'delivered' THEN ? ELSE delivered_at END WHERE id = ? AND state = 'queued'")
+      .run(state, note, state, Date.now(), id);
+  }
+  /** Updates why a queued notice still waits. */
+  noteNotice(id: string, note: string): void {
+    this.db.prepare("UPDATE notices SET note = ? WHERE id = ? AND state = 'queued'").run(note, id);
   }
 }
 
@@ -371,6 +440,11 @@ const batchId = (requestId: string) => createHash("sha256").update(requestId).di
 const batchOf = (row: Row): CommentBatch => ({
   id: String(row.id), artifact: String(row.artifact), requestId: String(row.request_id), text: String(row.text), target: parseAuthor(String(row.target)),
   state: String(row.state) as CommentBatch["state"], note: row.note === null ? null : String(row.note), createdAt: Number(row.created_at),
+  deliveredAt: row.delivered_at === null ? null : Number(row.delivered_at),
+});
+const noticeOf = (row: Row): ActionNotice => ({
+  id: String(row.id), artifact: String(row.artifact), run: String(row.run), requestId: String(row.request_id), text: String(row.text), target: parseTarget(String(row.target)),
+  state: String(row.state) as ActionNotice["state"], note: row.note === null ? null : String(row.note), createdAt: Number(row.created_at),
   deliveredAt: row.delivered_at === null ? null : Number(row.delivered_at),
 });
 const runOf = (row: Row): ActionRun => ({

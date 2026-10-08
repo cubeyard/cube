@@ -65,6 +65,8 @@
   // the newest is what the composer pins.
   const revisionHash = (value: number) => value === head && !pending ? `#/a/${artifactId}` : `#/a/${artifactId}?rev=${value}`;
   const runs = (action: string) => view?.actionRuns.filter((run) => run.action === action) ?? [];
+  // Who hears of a run's outcome; a chat that did not start the thread is not told.
+  const told = (run: string) => view?.notices.filter((notice) => notice.run === run && notice.state !== "skipped") ?? [];
   const dark = () => matchMedia("(prefers-color-scheme: dark)").matches;
 
   async function load(): Promise<void> {
@@ -312,7 +314,12 @@
   const stateText = (comment: ArtifactComment) => comment.state === "draft" ? "not sent"
     : comment.state === "queued" ? (comment.note ?? "waiting") : comment.state === "delivered" ? `sent to ${author}${comment.deliveredAt ? ` · ${relTime(comment.deliveredAt)}` : ""}`
     : comment.note ?? "not delivered";
-  const lamp = (comment: ArtifactComment) => comment.state === "queued" ? "on-amber" : comment.state === "delivered" ? "on-green" : comment.state === "undeliverable" ? "on-red" : "";
+  const noticeText = (notice: ArtifactView["notices"][number]) => {
+    const who = notice.target.kind === "thread" ? "the thread" : "optchat";
+    return notice.state === "delivered" ? `told ${who}${notice.deliveredAt ? ` · ${relTime(notice.deliveredAt)}` : ""}`
+      : notice.state === "queued" ? `to ${who}: ${notice.note ?? "waiting"}` : `not told ${who}: ${notice.note ?? "undeliverable"}`;
+  };
+  const lamp = (comment: { state: string }) => comment.state === "queued" ? "on-amber" : comment.state === "delivered" ? "on-green" : comment.state === "undeliverable" ? "on-red" : "";
   const placeText = (comment: ArtifactComment) => {
     const placed = placements[comment.id];
     if (!shown || !placed) return "";
@@ -392,6 +399,11 @@
                   <span class="artifact-action-label">{action.label}</span>
                   <span class="artifact-action-target">github.merge · {action.repository}#{action.pull} · head {action.headSha.slice(0, 12)} · {action.method}</span>
                   {#if last}<span class="artifact-action-run {last.state}">{last.state}: {last.detail}</span>{/if}
+                  {#if last}
+                    {#each told(last.id) as notice (notice.id)}
+                      <span class="artifact-action-told"><span class="lamp mini {lamp(notice)}" aria-hidden="true"></span><span>{noticeText(notice)}</span></span>
+                    {/each}
+                  {/if}
                 </div>
                 <button class="key" onclick={() => openAction(action)} disabled={last?.state === "succeeded" || last?.state === "running"}>
                   {last?.state === "succeeded" ? "done" : "review…"}

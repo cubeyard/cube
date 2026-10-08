@@ -7,18 +7,24 @@
  * prompt (refused while it works, never queued into a run or interrupting
  * one) for a thread's. A batch that cannot go yet stays queued, with the
  * reason, and is tried again; its request id makes every attempt the same
- * message, accepted once. */
+ * message, accepted once.
+ *
+ * A confirmed action's outcome goes the same way, as notices written with
+ * the outcome: to the author, and to OptChat when it started the author
+ * thread (whose answer to its notice also reaches OptChat as its report). */
 import { parseGitHubRepo } from "@cube/git";
 import { createLogger } from "./log.ts";
 import {
   ARTIFACT_LIMITS, ArtifactError, ArtifactStore, authorText, parseActions, sameAuthor,
-  type ArtifactAction, type ArtifactAuthor, type ArtifactComment, type ArtifactSummary, type CommentBatch, type Provenance,
+  type ActionNotice, type ArtifactAction, type ArtifactAuthor, type ArtifactComment, type ArtifactSummary, type CommentBatch, type Provenance,
 } from "./artifacts.ts";
 import { GithubPullsError, type GithubPulls, type PullState } from "./github-pulls.ts";
 import { threadAgent, type Registry } from "./registry.ts";
 
 const log = createLogger("artifacts");
 export const DELIVERY_RETRY_MS = 10_000;
+/** A notice that could not go for this long stops waiting and says so. */
+export const NOTICE_GIVE_UP_MS = 24 * 60 * 60_000;
 /** How much of a body a read returns to an agent. */
 const READ_BODY_CHARS = 120_000;
 
@@ -36,21 +42,28 @@ export interface ActionPreview {
   confirm: string;
 }
 
+/** OptChat as artifacts need it: its own queue, and the threads it started. */
+export interface ArtifactChat { send(text: string, requestId: string): Promise<void>; started(thread: string): Promise<boolean> }
+/** One message on its way: a comment batch or an action notice. */
+type Outgoing = Pick<ActionNotice, "id" | "requestId" | "text" | "target">;
+
 export class Artifacts {
   readonly store: ArtifactStore;
   private readonly registry: Registry;
   private readonly github: GithubPulls;
-  private readonly optchat: () => Promise<{ send(text: string, requestId: string): Promise<void> } | null>;
+  private readonly optchat: () => Promise<ArtifactChat | null>;
   private readonly submit: (thread: string, text: string, requestId: string) => Promise<unknown>;
   private readonly inflight = new Set<string>();
   private readonly timer: ReturnType<typeof setInterval>;
+  private readonly giveUpMs: number;
   private closing = false;
 
   constructor(options: { store: ArtifactStore; registry: Registry; github: GithubPulls;
-    optchat: () => Promise<{ send(text: string, requestId: string): Promise<void> } | null>;
-    submit: (thread: string, text: string, requestId: string) => Promise<unknown>; retryMs?: number }) {
+    optchat: () => Promise<ArtifactChat | null>;
+    submit: (thread: string, text: string, requestId: string) => Promise<unknown>; retryMs?: number; giveUpMs?: number }) {
     this.store = options.store; this.registry = options.registry; this.github = options.github;
     this.optchat = options.optchat; this.submit = options.submit;
+    this.giveUpMs = options.giveUpMs ?? NOTICE_GIVE_UP_MS;
     this.store.interruptedActions();
     this.timer = setInterval(() => void this.pump(), options.retryMs ?? DELIVERY_RETRY_MS);
     this.timer.unref();
@@ -117,11 +130,13 @@ export class Artifacts {
     const project = artifact.projectId ? this.registry.getProject(artifact.projectId) : null;
     const comments = this.store.comments(id).filter(comment => comment.state !== "draft");
     const runs = this.store.actionRuns(id);
+    const notices = this.store.notices(id).filter(notice => notice.state !== "skipped");
     const body = shown.body.length > READ_BODY_CHARS ? `${shown.body.slice(0, READ_BODY_CHARS)}\n[cut at ${READ_BODY_CHARS} characters]` : shown.body;
     return [
       `artifact ${id} "${shown.title}" · revision ${number} of ${artifact.head} · by ${authorText(artifact.author)}${project ? ` · project ${project.name}` : ""} · open it at #/a/${id}`,
       shown.actions.length ? `actions: ${shown.actions.map(actionText).join("; ")}` : "actions: none",
-      ...runs.map(run => `action ${run.action} (revision ${run.revision}): ${run.state}: ${run.detail}`),
+      ...runs.flatMap(run => [`action ${run.action} (revision ${run.revision}): ${run.state}: ${run.detail}`,
+        ...notices.filter(notice => notice.run === run.id).map(notice => `  told ${targetText(notice.target)}: ${notice.state}${notice.note ? ` (${notice.note})` : ""}`)]),
       comments.length ? `comments sent to the author:\n${comments.map(commentLine).join("\n")}` : "comments sent to the author: none",
       `--- body of revision ${number} ---`,
       body,
@@ -140,41 +155,54 @@ export class Artifacts {
     return batch;
   }
 
-  /** Tries every queued batch once; one that cannot go yet keeps its reason. */
+  /** Tries every queued batch and notice once; one that cannot go yet keeps its reason. */
   async pump(): Promise<void> {
     if (this.closing) return;
-    await Promise.all(this.store.queued().map(batch => this.deliver(batch)));
+    const { store } = this;
+    await Promise.all([
+      ...store.queued().map(batch => this.deliver(batch, { settle: (state, note) => store.settle(batch.id, state, note), note: note => store.note(batch.id, note) })),
+      ...store.queuedNotices().map(notice => this.deliver(notice, {
+        settle: (state, note) => store.settleNotice(notice.id, state, note), note: note => store.noteNotice(notice.id, note),
+        skip: note => store.settleNotice(notice.id, "skipped", note),
+        giveUp: notice.createdAt + this.giveUpMs <= Date.now() })),
+    ]);
   }
-  private async deliver(batch: CommentBatch): Promise<void> {
-    if (this.inflight.has(batch.id) || this.closing) return;
-    this.inflight.add(batch.id);
+  private async deliver(item: Outgoing, record: { settle(state: "delivered" | "undeliverable", note: string): void; note(note: string): void;
+    skip?: (note: string) => void; giveUp?: boolean }): Promise<void> {
+    if (this.inflight.has(item.id) || this.closing) return;
+    this.inflight.add(item.id);
+    // A notice past its bound stops waiting: the last reason is its outcome.
+    const wait = (note: string) => record.giveUp
+      ? record.settle("undeliverable", `not delivered in ${Math.round(this.giveUpMs / 3_600_000)} h, so it stopped waiting; last: ${note.replace(/^waiting: /, "")}`)
+      : record.note(note);
     try {
-      if (batch.target.kind === "optchat") {
+      if (item.target.kind !== "thread") {
         const chat = await this.optchat().catch(() => null);
-        if (!chat) { this.store.note(batch.id, "waiting: the chat is not open yet"); return; }
+        if (!chat) { wait("waiting: the chat is not open yet"); return; }
+        if (item.target.kind === "starter" && !await chat.started(item.target.thread)) { record.skip?.("the chat did not start this thread"); return; }
         // The chat's own queue: delivered between its tool calls or as its next turn.
-        await chat.send(batch.text, batch.requestId);
-        this.store.settle(batch.id, "delivered", "in the chat");
+        await chat.send(item.text, item.requestId);
+        record.settle("delivered", "in the chat");
         return;
       }
-      const thread = this.registry.getThread(batch.target.thread);
+      const thread = this.registry.getThread(item.target.thread);
       if (!thread || thread.archived) {
-        this.store.settle(batch.id, "undeliverable", `${thread ? "the thread was archived" : "cube no longer knows the thread"}, so nothing can reach it; say it in the chat if it still matters`);
+        record.settle("undeliverable", `${thread ? "the thread was archived" : "cube no longer knows the thread"}, so nothing can reach it; say it in the chat if it still matters`);
         return;
       }
       try {
-        await this.submit(thread.id, batch.text, batch.requestId);
-        this.store.settle(batch.id, "delivered", "sent to the thread");
+        await this.submit(thread.id, item.text, item.requestId);
+        record.settle("delivered", "sent to the thread");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const busy = /already working/.test(message);
-        this.store.note(batch.id, busy ? "waiting: the thread is working; sent once its turn ends" : `waiting: ${message}`);
+        wait(busy ? "waiting: the thread is working; sent once its turn ends" : `waiting: ${message}`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      log.warn("comment delivery failed", { batch: batch.id, error: message });
-      this.store.note(batch.id, `waiting: ${message}`);
-    } finally { this.inflight.delete(batch.id); }
+      log.warn("artifact delivery failed", { item: item.id, error: message });
+      wait(`waiting: ${message}`);
+    } finally { this.inflight.delete(item.id); }
   }
 
   /** The action as it stands now: the document's target, the project's
@@ -227,25 +255,32 @@ export class Artifacts {
       if (run.state === "failed") throw new ArtifactError(`not merged: ${run.detail}`, 409);
       return { preview, detail: run.detail, state: run.state as "running" | "succeeded" };
     }
+    let detail: string;
     try {
       const result = await this.github.merge(action.repository, action.pull, { sha: action.headSha, method: action.method });
       if (!result.merged) throw new GithubPullsError(`github did not merge: ${result.message}`, 409);
-      const detail = `merged ${action.repository}#${action.pull} at ${action.headSha.slice(0, 12)} (${action.method})${result.sha ? `; merge commit ${result.sha.slice(0, 12)}` : ""}`;
-      this.store.finishAction(run.id, "succeeded", detail);
-      log.info("artifact action ran", { artifact: id, action: action.id, repository: action.repository, pull: action.pull });
-      return { preview, detail, state: "succeeded" };
+      detail = `merged ${action.repository}#${action.pull} at ${action.headSha.slice(0, 12)} (${action.method})${result.sha ? `; merge commit ${result.sha.slice(0, 12)}` : ""}`;
     } catch (error) {
-      const detail = error instanceof GithubPullsError ? error.message : `failed: ${error instanceof Error ? error.message : String(error)}`;
+      detail = error instanceof GithubPullsError ? error.message : `failed: ${error instanceof Error ? error.message : String(error)}`;
       this.store.finishAction(run.id, "failed", detail);
+      void this.pump();
       throw new ArtifactError(`not merged: ${detail}`, 409);
     }
+    // Outside the merge's try: a store failure after GitHub merged is never
+    // recorded as a failed merge; the run stays running until a restart
+    // records, and tells, that its outcome is unknown.
+    this.store.finishAction(run.id, "succeeded", detail);
+    log.info("artifact action ran", { artifact: id, action: action.id, repository: action.repository, pull: action.pull });
+    void this.pump();
+    return { preview, detail, state: "succeeded" };
   }
 
   /** Everything the browser shows of one artifact. */
   view(id: string) {
     const artifact = this.store.get(id);
     if (!artifact) return null;
-    return { artifact: this.summaryView(artifact), revisions: this.store.revisions(id), comments: this.store.comments(id), actionRuns: this.store.actionRuns(id) };
+    return { artifact: this.summaryView(artifact), revisions: this.store.revisions(id), comments: this.store.comments(id), actionRuns: this.store.actionRuns(id),
+      notices: this.store.notices(id).map(({ text: _text, requestId: _request, ...notice }) => notice) };
   }
   summaryView(artifact: ArtifactSummary) {
     const project = artifact.projectId ? this.registry.getProject(artifact.projectId) : null;
@@ -255,6 +290,7 @@ export class Artifacts {
   }
 }
 
+const targetText = (target: ActionNotice["target"]) => target.kind === "starter" ? "the chat" : authorText(target);
 const actionText = (action: ArtifactAction) => `${action.id}: merge ${action.repository}#${action.pull} at ${action.headSha.slice(0, 12)} (${action.method})`;
 const commentCounts = (item: ArtifactSummary) => {
   const { draft, queued, delivered, undeliverable } = item.comments;
