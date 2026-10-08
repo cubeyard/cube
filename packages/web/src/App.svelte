@@ -10,6 +10,7 @@
   import Onboarding from "./components/Onboarding.svelte";
   import ModelProviders from "./components/ModelProviders.svelte";
   import SystemSettings from "./components/SystemSettings.svelte";
+  import Settings from "./components/Settings.svelte";
   import Wordmark from "./components/Wordmark.svelte";
   import NewThreadDialog from "./components/NewThreadDialog.svelte";
   import { errorText, fetchState, fetchThreads, isUnreachable } from "./lib/api.ts";
@@ -178,6 +179,7 @@
       : chatRoute ? "chat · cube"
       : hash === "#/models" ? "models · cube"
       : hash === "#/system" ? "system · cube"
+      : hash === "#/settings" ? "settings · cube"
       : "threads · cube";
   });
 </script>
@@ -199,6 +201,8 @@
   <ModelProviders />
 {:else if hash === "#/system"}
   <SystemSettings />
+{:else if hash === "#/settings"}
+  <Settings />
 {:else if !daemon.onboardingComplete}
   <Onboarding onComplete={() => {
     daemon = { ...daemon!, onboardingComplete: true };

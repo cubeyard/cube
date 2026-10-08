@@ -20,6 +20,7 @@ import { createModelRuntime, preferredModel, type ModelSelection } from "./model
 import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
+import { SettingsStore, type SettingsView } from "./settings.ts";
 import { UpdateService } from "./update-service.ts";
 import { versionInfo } from "./version.ts";
 import { OptChat, OptChatEvents } from "./optchat.ts";
@@ -325,13 +326,43 @@ export async function createCubed(options: {
     ...options.artifactRetryMs ? { retryMs: options.artifactRetryMs } : {} });
   const artifactService = artifacts;
   let optchatError = "";
+  // OptChat's compactor: CUBED_OPTCHAT_COMPACTOR, read once at startup, wins
+  // over the choice saved on the settings page; with neither, the chat's
+  // own model. A saved model no provider offers now is passed over for the
+  // chat's, and the settings page says so.
+  const settings = new SettingsStore(path.join(options.state, "settings.json"));
+  const compactorEnvironment = fromEnvironment("CUBED_OPTCHAT_COMPACTOR", compactorModel);
+  const settingsLog = createLogger("optchat");
+  let passedOver = "";
+  let unlisted = false;
+  /** A catalog that cannot be read decides nothing: the saved model is
+   * used, and fails in the compactor if it is really gone. */
+  const compactorChoice = async (available?: ModelSelection[]): Promise<{ model: ModelSelection | null; source: "environment" | "saved" | "chat"; unavailable: ModelSelection | null }> => {
+    if (compactorEnvironment.raw !== null) return { model: compactorEnvironment.value, source: "environment", unavailable: null };
+    const saved = settings.get().compactor;
+    if (!saved) return { model: null, source: "chat", unavailable: null };
+    try { available ??= await catalog(); unlisted = false; }
+    catch (error) {
+      if (!unlisted) settingsLog.warn("models not listed; using the saved compactor model", { error: errorText(error) });
+      unlisted = true;
+      return { model: saved, source: "saved", unavailable: null };
+    }
+    const offered = available.some(model => model.provider === saved.provider && model.id === saved.id);
+    const key = offered ? "" : `${saved.provider}/${saved.id}`;
+    if (key && key !== passedOver) settingsLog.warn("saved compactor model unavailable; using the chat's model", { model: key });
+    passedOver = key;
+    return offered ? { model: saved, source: "saved", unavailable: null } : { model: null, source: "chat", unavailable: saved };
+  };
   // Inside the promise: a bad CUBED_OPTCHAT_COMPACTOR must reject here,
   // not throw out of startup or the recovery timer and end cubed.
-  const openOptchat = () => optchat ??= (async () => OptChat.open({
-    directory: path.join(options.state, "optchat"), models, threads: optchatThreads,
-    model: async () => preferredModel(await catalog()), compactor: compactorModel(process.env.CUBED_OPTCHAT_COMPACTOR),
-    artifacts: artifactService,
-  }))().then(chat => ({ chat, events: new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => chat.failure() })) }))
+  const openOptchat = () => optchat ??= (async () => {
+    if (compactorEnvironment.error) throw new Error(compactorEnvironment.error);
+    return OptChat.open({
+      directory: path.join(options.state, "optchat"), models, threads: optchatThreads,
+      model: async () => preferredModel(await catalog()), compactor: async () => (await compactorChoice()).model,
+      artifacts: artifactService,
+    });
+  })().then(chat => ({ chat, events: new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => chat.failure() })) }))
     .catch(error => {
       optchat = null;
       const message = error instanceof Error ? error.message : String(error);
@@ -339,6 +370,25 @@ export async function createCubed(options: {
       optchatError = message;
       throw error;
     });
+  /** The settings page: what is saved, what the environment sets, and the
+   * model the compactor uses now because of them. */
+  const settingsView = async (): Promise<SettingsView> => {
+    // A chat still opening (a long log) does not hold the page up.
+    const opening = optchat?.then(({ chat }) => chat.selectModel(), () => null) ?? null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const chat = opening && await Promise.race([opening, new Promise<null>(resolve => { timer = setTimeout(resolve, 500, null); })]).finally(() => clearTimeout(timer));
+    let available: ModelSelection[] | undefined, unreadable: string | null = null;
+    try { available = await catalog(); }
+    catch (error) { unreadable = `the models could not be listed: ${errorText(error)}`; }
+    const choice = await compactorChoice(available);
+    const environment = compactorEnvironment.raw === null ? null : { value: compactorEnvironment.raw, error: compactorEnvironment.error };
+    return {
+      chat,
+      models: available ?? null,
+      error: [settings.error, unreadable].filter(Boolean).join("; ") || null,
+      compactor: { saved: settings.get().compactor, environment, source: choice.source, model: choice.source === "chat" ? chat : choice.model, unavailable: choice.unavailable },
+    };
+  };
   /** The global pool every project sees; read once per response. */
   const poolView = () => {
     const slots = registry.runnerSlots();
@@ -550,6 +600,27 @@ export async function createCubed(options: {
         const project = url.searchParams.get("project") || null;
         if (project && !registry.getProject(project)) return json({ error: "project not found" }, 404);
         return json(await usage.report({ project }));
+      }
+      if (parts[0] === "api" && parts[1] === "settings") {
+        if (parts.length === 2 && method === "GET") return json(await settingsView());
+        // `{model: {provider, id}}` saves a compactor model, `{model: null}`
+        // follows the chat's. The next node written uses it; one being
+        // written finishes with the model it started with.
+        if (parts.length === 3 && parts[2] === "compactor" && method === "PUT") {
+          const input = body.model;
+          if (Object.keys(body).some(key => key !== "model") || input === undefined) return json({ error: "send {model: {provider, id}} or {model: null}" }, 400);
+          let chosen: ModelSelection | null = null;
+          if (input !== null) {
+            const candidate = input as Record<string, unknown>;
+            if (typeof input !== "object" || Array.isArray(input) || Object.keys(candidate).some(key => key !== "provider" && key !== "id")
+              || typeof candidate.provider !== "string" || typeof candidate.id !== "string") return json({ error: "model must be {provider, id}" }, 400);
+            chosen = (await catalog()).find(model => model.provider === candidate.provider && model.id === candidate.id) ?? null;
+            if (!chosen) return json({ error: `${`${candidate.provider}/${candidate.id}`.slice(0, 200)} is not an available model; connect its provider first` }, 422);
+          }
+          settings.setCompactor(chosen);
+          return json(await settingsView());
+        }
+        return json({ error: "not found" }, 404);
       }
       if (parts[0] === "api" && parts[1] === "optchat") {
         const { chat, events } = await openOptchat();
@@ -772,7 +843,16 @@ export async function createCubed(options: {
   } };
 }
 
-/** CUBED_OPTCHAT_COMPACTOR=provider/model picks OptChat's compactor; default: the chat's own model. */
+/** An environment variable as cubed read it at startup: its text, what it
+ * says, and why it cannot be used, if it cannot. */
+function fromEnvironment<T>(name: string, parse: (value: string | undefined) => T): { raw: string | null; value: T | null; error: string | null } {
+  const raw = process.env[name]?.trim() || null;
+  try { return { raw, value: parse(raw ?? undefined), error: null }; }
+  catch (error) { return { raw, value: null, error: errorText(error) }; }
+}
+
+/** CUBED_OPTCHAT_COMPACTOR=provider/model picks OptChat's compactor over
+ * the saved choice; default: the saved choice, else the chat's own model. */
 function compactorModel(value: string | undefined, name = "CUBED_OPTCHAT_COMPACTOR"): ModelSelection | null {
   if (!value?.trim()) return null;
   const slash = value.indexOf("/");

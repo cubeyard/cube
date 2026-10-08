@@ -291,6 +291,20 @@ headless Chromium (`artifact-browser-test.ts`, desktop light/dark and phone)
 with a faux model and a fake GitHub; not with a real model, a real Claude
 Code session or GitHub itself. Details and gaps: docs/artifacts.md.
 
+## Settings (branch `feat/global-settings`)
+
+`#/settings` (header nav) holds host-wide choices; today only OptChat's
+compactor model, apart from the chat's model, with "follow the chat model"
+as the default. Saved in `CUBED_STATE/settings.json`; `CUBED_OPTCHAT_COMPACTOR`
+still wins and the page shows it beside the saved choice. A change applies
+to the next node the compactor writes, no restart; a node being written keeps
+its model. Precedence and routes: docs/optchat.md, "Configuration". Verified
+offline (`settings-test.ts`: persistence, restart, reset, invalid input, an
+unavailable saved model, environment precedence, a held in-flight node) and
+in headless Chromium (`settings-browser-test.ts`, desktop and phone); not
+with real provider models. On phones the header's destinations are now one
+scrolling row under the wordmark (they overflowed the page before).
+
 ## Known gaps and next steps
 
 - **Machine templates:** built on `vm-snapshots`, verified on Linux/KVM only

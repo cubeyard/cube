@@ -355,8 +355,9 @@ export type OptChatOptions = {
   models: Models;
   /** The model a new chat starts with. */
   model: () => Promise<{ provider: string; id: string } | null>;
-  /** The compactor's model; default: the chat's own model. */
-  compactor?: { provider: string; id: string } | null;
+  /** The compactor's model, asked again before each node it writes (a node
+   * already being written keeps its model); null: the chat's own model. */
+  compactor?: () => Promise<{ provider: string; id: string } | null>;
   threads: OptThreads;
   /** Work artifacts: the chat writes its own and reads its threads'. */
   artifacts?: Artifacts;
@@ -672,7 +673,7 @@ export class OptChat {
     let text: string;
     if ("free" in source) text = source.free;
     else {
-      const model = this.options.compactor ?? this.model;
+      const model = await this.compactorModel();
       if (!model) throw new Error("the chat has no model");
       text = await compactNode({ models: this.compactorModels, model, context: this.memory.context(l, i), source, node: this.memory.nodeLimit, signal: this.abort.signal,
         onReply: reply => this.countCompactor(reply) });
@@ -1035,6 +1036,11 @@ export class OptChat {
       threads.push({ ...thread, spawned: at.get(id) ?? null });
     }
     return { threads, archived: { shown: recent.length, total: archived.length }, unknown: ids.filter(id => !first.get(id)).length };
+  }
+
+  /** The model the compactor calls now: its own, else the chat's. */
+  private async compactorModel(): Promise<{ provider: string; id: string } | null> {
+    return await this.options.compactor?.() ?? this.model;
   }
 
   private extension() {

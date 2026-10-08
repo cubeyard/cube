@@ -1400,8 +1400,11 @@ select.compose-input {
 
 /* ============================================================ mobile */
 @media (max-width: 40rem) {
-  header { gap: 0.6rem; padding: 0.5rem 0.8rem; }
-  header nav { gap: 0.55rem; margin-left: 0; }
+  header { gap: 0.6rem; padding: 0.5rem 0.8rem; flex-wrap: wrap; row-gap: 0.15rem; }
+  /* the destinations take their own row under the wordmark and lamp; a
+     row too narrow for them scrolls rather than pushing the page sideways */
+  header nav { gap: 0.8rem; margin-left: 0; order: 3; flex-basis: 100%; min-width: 0; overflow-x: auto; scrollbar-width: none; padding-block: 2px; }
+  header nav a { flex: none; }
   /* the lamp keeps a two-letter label rather than going mute */
   header .auth-ok .auth-full { display: none; }
   header .auth-ok .auth-short { display: inline; }
@@ -1644,7 +1647,8 @@ p.action-problems { padding-left: 0.75rem; }
   .artifact-workspace > .work-panel { max-height: 36vh; }
 }
 /* the docked thread sidebar has room for four destinations; artifacts are
-   a key away in the chat's panel and on every other page */
+   a key away in the chat's panel and on every other page, settings on
+   every other page */
 @media (min-width: 52.001rem) {
-  .thread-navigation header nav a.nav-artifacts { display: none; }
+  .thread-navigation header nav a:is(.nav-artifacts, .nav-settings) { display: none; }
 }

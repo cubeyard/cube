@@ -12,6 +12,7 @@ import type {
   Project,
   ProjectInput,
   RunnerStatus,
+  SettingsView,
   SubjectUsage,
   ThreadOverview,
   ThreadModels,
@@ -30,6 +31,10 @@ export const providerAction = (id: string, operation: "login" | "answer" | "canc
 };
 export const fetchUpdateStatus = () => request<UpdateStatus>("/api/system/update");
 export const checkForUpdate = () => request<UpdateStatus>("/api/system/update", "POST", { action: "check" });
+/** The host's settings: what is saved beside what is in effect. */
+export const fetchSettings = () => request<SettingsView>("/api/settings");
+/** null: the compactor follows the chat's model. */
+export const setCompactor = (model: ModelSelection | null) => request<SettingsView>("/api/settings/compactor", "PUT", { model });
 export const installUpdate = (targetVersion: string, expectedCurrentVersion: string, requestId: string) =>
   request<UpdateStatus>("/api/system/update", "POST", { action: "install", targetVersion, expectedCurrentVersion, requestId });
 

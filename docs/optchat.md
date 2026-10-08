@@ -419,8 +419,24 @@ sent. Hit rates against a live provider are not measured.
 
 - The chat's model is chosen on the chat strip (`GET/PATCH /api/optchat/model`);
   a new chat starts on the host's preferred model.
-- `CUBED_OPTCHAT_COMPACTOR=provider/model` selects the compactor's model
-  (default: the chat's own). The spec recommends a cheap but competent model.
+- The compactor's model is chosen on the settings page (`#/settings`), apart
+  from the chat's. The spec recommends a cheap but competent model. In order:
+  1. `CUBED_OPTCHAT_COMPACTOR=provider/model`, read once when cubed starts,
+     wins; the page shows it and that a saved choice waits behind it. A
+     malformed value leaves the chat unavailable, as before.
+  2. The model saved on the page, in `<CUBED_STATE>/settings.json` (mode
+     0600, written whole and renamed). Only a model a connected provider
+     offers can be saved. If none offers it later, the chat's model is used
+     instead and the page says so; nothing is rewritten. If the models
+     cannot be listed at all, the saved model is still used and the page
+     says the list failed.
+  3. The chat's own model ("follow the chat model", the default; an
+     install without `settings.json` is unchanged).
+  The compactor asks for its model before each node it writes, so a saved
+  change applies to the next node without a restart; a node being written
+  finishes with the model it started with. cubed never edits its
+  environment or the host's service files. An unreadable `settings.json` is
+  reported on the page and the defaults apply until a save replaces it.
 - `<CUBED_STATE>/optchat/AGENTS.md`, if present, is the user's instructions,
   appended to the system prompt. It is read on every request; keep it stable
   for the cache.
@@ -434,6 +450,10 @@ image bytes; answers `{image: {id, mimeType, width, height, bytes}}`),
 `GET /api/optchat/media/<id>`, `POST /api/optchat/stop`,
 `GET /api/optchat/view` (what the model reads: the view and the message count),
 `GET /api/optchat/threads` (the threads the chat started, with their state).
+The settings page reads `GET /api/settings` (the saved, environment and
+effective compactor model, the chat's model, the available models) and
+saves with `PUT /api/settings/compactor {model: {provider, id} | null}`
+(400 for a malformed body, 422 for a model no connected provider offers).
 The panel also lists the newest
 artifacts (`GET /api/artifacts`); comments on the chat's own artifacts reach
 it as messages starting `[artifact <id>]` through the same pending queue, as

@@ -12,7 +12,7 @@ import { createCubed } from "../src/index.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 import { LocalMachines } from "./local-guest.ts";
 
-export async function startChatHost(options: { renderMs?: number } = {}): Promise<{ url: string; close(): Promise<void> }> {
+export async function startChatHost(options: { renderMs?: number; models?: string[] } = {}): Promise<{ url: string; close(): Promise<void> }> {
   if (options.renderMs) {
     const prototype = PiThreadEvents.prototype as unknown as { render: (...args: unknown[]) => Promise<unknown> };
     const render = prototype.render;
@@ -23,7 +23,7 @@ export async function startChatHost(options: { renderMs?: number } = {}): Promis
     };
   }
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-chat-"));
-  const faux = fauxProvider({ tokensPerSecond: 60, tokenSize: { min: 2, max: 4 } });
+  const faux = fauxProvider({ tokensPerSecond: 60, tokenSize: { min: 2, max: 4 }, ...options.models ? { models: options.models.map(id => ({ id })) } : {} });
   const said = (message: unknown) => JSON.stringify(message) ?? "";
   faux.setResponses(Array.from({ length: 100 }, () => async request => {
     if (said(request.messages.find(message => message.role === "system")).includes("You write the memory of OptChat")) return fauxAssistantMessage("a summary");
