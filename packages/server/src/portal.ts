@@ -134,6 +134,8 @@ export class Portal {
   guest(thread: Thread): GuestPortal {
     const settings = this.settings;
     if (!settings) return { reason: "this cube installation has no portal (CUBED_PORTAL_IP is not set)" };
+    // A port taken by something else: no URLs that would reach it instead.
+    if (this.state.startsWith("failed")) return { reason: `cube's portal could not listen on ${settings.listen}:${settings.port}; see cubed's log` };
     return { urlTemplate: `http://{name}-${this.label(thread.id)}.${settings.suffix}${settings.port === 80 ? "" : `:${settings.port}`}/` };
   }
 

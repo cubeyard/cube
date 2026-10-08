@@ -14,7 +14,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
-import { portalSettings, privateIpv4, responseHeaders } from "../src/portal.ts";
+import { Portal, portalSettings, privateIpv4, responseHeaders } from "../src/portal.ts";
 import type { Thread } from "../src/registry.ts";
 import { helperBootstrapScripts } from "../src/vm.ts";
 import { GUEST_CLI_SHIM, shippedHelper } from "../src/vm-seed.ts";
@@ -84,6 +84,21 @@ faux.setResponses(Array.from({ length: 4 }, () => fauxAssistantMessage("ok")));
 const models = createModels();
 models.setProvider(faux.provider);
 const portalPort = await free();
+
+// A port someone else holds: cubed runs on, and machines get no URLs that
+// would reach that other listener.
+{
+  const taken = net.createServer();
+  await new Promise<void>(resolve => taken.listen(0, "127.0.0.1", resolve));
+  const port = (taken.address() as net.AddressInfo).port;
+  const blocked = new Portal({ settings: portalSettings({ CUBED_PORTAL_IP: "127.0.0.1", CUBED_PORTAL_DOMAIN: "localhost", CUBED_PORTAL_PORT: String(port) }),
+    directory: path.join(root, "blocked"), registry: null as never, machines: null as never, archiving: () => false, log: { error() {}, info() {} } as never });
+  await blocked.listen();
+  assert.match(blocked.state, /^failed: .*EADDRINUSE/);
+  assert.deepEqual(blocked.guest({ id: "t" } as Thread), { reason: `cube's portal could not listen on 127.0.0.1:${port}; see cubed's log` });
+  await new Promise(resolve => taken.close(resolve));
+  console.log("ok: a portal that cannot listen gives machines a reason, not URLs");
+}
 // The Homebrew launcher's default: a loopback portal under *.localhost.
 const settings = portalSettings({ CUBED_PORTAL_IP: "127.0.0.1", CUBED_PORTAL_DOMAIN: "localhost", CUBED_PORTAL_PORT: String(portalPort) })!;
 const suffix = settings.suffix;

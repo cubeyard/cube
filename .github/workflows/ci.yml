@@ -114,19 +114,22 @@ jobs:
           mkdir -p "$RUNNER_TEMP/site" && echo "portal probe" > "$RUNNER_TEMP/site/index.html"
           python3 -m http.server 7781 --bind 127.0.0.1 --directory "$RUNNER_TEMP/site" >/dev/null 2>&1 &
           site=$!
-          trap 'kill $site ${driver:-}' EXIT
-          sleep 1
-          curl -fsS http://web-0123456789.localhost:7781/ | grep -q "portal probe"
+          trap 'kill $site ${driver:-} 2>/dev/null || true' EXIT
+          for _ in $(seq 50); do curl -fsS -o /dev/null http://127.0.0.1:7781/ && break; sleep 0.2; done
+          curl -fsS -o "$RUNNER_TEMP/probe.html" -w 'curl: %{remote_ip} connect %{time_connect}s total %{time_total}s\n' http://web-0123456789.localhost:7781/
+          grep -q "portal probe" "$RUNNER_TEMP/probe.html"
           dscacheutil -q host -a name web-0123456789.localhost || true
           sudo safaridriver --enable
           safaridriver --port 4444 & driver=$!
-          sleep 3
+          for _ in $(seq 50); do curl -fsS -o /dev/null http://127.0.0.1:4444/status && break; sleep 0.2; done
           session="$(curl -fsS -X POST http://127.0.0.1:4444/session -H 'content-type: application/json' \
             -d '{"capabilities":{"alwaysMatch":{"browserName":"safari"}}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"]["sessionId"])')"
+          started=$(date +%s)
           curl -fsS -X POST "http://127.0.0.1:4444/session/$session/url" -H 'content-type: application/json' \
             -d '{"url":"http://web-0123456789.localhost:7781/"}' >/dev/null || true
+          echo "Safari navigation: $(( $(date +%s) - started ))s"
           text="$(curl -fsS -X POST "http://127.0.0.1:4444/session/$session/execute/sync" -H 'content-type: application/json' \
             -d '{"script":"return document.body ? document.body.innerText + \" secure=\" + window.isSecureContext : \"\"","args":[]}')"
           curl -fsS -X DELETE "http://127.0.0.1:4444/session/$session" >/dev/null || true
           echo "Safari $(defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString), macOS $(sw_vers -productVersion): $text"
-          grep -q "portal probe" <<<"$text"
+          grep -q "portal probe secure=true" <<<"$text"

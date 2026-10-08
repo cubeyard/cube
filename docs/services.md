@@ -4,8 +4,9 @@ A thread's agent can run a web server in its machine as a **service** and
 give the user a URL for it. The URL goes to cubed's **portal**, which passes
 plain HTTP and WebSocket traffic to the service through the gateway and the
 runner, the path cubed already uses for the guest's sshd. The portal is
-private: it listens only on a private address of the cubed host (a Tailscale
-address, typically) and has no login of its own.
+private: it listens only on a private or loopback address of the cubed host
+(a Tailscale address, or loopback for a browser on the same host, the
+Homebrew default) and has no login of its own.
 
 ## For thread agents: `cube service`
 
@@ -107,9 +108,9 @@ stable for a thread and not derivable from thread ids. With the default
 domain the suffix embeds the IP: `100-101-102-103.sslip.io`, which public
 DNS (sslip.io, or nip.io) answers with 100.101.102.103 for any name. A
 loopback portal can use `localhost` instead (`http://web-<label>.localhost:7780/`):
-browsers and curl resolve every `*.localhost` name to the machine they run
-on themselves (RFC 6761), with no DNS at all, so it works only in a browser on
-cubed's own host.
+browsers, recent curl and macOS's own resolver answer every `*.localhost`
+name with the machine they run on (RFC 6761), with no DNS server asked, so it
+works only in a browser on cubed's own host.
 
 ### Setting it up
 
@@ -135,7 +136,10 @@ outside 127.0.0.0/8, and refuses to start on a malformed setting.
 `127.0.0.1:7780` (or `CUBED_PORTAL_PORT`) with URLs that open in a browser on
 the same Mac. Settings of your own are kept as they are, a partial one
 included; `CUBED_PORTAL_IP=` (empty) turns the portal off. Other devices
-need the Tailscale setup below, not `localhost`.
+need the Tailscale setup below, not `localhost`. If the port is taken, cubed
+runs on, `/api/health` reports `"portal": "failed: ..."` and machines get
+that reason instead of URLs until cubed restarts on a free port
+(`CUBED_PORTAL_PORT`).
 
 A Tailscale setup:
 
@@ -228,14 +232,16 @@ the settings the Homebrew launcher produces, and
 `scripts/homebrew-formula-test.ts` runs the generated launcher with no
 environment file, other settings, a Tailscale IP, `CUBED_PORTAL_IP=` and a
 partial configuration. Once, by hand on Linux, against cubed's real portal on
-127.0.0.1:7780 with real name resolution (no host rules, no hosts entries):
-curl, and headless Chromium 153, Firefox 155 and WebKit 26.6 (Playwright),
+127.0.0.1:7780 without host rules or hosts entries (that host's own resolver
+also answers `*.localhost`, so this is not evidence of browser-side
+resolution): curl, and headless Chromium 153, Firefox 155 and WebKit 26.6 (Playwright),
 loaded two services of one thread by their `*.localhost` URLs, completed a
 WebSocket round trip through the portal, kept each service's cookies on its
 own host (a `Domain=localhost` attribute stripped), reported a secure
 context, and could not read or post to cube's API; cube's API refused the
-service host as Host. CI's `homebrew` job checks that curl and Safari on
-GitHub's macOS runner reach a loopback server by a `*.localhost` name.
+service host as Host. CI's `homebrew` job checks that curl, the system
+resolver and Safari on GitHub's macOS runner (Safari 26.6.2, macOS 26.6.2 when
+added) reach a loopback server by a `*.localhost` name, as a secure context.
 
 Not yet verified: a real VM (systemd units surviving the command's unit,
 journal logs, restart at boot, the LAN address probe, a template build with
