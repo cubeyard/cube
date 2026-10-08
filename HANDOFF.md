@@ -65,9 +65,10 @@ in `docs/plans/` hold the reasoning and the detailed evidence.
   `cubed runners init-local --image …` sets up and enrolls the local runner
   over loopback; `brew services` runs both. README, "macOS quickstart". Validated with
   Homebrew on Linux only (`brew style`, `brew audit --strict`, `brew fetch`
-  checksums); the macOS CI job and the publishing workflow are staged in
-  `scripts/homebrew/workflows/` until a maintainer installs them (DEVELOPING.md,
-  "Homebrew publishing"); nothing has run on a real Mac yet.
+  checksums) and by the `homebrew` job of ci.yml on GitHub's macOS runner
+  (install, `brew audit --strict`, `brew test` against the latest release);
+  the publishing workflow runs at the next release; nothing has run on a
+  real Mac with a thread machine yet.
 - State schema 102 adopts no older state. Moving from v0.2.x means a fresh
   `CUBED_STATE` and re-initialized runners (DEVELOPING.md, "Fresh start").
 

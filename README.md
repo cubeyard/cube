@@ -32,12 +32,10 @@ machines. The runner, QEMU and the machines run as your user; see the
 
 > **Availability.** The tap formulas are generated from each published
 > stable release's signed manifests and pushed to `cubeyard/homebrew-tap` by
-> the `homebrew` workflow ([DEVELOPING.md](DEVELOPING.md#homebrew-publishing);
-> the workflow is staged in `scripts/homebrew/workflows/` until a maintainer
-> installs it). The first release that carries `cubed runners init-local` is
-> the one after v0.3.18; until it is published and the tap updated, this
-> quickstart does not work yet, and the same-Mac setup has not been run on
-> real hardware.
+> the `homebrew` workflow ([DEVELOPING.md](DEVELOPING.md#homebrew-publishing)).
+> The first release that carries `cubed runners init-local` is the one after
+> v0.3.18; until it is published and the tap updated, this quickstart does not
+> work yet, and the same-Mac setup has not been run on real hardware.
 
 What `brew install` does, and what stays yours to do:
 
