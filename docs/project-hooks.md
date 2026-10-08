@@ -58,7 +58,8 @@ cannot. A thread's report is not the user asking: `project_hooks_write`
 refuses in a run that has no message of the user (one started by a
 report alone, whatever the report says) and OptChat asks the user instead.
 A message of the user counts once it is placed in the run, steered in
-between tool calls included.
+between tool calls included; a turn made of messages that waited together
+is the user's when one of them is the user's.
 
 `project_hooks(project)` is read only:
 
@@ -141,5 +142,9 @@ points the user to the project page or OptChat.
 - No execution history beyond the latest outcome of each hook per thread
   (cubed's record) and the newest log per hook in each machine. Logs are not
   copied to the cubed host and are gone with a machine's disk.
+- The refusal is by origin, not content: a report that reaches OptChat
+  while it works on a request of the user joins that run, and then only
+  OptChat's judgement (its prompt says a report never counts as the user
+  asking) stands between the report and a write.
 - Changing hooks is not versioned: `project_hooks` shows only the current
   scripts and whether a thread ran them or earlier ones.

@@ -264,14 +264,13 @@ export function formatHistory(id: string, record: ThreadRecord, report: ReportSt
 type Settings = { tree: number; cache: string; threads: Record<string, { at: number; tells?: string[] }> };
 const SettingsDoc = defineDoc<Settings>({ kind: "cube.optchat", version: 1, scope: "session", initial: () => ({ tree: 0, cache: "", threads: {} }) });
 /** The view parts the current turn started with; the request hook renders
- * them. `userRun`: the run a message of the user (not a thread's report)
- * was last placed in (`runOf`); project_hooks_write needs it to be the
- * running one. */
-const TurnDoc = defineDoc<{ started: boolean; parts: number[]; userRun?: number }>({
+ * them. `userInputs`: the latest run inputs that carry a message of the
+ * user (not a thread's report); project_hooks_write needs one among the
+ * running run's inputs. */
+const TurnDoc = defineDoc<{ started: boolean; parts: number[]; userInputs?: number[] }>({
   kind: "cube.optchat.turn", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ started: false, parts: [] }),
 });
-/** A run, by its first input's submission: its task changes every step. */
-const runOf = (live: LiveState | undefined): number | undefined => live?.run?.inputs[0] === undefined ? undefined : Number(live.run.inputs[0]);
+const isReport = (requestId: string) => requestId.startsWith("report:");
 /** A message accepted when the log had `after` as its newest entry. */
 type PendingItem = { text: string; requestId: string; after: number; images?: MediaRef[] };
 /** Messages accepted but not yet in the chat: waiting (`items`), going into
@@ -794,11 +793,15 @@ export class OptChat {
 
   private async live() { return this.harness.snapshot(LiveDoc, this.conversation.id, context); }
 
-  /** Records that a message of the user is in the run going now, after it
-   * was placed: until then project_hooks_write refuses, never the reverse. */
-  private async markUserRun(): Promise<void> {
-    const run = runOf(await this.live());
-    if (run !== undefined) await this.conversation.commit(async tx => { (await tx.doc(TurnDoc, this.conversation.id)).userRun = run; }, context);
+  /** Records the admitted input `requestId` as carrying a message of the
+   * user; it counts for project_hooks_write once placed in a run. */
+  private async markUser(requestId: string): Promise<void> {
+    const input = await this.known(requestId);
+    if (input?.type !== "input") return;
+    await this.conversation.commit(async tx => {
+      const turn = await tx.doc(TurnDoc, this.conversation.id);
+      turn.userInputs = [...(turn.userInputs ?? []).filter(id => id !== Number(input.id)), Number(input.id)].slice(-32);
+    }, context);
   }
 
   /** Runs `action` alone among the steps that move pending messages
@@ -871,7 +874,7 @@ export class OptChat {
     const items = (await this.harness.snapshot(PendingDoc, context))?.items ?? [];
     for (const item of items) {
       await this.conversation.submit({ type: "input", content: userContent(item), requestId: item.requestId, whenBusy: "steer" }, context);
-      if (!item.requestId.startsWith("report:")) await this.markUserRun();
+      if (!isReport(item.requestId)) await this.markUser(item.requestId);
       await this.harness.commit(async tx => {
         const doc = await tx.doc(PendingDoc);
         doc.items = doc.items.filter(other => other.requestId !== item.requestId);
@@ -914,8 +917,12 @@ export class OptChat {
         if (!await this.known(item.requestId)) await conversation.submit({ type: "write", requestId: item.requestId, entry: userEntry(item) }, context);
       }
       await conversation.submit({ type: "input", content: userContent(last), requestId: last.requestId, whenBusy: "steer" }, context);
-      if (batch.some(item => !item.requestId.startsWith("report:"))) await this.markUserRun();
     }
+    // The turn is the user's when the user wrote in it: its last message, or
+    // one written into it here (not one an earlier run already took).
+    let user = !isReport(last.requestId);
+    for (const item of batch.slice(0, -1)) if (!user && !isReport(item.requestId) && (await this.known(item.requestId))?.type === "write") user = true;
+    if (user) await this.markUser(last.requestId);
     // The batch's other messages leave the pending ones with this commit; the last is sent.
     await this.remember(batch.slice(0, -1).map(item => item.requestId));
     await this.harness.commit(async tx => {
@@ -1271,9 +1278,9 @@ export class OptChat {
       execute: async (args, api, callContext) => {
         if (!this.options.threads.writeHooks) return text("project hooks are not available");
         // A thread's report is no request of the user's: its agent reads untrusted content.
-        const turn = await api.snapshot(TurnDoc, api.conversationId, callContext);
-        const live = await api.snapshot(LiveDoc, api.conversationId, callContext);
-        if (turn?.userRun === undefined || turn.userRun !== runOf(live)) {
+        const users = (await api.snapshot(TurnDoc, api.conversationId, callContext))?.userInputs ?? [];
+        const inputs = (await api.snapshot(LiveDoc, api.conversationId, callContext))?.run?.inputs ?? [];
+        if (!inputs.some(id => users.includes(Number(id)))) {
           return text("not saved: no message of the user in this turn asks for it, and a thread's report cannot change hooks; ask the user to confirm in the chat");
         }
         try { return text(await this.options.threads.writeHooks(args.project, { preSetup: args.preSetup, preResume: args.preResume })); }

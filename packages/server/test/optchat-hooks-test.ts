@@ -60,7 +60,7 @@ process.env.PATH = `${shim}:${process.env.PATH}`;
 
 // What OptChat does in each turn, one response per model request; tool results by call id.
 const results = new Map<string, string>();
-let script: Array<() => ReturnType<typeof fauxAssistantMessage>> = [];
+let script: Array<() => ReturnType<typeof fauxAssistantMessage> | Promise<ReturnType<typeof fauxAssistantMessage>>> = [];
 const call = (name: string, args: ToolArgs, id: string) => () => fauxAssistantMessage([fauxToolCall(name, args, { id })], { stopReason: "toolUse" });
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
 faux.setResponses(Array.from({ length: 200 }, () => async request => {
@@ -189,6 +189,23 @@ try {
   ], "report:abcdef12-0000-4000-8000-000000000001:run-1");
   assert.equal(results.get("from-report"), "not saved: no message of the user in this turn asks for it, and a thread's report cannot change hooks; ask the user to confirm in the chat");
   assert.deepEqual(hooksOf(demo.id), { preSetup, preResume });
+
+  // A user message and a report that wait together make one turn, the user's,
+  // even with the report last.
+  let open!: () => void;
+  const waiting = new Promise<void>(resolve => { open = resolve; });
+  script = [async () => { await waiting; return fauxAssistantMessage("held"); },
+    call("project_hooks_write", { project: "demo", preResume: "echo batched" }, "batched"), () => fauxAssistantMessage("saved")];
+  assert.equal((await post("/api/optchat/prompt", { text: "wait a moment", requestId: `chat-${++turns}` })).status, 200);
+  await until(async () => (await (await fetch(`${base}/api/optchat/history`)).json()).status.state as string, state => state === "working", "the chat works");
+  assert.equal((await post("/api/optchat/prompt", { text: "set demo's pre-resume to echo batched", requestId: `chat-${++turns}` })).status, 200);
+  assert.equal((await post("/api/optchat/prompt", { text: "[abcdef12] ended its turn", requestId: `report:abcdef12-0000-4000-8000-000000000001:run-2` })).status, 200);
+  turns++;
+  open();
+  await until(async () => (await (await fetch(`${base}/api/optchat/history`)).json()) as { status: { state: string }; events: Array<{ type: string }> },
+    history => !script.length && history.status.state === "completed" && history.events.filter(event => event.type === "user-message").length === turns, "the batched turn finishes");
+  assert.match(results.get("batched")!, /^saved preResume;/);
+  app.registry.saveProjectHooks(demo.id, { preSetup, preResume });
 
   // 4. Keep one, change the other; "" removes; secret-looking values are redacted in what is read back.
   const secret = "export API_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234\necho resumed";
