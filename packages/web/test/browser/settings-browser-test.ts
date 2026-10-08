@@ -62,6 +62,22 @@ try {
   await page.locator(".settings-board .compactor-model").filter({ hasText: "faux/faux-cheap" }).waitFor();
   assert.equal(JSON.parse(await select.inputValue()).id, "faux-cheap", "kept over a reload");
 
+  // Models that cannot be listed are not missing: the saved one stays in use and is not marked.
+  const getAvailable = host.models.getAvailable.bind(host.models);
+  host.models.getAvailable = async () => { throw new Error("credential store unreadable"); };
+  try {
+    // The page's own poll reads it (a reload would fail earlier: /api/state lists the models too).
+    await page.locator(".settings-board .notice", { hasText: "the models could not be listed: credential store unreadable" }).waitFor({ timeout: 15_000 });
+    assert.equal(await text(page, "compactor-model"), "faux/faux-cheap");
+    assert.deepEqual(await select.locator("option").allTextContents(), ["follow the chat model", "faux/faux-cheap"]);
+    assert.equal(JSON.parse(await select.inputValue()).id, "faux-cheap");
+    assert.equal(await page.getByText("no models are available").count(), 0, "not told to connect a provider");
+    assert.ok(await save.isDisabled());
+    await shoot(page, "desktop-unlisted");
+  } finally { host.models.getAvailable = getAvailable; }
+  await page.reload();
+  await page.locator(".settings-board .compactor-model").filter({ hasText: "faux/faux-cheap" }).waitFor();
+
   await select.selectOption({ label: "follow the chat model" });
   await save.click();
   await page.locator(".settings-board .compactor-model").filter({ hasText: "faux/faux-chat" }).waitFor();

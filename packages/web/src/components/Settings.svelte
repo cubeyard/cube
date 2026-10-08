@@ -44,7 +44,7 @@
   async function save() {
     if (!settings || saving) return;
     const model = choice === FOLLOW ? null : settings.models?.find((candidate) => key(candidate) === choice) ?? null;
-    if (choice !== FOLLOW && !model) { saveError = "that model is no longer available"; return; }
+    if (choice !== FOLLOW && !model) { saveError = settings.models ? "that model is no longer available" : "the models could not be listed; try again"; return; }
     saving = true;
     saveError = null;
     try {

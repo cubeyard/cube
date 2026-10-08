@@ -7,12 +7,12 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AddressInfo } from "node:net";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Models } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 import { LocalMachines } from "./local-guest.ts";
 
-export async function startChatHost(options: { renderMs?: number; models?: string[] } = {}): Promise<{ url: string; close(): Promise<void> }> {
+export async function startChatHost(options: { renderMs?: number; models?: string[] } = {}): Promise<{ url: string; models: Models; close(): Promise<void> }> {
   if (options.renderMs) {
     const prototype = PiThreadEvents.prototype as unknown as { render: (...args: unknown[]) => Promise<unknown> };
     const render = prototype.render;
@@ -44,6 +44,7 @@ export async function startChatHost(options: { renderMs?: number; models?: strin
   await fetch(`${url}/api/onboarding`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   return {
     url,
+    models,
     async close() {
       app.server.closeAllConnections();
       await app.close();

@@ -336,12 +336,18 @@ export async function createCubed(options: {
   let passedOver = "";
   let unlisted = false;
   /** A catalog that cannot be read decides nothing: the saved model is
-   * used, and fails in the compactor if it is really gone. */
-  const compactorChoice = async (available?: ModelSelection[]): Promise<{ model: ModelSelection | null; source: "environment" | "saved" | "chat"; unavailable: ModelSelection | null }> => {
+   * used, and fails in the compactor if it is really gone. `listed`: the
+   * catalog, or why it could not be read, when the caller read it already. */
+  const compactorChoice = async (listed?: ModelSelection[] | Error): Promise<{ model: ModelSelection | null; source: "environment" | "saved" | "chat"; unavailable: ModelSelection | null }> => {
     if (compactorEnvironment.raw !== null) return { model: compactorEnvironment.value, source: "environment", unavailable: null };
     const saved = settings.get().compactor;
     if (!saved) return { model: null, source: "chat", unavailable: null };
-    try { available ??= await catalog(); unlisted = false; }
+    let available: ModelSelection[];
+    try {
+      if (listed instanceof Error) throw listed;
+      available = listed ?? await catalog();
+      unlisted = false;
+    }
     catch (error) {
       if (!unlisted) settingsLog.warn("models not listed; using the saved compactor model", { error: errorText(error) });
       unlisted = true;
@@ -377,15 +383,15 @@ export async function createCubed(options: {
     const opening = optchat?.then(({ chat }) => chat.selectModel(), () => null) ?? null;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const chat = opening && await Promise.race([opening, new Promise<null>(resolve => { timer = setTimeout(resolve, 500, null); })]).finally(() => clearTimeout(timer));
-    let available: ModelSelection[] | undefined, unreadable: string | null = null;
+    let available: ModelSelection[] | undefined, unreadable: Error | undefined;
     try { available = await catalog(); }
-    catch (error) { unreadable = `the models could not be listed: ${errorText(error)}`; }
-    const choice = await compactorChoice(available);
+    catch (error) { unreadable = error instanceof Error ? error : new Error(String(error)); }
+    const choice = await compactorChoice(available ?? unreadable);
     const environment = compactorEnvironment.raw === null ? null : { value: compactorEnvironment.raw, error: compactorEnvironment.error };
     return {
       chat,
       models: available ?? null,
-      error: [settings.error, unreadable].filter(Boolean).join("; ") || null,
+      error: [settings.error, unreadable && `the models could not be listed: ${unreadable.message}`].filter(Boolean).join("; ") || null,
       compactor: { saved: settings.get().compactor, environment, source: choice.source, model: choice.source === "chat" ? chat : choice.model, unavailable: choice.unavailable },
     };
   };
