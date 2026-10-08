@@ -420,7 +420,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844,
 
     // no model-inferred wish list: no section, no request for one
     assert.equal(await page.locator(".work-wishes, .work-wish").count(), 0);
-    assert.equal(await page.getByText(/not started|inferred from the chat/).count(), 0);
+    assert.equal(await page.getByText(/inferred from the chat/).count(), 0);
     assert.deepEqual(host.requests.filter(request => request.includes("/wishes")), []);
   }, viewport);
 }

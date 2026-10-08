@@ -394,8 +394,6 @@ export class OptChat {
   private watchTimer: ReturnType<typeof setInterval> | undefined;
   private stopWatch: (() => Promise<void>) | undefined;
   private model: { provider: string; id: string } | null = null;
-  /** Each log message's Pi entry: the transcript's events carry its id. */
-  private readonly entries: number[] = [];
   /** Archived threads' last runs, read once each. */
   private readonly archivedRuns = new Map<string, ObservedThread>();
   /** The attached images; `referenced`: the ids the log's messages hold. */
@@ -513,7 +511,6 @@ export class OptChat {
     for (const entry of await this.scan(this.conversation.id, 0)) {
       const logged = entryMessages(entry);
       messages.push(...logged);
-      for (let k = 0; k < logged.length; k++) this.entries.push(entry.id);
       for (const id of entryImages(entry)) this.referenced.add(id);
       this.lastEntry = entry.id;
     }
@@ -636,7 +633,7 @@ export class OptChat {
       do {
         this.dirty = false;
         for (const entry of await this.scan(this.conversation.id, this.lastEntry)) {
-          for (const message of entryMessages(entry)) { this.memory.append(message); this.entries.push(entry.id); }
+          for (const message of entryMessages(entry)) this.memory.append(message);
           for (const id of entryImages(entry)) this.referenced.add(id);
           this.lastEntry = entry.id;
         }

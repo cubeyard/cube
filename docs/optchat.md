@@ -15,8 +15,8 @@ artifacts and reads its own and its threads' (`artifact_write`,
 `artifact_read`; see [artifacts.md](artifacts.md)) and reads its own
 memory (`zoom`, `date`). It keeps no task list: the chat page shows its
 threads, derived from its own spawns (see "Threads beside the chat"), and
-no model reads the chat in the background for wishes or todos. Threads do all the work, each in its own VM, exactly like a thread
-started from the UI.
+no model reads the chat in the background for wishes or todos. Threads do
+all the work, each in its own VM, exactly like a thread started from the UI.
 
 The memory follows Victor Taelin's OptChat spec
 (<https://gist.github.com/VictorTaelin/91837951a5ce5b38f341ec1ba1df6449>): the
