@@ -26,6 +26,7 @@
           set -euo pipefail
           brew tap-new --no-git cubeyard/tap
           cp "$RUNNER_TEMP"/formula/*.rb "$(brew --repository cubeyard/tap)/Formula/"
+          brew trust cubeyard/tap
           brew install cubeyard/tap/cube
           brew audit --strict cubeyard/tap/cube cubeyard/tap/cube-runner
           brew test cubeyard/tap/cube cubeyard/tap/cube-runner

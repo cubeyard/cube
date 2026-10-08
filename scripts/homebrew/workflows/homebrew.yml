@@ -41,12 +41,13 @@ jobs:
             --jq 'if .isDraft or .isPrerelease then error("stable release required") else true end'
           mkdir -p "$RUNNER_TEMP/assets" "$RUNNER_TEMP/formula"
           gh release download "$VERSION" --pattern 'cubed-darwin-arm64.json*' --pattern 'cube-runner-darwin-arm64.json*' --dir "$RUNNER_TEMP/assets"
-          node scripts/homebrew/formula.ts "$VERSION" --assets "$RUNNER_TEMP/assets" --out "$RUNNER_TEMP/formula"
+          node scripts/homebrew/formula.ts "$VERSION" --assets "$RUNNER_TEMP/assets" --out "$RUNNER_TEMP/formula" | tee "$RUNNER_TEMP/formula.json"
       - name: install, audit and test the formulas
         run: |
           set -euo pipefail
           brew tap-new --no-git cubeyard/tap
           cp "$RUNNER_TEMP"/formula/*.rb "$(brew --repository cubeyard/tap)/Formula/"
+          brew trust cubeyard/tap
           brew install cubeyard/tap/cube
           brew audit --strict cubeyard/tap/cube cubeyard/tap/cube-runner
           brew test cubeyard/tap/cube cubeyard/tap/cube-runner
@@ -67,7 +68,7 @@ jobs:
           mkdir -p Formula
           cp "$RUNNER_TEMP"/formula/*.rb Formula/
           cp ../scripts/homebrew/tap-README.md README.md
-          runner="$(sed -n 's/^  version "\(.*\)"$/\1/p' Formula/cube-runner.rb)"
+          runner="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).runner)' "$RUNNER_TEMP/formula.json")"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add Formula README.md

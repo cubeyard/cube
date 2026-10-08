@@ -122,8 +122,11 @@ It creates a control key at `<home>/control.key`, runs `cube-runner init
 then runs the runner once to make the authenticated hello and record the
 admission in the registry, and stops it as its first Ctrl-C would. The runner is
 then started by its service (`brew services start cube-runner` under Homebrew,
-the LaunchAgent or systemd profile elsewhere) or by `cube-runner run --home
-<home>/runner`. An existing `<home>/runner`, control key or config is refused:
+whose service assumes the default `--home ~/.cube`; the LaunchAgent or systemd
+profile elsewhere) or by `cube-runner run --home <home>/runner`. Start the
+service after `init-local`, not before: a service that already runs the home
+takes its lock and port, and `init-local` then enrolls whichever runner
+answers with the key. An existing `<home>/runner`, control key or config is refused:
 a runner is never rebound. If the runner cannot start on this host (no
 accelerator, QEMU missing), the command leaves the setup in place, prints why,
 and exits 1 with the enrollment to run once it is up:

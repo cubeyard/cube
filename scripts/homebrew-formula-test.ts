@@ -43,15 +43,20 @@ try {
   assert.match(cube, new RegExp(`url "${base}/cubed-v9.8.7-darwin-arm64.tar.gz"`));
   assert.match(cube, /sha256 "a{64}"/);
   assert.match(cube, /depends_on arch: :arm64/);
-  assert.match(cube, /depends_on "cube-runner"/);
-  assert.match(cube, /CUBED_COMMIT="\$\{CUBED_COMMIT:-0123456789abcdef0123456789abcdef01234567\}"/);
-  assert.match(cube, /CUBED_VERSION="\$\{CUBED_VERSION:-v9\.8\.7\}"/);
-  assert.doesNotMatch(cube, /^\s*version "/m, "the cubed formula version is the tag in its URL");
+  assert.match(cube, /CUBED_VERSION="v9\.8\.7" CUBED_COMMIT="0123456789abcdef0123456789abcdef01234567"/);
+  assert.match(cube, /depends_on "cubeyard\/tap\/cube-runner"/);
+  assert.match(cube, /shell_output\("#\{bin\}\/cubed --self-check"\)/, "the self-check runs through the launcher, which sets the version");
   assert.match(cubeRunner, /^class CubeRunner < Formula$/m);
-  assert.match(cubeRunner, /version "1\.2\.3"/, "the runner's own version differs from the release tag");
+  assert.match(cubeRunner, /cube-runner 1\.2\.3/, "the runner's own version is named");
+  for (const text of [cube, cubeRunner]) {
+    assert.doesNotMatch(text, /^\s*version "/m, "both formulas take the release tag from their URL, so every release upgrades both");
+    assert.match(text, /stop_timeout 60/);
+    assert.doesNotMatch(text, /restart_delay/);
+  }
   assert.match(cubeRunner, /sha256 "b{64}"/);
   assert.match(cubeRunner, /depends_on "qemu"/);
-  assert.match(cubeRunner, /run \[opt_bin\/"cube-runner", "run", "--home"/);
+  assert.match(cubeRunner, /run \[opt_libexec\/"service.sh"\]/);
+  assert.match(cubeRunner, /cube-runner" run --home "\$\{CUBE_RUNNER_HOME:-\$HOME\/.cube\/runner\}"/, "the home is the starting user's, resolved at start");
   for (const text of [cube, cubeRunner]) {
     assert.doesNotMatch(text, /latest\//, "never a moving URL");
     assert.doesNotMatch(text, /#\$|#@/, "no accidental Ruby interpolation in the generated text");
@@ -64,6 +69,7 @@ try {
   refused("another tag's manifests", assets(cubed(), runner()), /not a cubed darwin-arm64 manifest of v9.8.8/, "v9.8.8");
   refused("a prerelease tag", assets(cubed(), runner()), /stable tag/, "v9.8.7-rc1");
   refused("a moving artifact URL", assets(cubed({ artifact: { url: "https://github.com/cubeyard/cube/releases/latest/download/cubed-darwin-arm64.tar.gz", sha256: "a".repeat(64), bytes: 1 } }), runner()), /not a cubed/);
+  refused("an asset URL with anything but the release's asset name", assets(cubed({ artifact: { url: `${base}/cubed-v9.8.7-darwin-arm64.tar.gz"#{x}`, sha256: "a".repeat(64), bytes: 1 } }), runner()), /not a cubed/);
   refused("a Linux manifest", assets(cubed({ platform: "linux-x64-gnu" }), runner()), /not a cubed darwin-arm64/);
   refused("a bundle that claims to include the runner", assets(cubed({ includesRunner: true }), runner()), /release contract/);
   refused("another state schema", assets(cubed({ stateSchema: { minimum: 103, maximum: 103, rollbackSafeFrom: 103 } }), runner()), /release contract/);

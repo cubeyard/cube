@@ -240,9 +240,18 @@ to the formula's runner and runs the bundle's `bin/node` on
 externally managed installation and `brew upgrade` is the update path; the
 runner's self-updater is not installed, for the same reason. Services are
 `brew services` user agents (`homebrew.mxcl.cube`, `homebrew.mxcl.cube-runner`)
-running `cubed` and `cube-runner run --home ~/.cube/runner`; the runner's
-state and the enrollment come from `cubed runners init-local` (see
-[runner operations](docs/runner-operations.md#local-runner)).
+running `cubed` and the runner formula's `libexec/service.sh`
+(`cube-runner run --home "${CUBE_RUNNER_HOME:-$HOME/.cube/runner}"`, resolved
+for the user who starts the service); the runner's state and the enrollment
+come from `cubed runners init-local` (see
+[runner operations](docs/runner-operations.md#local-runner)). Homebrew 7 asks
+users to trust a third-party tap once (`brew trust cubeyard/tap`) before a
+formula from it, and its dependencies, load; the formulas name the runner
+dependency as `cubeyard/tap/cube-runner`. Both formulas take their version
+from the release tag in their URL, so every release upgrades both even when
+the runner's own version did not change. `brew upgrade` does not restart the
+services and removes the previous keg; the caveats and README say to restart
+them.
 
 ## Fresh start and recovery
 

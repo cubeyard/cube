@@ -53,7 +53,7 @@ const stopTimeoutMs = numberEnv("CUBED_UPDATE_STOP_TIMEOUT_MS", 30_000);
 // CUBED_* from the environment file.
 const commandLine = process.argv.slice(2);
 if (commandLine.length) {
-  if (commandLine[0].startsWith("-") && !["--help", "-h", "--version", "--self-check"].includes(commandLine[0])) {
+  if (commandLine[0].startsWith("-") && !["--help", "--version", "--self-check"].includes(commandLine[0])) {
     console.error("cubed: the managed launcher takes no serve options; set CUBED_HOST, CUBED_PORT, CUBED_STATE and the others in the environment file (see cubed --help)");
     process.exit(2);
   }

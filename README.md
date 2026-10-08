@@ -49,6 +49,7 @@ What `brew install` does, and what stays yours to do:
 | user services (`brew services`) for both daemons, loopback only | optional: Claude Code login, Tailscale access |
 
 ```sh
+brew trust cubeyard/tap          # Homebrew asks you once to trust a third-party tap
 brew install cubeyard/tap/cube
 
 # the base image every thread machine starts from (~400 MB); keep it anywhere
@@ -65,8 +66,12 @@ open http://127.0.0.1:7777
 
 `init-local` checks QEMU, copies the image, starts the runner once to enroll
 it and stops it again; the services then keep both running and restart them
-after a crash or a login. The runner needs Hypervisor.framework
-(`sysctl kern.hv_support` prints 1). Nothing asks for `sudo`.
+after a crash or a login. Run it before starting the `cube-runner` service,
+and keep the default `--home` (`~/.cube`): the service starts the runner
+there. The runner needs Hypervisor.framework (`sysctl kern.hv_support` prints
+1). Nothing asks for `sudo`. Do not combine this with a `install.sh`
+installation of cubed on the same Mac: both would use `~/.cube-host`,
+`~/.config/cubed/environment` and port 7777.
 
 ### First run
 
@@ -120,15 +125,20 @@ sizes (`cube-runner run --max-active-vms` to override; see
 ### Updating and removing
 
 ```sh
-brew upgrade cube cube-runner      # a running service restarts; thread machines reboot and resume
+brew upgrade cube cube-runner && brew services restart cube-runner cube
 brew services stop cube cube-runner
 brew uninstall cube cube-runner    # keeps ~/.cube-host and ~/.cube; delete them yourself
 ```
 
-Under Homebrew the **system** page reports cubed as managed externally: the
-browser never updates it, `brew upgrade` does. The runner's own self-updater
-is not installed either. `brew upgrade qemu` is safe: the runner keeps the
-launcher paths it was given, not the versioned ones behind them.
+Restart the services right after an upgrade: `brew upgrade` does not restart
+them, and it removes the old version's files from under the still-running
+processes. Restarting the runner powers its thread machines down; cubed boots
+them again from the same disks when it needs them. Under Homebrew the
+**system** page reports cubed as managed externally: the browser never
+updates it, `brew upgrade` does. The runner's own self-updater is not
+installed either. `brew upgrade qemu` is expected to keep working: the runner
+records the launcher paths it was given (`/opt/homebrew/bin/...`), not the
+versioned ones behind them; restart the runner afterwards.
 
 ### If something does not work
 
@@ -202,6 +212,10 @@ one. Development checks: [DEVELOPING.md](DEVELOPING.md).
   runner can read every machine disk it hosts, and a guest escape would run as
   you. Give a runner that matters a dedicated account or machine without SSH,
   cloud, browser, Git or provider credentials.
+- **cubed's own processes are not sandboxed either.** Pi, codemode's worker
+  and Claude Code run on the cubed host as the user who runs cubed, with that
+  user's files and the model credentials; only the tools they call run in the
+  thread's machine.
 - **The agent can act with what it is given.** It can push to GitHub with
   your token through the gateway (github.com and api.github.com only) and send
   what it reads to any public HTTPS host. Give projects the repositories you
@@ -212,9 +226,13 @@ one. Development checks: [DEVELOPING.md](DEVELOPING.md).
   list the exact MagicDNS name and IP in `CUBED_ALLOWED_HOSTS` (DNS-rebinding
   protection, not access control). Never bind `0.0.0.0` on a network you do
   not control. [SECURITY.md](SECURITY.md) has the reporting process.
-- **Updates are signed.** Release bundles carry Ed25519-signed manifests
-  (trust anchor `scripts/cubed/update-public-key.pem`); the Homebrew formulas
-  are generated from those manifests and pin each asset's sha256.
+- **Updates are signed, Homebrew's by proxy.** Release bundles carry
+  Ed25519-signed manifests (trust anchor `scripts/cubed/update-public-key.pem`)
+  that the managed launcher and the runner's updater verify. The Homebrew
+  formulas are generated from those manifests and pin each asset's sha256,
+  but a Homebrew user trusts the tap's commits: whoever can write the tap
+  (the `homebrew` workflow's token, the tap's maintainers) can publish a
+  formula.
 
 ## Fresh state, not migration
 

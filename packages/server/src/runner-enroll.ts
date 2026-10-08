@@ -111,7 +111,10 @@ export async function initLocalRunner(options: LocalRunnerOptions): Promise<Loca
   const state = path.resolve(options.state);
   const image = path.resolve(options.image);
   if (!fs.existsSync(image) || !fs.statSync(image).isFile()) throw new Error(`base image not found: ${image}`);
-  if (!/^(127\.\d+\.\d+\.\d+|\[::1\]|localhost):\d{1,5}$/.test(options.listen)) throw new Error("--listen must be a loopback address with a port, for example 127.0.0.1:7778");
+  const listen = options.listen.match(/^(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\]|localhost):(\d{1,5})$/);
+  if (!listen || !listen[1].split(".").slice(1).every(octet => Number(octet) <= 255) || Number(listen[2]) < 1 || Number(listen[2]) > 65535) {
+    throw new Error("--listen must be a loopback address with a port from 1 to 65535, for example 127.0.0.1:7778");
+  }
   const address = options.listen.replace(/^localhost:/, "127.0.0.1:");
   const nodeId = options.nodeId ?? localNodeId();
   if (!/^node-[a-zA-Z0-9-]{1,123}$/.test(nodeId)) throw new Error("--node-id must start with node- and contain letters, digits and dashes only");
@@ -138,6 +141,10 @@ export async function initLocalRunner(options: LocalRunnerOptions): Promise<Loca
   let initOutput: string;
   try { initOutput = (await run(runner, initArgs, { encoding: "utf8", timeout: 30 * 60_000, maxBuffer: 1 << 20 })).stdout; }
   catch (error) {
+    // Nothing was enrolled and the key was never used: leave nothing behind
+    // that would make the next attempt look like a rebinding.
+    fs.rmSync(controlKey, { force: true });
+    if (!fs.existsSync(path.join(runnerHome, "state", "journal.db"))) fs.rmSync(runnerHome, { recursive: true, force: true });
     const failure = error as { stderr?: string; message: string };
     throw new Error(`cube-runner init failed: ${(failure.stderr || failure.message).trim()}`);
   }
@@ -158,16 +165,32 @@ export async function initLocalRunner(options: LocalRunnerOptions): Promise<Loca
   let stderr = "";
   child.stderr!.setEncoding("utf8");
   child.stderr!.on("data", chunk => { stderr = (stderr + chunk).slice(-8192); });
-  const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
+  const exited = new Promise<void>(resolve => { child.once("exit", () => resolve()); child.once("error", () => resolve()); });
   const gone = () => child.exitCode !== null || child.signalCode !== null;
+  // The temporary runner never outlives this command: a signal stops it the
+  // way its first Ctrl-C would, and an exit kills it.
+  const onSignal = (signal: NodeJS.Signals) => {
+    void stopRunner(child, exited).finally(() => { process.exitCode = 130; process.kill(process.pid, signal); });
+  };
+  const onExit = () => { if (!gone()) child.kill("SIGKILL"); };
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.once(signal, onSignal);
+  process.once("exit", onExit);
+  const describe = async () => {
+    try { await new IrohRunnerClient({ configPath }).describe(); return null; }
+    catch (error) { return error instanceof Error ? error.message : String(error); }
+  };
   const deadline = Date.now() + (options.startTimeoutMs ?? 20_000);
   let reachable = false;
   let lastError = "no answer yet";
   while (!gone() && Date.now() < deadline) {
-    try { await new IrohRunnerClient({ configPath }).describe(); reachable = true; break; }
-    catch (error) { lastError = error instanceof Error ? error.message : String(error); }
+    const failure = await describe();
+    if (failure === null) { reachable = true; break; }
+    lastError = failure;
     await delay(250);
   }
+  // A runner that exited may have lost the home to the service that already
+  // runs it (its lock and port); whoever answers with this key is it.
+  if (!reachable && gone() && (await describe()) === null) reachable = true;
   try {
     if (reachable) {
       result.enrollment = await enrollRunner({ state, configPath });
@@ -177,7 +200,11 @@ export async function initLocalRunner(options: LocalRunnerOptions): Promise<Loca
         ? `the runner exited (${child.exitCode ?? child.signalCode}): ${lastLines(stderr)}`
         : `the runner did not answer at ${address} in time (${lastError}); ${lastLines(stderr)}`;
     }
-  } finally { await stopRunner(child, exited); }
+  } finally {
+    await stopRunner(child, exited);
+    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.off(signal, onSignal);
+    process.off("exit", onExit);
+  }
   return result;
 }
 

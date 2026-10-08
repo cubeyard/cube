@@ -4,6 +4,7 @@
 each in its own virtual machine on your Mac. Apple Silicon only.
 
 ```sh
+brew trust cubeyard/tap      # Homebrew asks you to trust a third-party tap once
 brew install cubeyard/tap/cube
 ```
 
@@ -17,7 +18,7 @@ connecting a model in the browser.
 ## Updates and removal
 
 ```sh
-brew upgrade cube cube-runner    # both; a running service restarts
+brew upgrade cube cube-runner && brew services restart cube-runner cube
 brew services stop cube cube-runner
 brew uninstall cube cube-runner  # keeps ~/.cube-host and ~/.cube
 ```

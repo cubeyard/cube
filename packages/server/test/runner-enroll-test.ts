@@ -71,7 +71,7 @@ case "$1" in
   keygen) shift; [ "$1" = --key ]; cp "$FAKE_CONTROL_KEY_FILE" "$2"; chmod 600 "$2"
     printf '{"peerId":"%s"}\\n' "$FAKE_CONTROL_PEER" ;;
   init) shift; home=""; while [ "$#" -gt 0 ]; do [ "$1" = --home ] && home="$2"; shift 2; done
-    mkdir -m 700 "$home"; printf 'cube-runner 0.8.4\\ninitialized: %s\\nnode: x\\npeer: %s\\nnetwork: loopback\\nbase image: sha256 %s\\nqemu: /opt/homebrew/bin/qemu-system-aarch64\\n' "$home" "$FAKE_PEER" "${sha}" ;;
+    mkdir -m 700 "$home"; if [ "\${FAKE_INIT_FAIL:-}" = 1 ]; then echo 'Error: QEMU not found: qemu-system-aarch64' >&2; exit 1; fi; printf 'cube-runner 0.8.4\\ninitialized: %s\\nnode: x\\npeer: %s\\nnetwork: loopback\\nbase image: sha256 %s\\nqemu: /opt/homebrew/bin/qemu-system-aarch64\\n' "$home" "$FAKE_PEER" "${sha}" ;;
   run) if [ "\${FAKE_RUN_FAIL:-}" = 1 ]; then echo 'Error: Hypervisor.framework is not available (kern.hv_support != 1)' >&2; exit 1; fi
     trap 'printf "run stopped by SIGINT\\n" >> "${log}"; exit 0' INT
     echo 'network ready / waiting for cubed' >&2
@@ -112,6 +112,15 @@ try {
     assert.ok(!fs.existsSync(home), "nothing is written for a refused request");
   }
   assert.match((await cubed(["runners", "enroll", "--state", state])).stderr, /needs --config/);
+  assert.match((await cubed(["runners", "init-local", "--state", state, "--image", image, "--home", home, "--listen", "127.0.0.1:70000"])).stderr, /port from 1 to 65535/);
+
+  // A failed init leaves nothing behind: the next attempt is not a rebinding.
+  const failedInit = await cubed(["runners", "init-local", "--state", state, "--image", image, "--home", home, "--listen", address], { FAKE_INIT_FAIL: "1" });
+  assert.equal(failedInit.status, 1);
+  assert.match(failedInit.stderr, /cube-runner init failed: Error: QEMU not found/);
+  assert.ok(!fs.existsSync(path.join(home, "control.key")) && !fs.existsSync(path.join(home, "runner")) && !fs.existsSync(path.join(home, "runner.json")),
+    "a failed init removes the unused key and the partial home");
+  fs.rmSync(log);
 
   // The whole flow: keygen, init, config, a temporary run, enrollment, stop.
   const done = await cubed(["runners", "init-local", "--state", state, "--image", image, "--home", home, "--listen", address,
