@@ -283,8 +283,9 @@ user selects text and comments; drafts are sent as one message to the author
 (OptChat's queue, or a thread's prompt once its turn ends; never an
 interruption), delivered once. The only action is `github.merge`, previewed
 against the project, the newest revision and the pull request's live head,
-confirmed by the user and merged pinned to that head with the host's token.
-Verified offline (`artifacts-test.ts`, `artifact-render-test.ts`) and in
+confirmed by the user and merged pinned to that head with the host's token;
+its outcome is told once to the author and to OptChat for a thread it started.
+Verified offline (`artifacts-test.ts`, `artifact-notices-test.ts`, `artifact-render-test.ts`) and in
 headless Chromium (`artifact-browser-test.ts`, desktop light/dark and phone)
 with a faux model and a fake GitHub; not with a real model, a real Claude
 Code session or GitHub itself. Details and gaps: docs/artifacts.md.

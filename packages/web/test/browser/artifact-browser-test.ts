@@ -3,7 +3,9 @@
  * quote), a Pi thread writes notes over a local guest. The user opens the
  * review from the chat, selects text and comments, sends comments to the
  * chat and to a working thread (they wait until its turn ends), reads an
- * older revision, and confirms a merge after it is refused for a moved head.
+ * older revision, and confirms a merge after it is refused for a moved head;
+ * the chat hears of the failed try and of the merge, once each, and the
+ * page says it was told.
  * Faux model and fake GitHub; disposable state. Screenshots go to
  * CUBE_SCREENSHOTS when it is set. Needs a built UI and Playwright's Chromium. */
 import assert from "node:assert/strict";
@@ -239,6 +241,19 @@ try {
   await shoot(page, "11-merged");
   await page.locator(".action-footer button", { hasText: "close" }).click();
   await page.locator(".artifact-action button", { hasText: "done" }).waitFor();
+  // The outcome reaches the chat that wrote the review, and the page says so.
+  await page.locator(".artifact-action-told", { hasText: "told optchat" }).waitFor({ timeout: 30_000 });
+  await shoot(page, "11a-merge-told");
+  await page.goto(`${url}/#/chat`);
+  await page.getByText("Merged: cubeyard/demo#7 is in main now.").waitFor({ timeout: 30_000 });
+  const told = (await api("/api/optchat/history")).events.filter((event: { type: string; text?: string }) => event.type === "user-message" && /^\[artifact [0-9a-f]{8}\] The user confirmed/.test(event.text ?? ""))
+    .map((event: { text: string }) => event.text) as string[];
+  assert.equal(told.length, 2, "the failed try and the merge, once each");
+  assert.match(told[0]!, /It did not succeed: could not reach github/);
+  assert.match(told[1]!, /Done: merged cubeyard\/demo#7 at 3f9c2a7e5b1d \(squash\)/);
+  await shoot(page, "11b-chat-told");
+  await page.goto(`${url}/#/a/${reviewId}`);
+  await page.locator(".artifact-action-told", { hasText: "told optchat" }).waitFor();
 
   // The phone: the document first, its comments below, the chat with its panel.
   const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
@@ -343,7 +358,7 @@ try {
 
   assert.deepEqual(dialogs, [], "nothing in a document opened a dialog");
   assert.deepEqual(errors, [], "no page errors");
-  console.log("ok: artifacts in the browser: review from the chat, inert hostile content, diagrams, selection comments to the chat and to a working thread, older revision, merge refused then confirmed once, phone layout");
+  console.log("ok: artifacts in the browser: review from the chat, inert hostile content, diagrams, selection comments to the chat and to a working thread, older revision, merge refused then confirmed once and told to the chat, phone layout");
 } finally {
   await browser.close();
   await close();

@@ -55,6 +55,7 @@ export async function startArtifactHost(options: { web: string }) {
         return fauxAssistantMessage([fauxToolCall("artifact_write", { ...revise ? { id: revise } : { project: "gh" }, title: "post-merge review: work artifacts",
           body: revise ? REVIEW_REVISED : REVIEW, actions: [{ kind: "github.merge", repository: "cubeyard/demo", pull: 7, headSha: SHA, method: "squash", label: "merge the work artifacts pull request" }] })], { stopReason: "toolUse" });
       }
+      if (said.includes("The user confirmed")) return fauxAssistantMessage(said.includes("Done: merged") ? "Merged: cubeyard/demo#7 is in main now." : "That merge did not go through; nothing changed on GitHub.");
       if (said.includes("[artifact ")) return fauxAssistantMessage("Got your comments on the review; I will answer them in a new revision.");
       return fauxAssistantMessage("noted");
     }

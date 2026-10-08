@@ -311,6 +311,9 @@ refuses while it works, and waits with its reason until it is accepted once.
 The only action is `github.merge`, checked against the artifact's project,
 its newest revision and the pull request's live head before the user's
 confirmation, and merged pinned to that head with the host's GitHub token.
+Its outcome (done, failed, or unknown after a restart cut it off) is written
+with notices to the author and, for a thread OptChat started, to OptChat,
+delivered like a comment batch.
 Details: [docs/artifacts.md](docs/artifacts.md).
 
 ## Usage and cost
