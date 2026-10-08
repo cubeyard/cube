@@ -10,7 +10,8 @@
   import Onboarding from "./components/Onboarding.svelte";
   import ModelProviders from "./components/ModelProviders.svelte";
   import SystemSettings from "./components/SystemSettings.svelte";
-  import Settings from "./components/Settings.svelte";
+  import ChatMemorySettings from "./components/ChatMemorySettings.svelte";
+  import SettingsLayout, { type SettingsPage } from "./components/SettingsLayout.svelte";
   import Wordmark from "./components/Wordmark.svelte";
   import NewThreadDialog from "./components/NewThreadDialog.svelte";
   import { errorText, fetchState, fetchThreads, isUnreachable } from "./lib/api.ts";
@@ -20,7 +21,16 @@
 
   // Global threads, project setup, and one thread's terminal. Cubes never
   // appear in URLs. Ids are opaque tokens (uuids, "new"), used verbatim.
-  let hash = $state(location.hash);
+  // The settings pages' older addresses, and settings' own, land on a page.
+  const MOVED: Record<string, string> = { "#/models": "#/settings/providers", "#/system": "#/settings/system", "#/settings": "#/settings/providers" };
+  function settle(): string {
+    const moved = MOVED[location.hash];
+    if (moved) history.replaceState(history.state, "", moved);
+    return location.hash;
+  }
+  let hash = $state(settle());
+  const settingsPage = $derived<SettingsPage | null>(/^#\/settings\//.test(hash)
+    ? (["providers", "memory", "system"] as const).find((page) => hash === `#/settings/${page}`) ?? "providers" : null);
   const threadId = $derived(hash.match(/^#\/t\/([^/?]+)/)?.[1] ?? null);
   const projectId = $derived(hash.match(/^#\/projects\/([^/?]+)/)?.[1] ?? null);
   const artifactId = $derived(hash.match(/^#\/a\/([^/?]+)/)?.[1] ?? null);
@@ -133,7 +143,7 @@
   }
 
   function onHashChange(): void {
-    hash = location.hash;
+    hash = settle();
     void refresh();
     void focusHeading();
   }
@@ -177,9 +187,9 @@
       threadId ? `${current?.title ?? "untitled"} · cube`
       : projectsRoute ? "projects · cube"
       : chatRoute ? "chat · cube"
-      : hash === "#/models" ? "models · cube"
-      : hash === "#/system" ? "system · cube"
-      : hash === "#/settings" ? "settings · cube"
+      : settingsPage === "providers" ? "model providers · settings · cube"
+      : settingsPage === "memory" ? "chat memory · settings · cube"
+      : settingsPage === "system" ? "system · settings · cube"
       : "threads · cube";
   });
 </script>
@@ -197,12 +207,12 @@
   </main>
 {:else if !daemon}
   <p class="loading">loading…</p>
-{:else if hash === "#/models"}
-  <ModelProviders />
-{:else if hash === "#/system"}
-  <SystemSettings />
-{:else if hash === "#/settings"}
-  <Settings />
+{:else if settingsPage}
+  <SettingsLayout page={settingsPage}>
+    {#if settingsPage === "providers"}<ModelProviders />
+    {:else if settingsPage === "memory"}<ChatMemorySettings />
+    {:else}<SystemSettings />{/if}
+  </SettingsLayout>
 {:else if !daemon.onboardingComplete}
   <Onboarding onComplete={() => {
     daemon = { ...daemon!, onboardingComplete: true };

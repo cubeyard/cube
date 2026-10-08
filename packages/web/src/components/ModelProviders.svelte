@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import Header from "./Header.svelte";
   import { errorText, fetchProviders, providerAction } from "../lib/api.ts";
 
   let providers = $state<Awaited<ReturnType<typeof fetchProviders>>>([]);
@@ -46,10 +45,9 @@
   });
 </script>
 
-<Header section="models" />
-<main class="provider-settings">
+<section class="provider-settings" aria-labelledby="providers-title">
   <div class="intro">
-    <h1>model providers</h1>
+    <h1 id="providers-title">model providers</h1>
     <p>connect a provider to choose its models in your threads. credentials stay on this host and are managed by pi.</p>
     <p class="hint">disconnect removes the saved login, not credentials supplied by the host environment. it does not change a thread's selected model.</p>
     <p class="hint">claude pro or max is not a pi login. choose claude · max when you start a thread: claude code then runs it with its own login on this host (claude /login). pi reaches anthropic models with an api key.</p>
@@ -121,10 +119,9 @@
       </section>
     {/each}
   </div>
-</main>
+</section>
 
 <style>
-  .provider-settings { overflow-y: auto; padding: 2rem clamp(1rem, 4vw, 4rem); }
   .intro { max-width: 65ch; margin-bottom: 1.5rem; }
   h1 { margin: 0 0 0.8rem; }
   h2 { font-size: 15px; margin: 0 0 0.25rem; }

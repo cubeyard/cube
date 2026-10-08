@@ -293,17 +293,22 @@ Code session or GitHub itself. Details and gaps: docs/artifacts.md.
 
 ## Settings (branch `feat/global-settings`)
 
-`#/settings` (header nav) holds host-wide choices; today only OptChat's
-compactor model, apart from the chat's model, with "follow the chat model"
-as the default. Saved in `CUBED_STATE/settings.json`; `CUBED_OPTCHAT_COMPACTOR`
-still wins and the page shows it beside the saved choice. A change applies
-to the next node the compactor writes, no restart; a node being written keeps
-its model. Precedence and routes: docs/optchat.md, "Configuration". Verified
-offline (`settings-test.ts`: persistence, restart, reset, invalid input, an
-unavailable saved model, environment precedence, a held in-flight node) and
-in headless Chromium (`settings-browser-test.ts`, desktop and phone); not
-with real provider models. On phones the header's destinations are now one
-scrolling row under the wordmark (they overflowed the page before).
+The header has one **settings** entry (`#/settings/<page>`): a rail of pages
+beside the page itself, a row of keys on phones. Model providers and system
+moved there from the header (`#/models` and `#/system` still land on them);
+**chat memory** is new and chooses OptChat's compactor model, apart from the
+chat's, with "follow the chat model" as the default. The first-run setup
+offers the same choice. Saved in `CUBED_STATE/settings.json`;
+`CUBED_OPTCHAT_COMPACTOR` is no longer read (a set one is logged and shown as
+ignored). A change applies to the next node the compactor writes, no
+restart; a node being written keeps its model. Details: docs/optchat.md,
+"Configuration". Verified offline (`settings-test.ts`: persistence, restart,
+reset, invalid input, an unavailable saved model, a model list that cannot
+be read, the ignored variable, a held in-flight node) and in headless
+Chromium (`settings-browser-test.ts`: navigation and old addresses, saving,
+setup, desktop, 390px and 320px); not with real provider models. Below
+24.5rem the header's destinations take their own row (they overflowed
+narrow phones before).
 
 ## Known gaps and next steps
 

@@ -12,7 +12,7 @@ import { createCubed } from "../src/index.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 import { LocalMachines } from "./local-guest.ts";
 
-export async function startChatHost(options: { renderMs?: number; models?: string[] } = {}): Promise<{ url: string; models: Models; close(): Promise<void> }> {
+export async function startChatHost(options: { renderMs?: number; models?: string[]; setup?: boolean } = {}): Promise<{ url: string; models: Models; close(): Promise<void> }> {
   if (options.renderMs) {
     const prototype = PiThreadEvents.prototype as unknown as { render: (...args: unknown[]) => Promise<unknown> };
     const render = prototype.render;
@@ -41,7 +41,8 @@ export async function startChatHost(options: { renderMs?: number; models?: strin
   const app = await createCubed({ state: path.join(root, "state"), models, machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null });
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
-  await fetch(`${url}/api/onboarding`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  // `setup`: leave the first-run setup to the test.
+  if (!options.setup) await fetch(`${url}/api/onboarding`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   return {
     url,
     models,

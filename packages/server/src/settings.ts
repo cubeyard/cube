@@ -1,6 +1,5 @@
 /** The host's settings chosen in the UI, kept in `<CUBED_STATE>/settings.json`.
- * Only what the settings page offers is here: OptChat's compactor model. An
- * environment variable set for cubed still wins over a saved choice. */
+ * Only what the settings page offers is here: OptChat's compactor model. */
 import fs from "node:fs";
 import path from "node:path";
 import * as Schema from "effect/Schema";
@@ -51,9 +50,6 @@ export class SettingsStore {
   }
 }
 
-/** An environment variable cubed read at startup; `error`: why it cannot be used. */
-export interface EnvironmentValue { value: string; error: string | null }
-
 /** `GET /api/settings`: the saved choice beside what is in effect. */
 export interface SettingsView {
   /** The chat's own model; null until the chat is open. */
@@ -65,9 +61,10 @@ export interface SettingsView {
   error: string | null;
   compactor: {
     saved: ModelSelection | null;
-    environment: EnvironmentValue | null;
+    /** CUBED_OPTCHAT_COMPACTOR when cubed was started with it: no longer read. */
+    ignored: string | null;
     /** What decides the model the next node is written with. */
-    source: "environment" | "saved" | "chat";
+    source: "saved" | "chat";
     /** That model; null while the chat's model is not known. */
     model: ModelSelection | null;
     /** The saved model, when no provider offers it now and the chat's is used instead. */

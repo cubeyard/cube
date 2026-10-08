@@ -2,8 +2,8 @@
  * in the state directory, checked against the available models, used by
  * the next node the compactor writes (one being written keeps its model),
  * kept over a restart, reset to the chat's model, passed over when no
- * provider offers it, and below CUBED_OPTCHAT_COMPACTOR. Faux models,
- * disposable state. */
+ * provider offers it; CUBED_OPTCHAT_COMPACTOR is no longer read, only
+ * reported. Faux models, disposable state. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -67,7 +67,7 @@ try {
   let view = (await host.call("/api/settings")).body;
   assert.deepEqual(view.chat, chatModel);
   assert.deepEqual(view.models, [chatModel, cheap, other]);
-  assert.deepEqual(view.compactor, { saved: null, environment: null, source: "chat", model: chatModel, unavailable: null });
+  assert.deepEqual(view.compactor, { saved: null, ignored: null, source: "chat", model: chatModel, unavailable: null });
   assert.equal(view.error, null);
   assert.equal(fs.existsSync(file), false, "reading saves nothing");
 
@@ -87,7 +87,7 @@ try {
 
   // A saved model is used by the next node, without a restart.
   view = (await host.call("/api/settings/compactor", "PUT", { model: cheap })).body;
-  assert.deepEqual(view.compactor, { saved: cheap, environment: null, source: "saved", model: cheap, unavailable: null });
+  assert.deepEqual(view.compactor, { saved: cheap, ignored: null, source: "saved", model: cheap, unavailable: null });
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { version: 1, optchat: { compactor: cheap } });
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   await long(host.call);
@@ -125,7 +125,7 @@ try {
     view = (await host.call("/api/settings")).body;
     assert.match(view.error, /the models could not be listed: credential store unreadable/);
     assert.equal(view.models, null, "not listed, not empty");
-    assert.deepEqual(view.compactor, { saved: other, environment: null, source: "saved", model: other, unavailable: null });
+    assert.deepEqual(view.compactor, { saved: other, ignored: null, source: "saved", model: other, unavailable: null });
     await long(host.call);
     assert.equal(calls.at(-1), "faux-other");
   } finally { models.getAvailable = getAvailable; }
@@ -133,7 +133,7 @@ try {
 
   // Reset: the chat's model again.
   view = (await host.call("/api/settings/compactor", "PUT", { model: null })).body;
-  assert.deepEqual(view.compactor, { saved: null, environment: null, source: "chat", model: chatModel, unavailable: null });
+  assert.deepEqual(view.compactor, { saved: null, ignored: null, source: "chat", model: chatModel, unavailable: null });
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { version: 1, optchat: { compactor: null } });
   await long(host.call);
   assert.equal(calls.at(-1), "faux-chat");
@@ -143,7 +143,7 @@ try {
   fs.writeFileSync(file, JSON.stringify({ version: 1, optchat: { compactor: { provider: "gone", id: "gone-1" } } }));
   host = await start();
   view = (await host.call("/api/settings")).body;
-  assert.deepEqual(view.compactor, { saved: { provider: "gone", id: "gone-1" }, environment: null, source: "chat", model: chatModel, unavailable: { provider: "gone", id: "gone-1" } });
+  assert.deepEqual(view.compactor, { saved: { provider: "gone", id: "gone-1" }, ignored: null, source: "chat", model: chatModel, unavailable: { provider: "gone", id: "gone-1" } });
   await long(host.call);
   assert.equal(calls.at(-1), "faux-chat");
   await host.close();
@@ -159,27 +159,21 @@ try {
   assert.deepEqual(view.compactor.saved, cheap);
   await host.close();
 
-  // CUBED_OPTCHAT_COMPACTOR wins over the saved choice; a save is kept for later, the file never takes the variable.
+  // CUBED_OPTCHAT_COMPACTOR is no longer read: the saved choice decides, and the page says the variable is ignored.
   process.env.CUBED_OPTCHAT_COMPACTOR = "faux/faux-other";
   try {
     host = await start();
     view = (await host.call("/api/settings")).body;
-    assert.deepEqual(view.compactor, { saved: cheap, environment: { value: "faux/faux-other", error: null }, source: "environment", model: other, unavailable: null });
+    assert.deepEqual(view.compactor, { saved: cheap, ignored: "faux/faux-other", source: "saved", model: cheap, unavailable: null });
     await long(host.call);
-    assert.equal(calls.at(-1), "faux-other");
-    view = (await host.call("/api/settings/compactor", "PUT", { model: null })).body;
-    assert.equal(view.compactor.source, "environment");
-    assert.deepEqual(view.compactor.model, other);
-    await long(host.call);
-    assert.equal(calls.at(-1), "faux-other", "the variable still wins");
-    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { version: 1, optchat: { compactor: null } });
+    assert.equal(calls.at(-1), "faux-cheap", "the variable decides nothing");
     await host.close();
+    // Not even a malformed one keeps the chat from opening.
     process.env.CUBED_OPTCHAT_COMPACTOR = "no-slash";
     host = await start();
     view = (await host.call("/api/settings")).body;
-    assert.deepEqual(view.compactor.environment, { value: "no-slash", error: "CUBED_OPTCHAT_COMPACTOR must be provider/model" });
-    assert.equal(view.compactor.model, null);
-    assert.equal(view.chat, null, "the chat is unavailable");
+    assert.equal(view.compactor.ignored, "no-slash");
+    assert.deepEqual(view.chat, chatModel, "the chat opens");
     await host.close();
   } finally {
     delete process.env.CUBED_OPTCHAT_COMPACTOR;

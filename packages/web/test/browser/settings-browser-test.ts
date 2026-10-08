@@ -1,8 +1,11 @@
-/** The settings page in a real browser against the real cubed: reached from
- * the header, the compactor chosen, saved, kept over a reload and reset to
- * the chat's model; CUBED_OPTCHAT_COMPACTOR shown as winning; no sideways
- * scroll at phone width. CUBE_SCREENSHOTS=<dir> keeps a picture of each
- * state. Needs a built UI (pnpm build) and Playwright's Chromium. */
+/** Settings in a real browser against the real cubed: one header entry, a
+ * rail of pages (model providers, chat memory, system) with the old
+ * addresses landing on theirs; the chat memory page chooses the compactor,
+ * saves it, keeps it over a reload and resets it to the chat's model; models
+ * that cannot be listed; CUBED_OPTCHAT_COMPACTOR shown as no longer read; the
+ * first-run setup offering the choice; no sideways scroll at phone width.
+ * CUBE_SCREENSHOTS=<dir> keeps a picture of each state. Needs a built UI
+ * (pnpm build) and Playwright's Chromium. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -13,53 +16,58 @@ const shots = process.env.CUBE_SCREENSHOTS;
 if (shots) fs.mkdirSync(shots, { recursive: true });
 const shoot = async (page: Page, name: string) => { if (shots) await page.screenshot({ path: path.join(shots, `${name}.png`), fullPage: true }); };
 const models = ["faux-chat", "faux-cheap", "faux-other"];
+const desktop = { width: 1280, height: 800 }, phone = { width: 390, height: 844 };
 const errors: string[] = [];
 const browser = await chromium.launch();
 
-async function open(url: string, viewport: { width: number; height: number }): Promise<Page> {
-  const page = await browser.newPage({ viewport });
-  page.on("pageerror", error => errors.push(String(error)));
-  await page.goto(`${url}/#/chat`);
-  await page.locator(".composer textarea").waitFor();
-  await page.locator("header nav a", { hasText: "settings" }).click();
-  await page.waitForURL(/#\/settings$/);
-  await page.locator("h1", { hasText: "settings" }).waitFor();
-  return page;
+async function page(viewport: { width: number; height: number }): Promise<Page> {
+  const opened = await browser.newPage({ viewport });
+  opened.on("pageerror", error => errors.push(String(error)));
+  return opened;
 }
-const text = (page: Page, name: string) => page.locator(`.settings-board .${name}`).textContent();
-const noSideways = (page: Page) => page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= window.innerWidth);
-/** The header's link to this page is on screen, not scrolled out of its row. */
-const linkInSight = (page: Page) => page.locator("header nav a.active").evaluate(link => {
-  const box = link.getBoundingClientRect(), row = link.parentElement!.getBoundingClientRect();
-  return box.left >= row.left - 1 && box.right <= row.right + 1 && box.right <= window.innerWidth;
-});
+/** From the chat, through the header's one settings entry and the rail. */
+async function memoryPage(url: string, viewport: { width: number; height: number }): Promise<Page> {
+  const opened = await page(viewport);
+  await opened.goto(`${url}/#/chat`);
+  await opened.locator(".composer textarea").waitFor();
+  await opened.locator("header nav a", { hasText: "settings" }).click();
+  await opened.waitForURL(/#\/settings\/providers$/);
+  await opened.locator("h1", { hasText: "model providers" }).waitFor();
+  await opened.getByRole("navigation", { name: "settings" }).getByRole("link", { name: "chat memory" }).click();
+  await opened.waitForURL(/#\/settings\/memory$/);
+  await opened.locator("h1", { hasText: "chat memory" }).waitFor();
+  return opened;
+}
+const text = (opened: Page, name: string) => opened.locator(`.settings-board .${name}`).textContent();
+const noSideways = (opened: Page) => opened.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= window.innerWidth);
 
 let host = await startChatHost({ models });
 try {
-  const page = await open(host.url, { width: 1280, height: 800 });
-  assert.equal(await page.title(), "settings · cube");
-  assert.equal(await page.locator("header nav a.active").textContent(), "settings");
-  await page.locator(".settings-board .chat-model").filter({ hasText: "faux/faux-chat" }).waitFor();
-  assert.equal(await text(page, "compactor-model"), "faux/faux-chat");
-  assert.match(await page.locator(".readout").textContent() ?? "", /follows the chat model/);
-  const select = page.getByLabel("compactor");
-  const save = page.getByRole("button", { name: "save" });
+  const view = await memoryPage(host.url, desktop);
+  assert.equal(await view.title(), "chat memory · settings · cube");
+  assert.equal(await view.locator("header nav a.active").textContent(), "settings");
+  assert.deepEqual(await view.locator("header nav a").allTextContents(), ["chat", "threads", "artifacts", "projects", "settings"], "models and system are under settings");
+  assert.equal(await view.locator(".settings-rail [aria-current=page]").getAttribute("aria-label"), "chat memory");
+  await view.locator(".settings-board .chat-model").filter({ hasText: "faux/faux-chat" }).waitFor();
+  assert.equal(await text(view, "compactor-model"), "faux/faux-chat");
+  assert.match(await view.locator(".readout").textContent() ?? "", /follows the chat model/);
+  const select = view.getByLabel("compactor");
+  const save = view.getByRole("button", { name: "save" });
   assert.equal(await select.inputValue(), "", "follows the chat model");
   assert.deepEqual(await select.locator("option").allTextContents(), ["follow the chat model", ...models]);
   assert.ok(await save.isDisabled(), "nothing to save");
-  await shoot(page, "desktop-default");
+  await shoot(view, "desktop-memory-default");
 
   await select.selectOption({ label: "faux-cheap" });
-  assert.ok(await save.isEnabled());
   await save.click();
-  await page.locator(".settings-board .compactor-model").filter({ hasText: "faux/faux-cheap" }).waitFor();
-  assert.equal(await text(page, "chat-model"), "faux/faux-chat", "the chat keeps its model");
-  assert.match(await page.locator(".readout").textContent() ?? "", /saved here/);
+  await view.locator(".settings-board .compactor-model").filter({ hasText: "faux/faux-cheap" }).waitFor();
+  assert.equal(await text(view, "chat-model"), "faux/faux-chat", "the chat keeps its model");
+  assert.match(await view.locator(".readout").textContent() ?? "", /chosen here/);
   assert.ok(await save.isDisabled());
-  await shoot(page, "desktop-saved");
+  await shoot(view, "desktop-memory-saved");
 
-  await page.reload();
-  await page.locator(".settings-board .compactor-model").filter({ hasText: "faux/faux-cheap" }).waitFor();
+  await view.reload();
+  await view.locator(".settings-board .compactor-model").filter({ hasText: "faux/faux-cheap" }).waitFor();
   assert.equal(JSON.parse(await select.inputValue()).id, "faux-cheap", "kept over a reload");
 
   // Models that cannot be listed are not missing: the saved one stays in use and is not marked.
@@ -67,50 +75,104 @@ try {
   host.models.getAvailable = async () => { throw new Error("credential store unreadable"); };
   try {
     // The page's own poll reads it (a reload would fail earlier: /api/state lists the models too).
-    await page.locator(".settings-board .notice", { hasText: "the models could not be listed: credential store unreadable" }).waitFor({ timeout: 15_000 });
-    assert.equal(await text(page, "compactor-model"), "faux/faux-cheap");
+    await view.locator(".settings-board .notice", { hasText: "the models could not be listed: credential store unreadable" }).waitFor({ timeout: 15_000 });
+    assert.equal(await text(view, "compactor-model"), "faux/faux-cheap");
     assert.deepEqual(await select.locator("option").allTextContents(), ["follow the chat model", "faux/faux-cheap"]);
-    assert.equal(JSON.parse(await select.inputValue()).id, "faux-cheap");
-    assert.equal(await page.getByText("no models are available").count(), 0, "not told to connect a provider");
+    assert.equal(await view.getByText("no models are available").count(), 0, "not told to connect a provider");
     assert.ok(await save.isDisabled());
-    await shoot(page, "desktop-unlisted");
+    await shoot(view, "desktop-memory-unlisted");
   } finally { host.models.getAvailable = getAvailable; }
-  await page.reload();
-  await page.locator(".settings-board .compactor-model").filter({ hasText: "faux/faux-cheap" }).waitFor();
+  await view.reload();
+  await view.locator(".settings-board .compactor-model").filter({ hasText: "faux/faux-cheap" }).waitFor();
 
   await select.selectOption({ label: "follow the chat model" });
   await save.click();
-  await page.locator(".settings-board .compactor-model").filter({ hasText: "faux/faux-chat" }).waitFor();
-  assert.match(await page.locator(".readout").textContent() ?? "", /follows the chat model/);
+  await view.locator(".settings-board .compactor-model").filter({ hasText: "faux/faux-chat" }).waitFor();
 
-  const phone = await open(host.url, { width: 390, height: 844 });
-  await phone.locator(".settings-board .chat-model").filter({ hasText: "faux/faux-chat" }).waitFor();
-  assert.ok(await noSideways(phone), "no sideways scroll on a phone");
-  for (let i = 0; !await linkInSight(phone); i++) { assert.ok(i < 40, "the settings link is in sight on a phone"); await phone.waitForTimeout(50); }
-  await phone.getByLabel("compactor").selectOption({ label: "faux-other" });
-  await shoot(phone, "phone-choosing");
-  await phone.close();
-  await page.close();
+  // The rail's other pages, and the old addresses, which land on theirs.
+  const rail = view.getByRole("navigation", { name: "settings" });
+  await rail.getByRole("link", { name: "system" }).click();
+  await view.waitForURL(/#\/settings\/system$/);
+  await view.locator("h1", { hasText: "system" }).waitFor();
+  await shoot(view, "desktop-system");
+  await view.goto(`${host.url}/#/models`);
+  await view.waitForURL(/#\/settings\/providers$/);
+  await view.locator("h1", { hasText: "model providers" }).waitFor();
+  assert.equal(await view.title(), "model providers · settings · cube");
+  await shoot(view, "desktop-providers");
+  await view.goto(`${host.url}/#/system`);
+  await view.waitForURL(/#\/settings\/system$/);
+  await view.locator("h1", { hasText: "system" }).waitFor();
+
+  for (const route of ["memory", "providers", "system"]) {
+    const small = await page(phone);
+    await small.goto(`${host.url}/#/settings/${route}`);
+    await small.locator(".settings-pane h1").waitFor();
+    await small.waitForTimeout(300);
+    assert.ok(await noSideways(small), `no sideways scroll on a phone (${route})`);
+    const keys = small.locator(".settings-rail .rail-item");
+    const boxes = await keys.evaluateAll(items => items.map(item => item.getBoundingClientRect()).map(box => ({ top: Math.round(box.top), right: box.right })));
+    assert.equal(new Set(boxes.map(box => box.top)).size, 1, "the rail is one row on a phone");
+    assert.ok(boxes.every(box => box.right <= 390), "every page's key is on screen");
+    if (route === "memory") {
+      await small.locator(".settings-board .chat-model").filter({ hasText: "faux/faux-chat" }).waitFor();
+      await small.getByLabel("compactor").selectOption({ label: "faux-other" });
+    }
+    await shoot(small, `phone-${route}`);
+    await small.close();
+  }
+  // The narrowest phones: every header destination on screen, nothing sideways.
+  const narrow = await page({ width: 320, height: 700 });
+  await narrow.goto(`${host.url}/#/settings/memory`);
+  await narrow.locator(".settings-pane h1").waitFor();
+  await narrow.waitForTimeout(300);
+  assert.ok(await noSideways(narrow), "no sideways scroll at 320px");
+  const links = await narrow.locator("header nav a").evaluateAll(items => items.map(item => item.getBoundingClientRect().right));
+  assert.ok(links.every(right => right <= 320), `every header destination is on screen at 320px: ${links}`);
+  await shoot(narrow, "phone320-memory");
+  await narrow.close();
+  await view.close();
 } finally {
   await host.close();
 }
 
-// The variable wins; the page says so and keeps the saved choice for later.
+// The variable is no longer read: the page says so, and the choice here decides.
 process.env.CUBED_OPTCHAT_COMPACTOR = "faux/faux-other";
 host = await startChatHost({ models });
 try {
-  for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
-    const page = await open(host.url, viewport);
-    await page.locator(".settings-board .compactor-override").waitFor();
-    assert.equal(await text(page, "compactor-model"), "faux/faux-other");
-    assert.match(await page.locator(".readout").textContent() ?? "", /from CUBED_OPTCHAT_COMPACTOR/);
-    assert.match(await page.locator(".settings-board .compactor-override").textContent() ?? "", /wins over the choice saved here/);
-    assert.ok(await noSideways(page), `no sideways scroll at ${viewport.width}px`);
-    await shoot(page, `${viewport.width < 600 ? "phone" : "desktop"}-environment`);
-    await page.close();
-  }
+  const view = await memoryPage(host.url, desktop);
+  await view.locator(".settings-board .compactor-ignored").waitFor();
+  assert.equal(await text(view, "compactor-model"), "faux/faux-chat");
+  assert.match(await view.locator(".settings-board .compactor-ignored").textContent() ?? "", /no longer reads it/);
+  await shoot(view, "desktop-memory-ignored");
+  await view.close();
 } finally {
   delete process.env.CUBED_OPTCHAT_COMPACTOR;
+  await host.close();
+}
+
+// First-run setup offers the choice, following the chat's model unless changed.
+host = await startChatHost({ models, setup: true });
+try {
+  for (const [viewport, name] of [[phone, "phone"], [desktop, "desktop"]] as const) {
+    const setup = await page(viewport);
+    await setup.goto(`${host.url}/`);
+    await setup.getByRole("button", { name: "not now" }).click();
+    const choice = setup.getByLabel("chat memory");
+    await choice.waitFor();
+    assert.equal(await choice.inputValue(), "", "the default follows the chat's model");
+    assert.ok(await noSideways(setup), `no sideways scroll in setup (${name})`);
+    await shoot(setup, `${name}-setup`);
+    if (name === "desktop") {
+      await choice.selectOption({ label: "faux/faux-cheap" });
+      await setup.getByRole("button", { name: "open the chat" }).click();
+      await setup.locator(".composer textarea").waitFor();
+      const saved = await (await fetch(`${host.url}/api/settings`)).json();
+      assert.deepEqual(saved.compactor.saved, { provider: "faux", id: "faux-cheap" }, "setup saved the choice");
+    }
+    await setup.close();
+  }
+} finally {
   await host.close();
   await browser.close();
 }
