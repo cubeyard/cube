@@ -66,7 +66,10 @@ jobs:
 
   # The Homebrew formulas this checkout generates, installed from the latest
   # published release on a real Mac: install, audit, formula tests, the
-  # launchers. No thread machine: GitHub's macOS runners have no nested
+  # launchers. The generator checks that release's contract (state schema,
+  # protocol) against this checkout, so the job fails on a pull request that
+  # changes the contract until the next release ships; it is not a required
+  # check. No thread machine: GitHub's macOS runners have no nested
   # virtualization, so the runner service and HVF are not exercised here.
   homebrew:
     runs-on: macos-latest
@@ -87,6 +90,8 @@ jobs:
           gh release download "$version" --repo "$GITHUB_REPOSITORY" --pattern 'cubed-darwin-arm64.json*' --pattern 'cube-runner-darwin-arm64.json*' --dir "$RUNNER_TEMP/assets"
           node scripts/homebrew/formula.ts "$version" --assets "$RUNNER_TEMP/assets" --out "$RUNNER_TEMP/formula"
       - name: install, audit and test
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
         run: |
           set -euo pipefail
           brew tap-new --no-git cubeyard/tap
@@ -96,7 +101,7 @@ jobs:
           brew audit --strict cubeyard/tap/cube cubeyard/tap/cube-runner
           brew test cubeyard/tap/cube cubeyard/tap/cube-runner
           cubed --version
-          cubed --help | grep -q 'runners status'
-          cube-runner version | grep -q '"protocolVersion":3'
+          grep -q 'runners status' <<<"$(cubed --help)"
+          grep -q '"protocolVersion":3' <<<"$(cube-runner version)"
           sysctl -n kern.hv_support || true
           brew services list

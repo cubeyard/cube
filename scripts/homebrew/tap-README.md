@@ -15,6 +15,15 @@ a one-time `cubed runners init-local` with a Debian 13 genericcloud arm64
 image, `brew services start cube-runner`, `brew services start cube`, and
 connecting a model in the browser.
 
+## If you installed the old `cube` launcher from this tap
+
+Before October 2026 this tap's `cube` formula was a different product: a
+launcher (`cube up`) with its VM data in `~/.cube`. `brew upgrade` replaces it
+with cubed; `bin/cube` goes away. Run `cube destroy --yes` and
+`brew uninstall cube` first, and move `~/.cube` aside before
+`cubed runners init-local`, which refuses an existing `~/.cube/runner`,
+`control.key` or `runner.json` and does not clean up the old layout.
+
 ## Updates and removal
 
 ```sh

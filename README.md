@@ -62,7 +62,9 @@ brew services start cube
 open http://127.0.0.1:7777
 ```
 
-`init-local` checks QEMU, copies the image, starts the runner once to enroll
+If the old v0.1 `cube` launcher from this tap is installed (`cube up`, its
+data in `~/.cube`), remove it first: `cube destroy --yes`, `brew uninstall
+cube`, and move `~/.cube` aside. `init-local` checks QEMU, copies the image, starts the runner once to enroll
 it and stops it again; the services then keep both running and restart them
 after a crash or a login. Run it before starting the `cube-runner` service,
 and keep the default `--home` (`~/.cube`): the service starts the runner

@@ -220,10 +220,21 @@ with a `version` input): it generates the formulas on a macOS runner, installs
 them from the release, runs `brew audit --strict` and `brew test`, then commits
 them to the tap with the `HOMEBREW_TAP_TOKEN` secret (a fine-grained token with
 contents write on `cubeyard/homebrew-tap`; renew it when it expires). Drafts and
-prereleases are refused. The `homebrew` job of `ci.yml` does the same against
-the latest published release on every pull request, without the push, so a
-formula change is validated on a real Mac before it is merged; GitHub's macOS
+prereleases are refused, and so is a version older than the latest release
+unless the `force` input says a downgrade is meant; the push runs in a second
+job on Linux so the tap token never reaches the machine that ran the release's
+binaries. The `homebrew` job of `ci.yml` does the same against the latest
+published release on every pull request, without the push, so a formula change
+is validated on a real Mac before it is merged. It checks this checkout's
+generator and tests against that release's binaries (v0.3.18 today, whose
+cubed has no `runners init-local`), which is why the formula tests assert only
+what every 0.3.x release has (`runners status`, `--self-check`, `cube-runner
+version`); the generator also requires the release's state schema and protocol
+to match the checkout, so a pull request that changes either fails this job
+until the next release ships. It is not a required check. GitHub's macOS
 runners have no nested virtualization, so neither job starts a thread machine.
+The tap's previous formula was a different product (the v0.1 `cube` launcher);
+the tap README tells those users how to move over.
 The formulas' `test do` blocks run `cubed --version`, `--help`, cubed's
 `--self-check` (which runs `cube-gateway --version`) and `cube-runner version`.
 

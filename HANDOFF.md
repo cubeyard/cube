@@ -64,9 +64,10 @@ in `docs/plans/` hold the reasoning and the detailed evidence.
   `cubeyard/homebrew-tap` by the `homebrew` workflow at publication);
   `cubed runners init-local --image …` sets up and enrolls the local runner
   over loopback; `brew services` runs both. README, "macOS quickstart". Validated with
-  Homebrew on Linux only (`brew style`, `brew audit --strict`, `brew fetch`
-  checksums) and by the `homebrew` job of ci.yml on GitHub's macOS runner
-  (install, `brew audit --strict`, `brew test` against the latest release);
+  Homebrew on Linux (`brew style`, `brew audit --strict`, `brew fetch`
+  checksums); the `homebrew` job of ci.yml installs, audits and tests the
+  generated formulas against the latest release on GitHub's macOS runner
+  (`brew install` of cube and cube-runner succeeded there on 2026-10-08);
   the publishing workflow runs at the next release; nothing has run on a
   real Mac with a thread machine yet.
 - State schema 102 adopts no older state. Moving from v0.2.x means a fresh

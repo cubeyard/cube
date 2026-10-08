@@ -171,7 +171,12 @@ class Cube < Formula
     libexec.install Dir["*"]
     # A dependency (pi-tui) ships prebuilt native modules for every platform;
     # only this one's may stay in the keg (brew audit refuses the others).
-    Dir[libexec/"app/**/prebuilds/*"].each { |dir| rm_r(dir) if File.basename(dir) != "darwin-arm64" }
+    # They live under node_modules/.pnpm, so the glob must match dot directories.
+    Dir.glob(libexec/"app/**/native/*/prebuilds/*", File::FNM_DOTMATCH).each do |dir|
+      next if !File.directory?(dir) || File.basename(dir) == "darwin-arm64" || File.basename(dir).start_with?(".")
+
+      rm_r(dir)
+    end
     # The bundle's bin/cubed starts the self-update supervisor; under
     # Homebrew, cubed runs directly and brew upgrade updates it.
     (bin/"cubed").write <<~SH
