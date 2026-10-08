@@ -159,12 +159,17 @@ artifact by a thread  -> the thread (its next prompt)
                          otherwise "skipped"); the thread's answer reaches OptChat as its report
 ```
 
+OptChat records a thread it spawned just after the spawn returns, so a
+thread younger than 10 minutes that it has not recorded keeps its notice
+waiting instead of skipping it.
+
 A notice is delivered exactly like a comment batch (above): the same text
-under `artifact:<id>:action:<run>:<recipient>` on every try, accepted once;
+under `report:artifact:<id>:action:<run>:<recipient>` on every try, accepted once
+(a report to OptChat, not a message of the user, so it renews no tells);
 waiting with its reason while the chat is not open or the thread works;
 `undeliverable` for an archived or unknown thread. One still waiting after
-24 h stops and says why. A failed or cut-off run is told as not done ("Nothing
-says it merged"), never as success. The page shows each notice under the run
+24 h stops and says why. A failed run is told as not done ("Nothing says it
+merged"), a run cut off by a restart as of unknown outcome; neither as success. The page shows each notice under the run
 (`told optchat`, `to the thread: waiting: …`), and `artifact_read` lists them.
 
 The merge uses the host's GitHub token (`gh auth token` or
@@ -235,4 +240,7 @@ heavily rewritten documents.
 - No per-user identity: anyone who can reach cubed can confirm an action.
 - Comments are not threaded and the author's answer arrives in the chat or
   thread, not on the artifact.
+- A merge on the artifact of a thread OptChat started costs that thread a
+  turn (its machine starts if it was stopped), and OptChat hears both the
+  notice and the thread's report of its answer.
 - The page reads the artifact every 4 s while visible; there is no stream.

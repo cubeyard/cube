@@ -25,6 +25,10 @@ const log = createLogger("artifacts");
 export const DELIVERY_RETRY_MS = 10_000;
 /** A notice that could not go for this long stops waiting and says so. */
 export const NOTICE_GIVE_UP_MS = 24 * 60 * 60_000;
+/** OptChat records a thread it spawned just after the spawn returns (and on
+ * a replay after a restart): a thread this young that it has not recorded
+ * may still be its own, so its notice waits rather than being skipped. */
+export const STARTER_GRACE_MS = 10 * 60_000;
 /** How much of a body a read returns to an agent. */
 const READ_BODY_CHARS = 120_000;
 
@@ -56,14 +60,16 @@ export class Artifacts {
   private readonly inflight = new Set<string>();
   private readonly timer: ReturnType<typeof setInterval>;
   private readonly giveUpMs: number;
+  private readonly starterGraceMs: number;
   private closing = false;
 
   constructor(options: { store: ArtifactStore; registry: Registry; github: GithubPulls;
     optchat: () => Promise<ArtifactChat | null>;
-    submit: (thread: string, text: string, requestId: string) => Promise<unknown>; retryMs?: number; giveUpMs?: number }) {
+    submit: (thread: string, text: string, requestId: string) => Promise<unknown>; retryMs?: number; giveUpMs?: number; starterGraceMs?: number }) {
     this.store = options.store; this.registry = options.registry; this.github = options.github;
     this.optchat = options.optchat; this.submit = options.submit;
     this.giveUpMs = options.giveUpMs ?? NOTICE_GIVE_UP_MS;
+    this.starterGraceMs = options.starterGraceMs ?? STARTER_GRACE_MS;
     this.store.interruptedActions();
     this.timer = setInterval(() => void this.pump(), options.retryMs ?? DELIVERY_RETRY_MS);
     this.timer.unref();
@@ -159,27 +165,35 @@ export class Artifacts {
   async pump(): Promise<void> {
     if (this.closing) return;
     const { store } = this;
-    await Promise.all([
-      ...store.queued().map(batch => this.deliver(batch, { settle: (state, note) => store.settle(batch.id, state, note), note: note => store.note(batch.id, note) })),
-      ...store.queuedNotices().map(notice => this.deliver(notice, {
-        settle: (state, note) => store.settleNotice(notice.id, state, note), note: note => store.noteNotice(notice.id, note),
-        skip: note => store.settleNotice(notice.id, "skipped", note),
-        giveUp: notice.createdAt + this.giveUpMs <= Date.now() })),
-    ]);
+    // Never rejects: it runs unawaited, and a failed try stays queued for the next.
+    try {
+      await Promise.allSettled([
+        ...store.queued().map(batch => this.deliver(batch, { settle: (state, note) => store.settle(batch.id, state, note), note: note => store.note(batch.id, note) })),
+        ...store.queuedNotices().map(notice => this.deliver(notice, {
+          settle: (state, note) => store.settleNotice(notice.id, state, note), note: note => store.noteNotice(notice.id, note),
+          skip: note => store.settleNotice(notice.id, "skipped", note),
+          giveUp: notice.createdAt + this.giveUpMs <= Date.now() })),
+      ]);
+    } catch (error) { if (!this.closing) log.warn("artifact delivery round failed", { error: error instanceof Error ? error.message : String(error) }); }
   }
   private async deliver(item: Outgoing, record: { settle(state: "delivered" | "undeliverable", note: string): void; note(note: string): void;
     skip?: (note: string) => void; giveUp?: boolean }): Promise<void> {
     if (this.inflight.has(item.id) || this.closing) return;
     this.inflight.add(item.id);
     // A notice past its bound stops waiting: the last reason is its outcome.
-    const wait = (note: string) => record.giveUp
+    const wait = (note: string) => this.closing ? undefined : record.giveUp
       ? record.settle("undeliverable", `not delivered in ${Math.round(this.giveUpMs / 3_600_000)} h, so it stopped waiting; last: ${note.replace(/^waiting: /, "")}`)
       : record.note(note);
     try {
       if (item.target.kind !== "thread") {
         const chat = await this.optchat().catch(() => null);
         if (!chat) { wait("waiting: the chat is not open yet"); return; }
-        if (item.target.kind === "starter" && !await chat.started(item.target.thread)) { record.skip?.("the chat did not start this thread"); return; }
+        if (item.target.kind === "starter" && !await chat.started(item.target.thread)) {
+          const young = (this.registry.getThread(item.target.thread)?.createdAt ?? 0) + this.starterGraceMs > Date.now();
+          if (young) wait("waiting: the chat has not recorded this thread as its own yet");
+          else record.skip?.("the chat did not start this thread");
+          return;
+        }
         // The chat's own queue: delivered between its tool calls or as its next turn.
         await chat.send(item.text, item.requestId);
         record.settle("delivered", "in the chat");

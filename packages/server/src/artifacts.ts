@@ -159,11 +159,14 @@ export function commentMessage(artifact: { id: string; title: string; head: numb
 /** What a finished run tells `target`: the action, its exact target and
  * what the run recorded, nothing more. */
 export function actionMessage(artifact: { id: string; title: string; author: ArtifactAuthor }, action: ArtifactAction | null,
-  run: { action: string; revision: number; state: "succeeded" | "failed"; detail: string }, target: NoticeTarget): string {
+  run: { action: string; revision: number; state: "succeeded" | "failed" | "unknown"; detail: string }, target: NoticeTarget): string {
   const what = action ? `"${action.label}" (github.merge ${action.repository}#${action.pull} at ${action.headSha.slice(0, 12)}, ${action.method})` : `action ${run.action}`;
   const whose = target.kind === "starter" && artifact.author.kind === "thread" ? `the artifact "${artifact.title}" of thread [${artifact.author.thread.slice(0, 8)}]` : `your artifact "${artifact.title}"`;
-  const detail = run.detail.replace(/\.$/, "");
-  const outcome = run.state === "succeeded" ? `Done: ${detail}.` : `It did not succeed: ${detail}. Nothing says it merged; check the pull request on GitHub before saying otherwise.`;
+  // One line: text from GitHub cannot start a line of its own.
+  const detail = run.detail.replace(/\s+/g, " ").trim().replace(/\.$/, "");
+  const outcome = run.state === "succeeded" ? `Done: ${detail}.`
+    : run.state === "unknown" ? `Its outcome is unknown: ${detail}. Check the pull request on GitHub before saying either way.`
+    : `It did not succeed: ${detail}. Nothing says it merged; check the pull request on GitHub before saying otherwise.`;
   const next = target.kind === "thread"
     ? "Nothing more is asked of you. If the outcome calls for follow-up, say what; otherwise answer in one line."
     : "Tell the user only what this changes for them.";
@@ -392,8 +395,9 @@ export class ArtifactStore {
   finishAction(run: string, state: "succeeded" | "failed", detail: string): void {
     this.transaction(() => this.finish(run, state, detail));
   }
-  private finish(run: string, state: "succeeded" | "failed", detail: string): void {
-    const updated = this.db.prepare("UPDATE action_runs SET state = ?, detail = ? WHERE id = ? AND state = 'running'").run(state, detail.slice(0, 2000), run);
+  /** `unknown` is kept as failed (a new try is allowed) and told as unknown. */
+  private finish(run: string, state: "succeeded" | "failed" | "unknown", detail: string): void {
+    const updated = this.db.prepare("UPDATE action_runs SET state = ?, detail = ? WHERE id = ? AND state = 'running'").run(state === "unknown" ? "failed" : state, detail.slice(0, 2000), run);
     if (!updated.changes) return;
     const finished = runOf(this.db.prepare("SELECT * FROM action_runs WHERE id = ?").get(run) as Row);
     const artifact = this.summary(this.row(finished.artifact)!);
@@ -402,7 +406,8 @@ export class ArtifactStore {
     const insert = this.db.prepare("INSERT OR IGNORE INTO notices (id, artifact, run, target, request_id, text, state, note, created_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)");
     for (const target of targets) {
       const key = targetKey(target);
-      insert.run(randomUUID(), artifact.id, run, key, `artifact:${artifact.id}:action:${run}:${key}`,
+      // A report to OptChat, not a message of the user: it renews no thread's tells.
+      insert.run(randomUUID(), artifact.id, run, key, `report:artifact:${artifact.id}:action:${run}:${key}`,
         actionMessage(artifact, action, { action: finished.action, revision: finished.revision, state, detail: finished.detail }, target), "waiting to be delivered", Date.now());
     }
   }
@@ -413,7 +418,7 @@ export class ArtifactStore {
   interruptedActions(): void {
     this.transaction(() => {
       for (const row of this.db.prepare("SELECT id FROM action_runs WHERE state = 'running'").all() as Row[]) {
-        this.finish(String(row.id), "failed", "cubed stopped while this ran, so whether GitHub merged it is unknown; check the pull request on GitHub before trying again");
+        this.finish(String(row.id), "unknown", "cubed stopped while this ran, so whether GitHub merged it is unknown; check the pull request on GitHub before trying again");
       }
     });
   }

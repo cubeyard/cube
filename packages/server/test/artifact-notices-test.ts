@@ -21,7 +21,7 @@ const file = path.join(root, "artifacts.sqlite");
 const SHA = "6a26aa39f9ace624f24549f597d5a4436a0912a9";
 
 const project = { id: "p", name: "cube", repositories: [{ url: "https://github.com/cubeyard/cube" }] };
-const threads = new Map<string, { id: string; projectId: string; archived: boolean }>();
+const threads = new Map<string, { id: string; projectId: string; archived: boolean; createdAt: number }>();
 const registry = {
   getThread: (id: string) => threads.get(id) ?? null,
   getProject: (id: string) => id === project.id ? project : null,
@@ -76,7 +76,7 @@ const notices = (id: string) => artifacts.store.notices(id);
 
 try {
   // The case that went missing: a thread OptChat started wrote the review; the user merged it.
-  threads.set("eb809312-0000-4000-8000-000000000001", { id: "eb809312-0000-4000-8000-000000000001", projectId: "p", archived: false });
+  threads.set("eb809312-0000-4000-8000-000000000001", { id: "eb809312-0000-4000-8000-000000000001", projectId: "p", archived: false, createdAt: Date.now() });
   const author = "eb809312-0000-4000-8000-000000000001";
   chat.started.add(author);
   const review = write({ kind: "thread", thread: author }, [116, 117], "review");
@@ -102,7 +102,7 @@ try {
   await Promise.all([artifacts.pump(), artifacts.pump(), artifacts.pump()]);
   assert.equal(prompts.size, 1);
   assert.equal(chat.got.size, 1);
-  assert.deepEqual([...chat.got.keys()], [`artifact:${review}:action:${artifacts.store.actionRuns(review)[0]!.id}:starter:${author}`]);
+  assert.deepEqual([...chat.got.keys()], [`report:artifact:${review}:action:${artifacts.store.actionRuns(review)[0]!.id}:starter:${author}`]);
   // A repeated request answers again and merges nothing; another is refused.
   assert.equal((await confirm(review, 116, "m1")).state, "succeeded");
   await assert.rejects(confirm(review, 116, "m2"), /already/);
@@ -119,8 +119,8 @@ try {
   assert.match(failed, /It did not succeed: github: Head branch was modified\. Review and try the merge again\. Nothing says it merged/);
   assert.doesNotMatch(failed, /Done:/);
 
-  // A thread started in cube (not by the chat): the thread is told, the chat is not.
-  threads.set("user-thread", { id: "user-thread", projectId: "p", archived: false });
+  // A thread started in cube (not by the chat), older than the chat's grace to record one: the thread is told, the chat is not.
+  threads.set("user-thread", { id: "user-thread", projectId: "p", archived: false, createdAt: Date.now() - 11 * 60_000 });
   const notes = write({ kind: "thread", thread: "user-thread" }, [118], "notes");
   const before = chat.got.size;
   await confirm(notes, 118, "m4");
@@ -129,8 +129,17 @@ try {
   assert.equal(chat.got.size, before);
   assert.doesNotMatch(artifacts.read([{ kind: "thread", thread: "user-thread" }], notes), /told the chat/);
 
+  // A thread so young the chat may not have recorded spawning it yet: the chat's notice waits, then goes once it has.
+  threads.set("young-thread", { id: "young-thread", projectId: "p", archived: false, createdAt: Date.now() });
+  open.add(122);
+  const young = write({ kind: "thread", thread: "young-thread" }, [122], "young");
+  await confirm(young, 122, "m-young");
+  await until(() => notices(young)[1]!, notice => notice.note === "waiting: the chat has not recorded this thread as its own yet", "the chat's notice waits");
+  chat.started.add("young-thread");
+  await until(() => notices(young).map(notice => notice.state), states => states.join() === "delivered,delivered", "the chat is told once it has recorded the thread");
+
   // An archived author: nothing reaches it, and says so; the chat that started it is still told.
-  threads.set("archived-thread", { id: "archived-thread", projectId: "p", archived: false });
+  threads.set("archived-thread", { id: "archived-thread", projectId: "p", archived: false, createdAt: Date.now() });
   chat.started.add("archived-thread");
   const late = write({ kind: "thread", thread: "archived-thread" }, [119], "late");
   threads.get("archived-thread")!.archived = true;
@@ -140,7 +149,7 @@ try {
 
   // The chat's own artifact: told to the chat alone.
   const own = write({ kind: "optchat" }, [120], "own");
-  // A run cut off mid-merge: cubed stops after GitHub was asked, before the outcome.
+  // A run cut off mid-merge: cubed stops after GitHub was asked, before the outcome; told as unknown, never as failed or done.
   artifacts.close();
   store.beginAction(own, 1, "merge-120", "m6");
   store.close();
@@ -153,7 +162,7 @@ try {
   assert.deepEqual(notices(own).map(notice => [notice.target.kind, notice.state]), [["optchat", "queued"]], "the restart wrote its notice");
   chat.open = true;
   await until(() => notices(own)[0]!.state, state => state === "delivered", "the unknown outcome is told");
-  assert.match([...chat.got.values()].at(-1)!, /on your artifact "own".*It did not succeed: cubed stopped while this ran, so whether GitHub merged it is unknown/);
+  assert.match([...chat.got.values()].at(-1)!, /on your artifact "own".*Its outcome is unknown: cubed stopped while this ran, so whether GitHub merged it is unknown.*before saying either way/);
   // Delivered before the restart stays delivered: nothing is told twice.
   assert.equal(notices(review).filter(notice => notice.state === "delivered").length, 4);
   const sentBefore = chat.sends;
@@ -163,7 +172,7 @@ try {
   // Bounded: a notice that cannot go for the bound stops waiting and says why.
   artifacts.close();
   artifacts = service({ giveUpMs: 300 });
-  threads.set("busy-thread", { id: "busy-thread", projectId: "p", archived: false });
+  threads.set("busy-thread", { id: "busy-thread", projectId: "p", archived: false, createdAt: 0 });
   open.add(121);
   const busy = write({ kind: "thread", thread: "busy-thread" }, [121], "busy");
   working.add("busy-thread");
