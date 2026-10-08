@@ -341,6 +341,9 @@ try {
   assert.equal(workspacePath(scope.root, "/home/cube/thread-other/x"), "/home/cube/thread-other/x", "a sibling of the root is not the workspace");
   assert.equal(workspacePath(scope.root, "../../tmp/./x.png"), "/tmp/x.png");
   assert.equal(workspacePath(scope.root, "~/notes.md"), "/home/agent/notes.md");
+  assert.equal(workspacePath(scope.root, "/real/cube/thread/src/a.ts", "/real/cube/thread"), "src/a.ts", "the root with its symlinks resolved is the workspace too");
+  assert.equal(workspacePath(scope.root, "/real/cube/thread/src/a.ts"), "/real/cube/thread/src/a.ts");
+  assert.match(String((workspacePath(scope.root, "/workspace/../cube/artifacts/plan.md") as { deny: string }).deny), /cube keeps artifacts at \/cube\/artifacts/);
   assert.deepEqual(workspacePath(scope.root, "~bob/notes.md"), { deny: "~bob/notes.md: only ~ and ~/ name a home, the agent's (/home/agent)" });
   assert.equal(workspacePath(scope.root, "/workspace/../etc/hosts"), "/etc/hosts");
   assert.deepEqual(workspacePath(scope.root, "/home/cube/thread"), { deny: "/home/cube/thread is the workspace root, not a file" });

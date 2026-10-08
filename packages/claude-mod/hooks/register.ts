@@ -23,6 +23,7 @@ async function workspace($: Pick<EngineInterface, 'env' | 'http'>, signal?: Abor
   const base = await $.env.get('CUBE_WORKSPACE_PATH')
   const token = await $.env.get('CUBE_WORKSPACE_TOKEN')
   const root = await $.env.get('CUBE_WORKSPACE_ROOT')
+  const realRoot = await $.env.get('CUBE_WORKSPACE_REAL_ROOT')
   if (!socketPath || !base || !token || !root) return undefined
   const client = new WorkspaceClient({
     base,
@@ -33,7 +34,7 @@ async function workspace($: Pick<EngineInterface, 'env' | 'http'>, signal?: Abor
       return { status: reply.status, text: reply.text }
     },
   })
-  return { client, token, root, ...(signal ? { signal } : {}) }
+  return { client, token, root, ...(realRoot ? { realRoot } : {}), ...(signal ? { signal } : {}) }
 }
 
 export const register: Register = on => {

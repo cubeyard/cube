@@ -151,6 +151,7 @@ tool's `path`) take any path in the thread's machine, as bash does:
 | any other absolute path: `/home/agent/…`, `/tmp/…`, `~/…` (not `~name`) | that path in the machine | the `agent` account's own permissions (`EACCES` says to use sudo in bash) |
 | `/proc`, `/sys`, `/dev`, or a link that resolves into them | refused (`INVALID_REQUEST`) | — use bash |
 | a path with a `..` part on the wire | refused; the agent side normalises first | — |
+| `/cube/…` in the Claude Code mod (after normalising) | not the machine's: `/cube/artifacts` are cube's work artifacts | — |
 
 The guest helper resolves every path inside the machine: symlinks are followed
 there (a workspace link may lead out of the workspace and is then reached as

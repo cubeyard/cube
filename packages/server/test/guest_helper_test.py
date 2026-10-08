@@ -277,8 +277,10 @@ class GuestHelperTest(unittest.TestCase):
         # Kernel and device filesystems are not files, directly or through a link.
         os.symlink(os.path.join(self.root, "proc/self"), os.path.join(self.root, "tmp/proc-link"))
         os.symlink(os.path.join(self.root, "dev"), os.path.join(self.workspace, "dev-link"))
+        os.makedirs(os.path.join(self.workspace, "inner"))
+        os.symlink(os.path.join(self.root, "proc"), os.path.join(self.workspace, "inner/proc"))
         os.symlink(self.root, os.path.join(self.root, "proc/self/root"))
-        for path in ["/proc/self/status", "/sys/kernel", "/dev/null", "/proc", "/tmp/proc-link/status", "dev-link/null", "/proc/self/root/etc/hosts"]:
+        for path in ["/proc/self/status", "/sys/kernel", "/dev/null", "/proc", "/tmp/proc-link/status", "dev-link/null", "/proc/self/root/etc/hosts", "inner/proc/self/status"]:
             answer = call("read", {"path": path})[0]
             self.assertEqual(answer["error"]["code"], "INVALID_REQUEST", path)
             self.assertIn("kernel or device filesystem", answer["error"]["message"], path)
@@ -317,6 +319,14 @@ class GuestHelperTest(unittest.TestCase):
         self.assertIn("use sudo in bash", call("stat", {"path": "/etc/secret"})[0]["error"]["message"])
         self.assertEqual((os.geteuid(), os.getegid()), (0, 0), "root again after")
         self.assertEqual(os.stat(guest.op_path("r2", "result.json")).st_uid, 0, "the journal stays root's")
+        # A rename the agent may not make (sticky /tmp, root's file) leaves no temporary file.
+        os.makedirs(os.path.join(self.root, "tmp"), mode=0o1777)
+        os.chmod(os.path.join(self.root, "tmp"), 0o1777)
+        with open(os.path.join(self.root, "tmp/root.txt"), "w") as handle:
+            handle.write("root's")
+        os.chmod(os.path.join(self.root, "tmp/root.txt"), 0o666)
+        self.assertIn("use sudo in bash", call("write", {"id": "r4", "epoch": 10, "path": "/tmp/root.txt"}, b"x")[0]["error"]["message"])
+        self.assertEqual(sorted(os.listdir(os.path.join(self.root, "tmp"))), ["root.txt"])
         # The workspace keeps its own rule: written as root, given to the agent.
         call("write", {"id": "r3", "epoch": 10, "path": "w.txt"}, b"x")
         self.assertEqual(os.stat(os.path.join(self.workspace, "w.txt")).st_uid, nobody.pw_uid)

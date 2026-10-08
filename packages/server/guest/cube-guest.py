@@ -282,7 +282,11 @@ def write_atomic(target, data, mode=0o600):
         os.fsync(fd)
     finally:
         os.close(fd)
-    os.rename(temporary, target)
+    try:
+        os.rename(temporary, target)
+    except OSError:
+        os.unlink(temporary)
+        raise
     fsync_dir(os.path.dirname(target))
 
 
@@ -434,16 +438,16 @@ def file_path(path, follow=True):
     resolved = os.path.realpath(full)
     # A write or stat acts on a final symlink itself, not on what it names.
     located = resolved if follow else os.path.join(os.path.realpath(os.path.dirname(full)), os.path.basename(full))
-    if within(located, workspace) and within(resolved, workspace):
-        return full, False
-    machine = os.path.realpath(CONFIG.root)
     # `full` too: /proc/self/root/… resolves elsewhere but opens through /proc.
     for where in (full, located, resolved):
-        if not within(where, machine):
-            raise Fail("INVALID_REQUEST", "path leaves the machine")
         for pseudo in PSEUDO_FILESYSTEMS:
             if within(where, os.path.realpath(rooted(pseudo))):
                 raise Fail("INVALID_REQUEST", "%s is in %s, a kernel or device filesystem; use bash" % (path, pseudo))
+    if within(located, workspace) and within(resolved, workspace):
+        return full, False
+    machine = os.path.realpath(CONFIG.root)
+    if not all(within(where, machine) for where in (full, located, resolved)):
+        raise Fail("INVALID_REQUEST", "path leaves the machine")
     return full, True
 
 

@@ -37,6 +37,8 @@ export interface ToolScope {
   token: string;
   /** The local directory Claude Code runs in; its absolute paths map onto the workspace root. */
   root: string;
+  /** The same directory with its symlinks resolved, an alias of `root`. */
+  realRoot?: string;
   /** Aborts when the call is abandoned (the person stopped the thread). */
   signal?: AbortSignal;
 }
@@ -58,9 +60,8 @@ export interface EditResult { filePath: string; oldString: string; newString: st
  * local directory Claude Code runs in and /workspace (and relative paths)
  * are the workspace, given relative to its root; any other absolute path is
  * a file in the thread's machine, never one on the cubed host. */
-export function workspacePath(root: string, file: string): string | Denied {
+export function workspacePath(root: string, file: string, realRoot?: string): string | Denied {
   if (typeof file !== "string" || !file || file.includes("\0")) return { deny: "a file path is required" };
-  const base = root.replace(/\/+$/, "");
   if (file.startsWith("~") && file !== "~" && !file.startsWith("~/")) return { deny: `${file}: only ~ and ~/ name a home, the agent's (${GUEST_HOME})` };
   const absolute = file === "~" || file.startsWith("~/") ? `${GUEST_HOME}${file.slice(1)}` : file.startsWith("/") ? file : `${VIRTUAL_ROOT}/${file}`;
   const parts: string[] = [];
@@ -70,7 +71,10 @@ export function workspacePath(root: string, file: string): string | Denied {
     else parts.push(part);
   }
   const normal = `/${parts.join("/")}`;
-  const resolved = base && (normal === base || normal.startsWith(`${base}/`)) ? `${VIRTUAL_ROOT}${normal.slice(base.length)}` : normal;
+  const base = [root, realRoot ?? ""].map(alias => alias.replace(/\/+$/, "")).find(alias => alias && (normal === alias || normal.startsWith(`${alias}/`)));
+  const resolved = base ? `${VIRTUAL_ROOT}${normal.slice(base.length)}` : normal;
+  // cube's artifacts are not the machine's, however the path reaches /cube.
+  if (resolved === "/cube" || resolved.startsWith("/cube/")) return { deny: `${file} is not in the machine: cube keeps artifacts at ${ARTIFACT_ROOT}/<name>.md, written whole with Write` };
   if (resolved === VIRTUAL_ROOT) return { deny: `${file} is the workspace root, not a file` };
   if (resolved === "/") return { deny: `${file} is the machine's root directory, not a file` };
   return resolved.startsWith(`${VIRTUAL_ROOT}/`) ? resolved.slice(VIRTUAL_ROOT.length + 1) : resolved;
@@ -176,7 +180,7 @@ export async function bash(scope: ToolScope, toolUseId: string, input: BashInput
 }
 
 export async function read(scope: ToolScope, input: ReadInput): Promise<ReadResult | Denied> {
-  const target = workspacePath(scope.root, input.file_path);
+  const target = workspacePath(scope.root, input.file_path, scope.realRoot);
   if (typeof target !== "string") return target;
   if (input.pages !== undefined) return { deny: "PDF pages are not available in cube threads; use bash to inspect the file" };
   try {
@@ -193,7 +197,7 @@ export async function read(scope: ToolScope, input: ReadInput): Promise<ReadResu
 }
 
 export async function write(scope: ToolScope, toolUseId: string, input: WriteInput): Promise<WriteResult | Denied> {
-  const target = workspacePath(scope.root, input.file_path);
+  const target = workspacePath(scope.root, input.file_path, scope.realRoot);
   if (typeof target !== "string") return target;
   if (typeof input.content !== "string") return { deny: "content is required" };
   try {
@@ -212,7 +216,7 @@ export async function write(scope: ToolScope, toolUseId: string, input: WriteInp
 
 /** Edit is read, replace, then a write conditional on the content read. */
 export async function edit(scope: ToolScope, toolUseId: string, input: EditInput): Promise<EditResult | Denied> {
-  const target = workspacePath(scope.root, input.file_path);
+  const target = workspacePath(scope.root, input.file_path, scope.realRoot);
   if (typeof target !== "string") return target;
   if (typeof input.old_string !== "string" || typeof input.new_string !== "string") return { deny: "old_string and new_string are required" };
   if (input.old_string === input.new_string) return { deny: "No changes to make: old_string and new_string are exactly the same." };
