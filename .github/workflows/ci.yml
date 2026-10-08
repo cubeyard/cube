@@ -105,3 +105,28 @@ jobs:
           runner="$(cube-runner version)"; grep -q '"protocolVersion":3' <<<"$runner"
           sysctl -n kern.hv_support || true
           brew services list
+      # The formula's default portal names services under *.localhost on
+      # loopback: check that curl, the system resolver and Safari reach this
+      # Mac's own loopback for such a name, with no DNS or hosts entry.
+      - name: "*.localhost reaches loopback (curl, resolver, Safari)"
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/site" && echo "portal probe" > "$RUNNER_TEMP/site/index.html"
+          python3 -m http.server 7781 --bind 127.0.0.1 --directory "$RUNNER_TEMP/site" >/dev/null 2>&1 &
+          site=$!
+          trap 'kill $site ${driver:-}' EXIT
+          sleep 1
+          curl -fsS http://web-0123456789.localhost:7781/ | grep -q "portal probe"
+          dscacheutil -q host -a name web-0123456789.localhost || true
+          sudo safaridriver --enable
+          safaridriver --port 4444 & driver=$!
+          sleep 3
+          session="$(curl -fsS -X POST http://127.0.0.1:4444/session -H 'content-type: application/json' \
+            -d '{"capabilities":{"alwaysMatch":{"browserName":"safari"}}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"]["sessionId"])')"
+          curl -fsS -X POST "http://127.0.0.1:4444/session/$session/url" -H 'content-type: application/json' \
+            -d '{"url":"http://web-0123456789.localhost:7781/"}' >/dev/null || true
+          text="$(curl -fsS -X POST "http://127.0.0.1:4444/session/$session/execute/sync" -H 'content-type: application/json' \
+            -d '{"script":"return document.body ? document.body.innerText + \" secure=\" + window.isSecureContext : \"\"","args":[]}')"
+          curl -fsS -X DELETE "http://127.0.0.1:4444/session/$session" >/dev/null || true
+          echo "Safari $(defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString), macOS $(sw_vers -productVersion): $text"
+          grep -q "portal probe" <<<"$text"

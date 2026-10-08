@@ -77,7 +77,9 @@ ${DEBIAN_IMAGE_BASE}; CUBE_DEBIAN_IMAGE_BASE names another https site with
 the same layout.
 
 The portal to threads' \`cube service\` web servers is off unless CUBED_PORTAL_IP
-names cubed's private (e.g. Tailscale) address; see docs/services.md.`;
+names cubed's private (e.g. Tailscale) or loopback address (with
+CUBED_PORTAL_DOMAIN=localhost: URLs for a browser on this host only); see
+docs/services.md.`;
 
 /** The `claude` binary for claude-code threads: CUBED_CLAUDE names it (or
  * `off`), otherwise the first `claude` on PATH. Null when there is none. */

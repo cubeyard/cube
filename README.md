@@ -115,9 +115,18 @@ cubed reads `~/.config/cubed/environment` (shell syntax, keep it mode 600):
 # CUBED_CLAUDE=/Users/me/.local/bin/claude  # Claude Code, if it is not on the service's PATH
 # CUBED_HOST=100.64.0.2                     # a Tailscale IP; see security below
 # CUBED_ALLOWED_HOSTS=mymac.tailnet.ts.net,100.64.0.2
-# CUBED_PORTAL_IP=100.64.0.2                # URLs for threads' `cube service` web servers (docs/services.md)
+# CUBED_PORTAL_IP=100.64.0.2                # serve threads' `cube service` web servers to the tailnet (docs/services.md)
+# CUBED_PORTAL_IP=                          # or: no URLs for them at all
 # CUBED_VM_MEMORY_MIB=4096 CUBED_VM_VCPUS=2 # size of new thread machines
 ```
+
+Web servers a thread runs with `cube service` get URLs such as
+`http://web-<label>.localhost:7780/` out of the box: the Homebrew launcher
+starts cubed's service portal on loopback (`127.0.0.1:7780`) under
+`*.localhost` names, which browsers and curl resolve to the machine they run
+on, without DNS. They open only in a browser on this Mac. Any
+`CUBED_PORTAL_IP`, `CUBED_PORTAL_LISTEN` or `CUBED_PORTAL_DOMAIN` of yours is
+kept as it is; for other devices set a Tailscale IP as above.
 
 `brew services restart cube` after a change. The runner takes its options at
 `init-local` (`--max-vcpus`, `--max-memory-mib`, `--max-disk-gib`, `--listen`,

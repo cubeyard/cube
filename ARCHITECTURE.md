@@ -563,7 +563,8 @@ resumes a machine it brings the helper to the one it ships (`install`, or a
 one-time chunked replacement of a helper from before `install`) and writes
 the machine's portal URL template (`portal`).
 
-The portal (`portal.ts`, off unless `CUBED_PORTAL_IP` is set) is a second
+The portal (`portal.ts`, off unless `CUBED_PORTAL_IP` is set; the Homebrew
+launcher sets a loopback one under `*.localhost`) is a second
 HTTP listener on a private address. A request's Host must be exactly
 `<service>-<thread label>.<suffix>:<port>` (label: an HMAC of the thread id
 under `CUBED_STATE/portal/key`; suffix: by default `<ip>.sslip.io`); cubed

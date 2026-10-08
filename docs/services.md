@@ -105,22 +105,39 @@ The thread label is the first 10 hex characters of an HMAC-SHA256 of the
 thread id under a random key in `CUBED_STATE/portal/key`, so labels are
 stable for a thread and not derivable from thread ids. With the default
 domain the suffix embeds the IP: `100-101-102-103.sslip.io`, which public
-DNS (sslip.io, or nip.io) answers with 100.101.102.103 for any name.
+DNS (sslip.io, or nip.io) answers with 100.101.102.103 for any name. A
+loopback portal can use `localhost` instead (`http://web-<label>.localhost:7780/`):
+browsers and curl resolve every `*.localhost` name to the machine they run
+on themselves (RFC 6761), with no DNS at all, so it works only in a browser on
+cubed's own host.
 
 ### Setting it up
 
-The portal is off unless `CUBED_PORTAL_IP` is set. Settings (environment of
-the cubed service; nothing in a live installation changes by itself):
+The portal is off unless `CUBED_PORTAL_IP` is set, except under Homebrew
+(below). Settings (environment of the cubed service; nothing in a live
+installation changes by itself):
 
 | variable | default | meaning |
 |---|---|---|
 | `CUBED_PORTAL_IP` | (off) | the private address browsers use, e.g. the cubed host's Tailscale IP (`tailscale ip -4`) |
 | `CUBED_PORTAL_PORT` | `7780` | the portal's port, in every URL |
 | `CUBED_PORTAL_LISTEN` | `CUBED_PORTAL_IP` | the address it binds; private or loopback IPv4 only |
-| `CUBED_PORTAL_DOMAIN` | `sslip.io` | `sslip.io` or `nip.io` (IP embedded), or a wildcard domain of your own that resolves to the IP |
+| `CUBED_PORTAL_DOMAIN` | `sslip.io` | `sslip.io` or `nip.io` (IP embedded), a wildcard domain of your own that resolves to the IP, or `localhost` (loopback IP and listen address only) |
 
 cubed refuses public addresses and `0.0.0.0` for both the IP and the listen
-address, and refuses to start on a malformed setting. A Tailscale setup:
+address, `localhost` (or any `*.localhost` domain) with an IP or listen address
+outside 127.0.0.0/8, and refuses to start on a malformed setting.
+
+**Homebrew.** The formula's `cubed` launcher reads
+`~/.config/cubed/environment`; when it sets none of `CUBED_PORTAL_IP`,
+`CUBED_PORTAL_LISTEN` and `CUBED_PORTAL_DOMAIN`, the launcher sets
+`CUBED_PORTAL_IP=127.0.0.1 CUBED_PORTAL_DOMAIN=localhost`: a portal on
+`127.0.0.1:7780` (or `CUBED_PORTAL_PORT`) with URLs that open in a browser on
+the same Mac. Settings of your own are kept as they are, a partial one
+included; `CUBED_PORTAL_IP=` (empty) turns the portal off. Other devices
+need the Tailscale setup below, not `localhost`.
+
+A Tailscale setup:
 
 ```
 CUBED_PORTAL_IP=$(tailscale ip -4)   # e.g. 100.101.102.103
@@ -167,17 +184,24 @@ ends open connections).
 
 - **HTTP only.** Traffic between the browser and the portal is plain HTTP;
   rely on the private network (Tailscale encrypts it) and do not expose the
-  port elsewhere. Browsers treat these origins as insecure contexts
-  (no service workers, no `crypto.subtle`, no secure cookies).
+  port elsewhere. Browsers treat sslip.io and other IP or domain origins as
+  insecure contexts (no service workers, no `crypto.subtle`, no secure
+  cookies); `*.localhost` origins are secure contexts (loopback never leaves
+  the machine).
 - **No login.** Anyone who can reach the port and knows a URL reaches the
   service. Labels are hard to guess, not secret: they appear in transcripts
   and logs.
+- **localhost reaches only the browser's own machine.** A
+  `*.localhost` URL opened on another device (a phone, another computer on the
+  tailnet) goes to that device, not to cubed. Agents inside a thread's machine
+  cannot open these URLs either: `localhost` there is the machine itself.
 - **DNS.** sslip.io and nip.io are public resolvers you depend on; they see
   the names asked for (service name, thread label, private IP). Resolvers
   with rebinding protection (some routers, Pi-hole, dnsmasq
   `--stop-dns-rebind`, some corporate DNS) refuse public names that resolve
-  to private addresses; allow `sslip.io` there, use a wildcard record in
-  your own DNS (`CUBED_PORTAL_DOMAIN`), or Tailscale's split DNS. Tailscale
+  to private addresses, and web filters (Fortinet and similar) may answer
+  them with an address of their own; allow `sslip.io` there, use a wildcard
+  record in your own DNS (`CUBED_PORTAL_DOMAIN`), or Tailscale's split DNS. Tailscale
   MagicDNS forwards other names to your resolvers, so the same applies.
 - Every portal origin is a sibling under one suffix; the portal strips
   cookie domains, but a service still shares the browser's
@@ -199,9 +223,24 @@ Once, by hand: headless Chromium (with `--host-resolver-rules` mapping
 its URL, completed a WebSocket round trip through the portal, kept the
 service's cookie host-only, and got the portal's 404 for the bare IP.
 
+The loopback default (`localhost`): `portal-test.ts` runs end to end with
+the settings the Homebrew launcher produces, and
+`scripts/homebrew-formula-test.ts` runs the generated launcher with no
+environment file, other settings, a Tailscale IP, `CUBED_PORTAL_IP=` and a
+partial configuration. Once, by hand on Linux, against cubed's real portal on
+127.0.0.1:7780 with real name resolution (no host rules, no hosts entries):
+curl, and headless Chromium 153, Firefox 155 and WebKit 26.6 (Playwright),
+loaded two services of one thread by their `*.localhost` URLs, completed a
+WebSocket round trip through the portal, kept each service's cookies on its
+own host (a `Domain=localhost` attribute stripped), reported a secure
+context, and could not read or post to cube's API; cube's API refused the
+service host as Host. CI's `homebrew` job checks that curl and Safari on
+GitHub's macOS runner reach a loopback server by a `*.localhost` name.
+
 Not yet verified: a real VM (systemd units surviving the command's unit,
 journal logs, restart at boot, the LAN address probe, a template build with
 services, the gateway and a remote runner carrying the traffic), the
 bootstrap against a real v1 helper in a VM, a browser on a Tailscale network
-resolving sslip.io, and macOS/HVF runners. These need
+resolving sslip.io, macOS/HVF runners, and the Homebrew default on a real
+Mac with a running thread machine. These need
 `scripts/test-node-transport.sh` on a KVM host and a manual check.

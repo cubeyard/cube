@@ -33,7 +33,8 @@ JPEG, GIF and WebP, recognized by their bytes, and serves a message's image
 with `nosniff`, a sandboxing content security policy and a same-origin
 resource policy; they are sent to the chat's model provider with the turn.
 
-The optional service portal (`CUBED_PORTAL_IP`, off by default) is a second
+The optional service portal (`CUBED_PORTAL_IP`, off by default; on loopback
+under `*.localhost` by default with the Homebrew launcher) is a second
 listener with the same boundary: no authentication, plain HTTP, bound only to
 a private or loopback IPv4 address. Anyone who reaches it and knows a service
 URL reaches that thread's web server. It routes only exact per-service Host
