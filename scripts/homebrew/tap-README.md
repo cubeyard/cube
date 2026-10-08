@@ -22,8 +22,10 @@ formula was a different product: a launcher (`cube up`) with its VM under
 `~/.cube`. `brew upgrade` replaces it with cubed and `bin/cube` goes away.
 Before upgrading: `cube down`, then move `~/.cube` aside to keep the old VM's
 data (`cube destroy --yes` deletes it), then `brew uninstall cube`. If you
-already upgraded: stop the old VM with `kill "$(cat ~/.cube/vm.pid)"` (it
-holds port 7777) and move `~/.cube` aside. `cubed runners init-local` refuses
+already upgraded: the old VM may still run and hold port 7777 (or the
+`CUBE_PORT` in `~/.cube/config`); if `ps -p "$(cat ~/.cube/vm.pid)" -o command=`
+shows a qemu process, `kill` that pid (a forced stop), then move `~/.cube`
+aside. `cubed runners init-local` refuses
 an existing `~/.cube/runner`, `control.key` or `runner.json` and does not
 clean up the old layout.
 

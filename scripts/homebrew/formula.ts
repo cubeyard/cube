@@ -219,8 +219,9 @@ class Cube < Formula
       CUBED_ALLOWED_HOSTS, CUBED_CLAUDE, ...). State: ~/.cube-host and ~/.cube;
       uninstalling keeps both. After brew upgrade, restart the services:
         brew services restart cube-runner cube
-      Had this tap's old v0.1 "cube" launcher? Its VM may still hold port 7777:
-      kill "$(cat ~/.cube/vm.pid)" and move ~/.cube aside before init-local.
+      Had this tap's old v0.1 "cube" launcher? Its VM may still run and hold
+      port 7777: check ps -p "$(cat ~/.cube/vm.pid)" -o command= for qemu, kill
+      that pid, and move ~/.cube aside before init-local.
     EOS
   end
 

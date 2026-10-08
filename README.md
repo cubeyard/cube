@@ -50,8 +50,10 @@ If this tap's earlier product, the v0.1 `cube` launcher (`cube up`, its VM
 under `~/.cube`), is installed, retire it before installing: `cube down`,
 then move `~/.cube` aside to keep the old VM's data (`cube destroy --yes`
 deletes it), then `brew uninstall cube`. If `brew upgrade` already replaced it,
-`bin/cube` is gone: stop the old VM with `kill "$(cat ~/.cube/vm.pid)"` (it
-holds port 7777), then move `~/.cube` aside.
+`bin/cube` is gone: the old VM may still run and hold port 7777 (or the
+`CUBE_PORT` in `~/.cube/config`); if `ps -p "$(cat ~/.cube/vm.pid)" -o command=`
+shows a qemu process, `kill` that pid (a forced stop; the old disk is kept as
+is), then move `~/.cube` aside.
 
 ```sh
 brew trust cubeyard/tap          # Homebrew asks you once to trust a third-party tap
