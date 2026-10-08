@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # The chat in a real browser (Chromium through Playwright): see DEVELOPING.md.
 # CI installs Chromium and runs it; elsewhere a missing Chromium is a SKIP
-# notice, and CUBE_TEST_BROWSER=required makes that a failure.
+# notice, and CUBE_TEST_BROWSER=required makes that a failure. The phone
+# layout also runs in WebKit, Safari's engine, when Playwright has it (CI does).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [ -n "${CI:-}" ]; then
-  pnpm --filter @cube/web exec playwright install --with-deps chromium
+  pnpm --filter @cube/web exec playwright install --with-deps chromium webkit
 fi
 if ! (cd packages/web && node -e 'require.resolve("playwright")' 2>/dev/null); then
   echo "FAIL: playwright is not installed: pnpm install --frozen-lockfile" >&2
@@ -22,5 +23,6 @@ fi
 pnpm build
 export CUBED_CLAUDE=off
 node packages/web/test/browser/chat-browser-test.ts
+node packages/web/test/browser/mobile-browser-test.ts
 node packages/web/test/browser/cubed-browser-test.ts
 node packages/web/test/browser/artifact-browser-test.ts

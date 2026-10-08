@@ -6,7 +6,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import type { ThreadEvent, ThreadOverview, ThreadStatus, ThreadTranscript } from "../../src/lib/types.ts";
+import type { ThreadEvent, ThreadOverview, ThreadStatus, ThreadSummary, ThreadTranscript } from "../../src/lib/types.ts";
 
 const DIST = path.resolve(import.meta.dirname, "../../dist");
 const TYPES: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".png": "image/png", ".json": "application/json", ".webmanifest": "application/manifest+json" };
@@ -21,6 +21,8 @@ export class ScriptedHost {
   overview: ThreadOverview = { threads: [], archived: { shown: 0, total: 0 }, unknown: 0 };
   /** Every API request the page made, as `METHOD /path`. */
   requests: string[] = [];
+  /** One thread, served at /api/threads/<id>/ with the chat's transcript, stream and media. */
+  thread: ThreadSummary | null = null;
   /** Images the chat uploaded, by id. */
   media = new Map<string, { type: string; body: Buffer }>();
   /** Answers a prompt: by default accepted at once. A thrown error is a 500. */
@@ -78,10 +80,17 @@ export class ScriptedHost {
       return;
     }
     this.requests.push(`${request.method} ${url.pathname}`);
+    // The thread's conversation routes are the chat's.
+    const threadPrefix = this.thread ? `/api/threads/${encodeURIComponent(this.thread.id)}/` : null;
+    if (threadPrefix && url.pathname.startsWith(threadPrefix)) {
+      const rest = url.pathname.slice(threadPrefix.length);
+      if (rest === "usage") return json({ error: "not found" }, 404);
+      url.pathname = `/api/optchat/${rest === "model" ? "model" : rest}`;
+    }
     const model = { provider: "faux", id: "faux-1" };
     switch (`${request.method} ${url.pathname}`) {
       case "GET /api/state": return json({ auth: { state: "ok", provider: "faux", credentialType: "api" }, onboardingComplete: true });
-      case "GET /api/threads": return json({ threads: [] });
+      case "GET /api/threads": return json({ threads: this.thread ? [this.thread] : [] });
       case "GET /api/projects": return json({ projects: [] });
       case "GET /api/optchat/model": return json({ models: [model], selected: model, images: { supported: true, reason: null } });
       case "GET /api/optchat/threads": return json(this.overview);

@@ -311,10 +311,18 @@ at `40dvh`. The right workspace bay scrolls independently so expanding a long
 diff never moves the conversation. Spacing rhythm is in rem with recurring
 steps of 0.55 / 0.7–0.75 / 0.85–0.9 / 1.0 / 1.4 / 2.1.
 
-At the 40rem mobile breakpoint: header and paddings tighten, the model selector
-stays in the thread rail, the busy lamp drops its label (the blinking lamp alone carries
-"working"), and the composer textarea rises to 16px. The composer form pads
-its bottom with `env(safe-area-inset-bottom)`.
+At the 40rem mobile breakpoint (and on a touch screen under 30rem tall, a
+phone on its side): the conversation keeps the screen. The destinations fold
+behind one menu key that names the current page; the chat and thread strips
+are one row of lamp, title and a `details` key, which opens the project,
+model, memory and archive key on the row beneath and folds again when the
+composer takes focus; the chat's threads panel starts folded. While the
+on-screen keyboard is up (`data-keyboard` on the root, from
+`lib/keyboard.ts`), the header, threads panel and memory step aside, and with
+under ~220px left the strip too. The busy lamp drops its label (the blinking
+lamp alone carries "working"). The composer's attach and send keys are 2.25rem
+faces with a 2.75rem hit area, the textarea rises to 16px, and the form pads
+its bottom with `env(safe-area-inset-bottom)` except over a keyboard.
 
 ### Named Rules
 **The Reading Measure Rule.** 47rem remains the measure for prose and thread

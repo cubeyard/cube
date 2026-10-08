@@ -130,6 +130,13 @@
     sidebarOpener = null;
   }
 
+  // ---- on a phone the project, state, model and archive key fold behind
+  // the strip's details key; they fold again when the composer takes focus ----
+  let detailsOpen = $state(false);
+  function onPaneFocusin(event: FocusEvent): void {
+    if ((event.target as Element).closest(".composer")) detailsOpen = false;
+  }
+
   // The view is keyed on threadId: a delete or a new thread navigates
   // away mid-request, and the completion must then touch nothing here.
   let disposed = false;
@@ -196,7 +203,7 @@
 <svelte:window onkeydown={onWindowKeydown} />
 
 {#snippet threadControls()}
-  <section class="thread-strip" class:hidden={!summary} aria-label="thread controls">
+  <section id="thread-controls" class="thread-strip" class:hidden={!summary} class:details-open={detailsOpen} aria-label="thread controls">
     {#if summary}
       <span class="lamp {lampClass(summary)}" aria-hidden="true"></span>
       <span class="strip-title" class:untitled={!summary.title}>{summary.title ?? "untitled"}</span>
@@ -210,6 +217,9 @@
       >
         <span>{summary.title ?? "untitled"}</span>
         <Icon name="chevron" size={12} />
+      </button>
+      <button class="strip-toggle strip-details-key" aria-expanded={detailsOpen} aria-controls="thread-controls" onclick={() => (detailsOpen = !detailsOpen)}>
+        details<Icon name="chevron" size={12} />
       </button>
       <a class="strip-project" href="#/projects/{summary.project.id}">project / {summary.project.name}</a>
       {#if summary.workspaceBase}
@@ -326,7 +336,7 @@
 
   <div class="thread-stage">
     <main class="thread-workspace">
-      <section class="workspace-pane thread-pane" aria-label="thread">
+      <section class="workspace-pane thread-pane" aria-label="thread" onfocusin={onPaneFocusin}>
         {@render threadControls()}
         {#if modelError || (modelState && !selectedModel)}
           <div class="strip-note bad" role="alert">

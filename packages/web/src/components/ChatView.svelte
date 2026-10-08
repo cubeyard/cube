@@ -16,6 +16,9 @@
   let busy = $state(false);
   let memory = $state<{ view: string; messages: number; failure: string | null } | null>(null);
   let memoryOpen = $state(false);
+  // On a phone the model and memory keys fold behind the strip's details
+  // key; they fold again when the composer takes focus.
+  let detailsOpen = $state(false);
   let memoryError = $state<string | null>(null);
   let disposed = false;
   const modelKey = $derived(modelState?.selected ? JSON.stringify(modelState.selected) : "");
@@ -94,10 +97,13 @@
   <div class="strip-note bad" role="alert"><span class="strip-note-text">{memory.failure} — retrying</span></div>
 {/if}
 <main class="thread-workspace chat-workspace">
-  <section class="workspace-pane thread-pane" aria-label="chat">
-    <section class="thread-strip" aria-label="chat controls">
+  <section class="workspace-pane thread-pane" aria-label="chat" onfocusin={(event) => { if ((event.target as Element).closest(".composer")) detailsOpen = false; }}>
+    <section id="chat-controls" class="thread-strip" class:details-open={detailsOpen} aria-label="chat controls">
       <span class="lamp {busy ? 'on-amber blink' : 'on-green'}" aria-hidden="true"></span>
       <span class="strip-title chat-title">optchat</span>
+      <button class="strip-toggle strip-details-key" aria-expanded={detailsOpen} aria-controls="chat-controls" onclick={() => (detailsOpen = !detailsOpen)}>
+        details<Icon name="chevron" size={12} />
+      </button>
       <span class="strip-state chat-tagline">starts threads · remembers everything</span>
       <span class="spacer"></span>
       <label class="strip-model" title={modelState?.selected ? `${modelState.selected.provider}/${modelState.selected.id}` : "choose a model"}>
