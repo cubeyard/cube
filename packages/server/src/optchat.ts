@@ -263,8 +263,12 @@ type PendingItem = { text: string; requestId: string; after: number; images?: Me
 type Pending = { items: PendingItem[]; batch: PendingItem[] | null; sent: PendingItem[] };
 const PendingDoc = defineDoc<Pending>({ kind: "cube.optchat.pending", version: 1, scope: "session", initial: () => ({ items: [], batch: null, sent: [] }) });
 /** The view as of the newest node, over the first `total` messages: a reopen
- * goes on from it instead of folding a different view. */
-const ViewDoc = defineDoc<{ total: number; parts: number[] }>({ kind: "cube.optchat.view", version: 1, scope: "session", initial: () => ({ total: 0, parts: [] }) });
+ * goes on from it instead of folding a different view. `batch` is set while
+ * a batch has not yet merged the view down to its low mark; views stored
+ * before batching lack it and were never mid-batch. `compaction` and
+ * `compactionBatch` are the compactor's view and its batch the same way;
+ * views stored before it lack them, and it is merged down from the view. */
+const ViewDoc = defineDoc<{ total: number; parts: number[]; batch?: boolean; compaction?: number[]; compactionBatch?: boolean }>({ kind: "cube.optchat.view", version: 1, scope: "session", initial: () => ({ total: 0, parts: [] }) });
 /** The compactor's model calls run beside Pi, so Pi's `pi.usage` does not
  * see them: their usage by `provider/model`, one commit per reply, failed
  * replies included. `since` is when this store began counting; `earlier`
@@ -369,7 +373,7 @@ export type OptChatOptions = {
   /** Work artifacts: the chat writes its own and reads its threads'. */
   artifacts?: Artifacts;
   /** Tests lower these. */
-  limits?: { view?: number; node?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number;
+  limits?: { view?: number; low?: number; node?: number; compaction?: number; compactionLow?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number;
     wishQuietMs?: number; wishIntervalMs?: number; wishGapMs?: number; wishRetryMs?: number; wishChunk?: number; wishCallsPerDay?: number };
 };
 
@@ -529,7 +533,8 @@ export class OptChat {
       this.lastEntry = entry.id;
     }
     const stored = await this.harness.snapshot(ViewDoc, context);
-    const total = stored && stored.total <= messages.length && this.memory.restore(messages.slice(0, stored.total), toParts(stored.parts)) ? stored.total : 0;
+    const total = stored && stored.total <= messages.length && this.memory.restore(messages.slice(0, stored.total), toParts(stored.parts), stored.batch === true,
+      stored.compaction ? { parts: toParts(stored.compaction), batching: stored.compactionBatch === true } : undefined) ? stored.total : 0;
     for (const message of messages.slice(total)) this.memory.append(message);
     // The compactor is counted from the first open that knows how. A tree
     // that already holds a node the compactor built (not one whose text fit
@@ -698,7 +703,8 @@ export class OptChat {
     // leads to is a cache for the next open, written after.
     await this.harness.commit(tx => tx.appendEntry(this.tree, { kind: NODE_ENTRY, data: { l, i, text } }), context);
     this.memory.setNode(l, i, text);
-    const view = { total: this.memory.length, parts: flatParts(this.memory.view) };
+    const view = { total: this.memory.length, parts: flatParts(this.memory.view), batch: this.memory.batching,
+      compaction: flatParts(this.memory.compaction), compactionBatch: this.memory.compactionBatching };
     await this.harness.commit(async tx => { Object.assign(await tx.doc(ViewDoc), view); }, context)
       .catch(error => { if (!this.closing) log.warn("view not stored", { error }); });
   }

@@ -4,6 +4,7 @@ OFFLINE_TESTS=(
   scripts/cubed-release-checksum-test.ts
   scripts/cubed-service-test.ts
   scripts/cubed-signing-key-test.ts
+  scripts/homebrew-formula-test.ts
   scripts/cubed-update-test.ts
   scripts/runner-production-test.ts
   packages/server/test/log-test.ts
@@ -16,6 +17,7 @@ OFFLINE_TESTS=(
   packages/server/test/models-test.ts
   packages/server/test/model-auth-test.ts
   packages/server/test/iroh-node-test.ts
+  packages/server/test/runner-enroll-test.ts
   packages/server/test/guest-helper-test.ts
   packages/server/test/workspace-test.ts
   packages/server/test/vm-seed-test.ts
@@ -30,9 +32,14 @@ OFFLINE_TESTS=(
   packages/server/test/thread-start-commits-test.ts
   packages/server/test/durable-agent-test.ts
   packages/server/test/codemode-test.ts
+  packages/server/test/pi-read-test.ts
   packages/server/test/thread-events-test.ts
   packages/server/test/pi-compaction-test.ts
   packages/server/test/optchat-memory-test.ts
+  packages/server/test/optchat-view-test.ts
+  packages/server/test/optchat-view-reopen-test.ts
+  packages/server/test/optchat-compaction-view-test.ts
+  packages/server/test/optchat-compaction-reopen-test.ts
   packages/server/test/optchat-test.ts
   packages/server/test/optchat-product-test.ts
   packages/server/test/optchat-cache-test.ts

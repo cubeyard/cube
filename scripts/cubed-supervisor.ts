@@ -4,7 +4,7 @@ import path from "node:path";
 import net from "node:net";
 import os from "node:os";
 import { createHash, randomBytes, verify } from "node:crypto";
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { promisify } from "node:util";
 import type { UpdateStatus } from "../packages/server/src/update-service.ts";
@@ -46,6 +46,23 @@ const token = process.env.CUBED_UPDATE_TEST_TOKEN || randomBytes(32).toString("h
 const timeoutMs = numberEnv("CUBED_UPDATE_HEALTH_TIMEOUT_MS", 30_000);
 const probationMs = numberEnv("CUBED_UPDATE_PROBATION_MS", 5_000);
 const stopTimeoutMs = numberEnv("CUBED_UPDATE_STOP_TIMEOUT_MS", 30_000);
+
+// A subcommand (`cubed runners status`, `--help`, `--version`) runs the
+// current release's cubed in the foreground, unsupervised, and exits with
+// its code. Serve options are not taken here: the supervised server reads
+// CUBED_* from the environment file.
+const commandLine = process.argv.slice(2);
+if (commandLine.length) {
+  if (commandLine[0].startsWith("-") && !["--help", "--version", "--self-check"].includes(commandLine[0])) {
+    console.error("cubed: the managed launcher takes no serve options; set CUBED_HOST, CUBED_PORT, CUBED_STATE and the others in the environment file (see cubed --help)");
+    process.exit(2);
+  }
+  const directory = resolveLink(currentLink); const record = releaseRecord(directory);
+  const result = spawnSync(path.join(directory, "bin/node"), [path.join(directory, record.entry), ...commandLine], {
+    stdio: "inherit", env: { ...process.env, CUBED_VERSION: record.version, CUBED_COMMIT: record.commit },
+  });
+  process.exit(result.status ?? 1);
+}
 
 fs.mkdirSync(releases, { recursive: true, mode: 0o700 });
 acquireLock();

@@ -32,8 +32,9 @@ Packages are native to their manifest's OS and architecture.
   `qemu-system-x86` and `qemu-utils`. macOS also needs the arm64 UEFI firmware
   (`edk2-aarch64-code.fd`, shipped with Homebrew QEMU).
 - A Debian 13 genericcloud qcow2 image (`debian-13-genericcloud-amd64.qcow2`
-  or `-arm64`) supplied by the operator. The runner downloads nothing; it
-  copies the image into its state at init and identifies it by sha256.
+  or `-arm64`) supplied by the operator, or downloaded by `cubed runners
+  init-local` (below). The runner downloads nothing; it copies the image into
+  its state at init and identifies it by sha256.
 - Disk for the base image, one qcow2 overlay per VM (up to `--max-disk-gib`,
   default 64 GiB) and retained VM disks.
 
@@ -91,12 +92,75 @@ bash scripts/runner/install.sh "$PWD/bin/cube-runner"
 
 `init` also takes `--qemu PATH`, `--firmware PATH`, `--max-vcpus` (default 4),
 `--max-memory-mib` (8192) and `--max-disk-gib` (64); they are recorded in the
-immutable installation. The foreground process reports `network ready /
+immutable installation. QEMU, `qemu-img` and the firmware are recorded as the
+paths given (or found on `PATH`), made absolute but with symlinks kept, so a
+package manager's launcher such as Homebrew's `/opt/homebrew/bin/qemu-system-aarch64`
+stays valid across the package's upgrades; `run` checks that they still exist
+and that QEMU still answers. The foreground process reports `network ready /
 waiting for cubed`. First Ctrl-C refuses new VMs and powers the running guest
 down (ACPI, up to 30 seconds); a second Ctrl-C makes QEMU quit at once and
 marks the VM `interrupted`. Restart with the same home. A VM that was running
 when the runner died is recorded `stopped` and `interrupted` at the next start;
 cubed boots it again from the same disk.
+
+## Local runner
+
+A runner on the cubed host itself, reached over loopback, is set up and
+enrolled by one cubed command (the `cube-runner` binary on `PATH`, or
+`CUBE_RUNNER`):
+
+```sh
+cubed runners init-local [--image /absolute/debian-13-genericcloud-<arch>.qcow2] \
+  [--home ~/.cube] [--listen 127.0.0.1:7778] [--node-id node-local-<host>] \
+  [--qemu PATH] [--firmware PATH] [--max-vcpus N] [--max-memory-mib N] [--max-disk-gib N] \
+  [--state ~/.cube-host]
+```
+
+Without `--image` it downloads the genericcloud image for the host (arm64 on
+an Apple Silicon Mac, amd64 on Linux x86-64): `SHA512SUMS` over HTTPS from
+`https://cloud.debian.org/images/cloud/trixie/latest/`, the image from
+whichever mirror that site redirects to, into `<home>/.image-download`. A
+digest mismatch discards the download (a mirror behind Debian's latest build
+gives exactly that; try again later); a network error leaves no partial file
+and names the cause; the file is removed once `cube-runner init` has copied it
+into the runner's state (kept if init fails, reused by the retry). The check
+covers transport corruption and a tampering mirror, not cloud.debian.org
+itself, and Debian publishes no signature for these sums.
+`CUBE_DEBIAN_IMAGE_BASE` names another site with the same layout; it must be
+https (plain http only to this host). There is no resume: an interrupted
+download starts over. The runner itself still downloads nothing. It creates a control key at
+`<home>/control.key`, runs `cube-runner init
+--home <home>/runner` (its own key, the base image copied in, loopback at
+`--listen`, the limits), writes the version-2 config `<home>/runner.json`
+(mode 0600, binding `node-local-<host>` / the same thread id / environment 1),
+then runs the runner once to make the authenticated hello and record the
+admission in the registry, and stops it as its first Ctrl-C would. The runner is
+then started by its service (`brew services start cube-runner` under Homebrew,
+whose service assumes the default `--home ~/.cube`; the LaunchAgent or systemd
+profile elsewhere) or by `cube-runner run --home <home>/runner`. Start the
+service after `init-local`, not before: a service that already runs the home
+takes its lock and port, and `init-local` then enrolls whichever runner
+answers with the key. An existing `<home>/runner`, control key or config is refused:
+a runner is never rebound. If the runner cannot start on this host (no
+accelerator, QEMU missing), the command leaves the setup in place, prints why,
+and exits 1 with the enrollment to run once it is up:
+
+```sh
+cubed runners enroll --config ~/.cube/runner.json [--state ~/.cube-host]
+```
+
+`runners enroll` is the same explicit admission as `scripts/enroll-runner.ts`
+(which now delegates to it): a hello and a status exchange, a refusal of a
+protocol-2 runner and of a control key another enrolled runner uses, then the
+registry row. Both commands also work through the managed launcher
+(`~/.local/bin/cubed`), which runs subcommands unsupervised.
+
+The local runner runs as the user who starts it: on the one-machine setup the
+runner account is the operator's own, and the trust statement above applies to
+it (a QEMU escape has that user's authority; the runner reads every machine
+disk it hosts). The same-host loopback setup on macOS is unverified on real
+hardware this round; macOS runners have been verified in production as remote
+(relay) runners.
 
 ## Thread machines per runner
 

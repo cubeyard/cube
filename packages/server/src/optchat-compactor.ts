@@ -1,5 +1,6 @@
-/** OptChat's compactor: one cheap model call per tree node, with the view as
- * context, no tools and no ids, enforcing the node size by feedback. */
+/** OptChat's compactor: one cheap model call per tree node, with the
+ * compaction view as context, no tools and no ids, enforcing the node size by
+ * feedback. */
 import type { AssistantMessage, Message, Models } from "@earendil-works/pi-ai";
 import { viewPieces } from "./optchat-cache.ts";
 import { bytes, cutBytes, NODE } from "./optchat-memory.ts";
