@@ -1,10 +1,12 @@
 /** OptChat's memory: the log of messages, the binary tree of one-line
- * summaries over it and the view that tiles the whole chat under a byte
- * budget. Pure and synchronous; the service persists messages (as Pi
+ * summaries over it and the view that tiles the whole chat in a byte
+ * sawtooth (VIEW_LOW to VIEW). Pure and synchronous; the service persists messages (as Pi
  * entries) and nodes, and the compactor builds nodes. See docs/optchat.md. */
 
 export const NODE = 512;
+/** Once the view passes VIEW bytes, one batch merges it down to VIEW_LOW. */
 export const VIEW = 128_000;
+export const VIEW_LOW = 64_000;
 export const CAP = 30_000;
 
 export type MessageKind = "user" | "talk" | "tool" | "echo" | "note";
@@ -20,6 +22,24 @@ const flat = (text: string) => text.replace(/\s*\n\s*/g, " ");
 const key = (l: number, i: number) => `${l}:${i}`;
 export const start = (part: Part) => part.i * 2 ** part.l;
 export const end = (part: Part) => (part.i + 1) * 2 ** part.l;
+
+/** How due the sibling pair starting at `a` is to merge, with `total`
+ * messages in the chat: how long ago the pair's last message was, in its
+ * own line size. Measuring from the first message rewrites old lines. */
+export const due = (a: Part, total: number) => (total - (end(a) + 2 ** a.l - 1)) / 2 ** a.l;
+
+/** The most due pair of adjacent siblings whose parent is built, the oldest
+ * of equal ones, as the index of its first part; -1 if there is none. */
+export function mostDue(view: readonly Part[], total: number, built: (l: number, i: number) => boolean): number {
+  let best = -1, most = -Infinity;
+  for (let k = 0; k + 1 < view.length; k++) {
+    const a = view[k]!, b = view[k + 1]!;
+    if (a.l !== b.l || a.i % 2 !== 0 || b.i !== a.i + 1 || !built(a.l + 1, a.i / 2)) continue;
+    const weight = due(a, total);
+    if (weight > most) { most = weight; best = k; }
+  }
+  return best;
+}
 
 /** The text of one message as the tree sees it. */
 export const messageLine = (message: LogMessage) => `${message.kind}: ${message.text}`;
@@ -47,34 +67,49 @@ export class Memory {
   /** Per level, the lowest index that may still be unbuilt. */
   private readonly low: number[] = [];
   private size = 0;
-  private readonly budget: number;
+  /** The view's high and low marks, in bytes. */
+  private readonly upper: number;
+  private readonly lower: number;
   private readonly limit: number;
+  /** A batch passed VIEW and has not reached VIEW_LOW yet. */
+  private merging = false;
+  /** Merges made, each a rewrite of the view from the merged line on. */
+  merges = 0;
   /** Called after every fit, so waiters can check `settled()`. */
   onChange: () => void = () => {};
-  constructor(options: { view?: number; node?: number } = {}) {
-    this.budget = options.view ?? VIEW;
+  constructor(options: { view?: number; low?: number; node?: number } = {}) {
+    this.upper = options.view ?? VIEW;
+    this.lower = options.low ?? Math.floor(this.upper / 2);
     this.limit = options.node ?? NODE;
   }
 
   get length(): number { return this.messages.length; }
   get nodeLimit(): number { return this.limit; }
+  /** The view's size in bytes: its rendered lines, each with its newline. */
+  get bytes(): number { return this.size; }
+  /** Whether a batch is still merging toward VIEW_LOW; stored with the view. */
+  get batching(): boolean { return this.merging; }
   built(l: number, i: number): boolean { return this.nodes.has(key(l, i)); }
   node(l: number, i: number): string | undefined { return this.nodes.get(key(l, i)); }
   private partText(part: Part): string { return this.node(part.l, part.i) ?? PLACEHOLDER; }
+  /** A view line as rendered: `id+n|text` with its newline. */
+  private line(part: Part): string { return `${start(part)}+${2 ** part.l}|${flat(this.partText(part))}`; }
+  private lineBytes(part: Part): number { return bytes(this.line(part)) + 1; }
 
   /** A new message: appended to the log and to the view as its own line. */
   append(message: LogMessage): void {
     this.messages.push(message);
     const part = { l: 0, i: this.messages.length - 1 };
     this.view.push(part);
-    this.size += bytes(this.partText(part));
+    this.size += this.lineBytes(part);
     this.fit();
   }
 
   /** Restores a stored view over the first messages of the log, so a reopen
-   * goes on from the view it had instead of folding a different one. Refused
-   * (false) unless the parts are built and tile exactly those messages. */
-  restore(messages: readonly LogMessage[], parts: readonly Part[]): boolean {
+   * goes on from the view it had instead of folding a different one, and an
+   * unfinished batch goes on merging. Refused (false) unless the parts are
+   * built and tile exactly those messages. */
+  restore(messages: readonly LogMessage[], parts: readonly Part[], batching = false): boolean {
     if (this.messages.length) return false;
     let at = 0;
     for (const part of parts) {
@@ -84,7 +119,8 @@ export class Memory {
     if (at !== messages.length) return false;
     this.messages.push(...messages);
     this.view.push(...parts.map(part => ({ ...part })));
-    this.size = parts.reduce((sum, part) => sum + bytes(this.partText(part)), 0);
+    this.size = parts.reduce((sum, part) => sum + this.lineBytes(part), 0);
+    this.merging = batching;
     this.fit();
     return true;
   }
@@ -92,30 +128,30 @@ export class Memory {
   /** A built node. Nodes are immutable: a second build of the same node is ignored. */
   setNode(l: number, i: number, text: string): void {
     if (this.built(l, i)) return;
+    const shown = this.view.filter(part => part.l === l && part.i === i);
+    for (const part of shown) this.size -= this.lineBytes(part);
     this.nodes.set(key(l, i), text);
-    for (const part of this.view) {
-      if (part.l === l && part.i === i) this.size += bytes(text) - bytes(PLACEHOLDER);
-    }
+    for (const part of shown) this.size += this.lineBytes(part);
     this.fit();
   }
 
-  /** Merges the most due pair until the view fits its budget, or no parent is built. */
+  /** Between batches the view only grows at its end. Once it passes its
+   * high mark, one batch merges the most due pairs until it is at most its
+   * low mark. A batch merges only pairs whose parent is built; one that
+   * cannot reach the low mark yet goes on at each later message or node. */
   private fit(): void {
     const total = this.messages.length;
-    while (this.size > this.budget) {
-      let best = -1, due = -Infinity;
-      for (let k = 0; k + 1 < this.view.length; k++) {
-        const a = this.view[k]!, b = this.view[k + 1]!;
-        if (a.l !== b.l || a.i % 2 !== 0 || b.i !== a.i + 1 || !this.built(a.l + 1, a.i / 2)) continue;
-        const weight = (total - start(a)) / 2 ** (a.l + 2);
-        if (weight > due) { due = weight; best = k; }
-      }
+    if (this.size > this.upper) this.merging = true;
+    while (this.merging && this.size > this.lower) {
+      const best = mostDue(this.view, total, (l, i) => this.built(l, i));
       if (best < 0) break;
       const a = this.view[best]!, b = this.view[best + 1]!;
       const parent = { l: a.l + 1, i: a.i / 2 };
-      this.size += bytes(this.partText(parent)) - bytes(this.partText(a)) - bytes(this.partText(b));
+      this.size += this.lineBytes(parent) - this.lineBytes(a) - this.lineBytes(b);
       this.view.splice(best, 2, parent);
+      this.merges++;
     }
+    if (this.size <= this.lower) this.merging = false;
     this.onChange();
   }
 
@@ -169,7 +205,7 @@ export class Memory {
 
   /** The view as every call sees it. `parts` defaults to the current view. */
   render(parts: readonly Part[] = this.view): string {
-    const lines = parts.map(part => `${start(part)}+${2 ** part.l}|${flat(this.partText(part))}`);
+    const lines = parts.map(part => this.line(part));
     return `<chat>\n${lines.join("\n")}${lines.length ? "\n" : ""}</chat>`;
   }
 
@@ -180,6 +216,6 @@ export class Memory {
     if (!valid) return `No line ${id}+${n}.`;
     if (n === 1) return `${id}+0|${messageLine(this.messages[id]!)}`;
     const l = Math.log2(n) - 1, i = (2 * id) / n;
-    return [{ l, i }, { l, i: i + 1 }].map(part => `${start(part)}+${2 ** part.l}|${flat(this.partText(part))}`).join("\n");
+    return [{ l, i }, { l, i: i + 1 }].map(part => this.line(part)).join("\n");
   }
 }

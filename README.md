@@ -92,7 +92,7 @@ api.github.com. The token never enters the machine, its seed or the runner.
 The UI opens on **chat**: OptChat, one endless chat that remembers everything
 said in it ([docs/optchat.md](docs/optchat.md)). It never runs code itself; it
 starts threads in your projects, follows their reports and tells them what to
-do next. Each turn sees the whole chat as a fixed-size view of one-line summaries
+do next. Each turn sees the whole chat as a bounded view of one-line summaries
 and can zoom into any line, down to the original message.
 
 Threads and the chat can write **artifacts**: documents (Markdown, Mermaid
