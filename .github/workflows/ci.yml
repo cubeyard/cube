@@ -118,7 +118,8 @@ jobs:
           for _ in $(seq 50); do curl -fsS -o /dev/null http://127.0.0.1:7781/ && break; sleep 0.2; done
           curl -fsS -o "$RUNNER_TEMP/probe.html" -w 'curl: %{remote_ip} connect %{time_connect}s total %{time_total}s\n' http://web-0123456789.localhost:7781/
           grep -q "portal probe" "$RUNNER_TEMP/probe.html"
-          dscacheutil -q host -a name web-0123456789.localhost || true
+          dscacheutil -q host -a name web-0123456789.localhost | tee "$RUNNER_TEMP/resolver.txt"
+          grep -q "ip_address: 127.0.0.1" "$RUNNER_TEMP/resolver.txt"
           sudo safaridriver --enable
           safaridriver --port 4444 & driver=$!
           for _ in $(seq 50); do curl -fsS -o /dev/null http://127.0.0.1:4444/status && break; sleep 0.2; done
