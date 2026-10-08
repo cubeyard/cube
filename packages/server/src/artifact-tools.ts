@@ -20,6 +20,8 @@ const actionSchema = Type.Object({
 }, { additionalProperties: false });
 
 const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
+/** Models fill optional fields with "": a blank id, path or body is one left out. */
+const given = (value: string | undefined) => value?.trim() ? value : undefined;
 
 export function artifactTools(options: {
   artifacts: Artifacts;
@@ -51,20 +53,21 @@ export function artifactTools(options: {
     execute: async (args, api) => {
       const input = args as { id?: string; title?: string; body?: string; path?: string; project?: string; actions?: unknown };
       try {
+        const id = given(input.id), path = given(input.path);
         let body = input.body;
         let source: Provenance["source"];
-        if (input.path !== undefined) {
-          if (body !== undefined) throw new ArtifactError("give body or path, not both");
+        if (path !== undefined) {
+          if (given(body) !== undefined) throw new ArtifactError("give body or path, not both");
           if (!options.readFile) throw new ArtifactError("path is not available here");
-          const file = await options.readFile(input.path);
+          const file = await options.readFile(path);
           body = file.text;
           source = { path: file.path, sha256: file.sha256 };
         }
-        if (body === undefined) throw new ArtifactError("body (or path) is required");
+        if (body === undefined || !body.trim()) throw new ArtifactError(source ? `${source.path} is empty` : "body (or path) is required");
         const model = options.model?.();
         const provenance: Provenance = { agent: options.agent, ...options.author.kind === "thread" ? { thread: options.author.thread } : {},
           call: api.callId, ...model ? { model } : {}, ...source ? { source } : {} };
-        return text(options.artifacts.write(options.author, { id: input.id, title: input.title, body, actions: input.actions, project: input.project },
+        return text(options.artifacts.write(options.author, { id, title: input.title, body, actions: input.actions, project: input.project },
           provenance, options.key(api)).text);
       } catch (error) {
         if (error instanceof ArtifactError) return text(`not written: ${error.message}`);

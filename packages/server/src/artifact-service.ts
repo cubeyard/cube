@@ -98,6 +98,8 @@ export class Artifacts {
 
   /** Writes a new artifact or a revision of one of `author`'s; answers in words for the agent. */
   write(author: ArtifactAuthor, input: ArtifactWrite, provenance: Provenance, requestId: string): { text: string; id: string; revision: number } {
+    // A blank id is none: create (or find by name) rather than look up "".
+    if (input.id !== undefined && !input.id.trim()) input = { ...input, id: undefined };
     const existing = input.id ? this.store.get(input.id) : input.name ? this.store.named(author, input.name) : null;
     if (input.id && (!existing || !sameAuthor(existing.author, author))) throw new ArtifactError(`no artifact ${input.id} of yours`, 404);
     const projectId = existing ? existing.projectId : this.project(author, input.project);
