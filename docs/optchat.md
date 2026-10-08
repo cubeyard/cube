@@ -35,6 +35,19 @@ batches read the last turn's whole view from the prompt cache. A batch merges
 only pairs whose parent is built; one that cannot reach 64,000 bytes yet goes
 on at each later message or node.
 
+A compaction reads its own view (spec §4): the chat's view merged further, in
+the same sawtooth from 32,000 down to 16,000 bytes. It gets each new message's
+line as the view does, merges in a batch once it passes 32,000 bytes, and
+starts again from the chat's view, merged down to 16,000, whenever that view
+merges, so each of its lines is a run of whole view lines. Its size is what
+the compactor reads: the built lines' bare text (no ids) with their newlines;
+an unbuilt line counts nothing. A compaction's `<chat>` holds the lines before
+its message, or up to a merge's last message, and stops at the first unbuilt
+line. So compactions read each other's view from the cache, at most 32 KB
+instead of the chat's 64-128 KB. A message's node starts once fewer than 8
+lines before it are unbuilt, so a turn's messages are compressed side by side;
+a merge starts once both its halves are built.
+
 ## Where things live
 
 Everything is in one pi-durable SQLite store, `<CUBED_STATE>/optchat/pi.sqlite`,
@@ -48,13 +61,14 @@ with Pi as its only writer. cubed's live-instance socket lock (one cubed per
 | fresh call per turn | an `optchat.turn` entry with `head: "self"` before the user's message; Pi starts the model context there and keeps every older entry |
 | view in block 1 | the turn's view parts are stored in the `cube.optchat.turn` doc; a `beforeRequest` hook renders them as the first text block of the turn's first user message, the same bytes on every request and recovery |
 | the input queue | `cube.optchat.pending`: a message or report is accepted there at once and kept until Pi has placed it; all waiting messages become one turn, each still its own user message and its own Pi submission |
-| view at load | `cube.optchat.view`, written with every node: the view over the first `total` messages and `batch`, whether a batch is still merging toward 64,000 bytes. A reopen restores both and appends the rest, so it goes on from the view it had. A view stored before batching has no `batch` and was never mid-batch; it restores as it was, and the first batch comes once it passes 128,000 bytes as now measured (ids included, so possibly at the reopen) |
+| view at load | `cube.optchat.view`, written with every node: the view over the first `total` messages and `batch`, whether a batch is still merging toward 64,000 bytes. A reopen restores both and appends the rest, so it goes on from the view it had. A view stored before batching has no `batch` and was never mid-batch; it restores as it was, and the first batch comes once it passes 128,000 bytes as now measured (ids included, so possibly at the reopen). `compaction` and `compactionBatch` are the compaction view and its batch, restored the same way if it still tiles the log and coarsens the view; a view stored before it lacks them, and the compaction view is merged down from the view at the reopen. A message's own line may be stored unbuilt (the view is written after every node) and restores as such; a merged line must be built |
 | compactor usage | `cube.optchat.usage`: the compactor's calls run beside Pi, so its `pi.usage` misses them; each reply's usage (failed ones too) is added there in its own commit, by `provider/model` with a call count |
 | subagent reports | when a spawned thread's run settles, how it ended and its last reply go to the chat as `[<first 8 of the thread id>] <report>` (see "Follow-up and unattended work"), with request id `report:<thread>:<run>`, so a report is delivered once across restarts. The transcript marks it with `from` (the short id) and shows it as the thread's, not the user's |
 
 `packages/server/src/optchat-memory.ts` is the pure part: the fold that appends
-and, in batches, merges the most due pairs (never splits), the build order (one message at a
-time, merges beside it, the compactor never sees a placeholder), free nodes,
+and, in batches, merges the most due pairs (never splits), the compaction view, the build order (a message once fewer than 8 lines before
+it are unbuilt, a merge once both halves are built, the compactor never sees a
+placeholder), free nodes,
 rendering and zoom. `optchat-compactor.ts` holds the `COMPACT` prompt, the
 512-byte `SCALE` line (an invented example in the system prompt) and the
 lengths: each answer brings three versions of about 26, 48 and 69 words and
@@ -439,8 +453,8 @@ count limits beyond the bounds above.
 `optchat-cache.ts` applies spec §8 through pi-ai's published request hooks,
 without changing Pi:
 
-- **Pieces.** The view (and the compactor's `<chat>` context, which is a
-  prefix of it) is sent as text blocks cut at the last line end before 50,000,
+- **Pieces.** The view (and the compactor's `<chat>` context, a prefix of
+  the compaction view) is sent as text blocks cut at the last line end before 50,000,
   80,000 and 100,000 characters. The view leads the turn's first user message.
   The hook puts the system baseline first; Pi writes it after that message.
 - **Anthropic.** An `onPayload` hook marks every piece but the last and drops
