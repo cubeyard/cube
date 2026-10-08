@@ -257,10 +257,13 @@ try {
   assert.match(stolen, new RegExp(`not written: no artifact ${review.id} of yours`));
   assert.match(stolen, new RegExp(`no artifact ${review.id} you can read`));
   assert.equal((await call(`/api/artifacts/${review.id}`)).body.artifact.head, 1, "nothing was written");
-  // A path outside the workspace and an action on another project's repository are refused.
+  // A path outside the workspace is one in the thread's machine, never the
+  // host's (the local machine has no /etc/passwd); an action on another
+  // project's repository is refused.
   await call(`/api/threads/${piThread}/prompt`, { text: "escape the workspace", requestId: "escape" });
   history = await until(() => call(`/api/threads/${piThread}/history`), value => JSON.stringify(value.body).includes("t-esc") && value.body.events.at(-1)?.type === "assistant-text", "escape settles");
-  assert.match(JSON.stringify(history.body), /must be inside the workspace/);
+  assert.match(JSON.stringify(history.body), /no such file/);
+  assert.doesNotMatch(JSON.stringify(history.body), /root:x:0:0/);
   await call(`/api/threads/${piThread}/prompt`, { text: "bad action", requestId: "bad-action" });
   history = await until(() => call(`/api/threads/${piThread}/history`), value => JSON.stringify(value.body).includes("t-act") && value.body.events.at(-1)?.type === "assistant-text", "bad action settles");
   assert.match(JSON.stringify(history.body), /cubeyard\/demo is not a repository of this artifact's project/);

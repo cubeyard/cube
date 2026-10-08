@@ -79,8 +79,10 @@ cross-process storage lock; the thread's workspace lease is that lock.
 
 Pi's tools reach the thread's VM only through the thread `Workspace`. `read`,
 `write` and `edit` are pi-durable's own file tools over an `ExecutionEnv`
-(`workspace-env.ts`) that maps the virtual root `/workspace` to workspace-relative
-guest paths; a write after a read in the same call carries the read content's
+(`workspace-env.ts`) that maps `/workspace` (and relative paths) to
+workspace-relative guest paths and passes every other absolute path, and `~`
+as `/home/agent`, to the guest as a path in the machine (see File paths below);
+a write after a read in the same call carries the read content's
 `expectedSha`. `bash` is cube's own tool. Every mutation key is derived from the
 storage identity and the Pi tool task ID, so a replayed task finds the same
 guest operation: a repeated exec retrieves retained work; changed arguments
@@ -136,6 +138,30 @@ so a transport failure (a gateway restart) is retried for a bounded time before
 it becomes `NODE_UNAVAILABLE` or `COMPLETION_UNKNOWN`. The HTTP routes under `/api/threads/:id/workspace` are a thin
 transport over the same interface, and `HttpWorkspace` implements it again for
 out-of-process agents. One contract suite runs against both.
+
+### File paths
+
+The file tools of both agents (Pi's `read`, `write`, `edit` and codemode's
+calls to them, the Claude Code mod's Read, Write and Edit, and the artifact
+tool's `path`) take any path in the thread's machine, as bash does:
+
+| path | in the guest | acts as |
+| --- | --- | --- |
+| relative, `/workspace/…`, the Claude Code mod's local root `…/claude/…` | beneath `/workspace` | root, new files given to `agent` (as before) |
+| any other absolute path: `/home/agent/…`, `/tmp/…`, `~/…` | that path in the machine | the `agent` account's own permissions (`EACCES` says to use sudo in bash) |
+| `/proc`, `/sys`, `/dev`, or a link that resolves into them | refused (`INVALID_REQUEST`) | — use bash |
+| a path with a `..` part on the wire | refused; the agent side normalises first | — |
+
+The guest helper resolves every path inside the machine: symlinks are followed
+there (a workspace link may lead out of the workspace and is then reached as
+`agent`), and a final symlink is replaced by a write, never written through.
+cubed only checks the shape (`filePath`) and asks for the helper's `fs.absolute`
+capability before it sends an absolute path; an older helper is refused with
+`OPERATION_UNSUPPORTED` and updated on the next attach. No path a model gives
+is ever opened on the cubed host: absolute host paths outside the mod's local
+root reach the guest as guest paths. A thread reaches only its own machine: the
+routes are mounted per thread and a lease token belongs to one thread's lease
+store. A command's `cwd` stays within the workspace. Bash is unchanged.
 
 Each thread has one writable owner, `pi` or `claude-code`, fixed for the thread.
 The lease (`workspace-lease.ts`) has a random token, which is the authorization

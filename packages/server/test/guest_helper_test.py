@@ -68,8 +68,9 @@ class GuestHelperTest(unittest.TestCase):
         self.workspace = os.path.join(self.root, "workspace")
         os.mkdir(self.workspace)
         self.launcher = FakeLauncher()
+        # The machine's root: absolute paths land beneath it.
         guest.configure(state=os.path.join(self.root, "state"), workspace=self.workspace, env_file=os.path.join(self.root, "env"),
-                        user=None, ready_files=[], commands=[], launcher=self.launcher)
+                        user=None, ready_files=[], commands=[], launcher=self.launcher, root=self.root)
 
     def tearDown(self):
         shutil.rmtree(self.root)
@@ -222,15 +223,102 @@ class GuestHelperTest(unittest.TestCase):
         guest.write_json(guest.op_path("w4", "request.json"), dict(request, hash=guest.canonical(request)))
         self.assertEqual(call("write", {"id": "w4", "epoch": 10, "path": "z"}, b"z")[0]["error"]["code"], "COMPLETION_UNKNOWN")
 
-    def test_paths_stay_beneath_the_workspace(self):
-        os.symlink("/etc", os.path.join(self.workspace, "outside"))
-        for path in ["/etc/passwd", "../x", "a/../../x", "a\0b", "", "outside/passwd"]:
+    def test_relative_paths_stay_beneath_the_workspace(self):
+        for path in ["../x", "a/../../x", "a\0b", "", "x" * (guest.LIMITS["maxPathBytes"] + 1)]:
             self.assertEqual(call("read", {"path": path})[0]["error"]["code"], "INVALID_REQUEST", path)
-        self.assertEqual(call("stat", {"path": "outside"})[0]["kind"], "symlink", "the link itself may be inspected")
-        self.assertEqual(call("write", {"id": "p1", "epoch": 10, "path": "outside/x"}, b"x")[0]["error"]["code"], "INVALID_REQUEST")
         self.assertEqual(call("stat", {"path": "."})[0]["kind"], "directory")
         self.assertEqual(call("read", {"path": "missing"})[0]["error"]["code"], "NOT_FOUND")
         self.assertEqual(call("read", {"path": "."})[0]["error"]["code"], "INVALID_REQUEST")
+        self.assertEqual(guest.file_path("a/b"), (os.path.join(self.workspace, "a/b"), False))
+        self.assertEqual(guest.file_path("/workspace/a/b"), (os.path.join(self.workspace, "a/b"), False), "/workspace is the workspace")
+
+    def test_absolute_paths_reach_the_whole_machine(self):
+        # The reported path: a script in the agent's home, its folder created.
+        script = "/home/agent/portal-runtime/start-portal.sh"
+        written, _ = call("write", {"id": "a1", "epoch": 10, "path": script, "createParents": True}, b"#!/bin/sh\nexec true\n")
+        self.assertEqual(read(os.path.join(self.root, script.lstrip("/"))), b"#!/bin/sh\nexec true\n")
+        self.assertEqual(guest.file_path(script), (os.path.join(self.root, script.lstrip("/")), True))
+        answer, content = call("read", {"path": script})
+        self.assertEqual((content, answer["sha256"]), (b"#!/bin/sh\nexec true\n", written["sha256"]))
+        # An edit: a write conditional on what was read.
+        edited, _ = call("write", {"id": "a2", "epoch": 10, "path": script, "expectedSha": written["sha256"]}, b"#!/bin/sh\nexec false\n")
+        self.assertEqual(call("write", {"id": "a3", "epoch": 10, "path": script, "expectedSha": written["sha256"]}, b"x")[0]["error"]["code"],
+                         "PRECONDITION_FAILED")
+        self.assertEqual(call("stat", {"path": script})[0]["sha256"], edited["sha256"])
+        # A screenshot under /tmp, bytes as they are.
+        png = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
+        call("write", {"id": "a4", "epoch": 10, "path": "/tmp/screens/shot.png", "createParents": True}, png)
+        self.assertEqual(call("read", {"path": "/tmp/screens/shot.png"})[1], png)
+        self.assertEqual(call("stat", {"path": "/tmp/screens"})[0]["kind"], "directory")
+        self.assertEqual(call("read", {"path": "/tmp/screens/missing.png"})[0]["error"]["code"], "NOT_FOUND")
+        self.assertEqual(call("get", {"id": "a1"})[0], {"state": "Written", "result": written}, "journaled like any write")
+
+    def test_absolute_paths_never_leave_the_machine_or_enter_pseudo_filesystems(self):
+        for name in ["proc/self", "sys/kernel", "dev", "etc", "tmp"]:
+            os.makedirs(os.path.join(self.root, name), exist_ok=True)
+        with open(os.path.join(self.root, "proc/self/status"), "w") as handle:
+            handle.write("Name: x\n")
+        with open(os.path.join(self.root, "etc/hosts"), "w") as handle:
+            handle.write("127.0.0.1 localhost\n")
+        # Links to the machine's own files are followed, from the workspace too.
+        os.symlink(os.path.join(self.root, "etc"), os.path.join(self.workspace, "etc"))
+        self.assertEqual(call("read", {"path": "etc/hosts"})[1], b"127.0.0.1 localhost\n")
+        self.assertEqual(call("read", {"path": "/etc/hosts"})[1], b"127.0.0.1 localhost\n")
+        self.assertEqual(call("stat", {"path": "etc"})[0]["kind"], "symlink", "the link itself may be inspected")
+        # Nothing outside the machine's root (in a VM: the host) is reachable, by link or by `..`.
+        os.symlink(HERE, os.path.join(self.workspace, "host"))
+        os.symlink(HERE, os.path.join(self.root, "tmp/host"))
+        for index, path in enumerate(["host/guest_helper_test.py", "/tmp/host/guest_helper_test.py", "/tmp/../../etc/passwd", "/../etc/passwd"]):
+            self.assertEqual(call("read", {"path": path})[0]["error"]["code"], "INVALID_REQUEST", path)
+            self.assertEqual(call("stat", {"path": path})[0]["error"]["code"], "INVALID_REQUEST", path)
+            self.assertEqual(call("write", {"id": "x%d" % index, "epoch": 10, "path": path + "-new", "createParents": True}, b"x")[0]["error"]["code"],
+                             "INVALID_REQUEST", path)
+        self.assertFalse(any(name.endswith("-new") for name in os.listdir(HERE)), "nothing written on the host")
+        # Kernel and device filesystems are not files, directly or through a link.
+        os.symlink(os.path.join(self.root, "proc/self"), os.path.join(self.root, "tmp/proc-link"))
+        os.symlink(os.path.join(self.root, "dev"), os.path.join(self.workspace, "dev-link"))
+        for path in ["/proc/self/status", "/sys/kernel", "/dev/null", "/proc", "/tmp/proc-link/status", "dev-link/null"]:
+            answer = call("read", {"path": path})[0]
+            self.assertEqual(answer["error"]["code"], "INVALID_REQUEST", path)
+            self.assertIn("kernel or device filesystem", answer["error"]["message"], path)
+            self.assertEqual(call("stat", {"path": path})[0]["error"]["code"], "INVALID_REQUEST", path)
+        self.assertEqual(call("write", {"id": "d1", "epoch": 10, "path": "/dev/cube-test"}, b"x")[0]["error"]["code"], "INVALID_REQUEST")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "dev/cube-test")))
+        self.assertEqual(call("write", {"id": "d2", "epoch": 10, "path": "/tmp/proc-link"}, b"x")[0]["error"]["code"], "INVALID_REQUEST",
+                         "nor a link into one")
+        # A FIFO is not a regular file: never opened, so never blocks.
+        os.mkfifo(os.path.join(self.root, "tmp/fifo"))
+        self.assertEqual(call("read", {"path": "/tmp/fifo"})[0]["error"]["code"], "INVALID_REQUEST")
+        self.assertEqual(call("stat", {"path": "/tmp/fifo"})[0]["kind"], "other")
+
+    @unittest.skipUnless(os.geteuid() == 0, "acting as the agent's account needs root")
+    def test_outside_the_workspace_files_are_reached_as_the_agent(self):
+        import pwd
+        nobody = pwd.getpwnam("nobody")
+        guest.configure(user="nobody")
+        os.chmod(self.root, 0o755)
+        home = os.path.join(self.root, "home/agent")
+        os.makedirs(home)
+        os.chown(home, nobody.pw_uid, nobody.pw_gid)
+        os.makedirs(os.path.join(self.root, "etc"))
+        call("write", {"id": "r1", "epoch": 10, "path": "/home/agent/portal/start.sh", "createParents": True}, b"x")
+        for made in ["portal", "portal/start.sh"]:
+            info = os.stat(os.path.join(home, made))
+            self.assertEqual((info.st_uid, info.st_gid), (nobody.pw_uid, nobody.pw_gid), made)
+        denied = call("write", {"id": "r2", "epoch": 10, "path": "/etc/cube-test", "createParents": True}, b"x")[0]["error"]
+        self.assertEqual(denied["code"], "IO_ERROR")
+        self.assertIn("use sudo in bash", denied["message"])
+        self.assertFalse(os.path.exists(os.path.join(self.root, "etc/cube-test")))
+        with open(os.path.join(self.root, "etc/secret"), "w") as handle:
+            handle.write("root only")
+        os.chmod(os.path.join(self.root, "etc/secret"), 0o600)
+        self.assertIn("use sudo in bash", call("read", {"path": "/etc/secret"})[0]["error"]["message"])
+        self.assertIn("use sudo in bash", call("stat", {"path": "/etc/secret"})[0]["error"]["message"])
+        self.assertEqual((os.geteuid(), os.getegid()), (0, 0), "root again after")
+        self.assertEqual(os.stat(guest.op_path("r2", "result.json")).st_uid, 0, "the journal stays root's")
+        # The workspace keeps its own rule: written as root, given to the agent.
+        call("write", {"id": "r3", "epoch": 10, "path": "w.txt"}, b"x")
+        self.assertEqual(os.stat(os.path.join(self.workspace, "w.txt")).st_uid, nobody.pw_uid)
 
     def test_record_capacity(self):
         original = guest.MAX_RECORDS

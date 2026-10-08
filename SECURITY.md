@@ -125,7 +125,9 @@ variable, no Bedrock/Vertex/Foundry switch, and none of cubed's provider, Git or
 cloud credentials. Claude Code starts with `--setting-sources ""`,
 `--strict-mcp-config` and an empty MCP configuration, so the user's settings
 hooks and MCP servers do not load, and `--tools` limits it to the mod's
-allow-list. The mod sends Bash, Read, Write and Edit to the thread's machine and
+allow-list. The mod sends Bash, Read, Write and Edit to the thread's machine (a
+file path outside the workspace names a file in that machine, read and written
+with the guest `agent` account's permissions, never one on the cubed host) and
 refuses every other tool not on that list (MCP tools and unknown built-ins
 included), isolated subagents and agent types that are not Claude Code's
 built-ins. Claude Code itself still runs on the cubed host with the cubed user's

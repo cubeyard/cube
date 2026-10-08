@@ -29,7 +29,7 @@ export function artifactTools(options: {
   agent: Provenance["agent"];
   /** The request id of a call: the same on replay, so a revision is written once. */
   key: (api: ToolExecutionApi) => string;
-  /** Reads a workspace file for `path` (threads only). */
+  /** Reads a file in the thread's machine for `path` (threads only). */
   readFile?: (path: string) => Promise<{ text: string; path: string; sha256: string }>;
   /** OptChat names the project an artifact belongs to; a thread's is its own. */
   projects?: boolean;
@@ -42,7 +42,7 @@ export function artifactTools(options: {
       id: Type.Optional(Type.String({ description: "An artifact of yours to revise; omit to create one" })),
       title: Type.Optional(Type.String({ description: "Default: the body's first # heading" })),
       body: Type.Optional(Type.String({ description: "The whole Markdown document" })),
-      ...options.readFile ? { path: Type.Optional(Type.String({ description: "A workspace file holding the Markdown body, instead of body" })) } : {},
+      ...options.readFile ? { path: Type.Optional(Type.String({ description: "A file in the thread machine (relative to the workspace, or absolute) holding the Markdown body, instead of body" })) } : {},
       ...options.projects ? { project: Type.Optional(Type.String({ description: "Project name or id; needed for actions" })) } : {},
       actions: Type.Optional(Type.Array(actionSchema, { maxItems: 8 })),
     }),

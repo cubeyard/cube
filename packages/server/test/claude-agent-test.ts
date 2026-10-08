@@ -332,10 +332,19 @@ try {
   await assert.rejects(client.lease({ token }), /held by cubed/);
   assert.equal(leases.holder(), "claude-code");
   const scope = { client, token, root: "/home/cube/thread" };
-  assert.deepEqual(workspacePath(scope.root, "/home/cube/thread/src/../x"), { deny: "/home/cube/thread/src/../x leaves the thread workspace" });
+  assert.equal(workspacePath(scope.root, "/home/cube/thread/src/../x"), "x");
   assert.equal(workspacePath(scope.root, "/workspace/src/a.ts"), "src/a.ts");
   assert.equal(workspacePath(scope.root, "src//./a.ts"), "src/a.ts");
-  assert.match(String((await read(scope, { file_path: "/etc/hosts" }) as { deny: string }).deny), /outside the thread workspace/);
+  assert.equal(workspacePath(scope.root, "/etc/../home/cube/thread/a.ts"), "a.ts");
+  // Every other path is one in the thread's machine, normalised there.
+  assert.equal(workspacePath(scope.root, "/home/agent/portal-runtime/start-portal.sh"), "/home/agent/portal-runtime/start-portal.sh");
+  assert.equal(workspacePath(scope.root, "/home/cube/thread-other/x"), "/home/cube/thread-other/x", "a sibling of the root is not the workspace");
+  assert.equal(workspacePath(scope.root, "../../tmp/./x.png"), "/tmp/x.png");
+  assert.equal(workspacePath(scope.root, "~/notes.md"), "/home/agent/notes.md");
+  assert.equal(workspacePath(scope.root, "/workspace/../etc/hosts"), "/etc/hosts");
+  assert.deepEqual(workspacePath(scope.root, "/home/cube/thread"), { deny: "/home/cube/thread is the workspace root, not a file" });
+  assert.deepEqual(workspacePath(scope.root, "/.."), { deny: "/.. is the machine's root directory, not a file" });
+  assert.match(String((await read(scope, { file_path: "/etc/hosts" }) as { deny: string }).deny), /does not exist/, "the machine's /etc/hosts, not the host's");
   assert.deepEqual(await write(scope, "t-w1", { file_path: "/home/cube/thread/c.txt", content: "one two" }), { type: "create", filePath: "/home/cube/thread/c.txt", content: "one two", structuredPatch: [], originalFile: null });
   assert.equal((await write(scope, "t-w2", { file_path: "/home/cube/thread/c.txt", content: "one two" }) as { type: string }).type, "update");
   fs.writeFileSync(path.join(files, "d.txt"), "same same\n");
@@ -365,7 +374,7 @@ try {
   assert.match((await read(scope, { file_path: ".shots/cut.png" }) as { deny: string }).deny, /looks truncated/);
   fs.writeFileSync(path.join(files, ".shots/text.png"), "not a picture\n");
   assert.match((await read(scope, { file_path: ".shots/text.png" }) as { deny: string }).deny, /not a PNG, JPEG, GIF or WebP image/);
-  assert.match((await read(scope, { file_path: "/etc/../home/cube/thread/.shots/dot.png" }) as { deny: string }).deny, /outside the thread workspace/);
+  assert.equal((await read(scope, { file_path: "/etc/../home/cube/thread/.shots/dot.png" }) as { type: string }).type, "image");
   const riff = (chunk: string, body: number[]) => Buffer.concat([Buffer.from("RIFF"), Buffer.from([22, 0, 0, 0]), Buffer.from(`WEBP${chunk}`), Buffer.from([10, 0, 0, 0, ...body])]);
   const headers: [string, Buffer, { type: string; width: number; height: number } | null][] = [
     ["png", png, { type: "image/png", width: 1, height: 1 }],
@@ -385,7 +394,29 @@ try {
       if (prefix !== null) assert.deepEqual(prefix, expected, `${name} cut at ${cut}`);
     }
   }
+  // Outside the workspace: the files of the thread's own machine (here its
+  // root, guest.root), read, written and edited by the same tools.
+  const script = "/home/agent/portal-runtime/start-portal.sh";
+  assert.deepEqual(await write(scope, "t-m1", { file_path: script, content: "#!/bin/sh\nexec node portal.js\n" }),
+    { type: "create", filePath: script, content: "#!/bin/sh\nexec node portal.js\n", structuredPatch: [], originalFile: null });
+  assert.equal(fs.readFileSync(path.join(guest.root, script), "utf8"), "#!/bin/sh\nexec node portal.js\n");
+  assert.equal((await edit(scope, "t-m2", { file_path: script, old_string: "node", new_string: "bun" }) as { originalFile: string }).originalFile, "#!/bin/sh\nexec node portal.js\n");
+  assert.equal((await read(scope, { file_path: "~/portal-runtime/start-portal.sh" }) as { file: { content: string } }).file.content, "#!/bin/sh\nexec bun portal.js");
+  fs.mkdirSync(path.join(guest.root, "tmp/screens"), { recursive: true });
+  fs.writeFileSync(path.join(guest.root, "tmp/screens/shot.png"), png);
+  assert.equal((await read(scope, { file_path: "/tmp/screens/shot.png" }) as { file: { base64: string } }).file.base64, png.toString("base64"));
+  // Never a file of the host Claude Code runs on, whatever path names it.
+  const hostFile = path.join(root, "host-secret.txt");
+  fs.writeFileSync(hostFile, "host only");
+  assert.match((await read(scope, { file_path: hostFile }) as { deny: string }).deny, /does not exist/);
+  assert.equal((await write(scope, "t-m3", { file_path: hostFile, content: "from the thread" }) as { type: string }).type, "create");
+  assert.equal(fs.readFileSync(hostFile, "utf8"), "host only", "the host file is untouched");
+  assert.equal(fs.readFileSync(path.join(guest.root, hostFile), "utf8"), "from the thread", "the machine got its own file");
+  fs.symlinkSync(import.meta.dirname, path.join(guest.root, "tmp/host-link"));
+  assert.match((await read(scope, { file_path: "/tmp/host-link/claude-agent-test.ts" }) as { deny: string }).deny, /leaves the machine/, "a link out of the machine leads nowhere");
+  assert.match((await read(scope, { file_path: "/proc/self/environ" }) as { deny: string }).deny, /kernel or device filesystem/);
   assert.match((await bash({ ...scope, token: "f".repeat(64) }, "t-b3", { command: "true" }) as { deny: string }).deny, /no longer holds the thread workspace/);
+  assert.match((await read({ ...scope, token: "f".repeat(64) }, { file_path: script }) as { deny: string }).deny, /no longer holds the thread workspace/, "another lease's token reaches no machine path");
   const aborting = new AbortController();
   const slow = bash({ ...scope, signal: aborting.signal }, "t-b4", { command: "sleep 3; touch late-2" });
   await delay(300);
@@ -393,7 +424,7 @@ try {
   assert.deepEqual(await slow, { stdout: "", stderr: "command stopped", interrupted: true });
   await delay(3200);
   assert.ok(!fs.existsSync(path.join(files, "late-2")), "an abandoned Bash call cancels its guest command");
-  console.log("ok: claude mod tools over the workspace socket: path mapping, write/edit with sha, images, refusals, keyed replay, conflict, cancel on abort");
+  console.log("ok: claude mod tools over the workspace socket: path mapping, machine paths outside the workspace, never host files, write/edit with sha, images, refusals, keyed replay, conflict, cancel on abort");
 
   // Pi never offers Anthropic's Claude Pro/Max OAuth login.
   const provider = (id: string) => ({ id, name: id, auth: { apiKey: { login: async () => ({ type: "api_key", key: "k" }) }, oauth: { loginLabel: `sign in to ${id}` } } });

@@ -239,7 +239,8 @@ try {
         const listed = await tools.bash({ command: "cat notes/a.txt; printf more >> notes/a.txt" });
         const read = await tools.read({ path: "/workspace/notes/a.txt" });
         let outside;
-        try { await tools.read({ path: "../escape" }) } catch (error) { outside = error.message }
+        try { await tools.read({ path: "/proc/self/environ" }) } catch (error) { outside = error.message }
+        await tools.write({ path: "/tmp/codemode/out.txt", content: "machine\\n" });
         return { listed, read, outside };
       `),
       fauxAssistantMessage("done"),
@@ -253,13 +254,14 @@ try {
       const value = JSON.parse(text(result!).split("Return value:\n")[1]!);
       assert.equal(value.listed, "two\n\n[exit=0; exited]");
       assert.equal(value.read, "two\nmore");
-      assert.match(value.outside, /outside the workspace/);
+      assert.match(value.outside, /kernel or device filesystem/);
+      assert.equal(fs.readFileSync(path.join(guest.root, "tmp/codemode/out.txt"), "utf8"), "machine\n");
       const details = result!.details as CodemodeDetails;
       const base = details.calls[0]!.key.replace(/:code:1$/, "");
       assert.match(base, /^pi:[0-9a-f-]+:\d+$/);
       assert.deepEqual(details.calls.map(call => [call.name, call.key, call.status]), [
         ["write", `${base}:code:1`, "ok"], ["edit", `${base}:code:2`, "ok"], ["bash", `${base}:code:3`, "ok"],
-        ["read", `${base}:code:4`, "ok"], ["read", `${base}:code:5`, "error"],
+        ["read", `${base}:code:4`, "ok"], ["read", `${base}:code:5`, "error"], ["write", `${base}:code:6`, "ok"],
       ]);
     } finally { await agent.close(); }
     console.log("ok: codemode drives write/edit/bash/read through the Workspace with stable nested keys");
