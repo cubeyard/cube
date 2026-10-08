@@ -1,0 +1,109 @@
+# Publish the Homebrew tap formulas (cubeyard/homebrew-tap) for one published
+# stable release: generate them from the release's signed darwin-arm64
+# manifests, install and test them on macOS, then commit them to the tap from
+# a separate job, so the tap token never reaches the machine that ran the
+# release's binaries. Runs when a release is published, or by hand for a
+# given version; only the latest release may be published unless forced.
+name: homebrew
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published stable release (vX.Y.Z)'
+        required: true
+        type: string
+      force:
+        description: 'Publish even if this is not the latest release (a downgrade of the tap)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-tap
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+
+jobs:
+  formula:
+    if: github.event_name != 'release' || (!github.event.release.prerelease && !github.event.release.draft)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 26
+      - name: generate the formulas from the release's signed manifests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force == true }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease \
+            --jq 'if .isDraft or .isPrerelease then error("stable release required") else true end'
+          latest="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          if [ "$VERSION" != "$latest" ] && [ "$FORCE" != true ]; then
+            echo "::error::$VERSION is not the latest release ($latest); publishing it would downgrade the tap. Run again with force to do that on purpose."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/assets" "$RUNNER_TEMP/formula"
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --pattern 'cubed-darwin-arm64.json*' --pattern 'cube-runner-darwin-arm64.json*' --dir "$RUNNER_TEMP/assets"
+          node scripts/homebrew/formula.ts "$VERSION" --assets "$RUNNER_TEMP/assets" --out "$RUNNER_TEMP/formula" | tee "$RUNNER_TEMP/formula/formula.json"
+          cp scripts/homebrew/tap-README.md "$RUNNER_TEMP/formula/README.md"
+      - name: install, audit and test the formulas
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: |
+          set -euo pipefail
+          brew tap-new --no-git cubeyard/tap
+          cp "$RUNNER_TEMP"/formula/*.rb "$(brew --repository cubeyard/tap)/Formula/"
+          brew trust cubeyard/tap
+          brew install cubeyard/tap/cube
+          brew audit --strict cubeyard/tap/cube cubeyard/tap/cube-runner
+          brew test cubeyard/tap/cube cubeyard/tap/cube-runner
+          cubed --version
+          cube-runner version
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: homebrew-formula
+          path: ${{ runner.temp }}/formula/
+          if-no-files-found: error
+
+  publish:
+    needs: formula
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: homebrew-formula
+          path: formula
+      - name: checkout the tap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: cubeyard/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+      - name: update the tap
+        working-directory: homebrew-tap
+        run: |
+          set -euo pipefail
+          mkdir -p Formula
+          cp ../formula/cube.rb ../formula/cube-runner.rb Formula/
+          cp ../formula/README.md README.md
+          runner="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).runner)' ../formula/formula.json)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula README.md
+          git diff --cached --quiet && { echo 'tap already up to date'; exit 0; }
+          git commit -m "cube ${VERSION} (cube-runner ${runner})"
+          git push
