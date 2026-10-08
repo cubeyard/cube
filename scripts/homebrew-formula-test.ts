@@ -45,7 +45,7 @@ try {
   assert.match(cube, /depends_on arch: :arm64/);
   assert.match(cube, /CUBED_VERSION="v9\.8\.7" CUBED_COMMIT="0123456789abcdef0123456789abcdef01234567"/);
   assert.match(cube, /depends_on "cubeyard\/tap\/cube-runner"/);
-  assert.match(cube, /prebuilds\/\*"\]\.each \{ \|dir\| rm_r\(dir\) unless File\.basename\(dir\) == "darwin-arm64" \}/, "other platforms' prebuilt native modules are pruned");
+  assert.match(cube, /prebuilds\/\*"\]\.each \{ \|dir\| rm_r\(dir\) if File\.basename\(dir\) != "darwin-arm64" \}/, "other platforms' prebuilt native modules are pruned");
   assert.match(cube, /shell_output\("#\{bin\}\/cubed --self-check"\)/, "the self-check runs through the launcher, which sets the version");
   assert.match(cubeRunner, /^class CubeRunner < Formula$/m);
   assert.match(cubeRunner, /cube-runner 1\.2\.3/, "the runner's own version is named");
