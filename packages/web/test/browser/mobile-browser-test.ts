@@ -280,6 +280,8 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
 
   await scenario(browser, engine, "turned on its side and back: the chrome folds, a keyboard leaves the composer and the conversation", { width: 667, height: 375 }, "chat", async page => {
     assert.ok(await visible(page, ".nav-menu-key"), "a short touch screen folds the destinations");
+    assert.equal((await box(page, ".composer .send-key")).height, 36, "a phone on its side has a phone's keys");
+    await assertHitArea(page, ".composer .send-key");
     assert.ok((await box(page, ".thread-strip")).height <= 50);
     await assertNoSideways(page);
     await shoot(page, engine, "chat-landscape-667x375");

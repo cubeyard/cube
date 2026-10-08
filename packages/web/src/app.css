@@ -1496,9 +1496,9 @@ select.compose-input {
   :root[data-keyboard] .composer { padding-bottom: 0.4rem; }
   :root[data-keyboard="tight"] .thread-strip { display: none; }
 }
-/* a phone's composer keys are smaller faces; a tablet whose keyboard
-   shortens the page to compact keeps its keys as they were */
-@media (max-width: 40rem) {
+/* a phone's composer keys, either way up, are smaller faces; a tablet
+   whose keyboard shortens the page to compact keeps its keys as they were */
+@media (max-width: 40rem), (pointer: coarse) and (max-height: 30rem) and (max-width: 52rem) {
   .composer { --composer-key: 2.25rem; --composer-pad: 0.2rem; }
 }
 /* a strip too narrow for one row: title and details key, the rest a tap

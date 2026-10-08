@@ -93,7 +93,8 @@ export function pinToVisualViewport(app: HTMLElement): void {
     queueMicrotask(sync);
     // A carry that began with the keyboard already down never sees the room
     // grow. Once the field is left and a keyboard would have gone, the room
-    // this width shows is its measure.
+    // this width shows is its measure (a floor: a slower keyboard still
+    // going down raises it on the next resize).
     const carry = carried;
     if (!carry) return;
     setTimeout(() => {
