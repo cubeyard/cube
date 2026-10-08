@@ -169,6 +169,9 @@ class Cube < Formula
     # The signed bundle as released: bin/node, bin/cube-gateway, app/,
     # release.json (cubed finds its gateway next to release.json).
     libexec.install Dir["*"]
+    # A dependency (pi-tui) ships prebuilt native modules for every platform;
+    # only this one's may stay in the keg (brew audit refuses the others).
+    Dir[libexec/"app/**/prebuilds/*"].each { |dir| rm_r(dir) if File.basename(dir) != "darwin-arm64" }
     # The bundle's bin/cubed starts the self-update supervisor; under
     # Homebrew, cubed runs directly and brew upgrade updates it.
     (bin/"cubed").write <<~SH
