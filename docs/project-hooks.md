@@ -54,13 +54,15 @@ every boot:   pre-resume ─▶ .agents/resume ─▶ the agent opens
 Both name the project explicitly, by id or by name (any case); a name two
 projects share is refused with their ids. OptChat changes hooks only when
 the user asked for it and named the project, and does it itself: a thread
-cannot.
+cannot. A thread's report is not the user asking: `project_hooks_write`
+refuses in a turn that has no message of the user (one started by a
+report alone, whatever the report says) and OptChat asks the user instead.
 
 `project_hooks(project)` is read only:
 
 ~~~text
-project demo (id 3f0c…); hooks saved 2026-10-08T12:00:00.000Z
-preSetup: 92 bytes, sha256 5be1…
+project demo (id 3f0c…); hooks last changed 2026-10-08T12:00:00.000Z
+preSetup: 26 bytes, sha256 5be1…; in a machine sha256 9c4d…
 ```sh
 sudo apt-get install -y jq
 ```
@@ -73,9 +75,16 @@ latest outcomes in this project's newest threads (…):
 Supported hooks (the only two; nothing else is settable): …
 ~~~
 
-- The scripts are the stored text, with secret-looking values (tokens,
-  `password=`/`token=` values, private keys) shown as `[redacted]`; the
-  size and sha256 are of the stored text, so a save can be verified exactly.
+- The scripts are the stored text, with secret-looking values shown as
+  `[redacted]`: well-known token formats, bearer tokens, private keys, the
+  values of variables whose name holds SECRET, TOKEN, PASSWORD, PASS, KEY,
+  CREDENTIAL or AUTH, and passwords in URLs. The size and sha256 are of the
+  stored text, so a save can be verified exactly; "in a machine" is the
+  sha256 of the file a machine gets (a `#!/bin/bash` line added when there
+  is no `#!`, a final newline), the one `cube hooks` shows.
+- "last changed" is when the scripts last changed (on the project page or
+  by OptChat); projects whose hooks have not changed since this was
+  recorded say so.
 - Outcomes are what cubed records for each thread: status (`ok`, `failed`
   with its exit code, `skipped`, `notrun`, `absent`), duration and time,
   for the 8 newest threads of the project (archived ones included), and
@@ -108,7 +117,8 @@ In a thread's machine, `cube hooks` shows the four hooks in the order they
 run, read only, from files in that machine: the project's pre-setup and
 pre-resume (`/etc/cube/hooks/`, written when the machine was made, so the
 ones this machine runs), the repository's `.agents/setup` and
-`.agents/resume`, each with its size and sha256, its last outcome in this
+`.agents/resume`, each with its size and sha256 (for the project's hooks,
+the "in a machine" sha256 of `project_hooks`), its last outcome in this
 machine (status, exit code, duration, when) and the last LINES lines of its
 log (default 20, at most 200). The outcome is in
 `~/.cache/cube/<hook>.status`, written by the preparation and resume scripts

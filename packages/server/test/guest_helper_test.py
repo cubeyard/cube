@@ -648,7 +648,7 @@ class ServicesTest(unittest.TestCase):
             self.assertEqual(views["pre-resume"]["sha256"], hashlib.sha256(b"#!/bin/bash\necho hi\n").hexdigest())
             self.assertFalse(views["pre-setup"]["present"])
             self.assertIsNone(views["setup"]["logTail"])
-            for argv in (["hooks", "set", "x"], ["hooks", "-n", "201"], ["hooks", "--timeout", "5"], ["hooks", "--", "x"]):
+            for argv in (["hooks", "set", "x"], ["hooks", "-n", "201"], ["hooks", "-n", "\u00b2"], ["hooks", "--timeout", "5"], ["hooks", "--", "x"]):
                 self.assertEqual(self.cube(*argv)[0], 2, argv)
             self.assertEqual(self.cube("hooks", "--help")[0], 0)
         finally:

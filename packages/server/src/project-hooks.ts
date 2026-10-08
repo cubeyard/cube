@@ -3,7 +3,8 @@
  * hooks themselves are `ProjectHooks` (registry.ts); vm.ts runs them. */
 import { createHash } from "node:crypto";
 import { MAX_HOOK_BYTES, NO_HOOKS, projectHooks, type HookOutcome, type Project, type ProjectHooks, type Registry } from "./registry.ts";
-import { redact, safeText } from "./vm-diagnostics.ts";
+import { REDACTED, redact, safeText } from "./vm-diagnostics.ts";
+import { hookFileContent } from "./vm-seed.ts";
 
 /** What cube supports, said once for the tools and the docs. Nothing else
  * (no timeout, working directory, order or trigger of one's own) is settable. */
@@ -20,6 +21,14 @@ const SCRIPT_SHOWN = 10 * MAX_HOOK_BYTES;
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
+/** `redact`, and in a script also the values of variables whose name says
+ * secret, token, password, key, credential or auth, and passwords in URLs. */
+export function redactHook(text: string): string {
+  return redact(text
+    .replace(/\b([A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|PASS|KEY|CREDENTIAL|AUTH)[A-Za-z0-9_]*[ \t]*=[ \t]*)(?:"[^"\n]*"|'[^'\n]*'|[^\s;&|]+)/gi, `$1${REDACTED}`)
+    .replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@/]+@/gi, `$1${REDACTED}@`));
+}
+
 /** A project by its exact id, else by its name (any case); an ambiguous name is refused. */
 export function findProject(registry: Registry, given: string): Project {
   const name = given.trim();
@@ -31,13 +40,14 @@ export function findProject(registry: Registry, given: string): Project {
   return named[0]!;
 }
 
-/** One hook's saved script for reading back: its size and sha256 of what is
- * stored, and the text with secret-looking values redacted. */
+/** One hook's saved script for reading back: the size and sha256 of what is
+ * stored and of the file a machine gets (what `cube hooks` shows), and the
+ * text with secret-looking values redacted. */
 function script(label: string, text: string): string[] {
   if (!text) return [`${label}: none`];
   const safe = safeText(text, SCRIPT_SHOWN);
-  const shown = redact(safe);
-  return [`${label}: ${Buffer.byteLength(text)} bytes, sha256 ${sha256(text)}`
+  const shown = redactHook(safe);
+  return [`${label}: ${Buffer.byteLength(text)} bytes, sha256 ${sha256(text)}; in a machine sha256 ${sha256(hookFileContent(text))}`
     + (shown !== safe ? " (secret-looking values shown as [redacted]; keep secrets out of hooks)" : ""),
     "```sh", shown, "```"];
 }
@@ -56,7 +66,7 @@ export function describeProjectHooks(registry: Registry, project: Project): stri
   const threads = registry.listThreads().filter(thread => thread.projectId === project.id)
     .sort((a, b) => b.createdAt - a.createdAt);
   const lines = [
-    `project ${project.name} (id ${project.id}); hooks saved ${new Date(project.updatedAt).toISOString()}`,
+    `project ${project.name} (id ${project.id}); hooks last changed ${project.hooksUpdatedAt ? new Date(project.hooksUpdatedAt).toISOString() : "before cube recorded it"}`,
     ...script("preSetup", hooks.preSetup),
     ...script("preResume", hooks.preResume),
     "",
@@ -89,7 +99,7 @@ export function writeProjectHooks(registry: Registry, given: string, input: { pr
   const stored = saved.hooks ?? NO_HOOKS;
   if (!same(stored, hooks)) throw new Error("the hooks read back differ from what was saved");
   const changed = (["preSetup", "preResume"] as const).filter(name => previous[name] !== stored[name]);
-  const secret = (["preSetup", "preResume"] as const).filter(name => redact(stored[name]) !== stored[name]);
+  const secret = (["preSetup", "preResume"] as const).filter(name => redactHook(stored[name]) !== stored[name]);
   return [
     changed.length ? `saved ${changed.join(" and ")}; read back from cubed's registry:` : "nothing changed; read back from cubed's registry:",
     ...changed.includes("preSetup") ? ["a changed pre-setup means a new template: the next thread prepares its machine from the start"] : [],

@@ -1314,7 +1314,7 @@ def hook_view(name, source, log, lines):
 
 
 def describe_hook(view):
-    script = ("%s, %d bytes" % (view["path"], view["bytes"])) if view["present"] else "none (%s)" % view["path"]
+    script = ("%s, %d bytes, sha256 %s" % (view["path"], view["bytes"], view["sha256"])) if view["present"] else "none (%s)" % view["path"]
     last = view["last"]
     outcome = "no outcome recorded in this machine" if not last else "%s%s, %.1f s, %s" % (
         last["status"], " (exit %d)" % last["exitCode"] if last["exitCode"] is not None else "", last["ms"] / 1000.0,
@@ -1336,7 +1336,7 @@ def cli_hooks(args):
     if positionals or rest is not None:
         raise Usage("hooks takes no arguments")
     raw = options.get("-n", options.get("--lines", "20"))
-    if not raw.isdigit() or int(raw) > 200:
+    if not (raw.isascii() and raw.isdigit()) or int(raw) > 200:
         raise Usage("-n is 0-200 lines")
     views = [hook_view(name, source, log, int(raw)) for name, source, log in HOOKS]
     Out("--json" in options).result({"hooks": views}, "\n".join(describe_hook(view) for view in views)

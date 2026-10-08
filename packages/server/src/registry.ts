@@ -61,6 +61,8 @@ export interface Project {
   repositories: ProjectRepository[];
   /** Absent: no hooks (projects saved before hooks existed). */
   hooks?: ProjectHooks;
+  /** When the hooks last changed; absent: not since this was recorded. */
+  hooksUpdatedAt?: number;
 }
 export interface Runner extends NodeBinding {
   configPath: string; configHash: string;
@@ -269,7 +271,10 @@ export class Registry {
     try {
       const project = this.getProject(id);
       if (!project) throw new Error("project not found");
-      const saved = { ...project, hooks: { preSetup: hooks.preSetup, preResume: hooks.preResume }, updatedAt: Date.now() };
+      const now = Date.now();
+      const changed = (project.hooks?.preSetup ?? "") !== hooks.preSetup || (project.hooks?.preResume ?? "") !== hooks.preResume;
+      const saved = { ...project, hooks: { preSetup: hooks.preSetup, preResume: hooks.preResume }, updatedAt: now,
+        ...changed ? { hooksUpdatedAt: now } : {} };
       this.saveProject(saved);
       this.db.exec("COMMIT");
       return saved;
