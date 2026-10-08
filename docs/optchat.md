@@ -14,8 +14,8 @@ a project or a thread; read-only, see [usage.md](usage.md)), writes work
 artifacts and reads its own and its threads' (`artifact_write`,
 `artifact_read`; see [artifacts.md](artifacts.md)) and reads its own
 memory (`zoom`, `date`). It keeps no task list: the chat page shows its
-threads and the wishes no thread took up, both derived (see "Threads beside
-the chat" and "Wishes not started"). Threads do all the work, each in its own VM, exactly like a thread
+threads, derived from its own spawns (see "Threads beside the chat"), and
+no model reads the chat in the background for wishes or todos. Threads do all the work, each in its own VM, exactly like a thread
 started from the UI.
 
 The memory follows Victor Taelin's OptChat spec
@@ -308,66 +308,6 @@ it on a phone) shows every thread this chat started. Nobody keeps it:
 
 OptChat's own `threads` tool lists the same threads with their state.
 
-## Wishes not started
-
-The user's main risk with an endless chat is a wish said once and never
-started. The panel's **not started** disclosure (closed by default) lists
-what the user explicitly asked for that no thread of the chat took up. It is
-inferred, not kept: no tool writes it and OptChat does not read it.
-
-- **The reader.** A cheap model call (`optchat-wishes.ts`) reads the log
-  from where it stopped, a chunk of at most 24,000 characters at a time: the
-  user's words (1,500 characters a message), OptChat's replies (400), its
-  `spawn` and `tell` calls (600) with their results (300), and thread
-  reports (300, marked as reports, never as the user's words); other tool
-  calls and results and notes are left out. With the chunk it gets the open wishes (at most 30) and the last 20
-  dismissed ones. It classifies each candidate as `wish`, `question`,
-  `hypothetical`, `rejected`, `deferred`, `suggestion` (OptChat's idea the
-  user did not take up) or `done`, and names wishes repeated, taken up by a
-  `spawn`/`tell` of the chunk, or withdrawn by the user.
-- **What is kept.** Only `wish` with high confidence, whose quote (three
-  words at least) is found word for word (spacing, case and quote marks
-  aside) in a user message of the chunk it names. A wish like a known one
-  (open, started or dismissed: the same quote, or nearly all the same words;
-  a csv and a pdf export stay two wishes) adds its messages to that one; a
-  repeat of a started or withdrawn wish opens it again. A start must name a
-  `spawn` or `tell` after the wish's words whose result shows a thread
-  started (`[id] started in …`) or the message sent (`sent to [id]`); a
-  spawn refused for its project or a refused tell takes nothing up.
-  Everything else is refused and logged (`wishes refused`), never kept. At
-  most 30 wishes are open.
-- **When it runs (the cost policy).** Never during a turn and never per
-  token or per message: once the chat has been quiet for 3 minutes (every
-  change of the chat moves the run), then a chunk every 20 s while it reads
-  an older backlog, and at most every 15 minutes once it has caught up. A
-  chunk with no words of the user, and no hand-off that could take up an
-  open wish, is read without a call. At most 60 calls a UTC day. A
-  provider's failure (an error or abort, a thrown call) is retried after 15
-  minutes and its messages are read then; an answer that came back but
-  cannot be read is not asked again (its messages are passed over and the
-  failure shown). The run checks again that no turn started right before
-  each call. Calls go
-  to the compactor's model (`CUBED_OPTCHAT_COMPACTOR`, default the chat's)
-  unless `CUBED_OPTCHAT_WISHES=provider/model`; `CUBED_OPTCHAT_WISHES=off`
-  switches it off. Their usage is counted beside the compactor's
-  (`optchat-wishes` in usage).
-- **What is shown.** Nothing until the whole log has been read once ("reading
-  the chat…" with the share read); then at most 7 open wishes, newest first,
-  each with the user's quote, its project if the model named one and a link
-  per message (the newest 3) that scrolls the transcript to it. An empty list
-  says nothing was found. Dismissing a wish (`POST
-  /api/optchat/wishes/<id>/dismiss`) takes it off for good; it is the user's
-  correction for a misread, a wish handled elsewhere or one no longer wanted.
-- **Where it lives.** `cube.optchat.wishes` in the chat's Pi store: how far
-  the log is read, the wishes with their message ids (the view's ids, which
-  `zoom` opens), the last failure and the call count and usage.
-- **Limits.** The model may miss a wish or misread one; there is no
-  measured precision on a real chat. A wish started outside this chat (from
-  the UI, or by an earlier, pre-chat thread) still shows until dismissed. A
-  wish taken up shows as started even if its thread failed: the panel above
-  shows the thread's state. Nothing here says a wish was done, merged,
-  released or installed.
-
 ## Images
 
 The user can attach images to a chat message: paste them into the composer
@@ -481,8 +421,6 @@ sent. Hit rates against a live provider are not measured.
   a new chat starts on the host's preferred model.
 - `CUBED_OPTCHAT_COMPACTOR=provider/model` selects the compactor's model
   (default: the chat's own). The spec recommends a cheap but competent model.
-- `CUBED_OPTCHAT_WISHES=provider/model` selects the wish finder's model
-  (default: the compactor's); `off` switches it off.
 - `<CUBED_STATE>/optchat/AGENTS.md`, if present, is the user's instructions,
   appended to the system prompt. It is read on every request; keep it stable
   for the cache.
@@ -495,9 +433,8 @@ uploads; with images `text` may be empty), `POST /api/optchat/media` (the raw
 image bytes; answers `{image: {id, mimeType, width, height, bytes}}`),
 `GET /api/optchat/media/<id>`, `POST /api/optchat/stop`,
 `GET /api/optchat/view` (what the model reads: the view and the message count),
-`GET /api/optchat/threads` (the threads the chat started, with their state),
-`GET /api/optchat/wishes` (wishes not started) and
-`POST /api/optchat/wishes/<id>/dismiss`. The panel also lists the newest
+`GET /api/optchat/threads` (the threads the chat started, with their state).
+The panel also lists the newest
 artifacts (`GET /api/artifacts`); comments on the chat's own artifacts reach
 it as messages starting `[artifact <id>]` through the same pending queue, as
 does the outcome of a merge the user confirmed on its artifact or on the

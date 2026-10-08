@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels, fauxAssistantMessage, fauxProvider, type Usage } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, type Message, type Usage } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, ROOT_CONVERSATION_ID, type UsageState } from "@earendil-works/pi-durable";
 import { openStorage } from "../src/durable-agent.ts";
 import type { Registry, Thread } from "../src/registry.ts";
@@ -268,10 +268,15 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
 // ---- OptChat's compactor ----
 {
   const { OptChat } = await import("../src/optchat.ts");
-  faux.setResponses(Array.from({ length: 50 }, () => () => fauxAssistantMessage("a short summary line")));
+  // Every model call's system prompt: only the chat and its compactor call a model.
+  const prompts: string[] = [];
+  faux.setResponses(Array.from({ length: 50 }, () => (context: { messages: Message[] }) => {
+    const system = context.messages.find(message => message.role === "system");
+    prompts.push(JSON.stringify(system ? [system.content, system.sections ?? {}] : null));
+    return fauxAssistantMessage("a short summary line"); }));
   const chat = await OptChat.open({ directory: path.join(root, "optchat"), models, model: async () => ({ provider: model.provider, id: model.id }),
     threads: { projects: async () => "", spawn: async () => { throw new Error("no"); }, tell: async () => {}, describe: async () => "", events: async () => null, runners: async () => "", history: async () => null },
-    limits: { retryMs: 50, watchMs: 60_000, wishQuietMs: 20, wishIntervalMs: 0, wishGapMs: 0 } });
+    limits: { retryMs: 50, watchMs: 60_000 } });
   try {
     // Longer than a node: the compactor summarizes it.
     await chat.send(`a long message for the log ${"words ".repeat(200)}`, "m1");
@@ -279,7 +284,7 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
     let counted;
     do {
       counted = await chat.usage();
-      if (Object.keys(counted.compactor.calls).length && Object.keys(counted.chat.models).length && Object.keys(counted.wishes?.calls ?? {}).length) break;
+      if (Object.keys(counted.compactor.calls).length && Object.keys(counted.chat.models).length) break;
       await new Promise(resolve => setTimeout(resolve, 50));
     } while (Date.now() < deadline);
     const key = `${model.provider}/${model.id}`;
@@ -290,10 +295,12 @@ const service = () => new UsageService({ file: path.join(root, "usage.sqlite"), 
     const report = await usage.report();
     assert.ok(report.optchat!.lines.some(line => line.source === "optchat-compactor" && line.calls! >= 1));
     assert.ok(report.optchat!.lines.some(line => line.source === "optchat"));
-    assert.match(usageText(report), /optchat itself: .*compactor .*, wish finder /);
-    // The wish finder's calls run beside Pi too, an unreadable answer included.
-    assert.ok(report.optchat!.lines.some(line => line.source === "optchat-wishes" && line.calls! >= 1));
-    assert.match((await chat.wishes()).error ?? "", /not read: the wish finder's reply holds no JSON object/);
+    assert.match(usageText(report), /optchat itself: .*\(chat .*, compactor [^,]*\)/);
+    // No model reads the chat for wishes behind the user's back, however long it idles.
+    await new Promise(resolve => setTimeout(resolve, 500));
+    assert.deepEqual(Object.keys(await chat.usage()).sort(), ["chat", "compactor", "threads"]);
+    assert.ok(prompts.length >= 2 && prompts.every(prompt => prompt.includes("You are OptChat") || prompt.startsWith('["You write the memory of OptChat')), JSON.stringify(prompts.map(prompt => prompt.slice(0, 60))));
+    assert.deepEqual([...new Set(report.optchat!.lines.map(line => line.source))].sort(), ["optchat", "optchat-compactor"]);
     assert.ok(!counted.compactor.earlier, "a new chat counts its compactor from its first call");
     assert.equal(report.optchat!.coverage, "complete");
     usage.close();

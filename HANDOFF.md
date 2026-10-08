@@ -175,7 +175,7 @@ with at most 8 tells per thread between two user messages. Verified offline
 with a fake `claude`; the real Claude Code's follow-up turn in headless mode
 is inferred from its bundle, not observed against a live login.
 
-## Threads and wishes beside the chat (replaced the now panel)
+## Threads beside the chat (replaced the now panel)
 
 OptChat's hand-kept task list is gone: the `task`/`tasks` tools, the
 `<now>` block every turn led with, its system prompt section, the
@@ -184,16 +184,17 @@ OptChat's hand-kept task list is gone: the `task`/`tasks` tools, the
 The chat page's **threads** panel shows every thread the chat spawned (its
 own spawn records; nothing to register), by project, with the thread's own
 state as cubed records it; archived ones (the newest 8) show how their last
-run ended. Below it, folded, **not started**: wishes the user stated in the
-chat that no spawn or tell took up, inferred by a cheap model (the
-compactor's unless `CUBED_OPTCHAT_WISHES` says otherwise) reading the log a
-chunk at a time once the chat has been quiet 3 minutes, at most every 15
-minutes when caught up and 60 calls a day. Wishes must quote the user's own
-words; they link to their messages and can be dismissed. Details:
-docs/optchat.md, "Threads beside the chat" and "Wishes not started".
-Verified offline (`optchat-wishes-test.ts` with faux models, the product
-smoke's real routes) and in headless Chromium at desktop and phone sizes;
-not with a real model, so its precision on a real chat is unmeasured.
+run ended. Details: docs/optchat.md, "Threads beside the chat".
+
+The inferred wish list ("not started") that sat folded below it is removed
+at the user's request: the background wish finder, its model calls and
+usage source (`optchat-wishes`), `CUBED_OPTCHAT_WISHES`, `GET
+/api/optchat/wishes` and its dismiss route, and the panel section. No model
+reads the chat in the background any more except the compactor. Chats that
+ran it keep a `cube.optchat.wishes` doc in their Pi store, unread and not
+deleted; the wish finder's past spend in it is no longer in usage reports.
+Regression: `usage-test.ts` (only the chat and compactor call a model),
+`optchat-product-test.ts` (routes 404) and the browser panel scenario.
 
 ## Images in the chat
 

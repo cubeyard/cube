@@ -14,7 +14,6 @@ import { LocalMachines } from "./local-guest.ts";
 import { REVIEW, REVIEW_REVISED } from "./artifact-review.ts";
 
 export async function startArtifactHost(options: { web: string }) {
-  process.env.CUBED_OPTCHAT_WISHES = "off";
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-artifact-browser-"));
   const SHA = "3f9c2a7e5b1d4c8e9a0f6b2d7c1e4a9b8d3f5e2c";
   const textOf = (message: Message) => typeof message.content === "string" ? message.content

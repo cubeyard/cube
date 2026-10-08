@@ -24,7 +24,6 @@ import { capText, Memory, type LogMessage, type Part } from "./optchat-memory.ts
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
 import { imageNote } from "./thread-images.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
-import { applyAnswer, findWishes, initialWishes, nextChunk, WISH_LIMITS, WishAnswerError, type WishList, type Wishes } from "./optchat-wishes.ts";
 import { PENDING_ID, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
 import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
 import type { Artifacts } from "./artifact-service.ts";
@@ -43,13 +42,6 @@ export const START_GRACE_MS = 2 * 60_000;
  * follow-up is bounded; the user's next message allows more. */
 export const TELLS = 8;
 
-/** The wish finder runs once the chat has been quiet this long, at most
- * once per interval when caught up, a chunk per gap while reading a
- * backlog, and again after a retry delay when a call failed. */
-export const WISH_QUIET_MS = 3 * 60_000;
-export const WISH_INTERVAL_MS = 15 * 60_000;
-export const WISH_GAP_MS = 20_000;
-export const WISH_RETRY_MS = 15 * 60_000;
 /** Archived threads the overview shows, newest first. */
 export const ARCHIVED_SHOWN = 8;
 
@@ -275,8 +267,6 @@ const ViewDoc = defineDoc<{ total: number; parts: number[]; batch?: boolean; com
  * says its tree already had compactor-built nodes then, whose calls nobody
  * counted. */
 type CompactorUsage = { models: Record<string, JsonRepresentation<Usage>>; calls: Record<string, number>; since: number | null; earlier?: boolean };
-/** The wish finder's reading of the log and the wishes it found (optchat-wishes.ts). */
-const WishesDoc = defineDoc<Wishes>({ kind: "cube.optchat.wishes", version: 1, scope: "session", initial: initialWishes });
 const CompactorUsageDoc = defineDoc<CompactorUsage>({ kind: "cube.optchat.usage", version: 1, scope: "session", initial: () => ({ models: {}, calls: {}, since: null }) });
 const TURN = "optchat.turn";
 const NODE_ENTRY = "optchat.node";
@@ -367,14 +357,11 @@ export type OptChatOptions = {
   model: () => Promise<{ provider: string; id: string } | null>;
   /** The compactor's model; default: the chat's own model. */
   compactor?: { provider: string; id: string } | null;
-  /** The wish finder's model; default: the compactor's. false: off. */
-  wishes?: { provider: string; id: string } | false | null;
   threads: OptThreads;
   /** Work artifacts: the chat writes its own and reads its threads'. */
   artifacts?: Artifacts;
   /** Tests lower these. */
-  limits?: { view?: number; low?: number; node?: number; compaction?: number; compactionLow?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number;
-    wishQuietMs?: number; wishIntervalMs?: number; wishGapMs?: number; wishRetryMs?: number; wishChunk?: number; wishCallsPerDay?: number };
+  limits?: { view?: number; low?: number; node?: number; compaction?: number; compactionLow?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number };
 };
 
 export class OptChat {
@@ -409,8 +396,6 @@ export class OptChat {
   private model: { provider: string; id: string } | null = null;
   /** Each log message's Pi entry: the transcript's events carry its id. */
   private readonly entries: number[] = [];
-  private wishTimer: ReturnType<typeof setTimeout> | undefined;
-  private wishRun: Promise<void> | null = null;
   /** Archived threads' last runs, read once each. */
   private readonly archivedRuns = new Map<string, ObservedThread>();
   /** The attached images; `referenced`: the ids the log's messages hold. */
@@ -565,7 +550,6 @@ export class OptChat {
     const sweep = setInterval(() => { void this.sweepMedia(Date.now() - UNSENT_MS); }, 60 * 60_000);
     sweep.unref();
     this.timers.add(sweep);
-    this.scheduleWishes();
   }
 
   /** Runs `action` alone among the steps that add or delete images. */
@@ -653,8 +637,6 @@ export class OptChat {
         this.dirty = false;
         for (const entry of await this.scan(this.conversation.id, this.lastEntry)) {
           for (const message of entryMessages(entry)) { this.memory.append(message); this.entries.push(entry.id); }
-          // The wish finder waits for the chat to be quiet again.
-          this.scheduleWishes();
           for (const id of entryImages(entry)) this.referenced.add(id);
           this.lastEntry = entry.id;
         }
@@ -727,10 +709,8 @@ export class OptChat {
   async usage(): Promise<OptChatUsage> {
     const compactor = await this.harness.snapshot(CompactorUsageDoc, context);
     const threads = Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {});
-    const wishes = (await this.harness.snapshot(WishesDoc, context))?.usage;
     return { chat: await this.harness.usage(context) as OptChatUsage["chat"],
-      compactor: compactor ? JSON.parse(JSON.stringify(compactor)) as OptChatUsage["compactor"] : { models: {}, calls: {}, since: null, earlier: false },
-      wishes: wishes ? JSON.parse(JSON.stringify(wishes)) as OptChatUsage["wishes"] : { models: {}, calls: {} }, threads };
+      compactor: compactor ? JSON.parse(JSON.stringify(compactor)) as OptChatUsage["compactor"] : { models: {}, calls: {}, since: null, earlier: false }, threads };
   }
 
   /** Accepts a user message or a thread report and keeps it until it is in
@@ -1060,126 +1040,6 @@ export class OptChat {
     return { threads, archived: { shown: recent.length, total: archived.length }, unknown: ids.filter(id => !first.get(id)).length };
   }
 
-  /** The model the wish finder calls, if any. */
-  private wishModel(): { provider: string; id: string } | null {
-    if (this.options.wishes === false) return null;
-    return this.options.wishes ?? this.options.compactor ?? this.model;
-  }
-
-  /** Runs the wish finder after `ms`; a later call moves the run. */
-  private scheduleWishes(ms = this.options.limits?.wishQuietMs ?? WISH_QUIET_MS): void {
-    if (this.closing || !this.wishModel()) return;
-    if (this.wishTimer) clearTimeout(this.wishTimer);
-    this.wishTimer = setTimeout(() => { this.wishTimer = undefined; void this.runWishes(); }, Math.max(0, ms));
-    this.wishTimer.unref();
-  }
-
-  /** Reads the log's unread messages for wishes, a chunk at a time, while
-   * the chat is idle: one cheap model call per chunk that holds the user's
-   * words, spaced out, bounded per day; never during a turn. */
-  private runWishes(): Promise<void> {
-    if (this.wishRun) return this.wishRun;
-    this.wishRun = (async () => {
-      const limits = this.options.limits ?? {};
-      const model = this.wishModel();
-      if (!model || this.closing) return;
-      // A turn under way, or messages waiting for one: after it settles.
-      if ((await this.live())?.run || (await this.pending()).length) return this.scheduleWishes();
-      await this.sync();
-      for (;;) {
-        if (this.closing) return;
-        const doc = await this.harness.snapshot(WishesDoc, context) ?? initialWishes();
-        const messages = this.memory.messages;
-        if (doc.through >= messages.length) {
-          if (!doc.ready) await this.harness.commit(async tx => { (await tx.doc(WishesDoc)).ready = true; }, context);
-          return;
-        }
-        const now = Date.now();
-        const today = new Date(now).toISOString().slice(0, 10);
-        const calls = doc.day === today ? doc.callsToday : 0;
-        if (calls >= (limits.wishCallsPerDay ?? WISH_LIMITS.callsPerDay)) return this.scheduleWishes(Date.parse(`${today}T00:00:00Z`) + 86_400_000 - now + 60_000);
-        const chunk = nextChunk(messages, doc.through, limits.wishChunk);
-        const open = doc.items.some(wish => wish.status === "open");
-        // Nothing the user asked, and nothing that could take up a wish: read without a call.
-        if (!chunk.users && !(open && chunk.handOffs)) {
-          await this.harness.commit(async tx => {
-            const fresh = await tx.doc(WishesDoc);
-            if (fresh.through === chunk.from) fresh.through = chunk.to;
-          }, context);
-          continue;
-        }
-        const spacing = doc.error ? limits.wishRetryMs ?? WISH_RETRY_MS : doc.ready ? limits.wishIntervalMs ?? WISH_INTERVAL_MS : limits.wishGapMs ?? WISH_GAP_MS;
-        if (doc.lastRun !== null && now - doc.lastRun < spacing) return this.scheduleWishes(doc.lastRun + spacing - now);
-        // A turn may have started while the log was read.
-        if ((await this.live())?.run || (await this.pending()).length) return this.scheduleWishes();
-        let replied = false;
-        try {
-          const answer = await findWishes({ models: this.compactorModels, model, doc, chunk, messages, signal: this.abort.signal,
-            onReply: async reply => { replied = true; await this.countWishes(reply); } });
-          await this.harness.commit(async tx => {
-            const fresh = await tx.doc(WishesDoc);
-            if (fresh.through !== chunk.from) return;
-            const applied = applyAnswer(fresh, answer, chunk, messages, Date.now());
-            if (applied.refused.length) log.info("wishes refused", { from: chunk.from, to: chunk.to, refused: applied.refused });
-            Object.assign(fresh, { through: chunk.to, lastRun: Date.now(), error: null, day: today, callsToday: calls + 1 });
-          }, context);
-        } catch (error) {
-          if (this.closing) return;
-          const message = error instanceof Error ? error.message : String(error);
-          log.warn("wish finder failed", { from: chunk.from, to: chunk.to, error: message });
-          // An answer that came back unusable is not asked again: the chunk is
-          // passed over. A provider's failure is retried later.
-          const unusable = error instanceof WishAnswerError;
-          await this.harness.commit(async tx => {
-            const fresh = await tx.doc(WishesDoc);
-            Object.assign(fresh, { lastRun: Date.now(), error: unusable ? `messages #${chunk.from}–#${chunk.to - 1} not read: ${message}` : message, day: today, callsToday: calls + (replied ? 1 : 0) });
-            if (unusable && fresh.through === chunk.from) fresh.through = chunk.to;
-          }, context);
-          return this.scheduleWishes(unusable ? limits.wishGapMs ?? WISH_GAP_MS : limits.wishRetryMs ?? WISH_RETRY_MS);
-        }
-      }
-    })().catch(error => { if (!this.closing) log.warn("wish finder failed", { error }); })
-      .finally(() => { this.wishRun = null; });
-    return this.wishRun;
-  }
-
-  /** Adds one wish finder reply's usage, as the compactor's. */
-  private async countWishes(reply: AssistantMessage): Promise<void> {
-    const key = `${reply.provider}/${reply.model}`;
-    await this.harness.commit(async tx => {
-      const usage = (await tx.doc(WishesDoc)).usage;
-      const total = Object.hasOwn(usage.models, key) ? usage.models[key] : undefined;
-      if (total) addUsage(total as unknown as Usage, reply.usage);
-      else usage.models[key] = JSON.parse(JSON.stringify(reply.usage)) as JsonRepresentation<Usage>;
-      usage.calls[key] = (Object.hasOwn(usage.calls, key) ? usage.calls[key]! : 0) + 1;
-    }, context).catch(error => { if (!this.closing) log.warn("wish finder usage not counted", { error }); });
-  }
-
-  /** The open wishes, newest first, with the messages they rest on; none
-   * while older messages are still being read. */
-  async wishes(): Promise<WishList> {
-    const doc = await this.harness.snapshot(WishesDoc, context) ?? initialWishes();
-    const total = this.memory.length;
-    const base = { read: Math.min(doc.through, total), total, error: doc.error, lastRun: doc.lastRun };
-    if (!this.wishModel()) return { ...base, state: "off", wishes: [], more: 0, reason: this.options.wishes === false ? "switched off on this host" : "the chat has no model" };
-    if (!doc.ready) return { ...base, state: "catching up", wishes: [], more: 0, reason: null };
-    const open = doc.items.filter(wish => wish.status === "open").sort((a, b) => Math.max(...b.sources) - Math.max(...a.sources));
-    return { ...base, state: "ready", more: Math.max(0, open.length - WISH_LIMITS.shown), reason: null,
-      wishes: open.slice(0, WISH_LIMITS.shown).map(wish => ({ id: wish.id, text: wish.text, quote: wish.quote, project: wish.project,
-        sources: wish.sources.map(message => ({ message, entry: this.entries[message] ?? null, date: this.memory.messages[message]?.date ?? null })) })) };
-  }
-
-  /** The user's correction: an open wish leaves the list and is not found
-   * again. false: no such wish. */
-  async dismissWish(id: string): Promise<boolean> {
-    return this.harness.commit(async tx => {
-      const wish = (await tx.doc(WishesDoc)).items.find(item => item.id === id);
-      if (!wish) return false;
-      if (wish.status === "open") Object.assign(wish, { status: "dismissed", updated: Date.now() });
-      return true;
-    }, context);
-  }
-
   private extension() {
     const zoom = defineTool({
       name: "zoom",
@@ -1391,8 +1251,6 @@ export class OptChat {
     this.notify();
     for (const timer of this.timers) clearTimeout(timer);
     if (this.watchTimer) clearInterval(this.watchTimer);
-    if (this.wishTimer) clearTimeout(this.wishTimer);
-    await this.wishRun;
     await Promise.allSettled([...this.watchers.values()].map(async watching => (await watching)?.stop()));
     await this.stopWatch?.().catch(() => {});
     await this.syncing;

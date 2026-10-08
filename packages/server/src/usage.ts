@@ -12,7 +12,7 @@
  * reads the stores. */
 import type { Usage } from "@earendil-works/pi-ai";
 
-export type UsageSource = "pi" | "claude-code" | "optchat" | "optchat-compactor" | "optchat-wishes";
+export type UsageSource = "pi" | "claude-code" | "optchat" | "optchat-compactor";
 
 export interface TokenCounts {
   input: number; output: number; cacheRead: number; cacheWrite: number;
