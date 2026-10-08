@@ -1,7 +1,9 @@
 /** cube's Claude Code mod. cubed starts `claude -p --plugin-dir <this
  * folder>` for a claude-code thread; this module sends Claude Code's Bash,
  * Read, Write and Edit to the thread Workspace in its virtual machine, keyed
- * by tool_use_id, and refuses what would act on the cubed host instead.
+ * by tool_use_id, and refuses what would act on the cubed host instead. Every
+ * file path names a file in that machine: the workspace, or with an absolute
+ * path anywhere else in it; none is opened on the host.
  *
  * cubed passes the workspace through the environment: a Unix socket that
  * serves only workspace routes, the thread's route path, the lease token it
@@ -10,7 +12,7 @@
  * and is not sandboxed. */
 import type { EngineInterface, Register } from 'claude-code'
 import { WorkspaceClient } from './workspace.ts'
-import { ALLOWED_TOOLS, ARTIFACT_GUIDE, ARTIFACT_ROOT, artifactPath, bash, edit, instructions, read, readArtifact, write, writeArtifact, VIRTUAL_ROOT, type ToolScope } from './tools.ts'
+import { ALLOWED_TOOLS, ARTIFACT_GUIDE, ARTIFACT_ROOT, artifactPath, bash, edit, GUEST_HOME, instructions, read, readArtifact, write, writeArtifact, VIRTUAL_ROOT, type ToolScope } from './tools.ts'
 
 const ALLOWED = new Set(ALLOWED_TOOLS)
 const UNCONFIGURED = 'cube: this session has no thread workspace; cubed starts Claude Code with one'
@@ -21,6 +23,7 @@ async function workspace($: Pick<EngineInterface, 'env' | 'http'>, signal?: Abor
   const base = await $.env.get('CUBE_WORKSPACE_PATH')
   const token = await $.env.get('CUBE_WORKSPACE_TOKEN')
   const root = await $.env.get('CUBE_WORKSPACE_ROOT')
+  const realRoot = await $.env.get('CUBE_WORKSPACE_REAL_ROOT')
   if (!socketPath || !base || !token || !root) return undefined
   const client = new WorkspaceClient({
     base,
@@ -31,7 +34,7 @@ async function workspace($: Pick<EngineInterface, 'env' | 'http'>, signal?: Abor
       return { status: reply.status, text: reply.text }
     },
   })
-  return { client, token, root, ...(signal ? { signal } : {}) }
+  return { client, token, root, ...(realRoot ? { realRoot } : {}), ...(signal ? { signal } : {}) }
 }
 
 export const register: Register = on => {
@@ -82,6 +85,9 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
     const scope = await workspace($, next.signal)
     if (!scope) return { deny: UNCONFIGURED }
+    // Artifacts are cube's, not the machine's: revised whole with Write.
+    const artifact = artifactPath(e.file_path)
+    if (artifact) return 'deny' in artifact ? artifact : { deny: `artifacts are revised with Write ${ARTIFACT_ROOT}/<name>.md (the whole document); Edit does not reach them` }
     const result = await edit(scope, e.tool_use_id, e)
     return 'deny' in result ? result : { result }
   })
@@ -95,6 +101,7 @@ export const register: Register = on => {
     const sections = [
       `You are working in a cube thread. ${scope.root} (also ${VIRTUAL_ROOT}) is the thread workspace in the thread's own virtual machine: ` +
       'Read, Write and Edit address files there, and Bash runs commands there with the workspace root as its working directory. ' +
+      `Any other absolute path (${GUEST_HOME}, /tmp, ~/…) is a file in the same machine, never on the host Claude Code runs on; there the file tools have the agent account's own permissions (use sudo in Bash for root-owned files; /proc, /sys and /dev only through Bash). ` +
       'Commands run there as user agent (with sudo); the machine reaches the internet over HTTP and HTTPS only, and GH_TOKEN is a placeholder that works for gh and git with GitHub. Background commands, notebooks, worktrees and host-local tools are not available. ' +
       'A server a command starts ends with that command: to keep a web server running and give the user a URL, run `cube service start NAME --port PORT -- COMMAND` (it must listen on 0.0.0.0; `cube service --help` lists status, logs and stop).',
       `Work artifacts: Write ${ARTIFACT_ROOT}/<name>.md to create a document for the user, or a new revision of it (the whole document each time; its title is the first # heading); ` +

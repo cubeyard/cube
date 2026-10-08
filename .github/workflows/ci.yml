@@ -52,6 +52,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test
+        env:
+          CUBE_TEST_GUEST_ROOT: required
       - name: shell syntax
         run: |
           set -e

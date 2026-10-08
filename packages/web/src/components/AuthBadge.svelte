@@ -23,7 +23,7 @@
     <span class="auth-short" aria-hidden="true">ok</span>
   </span>
 {:else if auth}
-  <a href="#/models"
+  <a href="#/settings/providers"
     class="auth-missing"
     aria-label="connect a model provider"
     title="connect a model provider"

@@ -97,7 +97,7 @@
 {#if modelError}
   <div class="strip-note bad" role="alert">
     <span class="strip-note-text">{modelError}</span>
-    <a class="key" href="#/models">providers</a>
+    <a class="key" href="#/settings/providers">providers</a>
     <button class="key" onclick={loadModels}>retry</button>
   </div>
 {/if}

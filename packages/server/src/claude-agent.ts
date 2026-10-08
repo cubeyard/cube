@@ -288,7 +288,10 @@ export class ClaudeAgent {
       CUBE_WORKSPACE_SOCKET: this.runtime.socket,
       CUBE_WORKSPACE_PATH: `/api/threads/${encodeURIComponent(this.threadId)}/workspace`,
       CUBE_WORKSPACE_TOKEN: this.lease.token,
-      CUBE_WORKSPACE_ROOT: this.cwd });
+      CUBE_WORKSPACE_ROOT: this.cwd,
+      // The same directory as the kernel names it (Claude Code's own cwd)
+      // when the state path has a symlink in it.
+      CUBE_WORKSPACE_REAL_ROOT: fs.realpathSync(this.cwd) });
     const child = spawn(command!, [...prefix,
       "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
       // Only cube's mod: no user or project settings (their hooks), no MCP

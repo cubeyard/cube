@@ -167,7 +167,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       assert.equal(await key.getAttribute("aria-expanded"), "true");
       const links = page.locator("header nav a");
       const names = await links.allTextContents();
-      for (const name of ["chat", "threads", "artifacts", "projects", "models", "system"]) assert.ok(names.includes(name), `the menu lists ${name}`);
+      for (const name of ["chat", "threads", "artifacts", "projects", "settings"]) assert.ok(names.includes(name), `the menu lists ${name}`);
       for (const link of await links.all()) assert.ok(await link.isVisible(), "every destination is in the menu, in view");
       const heights = await links.evaluateAll(all => all.map(link => link.getBoundingClientRect().height));
       assert.ok(heights.every(height => height >= 43.9), `each destination is a full key high: ${heights}`);
@@ -339,7 +339,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
   await scenario(browser, engine, "focus never stays on a destination the menu folded away", phone, "chat", async page => {
     const key = page.locator(".nav-menu-key");
     await key.tap();
-    await page.locator("header nav a", { hasText: "models" }).focus();
+    await page.locator("header nav a", { hasText: "projects" }).focus();
     const transcript = await box(page, ".transcript");
     await page.touchscreen.tap(transcript.right - 20, transcript.bottom - 20);
     assert.equal(await key.getAttribute("aria-expanded"), "false");

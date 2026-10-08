@@ -59,18 +59,38 @@ try {
       call("edit", { path: "/workspace/notes/a.txt", edits: [{ oldText: "world", newText: "pi" }] }),
       call("read", { path: "../outside.txt" }),
       call("bash", { command: "cat a.txt", cwd: "notes" }),
+      // Outside the workspace: files of the same machine (guest.root here).
+      call("write", { path: "/home/agent/portal-runtime/start-portal.sh", content: "#!/bin/sh\nexec node portal.js\n" }),
+      call("edit", { path: "~/portal-runtime/start-portal.sh", edits: [{ oldText: "node", newText: "bun" }] }),
+      call("read", { path: "/tmp/notes/../screens/note.txt" }),
+      call("read", { path: "/proc/self/environ" }),
+      call("read", { path: "/tmp/host/durable-agent-test.ts" }),
+      call("read", { path: "~bob/notes.md" }),
       fauxAssistantMessage("done"),
     ]) });
+    fs.mkdirSync(path.join(guest.root, "tmp/screens"), { recursive: true });
+    fs.writeFileSync(path.join(guest.root, "tmp/screens/note.txt"), "in the machine\n");
+    fs.symlinkSync(import.meta.dirname, path.join(guest.root, "tmp/host"));
     try {
       const submission = await agent.conversation.submit({ type: "input", content: "use the tools", requestId: "tools" }, context);
       assert.equal((await submission.wait(context)).status, "done");
       assert.equal(fs.readFileSync(path.join(files, "notes/a.txt"), "utf8"), "hello\npi\n");
-      const [write, read, edit, outside, bash] = await results(agent);
+      const [write, read, edit, outside, bash, machineWrite, machineEdit, machineRead, pseudo, host, otherHome] = await results(agent);
       assert.match(text(write), /Successfully wrote/);
       assert.equal(text(read), "hello\nworld\n");
       assert.match(text(edit), /Successfully replaced 1 block/);
+      // ../outside.txt is the machine's /outside.txt, which does not exist.
       assert.equal(outside.isError, true);
-      assert.match(text(outside), /outside the workspace/);
+      assert.match(text(outside), /does not exist/);
+      assert.match(text(machineWrite), /Successfully wrote/);
+      assert.match(text(machineEdit), /Successfully replaced 1 block/);
+      assert.equal(fs.readFileSync(path.join(guest.root, "home/agent/portal-runtime/start-portal.sh"), "utf8"), "#!/bin/sh\nexec bun portal.js\n");
+      assert.equal(text(machineRead), "in the machine\n");
+      assert.equal(pseudo.isError, true);
+      assert.match(text(pseudo), /kernel or device filesystem/);
+      assert.equal(host.isError, true);
+      assert.match(text(host), /leaves the machine/);
+      assert.match(text(otherHome), /only ~ and ~\/ name a home/);
       assert.equal(text(bash), "hello\npi\n\n[exit=0; exited]");
       assert.match(JSON.stringify(bash.details), /"operationKey":"pi:[0-9a-f-]+:\d+:bash"/);
       // The same request id never submits twice.
@@ -78,7 +98,7 @@ try {
     } finally { await agent.close(); }
     // The machine binding is fixed for the storage.
     await assert.rejects(openAgent({ directory, binding: "other", workspace, ...model([]) }), /thread machine binding changed/);
-    console.log("ok: pi-durable read/write/edit through the WorkspaceEnv, keyed bash, outside paths refused, request ids, fixed binding");
+    console.log("ok: pi-durable read/write/edit through the WorkspaceEnv, keyed bash, machine paths outside the workspace (never /proc or the host), request ids, fixed binding");
   }
   {
     // The repository's AGENTS.md/CLAUDE.md on the guest reach the model, and an edit applies to the next generation.

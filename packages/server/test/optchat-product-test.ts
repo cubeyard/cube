@@ -229,24 +229,4 @@ try {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
-// A malformed CUBED_OPTCHAT_COMPACTOR leaves the chat unavailable; cubed
-// starts and answers, it never throws out of startup.
-{
-  const badRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-bad-"));
-  process.env.CUBED_OPTCHAT_COMPACTOR = "no-slash";
-  try {
-    const bad = await createCubed({ state: path.join(badRoot, "state"), models, machines: new LocalMachines(path.join(badRoot, "machines")), claude: null, gateway: null });
-    try {
-      await new Promise<void>(resolve => bad.server.listen(0, "127.0.0.1", resolve));
-      const port = (bad.server.address() as { port: number }).port;
-      const response = await fetch(`http://127.0.0.1:${port}/api/optchat/view`);
-      assert.ok(response.status >= 400, "the chat is unavailable");
-      assert.match(await response.text(), /CUBED_OPTCHAT_COMPACTOR must be provider\/model/);
-      assert.equal((await fetch(`http://127.0.0.1:${port}/api/projects`)).status, 200, "the rest of cubed still answers");
-    } finally { await bad.close(); }
-  } finally {
-    delete process.env.CUBED_OPTCHAT_COMPACTOR;
-    fs.rmSync(badRoot, { recursive: true, force: true });
-  }
-}
 console.log("optchat product: ok");

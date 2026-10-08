@@ -143,6 +143,14 @@ try {
   const lease = await probes.lease({ owner: "pi" });
   const whoami = await run(probes, lease.token, "whoami", "id -un; pwd; test -n \"$GH_TOKEN\" && echo placeholder-set");
   assert.equal(whoami.output, "agent\n/workspace\nplaceholder-set", "commands run as agent in /workspace with the placeholder");
+  // Outside the workspace the file tools have the agent's permissions, as its commands do without sudo.
+  await probes.writeFile(lease.token, "machine-home", "/home/agent/portal-runtime/start-portal.sh", Buffer.from("#!/bin/sh\n"), { createParents: true });
+  assert.equal((await run(probes, lease.token, "machine-owner", "stat -c '%U:%G' /home/agent/portal-runtime /home/agent/portal-runtime/start-portal.sh")).output,
+    "agent:agent\nagent:agent", "what the file tools create outside the workspace is the agent's");
+  await assert.rejects(probes.writeFile(lease.token, "machine-etc", "/etc/cube-file-tools", Buffer.from("x")), /use sudo in bash/);
+  await assert.rejects(probes.readFile(lease.token, "/etc/shadow"), /use sudo in bash/);
+  assert.equal((await run(probes, lease.token, "machine-etc-absent", "test -e /etc/cube-file-tools && echo present || echo absent")).output, "absent");
+  log("file tools outside the workspace: agent-owned in /home/agent, root's files refused");
   const status = (url: string, extra = "") => `curl -s -o /dev/null -m 15 ${extra} -w '%{http_code}' ${url} || true`;
   const internet = (await run(probes, lease.token, "public", status("https://example.com/"))).output;
   if (internet === "200") log("guest https://example.com: 200 through interception");

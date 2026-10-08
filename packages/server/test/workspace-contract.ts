@@ -83,13 +83,31 @@ export async function workspaceContract(name: string, workspace: Workspace, owne
     await workspace.writeFile(token, `${run}-w4`, path, Buffer.from("edited\n"), { expectedSha: changed.sha256 });
     assert.equal(text((await workspace.readFile(token, path)).content), "edited\n");
 
-    // paths outside the workspace
-    for (const outside of ["../outside", `${dir}/../../outside`, "/etc/passwd"]) {
+    // paths: never with `..`; a relative one is in the workspace, an absolute
+    // one anywhere in the thread's machine but its kernel and device filesystems
+    for (const outside of ["../outside", `${dir}/../../outside`, "/tmp/../etc/passwd"]) {
       await assert.rejects(workspace.readFile(token, outside), code("INVALID_REQUEST"), outside);
       await assert.rejects(workspace.stat(token, outside), code("INVALID_REQUEST"), outside);
       await assert.rejects(workspace.writeFile(token, `${run}-outside`, outside, Buffer.from("x")), code("INVALID_REQUEST"), outside);
     }
+    assert.ok(capabilities.includes("fs.absolute"), `${name}: fs.absolute`);
+    await workspace.writeFile(token, `${run}-abs`, `/workspace/${dir}/abs.txt`, Buffer.from("abs\n"));
+    assert.equal(text((await workspace.readFile(token, `${dir}/abs.txt`)).content), "abs\n", "/workspace is the workspace");
+    for (const machine of [`/home/agent/${run}/portal-runtime/start-portal.sh`, `/tmp/${run}/screens/shot.png`]) {
+      const placed = await workspace.writeFile(token, `${run}-m1-${machine}`, machine, Buffer.from("machine\n"), { createParents: true });
+      assert.equal(text((await workspace.readFile(token, machine)).content), "machine\n", machine);
+      assert.equal((await workspace.stat(token, machine)).sha256, placed.sha256, machine);
+      await workspace.writeFile(token, `${run}-m2-${machine}`, machine, Buffer.from("edited\n"), { expectedSha: placed.sha256 });
+      await assert.rejects(workspace.writeFile(token, `${run}-m3-${machine}`, machine, Buffer.from("stale\n"), { expectedSha: placed.sha256 }), code("PRECONDITION_FAILED"), machine);
+      assert.equal(text((await workspace.readFile(token, machine)).content), "edited\n", machine);
+    }
+    await assert.rejects(workspace.readFile(token, `/tmp/${run}/missing`), code("NOT_FOUND"));
+    for (const pseudo of ["/proc/self/status", "/sys/kernel/hostname", "/dev/null"]) {
+      await assert.rejects(workspace.readFile(token, pseudo), code("INVALID_REQUEST"), pseudo);
+      await assert.rejects(workspace.writeFile(token, `${run}-pseudo-${pseudo}`, pseudo, Buffer.from("x")), code("INVALID_REQUEST"), pseudo);
+    }
     await assert.rejects(workspace.exec(token, `${run}-cwd`, { command: "touch must-not-run", cwd: "..", timeoutMs: 1000 }), code("INVALID_REQUEST"));
+    await assert.rejects(workspace.exec(token, `${run}-cwd-abs`, { command: "touch must-not-run", cwd: "/tmp", timeoutMs: 1000 }), code("INVALID_REQUEST"), "a command's cwd stays in the workspace");
     await assert.rejects(workspace.stat(token, `${dir}/missing`), code("NOT_FOUND"));
     await assert.rejects(workspace.readFile(token, `${dir}/missing`), code("NOT_FOUND"));
 
@@ -133,7 +151,7 @@ export async function workspaceContract(name: string, workspace: Workspace, owne
   } finally {
     await workspace.release(token);
   }
-  console.log(`ok: workspace contract (${name}): lease conflict and expiry, repeated key, expectedSha, cancel, limits, paths outside the workspace`);
+  console.log(`ok: workspace contract (${name}): lease conflict and expiry, repeated key, expectedSha, cancel, limits, workspace and machine paths`);
 }
 
 /** A bare HTTP server over the workspace routes, as cubed mounts them. */

@@ -1,7 +1,7 @@
 /** The thread Workspace over the guest helper in the thread's VM.
  *
- * Workspace semantics (journaled keys, epoch fencing, retained output, paths
- * beneath /workspace) live in the helper; this class checks limits, enforces
+ * Workspace semantics (journaled keys, epoch fencing, retained output, where
+ * a path leads in the machine) live in the helper; this class checks limits, enforces
  * the lease and translates. Every helper operation is idempotent by its key
  * (or read-only), so a transport failure — a gateway restart, a dead SSH
  * master — is retried for a bounded time. When that runs out, a read is
@@ -140,7 +140,7 @@ export class VmWorkspace implements Workspace {
   async readFile(token: string, file: string, options: { offset?: number; limit?: number } = {}): Promise<WorkspaceFile> {
     this.leases.verify(token);
     const limits = await this.require("fs.read");
-    filePath(file, limits);
+    await this.path(file, limits);
     if (options.limit !== undefined && (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > limits.maxReadBytes)) {
       throw invalid(`read limit is at most ${limits.maxReadBytes} bytes`);
     }
@@ -153,7 +153,7 @@ export class VmWorkspace implements Workspace {
   async writeFile(token: string, key: string, file: string, content: Uint8Array, options: WorkspaceWrite = {}): Promise<WorkspaceWriteResult> {
     const { epoch } = this.leases.verify(token);
     const limits = await this.require("fs.write");
-    filePath(file, limits);
+    await this.path(file, limits);
     if (!(content instanceof Uint8Array)) throw invalid("file content must be bytes");
     if (content.length > limits.maxWriteBytes) throw invalid(`file content is at most ${limits.maxWriteBytes} bytes`);
     if (options.expectedSha !== undefined && (typeof options.expectedSha !== "string" || !SHA.test(options.expectedSha))) throw invalid("expectedSha must be a sha256");
@@ -166,7 +166,7 @@ export class VmWorkspace implements Workspace {
   }
   async stat(token: string, file: string): Promise<WorkspaceStat> {
     this.leases.verify(token);
-    filePath(file, await this.require("fs.stat"));
+    await this.path(file, await this.require("fs.stat"));
     const { header } = await this.call("stat", { path: file }, false);
     if (!["file", "directory", "symlink", "other"].includes(String(header.kind)) || !Number.isSafeInteger(header.size)
       || !Number.isSafeInteger(header.mode) || !Number.isSafeInteger(header.modifiedMs)
@@ -205,12 +205,16 @@ export class VmWorkspace implements Workspace {
     return this.description;
   }
 
-  private async require(capability: typeof WORKSPACE_CAPABILITIES[number] | "services.list" | "helper.install" | "portal.configure"): Promise<WorkspaceLimits> {
+  private async require(capability: typeof WORKSPACE_CAPABILITIES[number] | "fs.absolute" | "services.list" | "helper.install" | "portal.configure"): Promise<WorkspaceLimits> {
     const description = await this.describe();
     if (!description.capabilities.includes(capability)) {
       throw new WorkspaceError("OPERATION_UNSUPPORTED", `the thread machine's guest helper lacks ${capability}`);
     }
     return description.limits;
+  }
+  /** A file path for the helper; an absolute one needs a helper that takes it. */
+  private async path(file: string, limits: WorkspaceLimits): Promise<void> {
+    if (filePath(file, limits).startsWith("/")) await this.require("fs.absolute");
   }
   /** Keys are scoped to the thread and its VM. */
   private operationId(key: string): string {

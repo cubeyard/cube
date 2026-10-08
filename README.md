@@ -223,8 +223,9 @@ one. Development checks: [DEVELOPING.md](DEVELOPING.md).
 ## Security and the private network
 
 - **The thread machine is the sandbox.** A thread's commands run as user
-  `agent` (with sudo) inside its QEMU guest. Its files, processes and network
-  are its own; it holds no real credential; its only network is cube's
+  `agent` (with sudo) inside its QEMU guest, and its file tools reach any
+  file in that guest (`/workspace`, `/home/agent`, `/tmp`, …) but never the
+  host's or another thread's. Its files, processes and network are its own; it holds no real credential; its only network is cube's
   gateway, which allows HTTP and HTTPS to public addresses and asks cubed's
   policy about every request. It cannot reach cubed, the runner, your LAN or
   a metadata service.

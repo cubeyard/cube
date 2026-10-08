@@ -70,6 +70,42 @@ if (process.argv[2] === "hold") {
     await assert.rejects(old.workspace.writeFile(oldLease.token, "k", "a", Buffer.from("x")), (error: unknown) =>
       error instanceof WorkspaceError && error.code === "OPERATION_UNSUPPORTED");
     assert.ok(!fs.existsSync(path.join(old.guest.workspace, "a")));
+    // A helper from before absolute paths is asked for none; cubed updates it on attach.
+    const older = open("older", "pi", guest => ({
+      close: () => guest.close(),
+      call: async (op, header, options) => {
+        if (op !== "hello" && typeof header.path === "string" && header.path.startsWith("/")) throw new Error(`${op} ${header.path} reached the helper`);
+        const answer = await guest.call(op, header, options);
+        if (op === "hello") answer.header.capabilities = (answer.header.capabilities as string[]).filter(capability => capability !== "fs.absolute");
+        return answer;
+      },
+    }));
+    const olderLease = await older.workspace.lease({ owner: "pi" });
+    await assert.rejects(older.workspace.writeFile(olderLease.token, "k", "/tmp/a", Buffer.from("x"), { createParents: true }), (error: unknown) =>
+      error instanceof WorkspaceError && error.code === "OPERATION_UNSUPPORTED" && /fs\.absolute/.test(error.message));
+    await assert.rejects(older.workspace.readFile(olderLease.token, "/tmp/a"), (error: unknown) => error instanceof WorkspaceError && error.code === "OPERATION_UNSUPPORTED");
+    assert.equal((await older.workspace.writeFile(olderLease.token, "k2", "a", Buffer.from("x"))).size, 1, "workspace paths still work");
+
+    // Each thread's lease reaches only its own machine: another thread's
+    // token is refused there, and a machine path lands in the writer's machine.
+    const mine = open("mine"), theirs = open("theirs");
+    const myLease = await mine.workspace.lease({ owner: "pi" });
+    const theirLease = await theirs.workspace.lease({ owner: "pi" });
+    await mine.workspace.writeFile(myLease.token, "m", "/home/agent/portal-runtime/start-portal.sh", Buffer.from("mine"), { createParents: true });
+    for (const attempt of [
+      () => theirs.workspace.readFile(myLease.token, "/home/agent/portal-runtime/start-portal.sh"),
+      () => theirs.workspace.writeFile(myLease.token, "t", "/home/agent/portal-runtime/start-portal.sh", Buffer.from("stolen"), { createParents: true }),
+      () => theirs.workspace.stat(myLease.token, "/tmp"),
+    ]) await assert.rejects(attempt(), (error: unknown) => error instanceof WorkspaceError && error.code === "LEASE_STALE");
+    assert.equal(fs.readFileSync(path.join(mine.guest.root, "home/agent/portal-runtime/start-portal.sh"), "utf8"), "mine");
+    assert.ok(!fs.existsSync(path.join(theirs.guest.root, "home/agent/portal-runtime")), "nothing reached the other machine");
+    await assert.rejects(theirs.workspace.readFile(theirLease.token, "/home/agent/portal-runtime/start-portal.sh"), (error: unknown) =>
+      error instanceof WorkspaceError && error.code === "NOT_FOUND", "the other machine has its own /home/agent");
+    // Its own links into the other machine's (or the host's) files lead nowhere.
+    fs.mkdirSync(path.join(theirs.guest.root, "tmp"), { recursive: true });
+    fs.symlinkSync(mine.guest.root, path.join(theirs.guest.root, "tmp/neighbour"));
+    await assert.rejects(theirs.workspace.readFile(theirLease.token, "/tmp/neighbour/home/agent/portal-runtime/start-portal.sh"), (error: unknown) =>
+      error instanceof WorkspaceError && error.code === "INVALID_REQUEST" && /leaves the machine/.test(error.message));
 
     // An unreachable machine: a read is unavailable, a mutation's outcome unknown.
     const gone = open("gone");
@@ -113,7 +149,7 @@ if (process.argv[2] === "hold") {
     assert.ok(next.epoch > taken.epoch);
     sibling.release(next.token);
     assert.throws(() => sibling.acquire("claude-code"), (error: unknown) => error instanceof WorkspaceError && error.code === "CONFLICT", "the owner is fixed for the thread");
-    console.log("ok: workspace lease across processes and instances, routes, incompatible guest, unreachable machine, retried outage");
+    console.log("ok: workspace lease across processes and instances, routes, incompatible guest, older helper without absolute paths, thread machines apart, unreachable machine, retried outage");
   } finally {
     for (const guest of guests) guest.stop();
     for (const store of stores) store.close();
