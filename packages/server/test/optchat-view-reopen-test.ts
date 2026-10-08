@@ -22,7 +22,8 @@ const faux = fauxProvider({ tokensPerSecond: 100_000 });
 faux.setResponses(Array.from({ length: 4_000 }, () => async request => {
   const system = JSON.stringify(request.messages.filter(message => message.role === "system"));
   if (system.includes("You write the memory of OptChat")) return fauxAssistantMessage(`summary ${++compactions} ${"s".repeat(30)}`);
-  const view = blocks(request.messages.find(message => message.role === "user")!)[0]!;
+  const user = blocks(request.messages.find(message => message.role === "user")!);
+  const view = user.slice(0, user.findIndex(block => block.endsWith("</chat>")) + 1).join("");
   assert.match(view, /^<chat>\n/);
   views.push(view);
   return fauxAssistantMessage(`reply ${views.length}`);

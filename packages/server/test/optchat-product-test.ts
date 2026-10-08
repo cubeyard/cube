@@ -108,8 +108,8 @@ try {
   assert.match(reportTurn[0]!, /^<chat>\n0\+1\|user: please count the files in demo\n/, "the report turn sees the view");
   assert.ok(!reportTurn[0]!.includes("not summarized yet"));
 
-  // No task list leads a turn: the view, then the message.
-  assert.equal(reportTurn.length, 2, JSON.stringify(reportTurn));
+  // No task list leads a turn: the view's blocks, then the message.
+  assert.equal(reportTurn.findIndex(block => block.endsWith("</chat>")), reportTurn.length - 2, JSON.stringify(reportTurn));
   assert.ok(!reportTurn.some(block => block.includes("<now>")));
   // The overview: the spawned thread is there without anyone registering
   // it, in its project, with its own run state as cubed records it.

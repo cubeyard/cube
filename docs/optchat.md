@@ -393,18 +393,26 @@ count limits beyond the bounds above.
 
 ## Caching
 
-`optchat-cache.ts` applies spec §8 through pi-ai's published request hooks,
+`optchat-cache.ts` applies spec §3.3 through pi-ai's published request hooks,
 without changing Pi:
 
-- **Pieces.** The view (and the compactor's `<chat>` context, a prefix of
-  the compaction view) is sent as text blocks cut at the last line end before 50,000,
-  80,000 and 100,000 characters. The view leads the turn's first user message.
-  The hook puts the system baseline first; Pi writes it after that message.
-- **Anthropic.** An `onPayload` hook marks every piece but the last and drops
-  pi-ai's system and tool marks, which the first piece covers. pi-ai keeps its
-  mark on the request's last user block. That gives three view marks plus the
-  end mark, Anthropic's maximum of four. A view under 50,000 characters keeps
-  pi-ai's own marks.
+- **Blocks.** The view (and the compactor's `<chat>` context, a prefix of
+  the compaction view) is sent as text blocks of 4 lines; `<chat>` rides with
+  the first and `</chat>` with the 0-3 lines left over. The view leads the
+  turn's first user message. The hook puts the system baseline first; Pi
+  writes it after that message.
+- **Anthropic.** An `onPayload` hook keeps pi-ai's mark on the last system
+  block only (it covers the tools and the OAuth Claude Code block), drops the
+  tool marks and marks the last whole view block. pi-ai keeps its mark on the
+  request's last user block: three marks. Anthropic looks back up to 20
+  blocks from a mark for an earlier entry, so the next turn (up to 80 new
+  lines) reads the view through this one and writes only the lines after it.
+  A view under 4 lines keeps pi-ai's own marks.
+- **Single flight.** A call whose marked prefix (model, tools, system, view
+  through its mark) another call is writing waits in `onPayload` until that
+  call's response starts or the call ends, or until its own abort; so
+  compactions started together on one context pay for its write once. Calls
+  with other prefixes do not wait.
 - **OpenAI / Codex.** Every request carries `sessionId`, which becomes
   `prompt_cache_key` and the `session-id` header. The key is
   `optchat-<uuid>` for the chat and `optchat-<uuid>-compact` for the
@@ -416,7 +424,8 @@ without changing Pi:
 
 `packages/server/test/optchat-cache-test.ts` runs pi-ai's real Anthropic and
 Codex request builders against a captured `fetch` and checks what would be
-sent. Hit rates against a live provider are not measured.
+sent, including the waiting. Hit rates are modelled offline (spec §3.3),
+not measured on a live provider.
 
 ## Configuration
 
