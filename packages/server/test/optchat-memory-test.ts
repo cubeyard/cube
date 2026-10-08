@@ -65,7 +65,7 @@ function drain(memory: Memory, seen: string[][] = []): void {
 
 {
   // Order: messages start while fewer than 8 lines before them are unbuilt,
-  // in order; a merge once both halves are built (optchat-start-rule-test.ts).
+  // in order; a merge once both halves are built (optchat-compaction-view-test.ts).
   const memory = new Memory({ node: 20 });
   for (const text of ["a".repeat(50), "b".repeat(50), "short"]) memory.append({ kind: "user", text, date: 0 });
   assert.deepEqual(memory.ready(new Set(), 8), [{ l: 0, i: 0 }, { l: 0, i: 1 }, { l: 0, i: 2 }], "messages in order, beside each other");

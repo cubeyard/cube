@@ -26,9 +26,10 @@ faux.setResponses(Array.from({ length: 4_000 }, () => async request => {
   assert.match(chat, /^<chat>\n[^]*<\/chat>$/);
   contexts.push(chat.split("\n").slice(1, -1));
   if (parts.at(-1)!.startsWith("Compress this message")) {
+    // Until two have met, each waits up to a second for another to start.
     running++;
     side = Math.max(side, running);
-    await delay(20);
+    for (let k = 0; k < 100 && side < 2; k++) { await delay(10); side = Math.max(side, running); }
     running--;
   }
   return fauxAssistantMessage(`summary ${++compactions} ${"s".repeat(30)}`);

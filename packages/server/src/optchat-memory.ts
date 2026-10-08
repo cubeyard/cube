@@ -221,6 +221,8 @@ export class Memory {
       const { size, merges } = this.shrink(this.view, this.size, this.lower, part => this.lineBytes(part));
       this.size = size;
       this.merged += merges;
+      // At every merge, even of a batch that goes on later: refolding only
+      // once a batch closes would leave lines finer than the view's.
       if (merges) this.refold();
       if (this.size <= this.lower) this.merging = false;
     }
@@ -238,18 +240,21 @@ export class Memory {
   /** Nodes that may be built now, in order. A message's node starts once
    * fewer than UNBUILT lines before it are unbuilt (an unbuilt line is
    * always a message's own, so: unbuilt messages before it, busy ones
-   * included); a merge starts once both its halves are built. */
+   * included); a merge starts once both its halves are built. No message
+   * from `stop` on has started (its unbuilt lines before only ever shrink),
+   * so no merge reaching it can start either: the scan ends there. */
   ready(busy: ReadonlySet<string>, limit: number): Job[] {
     const jobs: Job[] = [];
     const total = this.messages.length;
+    let stop = total;
     for (let l = 0; 2 ** l <= total; l++) {
       while ((this.low[l] ?? 0) * 2 ** l < total && this.built(l, this.low[l] ?? 0)) this.low[l] = (this.low[l] ?? 0) + 1;
       let unbuilt = 0;
-      for (let i = this.low[l] ?? 0; (i + 1) * 2 ** l <= total; i++) {
+      for (let i = this.low[l] ?? 0; (i + 1) * 2 ** l <= stop; i++) {
         if (jobs.length + busy.size >= limit) return jobs;
-        if (l === 0 && unbuilt >= UNBUILT) break;
+        if (l === 0 && unbuilt >= UNBUILT) { stop = i; break; }
         if (this.built(l, i)) continue;
-        unbuilt++;
+        if (l === 0) unbuilt++;
         if (busy.has(key(l, i))) continue;
         if (l > 0 && !(this.built(l - 1, 2 * i) && this.built(l - 1, 2 * i + 1))) continue;
         jobs.push({ l, i });

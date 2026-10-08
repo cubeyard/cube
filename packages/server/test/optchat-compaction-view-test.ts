@@ -74,6 +74,18 @@ assert.equal(UNBUILT, 8);
 }
 
 {
+  // No scan past the first message that cannot start: no merge reaching it
+  // can start either. Two thousand unbuilt messages cost a few lookups.
+  const memory = new Memory({ node: 8 });
+  for (let n = 0; n < 2_000; n++) memory.append({ kind: "user", text: `message ${n} is long`, date: n });
+  let lookups = 0;
+  const built = memory.built.bind(memory);
+  memory.built = (l, i) => { lookups++; return built(l, i); };
+  assert.equal(memory.ready(new Set(), 100).length, 8);
+  assert.ok(lookups < 40, `the scan stops at the 8th unbuilt message (${lookups} lookups)`);
+}
+
+{
   // The sawtooth at its marks, with the chat's view never merging: 8-byte
   // lines ("user: a" and its newline) and 2-byte merged lines.
   const memory = new Memory({ view: 1e9, compaction: 80, compactionLow: 40, node: 512 });
