@@ -295,6 +295,14 @@ export class Memory {
     return `<chat>\n${lines.join("\n")}${lines.length ? "\n" : ""}</chat>`;
   }
 
+  /** The view up to its first unbuilt line, rendered, and the messages its
+   * lines cover: what a thread gets, never a placeholder. */
+  builtView(): { chat: string; messages: number } {
+    const unbuilt = this.view.findIndex(part => !this.built(part.l, part.i));
+    const parts = unbuilt < 0 ? this.view : this.view.slice(0, unbuilt);
+    return { chat: this.render(parts), messages: parts.length ? end(parts.at(-1)!) : 0 };
+  }
+
   /** The `zoom` tool: a line opened into its two halves; n = 1 the whole message. */
   zoom(id: number, n: number): string {
     const total = this.messages.length;

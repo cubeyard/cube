@@ -13,6 +13,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, registerSessionResourceCleanup, type Message } from "@earendil-works/pi-ai";
 import { OptChat, OptChatEvents, TELLS, type OptThreads } from "../src/optchat.ts";
 import { COMPACT, SCALE } from "../src/optchat-compactor.ts";
+import { splitThreadView } from "../src/optchat-thread-view.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 import type { ThreadEvents, ThreadTranscript } from "../src/thread-events.ts";
 
@@ -73,13 +74,14 @@ const model = { provider: faux.getModel().provider, id: faux.getModel().id };
 
 // Fake threads: spawn records the task; a test emits a thread's transcript.
 const spawned: Array<{ task: string; requestId: string }> = [];
+const views: Array<string | undefined> = [];
 const listeners = new Map<string, (transcript: ThreadTranscript) => void | Promise<void>>();
 const told: string[] = [];
 const THREAD = "abcdef12-0000-4000-8000-000000000001";
 const threads: OptThreads = {
   async projects() { inProjects = true; await projectsGate; inProjects = false; return "projects:\ncube (id p1; ready): https://github.com/cubeyard/cube.git@main"; },
   async runners() { return "runners as cubed last heard from them:\n- node-a (id r1)"; },
-  async spawn(task, requestId) { spawned.push({ task: task.task, requestId }); return { id: THREAD, title: task.task.slice(0, 20) }; },
+  async spawn(task, requestId, view) { spawned.push({ task: task.task, requestId }); views.push(view); return { id: THREAD, title: task.task.slice(0, 20) }; },
   async tell(id, text) { if (text === "refused") throw new Error("thread is already working or message is invalid"); told.push(`${id}:${text}`); },
   async describe(ids) { return ids.map(id => `[${id.slice(0, 8)}] cube · ready`).join("\n"); },
   async history() { return null; },
@@ -96,7 +98,7 @@ const threads: OptThreads = {
 };
 
 const directory = path.join(root, "optchat");
-const open = () => OptChat.open({ directory, models, model: async () => model, threads, limits: { node: 64, retryMs: 50, watchMs: 50 } });
+const open = () => OptChat.open({ directory, models, model: async () => model, threads, limits: { node: 64, retryMs: 50, watchMs: 50, threadViewMs: 300 } });
 async function until(check: () => boolean, what: string) {
   for (let k = 0; k < 400 && !check(); k++) await delay(10);
   assert.ok(check(), what);
@@ -128,6 +130,9 @@ try {
   await chat.send(`please fix the gateway; ${"long detail ".repeat(20)}`, "r1");
   await idle(chat);
   assert.deepEqual(spawned, [{ task: "fix the gateway Host check", requestId: "optchat:call-spawn:0" }]);
+  // The thread got the view once the spawning turn's own messages were summaries.
+  assert.match(splitThreadView(`${views[0]}task`).text, /^task$/);
+  assert.match(views[0]!, /\n<chat>\n0\+1\|summary \d+\n1\+1\|talk: starting a thread\n2\+1\|summary \d+\n<\/chat>\n\(the lines cover messages 0 to 2 of the 3 in the chat; taken /);
   await until(() => listeners.has(THREAD), "the spawned thread is watched");
 
   // The thread reports: a new turn starts on its own, with the summarized view.
@@ -284,6 +289,24 @@ try {
   const history = await new (await import("../src/pi-thread-events.ts")).PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => null }).read();
   const users = history.events.filter(event => event.type === "user-message").map(event => event.type === "user-message" ? event.text : "");
   assert.deepEqual(users.map(text => text.slice(0, 20)), ["please fix the gatew", "[abcdef12] ended its turn; nothing of it runs now: done", "go on", "[abcdef12] ended its turn; nothing of it runs now: second", "also note the branch", "and the tag", "prepare", "first", "second", "prompt", "waiting one", "what happened?"].map(text => text.slice(0, 20)), "the transcript keeps every turn");
+
+  // Summaries that lag do not hold a spawn for long: the thread gets the
+  // lines up to the first that is not a summary yet, and says how many.
+  const lagging = gate();
+  compactorGate = lagging.promise;
+  script = [
+    () => fauxAssistantMessage([fauxToolCall("projects", {}, { id: "call-lag-projects" })], { stopReason: "toolUse" }),
+    () => fauxAssistantMessage([fauxToolCall("spawn", { tasks: [{ project: "cube", task: "look" }] }, { id: "call-lag-spawn" })], { stopReason: "toolUse" }),
+    () => fauxAssistantMessage("started"),
+  ];
+  await chat.send("start one", "r-lag");
+  await until(() => script.length === 0, "the spawn ran without its summaries");
+  // Message 30, the projects result, waits for the compactor; 31 is the spawn call.
+  assert.match(views.at(-1)!, /\|user: start one\n29\+1\|tool: projects \{\}\n<\/chat>\n\(the lines cover messages 0 to 29 of the 32 in the chat; /, "up to the first unbuilt line");
+  assert.ok(!views.at(-1)!.includes("not summarized yet"));
+  lagging.open();
+  compactorGate = Promise.resolve();
+  await chat.agent.conversation.waitForIdle(BACKGROUND_CONTEXT);
 
   // Tells to a thread are bounded between two messages of the user (reports
   // do not count as the user's); the user's next message renews them.

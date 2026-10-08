@@ -23,6 +23,7 @@ import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { capText, Memory, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
 import { imageNote } from "./thread-images.ts";
+import { threadViewBlock, threadViewNote } from "./optchat-thread-view.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
 import { PENDING_ID, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
 import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
@@ -34,6 +35,9 @@ const context = BACKGROUND_CONTEXT;
 const log = createLogger("optchat");
 export const JOBS = 8;
 export const RETRY_MS = 10_000;
+/** How long spawn waits for the view to be all summaries before it gives a
+ * thread the lines built so far. */
+export const THREAD_VIEW_MS = 30_000;
 /** How long a thread's machine must keep failing to start before the chat
  * hears of it: cubed's recovery loop retries every 30 s. */
 export const START_GRACE_MS = 2 * 60_000;
@@ -49,8 +53,9 @@ export const MASTER = `You are OptChat, an AI agent that works for one user in a
 never ends. You are the user's interface to cube. You never write code,
 run commands or touch files yourself, and you have no machine: you get
 work done by starting threads. A thread is a coding agent with its own
-virtual machine and a checkout of one project. It does not see this chat,
-so give each one a complete task that stands on its own. Follow the
+virtual machine and a checkout of one project. It gets the view below as
+it is when you start it, as context only, and never sees this chat after
+that, so give each one a complete task that stands on its own. Follow the
 user's instructions at the end of this prompt: they say who the user is,
 how their projects are organized and how they want work done.
 
@@ -145,8 +150,9 @@ export interface OptThreads {
   projects(): Promise<string>;
   /** Each runner's last report (version, platform, machines) and what is unknown, as text. */
   runners(): Promise<string>;
-  /** Starts one thread; the same request id finds the same thread again. */
-  spawn(task: { project: string; task: string; model?: string | undefined }, requestId: string): Promise<{ id: string; title: string }>;
+  /** Starts one thread; the same request id finds the same thread again.
+   * `view`, if given, leads its first message (optchat-thread-view.ts). */
+  spawn(task: { project: string; task: string; model?: string | undefined }, requestId: string, view?: string): Promise<{ id: string; title: string }>;
   /** A message to a thread; refused while it works. */
   tell(id: string, text: string, requestId: string): Promise<void>;
   /** One line per thread: its state and title. */
@@ -206,7 +212,7 @@ const HISTORY_TOOL = 400;
 const HISTORY_ANSWER = 4000;
 
 function historyLine(event: ThreadEvent, cap: number): string {
-  if (event.type === "user-message") return `user: ${capText(event.text, cap)}`;
+  if (event.type === "user-message") return `user: ${event.view ? `(${threadViewNote(event.view)}) ` : ""}${capText(event.text, cap)}`;
   if (event.type === "assistant-text") return `thread: ${capText(event.text, cap)}`;
   const tool = Math.min(cap, HISTORY_TOOL);
   if (event.type === "tool-call") return `tool ${event.name} ${capText(JSON.stringify(event.input ?? {}), tool)}`;
@@ -385,7 +391,7 @@ export type OptChatOptions = {
   /** Work artifacts: the chat writes its own and reads its threads'. */
   artifacts?: Artifacts;
   /** Tests lower these. */
-  limits?: { view?: number; low?: number; node?: number; compaction?: number; compactionLow?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number };
+  limits?: { view?: number; low?: number; node?: number; compaction?: number; compactionLow?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number; threadViewMs?: number };
 };
 
 export class OptChat {
@@ -710,6 +716,21 @@ export class OptChat {
       compaction: flatParts(this.memory.compaction), compactionBatch: this.memory.compactionBatching };
     await this.harness.commit(async tx => { Object.assign(await tx.doc(ViewDoc), view); }, context)
       .catch(error => { if (!this.closing) log.warn("view not stored", { error }); });
+  }
+
+  /** The view block a thread starts with: the view once every line is a
+   * summary, or after THREAD_VIEW_MS its lines up to the first that is not.
+   * undefined for a chat with no summary yet. */
+  private async threadView(): Promise<string | undefined> {
+    await this.sync();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settled = this.waitFor(() => this.memory.settled());
+    // A close after the timeout rejects a wait nobody awaits any more.
+    settled.catch(() => {});
+    await Promise.race([settled, new Promise<void>(resolve => { timer = setTimeout(resolve, this.options.limits?.threadViewMs ?? THREAD_VIEW_MS); })])
+      .finally(() => clearTimeout(timer));
+    const { chat, messages } = this.memory.builtView();
+    return messages ? threadViewBlock(chat, { messages, total: this.memory.length }, new Date()) : undefined;
   }
 
   /** Adds one compactor reply's usage. Best effort: a failed commit loses
@@ -1121,19 +1142,23 @@ export class OptChat {
     });
     const spawn = defineTool({
       name: "spawn",
-      description: "Start one thread per task, in parallel, and answer their ids at once. Each thread is a coding agent with its own machine and a checkout of the project; it does not see this chat. Its report comes back later as a message starting \"[id] \".",
+      description: "Start one thread per task, in parallel, and answer their ids at once. Each thread is a coding agent with its own machine and a checkout of the project. "
+        + "It gets the view of this chat as it is now, as context before its task, and never sees the chat after that; it cannot zoom. Its report comes back later as a message starting \"[id] \".",
       parameters: Type.Object({ tasks: Type.Array(Type.Object({
         project: Type.String({ description: "Project name or id" }),
         task: Type.String({ description: "The whole task, self-contained" }),
         model: Type.Optional(Type.String({ description: "provider/model; default: the host's preferred model" })),
-      }), { minItems: 1 }) }),
+      }), { minItems: 1 }),
+      view: Type.Optional(Type.Boolean({ description: "false: the threads get their task only, not the view (when the chat holds what this project's threads must not see)" })) }),
       // A request id per call and task: a rerun finds the same threads.
       replay: "safe",
       execute: async (args, api, callContext) => {
         const lines: string[] = [];
+        // One view for the call's threads, taken before the first starts.
+        const view = args.view === false ? undefined : await this.threadView();
         for (const [index, task] of args.tasks.entries()) {
           try {
-            const thread = await this.options.threads.spawn(task, `optchat:${api.callId}:${index}`);
+            const thread = await this.options.threads.spawn(task, `optchat:${api.callId}:${index}`, view);
             await api.commit(async tx => { (await tx.doc(SettingsDoc)).threads[thread.id] ??= { at: Date.now() }; }, callContext);
             lines.push(`[${short(thread.id)}] started in ${task.project}: ${thread.title}`);
           } catch (error) {

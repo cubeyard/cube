@@ -181,6 +181,55 @@ background agent's notification); it is checked against the installed
 Claude Code's messages offline only, with a fake `claude`, and a missing
 turn fails its run after the grace instead of waiting.
 
+## The view a thread gets
+
+The spec's subagent "is a fresh call whose first message is the view, then
+its task" (gist revision `3c190e06`, §6; revision `f51fe5c9`, §9, took the
+view "at spawn time (after settle)"). A thread OptChat starts gets that:
+
+- **When.** `spawn` takes one view for all the threads of its call, before
+  the first starts: once every line of the view is a summary (the spawning
+  turn's own messages included, so the user's words that led to it are
+  there), or after `THREAD_VIEW_MS` (30 s) the lines up to the first that is
+  not a summary yet. A thread never sees a placeholder.
+- **Frozen.** The view is stored with the thread's first message in the
+  registry's creation record. Every open of the thread (a restart, a machine
+  that comes back, a resume) sends those bytes under the same request id, so
+  Pi and Claude Code accept it once; later turns of the chat, merges and new
+  views change nothing a thread already has. A later `spawn` takes the view
+  as it is then.
+- **What it holds.** A block before the task:
+  `<optchat-view>`, a fixed guide, the view's lines as `<chat>…</chat>`, then
+  `(the lines cover messages 0 to N of the M in the chat; taken <ISO time>)`
+  and `</optchat-view>`. The guide is fixed and the time comes after the
+  lines, so threads started together share the prefix in the prompt cache.
+  The spec keeps dates out of the view; the time is the snapshot's own. The
+  guide says the view is context only, that the task decides what to do
+  (OptChat may give a thread part of the work), that a line can be asked for
+  by its `id+n` in the report, and that the view covers every project, so
+  nothing of it, nor what it says of other projects, goes into this
+  project's files, commits, pull requests, issues, comments or artifacts.
+  Strings that look like secrets are redacted as `diagnose` redacts them
+  (`vm-diagnostics.ts`).
+- **What it leaves out.** Only the chat's own log is in a view: the user's
+  words, OptChat's replies, tool calls and results, and threads' reports.
+  Another thread's own steps and messages never are, nor images. A thread
+  started from the UI gets no view. `spawn(…, view: false)` starts threads
+  with their task only.
+- **Shown apart.** The transcript adapters (Pi and Claude Code) take the
+  block off the first message: the thread page shows the task with a note
+  `with optchat's view of messages 0–N, taken …`, and `history` shows the
+  same note instead of the lines, so a view never comes back into the chat.
+- **No zoom or date in threads.** A thread cannot open a line. Serving
+  `zoom` into a thread's machine would let it read whole messages of the
+  chat, other projects' included, which the user has not asked for.
+
+`packages/server/test/optchat-thread-view-test.ts` runs it through real
+cubed over local guests: one Pi and one Claude Code (the fake `claude`)
+thread from one spawn, a later spawn, `view: false`, a UI thread in another
+project, `history`, and a restart. `optchat-test.ts` covers the wait that
+gives up and the lines it gives then.
+
 ## Reading a thread
 
 `history(id, before?, limit?)` reads one thread the chat started; any other id
@@ -483,8 +532,10 @@ artifact of a thread it started.
   the round's last tool finishes between the check and the submission, Pi
   places it at the final boundary and it continues that run in the old
   context. The window is the gap between two commits; it is not closed.
-- **Threads are cube threads.** A thread gets OptChat's task and a note that its
-  final reply is the report; it does not get the view, `zoom` or `date`. Each
+- **Threads are cube threads.** A thread gets the view as it was when it
+  started (see "The view a thread gets"), OptChat's task and a note that its
+  final reply is the report; it does not get `zoom`, `date` or later views,
+  and OptChat has no `zoom("Name")` of a thread (`history` reads one). Each
   settled run of a thread reports on its own; reports are not grouped by spawn.
   Only a thread's latest run is observed: if two runs settle while cubed is
   down, only the second is reported. A thread whose machine fails to start

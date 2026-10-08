@@ -317,7 +317,9 @@ the waiting messages; a `beforeRequest` hook puts the rendered view in front of 
 compactor runs beside it in cubed, with cheap model calls that carry no tools
 and no ids, and appends each node as an entry. A spawned thread is created
 through the registry with a request ID derived from the tool call, so a replayed
-`spawn` finds the same thread. Its settled runs come back as `[id] ` messages:
+`spawn` finds the same thread. Its first message starts with the view as it
+was at the spawn, stored in the registry's creation record with the task, so
+every open of the thread sends the same bytes. Its settled runs come back as `[id] ` messages:
 every accepted message waits in a Pi document until Pi has placed it, under its
 own request ID. Its `archive` tool calls the same `Conversations.archive` as
 the UI, for its own threads only, and refuses a working one. Images the user

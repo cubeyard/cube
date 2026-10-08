@@ -15,6 +15,8 @@
  * without a turn of its own), `background-later …` (started in the
  * foreground, then backgrounded by task_updated), `monitor <task_id>` (a
  * backgrounded task of another kind that never notifies).
+ * A leading OptChat view (optchat-thread-view.ts) is not steps: it is
+ * answered with one `say`.
  * FAKE_CLAUDE_LOG names a file that receives one JSON line per start.
  *
  * Every result carries `modelUsage` as Claude Code's does: running totals
@@ -26,6 +28,7 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { WorkspaceClient } from "../../claude-mod/hooks/workspace.ts";
+import { splitThreadView } from "../src/optchat-thread-view.ts";
 import { artifactPath, bash, edit, read, readArtifact, write, writeArtifact, type ToolScope } from "../../claude-mod/hooks/tools.ts";
 import { unixTransport } from "./unix-transport.ts";
 
@@ -146,7 +149,10 @@ async function turn(text: string, prompted = true): Promise<void> {
   current = controller;
   const started = Date.now();
   try {
-    for (const raw of text.split("\n")) {
+    // OptChat's view is context, not steps: named once.
+    const { text: steps, view } = splitThreadView(text);
+    if (view) await say(`read the view of messages 0-${view.messages - 1}`);
+    for (const raw of steps.split("\n")) {
       if (controller.signal.aborted) break;
       let line = raw.trim();
       let id = `toolu_${session.slice(0, 8)}_${process.pid}_${++calls}`;

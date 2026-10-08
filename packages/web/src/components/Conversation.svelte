@@ -376,6 +376,7 @@
           {:else if row.kind === "user"}
             <article class="conversation-message user" class:sending={row.sending} aria-label="user message">
               <span class="message-label">you{#if row.sending}<span class="message-sending"> · sending</span>{/if}</span>
+              {#if row.view}<span class="message-view">with optchat's view of messages 0–{row.view.messages - 1}{row.view.messages < row.view.total ? ` of ${row.view.total}` : ""}, taken {new Date(row.view.taken).toLocaleString()}</span>{/if}
               {#if row.images}{@render messageImages(row.images, "")}{/if}
               {#if row.text}<div class="message-copy">{row.text}</div>{/if}
             </article>

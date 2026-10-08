@@ -39,6 +39,9 @@ assert.deepEqual(report, [
   { kind: "user", id: "1", text: "done: PR #212", from: "abcdef12" },
   { kind: "user", id: "2", text: "[abcdef12] typed by the user" },
 ], "a thread's report is the thread's; the user's own text stays theirs");
+const view = { messages: 30, total: 32, taken: "2026-10-08T21:30:00.000Z" };
+assert.deepEqual(transcriptRows({ events: [{ type: "user-message", id: "1", text: "the task", view }], status: status("idle") }),
+  [{ kind: "user", id: "1", text: "the task", view }], "the view a first message carried rides beside its task");
 
 // A strip the reader opened stays open while the run streams on: every frame
 // is a new row object, and a streamed call is renumbered once it is saved.

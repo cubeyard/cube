@@ -263,6 +263,23 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.equal(await visible(page, ".thread-navigation .nav-menu-key"), false);
   });
 
+  for (const [size, name] of [[phone, "375x667"], [{ width: 1280, height: 800, touch: false }, "1280x800"]] as const) {
+    await scenario(browser, engine, "a thread started by optchat names the view it got above its task, never its lines", size, "t/t1", async (page, host) => {
+      const view = { messages: 30, total: 32, taken: "2026-10-08T21:30:00.000Z" };
+      host.transcript = { ...host.transcript, events: [{ type: "user-message", id: "v", text: "count the files in alpha", view }, ...events] };
+      await page.reload();
+      const first = page.locator(".conversation-message.user").first();
+      await first.getByText("count the files in alpha").waitFor();
+      const note = await first.locator(".message-view").textContent();
+      assert.equal(note, `with optchat's view of messages 0–29 of 32, taken ${await page.evaluate(taken => new Date(taken).toLocaleString(), view.taken)}`);
+      assert.equal(await first.locator(".message-copy").textContent(), "count the files in alpha", "the task is the message");
+      assert.ok((await box(page, ".conversation-message.user .message-view")).bottom <= (await box(page, ".conversation-message.user .message-copy")).top, "the note sits above the task");
+      await assertNoSideways(page);
+      await first.scrollIntoViewIfNeeded();
+      await shoot(page, engine, `thread-view-${name}`);
+    });
+  }
+
   await scenario(browser, engine, "a thread's failure stays in print with the details folded", phone, "t/t1", async page => {
     assert.ok(await visible(page, ".thread-pane .strip-state.error"), "the error label shows");
     assert.equal(await visible(page, ".strip-model"), false, "the rest stays folded");

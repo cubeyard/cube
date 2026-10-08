@@ -3,6 +3,7 @@
  * same `ThreadTranscript` the Pi adapter produces. Subagent internals
  * (messages with a parent tool use) stay inside their Agent tool call. */
 import type { ClaudeAgent, ClaudeState, ClaudeSubmission } from "./claude-agent.ts";
+import { splitThreadView } from "./optchat-thread-view.ts";
 import type { MessageImage, ThreadAgent, ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
 import { imageNote, shownImage, THREAD_IMAGE_LIMITS } from "./thread-images.ts";
 
@@ -72,7 +73,7 @@ export function render(state: ClaudeState, owner: ThreadAgent | null, failure: s
   return { agent: "claude-code", owner, status: status(current, failure, state.waiting), events };
 }
 
-export const submissionEvent = (submission: Pick<ClaudeSubmission, "seq" | "text">): ThreadEvent => ({ type: "user-message", id: `s${submission.seq}`, text: submission.text });
+export const submissionEvent = (submission: Pick<ClaudeSubmission, "seq" | "text">): ThreadEvent => ({ type: "user-message", id: `s${submission.seq}`, ...splitThreadView(submission.text) });
 
 /** The events of one stored stream-json message. `names` maps tool use ids
  * to tool names: the message's calls are added, its results look up the

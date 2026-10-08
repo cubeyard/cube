@@ -50,6 +50,7 @@ OFFLINE_TESTS=(
   packages/server/test/optchat-hooks-test.ts
   packages/server/test/optchat-media-test.ts
   packages/server/test/optchat-start-test.ts
+  packages/server/test/optchat-thread-view-test.ts
   packages/server/test/optchat-events-test.ts
   packages/server/test/settings-test.ts
   packages/server/test/claude-agent-test.ts

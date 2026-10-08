@@ -38,7 +38,7 @@ export interface ProjectInput {
   /** A hook not given keeps its saved script. */
   hooks?: { preSetup?: string; preResume?: string };
 }
-export type { MessageImage, ThreadEvent, ThreadStatus, ThreadTranscript } from "../../../server/src/thread-events.ts";
+export type { MessageImage, ThreadEvent, ThreadStatus, ThreadTranscript, ThreadView } from "../../../server/src/thread-events.ts";
 export type { SubjectUsage, UsageLine } from "../../../server/src/usage.ts";
 export type { UsageReport } from "../../../server/src/usage-service.ts";
 export type { OverviewThread, ThreadOverview } from "../../../server/src/optchat-overview.ts";

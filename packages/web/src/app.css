@@ -968,6 +968,11 @@ header .spacer { margin-left: auto; }
   color: var(--ink-3); font-size: 10px; font-weight: 550;
   letter-spacing: 0.08em;
 }
+/* the optchat view a thread's first message carried: named, never shown */
+.message-view {
+  display: block; margin-bottom: 0.35rem;
+  color: var(--ink-3); font-size: 12px; overflow-wrap: anywhere;
+}
 .message-copy {
   white-space: pre-wrap; overflow-wrap: anywhere;
   font-size: 15.5px; line-height: 1.6;

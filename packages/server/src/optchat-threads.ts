@@ -59,7 +59,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
     async runners() {
       return describeRunners(options.runners());
     },
-    async spawn(task, requestId) {
+    async spawn(task, requestId, view) {
       const project = registry.listProjects().find(candidate => candidate.id === task.project)
         ?? registry.listProjects().find(candidate => candidate.name.toLowerCase() === task.project.toLowerCase());
       if (!project) throw new Error(`no project ${task.project}`);
@@ -71,7 +71,9 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         ? models.find(candidate => `${candidate.provider}/${candidate.id}` === task.model)
         : preferredModel(models);
       if (!model) throw new Error(task.model ? `model ${task.model} unavailable` : "connect a model provider first");
-      const text = `${task.task}\n\n${THREAD_NOTE}`;
+      // The view is stored with the first message: every open of the thread
+      // sends these bytes, whatever the chat holds by then.
+      const text = `${view ?? ""}${task.task}\n\n${THREAD_NOTE}`;
       let thread = registry.createThread(project.id, requestId, model, text, model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi",
         await options.latestCommits(project.id));
       // The title comes from the task alone, unless the user renamed it since.

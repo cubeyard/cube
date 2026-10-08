@@ -1,11 +1,12 @@
-import type { MessageImage, ThreadTranscript } from "./types.ts";
+import type { MessageImage, ThreadTranscript, ThreadView } from "./types.ts";
 
 /** One rendered row of a thread transcript. A tool call and its result
  * share one row. */
 export type TranscriptRow =
   /** `from`: a thread's report (its short id), shown as the thread's, without the "[id] " prefix.
-   * `sending`: the user's own message, not yet in the transcript. */
-  | { kind: "user"; id: string; text: string; from?: string; images?: MessageImage[]; sending?: boolean }
+   * `sending`: the user's own message, not yet in the transcript.
+   * `view`: the OptChat view the message started with, shown as a note. */
+  | { kind: "user"; id: string; text: string; from?: string; images?: MessageImage[]; sending?: boolean; view?: ThreadView }
   /** `pictures`: the images the text names by path (`![alt](path)`) that
    * the thread read before it, by the normalized path (`picturePath`). */
   | { kind: "assistant"; id: string; text: string; reasoning: boolean; labelled: boolean; pictures?: Record<string, MessageImage> }
@@ -35,7 +36,8 @@ export function transcriptRows(transcript: Pick<ThreadTranscript, "events" | "st
     if (event.type === "user-message") {
       const from = event.from;
       const images = event.images?.length ? { images: event.images } : {};
-      rows.push(from ? { kind: "user", id: event.id, text: event.text.replace(`[${from}] `, ""), from } : { kind: "user", id: event.id, text: event.text, ...images });
+      const view = event.view ? { view: event.view } : {};
+      rows.push(from ? { kind: "user", id: event.id, text: event.text.replace(`[${from}] `, ""), from } : { kind: "user", id: event.id, text: event.text, ...images, ...view });
     }
     else if (event.type === "assistant-text") {
       const pictures = picturesOf(event.text, read);

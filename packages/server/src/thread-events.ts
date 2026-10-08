@@ -14,14 +14,20 @@ export type ThreadAgent = "pi" | "claude-code";
  * in the thread's store (thread-images.ts). Events never carry the bytes. */
 export type MessageImage = { id: string; mimeType: string };
 
+/** The OptChat view a thread's first message carried (optchat-thread-view.ts):
+ * its lines cover messages 0 to `messages` - 1 of the `total` the chat had
+ * when it was taken, at `taken` (ISO). */
+export type ThreadView = { messages: number; total: number; taken: string };
+
 /** One thing a thread shows, in transcript order. `id` is stable across
  * frames for committed events; an event still streaming (`final: false`) gets
  * a new id once committed, and so does a user message the host accepted but
  * has not put in its log yet (its id starts with `PENDING_ID`). */
 export type ThreadEvent =
   /** `from` marks a report from a thread the chat started: its short id.
-   * `images`: the images attached to the message, if any. */
-  | { type: "user-message"; id: string; text: string; from?: string; images?: MessageImage[] }
+   * `images`: the images attached to the message, if any. `view`: the
+   * OptChat view the message started with, left out of `text`. */
+  | { type: "user-message"; id: string; text: string; from?: string; images?: MessageImage[]; view?: ThreadView }
   /** Assistant text; `reasoning` marks the model's visible thinking. */
   | { type: "assistant-text"; id: string; text: string; reasoning: boolean; final: boolean }
   /** A tool call; its result, if any, carries the same `callId`. */

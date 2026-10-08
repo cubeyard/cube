@@ -5,6 +5,7 @@ import type { AssistantMessage, ImageContent, Message, TextContent } from "@eare
 import { ROOT_CONVERSATION_ID, type ConversationView, type EntryRecord, type Storage, type SubmissionRecord, type ToolSlot } from "@earendil-works/pi-durable";
 import type { Agent } from "./durable-agent.ts";
 import { mediaId } from "./optchat-media.ts";
+import { splitThreadView } from "./optchat-thread-view.ts";
 import { imageNote, shownImage, THREAD_IMAGE_LIMITS } from "./thread-images.ts";
 import type { MessageImage, ThreadAgent, ThreadEvent, ThreadEvents, ThreadStatus, ThreadTranscript, ThreadWatch } from "./thread-events.ts";
 
@@ -129,9 +130,9 @@ export function entryEvents(entries: readonly EntryRecord[]): ThreadEvent[] {
 
 function messageEvents(message: Message, id: string): ThreadEvent[] {
   if (message.role === "user") {
-    if (typeof message.content === "string") return [{ type: "user-message", id, text: message.content }];
+    if (typeof message.content === "string") return [{ type: "user-message", id, ...splitThreadView(message.content) }];
     const { text, images } = partsOf(id, message.content, part => part);
-    return [{ type: "user-message", id, text, ...images.length ? { images } : {} }];
+    return [{ type: "user-message", id, ...splitThreadView(text), ...images.length ? { images } : {} }];
   }
   if (message.role === "assistant") return assistantEvents(message, id, true);
   if (message.role !== "toolResult") return [];
