@@ -35,7 +35,8 @@ export type ProjectStatus = Project["status"];
 export interface ProjectInput {
   name: string;
   repositories: Array<{ url: string; base?: string | null; checkoutName?: string }>;
-  hooks?: { preSetup: string; preResume: string };
+  /** A hook not given keeps its saved script. */
+  hooks?: { preSetup?: string; preResume?: string };
 }
 export type { MessageImage, ThreadEvent, ThreadStatus, ThreadTranscript } from "../../../server/src/thread-events.ts";
 export type { SubjectUsage, UsageLine } from "../../../server/src/usage.ts";

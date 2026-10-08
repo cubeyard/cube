@@ -66,15 +66,20 @@ export function vmMac(vmId: string, digest: (data: string) => Buffer): string {
   return `02:${[...digest(vmId).subarray(0, 5)].map(byte => byte.toString(16).padStart(2, "0")).join(":")}`;
 }
 
+/** A hook's script as its machine's file holds it: bash without a #! line, ending in a newline. */
+export function hookFileContent(script: string): string {
+  // Runs as the agent's account, like `.agents/setup`; without a #! line bash runs it.
+  const content = script.startsWith("#!") ? script : `#!/bin/bash\n${script}`;
+  return content.endsWith("\n") ? content : `${content}\n`;
+}
+
 function hookFiles(hooks: ProjectHooks | undefined): Array<Record<string, unknown>> {
   return (["preSetup", "preResume"] as const).flatMap(name => {
     const script = hooks?.[name] ?? "";
     if (!script.trim()) return [];
     const file = name === "preSetup" ? "pre-setup" : "pre-resume";
-    // Runs as the agent's account, like `.agents/setup`; without a #! line bash runs it.
-    const content = script.startsWith("#!") ? script : `#!/bin/bash\n${script}`;
     return [{ path: `${GUEST_HOOKS_DIRECTORY}/${file}`, permissions: "0755", owner: "root:root", encoding: "gz+b64",
-      content: gzipSync(Buffer.from(content.endsWith("\n") ? content : `${content}\n`)).toString("base64") }];
+      content: gzipSync(Buffer.from(hookFileContent(script))).toString("base64") }];
   });
 }
 

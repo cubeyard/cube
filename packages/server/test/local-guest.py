@@ -6,6 +6,7 @@ launcher; this file injects the other one.
   local-guest.py ROOT call OP        one helper request on stdin/stdout
   local-guest.py ROOT supervise ID MS  (internal) stands in for the unit
   local-guest.py ROOT cli service ...  the agent's `cube` command
+                                       (hooks in ROOT/hooks, their logs in ROOT/home/.cache/cube)
 """
 import importlib.util
 import os
@@ -143,7 +144,8 @@ def configure(root):
     guest.configure(root=root, state=os.path.join(root, "state"), workspace=os.path.join(root, "workspace"),
                     env_file=os.path.join(root, "env"), user=None, ready_files=[], commands=[], launcher=ProcessLauncher(root),
                     helper=os.path.join(root, "cube-guest"), cli=os.path.join(root, "bin", "cube"),
-                    portal_file=os.path.join(root, "portal.json"), services=ProcessServices(root), service_host="127.0.0.1")
+                    portal_file=os.path.join(root, "portal.json"), services=ProcessServices(root), service_host="127.0.0.1",
+                    hooks_dir=os.path.join(root, "hooks"), hook_logs=os.path.join(root, "home", ".cache", "cube"))
 
 
 def supervise(root, op_id, timeout_ms):

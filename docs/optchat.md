@@ -10,7 +10,10 @@ its threads (`history`), diagnoses the machine of one that does not start
 (`diagnose`: read only; see docs/runner-operations.md, "Diagnosing a machine
 that does not start"), archives its threads that are done to free their
 machines (`archive`), reads usage and estimated cost (`usage`: everything,
-a project or a thread; read-only, see [usage.md](usage.md)), writes work
+a project or a thread; read-only, see [usage.md](usage.md)), reads and
+saves a project's external hooks in cube's projects (`project_hooks`,
+`project_hooks_write`, the project named explicitly; see
+[project-hooks.md](project-hooks.md)), writes work
 artifacts and reads its own and its threads' (`artifact_write`,
 `artifact_read`; see [artifacts.md](artifacts.md)) and reads its own
 memory (`zoom`, `date`). It keeps no task list: the chat page shows its

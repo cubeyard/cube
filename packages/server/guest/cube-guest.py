@@ -22,7 +22,8 @@ is a shim that runs `cube-guest cli`): `cube service` runs the agent's web
 servers as supervised systemd services, outside the transient unit of the
 command that started them, and registers their port for cubed's portal.
 cubed reads the registrations with the `services` operation; nothing in the
-guest calls cubed.
+guest calls cubed. `cube hooks` shows the hooks this machine runs and their
+last outcomes and logs, read only, from files in this machine.
 
 File operations take a path relative to /workspace or an absolute path in
 this machine. Inside the workspace they act as root and give what they
@@ -236,6 +237,10 @@ class Config:
         # The address cubed's portal reaches services on; None: this machine's
         # address on the gateway's LAN.
         self.service_host = None
+        # The project's external hooks (from the seed) and the hook logs
+        # (None: ~/.cache/cube of `user`, the account the hooks run as).
+        self.hooks_dir = "/etc/cube/hooks"
+        self.hook_logs = None
 
 
 CONFIG = Config()
@@ -930,6 +935,7 @@ def service_run(name):
 # --- the `cube` command --------------------------------------------------
 
 CLI_USAGE = """usage: cube service <command> [options]
+       cube hooks [-n LINES] [--json]
 
 Runs web servers in this machine as supervised services that outlive the
 command that started them, and opens them in cube's portal.
@@ -946,12 +952,36 @@ command that started them, and opens them in cube's portal.
   cube service restart NAME [--wait SECONDS] [--json]
   cube service stop NAME [--json]
       stop the service and remove it from the portal
+  cube hooks [-n LINES] [--json]
+      the hooks this machine runs, their last outcomes and logs (read only;
+      cube hooks --help)
 
 A service gets PORT and HOST=0.0.0.0 in its environment and must listen on
 0.0.0.0 (or this machine's address), not only on 127.0.0.1: the portal
 reaches it over the machine's network. Ports 1024-65535; plain HTTP and
 WebSocket. NAME is 1-24 lowercase letters, digits and dashes.
 """
+
+
+HOOKS_USAGE = """usage: cube hooks [-n LINES] [--json]
+
+Shows the hooks this machine runs, read only: the project's external
+pre-setup and pre-resume hooks (set in cube's projects, written to
+/etc/cube/hooks when this machine was made) and the repository's
+.agents/setup and .agents/resume, each with its last outcome in this
+machine and the last LINES lines of its log (default 20, at most 200).
+
+Order: pre-setup, then .agents/setup (only if pre-setup succeeded), once
+when the machine is prepared; pre-resume, then .agents/resume, on every
+boot. All run as agent in /workspace. A thread cannot change the project's
+hooks: the user changes them in cube's projects, or asks OptChat
+(project_hooks_write). New threads use the hooks saved when they start.
+"""
+
+# name, where the script is, its log: the order they run in.
+HOOKS = (("pre-setup", "external", "pre-setup.log"), ("setup", ".agents/setup", "setup.log"),
+         ("pre-resume", "external", "pre-resume.log"), ("resume", ".agents/resume", "resume.log"))
+HOOK_STATUS = re.compile(r"^(ok|absent|skipped|notrun|failed:(\d+)) (\d+) (\d+)$")
 
 
 class Usage(Exception):
@@ -1246,6 +1276,74 @@ def cli_service(args, caller_cwd):
     raise Usage("unknown command %s (start, open, list, status, logs, restart, stop)" % command)
 
 
+def hook_logs():
+    if CONFIG.hook_logs:
+        return CONFIG.hook_logs
+    owner = account()
+    return os.path.join(owner[2] if owner else os.path.expanduser("~"), ".cache", "cube")
+
+
+def tail_lines(target, lines):
+    """The last `lines` lines of a file, at most 64 KiB of it."""
+    try:
+        with open(target, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 65536))
+            text = handle.read().decode(errors="replace")
+    except OSError:
+        return None
+    return "\n".join(text.splitlines()[-lines:]) if lines else ""
+
+
+def hook_view(name, source, log, lines):
+    script = os.path.join(CONFIG.hooks_dir, name) if source == "external" else os.path.join(CONFIG.workspace, source)
+    view = {"name": name, "source": "project" if source == "external" else "repository", "path": script,
+            "present": os.access(script, os.X_OK) and os.path.isfile(script), "log": os.path.join(hook_logs(), log)}
+    if view["present"]:
+        view["bytes"] = os.path.getsize(script)
+        view["sha256"] = sha256_file(script)
+    status = tail_lines(os.path.join(hook_logs(), name + ".status"), 1)
+    match = HOOK_STATUS.match((status or "").strip())
+    view["last"] = None if not match else {
+        "status": "failed" if match.group(1).startswith("failed") else match.group(1),
+        "exitCode": int(match.group(2)) if match.group(2) else None,
+        "ms": int(match.group(3)), "endedAt": int(match.group(4))}
+    view["logTail"] = tail_lines(view["log"], lines)
+    return view
+
+
+def describe_hook(view):
+    script = ("%s, %d bytes, sha256 %s" % (view["path"], view["bytes"], view["sha256"])) if view["present"] else "none (%s)" % view["path"]
+    last = view["last"]
+    outcome = "no outcome recorded in this machine" if not last else "%s%s, %.1f s, %s" % (
+        last["status"], " (exit %d)" % last["exitCode"] if last["exitCode"] is not None else "", last["ms"] / 1000.0,
+        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last["endedAt"] / 1000.0)))
+    lines = ["%s (%s hook): %s" % (view["name"], view["source"], script), "  last: %s" % outcome]
+    if view["logTail"] is None:
+        lines.append("  log: none (%s)" % view["log"])
+    elif view["logTail"]:
+        lines.append("  log %s, last lines:" % view["log"])
+        lines.append(indent(indent(view["logTail"])))
+    return "\n".join(lines)
+
+
+def cli_hooks(args):
+    if args[:1] in (["-h"], ["--help"], ["help"]):
+        sys.stdout.write(HOOKS_USAGE)
+        return 0
+    options, positionals, rest = cli_options(args, {"--json"}, {"-n", "--lines"})
+    if positionals or rest is not None:
+        raise Usage("hooks takes no arguments")
+    raw = options.get("-n", options.get("--lines", "20"))
+    if not (raw.isascii() and raw.isdigit()) or int(raw) > 200:
+        raise Usage("-n is 0-200 lines")
+    views = [hook_view(name, source, log, int(raw)) for name, source, log in HOOKS]
+    Out("--json" in options).result({"hooks": views}, "\n".join(describe_hook(view) for view in views)
+                                    + "\n\nthe project's hooks are changed in cube's projects, not here; see cube hooks --help")
+    return 0
+
+
 def cli(argv):
     """`cube ...`, run by the agent. Units and the registry need root, which
     the agent has through sudo; the caller's directory travels along."""
@@ -1261,6 +1359,13 @@ def cli(argv):
     if argv[0] == "--version":
         sys.stdout.write("cube (cube-guest %s, build %s)\n" % (VERSION, (build() or "unknown")[:12]))
         return 0
+    if argv[0] == "hooks":
+        # Read only, as the caller: the hooks and their logs are the agent's to read.
+        try:
+            return cli_hooks(argv[1:])
+        except Usage as problem:
+            sys.stderr.write("cube hooks: %s\n" % problem)
+            return 2
     if argv[0] != "service":
         sys.stderr.write("cube: unknown command %s\n%s" % (argv[0], CLI_USAGE))
         return 2

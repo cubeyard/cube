@@ -10,6 +10,7 @@ import net from "node:net";
 import { encodeGuestRequest, runGuestProcess, type GuestAnswer, type GuestCallOptions, type GuestOp, type GuestTransport } from "../src/guest-ssh.ts";
 import type { StartOptions, ThreadMachines } from "../src/vm.ts";
 import type { Thread } from "../src/registry.ts";
+import { hookFileContent } from "../src/vm-seed.ts";
 
 const LAUNCHER = path.join(import.meta.dirname, "local-guest.py");
 
@@ -79,7 +80,7 @@ export class LocalMachines implements ThreadMachines {
     const hooks = path.join(guest.root, "hooks");
     fs.mkdirSync(hooks, { recursive: true });
     for (const [name, script] of [["pre-setup", thread.allocation.hooks?.preSetup], ["pre-resume", thread.allocation.hooks?.preResume]] as const) {
-      if (script?.trim()) fs.writeFileSync(path.join(hooks, name), script.startsWith("#!") ? script : `#!/bin/bash\n${script}`, { mode: 0o755 });
+      if (script?.trim()) fs.writeFileSync(path.join(hooks, name), hookFileContent(script), { mode: 0o755 });
     }
     fs.writeFileSync(path.join(guest.root, "env"), `CUBE_HOOKS=${hooks}\nCUBE_RUN=${path.join(guest.root, "run")}\nHOME=${path.join(guest.root, "home")}\n`);
     return { booted: fresh };

@@ -410,6 +410,9 @@ export async function createCubed(options: {
     const current = registry.getProject(project.id);
     if (!current) throw new Error("project was deleted during check");
     if (current.revision !== project.revision) return projectView(current);
+    // Hooks saved on their own during the check (project_hooks_write) stay.
+    project.hooks = current.hooks;
+    project.hooksUpdatedAt = current.hooksUpdatedAt;
     registry.saveProject(project);
     return projectView(project);
   }
@@ -569,12 +572,14 @@ export async function createCubed(options: {
           const previous = id ? registry.getProject(id) : null;
           if (id && !previous) return json({ error: "project not found" }, 404);
           const projectId = id ?? randomUUID();
+          const hooks = projectHooks(body.hooks, previous?.hooks ?? NO_HOOKS);
+          const hooksChanged = hooks.preSetup !== (previous?.hooks?.preSetup ?? "") || hooks.preResume !== (previous?.hooks?.preResume ?? "");
           if (!Array.isArray(body.repositories) || body.repositories.length > 20) throw new Error("repositories must be an array of at most 20 entries");
           const checkoutNames = new Set<string>();
           const project: Project = { id: projectId, name: text("name"), status: "checking", error: null,
             revision: (previous?.revision ?? 0) + 1, checkedAt: null, createdAt: previous?.createdAt ?? Date.now(), updatedAt: Date.now(),
             // New threads use these; a changed pre-setup also means a new template.
-            hooks: projectHooks(body.hooks, previous?.hooks ?? NO_HOOKS),
+            hooks, ...hooksChanged ? { hooksUpdatedAt: Date.now() } : previous?.hooksUpdatedAt ? { hooksUpdatedAt: previous.hooksUpdatedAt } : {},
             repositories: body.repositories.map((item, position) => {
               if (!item || typeof item !== "object" || typeof item.url !== "string" || item.url.length > 2048 ||
                 (item.base != null && (typeof item.base !== "string" || !item.base.trim())) ||

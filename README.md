@@ -276,6 +276,8 @@ requires one writable owner.
 - [docs/cubed-updates.md](docs/cubed-updates.md): signed releases, the managed
   launcher and its user service, browser updates.
 - [docs/optchat.md](docs/optchat.md), [docs/artifacts.md](docs/artifacts.md),
-  [docs/services.md](docs/services.md), [docs/usage.md](docs/usage.md).
+  [docs/services.md](docs/services.md), [docs/usage.md](docs/usage.md),
+  [docs/project-hooks.md](docs/project-hooks.md) (a project's pre-setup and
+  pre-resume hooks: the project page, OptChat, `cube hooks`).
 - [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md). Apache-2.0;
   dependencies retain their [notices](THIRD_PARTY_NOTICES.md).

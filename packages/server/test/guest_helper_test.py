@@ -622,6 +622,38 @@ class ServicesTest(unittest.TestCase):
         self.assertEqual(call("hello", {})[0]["build"], digest)
         self.assertEqual(call("install", {"sha256": digest}, source)[0], {"build": digest})
 
+    def test_hooks_reads_what_this_machine_has(self):
+        hooks, logs = os.path.join(self.root, "hooks"), os.path.join(self.root, "logs")
+        guest.configure(hooks_dir=hooks, hook_logs=logs)
+        try:
+            code, out, _ = self.cube("hooks")
+            self.assertEqual(code, 0)
+            self.assertIn("pre-setup (project hook): none (%s/pre-setup)" % hooks, out)
+            self.assertIn("no outcome recorded in this machine", out)
+            self.assertIn("changed in cube's projects, not here", out)
+            os.makedirs(hooks)
+            os.makedirs(logs)
+            with open(os.path.join(hooks, "pre-resume"), "w") as handle:
+                handle.write("#!/bin/bash\necho hi\n")
+            os.chmod(os.path.join(hooks, "pre-resume"), 0o755)
+            with open(os.path.join(logs, "pre-resume.status"), "w") as handle:
+                handle.write("failed:3 1500 1700000000000\n")
+            with open(os.path.join(logs, "pre-resume.log"), "w") as handle:
+                handle.write("".join("line %d\n" % n for n in range(300)))
+            code, out, _ = self.cube("hooks", "--json", "-n", "2")
+            views = {view["name"]: view for view in json.loads(out)["hooks"]}
+            self.assertEqual([view["name"] for view in json.loads(out)["hooks"]], ["pre-setup", "setup", "pre-resume", "resume"])
+            self.assertEqual(views["pre-resume"]["last"], {"status": "failed", "exitCode": 3, "ms": 1500, "endedAt": 1700000000000})
+            self.assertEqual(views["pre-resume"]["logTail"], "line 298\nline 299")
+            self.assertEqual(views["pre-resume"]["sha256"], hashlib.sha256(b"#!/bin/bash\necho hi\n").hexdigest())
+            self.assertFalse(views["pre-setup"]["present"])
+            self.assertIsNone(views["setup"]["logTail"])
+            for argv in (["hooks", "set", "x"], ["hooks", "-n", "201"], ["hooks", "-n", "\u00b2"], ["hooks", "--timeout", "5"], ["hooks", "--", "x"]):
+                self.assertEqual(self.cube(*argv)[0], 2, argv)
+            self.assertEqual(self.cube("hooks", "--help")[0], 0)
+        finally:
+            guest.configure(hooks_dir="/etc/cube/hooks", hook_logs=None)
+
     def test_portal_settings_are_checked(self):
         for portal in [{"urlTemplate": "https://{name}-x.example/"}, {"urlTemplate": "http://evil/{name}"}, {}, None,
                        {"urlTemplate": "http://{name}-x.example/\n"}]:

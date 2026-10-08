@@ -61,6 +61,8 @@ export interface Project {
   repositories: ProjectRepository[];
   /** Absent: no hooks (projects saved before hooks existed). */
   hooks?: ProjectHooks;
+  /** When the hooks last changed; absent: not since this was recorded. */
+  hooksUpdatedAt?: number;
 }
 export interface Runner extends NodeBinding {
   configPath: string; configHash: string;
@@ -261,6 +263,23 @@ export class Registry {
   listProjects(): Project[] { return this.db.prepare("SELECT data FROM project").all().map(row => this.parse<Project>(row)!); }
   saveProject(project: Project): void {
     this.db.prepare("INSERT INTO project VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(project.id, JSON.stringify(project));
+  }
+  /** Replaces only the project's hooks (project-hooks.ts), in one
+   * transaction, if they differ; its repositories, revision and check stay
+   * as they are. */
+  saveProjectHooks(id: string, hooks: ProjectHooks): Project {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const project = this.getProject(id);
+      if (!project) throw new Error("project not found");
+      if ((project.hooks?.preSetup ?? "") !== hooks.preSetup || (project.hooks?.preResume ?? "") !== hooks.preResume) {
+        const now = Date.now();
+        this.saveProject({ ...project, hooks: { preSetup: hooks.preSetup, preResume: hooks.preResume }, updatedAt: now, hooksUpdatedAt: now });
+      }
+      this.db.exec("COMMIT");
+      // What the registry now holds, read again.
+      return this.getProject(id)!;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   deleteProject(id: string): void {
     if (this.db.prepare("SELECT 1 FROM thread WHERE project_id=?").get(id)) throw new Error("project still has retained thread history");

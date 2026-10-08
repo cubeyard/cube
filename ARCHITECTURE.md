@@ -495,8 +495,9 @@ and gateway communication, not browser users.
 ## Machine templates and hooks
 
 **Hooks.** A project has two optional external hooks (`hooks.preSetup`,
-`hooks.preResume`, at most 16 KiB each, edited on the project page and kept in
-the project record). A thread captures them at creation, like its pinned
+`hooks.preResume`, at most 16 KiB each, kept in the project record, edited on
+the project page or by OptChat's `project_hooks_write`; threads read the ones
+their machine runs with `cube hooks`; see docs/project-hooks.md). A thread captures them at creation, like its pinned
 commits, and its machine's seed writes them to `/etc/cube/hooks/`. Each hook
 runs as `agent` in `/workspace` with its output in `~/.cache/cube/<hook>.log`.
 The repository's own `.agents/setup` and `.agents/resume` run too; neither
@@ -513,7 +514,8 @@ replaces the other:
 
 A failing hook stops its phase but never the thread: the outcome (`ok`,
 `failed` with its exit code, `skipped`, `notrun`, `absent`) is recorded in
-`thread.vm.hooks` and the thread strip shows failures. A failing checkout
+`thread.vm.hooks` (and in the guest's `~/.cache/cube/<hook>.status`) and the
+thread strip shows failures. A failing checkout
 fails the thread as before. Hooks are not secret storage: the agent can read
 them and the guest holds only placeholders.
 

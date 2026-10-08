@@ -38,6 +38,11 @@ function machine(hooks: { preSetup?: string; preResume?: string }) {
   return { guest, workspace, home, order: () => fs.existsSync(path.join(guest.root, "order")) ? fs.readFileSync(path.join(guest.root, "order"), "utf8").split("\n").filter(Boolean) : [],
     reboot: () => fs.rmSync(path.join(guest.root, "run"), { recursive: true, force: true }) };
 }
+/** `cube hooks --json` in the machine: what an agent there reads. */
+type HookView = { name: string; source: string; present: boolean; sha256?: string; last: { status: string; exitCode: number | null; ms: number; endedAt: number } | null; logTail: string | null };
+const cubeHooks = (m: ReturnType<typeof machine>, ...args: string[]) =>
+  (JSON.parse(execFileSync("sh", ["-c", `${m.guest.cubeCommand()} hooks --json ${args.join(" ")}`], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })) as { hooks: HookView[] }).hooks;
+const lastOutcomes = (views: HookView[]) => Object.fromEntries(views.map(view => [view.name, view.last ? view.last.status + (view.last.exitCode === null ? "" : `:${view.last.exitCode}`) : null]));
 const statuses = (hooks: Record<string, { status: string; exitCode?: number }>) =>
   Object.fromEntries(Object.entries(hooks).map(([name, hook]) => [name, hook.status + (hook.exitCode === undefined ? "" : `:${hook.exitCode}`)]));
 
@@ -79,6 +84,7 @@ try {
     assert.equal((await resumeWorkspace(m.workspace, "pi")).already, false);
     assert.deepEqual(m.order().slice(4), ["pre-resume", "resume"]);
     assert.ok(fs.existsSync(path.join(m.home, ".cache/cube/setup.log")) && fs.existsSync(path.join(m.home, ".cache/cube/pre-resume.log")));
+    assert.deepEqual(lastOutcomes(cubeHooks(m)), { "pre-setup": "ok", setup: "ok", "pre-resume": "ok", resume: "ok" });
     console.log("ok: fresh machine: pre-setup then .agents/setup, pre-resume then .agents/resume, resume once per boot");
   }
 
@@ -90,6 +96,16 @@ try {
     assert.match(fs.readFileSync(path.join(m.home, ".cache/cube/pre-setup.log"), "utf8"), /broken-pre-setup/);
     assert.deepEqual(statuses((await resumeWorkspace(m.workspace, "pi")).hooks), { "pre-resume": "failed:4", resume: "notrun" });
     assert.deepEqual(m.order(), [], "neither repository hook ran");
+    // What the agent in that machine reads back: the same outcomes, the scripts and their logs.
+    const views = cubeHooks(m);
+    assert.deepEqual(views.map(view => [view.name, view.source, view.present]),
+      [["pre-setup", "project", true], ["setup", "repository", true], ["pre-resume", "project", true], ["resume", "repository", true]], "in the order they run");
+    assert.deepEqual(lastOutcomes(views), { "pre-setup": "failed:7", setup: "notrun", "pre-resume": "failed:4", resume: "notrun" });
+    assert.match(views[0]!.logTail ?? "", /broken-pre-setup/);
+    assert.ok(views.every(view => !view.last || view.last.endedAt > Date.now() - 600_000));
+    assert.equal(cubeHooks(m, "-n", "0")[0]!.logTail, "", "-n bounds the log lines");
+    assert.throws(() => cubeHooks(m, "-n", "201"), "at most 200 lines");
+    assert.throws(() => cubeHooks(m, "--timeout", "5"), "nothing to set");
     const failing = machine({});
     fs.writeFileSync(path.join(failing.guest.root, "env"), fs.readFileSync(path.join(failing.guest.root, "env"), "utf8") + "SETUP_FAILS=1\n");
     git(work, "checkout", "-q", "-b", "failing");
@@ -124,6 +140,7 @@ try {
     assert.equal(fs.readFileSync(path.join(workspace, "README.md"), "utf8"), "two\n", "the template's own changes are replaced");
     assert.equal(git(workspace, "reflog", "--all").trim(), "", "the template's history is not the thread's");
     assert.deepEqual(m.order(), []);
+    assert.deepEqual(lastOutcomes(cubeHooks(m)).setup, "skipped", "the agent sees that the template ran setup");
     // The setup changed: run it here and report the template stale.
     fs.writeFileSync(path.join(work, ".agents/setup"), agentsScript("setup", "echo v3 >/dev/null"), { mode: 0o755 });
     git(work, "commit", "-qam", "three");

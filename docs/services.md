@@ -51,6 +51,9 @@ servers need a flag (`vite --host 0.0.0.0`) and some check the Host header
 when the machine boots again. Without a configured portal the command says
 so instead of printing a URL; the service still runs.
 
+The same command has `cube hooks`, which shows the project's hooks this
+machine runs, read only (see [project-hooks.md](project-hooks.md)).
+
 The CLI is the guest helper itself (`/usr/local/bin/cube` is a shim for
 `cube-guest cli`). It needs root for units and registrations and gets it
 through the agent's sudo. Registrations are JSON files under

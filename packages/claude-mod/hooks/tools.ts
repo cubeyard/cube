@@ -80,6 +80,10 @@ export function workspacePath(root: string, file: string, realRoot?: string): st
   return resolved.startsWith(`${VIRTUAL_ROOT}/`) ? resolved.slice(VIRTUAL_ROOT.length + 1) : resolved;
 }
 
+/** What a thread's agent learns about the project's hooks (docs/project-hooks.md). */
+export const PROJECT_HOOKS_NOTE = "The project's external hooks (pre-setup and pre-resume, which run before the repository's .agents/setup and .agents/resume) are kept in cube's projects, not in the repository: "
+  + "`cube hooks` shows the ones this machine runs, with their last outcomes and logs (read only). A thread cannot change them; the user does, in cube's projects or by asking OptChat.";
+
 /** How an agent should write one, after the show-me skill
  * (https://www.humanlayer.com/blog/show-me-skill): compact visuals beside
  * short text, never walls of prose. */
