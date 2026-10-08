@@ -333,8 +333,13 @@ class AsAgent:
         if self.owner is not None:
             self.groups = os.getgroups()
             os.setgroups(os.getgrouplist(CONFIG.user, self.owner[1]))
-            os.setegid(self.owner[1])
-            os.seteuid(self.owner[0])
+            try:
+                os.setegid(self.owner[1])
+                os.seteuid(self.owner[0])
+            except BaseException:
+                os.setegid(0)
+                os.setgroups(self.groups)
+                raise
         return self
 
     def __exit__(self, kind, error, trace):
@@ -432,7 +437,8 @@ def file_path(path, follow=True):
     if within(located, workspace) and within(resolved, workspace):
         return full, False
     machine = os.path.realpath(CONFIG.root)
-    for where in (located, resolved):
+    # `full` too: /proc/self/root/… resolves elsewhere but opens through /proc.
+    for where in (full, located, resolved):
         if not within(where, machine):
             raise Fail("INVALID_REQUEST", "path leaves the machine")
         for pseudo in PSEUDO_FILESYSTEMS:

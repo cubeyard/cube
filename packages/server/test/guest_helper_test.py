@@ -277,7 +277,8 @@ class GuestHelperTest(unittest.TestCase):
         # Kernel and device filesystems are not files, directly or through a link.
         os.symlink(os.path.join(self.root, "proc/self"), os.path.join(self.root, "tmp/proc-link"))
         os.symlink(os.path.join(self.root, "dev"), os.path.join(self.workspace, "dev-link"))
-        for path in ["/proc/self/status", "/sys/kernel", "/dev/null", "/proc", "/tmp/proc-link/status", "dev-link/null"]:
+        os.symlink(self.root, os.path.join(self.root, "proc/self/root"))
+        for path in ["/proc/self/status", "/sys/kernel", "/dev/null", "/proc", "/tmp/proc-link/status", "dev-link/null", "/proc/self/root/etc/hosts"]:
             answer = call("read", {"path": path})[0]
             self.assertEqual(answer["error"]["code"], "INVALID_REQUEST", path)
             self.assertIn("kernel or device filesystem", answer["error"]["message"], path)

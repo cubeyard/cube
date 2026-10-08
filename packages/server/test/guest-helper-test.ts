@@ -12,9 +12,13 @@ assert.equal(result.status, 0, "guest helper unit tests failed");
 // in the guest: CUBE_TEST_GUEST_ROOT=1 (CI) runs that test with sudo -n.
 let asRoot = "";
 const rootTest = process.env.CUBE_TEST_GUEST_ROOT;
-const sudo = process.platform === "linux" && process.getuid?.() !== 0 && spawnSync("sudo", ["-n", "true"]).status === 0;
-assert.ok(rootTest !== "required" || sudo, "CUBE_TEST_GUEST_ROOT=required needs Linux and passwordless sudo");
-if (rootTest && rootTest !== "0" && sudo) {
+const alreadyRoot = process.getuid?.() === 0;
+const sudo = process.platform === "linux" && !alreadyRoot && spawnSync("sudo", ["-n", "true"]).status === 0;
+assert.ok(rootTest !== "required" || sudo || alreadyRoot, "CUBE_TEST_GUEST_ROOT=required needs Linux and passwordless sudo");
+if (alreadyRoot) {
+  assert.doesNotMatch(result.stderr, /skipped/, "as root no test is skipped");
+  asRoot = ", agent permissions as root";
+} else if (rootTest && rootTest !== "0" && sudo) {
   const root = spawnSync("sudo", ["-n", "python3", "-W", "error", path.join(import.meta.dirname, "guest_helper_test.py"),
     "GuestHelperTest.test_outside_the_workspace_files_are_reached_as_the_agent"], { encoding: "utf8" });
   process.stderr.write(root.stderr);
