@@ -12,3 +12,13 @@ same 360×180 canvas:
 Canvas `toDataURL("image/png")` / `toDataURL("image/jpeg")` produced the files.
 The offline provider asserts typed bytes, not their visual meaning. This
 provenance is not evidence of visual inspection by a real model.
+
+`pi-read.webp` was encoded by Chromium canvas from the same PNG via
+`toDataURL("image/webp")`. `pi-read.gif` is an authored 1×1 GIF89a with a
+black/white palette and one black pixel (LZW clear/pixel/end codes 4,0,5).
+Both are Harness fixtures for typed delivery/persistence; browser decoding
+checks their dimensions, not visual meaning.
+
+Tests also inject standalone TEM and RST0–RST7 markers after JPEG SOI to
+exercise marker parsing, and append bytes to JPEG/GIF to test the conservative
+no-trailing-bytes policy. These synthetic variants are not vision fixtures.
