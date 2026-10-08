@@ -20,7 +20,6 @@ import { ArtifactError, ArtifactStore, commentMessage, parseActions } from "../s
 import { GithubPullsError, type GithubPulls, type PullState } from "../src/github-pulls.ts";
 import { LocalMachines } from "./local-guest.ts";
 
-process.env.CUBED_OPTCHAT_WISHES = "off";
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-artifacts-"));
 const textOf = (message: Message) => typeof message.content === "string" ? message.content
   : message.content.map(part => part.type === "text" ? part.text : "").join("\n");

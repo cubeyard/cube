@@ -1469,8 +1469,7 @@ select.compose-input {
 
 /* ============================================================ threads
    The chat's threads beside the conversation, by project: a recessed bank
-   of lamps and lines, with the wishes not started folded at its foot. On a
-   narrow screen it folds above the conversation. */
+   of lamps and lines. On a narrow screen it folds above the conversation. */
 .chat-workspace:has(.work-panel) { grid-template-columns: minmax(0, 1fr) minmax(16rem, 22rem); }
 .chat-workspace > .thread-pane { grid-column: 1; grid-row: 1; }
 .work-panel {
@@ -1510,12 +1509,6 @@ a.work-title { text-decoration: none; }
 a.work-title:hover { color: var(--signal); }
 .work-thread.archived .work-title { color: var(--ink-3); font-weight: 550; }
 .work-state { font: 10.5px/1.4 var(--font-mono); color: var(--ink-3); overflow-wrap: anywhere; }
-.work-wishes { margin-top: 0.9rem; border-top: 1px solid var(--line); padding-top: 0.4rem; }
-.work-wishes summary { cursor: pointer; font-size: 11px; font-weight: 550; letter-spacing: 0.05em; color: var(--ink-3); padding: 0.2rem; }
-.work-wishes .work-list { margin-top: 0.35rem; }
-.work-wish { padding: 0.4rem 0.55rem; border: 1px dashed var(--line-2); border-radius: var(--r-key); }
-.work-wish-head { display: flex; align-items: flex-start; gap: 0.4rem; }
-.work-wish-text { flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.4; color: var(--ink-2); overflow-wrap: anywhere; }
 .work-dismiss {
   flex: none; display: inline-grid; place-items: center; width: 22px; height: 22px; margin: -2px -4px 0 0;
   border: 0; border-radius: var(--r-key); background: transparent; color: var(--ink-3); cursor: pointer;
@@ -1527,17 +1520,10 @@ a.work-title:hover { color: var(--signal); }
   font-size: 11.5px; line-height: 1.4; color: var(--ink-3); overflow-wrap: anywhere;
   overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical;
 }
-.work-sources { margin-top: 0.3rem; display: flex; flex-wrap: wrap; gap: 0.2rem 0.6rem; font: 10.5px/1.5 var(--font-mono); color: var(--ink-3); }
-.work-source {
-  padding: 0; border: 0; background: none; font: inherit; color: var(--ink-2); cursor: pointer;
-  text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px;
-}
-.work-source:hover { color: var(--signal); text-decoration-color: currentColor; }
 .work-empty { margin: 0.4rem 0.2rem; font-size: 12.5px; color: var(--ink-3); }
 .work-note { margin: 0.45rem 0.2rem 0; font: 10.5px/1.4 var(--font-mono); color: var(--ink-3); }
 .work-error { margin: 0.2rem 0.2rem 0.5rem; font-size: 12px; color: var(--bad); display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
 .work-foot { margin: 0.8rem 0.2rem 0; font: 10.5px/1.4 var(--font-mono); color: var(--ink-3); }
-.conversation-message.located { outline: 2px solid var(--signal); outline-offset: 4px; border-radius: var(--r-key); transition: outline-color 0.4s; }
 @media (max-width: 52rem) {
   .chat-workspace:has(.work-panel) { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .chat-workspace > .thread-pane { grid-column: 1; grid-row: 2; }

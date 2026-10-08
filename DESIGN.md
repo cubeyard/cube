@@ -543,11 +543,7 @@ card: a lamp (amber working, starting or waiting, red failed or machine
 error, unlit otherwise) beside the bold title, linked to the thread while it
 is open, and the short id with the thread's own state in muted mono (`turn
 ended`, never `done`). An archived thread is a transparent card, its title
-muted and unlinked, its state `archived · <last run>`. Below a hairline, a
-native disclosure, closed by default, holds `not started`: dashed cards with
-the inferred wish, the user's quote behind a hairline rule, the project and
-`you, 3d` keys that scroll the transcript to the message (outlined in
-signal for a moment), and a quiet close glyph to dismiss. Empty and catching-up
+muted and unlinked, its state `archived · <last run>`. Empty and loading
 states are one muted line, never a placeholder card. The foot says states come
 from cube, archived is not done and merged is not released. Under 52rem the bay
 stacks above the conversation, capped at 38vh and foldable by a chevron rail

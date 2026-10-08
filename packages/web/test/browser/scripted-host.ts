@@ -6,7 +6,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import type { ThreadEvent, ThreadOverview, ThreadStatus, ThreadTranscript, WishList } from "../../src/lib/types.ts";
+import type { ThreadEvent, ThreadOverview, ThreadStatus, ThreadTranscript } from "../../src/lib/types.ts";
 
 const DIST = path.resolve(import.meta.dirname, "../../dist");
 const TYPES: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".png": "image/png", ".json": "application/json", ".webmanifest": "application/manifest+json" };
@@ -17,10 +17,10 @@ export class ScriptedHost {
   url = "";
   transcript: ThreadTranscript = { agent: "pi", owner: null, status: { state: "idle", run: null, error: null }, events: [] };
   prompts: Prompt[] = [];
-  /** The chat's threads and wishes as the panel reads them; dismissed wish ids. */
+  /** The chat's threads as the panel reads them. */
   overview: ThreadOverview = { threads: [], archived: { shown: 0, total: 0 }, unknown: 0 };
-  wishes: WishList = { state: "ready", wishes: [], more: 0, read: 0, total: 0, error: null, lastRun: null, reason: null };
-  dismissed: string[] = [];
+  /** Every API request the page made, as `METHOD /path`. */
+  requests: string[] = [];
   /** Images the chat uploaded, by id. */
   media = new Map<string, { type: string; body: Buffer }>();
   /** Answers a prompt: by default accepted at once. A thrown error is a 500. */
@@ -77,6 +77,7 @@ export class ScriptedHost {
       response.end(fs.readFileSync(file));
       return;
     }
+    this.requests.push(`${request.method} ${url.pathname}`);
     const model = { provider: "faux", id: "faux-1" };
     switch (`${request.method} ${url.pathname}`) {
       case "GET /api/state": return json({ auth: { state: "ok", provider: "faux", credentialType: "api" }, onboardingComplete: true });
@@ -84,7 +85,6 @@ export class ScriptedHost {
       case "GET /api/projects": return json({ projects: [] });
       case "GET /api/optchat/model": return json({ models: [model], selected: model, images: { supported: true, reason: null } });
       case "GET /api/optchat/threads": return json(this.overview);
-      case "GET /api/optchat/wishes": return json(this.wishes);
       case "GET /api/optchat/view": return json({ view: "<chat>\n</chat>", messages: 0, failure: null });
       case "GET /api/optchat/history": return json(this.transcript);
       case "GET /api/optchat/stream": {
@@ -111,12 +111,6 @@ export class ScriptedHost {
         return json({ image: { id, mimeType: request.headers["content-type"], width: 1, height: 1 } });
       }
       default: {
-        const dismiss = request.method === "POST" ? /^\/api\/optchat\/wishes\/([^/]+)\/dismiss$/.exec(url.pathname) : null;
-        if (dismiss) {
-          this.dismissed.push(decodeURIComponent(dismiss[1]!));
-          this.wishes = { ...this.wishes, wishes: this.wishes.wishes.filter(wish => !this.dismissed.includes(wish.id)) };
-          return json({ ok: true });
-        }
         const image = request.method === "GET" && url.pathname.startsWith("/api/optchat/media/") ? this.media.get(decodeURIComponent(url.pathname.slice("/api/optchat/media/".length))) : undefined;
         if (!image) return json({ error: "not found" }, 404);
         response.writeHead(200, { "content-type": image.type });

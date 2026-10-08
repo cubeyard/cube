@@ -35,8 +35,6 @@ export interface OptChatUsage {
   chat: UsageState;
   /** The compactor's model calls, which run beside Pi. */
   compactor: { models: Record<string, Usage>; calls: Record<string, number>; since: number | null; earlier?: boolean };
-  /** The wish finder's model calls, which run beside Pi too. */
-  wishes?: { models: Record<string, Usage>; calls: Record<string, number> };
   /** The threads it started. */
   threads: string[];
 }
@@ -211,9 +209,7 @@ export class UsageService {
     const compactor = piLines({ models: chat.compactor.models }, "optchat-compactor", this.pricing)
       .map(line => ({ ...line, calls: chat.compactor.calls[`${line.provider}/${line.model}`] ?? null }));
     const notes = chat.compactor.earlier ? [`compactor calls before ${chat.compactor.since === null ? "now" : new Date(chat.compactor.since).toISOString()} were not counted (an older cube): their usage is unknown`] : [];
-    const wishes = piLines({ models: chat.wishes?.models ?? {} }, "optchat-wishes", this.pricing)
-      .map(line => ({ ...line, calls: chat.wishes?.calls[`${line.provider}/${line.model}`] ?? null }));
-    const usage = subject({ ...base, lines: [...piLines(chat.chat, "optchat", this.pricing), ...compactor, ...wishes], unknownTurns: 0, incomplete: !!chat.compactor.earlier, read: "live", readAt: Date.now(), notes });
+    const usage = subject({ ...base, lines: [...piLines(chat.chat, "optchat", this.pricing), ...compactor], unknownTurns: 0, incomplete: !!chat.compactor.earlier, read: "live", readAt: Date.now(), notes });
     this.store(usage, null);
     return { usage, threads: chat.threads };
   }
@@ -306,11 +302,10 @@ export function usageText(report: UsageReport, options: { limit?: number; projec
     `total: ${spendText(total.spend)} · ${tokensText(total.spend.tokens)}${gapsText(total) ? ` · ${gapsText(total)}` : ""}`,
   ];
   if (report.optchat) {
-    const chat = report.optchat.lines.filter(line => line.source === "optchat"), compactor = report.optchat.lines.filter(line => line.source === "optchat-compactor"),
-      wishes = report.optchat.lines.filter(line => line.source === "optchat-wishes");
+    const chat = report.optchat.lines.filter(line => line.source === "optchat"), compactor = report.optchat.lines.filter(line => line.source === "optchat-compactor");
     const sum = (items: UsageLine[]) => { const spend = zeroSpend(); for (const item of items) addSpend(spend, item.spend); return spend; };
     lines.push(report.optchat.coverage === "unavailable" ? `optchat itself: unknown (${report.optchat.notes.join("; ")})`
-      : `optchat itself: ${spendText(report.optchat.spend)} (chat ${spendText(sum(chat))}, compactor ${spendText(sum(compactor))}${wishes.length ? `, wish finder ${spendText(sum(wishes))}` : ""})${report.optchat.read === "snapshot" ? " · last reading" : ""}`);
+      : `optchat itself: ${spendText(report.optchat.spend)} (chat ${spendText(sum(chat))}, compactor ${spendText(sum(compactor))})${report.optchat.read === "snapshot" ? " · last reading" : ""}`);
     if (report.optchatThreads?.count) lines.push(`threads optchat started: ${report.optchatThreads.count}, ${spendText(report.optchatThreads.totals.spend)} (inside the total above, not added again)`);
   }
   if (!report.project && report.projects.length) {

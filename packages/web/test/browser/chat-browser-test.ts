@@ -401,13 +401,11 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844,
     assert.ok(await page.locator(".transcript-column").evaluate(element => element.scrollWidth <= element.clientWidth), "nothing overflows the transcript sideways");
   }, viewport);
 
-  await scenario("the chat's threads show by project with their own state; a wish not started links its message and can be dismissed", async (page, host) => {
+  await scenario("the chat's threads show by project with their own state; no inferred wish list", async (page, host) => {
     const thread = (id: string, project: string, title: string, state: string, archived = false) =>
       ({ id: `${id}-0000-4000-8000-000000000000`, title, project: { id: project, name: project }, state, archived, spawned: 1 });
     host.overview = { threads: [thread("aaaaaaa1", "cube", "fix the gateway host check", "working"), thread("bbbbbbb2", "site", "a much longer thread title that has to wrap or clamp in the narrow panel without overflowing it at all", "completed"),
       thread("ccccccc3", "cube", "old work", "stopped", true)], archived: { shown: 1, total: 3 }, unknown: 0 };
-    host.wishes = { state: "ready", more: 0, read: 2, total: 2, error: null, lastRun: 1, reason: null,
-      wishes: [{ id: "w1", text: "an export of the usage report as csv", quote: "earlier", project: "cube", sources: [{ message: 0, entry: 1, date: Date.now() - 3 * 86_400_000 }] }] };
     await page.reload();
     await page.locator(".work-thread").first().waitFor();
     assert.deepEqual(await page.locator(".work-group h3").allTextContents(), ["cube", "site"], "grouped by project, newest first");
@@ -420,18 +418,10 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844,
     assert.ok(await page.locator(".work-body").evaluate(element => element.scrollWidth <= element.clientWidth), "nothing overflows the panel sideways");
     assert.ok(panel.right <= viewport.width + 0.5, "the panel fits the screen");
 
-    // the wishes are folded and quiet until opened
-    const wishes = page.locator(".work-wishes summary");
-    assert.equal(await wishes.textContent(), "not started · 1");
-    assert.equal(await page.locator(".work-wish").isVisible(), false);
-    await wishes.click();
-    await page.locator(".work-wish", { hasText: "an export of the usage report as csv" }).waitFor();
-    await page.locator(".work-source", { hasText: "you, 3d" }).click();
-    await page.locator(".conversation-message.user.located", { hasText: "earlier" }).waitFor();
-    await page.getByRole("button", { name: "dismiss: an export of the usage report as csv" }).click();
-    await page.getByText("nothing found that no thread took up.").waitFor();
-    assert.deepEqual(host.dismissed, ["w1"]);
-    assert.equal(await wishes.textContent(), "not started · 0");
+    // no model-inferred wish list: no section, no request for one
+    assert.equal(await page.locator(".work-wishes, .work-wish").count(), 0);
+    assert.equal(await page.getByText(/inferred from the chat/).count(), 0);
+    assert.deepEqual(host.requests.filter(request => request.includes("/wishes")), []);
   }, viewport);
 }
 

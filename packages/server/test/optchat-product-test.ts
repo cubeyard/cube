@@ -118,9 +118,8 @@ try {
     [{ id: thread.id, title: thread.title, project: { id: project.project.id, name: "demo" }, state: "completed", archived: false, spawned: "number" }]);
   assert.deepEqual([overview.archived, overview.unknown], [{ shown: 0, total: 0 }, 0]);
   assert.equal((await fetch(`${base}/api/optchat/tasks`)).status, 404, "the task list is gone");
-  // Wishes are read only once the chat has been quiet a while: nothing yet, never a guess.
-  const wishes = await (await fetch(`${base}/api/optchat/wishes`)).json();
-  assert.deepEqual([wishes.state, wishes.wishes, wishes.read], ["catching up", [], 0]);
+  // No model-inferred wish list: neither its list nor its dismissal is served.
+  assert.equal((await fetch(`${base}/api/optchat/wishes`)).status, 404, "the wish list is gone");
   assert.equal((await post("/api/optchat/wishes/w1/dismiss", {})).status, 404);
 
   // A replayed spawn finds its thread, even with another model or none left.
