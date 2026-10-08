@@ -1499,7 +1499,8 @@ select.compose-input {
 /* a strip too narrow for one row: title and details key, the rest a tap
    away. Only the chat's and a thread's strips have the key; others keep theirs. */
 @media (max-width: 40rem), (pointer: coarse) and (max-height: 30rem) and (max-width: 52rem) {
-  :root { --rail-pad: 0.25rem 0.8rem; }
+  /* the chat's threads head stays as tall as its strip */
+  .thread-strip:has(> .strip-details-key), .chat-workspace .work-head { --rail-pad: 0.25rem 0.8rem; }
   .thread-strip:has(> .strip-details-key) { row-gap: 0.25rem; }
   .thread-strip:has(> .strip-details-key) > .spacer { display: none; }
   .mobile-thread-switch { flex: 1 1 0; }

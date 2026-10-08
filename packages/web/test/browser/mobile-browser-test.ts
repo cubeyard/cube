@@ -40,11 +40,13 @@ const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
 function fakeVisualViewport(): void {
   // Read live: the page's own size settles after this runs.
   let keyboardHeight: number | null = null;
+  let scale = 1;
   const target = Object.defineProperties(new EventTarget(), {
-    width: { get: () => innerWidth },
-    height: { get: () => keyboardHeight ?? innerHeight },
-    scale: { value: 1 }, offsetTop: { value: 0 }, offsetLeft: { value: 0 },
+    width: { get: () => innerWidth / scale },
+    height: { get: () => (keyboardHeight ?? innerHeight) / scale },
+    scale: { get: () => scale }, offsetTop: { value: 0 }, offsetLeft: { value: 0 },
     set: { value: (height: number | null) => { keyboardHeight = height; target.dispatchEvent(new Event("resize")); } },
+    zoom: { value: (to: number) => { scale = to; target.dispatchEvent(new Event("resize")); } },
   });
   Object.defineProperty(window, "visualViewport", { configurable: true, get: () => target });
 }
@@ -126,6 +128,8 @@ async function openKeyboard(page: Page, size: { width: number; height: number; i
 }
 async function closeKeyboard(page: Page, size: { width: number; height: number; ios?: boolean }): Promise<void> {
   await page.locator(".composer textarea").blur();
+  await settle(page);
+  assert.equal(await keyboard(page), null, "leaving the field ends typing before the keyboard has gone");
   if (size.ios) await page.evaluate(() => (window.visualViewport as unknown as { set: (h: null) => void }).set(null));
   else await page.setViewportSize({ width: size.width, height: size.height });
   await settle(page);
@@ -286,6 +290,69 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
     assert.ok(await visible(page, "header") && await visible(page, ".nav-menu-key"));
     assert.ok((await box(page, ".composer")).bottom <= 667);
     await assertNoSideways(page);
+  });
+
+  await scenario(browser, engine, "the details' model choice is no keyboard; open memory folds with the details", phone, "chat", async page => {
+    await page.locator(".chat-workspace .strip-details-key").tap();
+    await page.locator(".strip-model select").focus();
+    await page.setViewportSize({ width: 375, height: 347 });
+    await settle(page);
+    assert.equal(await keyboard(page), null, "a focused select is not typing");
+    assert.ok(await visible(page, "header"));
+    await page.setViewportSize({ width: 375, height: 667 });
+    const memory = page.locator(".strip-toggle[aria-controls=chat-memory]");
+    await memory.tap();
+    await page.locator("#chat-memory").waitFor();
+    await page.locator(".composer textarea").tap();
+    assert.equal(await memory.getAttribute("aria-expanded"), "false", "memory folds with its toggle");
+    assert.equal(await page.locator("#chat-memory").count(), 0);
+  });
+
+  await scenario(browser, engine, "focus never stays on a destination the menu folded away", phone, "chat", async page => {
+    const key = page.locator(".nav-menu-key");
+    await key.tap();
+    await page.locator("header nav a", { hasText: "models" }).focus();
+    const transcript = await box(page, ".transcript");
+    await page.touchscreen.tap(transcript.right - 20, transcript.bottom - 20);
+    assert.equal(await key.getAttribute("aria-expanded"), "false");
+    assert.equal(await page.evaluate(() => !!document.activeElement?.closest("header nav")), false, "a press outside moves focus off the folded menu");
+    await key.tap();
+    await page.locator("header nav a", { hasText: "chat" }).tap();
+    assert.equal(await key.getAttribute("aria-expanded"), "false", "the page already open closes the menu");
+    assert.ok(await key.evaluate(el => el === document.activeElement), "and focus stays on the key");
+  });
+
+  await scenario(browser, engine, "turned with the keyboard up (Android): typing carries over to the new width", phone, "chat", async page => {
+    await openKeyboard(page, phone, 347);
+    assert.equal(await keyboard(page), "open");
+    await page.setViewportSize({ width: 667, height: 175 });
+    await settle(page);
+    assert.equal(await keyboard(page), "tight", "still typing on its side");
+    assert.equal(await visible(page, ".chat-workspace .thread-strip"), false);
+    // the keyboard goes down with focus kept (Android's back key): the chrome returns
+    await page.setViewportSize({ width: 667, height: 375 });
+    await settle(page);
+    assert.equal(await keyboard(page), null);
+    assert.ok(await visible(page, "header"));
+  });
+
+  await scenario(browser, engine, "zoomed in with the keyboard up (iOS), leaving the field still brings the chrome back", { ...phone, ios: true }, "chat", async page => {
+    await openKeyboard(page, { ...phone, ios: true }, 347);
+    assert.equal(await keyboard(page), "open");
+    await page.evaluate(() => (window.visualViewport as unknown as { zoom: (s: number) => void }).zoom(1.6));
+    await page.locator(".composer textarea").blur();
+    await settle(page);
+    assert.equal(await keyboard(page), null);
+    assert.ok(await visible(page, "header"));
+  });
+
+  await scenario(browser, engine, "a narrow desktop window shortened by hand is not a keyboard", { width: 600, height: 800, touch: false }, "chat", async page => {
+    assert.ok(await visible(page, ".nav-menu-key"), "a narrow window gets the menu");
+    await page.locator(".composer textarea").focus();
+    await page.setViewportSize({ width: 600, height: 650 });
+    await settle(page);
+    assert.equal(await keyboard(page), null);
+    assert.ok(await visible(page, "header"));
   });
 
   await scenario(browser, engine, "the desktop keeps its rows: destinations, model and threads in view, no menu or details keys", { width: 1280, height: 800, touch: false }, "chat", async page => {

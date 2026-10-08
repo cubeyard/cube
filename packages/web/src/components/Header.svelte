@@ -25,6 +25,12 @@
   function onWindowPointerdown(event: PointerEvent): void {
     if (menuOpen && !header.contains(event.target as Node)) closeMenu();
   }
+  // Another page focuses its own heading; the page already open keeps
+  // focus on the key rather than on a link that just folded away.
+  function onNavClick(event: MouseEvent): void {
+    const link = (event.target as Element).closest("a");
+    if (link) closeMenu(link.getAttribute("href") === location.hash);
+  }
 </script>
 
 <svelte:window onkeydown={onWindowKeydown} onpointerdown={onWindowPointerdown} onhashchange={() => closeMenu()} />
@@ -36,7 +42,7 @@
   </button>
   <!-- a choice closes the menu, the current page's link included -->
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-  <nav id="main-nav" aria-label="main" onclick={(event) => { if ((event.target as Element).closest("a")) closeMenu(); }}>
+  <nav id="main-nav" aria-label="main" onclick={onNavClick}>
     <a href="#/chat" class:active={section === "chat"} title="chat · press g then c">chat</a>
     <a href="#/threads" class:active={section === "threads"} title="threads · press g then t">threads</a>
     <a href="#/artifacts" class="nav-artifacts" class:active={section === "artifacts"}>artifacts</a>

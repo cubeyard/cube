@@ -85,7 +85,7 @@ export class ScriptedHost {
     if (threadPrefix && url.pathname.startsWith(threadPrefix)) {
       const rest = url.pathname.slice(threadPrefix.length);
       if (rest === "usage") return json({ error: "not found" }, 404);
-      url.pathname = `/api/optchat/${rest === "model" ? "model" : rest}`;
+      url.pathname = `/api/optchat/${rest}`;
     }
     const model = { provider: "faux", id: "faux-1" };
     switch (`${request.method} ${url.pathname}`) {
