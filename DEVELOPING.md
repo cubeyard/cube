@@ -215,6 +215,12 @@ contract (102), protocol 3 and one commit for both, and writes formulas that pin
 each asset's release URL and sha256 (`scripts/homebrew-formula-test.ts`). The
 tap's README comes from `scripts/homebrew/tap-README.md`.
 
+> **Staged, not installed.** Both workflow files below sit in
+> `scripts/homebrew/workflows/` with a README on how to move them: the thread
+> that wrote them could not push workflow files (its GitHub token has no
+> `workflow` scope). Until a maintainer moves them, nothing publishes the tap
+> and no CI run exercises the formulas on macOS.
+
 `.github/workflows/homebrew.yml` runs when a release is published (or by hand
 with a `version` input): it generates the formulas on a macOS runner, installs
 them from the release, runs `brew audit --strict` and `brew test`, then commits
