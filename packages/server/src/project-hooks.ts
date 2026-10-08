@@ -11,7 +11,7 @@ import { hookFileContent } from "./vm-seed.ts";
 export const HOOKS_SUPPORTED = `Supported hooks (the only two; nothing else is settable):
 - preSetup ("pre-setup"): runs once when a new thread machine is prepared, after the project's repositories are checked out and before the repository's own .agents/setup, which runs only if pre-setup succeeded. A machine made from a prepared template skips both (the template ran them), unless the pinned .agents/setup differs from the template's.
 - preResume ("pre-resume"): runs on every boot of a thread machine before the agent opens, before the repository's .agents/resume, which runs only if pre-resume succeeded.
-Each is one script of at most ${MAX_HOOK_BYTES} bytes, run as the guest user agent in /workspace with bash unless it starts with #!; output goes to ~/.cache/cube/<hook>.log in that machine. The order is fixed (external hook, then the repository's); both always run when present. There is no per-hook timeout: the whole preparation (checkout and setup hooks) and the whole resume phase each have 30 minutes. A failing hook is recorded and never fails the thread. New threads use the hooks saved when they start; running threads keep theirs. A changed pre-setup means a new template. Hooks are not secret storage: every machine of the project can read them.`;
+Each is one script of at most ${MAX_HOOK_BYTES} bytes, run as the guest user agent in /workspace with bash unless it starts with #!; output goes to ~/.cache/cube/<hook>.log in that machine. The order is fixed: the external hook, then the repository's, which runs only after the external one succeeded (or is absent). There is no per-hook timeout: the whole preparation (checkout and setup hooks) and the whole resume phase each have 30 minutes. A failing hook is recorded and never fails the thread. New threads use the hooks saved when they start; running threads keep theirs. A changed pre-setup means a new template. Hooks are not secret storage: every machine of the project can read them.`;
 
 /** At most this many threads' latest outcomes are shown. */
 export const HOOK_RESULTS_SHOWN = 8;
@@ -66,7 +66,8 @@ export function describeProjectHooks(registry: Registry, project: Project): stri
   const threads = registry.listThreads().filter(thread => thread.projectId === project.id)
     .sort((a, b) => b.createdAt - a.createdAt);
   const lines = [
-    `project ${project.name} (id ${project.id}); hooks last changed ${project.hooksUpdatedAt ? new Date(project.hooksUpdatedAt).toISOString() : "before cube recorded it"}`,
+    `project ${project.name} (id ${project.id}); ${project.hooksUpdatedAt ? `hooks last changed ${new Date(project.hooksUpdatedAt).toISOString()}`
+      : hooks.preSetup || hooks.preResume ? "hooks last changed before cube recorded it" : "hooks never set"}`,
     ...script("preSetup", hooks.preSetup),
     ...script("preResume", hooks.preResume),
     "",

@@ -265,19 +265,20 @@ export class Registry {
     this.db.prepare("INSERT INTO project VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(project.id, JSON.stringify(project));
   }
   /** Replaces only the project's hooks (project-hooks.ts), in one
-   * transaction; its repositories, revision and check stay as they are. */
+   * transaction, if they differ; its repositories, revision and check stay
+   * as they are. */
   saveProjectHooks(id: string, hooks: ProjectHooks): Project {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const project = this.getProject(id);
       if (!project) throw new Error("project not found");
-      const now = Date.now();
-      const changed = (project.hooks?.preSetup ?? "") !== hooks.preSetup || (project.hooks?.preResume ?? "") !== hooks.preResume;
-      const saved = { ...project, hooks: { preSetup: hooks.preSetup, preResume: hooks.preResume }, updatedAt: now,
-        ...changed ? { hooksUpdatedAt: now } : {} };
-      this.saveProject(saved);
+      if ((project.hooks?.preSetup ?? "") !== hooks.preSetup || (project.hooks?.preResume ?? "") !== hooks.preResume) {
+        const now = Date.now();
+        this.saveProject({ ...project, hooks: { preSetup: hooks.preSetup, preResume: hooks.preResume }, updatedAt: now, hooksUpdatedAt: now });
+      }
       this.db.exec("COMMIT");
-      return saved;
+      // What the registry now holds, read again.
+      return this.getProject(id)!;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   deleteProject(id: string): void {

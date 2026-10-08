@@ -7,7 +7,7 @@ supported interface for reading and changing them; there is no other.
 
 | who | reads | changes |
 | --- | --- | --- |
-| the user, on the project page | the scripts | both scripts (`PUT /api/projects/<id>`, with the repositories) |
+| the user, on the project page | the scripts | both scripts (`PUT /api/projects/<id>`, with the repositories; the page sends only the hooks edited on it, so one OptChat saved meanwhile stays) |
 | OptChat | `project_hooks(project)`: the scripts, their latest outcomes, what is supported | `project_hooks_write(project, preSetup?, preResume?)` |
 | a thread's agent (Pi or Claude Code) | `cube hooks` in its machine: the hooks that machine runs, their last outcomes and logs | nothing |
 
@@ -55,8 +55,10 @@ Both name the project explicitly, by id or by name (any case); a name two
 projects share is refused with their ids. OptChat changes hooks only when
 the user asked for it and named the project, and does it itself: a thread
 cannot. A thread's report is not the user asking: `project_hooks_write`
-refuses in a turn that has no message of the user (one started by a
+refuses in a run that has no message of the user (one started by a
 report alone, whatever the report says) and OptChat asks the user instead.
+A message of the user counts once it is placed in the run, steered in
+between tool calls included.
 
 `project_hooks(project)` is read only:
 
@@ -83,8 +85,8 @@ Supported hooks (the only two; nothing else is settable): …
   sha256 of the file a machine gets (a `#!/bin/bash` line added when there
   is no `#!`, a final newline), the one `cube hooks` shows.
 - "last changed" is when the scripts last changed (on the project page or
-  by OptChat); projects whose hooks have not changed since this was
-  recorded say so.
+  by OptChat); a project without hooks says "never set", and one whose
+  hooks have not changed since this was recorded says so.
 - Outcomes are what cubed records for each thread: status (`ok`, `failed`
   with its exit code, `skipped`, `notrun`, `absent`), duration and time,
   for the 8 newest threads of the project (archived ones included), and

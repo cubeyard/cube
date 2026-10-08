@@ -41,6 +41,9 @@
   ]);
   let preSetup = $state("");
   let preResume = $state("");
+  // The hooks as the form loaded them: only the ones edited here are saved,
+  // so hooks saved elsewhere since (OptChat) stay.
+  let loadedHooks = { preSetup: "", preResume: "" };
   let dirty = $state(untrack(() => projectId === "new"));
   let loaded = $state(untrack(() => projectId === "new"));
   let error = $state<string | null>(null);
@@ -61,6 +64,7 @@
     }));
     preSetup = fresh.hooks?.preSetup ?? "";
     preResume = fresh.hooks?.preResume ?? "";
+    loadedHooks = { preSetup, preResume };
     dirty = false;
   }
 
@@ -119,7 +123,10 @@
         base: null,
         ...(index === 0 ? {} : { checkoutName: repository.checkoutName }),
       })),
-      hooks: { preSetup, preResume },
+      hooks: {
+        ...(preSetup !== loadedHooks.preSetup ? { preSetup } : {}),
+        ...(preResume !== loadedHooks.preResume ? { preResume } : {}),
+      },
     };
   }
 

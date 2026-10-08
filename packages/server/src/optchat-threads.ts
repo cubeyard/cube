@@ -4,8 +4,8 @@ import { agents, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { releaseUnfinished, ThreadArchiving, ThreadWorking, type Conversations } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
 import { THREAD_NOTE, type ObservedThread, type OptThreads } from "./optchat.ts";
-import { threadAgent, type Project, type Registry, type ResolvedRepositories, type Thread } from "./registry.ts";
 import { describeProjectHooks, findProject, writeProjectHooks } from "./project-hooks.ts";
+import { threadAgent, type Project, type Registry, type ResolvedRepositories, type Thread } from "./registry.ts";
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
 
 /** How long the overview waits for one thread's stored state. */
