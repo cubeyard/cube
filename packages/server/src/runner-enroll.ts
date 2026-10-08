@@ -8,6 +8,9 @@ import path from "node:path";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
+import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { Registry } from "./registry.ts";
 import { IrohRunnerClient, RUNNER_CONFIG_VERSION } from "./iroh-node.ts";
 
@@ -53,8 +56,12 @@ export interface LocalRunnerOptions {
   /** The local runner's directory (default `~/.cube`): `control.key`,
    * `runner/` (the cube-runner home) and `runner.json`. */
   home: string;
-  /** The Debian 13 genericcloud qcow2 the runner copies into its state. */
-  image: string;
+  /** The Debian 13 genericcloud qcow2 the runner copies into its state;
+   * absent: downloaded from Debian (or `imageBase`) and checksum-verified. */
+  image?: string;
+  /** Where the image and its SHA512SUMS come from when `image` is absent
+   * (default Debian's cloud image site; `CUBE_DEBIAN_IMAGE_BASE` overrides). */
+  imageBase?: string;
   /** The loopback address the runner listens on; cubed reaches it there. */
   listen: string;
   nodeId?: string;
@@ -81,6 +88,61 @@ export interface LocalRunner {
 }
 
 export const DEFAULT_LOCAL_RUNNER_LISTEN = "127.0.0.1:7778";
+/** Debian's official cloud images; `SHA512SUMS` is published beside them. */
+export const DEBIAN_IMAGE_BASE = "https://cloud.debian.org/images/cloud/trixie/latest";
+
+/** The genericcloud image for this host's thread machines: arm64 on an Apple
+ * Silicon Mac, amd64 on Linux x86-64 (the platforms a runner supports). */
+export function debianImageName(platform = process.platform, arch = process.arch): string {
+  const debianArch = platform === "darwin" && arch === "arm64" ? "arm64" : platform === "linux" && arch === "x64" ? "amd64" : null;
+  if (!debianArch) throw new Error(`no runner for ${platform} ${arch}; a runner needs an Apple Silicon Mac or Linux x86-64`);
+  return `debian-13-genericcloud-${debianArch}.qcow2`;
+}
+
+async function sha512Of(file: string): Promise<string> {
+  const hash = createHash("sha512");
+  for await (const chunk of fs.createReadStream(file)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
+}
+
+/** Downloads `<base>/<name>` into `directory` and verifies it against the
+ * `SHA512SUMS` published beside it; a file already there with the right
+ * digest is kept. Returns the file's path. The runner itself downloads
+ * nothing: this is cubed, on the host, before `cube-runner init`. */
+export async function downloadDebianImage(options: { directory: string; name?: string; base?: string; log?: (line: string) => void }): Promise<string> {
+  const log = options.log ?? (() => {});
+  const base = (options.base ?? (process.env.CUBE_DEBIAN_IMAGE_BASE?.trim() || DEBIAN_IMAGE_BASE)).replace(/\/$/, "");
+  const name = options.name ?? debianImageName();
+  const target = path.join(options.directory, name);
+  const sums = await fetch(`${base}/SHA512SUMS`);
+  if (!sums.ok) throw new Error(`could not fetch ${base}/SHA512SUMS: HTTP ${sums.status}`);
+  const expected = (await sums.text()).split("\n").map(line => line.trim().split(/\s+/)).find(([, file]) => file === name || file === `*${name}`)?.[0];
+  if (!expected || !/^[0-9a-f]{128}$/.test(expected)) throw new Error(`${base}/SHA512SUMS does not list ${name}`);
+  if (fs.existsSync(target) && await sha512Of(target) === expected) { log(`using the downloaded ${name} (checksum verified)`); return target; }
+  fs.mkdirSync(options.directory, { recursive: true, mode: 0o700 });
+  const partial = `${target}.part`;
+  const response = await fetch(`${base}/${name}`);
+  if (!response.ok || !response.body) throw new Error(`could not download ${base}/${name}: HTTP ${response.status}`);
+  const total = Number(response.headers.get("content-length")) || 0;
+  log(`downloading ${name}${total ? ` (${Math.round(total / 1048576)} MB)` : ""} from ${base}`);
+  const hash = createHash("sha512");
+  let received = 0;
+  let reported = 0;
+  try {
+    await pipeline(Readable.fromWeb(response.body as import("node:stream/web").ReadableStream), async function* (source) {
+      for await (const chunk of source) {
+        hash.update(chunk as Buffer); received += (chunk as Buffer).length;
+        if (total && received - reported >= total / 4) { reported = received; log(`  ${Math.round(received / total * 100)}%`); }
+        yield chunk;
+      }
+    }, fs.createWriteStream(partial, { mode: 0o600 }));
+    const actual = hash.digest("hex");
+    if (actual !== expected) throw new Error(`${name} does not match Debian's SHA512SUMS (got ${actual.slice(0, 16)}…); the download is discarded`);
+  } catch (error) { fs.rmSync(partial, { force: true }); throw error; }
+  fs.renameSync(partial, target);
+  log(`downloaded ${name} (checksum verified)`);
+  return target;
+}
 
 /** The `cube-runner` binary: CUBE_RUNNER names it, otherwise the first on PATH. */
 export function findRunner(env: NodeJS.ProcessEnv = process.env, configured?: string): string | null {
@@ -109,8 +171,10 @@ export async function initLocalRunner(options: LocalRunnerOptions): Promise<Loca
   if (!runner) throw new Error("cube-runner was not found on PATH (install it, or set CUBE_RUNNER to the binary)");
   const home = path.resolve(options.home);
   const state = path.resolve(options.state);
-  const image = path.resolve(options.image);
-  if (!fs.existsSync(image) || !fs.statSync(image).isFile()) throw new Error(`base image not found: ${image}`);
+  if (options.image !== undefined) {
+    const given = path.resolve(options.image);
+    if (!fs.existsSync(given) || !fs.statSync(given).isFile()) throw new Error(`base image not found: ${given}`);
+  } else debianImageName();
   const listen = options.listen.match(/^(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\]|localhost):(\d{1,5})$/);
   if (!listen || !listen[1].split(".").slice(1).every(octet => Number(octet) <= 255) || Number(listen[2]) < 1 || Number(listen[2]) > 65535) {
     throw new Error("--listen must be a loopback address with a port from 1 to 65535, for example 127.0.0.1:7778");
@@ -128,6 +192,10 @@ export async function initLocalRunner(options: LocalRunnerOptions): Promise<Loca
   }
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
   log(`cube-runner ${version.softwareVersion ?? "?"} at ${runner}`);
+  // The runner copies the image into its state, so a download is kept only
+  // until init succeeded (a failed init keeps it for the retry).
+  const downloaded = options.image === undefined ? await downloadDebianImage({ directory: path.join(home, "images"), base: options.imageBase, log }) : null;
+  const image = downloaded ?? path.resolve(options.image!);
   const control = JSON.parse((await run(runner, ["keygen", "--key", controlKey], { encoding: "utf8", timeout: 10000 })).stdout) as { peerId: string };
   // The binding's thread id is the registry's runner id, so it is the node id: unique per installation by construction.
   const initArgs = ["init", "--home", runnerHome, "--image", image, "--allow-peer", control.peerId, "--node-id", nodeId,
@@ -147,6 +215,11 @@ export async function initLocalRunner(options: LocalRunnerOptions): Promise<Loca
     if (!fs.existsSync(path.join(runnerHome, "state", "journal.db"))) fs.rmSync(runnerHome, { recursive: true, force: true });
     const failure = error as { stderr?: string; message: string };
     throw new Error(`cube-runner init failed: ${(failure.stderr || failure.message).trim()}`);
+  }
+  if (downloaded) {
+    fs.rmSync(downloaded, { force: true });
+    fs.rmSync(path.dirname(downloaded), { recursive: true, force: true });
+    log("removed the download: the runner holds its own copy");
   }
   const field = (name: string) => initOutput.match(new RegExp(`^${name}: (.+)$`, "m"))?.[1]?.trim() ?? null;
   const peer = field("peer");

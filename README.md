@@ -59,20 +59,22 @@ is), then move `~/.cube` aside.
 brew trust cubeyard/tap          # Homebrew asks you once to trust a third-party tap
 brew install cubeyard/tap/cube
 
-# the base image every thread machine starts from (~400 MB); keep it anywhere
-curl -fLO https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2
-
-# one time: the runner's key, state and a copy of the image under ~/.cube,
-# loopback on 127.0.0.1:7778, enrolled in cubed's state (~/.cube-host)
-cubed runners init-local --image "$PWD/debian-13-genericcloud-arm64.qcow2"
+# one time: downloads Debian's cloud image (~400 MB, checksum-verified), sets up
+# the runner's key, state and image copy under ~/.cube, loopback on
+# 127.0.0.1:7778, and enrolls it in cubed's state (~/.cube-host)
+cubed runners init-local
 
 brew services start cube-runner
 brew services start cube
 open http://127.0.0.1:7777
 ```
 
-`init-local` checks QEMU, copies the image, starts the runner once to enroll
-it and stops it again; the services then keep both running and restart them
+`init-local` checks QEMU, fetches `debian-13-genericcloud-arm64.qcow2` from
+[cloud.debian.org](https://cloud.debian.org/images/cloud/trixie/latest/) and
+verifies it against the `SHA512SUMS` published there (`--image` takes a file you
+already have; `CUBE_DEBIAN_IMAGE_BASE` names a mirror), hands it to the runner,
+which keeps its own copy, starts the runner once to enroll it and stops it
+again; the services then keep both running and restart them
 after a crash or a login. Run it before starting the `cube-runner` service,
 and keep the default `--home` (`~/.cube`): the service starts the runner
 there. The runner needs Hypervisor.framework (`sysctl kern.hv_support` prints
@@ -193,8 +195,8 @@ or from the signed release (`install.sh`, [cubed updates](docs/cubed-updates.md)
 ```sh
 pnpm install --frozen-lockfile && pnpm build
 cargo build --locked -p cube-runner -p cube-gateway
-CUBE_RUNNER=target/debug/cube-runner pnpm cubed runners init-local \
-  --image /absolute/debian-13-genericcloud-amd64.qcow2 --state "$HOME/.cube-host"
+CUBE_RUNNER=target/debug/cube-runner pnpm cubed runners init-local --state "$HOME/.cube-host"
+# (downloads debian-13-genericcloud-amd64.qcow2; --image /absolute/file.qcow2 uses one you have)
 target/debug/cube-runner run --home "$HOME/.cube/runner"     # terminal 1
 pnpm cubed --state "$HOME/.cube-host"                          # terminal 2
 ```

@@ -109,13 +109,20 @@ enrolled by one cubed command (the `cube-runner` binary on `PATH`, or
 `CUBE_RUNNER`):
 
 ```sh
-cubed runners init-local --image /absolute/debian-13-genericcloud-<arch>.qcow2 \
+cubed runners init-local [--image /absolute/debian-13-genericcloud-<arch>.qcow2] \
   [--home ~/.cube] [--listen 127.0.0.1:7778] [--node-id node-local-<host>] \
   [--qemu PATH] [--firmware PATH] [--max-vcpus N] [--max-memory-mib N] [--max-disk-gib N] \
   [--state ~/.cube-host]
 ```
 
-It creates a control key at `<home>/control.key`, runs `cube-runner init
+Without `--image` it downloads the genericcloud image for the host (arm64 on
+an Apple Silicon Mac, amd64 on Linux x86-64) from
+`https://cloud.debian.org/images/cloud/trixie/latest/` into `<home>/images`,
+verifies it against the `SHA512SUMS` published beside it (a mismatch discards
+the download), and removes it once `cube-runner init` has copied it into the
+runner's state; `CUBE_DEBIAN_IMAGE_BASE` names a mirror with the same layout.
+The runner itself still downloads nothing. It creates a control key at
+`<home>/control.key`, runs `cube-runner init
 --home <home>/runner` (its own key, the base image copied in, loopback at
 `--listen`, the limits), writes the version-2 config `<home>/runner.json`
 (mode 0600, binding `node-local-<host>` / the same thread id / environment 1),

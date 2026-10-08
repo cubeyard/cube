@@ -11,9 +11,9 @@ brew install cubeyard/tap/cube
 This installs `cubed` (the control plane, with its own Node runtime and
 `cube-gateway`), `cube-runner` (the VM runner), QEMU and `gh`. Then follow
 [the macOS quickstart](https://github.com/cubeyard/cube#macos-quickstart-homebrew):
-a one-time `cubed runners init-local` with a Debian 13 genericcloud arm64
-image, `brew services start cube-runner`, `brew services start cube`, and
-connecting a model in the browser.
+a one-time `cubed runners init-local` (it downloads Debian's genericcloud
+arm64 image, checksum-verified), `brew services start cube-runner`,
+`brew services start cube`, and connecting a model in the browser.
 
 ## If you installed the old `cube` launcher from this tap
 

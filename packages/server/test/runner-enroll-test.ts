@@ -9,6 +9,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import http from "node:http";
+import { createHash } from "node:crypto";
 import { Endpoint, SecretKey } from "@number0/iroh/index.js";
 import { Registry } from "../src/registry.ts";
 import { localNodeId } from "../src/runner-enroll.ts";
@@ -191,6 +193,45 @@ try {
   assert.equal(summary.maxActiveVms, 2);
   const status = await cubed(["runners", "status", "--state", state]);
   assert.match(status.stdout, /node-local-two: reachable; lifecycle=ready; machines=0 of 2/);
+
+  // Without --image: the image comes from Debian's site (here a local stand-in),
+  // verified against its SHA512SUMS, and goes once the runner has its copy.
+  const imageName = process.platform === "darwin" ? "debian-13-genericcloud-arm64.qcow2" : "debian-13-genericcloud-amd64.qcow2";
+  const bytes = Buffer.concat([Buffer.from("QFI\xfb", "binary"), Buffer.alloc(70000, 7)]);
+  let serveBad = false;
+  const requests: string[] = [];
+  const site = http.createServer((request, response) => {
+    requests.push(request.url ?? "");
+    if (request.url === "/SHA512SUMS") response.end(`${createHash("sha512").update(bytes).digest("hex")}  ${imageName}\n0123  other.qcow2\n`);
+    else if (request.url === `/${imageName}`) { response.setHeader("content-length", bytes.length); response.end(serveBad ? Buffer.from(bytes.map(b => b ^ 1)) : bytes); }
+    else { response.statusCode = 404; response.end(); }
+  });
+  await new Promise<void>(resolve => site.listen(0, "127.0.0.1", resolve));
+  const siteBase = `http://127.0.0.1:${(site.address() as { port: number }).port}`;
+  try {
+    const third = path.join(root, "cube-three");
+    expectedNode = "node-local-three";
+    // The fake keygen hands out one key; free it from the second runner first.
+    fs.writeFileSync(path.join(second, "control.key"), Buffer.from(SecretKey.generate().toBytes()), { mode: 0o600 });
+    serveBad = true;
+    const corrupt = await cubed(["runners", "init-local", "--state", state, "--home", third, "--listen", address, "--node-id", "node-local-three"],
+      { CUBE_DEBIAN_IMAGE_BASE: siteBase });
+    assert.equal(corrupt.status, 1, corrupt.stdout + corrupt.stderr);
+    assert.match(corrupt.stderr, /does not match Debian's SHA512SUMS/);
+    assert.ok(!fs.existsSync(path.join(third, "images", imageName)) && !fs.existsSync(path.join(third, "images", `${imageName}.part`)), "a corrupt download is discarded");
+    assert.ok(!fs.existsSync(path.join(third, "runner")), "nothing was initialized from it");
+    serveBad = false;
+    const fetched = await cubed(["runners", "init-local", "--state", state, "--home", third, "--listen", address, "--node-id", "node-local-three"],
+      { CUBE_DEBIAN_IMAGE_BASE: siteBase });
+    assert.equal(fetched.status, 0, fetched.stdout + fetched.stderr);
+    assert.match(fetched.stdout, new RegExp(`downloading ${imageName} \\(0 MB\\) from ${siteBase}`));
+    assert.match(fetched.stdout, /downloaded .* \(checksum verified\)/);
+    assert.match(fetched.stdout, /removed the download: the runner holds its own copy/);
+    assert.ok(!fs.existsSync(path.join(third, "images")), "the download is gone once the runner has its copy");
+    const initCall = fs.readFileSync(log, "utf8").trim().split("\n").filter(line => line.startsWith("init ")).at(-1)!;
+    assert.match(initCall, new RegExp(`--image ${path.join(third, "images", imageName)} `), "the verified download was what init copied");
+    assert.deepEqual(requests.filter(url => url === `/${imageName}`).length, 2, "one download per attempt");
+  } finally { site.close(); }
   console.log("ok: runners init-local sets up, enrolls and stops a local runner; runners enroll admits a running one; rebinding and shared keys are refused");
 } finally {
   await server.close();

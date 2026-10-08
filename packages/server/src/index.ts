@@ -36,7 +36,7 @@ import { Artifacts } from "./artifact-service.ts";
 import { ARTIFACT_GUIDE, artifactTools } from "./artifact-tools.ts";
 import { githubPulls, type GithubPulls } from "./github-pulls.ts";
 import { Portal, portalSettings, type PortalSettings } from "./portal.ts";
-import { DEFAULT_LOCAL_RUNNER_LISTEN, enrollRunner, initLocalRunner } from "./runner-enroll.ts";
+import { DEBIAN_IMAGE_BASE, DEFAULT_LOCAL_RUNNER_LISTEN, enrollRunner, initLocalRunner } from "./runner-enroll.ts";
 
 const CUBED_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
 /** The release's version (its launcher exports CUBED_VERSION=vX.Y.Z); null
@@ -48,7 +48,7 @@ function releaseVersion(): string | null {
 const HELP = `usage: cubed [options]
        cubed runners status [--state <directory>]
        cubed runners enroll --config <runner.json> [--state <directory>]
-       cubed runners init-local --image <debian-13-genericcloud.qcow2> [--home <directory>]
+       cubed runners init-local [--image <debian-13-genericcloud.qcow2>] [--home <directory>]
              [--listen <127.0.0.1:port>] [--node-id <node-id>] [--qemu <path>] [--firmware <path>]
              [--max-vcpus N] [--max-memory-mib N] [--max-disk-gib N] [--state <directory>]
 
@@ -70,7 +70,10 @@ runners init-local sets up a cube-runner on this host (the binary on PATH, or
 CUBE_RUNNER): its key, state and base image under <home>/runner (default
 ~/.cube), loopback at --listen (default ${DEFAULT_LOCAL_RUNNER_LISTEN}), the config
 <home>/runner.json, and enrolls it; the runner is then started by its service
-or by \`cube-runner run --home <home>/runner\`.
+or by \`cube-runner run --home <home>/runner\`. Without --image it downloads
+Debian's genericcloud image for this host from ${DEBIAN_IMAGE_BASE}
+(verified against the SHA512SUMS published there; CUBE_DEBIAN_IMAGE_BASE names
+a mirror).
 
 The portal to threads' \`cube service\` web servers is off unless CUBED_PORTAL_IP
 names cubed's private (e.g. Tailscale) address; see docs/services.md.`;
@@ -794,7 +797,7 @@ interface CubedCli {
   /** `runners enroll`: the runner's private config. */
   config?: string;
   /** `runners init-local`: the local runner's options. */
-  local?: { image: string; home: string; listen: string; nodeId?: string; qemu?: string; firmware?: string;
+  local?: { image?: string; home: string; listen: string; nodeId?: string; qemu?: string; firmware?: string;
     maxVcpus?: number; maxMemoryMib?: number; maxDiskGib?: number };
 }
 
@@ -827,7 +830,6 @@ function cli(argv: string[]): CubedCli {
     config = path.resolve(values.config);
   }
   if (command === "runners-init-local") {
-    if (!values.image) throw new Error(`runners init-local needs --image <debian-13-genericcloud.qcow2>\n\n${HELP}`);
     const limit = (name: "max-vcpus" | "max-memory-mib" | "max-disk-gib"): number | undefined => {
       const raw = values[name];
       if (raw === undefined) return undefined;
@@ -835,7 +837,7 @@ function cli(argv: string[]): CubedCli {
       if (!Number.isInteger(parsed) || parsed < 1 || String(parsed) !== raw) throw new Error(`--${name} must be a positive integer`);
       return parsed;
     };
-    local = { image: path.resolve(values.image), home: path.resolve(values.home ?? path.join(os.homedir(), ".cube")),
+    local = { image: values.image === undefined ? undefined : path.resolve(values.image), home: path.resolve(values.home ?? path.join(os.homedir(), ".cube")),
       listen: values.listen ?? DEFAULT_LOCAL_RUNNER_LISTEN, nodeId: values["node-id"], qemu: values.qemu, firmware: values.firmware,
       maxVcpus: limit("max-vcpus"), maxMemoryMib: limit("max-memory-mib"), maxDiskGib: limit("max-disk-gib") };
   }
