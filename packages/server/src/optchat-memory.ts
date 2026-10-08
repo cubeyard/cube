@@ -1,7 +1,8 @@
 /** OptChat's memory: the log of messages, the binary tree of one-line
  * summaries over it and the view that tiles the whole chat in a byte
- * sawtooth (VIEW_LOW to VIEW). Pure and synchronous; the service persists messages (as Pi
- * entries) and nodes, and the compactor builds nodes. See docs/optchat.md. */
+ * sawtooth (VIEW_LOW to VIEW). Pure and synchronous; the service persists
+ * messages (as Pi entries) and nodes, and the compactor builds nodes. See
+ * docs/optchat.md. */
 
 export const NODE = 512;
 /** Once the view passes VIEW bytes, one batch merges it down to VIEW_LOW. */
@@ -73,8 +74,7 @@ export class Memory {
   private readonly limit: number;
   /** A batch passed VIEW and has not reached VIEW_LOW yet. */
   private merging = false;
-  /** Merges made, each a rewrite of the view from the merged line on. */
-  merges = 0;
+  private merged = 0;
   /** Called after every fit, so waiters can check `settled()`. */
   onChange: () => void = () => {};
   constructor(options: { view?: number; low?: number; node?: number } = {}) {
@@ -89,6 +89,8 @@ export class Memory {
   get bytes(): number { return this.size; }
   /** Whether a batch is still merging toward VIEW_LOW; stored with the view. */
   get batching(): boolean { return this.merging; }
+  /** Merges made, each a rewrite of the view from the merged line on. */
+  get merges(): number { return this.merged; }
   built(l: number, i: number): boolean { return this.nodes.has(key(l, i)); }
   node(l: number, i: number): string | undefined { return this.nodes.get(key(l, i)); }
   private partText(part: Part): string { return this.node(part.l, part.i) ?? PLACEHOLDER; }
@@ -149,7 +151,7 @@ export class Memory {
       const parent = { l: a.l + 1, i: a.i / 2 };
       this.size += this.lineBytes(parent) - this.lineBytes(a) - this.lineBytes(b);
       this.view.splice(best, 2, parent);
-      this.merges++;
+      this.merged++;
     }
     if (this.size <= this.lower) this.merging = false;
     this.onChange();

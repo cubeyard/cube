@@ -45,10 +45,13 @@ async function until(check: () => boolean, what: string) {
   for (let k = 0; k < 1500 && !check(); k++) await delay(10);
   assert.ok(check(), what);
 }
-const quiet = async (chat: OptChat) => {
+/** The chat is quiet: its turn ended, its log holds `messages`, and every
+ * node build has finished, the stored view's commit included (a build
+ * leaves the busy set only after it). No sleeps. */
+const quiet = async (chat: OptChat, messages: number) => {
   await chat.agent.conversation.waitForIdle(BACKGROUND_CONTEXT);
-  await until(() => chat.memory.settled() && chat.memory.ready(new Set(), 8).length === 0, "the tree is complete");
-  await delay(50);
+  const busy = (chat as unknown as { busy: ReadonlySet<string> }).busy;
+  await until(() => chat.memory.length === messages && chat.memory.settled() && chat.memory.ready(new Set(), 8).length === 0 && busy.size === 0, "the tree is complete and stored");
 };
 const lines = (view: string) => view.split("\n").slice(1, -1);
 
@@ -72,7 +75,7 @@ try {
   for (let n = 0; n < 40; n++) {
     await chat.send(`message ${n}: ${"word ".repeat(20)}`, `r${n}`);
     await until(() => views.length === n + 1, `turn ${n} ran`);
-    await quiet(chat);
+    await quiet(chat, 2 * (n + 1));
     assert.ok(bytes(lines(views[n]!).join("\n")) < HIGH, "a turn's view is at most the high mark");
     if (n === 0) continue;
     const [before, after] = [lines(views[n - 1]!), lines(views[n]!)];
@@ -108,7 +111,7 @@ try {
   await chat.send("after the reopen", "r-after");
   await until(() => views.length === count + 1, "a turn after the reopen ran");
   assert.deepEqual(lines(views.at(-1)!).slice(0, lines(rendered).length), lines(rendered), "the first turn after a reopen reads the stored view as its prefix");
-  await quiet(chat);
+  await quiet(chat, 82);
 } finally { await chat.close(); fs.rmSync(root, { recursive: true, force: true }); }
 
 console.log("optchat view reopen: ok");

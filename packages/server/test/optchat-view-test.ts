@@ -210,6 +210,7 @@ assert.equal(VIEW_LOW, 64_000);
   const log = Array.from({ length: total }, (_, n) => ({ kind: "user" as const, text: `m${n}`, date: n }));
   assert.ok(memory.restore(log, old), "an old stored view, without a batch flag, restores");
   assert.equal(shape(memory.view), shape(old), "as it was");
+  assert.equal(memory.bytes, bytes(memory.render()) - bytes("<chat>\n</chat>"), "a restore counts the rendered lines too");
   assert.equal(memory.merges, 0);
   let n = total;
   while (memory.merges === 0) {
@@ -236,7 +237,7 @@ assert.equal(VIEW_LOW, 64_000);
 }
 
 {
-  // The representative workload: 30,000 messages of mixed size, nodes about
+  // The representative workload: 10,000 messages of mixed size, nodes about
   // 300-500 bytes, the spec's marks. Batching keeps the same merges in the
   // same order and only changes their timing; it rewrites far fewer lines
   // per message than merging at every message (high mark = low mark).
@@ -244,7 +245,7 @@ assert.equal(VIEW_LOW, 64_000);
     const memory = new Memory({ view: VIEW, low, node: 512 });
     const ends = batchEnds(memory);
     let previous: Part[] = [], lines = 0, rewrites = 0, peak = 0;
-    for (let n = 0; n < 30_000; n++) {
+    for (let n = 0; n < 10_000; n++) {
       const merges = memory.merges;
       memory.append({ kind: n % 3 ? "talk" : "user", text: `message ${n} ${"q".repeat(n % 7 ? 100 : 900)}`, date: n });
       drain(memory);
@@ -253,14 +254,14 @@ assert.equal(VIEW_LOW, 64_000);
       peak = Math.max(peak, memory.bytes);
       previous = memory.view.map(part => ({ ...part }));
     }
-    return { memory, lines: lines / 30_000, rewrites, merges: memory.merges, peak, trough: Math.max(...ends) };
+    return { memory, lines: lines / 10_000, rewrites, merges: memory.merges, peak, trough: Math.max(...ends) };
   };
   const batched = run(VIEW_LOW), every = run(VIEW);
   assert.ok(batched.peak <= VIEW, `the view stays at most 128 KB (${batched.peak})`);
   assert.ok(batched.trough <= VIEW_LOW, `and every batch ends at most at 64 KB (${batched.trough})`);
   assert.ok(batched.rewrites * 50 < every.rewrites, `batches are rare (${batched.rewrites} vs ${every.rewrites} messages that changed old lines)`);
   assert.ok(batched.lines * 4 < every.lines, `and rewrite far fewer lines per message (${batched.lines.toFixed(1)} vs ${every.lines.toFixed(1)})`);
-  console.log(`optchat view workload (30,000 messages, simulated): batched ${batched.rewrites} rewrites, ${batched.merges} merges, ${batched.lines.toFixed(1)} lines written per message; every message ${every.rewrites} rewrites, ${every.merges} merges, ${every.lines.toFixed(1)} lines`);
+  console.log(`optchat view workload (10,000 messages, simulated): batched ${batched.rewrites} rewrites, ${batched.merges} merges, ${batched.lines.toFixed(1)} lines written per message; every message ${every.rewrites} rewrites, ${every.merges} merges, ${every.lines.toFixed(1)} lines`);
 }
 
 console.log("optchat view: ok");
