@@ -160,10 +160,12 @@ waiting message only during a tool round, a lock across steer, submit and
 stop, and unanswered messages on stop. The rounds also stopped logging failed
 attempts, restored the view on reopen and made spawn replay find its thread.
 These are tested offline, except a restart in the middle of a turn's
-submission, which is idempotent by construction but untested. Prompt caching follows spec §8 through pi-ai's
-`onPayload` and `sessionId`: three Anthropic marks in the view and a stable
-OpenAI `prompt_cache_key`. It is checked against pi-ai's real request builders
-offline, but hit rates on a live provider are not measured. Deviations (no
+submission, which is idempotent by construction but untested. Prompt caching follows spec §3.3 through pi-ai's
+`onPayload` and `sessionId`: the view in blocks of 4 lines, Anthropic marks on
+the last system block, the last whole view block and the request end, one
+writer per marked prefix, and a stable OpenAI `prompt_cache_key`. It is
+checked against pi-ai's real request builders offline; hit rates are modelled
+offline, not measured on a live provider. Deviations (no
 OpenAI breakpoint field, a small steering window, threads do not get the view)
 are listed in docs/optchat.md.
 

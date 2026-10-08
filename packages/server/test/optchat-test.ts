@@ -21,6 +21,12 @@ const textOf = (message: Message) => typeof message.content === "string" ? messa
   : message.content.map(part => part.type === "text" ? part.text : "").join("\n");
 const userBlocks = (message: Message) => typeof message.content === "string" ? [message.content]
   : message.content.map(part => part.type === "text" ? part.text : "");
+// The view goes in blocks of lines: joined here, then the blocks after it.
+const withJoinedView = (message: Message) => {
+  const blocks = userBlocks(message);
+  const end = blocks.findIndex(block => block.endsWith("</chat>")) + 1;
+  return [blocks.slice(0, end).join(""), ...blocks.slice(end)];
+};
 
 type Turn = { system: string; messages: Message[]; tools: string[] };
 const turns: Turn[] = [];
@@ -128,7 +134,7 @@ try {
   script = [
     turn => {
       assert.equal(turn.messages.length, 1, "the report starts a fresh turn");
-      const [view, report] = userBlocks(turn.messages[0]!);
+      const [view, report] = withJoinedView(turn.messages[0]!);
       assert.equal(report, "[abcdef12] ended its turn; nothing of it runs now: done: PR #212, tests pass");
       assert.match(view!, /^<chat>\n0\+1\|summary \d+\n/, "the long first message is summarized, not shown");
       assert.ok(!view!.includes("long detail long detail"), "no message appears in full");
@@ -266,7 +272,7 @@ chat = reopened;
 try {
   assert.equal(chat.memory.render(), viewBeforeClose, "a reopen restores the view it had");
   script = [turn => {
-    const [view, , message] = userBlocks(turn.messages[0]!);
+    const [view, , message] = withJoinedView(turn.messages[0]!);
     assert.equal(message, "what happened?");
     assert.match(view!, /\|work: |\|summary|\|user: \[abcdef12\]/, "the report is in the view");
     assert.ok(view!.split("\n").length > 5);
