@@ -1017,19 +1017,21 @@ function checkouts(allocation: WorkspaceAllocation): Array<{ dir: string; url: s
 /** Shell helpers shared by the preparation and resume scripts. `hook NAME
  * FILE LOG` runs FILE (if it is executable) as the agent's account in
  * /workspace with its output in ~/.cache/cube/LOG and prints
- * `cube-hook NAME ok|failed:<exit>|absent <ms>`. */
+ * `cube-hook NAME ok|failed:<exit>|absent <ms>`; the same line, with the
+ * time it ended, goes to ~/.cache/cube/NAME.status for `cube hooks`. */
 const HOOK_SHELL = [
   "logs=\"${HOME:-/tmp}/.cache/cube\"",
   "hooks=\"${CUBE_HOOKS:-/etc/cube/hooks}\"",
   "mkdir -p \"$logs\"",
   "ms() { if [ -n \"${EPOCHREALTIME:-}\" ]; then t=${EPOCHREALTIME/[.,]/}; echo $((10#$t / 1000)); else echo $(( $(date +%s) * 1000 )); fi; }",
+  "outcome() { echo \"cube-hook $1 $2 $3\"; echo \"$2 $3 $(ms)\" >\"$logs/$1.status\" 2>/dev/null || true; }",
   "hook() {",
   "  name=$1 file=$2 log=\"$logs/$3\"",
-  "  if [ ! -x \"$file\" ]; then echo \"cube-hook $name absent 0\"; return 0; fi",
+  "  if [ ! -x \"$file\" ]; then outcome \"$name\" absent 0; return 0; fi",
   "  start=$(ms)",
   "  \"$file\" >\"$log\" 2>&1 </dev/null; code=$?",
-  "  if [ \"$code\" -eq 0 ]; then echo \"cube-hook $name ok $(( $(ms) - start ))\"; return 0; fi",
-  "  echo \"cube-hook $name failed:$code $(( $(ms) - start ))\"",
+  "  if [ \"$code\" -eq 0 ]; then outcome \"$name\" ok $(( $(ms) - start )); return 0; fi",
+  "  outcome \"$name\" \"failed:$code\" $(( $(ms) - start ))",
   "  echo \"$name failed (exit $code); see $log\"; tail -n 5 \"$log\"",
   "  return 1",
   "}",
@@ -1072,10 +1074,10 @@ export function preparationScript(allocation: WorkspaceAllocation, mode: Prepara
     "echo \"cube-setup-blob $blob\"",
     "prepare() {",
     "  if hook pre-setup \"$hooks/pre-setup\" pre-setup.log; then hook setup .agents/setup setup.log",
-    "  else echo \"cube-hook setup notrun 0\"; fi",
+    "  else outcome setup notrun 0; fi",
     "}",
     ...(mode.kind === "template"
-      ? [`if [ "$blob" = ${quote(mode.setupBlob)} ]; then echo "cube-hook pre-setup skipped 0"; echo "cube-hook setup skipped 0"`,
+      ? [`if [ "$blob" = ${quote(mode.setupBlob)} ]; then outcome pre-setup skipped 0; outcome setup skipped 0`,
         "else echo \"cube-template stale\"; prepare; fi"]
       : ["prepare"]),
     "echo provisioned",
@@ -1101,7 +1103,7 @@ export function resumeScript(): string {
     "command -v flock >/dev/null 2>&1 && flock 9",
     "if [ -e \"$run/resumed\" ]; then echo \"cube-resume already\"; exit 0; fi",
     "if hook pre-resume \"$hooks/pre-resume\" pre-resume.log; then hook resume .agents/resume resume.log",
-    "else echo \"cube-hook resume notrun 0\"; fi",
+    "else outcome resume notrun 0; fi",
     ": >\"$run/resumed\"",
     "echo resumed",
   ].join("\n");

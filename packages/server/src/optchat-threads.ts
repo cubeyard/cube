@@ -4,11 +4,18 @@ import { agents, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { releaseUnfinished, ThreadArchiving, ThreadWorking, type Conversations } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
 import { THREAD_NOTE, type ObservedThread, type OptThreads } from "./optchat.ts";
-import { threadAgent, type Registry, type ResolvedRepositories, type Thread } from "./registry.ts";
+import { threadAgent, type Project, type Registry, type ResolvedRepositories, type Thread } from "./registry.ts";
+import { describeProjectHooks, findProject, writeProjectHooks } from "./project-hooks.ts";
 import { describeRunners, type RunnersObservation } from "./runner-observe.ts";
 
 /** How long the overview waits for one thread's stored state. */
 const OBSERVE_MS = 2000;
+
+/** Which of a project's hooks are set (project_hooks reads them). */
+function hookSummary(hooks: Project["hooks"]): string {
+  const set = [hooks?.preSetup ? "pre-setup" : "", hooks?.preResume ? "pre-resume" : ""].filter(Boolean);
+  return set.length ? set.join(", ") : "none";
+}
 
 /** `latestCommits` resolves a project's repositories against upstream for a
  * new thread (index.ts); a thread is never started at the last check's. */
@@ -35,12 +42,19 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       const models = await options.catalog();
       const slots = registry.runnerSlots();
       const lines = projects.map(project => `${project.name} (id ${project.id}; ${project.status}${project.error ? `: ${project.error}` : ""}): `
-        + project.repositories.map(repository => `${repository.url}@${repository.base ?? "default"}`).join(", "));
+        + project.repositories.map(repository => `${repository.url}@${repository.base ?? "default"}`).join(", ")
+        + `; hooks: ${hookSummary(project.hooks)}`);
       return [
         lines.length ? `projects:\n${lines.join("\n")}` : "no projects: the user creates them under projects",
         `free thread machines: ${slots.free} of ${slots.total} (an open thread holds one until it is archived; runners has each runner's version and state)`,
         `models: ${models.map(model => `${model.provider}/${model.id}`).join(", ") || "none connected"}`,
       ].join("\n");
+    },
+    async hooks(project) {
+      return describeProjectHooks(registry, findProject(registry, project));
+    },
+    async writeHooks(project, hooks) {
+      return writeProjectHooks(registry, project, hooks);
     },
     async runners() {
       return describeRunners(options.runners());

@@ -83,6 +83,9 @@ export function workspacePath(root: string, file: string, realRoot?: string): st
 /** How an agent should write one, after the show-me skill
  * (https://www.humanlayer.com/blog/show-me-skill): compact visuals beside
  * short text, never walls of prose. */
+/** What a thread's agent learns about the project's hooks (docs/project-hooks.md). */
+export const PROJECT_HOOKS_NOTE = "The project's external hooks (pre-setup and pre-resume, which run before the repository's .agents/setup and .agents/resume) are kept in cube's projects, not in the repository: "
+  + "`cube hooks` shows the ones this machine runs, with their last outcomes and logs (read only). A thread cannot change them; the user does, in cube's projects or by asking OptChat.";
 export const ARTIFACT_GUIDE = "An artifact is a document the user reads beside the chat, selects text in and comments on; every write is a new revision and older ones stay. "
   + "Use one for what the user will read and discuss at length (a review, a plan, a report, a design), not for a short reply. "
   + "Write it as GitHub Markdown and show rather than tell: keep prose brief and put each visual next to the short text it supports. "

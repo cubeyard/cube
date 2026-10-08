@@ -106,7 +106,7 @@ try {
   // Turn 1: the view is empty, the message comes whole; OptChat spawns a thread.
   script = [
     turn => {
-      assert.deepEqual(turn.tools.sort(), ["archive", "date", "diagnose", "history", "projects", "runners", "spawn", "tell", "threads", "usage", "zoom"], "no code tools, no task tools");
+      assert.deepEqual(turn.tools.sort(), ["archive", "date", "diagnose", "history", "project_hooks", "project_hooks_write", "projects", "runners", "spawn", "tell", "threads", "usage", "zoom"], "no code tools, no task tools");
       assert.doesNotMatch(turn.system, /<now>|task list|task\(\)/, "no task list to keep by hand");
       assert.match(turn.system, /You are OptChat/);
       assert.equal(turn.messages.length, 1, "a fresh context: the view and the message only");

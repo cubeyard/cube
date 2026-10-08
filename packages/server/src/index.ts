@@ -410,6 +410,8 @@ export async function createCubed(options: {
     const current = registry.getProject(project.id);
     if (!current) throw new Error("project was deleted during check");
     if (current.revision !== project.revision) return projectView(current);
+    // Hooks saved on their own during the check (project_hooks_write) stay.
+    project.hooks = current.hooks;
     registry.saveProject(project);
     return projectView(project);
   }

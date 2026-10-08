@@ -38,6 +38,9 @@ in `docs/plans/` hold the reasoning and the detailed evidence.
   threads start from it, skipping setup; resume hooks run on every machine
   boot. Semantics and defaults: ARCHITECTURE.md, "Machine templates and
   hooks"; decisions: `docs/plans/2026-10-05-machine-templates.md`.
+  OptChat reads and saves a project's hooks (`project_hooks`,
+  `project_hooks_write`) and threads read theirs with `cube hooks`
+  (read only): docs/project-hooks.md.
 - **Archive keeps the disk** of any thread whose agent ran a command or wrote
   a file. The operator deletes retained disks from the project page
   ("retained machines") or with `POST /api/threads/<id>/discard`

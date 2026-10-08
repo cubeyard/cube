@@ -119,6 +119,18 @@ reading at length. Link an artifact in your reply as [title](#/a/<id>).
 Comments the user leaves on yours come to you as a message starting
 "[artifact <id>]"; comments on a thread's go to that thread. ${ARTIFACT_GUIDE}`;
 
+/** OptChat's part in project hooks (project-hooks.ts, docs/project-hooks.md). */
+export const HOOKS_NOTE = `Project hooks: a project in cube's projects has two external hooks,
+pre-setup and pre-resume, shell scripts cube runs in each of its thread
+machines before the repository's own .agents/setup and .agents/resume.
+They live in cube, not in the repository. project_hooks(project) reads
+them back with their latest outcomes; project_hooks_write(project, ...)
+saves them, only when the user asked for it and named the project, and
+answers with what cubed now has. Do these yourself; a thread cannot change
+hooks. Hooks run commands in every new thread machine of that project, so
+show the user the scripts you saved. Nothing else (a timeout, a working
+directory, another trigger) can be set.`;
+
 /** What a thread report says when the thread started: its final reply is the report. */
 export const THREAD_NOTE = "(This thread was started by OptChat, the user's chat agent. Your final reply is your report to it. "
   + "Once you end your turn nothing wakes you except a background agent of yours finishing, so do not end it to wait for CI, a review or a command: "
@@ -158,6 +170,11 @@ export interface OptThreads {
   /** Evidence about the thread's machine as bounded, cleaned text
    * (vm-diagnostics.ts); read only. null: no such thread. */
   diagnose?(id: string): Promise<string | null>;
+  /** A project's saved hooks and their latest outcomes, as text
+   * (project-hooks.ts); `project` is a name or id. */
+  hooks?(project: string): Promise<string>;
+  /** Saves a project's hooks (absent: kept, "": removed) and reads them back, as text. */
+  writeHooks?(project: string, hooks: { preSetup?: string | undefined; preResume?: string | undefined }): Promise<string>;
 }
 
 export type ThreadRecord = {
@@ -1212,6 +1229,35 @@ export class OptChat {
       replay: "safe",
       execute: async args => text(this.options.threads.usage ? await this.options.threads.usage(args) : "usage is not available"),
     });
+    const hooks = defineTool({
+      name: "project_hooks",
+      description: "Read a project's external hooks as cubed saved them (the scripts, each with its size and sha256; secret-looking values redacted), "
+        + "the latest hook outcomes in its newest threads, and what hooks cube supports. Read-only.",
+      parameters: Type.Object({ project: Type.String({ description: "Project name or id" }) }),
+      replay: "safe",
+      execute: async args => {
+        if (!this.options.threads.hooks) return text("project hooks are not available");
+        try { return text(await this.options.threads.hooks(args.project)); }
+        catch (error) { return text(`not read: ${error instanceof Error ? error.message : String(error)}`); }
+      },
+    });
+    const writeHooks = defineTool({
+      name: "project_hooks_write",
+      description: "Save a project's external hooks in cube's projects (not its repository) and read them back. Hooks are shell scripts that run in every new thread machine of that project, "
+        + "so change them only when the user asked for it, naming the project. A hook not given stays as it is; \"\" removes it. Only preSetup and preResume exist.",
+      parameters: Type.Object({
+        project: Type.String({ description: "Project name or id" }),
+        preSetup: Type.Optional(Type.String({ description: "The whole pre-setup script; \"\" removes it" })),
+        preResume: Type.Optional(Type.String({ description: "The whole pre-resume script; \"\" removes it" })),
+      }, { additionalProperties: false }),
+      // Saving the same scripts again changes nothing.
+      replay: "safe",
+      execute: async args => {
+        if (!this.options.threads.writeHooks) return text("project hooks are not available");
+        try { return text(await this.options.threads.writeHooks(args.project, { preSetup: args.preSetup, preResume: args.preResume })); }
+        catch (error) { return text(`not saved: ${error instanceof Error ? error.message : String(error)}`); }
+      },
+    });
     const instructions = path.join(this.options.directory, "AGENTS.md");
     const artifacts = this.options.artifacts ? artifactTools({
       artifacts: this.options.artifacts, author: { kind: "optchat" }, agent: "optchat", projects: true,
@@ -1223,9 +1269,10 @@ export class OptChat {
     }) : [];
     return defineExtension({
       name: "optchat",
-      tools: [zoom, date, projects, runners, spawn, tell, threads, history, diagnose, archive, usage, ...artifacts],
+      tools: [zoom, date, projects, runners, spawn, tell, threads, history, diagnose, archive, usage, hooks, writeHooks, ...artifacts],
       sections: [
         section("master", () => MASTER, { tag: false }),
+        section("hooks", () => HOOKS_NOTE, { tag: false }),
         ...artifacts.length ? [section("artifacts", () => ARTIFACTS_NOTE, { tag: false })] : [],
         section("view", () => VIEW_DOC, { tag: false }),
         // The user's own instructions; constant unless they edit the file.
