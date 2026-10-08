@@ -67,7 +67,8 @@ in `docs/plans/` hold the reasoning and the detailed evidence.
   Homebrew on Linux (`brew style`, `brew audit --strict`, `brew fetch`
   checksums); the `homebrew` job of ci.yml installs, audits and tests the
   generated formulas against the latest release on GitHub's macOS runner
-  (`brew install` of cube and cube-runner succeeded there on 2026-10-08);
+  (green at 2026-10-08, run 37742299757: install, `brew audit --strict`,
+  `brew test` of both formulas);
   the publishing workflow runs at the next release; nothing has run on a
   real Mac with a thread machine yet.
 - State schema 102 adopts no older state. Moving from v0.2.x means a fresh

@@ -46,7 +46,8 @@ try {
   assert.match(cube, /CUBED_VERSION="v9\.8\.7" CUBED_COMMIT="0123456789abcdef0123456789abcdef01234567"/);
   assert.match(cube, /depends_on "cubeyard\/tap\/cube-runner"/);
   assert.match(cube, /Dir\.glob\(libexec\/"app\/\*\*\/native\/\*\/prebuilds\/\*", File::FNM_DOTMATCH\)/, "other platforms' prebuilt native modules are pruned, under node_modules/.pnpm too");
-  assert.match(cube, /File\.basename\(dir\) == "darwin-arm64"/);
+  assert.match(cube, /name\.start_with\?\("darwin-"\) && name\.include\?\("arm64"\)/, "every darwin arm64 build stays");
+  assert.match(cube, /vm\.pid/, "the caveats tell users of the tap's old launcher what holds port 7777");
   assert.match(cube, /shell_output\("#\{bin\}\/cubed --self-check"\)/, "the self-check runs through the launcher, which sets the version");
   assert.match(cubeRunner, /^class CubeRunner < Formula$/m);
   assert.match(cubeRunner, /cube-runner 1\.2\.3/, "the runner's own version is named");

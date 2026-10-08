@@ -101,7 +101,7 @@ jobs:
           brew audit --strict cubeyard/tap/cube cubeyard/tap/cube-runner
           brew test cubeyard/tap/cube cubeyard/tap/cube-runner
           cubed --version
-          grep -q 'runners status' <<<"$(cubed --help)"
-          grep -q '"protocolVersion":3' <<<"$(cube-runner version)"
+          help="$(cubed --help)"; grep -q 'runners status' <<<"$help"
+          runner="$(cube-runner version)"; grep -q '"protocolVersion":3' <<<"$runner"
           sysctl -n kern.hv_support || true
           brew services list

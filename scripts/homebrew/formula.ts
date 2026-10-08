@@ -173,7 +173,8 @@ class Cube < Formula
     # only this one's may stay in the keg (brew audit refuses the others).
     # They live under node_modules/.pnpm, so the glob must match dot directories.
     Dir.glob(libexec/"app/**/native/*/prebuilds/*", File::FNM_DOTMATCH).each do |dir|
-      next if !File.directory?(dir) || File.basename(dir) == "darwin-arm64" || File.basename(dir).start_with?(".")
+      name = File.basename(dir)
+      next if !File.directory?(dir) || (name.start_with?("darwin-") && name.include?("arm64"))
 
       rm_r(dir)
     end
@@ -218,6 +219,8 @@ class Cube < Formula
       CUBED_ALLOWED_HOSTS, CUBED_CLAUDE, ...). State: ~/.cube-host and ~/.cube;
       uninstalling keeps both. After brew upgrade, restart the services:
         brew services restart cube-runner cube
+      Had this tap's old v0.1 "cube" launcher? Its VM may still hold port 7777:
+      kill "$(cat ~/.cube/vm.pid)" and move ~/.cube aside before init-local.
     EOS
   end
 

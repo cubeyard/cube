@@ -226,8 +226,8 @@ job on Linux so the tap token never reaches the machine that ran the release's
 binaries. The `homebrew` job of `ci.yml` does the same against the latest
 published release on every pull request, without the push, so a formula change
 is validated on a real Mac before it is merged. It checks this checkout's
-generator and tests against that release's binaries (v0.3.18 today, whose
-cubed has no `runners init-local`), which is why the formula tests assert only
+generator and tests against the latest release's binaries (which may lack
+`runners init-local`), which is why the formula tests assert only
 what every 0.3.x release has (`runners status`, `--self-check`, `cube-runner
 version`); the generator also requires the release's state schema and protocol
 to match the checkout, so a pull request that changes either fails this job
@@ -237,6 +237,11 @@ The tap's previous formula was a different product (the v0.1 `cube` launcher);
 the tap README tells those users how to move over.
 The formulas' `test do` blocks run `cubed --version`, `--help`, cubed's
 `--self-check` (which runs `cube-gateway --version`) and `cube-runner version`.
+The cube formula keeps the release bundle as signed except that it removes the
+prebuilt native modules a dependency (pi-tui) ships for other platforms, which
+`brew audit` refuses in an arm64 keg. A backport release published after a
+newer one fails the workflow's latest-release guard; publish it by hand with
+`force` only if the tap should go back.
 
 What the Homebrew layout changes against the managed launcher: `bin/cubed` is
 a small wrapper that sources `~/.config/cubed/environment`, sets `CUBE_RUNNER`

@@ -98,7 +98,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p Formula
-          cp ../formula/*.rb Formula/
+          cp ../formula/cube.rb ../formula/cube-runner.rb Formula/
           cp ../formula/README.md README.md
           runner="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).runner)' ../formula/formula.json)"
           git config user.name 'github-actions[bot]'

@@ -17,12 +17,15 @@ connecting a model in the browser.
 
 ## If you installed the old `cube` launcher from this tap
 
-Before October 2026 this tap's `cube` formula was a different product: a
-launcher (`cube up`) with its VM data in `~/.cube`. `brew upgrade` replaces it
-with cubed; `bin/cube` goes away. Run `cube destroy --yes` and
-`brew uninstall cube` first, and move `~/.cube` aside before
-`cubed runners init-local`, which refuses an existing `~/.cube/runner`,
-`control.key` or `runner.json` and does not clean up the old layout.
+Until the first release with `cubed runners init-local`, this tap's `cube`
+formula was a different product: a launcher (`cube up`) with its VM under
+`~/.cube`. `brew upgrade` replaces it with cubed and `bin/cube` goes away.
+Before upgrading: `cube down`, then move `~/.cube` aside to keep the old VM's
+data (`cube destroy --yes` deletes it), then `brew uninstall cube`. If you
+already upgraded: stop the old VM with `kill "$(cat ~/.cube/vm.pid)"` (it
+holds port 7777) and move `~/.cube` aside. `cubed runners init-local` refuses
+an existing `~/.cube/runner`, `control.key` or `runner.json` and does not
+clean up the old layout.
 
 ## Updates and removal
 

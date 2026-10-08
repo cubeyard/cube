@@ -39,6 +39,12 @@ import { Portal, portalSettings, type PortalSettings } from "./portal.ts";
 import { DEFAULT_LOCAL_RUNNER_LISTEN, enrollRunner, initLocalRunner } from "./runner-enroll.ts";
 
 const CUBED_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
+/** The release's version (its launcher exports CUBED_VERSION=vX.Y.Z); null
+ * for a source checkout, whose package version is what `--version` prints. */
+function releaseVersion(): string | null {
+  const tag = versionInfo().version;
+  return /^v\d+\.\d+\.\d+$/.test(tag) ? tag.slice(1) : null;
+}
 const HELP = `usage: cubed [options]
        cubed runners status [--state <directory>]
        cubed runners enroll --config <runner.json> [--state <directory>]
@@ -899,7 +905,7 @@ async function runnersStatus(state: string): Promise<number> {
 async function main(argv: string[]): Promise<void> {
   const options = cli(argv);
   if (options.command === "help") { console.log(HELP); return; }
-  if (options.command === "version") { console.log(`cubed ${CUBED_VERSION}`); return; }
+  if (options.command === "version") { console.log(`cubed ${releaseVersion() ?? CUBED_VERSION}`); return; }
   if (options.command === "runners-status") { process.exitCode = await runnersStatus(options.state); return; }
   if (options.command === "runners-enroll") { await runnersEnroll(options.state, options.config!); return; }
   if (options.command === "runners-init-local") { process.exitCode = await runnersInitLocal(options.state, options.local!); return; }

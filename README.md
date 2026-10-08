@@ -41,10 +41,17 @@ What `brew install` does, and what stays yours to do:
 
 | `brew install cubeyard/tap/cube` | you |
 |---|---|
-| `cubed`: the control plane with its own Node runtime, `cube-gateway` and the web UI (the signed `darwin-arm64` release bundle, verified by its pinned sha256) | download a Debian 13 genericcloud **arm64** image |
+| `cubed`: the control plane with its own Node runtime, `cube-gateway` and the web UI (the signed `darwin-arm64` release bundle, verified by its pinned sha256, minus other platforms' prebuilt native modules) | download a Debian 13 genericcloud **arm64** image |
 | `cube-runner` and QEMU (Homebrew's `qemu`, which carries the arm64 UEFI firmware) | run the one-time `cubed runners init-local` |
 | `gh`, so threads can use your GitHub access | `gh auth login`; connect a model in the UI |
 | user services (`brew services`) for both daemons, loopback only | optional: Claude Code login, Tailscale access |
+
+If this tap's earlier product, the v0.1 `cube` launcher (`cube up`, its VM
+under `~/.cube`), is installed, retire it before installing: `cube down`,
+then move `~/.cube` aside to keep the old VM's data (`cube destroy --yes`
+deletes it), then `brew uninstall cube`. If `brew upgrade` already replaced it,
+`bin/cube` is gone: stop the old VM with `kill "$(cat ~/.cube/vm.pid)"` (it
+holds port 7777), then move `~/.cube` aside.
 
 ```sh
 brew trust cubeyard/tap          # Homebrew asks you once to trust a third-party tap
@@ -62,9 +69,7 @@ brew services start cube
 open http://127.0.0.1:7777
 ```
 
-If the old v0.1 `cube` launcher from this tap is installed (`cube up`, its
-data in `~/.cube`), remove it first: `cube destroy --yes`, `brew uninstall
-cube`, and move `~/.cube` aside. `init-local` checks QEMU, copies the image, starts the runner once to enroll
+`init-local` checks QEMU, copies the image, starts the runner once to enroll
 it and stops it again; the services then keep both running and restart them
 after a crash or a login. Run it before starting the `cube-runner` service,
 and keep the default `--home` (`~/.cube`): the service starts the runner
