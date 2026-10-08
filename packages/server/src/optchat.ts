@@ -794,7 +794,9 @@ export class OptChat {
   private async live() { return this.harness.snapshot(LiveDoc, this.conversation.id, context); }
 
   /** Records the admitted input `requestId` as carrying a message of the
-   * user; it counts for project_hooks_write once placed in a run. */
+   * user; it counts for project_hooks_write once placed in a run. The
+   * record follows the admission in its own commit (Pi admits on its own),
+   * so a tool that runs in between refuses: never the reverse. */
   private async markUser(requestId: string): Promise<void> {
     const input = await this.known(requestId);
     if (input?.type !== "input") return;

@@ -60,6 +60,7 @@ process.env.PATH = `${shim}:${process.env.PATH}`;
 
 // What OptChat does in each turn, one response per model request; tool results by call id.
 const results = new Map<string, string>();
+let lastMessages: Message[] = [];
 let script: Array<() => ReturnType<typeof fauxAssistantMessage> | Promise<ReturnType<typeof fauxAssistantMessage>>> = [];
 const call = (name: string, args: ToolArgs, id: string) => () => fauxAssistantMessage([fauxToolCall(name, args, { id })], { stopReason: "toolUse" });
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
@@ -70,6 +71,7 @@ faux.setResponses(Array.from({ length: 200 }, () => async request => {
     assert.match(system, /project_hooks_write\(project, \.\.\.\)/, "the prompt documents the tools");
     assert.ok(system.includes(JSON.stringify(HOOKS_NOTE).slice(1, -1)), "the prompt says who may change hooks");
     for (const message of request.messages) if (message.role === "toolResult") results.set(message.toolCallId, textOf(message));
+    lastMessages = request.messages;
     return (script.shift() ?? (() => fauxAssistantMessage("noted")))();
   }
   return fauxAssistantMessage("thread done");
@@ -260,7 +262,30 @@ try {
   assert.equal(fs.readFileSync(path.join(otherGuest.root, "home", "other"), "utf8"), "other-resume\n");
   assert.ok(!fs.existsSync(path.join(otherGuest.root, "home", "order")), "demo's hooks never ran there");
 
+  // A message of the user steered into a run a report started counts from
+  // the next step on: spawn holds its tool round on the slow repository.
+  fs.rmSync(go);
+  let steeredIn = false;
+  script = [call("spawn", { tasks: [{ project: "slow", task: "hold" }] }, "slow-spawn"),
+    () => {
+      // The same run: the spawn's result, then the user's message steered in after it.
+      const spawned = lastMessages.findIndex(message => message.role === "toolResult" && message.toolCallId === "slow-spawn");
+      steeredIn = spawned >= 0 && lastMessages.slice(spawned).some(message => message.role === "user" && textOf(message).includes("echo steered"));
+      return call("project_hooks_write", { project: "demo", preResume: "echo steered" }, "steered")();
+    }, () => fauxAssistantMessage("saved")];
+  assert.equal((await post("/api/optchat/prompt", { text: "[abcdef12] ended its turn", requestId: "report:abcdef12-0000-4000-8000-000000000001:run-3" })).status, 200);
+  turns++;
+  await until(() => fs.existsSync(held), Boolean, "the spawn's tool round is under way");
+  assert.equal((await post("/api/optchat/prompt", { text: "set demo's pre-resume to echo steered", requestId: `chat-${++turns}` })).status, 200);
+  await delay(1000);
+  fs.writeFileSync(go, "");
+  await until(async () => (await (await fetch(`${base}/api/optchat/history`)).json()) as { status: { state: string }; events: Array<{ type: string }> },
+    history => !script.length && history.status.state === "completed" && history.events.filter(event => event.type === "user-message").length === turns, "the steered turn finishes");
+  assert.ok(steeredIn, "the message was steered into the report's run");
+  assert.match(results.get("steered")!, /^saved preResume;/);
+
   // 8. A project check under way when hooks are saved keeps them.
+  fs.rmSync(held);
   fs.rmSync(go);
   const checking = post(`/api/projects/${slow.id}/check`, {});
   await until(() => fs.existsSync(held), Boolean, "the check is under way");
