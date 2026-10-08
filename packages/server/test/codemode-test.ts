@@ -190,6 +190,19 @@ try {
     console.log("ok: a call ignoring cancellation is uncertain and blocks the next script until it settles");
   }
 
+  {
+    // Typed images travel outside QuickJS and text truncation. The aggregate
+    // image budget is enforced even when each nested text result is empty.
+    const image = stand("picture", async () => "", [], false);
+    image.run = async () => ({ content: [{ type: "image", mimeType: "image/png", data: "a".repeat(3 * 1024 * 1024) }] });
+    const { result, body } = await run('for(let i=0;i<3;i++) await tools.picture({})', [image]);
+    assert.equal(result.isError, true);
+    assert.equal(result.content?.filter(part => part.type === "image").length, 2);
+    assert.match(body, /image budget exceeded/);
+    assert(!body.includes("a".repeat(100)), "base64 is not text output");
+    console.log("ok: codemode bounds aggregate typed image bytes independently of text");
+  }
+
   // --- the agent: cube's workspace tools through pi-durable ---------------
   const thread = (name: string) => {
     const files = path.join(root, name, "workspace");
