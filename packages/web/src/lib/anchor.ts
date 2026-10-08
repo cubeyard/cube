@@ -88,6 +88,18 @@ function heading(root: HTMLElement, node: Node): string {
   return found;
 }
 
+/** A range over [start, end) of the document's text, or null outside it. */
+export function textRange(root: HTMLElement, start: number, end: number): Range | null {
+  const { nodes } = textNodes(root);
+  const first = nodes.find(entry => start < entry.start + entry.node.data.length);
+  const last = nodes.findLast(entry => entry.start < end);
+  if (!first || !last || end <= start) return null;
+  const range = document.createRange();
+  range.setStart(first.node, start - first.start);
+  range.setEnd(last.node, end - last.start);
+  return range;
+}
+
 /** Marks [start, end) of the document's text, across element boundaries. */
 export function mark(root: HTMLElement, start: number, end: number, attributes: Record<string, string>): HTMLElement[] {
   const marks: HTMLElement[] = [];

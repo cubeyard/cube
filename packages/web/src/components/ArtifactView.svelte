@@ -2,7 +2,7 @@
   import { onMount, tick, untrack } from "svelte";
   import { addComment, deleteComment, errorText, fetchArtifact, fetchRevision, isNotFound, previewAction, runAction, sendComments } from "../lib/api.ts";
   import { renderArtifact } from "../lib/artifact-render.ts";
-  import { mark, placeAnchor, selectionAnchor, textNodes, type Anchor, type Placement } from "../lib/anchor.ts";
+  import { mark, placeAnchor, selectionAnchor, textNodes, textRange, type Anchor, type Placement } from "../lib/anchor.ts";
   import { drawDiagram } from "../lib/mermaid.ts";
   import { relTime } from "../lib/time.ts";
   import { uid } from "../lib/uid.ts";
@@ -26,7 +26,7 @@
   let placements = $state<Record<string, Placement>>({});
   // A selection waiting to become a comment, and the comment being written:
   // each keeps the revision its offsets belong to.
-  let selection = $state<{ anchor: Anchor; revision: number; x: number; y: number } | null>(null);
+  let selection = $state<{ anchor: Anchor; revision: number; x: number; y: number; away: boolean } | null>(null);
   let selectionNote = $state<string | null>(null);
   let pending = $state<{ anchor: Anchor; revision: number } | null>(null);
   let draftText = $state("");
@@ -59,6 +59,8 @@
     : `thread ${artifact.thread?.title ? `“${artifact.thread.title}”` : `[${artifact.author.thread.slice(0, 8)}]`}`);
   const authorLink = $derived(artifact?.author.kind === "thread" && artifact.thread && !artifact.thread.archived ? `#/t/${artifact.author.thread}` : artifact?.author.kind === "optchat" ? "#/chat" : null);
   const meta = $derived(view?.revisions.find((item) => item.number === shown?.number) ?? null);
+  // Whether there is one, not meta itself: each poll brings a new meta object.
+  const metaShown = $derived(!!meta);
   // While a comment is written, even the newest revision is named: following
   // the newest is what the composer pins.
   const revisionHash = (value: number) => value === head && !pending ? `#/a/${artifactId}` : `#/a/${artifactId}?rev=${value}`;
@@ -133,6 +135,13 @@
   }
 
   function placeMarks(root: HTMLElement, revision: number, list: ArtifactComment[]): void {
+    // Marking replaces text nodes; a selection waiting for a comment is selected again after.
+    const kept = selection?.revision === revision ? selection.anchor : null;
+    const live = document.getSelection();
+    const order = document.createRange();
+    if (live?.anchorNode && live.focusNode) { order.setStart(live.anchorNode, live.anchorOffset); order.setEnd(live.focusNode, live.focusOffset); }
+    // A range from a later anchor to an earlier focus collapses: the selection runs backward.
+    const backward = !!live && !live.isCollapsed && order.collapsed;
     for (const old of root.querySelectorAll("mark.anchor")) old.replaceWith(...old.childNodes);
     root.normalize();
     docText = textNodes(root).text;
@@ -148,6 +157,9 @@
       if (own.state !== "outdated") mark(root, own.start, own.end, { class: "anchor composing" });
     }
     placements = next;
+    const again = kept && textRange(root, kept.start, kept.end);
+    if (again && backward) live?.setBaseAndExtent(again.endContainer, again.endOffset, again.startContainer, again.startOffset);
+    else if (again) live?.setBaseAndExtent(again.startContainer, again.startOffset, again.endContainer, again.endOffset);
   }
 
   // A selection in the document offers a comment on it.
@@ -160,11 +172,33 @@
     const anchor = selectionAnchor(root, range);
     if ("error" in anchor) { selection = null; selectionNote = anchor.error; return; }
     selectionNote = null;
-    const rect = range.getBoundingClientRect();
-    // Below the selection, kept in the document's view (a phone's own selection menu sits above it).
-    const field = scroller?.getBoundingClientRect() ?? { top: 0, bottom: innerHeight };
-    selection = { anchor, revision: shown?.number ?? 0, x: Math.min(Math.max(rect.left + rect.width / 2, 60), innerWidth - 60), y: Math.min(Math.max(rect.bottom + 8, field.top + 8), field.bottom - 52) };
+    selection = { anchor, revision: shown?.number ?? 0, ...keyAt(range) };
   }
+
+  // The comment key: below the selection, kept in the document's view (a phone's own selection menu sits above it);
+  // away while none of the selection is in view, rather than over other text.
+  function keyAt(range: Range): { x: number; y: number; away: boolean } {
+    const rect = range.getBoundingClientRect();
+    const field = scroller?.getBoundingClientRect() ?? { top: 0, bottom: innerHeight };
+    return { x: Math.min(Math.max(rect.left + rect.width / 2, 60), innerWidth - 60), y: Math.min(Math.max(rect.bottom + 8, field.top + 8), field.bottom - 52),
+      away: rect.bottom < field.top || rect.top > field.bottom };
+  }
+
+  // The document moved under the selection: a scroll, a diagram drawn, a resize, the panel below it.
+  function follow(): void {
+    const current = document.getSelection();
+    if (selection && current?.rangeCount) selection = { ...selection, ...keyAt(current.getRangeAt(0)) };
+  }
+  // Anything in the document's scroller that changes size moves the text after it.
+  $effect(() => {
+    const field = scroller;
+    void body; void metaShown; void shown; void shownError;
+    if (!field) return;
+    const sizes = new ResizeObserver(follow);
+    sizes.observe(field);
+    for (const child of field.children) sizes.observe(child);
+    return () => sizes.disconnect();
+  });
 
   async function startComment(): Promise<void> {
     if (!selection) return;
@@ -344,7 +378,7 @@
       {/if}
       {#if loadError}<div class="strip-note bad" role="alert"><span class="strip-note-text">{loadError} — retrying</span></div>{/if}
       <!-- The document scrolls here, not the window: the comment key follows its selection. -->
-      <div class="artifact-scroll" bind:this={scroller} onscroll={() => { if (selection) onSelection(); }}>
+      <div class="artifact-scroll" bind:this={scroller} onscroll={follow}>
         {#if meta}
           <p class="artifact-provenance">revision {meta.number} · {relTime(meta.createdAt)} · {provenance(meta)}</p>
         {/if}
@@ -374,7 +408,7 @@
         {/if}
         <p id="artifact-select-hint" class="artifact-hint">select text to comment on it{selectionNote ? ` — ${selectionNote}` : ""}</p>
       </div>
-      {#if selection}
+      {#if selection && !selection.away}
         <button class="key primary artifact-select-key" style={`left: ${selection.x}px; top: ${selection.y}px`}
           onpointerdown={(event) => event.preventDefault()} onclick={startComment} title="comment on the selection · c">comment</button>
       {/if}
