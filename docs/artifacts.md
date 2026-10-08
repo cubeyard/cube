@@ -147,7 +147,30 @@ succeeded action is refused; a request id whose run failed answers that
 failure, and the page's next press is a new attempt with a new id) and asks GitHub to merge with `sha` set to the
 reviewed head, so GitHub itself refuses if the branch moved in between. The
 outcome is kept on the artifact; a run cut off by a cubed restart is marked
-failed with a note to check GitHub before trying again.
+failed with a note that whether GitHub merged it is unknown.
+
+The outcome is told, in the same transaction that records it, as one notice
+per recipient:
+
+```text
+artifact by OptChat   -> OptChat
+artifact by a thread  -> the thread (its next prompt)
+                      -> OptChat, if OptChat started that thread (checked when it goes;
+                         otherwise "skipped"); the thread's answer reaches OptChat as its report
+```
+
+OptChat records a thread it spawned just after the spawn returns, so a
+thread younger than 10 minutes that it has not recorded keeps its notice
+waiting instead of skipping it.
+
+A notice is delivered exactly like a comment batch (above): the same text
+under `report:artifact:<id>:action:<run>:<recipient>` on every try, accepted once
+(a report to OptChat, not a message of the user, so it renews no tells);
+waiting with its reason while the chat is not open or the thread works;
+`undeliverable` for an archived or unknown thread. One still waiting after
+24 h stops and says why. A failed run is told as not done ("Nothing says it
+merged"), a run cut off by a restart as of unknown outcome; neither as success. The page shows each notice under the run
+(`told optchat`, `to the thread: waiting: …`), and `artifact_read` lists them.
 
 The merge uses the host's GitHub token (`gh auth token` or
 `CUBED_GITHUB_TOKEN`) from cubed, the authority threads already use through the
@@ -180,8 +203,17 @@ journaled there.
   waiting while a thread works and delivered once after; comments to the
   chat; preview, a moved head, a wrong confirmation, an older revision, the
   merge once and a second refused, a failed try not reported as done and a
-  new try merging (a fake GitHub); everything across a
-  restart; an archived thread's comments undeliverable.
+  new try merging (a fake GitHub); the outcome told to the chat (the failure
+  as a failure, the merge as done, once each) and, for a thread the chat
+  spawned, to the thread once and to the chat, also once that thread is
+  archived; everything across a restart; an archived thread's comments
+  undeliverable.
+- `packages/server/test/artifact-notices-test.ts`: the service over a real
+  store with fakes: notices written with the outcome, waiting while the chat
+  is closed or the thread works, once each across concurrent pumps and a
+  restart, skipped for a thread the chat did not start, undeliverable when
+  archived, a run cut off mid-merge told as unknown after a restart, and the
+  24 h bound.
 - `packages/web/test/artifact-render-test.ts`: hostile Markdown, links,
   images, diagram sources, diff lines, fence languages; anchors exact, moved,
   outdated and ambiguous.
@@ -192,7 +224,8 @@ journaled there.
   working thread waiting and then reaching it once, a comment being written
   keeping its revision while the thread writes a newer one, an older
   revision, the merge refused for a moved head, failing once at GitHub and
-  then confirmed once, no sideways scroll on the phone. `CUBE_SCREENSHOTS=<dir>` keeps the screenshots.
+  then confirmed once, the chat told of the failure and of the merge once each
+  and the page saying `told optchat`, no sideways scroll on the phone. `CUBE_SCREENSHOTS=<dir>` keeps the screenshots.
 
 Not verified: a real model writing artifacts, a real Claude Code session
 using `/cube/artifacts` (the mod's functions run offline under the fake
@@ -207,4 +240,7 @@ heavily rewritten documents.
 - No per-user identity: anyone who can reach cubed can confirm an action.
 - Comments are not threaded and the author's answer arrives in the chat or
   thread, not on the artifact.
+- A merge on the artifact of a thread OptChat started costs that thread a
+  turn (its machine starts if it was stopped), and OptChat hears both the
+  notice and the thread's report of its answer.
 - The page reads the artifact every 4 s while visible; there is no stream.

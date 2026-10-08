@@ -5,7 +5,9 @@
  * kept apart; hostile action declarations are refused; comments are anchored
  * to a revision, wait while a thread works and reach it once; a confirmed
  * merge is checked against the project and the pull request's live state
- * (a fake GitHub) and runs once. Faux model only. */
+ * (a fake GitHub) and runs once, and its outcome reaches the author and
+ * the chat that started the author thread once, also when that thread is
+ * archived. Faux model only. */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -99,8 +101,10 @@ git(repository, ["commit", "-qm", "base"]);
 const pulls = new Map<string, PullState>();
 const merges: Array<{ repository: string; number: number; sha: string; method: string }> = [];
 let failMerge = false;
-pulls.set("cubeyard/demo#7", { repository: "cubeyard/demo", number: 7, url: "https://github.com/cubeyard/demo/pull/7", title: "Add the thing", author: "someone",
-  state: "open", merged: false, draft: false, headSha: SHA, headRef: "feat/thing", baseRef: "main", mergeable: true, mergeableState: "clean" });
+for (const number of [7, 8, 9]) {
+  pulls.set(`cubeyard/demo#${number}`, { repository: "cubeyard/demo", number, url: `https://github.com/cubeyard/demo/pull/${number}`, title: "Add the thing", author: "someone",
+    state: "open", merged: false, draft: false, headSha: SHA, headRef: "feat/thing", baseRef: "main", mergeable: true, mergeableState: "clean" });
+}
 const github: GithubPulls = {
   async pull(repo, number) {
     const pull = pulls.get(`${repo}#${number}`);
@@ -138,6 +142,9 @@ faux.setResponses(Array.from({ length: 200 }, () => async request => {
       return fauxAssistantMessage([fauxToolCall("artifact_write", { id, body: `${HOSTILE}\n\nrevised`,
         actions: [{ kind: "github.merge", repository: "cubeyard/demo", pull: 7, headSha: SHA, method: "squash" }] }, { id: "call-revise" })], { stopReason: "toolUse" });
     }
+    if (words.includes("spawn the merge notes thread")) {
+      return fauxAssistantMessage([fauxToolCall("spawn", { tasks: [{ project: "demo", task: "stand by for merge notes" }] }, { id: "call-spawn" })], { stopReason: "toolUse" });
+    }
     if (words.includes("list artifacts")) return fauxAssistantMessage([fauxToolCall("artifact_read", {}, { id: "call-list" })], { stopReason: "toolUse" });
     if (said.includes("[artifact ")) { prompts.push(`optchat:${said}`); return fauxAssistantMessage("noted the comment"); }
     return fauxAssistantMessage(`noted: ${words}`);
@@ -155,6 +162,10 @@ faux.setResponses(Array.from({ length: 200 }, () => async request => {
     return fauxAssistantMessage([fauxToolCall("artifact_write", { id, body: "# mine now" }, { id: "t-steal" }), fauxToolCall("artifact_read", { id }, { id: "t-peek" })], { stopReason: "toolUse" });
   }
   if (said.includes("escape")) return fauxAssistantMessage([fauxToolCall("artifact_write", { path: "../../etc/passwd" }, { id: "t-esc" })], { stopReason: "toolUse" });
+  if (said.includes("write merge notes")) {
+    return fauxAssistantMessage([fauxToolCall("artifact_write", { title: "merge notes", body: "# merge notes\n\nready to merge",
+      actions: [8, 9].map(pull => ({ kind: "github.merge", repository: "cubeyard/demo", pull, headSha: SHA })) }, { id: "t-merge-notes" })], { stopReason: "toolUse" });
+  }
   if (said.includes("bad action")) {
     return fauxAssistantMessage([fauxToolCall("artifact_write", { body: "# x", actions: [{ kind: "github.merge", repository: "cubeyard/demo", pull: 7, headSha: SHA }] }, { id: "t-act" })], { stopReason: "toolUse" });
   }
@@ -340,6 +351,44 @@ try {
   assert.equal(merges.length, 1);
   preview = await call(`/api/artifacts/${review.id}/actions/merge-7?revision=2`);
   assert.match(preview.body.preview.problems.join(), /already merged/);
+  // The outcome reaches the chat, its author, as a message: the failure as a failure, the merge as done, each once.
+  const chatHeard = async (pattern: RegExp, count: number, what: string) => (await until(() => call("/api/optchat/history"),
+    value => (value.body.events as Array<{ type: string; text?: string }>).filter(event => event.type === "user-message" && pattern.test(event.text ?? "")).length === count, what))
+    .body.events.filter((event: { type: string; text?: string }) => event.type === "user-message" && pattern.test(event.text ?? "")).map((event: { text: string }) => event.text) as string[];
+  const [failedNote] = await chatHeard(/^\[artifact [0-9a-f]{8}\] The user confirmed "merge cubeyard\/demo#7".*It did not succeed: could not reach github/, 1, "the chat hears of the failure");
+  assert.doesNotMatch(failedNote!, /Done:/);
+  await chatHeard(/^\[artifact [0-9a-f]{8}\] The user confirmed "merge cubeyard\/demo#7" \(github\.merge cubeyard\/demo#7 at aaaaaaaaaaaa, squash\) on your artifact "post-merge review".*Done: merged cubeyard\/demo#7/, 1, "the chat hears of the merge");
+  view = await until(() => call(`/api/artifacts/${review.id}`), value => value.body.notices.length === 2 && value.body.notices.every((notice: any) => notice.state === "delivered"), "both notices delivered");
+  assert.deepEqual(view.body.notices.map((notice: any) => notice.target), [{ kind: "optchat" }, { kind: "optchat" }]);
+  assert.equal(view.body.notices[0].text, undefined, "the page gets the state, not the message");
+
+  // A thread the chat started writes the artifact: the merge reaches the thread and the chat.
+  await chatSays("spawn the merge notes thread", "u-spawn");
+  const spawned = await until(async () => app.registry.listThreads().find(thread => thread.title?.includes("stand by")), thread => !!thread, "the chat's thread");
+  await idle(spawned!.id);
+  // The project gains the GitHub repository (the running thread keeps its checkout).
+  const demo = app.registry.getProject(project.body.project.id)!;
+  app.registry.saveProject({ ...demo, repositories: [...demo.repositories, { ...demo.repositories[0]!, id: "gh-r", position: 1, url: "https://github.com/cubeyard/demo", checkoutName: "demo" }] });
+  await call(`/api/threads/${spawned!.id}/prompt`, { text: "write merge notes", requestId: "merge-notes" });
+  const mergeNotes = (await until(() => call("/api/artifacts"), value => value.body.artifacts.some((item: any) => item.title === "merge notes"), "the thread's merge notes"))
+    .body.artifacts.find((item: any) => item.title === "merge notes");
+  await idle(spawned!.id);
+  const threadNotices = () => prompts.filter(prompt => prompt.startsWith(`[artifact ${mergeNotes.id.slice(0, 8)}] The user confirmed`));
+  assert.equal(threadNotices().length, 0);
+  assert.equal((await call(`/api/artifacts/${mergeNotes.id}/actions/merge-8`, { revision: 1, confirm: "cubeyard/demo#8", requestId: "m8" })).body.state, "succeeded");
+  await until(async () => threadNotices(), value => value.length === 1, "the author thread is told");
+  assert.match(threadNotices()[0]!, /on your artifact "merge notes".*Done: merged cubeyard\/demo#8 at aaaaaaaaaaaa \(merge\); merge commit cccccccccccc\. Nothing more is asked of you/);
+  await chatHeard(new RegExp(`^\\[artifact ${mergeNotes.id.slice(0, 8)}\\] .* on the artifact "merge notes" of thread \\[${spawned!.id.slice(0, 8)}\\].*Done: merged cubeyard/demo#8`), 1, "the chat that started it is told");
+  // Archived, the thread is beyond reach and says so; the chat still hears.
+  await idle(spawned!.id);
+  await until(() => call(`/api/threads/${spawned!.id}`, undefined, "DELETE"), value => value.status === 200, "archive the chat's thread");
+  assert.equal((await call(`/api/artifacts/${mergeNotes.id}/actions/merge-9`, { revision: 1, confirm: "cubeyard/demo#9", requestId: "m9" })).body.state, "succeeded");
+  await chatHeard(/on the artifact "merge notes" of thread .*Done: merged cubeyard\/demo#9/, 1, "the chat hears of the archived thread's merge");
+  view = await until(() => call(`/api/artifacts/${mergeNotes.id}`), value => value.body.notices.length === 4 && value.body.notices.every((notice: any) => notice.state !== "queued"), "settled");
+  assert.deepEqual(view.body.notices.map((notice: any) => `${notice.target.kind}:${notice.state}`), ["thread:delivered", "starter:delivered", "thread:undeliverable", "starter:delivered"]);
+  assert.match(view.body.notices[2].note, /archived/);
+  assert.equal(threadNotices().length, 1, "told once; nothing reached the archived thread");
+  assert.deepEqual(merges.map(merge => merge.number), [7, 8, 9], "each merged once");
 
   // The chat reads its threads' artifacts, not other ones.
   await chatSays("list artifacts", "u3");
@@ -356,6 +405,7 @@ try {
   assert.deepEqual(after.revisions, before.revisions);
   assert.deepEqual(after.comments, before.comments);
   assert.deepEqual(after.actionRuns, before.actionRuns);
+  assert.deepEqual(after.notices, before.notices, "nothing is told again after a restart");
   // An archived thread's comments cannot be delivered and say so.
   await call(`/api/artifacts/${design.id}/comments`, { revision: 1, anchor: anchorOf("design notes", 0), body: "late", requestId: "k4" });
   await until(() => call(`/api/threads/${claudeThread}`, undefined, "DELETE"), value => value.status === 200, "archive the claude thread");

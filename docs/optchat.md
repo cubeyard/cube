@@ -499,7 +499,9 @@ image bytes; answers `{image: {id, mimeType, width, height, bytes}}`),
 `GET /api/optchat/wishes` (wishes not started) and
 `POST /api/optchat/wishes/<id>/dismiss`. The panel also lists the newest
 artifacts (`GET /api/artifacts`); comments on the chat's own artifacts reach
-it as messages starting `[artifact <id>]` through the same pending queue.
+it as messages starting `[artifact <id>]` through the same pending queue, as
+does the outcome of a merge the user confirmed on its artifact or on the
+artifact of a thread it started.
 
 ## Deviations from the spec
 

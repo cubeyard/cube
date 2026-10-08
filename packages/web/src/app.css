@@ -1603,6 +1603,8 @@ a.work-title:hover { color: var(--signal); }
 .artifact-action-target, .artifact-action-run { font: 11px/1.45 var(--font-mono); color: var(--ink-3); overflow-wrap: anywhere; }
 .artifact-action-run.failed { color: var(--bad); }
 .artifact-action-run.succeeded { color: var(--lamp-green); }
+.artifact-action-told { display: flex; align-items: center; gap: 0.4rem; font: 10.5px/1.4 var(--font-mono); color: var(--ink-3); overflow-wrap: anywhere; }
+.artifact-action-told > span:not(.lamp) { flex: 1; min-width: 0; }
 /* comments */
 .comment-item { padding: 0.45rem 0.55rem; border: 1px solid var(--line); border-radius: var(--r-key); background: var(--s4); }
 .comment-item.draft { border-style: dashed; border-color: var(--line-2); }

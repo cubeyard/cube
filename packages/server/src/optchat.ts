@@ -774,6 +774,11 @@ export class OptChat {
     void this.drain();
   }
 
+  /** Whether this chat started the thread `id`. */
+  async started(id: string): Promise<boolean> {
+    return Object.hasOwn((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {}, id);
+  }
+
   /** The short ids of the threads this chat started. */
   async threadPrefixes(): Promise<Set<string>> {
     return new Set(Object.keys((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {}).map(short));
