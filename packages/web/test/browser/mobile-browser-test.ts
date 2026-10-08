@@ -91,9 +91,9 @@ const atEnd = (page: Page, what: string) => page.waitForFunction(() => {
 
 let failed = false;
 async function scenario(browser: Browser, engine: string, name: string, size: { width: number; height: number; touch?: boolean; ios?: boolean }, route: string,
-  run: (page: Page, host: ScriptedHost) => Promise<void>, threadState: ThreadSummary["state"] = thread.state): Promise<void> {
+  run: (page: Page, host: ScriptedHost) => Promise<void>, threadState: ThreadSummary["state"] = thread.state, shown: ThreadEvent[] = events): Promise<void> {
   const host = await ScriptedHost.start();
-  host.transcript = { agent: "pi", owner: null, status: { state: "completed", run: "r", error: null }, events };
+  host.transcript = { agent: "pi", owner: null, status: { state: "completed", run: "r", error: null }, events: shown };
   host.thread = { ...thread, state: threadState };
   host.overview = { threads: [{ id: "t1", title: thread.title, state: "working", project: thread.project, archived: false } as never], archived: { shown: 0, total: 0 }, unknown: 0 };
   const touch = size.touch ?? true;
@@ -264,10 +264,8 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
   });
 
   for (const [size, name] of [[phone, "375x667"], [{ width: 1280, height: 800, touch: false }, "1280x800"]] as const) {
-    await scenario(browser, engine, "a thread started by optchat names the view it got above its task, never its lines", size, "t/t1", async (page, host) => {
-      const view = { messages: 30, total: 32, taken: "2026-10-08T21:30:00.000Z" };
-      host.transcript = { ...host.transcript, events: [{ type: "user-message", id: "v", text: "count the files in alpha", view }, ...events] };
-      await page.reload();
+    const view = { messages: 30, total: 32, taken: "2026-10-08T21:30:00.000Z" };
+    await scenario(browser, engine, "a thread started by optchat names the view it got above its task, never its lines", size, "t/t1", async page => {
       const first = page.locator(".conversation-message.user").first();
       await first.getByText("count the files in alpha").waitFor();
       const note = await first.locator(".message-view").textContent();
@@ -277,7 +275,7 @@ async function suite(type: BrowserType, engine: string): Promise<void> {
       await assertNoSideways(page);
       await first.scrollIntoViewIfNeeded();
       await shoot(page, engine, `thread-view-${name}`);
-    });
+    }, thread.state, [{ type: "user-message", id: "v", text: "count the files in alpha", view }, ...events]);
   }
 
   await scenario(browser, engine, "a thread's failure stays in print with the details folded", phone, "t/t1", async page => {
