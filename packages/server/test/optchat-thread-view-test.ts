@@ -12,7 +12,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
-import { formatHistory, THREAD_NOTE } from "../src/optchat.ts";
+import { formatHistory, THREAD_NOTE, ZOOM_ECHO } from "../src/optchat.ts";
 import { Memory } from "../src/optchat-memory.ts";
 import { splitThreadView, threadViewBlock, THREAD_VIEW_GUIDE } from "../src/optchat-thread-view.ts";
 import type { ThreadTranscript } from "../src/thread-events.ts";
@@ -52,9 +52,13 @@ git(["commit", "-qm", "base"]);
 const ASK = "alpha: start the work; the user's own words zebra-7";
 const PI_TASK = "count the files in alpha";
 // The thread computes PEAR42 itself: only its own step shows it.
-const CLAUDE_TASK = "run echo PEAR$((6*7))\nsay claude done";
+// It opens the view as Pi does: a line, a date, and a line past the view.
+const CLAUDE_TASK = "run echo PEAR$((6*7))\nread-at /cube/optchat/zoom/0+1\nread-at /cube/optchat/date/0\nread-at /cube/optchat/zoom/4096+1\nsay claude done";
 /** What each Pi thread's model got as its first message, by its task's first line. */
 const firstMessages = new Map<string, string>();
+/** Each Pi thread's tools and what its zoom and date answered, by the same key. */
+const threadTools = new Map<string, string[]>();
+const looked = new Map<string, string[]>();
 const faux = fauxProvider({ tokensPerSecond: 100_000 });
 faux.setResponses(Array.from({ length: 200 }, () => async request => {
   const system = JSON.stringify(request.messages.filter(message => message.role === "system"));
@@ -71,9 +75,16 @@ faux.setResponses(Array.from({ length: 200 }, () => async request => {
     if (said.endsWith("beta: no view")) return fauxAssistantMessage([fauxToolCall("spawn", { tasks: [{ project: "beta", task: "beta look" }], view: false }, { id: "call-beta" })], { stopReason: "toolUse" });
     return fauxAssistantMessage("noted");
   }
-  if (last.role === "toolResult") return fauxAssistantMessage("pi done");
   const first = textOf(request.messages.find(message => message.role === "user")!);
-  firstMessages.set(splitThreadView(first).text.split("\n")[0]!, first);
+  const task = splitThreadView(first).text.split("\n")[0]!;
+  if (last.role === "toolResult") {
+    looked.set(task, request.messages.filter(message => message.role === "toolResult").map(textOf));
+    return fauxAssistantMessage("pi done");
+  }
+  firstMessages.set(task, first);
+  threadTools.set(task, ((request.messages.find(message => message.role === "system") as { toolsAdded?: Array<{ name: string }> } | undefined)?.toolsAdded ?? []).map(tool => tool.name));
+  // A thread with a view opens it: a line, a date, and a line past the view.
+  if (splitThreadView(first).view) return fauxAssistantMessage([fauxToolCall("zoom", { id: 0, n: 1 }), fauxToolCall("date", { id: 0 }), fauxToolCall("zoom", { id: 4096, n: 1 })], { stopReason: "toolUse" });
   return fauxAssistantMessage([fauxToolCall("bash", { command: "ls | wc -l" })], { stopReason: "toolUse" });
 }));
 const models = createModels();
@@ -118,11 +129,12 @@ try {
   await finished(ui.id);
   assert.equal(app.registry.initialPrompt(ui.id), "beta private plan KIWI-42", "a thread started from the UI gets no view");
   assert.equal(splitThreadView(firstMessages.get("beta private plan KIWI-42")!).view, undefined);
+  assert.ok(!threadTools.get("beta private plan KIWI-42")!.includes("zoom"), "nor zoom");
 
   // OptChat starts a Pi thread and a Claude Code thread in one call: one view for both.
   assert.equal((await post("/api/optchat/prompt", { text: ASK, requestId: "chat-1" })).status, 200);
   const [pi] = await until(() => threadsOf(PI_TASK), list => list.length === 1, "the pi thread starts");
-  const [claude] = await until(() => threadsOf("run echo PEAR$((6*7)) say claude done"), list => list.length === 1, "the claude thread starts");
+  const [claude] = await until(() => threadsOf(CLAUDE_TASK.replace(/\s+/g, " ").slice(0, 80)), list => list.length === 1, "the claude thread starts");
   assert.equal(app.registry.getThread(claude!.id)!.agent, "claude-code");
   const piPrompt = app.registry.initialPrompt(pi!.id), claudePrompt = app.registry.initialPrompt(claude!.id);
   const piSplit = splitThreadView(piPrompt), claudeSplit = splitThreadView(claudePrompt);
@@ -138,6 +150,12 @@ try {
   // The Pi thread's model got exactly those bytes; its transcript names the view apart from the task.
   await finished(pi!.id);
   assert.equal(firstMessages.get(PI_TASK), piPrompt);
+  // zoom and date reach the chat's messages the view covers, and no further.
+  assert.ok(["zoom", "date"].every(name => threadTools.get(PI_TASK)!.includes(name)), threadTools.get(PI_TASK)!.join(" "));
+  const [whole, dated, past] = looked.get(PI_TASK)!;
+  assert.equal(whole, `0+0|user: ${ASK}`, "zoom(0, 1) gives the message whole");
+  assert.match(dated!, /^\w{3} \w{3} \d{2} 20\d\d \d\d:\d\d:\d\d GMT/, "date gives its date and time");
+  assert.equal(past, `No line 4096+1 in your view: it covers messages 0 to ${piSplit.view!.messages - 1}.`);
   const piFirst = (await history(pi!.id)).events[0]!;
   assert.deepEqual(piFirst, { type: "user-message", id: piFirst.id, text: `${PI_TASK}\n\n${THREAD_NOTE}`, view: piSplit.view });
   // Claude Code got them too, through stream-json, and read the view as context, not steps.
@@ -146,6 +164,8 @@ try {
   const said = claudeDone.events.filter(event => event.type === "assistant-text").map(event => event.type === "assistant-text" ? event.text : "");
   assert.equal(said[0], `read the view of messages 0-${claudeSplit.view!.messages - 1}`);
   assert.ok(said.includes("claude done"), said.join(" | "));
+  const reads = claudeDone.events.flatMap(event => event.type === "tool-result" && event.name === "Read" ? [event.output] : []);
+  assert.deepEqual(reads, [whole, dated, `No line 4096+1 in your view: it covers messages 0 to ${claudeSplit.view!.messages - 1}.`], "Claude Code reads the same through /cube/optchat");
   assert.ok(claudeDone.events.some(event => event.type === "tool-result" && event.output.includes("PEAR42")), "the claude thread ran its own step");
   await chatSettled(2);
 
@@ -176,6 +196,7 @@ try {
   const page = formatHistory(pi!.id, record!, "delivered");
   assert.match(page, new RegExp(`\\n#0 user: \\(with optchat's view of messages 0–${piSplit.view!.messages - 1}, taken ${piSplit.view!.taken}\\) ${PI_TASK}\\n`));
   assert.ok(!page.includes("<optchat-view>") && !page.includes(ASK), "the view's lines stay out of the chat");
+  assert.ok(page.includes(ZOOM_ECHO), "a thread's zoom comes back as a pointer");
 
   // A restart: every thread opens again with the same first message, sent once.
   const before = { pi: (await history(pi!.id)).events, claude: (await history(claude!.id)).events };

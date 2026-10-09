@@ -96,6 +96,10 @@ export class WorkspaceClient {
   artifact(token: string, name?: string): Promise<{ text: string }> {
     return this.call("GET", `/artifacts${name === undefined ? "" : `?${new URLSearchParams({ name })}`}`, { token });
   }
+  /** OptChat's view the thread started with: a line opened (`zoom`: `<id>+<n>`) or a message's date. */
+  optchat(token: string, query: { zoom: string } | { date: string }): Promise<{ text: string }> {
+    return this.call("GET", `/optchat?${new URLSearchParams(query)}`, { token });
+  }
   /** Writes the named artifact's next revision; the request id makes a repeated call write it once. */
   writeArtifact(token: string, request: { name: string; requestId: string; call: string; body: string; title?: string; actions?: unknown }): Promise<{ text: string; id: string; revision: number }> {
     return this.call("POST", "/artifacts", { token, body: request });

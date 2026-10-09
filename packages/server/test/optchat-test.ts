@@ -308,6 +308,21 @@ try {
   compactorGate = Promise.resolve();
   await chat.agent.conversation.waitForIdle(BACKGROUND_CONTEXT);
 
+  // A thread's zoom and date: the chat's lines, only those its view covers,
+  // only for a thread this chat started, secrets redacted.
+  script = [() => fauxAssistantMessage("ok")];
+  await chat.send("deploy with ghp_abcdefghijklmnopqrstuv", "r-secret");
+  await idle(chat);
+  const secret = chat.memory.messages.findIndex(message => message.text.startsWith("deploy with"));
+  const lookup = chat.threadLookup(THREAD, { messages: secret + 1, total: secret + 1, taken: "2026-10-08T21:30:00.000Z" });
+  assert.match(await lookup.zoom(0, 1), /^0\+0\|user: please fix the gateway; (long detail ){20}$/, "a message whole");
+  assert.match(await lookup.zoom(0, 2), /^0\+1\|summary \d+\n1\+1\|talk: starting a thread$/, "a line opened into its halves");
+  assert.equal(await lookup.zoom(secret, 1), `${secret}+0|user: deploy with ghp_[redacted]`);
+  assert.equal(await lookup.zoom(secret + 1, 1), `No line ${secret + 1}+1 in your view: it covers messages 0 to ${secret}.`, "the chat after the view stays out of reach");
+  assert.equal(await lookup.date(secret + 1), `No line ${secret + 1}+1 in your view: it covers messages 0 to ${secret}.`);
+  assert.equal(await lookup.date(0), new Date(chat.memory.messages[0]!.date).toString());
+  await assert.rejects(chat.threadLookup("not-ours", { messages: 1, total: 1, taken: "x" }).zoom(0, 1), /only a thread OptChat started/);
+
   // Tells to a thread are bounded between two messages of the user (reports
   // do not count as the user's); the user's next message renews them.
   const toldBefore = told.length;

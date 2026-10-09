@@ -12,6 +12,7 @@
  * and is not sandboxed. */
 import type { EngineInterface, Register } from 'claude-code'
 import { WorkspaceClient } from './workspace.ts'
+import { OPTCHAT_NOTE, optchatPath, readOptchat } from './tools.ts'
 import { ALLOWED_TOOLS, ARTIFACT_GUIDE, ARTIFACT_ROOT, PROJECT_HOOKS_NOTE, artifactPath, bash, edit, GUEST_HOME, instructions, read, readArtifact, write, writeArtifact, VIRTUAL_ROOT, type ToolScope } from './tools.ts'
 
 const ALLOWED = new Set(ALLOWED_TOOLS)
@@ -67,6 +68,12 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Read' }, async ($, e, next) => {
     const scope = await workspace($, next.signal)
     if (!scope) return { deny: UNCONFIGURED }
+    const view = optchatPath(e.file_path)
+    if (view && 'deny' in view) return view
+    if (view) {
+      const result = await readOptchat(scope, view, e)
+      return 'deny' in result ? result : { result }
+    }
     const artifact = artifactPath(e.file_path)
     if (artifact && 'deny' in artifact) return artifact
     const result = artifact ? await readArtifact(scope, artifact, e) : await read(scope, e)
@@ -108,6 +115,7 @@ export const register: Register = on => {
       `Work artifacts: Write ${ARTIFACT_ROOT}/<name>.md to create a document for the user, or a new revision of it (the whole document each time; its title is the first # heading); ` +
       `Write ${ARTIFACT_ROOT}/<name>.json as {"title"?, "body", "actions"?} to offer actions; Read ${ARTIFACT_ROOT}/<name>.md for the newest revision with the comments sent to you, and Read ${ARTIFACT_ROOT} for the list. ` +
       'These paths are kept by cube, not in the machine; Edit and Bash do not reach them. ' + ARTIFACT_GUIDE,
+      OPTCHAT_NOTE,
     ]
     for (const file of INSTRUCTION_FILES) {
       const text = await instructions(scope, file).catch(() => null)

@@ -220,15 +220,27 @@ view "at spawn time (after settle)"). A thread OptChat starts gets that:
   block off the first message: the thread page shows the task with a note
   `with optchat's view of messages 0–N, taken …`, and `history` shows the
   same note instead of the lines, so a view never comes back into the chat.
-- **No zoom or date in threads.** A thread cannot open a line. Serving
-  `zoom` into a thread's machine would let it read whole messages of the
-  chat, other projects' included, which the user has not asked for.
+- **zoom and date.** As the spec's subagents, a thread with a view opens
+  its lines: a Pi thread with the host tools `zoom(id, n)` and `date(id)`, a
+  Claude Code thread with Read `/cube/optchat/zoom/<id>+<n>` and
+  `/cube/optchat/date/<id>` (the mod sends them to cubed's workspace socket,
+  authorized by the thread's lease token, like `/cube/artifacts`). Both reach
+  only the messages the view covers (`No line … in your view: it covers
+  messages 0 to N.`), so the chat after the spawn stays out of reach; tree
+  nodes never change once built, so the same zoom answers the same later.
+  Only a thread this chat started has them, and the view's range is read
+  from its stored first message. `zoom(id, 1)` gives a message whole, other
+  projects' included, redacted as the view is. A thread's zoomed lines come
+  back through `history` as a pointer, as OptChat's own zoom results are
+  logged, so they never come back into the chat.
 
 `packages/server/test/optchat-thread-view-test.ts` runs it through real
 cubed over local guests: one Pi and one Claude Code (the fake `claude`)
-thread from one spawn, a later spawn, `view: false`, a UI thread in another
-project, `history`, and a restart. `optchat-test.ts` covers the wait that
-gives up and the lines it gives then.
+thread from one spawn (each zooms, dates and is refused past its view), a
+later spawn, `view: false`, a UI thread in another project (no view, no
+zoom), `history`, and a restart. `optchat-test.ts` covers the wait that
+gives up and the lines it gives then, and zoom and date themselves: halves,
+a whole message, redaction, the bound and a thread the chat did not start.
 
 ## Reading a thread
 
@@ -533,9 +545,10 @@ artifact of a thread it started.
   places it at the final boundary and it continues that run in the old
   context. The window is the gap between two commits; it is not closed.
 - **Threads are cube threads.** A thread gets the view as it was when it
-  started (see "The view a thread gets"), OptChat's task and a note that its
-  final reply is the report; it does not get `zoom`, `date` or later views,
-  and OptChat has no `zoom("Name")` of a thread (`history` reads one). Each
+  started (see "The view a thread gets"), with `zoom` and `date` over it,
+  OptChat's task and a note that its final reply is the report; it does not
+  get later views, and OptChat has no `zoom("Name")` of a thread (`history`
+  reads one). Each
   settled run of a thread reports on its own; reports are not grouped by spawn.
   Only a thread's latest run is observed: if two runs settle while cubed is
   down, only the second is reported. A thread whose machine fails to start

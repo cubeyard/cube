@@ -29,7 +29,7 @@ import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { WorkspaceClient } from "../../claude-mod/hooks/workspace.ts";
 import { splitThreadView } from "../src/optchat-thread-view.ts";
-import { artifactPath, bash, edit, read, readArtifact, write, writeArtifact, type ToolScope } from "../../claude-mod/hooks/tools.ts";
+import { artifactPath, bash, edit, optchatPath, read, readArtifact, readOptchat, write, writeArtifact, type ToolScope } from "../../claude-mod/hooks/tools.ts";
 import { unixTransport } from "./unix-transport.ts";
 
 const args = process.argv.slice(2);
@@ -109,9 +109,11 @@ async function tool(id: string, name: string, toolInput: Record<string, unknown>
   emit({ type: "assistant", parent_tool_use_id: null, message: { id: `msg_${randomUUID()}`, role: "assistant", model, content: [{ type: "tool_use", id, name, input: toolInput }] } });
   const scope: ToolScope = { client, token: env.CUBE_WORKSPACE_TOKEN!, root: env.CUBE_WORKSPACE_ROOT!,
     ...(env.CUBE_WORKSPACE_REAL_ROOT ? { realRoot: env.CUBE_WORKSPACE_REAL_ROOT } : {}), signal };
-  // As register.ts: /cube/artifacts paths are the thread's artifacts.
-  const artifact = name === "Read" || name === "Write" ? artifactPath(toolInput.file_path) : null;
-  const result = artifact && "deny" in artifact ? artifact
+  // As register.ts: /cube/optchat paths open the view, /cube/artifacts paths are the thread's artifacts.
+  const view = name === "Read" ? optchatPath(toolInput.file_path) : null;
+  const artifact = !view && (name === "Read" || name === "Write") ? artifactPath(toolInput.file_path) : null;
+  const result = view ? "deny" in view ? view : await readOptchat(scope, view, toolInput as never)
+    : artifact && "deny" in artifact ? artifact
     : artifact ? name === "Write" ? await writeArtifact(scope, id, artifact, toolInput as never) : await readArtifact(scope, artifact, toolInput as never)
     : name === "Bash" ? await bash(scope, id, toolInput as never)
     : name === "Write" ? await write(scope, id, toolInput as never)

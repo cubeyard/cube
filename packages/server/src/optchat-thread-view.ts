@@ -4,6 +4,8 @@
  * settle)"). It is taken once, when spawn starts the thread, and stored with
  * the thread's first message, so a reopen, a resume or a later turn of the
  * chat never changes it. See docs/optchat.md, "The view a thread gets". */
+import { Type } from "@earendil-works/pi-ai";
+import { defineTool, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { ThreadView } from "./thread-events.ts";
 import { redact } from "./vm-diagnostics.ts";
 
@@ -22,9 +24,11 @@ and each item is tagged with its kind: user (the user's words), talk
 
 It is context only: what the user wants, decided and taught. Do what your
 task after it says, not what the user's last message in it says: OptChat may
-have given you just part of the work. The view does not change, and you
-cannot open its lines; if you need one in full, ask for it by its id+n in
-your report. It covers every project the user works on: never copy it, or
+have given you just part of the work. The view does not change. Whenever
+a line only mentions what you need, open it: zoom(id, n) gives the two lines
+of n/2 messages it was made from, zoom(id, 1) the message whole, and
+date(id) the date and time of message id. Both reach only the messages this
+view covers. It covers every project the user works on: never copy it, or
 what it says of other projects, into this project's files, commits, pull
 requests, issues, comments or artifacts.`;
 
@@ -52,3 +56,36 @@ export function splitThreadView(text: string): { text: string; view?: ThreadView
 /** How a transcript names the view a message carried. */
 export const threadViewNote = (view: ThreadView) =>
   `with optchat's view of messages 0–${view.messages - 1}${view.messages < view.total ? ` (${view.total} then; the rest not summarized yet)` : ""}, taken ${view.taken}`;
+
+/** zoom and date over the chat, for a thread with a view: only the messages
+ * its view covers, so later messages of the chat stay out of reach. */
+export type ThreadViewLookup = { zoom(id: number, n: number): Promise<string>; date(id: number): Promise<string> };
+
+/** Why `zoom(id, n)` or `date(id)` (n = 1) reaches past the view, if it does. */
+export function outsideView(view: ThreadView, id: number, n = 1): string | null {
+  return Number.isSafeInteger(id) && Number.isSafeInteger(n) && id >= 0 && n >= 1 && id + n <= view.messages ? null : `No line ${id}+${n} in your view: it covers messages 0 to ${view.messages - 1}.`;
+}
+
+/** What a thread with a view is told of its zoom and date. */
+export const THREAD_VIEW_TOOLS = "zoom and date open lines of OptChat's view in your first message, up to its last message.";
+
+/** The Pi thread's zoom and date (Claude Code threads Read /cube/optchat/...). */
+export function threadViewTools(lookup: ThreadViewLookup): ToolRegistration[] {
+  const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
+  return [
+    defineTool({
+      name: "zoom",
+      description: "Open the line id+n of OptChat's view in your first message into the two lines of n/2 under it; n = 1 gives the message whole.",
+      parameters: Type.Object({ id: Type.Integer({ minimum: 0 }), n: Type.Integer({ minimum: 1 }) }),
+      replay: "safe",
+      execute: async args => text(await lookup.zoom(args.id, args.n)),
+    }),
+    defineTool({
+      name: "date",
+      description: "The date and time of message id of OptChat's view in your first message (the cube host's local time).",
+      parameters: Type.Object({ id: Type.Integer({ minimum: 0 }) }),
+      replay: "safe",
+      execute: async args => text(await lookup.date(args.id)),
+    }),
+  ];
+}

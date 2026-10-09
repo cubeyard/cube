@@ -27,6 +27,8 @@ import { OptChat, OptChatEvents } from "./optchat.ts";
 import { isMediaId, MEDIA_LIMITS, MediaError } from "./optchat-media.ts";
 import { createLogger } from "./log.ts";
 import { cubeThreads } from "./optchat-threads.ts";
+import { splitThreadView, THREAD_VIEW_TOOLS, threadViewTools, type ThreadViewLookup } from "./optchat-thread-view.ts";
+import type { ThreadView } from "./thread-events.ts";
 import { observeRunners } from "./runner-observe.ts";
 import { formatDiagnostics, threadDiagnostics } from "./vm-diagnostics.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
@@ -247,15 +249,26 @@ export async function createCubed(options: {
   }
   let portal: Portal | null = null;
   let artifacts: Artifacts | null = null;
+  /** The OptChat view a thread's first message carries, if any. */
+  const threadView = (id: string) => splitThreadView(registry.initialPrompt(id)).view;
+  const viewLookup = (id: string, view: ThreadView): ThreadViewLookup => ({
+    zoom: async (at, n) => (await openOptchat()).chat.threadLookup(id, view).zoom(at, n),
+    date: async at => (await openOptchat()).chat.threadLookup(id, view).date(at),
+  });
   const conversations = new Conversations({ registry, directory: path.join(options.state, "threads"), models, machines, claude: claudeCommand ? {
     command: claudeCommand, socket, mod: claudeMod(options.state), ...options.claudeOptions,
   } : null, portal: thread => portal!.guest(thread),
-  // A Pi thread writes and reads its own artifacts; a body may come from a workspace file.
-  hostTools: thread => ({ readFile, key }) => ({
-    note: `artifact_write and artifact_read keep documents for the user (work artifacts). ${ARTIFACT_GUIDE}`,
-    tools: artifactTools({ artifacts: artifacts!, author: { kind: "thread", thread: thread.id }, agent: "pi", key,
-      readable: async () => [{ kind: "thread", thread: thread.id }], readFile: file => readFile(file, ARTIFACT_LIMITS.body) }),
-  }) });
+  // A Pi thread writes and reads its own artifacts; a body may come from a
+  // workspace file. One OptChat started with a view zooms and dates it.
+  hostTools: thread => ({ readFile, key }) => {
+    const view = threadView(thread.id);
+    return {
+      note: `artifact_write and artifact_read keep documents for the user (work artifacts). ${ARTIFACT_GUIDE}${view ? ` ${THREAD_VIEW_TOOLS}` : ""}`,
+      tools: [...artifactTools({ artifacts: artifacts!, author: { kind: "thread", thread: thread.id }, agent: "pi", key,
+        readable: async () => [{ kind: "thread", thread: thread.id }], readFile: file => readFile(file, ARTIFACT_LIMITS.body) }),
+      ...view ? threadViewTools(viewLookup(thread.id, view)) : []],
+    };
+  } });
   portal = new Portal({ settings: options.portal === undefined ? portalSettings() : options.portal, directory: path.join(options.state, "portal"),
     registry, machines, archiving: id => conversations.archivingNow(id) });
   const git = new GitService(path.join(options.state, "repositories"));
@@ -791,6 +804,20 @@ export async function createCubed(options: {
           throw error;
         }
         return json({ error: "not found", code: "NOT_FOUND", completionUnknown: false }, 404);
+      }
+      // A Claude Code thread's zoom and date (the mod's /cube/optchat paths),
+      // authorized the same way, over the view its first message carries.
+      if (parts[4] === "optchat" && parts.length === 5 && request.method === "GET") {
+        const token = /^Bearer ([^\s]+)$/.exec(request.headers.authorization ?? "")?.[1];
+        const lease = token ? await conversations.workspace(thread.id).lease({ token }).catch(() => null) : null;
+        if (!lease || lease.owner !== "claude-code") return json({ error: "workspace lease is not held by this token", code: "LEASE_STALE", completionUnknown: false }, 401);
+        const view = threadView(thread.id);
+        if (!view) return json({ error: "this thread got no OptChat view", code: "NOT_FOUND", completionUnknown: false }, 404);
+        const lookup = viewLookup(thread.id, view);
+        const zoom = /^(\d+)\+(\d+)$/.exec(url.searchParams.get("zoom") ?? ""), date = /^\d+$/.exec(url.searchParams.get("date") ?? "");
+        if (zoom) return json({ text: await lookup.zoom(Number(zoom[1]), Number(zoom[2])) });
+        if (date) return json({ text: await lookup.date(Number(date[0])) });
+        return json({ error: "give zoom=<id>+<n> or date=<id>", code: "INVALID_REQUEST", completionUnknown: false }, 400);
       }
       const result = await workspaceRoute(conversations.workspace(thread.id), { method: request.method!, parts: parts.slice(4), query: url.searchParams, headers: request.headers, body });
       return json(result.body, result.status);

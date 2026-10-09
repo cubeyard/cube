@@ -110,6 +110,26 @@ export function artifactPath(file: unknown): ArtifactPath | Denied | null {
   return { kind: match[2] as "md" | "json", name: match[1]! };
 }
 
+/** Where Read reaches OptChat's view the thread started with, as Pi
+ * threads' zoom and date do: `zoom/<id>+<n>` opens a line, `date/<id>` gives
+ * a message's date and time. cubed answers, over the messages the view covers. */
+export const OPTCHAT_ROOT = "/cube/optchat";
+export const OPTCHAT_NOTE = `If your first message starts with OptChat's view, Read ${OPTCHAT_ROOT}/zoom/<id>+<n> opens its line id+n into the two lines under it (n = 1: the message whole) and Read ${OPTCHAT_ROOT}/date/<id> gives the date and time of message id; both reach only the messages that view covers.`;
+export type OptchatPath = { zoom: string } | { date: string };
+export function optchatPath(file: unknown): OptchatPath | Denied | null {
+  if (typeof file !== "string" || (file !== OPTCHAT_ROOT && !file.startsWith(`${OPTCHAT_ROOT}/`))) return null;
+  const zoom = /^\/cube\/optchat\/zoom\/(\d+\+\d+)$/.exec(file), date = /^\/cube\/optchat\/date\/(\d+)$/.exec(file);
+  return zoom ? { zoom: zoom[1]! } : date ? { date: date[1]! } : { deny: `${file} is not an OptChat path: Read ${OPTCHAT_ROOT}/zoom/<id>+<n> or ${OPTCHAT_ROOT}/date/<id>` };
+}
+
+export async function readOptchat(scope: ToolScope, target: OptchatPath, input: ReadInput): Promise<ReadResult | Denied> {
+  try {
+    const { text } = await scope.client.optchat(scope.token, target);
+    const lines = text.split("\n");
+    return { type: "text", file: { filePath: input.file_path, content: text, numLines: lines.length, startLine: 1, totalLines: lines.length } };
+  } catch (error) { return denied(error, input.file_path); }
+}
+
 export async function readArtifact(scope: ToolScope, target: ArtifactPath, input: ReadInput): Promise<ReadResult | Denied> {
   try {
     const { text } = await scope.client.artifact(scope.token, target.kind === "list" ? undefined : target.name);

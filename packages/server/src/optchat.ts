@@ -23,7 +23,9 @@ import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { capText, Memory, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
 import { imageNote } from "./thread-images.ts";
-import { threadViewBlock, threadViewNote } from "./optchat-thread-view.ts";
+import { outsideView, threadViewBlock, threadViewNote, type ThreadViewLookup } from "./optchat-thread-view.ts";
+import type { ThreadView } from "./thread-events.ts";
+import { redact } from "./vm-diagnostics.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
 import { PENDING_ID, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
 import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
@@ -218,7 +220,9 @@ function historyLine(event: ThreadEvent, cap: number): string {
   if (event.type === "tool-call") return `tool ${event.name} ${capText(JSON.stringify(event.input ?? {}), tool)}`;
   // The images a result shows are named, never sent: the chat sees that there were some.
   const images = imageNote(event.images?.length ?? 0);
-  return `result ${event.name}${event.isError ? " (error)" : ""}: ${[images, capText(event.output, tool)].filter(Boolean).join(" ")}`;
+  // A thread's zoom into this chat's view copies the chat: a pointer, as the log keeps its own.
+  const output = ZOOMED.test(event.output) ? ZOOM_ECHO : capText(event.output, tool);
+  return `result ${event.name}${event.isError ? " (error)" : ""}: ${[images, output].filter(Boolean).join(" ")}`;
 }
 
 export type ReportState = "delivered" | "accepted" | "none";
@@ -799,6 +803,17 @@ export class OptChat {
   /** Whether this chat started the thread `id`. */
   async started(id: string): Promise<boolean> {
     return Object.hasOwn((await this.harness.snapshot(SettingsDoc, context))?.threads ?? {}, id);
+  }
+
+  /** zoom and date for a thread this chat started with `view`, over the
+   * messages that view covers, redacted as the view is. Tree nodes never
+   * change once built, so the same call gives the same lines later. */
+  threadLookup(thread: string, view: ThreadView): ThreadViewLookup {
+    const mine = async () => { if (!await this.started(thread)) throw new Error("only a thread OptChat started can open its view"); };
+    return {
+      zoom: async (id, n) => { await mine(); return outsideView(view, id, n) ?? redact(this.memory.zoom(id, n)); },
+      date: async id => { await mine(); return outsideView(view, id) ?? new Date(this.memory.messages[id]!.date).toString(); },
+    };
   }
 
   /** The short ids of the threads this chat started. */

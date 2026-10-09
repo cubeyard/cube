@@ -319,7 +319,9 @@ and no ids, and appends each node as an entry. A spawned thread is created
 through the registry with a request ID derived from the tool call, so a replayed
 `spawn` finds the same thread. Its first message starts with the view as it
 was at the spawn, stored in the registry's creation record with the task, so
-every open of the thread sends the same bytes. Its settled runs come back as `[id] ` messages:
+every open of the thread sends the same bytes. Such a thread zooms and dates
+that view (Pi host tools, or the Claude Code mod's `/cube/optchat` Read paths
+answered by cubed's workspace socket), never past the messages it covers. Its settled runs come back as `[id] ` messages:
 every accepted message waits in a Pi document until Pi has placed it, under its
 own request ID. Its `archive` tool calls the same `Conversations.archive` as
 the UI, for its own threads only, and refuses a working one. Images the user
