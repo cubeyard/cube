@@ -11,6 +11,7 @@ import { createLogger } from "./log.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
 import type { ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
+import type { WindowQuery } from "./transcript-window.ts";
 import { readClaudeHistory, readPiHistory, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { isThreadImageRef, readThreadImage } from "./thread-images.ts";
 import { Registry, threadAgent, type HookOutcome, type Thread } from "./registry.ts";
@@ -479,8 +480,8 @@ export class Conversations {
     assertCurrentThreadStore(directory);
     return readThreadImage({ agent: "pi", file: path.join(directory, "pi.sqlite") }, ref);
   }
-  async stream(id: string, response: ServerResponse): Promise<void> {
-    await serveThreadEvents(await this.events(id), response);
+  async stream(id: string, response: ServerResponse, query: WindowQuery = null): Promise<void> {
+    await serveThreadEvents(await this.events(id), response, query);
   }
   /** Closes the agent and releases the machine. Its disk is deleted only
    * when cubed's own records show the agent never ran a command or wrote a
