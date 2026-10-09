@@ -11,8 +11,9 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Mo
 import { createCubed } from "../src/index.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 import { LocalMachines } from "./local-guest.ts";
+import type { SkillSource } from "../src/skills.ts";
 
-export async function startChatHost(options: { renderMs?: number; models?: string[]; setup?: boolean } = {}): Promise<{ url: string; models: Models; close(): Promise<void> }> {
+export async function startChatHost(options: { renderMs?: number; models?: string[]; setup?: boolean; skillSource?: SkillSource } = {}): Promise<{ url: string; models: Models; close(): Promise<void> }> {
   if (options.renderMs) {
     const prototype = PiThreadEvents.prototype as unknown as { render: (...args: unknown[]) => Promise<unknown> };
     const render = prototype.render;
@@ -38,7 +39,8 @@ export async function startChatHost(options: { renderMs?: number; models?: strin
   }));
   const models = createModels();
   models.setProvider(faux.provider);
-  const app = await createCubed({ state: path.join(root, "state"), models, machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null });
+  const app = await createCubed({ state: path.join(root, "state"), models, machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null,
+    ...options.skillSource ? { skillSource: options.skillSource } : {} });
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   // `setup`: leave the first-run setup to the test.

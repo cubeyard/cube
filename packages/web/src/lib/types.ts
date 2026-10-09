@@ -5,6 +5,7 @@ export type { RunnerStatus } from "../../../server/src/registry.ts";
 export type { GithubAuthStatus } from "../../../server/src/github-auth.ts";
 export type { UpdateStatus } from "../../../server/src/update-service.ts";
 export type { SettingsView } from "../../../server/src/settings.ts";
+export type { SkillSource, SkillsConfig, ThreadSkills } from "../../../server/src/skills.ts";
 
 export type AuthState =
   | { state: "ok"; provider: string; credentialType: string; expiresAt?: number }

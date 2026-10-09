@@ -348,12 +348,14 @@ narrow phones before).
 Threads get skills from cubeyard/skills at an exact commit, then the user's
 sources (`PUT /api/settings/skills`), resolved at thread start into the
 allocation, installed as `~/.cube/skills/<name>/` and listed in Pi's and
-Claude Code's prompts ([docs/skills.md](docs/skills.md)). Verified offline
-(`skills-test.ts`: real git and bash, a Pi thread on a local guest), and the
-default source resolved and installed from GitHub by the same commands
-outside provisioning; not yet in a runner VM test. Not done:
-OptChat reading `optchat`/`both` skills, a settings page, the repository's
-own `.agents/skills`. A private source outside GitHub resolves on the host but
+Claude Code's prompts ([docs/skills.md](docs/skills.md)); the settings
+page **skills** edits the sources. Verified offline (`skills-test.ts`: real
+git and bash, a Pi thread on a local guest; `skills-browser-test.ts`), in
+`test-vm-e2e.ts` on Linux/KVM (a Pi and a Claude Code thread's guest fetch
+the pinned skills through the gateway), and the default source resolved and
+installed from GitHub by the same commands outside provisioning. Not done:
+OptChat reading `optchat`/`both` skills, the repository's own
+`.agents/skills`, a real model choosing to read a skill. A private source outside GitHub resolves on the host but
 fails in the machine, which has no credentials for it.
 
 ## Known gaps and next steps

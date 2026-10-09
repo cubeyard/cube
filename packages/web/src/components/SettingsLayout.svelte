@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  export type SettingsPage = "providers" | "memory" | "system";
+  export type SettingsPage = "providers" | "memory" | "skills" | "system";
 </script>
 
 <script lang="ts">
@@ -12,6 +12,7 @@
   const pages: Array<{ id: SettingsPage; name: string; short: string; hint: string }> = [
     { id: "providers", name: "model providers", short: "providers", hint: "logins for the models cube runs" },
     { id: "memory", name: "chat memory", short: "chat memory", hint: "the model that summarizes the chat" },
+    { id: "skills", name: "skills", short: "skills", hint: "instructions thread agents follow" },
     { id: "system", name: "system", short: "system", hint: "cubed updates and usage" },
   ];
 </script>
@@ -58,7 +59,7 @@
      would scroll sideways inside the pane */
   @media (max-width: 46rem) {
     .settings-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-    /* on a phone the bank lies flat above the page: three keys in a row */
+    /* on a phone the bank lies flat above the page: its keys in a row */
     .settings-rail { flex-direction: row; margin: 0.8rem 0.8rem 0; }
     .rail-item { flex: 1 1 0; min-width: 0; align-items: center; padding: 0.55rem 0.4rem; min-height: 2.5rem; justify-content: center; }
     .rail-hint { display: none; }

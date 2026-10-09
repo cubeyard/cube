@@ -14,6 +14,7 @@
   import SettingsLayout, { type SettingsPage } from "./components/SettingsLayout.svelte";
   import Wordmark from "./components/Wordmark.svelte";
   import NewThreadDialog from "./components/NewThreadDialog.svelte";
+  import SkillSettings from "./components/SkillSettings.svelte";
   import { errorText, fetchState, fetchThreads, isUnreachable } from "./lib/api.ts";
   import { COMMAND_TTL_MS, type Command } from "./lib/command.ts";
   import { createOrdered } from "./lib/ordered.ts";
@@ -23,7 +24,7 @@
   // appear in URLs. Ids are opaque tokens (uuids, "new"), used verbatim.
   // The settings pages' older addresses, and settings' own, land on a page.
   const MOVED: Record<string, string> = { "#/models": "#/settings/providers", "#/system": "#/settings/system", "#/settings": "#/settings/providers" };
-  const SETTINGS_PAGES: readonly SettingsPage[] = ["providers", "memory", "system"];
+  const SETTINGS_PAGES: readonly SettingsPage[] = ["providers", "memory", "skills", "system"];
   function settle(): string {
     const page = location.hash.match(/^#\/settings\/([^/?]*)/)?.[1];
     // An address under settings that names no page lands on the first.
@@ -191,6 +192,7 @@
       : chatRoute ? "chat · cube"
       : settingsPage === "providers" ? "model providers · settings · cube"
       : settingsPage === "memory" ? "chat memory · settings · cube"
+      : settingsPage === "skills" ? "skills · settings · cube"
       : settingsPage === "system" ? "system · settings · cube"
       : "threads · cube";
   });
@@ -213,6 +215,7 @@
   <SettingsLayout page={settingsPage}>
     {#if settingsPage === "providers"}<ModelProviders />
     {:else if settingsPage === "memory"}<ChatMemorySettings />
+    {:else if settingsPage === "skills"}<SkillSettings />
     {:else}<SystemSettings />{/if}
   </SettingsLayout>
 {:else if !daemon.onboardingComplete}

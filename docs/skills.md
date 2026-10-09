@@ -60,6 +60,11 @@ sequenceDiagram
   The agent reads a `SKILL.md` when a task matches, and its linked files when
   it needs them. Pi gets the list as a prompt section, Claude Code through
   its mod (`CUBE_SKILLS_PROMPT`), the same text for both.
+- Claude Code's own skill discovery (its `Skill` tool, `~/.claude/skills`)
+  is not used: it would read the cubed host, not the thread's machine, and
+  cube starts Claude Code with only its mod. Claude Code learns the skills
+  from the list in its context and reads them with Read, which the mod
+  sends to the machine.
 - Threads created before skills have no `allocation.skills` and get none.
 
 ## Checks and limits
@@ -98,8 +103,10 @@ sandbox (docs/security.md).
 `{default, saved, resolved: {sources, skills, skipped}}`.
 `PUT /api/settings/skills {sources, disabled}` saves only a configuration
 that resolves (400 for a malformed one, 422 for one that does not resolve).
-It is kept in `<CUBED_STATE>/settings.json` under `skills`. There is no
-settings page for skills yet.
+It is kept in `<CUBED_STATE>/settings.json` under `skills`. The settings
+page **skills** (`#/settings/skills`) shows the same: the sources (add,
+remove), the skills new threads get with their surface and provenance
+(disable, enable) and skipped folders with their reason.
 
 ```sh
 curl -X PUT http://127.0.0.1:7777/api/settings/skills -H 'content-type: application/json' -d '{
