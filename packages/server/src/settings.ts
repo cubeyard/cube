@@ -54,7 +54,7 @@ export class SettingsStore {
     // A left-over temporary file would keep its own mode through the rename.
     fs.rmSync(temporary, { force: true });
     fs.writeFileSync(temporary, `${JSON.stringify({ version: 1, optchat: { compactor: next.compactor },
-      ...next.skills.sources.length || next.skills.disabled.length ? { skills: next.skills } : {} }, null, 2)}\n`, { mode: 0o600 });
+      ...next.skills.sources.length || next.skills.disabled.length || next.skills.defaultCommit ? { skills: next.skills } : {} }, null, 2)}\n`, { mode: 0o600 });
     fs.renameSync(temporary, this.file);
     this.current = next;
     this.error = null;

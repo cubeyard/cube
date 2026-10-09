@@ -17,7 +17,7 @@ import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-work
 import { GitService } from "@cube/git";
 import { createCubed } from "../src/index.ts";
 import { SettingsStore } from "../src/settings.ts";
-import { GUEST_COMMAND_BYTES, parseSkillsConfig, resolveSkills, skillInstallScripts, skillsPrompt, type SkillSource } from "../src/skills.ts";
+import { defaultSource, GUEST_COMMAND_BYTES, parseSkillsConfig, resolveSkills, skillInstallScripts, skillsPrompt, type SkillSource } from "../src/skills.ts";
 import { LocalMachines } from "./local-guest.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-skills-"));
@@ -123,6 +123,15 @@ try {
   const fewer = await resolveSkills(hostGit, oversized, { sources: [], disabled: Array.from({ length: 20 }, (_, index) => `skill-${index}`) });
   assert.equal(fewer.skills.length, 20, "disabling some brings it under the limit");
   console.log("ok: a source too large for one install command is refused at resolution; disabling skills fits it");
+
+  // 2c. A saved default commit replaces only the default's commit; the
+  //     user's sources still win names after it.
+  assert.throws(() => parseSkillsConfig({ defaultCommit: "main" }), /defaultCommit must be a full 40-character commit/);
+  assert.deepEqual(parseSkillsConfig({ defaultCommit: mine.commit }), { sources: [], disabled: [], defaultCommit: mine.commit });
+  assert.deepEqual(defaultSource(defaults, { sources: [], disabled: [], defaultCommit: mine.commit }), { ...defaults, commit: mine.commit });
+  assert.equal(defaultSource(defaults, { sources: [], disabled: [] }), defaults);
+  assert.equal(defaultSource(null, { sources: [], disabled: [], defaultCommit: mine.commit }), null);
+  console.log("ok: a saved default commit must be exact and replaces only the default source's commit");
 
   // 3. The prompt lists thread and both skills by name, description and
   //    path, not optchat-only or manual ones, and no skill bodies.
@@ -250,6 +259,108 @@ try {
   } finally {
     app.server.closeAllConnections();
     await app.close();
+  }
+
+  // 8. Updating the default source through cubed: a check names the branch
+  //    tip as an exact commit and saves nothing; a save pins the commit
+  //    shown even after the branch moved again; a thread started before
+  //    keeps its pins, a new one gets the saved commit; the user's sources
+  //    still win names; the pin survives a restart; a branch name or an
+  //    unknown commit is refused.
+  const upstream = repository("upstream-skills", {
+    "skills/prove-it-works/SKILL.md": skill("prove-it-works", "Check the real thing."),
+    "skills/old-skill/SKILL.md": skill("old-skill", "Removed later."),
+  });
+  const upstreamDir = new URL(upstream.url).pathname;
+  const advance = (message: string, add: Record<string, string>, remove: string[] = []) => {
+    for (const [file, text] of Object.entries(add)) {
+      fs.mkdirSync(path.dirname(path.join(upstreamDir, file)), { recursive: true });
+      fs.writeFileSync(path.join(upstreamDir, file), text);
+    }
+    for (const file of remove) fs.rmSync(path.join(upstreamDir, file), { recursive: true });
+    git(upstreamDir, "add", "-A");
+    git(upstreamDir, "commit", "-qm", message);
+    return git(upstreamDir, "rev-parse", "HEAD");
+  };
+  const state = path.join(root, "update-state");
+  const settingsFile = path.join(state, "settings.json");
+  const updateFaux = fauxProvider({ tokensPerSecond: 100_000 });
+  updateFaux.setResponses(Array.from({ length: 20 }, () => fauxAssistantMessage("done")));
+  const updateModels = createModels();
+  updateModels.setProvider(updateFaux.provider);
+  const updateModel = { provider: updateFaux.getModel().provider, id: updateFaux.getModel().id };
+  const open = async () => {
+    const app = await createCubed({ state, models: updateModels, machines: new LocalMachines(path.join(root, "update-machines")), claude: null, gateway: null, skillSource: upstream });
+    await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
+    const address = app.server.address();
+    assert(address && typeof address === "object");
+    const call = async (route: string, method = "GET", body?: unknown) => {
+      const response = await fetch(`http://127.0.0.1:${address.port}${route}`, { method, ...body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } });
+      return { status: response.status, body: await response.json() as Record<string, any> };
+    };
+    let closed = false;
+    return { app, call, close: async () => { if (closed) return; closed = true; app.server.closeAllConnections(); await app.close(); } };
+  };
+  const cubed = await open();
+  try {
+    for (const index of [0, 1, 2]) {
+      cubed.app.registry.enrollRunner({ nodeId: `update-${index}`, threadId: `update-runner-${index}`, environmentId: 10 + index, configPath: `/private/update-${index}.json`, configHash: `update-${index}` });
+    }
+    const upToDate = await cubed.call("/api/settings/skills/update");
+    assert.equal(upToDate.status, 200, JSON.stringify(upToDate.body));
+    assert.deepEqual([upToDate.body.branch, upToDate.body.current, upToDate.body.candidate, upToDate.body.upToDate], ["main", upstream.commit, upstream.commit, true]);
+
+    const projectRepo = path.join(root, "update-project");
+    fs.mkdirSync(projectRepo);
+    git(projectRepo, "init", "-q", "--initial-branch=main");
+    fs.writeFileSync(path.join(projectRepo, "README"), "project\n");
+    git(projectRepo, "add", "README");
+    git(projectRepo, "commit", "-qm", "project");
+    const project = (await cubed.call("/api/projects", "POST", { name: "update", repositories: [{ url: projectRepo }] })).body.project as { id: string };
+    const start = async (requestId: string) => {
+      const started = await cubed.call("/api/threads", "POST", { projectId: project.id, requestId, text: "hello", model: updateModel });
+      assert.equal(started.status, 200, JSON.stringify(started.body));
+      return String(started.body.id);
+    };
+    const pins = (id: string) => cubed.app.registry.getThread(id)!.allocation.skills!.skills.map(entry => [entry.name, entry.commit]);
+    const before = await start("before");
+    assert.deepEqual(pins(before), [["old-skill", upstream.commit], ["prove-it-works", upstream.commit]]);
+
+    const second = advance("second", { "skills/new-skill/SKILL.md": skill("new-skill", "Added upstream.") }, ["skills/old-skill"]);
+    const check = await cubed.call("/api/settings/skills/update");
+    assert.deepEqual([check.status, check.body.current, check.body.candidate, check.body.upToDate], [200, upstream.commit, second, false]);
+    assert.deepEqual(check.body.preview.skills.map((entry: { name: string; commit: string }) => [entry.name, entry.commit]), [["new-skill", second], ["prove-it-works", second]]);
+    assert.ok(!fs.existsSync(settingsFile), "a check saves nothing");
+    assert.deepEqual(pins(await start("unconfirmed")), [["old-skill", upstream.commit], ["prove-it-works", upstream.commit]], "an unconfirmed update changes no new thread");
+
+    const third = advance("third", { "skills/later/SKILL.md": skill("later", "After the check.") });
+    assert.equal((await cubed.call("/api/settings/skills", "PUT", { sources: [], disabled: [], defaultCommit: "main" })).status, 400);
+    assert.equal((await cubed.call("/api/settings/skills", "PUT", { sources: [], disabled: [], defaultCommit: "f".repeat(40) })).status, 422);
+    assert.ok(!fs.existsSync(settingsFile), "refused saves change nothing");
+    const saved = await cubed.call("/api/settings/skills", "PUT", { sources: [], disabled: ["prove-it-works"], defaultCommit: second });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    assert.deepEqual([saved.body.default, saved.body.builtin], [{ ...upstream, commit: second }, upstream]);
+    assert.deepEqual(saved.body.resolved.skills.map((entry: { name: string }) => entry.name), ["new-skill"], "the confirmed commit, not the newer tip; the disabled skill stays out");
+    assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile, "utf8")).skills, { sources: [], disabled: ["prove-it-works"], defaultCommit: second });
+    assert.notEqual(third, second);
+
+    assert.deepEqual(pins(await start("after")), [["new-skill", second]], "a new thread gets the saved commit");
+    assert.deepEqual(pins(before), [["old-skill", upstream.commit], ["prove-it-works", upstream.commit]], "a thread started before keeps its pins");
+    const overridden = await resolveSkills(hostGit, defaultSource(upstream, { sources: [], disabled: [], defaultCommit: second }), { sources: [mine], disabled: [] });
+    assert.deepEqual(overridden.skills.filter(entry => entry.name === "prove-it-works").map(entry => [entry.url, entry.overrides?.commit]), [[mine.url, second]], "a user source still wins over the saved default");
+
+    // Closing during an activation is another test's subject: let them settle.
+    for (const thread of cubed.app.registry.listThreads()) {
+      for (const deadline = Date.now() + 30_000; cubed.app.registry.getThread(thread.id)!.workspaceState !== "available"; await delay(25)) {
+        assert.ok(Date.now() < deadline, `thread ${thread.id} becomes ready: ${cubed.app.conversations.error(thread.id)}`);
+      }
+    }
+    await cubed.close();
+    const reread = new SettingsStore(settingsFile).get().skills;
+    assert.deepEqual([reread.defaultCommit, defaultSource(upstream, reread)!.commit], [second, second], "the pin survives a restart");
+    console.log("ok: a check names an exact commit and saves nothing; a save pins that commit, not a newer tip; earlier threads keep theirs; a fresh settings store reads it back");
+  } finally {
+    await cubed.close();
   }
 } finally {
   fs.rmSync(root, { recursive: true, force: true });

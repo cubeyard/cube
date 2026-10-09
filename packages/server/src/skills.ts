@@ -17,8 +17,9 @@ export interface SkillSource { url: string; commit: string; path: string }
 export type SkillSurface = "thread" | "optchat" | "both";
 
 /** What the user chose, in settings.json: sources after the default one,
- * and skill names to leave out. */
-export interface SkillsConfig { sources: SkillSource[]; disabled: string[] }
+ * skill names to leave out, and the default source's commit when it was
+ * updated here rather than by a cube release. */
+export interface SkillsConfig { sources: SkillSource[]; disabled: string[]; defaultCommit?: string }
 export const NO_SKILLS_CONFIG: SkillsConfig = { sources: [], disabled: [] };
 
 /** The skill that won its name, with where it came from. */
@@ -56,14 +57,36 @@ export interface SkillGit {
   ensureMirror(url: string): Promise<string>;
   listFilesAtCommit(url: string, oid: string, dir: string): Promise<Array<{ path: string; mode: string; size: number }> | null>;
   readFileAtCommit(url: string, oid: string, relPath: string): Promise<string | null>;
+  /** The default branch's tip, fetched into the mirror, as an exact commit. */
+  prepareRepository(url: string): Promise<{ base: string; baseOid: string }>;
+}
+
+/** The default source as in effect: cube's pin, or the commit saved here. */
+export function defaultSource(builtin: SkillSource | null, config: SkillsConfig): SkillSource | null {
+  return builtin && config.defaultCommit ? { ...builtin, commit: config.defaultCommit } : builtin;
+}
+
+/** What updating the default source would give: its default branch's tip
+ * as an exact commit and the skills new threads would get with it. Nothing
+ * is saved; saving that commit is the caller's, after the user confirms. */
+export async function checkDefaultUpdate(git: SkillGit, builtin: SkillSource, config: SkillsConfig) {
+  const current = defaultSource(builtin, config)!.commit;
+  const { base, baseOid } = await git.prepareRepository(builtin.url);
+  if (!COMMIT.test(baseOid)) throw new Error(`${builtin.url} answered ${JSON.stringify(baseOid)}, not a full commit`);
+  const preview = await resolveSkills(git, { ...builtin, commit: baseOid }, config);
+  return { branch: base, current, candidate: baseOid, upToDate: baseOid === current, preview };
 }
 
 /** settings.json's `skills`, or why it is not one. */
 export function parseSkillsConfig(value: unknown): SkillsConfig {
   const record = value as Record<string, unknown> | null;
-  if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("skills must be an object {sources, disabled}");
-  const extra = Object.keys(record).filter(key => key !== "sources" && key !== "disabled");
+  if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("skills must be an object {sources, disabled, defaultCommit?}");
+  const extra = Object.keys(record).filter(key => key !== "sources" && key !== "disabled" && key !== "defaultCommit");
   if (extra.length) throw new Error(`skills: unknown field ${extra.join(", ")}`);
+  const { defaultCommit } = record;
+  if (defaultCommit !== undefined && defaultCommit !== null && (typeof defaultCommit !== "string" || !COMMIT.test(defaultCommit))) {
+    throw new Error("skills.defaultCommit must be a full 40-character commit, not a branch or tag");
+  }
   const sources = record.sources ?? [];
   const disabled = record.disabled ?? [];
   if (!Array.isArray(sources) || !Array.isArray(disabled)) throw new Error("skills.sources and skills.disabled must be lists");
@@ -73,6 +96,7 @@ export function parseSkillsConfig(value: unknown): SkillsConfig {
       if (typeof name !== "string" || !NAME.test(name)) throw new Error(`skills.disabled[${index}] is not a skill name`);
       return name;
     }),
+    ...typeof defaultCommit === "string" ? { defaultCommit } : {},
   };
 }
 

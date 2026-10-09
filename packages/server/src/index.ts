@@ -21,7 +21,7 @@ import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { SettingsStore, type SettingsView } from "./settings.ts";
-import { DEFAULT_SKILL_SOURCE, parseSkillsConfig, resolveSkills, type SkillSource } from "./skills.ts";
+import { checkDefaultUpdate, DEFAULT_SKILL_SOURCE, defaultSource, parseSkillsConfig, resolveSkills, type SkillSource } from "./skills.ts";
 import { UpdateService } from "./update-service.ts";
 import { versionInfo } from "./version.ts";
 import { OptChat, OptChatEvents } from "./optchat.ts";
@@ -449,7 +449,8 @@ export async function createCubed(options: {
         throw Object.assign(new Error(`fetching the latest ${repository.base ?? "default branch"} of ${repository.url} failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
       }
     }));
-    const skills = await resolveSkills(git, options.skillSource ?? null, settings.get().skills).catch(error => {
+    const saved = settings.get().skills;
+    const skills = await resolveSkills(git, defaultSource(options.skillSource ?? null, saved), saved).catch(error => {
       throw Object.assign(new Error(`resolving the skills failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
     });
     return { projectRevision: project.revision, repositories, skills };
@@ -646,18 +647,25 @@ export async function createCubed(options: {
           settings.setCompactor(chosen);
           return json(await settingsView());
         }
+        // What updating the default source would give; nothing is saved.
+        if (parts.length === 4 && parts[2] === "skills" && parts[3] === "update" && method === "GET") {
+          if (!options.skillSource) return json({ error: "this cube has no default skill source" }, 404);
+          try { return json(await checkDefaultUpdate(git, options.skillSource, settings.get().skills)); }
+          catch (error) { return json({ error: `checking ${options.skillSource.url} for an update failed: ${errorText(error)}` }, 502); }
+        }
         // The skills the next thread gets: GET resolves the saved sources,
-        // PUT `{sources, disabled}` saves them once they resolve.
+        // PUT `{sources, disabled, defaultCommit?}` saves them whole once they resolve.
         if (parts.length === 3 && parts[2] === "skills" && (method === "GET" || method === "PUT")) {
           let config = settings.get().skills;
           if (method === "PUT") {
             try { config = parseSkillsConfig(body); } catch (error) { return json({ error: (error as Error).message }, 400); }
           }
           let resolved;
-          try { resolved = await resolveSkills(git, options.skillSource ?? null, config); }
+          if (config.defaultCommit && !options.skillSource) return json({ error: "this cube has no default skill source to set a commit for" }, 400);
+          try { resolved = await resolveSkills(git, defaultSource(options.skillSource ?? null, config), config); }
           catch (error) { return json({ error: errorText(error), saved: settings.get().skills }, method === "PUT" ? 422 : 502); }
           if (method === "PUT") settings.setSkills(config);
-          return json({ default: options.skillSource ?? null, saved: config, resolved });
+          return json({ default: defaultSource(options.skillSource ?? null, config), builtin: options.skillSource ?? null, saved: config, resolved });
         }
         return json({ error: "not found" }, 404);
       }
