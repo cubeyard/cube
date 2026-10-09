@@ -11,7 +11,7 @@ import path from "node:path";
 import { gunzipSync } from "node:zlib";
 import type { RunnerTemplate } from "../src/iroh-node.ts";
 import { MAX_HOOK_BYTES, NO_HOOKS, projectHooks, type WorkspaceAllocation } from "../src/registry.ts";
-import { provisionWorkspace, resumeWorkspace, StepFailure } from "../src/vm.ts";
+import { provisionWorkspace, readStartupLog, resumeWorkspace, StepFailure } from "../src/vm.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
 import { GUEST_HOOKS_DIRECTORY, GUEST_PACKAGES, vmSeed } from "../src/vm-seed.ts";
 import { DEFAULT_TEMPLATE_TTL_MS, TEMPLATE_FORMAT, obsoleteTemplates, pickTemplate, templateKey, templateMeta, templateSettings } from "../src/vm-template.ts";
@@ -141,7 +141,16 @@ try {
     assert.match(fs.readFileSync(path.join(m.home, ".cache/cube/pre-setup.log"), "utf8"), /second-try/);
     assert.match(fs.readFileSync(path.join(m.home, ".cache/cube/pre-setup.log.prev"), "utf8"), /first-try/);
     assert.ok(!fs.existsSync(path.join(m.home, ".cache/cube/running")), "nothing runs now");
-    console.log("ok: a hook stopped for want of memory fails its try with the command's memory; the next try keeps the previous log");
+    // The live log: the running hook and the end of a long log, from whole lines.
+    fs.writeFileSync(path.join(m.home, ".cache/cube/running"), "setup setup.log\n");
+    fs.writeFileSync(path.join(m.home, ".cache/cube/setup.log"), Array.from({ length: 4000 }, (_, k) => `line ${k}`).join("\n") + "\n");
+    const live = await readStartupLog(m.guest, "thread", "/home/.cache/cube");
+    assert.equal(live.hook, "setup");
+    assert.equal(live.bytes, fs.statSync(path.join(m.home, ".cache/cube/setup.log")).size);
+    assert.ok(live.truncated && live.text.startsWith("line ") && live.text.endsWith("line 3999\n") && Buffer.byteLength(live.text) <= 16 * 1024, live.text.slice(0, 40));
+    fs.rmSync(path.join(m.home, ".cache/cube/running"));
+    assert.deepEqual(await readStartupLog(m.guest, "thread", "/home/.cache/cube"), { machine: "thread", hook: null, text: "", bytes: 0, truncated: false });
+    console.log("ok: a hook stopped for want of memory fails its try with the command's memory; the next try keeps the previous log; the live log reads the end of a long one");
   }
 
   // 3. A machine on a template: the checkout moves to the thread's commit and setup is skipped,

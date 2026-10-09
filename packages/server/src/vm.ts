@@ -90,13 +90,18 @@ export async function readStartupLog(transport: GuestTransport, machine: Startup
   const running = await read("running", 0, 256);
   const [hook, log] = running ? running.content.toString("utf8").trim().split(" ") : [];
   if (!hook || !log || !/^[a-z-]{1,32}$/.test(hook) || !/^[a-z-]{1,32}\.log$/.test(log)) return { machine, hook: null, text: "", bytes: 0, truncated: false };
-  const size = (await read(log, 0, 1))?.size ?? 0;
-  const offset = Math.max(0, size - STARTUP_LOG_BYTES);
-  const tail = size ? await read(log, offset, STARTUP_LOG_BYTES) : null;
+  // The size and the text come from the same read: a next try moves the
+  // log aside (to .prev) at any moment.
+  let offset = 0;
+  let tail = await read(log, 0, STARTUP_LOG_BYTES);
+  if (tail && tail.size > STARTUP_LOG_BYTES) {
+    const end = await read(log, tail.size - STARTUP_LOG_BYTES, STARTUP_LOG_BYTES);
+    if (end && end.size >= STARTUP_LOG_BYTES) { offset = tail.size - STARTUP_LOG_BYTES; tail = end; }
+  }
   let text = tail ? tail.content.toString("utf8") : "";
   // From the first whole line when the start was cut off.
   if (offset > 0) text = text.slice(text.indexOf("\n") + 1);
-  return { machine, hook, text: clean(text, STARTUP_LOG_BYTES * 4), bytes: size, truncated: offset > 0 };
+  return { machine, hook, text: clean(text, STARTUP_LOG_BYTES * 4), bytes: tail?.size ?? 0, truncated: offset > 0 };
 }
 
 export interface MachineStart { booted: boolean }
