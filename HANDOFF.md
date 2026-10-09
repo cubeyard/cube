@@ -349,7 +349,8 @@ Threads get skills from cubeyard/skills at an exact commit, then the user's
 sources (`PUT /api/settings/skills`), resolved at thread start into the
 allocation, installed as `~/.cube/skills/<name>/` and listed in Pi's and
 Claude Code's prompts ([docs/skills.md](docs/skills.md)); the settings
-page **skills** edits the sources. Verified offline (`skills-test.ts`: real
+page **skills** edits the sources and updates the default source to a
+confirmed exact commit (`skills.defaultCommit`), without a cube release. Verified offline (`skills-test.ts`: real
 git and bash, a Pi thread on a local guest; `skills-browser-test.ts`), in
 `test-vm-e2e.ts` on Linux/KVM (a Pi and a Claude Code thread's guest fetch
 the pinned skills through the gateway), and the default source resolved and

@@ -2,7 +2,10 @@
  * local default source: the sources, the skills in effect with their
  * surface and provenance, skipped folders with their reason; disabling and
  * enabling a skill, kept over a reload; a branch name and a URL with a token
- * refused without saving; no sideways scroll at 390px and 320px.
+ * refused without saving; checking the default source for an update (up to
+ * date, a new exact commit with what it changes, cancel, a failed check,
+ * confirming it, kept over a reload with the disabled skill); no sideways
+ * scroll at 390px and 320px.
  * CUBE_SCREENSHOTS=<dir> keeps a picture of each state. Needs a built UI
  * (pnpm build) and Playwright's Chromium. */
 import assert from "node:assert/strict";
@@ -47,7 +50,7 @@ try {
   await page.locator(".skills .skill").first().waitFor();
   assert.equal(await page.title(), "skills · settings · cube");
   assert.equal(await page.locator(".default-source").textContent().then(text => text?.replace(/\s+/g, " ").trim()),
-    `file://${root} @${source.commit.slice(0, 12)} /skills cube's default`);
+    `file://${root} @${source.commit.slice(0, 12)} /skills cube's default · pinned by this cube check for update`);
   assert.deepEqual(await names(page), ["briefing-a-thread", "prove-it-works"]);
   assert.deepEqual(await page.locator(".skills .skill .tag").allTextContents(), ["chat (not read yet)", "threads"]);
   assert.match(await page.locator(".skills .skill .provenance").last().textContent() ?? "", new RegExp(`@${source.commit.slice(0, 12)} /skills/prove-it-works`));
@@ -80,13 +83,61 @@ try {
   await shoot(page, "desktop-skills-refused");
   console.log("ok: a branch name and a URL with a token are refused, nothing is saved, the form keeps its input");
 
+  // The default source's update: looked up as an exact commit, shown, and
+  // saved only on confirmation; cancel and errors save nothing.
+  const saved = async () => (await (await fetch(`${host.url}/api/settings/skills`)).json() as { saved: { defaultCommit?: string; disabled: string[] } }).saved;
+  await page.getByRole("button", { name: "check for update" }).click();
+  await page.locator(".update-status", { hasText: `up to date: main is at @${source.commit.slice(0, 12)}` }).waitFor();
+  await page.locator(".update").getByRole("button", { name: "close" }).click();
+  assert.equal(await page.locator(".update").count(), 0);
+
+  fs.mkdirSync(path.join(root, "skills/new-skill"));
+  fs.writeFileSync(path.join(root, "skills/new-skill/SKILL.md"), "---\nname: new-skill\ndescription: Added upstream.\n---\n");
+  fs.rmSync(path.join(root, "skills/briefing-a-thread"), { recursive: true });
+  git("add", "-A");
+  git("commit", "-qm", "update");
+  const next = git("rev-parse", "HEAD");
+  await page.getByRole("button", { name: "check for update" }).click();
+  await page.locator(".update code.candidate", { hasText: next }).waitFor();
+  assert.match(await page.locator(".update-status").textContent() ?? "", new RegExp(`main is now at ${next}; in use: @${source.commit.slice(0, 12)}`));
+  assert.deepEqual(await page.locator(".update-changes li").allTextContents(),
+    ["new threads gain: new-skill", "new threads lose: briefing-a-thread", "from the new commit: prove-it-works"]);
+  await shoot(page, "desktop-skills-update");
+  await page.locator(".update").getByRole("button", { name: "cancel" }).click();
+  assert.equal(await page.locator(".update").count(), 0);
+  assert.equal((await saved()).defaultCommit, undefined, "cancel saves nothing");
+  assert.match(await page.locator(".default-source").textContent() ?? "", new RegExp(`@${source.commit.slice(0, 12)}`));
+  console.log("ok: check for update shows the exact commit and what changes; up to date and cancel save nothing");
+
+  fs.renameSync(root, `${root}-away`);
+  await page.getByRole("button", { name: "check for update" }).click();
+  await page.locator(".update-error", { hasText: `checking file://${root} for an update failed` }).waitFor();
+  fs.renameSync(`${root}-away`, root);
+  assert.equal((await saved()).defaultCommit, undefined, "a failed check saves nothing");
+
+  await page.locator(".skill", { hasText: "prove-it-works" }).getByRole("button", { name: "disable" }).click();
+  await page.locator(".disabled li", { hasText: "prove-it-works" }).waitFor();
+  await page.getByRole("button", { name: "check for update" }).click();
+  await page.locator(".update code.candidate", { hasText: next }).waitFor();
+  await page.getByRole("button", { name: `use @${next.slice(0, 12)}` }).click();
+  await page.locator(".default-source", { hasText: `@${next.slice(0, 12)}` }).waitFor();
+  assert.match(await page.locator(".default-source .pin").textContent() ?? "", /commit chosen here/);
+  assert.deepEqual(await names(page), ["new-skill"], "the new commit's skills, prove-it-works still disabled");
+  await page.reload();
+  await page.locator(".default-source", { hasText: `@${next.slice(0, 12)}` }).waitFor();
+  assert.deepEqual(await saved(), { sources: [], disabled: ["prove-it-works"], defaultCommit: next }, "kept over a reload, with the disabled skill");
+  await shoot(page, "desktop-skills-updated");
+  console.log("ok: a failed check saves nothing; confirming pins the exact commit, keeps disabled skills and survives a reload");
+
   for (const viewport of [{ width: 390, height: 844 }, { width: 320, height: 700 }]) {
     const small = await browser.newPage({ viewport });
     small.on("pageerror", error => errors.push(String(error)));
     await small.goto(`${host.url}/#/settings/skills`);
-    await small.locator(".skills .skill").first().waitFor();
+    await small.locator(".default-source").waitFor();
     await small.waitForTimeout(300);
     assert.ok(await noSideways(small), `no sideways scroll at ${viewport.width}px`);
+    const fields = await small.locator(".add .field").evaluateAll(items => items.map(item => Math.round(item.getBoundingClientRect().height)));
+    assert.ok(fields.every(height => height < 90), `the form's fields keep their height on a phone: ${fields.join(", ")}`);
     const keys = await small.locator(".settings-rail .rail-item").evaluateAll(items => items.map(item => item.getBoundingClientRect()).map(box => ({ top: Math.round(box.top), right: box.right })));
     assert.equal(new Set(keys.map(key => key.top)).size, 1, "the rail is one row");
     assert.ok(keys.every(key => key.right <= viewport.width), `every key is on screen at ${viewport.width}px`);

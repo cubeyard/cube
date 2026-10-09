@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { errorText, fetchSkills, saveSkills, type SkillsView } from "../lib/api.ts";
+  import { checkSkillsUpdate, errorText, fetchSkills, saveSkills, type SkillsUpdate, type SkillsView } from "../lib/api.ts";
   import type { SkillsConfig } from "../lib/types.ts";
 
   let view = $state<SkillsView | null>(null);
@@ -11,6 +11,20 @@
   let commit = $state("");
   let folder = $state("skills");
   let disposed = false;
+  let checking = $state(false);
+  let update = $state<SkillsUpdate | null>(null);
+  let updateError = $state<string | null>(null);
+  /** What the shown update changes for new threads, by skill name. */
+  const changes = $derived.by(() => {
+    if (!update || !view) return null;
+    const before = new Map(view.resolved.skills.map((skill) => [skill.name, skill]));
+    const after = new Map(update.preview.skills.map((skill) => [skill.name, skill]));
+    return {
+      added: [...after.keys()].filter((name) => !before.has(name)),
+      removed: [...before.keys()].filter((name) => !after.has(name)),
+      changed: [...after.values()].filter((skill) => before.has(skill.name) && before.get(skill.name)!.commit !== skill.commit).map((skill) => skill.name),
+    };
+  });
 
   const repository = (source: { url: string }) => source.url.replace(/^https:\/\//, "").replace(/\.git$/, "");
   const short = (commit: string) => commit.slice(0, 12);
@@ -42,7 +56,28 @@
     }
   }
 
-  const config = (): SkillsConfig => view ? { sources: [...view.saved.sources], disabled: [...view.saved.disabled] } : { sources: [], disabled: [] };
+  const config = (): SkillsConfig => view
+    ? { sources: [...view.saved.sources], disabled: [...view.saved.disabled], ...view.saved.defaultCommit ? { defaultCommit: view.saved.defaultCommit } : {} }
+    : { sources: [], disabled: [] };
+
+  /** Looks up the default branch's tip; only a confirmation saves it. */
+  async function check() {
+    if (checking) return;
+    checking = true;
+    updateError = null;
+    update = null;
+    try {
+      const next = await checkSkillsUpdate();
+      if (!disposed) update = next;
+    } catch (cause) {
+      if (!disposed) updateError = errorText(cause);
+    } finally {
+      if (!disposed) checking = false;
+    }
+  }
+  async function confirmUpdate() {
+    if (update && await save({ ...config(), defaultCommit: update.candidate })) update = null;
+  }
   const remove = (index: number) => save({ ...config(), sources: config().sources.filter((_, at) => at !== index) });
   const disable = (name: string) => save({ ...config(), disabled: [...config().disabled, name].sort() });
   const enable = (name: string) => save({ ...config(), disabled: config().disabled.filter((entry) => entry !== name) });
@@ -76,9 +111,34 @@
             <span class="repo">{repository(view.default)}</span>
             <code title={view.default.commit}>@{short(view.default.commit)}</code>
             {#if view.default.path}<span class="path">/{view.default.path}</span>{/if}
-            <span class="tag">cube's default</span>
+            <span class="tag pin">{view.saved.defaultCommit ? "cube's default · commit chosen here" : "cube's default · pinned by this cube"}</span>
+            <button class="key check-update" disabled={checking || saving} onclick={() => void check()}>{checking ? "checking…" : "check for update"}</button>
           </li>
         {/if}
+      </ol>
+      {#if updateError}<p class="error update-error" role="alert">{updateError}</p>{/if}
+      {#if update && changes}
+        <div class="update" role="region" aria-label="default source update">
+          {#if update.upToDate}
+            <p class="update-status">up to date: {update.branch} is at <code title={update.candidate}>@{short(update.candidate)}</code>, the commit in use.</p>
+            <div class="update-actions"><button class="key" onclick={() => (update = null)}>close</button></div>
+          {:else}
+            <p class="update-status">{update.branch} is now at <code class="candidate">{update.candidate}</code>; in use: <code title={update.current}>@{short(update.current)}</code>.</p>
+            <ul class="update-changes">
+              {#if changes.added.length}<li>new threads gain: {changes.added.join(", ")}</li>{/if}
+              {#if changes.removed.length}<li>new threads lose: {changes.removed.join(", ")}</li>{/if}
+              {#if changes.changed.length}<li>from the new commit: {changes.changed.join(", ")}</li>{/if}
+              {#if !changes.added.length && !changes.removed.length && !changes.changed.length}<li>no skill new threads get changes: your sources replace every one.</li>{/if}
+            </ul>
+            <p class="hint">saving pins this exact commit. threads already started keep their skills; new threads get these.</p>
+            <div class="update-actions">
+              <button class="key primary" disabled={saving} onclick={() => void confirmUpdate()}>{saving ? "saving…" : `use @${short(update.candidate)}`}</button>
+              <button class="key" disabled={saving} onclick={() => (update = null)}>cancel</button>
+            </div>
+          {/if}
+        </div>
+      {/if}
+      <ol class="sources user-sources">
         {#each view.saved.sources as source, index (index)}
           <li class="source user-source">
             <span class="repo">{repository(source)}</span>
@@ -151,6 +211,14 @@
   li { min-width: 0; padding: 0.6rem 0.25rem; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
   .source, .disabled li { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.6rem; }
   .source .key, .disabled .key { margin-left: auto; }
+  .user-sources { margin-top: 0; border-top: 0; }
+  .user-sources:empty { display: none; }
+  .update { margin-top: 0.6rem; padding: 0.75rem; background: var(--note-soft); border: 1px solid var(--note-line); border-radius: var(--r-chip); font-size: 13px; line-height: 1.55; color: var(--ink-2); }
+  .update code.candidate { overflow-wrap: anywhere; color: var(--ink); }
+  .update-changes { border-top: 0; margin: 0.4rem 0; }
+  .update-changes li { border-bottom: 0; padding: 0.1rem 0; }
+  .update .hint { margin-top: 0.3rem; }
+  .update-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.6rem; }
   .repo, .name { font-weight: 550; color: var(--ink); }
   .name { font-family: var(--font-mono); font-size: 12.5px; }
   code, .path { font: 12px var(--font-mono); color: var(--ink-2); }
@@ -172,6 +240,8 @@
   @media (max-width: 40rem) {
     .settings-board { padding: 0.85rem; }
     .add { flex-direction: column; align-items: stretch; }
+    /* in a column the url field's basis would be its height */
+    .field.grow { flex: none; }
     .field input { font-size: 16px; }
     .add .key { min-height: 2.5rem; }
   }

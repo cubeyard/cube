@@ -9,9 +9,24 @@ yet. Code: `packages/server/src/skills.ts`.
 ## Sources and precedence
 
 ```text
-cubeyard/skills @ d5041ce9ae3af0c5b0dbb00234a2bd600df8cf63   cube's default (a release moves the pin)
+cubeyard/skills @ d5041ce9ae3af0c5b0dbb00234a2bd600df8cf63   cube's default: this cube's pin,
+                                                             or skills.defaultCommit once updated here
 your sources, in order                                       settings.json: skills.sources
 ```
+
+## Updating the default source
+
+**check for update** on the settings page (`GET /api/settings/skills/update`)
+fetches cubeyard/skills into the host mirror and resolves its default
+branch's tip to a full commit. It shows that commit, the one in use, and
+which skills new threads would gain, lose or get from the new commit. It
+saves nothing. **use @<commit>** saves exactly that commit as
+`skills.defaultCommit`, even if the branch has moved on since; **cancel**
+saves nothing. No branch is ever followed: the commit changes only when
+someone confirms one. Only the commit changes, not the repository or its
+folder; the user's sources, overrides and disabled names stay as they are.
+A saved commit stays in effect when cube itself is updated, whatever pin
+the new release carries.
 
 - A source is `{url, commit, path}`: an `https` git URL without
   credentials (`user@` or `user:token@` is refused, and never saved), a full
@@ -101,7 +116,8 @@ sandbox (docs/security.md).
 
 `GET /api/settings/skills` resolves the saved sources and returns
 `{default, saved, resolved: {sources, skills, skipped}}`.
-`PUT /api/settings/skills {sources, disabled}` saves only a configuration
+`PUT /api/settings/skills {sources, disabled, defaultCommit?}` replaces the
+whole set and saves only a configuration
 that resolves (400 for a malformed one, 422 for one that does not resolve).
 It is kept in `<CUBED_STATE>/settings.json` under `skills`. The settings
 page **skills** (`#/settings/skills`) shows the same: the sources (add,
