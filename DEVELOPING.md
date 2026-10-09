@@ -180,6 +180,9 @@ runs the mod's tool functions over the socket. `bash scripts/check-claude-mod.sh
 runs `claude plugin validate`, `claude plugin test` (the mod's tests against the
 engine with the routes answered in memory; no model call) and, with
 `CLAUDE_CODE_TYPES` pointing at Claude Code's `claude-code.d.ts`, tsc.
+`node scripts/check-claude-subagents.ts` starts the real `claude` with cubed's
+arguments against a scripted Messages API on loopback (no login, no model) and
+checks that it runs no subagent, fresh or resumed, while Bash still works.
 
 Runner operations are installation-global. `GET /api/runners` returns persisted
 contact and the current global allocation snapshot without private adapter paths;

@@ -129,8 +129,7 @@ allow-list. The mod sends Bash, Read, Write and Edit to the thread's machine (a
 file path outside the workspace names a file in that machine, read and written
 with the guest `agent` account's permissions, never one on the cubed host) and
 refuses every other tool not on that list (MCP tools and unknown built-ins
-included), isolated subagents and agent types that are not Claude Code's
-built-ins. Claude Code itself still runs on the cubed host with the cubed user's
+included) and every subagent. Claude Code itself still runs on the cubed host with the cubed user's
 authority and reads its own login from its config directory: it is not
 sandboxed either, and these guards depend on Claude Code honouring its flags
 and hooks, which no real session has verified yet. The mod reaches the

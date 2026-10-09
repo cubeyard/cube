@@ -138,6 +138,13 @@ try {
   const second = starts()[1]!;
   assert.equal(second.args[second.args.indexOf("--resume") + 1], first!.session, "a restarted child resumes the Claude Code session");
   assert.equal(second.args[second.args.indexOf("--model") + 1], "opus");
+  // Claude Code offers no tool that starts or continues a subagent, on a
+  // first start or a resumed one; the ordinary tools stay.
+  for (const start of [first!, second]) {
+    const tools = start.args[start.args.indexOf("--tools") + 1]!.split(",");
+    assert.deepEqual(["Agent", "Task", "Workflow", "SendMessage"].filter(name => tools.includes(name)), [], `no subagent tool: ${tools.join(",")}`);
+    assert.deepEqual(["Bash", "Read", "Write", "Edit", "WebSearch", "TodoWrite"].filter(name => !tools.includes(name)), []);
+  }
   await assert.rejects(agent.setModel("gpt-5"), /model unavailable/);
 
   // Stop interrupts the turn and kills the guest command.

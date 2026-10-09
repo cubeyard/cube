@@ -115,8 +115,8 @@ The last kind of wait cube cannot see: CI, a reviewer or a command started
 outside the thread. Two things keep such work going overnight:
 
 - **Threads are told not to end a turn to wait.** OptChat's task note
-  says nothing wakes a thread after its final reply except its own
-  background agent finishing, so it waits for CI, reviews or commands in
+  says nothing wakes a thread after its final reply, so it waits for CI,
+  reviews or commands in
   the foreground (a command runs at most 10 minutes; it repeats a bounded
   wait such as `timeout 590 gh pr checks <n> --watch`), and says plainly
   what is left when it stops early.
@@ -172,8 +172,11 @@ agent "…"`) and, when the agent is not open in cubed, notes that the agent
 ended with it. `threads` shows `completed, waiting on background agent "…"`.
 The thread page shows `waiting on a background agent: …` with its stop key.
 
-Limits: cube tracks only Claude Code's own background agents. Pi threads
-have none. CI, reviews by other threads or people, and commands outside
+Limits: cube tracks only Claude Code's own background agents, and a
+thread starts none now: Claude Code threads have no subagents (see
+ARCHITECTURE.md, "Claude Code threads"). The tracking stays for sessions
+that started one before, so their records and results still report. Pi
+threads have none. CI, reviews by other threads or people, and commands outside
 the thread are not tracked; a thread must wait for them itself, or OptChat
 must tell it to look again. Claude Code's follow-up turn is a Claude Code
 behavior cube relies on (headless `-p` stream-json input takes a turn for a
