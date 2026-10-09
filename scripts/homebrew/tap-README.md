@@ -10,10 +10,10 @@ brew install cubeyard/tap/cube
 
 This installs `cubed` (the control plane, with its own Node runtime and
 `cube-gateway`), `cube-runner` (the VM runner), QEMU and `gh`. Then follow
-[the macOS quickstart](https://github.com/cubeyard/cube#macos-quickstart-homebrew):
+[macOS with Homebrew](https://github.com/cubeyard/cube/blob/main/docs/macos.md):
 a one-time `cubed runners init-local` (it downloads Debian's genericcloud
-arm64 image, checksum-verified), `brew services start cube-runner`,
-`brew services start cube`, and connecting a model in the browser.
+arm64 image, checksum-verified), `brew services start cubeyard/tap/cube-runner`,
+`brew services start cubeyard/tap/cube`, and connecting a model in the browser.
 
 ## If you installed the old `cube` launcher from this tap
 
@@ -32,10 +32,15 @@ clean up the old layout.
 ## Updates and removal
 
 ```sh
-brew upgrade cube cube-runner && brew services restart cube-runner cube
-brew services stop cube cube-runner
-brew uninstall cube cube-runner  # keeps ~/.cube-host and ~/.cube
+brew update
+brew upgrade cubeyard/tap/cube cubeyard/tap/cube-runner
+brew services restart cubeyard/tap/cube-runner cubeyard/tap/cube
+brew services stop cubeyard/tap/cube cubeyard/tap/cube-runner
+brew uninstall cubeyard/tap/cube cubeyard/tap/cube-runner  # keeps ~/.cube-host and ~/.cube
 ```
+
+`brew update` fetches this tap now; without it Homebrew may not see a new
+release for up to a day and says the old version is already installed.
 
 ## Maintaining the formulas
 

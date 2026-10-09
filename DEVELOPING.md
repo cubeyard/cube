@@ -281,7 +281,10 @@ dependency as `cubeyard/tap/cube-runner`. Both formulas take their version
 from the release tag in their URL, so every release upgrades both even when
 the runner's own version did not change. `brew upgrade` does not restart the
 services and removes the previous keg; the caveats and README say to restart
-them.
+them. The cube formula sets `skip_clean "libexec"` so Homebrew's cleaner does
+not walk the bundle's 20,000 files, and prints one `ohai` at the end of
+`install`: Homebrew shows nothing else between `Installing` and the summary
+without `--verbose` ([install progress](docs/macos.md#install-progress)).
 
 ## Fresh start and recovery
 
