@@ -1,5 +1,6 @@
 /** Skills from pinned git commits: resolution over the host's real git
- * (precedence, overrides, surfaces, disabled names, skipped folders, exact
+ * (precedence, overrides, surfaces, disabled names, skipped folders, ids
+ * apart from display names, exact
  * pins), the install commands run by bash into a home directory (relative
  * links between skills, scripts' modes, a reinstall replacing the last),
  * and a Pi thread started through cubed's HTTP routes on a local guest: its
@@ -54,7 +55,7 @@ const defaults = repository("defaults", {
 const mine = repository("mine", {
   "skills/prove-it-works/SKILL.md": skill("prove-it-works", "My own way to check work.", "metadata:\n  cube:\n    surface: both\n", "# mine\n"),
   "skills/Bad-Name/SKILL.md": skill("Bad-Name", "Upper case."),
-  "skills/wrong-name/SKILL.md": skill("other-name", "Mismatched."),
+  "skills/unnamed/SKILL.md": "---\ndescription: No name.\n---\n",
   "skills/odd-surface/SKILL.md": skill("odd-surface", "Unknown surface.", "metadata:\n  cube:\n    surface: everywhere\n"),
   "skills/no-description/SKILL.md": "---\nname: no-description\n---\n",
   "skills/linked/SKILL.md": skill("linked", "Has a symlink."),
@@ -82,10 +83,64 @@ try {
     { url: mine.url, dir: "skills/linked", reason: "skills/linked/escape is a symlink; skills are plain files" },
     { url: mine.url, dir: "skills/no-description", reason: "description must be 1 to 1024 characters" },
     { url: mine.url, dir: "skills/odd-surface", reason: "metadata.cube.surface \"everywhere\" is not thread, optchat or both" },
-    { url: mine.url, dir: "skills/wrong-name", reason: "SKILL.md names \"other-name\", not its folder wrong-name" },
+    { url: mine.url, dir: "skills/unnamed", reason: "SKILL.md name must be 1 to 64 characters without control characters" },
   ]);
   assert.deepEqual((await resolveSkills(hostGit, null, { sources: [], disabled: [] })).skills, [], "no source, no skills");
   console.log("ok: the last source with a name wins it, disabled names are left out, unqualified folders are skipped with a reason");
+
+  // 1b. A skill's id is its folder; its SKILL.md name is only its display
+  //     name and may differ (cursor/plugins pstack/skills/poteto-mode names
+  //     itself "Poteto Mode"). Overrides, disabled names, install paths and
+  //     the prompt use the id; a display name never reaches a path.
+  const potetoUpstream = repository("poteto-upstream", {
+    "pstack/skills/poteto-mode/SKILL.md": skill("Poteto Mode", "poteto's agent style.", "disable-model-invocation: true\n"),
+    "pstack/skills/poteto-mode/playbooks/bug-fix.md": "### Bug fix\n",
+    "pstack/skills/same-title/SKILL.md": skill("Poteto Mode", "Another skill with the same display name."),
+    "pstack/skills/escape/SKILL.md": skill("../../etc/passwd", "A display name that looks like a path."),
+    "pstack/skills/prove-it-works/SKILL.md": skill("Prove It Works", "Upstream's way to check work."),
+    "pstack/skills/claims-other/SKILL.md": skill("opening-a-pull-request", "Names another skill; does not override it."),
+    "pstack/skills/blank-name/SKILL.md": skill("\"  \"", "A blank display name."),
+    "pstack/skills/long-name/SKILL.md": skill("x".repeat(65), "Too long a display name."),
+    "pstack/skills/control-name/SKILL.md": skill("\"bad\\u202ename\"", "A bidi override in the display name."),
+    "pstack/skills/Poteto Mode/SKILL.md": skill("Poteto Mode", "A folder that is not an id."),
+  });
+  const poteto = { ...potetoUpstream, path: "pstack/skills" };
+  const overridePoteto = repository("poteto-override", { "skills/poteto-mode/SKILL.md": skill("poteto-mode", "My own poteto mode.") });
+  const display = await resolveSkills(hostGit, defaults, { sources: [poteto], disabled: ["manual-only"] });
+  assert.deepEqual(display.skills.map(({ name, displayName, dir, hidden, overrides }) => ({ name, displayName, dir, hidden, overrides })), [
+    { name: "briefing-a-thread", displayName: undefined, dir: "skills/briefing-a-thread", hidden: undefined, overrides: undefined },
+    { name: "claims-other", displayName: "opening-a-pull-request", dir: "pstack/skills/claims-other", hidden: undefined, overrides: undefined },
+    { name: "escape", displayName: "../../etc/passwd", dir: "pstack/skills/escape", hidden: undefined, overrides: undefined },
+    { name: "opening-a-pull-request", displayName: undefined, dir: "skills/opening-a-pull-request", hidden: undefined, overrides: undefined },
+    { name: "poteto-mode", displayName: "Poteto Mode", dir: "pstack/skills/poteto-mode", hidden: true, overrides: undefined },
+    { name: "prove-it-works", displayName: "Prove It Works", dir: "pstack/skills/prove-it-works", hidden: undefined, overrides: { url: defaults.url, commit: defaults.commit } },
+    { name: "same-title", displayName: "Poteto Mode", dir: "pstack/skills/same-title", hidden: undefined, overrides: undefined },
+  ]);
+  assert.deepEqual(display.skipped, [
+    { url: poteto.url, dir: "pstack/skills/Poteto Mode", reason: "the folder name is not a skill name (lowercase letters, digits and inner hyphens)" },
+    { url: poteto.url, dir: "pstack/skills/blank-name", reason: "SKILL.md name must be 1 to 64 characters without control characters" },
+    { url: poteto.url, dir: "pstack/skills/control-name", reason: "SKILL.md name must be 1 to 64 characters without control characters" },
+    { url: poteto.url, dir: "pstack/skills/long-name", reason: "SKILL.md name must be 1 to 64 characters without control characters" },
+  ]);
+  const overridden = await resolveSkills(hostGit, null, { sources: [poteto, overridePoteto], disabled: [] });
+  assert.deepEqual(overridden.skills.find(entry => entry.name === "poteto-mode"), { name: "poteto-mode", description: "My own poteto mode.", surface: "thread",
+    url: overridePoteto.url, commit: overridePoteto.commit, dir: "skills/poteto-mode", overrides: { url: poteto.url, commit: poteto.commit } }, "the same id overrides, whatever the display name");
+  assert.deepEqual((await resolveSkills(hostGit, null, { sources: [poteto], disabled: ["poteto-mode", "escape"] })).skills.map(entry => entry.name),
+    ["claims-other", "prove-it-works", "same-title"], "disabled by id");
+  assert.throws(() => parseSkillsConfig({ disabled: ["Poteto Mode"] }), /not a skill name/, "a display name is not an id");
+  assert.deepEqual(parseSkillsConfig({ disabled: ["poteto-mode"] }), { sources: [], disabled: ["poteto-mode"] }, "settings saved before display names still parse");
+  const displayPrompt = skillsPrompt(display)!;
+  assert.deepEqual([...displayPrompt.matchAll(/<name>(.*)<\/name>/g)].map(match => match[1]), ["claims-other", "escape", "opening-a-pull-request", "prove-it-works", "same-title"],
+    "listed by id; hidden poteto-mode is not listed");
+  assert.deepEqual([...displayPrompt.matchAll(/<location>(.*)<\/location>/g)].map(match => match[1]),
+    ["claims-other", "escape", "opening-a-pull-request", "prove-it-works", "same-title"].map(id => `/home/agent/.cube/skills/${id}/SKILL.md`));
+  assert.doesNotMatch(displayPrompt, /etc\/passwd|Poteto Mode/);
+  const displayHome = path.join(root, "display-home");
+  for (const script of skillInstallScripts(display)) execFileSync("bash", ["-c", script], { env: { PATH: process.env.PATH!, HOME: displayHome }, encoding: "utf8" });
+  assert.deepEqual(fs.readdirSync(path.join(displayHome, ".cube", "skills")).sort(),
+    ["briefing-a-thread", "claims-other", "escape", "opening-a-pull-request", "poteto-mode", "prove-it-works", "same-title"]);
+  assert.equal(fs.readFileSync(path.join(displayHome, ".cube/skills/poteto-mode/playbooks/bug-fix.md"), "utf8"), "### Bug fix\n");
+  console.log("ok: a skill's id is its folder; a different SKILL.md name is its display name, never its path, override or disabled id");
 
   // 2. Exact pins: a commit the repository does not have fails resolution;
   //    settings take only full commits and https URLs.
