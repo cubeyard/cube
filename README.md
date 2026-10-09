@@ -69,6 +69,7 @@ restarted.
 - [docs/cubed-updates.md](docs/cubed-updates.md): signed releases, the managed
   launcher and its user service, browser updates.
 - [docs/optchat.md](docs/optchat.md), [docs/artifacts.md](docs/artifacts.md),
+  [docs/skills.md](docs/skills.md),
   [docs/services.md](docs/services.md), [docs/usage.md](docs/usage.md),
   [docs/project-hooks.md](docs/project-hooks.md) (a project's pre-setup and
   pre-resume hooks: the project page, OptChat, `cube hooks`).

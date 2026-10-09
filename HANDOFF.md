@@ -343,6 +343,18 @@ setup, desktop, 390px and 320px); not with real provider models. Below
 24rem the header's destinations take their own row (they overflowed
 narrow phones before).
 
+## Skills (branch `feat/thread-skills`)
+
+Threads get skills from cubeyard/skills at an exact commit, then the user's
+sources (`PUT /api/settings/skills`), resolved at thread start into the
+allocation, installed as `~/.cube/skills/<name>/` and listed in Pi's and
+Claude Code's prompts ([docs/skills.md](docs/skills.md)). Verified offline
+(`skills-test.ts`: real git and bash, a Pi thread on a local guest), and the
+default source resolved and installed from GitHub by the same commands
+outside provisioning; not yet in a runner VM test. Not done:
+OptChat reading `optchat`/`both` skills, a settings page, the repository's
+own `.agents/skills`.
+
 ## Known gaps and next steps
 
 - **Machine templates:** built on `vm-snapshots`, verified on Linux/KVM only
