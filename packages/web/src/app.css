@@ -949,6 +949,11 @@ header .spacer { margin-left: auto; }
   flex: none; margin: 0; max-width: 42rem; padding-left: 0.65rem;
   border-left: 2px solid var(--line); color: var(--ink-3); font-size: 12.5px; line-height: 1.5;
 }
+/* The top of a window: older messages are read from here. */
+.transcript-earlier {
+  flex: none; display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+  min-height: 2rem; color: var(--ink-3); font-size: 12.5px;
+}
 .conversation-message { min-width: 0; }
 .conversation-message.user {
   align-self: flex-end; max-width: min(42rem, 85%); min-width: min(12rem, 70%);

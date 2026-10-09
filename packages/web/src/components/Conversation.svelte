@@ -8,6 +8,8 @@
   import { picturePath, toolOpen, transcriptRows, type ToolState, type TranscriptRow } from "../lib/transcript.ts";
   import { uid } from "../lib/uid.ts";
   import type { MessageImage, ModelSelection, ThreadStatus, ThreadTranscript } from "../lib/types.ts";
+  import { tailStart, WINDOW_EVENTS } from "../../../server/src/transcript-window.ts";
+  import type { TranscriptPage } from "../../../server/src/thread-events.ts";
   import Icon from "./Icon.svelte";
 
   let { threadId = "", base = threadBase(threadId), steer = false, model, changingModel = false, busy = $bindable(false), waitingText = null, notice = null, empty = null, placeholder = "message this thread", images = null }: {
@@ -31,13 +33,22 @@
   } = $props();
   // The neutral thread event model is the only input; no agent shapes here.
   const events = $derived(threadEvents(base));
-  let transcript = $state<Pick<ThreadTranscript, "events" | "status">>({ events: [], status: { state: "idle", run: null, error: null } });
+  /** The window of the newest events the stream keeps current. */
+  let transcript = $state<Pick<ThreadTranscript, "events" | "status" | "start">>({ events: [], status: { state: "idle", run: null, error: null } });
+  /** The events before the window, read a page at a time as the reader
+   * scrolls up; they end where the window starts. */
+  let earlier = $state<TranscriptPage>({ start: 0, events: [] });
+  /** The index of the first event shown; above it there is more to read. */
+  const first = $derived(earlier.events.length ? earlier.start : transcript.start ?? 0);
+  let loadingEarlier = $state(false);
+  let earlierError = $state<string | null>(null);
   /** Sent messages not yet in the log: each is shown, from the moment it is
    * sent, while the transcript shows no copy of it, so a send never reads as
-   * nothing, or as gone. */
+   * nothing, or as gone. Counted in the window alone, whose start is fixed
+   * while a message waits, so a page read meanwhile cannot answer one. */
   let echoes = $state<Echo[]>([]);
   const outgoing = $derived(unanswered(transcript, echoes));
-  const rows = $derived([...transcriptRows(transcript), ...echoRows(outgoing)]);
+  const rows = $derived([...transcriptRows({ events: [...earlier.events, ...transcript.events], status: transcript.status }), ...echoRows(outgoing)]);
   const status = $derived<ThreadStatus>(transcript.status);
   let prompt = $state("");
   let loading = $state(true);
@@ -86,15 +97,61 @@
   async function show(next: ThreadTranscript, follow = false): Promise<void> {
     if (disposed) return;
     if (follow) following = true;
+    // A window chosen again elsewhere (the host lost its start) no longer
+    // continues the pages read before it.
+    if (earlier.events.length && earlier.start + earlier.events.length !== (next.start ?? 0)) earlier = { start: 0, events: [] };
     transcript = next;
     if (echoes.length) echoes = unlogged(next, echoes);
+    trim();
     historyError = null;
     loading = false;
     if (following) {
       await tick();
       toBottom();
     }
+    // A window that fits on the screen gives no scroll to read on from.
+    nearTop();
   }
+
+  /** A window grown far past its first size (a chat left open) moves its
+   * older part to the pages and starts the stream later, so a frame stays
+   * small. Only while no message waits: echoes are counted in the window. */
+  function trim(): void {
+    if (echoes.length || sending || loadingEarlier || transcript.events.length <= 3 * WINDOW_EVENTS) return;
+    const cut = tailStart(transcript.events, WINDOW_EVENTS);
+    if (cut <= 0) return;
+    const at = (transcript.start ?? 0) + cut;
+    earlier = { start: first, events: [...earlier.events, ...transcript.events.slice(0, cut)] };
+    transcript = { ...transcript, start: at, events: transcript.events.slice(cut) };
+    events.advance(at, transcript.events[0]!.id);
+  }
+
+  /** Reads the page before the first event shown and keeps the reader's
+   * place: what they see stays where it is as the page goes in above it. */
+  async function loadEarlier(): Promise<void> {
+    if (loadingEarlier || loading || first <= 0 || disposed) return;
+    loadingEarlier = true;
+    earlierError = null;
+    const before = first;
+    try {
+      const page = await events.older(before, WINDOW_EVENTS);
+      if (disposed || first !== before) return;
+      const fromBottom = scroller.scrollHeight - scroller.scrollTop;
+      earlier = { start: page.start, events: [...page.events, ...earlier.events] };
+      await tick();
+      scroller.scrollTop = scroller.scrollHeight - fromBottom;
+    } catch (cause) {
+      if (!disposed) earlierError = errorText(cause);
+    } finally {
+      loadingEarlier = false;
+    }
+    nearTop();
+  }
+  /** The reader is near the oldest event shown (or it all fits): read on. */
+  function nearTop(): void {
+    if (!disposed && !earlierError && scroller && scroller.scrollTop < EARLIER_MARGIN) void loadEarlier();
+  }
+  const EARLIER_MARGIN = 600;
 
   /** Frames shown so far: a read that a frame overtook is older than the
    * stream, which sends a newer frame for every later change. */
@@ -139,7 +196,7 @@
       },
       onEnd: cause => { if (!disposed) { historyError = errorText(cause); reconnecting = false; loading = false; } },
     });
-    const onScroll = () => { following = atBottom(); };
+    const onScroll = () => { following = atBottom(); nearTop(); };
     scroller.addEventListener("scroll", onScroll, { passive: true });
     // An image in agent prose is markup, not a component: its failure is caught here.
     const onImageError = (event: Event) => {
@@ -346,6 +403,13 @@
   <div class="transcript" bind:this={scroller} aria-busy={working}>
     <div class="transcript-column" bind:this={column}>
       {#if notice}<p class="conversation-notice" role="note">{notice}</p>{/if}
+      {#if !loading && first > 0}
+        <div class="transcript-earlier">
+          {#if loadingEarlier}<span role="status">reading earlier messages…</span>
+          {:else if earlierError}<span role="alert">{earlierError}</span><button class="key" type="button" onclick={() => { earlierError = null; void loadEarlier(); }}>retry</button>
+          {:else}<button class="key" type="button" onclick={() => void loadEarlier()}>show earlier messages</button>{/if}
+        </div>
+      {/if}
       {#if loading}
         <p class="conversation-empty">{waitingText ?? "reading thread…"}</p>
       {:else if rows.length === 0}

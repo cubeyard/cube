@@ -7,6 +7,7 @@ import http from "node:http";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import type { ThreadEvent, ThreadOverview, ThreadStatus, ThreadSummary, ThreadTranscript } from "../../src/lib/types.ts";
+import { streamWindow, TranscriptWindowError, windowed, windowOf, windowQuery } from "../../../server/src/transcript-window.ts";
 
 const DIST = path.resolve(import.meta.dirname, "../../dist");
 const TYPES: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".png": "image/png", ".json": "application/json", ".webmanifest": "application/manifest+json" };
@@ -27,7 +28,13 @@ export class ScriptedHost {
   media = new Map<string, { type: string; body: Buffer }>();
   /** Answers a prompt: by default accepted at once. A thrown error is a 500. */
   onPrompt: (prompt: Prompt) => Promise<void> | void = () => {};
-  private readonly streams = new Set<http.ServerResponse>();
+  /** Holds a request for older messages until it resolves. */
+  onOlder: () => Promise<void> | void = () => {};
+  /** Every API request with its query, as `METHOD /path?query`. */
+  queries: string[] = [];
+  /** The bytes of each transcript the host sent: history answers and stream frames. */
+  sent: number[] = [];
+  private readonly streams = new Map<http.ServerResponse, (transcript: ThreadTranscript) => ThreadTranscript>();
   private readonly server: http.Server;
 
   private constructor() {
@@ -45,7 +52,7 @@ export class ScriptedHost {
   /** Sends a frame to every open stream; with `keep`, the host's current transcript stays as it was (an older frame). */
   frame(transcript: ThreadTranscript, options: { keep?: boolean } = {}): void {
     if (!options.keep) this.transcript = transcript;
-    for (const stream of this.streams) stream.write(`data: ${JSON.stringify(transcript)}\n\n`);
+    for (const [stream, window] of this.streams) this.write(stream, transcript, window);
   }
 
   /** The current transcript with these changes, sent as a frame. */
@@ -55,9 +62,23 @@ export class ScriptedHost {
     return next;
   }
 
+  /** One stream frame of the window the stream asked for, as cubed sends it. */
+  private write(stream: http.ServerResponse, transcript: ThreadTranscript, window: (transcript: ThreadTranscript) => ThreadTranscript): void {
+    let text: string;
+    try { text = JSON.stringify(window(transcript)); }
+    catch (error) {
+      if (!(error instanceof TranscriptWindowError)) throw error;
+      stream.end(`event: reset\ndata: ${JSON.stringify(error.body)}\n\n`);
+      this.streams.delete(stream);
+      return;
+    }
+    this.sent.push(Buffer.byteLength(text));
+    stream.write(`data: ${text}\n\n`);
+  }
+
   /** Ends every open stream as a lost connection does. */
   drop(): void {
-    for (const stream of this.streams) stream.destroy();
+    for (const stream of this.streams.keys()) stream.destroy();
     this.streams.clear();
   }
 
@@ -80,6 +101,7 @@ export class ScriptedHost {
       return;
     }
     this.requests.push(`${request.method} ${url.pathname}`);
+    this.queries.push(`${request.method} ${url.pathname}${url.search}`);
     // The thread's conversation routes are the chat's.
     const threadPrefix = this.thread ? `/api/threads/${encodeURIComponent(this.thread.id)}/` : null;
     if (threadPrefix && url.pathname.startsWith(threadPrefix)) {
@@ -95,12 +117,27 @@ export class ScriptedHost {
       case "GET /api/optchat/model": return json({ models: [model], selected: model, images: { supported: true, reason: null } });
       case "GET /api/optchat/threads": return json(this.overview);
       case "GET /api/optchat/view": return json({ view: "<chat>\n</chat>", messages: 0, failure: null });
-      case "GET /api/optchat/history": return json(this.transcript);
+      case "GET /api/optchat/history": {
+        if (url.searchParams.has("before")) await this.onOlder();
+        try {
+          const body = JSON.stringify(windowed(this.transcript, url.searchParams));
+          if (!url.searchParams.has("before")) this.sent.push(Buffer.byteLength(body));
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(body);
+          return;
+        } catch (error) {
+          if (error instanceof TranscriptWindowError) return json(error.body, error.status);
+          throw error;
+        }
+      }
       case "GET /api/optchat/stream": {
+        let window: (transcript: ThreadTranscript) => ThreadTranscript;
+        try { const query = windowQuery(url.searchParams); windowOf(this.transcript, query); window = streamWindow(query); }
+        catch (error) { if (error instanceof TranscriptWindowError) return json(error.body, error.status); throw error; }
         response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
-        response.write(`data: ${JSON.stringify(this.transcript)}\n\n`);
-        this.streams.add(response);
+        this.streams.set(response, window);
         response.on("close", () => this.streams.delete(response));
+        this.write(response, this.transcript, window);
         return;
       }
       case "POST /api/optchat/prompt": {
