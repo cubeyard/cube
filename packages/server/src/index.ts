@@ -31,6 +31,7 @@ import { observeRunners } from "./runner-observe.ts";
 import { formatDiagnostics, threadDiagnostics } from "./vm-diagnostics.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
 import { serveThreadEvents } from "./thread-events-http.ts";
+import { TranscriptWindowError, windowed, windowQuery } from "./transcript-window.ts";
 import { threadUsageText, usageText, UsageService } from "./usage-service.ts";
 import { ARTIFACT_LIMITS, ArtifactError, ArtifactStore, isArtifactId, isArtifactName, type ArtifactAuthor } from "./artifacts.ts";
 import { Artifacts } from "./artifact-service.ts";
@@ -628,8 +629,8 @@ export async function createCubed(options: {
       }
       if (parts[0] === "api" && parts[1] === "optchat") {
         const { chat, events } = await openOptchat();
-        if (parts[2] === "history" && method === "GET") return json(await events.read());
-        if (parts[2] === "stream" && method === "GET") return await serveThreadEvents(events, response);
+        if (parts[2] === "history" && method === "GET") return json(windowed(await events.read(), url.searchParams));
+        if (parts[2] === "stream" && method === "GET") return await serveThreadEvents(events, response, windowQuery(url.searchParams));
         // The threads this chat started.
         if (parts[2] === "threads" && parts.length === 3 && method === "GET") return json(await chat.threadOverview());
         if (parts[2] === "view" && method === "GET") return json({ view: chat.memory.render(), messages: chat.memory.length, failure: chat.failure() });
@@ -720,7 +721,7 @@ export async function createCubed(options: {
         }
         if (!parts[3] && method === "DELETE") return json({ ok: true, ...await conversations.archive(id) });
         if (!parts[3] && method === "PATCH") { registry.saveThread({ ...thread, title: text("title").slice(0, 200) }); return json({ ok: true }); }
-        if (parts[3] === "history" && method === "GET") return json(await conversations.history(id));
+        if (parts[3] === "history" && method === "GET") return json(windowed(await conversations.history(id), url.searchParams));
         // `cube service` services in the thread's machine; never starts it.
         if (parts[3] === "services" && parts.length === 4 && method === "GET") {
           const running = thread.workspaceState === "available" && !conversations.archivingNow(id) && !!machines.running?.(thread);
@@ -730,7 +731,7 @@ export async function createCubed(options: {
               throw Object.assign(new Error(`the thread's machine did not list its services: ${error instanceof Error ? error.message : String(error)}`), { status: 502 });
             }) : [] });
         }
-        if (parts[3] === "stream" && method === "GET") return await conversations.stream(id, response);
+        if (parts[3] === "stream" && method === "GET") return await conversations.stream(id, response, windowQuery(url.searchParams));
         if (parts[3] === "stop" && method === "POST") { await conversations.stop(id); return json({ ok: true }); }
         if (parts[3] === "model" && (method === "GET" || method === "PATCH")) {
           // The agent is fixed for the thread; only its own models are offered.
@@ -749,6 +750,7 @@ export async function createCubed(options: {
       fs.createReadStream(file).pipe(response);
     } catch (error) {
       if (response.headersSent) response.destroy();
+      else if (error instanceof TranscriptWindowError) json(error.body, error.status);
       else json({ error: error instanceof Error ? error.message : String(error) }, (error as { status?: number }).status === 502 ? 502 : 409);
     }
   });
