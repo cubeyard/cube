@@ -22,6 +22,7 @@ import type {
 } from "./types.ts";
 import { uid } from "./uid.ts";
 import { HttpThreadEvents } from "../../../server/src/thread-events.ts";
+import { WINDOW_EVENTS } from "../../../server/src/transcript-window.ts";
 import type { ModelAuth } from "../../../server/src/model-auth.ts";
 
 export const fetchProviders = () => request<{ providers: Awaited<ReturnType<ModelAuth["list"]>> }>("/api/providers").then(result => result.providers);
@@ -169,8 +170,9 @@ export const deleteThread = (id: string) => request<{ ok: true }>(threadBase(id)
 export const renameThread = (id: string, title: string) =>
   request<{ ok: true }>(threadBase(id), "PATCH", { title });
 
-/** The thread in the neutral event model: history and the live stream. */
-export const threadEvents = (base: string) => new HttpThreadEvents({ base });
+/** The thread in the neutral event model: history and the live stream,
+ * from a window of its newest events; `older` reads the events before it. */
+export const threadEvents = (base: string) => new HttpThreadEvents({ base, tail: WINDOW_EVENTS });
 
 /** Usage and estimated cost: everything, or one project's threads. */
 export const fetchUsage = (projectId: string | null = null) =>
