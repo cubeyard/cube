@@ -240,6 +240,21 @@ browser-safe and the web UI uses it directly. An agent adapter is the only code
 that knows its agent's shapes; the UI never reads Pi messages.
 `ClaudeThreadEvents` renders a claude-code thread into the same transcript.
 
+A long thread is read as a window (`transcript-window.ts`). A position is an
+event's index in the whole list; committed events keep theirs, and only
+streaming events and messages waiting for the log sit at the end. The
+browser asks for `?tail=120`: the window starts at a logged user message
+among the newest 120 events, and the stream keeps that start for every frame.
+Reads and reconnects ask `?from=<start>`, so the window only grows and the
+outbox's counts in it never go down. `?before=<start>&limit=N` reads an older
+page as the reader scrolls up; the view keeps their place. A start the host
+no longer has (409 with `reset`, or an SSE `reset` event), or one whose event
+changed, makes the reader choose the window again. A window grown past three
+times its size while no message waits moves its older part to the pages and
+starts later (`advance`). No query is the whole transcript, as before; Pi and
+OptChat still render the whole list per frame on the host, only what is sent
+is cut.
+
 A send has one rule from the key to the log: once the reader sees a message,
 they see it until the log has it. The browser shows its own copy at once
 (`packages/web/src/lib/outbox.ts`), stands it aside while the transcript shows
