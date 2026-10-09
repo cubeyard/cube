@@ -1,7 +1,9 @@
 /** The skills settings page in a real browser against the real cubed, with a
  * local default source: the sources, the skills in effect with their
- * surface and provenance, skipped folders with their reason; disabling and
- * enabling a skill, kept over a reload; a branch name and a URL with a token
+ * surface and provenance, skipped folders with their reason; a SKILL.md name
+ * unlike its folder shown as the display name while the folder stays the id
+ * that is disabled and saved; disabling and enabling a skill, kept over a
+ * reload; a branch name and a URL with a token
  * refused without saving; checking the default source for an update (up to
  * date, a new exact commit with what it changes, cancel, a failed check,
  * confirming it, kept over a reload with the disabled skill); no sideways
@@ -25,7 +27,8 @@ const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=Cube Te
 const files: Record<string, string> = {
   "skills/prove-it-works/SKILL.md": "---\nname: prove-it-works\ndescription: Check the real thing before reporting it done.\n---\n",
   "skills/briefing-a-thread/SKILL.md": "---\nname: briefing-a-thread\ndescription: Brief a new thread.\nmetadata:\n  cube:\n    surface: optchat\n---\n",
-  "skills/odd/SKILL.md": "---\nname: other\ndescription: Mismatched.\n---\n",
+  "skills/poteto-mode/SKILL.md": "---\nname: Poteto Mode\ndescription: poteto's agent style.\n---\n",
+  "skills/odd/SKILL.md": "---\nname: \"\"\ndescription: No name.\n---\n",
 };
 for (const [file, text] of Object.entries(files)) {
   fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
@@ -51,23 +54,34 @@ try {
   assert.equal(await page.title(), "skills · settings · cube");
   assert.equal(await page.locator(".default-source").textContent().then(text => text?.replace(/\s+/g, " ").trim()),
     `file://${root} @${source.commit.slice(0, 12)} /skills cube's default · pinned by this cube check for update`);
-  assert.deepEqual(await names(page), ["briefing-a-thread", "prove-it-works"]);
-  assert.deepEqual(await page.locator(".skills .skill .tag").allTextContents(), ["chat (not read yet)", "threads"]);
+  assert.deepEqual(await names(page), ["briefing-a-thread", "poteto-mode", "prove-it-works"]);
+  assert.deepEqual(await page.locator(".skills .skill .title").allTextContents(), ["Poteto Mode"], "only a SKILL.md name unlike its id is shown apart");
+  assert.deepEqual(await page.locator(".skills .skill .tag").allTextContents(), ["chat (not read yet)", "threads", "threads"]);
   assert.match(await page.locator(".skills .skill .provenance").last().textContent() ?? "", new RegExp(`@${source.commit.slice(0, 12)} /skills/prove-it-works`));
-  assert.match(await page.locator(".skipped").textContent() ?? "", /skills\/odd: SKILL.md names "other", not its folder odd/);
+  assert.match(await page.locator(".skipped").textContent() ?? "", /skills\/odd: SKILL.md name must be 1 to 64 characters/);
   await shoot(page, "desktop-skills");
   console.log("ok: the page shows the default source, each skill with its surface and provenance, and the skipped folder");
 
   await page.locator(".skill", { hasText: "prove-it-works" }).getByRole("button", { name: "disable" }).click();
   await page.locator(".disabled li", { hasText: "prove-it-works" }).waitFor();
-  assert.deepEqual(await names(page), ["briefing-a-thread"]);
+  assert.deepEqual(await names(page), ["briefing-a-thread", "poteto-mode"]);
   await page.reload();
   await page.locator(".disabled li", { hasText: "prove-it-works" }).waitFor();
-  assert.deepEqual(await names(page), ["briefing-a-thread"], "kept over a reload");
+  assert.deepEqual(await names(page), ["briefing-a-thread", "poteto-mode"], "kept over a reload");
   await page.locator(".disabled li", { hasText: "prove-it-works" }).getByRole("button", { name: "enable" }).click();
   await page.locator(".skills .skill", { hasText: "prove-it-works" }).waitFor();
   assert.equal(await page.locator(".disabled").count(), 0);
   console.log("ok: disable and enable a skill, kept over a reload");
+
+  const savedDisabled = async () => (await (await fetch(`${host.url}/api/settings/skills`)).json() as { saved: { disabled: string[] } }).saved.disabled;
+  await page.locator(".skill", { hasText: "Poteto Mode" }).getByRole("button", { name: "disable" }).click();
+  await page.locator(".disabled li", { hasText: "poteto-mode" }).waitFor();
+  assert.deepEqual(await savedDisabled(), ["poteto-mode"], "the id is saved, not the display name");
+  assert.deepEqual(await names(page), ["briefing-a-thread", "prove-it-works"]);
+  await page.locator(".disabled li", { hasText: "poteto-mode" }).getByRole("button", { name: "enable" }).click();
+  await page.locator(".skills .skill", { hasText: "Poteto Mode" }).waitFor();
+  assert.deepEqual(await savedDisabled(), []);
+  console.log("ok: a skill named \"Poteto Mode\" in poteto-mode/ shows its display name and is disabled by its id");
 
   await page.getByLabel("repository url").fill("https://github.com/me/skills");
   await page.getByLabel("commit").fill("main");
@@ -101,7 +115,7 @@ try {
   await page.locator(".update code.candidate", { hasText: next }).waitFor();
   assert.match(await page.locator(".update-status").textContent() ?? "", new RegExp(`main is now at ${next}; in use: @${source.commit.slice(0, 12)}`));
   assert.deepEqual(await page.locator(".update-changes li").allTextContents(),
-    ["new threads gain: new-skill", "new threads lose: briefing-a-thread", "from the new commit: prove-it-works"]);
+    ["new threads gain: new-skill", "new threads lose: briefing-a-thread", "from the new commit: poteto-mode, prove-it-works"]);
   await shoot(page, "desktop-skills-update");
   await page.locator(".update").getByRole("button", { name: "cancel" }).click();
   assert.equal(await page.locator(".update").count(), 0);
@@ -122,7 +136,7 @@ try {
   await page.getByRole("button", { name: `use @${next.slice(0, 12)}` }).click();
   await page.locator(".default-source", { hasText: `@${next.slice(0, 12)}` }).waitFor();
   assert.match(await page.locator(".default-source .pin").textContent() ?? "", /commit chosen here/);
-  assert.deepEqual(await names(page), ["new-skill"], "the new commit's skills, prove-it-works still disabled");
+  assert.deepEqual(await names(page), ["new-skill", "poteto-mode"], "the new commit's skills, prove-it-works still disabled");
   await page.reload();
   await page.locator(".default-source", { hasText: `@${next.slice(0, 12)}` }).waitFor();
   assert.deepEqual(await saved(), { sources: [], disabled: ["prove-it-works"], defaultCommit: next }, "kept over a reload, with the disabled skill");

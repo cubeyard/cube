@@ -14,7 +14,7 @@
   let checking = $state(false);
   let update = $state<SkillsUpdate | null>(null);
   let updateError = $state<string | null>(null);
-  /** What the shown update changes for new threads, by skill name. */
+  /** What the shown update changes for new threads, by skill id. */
   const changes = $derived.by(() => {
     if (!update || !view) return null;
     const before = new Map(view.resolved.skills.map((skill) => [skill.name, skill]));
@@ -104,7 +104,7 @@
   {:else}
     <div class="settings-board">
       <h2>sources</h2>
-      <p class="hint">for each name, the last source that has it wins: add a source with a skill of the same name to replace one.</p>
+      <p class="hint">for each skill folder, the last source that has it wins: add a source with a folder of the same name to replace one.</p>
       <ol class="sources">
         {#if view.default}
           <li class="source default-source">
@@ -164,6 +164,7 @@
           {#each view.resolved.skills as skill (skill.name)}
             <li class="skill">
               <div class="skill-head">
+                {#if skill.displayName}<span class="title">{skill.displayName}</span>{/if}
                 <span class="name">{skill.name}</span>
                 <span class="tag">{skill.hidden ? "only by name" : SURFACE[skill.surface]}</span>
                 <button class="key" disabled={saving} onclick={() => void disable(skill.name)}>disable</button>
@@ -219,7 +220,7 @@
   .update-changes li { border-bottom: 0; padding: 0.1rem 0; }
   .update .hint { margin-top: 0.3rem; }
   .update-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.6rem; }
-  .repo, .name { font-weight: 550; color: var(--ink); }
+  .repo, .name, .title { font-weight: 550; color: var(--ink); }
   .name { font-family: var(--font-mono); font-size: 12.5px; }
   code, .path { font: 12px var(--font-mono); color: var(--ink-2); }
   .tag { color: var(--ink-3); font-size: 11.5px; }
