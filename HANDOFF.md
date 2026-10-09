@@ -353,7 +353,8 @@ Claude Code's prompts ([docs/skills.md](docs/skills.md)). Verified offline
 default source resolved and installed from GitHub by the same commands
 outside provisioning; not yet in a runner VM test. Not done:
 OptChat reading `optchat`/`both` skills, a settings page, the repository's
-own `.agents/skills`.
+own `.agents/skills`. A private source outside GitHub resolves on the host but
+fails in the machine, which has no credentials for it.
 
 ## Known gaps and next steps
 

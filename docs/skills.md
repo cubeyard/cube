@@ -13,9 +13,10 @@ cubeyard/skills @ d5041ce9ae3af0c5b0dbb00234a2bd600df8cf63   cube's default (a r
 your sources, in order                                       settings.json: skills.sources
 ```
 
-- A source is `{url, commit, path}`: an `https` git URL, a full 40-character
-  commit (never a branch or tag) and the directory holding skill folders
-  (`<path>/<name>/SKILL.md`; empty for the repository root).
+- A source is `{url, commit, path}`: an `https` git URL without
+  credentials (`user@` or `user:token@` is refused, and never saved), a full
+  40-character commit (never a branch or tag) and the directory holding
+  skill folders (`<path>/<name>/SKILL.md`; empty for the repository root).
 - For each skill name, **the last source that has it wins**, whatever its
   surface. To change one default skill without forking, add a source with a
   skill of the same name. The winner records the source it overrides.
@@ -67,7 +68,24 @@ A folder is skipped, with its reason in `skipped`, when its name is not a
 skill name (lowercase letters, digits, inner hyphens, at most 64), its
 `SKILL.md` names another skill, its description is empty or over 1024
 characters, its surface is unknown, or it holds a symlink or submodule. A
-thread installs at most 64 skills, 2000 files and 8 MiB.
+thread installs at most 64 skills, 2000 files and 8 MiB, and each source's
+install command must fit the machine's 8 KiB command limit. The path is
+repeated for every skill: 64 skills of 64-character names under `skills`
+take about 5.3 KB, 64 under a 100-character path about 9.2 KB. A set that does not fit is refused when it is
+saved or when a thread starts, before a machine is allocated; disable some
+skills or shorten the path.
+
+## Private sources
+
+Two parties fetch a source, with different credentials. cubed resolves it in
+its host mirror with the host's git credentials; the thread's machine then
+fetches the same commit through cube's gateway, which adds credentials only
+where it substitutes them (GitHub, with the host's token). A private source
+on GitHub works in both places. A private source elsewhere may resolve on
+the host and still fail in the machine: the thread's preparation step fails
+with the source and commit, and cube retries it. Credentials are never put
+in the URL or carried into the machine for skills; use a public source or
+one on GitHub.
 
 Skills are instructions the agent follows and files it may run, in its own
 machine only, the same trust as the repository's own files. Add only sources
