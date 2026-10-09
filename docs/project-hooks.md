@@ -48,6 +48,43 @@ every boot:   pre-resume ─▶ .agents/resume ─▶ the agent opens
 - Hooks are not secret storage. Every machine of the project can read them
   (`/etc/cube/hooks/`). Use the gateway's placeholders for credentials, never
   a secret in a hook.
+- Print and time the slow steps: a starting thread shows the running hook's
+  log (below). Processes a hook leaves running in its own command (a build
+  tool's daemon, say) keep their memory until the hook ends and are stopped
+  with it; services it starts through systemd keep running.
+
+## Watching a machine start
+
+While a thread's machine starts, the thread shows each step cubed takes
+(`vm.steps` on the thread, oldest first, at most 40): whether a template
+was found and if not why (none yet, expired, which part of its key changed,
+a build already running, or a build that failed lately and when cube tries
+again), the template build's boot, preparation, seal and publication, the
+machine's boot (its size, and the runner's limit when it clamped the
+project's), each preparation try and the resume hooks, each with its time.
+Under the step that runs a hook, the end of that hook's log, read every few
+seconds (`GET /api/threads/<id>/startup-log`, from the build machine or the
+thread's own; read only, with no lease, so it never waits for or disturbs
+the preparation). Afterwards the machine label on the thread opens the same
+steps; OptChat's `diagnose` lists them too.
+
+A step that fails keeps its error in full, the end of the failed hook's log
+(also from a build machine, whose disk goes with it) and, when the guest
+helper reports it, the command's memory: its peak, the machine's memory and
+how many of its processes the kernel's OOM killer stopped. A command the OOM
+killer stopped fails as `pre-setup was stopped: the machine ran out of
+memory (…)`, and the thread suggests a larger machine size for the project.
+A failed preparation is tried again by cubed's recovery loop within 30
+seconds, in the same machine; the previous try's log is kept as
+`~/.cache/cube/<hook>.log.prev`.
+
+**Machine size.** A project may set the memory and processors of its new
+thread machines (`machine: { memoryMiB?, vcpus? }` with `PUT
+/api/projects/<id>`, or the project page); absent fields use cubed's
+`CUBED_VM_MEMORY_MIB` and `CUBED_VM_VCPUS`. Each runner clamps them to its
+own limits. A thread keeps the size it was created with. A template build
+uses the same size; a build that failed is tried again at once with another
+size or a new commit of the primary repository, otherwise after an hour.
 
 ## OptChat: `project_hooks` and `project_hooks_write`
 
@@ -139,9 +176,10 @@ points the user to the project page or OptChat.
 - Two hooks only, with fixed order, triggers, user and directory. A
   repository's own `.agents/setup` and `.agents/resume` are its way to add
   steps of its own.
-- No execution history beyond the latest outcome of each hook per thread
-  (cubed's record) and the newest log per hook in each machine. Logs are not
-  copied to the cubed host and are gone with a machine's disk.
+- No execution history beyond the latest outcome of each hook per thread,
+  the startup steps (each try, with the end of a failed hook's log) and the
+  newest two logs per hook in each machine. Whole logs are not copied to the
+  cubed host and are gone with a machine's disk.
 - The refusal is by origin, not content: a report that reaches OptChat
   while it works on a request of the user joins that run, and then only
   OptChat's judgement (its prompt says a report never counts as the user

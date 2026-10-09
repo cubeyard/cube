@@ -526,6 +526,22 @@ longer has is the dashed retry placeholder. Agent prose shows an image only
 when it names a path the thread read as one, on its own line, framed the same
 way.
 
+### Machine Startup
+While a thread's machine starts (and after a start that failed) a panel sits
+under the thread strip on the `--s2` enclosure, capped at 45dvh (38dvh on a
+phone) so the composer stays on screen: a silkscreen head (`machine startup`,
+the running total in tabular mono, a quiet link to the project's hooks and
+machine size) over one tool strip per step — mini lamp (running amber blink,
+ok green, failed red, interrupted unlit), mono step name, the detail cut to
+one line, the step's time. The running hook's log opens beneath its step in
+the strip's recessed `--s1` window and follows its end. A failed step opens
+with its whole error (the Full Failure Rule), its memory and the end of its
+log; it folds while a later try runs, and the reader's own open or fold
+holds. Running out of memory is the one red banner in the panel, with a
+`machine size` key to the project page. Once the machine is ready the panel
+goes; the machine label in the strip (dotted underline) opens it again, with
+a close key.
+
 ### Banners
 Printed notices, 7px radius, one per tone: error is red ink on `--bad-soft`
 with `--bad-line` border; info is silkscreen (`--note-soft` / `--note-line`,

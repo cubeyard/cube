@@ -279,6 +279,31 @@ real guest or on a real Mac. cube-runner 0.8.3 also carries the macOS NIC
 change of #105 (no x86 option ROM), which v0.3.15 (cube-runner 0.8.2) does
 not.
 
+## Machine startup steps and sizes (branch `feat/startup-visibility`)
+
+A slow or failed start used to read as "starting the thread's machine…"
+for many minutes, with a template build hidden inside `allocate`, failed
+preparation tries erased by the retry that followed, and an OOM-killed hook
+reported as "checking out the project failed". Now the thread shows each
+step (`vm.steps`: template lookup with the reason there is none, the
+build's boot/prepare/seal/publish, boot, each preparation try, resume) with
+its time, the running hook's log live (`/startup-log`, unfenced guest read,
+no lease), and for a failed step its full error, the end of the hook's log
+and the command's memory. The guest helper reports systemd's
+`$SERVICE_RESULT` and the unit's cgroup memory peak and OOM kills; an OOM
+says so, and the thread suggests a larger machine. Projects have a machine
+size (memory, processors), captured by new threads and clamped by each
+runner. A failed template build is retried at once with another size or a
+new primary commit; the previous try's hook log stays as `<hook>.log.prev`.
+Verified offline (`startup-steps-test.ts`, `vm-prepare-test.ts`,
+`vm-template-test.ts`, `web/test/startup-test.ts`), in Chromium at desktop
+and phone sizes (`startup-browser-test.ts`) and with real Linux/KVM VMs
+(`test-vm-templates.ts` step 7: a pre-setup the kernel's OOM killer stops in
+the build machine and in the thread's machine, read live and kept). Not
+verified on macOS/HVF or against a production installation. Known, not
+changed here: after a failed start that recovers, the conversation keeps
+the history request's error line until the next run.
+
 ## Work artifacts (branch `feat/work-artifacts`)
 
 OptChat and threads write documents for the user (`artifact_write`/

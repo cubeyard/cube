@@ -549,7 +549,9 @@ clean power-off (not `interrupted`) is required for the runner to publish the
 disk (`vm.publish` moves it, read-only); then
 the thread's own machine is allocated on it. Anything else deletes the build
 machine and the thread starts fresh (a build that failed is not retried for
-the same key on that runner for an hour). Toolchains, package caches and the
+the same key, machine size and primary commit on that runner for an hour;
+another size or a new commit builds at once; the backoff is in cubed's
+memory, so a restart forgets it). Toolchains, package caches and the
 prepared checkout stay; that is the point.
 
 A seal that could not clean something says so in a marker; the first boot
@@ -585,9 +587,32 @@ of deleted projects are removed when the next machine is allocated there.
 The runner deletes a removed template once no VM depends on it (retained
 ones included). One build per runner and key runs at a time: a thread that
 comes meanwhile starts fresh. `CUBED_TEMPLATES=off` or a runner before 0.8.0
-means every machine starts fresh. The startup phases (`allocate`,
+means every machine starts fresh. A template's metadata also keeps short
+hashes of its key's parts, so a thread that finds none can say why: none
+yet, expired, or which part changed (repositories, pre-setup, the guest
+helper or packages, the base image, the disk size). The startup phases (`allocate`,
 `build-*`, `boot`, `prepare`, `resume`) and the total from creation to ready
 are logged ("machine ready for the agent") and kept in `thread.vm.startup`.
+
+**Startup steps.** What the thread shows while its machine starts is
+`thread.vm.steps` (registry, at most 40, oldest first): `lookup` (the
+template found, or why none, and whether a build starts), `build-boot`,
+`build-prepare`, `build-seal`, `build-publish`, `boot`, `prepare` (one per
+try, `attempt` = the `cube:provision:<n>` key) and `resume`, each with its
+state (`running`, `ok`, `failed`, `interrupted` when cubed began it again),
+times, a detail, the command's memory and, for a failed hook, the end of its
+log (4 KiB, escaped and redacted). ThreadVms writes the lookup, build and
+boot steps; Conversations the preparation and resume. They are evidence
+only: a registry error never fails a start. The guest helper adds to each
+command's result systemd's `$SERVICE_RESULT` and the unit's cgroup
+`memory.peak` and `memory.events` `oom_kill` (read in `ExecStopPost`) with
+the machine's MemTotal; a command the OOM killer stopped is reported as
+such instead of as a failed checkout. While a hook runs,
+`~/.cache/cube/running` names it; `GET /api/threads/<id>/startup-log` reads
+the end of its log through the guest's unfenced `read` (no lease, nothing
+changed) from the build machine while one prepares, else from the thread's
+attached machine. A project's `machine` (`memoryMiB`, `vcpus`) is captured
+in a new thread's allocation like its hooks and clamped by the runner.
 A machine that does not get there leaves evidence: cubed's machine events
 (`threads/<id>/machine-events.jsonl`) and the runner's (`vms/<n>/events.log`,
 cube-runner 0.8.3), read with the rest by `GET /api/threads/<id>/diagnostics`
