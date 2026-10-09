@@ -2,7 +2,8 @@
  * and OptChat's, with project) over a real store with a fake registry: a
  * blank id, path or body counts as left out, as models often send them, so
  * creating still creates; a real body with a real path is still refused;
- * a nonempty id still only revises the caller's own artifact. No network. */
+ * a nonempty id revises only an artifact the caller can read, on its
+ * newest revision. No network. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -95,20 +96,23 @@ try {
   assert.equal(await thread({ path: "empty.md" }), "not written: empty.md is empty");
   assert.equal(store.list({ authors: [{ kind: "thread", thread: THREAD }] }).length, before);
 
-  // A nonempty id revises only the caller's own artifact.
+  // A nonempty id revises an artifact the caller can read: its own, or its project's once read.
   assert.match(await thread({ id: fromThread, body: "# review\n\ntwo" }), /^artifact .* wrote revision 2\./);
   assert.match(await thread({ id: fromThread, path: "", body: "# review\n\nthree" }), /wrote revision 3\./);
   assert.match(await thread({ id: fromThread, path: "notes.md" }), /wrote revision 4\./);
   assert.match(await optchat({ id: fromChat, body: "# plan\n\ntwo" }), /wrote revision 2\./);
-  assert.equal(await other({ id: fromThread, body: "# mine" }), `not written: no artifact ${fromThread} of yours`);
-  assert.equal(await optchat({ id: fromThread, body: "# mine" }), `not written: no artifact ${fromThread} of yours`);
-  assert.equal(await thread({ id: fromChat, body: "# mine" }), `not written: no artifact ${fromChat} of yours`);
-  assert.equal(await thread({ id: "not-an-id", body: "# x" }), "not written: no artifact not-an-id of yours");
+  assert.match(await other({ id: fromThread, body: "# mine" }), /^not written: revision 4 of artifact .* was written by thread \[eb809312\]; read its newest revision first/);
+  assert.equal(await optchat({ id: fromThread, body: "# mine" }), `not written: no artifact ${fromThread} you can read`);
+  assert.equal(await thread({ id: fromChat, body: "# mine" }), `not written: no artifact ${fromChat} you can read`);
+  assert.equal(await thread({ id: "not-an-id", body: "# x" }), "not written: no artifact not-an-id you can read");
   assert.equal(store.get(fromThread)!.head, 4);
+  assert.match(await other({ id: fromThread, base: 4, body: "# review\n\nby the other thread" }), /wrote revision 5\. .*it stays thread \[eb809312\]'s artifact/);
+  assert.match(await thread({ id: fromThread, base: 4, body: "# review\n\nlate" }), /^not written: revision 5 \(by thread \[eb809312\]\) is newer than revision 4/);
+  assert.equal(store.get(fromThread)!.head, 5);
   assert.equal(store.get(fromChat)!.head, 2);
 
   // The service itself treats a blank id as none, for any caller.
-  const direct = artifacts.write({ kind: "optchat" }, { id: "", body: "# direct" }, { agent: "optchat" }, "direct-1");
+  const direct = artifacts.write({ agent: { kind: "optchat" }, authors: [{ kind: "optchat" }] }, { id: "", body: "# direct" }, { agent: "optchat" }, "direct-1");
   assert.equal(direct.revision, 1);
   assert.equal(store.get(direct.id)!.author.kind, "optchat");
   console.log("artifact tools: ok");

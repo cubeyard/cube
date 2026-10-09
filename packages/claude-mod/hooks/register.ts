@@ -102,6 +102,7 @@ export const register: Register = on => {
       PROJECT_HOOKS_NOTE,
       `Work artifacts: Write ${ARTIFACT_ROOT}/<name>.md to create a document for the user, or a new revision of it (the whole document each time; its title is the first # heading); ` +
       `Write ${ARTIFACT_ROOT}/<name>.json as {"title"?, "body", "actions"?} to offer actions; Read ${ARTIFACT_ROOT}/<name>.md for the newest revision with the comments sent to you, and Read ${ARTIFACT_ROOT} for the list. ` +
+      `To revise an existing artifact by its id (yours, another thread's or OptChat's in this project), Read ${ARTIFACT_ROOT}/<id>.md, then Write ${ARTIFACT_ROOT}/<id>.md with the whole document. ` +
       'These paths are kept by cube, not in the machine; Edit and Bash do not reach them. ' + ARTIFACT_GUIDE,
     ]
     for (const file of INSTRUCTION_FILES) {

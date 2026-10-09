@@ -1,6 +1,9 @@
 /** What agents and the browser do with artifacts (artifacts.ts): agents
- * write and read their own; the user comments, sends comments back to the
- * author, and confirms an artifact's typed actions.
+ * write and read the artifacts in their scope, OptChat its own and its
+ * threads', a thread every artifact of its project; the user comments,
+ * sends comments back to the author, and confirms an artifact's typed
+ * actions. Whoever revises an artifact, its author stays the one comments
+ * and action outcomes go to.
  *
  * Comments reach their author as an ordinary message, the way a person's
  * would: OptChat's own pending queue for the chat's artifacts, a thread's
@@ -15,7 +18,7 @@
 import { parseGitHubRepo } from "@cube/git";
 import { createLogger } from "./log.ts";
 import {
-  ARTIFACT_LIMITS, ArtifactError, ArtifactStore, authorText, parseActions, sameAuthor,
+  ARTIFACT_LIMITS, ArtifactError, ArtifactStore, authorKey, authorText, parseActions, sameAuthor,
   type ActionNotice, type ArtifactAction, type ArtifactAuthor, type ArtifactComment, type ArtifactSummary, type CommentBatch, type Provenance,
 } from "./artifacts.ts";
 import { GithubPullsError, type GithubPulls, type PullState } from "./github-pulls.ts";
@@ -32,8 +35,15 @@ export const STARTER_GRACE_MS = 10 * 60_000;
 /** How much of a body a read returns to an agent. */
 const READ_BODY_CHARS = 120_000;
 
-/** What an agent passes to write an artifact. */
-export interface ArtifactWrite { id?: string | undefined; name?: string | undefined; title?: string | undefined; body: string; actions?: unknown; project?: string | undefined }
+/** How many (agent, artifact) reads are remembered as the base of the agent's next write. */
+const READS_KEPT = 2000;
+
+/** What an agent passes to write an artifact. `base` is the revision the
+ * new one is written on; left out, it is the one the agent last read. */
+export interface ArtifactWrite { id?: string | undefined; name?: string | undefined; base?: number | undefined; title?: string | undefined; body: string; actions?: unknown; project?: string | undefined }
+/** Who is asking, and the authors whose artifacts it may read and revise
+ * besides those of a thread's own project. */
+export interface ArtifactScope { agent: ArtifactAuthor; authors: readonly ArtifactAuthor[] }
 
 export interface ActionPreview {
   artifact: string; revision: number; head: number; action: ArtifactAction;
@@ -58,6 +68,8 @@ export class Artifacts {
   private readonly optchat: () => Promise<ArtifactChat | null>;
   private readonly submit: (thread: string, text: string, requestId: string) => Promise<unknown>;
   private readonly inflight = new Set<string>();
+  /** The revision each agent last read or wrote of an artifact, oldest first. */
+  private readonly reads = new Map<string, number>();
   private readonly timer: ReturnType<typeof setInterval>;
   private readonly giveUpMs: number;
   private readonly starterGraceMs: number;
@@ -96,15 +108,35 @@ export class Artifacts {
     return new Set((project?.repositories ?? []).map(repository => parseGitHubRepo(repository.url)?.toLowerCase()).filter((name): name is string => !!name));
   }
 
-  /** Writes a new artifact or a revision of one of `author`'s; answers in words for the agent. */
-  write(author: ArtifactAuthor, input: ArtifactWrite, provenance: Provenance, requestId: string): { text: string; id: string; revision: number } {
+  /** Whether `scope` may read and revise `artifact`: an author it names, or
+   * for a thread, its own project. */
+  private reaches(scope: ArtifactScope, artifact: ArtifactSummary): boolean {
+    if (scope.authors.some(author => sameAuthor(author, artifact.author))) return true;
+    const project = this.threadProject(scope.agent);
+    return project !== null && artifact.projectId === project;
+  }
+  private threadProject(agent: ArtifactAuthor): string | null {
+    return agent.kind === "thread" ? this.registry.getThread(agent.thread)?.projectId ?? null : null;
+  }
+  private remember(agent: ArtifactAuthor, id: string, revision: number): void {
+    const key = `${authorKey(agent)}|${id}`;
+    this.reads.delete(key);
+    this.reads.set(key, revision);
+    if (this.reads.size > READS_KEPT) this.reads.delete(this.reads.keys().next().value!);
+  }
+
+  /** Writes a new artifact, or a revision of one in `scope` on its newest
+   * revision; answers in words for the agent. */
+  write(scope: ArtifactScope, input: ArtifactWrite, provenance: Provenance, requestId: string): { text: string; id: string; revision: number } {
+    const { agent } = scope;
     // A blank id is none: create (or find by name) rather than look up "".
     if (input.id !== undefined && !input.id.trim()) input = { ...input, id: undefined };
-    const existing = input.id ? this.store.get(input.id) : input.name ? this.store.named(author, input.name) : null;
-    if (input.id && (!existing || !sameAuthor(existing.author, author))) throw new ArtifactError(`no artifact ${input.id} of yours`, 404);
-    const projectId = existing ? existing.projectId : this.project(author, input.project);
-    const actions = parseActions(input.actions);
-    if (actions.length) {
+    const existing = input.id ? this.store.get(input.id) : input.name ? this.store.named(agent, input.name) : null;
+    if (input.id && (!existing || !this.reaches(scope, existing))) throw new ArtifactError(`no artifact ${input.id} you can read`, 404);
+    if (input.base !== undefined && (!Number.isSafeInteger(input.base) || input.base < 1)) throw new ArtifactError("base must be a revision number");
+    const projectId = existing ? existing.projectId : this.project(agent, input.project);
+    const actions = input.actions === undefined ? undefined : parseActions(input.actions);
+    if (actions?.length) {
       if (!projectId) throw new ArtifactError("an artifact with actions needs a project: name the project whose repository the pull request is in");
       const repositories = this.repositories(projectId);
       for (const action of actions) {
@@ -112,36 +144,47 @@ export class Artifacts {
       }
     }
     const title = input.title?.trim() || /^#\s+(.+)$/m.exec(input.body ?? "")?.[1]?.trim() || "";
-    const written = this.store.write(author, { id: input.id, name: input.name, title, body: input.body, actions, projectId }, provenance, requestId);
+    const base = input.base ?? (existing ? this.reads.get(`${authorKey(agent)}|${existing.id}`) : undefined);
+    const written = this.store.write(agent, { id: existing?.id, name: input.name, base, title, body: input.body, actions, projectId }, provenance, requestId);
     const { revision } = written;
+    this.remember(agent, revision.artifact, revision.number);
+    const author = existing?.author ?? agent;
     const verb = written.unchanged ? "unchanged: the same as revision" : written.created ? "created at revision" : "wrote revision";
+    const routed = sameAuthor(author, agent)
+      ? `their comments come back to you as a message starting "[artifact ${revision.artifact.slice(0, 8)}]".`
+      : `it stays ${authorText(author)}'s artifact: the user's comments on it go to ${authorText(author)}, not to you.`;
+    const offered = written.actionsKept
+      ? ` Actions kept from revision ${revision.number - 1} (give actions to change them, [] to remove them): ${revision.actions.map(actionText).join("; ")}.`
+      : actions?.length ? ` Actions offered, each run only if the user confirms it: ${actions.map(actionText).join("; ")}.` : "";
     return {
       id: revision.artifact, revision: revision.number,
       text: `artifact ${revision.artifact} "${revision.title}" ${verb} ${revision.number}. The user opens it at #/a/${revision.artifact} `
-        + `(link it in your reply as [${revision.title}](#/a/${revision.artifact})); their comments come back to you as a message starting "[artifact ${revision.artifact.slice(0, 8)}]".`
-        + (actions.length ? ` Actions offered, each run only if the user confirms it: ${actions.map(actionText).join("; ")}.` : ""),
+        + `(link it in your reply as [${revision.title}](#/a/${revision.artifact})); ${routed}${offered}`,
     };
   }
 
-  /** One artifact whole (or a list without `id`) for an agent that may read `authors`' artifacts. */
-  read(authors: readonly ArtifactAuthor[], id: string | undefined, revision?: number): string {
+  /** One artifact whole (or a list without `id`) for an agent; the revision
+   * it reads is the base of its next write of that artifact. */
+  read(scope: ArtifactScope, id: string | undefined, revision?: number): string {
     if (!id) {
-      const list = this.store.list({ authors });
+      const list = this.store.list({ authors: scope.authors, project: this.threadProject(scope.agent) });
       if (!list.length) return "no artifacts yet";
       return list.map(item => `${item.id} "${item.title}" · revision ${item.head} · by ${authorText(item.author)} · ${commentCounts(item)}`).join("\n");
     }
     const artifact = this.store.get(id);
-    if (!artifact || !authors.some(author => sameAuthor(author, artifact.author))) throw new ArtifactError(`no artifact ${id} you can read`, 404);
+    if (!artifact || !this.reaches(scope, artifact)) throw new ArtifactError(`no artifact ${id} you can read`, 404);
     const number = revision ?? artifact.head;
     const shown = this.store.revision(id, number);
     if (!shown) throw new ArtifactError(`no revision ${number}; the artifact has ${artifact.head}`);
+    this.remember(scope.agent, id, number);
+    const edited = sameAuthor(shown.editor, artifact.author) ? "" : ` · this revision by ${authorText(shown.editor)}`;
     const project = artifact.projectId ? this.registry.getProject(artifact.projectId) : null;
     const comments = this.store.comments(id).filter(comment => comment.state !== "draft");
     const runs = this.store.actionRuns(id);
     const notices = this.store.notices(id).filter(notice => notice.state !== "skipped");
     const body = shown.body.length > READ_BODY_CHARS ? `${shown.body.slice(0, READ_BODY_CHARS)}\n[cut at ${READ_BODY_CHARS} characters]` : shown.body;
     return [
-      `artifact ${id} "${shown.title}" · revision ${number} of ${artifact.head} · by ${authorText(artifact.author)}${project ? ` · project ${project.name}` : ""} · open it at #/a/${id}`,
+      `artifact ${id} "${shown.title}" · revision ${number} of ${artifact.head} · by ${authorText(artifact.author)}${edited}${project ? ` · project ${project.name}` : ""} · open it at #/a/${id}`,
       shown.actions.length ? `actions: ${shown.actions.map(actionText).join("; ")}` : "actions: none",
       ...runs.flatMap(run => [`action ${run.action} (revision ${run.revision}): ${run.state}: ${run.detail}`,
         ...notices.filter(notice => notice.run === run.id).map(notice => `  told ${targetText(notice.target)}: ${notice.state}${notice.note ? ` (${notice.note})` : ""}`)]),

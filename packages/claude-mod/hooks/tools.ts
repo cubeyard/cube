@@ -99,12 +99,17 @@ export const ARTIFACT_GUIDE = "An artifact is a document the user reads beside t
   + "a ```diff of the shape that changes (a component tree, a call stack, a file layout, real code), a short table, pseudocode. "
   + "Raw HTML is shown as text, scripts never run, images are links, and only http(s) and #/ links work. "
   + "Comments come back to you as a message starting \"[artifact <id>]\" with the exact text they are about; answer them, and write a new revision of the same artifact when they call for changes. "
+  + "You may revise an artifact someone else wrote when you can read it (a thread reads every artifact of its project): read its newest revision first, then write the whole document with its id. "
+  + "A write on an older revision than the newest is refused rather than overwriting someone's newer one: read again and redo it on top. It stays its author's: the user's comments on it still go to the author. "
   + "actions offer the user a button; the only kind is github.merge of a pull request in the project's own repository, pinned to its exact 40-character head commit. "
+  + "A revision that leaves actions out keeps the newest revision's as they are; give actions to change them (a new head needs a new headSha), [] to remove them. "
   + "Nothing runs unless the user confirms it on the artifact's page, after cube checks the pull request again; never claim an action ran.";
 
-/** Where Read and Write reach the thread's work artifacts instead of the
- * workspace: `<name>.md` is a document, `<name>.json` is `{title?, body,
- * actions?}`, the folder itself lists them. cubed keeps them, not the machine. */
+/** Where Read and Write reach work artifacts instead of the workspace:
+ * `<name>.md` is a document, `<name>.json` is `{title?, body, actions?,
+ * base?}`, the folder itself lists them; a name in the form of an artifact
+ * id is that artifact, the thread's or another one it can read. cubed keeps
+ * them, not the machine. */
 export const ARTIFACT_ROOT = "/cube/artifacts";
 export type ArtifactPath = { kind: "list" } | { kind: "md" | "json"; name: string };
 export function artifactPath(file: unknown): ArtifactPath | Denied | null {
@@ -126,17 +131,19 @@ export async function readArtifact(scope: ToolScope, target: ArtifactPath, input
 export async function writeArtifact(scope: ToolScope, toolUseId: string, target: ArtifactPath, input: WriteInput): Promise<WriteResult | Denied> {
   if (target.kind === "list") return { deny: `write ${ARTIFACT_ROOT}/<name>.md, not the folder` };
   if (typeof input.content !== "string") return { deny: "content is required" };
-  let document: { body: string; title?: string; actions?: unknown } = { body: input.content };
+  let document: { body: string; title?: string; actions?: unknown; base?: number } = { body: input.content };
   if (target.kind === "json") {
     let parsed: unknown;
-    try { parsed = JSON.parse(input.content); } catch { return { deny: `${input.file_path} must be JSON: {"title"?: string, "body": string, "actions"?: [...]}` }; }
+    try { parsed = JSON.parse(input.content); } catch { return { deny: `${input.file_path} must be JSON: {"title"?: string, "body": string, "actions"?: [...], "base"?: number}` }; }
     const record = parsed as Record<string, unknown> | null;
-    if (!record || typeof record !== "object" || Array.isArray(record) || typeof record.body !== "string" || (record.title !== undefined && typeof record.title !== "string")) {
-      return { deny: `${input.file_path} must be JSON: {"title"?: string, "body": string, "actions"?: [...]}` };
+    if (!record || typeof record !== "object" || Array.isArray(record) || typeof record.body !== "string" || (record.title !== undefined && typeof record.title !== "string")
+      || (record.base !== undefined && typeof record.base !== "number")) {
+      return { deny: `${input.file_path} must be JSON: {"title"?: string, "body": string, "actions"?: [...], "base"?: number}` };
     }
-    const extra = Object.keys(record).filter(name => !["title", "body", "actions"].includes(name));
+    const extra = Object.keys(record).filter(name => !["title", "body", "actions", "base"].includes(name));
     if (extra.length) return { deny: `${input.file_path}: unknown field ${extra.join(", ")}` };
-    document = { body: record.body, ...typeof record.title === "string" ? { title: record.title } : {}, ...record.actions === undefined ? {} : { actions: record.actions } };
+    document = { body: record.body, ...typeof record.title === "string" ? { title: record.title } : {}, ...record.actions === undefined ? {} : { actions: record.actions },
+      ...typeof record.base === "number" ? { base: record.base } : {} };
   }
   try {
     const written = await scope.client.writeArtifact(scope.token, { name: target.name, requestId: key(toolUseId, "artifact"), call: toolUseId, ...document });

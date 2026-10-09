@@ -56,6 +56,8 @@ export interface ArtifactSummary {
 export interface Revision {
   artifact: string; number: number; title: string; body: string; actions: ArtifactAction[];
   provenance: Provenance; createdAt: number;
+  /** Who wrote this revision, from its provenance; the artifact's author never changes. */
+  editor: ArtifactAuthor;
 }
 /** A selection in one revision's rendered text: the quote with what
  * surrounds it, its offsets in that text and the heading it falls under. */
@@ -95,12 +97,13 @@ export class ArtifactError extends Error {
 
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const isArtifactId = (value: unknown): value is string => typeof value === "string" && ID.test(value);
-const authorKey = (author: ArtifactAuthor) => author.kind === "optchat" ? "optchat" : `thread:${author.thread}`;
+export const authorKey = (author: ArtifactAuthor) => author.kind === "optchat" ? "optchat" : `thread:${author.thread}`;
 const parseAuthor = (key: string): ArtifactAuthor => key === "optchat" ? { kind: "optchat" } : { kind: "thread", thread: key.slice("thread:".length) };
 const targetKey = (target: NoticeTarget) => target.kind === "starter" ? `starter:${target.thread}` : authorKey(target);
 const parseTarget = (key: string): NoticeTarget => key.startsWith("starter:") ? { kind: "starter", thread: key.slice("starter:".length) } : parseAuthor(key);
 export const sameAuthor = (a: ArtifactAuthor, b: ArtifactAuthor) => authorKey(a) === authorKey(b);
 export const authorText = (author: ArtifactAuthor) => author.kind === "optchat" ? "optchat" : `thread [${author.thread.slice(0, 8)}]`;
+export const editorOf = (provenance: Provenance): ArtifactAuthor => provenance.agent === "optchat" ? { kind: "optchat" } : { kind: "thread", thread: provenance.thread ?? "" };
 
 /** The typed action list as an agent wrote it, checked field by field:
  * unknown kinds and fields are refused, never ignored. */
@@ -140,8 +143,9 @@ export function parseActions(raw: unknown): ArtifactAction[] {
 /** The comments as the message their author receives: each with its exact
  * quote, the text around it, the heading it falls under and the revision it
  * was written on, so the author can find it without guessing. */
-export function commentMessage(artifact: { id: string; title: string; head: number }, comments: readonly ArtifactComment[], hint: string): string {
-  const lines = [`[artifact ${artifact.id.slice(0, 8)}] The user commented on your artifact "${artifact.title}" (${artifact.id}, now at revision ${artifact.head}): ${comments.length} comment${comments.length === 1 ? "" : "s"}.`];
+export function commentMessage(artifact: { id: string; title: string; head: number }, comments: readonly ArtifactComment[], hint: string, editedBy?: ArtifactAuthor): string {
+  const edited = editedBy ? `; ${authorText(editedBy)} wrote that revision` : "";
+  const lines = [`[artifact ${artifact.id.slice(0, 8)}] The user commented on your artifact "${artifact.title}" (${artifact.id}, now at revision ${artifact.head}${edited}): ${comments.length} comment${comments.length === 1 ? "" : "s"}.`];
   comments.forEach((comment, index) => {
     const { anchor } = comment;
     const stale = comment.revision !== artifact.head ? ` (written on revision ${comment.revision}; the current one is ${artifact.head})` : "";
@@ -213,48 +217,61 @@ export class ArtifactStore {
     catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
-  /** A new artifact, or a new revision of one of the author's. The same
-   * request id finds the revision it wrote (a replayed tool call); the same
-   * content as the current revision writes nothing. */
-  write(author: ArtifactAuthor, input: { id?: string | undefined; name?: string | undefined; title: string; body: string; actions: ArtifactAction[]; projectId: string | null },
-    provenance: Provenance, requestId: string): { revision: Revision; created: boolean; unchanged: boolean } {
+  /** A new artifact by `editor`, or a new revision of any artifact (who may
+   * revise which is artifact-service.ts's to decide). A revision must be
+   * written on the newest one: on `base`, or without it on the editor's own
+   * newest revision; anything else is refused, never merged or overwritten.
+   * Actions left out keep the newest revision's, exactly. The same request
+   * id finds the revision it wrote (a replayed tool call); the same content
+   * as the current revision writes nothing. */
+  write(editor: ArtifactAuthor, input: { id?: string | undefined; name?: string | undefined; base?: number | undefined; title: string; body: string;
+    actions?: ArtifactAction[] | undefined; projectId: string | null },
+  provenance: Provenance, requestId: string): { revision: Revision; created: boolean; unchanged: boolean; actionsKept: boolean } {
     const title = input.title.trim().replace(/\s+/g, " ");
     if (!title || title.length > ARTIFACT_LIMITS.title) throw new ArtifactError(`title is required and must be at most ${ARTIFACT_LIMITS.title} characters`);
     if (typeof input.body !== "string" || !input.body.trim()) throw new ArtifactError("body is required");
     if (Buffer.byteLength(input.body) > ARTIFACT_LIMITS.body) throw new ArtifactError(`body is ${Buffer.byteLength(input.body)} bytes; at most ${ARTIFACT_LIMITS.body}`);
     if (!requestId || requestId.length > 300) throw new ArtifactError("a request id is required");
     if (input.name !== undefined && !isArtifactName(input.name)) throw new ArtifactError("a name is 1 to 64 lowercase letters, digits, dots, dashes or underscores");
+    // The editor is read back from the provenance, so it names the editor's thread.
+    if (editor.kind === "thread") provenance = { ...provenance, thread: editor.thread };
     return this.transaction(() => {
-      const prior = this.db.prepare("SELECT r.artifact, r.number, a.author FROM revisions r JOIN artifacts a ON a.id = r.artifact WHERE r.request_id = ?").get(requestId) as Row | undefined;
-      // Another author's request id is a clash, never that author's revision.
-      if (prior && prior.author !== authorKey(author)) throw new ArtifactError("this request id belongs to another author's write", 409);
-      if (prior) return { revision: this.revision(String(prior.artifact), Number(prior.number))!, created: false, unchanged: false };
+      const prior = this.db.prepare("SELECT artifact, number, provenance FROM revisions WHERE request_id = ?").get(requestId) as Row | undefined;
+      // Another editor's request id is a clash, never that editor's revision.
+      if (prior && !sameAuthor(editorOf(JSON.parse(String(prior.provenance)) as Provenance), editor)) throw new ArtifactError("this request id belongs to another author's write", 409);
+      if (prior) return { revision: this.revision(String(prior.artifact), Number(prior.number))!, created: false, unchanged: false, actionsKept: false };
       const now = Date.now();
-      const actions = JSON.stringify(input.actions);
       const named = input.id === undefined && input.name !== undefined
-        ? this.db.prepare("SELECT id FROM artifacts WHERE author = ? AND name = ?").get(authorKey(author), input.name) as Row | undefined : undefined;
+        ? this.db.prepare("SELECT id FROM artifacts WHERE author = ? AND name = ?").get(authorKey(editor), input.name) as Row | undefined : undefined;
       if (named) input = { ...input, id: String(named.id) };
       if (input.id === undefined) {
-        const count = (this.db.prepare("SELECT count(*) AS n FROM artifacts WHERE author = ?").get(authorKey(author)) as { n: number }).n;
+        const count = (this.db.prepare("SELECT count(*) AS n FROM artifacts WHERE author = ?").get(authorKey(editor)) as { n: number }).n;
         if (count >= ARTIFACT_LIMITS.perAuthor) throw new ArtifactError(`at most ${ARTIFACT_LIMITS.perAuthor} artifacts per author`);
         const id = randomUUID();
         this.db.prepare("INSERT INTO artifacts (id, title, author, project_id, head, created_at, updated_at, create_request, name) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)")
-          .run(id, title, authorKey(author), input.projectId, now, now, requestId, input.name ?? null);
+          .run(id, title, authorKey(editor), input.projectId, now, now, requestId, input.name ?? null);
         this.db.prepare("INSERT INTO revisions (artifact, number, title, body, actions, provenance, request_id, created_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?)")
-          .run(id, title, input.body, actions, JSON.stringify(provenance), requestId, now);
-        return { revision: this.revision(id, 1)!, created: true, unchanged: false };
+          .run(id, title, input.body, JSON.stringify(input.actions ?? []), JSON.stringify(provenance), requestId, now);
+        return { revision: this.revision(id, 1)!, created: true, unchanged: false, actionsKept: false };
       }
       const artifact = this.row(input.id);
-      // Someone else's artifact is indistinguishable from none.
-      if (!artifact || artifact.author !== authorKey(author)) throw new ArtifactError(`no artifact ${input.id} of yours`, 404);
+      if (!artifact) throw new ArtifactError(`no artifact ${input.id}`, 404);
       const head = this.revision(input.id, Number(artifact.head))!;
-      if (head.title === title && head.body === input.body && JSON.stringify(head.actions) === actions) return { revision: head, created: false, unchanged: true };
+      const actions = JSON.stringify(input.actions ?? head.actions);
+      if (head.title === title && head.body === input.body && JSON.stringify(head.actions) === actions) return { revision: head, created: false, unchanged: true, actionsKept: false };
+      const base = input.base ?? (sameAuthor(head.editor, editor) ? head.number : undefined);
+      if (base === undefined) {
+        throw new ArtifactError(`revision ${head.number} of artifact ${input.id} was written by ${authorText(head.editor)}; read its newest revision first, then write the whole document on top of it`, 409);
+      }
+      if (base !== head.number) {
+        throw new ArtifactError(`revision ${head.number} (by ${authorText(head.editor)}) is newer than revision ${base} this write is based on; read the newest revision again and write the whole document on top of it`, 409);
+      }
       if (head.number >= ARTIFACT_LIMITS.revisions) throw new ArtifactError(`at most ${ARTIFACT_LIMITS.revisions} revisions; start a new artifact`);
       const number = head.number + 1;
       this.db.prepare("INSERT INTO revisions (artifact, number, title, body, actions, provenance, request_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
         .run(input.id, number, title, input.body, actions, JSON.stringify(provenance), requestId, now);
       this.db.prepare("UPDATE artifacts SET head = ?, title = ?, updated_at = ? WHERE id = ?").run(number, title, now, input.id);
-      return { revision: this.revision(input.id, number)!, created: false, unchanged: false };
+      return { revision: this.revision(input.id, number)!, created: false, unchanged: false, actionsKept: input.actions === undefined && head.actions.length > 0 };
     });
   }
 
@@ -276,26 +293,32 @@ export class ArtifactStore {
     const row = this.row(id);
     return row ? this.summary(row) : null;
   }
-  /** Newest first; an author's own only when `author` is given. */
-  list(options: { author?: ArtifactAuthor; authors?: readonly ArtifactAuthor[]; limit?: number } = {}): ArtifactSummary[] {
+  /** Newest first; with `authors` (or `author`), only theirs and, with `project` too, every artifact of that project. */
+  list(options: { author?: ArtifactAuthor; authors?: readonly ArtifactAuthor[]; project?: string | null; limit?: number } = {}): ArtifactSummary[] {
     const keys = options.authors ? options.authors.map(authorKey) : options.author ? [authorKey(options.author)] : null;
-    const rows = keys
-      ? keys.length ? this.db.prepare(`SELECT * FROM artifacts WHERE author IN (${keys.map(() => "?").join(",")}) ORDER BY updated_at DESC LIMIT ?`).all(...keys, options.limit ?? 200) as Row[] : []
-      : this.db.prepare("SELECT * FROM artifacts ORDER BY updated_at DESC LIMIT ?").all(options.limit ?? 200) as Row[];
-    return rows.map(row => this.summary(row));
+    const limit = options.limit ?? 200;
+    if (!keys) return (this.db.prepare("SELECT * FROM artifacts ORDER BY updated_at DESC LIMIT ?").all(limit) as Row[]).map(row => this.summary(row));
+    const clauses = [...keys.length ? [`author IN (${keys.map(() => "?").join(",")})`] : [], ...options.project ? ["project_id = ?"] : []];
+    if (!clauses.length) return [];
+    return (this.db.prepare(`SELECT * FROM artifacts WHERE ${clauses.join(" OR ")} ORDER BY updated_at DESC LIMIT ?`)
+      .all(...keys, ...options.project ? [options.project] : [], limit) as Row[]).map(row => this.summary(row));
   }
   revision(id: string, number: number): Revision | null {
     if (!isArtifactId(id) || !Number.isSafeInteger(number)) return null;
     const row = this.db.prepare("SELECT * FROM revisions WHERE artifact = ? AND number = ?").get(id, number) as Row | undefined;
     if (!row) return null;
+    const provenance = JSON.parse(String(row.provenance)) as Provenance;
     return { artifact: id, number, title: String(row.title), body: String(row.body), actions: JSON.parse(String(row.actions)) as ArtifactAction[],
-      provenance: JSON.parse(String(row.provenance)) as Provenance, createdAt: Number(row.created_at) };
+      provenance, createdAt: Number(row.created_at), editor: editorOf(provenance) };
   }
   /** Every revision without its body, oldest first. */
   revisions(id: string): Array<Omit<Revision, "body" | "actions"> & { bytes: number; actions: number }> {
     return (this.db.prepare("SELECT number, title, length(CAST(body AS BLOB)) AS bytes, actions, provenance, created_at FROM revisions WHERE artifact = ? ORDER BY number").all(id) as Row[])
-      .map(row => ({ artifact: id, number: Number(row.number), title: String(row.title), bytes: Number(row.bytes),
-        actions: (JSON.parse(String(row.actions)) as unknown[]).length, provenance: JSON.parse(String(row.provenance)) as Provenance, createdAt: Number(row.created_at) }));
+      .map(row => {
+        const provenance = JSON.parse(String(row.provenance)) as Provenance;
+        return { artifact: id, number: Number(row.number), title: String(row.title), bytes: Number(row.bytes),
+          actions: (JSON.parse(String(row.actions)) as unknown[]).length, provenance, createdAt: Number(row.created_at), editor: editorOf(provenance) };
+      });
   }
 
   comments(id: string): ArtifactComment[] {
@@ -352,8 +375,11 @@ export class ArtifactStore {
       if (!drafts.length) return null;
       const summary = this.summary(artifact);
       const idOf = batchId(requestId);
+      // Comments go to the artifact's author whoever wrote its newest revision.
+      const { editor } = this.revision(id, summary.head)!;
       this.db.prepare("INSERT INTO batches (id, artifact, request_id, text, target, state, note, created_at) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)")
-        .run(idOf, id, `artifact:${id}:comments:${idOf}`, commentMessage(summary, drafts, hint(summary)), authorKey(summary.author), "waiting to be delivered", Date.now());
+        .run(idOf, id, `artifact:${id}:comments:${idOf}`, commentMessage(summary, drafts, hint(summary), sameAuthor(editor, summary.author) ? undefined : editor),
+          authorKey(summary.author), "waiting to be delivered", Date.now());
       const assign = this.db.prepare("UPDATE comments SET batch = ? WHERE id = ? AND batch IS NULL");
       for (const draft of drafts) assign.run(idOf, draft.id);
       return this.batch(idOf);
