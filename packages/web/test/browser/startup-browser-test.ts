@@ -4,12 +4,13 @@
  * error, the memory, the end of its log, and the advice with a link to the
  * project's machine size), the next try; once the machine is ready the
  * steps fold away and the machine label opens them again. The project page
- * sets the machine size. Desktop and phone. Screenshots go to
- * CUBE_SCREENSHOTS when it is set. Needs a built UI (pnpm build). */
+ * sets the machine size. Desktop and phone, in Chromium and, when
+ * Playwright has it, WebKit. Screenshots go to CUBE_SCREENSHOTS when it is
+ * set. Needs a built UI (pnpm build). */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { chromium, type Page } from "playwright";
+import { chromium, webkit, type Browser, type Page } from "playwright";
 import { STARTUP_PRE_SETUP, startStartupHost } from "../../../server/test/startup-fixture.ts";
 
 const shots = process.env.CUBE_SCREENSHOTS ?? null;
@@ -18,7 +19,7 @@ const host = await startStartupHost();
 const url = host.url;
 const project = { id: host.projectId };
 
-const browser = await chromium.launch();
+let browser: Browser = await chromium.launch();
 const errors: string[] = [];
 async function open(width: number, height: number, hash: string): Promise<Page> {
   const page = await browser.newPage({ viewport: { width, height } });
@@ -28,8 +29,14 @@ async function open(width: number, height: number, hash: string): Promise<Page> 
 }
 const shot = async (page: Page, name: string) => { if (shots) await page.screenshot({ path: path.join(shots, `${name}.png`) }); };
 
+const engines = fs.existsSync(webkit.executablePath()) ? [chromium, webkit] : [chromium];
+if (engines.length === 1) console.log("SKIP: webkit (install it: pnpm --filter @cube/web exec playwright install webkit)");
 try {
-  for (const [size, width, height] of [["desktop", 1280, 800], ["phone", 390, 844]] as const) {
+  for (const engine of engines) {
+  if (engine !== chromium) { await browser.close(); browser = await engine.launch(); }
+  const name = engine.name();
+  for (const [layout, width, height] of [["desktop", 1280, 800], ["phone", 390, 844]] as const) {
+    const size = `${name}-${layout}`;
     const thread = await host.thread(size);
     const guest = () => host.guest(thread);
     const page = await open(width, height, `#/t/${thread}`);
@@ -72,7 +79,7 @@ try {
     // Ready: the steps fold away; the machine label opens them again.
     fs.writeFileSync(path.join(guest(), "go"), "");
     await panel.waitFor({ state: "detached", timeout: 20_000 });
-    if (size === "phone") await page.locator(".strip-details-key").click();
+    if (layout === "phone") await page.locator(".strip-details-key").click();
     const label = page.locator("button.strip-machine");
     await label.waitFor();
     // (A local guest records no disk preparation, so the label names the steps.)
@@ -85,7 +92,9 @@ try {
     await panel.waitFor({ state: "detached" });
     assert.equal(await label.getAttribute("aria-expanded"), "false");
     await page.close();
+    await host.archive(thread);
     console.log(`ok (${size}): steps, the live log, the out-of-memory try with its advice, the next try, and the steps after ready`);
+  }
   }
 
   // The project page sets the machine size; new threads get it.

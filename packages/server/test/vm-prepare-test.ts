@@ -185,6 +185,33 @@ try {
   assert.equal(registry.getThread(left.id)!.vm!.build, undefined);
   console.log("ok: a build machine left by a crash is released (not retained) on the runner it was made on");
 
+  // cubed stopped in the middle of a build; when it is back another thread
+  // has published a template. The next activation (which first marks what
+  // was left running interrupted, Conversations.activate) deletes the build
+  // machine and uses the template; nothing stays running.
+  templates = [template("a000000000000005", key)];
+  const crashed = registry.createThread("p1", "crashed", model, "hello");
+  for (const name of ["lookup", "build-boot"] as const) {
+    registry.beginStartupStep(crashed.id, { name });
+    registry.endStartupStep(crashed.id, { name, state: "ok" });
+  }
+  registry.beginStartupStep(crashed.id, { name: "build-prepare" });
+  registry.updateThreadVm(crashed.id, { build: { vmId: "b000000000000002", placeholders: {}, key, runnerId: "r1" } });
+  machines.set("r1:b000000000000002", "running");
+  calls.length = 0;
+  registry.interruptStartupSteps(crashed.id);
+  await assert.rejects(threadVms.start(crashed), /fixture stops here/);
+  assert.deepEqual(calls, ["r1:release:b000000000000002:false", "r1:allocate:a000000000000005"]);
+  assert.deepEqual(shown(crashed), ["lookup ok: ", "build-boot ok: ", "build-prepare interrupted: ", "lookup ok: template a000000000000005, prepared under a minute ago",
+    "boot failed: fixture stops here"]);
+  // A preparation try marked interrupted that ended in the guest meanwhile ends in its place.
+  registry.beginStartupStep(crashed.id, { name: "prepare", attempt: 1 });
+  registry.interruptStartupSteps(crashed.id);
+  registry.endStartupStep(crashed.id, { name: "prepare", attempt: 1, state: "ok", detail: "pre-setup ok" }, Date.now(), true);
+  assert.deepEqual(shown(crashed).slice(-1), ["prepare ok: pre-setup ok"], "one entry for the try, not two");
+  registry.finishRelease(crashed.id);
+  console.log("ok: after a build cubed did not finish, a template is used and no step stays running; an interrupted try that ended meanwhile ends in its place");
+
   // Templates off, or a runner before 0.8.0: fresh machines.
   calls.length = 0;
   assert.deepEqual((await start(vms(false))).vm!.preparation, { source: "fresh", reason: "templates are off (CUBED_TEMPLATES=off)" });

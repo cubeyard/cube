@@ -1143,6 +1143,8 @@ const HOOK_SHELL = [
   "logs=\"${HOME:-/tmp}/.cache/cube\"",
   "hooks=\"${CUBE_HOOKS:-/etc/cube/hooks}\"",
   "mkdir -p \"$logs\"",
+  // A hook killed with its command (out of memory) left its marker: nothing runs yet.
+  "rm -f \"$logs/running\"",
   "ms() { if [ -n \"${EPOCHREALTIME:-}\" ]; then t=${EPOCHREALTIME/[.,]/}; echo $((10#$t / 1000)); else echo $(( $(date +%s) * 1000 )); fi; }",
   "outcome() { echo \"cube-hook $1 $2 $3\"; echo \"$2 $3 $(ms)\" >\"$logs/$1.status\" 2>/dev/null || true; }",
   "hook() {",

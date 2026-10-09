@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick, untrack } from "svelte";
   import { SvelteMap } from "svelte/reactivity";
-  import { errorText, fetchStartupLog } from "../lib/api.ts";
+  import { errorText, fetchStartupLog, fetchThreadSteps } from "../lib/api.ts";
   import { duration, LOGGED_STEPS, longStep, memoryAdvice, size, stepLabel, stepLamp, stepMs, totalMs } from "../lib/startup.ts";
   import type { StartupLog, StartupStep, ThreadSummary } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
@@ -43,6 +43,19 @@
     return () => { stopped = true; clearInterval(timer); };
   });
 
+  const stepKey = (step: StartupStep) => `${step.name}:${step.attempt ?? ""}:${step.startedAt}`;
+  // The ends of failed hooks' logs: the thread list leaves them out, so
+  // they are read once for each step that has one.
+  const logs = new SvelteMap<string, string>();
+  const missingLogs = $derived(steps.filter((step) => step.hasLog && !logs.has(stepKey(step))).map(stepKey).join(" "));
+  $effect(() => {
+    if (!missingLogs) return;
+    const id = thread.id;
+    void fetchThreadSteps(id).then((full) => {
+      for (const step of full) if (step.log) logs.set(stepKey(step), step.log);
+    }, () => { /* the step says what failed; its log stays unread */ });
+  });
+
   // A log window follows its end unless the reader scrolled up.
   let logWindow = $state<HTMLPreElement>();
   $effect(() => {
@@ -55,7 +68,6 @@
   // A step opens while its hook runs or when it failed with a log; the
   // reader's own choice holds through later polls.
   const chosen = new SvelteMap<string, boolean>();
-  const stepKey = (step: StartupStep) => `${step.name}:${step.attempt ?? ""}:${step.startedAt}`;
   const openByDefault = (step: StartupStep) => (step === running && logged) || (step.state === "failed" && !running);
   function onToggle(event: Event, step: StartupStep): void {
     const open = (event.currentTarget as HTMLDetailsElement).open;
@@ -99,7 +111,7 @@
       {@const showLive = step === running && logged}
       <!-- a failed step's whole error is printed; another's detail only when its line cuts it -->
       {@const fullDetail = !!step.detail && (step.state === "failed" || step.detail.length > 90)}
-      {@const body = fullDetail || !!step.memory || !!step.log || showLive}
+      {@const body = fullDetail || !!step.memory || !!step.log || !!step.hasLog || showLive}
       <li data-step={stepKey(step)}>
         <details class="tool-strip startup-step" open={chosen.get(stepKey(step)) ?? openByDefault(step)} ontoggle={(event) => onToggle(event, step)}>
           <summary title={step.detail ?? stepLabel(step)}>
@@ -120,9 +132,9 @@
             {:else if liveError}
               <p class="startup-detail">the log could not be read: {liveError}</p>
             {/if}
-          {:else if step.log}
+          {:else if step.log ?? logs.get(stepKey(step))}
             <p class="startup-log-head">the end of the failed hook's log</p>
-            <pre class="startup-log">{step.log}</pre>
+            <pre class="startup-log">{step.log ?? logs.get(stepKey(step))}</pre>
           {/if}
         </details>
       </li>

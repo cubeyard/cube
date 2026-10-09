@@ -14,7 +14,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
-import type { StartupStep } from "../src/registry.ts";
+import { Registry, type StartupStep } from "../src/registry.ts";
 import { formatDiagnostics } from "../src/vm-diagnostics.ts";
 import { LocalMachines } from "./local-guest.ts";
 
@@ -32,12 +32,13 @@ faux.setResponses(Array.from({ length: 50 }, () => () => fauxAssistantMessage("t
 const models = createModels();
 models.setProvider(faux.provider);
 const machines = new LocalMachines(path.join(root, "machines"));
-const app = await createCubed({ state: path.join(root, "state"), models, machines, claude: null, gateway: null });
+let app = await createCubed({ state: path.join(root, "state"), models, machines, claude: null, gateway: null });
 app.registry.enrollRunner({ nodeId: "node-steps", environmentId: 1, threadId: "runner-steps", configPath: "/private/steps.json", configHash: "steps", maxActiveVms: 2 });
 await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
 const address = app.server.address();
 assert(address && typeof address === "object");
-const base = `http://127.0.0.1:${address.port}`;
+const port = address.port;
+const base = `http://127.0.0.1:${port}`;
 const send = async (route: string, body?: unknown, method = body === undefined ? "GET" : "POST") => {
   const response = await fetch(`${base}${route}`, { method, ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }) });
   return { status: response.status, json: await response.json() as any };
@@ -85,7 +86,10 @@ try {
   assert.equal(failed.attempt, 1);
   assert.equal(failed.detail, "pre-setup was stopped: the machine ran out of memory (this command used up to 3.5 GB; the machine has 3.8 GB); cube tries again");
   assert.deepEqual(failed.memory, { peakBytes: 3758096384, totalBytes: 4013504 * 1024, oomKills: 1 });
-  assert.equal(failed.log, "building the services\ntoken=[redacted]", "the killed hook's log, from the machine, redacted");
+  assert.equal(failed.log, undefined, "the thread list leaves the log out");
+  assert.equal(failed.hasLog, true);
+  const full = (await send(`/api/threads/${thread.id}/steps`)).json.steps as StartupStep[];
+  assert.equal(full.find(step => step.name === "prepare")!.log, "building the services\ntoken=[redacted]", "the killed hook's log, from the machine, redacted");
   console.log("ok: a try the OOM killer stopped is a failed step with its memory and the end of its log");
 
   // The next try (the recovery loop's, here at once) runs; its log is read while it runs.
@@ -110,6 +114,49 @@ try {
   assert.match(text, /\n {2}\S+ prepare 1 failed after [\d.]+ s: pre-setup was stopped: the machine ran out of memory .*; memory peak 3\.5 of 3\.8 GiB, 1 process killed for want of memory\n/);
   assert.match(text, /\npreparation tries: 2\n/);
   console.log("ok: diagnostics show the steps, the memory and the tries");
+
+  // cubed stops in the middle of a start: a template build, the boot and a
+  // preparation try (whose command never reached the guest) were running.
+  // The next activation marks them interrupted before it records its own;
+  // its next try (4) runs and is not touched by another call meanwhile.
+  await app.close();
+  // What that cubed left in its registry, written while no cubed runs.
+  const stopped = (change: (registry: Registry) => void) => { const registry = new Registry(path.join(root, "state", "registry.sqlite")); change(registry); registry.close(); };
+  stopped(registry => {
+    for (const name of ["lookup", "build-prepare", "boot"] as const) registry.beginStartupStep(thread.id, { name });
+    registry.beginStartupStep(thread.id, { name: "prepare", attempt: 3 });
+    registry.updateThreadVm(thread.id, { provisionAttempt: 3 });
+    registry.markWorkspaceFailed(thread.id, "workspace allocation failed: cubed stopped");
+  });
+  const guestRoot = machines.guest({ id: thread.id } as never).root;
+  fs.rmSync(path.join(guestRoot, "go"));
+  const restart = async () => {
+    app = await createCubed({ state: path.join(root, "state"), models, machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null });
+    await new Promise<void>(resolve => app.server.listen(port, "127.0.0.1", resolve));
+  };
+  await restart();
+  const again = await until(steps, list => list.some(step => step.name === "prepare" && step.attempt === 4 && step.state === "running"), "the next try runs");
+  const states = (list: StartupStep[]) => list.slice(3).map(step => `${step.name}${step.attempt ? ` ${step.attempt}` : ""} ${step.state}`);
+  assert.deepEqual(states(again), ["lookup interrupted", "build-prepare interrupted", "boot interrupted", "prepare 3 interrupted", "prepare 4 running"]);
+  assert.ok(again.slice(3, 7).every(step => step.endedAt && step.endedAt >= step.startedAt), "an interrupted step has its end");
+  void app.conversations.activate(thread.id);
+  await delay(300);
+  assert.equal((await steps()).at(-1)!.state, "running", "a call meanwhile shares the activation and leaves its step running");
+  fs.writeFileSync(path.join(guestRoot, "go"), "");
+  await until(async () => (await row()).state, state => state === "ready", "the thread is ready again");
+  assert.deepEqual(states(await steps()), ["lookup interrupted", "build-prepare interrupted", "boot interrupted", "prepare 3 interrupted", "prepare 4 ok", "resume ok"]);
+  console.log("ok: steps a stopped cubed left running end as interrupted when the next activation begins; its own next try runs on");
+
+  // A ready machine attached again after a restart: a resume left running ends as interrupted too.
+  await app.close();
+  stopped(registry => registry.beginStartupStep(thread.id, { name: "resume" }));
+  await restart();
+  await until(steps, list => list.at(-1)?.state !== "running" && list.filter(step => step.name === "resume").length === 4, "the machine resumed again");
+  const after = await steps();
+  assert.ok(after.every(step => step.state !== "running"), JSON.stringify(after.slice(-3)));
+  assert.deepEqual(states(after).slice(-2), ["resume interrupted", "resume ok"]);
+  await until(async () => (await row()).state, state => state === "ready", "the thread stays ready");
+  console.log("ok: after a restart that attaches the machine again, nothing stays running");
 } finally {
   await app.close();
   fs.rmSync(root, { recursive: true, force: true });

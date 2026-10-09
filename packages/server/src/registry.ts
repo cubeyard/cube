@@ -198,6 +198,8 @@ export interface StartupStep {
   /** The end of the failed hook's log (escaped, redacted, at most
    * `STEP_LOG_BYTES`): kept because a build machine's disk goes with it. */
   log?: string;
+  /** Only in the thread list, which leaves `log` out: the step has one. */
+  hasLog?: boolean;
   /** The memory of cubed's command when it ended, from the guest (the
    * command's own peak, the machine's memory, and how many of its processes
    * the kernel killed for want of memory). */
@@ -609,11 +611,23 @@ export class Registry {
       { name: step.name, ...(step.attempt !== undefined ? { attempt: step.attempt } : {}), state: "running", startedAt: at, ...(step.detail ? { detail: step.detail } : {}) },
     ]);
   }
+  /** Marks every step still running as interrupted. An activation calls it
+   * before it records a step of its own: one thread has one activation at a
+   * time, so a running step then is one an earlier activation, or a cubed
+   * that stopped, never ended. Writes nothing when none runs. */
+  interruptStartupSteps(threadId: string, at = Date.now()): void {
+    this.changeSteps(threadId, steps => steps.some(step => step.state === "running")
+      ? steps.map(step => step.state === "running" ? { ...step, state: "interrupted" as const, endedAt: at } : step) : steps);
+  }
   /** Ends the newest running step of that name (and attempt); a step that
-   * never began (a cubed that restarted in between) is recorded as it ends. */
-  endStartupStep(threadId: string, step: Pick<StartupStep, "name" | "attempt" | "detail" | "memory" | "log"> & { state: "ok" | "failed" }, at = Date.now()): void {
+   * never began (a cubed that restarted in between) is recorded as it ends.
+   * `resumed`: a step marked interrupted may end after all (a preparation
+   * try that went on in the guest while cubed was away), in its own place. */
+  endStartupStep(threadId: string, step: Pick<StartupStep, "name" | "attempt" | "detail" | "memory" | "log"> & { state: "ok" | "failed" }, at = Date.now(), resumed = false): void {
     this.changeSteps(threadId, steps => {
-      const index = steps.findLastIndex(old => old.state === "running" && old.name === step.name && old.attempt === step.attempt);
+      const same = (old: StartupStep) => old.name === step.name && old.attempt === step.attempt;
+      let index = steps.findLastIndex(old => old.state === "running" && same(old));
+      if (index < 0 && resumed) index = steps.findLastIndex(old => old.state === "interrupted" && same(old));
       const begun: Omit<StartupStep, "state"> = index >= 0 ? steps[index]! : { name: step.name, ...(step.attempt !== undefined ? { attempt: step.attempt } : {}), startedAt: at };
       const ended: StartupStep = { ...begun, state: step.state, endedAt: at, ...(step.detail ?? begun.detail ? { detail: step.detail ?? begun.detail } : {}),
         ...(step.memory ? { memory: step.memory } : {}), ...(step.log ? { log: step.log.slice(-STEP_LOG_BYTES) } : {}) };
@@ -625,8 +639,9 @@ export class Registry {
     try {
       const thread = this.getThread(threadId);
       if (thread?.vm) {
-        const steps = change(thread.vm.steps ?? []).slice(-MAX_STARTUP_STEPS);
-        this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, vm: { ...thread.vm, steps } }), threadId);
+        const before = thread.vm.steps ?? [];
+        const steps = change(before);
+        if (steps !== before) this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, vm: { ...thread.vm, steps: steps.slice(-MAX_STARTUP_STEPS) } }), threadId);
       }
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }

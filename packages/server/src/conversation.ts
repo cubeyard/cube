@@ -125,6 +125,9 @@ export class Conversations {
     if (current?.workspaceState === "available" && this.agentOpen(id)) this.checks.add(id);
     const activation = (async () => {
       try {
+        // Steps an earlier activation (or a cubed that stopped) left running
+        // end here as interrupted, before this one records its own.
+        if (this.registry.getThread(id)?.vm) this.registry.interruptStartupSteps(id);
         await this.ensureWorkspace(id);
         // An agent that was still opening and failed meanwhile opens again here: a start.
         if (!this.agentOpen(id)) this.checks.delete(id);
@@ -268,13 +271,13 @@ export class Conversations {
   /** Records how a preparation try ended (`vm.steps`); `late`: only if it
    * is not recorded yet (a try that ended while cubed was away). */
   private endPrepare(id: string, attempt: number, outcome: PreparationOutcome, late = false): void {
-    const recorded = this.thread(id).vm?.steps?.some(step => step.name === "prepare" && step.attempt === attempt && step.state !== "running");
+    const recorded = this.thread(id).vm?.steps?.some(step => step.name === "prepare" && step.attempt === attempt && (step.state === "ok" || step.state === "failed"));
     if (late && recorded) return;
     const failed = Object.entries(outcome.hooks).filter(([, hook]) => hook.status === "failed").map(([name, hook]) => `${name} failed (exit ${hook.exitCode})`);
     this.registry.endStartupStep(id, { name: "prepare", attempt, state: outcome.error || failed.length ? "failed" : "ok",
       detail: outcome.error ? `${outcome.error}; cube tries again` : failed.length ? failed.join(", ")
         : Object.entries(outcome.hooks).map(([name, hook]) => `${name} ${hook.status}`).join(", "),
-      ...(outcome.memory ? { memory: outcome.memory } : {}), ...(outcome.log ? { log: outcome.log } : {}) });
+      ...(outcome.memory ? { memory: outcome.memory } : {}), ...(outcome.log ? { log: outcome.log } : {}) }, Date.now(), late);
   }
   /** Records a step that threw: its error, the command's memory, and the end
    * of the failed hook's log (what the script printed, or for a hook that

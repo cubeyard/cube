@@ -14,6 +14,7 @@ import type {
   RunnerStatus,
   SettingsView,
   StartupLog,
+  StartupStep,
   SubjectUsage,
   ThreadOverview,
   ThreadModels,
@@ -180,6 +181,10 @@ export const fetchUsage = (projectId: string | null = null) =>
 export const fetchThreadUsage = (id: string) =>
   request<{ usage: SubjectUsage }>(`${threadBase(id)}/usage`).then((r) => r.usage);
 
+/** The thread's startup steps with the ends of failed hooks' logs (the
+ * thread list leaves those out). */
+export const fetchThreadSteps = (id: string) =>
+  request<{ steps: StartupStep[] }>(`${threadBase(id)}/steps`).then((r) => r.steps);
 /** The log of the hook running now while the thread's machine starts;
  * null when no machine of the thread is reachable. */
 export const fetchStartupLog = (id: string) =>

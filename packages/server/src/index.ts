@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import type { Models } from "@earendil-works/pi-ai";
 import { GitService, normalizeRepoUrl } from "@cube/git";
-import { NO_HOOKS, projectHooks, projectMachine, Registry, threadAgent, type Project, type ResolvedRepositories, type Runner } from "./registry.ts";
+import { NO_HOOKS, projectHooks, projectMachine, Registry, threadAgent, type Project, type ResolvedRepositories, type Runner, type Thread } from "./registry.ts";
 import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { Conversations } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
@@ -394,6 +394,10 @@ export async function createCubed(options: {
     return { availableRunnerCount: slots.runners, availableSlotCount: slots.free, runnerCount: registry.runnerCount(),
       runnerCapacity: registry.runnerCapacity(slots), runners: registry.runnerStatuses() };
   };
+  // A thread as the list shows it: its startup steps without the ends of
+  // failed hooks' logs (up to 4 KiB each; GET /api/threads/<id>/steps has them).
+  const listed = (thread: Thread): Thread => thread.vm?.steps?.some(step => step.log)
+    ? { ...thread, vm: { ...thread.vm, steps: thread.vm.steps.map(({ log, ...step }) => log ? { ...step, hasLog: true } : step) } } : thread;
   // What a project's machine size means here: cubed's defaults and the
   // most the enrolled runners last said they allow.
   const machineView = () => {
@@ -694,7 +698,7 @@ export async function createCubed(options: {
       if (parts[0] === "api" && parts[1] === "threads") {
         const id = parts[2];
         if (parts.length > 4 && parts[3] !== "workspace" && !(parts[3] === "media" && parts.length === 5)) return json({ error: "not found" }, 404);
-        if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...thread, state: threadState(thread.id), error: conversations.error(thread.id), waiting: conversations.waiting(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
+        if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...listed(thread), state: threadState(thread.id), error: conversations.error(thread.id), waiting: conversations.waiting(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
         if (!id && method === "POST") {
           const model = await selection(body.model);
           const projectId = text("projectId");
@@ -713,6 +717,9 @@ export async function createCubed(options: {
         if (thread && parts[3] === "usage" && parts.length === 4 && method === "GET") return json({ usage: await usage.thread(id) });
         // So does the evidence about its machine (a retained disk's, say).
         if (thread && parts[3] === "diagnostics" && parts.length === 4 && method === "GET") return json({ diagnostics: await diagnostics(id) });
+        // The machine's startup steps with the ends of failed hooks' logs,
+        // which the thread list (polled every few seconds) leaves out.
+        if (thread && parts[3] === "steps" && parts.length === 4 && method === "GET") return json({ steps: thread.vm?.steps ?? [] });
         // The log of the hook running now while the machine starts (read
         // only, no lease); null when no machine of the thread is reachable.
         if (thread && parts[3] === "startup-log" && parts.length === 4 && method === "GET") {

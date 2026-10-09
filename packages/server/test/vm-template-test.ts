@@ -135,6 +135,9 @@ try {
     assert.equal(failure.message, "pre-setup was stopped: the machine ran out of memory (this command used up to 3.5 GB; the machine has 3.8 GB)");
     assert.deepEqual(failure.memory, { peakBytes: 3758096384, totalBytes: 4013504 * 1024, oomKills: 1 });
     assert.equal(fs.readFileSync(path.join(m.home, ".cache/cube/running"), "utf8"), "pre-setup pre-setup.log\n", "the killed hook is the one shown");
+    // The next command of cubed's (here the resume hooks) clears the killed hook's marker first.
+    await resumeWorkspace(m.workspace, "pi");
+    assert.ok(!fs.existsSync(path.join(m.home, ".cache/cube/running")), "no stale marker once another command of cubed's began");
     fs.rmSync(path.join(m.guest.root, "cgroup"), { recursive: true });
     const retried = await provisionWorkspace(m.workspace, "pi", allocation(first), 2);
     assert.deepEqual(statuses(retried.hooks), { "pre-setup": "ok", setup: "ok" });

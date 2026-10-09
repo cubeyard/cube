@@ -51,6 +51,8 @@ export async function startStartupHost() {
     thread: async (name: string) => (await post("/api/threads", { projectId: project.id, requestId: name, text: "hello", model })).id as string,
     /** The thread machine's root (where `oom` and `go` let its hook go on). */
     guest: (id: string) => machines.guest(app.registry.getThread(id)!).root,
+    /** Archives a thread, which frees its runner slot. */
+    archive: async (id: string) => { await fetch(`${url}/api/threads/${id}`, { method: "DELETE" }); },
     /** The recovery loop's next round for one thread, now. */
     retry: (id: string) => void app.conversations.activate(id),
     project: () => app.registry.getProject(project.id)!,
