@@ -67,6 +67,7 @@ OFFLINE_TESTS=(
   packages/web/test/ordered-test.ts
   packages/web/test/images-test.ts
   packages/web/test/outbox-test.ts
+  packages/web/test/startup-test.ts
   packages/server/test/github-auth-test.ts
   packages/server/test/github-read-test.ts
   packages/server/test/onboarding-test.ts

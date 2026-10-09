@@ -13,6 +13,7 @@ import type {
   ProjectInput,
   RunnerStatus,
   SettingsView,
+  StartupLog,
   SubjectUsage,
   ThreadOverview,
   ThreadModels,
@@ -179,6 +180,10 @@ export const fetchUsage = (projectId: string | null = null) =>
 export const fetchThreadUsage = (id: string) =>
   request<{ usage: SubjectUsage }>(`${threadBase(id)}/usage`).then((r) => r.usage);
 
+/** The log of the hook running now while the thread's machine starts;
+ * null when no machine of the thread is reachable. */
+export const fetchStartupLog = (id: string) =>
+  request<{ log: StartupLog | { error: string } | null }>(`${threadBase(id)}/startup-log`).then((r) => r.log);
 export const fetchThreadModels = (id: string) =>
   request<ThreadModels>(`${threadBase(id)}/model`);
 

@@ -530,6 +530,36 @@ header .spacer { margin-left: auto; }
   color: var(--ink-3); font: 10px var(--font-mono); white-space: nowrap;
 }
 .strip-machine.error { color: var(--bad); }
+button.strip-machine { padding: 0; border: 0; background: none; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+button.strip-machine:hover { color: var(--ink-2); }
+button.strip-machine[aria-expanded="true"] { color: var(--ink-2); text-decoration-style: solid; }
+
+/* machine startup: the steps cubed took to start the thread's machine, as
+   tool strips on the reading field, with the running hook's log beneath */
+.startup {
+  flex: none; display: flex; flex-direction: column; gap: 0.4rem;
+  max-height: 45dvh; overflow: auto; padding: 0.55rem 1.1rem 0.7rem;
+  background: var(--s2); border-bottom: 1px solid var(--line);
+  animation: settle-in 140ms ease-out;
+}
+.startup-head { display: flex; align-items: center; gap: 0.6rem; min-height: 1.6rem; }
+.startup-title { color: var(--ink-3); font-size: 11px; font-weight: 550; letter-spacing: 0.05em; }
+.startup-total, .startup-time { color: var(--ink-3); font: 11px var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.startup-time { flex: none; margin-left: auto; }
+.startup-step .startup-time + .tool-chevron { margin-left: 0; }
+.startup-link { color: var(--ink-3); font-size: 11px; font-weight: 550; letter-spacing: 0.05em; text-decoration: none; }
+.startup-link:hover { color: var(--signal); }
+.startup-close.key.icon { width: 1.6rem; height: 1.6rem; flex: none; }
+.startup-note { border: 1px solid var(--note-line); border-radius: 7px; padding: 0.35rem 0.65rem; }
+.startup-note.bad { border-color: var(--bad-line); }
+.startup-steps { display: flex; flex-direction: column; gap: 0.3rem; margin: 0; padding: 0; list-style: none; }
+.startup-detail {
+  margin: 0; padding: 0.45rem 0.65rem; border-top: 1px solid var(--line);
+  color: var(--ink-2); font: 12px/1.5 var(--font-mono); overflow-wrap: anywhere;
+}
+.startup-detail.bad { color: var(--bad); }
+.startup-log-head { margin: 0; padding: 0.35rem 0.65rem 0; border-top: 1px solid var(--line); background: var(--s1); color: var(--ink-3); font-size: 11px; letter-spacing: 0.05em; }
+.tool-strip pre.startup-log { border-top: 0; }
 
 .strip-model {
   position: relative; display: inline-flex; align-items: center;
@@ -1441,7 +1471,10 @@ select.compose-input {
   .files-shelf { padding: 0.6rem 0.8rem; }
   .task-bank li { grid-template-columns: minmax(0, 1fr) auto; }
   .task-bank li span:last-child { grid-column: 1 / -1; white-space: normal; overflow-wrap: anywhere; }
-  .strip-base, .strip-machine:not(.error) { display: none; }
+  .strip-base, span.strip-machine:not(.error) { display: none; }
+  /* on a phone the machine label is the key to the startup steps: a fingertip's height */
+  button.strip-machine { min-height: 2.75rem; }
+  .startup { max-height: 38dvh; padding-inline: 0.8rem; }
 
   .message-image img { width: 7rem; height: 5.5rem; }
   .message-images li:only-child .message-image img { max-width: 100%; max-height: 12rem; }
