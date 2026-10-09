@@ -257,7 +257,10 @@ try {
   assert.match(rowE.vm.preparation?.reason ?? "", new RegExp(`^the template build failed: ${oom.source}$`));
   assert.deepEqual(rowE.vm.steps.map(step => `${step.name}${step.attempt ? ` ${step.attempt}` : ""} ${step.state}`),
     ["lookup ok", "build-boot ok", "build-prepare failed", "boot ok", "prepare 1 failed", "prepare 2 ok", "resume ok"]);
-  const [build, , first] = [rowE.vm.steps[2]!, rowE.vm.steps[3]!, rowE.vm.steps[4]!];
+  // The thread list leaves the ends of failed hooks' logs out; the steps route has them.
+  assert.ok(rowE.vm.steps.every(step => step.log === undefined));
+  const full = (await api(`/api/threads/${e}/steps`)).steps as typeof rowE.vm.steps;
+  const [build, , first] = [full[2]!, full[3]!, full[4]!];
   for (const failed of [build, first]) {
     assert.match(failed.detail ?? "", oom);
     assert.ok(failed.memory && failed.memory.oomKills >= 1 && failed.memory.totalBytes < 1.1 * 2 ** 30 && failed.memory.peakBytes > 256 * 2 ** 20, JSON.stringify(failed.memory));
