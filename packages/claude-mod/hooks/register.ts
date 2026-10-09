@@ -11,8 +11,8 @@
  * machine is the thread's sandbox; Claude Code itself runs on the cubed host
  * and is not sandboxed. */
 import type { EngineInterface, Register } from 'claude-code'
-import { WorkspaceClient } from './workspace.ts'
 import { OPTCHAT_NOTE, optchatPath, readOptchat } from './tools.ts'
+import { WorkspaceClient } from './workspace.ts'
 import { ALLOWED_TOOLS, ARTIFACT_GUIDE, ARTIFACT_ROOT, PROJECT_HOOKS_NOTE, artifactPath, bash, edit, GUEST_HOME, instructions, read, readArtifact, write, writeArtifact, VIRTUAL_ROOT, type ToolScope } from './tools.ts'
 
 const ALLOWED = new Set(ALLOWED_TOOLS)
