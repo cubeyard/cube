@@ -177,7 +177,7 @@ export class HttpThreadEvents implements ThreadEvents {
             const shown = this.accept(transcript);
             if (shown) await listener(shown);
             else connection.abort();
-          });
+          }, connection.signal);
         } catch (error) {
           if (error instanceof WindowReset) { this.pin = null; continue; }
           failure = error;
@@ -205,8 +205,11 @@ function serverError(body: unknown, fallback: string): string {
 /** The host ended a window's stream: it no longer has the window's start. */
 class WindowReset extends Error {}
 
-async function readFrames(body: ReadableStream<Uint8Array>, listener: (transcript: ThreadTranscript) => void | Promise<void>): Promise<void> {
+/** Reads SSE frames until the body ends or `signal` aborts: the read is
+ * cancelled then, as not every engine ends it when the fetch is aborted. */
+async function readFrames(body: ReadableStream<Uint8Array>, listener: (transcript: ThreadTranscript) => void | Promise<void>, signal?: AbortSignal): Promise<void> {
   const reader = body.getReader();
+  signal?.addEventListener("abort", () => { void reader.cancel().catch(() => {}); }, { once: true });
   const decoder = new TextDecoder();
   let buffer = "";
   try {
