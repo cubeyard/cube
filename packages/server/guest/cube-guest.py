@@ -119,6 +119,20 @@ class SystemdLauncher:
         subprocess.run(["systemctl", "kill", "--signal=SIGKILL", unit_name(op_id)], stdin=subprocess.DEVNULL,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
 
+    def memory(self, op_id):
+        """The unit's peak memory and OOM kills, read from its cgroup while
+        its ExecStopPost runs (the cgroup still exists), with the machine's
+        memory; None when the kernel or systemd does not say."""
+        try:
+            result = subprocess.run(["systemctl", "show", "--property=ControlGroup", "--value", unit_name(op_id)],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10)
+            group = result.stdout.decode().strip()
+            if not group.startswith("/") or ".." in group.split("/"):
+                return None
+            return cgroup_memory(os.path.join("/sys/fs/cgroup", group.lstrip("/")), "/proc/meminfo")
+        except (OSError, subprocess.SubprocessError):
+            return None
+
     def shutting_down(self):
         try:
             result = subprocess.run(["systemctl", "is-system-running"], stdin=subprocess.DEVNULL,
@@ -126,6 +140,30 @@ class SystemdLauncher:
         except (OSError, subprocess.SubprocessError):
             return False
         return result.stdout.decode().strip() == "stopping"
+
+
+def cgroup_memory(group, meminfo):
+    """`{peakBytes, totalBytes, oomKills}` of a cgroup (v2: memory.peak and
+    memory.events) on a machine with `meminfo`'s MemTotal, or None."""
+    try:
+        with open(os.path.join(group, "memory.peak")) as handle:
+            peak = int(handle.read().strip())
+        kills = 0
+        with open(os.path.join(group, "memory.events")) as handle:
+            for line in handle:
+                name, _, value = line.partition(" ")
+                if name == "oom_kill":
+                    kills = int(value)
+        total = None
+        with open(meminfo) as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    total = int(line.split()[1]) * 1024
+        if total is None:
+            return None
+        return {"peakBytes": peak, "totalBytes": total, "oomKills": kills}
+    except (OSError, ValueError):
+        return None
 
 
 class SystemdServices:
@@ -1473,8 +1511,12 @@ def exec_result(op):
     else:
         exit_code, termination = None, "signalled"
     output_bytes = max(retained, wrapped["outputBytes"] if wrapped is not None else retained)
+    service_result = os.environ.get("SERVICE_RESULT")
+    memory = getattr(CONFIG.launcher, "memory", lambda _: None)(op)
     return {"exitCode": exit_code, "termination": termination, "outputBytes": output_bytes,
-            "truncated": output_bytes > retained, "retainedBytes": retained}
+            "truncated": output_bytes > retained, "retainedBytes": retained,
+            "serviceResult": service_result if service_result and re.match(r"^[a-z-]{1,32}$", service_result) else None,
+            "memory": memory}
 
 
 def recover():

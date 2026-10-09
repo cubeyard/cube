@@ -14,7 +14,7 @@ import type { GatewaySupervisor } from "../src/gateway.ts";
 import { IrohNodeError, type IrohRunnerClient, type RunnerTemplate } from "../src/iroh-node.ts";
 import { Registry, type Thread } from "../src/registry.ts";
 import { ThreadVms } from "../src/vm.ts";
-import { TEMPLATE_FORMAT, templateKey } from "../src/vm-template.ts";
+import { TEMPLATE_FORMAT, missingTemplate, templateKey, templateParts } from "../src/vm-template.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-prepare-"));
 const model = { provider: "faux", id: "faux" };
@@ -100,7 +100,7 @@ try {
   while (!calls.includes("r1:build-allocate")) await new Promise(resolve => setTimeout(resolve, 5));
   assert.ok(registry.getThread(first.id)!.vm!.build, "the build machine is recorded on its thread");
   const meanwhile = await start();
-  assert.deepEqual(meanwhile.vm!.preparation, { source: "fresh", reason: "another thread is preparing this project's template" });
+  assert.deepEqual(meanwhile.vm!.preparation, { source: "fresh", reason: "the project has no template on this runner yet; another thread is preparing the project's template now" });
   // The build fails: its thread starts fresh, the build record goes, and the key backs off.
   fail(new IrohNodeError("IO_ERROR", false, "disk full"));
   await building;
@@ -110,9 +110,60 @@ try {
   assert.equal(failed.vm!.build, undefined);
   calls.length = 0;
   const after = await start();
-  assert.deepEqual(after.vm!.preparation, { source: "fresh", reason: "the project's last template build failed" });
+  assert.equal(after.vm!.preparation!.source, "fresh");
+  assert.match(after.vm!.preparation!.reason!, /^the project has no template on this runner yet; the last build of one failed under a minute ago \(disk full\); cube tries again in 60 min, or at once with a new commit or another machine size$/);
   assert.deepEqual(calls, ["r1:allocate:base"], "no second build right away");
-  console.log("ok: one build per runner and key; a failed build starts its thread fresh and backs off");
+  // The steps the thread shows: what the lookup found, and where the build stopped.
+  const shown = (thread: Thread) => registry.getThread(thread.id)!.vm!.steps!.map(step => `${step.name} ${step.state}: ${step.detail ?? ""}`);
+  assert.deepEqual(shown(failed), ["lookup ok: the project has no template on this runner yet: building one",
+    "build-boot failed: IO_ERROR: disk full; no template was published", "boot failed: fixture stops here"]);
+  assert.deepEqual(shown(meanwhile), ["lookup ok: no template: the project has no template on this runner yet; another thread is preparing the project's template now", "boot failed: fixture stops here"]);
+  assert.match(shown(after)[0]!, /^lookup ok: no template: .*the last build of one failed/);
+  // Another machine size is not held back by the failed build: it builds at once.
+  registry.saveProject({ ...project("p1"), machine: { memoryMiB: 2048 } });
+  buildAllocate = async () => { throw new IrohNodeError("IO_ERROR", false, "disk full"); };
+  calls.length = 0;
+  const bigger = await start();
+  assert.deepEqual(bigger.allocation.machine, { memoryMiB: 2048 });
+  assert.deepEqual(calls, ["r1:build-allocate", "r1:allocate:base"], "a build with the new size");
+  assert.match(shown(bigger)[1]!, /^build-boot failed: .*disk full/);
+  registry.saveProject(project("p1"));
+  console.log("ok: one build per runner and key; a failed build starts its thread fresh and backs off, except for another machine size; the steps say so");
+
+  // Nor is a new commit of the primary repository: the fix may be in it.
+  const repository = (oid: string) => ({ id: "r", projectId: "p2", position: 0, url: "https://example.invalid/p2.git", base: "main", checkoutName: "workspace",
+    status: "ready" as const, error: null, resolvedBase: "refs/heads/main", baseOid: oid, checkedAt: 1 });
+  registry.saveProject({ ...project("p2"), repositories: [repository("a".repeat(40))] });
+  const inProject = async (name: string) => {
+    const thread = registry.createThread("p2", name, model, "hello");
+    await assert.rejects(threadVms.start(thread), /fixture stops here/);
+    registry.finishRelease(thread.id);
+    return registry.getThread(thread.id)!;
+  };
+  calls.length = 0;
+  await inProject("c1");
+  await inProject("c2");
+  assert.deepEqual(calls, ["r1:build-allocate", "r1:allocate:base", "r1:allocate:base"], "one failed build, then the backoff");
+  registry.saveProject({ ...project("p2"), repositories: [repository("b".repeat(40))] });
+  calls.length = 0;
+  await inProject("c3");
+  assert.deepEqual(calls, ["r1:build-allocate", "r1:allocate:base"], "a new commit builds again at once");
+  console.log("ok: a new commit is not held back by the failed build of an older one");
+
+  // Why there is no template: an expired one, or what changed since the project's last one.
+  const keyed = registry.createThread("p1", "keyed", model, "hello");
+  const parts = templateParts({ allocation: keyed.allocation, hooks: keyed.allocation.hooks!, runner: { baseImageSha256: IMAGE, platform: "linux-x86_64" }, diskGiB: 8 });
+  const withParts = (id: string, key: string, createdAt: number, changed: Partial<typeof parts> = {}): RunnerTemplate => ({ ...template(id, key, createdAt),
+    meta: JSON.stringify({ format: TEMPLATE_FORMAT, projectId: "p1", setupBlob: "none", commit: null, parts: { ...parts, ...changed } }) });
+  const why = (list: RunnerTemplate[]) => missingTemplate(list, { projectId: "p1", key, parts, now: Date.now(), ttlMs: 24 * 3600000 });
+  assert.equal(why([]), "the project has no template on this runner yet");
+  assert.equal(why([withParts("c000000000000001", key, Date.now() - 25 * 3600000)]), "template c000000000000001 expired (prepared 25 h ago; templates are reused for 24 h)");
+  assert.equal(why([withParts("c000000000000002", "e".repeat(64), Date.now() - 3600000, { preSetup: "0".repeat(16) })]), "the pre-setup hook changed since template c000000000000002");
+  assert.equal(why([withParts("c000000000000003", "e".repeat(64), Date.now(), { repositories: "1".repeat(16), disk: "2".repeat(16) })]),
+    "the project's repositories, the disk size changed since template c000000000000003");
+  assert.equal(why([template("c000000000000004", "e".repeat(64))]), "template c000000000000004 was prepared with other settings", "a template from before parts were kept");
+  registry.finishRelease(keyed.id);
+  console.log("ok: a missing template is explained: none yet, expired, or what changed since the last one");
 
   // A template removed between listing and allocation: fresh instead.
   templates = [template("a000000000000004", key)];

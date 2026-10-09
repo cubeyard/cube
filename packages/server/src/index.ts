@@ -8,14 +8,14 @@ import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import type { Models } from "@earendil-works/pi-ai";
 import { GitService, normalizeRepoUrl } from "@cube/git";
-import { NO_HOOKS, projectHooks, Registry, threadAgent, type Project, type ResolvedRepositories, type Runner } from "./registry.ts";
+import { NO_HOOKS, projectHooks, projectMachine, Registry, threadAgent, type Project, type ResolvedRepositories, type Runner } from "./registry.ts";
 import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { Conversations } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
 import { IrohRunnerClient, loadRunnerConfig, runnerClient, type RunnerNetwork, type TrustedRunnerHealth } from "./iroh-node.ts";
 import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
 import { GatewaySupervisor, locateGateway, widestNetwork } from "./gateway.ts";
-import { errorText, machineFor, ThreadVms, type ThreadMachines } from "./vm.ts";
+import { errorText, machineFor, ThreadVms, vmSizes, type ThreadMachines } from "./vm.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
@@ -394,7 +394,15 @@ export async function createCubed(options: {
     return { availableRunnerCount: slots.runners, availableSlotCount: slots.free, runnerCount: registry.runnerCount(),
       runnerCapacity: registry.runnerCapacity(slots), runners: registry.runnerStatuses() };
   };
-  const projectView = (project: Project, pool = poolView()) => ({ ...project, ...pool,
+  // What a project's machine size means here: cubed's defaults and the
+  // most the enrolled runners last said they allow.
+  const machineView = () => {
+    const sizes = vmSizes();
+    const limits = registry.runnerStatuses().filter(runner => !runner.retiredAt).map(runner => runner.health?.limits).filter(limit => !!limit);
+    return { machineDefaults: { vcpus: sizes.vcpus, memoryMiB: sizes.memoryMiB },
+      machineLimits: limits.length ? { maxVcpus: Math.max(...limits.map(limit => limit.maxVcpus)), maxMemoryMiB: Math.max(...limits.map(limit => limit.maxMemoryMiB)) } : null };
+  };
+  const projectView = (project: Project, pool = poolView()) => ({ ...project, ...pool, ...machineView(),
     threadCount: registry.listThreads().filter(thread => thread.projectId === project.id && !thread.archived).length,
     retainedThreadCount: registry.listThreads().filter(thread => thread.projectId === project.id).length });
   async function check(project: Project) {
@@ -580,6 +588,8 @@ export async function createCubed(options: {
             revision: (previous?.revision ?? 0) + 1, checkedAt: null, createdAt: previous?.createdAt ?? Date.now(), updatedAt: Date.now(),
             // New threads use these; a changed pre-setup also means a new template.
             hooks, ...hooksChanged ? { hooksUpdatedAt: Date.now() } : previous?.hooksUpdatedAt ? { hooksUpdatedAt: previous.hooksUpdatedAt } : {},
+            // New threads get this size (clamped by each runner); empty: cubed's defaults.
+            ...(() => { const machine = projectMachine(body.machine, previous?.machine); return Object.keys(machine).length ? { machine } : {}; })(),
             repositories: body.repositories.map((item, position) => {
               if (!item || typeof item !== "object" || typeof item.url !== "string" || item.url.length > 2048 ||
                 (item.base != null && (typeof item.base !== "string" || !item.base.trim())) ||
@@ -703,6 +713,11 @@ export async function createCubed(options: {
         if (thread && parts[3] === "usage" && parts.length === 4 && method === "GET") return json({ usage: await usage.thread(id) });
         // So does the evidence about its machine (a retained disk's, say).
         if (thread && parts[3] === "diagnostics" && parts.length === 4 && method === "GET") return json({ diagnostics: await diagnostics(id) });
+        // The log of the hook running now while the machine starts (read
+        // only, no lease); null when no machine of the thread is reachable.
+        if (thread && parts[3] === "startup-log" && parts.length === 4 && method === "GET") {
+          return json({ log: thread.archived || !machines.startupLog ? null : await machines.startupLog(thread).catch((error: unknown) => ({ error: errorText(error) })) });
+        }
         // So do the images its transcript shows: they are kept on this host,
         // in the thread's own store, not on its machine.
         if (thread && parts[3] === "media" && parts.length === 5 && method === "GET") {

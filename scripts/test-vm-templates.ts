@@ -14,7 +14,9 @@
 //   is archived; 5 a runner restart boots the machine again and the resume
 //   hooks run again before the agent continues; 6 a failing pre-setup
 //   publishes nothing and the thread starts fresh with the failure shown;
-//   7 every process stopped. Small VMs (1 vCPU, 1 GiB). CUBE_SMOKE_KEEP=1
+//   7 a pre-setup the OOM killer stops: the build and the thread's first try
+//   fail saying so, with memory and log (the build's read live), and the
+//   next try succeeds; 8 every process stopped. Small VMs (1 vCPU, 1 GiB). CUBE_SMOKE_KEEP=1
 //   keeps the work directory; TMPDIR chooses where it is.
 import assert from "node:assert/strict";
 import { type ChildProcess, execFileSync, fork, spawn, spawnSync } from "node:child_process";
@@ -231,12 +233,51 @@ try {
   log(`6: a failing pre-setup published nothing; the thread started fresh (${seconds(rowD)}) with the failure recorded`);
   await api(`/api/threads/${d}`, "DELETE");
 
-  // 7. Stop everything this run started.
+  // 7. A pre-setup the kernel's OOM killer stops: the template build fails
+  // saying so, with the build machine's memory and the end of its log, which
+  // the thread showed live while it ran; the thread's own first try fails
+  // the same way and the recovery loop's next try (same disk) succeeds.
+  const hungry = (await api("/api/projects", "POST", { name: "hungry", repositories: [], hooks: { preResume: "", preSetup: [
+    "if [ -e /var/tmp/fed ]; then echo fed; exit 0; fi",
+    "sudo touch /var/tmp/fed; echo allocating; sleep 25",
+    "python3 -c 'x = []\nwhile True: x.append(b\"\\x01\" * (32 << 20))'",
+  ].join("\n") } })).project;
+  const e = await create(hungry.id, "e");
+  const live = await until("the build machine's live log", 300, async () => {
+    const { log } = await api(`/api/threads/${e}/startup-log`);
+    return log?.machine === "build" && log.hook === "pre-setup" && log.text.includes("allocating") ? log : undefined;
+  });
+  assert.equal(live.text, "allocating\n");
+  const rowE = await until("the thread after its second try", 900, async () => {
+    const r = await row(e);
+    return r && r.state === "ready" ? r : undefined;
+  }) as Row & { vm: { steps: Array<{ name: string; attempt?: number; state: string; detail?: string; log?: string; memory?: { peakBytes: number; totalBytes: number; oomKills: number } }> } };
+  const oom = /pre-setup was stopped: the machine ran out of memory \(this command used up to [\d.]+ (MB|GB); the machine has [\d.]+ (MB|GB)\)/;
+  assert.equal(rowE.vm.preparation?.source, "fresh");
+  assert.match(rowE.vm.preparation?.reason ?? "", new RegExp(`^the template build failed: ${oom.source}$`));
+  assert.deepEqual(rowE.vm.steps.map(step => `${step.name}${step.attempt ? ` ${step.attempt}` : ""} ${step.state}`),
+    ["lookup ok", "build-boot ok", "build-prepare failed", "boot ok", "prepare 1 failed", "prepare 2 ok", "resume ok"]);
+  const [build, , first] = [rowE.vm.steps[2]!, rowE.vm.steps[3]!, rowE.vm.steps[4]!];
+  for (const failed of [build, first]) {
+    assert.match(failed.detail ?? "", oom);
+    assert.ok(failed.memory && failed.memory.oomKills >= 1 && failed.memory.totalBytes < 1.1 * 2 ** 30 && failed.memory.peakBytes > 256 * 2 ** 20, JSON.stringify(failed.memory));
+    assert.match(failed.log ?? "", /allocating/, "the end of the killed hook's log");
+  }
+  assert.match(build.detail!, /; no template was published$/);
+  // (Whether bash printed "Killed" before systemd stopped the unit varies.)
+  assert.match(await bash(e, "cat ~/.cache/cube/pre-setup.log.prev"), /^allocating(\n|$)/, "the try before keeps its log");
+  assert.equal(await bash(e, "cat ~/.cache/cube/pre-setup.log"), "fed");
+  const diagnosis = await api(`/api/threads/${e}/diagnostics`);
+  assert.equal(diagnosis.diagnostics.thread.machine.steps.length, 7);
+  log(`7: an OOM-killed pre-setup: the build failed saying so (memory peak ${(build.memory!.peakBytes / 2 ** 20).toFixed(0)} MiB of ${(build.memory!.totalBytes / 2 ** 20).toFixed(0)} MiB, ${build.memory!.oomKills} killed), its log was live and kept; the thread's next try succeeded (${seconds(rowE)})`);
+  await api(`/api/threads/${e}`, "DELETE");
+
+  // 8. Stop everything this run started.
   await stop(cubed);
   await until("the gateway to exit with cubed", 30, () => gatewayPids().length === 0);
   await stop(runner);
   assert.equal(spawnSync("pgrep", ["-f", `${runnerState}/vms/`]).status, 1, "no qemu left");
-  log("7: every process stopped");
+  log("8: every process stopped");
   console.log(`test-vm-templates: PASS in ${((Date.now() - started) / 1000).toFixed(0)} s`);
 } catch (error) {
   console.error("test-vm-templates: FAIL", error);

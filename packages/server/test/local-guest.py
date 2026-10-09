@@ -69,6 +69,11 @@ class ProcessLauncher:
     def shutting_down(self):
         return False
 
+    def memory(self, op_id):
+        """A test's stand-in for the unit's cgroup: `<root>/cgroup/` (memory.peak,
+        memory.events) and `<root>/meminfo`, when a test wrote them."""
+        return guest.cgroup_memory(os.path.join(self.root, "cgroup"), os.path.join(self.root, "meminfo"))
+
 
 class ProcessServices:
     """`cube service` services as detached process groups in place of
@@ -169,7 +174,10 @@ def supervise(root, op_id, timeout_ms):
     timer.start()
     code = child.wait()
     timer.cancel()
-    os.environ["SERVICE_RESULT"] = "timeout" if timed_out.is_set() else "success" if code == 0 \
+    # A command killed while `<root>/cgroup/memory.events` counts an OOM kill
+    # ended as systemd says of a unit the kernel's OOM killer stopped.
+    oom = code < 0 and (guest.cgroup_memory(os.path.join(root, "cgroup"), os.path.join(root, "meminfo")) or {}).get("oomKills", 0) > 0
+    os.environ["SERVICE_RESULT"] = "timeout" if timed_out.is_set() else "oom-kill" if oom else "success" if code == 0 \
         else "signal" if code < 0 else "exit-code"
     os.environ["EXIT_CODE"] = "killed" if code < 0 else "exited"
     os.environ["EXIT_STATUS"] = str(-code if code < 0 else code)

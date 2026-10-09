@@ -8,7 +8,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import net from "node:net";
 import { encodeGuestRequest, runGuestProcess, type GuestAnswer, type GuestCallOptions, type GuestOp, type GuestTransport } from "../src/guest-ssh.ts";
-import type { StartOptions, ThreadMachines } from "../src/vm.ts";
+import { readStartupLog, type StartOptions, type StartupLog, type ThreadMachines } from "../src/vm.ts";
 import type { Thread } from "../src/registry.ts";
 import { hookFileContent } from "../src/vm-seed.ts";
 
@@ -104,6 +104,10 @@ export class LocalMachines implements ThreadMachines {
     fs.rmSync(path.join(this.root, thread.id), { recursive: true, force: true });
   }
   async close(): Promise<void> { for (const guest of this.guests.values()) guest.stop(); }
+  /** As ThreadVms reads it; the guest's root stands for its /. */
+  async startupLog(thread: Thread): Promise<StartupLog | null> {
+    return this.guests.has(thread.id) ? readStartupLog(this.guest(thread), "thread", "/home/.cache/cube") : null;
+  }
   running(thread: Thread): boolean { return this.guests.has(thread.id) && !this.released.has(thread.id); }
   /** A local guest's services listen on 127.0.0.1 (its service host). */
   dial(thread: Thread, port: number): Promise<net.Socket> {

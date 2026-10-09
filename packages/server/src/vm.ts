@@ -19,13 +19,14 @@ import { dialGuest, GatewayUnavailable, type GatewayAttach, type GatewayClient, 
 import { SshGuestTransport, controlDirectory, type GuestTransport } from "./guest-ssh.ts";
 import { IrohNodeError, runnerClient, type IrohRunnerClient, type RunnerDescription, type RunnerTemplate, type TrustedRunnerHealth, type VmRecord, type VmRef } from "./iroh-node.ts";
 import { createLogger, type Logger } from "./log.ts";
-import { NO_HOOKS, placement, threadAgent, type HookOutcome, type Registry, type Thread, type WorkspaceAllocation } from "./registry.ts";
+import { NO_HOOKS, STEP_LOG_BYTES, placement, threadAgent, type CommandMemory, type HookOutcome, type Registry, type StartupStep, type Thread,
+  type WorkspaceAllocation } from "./registry.ts";
 import { newPlaceholder, type EgressVms } from "./egress-policy.ts";
 import { guestDescription, VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { GUEST_HELPER_PATH, shippedHelper, vmMac, vmSeed } from "./vm-seed.ts";
 import { clean, MachineEvents, type Evidence, type MachineEvidence } from "./vm-diagnostics.ts";
-import { FAILED_BUILD_BACKOFF_MS, TEMPLATE_CAPABILITY, TEMPLATE_FORMAT, obsoleteTemplates, pickTemplate, templateKey, templateSettings,
-  type TemplateMeta, type TemplateSettings } from "./vm-template.ts";
+import { FAILED_BUILD_BACKOFF_MS, TEMPLATE_CAPABILITY, TEMPLATE_FORMAT, missingTemplate, obsoleteTemplates, pickTemplate, templateKey, templateParts,
+  templateSettings, type TemplateMeta, type TemplateParts, type TemplateSettings } from "./vm-template.ts";
 import { LeaseStore } from "./workspace-lease.ts";
 import { settleOperation, WorkspaceError, type WorkspaceOwner } from "./workspace.ts";
 
@@ -58,6 +59,44 @@ export interface ThreadMachines {
   /** Read-only evidence about the thread's machine (vm-diagnostics.ts);
    * never starts, stops or attaches it. */
   diagnose?(thread: Thread): Promise<MachineEvidence>;
+  /** The end of the log of the hook running now in the thread's template
+   * build machine or its own machine; null when neither is reachable. Read
+   * only, with no lease: it never waits for or disturbs the preparation. */
+  startupLog?(thread: Thread): Promise<StartupLog | null>;
+}
+
+/** The hook running now in a machine (from ~/.cache/cube/running) and the
+ * end of its log, escaped and redacted. */
+export interface StartupLog { machine: "build" | "thread"; hook: string | null; text: string; bytes: number; truncated: boolean }
+/** Where the guest's hooks write their logs (the seed's user `agent`). */
+const HOOK_LOGS = "/home/agent/.cache/cube";
+/** How much of a hook's log the thread shows. */
+export const STARTUP_LOG_BYTES = 16 * 1024;
+
+/** The hook running now in a machine and the end of its log, read with the
+ * guest's `read`, which is not fenced: it needs no lease and changes nothing.
+ * `logs`: the hooks' log directory in that machine. */
+export async function readStartupLog(transport: GuestTransport, machine: StartupLog["machine"], logs = HOOK_LOGS): Promise<StartupLog> {
+  const read = async (file: string, offset: number, limit: number) => {
+    const answer = await transport.call("read", { path: `${logs}/${file}`, offset, limit }, { timeoutMs: 10000 });
+    const error = answer.header.error as { code?: unknown; message?: unknown } | undefined;
+    if (error && typeof error === "object") {
+      if (error.code === "NOT_FOUND") return null;
+      throw new Error(`reading ${file} failed: ${String(error.message ?? error.code)}`);
+    }
+    if (!Number.isSafeInteger(answer.header.size)) throw new Error("the guest helper's answer is malformed");
+    return { size: answer.header.size as number, content: Buffer.from(answer.body) };
+  };
+  const running = await read("running", 0, 256);
+  const [hook, log] = running ? running.content.toString("utf8").trim().split(" ") : [];
+  if (!hook || !log || !/^[a-z-]{1,32}$/.test(hook) || !/^[a-z-]{1,32}\.log$/.test(log)) return { machine, hook: null, text: "", bytes: 0, truncated: false };
+  const size = (await read(log, 0, 1))?.size ?? 0;
+  const offset = Math.max(0, size - STARTUP_LOG_BYTES);
+  const tail = size ? await read(log, offset, STARTUP_LOG_BYTES) : null;
+  let text = tail ? tail.content.toString("utf8") : "";
+  // From the first whole line when the start was cut off.
+  if (offset > 0) text = text.slice(text.indexOf("\n") + 1);
+  return { machine, hook, text: clean(text, STARTUP_LOG_BYTES * 4), bytes: size, truncated: offset > 0 };
 }
 
 export interface MachineStart { booted: boolean }
@@ -118,12 +157,14 @@ export class ThreadVms implements ThreadMachines, EgressVms {
   private readonly controls: string;
   private readonly attached = new Map<string, GatewayAttach>();
   private readonly transports = new Map<string, SshGuestTransport>();
+  /** The guest of each thread's template build machine while it prepares. */
+  private readonly buildTransports = new Map<string, SshGuestTransport>();
   private readonly starting = new Map<string, Promise<MachineStart>>();
   private readonly templates: TemplateSettings;
   /** Template builds under way, by runner and key: one at a time. */
   private readonly builds = new Map<string, Promise<unknown>>();
-  /** When a build of a runner and key last failed. */
-  private readonly failedBuilds = new Map<string, number>();
+  /** When a build of a runner, key and machine size last failed, and why. */
+  private readonly failedBuilds = new Map<string, { at: number; error: string }>();
   /** Status questions under way, by runner: one at a time, shared. */
   private readonly probes = new Map<string, Promise<TrustedRunnerHealth>>();
   /** cubed's machine events per thread, kept for diagnostics. */
@@ -442,11 +483,16 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     const description = await runner.describe();
     // The runner's bound may have changed since cubed last asked.
     this.options.registry.recordRunnerSlots(thread.runnerId, description.limits.maxActiveVms);
+    // The project's size when the thread was created, else cubed's; the
+    // runner's limits bound both.
+    const wanted = { vcpus: thread.allocation.machine?.vcpus ?? this.sizes.vcpus, memoryMiB: thread.allocation.machine?.memoryMiB ?? this.sizes.memoryMiB };
     const sizes = {
-      vcpus: Math.min(this.sizes.vcpus, description.limits.maxVcpus),
-      memoryMiB: Math.min(this.sizes.memoryMiB, description.limits.maxMemoryMiB),
+      vcpus: Math.min(wanted.vcpus, description.limits.maxVcpus),
+      memoryMiB: Math.min(wanted.memoryMiB, description.limits.maxMemoryMiB),
       diskGiB: Math.min(this.sizes.diskGiB, description.limits.maxDiskGiB),
     };
+    const clamped = sizes.vcpus < wanted.vcpus || sizes.memoryMiB < wanted.memoryMiB
+      ? `; the project asks for ${wanted.vcpus} vCPU and ${gib(wanted.memoryMiB * MIB)}, this runner allows at most ${description.limits.maxVcpus} vCPU and ${gib(description.limits.maxMemoryMiB * MIB)}` : "";
     let record: VmRecord;
     try {
       record = (await runner.vmInspect(ref)).vm;
@@ -464,7 +510,8 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       this.phase(thread, "allocate", allocating);
       this.log.info("allocated", { thread: thread.id, vm: vm.vmId, diskGiB: sizes.diskGiB, source: preparation.source,
         ...(preparation.templateId ? { template: preparation.templateId } : {}), ...(preparation.reason ? { reason: preparation.reason } : {}) });
-      this.events.record(thread.id, "allocated", `${sizes.diskGiB} GiB on ${runner.nodeId}, ${preparation.source}${preparation.templateId ? ` template ${preparation.templateId}` : ""}`);
+      this.events.record(thread.id, "allocated", `${sizes.diskGiB} GiB on ${runner.nodeId}, ${preparation.source}${preparation.templateId ? ` template ${preparation.templateId}` : ""}`
+        + (preparation.reason ? ` (${preparation.reason})` : ""));
     }
     const deadline = Date.now() + SETTLE_TIMEOUT_MS;
     while (record.state === "stopping") {
@@ -485,20 +532,27 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     const seed = vmSeed({ vmId: vm.vmId, hostKey: keys.host, clientKeyPub: keys.clientPub, caPem: hello.caPem, placeholders: vm.placeholders,
       hooks: thread.allocation.hooks ?? NO_HOOKS, fromTemplate: record.template !== undefined });
     this.events.record(thread.id, "start sent", `the runner had it ${record.state}${reattach ? "; attaching again" : ""}`);
-    record = await runner.vmStart(ref, this.epoch(thread), { vcpus: sizes.vcpus, memoryMiB: sizes.memoryMiB, mac, seed, gateway: { peer: hello.peer, frameToken } });
-    this.events.record(thread.id, "start answered", `${record.state}${record.interrupted ? ", interrupted" : ""}${record.error ? `: ${record.error}` : ""}`);
-    if (!MACHINE_STATES_LIVE.has(record.state)) {
-      throw new Error(`the thread machine did not start${record.error ? `: ${record.error.trim().split("\n").slice(-3).join("; ")}` : ""}`);
+    if (booted) this.begin(thread, { name: "boot", detail: `${sizes.vcpus} vCPU, ${gib(sizes.memoryMiB * MIB)} memory, disk from ${record.template ? "the template" : "the base image"}${clamped}` });
+    try {
+      record = await runner.vmStart(ref, this.epoch(thread), { vcpus: sizes.vcpus, memoryMiB: sizes.memoryMiB, mac, seed, gateway: { peer: hello.peer, frameToken } });
+      this.events.record(thread.id, "start answered", `${record.state}${record.interrupted ? ", interrupted" : ""}${record.error ? `: ${record.error}` : ""}`);
+      if (!MACHINE_STATES_LIVE.has(record.state)) {
+        throw new Error(`the thread machine did not start${record.error ? `: ${record.error.trim().split("\n").slice(-3).join("; ")}` : ""}`);
+      }
+      const spec: GatewayAttach = { threadId: thread.id, runner: target, frameToken, mac };
+      await gateway.attach(vm.vmId, spec);
+      this.attached.set(vm.vmId, spec);
+      this.log.info("started", { thread: thread.id, vm: vm.vmId, state: record.state, runner: runner.nodeId });
+      this.events.record(thread.id, "gateway attached");
+      const readyMs = this.options.readyTimeoutMs ?? READY_TIMEOUT_MS;
+      const waitMs = reattach && !booted ? Math.min(readyMs, REATTACH_READY_TIMEOUT_MS) : readyMs;
+      this.events.record(thread.id, "waiting for the guest", `up to ${Math.round(waitMs / 1000)} s`);
+      await this.waitReady(this.guest(thread), runner, ref, waitMs);
+    } catch (error) {
+      if (booted) this.end(thread, { name: "boot", state: "failed", detail: errorText(error) });
+      throw error;
     }
-    const spec: GatewayAttach = { threadId: thread.id, runner: target, frameToken, mac };
-    await gateway.attach(vm.vmId, spec);
-    this.attached.set(vm.vmId, spec);
-    this.log.info("started", { thread: thread.id, vm: vm.vmId, state: record.state, runner: runner.nodeId });
-    this.events.record(thread.id, "gateway attached");
-    const readyMs = this.options.readyTimeoutMs ?? READY_TIMEOUT_MS;
-    const waitMs = reattach && !booted ? Math.min(readyMs, REATTACH_READY_TIMEOUT_MS) : readyMs;
-    this.events.record(thread.id, "waiting for the guest", `up to ${Math.round(waitMs / 1000)} s`);
-    await this.waitReady(this.guest(thread), runner, ref, waitMs);
+    if (booted) this.end(thread, { name: "boot", state: "ok" });
     if (first) this.phase(thread, "boot", booting);
     return { booted };
   }
@@ -534,6 +588,17 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     }
   }
 
+  /** Records the start of a step the thread shows (`vm.steps`); evidence
+   * only, so a registry error never fails the machine's start. */
+  private begin(thread: Thread, step: Pick<StartupStep, "name" | "attempt" | "detail">): void {
+    try { this.options.registry.beginStartupStep(thread.id, step); }
+    catch (error) { this.log.warn("startup step not kept", { thread: thread.id, step: step.name, error }); }
+  }
+  private end(thread: Thread, step: Pick<StartupStep, "name" | "attempt" | "detail" | "memory" | "log"> & { state: "ok" | "failed" }): void {
+    try { this.options.registry.endStartupStep(thread.id, step); }
+    catch (error) { this.log.warn("startup step not kept", { thread: thread.id, step: step.name, error }); }
+  }
+
   /** Records a startup phase of the thread's machine (ms since `since`). */
   private phase(thread: Thread, name: string, since: number): void {
     const current = this.options.registry.getThread(thread.id)?.vm;
@@ -547,7 +612,11 @@ export class ThreadVms implements ThreadMachines, EgressVms {
    * thread: the newest fresh template of the project on this runner, or a
    * template built now, or the base image. Returns the updated thread. */
   private async prepare(thread: Thread, runner: IrohRunnerClient, description: RunnerDescription, sizes: VmSizes, caPem: string): Promise<Thread> {
-    const fresh = (reason: string) => this.options.registry.updateThreadVm(thread.id, { preparation: { source: "fresh", reason } });
+    this.begin(thread, { name: "lookup" });
+    const fresh = (reason: string) => {
+      this.end(thread, { name: "lookup", state: "ok", detail: `no template: ${reason}` });
+      return this.options.registry.updateThreadVm(thread.id, { preparation: { source: "fresh", reason } });
+    };
     const left = thread.vm?.build?.runnerId;
     if (left && left !== thread.runnerId) {
       // A build machine on the runner the thread left (cubed's own, no agent):
@@ -562,7 +631,8 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     if (!this.templates.enabled) return fresh("templates are off (CUBED_TEMPLATES=off)");
     if (!description.capabilities.includes(TEMPLATE_CAPABILITY)) return fresh("the runner has no machine templates (cube-runner 0.8.0+)");
     const hooks = thread.allocation.hooks ?? NO_HOOKS;
-    const key = templateKey({ allocation: thread.allocation, hooks, runner: description, diskGiB: sizes.diskGiB });
+    const keyInput = { allocation: thread.allocation, hooks, runner: description, diskGiB: sizes.diskGiB };
+    const key = templateKey(keyInput);
     let templates: RunnerTemplate[];
     try { templates = await runner.templateList(); }
     catch (error) {
@@ -573,13 +643,26 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     await this.removeTemplates(runner, obsoleteTemplates(templates, { now, ttlMs: this.templates.ttlMs,
       projectExists: id => this.options.registry.getProject(id) !== null }), "obsolete");
     const found = pickTemplate(templates, key, now, this.templates.ttlMs);
-    if (found) return this.options.registry.updateThreadVm(thread.id, { preparation: { source: "template", templateId: found.id, setupBlob: found.meta.setupBlob } });
+    if (found) {
+      this.end(thread, { name: "lookup", state: "ok", detail: `template ${found.id}, prepared ${minutes(now - found.createdAt)} ago` });
+      return this.options.registry.updateThreadVm(thread.id, { preparation: { source: "template", templateId: found.id, setupBlob: found.meta.setupBlob } });
+    }
+    const missing = missingTemplate(templates, { projectId: thread.allocation.projectId, key, parts: templateParts(keyInput), now, ttlMs: this.templates.ttlMs });
     const flight = `${thread.runnerId}:${key}`;
     // One build per runner and key: a thread that comes meanwhile starts fresh.
-    if (this.builds.has(flight)) return fresh("another thread is preparing this project's template");
-    const failed = this.failedBuilds.get(flight);
-    if (failed !== undefined && now - failed < FAILED_BUILD_BACKOFF_MS) return fresh("the project's last template build failed");
-    const building = this.build(thread, runner, sizes, caPem, key);
+    if (this.builds.has(flight)) return fresh(`${missing}; another thread is preparing the project's template now`);
+    // A failed build is not tried again for an hour with the same key,
+    // machine size and commit. The size and the commit are not in the key
+    // (neither changes what a template is for), but a build that ran out of
+    // memory, or that a new commit fixes, is tried again at once.
+    const attempt = `${flight}:${sizes.vcpus}:${sizes.memoryMiB}:${thread.allocation.repositories[0]?.baseOid ?? ""}`;
+    const failed = this.failedBuilds.get(attempt);
+    if (failed !== undefined && now - failed.at < FAILED_BUILD_BACKOFF_MS) {
+      return fresh(`${missing}; the last build of one failed ${minutes(now - failed.at)} ago (${failed.error}); `
+        + `cube tries again in ${minutes(failed.at + FAILED_BUILD_BACKOFF_MS - now)}, or at once with a new commit or another machine size`);
+    }
+    this.end(thread, { name: "lookup", state: "ok", detail: `${missing}: building one` });
+    const building = this.build(thread, runner, sizes, caPem, key, templateParts(keyInput));
     this.builds.set(flight, building);
     try {
       const template = await building;
@@ -589,10 +672,10 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       // No room, or the runner went away: the caller may move the thread;
       // cubed stopping: retried later.
       if (refusal(error) || contactLost(error) || this.closed) throw error;
-      this.failedBuilds.set(flight, Date.now());
       const message = error instanceof Error ? error.message : String(error);
+      this.failedBuilds.set(attempt, { at: Date.now(), error: message });
       this.log.warn("template build failed; starting fresh", { thread: thread.id, runner: runner.nodeId, error: message });
-      return fresh(`the template build failed: ${message}`);
+      return this.options.registry.updateThreadVm(thread.id, { preparation: { source: "fresh", reason: `the template build failed: ${message}` } });
     } finally { this.builds.delete(flight); }
   }
 
@@ -603,7 +686,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
    * `.agents/setup` in it, seals it and powers it off, and the runner
    * publishes its disk. Anything short of that success publishes nothing
    * and the build machine is deleted. */
-  private async build(thread: Thread, runner: IrohRunnerClient, sizes: VmSizes, caPem: string, key: string): Promise<{ id: string; meta: TemplateMeta }> {
+  private async build(thread: Thread, runner: IrohRunnerClient, sizes: VmSizes, caPem: string, key: string, parts: TemplateParts): Promise<{ id: string; meta: TemplateMeta }> {
     const started = Date.now();
     const build = { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") }, key, runnerId: thread.runnerId };
     this.options.registry.updateThreadVm(thread.id, { build });
@@ -615,6 +698,9 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     let transport: SshGuestTransport | undefined;
     let leases: LeaseStore | undefined;
     let published = false;
+    // The step under way, marked failed if the build stops there.
+    let step: StartupStep["name"] = "build-boot";
+    this.begin(thread, { name: step, detail: `${sizes.vcpus} vCPU, ${gib(sizes.memoryMiB * MIB)} memory, from the base image` });
     try {
       let since = Date.now();
       await runner.vmAllocate(ref, this.epoch(thread), sizes.diskGiB);
@@ -636,20 +722,32 @@ export class ThreadVms implements ThreadMachines, EgressVms {
         gateway: { binary, control: this.controlSocket() } });
       await this.waitReady(transport, runner, ref, this.options.readyTimeoutMs ?? READY_TIMEOUT_MS);
       phases["build-boot"] = Date.now() - since;
+      this.end(thread, { name: step, state: "ok" });
 
       // cubed's own commands: the build machine never has an agent.
       since = Date.now();
+      step = "build-prepare";
+      this.begin(thread, { name: step, detail: "checkout, pre-setup and .agents/setup in the build machine" });
+      this.buildTransports.set(thread.id, transport);
       leases = new LeaseStore(path.join(directory, "lease"));
       const owner = threadAgent(thread);
       const workspace = new VmWorkspace({ guest: transport, leases, owner, binding: JSON.stringify({ build: build.vmId, thread: thread.id }) });
       const prepared = await own(workspace, owner, "cube:build:prepare", preparationScript(thread.allocation, { kind: "fresh" }), 1800000);
       const outcome = preparationOutcome(prepared);
-      if (outcome.error) throw new Error(outcome.error);
+      if (outcome.error) {
+        // A hook that was killed printed nothing more: its log is still in the machine.
+        const log = outcome.log ?? (outcome.running ? await readStartupLog(transport, "build").then(read => read.text ? stepLog(read.text) : undefined, () => undefined) : undefined);
+        throw new StepFailure(outcome.error, outcome.memory, log);
+      }
       const failedHook = Object.entries(outcome.hooks).find(([, hook]) => hook.status === "failed");
-      if (failedHook) throw new Error(`${failedHook[0]} failed (exit ${failedHook[1].exitCode}) in the build machine`);
+      if (failedHook) throw new StepFailure(`${failedHook[0]} failed (exit ${failedHook[1].exitCode}) in the build machine`, outcome.memory, outcome.log);
       phases["build-prepare"] = Date.now() - since;
+      this.buildTransports.delete(thread.id);
+      this.end(thread, { name: step, state: "ok", detail: hookSummary(outcome.hooks), ...(outcome.memory ? { memory: outcome.memory } : {}) });
 
       since = Date.now();
+      step = "build-seal";
+      this.begin(thread, { name: step, detail: "removing the build machine's identity, then powering it off" });
       const sealed = await own(workspace, owner, "cube:build:seal", `sudo -n ${GUEST_HELPER_PATH} seal`, 900000);
       const sealOutput = sealed.state === "succeeded" ? Buffer.from(sealed.output).toString("utf8") : "";
       if (sealed.state !== "succeeded" || sealed.exitCode !== 0 || !sealOutput.includes("sealed at power-off")) {
@@ -669,10 +767,13 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       }
       if (stopped.interrupted) throw new Error("the build machine did not power off cleanly");
       phases["build-seal"] = Date.now() - since;
+      this.end(thread, { name: step, state: "ok" });
 
       since = Date.now();
+      step = "build-publish";
+      this.begin(thread, { name: step });
       const meta: TemplateMeta = { format: TEMPLATE_FORMAT, projectId: thread.allocation.projectId, setupBlob: outcome.setupBlob ?? "none",
-        commit: thread.allocation.repositories[0]?.baseOid ?? null };
+        commit: thread.allocation.repositories[0]?.baseOid ?? null, parts };
       let template: RunnerTemplate;
       try { template = await runner.vmPublish(ref, this.epoch(thread), key, JSON.stringify(meta)); }
       catch (error) {
@@ -682,6 +783,7 @@ export class ThreadVms implements ThreadMachines, EgressVms {
       }
       published = true;
       phases["build-publish"] = Date.now() - since;
+      this.end(thread, { name: step, state: "ok", detail: `template ${template.id}, ${gib(template.bytes)}` });
       this.log.info("template published", { thread: thread.id, runner: runner.nodeId, template: template.id, bytes: template.bytes,
         ms: Date.now() - started, phases });
       for (const [name, ms] of Object.entries(phases)) this.phase(thread, name, Date.now() - ms);
@@ -692,7 +794,12 @@ export class ThreadVms implements ThreadMachines, EgressVms {
           projectExists: id => this.options.registry.getProject(id) !== null, projectId: meta.projectId, keep: template.id }), "superseded");
       } catch (error) { this.log.warn("removing superseded templates failed", { runner: runner.nodeId, error }); }
       return { id: template.id, meta };
+    } catch (error) {
+      if (!published) this.end(thread, { name: step, state: "failed", detail: `${errorText(error)}; no template was published`,
+        ...(error instanceof StepFailure && error.memory ? { memory: error.memory } : {}), ...(error instanceof StepFailure && error.log ? { log: error.log } : {}) });
+      throw error;
     } finally {
+      this.buildTransports.delete(thread.id);
       await transport?.close().catch(() => {});
       leases?.close();
       if (published) {
@@ -884,6 +991,12 @@ export class ThreadVms implements ThreadMachines, EgressVms {
     };
   }
 
+  async startupLog(thread: Thread): Promise<StartupLog | null> {
+    const build = this.buildTransports.get(thread.id);
+    const transport = build ?? (thread.vm && this.attached.has(thread.vm.vmId) ? this.guest(thread) : null);
+    return transport ? readStartupLog(transport, build ? "build" : "thread") : null;
+  }
+
   private async reattach(client: GatewayClient): Promise<void> {
     // SSH masters ran through the old gateway's dial; the next call opens a new one.
     await Promise.allSettled([...this.transports.values()].map(transport => transport.close()));
@@ -1016,9 +1129,11 @@ function checkouts(allocation: WorkspaceAllocation): Array<{ dir: string; url: s
 
 /** Shell helpers shared by the preparation and resume scripts. `hook NAME
  * FILE LOG` runs FILE (if it is executable) as the agent's account in
- * /workspace with its output in ~/.cache/cube/LOG and prints
- * `cube-hook NAME ok|failed:<exit>|absent <ms>`; the same line, with the
- * time it ended, goes to ~/.cache/cube/NAME.status for `cube hooks`. */
+ * /workspace with its output in ~/.cache/cube/LOG (the previous try's moves
+ * to LOG.prev) and prints `cube-hook NAME ok|failed:<exit>|absent <ms>`; the
+ * same line, with the time it ended, goes to ~/.cache/cube/NAME.status for
+ * `cube hooks`. While it runs, `cube-hook-start NAME` is printed and
+ * ~/.cache/cube/running names it and its log (what the thread shows live). */
 const HOOK_SHELL = [
   "logs=\"${HOME:-/tmp}/.cache/cube\"",
   "hooks=\"${CUBE_HOOKS:-/etc/cube/hooks}\"",
@@ -1028,11 +1143,14 @@ const HOOK_SHELL = [
   "hook() {",
   "  name=$1 file=$2 log=\"$logs/$3\"",
   "  if [ ! -x \"$file\" ]; then outcome \"$name\" absent 0; return 0; fi",
+  "  if [ -e \"$log\" ]; then mv -f \"$log\" \"$log.prev\"; fi",
+  "  echo \"cube-hook-start $name\"; echo \"$name $3\" >\"$logs/running\"",
   "  start=$(ms)",
   "  \"$file\" >\"$log\" 2>&1 </dev/null; code=$?",
+  "  rm -f \"$logs/running\"",
   "  if [ \"$code\" -eq 0 ]; then outcome \"$name\" ok $(( $(ms) - start )); return 0; fi",
   "  outcome \"$name\" \"failed:$code\" $(( $(ms) - start ))",
-  "  echo \"$name failed (exit $code); see $log\"; tail -n 5 \"$log\"",
+  "  echo \"$name failed (exit $code); see $log\"; tail -n 20 \"$log\"",
   "  return 1",
   "}",
 ];
@@ -1111,6 +1229,12 @@ export function resumeScript(): string {
 
 export interface PreparationOutcome {
   hooks: Record<string, HookOutcome>;
+  /** The command's memory when it ended (a guest helper that reports it). */
+  memory?: CommandMemory;
+  /** The end of the failed hook's log, as the script printed it. */
+  log?: string;
+  /** The hook that had started and not ended when the command stopped. */
+  running?: string;
   /** The primary checkout's `.agents/setup` blob ("none" without one). */
   setupBlob?: string;
   /** A template's setup differed from the pinned one; setup ran here. */
@@ -1125,21 +1249,75 @@ export function preparationOutcome(state: Awaited<ReturnType<typeof settleOperat
   const text = Buffer.from(state.output).toString("utf8");
   const hooks: Record<string, HookOutcome> = {};
   let setupBlob: string | undefined;
+  // The hook that had started and not ended when the command stopped.
+  let running: string | undefined;
+  // The lines the script printed of the last hook that failed.
+  let failureLog: string[] | null = null;
+  let capturing = false;
   for (const line of text.split("\n")) {
+    if (/^[a-z-]+ failed \(exit \d+\); see /.test(line)) { failureLog = []; capturing = true; continue; }
+    if (line.startsWith("cube-") || line === "provisioned" || line === "resumed") capturing = false;
+    else if (capturing) failureLog!.push(line);
+    const started = /^cube-hook-start ([a-z-]+)$/.exec(line.trim());
+    if (started) running = started[1];
     const hook = /^cube-hook ([a-z-]+) (ok|absent|skipped|notrun|failed:(\d+)) (\d+)$/.exec(line.trim());
     if (hook) {
       const status = hook[2].startsWith("failed") ? "failed" : hook[2] as HookOutcome["status"];
       hooks[hook[1]] = { status, ms: Number(hook[4]), at, ...(hook[3] ? { exitCode: Number(hook[3]) } : {}) };
+      if (hook[1] === running) running = undefined;
     }
     const blob = /^cube-setup-blob ([0-9a-f]{40}|[0-9a-f]{64}|none)$/.exec(line.trim());
     if (blob) setupBlob = blob[1];
   }
   const stale = /^cube-template stale$/m.test(text);
+  const memory = { ...(state.memory ? { memory: state.memory } : {}), ...(failureLog?.join("\n").trim() ? { log: stepLog(failureLog.join("\n")) } : {}),
+    ...(running ? { running } : {}) };
   if (state.exitCode !== 0) {
+    const what = running ?? "the preparation";
+    const stopped = stoppedBecause(state);
+    if (stopped) return { hooks, stale, ...(setupBlob ? { setupBlob } : {}), ...memory, error: `${what} was stopped: ${stopped}` };
     const tail = text.trim().split("\n").filter(line => !line.startsWith("cube-")).slice(-4).join("; ");
-    return { hooks, stale, ...(setupBlob ? { setupBlob } : {}), error: `checking out the project failed${tail ? `: ${tail}` : ""}` };
+    return { hooks, stale, ...(setupBlob ? { setupBlob } : {}), ...memory, error: `checking out the project failed${tail ? `: ${tail}` : ""}` };
   }
-  return { hooks, stale, ...(setupBlob ? { setupBlob } : {}) };
+  return { hooks, stale, ...(setupBlob ? { setupBlob } : {}), ...memory };
+}
+
+/** Why a command that did not exit on its own stopped, in words; null for
+ * one that exited with its own status. */
+export function stoppedBecause(state: { exitCode: number | null; termination: string; serviceResult?: string; memory?: CommandMemory }): string | null {
+  const oom = state.serviceResult === "oom-kill" || (state.exitCode === null && (state.memory?.oomKills ?? 0) > 0);
+  if (oom) return `the machine ran out of memory${state.memory ? ` (this command used up to ${gib(state.memory.peakBytes)}; the machine has ${gib(state.memory.totalBytes)})` : ""}`;
+  if (state.termination === "timedOut") return "it did not finish within 30 minutes";
+  if (state.exitCode === null) return `it was killed${state.serviceResult && !["success", "exit-code", "signal"].includes(state.serviceResult) ? ` (${state.serviceResult})` : " by a signal"}`;
+  return null;
+}
+
+/** A step that failed, with the memory its command reported and the end
+ * of the failed hook's log. */
+export class StepFailure extends Error {
+  readonly memory: CommandMemory | undefined;
+  log: string | undefined;
+  constructor(message: string, memory?: CommandMemory, log?: string) { super(message); this.name = "StepFailure"; this.memory = memory; this.log = log; }
+}
+
+/** The last lines of a log as a step keeps them: escaped, redacted, bounded. */
+export function stepLog(text: string): string {
+  return clean(text.trimEnd().split("\n").slice(-20).join("\n"), STEP_LOG_BYTES * 2).slice(-STEP_LOG_BYTES);
+}
+
+export const MIB = 1024 * 1024;
+/** Bytes as GB with one decimal ("3.5 GB"), or MB below one GB. */
+export function gib(bytes: number): string {
+  return bytes >= 1024 * MIB ? `${(bytes / (1024 * MIB)).toFixed(1)} GB` : `${Math.round(bytes / MIB)} MB`;
+}
+/** A duration as whole minutes ("12 min", "under a minute"). */
+function minutes(ms: number): string {
+  const whole = Math.round(ms / 60000);
+  return whole < 1 ? "under a minute" : `${whole} min`;
+}
+/** The hooks' outcomes in a few words ("pre-setup ok, setup absent"). */
+function hookSummary(hooks: Record<string, HookOutcome>): string {
+  return Object.entries(hooks).map(([name, hook]) => `${name} ${hook.status}${hook.exitCode !== undefined ? ` (exit ${hook.exitCode})` : ""}`).join(", ");
 }
 
 /** The release check: clean means every checkout is at its pinned commit
@@ -1190,7 +1368,7 @@ export async function provisionWorkspace(workspace: VmWorkspace, owner: Workspac
   mode: PreparationMode = { kind: "fresh" }): Promise<PreparationOutcome> {
   const state = await own(workspace, owner, `cube:provision:${attempt}`, preparationScript(allocation, mode), 1800000);
   const outcome = preparationOutcome(state);
-  if (outcome.error) throw new Error(outcome.error);
+  if (outcome.error) throw new StepFailure(outcome.error, outcome.memory, outcome.log);
   return outcome;
 }
 
@@ -1207,11 +1385,12 @@ export async function provisioned(workspace: VmWorkspace, owner: WorkspaceOwner,
 }
 
 /** Runs the resume hooks for this boot of the machine (see `resumeScript`). */
-export async function resumeWorkspace(workspace: VmWorkspace, owner: WorkspaceOwner): Promise<{ hooks: Record<string, HookOutcome>; already: boolean }> {
+export async function resumeWorkspace(workspace: VmWorkspace, owner: WorkspaceOwner): Promise<{ hooks: Record<string, HookOutcome>; already: boolean; memory?: CommandMemory; log?: string }> {
   const state = await own(workspace, owner, epoch => `cube:resume:${epoch}`, resumeScript(), 1800000);
   const outcome = preparationOutcome(state);
-  if (outcome.error) throw new Error(outcome.error.replace("checking out the project failed", "the resume hooks did not run"));
-  return { hooks: outcome.hooks, already: state.state === "succeeded" && /^cube-resume already$/m.test(Buffer.from(state.output).toString("utf8")) };
+  if (outcome.error) throw new StepFailure(outcome.error.replace("checking out the project failed", "the resume hooks did not run").replace("the preparation was", "the resume hooks were"), outcome.memory, outcome.log);
+  return { hooks: outcome.hooks, already: state.state === "succeeded" && /^cube-resume already$/m.test(Buffer.from(state.output).toString("utf8")),
+    ...(outcome.memory ? { memory: outcome.memory } : {}), ...(outcome.log ? { log: outcome.log } : {}) };
 }
 
 /** Base64 per bootstrap command: the helper takes commands up to 8 KiB. */
