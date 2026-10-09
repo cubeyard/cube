@@ -415,14 +415,23 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844,
     if (viewport.width <= 640) await page.getByRole("button", { name: "show threads" }).click();
     await page.locator(".work-thread").first().waitFor();
     assert.deepEqual(await page.locator(".work-group h3").allTextContents(), ["cube", "site"], "grouped by project, newest first");
-    assert.deepEqual(await page.locator(".work-state").allTextContents(), ["aaaaaaa1 · working", "ccccccc3 · archived · stopped", "bbbbbbb2 · turn ended"]);
+    assert.deepEqual(await page.locator(".work-state").allTextContents(), ["aaaaaaa1 · working", "bbbbbbb2 · turn ended"], "archived threads are not listed");
+    assert.equal(await page.getByText("old work").count(), 0);
     assert.equal(await page.locator(".work-thread a.work-title").first().getAttribute("href"), "#/t/aaaaaaa1-0000-4000-8000-000000000000");
-    assert.equal(await page.locator(".work-thread.archived a").count(), 0, "an archived thread has no thread page to open");
-    await page.getByText("2 older archived not shown").waitFor();
+    await page.getByText("3 archived not shown").waitFor();
     assert.match(await page.locator(".work-summary").textContent() ?? "", /^2 open · 1 running$/);
     const panel = await box(page, ".work-panel");
     assert.ok(await page.locator(".work-body").evaluate(element => element.scrollWidth <= element.clientWidth), "nothing overflows the panel sideways");
     assert.ok(panel.right <= viewport.width + 0.5, "the panel fits the screen");
+
+    // a thread archived meanwhile leaves the list on the next read
+    host.overview = { threads: [thread("aaaaaaa1", "cube", "fix the gateway host check", "completed"), thread("bbbbbbb2", "site", "a much longer thread title that has to wrap or clamp in the narrow panel without overflowing it at all", "stopped", true),
+      thread("ccccccc3", "cube", "old work", "stopped", true)], archived: { shown: 2, total: 4 }, unknown: 0 };
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await page.getByText("4 archived not shown").waitFor();
+    assert.deepEqual(await page.locator(".work-group h3").allTextContents(), ["cube"], "a project with only archived threads leaves the list");
+    assert.deepEqual(await page.locator(".work-state").allTextContents(), ["aaaaaaa1 · turn ended"], "the thread that is not archived stays");
+    assert.match(await page.locator(".work-summary").textContent() ?? "", /^1 open$/);
 
     // no model-inferred wish list: no section, no request for one
     assert.equal(await page.locator(".work-wishes, .work-wish").count(), 0);
