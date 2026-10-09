@@ -26,6 +26,7 @@ import { imageNote } from "./thread-images.ts";
 import { outsideView, threadViewBlock, threadViewNote, type ThreadViewLookup } from "./optchat-thread-view.ts";
 import type { ThreadView } from "./thread-events.ts";
 import { redact } from "./vm-diagnostics.ts";
+import { OPTCHAT_ROOT } from "../../claude-mod/hooks/tools.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
 import { PENDING_ID, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
 import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
@@ -213,7 +214,17 @@ const HISTORY_TEXT = 2000;
 const HISTORY_TOOL = 400;
 const HISTORY_ANSWER = 4000;
 
-function historyLine(event: ThreadEvent, cap: number): string {
+/** A thread's call that copies this chat's view: Pi's zoom tool, or Claude
+ * Code's Read of the mod's /cube/optchat/zoom paths. */
+const zoomCall = (event: Extract<ThreadEvent, { type: "tool-call" }>) => event.name === "zoom"
+  || (event.name === "Read" && typeof (event.input as { file_path?: unknown } | null)?.file_path === "string"
+    && (event.input as { file_path: string }).file_path.startsWith(`${OPTCHAT_ROOT}/zoom/`));
+/** Zoomed lines, also as Claude Code prints a Read result (each line after its number and a tab). */
+const ZOOMED_OUTPUT = /^\s*(?:\d+\t)?\d+\+\d+\|/;
+
+/** `zooms`: the call ids of the page's zoom calls; a result whose call is on
+ * an earlier page is known by its zoomed lines. */
+function historyLine(event: ThreadEvent, cap: number, zooms: ReadonlySet<string>): string {
   if (event.type === "user-message") return `user: ${event.view ? `(${threadViewNote(event.view)}) ` : ""}${capText(event.text, cap)}`;
   if (event.type === "assistant-text") return `thread: ${capText(event.text, cap)}`;
   const tool = Math.min(cap, HISTORY_TOOL);
@@ -221,7 +232,8 @@ function historyLine(event: ThreadEvent, cap: number): string {
   // The images a result shows are named, never sent: the chat sees that there were some.
   const images = imageNote(event.images?.length ?? 0);
   // A thread's zoom into this chat's view copies the chat: a pointer, as the log keeps its own.
-  const output = ZOOMED.test(event.output) ? ZOOM_ECHO : capText(event.output, tool);
+  const zoomed = event.name === "zoom" || zooms.has(event.callId) || ZOOMED_OUTPUT.test(event.output);
+  const output = zoomed ? ZOOM_ECHO : capText(event.output, tool);
   return `result ${event.name}${event.isError ? " (error)" : ""}: ${[images, output].filter(Boolean).join(" ")}`;
 }
 
@@ -264,7 +276,8 @@ export function formatHistory(id: string, record: ThreadRecord, report: ReportSt
   else if (start === end) lines.push(`messages: none before #${end} (${total} in all)`);
   else {
     lines.push(`messages #${start}–#${end - 1} of ${total}, oldest first${start > 0 ? `; earlier: history("${short(id)}", before: ${start})` : ""}`);
-    events.forEach((event, k) => lines.push(`#${start + k} ${historyLine(event, cap)}`));
+    const zooms = new Set(events.flatMap(event => event.type === "tool-call" && zoomCall(event) ? [event.callId] : []));
+    events.forEach((event, k) => lines.push(`#${start + k} ${historyLine(event, cap, zooms)}`));
   }
   return lines.join("\n");
 }

@@ -232,7 +232,11 @@ view "at spawn time (after settle)"). A thread OptChat starts gets that:
   from its stored first message. `zoom(id, 1)` gives a message whole, other
   projects' included, redacted as the view is. A thread's zoomed lines come
   back through `history` as a pointer, as OptChat's own zoom results are
-  logged, so they never come back into the chat.
+  logged, so they never come back into the chat. `history` knows them by
+  their call (Pi's `zoom`, Claude Code's Read of `/cube/optchat/zoom/…`); a
+  result whose call is on an earlier page, by its lines, numbered or not
+  (Claude Code prints a Read result with each line after its number and a
+  tab). Other Read results show as they are.
 
 `packages/server/test/optchat-thread-view-test.ts` runs it through real
 cubed over local guests: one Pi and one Claude Code (the fake `claude`)

@@ -53,7 +53,7 @@ const ASK = "alpha: start the work; the user's own words zebra-7";
 const PI_TASK = "count the files in alpha";
 // The thread computes PEAR42 itself: only its own step shows it.
 // It opens the view as Pi does: a line, a date, and a line past the view.
-const CLAUDE_TASK = "run echo PEAR$((6*7))\nread-at /cube/optchat/zoom/0+1\nread-at /cube/optchat/date/0\nread-at /cube/optchat/zoom/4096+1\nsay claude done";
+const CLAUDE_TASK = "run echo PEAR$((6*7))\nread-numbered-at /cube/optchat/zoom/0+1\nread-at /cube/optchat/date/0\nread-at /cube/optchat/zoom/4096+1\nread-numbered-at /workspace/README\nsay claude done";
 /** What each Pi thread's model got as its first message, by its task's first line. */
 const firstMessages = new Map<string, string>();
 /** Each Pi thread's tools and what its zoom and date answered, by the same key. */
@@ -165,7 +165,8 @@ try {
   assert.equal(said[0], `read the view of messages 0-${claudeSplit.view!.messages - 1}`);
   assert.ok(said.includes("claude done"), said.join(" | "));
   const reads = claudeDone.events.flatMap(event => event.type === "tool-result" && event.name === "Read" ? [event.output] : []);
-  assert.deepEqual(reads, [whole, dated, `No line 4096+1 in your view: it covers messages 0 to ${claudeSplit.view!.messages - 1}.`], "Claude Code reads the same through /cube/optchat");
+  // As Claude Code prints a Read result, numbered: the same lines.
+  assert.deepEqual(reads, [`1\t${whole}`, dated, `No line 4096+1 in your view: it covers messages 0 to ${claudeSplit.view!.messages - 1}.`, "1\thello"], "Claude Code reads the same through /cube/optchat");
   assert.ok(claudeDone.events.some(event => event.type === "tool-result" && event.output.includes("PEAR42")), "the claude thread ran its own step");
   await chatSettled(2);
 
@@ -191,12 +192,24 @@ try {
   await chatSettled(4);
 
   // OptChat's history of a thread names the view instead of repeating it.
-  const record = await (await import("../src/optchat-threads.ts")).cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [],
-    runners: () => ({ runners: [], at: Date.now() }) as never, latestCommits: () => { throw new Error("unused"); } }).history(pi!.id);
+  const adapter = (await import("../src/optchat-threads.ts")).cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [],
+    runners: () => ({ runners: [], at: Date.now() }) as never, latestCommits: () => { throw new Error("unused"); } });
+  const record = await adapter.history(pi!.id);
   const page = formatHistory(pi!.id, record!, "delivered");
   assert.match(page, new RegExp(`\\n#0 user: \\(with optchat's view of messages 0–${piSplit.view!.messages - 1}, taken ${piSplit.view!.taken}\\) ${PI_TASK}\\n`));
   assert.ok(!page.includes("<optchat-view>") && !page.includes(ASK), "the view's lines stay out of the chat");
   assert.ok(page.includes(ZOOM_ECHO), "a thread's zoom comes back as a pointer");
+  // Claude Code's zoom is a Read of /cube/optchat/zoom, its output numbered:
+  // known by its call, while a Read of a workspace file shows as it is.
+  const claudeRecord = (await adapter.history(claude!.id, { limit: 40 }))!;
+  const claudePage = formatHistory(claude!.id, claudeRecord, "delivered");
+  assert.ok(!claudePage.includes(ASK), `the claude thread's zoom does not repeat the chat:\n${claudePage}`);
+  assert.match(claudePage, new RegExp(`\\n#\\d+ result Read: \\${ZOOM_ECHO.slice(0, -1)}\\)\\n`));
+  assert.match(claudePage, /\n#\d+ result Read: 1\thello\n/, "a numbered workspace Read stays as it is");
+  // A result whose call is on an earlier page is known by its numbered lines.
+  const tail = { ...claudeRecord, transcript: { ...claudeRecord.transcript!, events: claudeRecord.transcript!.events.filter(event => event.type === "tool-result" && event.output.startsWith("1\t0+0|")) } };
+  assert.equal(tail.transcript.events.length, 1);
+  assert.ok(formatHistory(claude!.id, tail, "delivered").includes(`result Read: ${ZOOM_ECHO}`));
 
   // A restart: every thread opens again with the same first message, sent once.
   const before = { pi: (await history(pi!.id)).events, claude: (await history(claude!.id)).events };

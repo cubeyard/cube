@@ -6,7 +6,9 @@
  *
  * Steps, one per line: `run <command>`, `slow <command>`, `write <file> <text>`,
  * `edit <file> <old> <new>`, `read <file>`, `write-at <absolute path> <text>` and
- * `read-at <absolute path>` (the mod's /cube/artifacts paths too), `say <text>`, `crash`, `fail`,
+ * `read-at <absolute path>` (the mod's /cube/artifacts paths too), `read-numbered-at <absolute
+ * path>` (its text printed as Claude Code prints a Read result: each line
+ * after its number and a tab), `say <text>`, `crash`, `fail`,
  * `id <tool_use_id> run <command>`, `ignore-interrupt`, `ignore-term`,
  * `background <task_id> <ms> <description>` (a background Agent that
  * finishes after ms: Claude Code's task_started and task_notification
@@ -105,7 +107,7 @@ async function say(text: string): Promise<void> {
   emit({ type: "assistant", parent_tool_use_id: null, message: { id, role: "assistant", model, content: [{ type: "text", text }] } });
 }
 
-async function tool(id: string, name: string, toolInput: Record<string, unknown>, signal: AbortSignal): Promise<void> {
+async function tool(id: string, name: string, toolInput: Record<string, unknown>, signal: AbortSignal, numbered = false): Promise<void> {
   emit({ type: "assistant", parent_tool_use_id: null, message: { id: `msg_${randomUUID()}`, role: "assistant", model, content: [{ type: "tool_use", id, name, input: toolInput }] } });
   const scope: ToolScope = { client, token: env.CUBE_WORKSPACE_TOKEN!, root: env.CUBE_WORKSPACE_ROOT!,
     ...(env.CUBE_WORKSPACE_REAL_ROOT ? { realRoot: env.CUBE_WORKSPACE_REAL_ROOT } : {}), signal };
@@ -125,11 +127,14 @@ async function tool(id: string, name: string, toolInput: Record<string, unknown>
   const content = "deny" in result ? result.deny
     : image ? [{ type: "image", source: { type: "base64", data: image.base64, media_type: image.type } }]
     : name === "Bash" ? [(result as { stdout: string }).stdout, (result as { stderr: string }).stderr].filter(Boolean).join("\n")
-    : name === "Read" ? (result as { file: { content: string } }).file.content
+    : name === "Read" ? numberedLines((result as { file: { content: string } }).file.content, numbered)
     : artifact ? (result as { content: string }).content
     : `${name} ok: ${String(toolInput.file_path)}`;
   emit({ type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content, is_error: "deny" in result }] }, ...image ? { tool_use_result: result } : {} });
 }
+
+/** A Read result's text, with `numbered` as Claude Code prints it to the model and in stream-json. */
+const numberedLines = (text: string, numbered: boolean) => numbered ? text.split("\n").map((line, k) => `${k + 1}\t${line}`).join("\n") : text;
 
 /** A background Agent: launched within the turn, its own messages carry
  * its tool use id, and its notification comes when it finishes. */
@@ -172,7 +177,7 @@ async function turn(text: string, prompted = true): Promise<void> {
       else if (verb === "read") await tool(id, "Read", { file_path: `${env.CUBE_WORKSPACE_ROOT}/${rest[0]}` }, controller.signal);
       // An absolute path (the mod's /cube/artifacts); "\n" in the text is a line break.
       else if (verb === "write-at") await tool(id, "Write", { file_path: rest[0], content: rest.slice(1).join(" ").replace(/\\n/g, "\n") }, controller.signal);
-      else if (verb === "read-at") await tool(id, "Read", { file_path: rest[0] }, controller.signal);
+      else if (verb === "read-at" || verb === "read-numbered-at") await tool(id, "Read", { file_path: rest[0] }, controller.signal, verb === "read-numbered-at");
       else if (verb === "hang") await new Promise(() => {});
       else if (verb === "background" || verb === "background-quiet" || verb === "background-later") background(id, rest[0]!, Number(rest[1]), rest.slice(2).join(" "), verb !== "background-quiet", verb === "background-later");
       else if (verb === "monitor") emit({ type: "system", subtype: "task_started", task_id: rest[0], description: "watch a log", task_type: "monitor", is_backgrounded: true });
