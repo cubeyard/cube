@@ -2,8 +2,8 @@
  * post-merge review (show-me style, with hostile content an agent might
  * quote), a Pi thread writes notes over a local guest. The user opens the
  * review from the chat, selects text and comments, sends comments to the
- * chat and to a working thread (they wait until its turn ends), reads an
- * older revision, and confirms a merge after it is refused for a moved head;
+ * chat and to a working thread (they wait until its turn ends), sees a
+ * second thread's revision of the notes named as its, reads an older revision, and confirms a merge after it is refused for a moved head;
  * the chat hears of the failed try and of the merge, once each, and the
  * page says it was told.
  * Faux model and fake GitHub; disposable state. Screenshots go to
@@ -203,6 +203,20 @@ try {
   await page.getByText("Thanks: the guest is the thread's own VM").waitFor({ timeout: 30_000 });
   await shoot(page, "07-thread-received");
 
+  // Another thread of the project reads the notes, then revises them; they stay the first thread's.
+  const reviewer = (await api("/api/threads", { projectId: project.id, requestId: "reviewer", text: `review the notes ${notes.id}` })).id as string;
+  const shared = await until(() => api(`/api/artifacts/${notes.id}`), value => value.artifact.head === 3, "the second thread's revision");
+  assert.deepEqual(shared.artifact.author, { kind: "thread", thread }, "the author stays");
+  assert.deepEqual(shared.revisions.at(-1).editor, { kind: "thread", thread: reviewer });
+  await page.goto(`${url}/#/a/${notes.id}`);
+  await page.locator(".artifact-provenance", { hasText: `revision 3 · ` }).waitFor();
+  await page.locator(".artifact-provenance", { hasText: `pi thread · [${reviewer.slice(0, 8)}]` }).waitFor();
+  await page.locator(".strip-state", { hasText: "by thread" }).waitFor();
+  await shoot(page, "07b-revised-by-another-thread");
+  await page.goto(`${url}/#/a/${notes.id}?rev=2`);
+  await page.locator(".strip-note", { hasText: "revision 2 of 3" }).waitFor();
+  assert.equal(await page.locator(".artifact-provenance", { hasText: `[${reviewer.slice(0, 8)}]` }).count(), 0, "the author's own revision names no other thread");
+
   // A new revision: the old comments are found in it; the old revision reads as older.
   await page.goto(`${url}/#/chat`);
   await page.locator(".composer textarea").fill(`please revise the review ${(await api("/api/artifacts")).artifacts.find((item: { title: string }) => item.title.startsWith("post-merge")).id}`);
@@ -360,7 +374,7 @@ try {
 
   assert.deepEqual(dialogs, [], "nothing in a document opened a dialog");
   assert.deepEqual(errors, [], "no page errors");
-  console.log("ok: artifacts in the browser: review from the chat, inert hostile content, diagrams, selection comments to the chat and to a working thread, older revision, merge refused then confirmed once and told to the chat, phone layout");
+  console.log("ok: artifacts in the browser: review from the chat, inert hostile content, diagrams, selection comments to the chat and to a working thread, a revision by another thread, older revision, merge refused then confirmed once and told to the chat, phone layout");
 } finally {
   await browser.close();
   await close();

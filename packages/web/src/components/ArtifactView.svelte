@@ -328,6 +328,8 @@
   };
   const provenance = (item: NonNullable<typeof meta>) => [
     item.provenance.agent === "optchat" ? "optchat" : item.provenance.agent === "pi" ? "pi thread" : "claude code thread",
+    // A revision another thread wrote names that thread; the author is in the strip above.
+    item.editor.kind === "thread" && (artifact?.author.kind !== "thread" || artifact.author.thread !== item.editor.thread) ? `[${item.editor.thread.slice(0, 8)}]` : null,
     item.provenance.model,
     item.provenance.source ? `from ${item.provenance.source.path} · sha ${item.provenance.source.sha256.slice(0, 10)}` : null,
     item.provenance.call ? `call ${item.provenance.call.slice(0, 18)}` : null,
