@@ -2,8 +2,9 @@
 
 An artifact is a document OptChat or a thread writes for the user to read
 beside the chat: a post-merge review, a plan, a report. The user selects text
-in it and comments; the comments go back to whoever wrote it, as an ordinary
-message. An artifact may also offer typed actions (today only a pull
+in it and comments; the comments go back to its author, as an ordinary
+message. Threads of the same project, and OptChat for its threads, may
+revise one another's artifacts. An artifact may also offer typed actions (today only a pull
 request merge) that run only when the user confirms them on its page.
 
 The chat stays the only place to talk. An artifact is a linked work surface,
@@ -26,28 +27,63 @@ packages/web/src/components/ArtifactView.svelte, ArtifactList.svelte
 
 ## Who writes and reads what
 
-| agent | writes | reads |
+| agent | creates | reads and revises |
 | --- | --- | --- |
-| OptChat | its own (`artifact_write`; `project` names whose repositories actions may use) | its own and those of the threads it started (`artifact_read`) |
-| a Pi thread | its own (`artifact_write`, body inline or from a workspace file with `path`) | its own |
-| a Claude Code thread | its own: `Write /cube/artifacts/<name>.md` (or `.json` as `{title?, body, actions?}`) | its own: `Read /cube/artifacts/<name>.md`, `Read /cube/artifacts` lists them |
-| the browser | comments, sends them, confirms actions | everything (cubed has no users; see SECURITY.md) |
+| OptChat | `artifact_write`; `project` names whose repositories actions may use | its own and those of the threads it started (`artifact_read`, `artifact_write` with `id`) |
+| a Pi thread | `artifact_write`, body inline or from a workspace file with `path` | every artifact of its project: its own, other threads', OptChat's that names the project |
+| a Claude Code thread | `Write /cube/artifacts/<name>.md` (or `.json` as `{title?, body, actions?, base?}`) | the same as a Pi thread: `Read`/`Write /cube/artifacts/<name>.md` for its own, `<id>.md` for any; `Read /cube/artifacts` lists them |
+| the browser | nothing | everything; it comments, sends comments and confirms actions, and never writes a revision (cubed has no users; see SECURITY.md) |
 
-An agent revising or reading someone else's artifact is told there is no such
-artifact of theirs. A thread's artifacts belong to its project. The Claude
-Code mod reaches cubed on the private workspace socket; the thread's lease
-token, which cubed holds for that Claude Code child, is the authorization, and
-the routes refuse a Pi thread's lease. `/cube/artifacts` is not in the
-machine: Edit and Bash do not reach it.
+One cubed is one user's cube, and inside it the project is the sharing
+boundary: an agent asking for an artifact outside its scope (another
+project's, or OptChat's without a project) is told there is no such
+artifact it can read, as if there were none. A thread's artifacts belong to
+its project. The Claude Code mod reaches cubed on the private workspace
+socket; the thread's lease token, which cubed holds for that Claude Code
+child, is the authorization, and the routes refuse a Pi thread's lease. A
+name in the form of an artifact id (`/cube/artifacts/<id>.md`) is that
+artifact, never a new one. `/cube/artifacts` is not in the machine: Edit and
+Bash do not reach it.
 
 Every write is a whole new revision; older ones stay readable at
-`#/a/<id>?rev=<n>`. A write with the same request id (a Pi task, OptChat's
-tool call, a Claude Code `tool_use_id`) finds the revision it wrote, so a
-replayed call writes once; a write identical to the newest revision writes
+`#/a/<id>?rev=<n>`, with their body and actions as written. A write with the
+same request id (a Pi task, OptChat's tool call, a Claude Code
+`tool_use_id`) finds the revision it wrote, so a replayed call writes once,
+whoever wrote since; a write identical to the newest revision writes
 nothing. Each revision keeps its provenance: the agent (`optchat`, `pi`,
-`claude-code`), the thread, the tool call, OptChat's model, and for a body read
-from a workspace file its path and SHA-256. Bounds: title 200 characters, body
-256 KiB, 8 actions, 500 revisions an artifact, 500 artifacts an author.
+`claude-code`), the thread, the tool call, OptChat's model, and for a body
+read from a workspace file its path and SHA-256. Its editor (`editor` in the
+API) is read from that provenance; the artifact's author never changes.
+Bounds: title 200 characters, body 256 KiB, 8 actions, 500 revisions an
+artifact, 500 artifacts an author.
+
+## Revising someone else's artifact
+
+```text
+agent: read the newest revision  -> cubed remembers revision n for (agent, artifact)
+agent: write the whole document with the id (base = n, or given as base)
+cubed, in one transaction:
+  same request id as an earlier write -> that revision
+  same content as the newest          -> unchanged
+  base == newest                      -> revision newest + 1
+  no base, newest is the agent's own  -> revision newest + 1
+  otherwise                           -> refused (409): read again, write on top
+```
+
+Nothing is merged and nothing is overwritten: of two agents writing on the
+same revision the second is refused and told who wrote the newer one. The
+remembered reads live in cubed's memory (the newest 2000); after a restart
+an agent reads again, or names `base`. A revision that leaves `actions` out
+keeps the newest revision's exactly, pinned to the same head commit; `[]`
+removes them, and new actions (a new `headSha`) are checked against the
+artifact's project as when it was created. Writing a revision runs nothing.
+
+Comments stay with the author: whoever wrote the newest revision, a batch
+goes to the artifact's author (OptChat, or the thread that created it), and
+its message says which thread wrote the revision. Action notices go the same
+way. The agent revising another's artifact is told so in the write's answer.
+A thread asked to revise an artifact is given its id; OptChat names the
+project when it writes one a thread should revise.
 
 How to write one is in the tools' description (`ARTIFACT_GUIDE`), after
 HumanLayer's [show-me skill](https://www.humanlayer.com/blog/show-me-skill):
@@ -198,7 +234,10 @@ journaled there.
   unchanged writes, bounds, anchors, batches, persistence), hostile action
   declarations, and through cubed's routes OptChat, a Pi thread (local guest)
   and a Claude Code thread (the fake `claude` running the mod's tools over the
-  socket) writing artifacts; authors kept apart; a workspace path outside the
+  socket) writing artifacts; the Claude Code thread refused, then reading and
+  revising the Pi thread's artifact by id, and finding none of another
+  project's; no browser route writing a revision; the Pi thread's comments
+  reaching it, not the thread that revised it; a workspace path outside the
   workspace and an action on another project's repository refused; comments
   waiting while a thread works and delivered once after; comments to the
   chat; preview, a moved head, a wrong confirmation, an older revision, the
@@ -208,6 +247,15 @@ journaled there.
   spawned, to the thread once and to the chat, also once that thread is
   archived; everything across a restart; an archived thread's comments
   undeliverable.
+- `packages/server/test/artifact-sharing-test.ts`: the service over a real
+  store with fakes: a thread revising OptChat's artifact and another
+  thread's of its project, OptChat its thread's; another project's thread
+  refused, also in the list; a blind write, a stale base and the second of
+  two writers on one base refused with nothing written; a replay after
+  another's revision; each revision's body, actions and editor kept with the
+  author unchanged; kept actions pinned to the same head, a revision running
+  nothing, an older revision's merge refused, `[]` removing actions; comments
+  on a thread's revision going to the author OptChat.
 - `packages/server/test/artifact-notices-test.ts`: the service over a real
   store with fakes: notices written with the outcome, waiting while the chat
   is closed or the thread works, once each across concurrent pumps and a
@@ -221,7 +269,8 @@ journaled there.
   1440×900 (light and dark) and 390×844: the review linked from the chat,
   diagrams drawn, hostile content inert (no script, no dialog, no fetch, no
   `javascript:` link), two selection comments sent to the chat, a comment to a
-  working thread waiting and then reaching it once, a comment being written
+  working thread waiting and then reaching it once, a second thread's
+  revision of the notes named as its, a comment being written
   keeping its revision while the thread writes a newer one, an older
   revision, the merge refused for a moved head, failing once at GitHub and
   then confirmed once, the chat told of the failure and of the merge once each
@@ -244,3 +293,9 @@ heavily rewritten documents.
   turn (its machine starts if it was stopped), and OptChat hears both the
   notice and the thread's report of its answer.
 - The page reads the artifact every 4 s while visible; there is no stream.
+- Revising is whole-document and refuses a stale write; there is no merge
+  of concurrent edits. The reads it bases a write on are in cubed's memory,
+  so after a restart an agent reads again (or names `base`).
+- Since shared editing, a revision that leaves `actions` out keeps the
+  newest revision's; before, it dropped them. A Claude Code artifact whose
+  name has the form of an artifact id is reached by its id, not its name.

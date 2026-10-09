@@ -354,9 +354,12 @@ requests only. The details, deviations and gaps are in
 `artifact_write` and `artifact_read` are host tools: OptChat's own, and a
 Pi thread's beside its workspace tools (`openAgent`'s `hostTools`); a Claude
 Code thread reaches the same through the mod's `/cube/artifacts/<name>.md`
-paths on the workspace socket, authorized by its lease token. Each agent
-writes and reads only its own artifacts (OptChat also reads its threads'),
-and a write's request id is the tool call's, so a replay writes once. The
+paths on the workspace socket, authorized by its lease token (or
+`<id>.md` for an artifact it did not write). OptChat reads and revises its
+own and its threads' artifacts, a thread every artifact of its project; a
+revision must be written on the newest one, so a stale write is refused
+rather than lost, and the author, who gets the comments, never changes. A
+write's request id is the tool call's, so a replay writes once. The
 browser renders a body as data: raw HTML as text, safe links only, diffs as
 text, Mermaid diagrams as `<img>` of their SVG. Comments are drafts until
 sent; a batch goes to OptChat's pending queue or a thread's prompt, which
