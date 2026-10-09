@@ -57,6 +57,12 @@ record: the message shows at once and exactly once, never goes and comes
 back, and the chat reads busy from the send until the run ends, once. A
 change to how the UI reads, reconciles or shows the stream needs a scenario
 there; a screenshot or a unit test of a helper is not that evidence.
+`long-chat-browser-test.ts` opens a 150-turn chat and thread from a window,
+pages up keeping the reader's place, sends while a page loads, reconnects
+from the same start and trims a window left open.
+`node packages/web/test/browser/long-chat-measure.ts [runs]` (after `pnpm
+build`) prints the bytes and times of a synthetic 1,000-turn chat (`TURNS`)
+against the built UI; it is a measurement, not a test.
 
 ### CI
 
