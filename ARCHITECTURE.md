@@ -602,8 +602,13 @@ try, `attempt` = the `cube:provision:<n>` key) and `resume`, each with its
 state (`running`, `ok`, `failed`, `interrupted` when cubed began it again),
 times, a detail, the command's memory and, for a failed hook, the end of its
 log (4 KiB, escaped and redacted). ThreadVms writes the lookup, build and
-boot steps; Conversations the preparation and resume. They are evidence
-only: a registry error never fails a start. The guest helper adds to each
+boot steps; Conversations the preparation and resume. Each activation
+first marks every step still running as interrupted (one thread has one
+activation at a time, so such a step is one an earlier activation or a
+stopped cubed never ended); a preparation try marked so that ended in the
+guest meanwhile still ends in its place. They are evidence only: a registry
+error never fails a start. The thread list leaves the ends of failed hooks'
+logs out (`hasLog`); `GET /api/threads/<id>/steps` has them. The guest helper adds to each
 command's result systemd's `$SERVICE_RESULT` and the unit's cgroup
 `memory.peak` and `memory.events` `oom_kill` (read in `ExecStopPost`) with
 the machine's MemTotal; a command the OOM killer stopped is reported as

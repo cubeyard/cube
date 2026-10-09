@@ -295,9 +295,11 @@ says so, and the thread suggests a larger machine. Projects have a machine
 size (memory, processors), captured by new threads and clamped by each
 runner. A failed template build is retried at once with another size or a
 new primary commit; the previous try's hook log stays as `<hook>.log.prev`.
-Verified offline (`startup-steps-test.ts`, `vm-prepare-test.ts`,
-`vm-template-test.ts`, `web/test/startup-test.ts`), in Chromium at desktop
-and phone sizes (`startup-browser-test.ts`) and with real Linux/KVM VMs
+Steps left running by a stopped cubed or an earlier activation end as
+interrupted when the next activation begins. Verified offline
+(`startup-steps-test.ts`, including restarts mid-start and after ready,
+`vm-prepare-test.ts`, `vm-template-test.ts`, `web/test/startup-test.ts`), in
+Chromium and WebKit at desktop and phone sizes (`startup-browser-test.ts`) and with real Linux/KVM VMs
 (`test-vm-templates.ts` step 7: a pre-setup the kernel's OOM killer stops in
 the build machine and in the thread's machine, read live and kept). Not
 verified on macOS/HVF or against a production installation. Known, not

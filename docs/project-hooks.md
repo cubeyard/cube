@@ -66,7 +66,9 @@ Under the step that runs a hook, the end of that hook's log, read every few
 seconds (`GET /api/threads/<id>/startup-log`, from the build machine or the
 thread's own; read only, with no lease, so it never waits for or disturbs
 the preparation). Afterwards the machine label on the thread opens the same
-steps; OptChat's `diagnose` lists them too.
+steps; OptChat's `diagnose` lists them too. A step that was running when
+cubed stopped is shown as interrupted once the thread's machine is started
+again.
 
 A step that fails keeps its error in full, the end of the failed hook's log
 (also from a build machine, whose disk goes with it) and, when the guest
