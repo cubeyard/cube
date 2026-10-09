@@ -16,7 +16,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { GitService } from "@cube/git";
 import { createCubed } from "../src/index.ts";
-import { parseSkillsConfig, resolveSkills, skillInstallScripts, skillsPrompt, type SkillSource } from "../src/skills.ts";
+import { SettingsStore } from "../src/settings.ts";
+import { GUEST_COMMAND_BYTES, parseSkillsConfig, resolveSkills, skillInstallScripts, skillsPrompt, type SkillSource } from "../src/skills.ts";
 import { LocalMachines } from "./local-guest.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-skills-"));
@@ -97,7 +98,31 @@ try {
   assert.throws(() => parseSkillsConfig({ disabled: ["Nope"] }), /not a skill name/);
   assert.deepEqual(parseSkillsConfig({ sources: [{ url: "https://github.com/me/skills", commit: defaults.commit, path: "skills/" }] }),
     { sources: [{ url: "https://github.com/me/skills", commit: defaults.commit, path: "skills" }], disabled: [] });
-  console.log("ok: a missing commit fails resolution; settings take only https URLs and full commits");
+  for (const url of ["https://me:ghp_secret@github.com/me/skills", "https://ghp_secret@github.com/me/skills", "https://x-access-token:ghp_secret@github.com:443/me/skills"]) {
+    assert.throws(() => parseSkillsConfig({ sources: [{ url, commit: defaults.commit }] }), (error: Error) =>
+      /must not carry credentials/.test(error.message) && !error.message.includes("ghp_secret"), `${url} is refused without echoing the token`);
+  }
+  assert.deepEqual(parseSkillsConfig({ sources: [{ url: "https://github.com/me/skills@v2", commit: defaults.commit }] }).sources[0]!.url,
+    "https://github.com/me/skills@v2", "an @ in the path is not userinfo");
+  const edited = path.join(root, "edited-settings.json");
+  fs.writeFileSync(edited, JSON.stringify({ version: 1, optchat: { compactor: null },
+    skills: { sources: [{ url: "https://me:ghp_secret@github.com/me/skills", commit: defaults.commit }], disabled: [] } }));
+  const store = new SettingsStore(edited);
+  assert.deepEqual(store.get().skills, { sources: [], disabled: [] }, "a hand-edited credential URL is not used");
+  assert.match(String(store.error), /must not carry credentials/);
+  assert.doesNotMatch(String(store.error), /ghp_secret/);
+  console.log("ok: a missing commit fails resolution; settings take only https URLs without credentials and full commits");
+
+  // 2b. A source whose install command would exceed the guest's limit is
+  //     refused at resolution, before any thread or machine.
+  const deep = "p".repeat(200);
+  const oversized = { ...repository("oversized", Object.fromEntries(Array.from({ length: 40 }, (_, index) =>
+    [`${deep}/skill-${index}/SKILL.md`, skill(`skill-${index}`, "One of many.")]))), path: deep };
+  await assert.rejects(resolveSkills(hostGit, oversized, { sources: [], disabled: [] }),
+    new RegExp(`install command of \\d+ bytes, over the machine's ${GUEST_COMMAND_BYTES}`));
+  const fewer = await resolveSkills(hostGit, oversized, { sources: [], disabled: Array.from({ length: 20 }, (_, index) => `skill-${index}`) });
+  assert.equal(fewer.skills.length, 20, "disabling some brings it under the limit");
+  console.log("ok: a source too large for one install command is refused at resolution; disabling skills fits it");
 
   // 3. The prompt lists thread and both skills by name, description and
   //    path, not optchat-only or manual ones, and no skill bodies.
@@ -206,6 +231,22 @@ try {
     const step = app.registry.getThread(failed)!.vm!.steps!.find(entry => entry.name === "prepare" && entry.state === "failed")!;
     assert.match(String(step.detail), new RegExp(`installing the thread's skills failed \\(exit 3\\): .*fetching skills from ${defaults.url} at ${defaults.commit} failed`));
     console.log("ok: skills the machine cannot fetch fail its preparation with the source and commit");
+
+    // 7. Through cubed: an oversized source fails the start with 502 and
+    //    allocates no thread; a credential URL is not saved.
+    const before = app.registry.listThreads().length;
+    Object.assign(defaults, oversized);
+    const refusedStart = await call("/api/threads", "POST", { projectId: project.id, requestId: "three", text: "hello", model });
+    assert.equal(refusedStart.status, 502);
+    assert.match(String(refusedStart.body.error), /resolving the skills failed, so no thread was started: .*over the machine's 8192/);
+    assert.equal(app.registry.listThreads().length, before, "no thread was allocated");
+    const settingsFile = path.join(root, "state", "settings.json");
+    const savedBefore = fs.readFileSync(settingsFile, "utf8");
+    const leaked = await call("/api/settings/skills", "PUT", { sources: [{ url: "https://me:ghp_secret@github.com/me/skills", commit: oversized.commit }] });
+    assert.equal(leaked.status, 400);
+    assert.doesNotMatch(JSON.stringify(leaked.body), /ghp_secret/);
+    assert.equal(fs.readFileSync(settingsFile, "utf8"), savedBefore, "nothing is saved");
+    console.log("ok: through cubed, an oversized source allocates no thread and a credential URL is neither saved nor echoed");
   } finally {
     app.server.closeAllConnections();
     await app.close();

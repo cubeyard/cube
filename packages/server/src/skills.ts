@@ -44,6 +44,8 @@ export const DEFAULT_SKILL_SOURCE: SkillSource = {
 };
 
 export const SKILLS_ROOT = `${GUEST_HOME}/.cube/skills`;
+/** The largest command the guest helper runs (cube-guest.py maxCommandBytes). */
+export const GUEST_COMMAND_BYTES = 8192;
 export const SKILL_LIMITS = { skills: 64, files: 2000, bytes: 8 * 2 ** 20, description: 1024 };
 const NAME = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const COMMIT = /^[0-9a-f]{40}$/;
@@ -81,6 +83,9 @@ function parseSource(value: unknown, at: string): SkillSource {
   if (extra.length) throw new Error(`${at}: unknown field ${extra.join(", ")}`);
   const { url, commit, path = "" } = record;
   if (typeof url !== "string" || !/^https:\/\/[^\s'"\\]+$/.test(url)) throw new Error(`${at}.url must be an https git URL`);
+  // A token in the URL would be kept in settings.json and the allocation and
+  // sent into the machine; the host's and the gateway's credentials apply.
+  if (/^https:\/\/[^/?#]*@/.test(url)) throw new Error(`${at}.url must not carry credentials (user@ or user:token@)`);
   if (typeof commit !== "string" || !COMMIT.test(commit)) throw new Error(`${at}.commit must be a full 40-character commit, not a branch or tag`);
   if (typeof path !== "string" || path.startsWith("/") || path.split("/").some(part => part === ".." || part === ".") || /[\s'"\\]/.test(path)) {
     throw new Error(`${at}.path must be a directory in the repository, without . or ..`);
@@ -143,7 +148,12 @@ export async function resolveSkills(git: SkillGit, defaultSource: SkillSource | 
   if (total.files > SKILL_LIMITS.files || total.bytes > SKILL_LIMITS.bytes) {
     throw new Error(`the skills are ${total.files} files and ${total.bytes} bytes; a thread installs at most ${SKILL_LIMITS.files} files and ${SKILL_LIMITS.bytes / 2 ** 20} MiB`);
   }
-  return { sources, skills, skipped };
+  const resolved = { sources, skills, skipped };
+  // Each install command must fit the guest's limit; a set that cannot is
+  // refused here, before a thread is allocated, rather than in every try.
+  const long = skillInstallScripts(resolved).find(script => Buffer.byteLength(script) > GUEST_COMMAND_BYTES);
+  if (long) throw new Error(`the skills of one source make an install command of ${Buffer.byteLength(long)} bytes, over the machine's ${GUEST_COMMAND_BYTES}: disable some or use shorter names and paths`);
+  return resolved;
 }
 
 /** The prompt section a thread's agent gets (Pi and Claude Code alike):
