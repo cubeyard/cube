@@ -165,6 +165,10 @@ class Cube < Formula
   depends_on "gh"
   depends_on :macos
 
+  # The release bundle is used as signed; nothing in it needs Homebrew's
+  # cleaning, which would otherwise walk all of its files.
+  skip_clean "libexec"
+
   def install
     # The signed bundle as released: bin/node, bin/cube-gateway, app/,
     # release.json (cubed finds its gateway next to release.json).
@@ -202,6 +206,9 @@ class Cube < Formula
       exec "#{libexec}/bin/node" "#{libexec}/app/packages/server/src/index.ts" "$@"
     SH
     chmod 0755, bin/"cubed"
+    # Homebrew prints nothing for its own steps without --verbose, and cuts
+    # an ohai at the terminal width: keep this within 80 columns.
+    ohai "cube: files in place; Homebrew checks them next (quiet without --verbose)"
   end
 
   service do

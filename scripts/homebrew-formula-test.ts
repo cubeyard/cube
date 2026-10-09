@@ -49,6 +49,10 @@ try {
   assert.match(cube, /Dir\.glob\(libexec\/"app\/\*\*\/native\/\*\/prebuilds\/\*", File::FNM_DOTMATCH\)/, "other platforms' prebuilt native modules are pruned, under node_modules/.pnpm too");
   assert.match(cube, /name\.start_with\?\("darwin-"\) && name\.include\?\("arm64"\)/, "every darwin arm64 build stays");
   assert.match(cube, /vm\.pid/, "the caveats tell users of the tap's old launcher what holds port 7777");
+  assert.match(cube, /^  skip_clean "libexec"$/m, "Homebrew's cleaner does not walk the bundle's files");
+  assert.match(cube, /^    ohai "cube: files in place; Homebrew checks them next \(quiet without --verbose\)"\n  end\n\n  service do$/m,
+    "the last step of install says what the silent part after it is");
+  assert.ok(/ohai "([^"]*)"/.exec(cube)![1]!.length <= 76, "the line fits an 80-column terminal after ==>, so Homebrew does not cut it");
   assert.match(cube, /shell_output\("#\{bin\}\/cubed --self-check"\)/, "the self-check runs through the launcher, which sets the version");
   assert.match(cubeRunner, /^class CubeRunner < Formula$/m);
   assert.match(cubeRunner, /cube-runner 1\.2\.3/, "the runner's own version is named");
