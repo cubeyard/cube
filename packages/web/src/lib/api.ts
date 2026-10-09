@@ -13,8 +13,11 @@ import type {
   ProjectInput,
   RunnerStatus,
   SettingsView,
+  SkillSource,
+  SkillsConfig,
   StartupLog,
   StartupStep,
+  ThreadSkills,
   SubjectUsage,
   ThreadOverview,
   ThreadModels,
@@ -38,6 +41,15 @@ export const checkForUpdate = () => request<UpdateStatus>("/api/system/update", 
 export const fetchSettings = () => request<SettingsView>("/api/settings");
 /** null: the compactor follows the chat's model. */
 export const setCompactor = (model: ModelSelection | null) => request<SettingsView>("/api/settings/compactor", "PUT", { model });
+/** The skill sources after the default one, and what the next thread gets
+ * from them (resolved on the host). */
+export type SkillsView = { default: SkillSource | null; builtin: SkillSource | null; saved: SkillsConfig; resolved: ThreadSkills };
+/** The default source's branch tip as an exact commit, and what it would give; nothing is saved. */
+export type SkillsUpdate = { branch: string; current: string; candidate: string; upToDate: boolean; preview: ThreadSkills };
+export const checkSkillsUpdate = () => request<SkillsUpdate>("/api/settings/skills/update");
+export const fetchSkills = () => request<SkillsView>("/api/settings/skills");
+/** Saved only when it resolves. */
+export const saveSkills = (config: SkillsConfig) => request<SkillsView>("/api/settings/skills", "PUT", config);
 export const installUpdate = (targetVersion: string, expectedCurrentVersion: string, requestId: string) =>
   request<UpdateStatus>("/api/system/update", "POST", { action: "install", targetVersion, expectedCurrentVersion, requestId });
 

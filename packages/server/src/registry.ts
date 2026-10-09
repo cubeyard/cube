@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { ModelSelection } from "./models.ts";
 import type { NodeBinding, TrustedRunnerHealth } from "./iroh-node.ts";
 import type { ThreadAgent } from "./thread-events.ts";
+import type { ThreadSkills } from "./skills.ts";
 import { newPlaceholder } from "./egress-policy.ts";
 
 /** The registry schema; older registries are refused (fresh CUBED_STATE). */
@@ -110,6 +111,8 @@ export interface WorkspaceRepository {
  * one new thread (`git.prepareRepository`), in the project's order. */
 export interface ResolvedRepositories {
   projectRevision: number; repositories: Array<{ url: string; base: string; baseOid: string }>;
+  /** The skills resolved for the same thread (skills.ts). */
+  skills?: ThreadSkills;
 }
 export interface WorkspaceAllocation {
   projectId: string; projectRevision: number; repositories: WorkspaceRepository[];
@@ -117,6 +120,9 @@ export interface WorkspaceAllocation {
   hooks?: ProjectHooks;
   /** The project's machine size when the thread was created; fixed for the thread. */
   machine?: ProjectMachine;
+  /** The skills resolved when the thread was created, installed in its
+   * machine; absent for threads created before skills. */
+  skills?: ThreadSkills;
 }
 export type RunnerAllocationState = "available" | "allocating" | "busy" | "releasing" | "failed" | "retiring" | "retired";
 export type RunnerContactStatus = "unknown" | "reachable" | "unreachable" | "stale" | "retired";
@@ -744,7 +750,8 @@ export class Registry {
       const thread: Thread = { id: randomUUID(), projectId, runnerId: load.id,
         title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, agent, archived: false, createdAt: Date.now(),
         allocation: { projectId, projectRevision: project.revision, repositories, hooks: { ...NO_HOOKS, ...project.hooks },
-          ...(project.machine && Object.keys(project.machine).length ? { machine: { ...project.machine } } : {}) },
+          ...(project.machine && Object.keys(project.machine).length ? { machine: { ...project.machine } } : {}),
+          ...(resolved?.skills ? { skills: resolved.skills } : {}) },
         workspaceState: "allocating", workspaceError: null, workspaceBase: null,
         vm: { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") }, placement: "provisional" } };
       this.db.prepare("INSERT INTO thread VALUES (?,?,?,?)").run(thread.id, projectId, load.id, JSON.stringify(thread));

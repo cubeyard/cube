@@ -6,6 +6,7 @@ import type { Message, Models } from "@earendil-works/pi-ai";
 import { ConversationBusy, LiveDoc, type UsageState } from "@earendil-works/pi-durable";
 import { ClaudeAgent, ClaudeBusy, CLAUDE_PROVIDER, type ClaudeRuntime } from "./claude-agent.ts";
 import { ClaudeThreadEvents } from "./claude-thread-events.ts";
+import { skillsPrompt } from "./skills.ts";
 import { assertCurrentThreadStore, openAgent, type Agent } from "./durable-agent.ts";
 import { createLogger } from "./log.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
@@ -349,7 +350,7 @@ export class Conversations {
     const loading = (async () => {
       const hostTools = this.hostTools?.(thread);
       const agent = await openAgent({ directory: path.join(this.directory, id), binding: this.binding(thread), workspace: this.workspace(id), models: this.models, model: thread.model,
-        ...hostTools ? { hostTools } : {} });
+        skills: skillsPrompt(thread.allocation.skills), ...hostTools ? { hostTools } : {} });
       try {
         // Pi deduplicates by request id: a reopen finds the first submission
         // instead of submitting it again, whatever happened since.
@@ -402,7 +403,8 @@ export class Conversations {
     this.ready(thread);
     const runtime = this.claude;
     const loading = (async () => {
-      const agent = await ClaudeAgent.open({ directory: path.join(this.directory, id), threadId: id, workspace: this.workspace(id), runtime, model: thread.model.id });
+      const agent = await ClaudeAgent.open({ directory: path.join(this.directory, id), threadId: id, workspace: this.workspace(id), runtime, model: thread.model.id,
+        skills: skillsPrompt(thread.allocation.skills) });
       try {
         // The first message is accepted once under this request id.
         const initial = this.registry.initialPrompt(id);

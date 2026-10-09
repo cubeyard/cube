@@ -10,6 +10,7 @@
 // mid-command; 4 egress; 5 secrets (gh, git push; the token never in the
 // guest, seed, runner state or logs); 6 Claude Code thread through the mod;
 // 7 archive clean (deleted) and dirty (retained); 8 every process stopped.
+// 1a: the Pi thread's pinned skills, fetched by the guest and installed.
 // CUBE_SMOKE_KEEP=1 keeps the work directory.
 import assert from "node:assert/strict";
 import { type ChildProcess, execFileSync, fork, spawn, spawnSync } from "node:child_process";
@@ -47,7 +48,7 @@ async function until<T>(what: string, seconds: number, probe: () => Promise<T | 
 }
 
 // --- a local GitHub: api.github.com/user and smart HTTP for one repository
-function fakeGithub(): Promise<{ port: number; ca: string; repository: string; close(): void; requests: string[] }> {
+function fakeGithub(): Promise<{ port: number; ca: string; repository: string; skills: { url: string; commit: string; path: string; bare: string }; close(): void; requests: string[] }> {
   const dir = path.join(work, "github");
   fs.mkdirSync(path.join(dir, "cube-e2e"), { recursive: true });
   const openssl = (...args: string[]) => execFileSync("openssl", args, { cwd: dir, stdio: "ignore" });
@@ -63,6 +64,18 @@ function fakeGithub(): Promise<{ port: number; ca: string; repository: string; c
   git(seedTree, "commit", "-qm", "base");
   const repository = path.join(dir, "cube-e2e", "repo.git");
   git(dir, "clone", "-q", "--bare", seedTree, repository);
+  // Skills the thread installs: one links the other by ../<name>/SKILL.md.
+  const skillsTree = path.join(dir, "skills-seed");
+  for (const [name, body] of [["target", "the linked skill\n"], ["linking", "see [target](../target/SKILL.md)\n"]]) {
+    fs.mkdirSync(path.join(skillsTree, "skills", name), { recursive: true });
+    fs.writeFileSync(path.join(skillsTree, "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: e2e ${name}\n---\n${body}`);
+  }
+  git(skillsTree, "init", "-q", "--initial-branch=main");
+  git(skillsTree, "add", "-A");
+  git(skillsTree, "commit", "-qm", "skills");
+  const skillsBare = path.join(dir, "cube-e2e", "skills.git");
+  git(dir, "clone", "-q", "--bare", skillsTree, skillsBare);
+  const skills = { url: "https://github.com/cube-e2e/skills.git", commit: git(skillsTree, "rev-parse", "HEAD").trim(), path: "skills", bare: skillsBare };
   const requests: string[] = [];
   const server = https.createServer({ key: fs.readFileSync(path.join(dir, "leaf.key")), cert: fs.readFileSync(path.join(dir, "leaf.pem")) }, (request, response) => {
     const chunks: Buffer[] = [];
@@ -110,7 +123,7 @@ function fakeGithub(): Promise<{ port: number; ca: string; repository: string; c
   });
   return new Promise(resolve => server.listen(0, "127.0.0.1", () => {
     const port = (server.address() as { port: number }).port;
-    resolve({ port, ca: path.join(dir, "ca.pem"), repository, requests, close: () => server.close() });
+    resolve({ port, ca: path.join(dir, "ca.pem"), repository, skills, requests, close: () => server.close() });
   }));
 }
 
@@ -217,8 +230,13 @@ try {
   assert.equal(enrolled.admitted, true);
   log(`runner enrolled (${enrolled.platform}, protocol 3)`);
   fs.mkdirSync(path.join(work, "home"), { mode: 0o700 });
+  // cubed resolves the skills from its own mirror, seeded here (the host
+  // has no route to the fake); the guest fetches them through the gateway.
+  const { GitService } = await import(path.join(repo, "packages/git/src/index.ts")) as typeof import("../packages/git/src/index.ts");
+  const { bare, ...skillSource } = github.skills;
+  git(work, "clone", "-q", "--mirror", bare, new GitService(path.join(work, "state", "repositories")).mirrorPathFor(skillSource.url));
   fixtureEnv = { PATH: process.env.PATH, HOME: path.join(work, "home"), PI_CODING_AGENT_DIR: path.join(work, "home", "pi"),
-    CUBED_GATEWAY: gatewayBin, CUBED_GITHUB_TOKEN: fakeToken, CUBED_VM_VCPUS: "2", CUBED_VM_MEMORY_MIB: "2048", CUBED_VM_DISK_GIB: "8",
+    CUBED_GATEWAY: gatewayBin, CUBED_GITHUB_TOKEN: fakeToken, CUBED_VM_VCPUS: "2", CUBED_VM_MEMORY_MIB: "2048", CUBED_VM_DISK_GIB: "8", CUBE_FIXTURE_SKILL_SOURCE: JSON.stringify(skillSource),
     CUBED_GATEWAY_TEST_ARGS: JSON.stringify(["--test-upstream", `github.com=127.0.0.1:${github.port}`, "--test-upstream", `api.github.com=127.0.0.1:${github.port}`,
       "--test-upstream-ca", github.ca]) };
   cubed = await startCubed();
@@ -251,6 +269,10 @@ try {
   const leaked = execFileSync("find", [work, "(", "-name", "a.txt", "-o", "-name", "cm.txt", "-o", "-name", "start-portal.sh", ")", "-not", "-path", `${work}/github/*`], { encoding: "utf8" }).trim();
   assert.equal(leaked, "", "nothing the agent wrote appears outside the VM disk");
   log("1: write, read, edit, bash and codemode ran in the guest, also on /home/agent and /tmp; nothing on the runner outside the VM disk");
+  assert.equal(await bash(pi, "cd ~/.cube/skills && find . -type f | sort && cat linking/../target/SKILL.md | tail -1"),
+    "./linking/SKILL.md\n./target/SKILL.md\nthe linked skill");
+  assert.ok(github.requests.some(line => line.startsWith("POST github.com/cube-e2e/skills.git/git-upload-pack")), github.requests.join("\n"));
+  log(`1a: the guest fetched the pinned skills through the gateway and installed them; ../target links resolve`);
 
   // 1b. A guest that lost its packages (e.g. a first boot whose apt step
   // failed) reinstalls them on the next boot instead of staying broken.
@@ -342,7 +364,7 @@ try {
 
   // 6. A Claude Code thread through the mod: Bash/Read/Write/Edit in the guest; stop cancels.
   const claude = (await api("/api/threads", "POST", { projectId: project.id, requestId: "claude",
-    text: "write c.txt hello\nread c.txt\nedit c.txt hello bye\nrun cat c.txt; id -un; pwd", model: { provider: "claude-code", id: "sonnet" } })).id as string;
+    text: "write c.txt hello\nread c.txt\nedit c.txt hello bye\nrun cat c.txt; id -un; pwd; ls ~/.cube/skills | tr '\\n' ' '", model: { provider: "claude-code", id: "sonnet" } })).id as string;
   vmIds.push((await ready(claude)).vm!.vmId);
   const claudeFirst = await until("claude's first turn", 300, async () => {
     const value = await history(claude); return ["completed", "failed", "stopped"].includes(value.status?.state) ? value : undefined;
@@ -350,7 +372,7 @@ try {
   assert.equal(claudeFirst.status.state, "completed", JSON.stringify(claudeFirst.status));
   const results = (transcript: { events: Array<{ type: string; output?: string }> }) => transcript.events.filter(event => event.type === "tool-result").map(event => event.output ?? "");
   const outputs = claudeFirst.events.filter((event: { type: string }) => event.type === "tool-result").map((event: { output?: string }) => event.output ?? "");
-  assert.ok(outputs.some((output: string) => output.includes("bye") && output.includes("agent") && output.includes("/workspace")), JSON.stringify(outputs));
+  assert.ok(outputs.some((output: string) => output.includes("bye") && output.includes("agent") && output.includes("/workspace") && output.includes("linking target")), JSON.stringify(outputs));
   const machineRun = `e2e-${++requests}`;
   await api(`/api/threads/${claude}/prompt`, "POST", { text: "write-at /home/agent/portal-runtime/start-portal.sh from-claude\nrun cat /home/agent/portal-runtime/start-portal.sh; echo; stat -c %U /home/agent/portal-runtime/start-portal.sh", requestId: machineRun });
   assert.equal(results(await settled(claude, machineRun, 120)).at(-1)?.trim(), "from-claude\nagent", "the mod's Write reached the machine's /home/agent");
@@ -364,7 +386,7 @@ try {
   await api(`/api/threads/${claude}/prompt`, "POST", { text: "run systemctl list-units --plain --no-legend 'cube-op-*' --state=active,activating | wc -l; ls late.txt 2>&1 | grep -c 'No such'", requestId: checkRun });
   const checked = await settled(claude, checkRun, 120);
   assert.equal(results(checked).at(-1)?.trim(), "1\n1", "only the check itself runs; late.txt was never written");
-  log("6: claude code thread: Write, Read, Edit and Bash in the guest, Write also to /home/agent; stop cancelled the guest command");
+  log("6: claude code thread: Write, Read, Edit and Bash in the guest, Write also to /home/agent, its skills installed; stop cancelled the guest command");
   const claudeArchive = await api(`/api/threads/${claude}`, "DELETE");
   assert.equal(claudeArchive.retained, true);
 

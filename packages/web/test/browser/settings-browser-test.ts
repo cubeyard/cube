@@ -112,7 +112,7 @@ try {
   // Between phone and desktop: the bank lies flat until a page's tables fit beside it.
   for (const width of [641, 680, 740, 900]) {
     const middle = await page({ width, height: 800 });
-    for (const route of ["system", "memory", "providers"]) {
+    for (const route of ["system", "memory", "skills", "providers"]) {
       await middle.goto(`${host.url}/#/settings/${route}`);
       await middle.locator(".settings-pane h1").waitFor();
       await middle.waitForTimeout(300);
@@ -123,7 +123,7 @@ try {
     await middle.close();
   }
 
-  for (const route of ["memory", "providers", "system"]) {
+  for (const route of ["memory", "providers", "skills", "system"]) {
     const small = await page(phone);
     await small.goto(`${host.url}/#/settings/${route}`);
     await small.locator(".settings-pane h1").waitFor();

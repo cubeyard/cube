@@ -369,6 +369,22 @@ export class GitService {
     }
   }
 
+  /** Every entry under `<oid>:<dir>` in the host mirror of `url`, recursively:
+   * its path from the repository root, git mode and size (blobs only), or
+   * null when the commit is not in the mirror. */
+  async listFilesAtCommit(url: string, oid: string, dir: string): Promise<Array<{ path: string; mode: string; size: number }> | null> {
+    if (!/^[0-9a-f]{40,64}$/.test(oid)) throw new Error(`invalid commit: ${oid}`);
+    const gitDir = ["--git-dir", this.mirrorPathFor(url)];
+    try { await this.git([...gitDir, "cat-file", "-e", `${oid}^{commit}`], LOCAL_TIMEOUT_MS); }
+    catch { return null; }
+    const { stdout } = await this.git([...gitDir, "ls-tree", "-r", "-l", "-z", "--full-tree", oid, "--", dir || "."], LOCAL_TIMEOUT_MS);
+    return stdout.split("\0").filter(Boolean).map(line => {
+      const tab = line.indexOf("\t");
+      const [mode, , , size] = line.slice(0, tab).split(/ +/);
+      return { path: line.slice(tab + 1), mode: mode!, size: size === "-" ? 0 : Number(size) };
+    });
+  }
+
   /** Capture a fresh remote branch tip, then import its objects. Default-branch
    * discovery must query the remote: fetching does not update a bare mirror's HEAD.
    * The mirror lock covers refresh and resolution, including concurrent threads. */

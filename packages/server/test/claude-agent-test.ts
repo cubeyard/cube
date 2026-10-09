@@ -71,7 +71,7 @@ async function until<T>(check: () => T | undefined | false | Promise<T | undefin
   }
 }
 
-let agent = await ClaudeAgent.open({ directory, threadId: "t1", workspace, runtime, model: "sonnet" });
+let agent = await ClaudeAgent.open({ directory, threadId: "t1", workspace, runtime, model: "sonnet", skills: "<available_skills></available_skills>" });
 try {
   // The lease: claude-code is the thread's one writable owner.
   assert.equal(leases.holder(), "claude-code");
@@ -109,7 +109,8 @@ try {
   for (const name of ["ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "OPENAI_API_KEY", "GITHUB_TOKEN"]) assert.ok(!first!.env.includes(name), `${name} does not reach the child`);
   assert.ok(first!.env.includes("CLAUDE_CODE_OAUTH_TOKEN") && first!.env.includes("HOME") && first!.env.includes("CUBE_WORKSPACE_TOKEN"));
   assert.ok(first!.env.includes("CUBE_WORKSPACE_REAL_ROOT"), "the mod also knows the root with its symlinks resolved");
-  assert.ok(first!.env.every(name => /^(HOME|PATH|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_\w+|TERM|TZ|TMPDIR|XDG_\w+|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|CUBE_WORKSPACE_\w+|FAKE_CLAUDE_LOG)$/.test(name)), `only allow-listed variables: ${first!.env.join(" ")}`);
+  assert.ok(first!.env.includes("CUBE_SKILLS_PROMPT"), "the mod gets the thread's skills to list");
+  assert.ok(first!.env.every(name => /^(HOME|PATH|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_\w+|TERM|TZ|TMPDIR|XDG_\w+|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|CUBE_WORKSPACE_\w+|CUBE_SKILLS_PROMPT|FAKE_CLAUDE_LOG)$/.test(name)), `only allow-listed variables: ${first!.env.join(" ")}`);
   assert.deepEqual(Object.keys(claudeEnvironment({ PATH: "/bin", AWS_SECRET_ACCESS_KEY: "x" }, { ANTHROPIC_BASE_URL: "x", CLAUDE_CODE_USE_VERTEX: "1", EXTRA: "y" }, { CUBE_WORKSPACE_TOKEN: "t" })).sort(), ["CUBE_WORKSPACE_TOKEN", "EXTRA", "PATH"]);
   assert.equal(first!.args[first!.args.indexOf("--setting-sources") + 1], "");
   assert.ok(first!.args.includes("--strict-mcp-config"));

@@ -331,6 +331,18 @@ session but has no task checkpoints, so a turn cut off by a cubed restart is
 marked failed and not continued. Workspace keys still keep the guest from
 executing any tool call twice. Repository skills reach Claude Code only as text.
 
+## Skills
+
+A thread's skills come from git repositories pinned to exact commits:
+cubeyard/skills, then the user's sources from `settings.json`, the last
+source with a name winning it. cubed resolves them on the host when the
+thread starts, beside its repositories' commits, and keeps the winners with
+their provenance in the thread's allocation. Provisioning installs them in
+the machine as `~/.cube/skills/<name>/` before the checkout, and both Pi and
+Claude Code list them in the prompt by name, description and path only.
+Their `metadata.cube.surface` marks skills for OptChat, which does not read
+them yet. [docs/skills.md](docs/skills.md).
+
 ## OptChat
 
 OptChat implements Victor Taelin's OptChat memory over Pi, with cube threads

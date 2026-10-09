@@ -1,0 +1,132 @@
+# Skills
+
+A thread's agent (Pi or Claude Code) gets skills: folders in the
+[Agent Skills](https://agentskills.io) format, each a `SKILL.md` with `name`
+and `description` frontmatter plus the files it links. They come from git
+repositories, each pinned to one exact commit. OptChat does not read skills
+yet. Code: `packages/server/src/skills.ts`.
+
+## Sources and precedence
+
+```text
+cubeyard/skills @ d5041ce9ae3af0c5b0dbb00234a2bd600df8cf63   cube's default: this cube's pin,
+                                                             or skills.defaultCommit once updated here
+your sources, in order                                       settings.json: skills.sources
+```
+
+## Updating the default source
+
+**check for update** on the settings page (`GET /api/settings/skills/update`)
+fetches cubeyard/skills into the host mirror and resolves its default
+branch's tip to a full commit. It shows that commit, the one in use, and
+which skills new threads would gain, lose or get from the new commit. It
+saves nothing. **use @<commit>** saves exactly that commit as
+`skills.defaultCommit`, even if the branch has moved on since; **cancel**
+saves nothing. No branch is ever followed: the commit changes only when
+someone confirms one. Only the commit changes, not the repository or its
+folder; the user's sources, overrides and disabled names stay as they are.
+A saved commit stays in effect when cube itself is updated, whatever pin
+the new release carries.
+
+- A source is `{url, commit, path}`: an `https` git URL without
+  credentials (`user@` or `user:token@` is refused, and never saved), a full
+  40-character commit (never a branch or tag) and the directory holding
+  skill folders (`<path>/<name>/SKILL.md`; empty for the repository root).
+- For each skill name, **the last source that has it wins**, whatever its
+  surface. To change one default skill without forking, add a source with a
+  skill of the same name. The winner records the source it overrides.
+- `skills.disabled` lists names that are left out after precedence.
+- Folders are read in name order. A thread lists its skills sorted by name.
+
+## Surface
+
+`metadata.cube.surface` in the frontmatter says which agent gets the skill.
+
+| value | thread prompt | OptChat |
+| --- | --- | --- |
+| `thread` (default) | listed | not listed |
+| `optchat` | installed, not listed | deferred |
+| `both` | listed | deferred |
+
+A skill with `disable-model-invocation: true` is installed but not listed.
+
+## When a thread starts
+
+```mermaid
+sequenceDiagram
+  participant H as cubed (host)
+  participant M as thread machine
+  H->>H: resolve sources at their commits (host mirror, git ls-tree / cat-file)
+  H->>H: winners + provenance -> allocation.skills (fixed for the thread)
+  H->>M: per source: git fetch --depth 1 <url> <commit>; git archive <commit>:<dir> into ~/.cube/skills.next/<name>
+  H->>M: replace ~/.cube/skills with ~/.cube/skills.next
+  H->>M: checkout, pre-setup, .agents/setup (as before)
+  H->>H: open the agent; its prompt lists name, description, SKILL.md path
+```
+
+- Skills resolve beside the repositories' latest commits. A source that
+  cannot be read fails the start, like an unreachable repository; one the
+  machine cannot fetch fails its preparation step, which cube tries again. A
+  later settings change never changes a started thread.
+- Every winning skill is installed as `/home/agent/.cube/skills/<name>/`, so
+  a link from one skill to `../<other>/SKILL.md` keeps working and reaches
+  the winning `<other>`. A link that leaves the skills directory does not.
+- Progressive disclosure: the prompt has names, descriptions and paths only.
+  The agent reads a `SKILL.md` when a task matches, and its linked files when
+  it needs them. Pi gets the list as a prompt section, Claude Code through
+  its mod (`CUBE_SKILLS_PROMPT`), the same text for both.
+- Claude Code's own skill discovery (its `Skill` tool, `~/.claude/skills`)
+  is not used: it would read the cubed host, not the thread's machine, and
+  cube starts Claude Code with only its mod. Claude Code learns the skills
+  from the list in its context and reads them with Read, which the mod
+  sends to the machine.
+- Threads created before skills have no `allocation.skills` and get none.
+
+## Checks and limits
+
+A folder is skipped, with its reason in `skipped`, when its name is not a
+skill name (lowercase letters, digits, inner hyphens, at most 64), its
+`SKILL.md` names another skill, its description is empty or over 1024
+characters, its surface is unknown, or it holds a symlink or submodule. A
+thread installs at most 64 skills, 2000 files and 8 MiB, and each source's
+install command must fit the machine's 8 KiB command limit. The path is
+repeated for every skill: 64 skills of 64-character names under `skills`
+take about 5.3 KB, 64 under a 100-character path about 9.2 KB. A set that does not fit is refused when it is
+saved or when a thread starts, before a machine is allocated; disable some
+skills or shorten the path.
+
+## Private sources
+
+Two parties fetch a source, with different credentials. cubed resolves it in
+its host mirror with the host's git credentials; the thread's machine then
+fetches the same commit through cube's gateway, which adds credentials only
+where it substitutes them (GitHub, with the host's token). A private source
+on GitHub works in both places. A private source elsewhere may resolve on
+the host and still fail in the machine: the thread's preparation step fails
+with the source and commit, and cube retries it. Credentials are never put
+in the URL or carried into the machine for skills; use a public source or
+one on GitHub.
+
+Skills are instructions the agent follows and files it may run, in its own
+machine only, the same trust as the repository's own files. Add only sources
+you trust. Nothing here limits what the agent may do; the machine is the
+sandbox (docs/security.md).
+
+## Settings
+
+`GET /api/settings/skills` resolves the saved sources and returns
+`{default, saved, resolved: {sources, skills, skipped}}`.
+`PUT /api/settings/skills {sources, disabled, defaultCommit?}` replaces the
+whole set and saves only a configuration
+that resolves (400 for a malformed one, 422 for one that does not resolve).
+It is kept in `<CUBED_STATE>/settings.json` under `skills`. The settings
+page **skills** (`#/settings/skills`) shows the same: the sources (add,
+remove), the skills new threads get with their surface and provenance
+(disable, enable) and skipped folders with their reason.
+
+```sh
+curl -X PUT http://127.0.0.1:7777/api/settings/skills -H 'content-type: application/json' -d '{
+  "sources": [{"url": "https://github.com/me/my-skills", "commit": "<40-character commit>", "path": "skills"}],
+  "disabled": ["briefing-a-thread"]
+}'
+```

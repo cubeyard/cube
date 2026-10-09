@@ -108,6 +108,9 @@ export const register: Register = on => {
       const text = await instructions(scope, file).catch(() => null)
       if (text?.trim()) sections.push(`Contents of ${file} in the thread workspace (project instructions, checked into the codebase):\n\n${text.trim()}`)
     }
+    // The thread's skills, installed in its machine; cubed renders the list.
+    const skills = await $.env.get('CUBE_SKILLS_PROMPT')
+    if (skills) sections.push(skills)
     return { ...context, blocks: [...context.blocks, { name: 'cubeWorkspace', text: sections.join('\n\n') }] }
   })
 }

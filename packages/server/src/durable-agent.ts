@@ -100,6 +100,8 @@ export async function openAgent(options: {
   codemodeLimits?: Partial<CodemodeLimits>;
   /** Installed after cube's own extension; tests use this for hooks. */
   extensions?: readonly Extension[];
+  /** The thread's skills as its prompt lists them (`skillsPrompt`). */
+  skills?: string | null;
   /** Host tools beside the workspace tools (artifacts), with a line for the
    * preamble. `readFile` reads a workspace file under the agent's lease;
    * `key` is a call's stable request id. */
@@ -205,7 +207,8 @@ export async function openAgent(options: {
             if (text) parts.push(`Contents of ${file} in the thread workspace (project instructions, checked into the codebase):\n\n${text}`);
           }
           return parts.length ? parts.join("\n\n") : undefined;
-        }, { tag: false })],
+        }, { tag: false }),
+        ...options.skills ? [section("skills", () => options.skills!, { tag: false })] : []],
     }));
     for (const extension of options.extensions ?? []) registry.install(extension);
     harness = await Harness.open(storage, { models: options.models, registry, settings: { toolExecution: "sequential" } }, context);

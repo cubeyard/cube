@@ -25,7 +25,8 @@ faux.setResponses(Array.from({ length: 500 }, () => async (request: { messages: 
 }));
 const models = createModels();
 models.setProvider(faux.provider);
-const app = await createCubed({ state, models, claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], claudeOptions: { stopGraceMs: 2000 } });
+const app = await createCubed({ state, models, claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], claudeOptions: { stopGraceMs: 2000 },
+  skillSource: process.env.CUBE_FIXTURE_SKILL_SOURCE ? JSON.parse(process.env.CUBE_FIXTURE_SKILL_SOURCE) : null });
 await new Promise<void>(resolve => app.server.listen(Number(process.env.CUBE_FIXTURE_PORT ?? 0), "127.0.0.1", resolve));
 const address = app.server.address();
 if (!address || typeof address === "string") throw new Error("missing listener");

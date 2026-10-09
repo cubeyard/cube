@@ -28,6 +28,7 @@ import { clean, MachineEvents, type Evidence, type MachineEvidence } from "./vm-
 import { FAILED_BUILD_BACKOFF_MS, TEMPLATE_CAPABILITY, TEMPLATE_FORMAT, missingTemplate, obsoleteTemplates, pickTemplate, templateKey, templateParts,
   templateSettings, type TemplateMeta, type TemplateParts, type TemplateSettings } from "./vm-template.ts";
 import { LeaseStore } from "./workspace-lease.ts";
+import { skillInstallScripts } from "./skills.ts";
 import { settleOperation, WorkspaceError, type WorkspaceOwner } from "./workspace.ts";
 
 const run = promisify(execFile);
@@ -1373,6 +1374,17 @@ async function own(workspace: VmWorkspace, owner: WorkspaceOwner, key: string | 
  * one is never rerun under its key, a new try gets a new key. */
 export async function provisionWorkspace(workspace: VmWorkspace, owner: WorkspaceOwner, allocation: WorkspaceAllocation, attempt: number,
   mode: PreparationMode = { kind: "fresh" }): Promise<PreparationOutcome> {
+  // The skills first: a try that checked out is not run again (`provisioned`).
+  if (allocation.skills) {
+    for (const [index, script] of skillInstallScripts(allocation.skills).entries()) {
+      const installed = await own(workspace, owner, `cube:skills:${attempt}:${index}`, script, 600000);
+      if (installed.state !== "succeeded") throw new StepFailure(`installing the thread's skills did not finish (${installed.state})`);
+      if (installed.exitCode !== 0) {
+        const output = Buffer.from(installed.output).toString("utf8").trim().split("\n").slice(-3).join("; ");
+        throw new StepFailure(`installing the thread's skills failed (exit ${installed.exitCode}): ${output}`);
+      }
+    }
+  }
   const state = await own(workspace, owner, `cube:provision:${attempt}`, preparationScript(allocation, mode), 1800000);
   const outcome = preparationOutcome(state);
   if (outcome.error) throw new StepFailure(outcome.error, outcome.memory, outcome.log);
