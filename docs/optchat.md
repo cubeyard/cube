@@ -14,7 +14,7 @@ a project or a thread; read-only, see [usage.md](usage.md)), reads and
 saves a project's external hooks in cube's projects (`project_hooks`,
 `project_hooks_write`, the project named explicitly; see
 [project-hooks.md](project-hooks.md)), writes work
-artifacts and reads its own and its threads' (`artifact_write`,
+artifacts and reads and revises its own and its threads' (`artifact_write`,
 `artifact_read`; see [artifacts.md](artifacts.md)) and reads its own
 memory (`zoom`, `date`). It keeps no task list: the chat page shows its
 threads, derived from its own spawns (see "Threads beside the chat"), and

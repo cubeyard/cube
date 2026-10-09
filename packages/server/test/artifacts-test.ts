@@ -1,8 +1,9 @@
 /** Work artifacts end to end through cubed's routes, with disposable state:
  * OptChat, a Pi thread (over a local guest) and a Claude Code thread (the
  * fake `claude` running the mod's own tools over the workspace socket) write
- * artifacts; revisions and provenance persist across a restart; authors are
- * kept apart; hostile action declarations are refused; comments are anchored
+ * artifacts; revisions and provenance persist across a restart; a Claude
+ * Code thread revises a Pi thread's artifact of its project by id, never
+ * another project's; hostile action declarations are refused; comments are anchored
  * to a revision, wait while a thread works and reach it once; a confirmed
  * merge is checked against the project and the pull request's live state
  * (a fake GitHub) and runs once, and its outcome reaches the author and
@@ -36,7 +37,8 @@ const SHA = "a".repeat(40), MOVED = "b".repeat(40);
   assert.equal(store.write(optchat, { title: "plan", body: "# plan\none", actions: [], projectId: null }, { agent: "optchat" }, "r1").revision.number, 1, "a replayed request finds its revision");
   assert.equal(store.write(optchat, { id, title: "plan", body: "# plan\none", actions: [], projectId: null }, { agent: "optchat" }, "r2").unchanged, true, "the same content writes nothing");
   assert.equal(store.write(optchat, { id, title: "plan", body: "# plan\ntwo", actions: [], projectId: null }, { agent: "optchat" }, "r3").revision.number, 2);
-  assert.throws(() => store.write({ kind: "thread", thread: "t1" }, { id, title: "x", body: "y", actions: [], projectId: null }, { agent: "pi" }, "r4"), /no artifact .* of yours/, "another author cannot revise it");
+  assert.throws(() => store.write({ kind: "thread", thread: "t1" }, { id, title: "x", body: "y", actions: [], projectId: null }, { agent: "pi" }, "r4"), /written by optchat; read its newest revision first/, "another editor must write on the newest revision");
+  assert.throws(() => store.write({ kind: "thread", thread: "t1" }, { id, base: 1, title: "x", body: "y", actions: [], projectId: null }, { agent: "pi" }, "r4"), /revision 2 \(by optchat\) is newer than revision 1/, "an older base is refused");
   assert.throws(() => store.write({ kind: "thread", thread: "t1" }, { title: "x", body: "y", actions: [], projectId: null }, { agent: "pi" }, "r1"), /another author/, "another author's request id is no replay");
   assert.throws(() => store.write(optchat, { title: "", body: "", actions: [], projectId: null }, { agent: "optchat" }, "r5"), ArtifactError);
   assert.throws(() => store.write(optchat, { title: "big", body: "x".repeat(256 * 1024 + 1), actions: [], projectId: null }, { agent: "optchat" }, "r6"), /at most/);
@@ -247,13 +249,13 @@ try {
   const idle = async (id: string) => until(() => call(`/api/threads/${id}/history`), value => value.status === 200 && value.body.status.state !== "working" && value.body.status.state !== "idle", `thread ${id} settles`);
   await idle(piThread);
 
-  // Authors are kept apart: the thread cannot revise or read the chat's.
+  // Projects are kept apart: the thread cannot revise or read the chat's artifact of another project.
   const steal = await call(`/api/threads/${piThread}/prompt`, { text: `steal ${review.id}`, requestId: "steal" });
   assert.equal(steal.status, 200);
   let history = await until(() => call(`/api/threads/${piThread}/history`), value => JSON.stringify(value.body).includes("t-peek") && value.body.status.state === "completed"
     && JSON.stringify(value.body).includes(`steal ${review.id}`) && value.body.events.at(-1)?.type === "assistant-text", "the steal settles");
   const stolen = JSON.stringify(history.body);
-  assert.match(stolen, new RegExp(`not written: no artifact ${review.id} of yours`));
+  assert.match(stolen, new RegExp(`not written: no artifact ${review.id} you can read`));
   assert.match(stolen, new RegExp(`no artifact ${review.id} you can read`));
   assert.equal((await call(`/api/artifacts/${review.id}`)).body.artifact.head, 1, "nothing was written");
   // A path outside the workspace is one in the thread's machine, never the
@@ -271,7 +273,11 @@ try {
   // A Claude Code thread: the mod's /cube/artifacts paths.
   const claudeThread = (await call("/api/threads", { projectId: project.body.project.id, requestId: "t-claude", model: { provider: "claude-code", id: "fable" },
     text: ["write-at /cube/artifacts/design.md # design notes\\n\\n```mermaid\\ngraph TD; A-->B\\n```", "read-at /cube/artifacts/design.md", "write-at /cube/artifacts/../x.md nope",
-      "write-at /cube/elsewhere.md nope", "read-at /cube/artifacts"].join("\n") })).body.id as string;
+      "write-at /cube/elsewhere.md nope", "read-at /cube/artifacts",
+      // Another thread's artifact of the project: refused unread, then read and revised by id; another project's is not there.
+      `write-at /cube/artifacts/${threadArtifact.id}.md # thread notes\\n\\nblind`, `read-at /cube/artifacts/${threadArtifact.id}.md`,
+      `write-at /cube/artifacts/${threadArtifact.id}.md # thread notes\\n\\nthe guest wrote this\\n\\nrevised by claude`,
+      `read-at /cube/artifacts/${review.id}.md`, `write-at /cube/artifacts/${review.id}.md # mine`].join("\n") })).body.id as string;
   const claudeHistory = await until(() => call(`/api/threads/${claudeThread}/history`), value => value.status === 200 && value.body.status.state === "completed", "the claude thread finishes");
   const claudeText = JSON.stringify(claudeHistory.body);
   assert.match(claudeText, /created at revision 1/);
@@ -281,6 +287,17 @@ try {
   const design = list.body.artifacts.find((item: any) => item.title === "design notes");
   assert.equal(design.author.thread, claudeThread);
   assert.equal((await call(`/api/artifacts/${design.id}`)).body.revisions[0].provenance.agent, "claude-code");
+  assert.match(claudeText, new RegExp(`revision 1 of artifact ${threadArtifact.id} was written by thread \\[${piThread.slice(0, 8)}\\]; read its newest revision first`));
+  assert.match(claudeText, new RegExp(`wrote revision 2\\. .*it stays thread \\[${piThread.slice(0, 8)}\\]'s artifact`));
+  assert.equal((claudeText.match(new RegExp(`File does not exist: /cube/artifacts/${review.id}\\.md`, "g")) ?? []).length, 2, "another project's artifact is neither read nor written, as if there were none");
+  const shared = (await call(`/api/artifacts/${threadArtifact.id}`)).body;
+  assert.deepEqual(shared.artifact.author, { kind: "thread", thread: piThread }, "the author stays");
+  assert.deepEqual(shared.revisions.map((item: any) => [item.number, item.editor.thread, item.provenance.agent]), [[1, piThread, "pi"], [2, claudeThread, "claude-code"]]);
+  assert.equal((await call(`/api/artifacts/${review.id}`)).body.artifact.head, 1, "the chat's artifact of another project is untouched");
+  // The browser's routes read and comment; none writes a revision.
+  assert.equal((await call("/api/artifacts", { body: "# x", requestId: "w" })).status, 404);
+  assert.equal((await call(`/api/artifacts/${threadArtifact.id}`, { body: "# x", requestId: "w" })).status, 404);
+  assert.equal((await call(`/api/artifacts/${threadArtifact.id}/revisions`, { body: "# x", requestId: "w" })).status, 404);
   // The socket's artifact routes need the thread's lease token.
   const unauth = await fetch(`${base}/api/threads/${claudeThread}/workspace/artifacts`);
   assert.equal(unauth.status, 404, "the browser-facing host does not serve them");
@@ -306,6 +323,8 @@ try {
   assert.match(delivered[0]!, /> the guest wrote this/);
   assert.match(delivered[0]!, /comment: who is the guest\?/);
   assert.match(delivered[0]!, /under "post-merge review"/);
+  assert.match(delivered[0]!, new RegExp(`now at revision 2; thread \\[${claudeThread.slice(0, 8)}\\] wrote that revision`), "the author gets them, told who wrote the newest revision");
+  assert.doesNotMatch(JSON.stringify((await call(`/api/threads/${claudeThread}/history`)).body), /who is the guest/, "the thread that revised it did not get them");
   assert.doesNotMatch(delivered[0]!, /drop me/);
   assert.equal((await call(`/api/artifacts/${threadArtifact.id}/send`, { requestId: "send-a" })).body.batch.state, "delivered", "a repeated send is the same batch");
 
@@ -414,7 +433,7 @@ try {
   await call(`/api/artifacts/${design.id}/send`, { requestId: "send-c" });
   const lost = await until(() => call(`/api/artifacts/${design.id}`), value => value.body.comments[0].state === "undeliverable", "undeliverable");
   assert.match(lost.body.comments[0].note, /archived/);
-  console.log("ok: artifacts: store, revisions and provenance across a restart, authors apart, hostile actions refused, comments anchored, queued while busy and delivered once, merge checked and run once");
+  console.log("ok: artifacts: store, revisions and provenance across a restart, a shared revision within a project and projects apart, hostile actions refused, comments anchored, queued while busy and delivered once, merge checked and run once");
 } finally {
   await app.close();
   fs.rmSync(root, { recursive: true, force: true });

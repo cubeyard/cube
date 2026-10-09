@@ -68,7 +68,7 @@ async function until<T>(read: () => T, check: (value: T) => boolean, what: strin
   }
   return value;
 }
-const write = (author: ArtifactAuthor, pulls: number[], name: string) => artifacts.write(author,
+const write = (author: ArtifactAuthor, pulls: number[], name: string) => artifacts.write({ agent: author, authors: [author] },
   { name, title: name, body: `# ${name}`, actions: pulls.map(pull => ({ kind: "github.merge", repository: "cubeyard/cube", pull, headSha: SHA })), project: "cube" },
   { agent: author.kind === "optchat" ? "optchat" : "pi" }, `w-${name}`).id;
 const confirm = (id: string, pull: number, requestId: string) => artifacts.run(id, `merge-${pull}`, { revision: 1, confirm: `cubeyard/cube#${pull}`, requestId });
@@ -109,7 +109,7 @@ try {
   assert.equal(merges.length, 1);
   assert.equal(notices(review).length, 2, "no second notice for a repeated request");
   // What the author reads says who was told.
-  assert.match(artifacts.read([{ kind: "thread", thread: author }], review), /action merge-116 \(revision 1\): succeeded: merged[\s\S]*told thread \[eb809312\]: delivered[\s\S]*told the chat: delivered/);
+  assert.match(artifacts.read({ agent: { kind: "thread", thread: author }, authors: [{ kind: "thread", thread: author }] }, review), /action merge-116 \(revision 1\): succeeded: merged[\s\S]*told thread \[eb809312\]: delivered[\s\S]*told the chat: delivered/);
 
   // A failure is told as a failure, never as done; the next try is its own run and notice.
   mergeError = new GithubPullsError("github: Head branch was modified. Review and try the merge again.", 409);
@@ -127,7 +127,7 @@ try {
   await until(() => notices(notes).map(notice => notice.state), states => states.join() === "delivered,skipped", "told the thread, skipped the chat");
   assert.equal(notices(notes)[1]!.note, "the chat did not start this thread");
   assert.equal(chat.got.size, before);
-  assert.doesNotMatch(artifacts.read([{ kind: "thread", thread: "user-thread" }], notes), /told the chat/);
+  assert.doesNotMatch(artifacts.read({ agent: { kind: "thread", thread: "user-thread" }, authors: [{ kind: "thread", thread: "user-thread" }] }, notes), /told the chat/);
 
   // A thread so young the chat may not have recorded spawning it yet: the chat's notice waits, then goes once it has.
   threads.set("young-thread", { id: "young-thread", projectId: "p", archived: false, createdAt: Date.now() });

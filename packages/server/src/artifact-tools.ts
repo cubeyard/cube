@@ -26,7 +26,7 @@ const given = (value: string | undefined) => value?.trim() ? value : undefined;
 export function artifactTools(options: {
   artifacts: Artifacts;
   author: ArtifactAuthor;
-  /** Whose artifacts this agent may read (its own, and OptChat's threads'). */
+  /** Whose artifacts this agent may read and revise (its own, and OptChat's threads'); a thread also its project's. */
   readable: () => Promise<ArtifactAuthor[]>;
   agent: Provenance["agent"];
   /** The request id of a call: the same on replay, so a revision is written once. */
@@ -39,19 +39,20 @@ export function artifactTools(options: {
 }): ToolRegistration[] {
   const write = defineTool({
     name: "artifact_write",
-    description: `Create an artifact, or with id write a new revision of one of yours (the whole document each time). ${ARTIFACT_GUIDE}`,
+    description: `Create an artifact, or with id write a new revision of one you can read (the whole document each time, on its newest revision). ${ARTIFACT_GUIDE}`,
     parameters: Type.Object({
-      id: Type.Optional(Type.String({ description: "An artifact of yours to revise; omit to create one" })),
+      id: Type.Optional(Type.String({ description: "An artifact to revise (yours, or another one artifact_read shows you); omit to create one" })),
+      base: Type.Optional(Type.Integer({ minimum: 1, description: "The revision you read and wrote this one on; default: the one you last read or wrote. A write on an older revision than the newest is refused" })),
       title: Type.Optional(Type.String({ description: "Default: the body's first # heading" })),
       body: Type.Optional(Type.String({ description: "The whole Markdown document" })),
       ...options.readFile ? { path: Type.Optional(Type.String({ description: "A file in the thread machine (relative to the workspace, or absolute) holding the Markdown body, instead of body" })) } : {},
       ...options.projects ? { project: Type.Optional(Type.String({ description: "Project name or id; needed for actions" })) } : {},
-      actions: Type.Optional(Type.Array(actionSchema, { maxItems: 8 })),
+      actions: Type.Optional(Type.Array(actionSchema, { maxItems: 8, description: "Left out on a revision: the newest revision's actions are kept as they are; [] removes them" })),
     }),
     // The request id finds the revision a replayed call wrote.
     replay: "safe",
     execute: async (args, api) => {
-      const input = args as { id?: string; title?: string; body?: string; path?: string; project?: string; actions?: unknown };
+      const input = args as { id?: string; base?: number; title?: string; body?: string; path?: string; project?: string; actions?: unknown };
       try {
         const id = given(input.id), path = given(input.path);
         let body = input.body;
@@ -67,7 +68,7 @@ export function artifactTools(options: {
         const model = options.model?.();
         const provenance: Provenance = { agent: options.agent, ...options.author.kind === "thread" ? { thread: options.author.thread } : {},
           call: api.callId, ...model ? { model } : {}, ...source ? { source } : {} };
-        return text(options.artifacts.write(options.author, { id, title: input.title, body, actions: input.actions, project: input.project },
+        return text(options.artifacts.write({ agent: options.author, authors: await options.readable() }, { id, base: input.base, title: input.title, body, actions: input.actions, project: input.project },
           provenance, options.key(api)).text);
       } catch (error) {
         if (error instanceof ArtifactError) return text(`not written: ${error.message}`);
@@ -77,14 +78,14 @@ export function artifactTools(options: {
   });
   const read = defineTool({
     name: "artifact_read",
-    description: "Read an artifact whole (its newest revision unless revision is given): its actions and what ran, the comments sent to its author, then its body. Without id: list the artifacts you can read.",
+    description: "Read an artifact whole (its newest revision unless revision is given): its actions and what ran, the comments sent to its author, then its body. Read the newest revision before you revise an artifact. Without id: list the artifacts you can read.",
     parameters: Type.Object({
       id: Type.Optional(Type.String()),
       revision: Type.Optional(Type.Integer({ minimum: 1 })),
     }),
     replay: "safe",
     execute: async args => {
-      try { return text(options.artifacts.read(await options.readable(), args.id, args.revision)); }
+      try { return text(options.artifacts.read({ agent: options.author, authors: await options.readable() }, args.id, args.revision)); }
       catch (error) {
         if (error instanceof ArtifactError) return text(error.message);
         throw error;

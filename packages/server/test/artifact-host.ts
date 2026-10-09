@@ -1,6 +1,7 @@
 /** cubed for the artifact browser test: a faux model scripted as OptChat
  * (writes and revises a post-merge review with a merge action) and as a Pi
- * thread over a local guest (publishes notes, holds until released), a fake
+ * thread over a local guest (publishes notes, holds until released, reads
+ * another thread's notes and then revises them), a fake
  * GitHub with one pull request, and two runners. Disposable state. */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -58,10 +59,17 @@ export async function startArtifactHost(options: { web: string }) {
       if (said.includes("[artifact ")) return fauxAssistantMessage("Got your comments on the review; I will answer them in a new revision.");
       return fauxAssistantMessage("noted");
     }
-    if (last.role === "toolResult") return fauxAssistantMessage("published the notes as an artifact.");
+    if (last.role === "toolResult") {
+      // What artifact_read showed: the newest revision, which the revision is written on.
+      const read = /^artifact (\S+) "machine notes" · revision \d+ of/.exec(said)?.[1];
+      if (read) return fauxAssistantMessage([fauxToolCall("artifact_write", { id: read, body: "# machine notes\n\nReviewed by a second thread: the helper runs as root in the guest only." })], { stopReason: "toolUse" });
+      return fauxAssistantMessage("published the notes as an artifact.");
+    }
     threadPrompts.push(said);
     if (said.includes("hold until released")) { await hold; return fauxAssistantMessage("released"); }
     if (said.includes("[artifact ")) return fauxAssistantMessage("Thanks: the guest is the thread's own VM; I will say so in the next revision.");
+    const review = /review the notes (\S+)/.exec(said)?.[1];
+    if (review) return fauxAssistantMessage([fauxToolCall("artifact_read", { id: review })], { stopReason: "toolUse" });
     const again = /publish the notes again (\S+)/.exec(said)?.[1];
     if (again) {
       return fauxAssistantMessage([fauxToolCall("artifact_write", { id: again, body: "# machine notes\n\nA newer revision: the guest runs the helper as root and every command as agent." })], { stopReason: "toolUse" });

@@ -110,14 +110,21 @@ whenever a summary only mentions something you need, such as what your
 last reply said, a decision, a past attempt or where a file is, before
 you act, guess or ask. date(id) gives the date and time of message id.`;
 
-/** OptChat's part in work artifacts: it writes its own, reads its threads'. */
+/** OptChat's part in work artifacts: it writes its own and revises its
+ * threads'; a thread revises any artifact of its project. */
 export const ARTIFACTS_NOTE = `Artifacts: artifact_write makes a document the user reads beside the
 chat, with revisions, comments and confirmed actions; artifact_read reads
-yours and your threads'. Threads can write their own (a review of their
-pull request, say); ask for one in a thread's task when the result is worth
-reading at length. Link an artifact in your reply as [title](#/a/<id>).
-Comments the user leaves on yours come to you as a message starting
-"[artifact <id>]"; comments on a thread's go to that thread. ${ARTIFACT_GUIDE}`;
+yours and your threads', and you may revise those. Threads can write their
+own (a review of their pull request, say); ask for one in a thread's task
+when the result is worth reading at length. A thread can also revise any
+artifact of its project, yours included when you named the project: to have
+a reviewer update an existing document rather than start another, give it
+the artifact's id and tell it to read the newest revision, then write the
+whole document on top of it (artifact_write with that id, or in Claude Code
+Read and then Write /cube/artifacts/<id>.md). Link an artifact in your reply
+as [title](#/a/<id>). Comments the user leaves on yours come to you as a
+message starting "[artifact <id>]"; comments on a thread's go to that
+thread, whoever wrote the revision. ${ARTIFACT_GUIDE}`;
 
 /** OptChat's part in project hooks (project-hooks.ts, docs/project-hooks.md). */
 export const HOOKS_NOTE = `Project hooks: a project in cube's projects has two external hooks,

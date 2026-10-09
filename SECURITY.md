@@ -114,7 +114,9 @@ are shown as images of their SVG. Their only side effect is a typed
 the repository against the artifact's project and the pull request's live
 head, the user confirms the exact target, and cubed merges with the host's
 GitHub token pinned to that head. Anyone who can reach cubed can confirm one,
-like every other control.
+like every other control. A thread may revise any artifact of its own
+project, not another project's; a revision keeps the earlier ones whole,
+runs nothing, and keeps a merge pinned to the head it names.
 
 Claude Code threads run the unmodified `claude` binary on the cubed host, as the
 cubed user, with that user's own Claude login. cubed never stores Claude
