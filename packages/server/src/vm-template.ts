@@ -52,7 +52,8 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 /** What a template's preparation depends on, as far as cubed knows before a
  * machine boots. Not in it: the pre-resume hook (resume hooks run on every
  * machine and are never cached) and `.agents/setup` (see `setupBlob`). */
-export function templateKey(input: { allocation: WorkspaceAllocation; hooks: ProjectHooks; runner: { baseImageSha256: string; platform: string }; diskGiB: number }): string {
+export type TemplateKeyInput = { allocation: WorkspaceAllocation; hooks: ProjectHooks; runner: { baseImageSha256: string; platform: string }; diskGiB: number };
+export function templateKey(input: TemplateKeyInput): string {
   const helper = guestHelper();
   return sha256(JSON.stringify({
     format: TEMPLATE_FORMAT,
@@ -67,6 +68,40 @@ export function templateKey(input: { allocation: WorkspaceAllocation; hooks: Pro
   }));
 }
 
+/** What each part of the key was, hashed, so a thread that finds no
+ * template can say what changed since the project's last one. */
+export type TemplateParts = Record<"repositories" | "preSetup" | "guest" | "image" | "disk", string>;
+const PART_WORDS: Record<keyof TemplateParts, string> = {
+  repositories: "the project's repositories", preSetup: "the pre-setup hook", guest: "cube's guest helper or packages",
+  image: "the runner's base image or platform", disk: "the disk size",
+};
+export function templateParts(input: TemplateKeyInput): TemplateParts {
+  const helper = guestHelper();
+  const short = (value: unknown) => sha256(JSON.stringify(value)).slice(0, 16);
+  return {
+    repositories: short(input.allocation.repositories.map(repository => [repository.url, repository.base, repository.checkoutName])),
+    preSetup: short(input.hooks.preSetup),
+    guest: short([GUEST_PACKAGES, helper.helper + helper.recoverUnit]),
+    image: short([input.runner.baseImageSha256, input.runner.platform]),
+    disk: short(input.diskGiB),
+  };
+}
+
+/** Why no ready template of the project matches `key` now, in words. */
+export function missingTemplate(templates: RunnerTemplate[], options: { projectId: string; key: string; parts: TemplateParts; now: number; ttlMs: number }): string {
+  const own = templates.map(template => ({ template, meta: templateMeta(template.meta) }))
+    .filter(({ template, meta }) => template.state === "ready" && meta?.projectId === options.projectId)
+    .sort((a, b) => b.template.createdAt - a.template.createdAt);
+  const newest = own[0];
+  if (!newest) return "the project has no template on this runner yet";
+  const age = `${Math.round((options.now - newest.template.createdAt) / 3600000)} h`;
+  if (newest.template.key === options.key) return `template ${newest.template.id} expired (prepared ${age} ago; templates are reused for ${Math.round(options.ttlMs / 3600000)} h)`;
+  const parts = newest.meta!.parts;
+  const changed = parts ? (Object.keys(PART_WORDS) as Array<keyof TemplateParts>).filter(name => parts[name] !== options.parts[name]).map(name => PART_WORDS[name]) : [];
+  return changed.length ? `${changed.join(", ")} changed since template ${newest.template.id}`
+    : `template ${newest.template.id} was prepared with other settings`;
+}
+
 /** cubed's metadata on a template; the runner stores it opaquely. */
 export interface TemplateMeta {
   format: number;
@@ -75,6 +110,8 @@ export interface TemplateMeta {
   setupBlob: string;
   /** The primary repository's commit the template was prepared at. */
   commit: string | null;
+  /** What its key was made of (absent in templates published before). */
+  parts?: TemplateParts;
 }
 
 const BLOB = /^(?:none|[0-9a-f]{40}|[0-9a-f]{64})$/;
@@ -84,7 +121,10 @@ export function templateMeta(raw: string): TemplateMeta | null {
     const value = JSON.parse(raw) as Record<string, unknown>;
     if (value.format !== TEMPLATE_FORMAT || typeof value.projectId !== "string" || typeof value.setupBlob !== "string" || !BLOB.test(value.setupBlob)
       || !(value.commit === null || (typeof value.commit === "string" && /^[0-9a-f]{40,64}$/.test(value.commit)))) return null;
-    return { format: value.format, projectId: value.projectId, setupBlob: value.setupBlob, commit: value.commit };
+    const parts = value.parts as Record<string, unknown> | undefined;
+    const partsValid = !!parts && typeof parts === "object" && (Object.keys(PART_WORDS)).every(name => typeof parts[name] === "string");
+    return { format: value.format, projectId: value.projectId, setupBlob: value.setupBlob, commit: value.commit,
+      ...(partsValid ? { parts: parts as TemplateParts } : {}) };
   } catch { return null; }
 }
 

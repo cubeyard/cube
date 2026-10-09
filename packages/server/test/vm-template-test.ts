@@ -11,7 +11,7 @@ import path from "node:path";
 import { gunzipSync } from "node:zlib";
 import type { RunnerTemplate } from "../src/iroh-node.ts";
 import { MAX_HOOK_BYTES, NO_HOOKS, projectHooks, type WorkspaceAllocation } from "../src/registry.ts";
-import { provisionWorkspace, resumeWorkspace } from "../src/vm.ts";
+import { provisionWorkspace, readStartupLog, resumeWorkspace, StepFailure } from "../src/vm.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
 import { GUEST_HOOKS_DIRECTORY, GUEST_PACKAGES, vmSeed } from "../src/vm-seed.ts";
 import { DEFAULT_TEMPLATE_TTL_MS, TEMPLATE_FORMAT, obsoleteTemplates, pickTemplate, templateKey, templateMeta, templateSettings } from "../src/vm-template.ts";
@@ -94,6 +94,7 @@ try {
     const outcome = await provisionWorkspace(m.workspace, "pi", allocation(first), 1);
     assert.deepEqual(statuses(outcome.hooks), { "pre-setup": "failed:7", setup: "notrun" });
     assert.match(fs.readFileSync(path.join(m.home, ".cache/cube/pre-setup.log"), "utf8"), /broken-pre-setup/);
+    assert.equal(outcome.log, "broken-pre-setup", "the end of the failed hook's log, kept with its step");
     assert.deepEqual(statuses((await resumeWorkspace(m.workspace, "pi")).hooks), { "pre-resume": "failed:4", resume: "notrun" });
     assert.deepEqual(m.order(), [], "neither repository hook ran");
     // What the agent in that machine reads back: the same outcomes, the scripts and their logs.
@@ -119,6 +120,40 @@ try {
     // A checkout that fails does fail provisioning.
     await assert.rejects(provisionWorkspace(machine({}).workspace, "pi", allocation("f".repeat(40)), 1), /pinned commit f+ is not on refs\/heads\/main/);
     console.log("ok: failures: pre-setup failure skips setup, pre-resume failure skips resume, setup failure recorded, failed checkout fails");
+  }
+
+  // 2b. A hook the kernel's OOM killer stops: the try fails saying so, with the
+  // command's memory; the next try keeps the previous log as <hook>.log.prev.
+  {
+    // The local guest's stand-in for the unit's cgroup and /proc/meminfo; the
+    // hook then kills its whole process group, as a unit stopped for OOM.
+    const killed = "if [ ! -e ../once ]; then touch ../once; mkdir -p ../cgroup; echo 3758096384 > ../cgroup/memory.peak; "
+      + "printf 'oom 1\\noom_kill 1\\n' > ../cgroup/memory.events; echo 'MemTotal: 4013504 kB' > ../meminfo; echo first-try; kill -9 0; fi; echo second-try";
+    const m = machine({ preSetup: killed });
+    const failure = await provisionWorkspace(m.workspace, "pi", allocation(first), 1).then(() => null, (error: unknown) => error as StepFailure);
+    assert.ok(failure instanceof StepFailure);
+    assert.equal(failure.message, "pre-setup was stopped: the machine ran out of memory (this command used up to 3.5 GB; the machine has 3.8 GB)");
+    assert.deepEqual(failure.memory, { peakBytes: 3758096384, totalBytes: 4013504 * 1024, oomKills: 1 });
+    assert.equal(fs.readFileSync(path.join(m.home, ".cache/cube/running"), "utf8"), "pre-setup pre-setup.log\n", "the killed hook is the one shown");
+    // The next command of cubed's (here the resume hooks) clears the killed hook's marker first.
+    await resumeWorkspace(m.workspace, "pi");
+    assert.ok(!fs.existsSync(path.join(m.home, ".cache/cube/running")), "no stale marker once another command of cubed's began");
+    fs.rmSync(path.join(m.guest.root, "cgroup"), { recursive: true });
+    const retried = await provisionWorkspace(m.workspace, "pi", allocation(first), 2);
+    assert.deepEqual(statuses(retried.hooks), { "pre-setup": "ok", setup: "ok" });
+    assert.match(fs.readFileSync(path.join(m.home, ".cache/cube/pre-setup.log"), "utf8"), /second-try/);
+    assert.match(fs.readFileSync(path.join(m.home, ".cache/cube/pre-setup.log.prev"), "utf8"), /first-try/);
+    assert.ok(!fs.existsSync(path.join(m.home, ".cache/cube/running")), "nothing runs now");
+    // The live log: the running hook and the end of a long log, from whole lines.
+    fs.writeFileSync(path.join(m.home, ".cache/cube/running"), "setup setup.log\n");
+    fs.writeFileSync(path.join(m.home, ".cache/cube/setup.log"), Array.from({ length: 4000 }, (_, k) => `line ${k}`).join("\n") + "\n");
+    const live = await readStartupLog(m.guest, "thread", "/home/.cache/cube");
+    assert.equal(live.hook, "setup");
+    assert.equal(live.bytes, fs.statSync(path.join(m.home, ".cache/cube/setup.log")).size);
+    assert.ok(live.truncated && live.text.startsWith("line ") && live.text.endsWith("line 3999\n") && Buffer.byteLength(live.text) <= 16 * 1024, live.text.slice(0, 40));
+    fs.rmSync(path.join(m.home, ".cache/cube/running"));
+    assert.deepEqual(await readStartupLog(m.guest, "thread", "/home/.cache/cube"), { machine: "thread", hook: null, text: "", bytes: 0, truncated: false });
+    console.log("ok: a hook stopped for want of memory fails its try with the command's memory; the next try keeps the previous log; the live log reads the end of a long one");
   }
 
   // 3. A machine on a template: the checkout moves to the thread's commit and setup is skipped,

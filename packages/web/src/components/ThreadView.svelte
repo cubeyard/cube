@@ -12,6 +12,7 @@
   import { createArmed } from "../lib/armed.svelte.ts";
   import type { Command } from "../lib/command.ts";
   import { lampClass, machineLabel, stateLabel, STARTING_TEXT } from "../lib/thread-state.ts";
+  import { startupShown } from "../lib/startup.ts";
   import type {
     SubjectUsage,
     ThreadModels,
@@ -21,6 +22,7 @@
   import Conversation from "./Conversation.svelte";
   import Header from "./Header.svelte";
   import Icon from "./Icon.svelte";
+  import StartupPanel from "./StartupPanel.svelte";
 
   let { threadId, threads, command = null, onConsume = () => {}, onNewThread }: {
     threadId: string;
@@ -133,6 +135,18 @@
   // ---- on a phone the project, state, model and archive key fold behind
   // the strip's details key; they fold again when the composer takes focus ----
   let detailsOpen = $state(false);
+
+  // ---- machine startup: shown while the machine starts and after a start
+  // that failed; afterwards the machine label opens it ----
+  let startupOpen = $state(false);
+  const startupSteps = $derived(summary?.vm?.steps?.length ? summary.vm.steps : null);
+  // A failed start's error is printed in full by its step; not twice.
+  const startupCarriesError = $derived(!!summary && startupShown(summary) && !!startupSteps?.some((step) => step.state === "failed")
+    && !!summary.error?.startsWith("workspace allocation failed"));
+  // Models could not be read while the machine was not up; read them again once it is.
+  $effect(() => {
+    if (summary?.state === "ready" && modelError) untrack(() => void loadModels());
+  });
   let detailsKey = $state<HTMLButtonElement>();
   function onPaneFocusin(event: FocusEvent): void {
     if ((event.target as Element).closest(".composer") && detailsKey?.getClientRects().length) detailsOpen = false;
@@ -228,7 +242,12 @@
           base / {summary.workspaceBase.ref.replace("refs/heads/", "")} @ {summary.workspaceBase.oid.slice(0, 8)}
         </span>
       {/if}
-      {#if machineLabel(summary)}
+      {#if startupSteps && !startupShown(summary)}
+        <!-- the machine label opens the steps the machine took to start -->
+        <button class="strip-machine" class:error={machineLabel(summary)?.failed}
+          title={`${machineLabel(summary)?.title ?? "the machine is up"}\n\nshow how the machine started`}
+          aria-expanded={startupOpen} onclick={() => (startupOpen = !startupOpen)}>{machineLabel(summary)?.text ?? "machine startup"}</button>
+      {:else if machineLabel(summary)}
         <span class="strip-machine" class:error={machineLabel(summary)?.failed} title={machineLabel(summary)?.title}>{machineLabel(summary)?.text}</span>
       {/if}
       {#if stateLabel(summary)}
@@ -346,7 +365,7 @@
             <button class="key" onclick={loadModels}>retry models</button>
           </div>
         {/if}
-        {#if summary?.error}
+        {#if summary?.error && !startupCarriesError}
           <div class="strip-note bad"><span class="strip-note-text">{summary.error}</span></div>
         {/if}
         {#if note}
@@ -359,6 +378,9 @@
               <Icon name="close" size={12} />
             </button>
           </div>
+        {/if}
+        {#if summary && startupSteps && (startupShown(summary) || startupOpen)}
+          <StartupPanel thread={summary} onClose={startupShown(summary) ? null : () => (startupOpen = false)} />
         {/if}
         {#if gone}
           <div class="conversation-gone"><p>this thread is no longer active.</p><a class="key" href="#/threads">back to threads</a></div>

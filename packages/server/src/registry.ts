@@ -55,6 +55,31 @@ export interface ProjectHooks { preSetup: string; preResume: string }
 export const NO_HOOKS: ProjectHooks = Object.freeze({ preSetup: "", preResume: "" });
 /** Each hook is written into the machine's cloud-init seed. */
 export const MAX_HOOK_BYTES = 16384;
+/** The size a project's new thread machines ask for; absent fields use
+ * cubed's defaults (CUBED_VM_VCPUS, CUBED_VM_MEMORY_MIB). Each runner
+ * clamps them to its own limits. Fixed for a machine's life. */
+export interface ProjectMachine { vcpus?: number; memoryMiB?: number }
+export const MACHINE_VCPUS = { min: 1, max: 64 } as const;
+export const MACHINE_MEMORY_MIB = { min: 1024, max: 256 * 1024 } as const;
+
+/** Validates a project's machine size from the API; absent keeps `previous`,
+ * null or {} uses cubed's defaults. */
+export function projectMachine(input: unknown, previous: ProjectMachine = {}): ProjectMachine {
+  if (input === undefined) return { ...previous };
+  if (input === null) return {};
+  if (typeof input !== "object" || Array.isArray(input)) throw new Error("machine must be an object");
+  const value = input as Record<string, unknown>;
+  if (Object.keys(value).some(key => key !== "vcpus" && key !== "memoryMiB")) throw new Error("machine has only vcpus and memoryMiB");
+  const field = (name: "vcpus" | "memoryMiB", range: { min: number; max: number }) => {
+    const given = value[name];
+    if (given === undefined || given === null) return {};
+    if (!Number.isSafeInteger(given) || (given as number) < range.min || (given as number) > range.max) {
+      throw new Error(`machine.${name} must be a whole number from ${range.min} to ${range.max}`);
+    }
+    return { [name]: given as number };
+  };
+  return { ...field("vcpus", MACHINE_VCPUS), ...field("memoryMiB", MACHINE_MEMORY_MIB) };
+}
 export interface Project {
   id: string; name: string; status: "checking" | "ready" | "error"; error: string | null;
   revision: number; checkedAt: number | null; createdAt: number; updatedAt: number;
@@ -63,6 +88,8 @@ export interface Project {
   hooks?: ProjectHooks;
   /** When the hooks last changed; absent: not since this was recorded. */
   hooksUpdatedAt?: number;
+  /** The size of the project's new thread machines; absent: cubed's defaults. */
+  machine?: ProjectMachine;
 }
 export interface Runner extends NodeBinding {
   configPath: string; configHash: string;
@@ -88,6 +115,8 @@ export interface WorkspaceAllocation {
   projectId: string; projectRevision: number; repositories: WorkspaceRepository[];
   /** The project's hooks when the thread was created; fixed for the thread. */
   hooks?: ProjectHooks;
+  /** The project's machine size when the thread was created; fixed for the thread. */
+  machine?: ProjectMachine;
 }
 export type RunnerAllocationState = "available" | "allocating" | "busy" | "releasing" | "failed" | "retiring" | "retired";
 export type RunnerContactStatus = "unknown" | "reachable" | "unreachable" | "stale" | "retired";
@@ -143,7 +172,40 @@ export interface ThreadVm {
   hooks?: Record<string, HookOutcome>;
   /** How long the machine took to become ready for the agent, by phase (ms). */
   startup?: { source: MachinePreparation["source"]; totalMs: number; phases: Record<string, number> };
+  /** What cubed did to start the machine, step by step, oldest first (at
+   * most `MAX_STARTUP_STEPS`): what the thread shows while it starts and
+   * afterwards, failed tries included. */
+  steps?: StartupStep[];
 }
+/** At most this many startup steps are kept per thread. */
+export const MAX_STARTUP_STEPS = 40;
+/** At most this much of a failed hook's log is kept on its step. */
+export const STEP_LOG_BYTES = 4096;
+/** `lookup`: is there a template for the project; `build-*`: a template
+ * build machine; `boot`: the thread's machine boots until its guest answers;
+ * `prepare`: checkout, pre-setup and setup (one try per `attempt`);
+ * `resume`: the resume hooks. */
+export type StartupStepName = "lookup" | "build-boot" | "build-prepare" | "build-seal" | "build-publish" | "boot" | "prepare" | "resume";
+export interface StartupStep {
+  name: StartupStepName;
+  /** The preparation try (its command's key is `cube:provision:<attempt>`). */
+  attempt?: number;
+  /** `interrupted`: cubed stopped (or started the step again) before it ended. */
+  state: "running" | "ok" | "failed" | "interrupted";
+  startedAt: number; endedAt?: number;
+  /** What the step found or why it failed, in a few words. */
+  detail?: string;
+  /** The end of the failed hook's log (escaped, redacted, at most
+   * `STEP_LOG_BYTES`): kept because a build machine's disk goes with it. */
+  log?: string;
+  /** Only in the thread list, which leaves `log` out: the step has one. */
+  hasLog?: boolean;
+  /** The memory of cubed's command when it ended, from the guest (the
+   * command's own peak, the machine's memory, and how many of its processes
+   * the kernel killed for want of memory). */
+  memory?: CommandMemory;
+}
+export interface CommandMemory { peakBytes: number; totalBytes: number; oomKills: number }
 export interface MachinePreparation {
   /** `template`: the disk is backed by a prepared template; `fresh`: by the base image. */
   source: "template" | "fresh";
@@ -541,6 +603,49 @@ export class Registry {
       return updated;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
+  /** Begins a startup step of the thread's machine (`vm.steps`); a step of
+   * the same name and attempt still running is marked interrupted. */
+  beginStartupStep(threadId: string, step: Pick<StartupStep, "name" | "attempt" | "detail">, at = Date.now()): void {
+    this.changeSteps(threadId, steps => [
+      ...steps.map(old => old.state === "running" && old.name === step.name && old.attempt === step.attempt ? { ...old, state: "interrupted" as const, endedAt: at } : old),
+      { name: step.name, ...(step.attempt !== undefined ? { attempt: step.attempt } : {}), state: "running", startedAt: at, ...(step.detail ? { detail: step.detail } : {}) },
+    ]);
+  }
+  /** Marks every step still running as interrupted. An activation calls it
+   * before it records a step of its own: one thread has one activation at a
+   * time, so a running step then is one an earlier activation, or a cubed
+   * that stopped, never ended. Writes nothing when none runs. */
+  interruptStartupSteps(threadId: string, at = Date.now()): void {
+    this.changeSteps(threadId, steps => steps.some(step => step.state === "running")
+      ? steps.map(step => step.state === "running" ? { ...step, state: "interrupted" as const, endedAt: at } : step) : steps);
+  }
+  /** Ends the newest running step of that name (and attempt); a step that
+   * never began (a cubed that restarted in between) is recorded as it ends.
+   * `resumed`: a step marked interrupted may end after all (a preparation
+   * try that went on in the guest while cubed was away), in its own place. */
+  endStartupStep(threadId: string, step: Pick<StartupStep, "name" | "attempt" | "detail" | "memory" | "log"> & { state: "ok" | "failed" }, at = Date.now(), resumed = false): void {
+    this.changeSteps(threadId, steps => {
+      const same = (old: StartupStep) => old.name === step.name && old.attempt === step.attempt;
+      let index = steps.findLastIndex(old => old.state === "running" && same(old));
+      if (index < 0 && resumed) index = steps.findLastIndex(old => old.state === "interrupted" && same(old));
+      const begun: Omit<StartupStep, "state"> = index >= 0 ? steps[index]! : { name: step.name, ...(step.attempt !== undefined ? { attempt: step.attempt } : {}), startedAt: at };
+      const ended: StartupStep = { ...begun, state: step.state, endedAt: at, ...(step.detail ?? begun.detail ? { detail: step.detail ?? begun.detail } : {}),
+        ...(step.memory ? { memory: step.memory } : {}), ...(step.log ? { log: step.log.slice(-STEP_LOG_BYTES) } : {}) };
+      return index >= 0 ? steps.map((old, k) => k === index ? ended : old) : [...steps, ended];
+    });
+  }
+  private changeSteps(threadId: string, change: (steps: StartupStep[]) => StartupStep[]): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const thread = this.getThread(threadId);
+      if (thread?.vm) {
+        const before = thread.vm.steps ?? [];
+        const steps = change(before);
+        if (steps !== before) this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify({ ...thread, vm: { ...thread.vm, steps: steps.slice(-MAX_STARTUP_STEPS) } }), threadId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
   /** Moves the thread's placement from one of `from` to `to` while it is
    * on `runnerId`; false when it moved or its placement is another. */
   markPlacement(threadId: string, runnerId: string, from: readonly ThreadPlacement[], to: ThreadPlacement): boolean {
@@ -638,7 +743,8 @@ export class Registry {
       if (!load) throw new Error("no free thread machine in the global runner pool — archive an idle thread, register another trusted runner or raise a runner's --max-active-vms");
       const thread: Thread = { id: randomUUID(), projectId, runnerId: load.id,
         title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, agent, archived: false, createdAt: Date.now(),
-        allocation: { projectId, projectRevision: project.revision, repositories, hooks: { ...NO_HOOKS, ...project.hooks } },
+        allocation: { projectId, projectRevision: project.revision, repositories, hooks: { ...NO_HOOKS, ...project.hooks },
+          ...(project.machine && Object.keys(project.machine).length ? { machine: { ...project.machine } } : {}) },
         workspaceState: "allocating", workspaceError: null, workspaceBase: null,
         vm: { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") }, placement: "provisional" } };
       this.db.prepare("INSERT INTO thread VALUES (?,?,?,?)").run(thread.id, projectId, load.id, JSON.stringify(thread));

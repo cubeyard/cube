@@ -44,6 +44,16 @@
   // The hooks as the form loaded them: only the ones edited here are saved,
   // so hooks saved elsewhere since (OptChat) stay.
   let loadedHooks = { preSetup: "", preResume: "" };
+  // The machine size as select values ("" is cube's default), and as loaded.
+  let memoryMiB = $state("");
+  let vcpus = $state("");
+  let loadedMachine = { memoryMiB: "", vcpus: "" };
+  const MEMORY_CHOICES = [2048, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536];
+  const VCPU_CHOICES = [1, 2, 4, 6, 8, 12, 16];
+  const gigabytes = (mib: number) => `${mib / 1024} GB`;
+  // What the runners allow (their last reports), and what is chosen now.
+  const memoryChoices = $derived(MEMORY_CHOICES.filter((mib) => !project?.machineLimits || mib <= project.machineLimits.maxMemoryMiB || String(mib) === memoryMiB));
+  const vcpuChoices = $derived(VCPU_CHOICES.filter((count) => !project?.machineLimits || count <= project.machineLimits.maxVcpus || String(count) === vcpus));
   let dirty = $state(untrack(() => projectId === "new"));
   let loaded = $state(untrack(() => projectId === "new"));
   let error = $state<string | null>(null);
@@ -65,6 +75,9 @@
     preSetup = fresh.hooks?.preSetup ?? "";
     preResume = fresh.hooks?.preResume ?? "";
     loadedHooks = { preSetup, preResume };
+    memoryMiB = fresh.machine?.memoryMiB ? String(fresh.machine.memoryMiB) : "";
+    vcpus = fresh.machine?.vcpus ? String(fresh.machine.vcpus) : "";
+    loadedMachine = { memoryMiB, vcpus };
     dirty = false;
   }
 
@@ -127,6 +140,9 @@
         ...(preSetup !== loadedHooks.preSetup ? { preSetup } : {}),
         ...(preResume !== loadedHooks.preResume ? { preResume } : {}),
       },
+      // Sent only when changed here, so a size saved elsewhere stays.
+      ...(memoryMiB !== loadedMachine.memoryMiB || vcpus !== loadedMachine.vcpus
+        ? { machine: { ...(memoryMiB ? { memoryMiB: Number(memoryMiB) } : {}), ...(vcpus ? { vcpus: Number(vcpus) } : {}) } } : {}),
     };
   }
 
@@ -407,7 +423,32 @@
             oninput={changed}
           ></textarea>
         </label>
-        <p class="hook-note" id="hook-note">both hooks run, and so do the repository's own. a prepared machine is kept as a template for the project's next threads; they skip setup until the template expires (24 h) or pre-setup, the repositories or .agents/setup change. new threads use these hooks; the agent can read them, so keep secrets out.</p>
+        <p class="hook-note" id="hook-note">both hooks run, and so do the repository's own. a prepared machine is kept as a template for the project's next threads; they skip setup until the template expires (24 h) or pre-setup, the repositories or .agents/setup change. new threads use these hooks; the agent can read them, so keep secrets out. print and time the slow steps: a starting thread shows the running hook's log.</p>
+      </div>
+
+      <div class="board-head" id="machine-size">
+        <div>
+          <h2>machine size</h2>
+          <p>memory and processors of the project's new thread machines</p>
+        </div>
+      </div>
+      <div class="hook-board machine-board well">
+        <label class="config-field">
+          <span class="silk">memory</span>
+          <select class="compose-input machine-select" aria-label="machine memory" aria-describedby="machine-note" bind:value={memoryMiB} onchange={changed}>
+            <option value="">cube default · {gigabytes(project?.machineDefaults.memoryMiB ?? 4096)}</option>
+            {#each memoryChoices as mib}<option value={String(mib)}>{gigabytes(mib)}</option>{/each}
+          </select>
+        </label>
+        <label class="config-field">
+          <span class="silk">processors</span>
+          <select class="compose-input machine-select" aria-label="machine processors" aria-describedby="machine-note" bind:value={vcpus} onchange={changed}>
+            <option value="">cube default · {project?.machineDefaults.vcpus ?? 2} vCPU</option>
+            {#each vcpuChoices as count}<option value={String(count)}>{count} vCPU</option>{/each}
+          </select>
+        </label>
+        <p class="hook-note" id="machine-note">new threads get this size; a running machine keeps its own. a build or setup that runs out of memory needs more of it (a starting thread says so).
+          {#if project?.machineLimits}the runners allow up to {gigabytes(project.machineLimits.maxMemoryMiB)} and {project.machineLimits.maxVcpus} vCPU; a runner that allows less gives what it can.{/if}</p>
       </div>
 
     </section>
@@ -465,4 +506,8 @@
   .hook-board { display: grid; gap: 0.85rem; padding: 0.9rem; }
   .hook-script { display: block; width: 100%; min-height: 5.5rem; resize: vertical; font: 12.5px/1.5 var(--font-mono); box-sizing: border-box; }
   .hook-note { margin: 0; color: var(--ink-3); font-size: 12px; line-height: 1.5; }
+  .machine-board { grid-template-columns: repeat(2, minmax(0, 14rem)); }
+  .machine-board .hook-note { grid-column: 1 / -1; }
+  .machine-select { display: block; width: 100%; }
+  @media (max-width: 46rem) { .machine-board { grid-template-columns: minmax(0, 1fr); } }
 </style>

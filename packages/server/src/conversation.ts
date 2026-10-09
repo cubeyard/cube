@@ -15,7 +15,8 @@ import type { WindowQuery } from "./transcript-window.ts";
 import { readClaudeHistory, readPiHistory, type HistoryPage, type HistoryRequest } from "./thread-history.ts";
 import { isThreadImageRef, readThreadImage } from "./thread-images.ts";
 import { Registry, threadAgent, type HookOutcome, type Thread } from "./registry.ts";
-import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWorkspace, RunnerWait, type ThreadMachines } from "./vm.ts";
+import { provisioned, provisionWorkspace, refreshGuest, releaseCheck, resumeWorkspace, RunnerWait, StepFailure, stepLog, type PreparationOutcome,
+  type ThreadMachines } from "./vm.ts";
 import { VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { LeaseStore } from "./workspace-lease.ts";
 import type { ModelSelection } from "./models.ts";
@@ -125,6 +126,9 @@ export class Conversations {
     if (current?.workspaceState === "available" && this.agentOpen(id)) this.checks.add(id);
     const activation = (async () => {
       try {
+        // Steps an earlier activation (or a cubed that stopped) left running
+        // end here as interrupted, before this one records its own.
+        if (this.registry.getThread(id)?.vm) this.registry.interruptStartupSteps(id);
         await this.ensureWorkspace(id);
         // An agent that was still opening and failed meanwhile opens again here: a start.
         if (!this.agentOpen(id)) this.checks.delete(id);
@@ -218,11 +222,20 @@ export class Conversations {
       const preparing = Date.now();
       const last = thread.vm?.provisionAttempt ?? 0;
       let outcome = last > 0 ? await provisioned(workspace, owner, last) : null;
+      // A try that ended while cubed was away is recorded as it ended.
+      if (outcome) this.endPrepare(id, last, outcome, true);
       if (!outcome || outcome.error) {
         const attempt = last + 1;
+        const mode = preparation?.source === "template" && preparation.setupBlob ? { kind: "template" as const, setupBlob: preparation.setupBlob } : { kind: "fresh" as const };
         this.registry.updateThreadVm(id, { provisionAttempt: attempt });
-        outcome = await provisionWorkspace(workspace, owner, thread.allocation, attempt,
-          preparation?.source === "template" && preparation.setupBlob ? { kind: "template", setupBlob: preparation.setupBlob } : { kind: "fresh" });
+        this.registry.beginStartupStep(id, { name: "prepare", attempt,
+          detail: mode.kind === "template" ? "checkout on the template's disk" : "checkout, pre-setup and .agents/setup" });
+        try { outcome = await provisionWorkspace(workspace, owner, thread.allocation, attempt, mode); }
+        catch (error) {
+          await this.failStep(id, "prepare", attempt, error, "; cube tries again");
+          throw error;
+        }
+        this.endPrepare(id, attempt, outcome);
       }
       this.recordHooks(id, outcome.hooks, "prepare", preparing);
       // A template whose seal could not clean everything: this machine got
@@ -256,6 +269,31 @@ export class Conversations {
       throw new Error(message, { cause: error });
     }
   }
+  /** Records how a preparation try ended (`vm.steps`); `late`: only if it
+   * is not recorded yet (a try that ended while cubed was away). */
+  private endPrepare(id: string, attempt: number, outcome: PreparationOutcome, late = false): void {
+    const recorded = this.thread(id).vm?.steps?.some(step => step.name === "prepare" && step.attempt === attempt && (step.state === "ok" || step.state === "failed"));
+    if (late && recorded) return;
+    const failed = Object.entries(outcome.hooks).filter(([, hook]) => hook.status === "failed").map(([name, hook]) => `${name} failed (exit ${hook.exitCode})`);
+    this.registry.endStartupStep(id, { name: "prepare", attempt, state: outcome.error || failed.length ? "failed" : "ok",
+      detail: outcome.error ? `${outcome.error}; cube tries again` : failed.length ? failed.join(", ")
+        : Object.entries(outcome.hooks).map(([name, hook]) => `${name} ${hook.status}`).join(", "),
+      ...(outcome.memory ? { memory: outcome.memory } : {}), ...(outcome.log ? { log: outcome.log } : {}) }, Date.now(), late);
+  }
+  /** Records a step that threw: its error, the command's memory, and the end
+   * of the failed hook's log (what the script printed, or for a hook that
+   * was killed, what its log in the machine says). */
+  private async failStep(id: string, name: "prepare" | "resume", attempt: number | undefined, error: unknown, suffix = ""): Promise<void> {
+    let log = error instanceof StepFailure ? error.log : undefined;
+    if (!log) {
+      const thread = this.registry.getThread(id);
+      const read = thread && this.machines.startupLog ? await this.machines.startupLog(thread).catch(() => null) : null;
+      if (read?.hook && read.text) log = stepLog(read.text);
+    }
+    this.registry.endStartupStep(id, { name, ...(attempt !== undefined ? { attempt } : {}), state: "failed",
+      detail: `${error instanceof Error ? error.message : String(error)}${suffix}`,
+      ...(error instanceof StepFailure && error.memory ? { memory: error.memory } : {}), ...(log ? { log } : {}) });
+  }
   /** The resume hooks, once per machine boot. A machine that booted again
    * under an open agent (a runner restart) closes the agent first, as a
    * cubed restart would, and the activation reopens it afterwards. */
@@ -278,8 +316,19 @@ export class Conversations {
       log.warn("the machine's cube command could not be brought up to date", { thread: id, error: error instanceof Error ? error.message : String(error) });
     }
     const started = Date.now();
-    const { hooks, already } = await resumeWorkspace(this.workspace(id), threadAgent(thread));
+    this.registry.beginStartupStep(id, { name: "resume", detail: "pre-resume and .agents/resume" });
+    let resumed: Awaited<ReturnType<typeof resumeWorkspace>>;
+    try { resumed = await resumeWorkspace(this.workspace(id), threadAgent(thread)); }
+    catch (error) {
+      await this.failStep(id, "resume", undefined, error);
+      throw error;
+    }
+    const { hooks, already, memory, log: failureLog } = resumed;
     this.resumed.add(id);
+    const failed = Object.entries(hooks).filter(([, hook]) => hook.status === "failed").map(([name, hook]) => `${name} failed (exit ${hook.exitCode})`);
+    this.registry.endStartupStep(id, { name: "resume", state: failed.length ? "failed" : "ok",
+      detail: already ? "already ran in this boot" : failed.length ? failed.join(", ") : Object.entries(hooks).map(([name, hook]) => `${name} ${hook.status}`).join(", "),
+      ...(memory ? { memory } : {}), ...(failureLog ? { log: failureLog } : {}) });
     if (!already) this.recordHooks(id, hooks, "resume", started);
   }
   private recordHooks(id: string, hooks: Record<string, HookOutcome>, phase: string, since: number): void {

@@ -13,7 +13,7 @@ import { GuestTransportError, type GuestAnswer, type GuestCallOptions, type Gues
 import type { LeaseStore } from "./workspace-lease.ts";
 import {
   WORKSPACE_CAPABILITIES, WORKSPACE_LIMIT_KEYS, WORKSPACE_OWNERS, WorkspaceError, errorCode, execSpec, filePath, invalid, operation, validKey,
-  type GuestOperationState, type Workspace, type WorkspaceExecSpec, type WorkspaceFile, type WorkspaceLease,
+  type CommandEnd, type GuestOperationState, type Workspace, type WorkspaceExecSpec, type WorkspaceFile, type WorkspaceLease,
   type WorkspaceLeaseRequest, type WorkspaceLimits, type WorkspaceOperation, type WorkspaceOperationOptions, type WorkspaceOwner,
   type WorkspaceStat, type WorkspaceWrite, type WorkspaceWriteResult,
 } from "./workspace.ts";
@@ -258,7 +258,7 @@ export class VmWorkspace implements Workspace {
         || (result.outputOffset as number) + body.length > (result.retainedBytes as number)) throw malformed();
       return { state: "Succeeded", output: body, result: { exitCode: result.exitCode as number | null,
         termination: result.termination as "exited" | "signalled" | "timedOut", outputBytes: result.outputBytes as number,
-        truncated: result.truncated, outputOffset: result.outputOffset as number, retainedBytes: result.retainedBytes as number } };
+        truncated: result.truncated, outputOffset: result.outputOffset as number, retainedBytes: result.retainedBytes as number, ...commandEnd(result) } };
     }
     if (answer.state === "Failed") {
       if (typeof answer.error !== "string" || typeof answer.completionUnknown !== "boolean") throw malformed();
@@ -272,6 +272,19 @@ export class VmWorkspace implements Workspace {
     if (answer.state === "Interrupted") return { state: "Interrupted", completionUnknown: true };
     return { state: answer.state as "Accepted" | "Running" | "Unknown" };
   }
+}
+
+/** What a newer guest helper adds about how a command ended; an older one
+ * (or a malformed field) adds nothing. */
+function commandEnd(result: Record<string, unknown>): CommandEnd {
+  const end: CommandEnd = {};
+  if (typeof result.serviceResult === "string" && /^[a-z-]{1,32}$/.test(result.serviceResult)) end.serviceResult = result.serviceResult;
+  const memory = result.memory as Record<string, unknown> | null | undefined;
+  const count = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0;
+  if (memory && typeof memory === "object" && count(memory.peakBytes) && count(memory.totalBytes) && count(memory.oomKills)) {
+    end.memory = { peakBytes: memory.peakBytes as number, totalBytes: memory.totalBytes as number, oomKills: memory.oomKills as number };
+  }
+  return end;
 }
 
 function malformed(): WorkspaceError {

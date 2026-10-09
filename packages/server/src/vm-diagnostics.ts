@@ -13,7 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { RunnerObservation } from "./runner-observe.ts";
-import { placement, threadAgent, type Registry, type Thread } from "./registry.ts";
+import { placement, threadAgent, type Registry, type StartupStep, type Thread } from "./registry.ts";
 
 export const BUNDLE_VERSION = 1;
 /** The longest one string of a bundle may be, after escaping. */
@@ -252,7 +252,7 @@ export async function threadDiagnostics(sources: DiagnosticsSources, threadId: s
       workspaceState: thread.workspaceState, workspaceError: thread.workspaceError, runnerId: thread.runnerId,
       runnerNode: sources.registry.getRunner(thread.runnerId)?.nodeId ?? null,
       machine: vm ? { vmId: vm.vmId, placement: placement(thread), preparation: vm.preparation ?? null, startup: vm.startup ?? null,
-        hooks: vm.hooks ?? null, provisionAttempt: vm.provisionAttempt ?? null, retain: vm.retain ?? null, discarded: vm.discarded ?? null,
+        steps: vm.steps ?? null, hooks: vm.hooks ?? null, provisionAttempt: vm.provisionAttempt ?? null, retain: vm.retain ?? null, discarded: vm.discarded ?? null,
         build: vm.build ? { vmId: vm.build.vmId, runnerId: vm.build.runnerId ?? thread.runnerId } : null } : null,
     },
     activation: { starting: conversations.starting(thread.id), waiting: conversations.waiting(thread.id), error: conversations.error(thread.id),
@@ -268,6 +268,16 @@ const lastLines = (text: string, count: number) => text.split("\n").slice(-count
 const iso = (at: unknown) => typeof at === "number" && Number.isFinite(at) && Math.abs(at) < 8.64e15 ? new Date(at).toISOString() : String(at);
 const ago = (at: unknown, now: number) => typeof at === "number" ? `${Math.round((now - at) / 1000)} s ago` : "never";
 
+/** One startup step as a line: when, what, how long, how it ended. */
+export function stepLine(step: StartupStep, now = Date.now()): string {
+  const ms = (step.endedAt ?? now) - step.startedAt;
+  const duration = ms >= 60000 ? `${Math.floor(ms / 60000)} min ${Math.round((ms % 60000) / 1000)} s` : `${(ms / 1000).toFixed(1)} s`;
+  const memory = step.memory ? `; memory peak ${(step.memory.peakBytes / 2 ** 30).toFixed(1)} of ${(step.memory.totalBytes / 2 ** 30).toFixed(1)} GiB`
+    + `${step.memory.oomKills ? `, ${step.memory.oomKills} process${step.memory.oomKills === 1 ? "" : "es"} killed for want of memory` : ""}` : "";
+  return `${iso(step.startedAt)} ${step.name}${step.attempt ? ` ${step.attempt}` : ""} ${step.state} after ${duration}`
+    + `${step.detail ? `: ${step.detail}` : ""}${memory}`;
+}
+
 /** A bundle as bounded text for OptChat: the facts, then the newest events
  * and console lines. The whole bundle stays at the HTTP route. */
 export function formatDiagnostics(bundle: Record<string, unknown>, maxChars = 12000): string {
@@ -278,7 +288,18 @@ export function formatDiagnostics(bundle: Record<string, unknown>, maxChars = 12
   const lines = [`[${String(thread.id).slice(0, 8)}] diagnostics at ${iso(now)} (cubed ${String(get(bundle, "cubed", "version"))})`,
     `thread: workspace ${String(thread.workspaceState)}${thread.workspaceError ? ` (${String(thread.workspaceError)})` : ""}; runner ${String(thread.runnerNode)}; `
       + `machine ${String(get(thread, "machine", "vmId"))}, placement ${String(get(thread, "machine", "placement"))}`,
-    `activation: ${JSON.stringify(get(bundle, "activation"))}`];
+    `activation: ${JSON.stringify(get(bundle, "activation"))}`,
+    `created ${iso(thread.createdAt)}`];
+  const record = get(thread, "machine") as Record<string, unknown> | null;
+  if (record) {
+    const preparation = record.preparation as Record<string, unknown> | null;
+    lines.push(preparation ? `disk: ${String(preparation.source)}${preparation.templateId ? ` template ${String(preparation.templateId)}` : ""}`
+      + `${preparation.reason ? ` (${String(preparation.reason)})` : ""}${preparation.sealFailure ? `; seal failed: ${String(preparation.sealFailure)}` : ""}`
+      : "disk: not decided yet");
+    const steps = (record.steps as StartupStep[] | null) ?? [];
+    lines.push(steps.length ? "startup steps:" : "startup steps: none recorded", ...steps.map(step => `  ${stepLine(step, now)}`));
+    if (record.provisionAttempt) lines.push(`preparation tries: ${String(record.provisionAttempt)}`);
+  }
   const observation = get(bundle, "runnerObservation", "report") as Record<string, unknown> | null | undefined;
   lines.push(observation ? `runner's last report: ${String(observation.softwareVersion)} ${String(observation.platform)} ${String(observation.lifecycle)}, `
     + `${ago(observation.at, now)}${observation.fresh ? "" : " (stale)"}; contact ${String(get(bundle, "runnerObservation", "contact", "status"))}`

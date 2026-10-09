@@ -43,10 +43,14 @@ export type WorkspaceOperation =
   | { key: string; state: "running" }
   | { key: string; state: "succeeded"; exitCode: number | null; termination: "exited" | "signalled" | "timedOut";
     /** One page of retained output starting at outputOffset. */
-    output: Uint8Array; outputOffset: number; retainedBytes: number; outputBytes: number; truncated: boolean }
+    output: Uint8Array; outputOffset: number; retainedBytes: number; outputBytes: number; truncated: boolean } & CommandEnd
   | { key: string; state: "written"; sha256: string; size: number }
   | { key: string; state: "failed"; error: WorkspaceErrorCode; completionUnknown: boolean }
   | { key: string; state: "interrupted"; completionUnknown: true };
+/** How a command's unit ended, from a guest helper that reports it: systemd's
+ * result (`success`, `exit-code`, `signal`, `oom-kill`, `timeout`, ...) and
+ * the command's memory. */
+export interface CommandEnd { serviceResult?: string; memory?: { peakBytes: number; totalBytes: number; oomKills: number } }
 export interface WorkspaceFile { content: Uint8Array; offset: number; size: number; eof: boolean; sha256: string | null }
 export interface WorkspaceWriteResult { sha256: string; size: number }
 export interface WorkspaceStat { kind: "file" | "directory" | "symlink" | "other"; size: number; mode: number; modifiedMs: number; sha256: string | null }
@@ -149,7 +153,7 @@ export function execSpec(spec: WorkspaceExecSpec, limits: WorkspaceLimits): Requ
 export type GuestOperationState =
   | { state: "Accepted" | "Running" | "Unknown" }
   | { state: "Succeeded"; result: { exitCode: number | null; termination: "exited" | "signalled" | "timedOut"; outputBytes: number;
-    truncated: boolean; outputOffset: number; retainedBytes: number }; output: Uint8Array }
+    truncated: boolean; outputOffset: number; retainedBytes: number } & CommandEnd; output: Uint8Array }
   | { state: "Written"; result: WorkspaceWriteResult }
   | { state: "Failed"; error: string; completionUnknown: boolean }
   | { state: "Interrupted"; completionUnknown: true };

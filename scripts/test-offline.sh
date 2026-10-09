@@ -30,6 +30,7 @@ OFFLINE_TESTS=(
   packages/server/test/vm-prepare-test.ts
   packages/server/test/vm-reattach-test.ts
   packages/server/test/vm-diagnostics-test.ts
+  packages/server/test/startup-steps-test.ts
   packages/server/test/thread-start-commits-test.ts
   packages/server/test/durable-agent-test.ts
   packages/server/test/codemode-test.ts
@@ -67,6 +68,7 @@ OFFLINE_TESTS=(
   packages/web/test/ordered-test.ts
   packages/web/test/images-test.ts
   packages/web/test/outbox-test.ts
+  packages/web/test/startup-test.ts
   packages/server/test/github-auth-test.ts
   packages/server/test/github-read-test.ts
   packages/server/test/onboarding-test.ts

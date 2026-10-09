@@ -98,7 +98,9 @@ a release's `bin/cube-gateway` or the checkout's `target/{release,debug}/cube-ga
 is used (`cargo build -p cube-gateway`). Its network mode is the widest of the
 enrolled runners' (relay > direct > loopback). `CUBED_VM_VCPUS`,
 `CUBED_VM_MEMORY_MIB` and `CUBED_VM_DISK_GIB` size new thread machines (default
-2, 4096, 32; clamped to each runner's limits; fixed for a machine's life).
+2, 4096, 32; clamped to each runner's limits; fixed for a machine's life); a
+project's own machine size (memory, processors; the project page) takes
+precedence for its new threads.
 `CUBED_TEMPLATES=off` turns machine templates off (every machine starts from
 the base image); `CUBED_TEMPLATE_TTL_HOURS` sets how long a template is reused
 (default 24). See ARCHITECTURE.md, "Machine templates and hooks".
@@ -154,7 +156,8 @@ and exact OIDs are checked out inside the VM through the gateway; GitHub
 repositories authenticate with the placeholder the gateway replaces by the
 host's token. Git prompting is disabled.
 
-Useful reads: `/api/threads`, `/api/projects`, `/api/threads/<id>/history`,
+Useful reads: `/api/threads` (with each machine's startup steps), `/api/projects`,
+`/api/threads/<id>/startup-log` (the running hook's log while a machine starts), `/api/threads/<id>/history`,
 `/api/threads/<id>/stream`, `/api/usage` and `/api/threads/<id>/usage`
 (tokens and estimated cost; see [docs/usage.md](docs/usage.md)). Both return the neutral `ThreadTranscript`
 (`packages/server/src/thread-events.ts`); the stream is SSE and starts with the
