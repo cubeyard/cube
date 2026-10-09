@@ -58,6 +58,21 @@ back, and the chat reads busy from the send until the run ends, once. A
 change to how the UI reads, reconciles or shows the stream needs a scenario
 there; a screenshot or a unit test of a helper is not that evidence.
 
+### CI
+
+`ci.yml` is the pull-request gate, all on Linux and side by side: `check`
+(references, typecheck, lint, shell syntax, shellcheck), `test (K/4)` (the
+offline suites split by `CUBE_TEST_SHARD=K/4`), `browser` and
+`node-transport (linux)`. A new push to a pull request cancels its older run.
+`platforms.yml` runs `node-transport (macos)` and the `homebrew` formula check
+on every push to `main`, on pull requests that touch Rust, the runner scripts,
+the Homebrew generator or CI itself, and by hand (`gh workflow run platforms.yml
+--ref <branch>`). Rust dependency builds are cached; only `main` saves the
+cache. `release.yml` builds nothing until `scripts/release-gate.sh` finds that
+the tagged commit passed `ci` and `node-transport (macos)` on `main`.
+`scripts/ci-test.ts` checks this layout: every offline suite in exactly one
+shard, no check dropped, pinned actions, the gate.
+
 ## Product development
 
 ```sh
@@ -191,7 +206,8 @@ Ed25519 key with `scripts/cubed/build-release.ts`, then run `install.sh` against
 the resulting archive and manifest. Never use the production signing key locally.
 
 Pushing a stable `vX.Y.Z` tag runs `.github/workflows/release.yml` on Linux x64,
-Linux arm64 and macOS arm64. It requires the protected
+Linux arm64 and macOS arm64 once the tagged commit has passed `ci` and
+`node-transport (macos)` on `main` (the release gate, see CI). It requires the protected
 `CUBED_UPDATE_SIGNING_KEY` Ed25519 PEM secret and creates a draft release. Review
 the generated packages, manifests, signatures and checksums before explicitly
 publishing the draft. Publication and deployment are not CI acceptance steps.
@@ -226,9 +242,10 @@ contents write on `cubeyard/homebrew-tap`; renew it when it expires). Drafts and
 prereleases are refused, and so is a version older than the latest release
 unless the `force` input says a downgrade is meant; the push runs in a second
 job on Linux so the tap token never reaches the machine that ran the release's
-binaries. The `homebrew` job of `ci.yml` does the same against the latest
-published release on every pull request, without the push, so a formula change
-is validated on a real Mac before it is merged. It checks this checkout's
+binaries. The `homebrew` job of `platforms.yml` does the same against the latest
+published release, without the push, on every push to `main` and on pull
+requests that touch the generator, so a formula change is validated on a real
+Mac before it is merged. It checks this checkout's
 generator and tests against the latest release's binaries (which may lack
 `runners init-local`), which is why the formula tests assert only
 what every 0.3.x release has (`runners status`, `--self-check`, `cube-runner

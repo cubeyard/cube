@@ -11,7 +11,24 @@ permissions:
   contents: read
 
 jobs:
+  # Fast pull-request CI leaves macOS to main (platforms.yml): release only a
+  # commit whose checks on main passed.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: the tagged commit passed ci and node-transport (macos) on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: bash scripts/release-gate.sh
+
   build:
+    needs: gate
     strategy:
       fail-fast: false
       matrix:

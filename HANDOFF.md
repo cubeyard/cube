@@ -79,10 +79,11 @@ in `docs/plans/` hold the reasoning and the detailed evidence.
 
 ## Shipping a change
 
-1. Merge to `main` after CI (`check`, `node-transport` on Linux and macOS).
-2. Push a `vX.Y.Z` tag. `release.yml` builds and signs cubed for three
-   platforms and cube-runner bundles for `linux-x64-gnu` and `darwin-arm64`,
-   all into a draft release.
+1. Merge to `main` after CI (`ci.yml`; `platforms.yml` when it runs).
+2. Push a `vX.Y.Z` tag on a commit of `main`. `release.yml` waits until that
+   commit passed `ci` and `node-transport (macos)` on `main`, then builds and
+   signs cubed for three platforms and cube-runner bundles for
+   `linux-x64-gnu` and `darwin-arm64`, all into a draft release.
 3. Publishing the draft makes it `latest`:
    - cubed updates through its feed (browser, or `install.sh` with the
      downloaded assets);

@@ -1,0 +1,20 @@
+# The pinned Rust toolchain, the dependency build cache and the locked crates.
+# Only main saves the cache; pull requests restore main's.
+name: rust dependencies
+description: pinned Rust toolchain, cached dependency builds, cargo fetch --locked
+runs:
+  using: composite
+  steps:
+    - name: pinned Rust toolchain
+      shell: bash
+      run: |
+        version=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
+        test -n "$version"
+        rustup set auto-self-update disable
+        rustup toolchain install "$version" --profile minimal --component rustfmt --component clippy
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+    - name: locked dependencies
+      shell: bash
+      run: cargo fetch --locked

@@ -1,0 +1,14 @@
+# Node 26 and the pnpm version package.json pins, then the locked install.
+name: node dependencies
+description: Node 26, the pinned pnpm and pnpm install --frozen-lockfile
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      with:
+        node-version: 26
+    - name: pinned Node dependencies
+      shell: bash
+      run: |
+        npm i -g "pnpm@$(sed -n 's/.*"packageManager": *"pnpm@\([^"]*\)".*/\1/p' package.json)"
+        pnpm install --frozen-lockfile
