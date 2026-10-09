@@ -4,6 +4,7 @@ OFFLINE_TESTS=(
   scripts/cubed-release-checksum-test.ts
   scripts/cubed-service-test.ts
   scripts/cubed-signing-key-test.ts
+  scripts/ci-test.ts
   scripts/homebrew-formula-test.ts
   scripts/cubed-update-test.ts
   scripts/runner-production-test.ts
@@ -75,10 +76,26 @@ RUST_OFFLINE_PACKAGES=(cube-runner cube-gateway)
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -uo pipefail
   cd "$(dirname "$0")/.." || exit 1
+  # CUBE_TEST_SHARD=K/N runs every Nth suite from the Kth (CI runs N shards
+  # side by side); --list prints the shard's suites instead of running them.
+  shard="${CUBE_TEST_SHARD:-1/1}"
+  if ! [[ "$shard" =~ ^([1-9][0-9]*)/([1-9][0-9]*)$ ]] || (( BASH_REMATCH[1] > BASH_REMATCH[2] )); then
+    echo "FAIL: CUBE_TEST_SHARD must be K/N with 1 <= K <= N, not '$shard'" >&2
+    exit 2
+  fi
+  index=$(( BASH_REMATCH[1] - 1 )) count=${BASH_REMATCH[2]}
+  suites=()
+  for i in "${!OFFLINE_TESTS[@]}"; do
+    (( i % count == index )) && suites+=("${OFFLINE_TESTS[$i]}")
+  done
+  if [ "${1:-}" = --list ]; then
+    printf '%s\n' "${suites[@]}"
+    exit 0
+  fi
   # Never start an installed Claude Code from tests; they use a fake.
   export CUBED_CLAUDE=off
   failed=()
-  for t in "${OFFLINE_TESTS[@]}"; do
+  for t in "${suites[@]}"; do
     printf '\n==== %s ====\n' "$t"
     node "$t" || failed+=("$t")
   done
@@ -86,5 +103,5 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     printf 'FAIL: %s\n' "${failed[@]}"
     exit 1
   fi
-  echo "ALL PASS (${#OFFLINE_TESTS[@]} offline suites)"
+  echo "ALL PASS (${#suites[@]} of ${#OFFLINE_TESTS[@]} offline suites, shard $shard)"
 fi

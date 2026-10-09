@@ -1,4 +1,6 @@
-# Product checks and actual runner integration on Linux and macOS.
+# The fast gate on Linux: typecheck, lint, the offline suites in parallel
+# shards, the browser tests and the Rust checks. macOS and Homebrew run in
+# platforms.yml; release.yml requires both on the tagged commit.
 name: ci
 
 on:
@@ -9,51 +11,21 @@ on:
 permissions:
   contents: read
 
-jobs:
-  node-transport:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 26
-      - name: pinned Node dependencies
-        run: |
-          npm i -g "pnpm@$(sed -n 's/.*"packageManager": *"pnpm@\([^"]*\)".*/\1/p' package.json)"
-          pnpm install --frozen-lockfile
-      - name: pinned Rust toolchain
-        run: |
-          version=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
-          test -n "$version"
-          rustup set auto-self-update disable
-          rustup toolchain install "$version" --profile minimal --component rustfmt --component clippy
-      - name: locked dependencies
-        run: cargo fetch --locked
-      - name: real-QUIC Rust and in-process Node interoperability
-        run: bash scripts/test-node-transport.sh
+# A new push to a pull request cancels its older run; main runs every commit.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 26
-      - name: pnpm (the version package.json pins)
-        run: |
-          npm i -g "pnpm@$(sed -n 's/.*"packageManager": *"pnpm@\([^"]*\)".*/\1/p' package.json)"
-      - run: pnpm install --frozen-lockfile
+      - uses: ./.github/actions/node-deps
+      - run: pnpm check:references
       - run: pnpm typecheck
       - run: pnpm lint
-      - run: pnpm test
-        env:
-          CUBE_TEST_GUEST_ROOT: required
       - name: shell syntax
         run: |
           set -e
@@ -66,73 +38,37 @@ jobs:
           scandir: ./scripts
           severity: warning
 
-  # The Homebrew formulas this checkout generates, installed from the latest
-  # published release on a real Mac: install, audit, formula tests, the
-  # launchers. The generator checks that release's contract (state schema,
-  # protocol) against this checkout, so the job fails on a pull request that
-  # changes the contract until the next release ships; it is not a required
-  # check. No thread machine: GitHub's macOS runners have no nested
-  # virtualization, so the runner service and HVF are not exercised here.
-  homebrew:
-    runs-on: macos-latest
-    timeout-minutes: 30
+  test:
+    name: test (${{ matrix.shard }}/4)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 26
-      - name: generate the formulas from the latest release's signed manifests
+      - uses: ./.github/actions/node-deps
+      - run: bash scripts/test-offline.sh
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          version="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
-          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          mkdir -p "$RUNNER_TEMP/assets" "$RUNNER_TEMP/formula"
-          gh release download "$version" --repo "$GITHUB_REPOSITORY" --pattern 'cubed-darwin-arm64.json*' --pattern 'cube-runner-darwin-arm64.json*' --dir "$RUNNER_TEMP/assets"
-          node scripts/homebrew/formula.ts "$version" --assets "$RUNNER_TEMP/assets" --out "$RUNNER_TEMP/formula"
-      - name: install, audit and test
-        env:
-          HOMEBREW_NO_INSTALL_CLEANUP: 1
-        run: |
-          set -euo pipefail
-          brew tap-new --no-git cubeyard/tap
-          cp "$RUNNER_TEMP"/formula/*.rb "$(brew --repository cubeyard/tap)/Formula/"
-          brew trust cubeyard/tap
-          brew install cubeyard/tap/cube
-          brew audit --strict cubeyard/tap/cube cubeyard/tap/cube-runner
-          brew test cubeyard/tap/cube cubeyard/tap/cube-runner
-          cubed --version
-          help="$(cubed --help)"; grep -q 'runners status' <<<"$help"
-          runner="$(cube-runner version)"; grep -q '"protocolVersion":3' <<<"$runner"
-          sysctl -n kern.hv_support || true
-          brew services list
-      # The formula's default portal names services under *.localhost on
-      # loopback: check that curl, the system resolver and Safari reach this
-      # Mac's own loopback for such a name, with no DNS or hosts entry.
-      - name: "*.localhost reaches loopback (curl, resolver, Safari)"
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/site" && echo "portal probe" > "$RUNNER_TEMP/site/index.html"
-          python3 -m http.server 7781 --bind 127.0.0.1 --directory "$RUNNER_TEMP/site" >/dev/null 2>&1 &
-          site=$!
-          trap 'kill $site ${driver:-} 2>/dev/null || true' EXIT
-          for _ in $(seq 50); do curl -fsS -o /dev/null http://127.0.0.1:7781/ && break; sleep 0.2; done
-          curl -fsS -o "$RUNNER_TEMP/probe.html" -w 'curl: %{remote_ip} connect %{time_connect}s total %{time_total}s\n' http://web-0123456789.localhost:7781/
-          grep -q "portal probe" "$RUNNER_TEMP/probe.html"
-          dscacheutil -q host -a name web-0123456789.localhost | tee "$RUNNER_TEMP/resolver.txt"
-          grep -q "ip_address: 127.0.0.1" "$RUNNER_TEMP/resolver.txt"
-          sudo safaridriver --enable
-          safaridriver --port 4444 & driver=$!
-          for _ in $(seq 50); do curl -fsS -o /dev/null http://127.0.0.1:4444/status && break; sleep 0.2; done
-          session="$(curl -fsS -X POST http://127.0.0.1:4444/session -H 'content-type: application/json' \
-            -d '{"capabilities":{"alwaysMatch":{"browserName":"safari"}}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"]["sessionId"])')"
-          started=$(date +%s)
-          curl -fsS -X POST "http://127.0.0.1:4444/session/$session/url" -H 'content-type: application/json' \
-            -d '{"url":"http://web-0123456789.localhost:7781/"}' >/dev/null || true
-          echo "Safari navigation: $(( $(date +%s) - started ))s"
-          text="$(curl -fsS -X POST "http://127.0.0.1:4444/session/$session/execute/sync" -H 'content-type: application/json' \
-            -d '{"script":"return document.body ? document.body.innerText + \" secure=\" + window.isSecureContext : \"\"","args":[]}')"
-          curl -fsS -X DELETE "http://127.0.0.1:4444/session/$session" >/dev/null || true
-          echo "Safari $(defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString), macOS $(sw_vers -productVersion): $text"
-          grep -q "portal probe secure=true" <<<"$text"
+          CUBE_TEST_SHARD: ${{ matrix.shard }}/4
+          CUBE_TEST_GUEST_ROOT: required
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/node-deps
+      - run: pnpm test:browser
+
+  node-transport:
+    name: node-transport (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/node-deps
+      - uses: ./.github/actions/rust-deps
+      - name: real-QUIC Rust and in-process Node interoperability
+        run: bash scripts/test-node-transport.sh

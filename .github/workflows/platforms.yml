@@ -1,0 +1,116 @@
+# The macOS checks: the Rust runner and its launchd packaging, and the
+# Homebrew formulas. Every push to main runs them, a pull request only when it
+# touches what they check, anyone by hand. release.yml requires
+# `node-transport (macos)` on the tagged commit (DEVELOPING.md, "CI").
+name: platforms
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - .github/workflows/platforms.yml
+      - .github/actions/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - packages/node-transport/**
+      - packages/gateway/**
+      - scripts/test-node-transport.sh
+      - scripts/test-local-runner.ts
+      - scripts/runner-production-test.ts
+      - scripts/runner/**
+      - scripts/homebrew/**
+      - scripts/homebrew-formula-test.ts
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  node-transport:
+    name: node-transport (macos)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/node-deps
+      - uses: ./.github/actions/rust-deps
+      - name: real-QUIC Rust and in-process Node interoperability
+        run: bash scripts/test-node-transport.sh
+
+  # The Homebrew formulas this checkout generates, installed from the latest
+  # published release on a real Mac: install, audit, formula tests, the
+  # launchers. The generator checks that release's contract (state schema,
+  # protocol) against this checkout, so the job fails on a change to the
+  # contract until the next release ships; the release gate does not require
+  # it (homebrew.yml tests the release's own formulas before publishing). No
+  # thread machine: GitHub's macOS runners have no nested virtualization, so
+  # the runner service and HVF are not exercised here.
+  homebrew:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 26
+      - name: generate the formulas from the latest release's signed manifests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          mkdir -p "$RUNNER_TEMP/assets" "$RUNNER_TEMP/formula"
+          gh release download "$version" --repo "$GITHUB_REPOSITORY" --pattern 'cubed-darwin-arm64.json*' --pattern 'cube-runner-darwin-arm64.json*' --dir "$RUNNER_TEMP/assets"
+          node scripts/homebrew/formula.ts "$version" --assets "$RUNNER_TEMP/assets" --out "$RUNNER_TEMP/formula"
+      - name: install, audit and test
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: |
+          set -euo pipefail
+          brew tap-new --no-git cubeyard/tap
+          cp "$RUNNER_TEMP"/formula/*.rb "$(brew --repository cubeyard/tap)/Formula/"
+          brew trust cubeyard/tap
+          brew install cubeyard/tap/cube
+          brew audit --strict cubeyard/tap/cube cubeyard/tap/cube-runner
+          brew test cubeyard/tap/cube cubeyard/tap/cube-runner
+          cubed --version
+          help="$(cubed --help)"; grep -q 'runners status' <<<"$help"
+          runner="$(cube-runner version)"; grep -q '"protocolVersion":3' <<<"$runner"
+          sysctl -n kern.hv_support || true
+          brew services list
+      # The formula's default portal names services under *.localhost on
+      # loopback: check that curl, the system resolver and Safari reach this
+      # Mac's own loopback for such a name, with no DNS or hosts entry.
+      - name: "*.localhost reaches loopback (curl, resolver, Safari)"
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/site" && echo "portal probe" > "$RUNNER_TEMP/site/index.html"
+          python3 -m http.server 7781 --bind 127.0.0.1 --directory "$RUNNER_TEMP/site" >/dev/null 2>&1 &
+          site=$!
+          trap 'kill $site ${driver:-} 2>/dev/null || true' EXIT
+          for _ in $(seq 50); do curl -fsS -o /dev/null http://127.0.0.1:7781/ && break; sleep 0.2; done
+          curl -fsS -o "$RUNNER_TEMP/probe.html" -w 'curl: %{remote_ip} connect %{time_connect}s total %{time_total}s\n' http://web-0123456789.localhost:7781/
+          grep -q "portal probe" "$RUNNER_TEMP/probe.html"
+          dscacheutil -q host -a name web-0123456789.localhost | tee "$RUNNER_TEMP/resolver.txt"
+          grep -q "ip_address: 127.0.0.1" "$RUNNER_TEMP/resolver.txt"
+          sudo safaridriver --enable
+          safaridriver --port 4444 & driver=$!
+          for _ in $(seq 50); do curl -fsS -o /dev/null http://127.0.0.1:4444/status && break; sleep 0.2; done
+          session="$(curl -fsS -X POST http://127.0.0.1:4444/session -H 'content-type: application/json' \
+            -d '{"capabilities":{"alwaysMatch":{"browserName":"safari"}}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"]["sessionId"])')"
+          started=$(date +%s)
+          curl -fsS -X POST "http://127.0.0.1:4444/session/$session/url" -H 'content-type: application/json' \
+            -d '{"url":"http://web-0123456789.localhost:7781/"}' >/dev/null || true
+          echo "Safari navigation: $(( $(date +%s) - started ))s"
+          text="$(curl -fsS -X POST "http://127.0.0.1:4444/session/$session/execute/sync" -H 'content-type: application/json' \
+            -d '{"script":"return document.body ? document.body.innerText + \" secure=\" + window.isSecureContext : \"\"","args":[]}')"
+          curl -fsS -X DELETE "http://127.0.0.1:4444/session/$session" >/dev/null || true
+          echo "Safari $(defaults read /Applications/Safari.app/Contents/Info CFBundleShortVersionString), macOS $(sw_vers -productVersion): $text"
+          grep -q "portal probe secure=true" <<<"$text"
