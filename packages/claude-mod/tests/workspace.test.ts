@@ -14,14 +14,14 @@ type Reply = { value: { status: number; ok: boolean; headers: Record<string, str
 type Request = { method: string; path: string; body: Record<string, unknown> | undefined; socketPath: string | undefined; authorization: string | undefined }
 
 /** The routes cubed serves, in memory: files, keyed commands and writes. */
-function fakeWorkspace(on: On, files: Record<string, string> = {}) {
+function fakeWorkspace(on: On, files: Record<string, string> = {}, env: Record<string, string> = {}) {
   const requests: Request[] = []
   const operations = new Map<string, { request: string; reply: Reply }>()
   const shas = new Map<string, number>()
   const sha = (file: string) => `sha-${file}-${shas.get(file) ?? 0}`
   const reply = (status: number, body: unknown): Reply => ({ value: { status, ok: status < 300, headers: {}, text: JSON.stringify(body) } })
   const fail = (status: number, code: string) => reply(status, { error: code.toLowerCase(), code, completionUnknown: false })
-  mock.env(on, { CUBE_WORKSPACE_SOCKET: SOCKET, CUBE_WORKSPACE_PATH: BASE, CUBE_WORKSPACE_TOKEN: TOKEN, CUBE_WORKSPACE_ROOT: ROOT })
+  mock.env(on, { CUBE_WORKSPACE_SOCKET: SOCKET, CUBE_WORKSPACE_PATH: BASE, CUBE_WORKSPACE_TOKEN: TOKEN, CUBE_WORKSPACE_ROOT: ROOT, ...env })
   on('http.fetch', ($, e) => {
     const url = new URL(e.url)
     const body = e.init?.body === undefined ? undefined : JSON.parse(e.init.body) as Record<string, unknown>
@@ -265,6 +265,15 @@ describe('workspace tools', () => {
     expect(context.blocks[1]!.name).toBe('cubeWorkspace')
     expect(context.blocks[1]!.text).toMatch(/run the tests/)
     expect(context.blocks[1]!.text).toMatch(/virtual machine/)
+    expect(context.blocks[1]!.text).not.toMatch(/available_skills/)
+  })
+
+  test('the thread\'s skills follow the workspace instructions', async ($, on) => {
+    const skills = '<available_skills>\n  <skill>\n    <name>prove-it-works</name>\n  </skill>\n</available_skills>'
+    fakeWorkspace(on, { 'AGENTS.md': 'run the tests\n' }, { CUBE_SKILLS_PROMPT: skills })
+    on('prompt.context', ($, e) => ({ blocks: e.blocks }))
+    const context = await $.prompt.context({ blocks: [] })
+    expect(context.blocks[0]!.text.endsWith(`run the tests\n\n${skills}`)).toBe(true)
   })
 })
 

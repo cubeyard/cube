@@ -114,6 +114,8 @@ export class ClaudeAgent {
   private readonly lease: WorkspaceLease;
   private readonly runtime: ClaudeRuntime;
   private readonly cwd: string;
+  /** The thread's skills as its prompt lists them; the mod adds them. */
+  private readonly skills: string | null;
   private readonly submissions: ClaudeSubmission[];
   private readonly messages: ClaudeMessage[];
   private partial: ClaudePartial = [];
@@ -141,9 +143,9 @@ export class ClaudeAgent {
   /** Settles when the agent closes. */
   readonly closed = new Promise<void>(resolve => { this.closedResolve = resolve; });
 
-  private constructor(options: { threadId: string; db: DatabaseSync; workspace: Workspace; lease: WorkspaceLease; runtime: ClaudeRuntime; cwd: string }) {
+  private constructor(options: { threadId: string; db: DatabaseSync; workspace: Workspace; lease: WorkspaceLease; runtime: ClaudeRuntime; cwd: string; skills: string | null }) {
     this.threadId = options.threadId; this.db = options.db; this.workspace = options.workspace;
-    this.lease = options.lease; this.runtime = options.runtime; this.cwd = options.cwd;
+    this.lease = options.lease; this.runtime = options.runtime; this.cwd = options.cwd; this.skills = options.skills;
     ({ submissions: this.submissions, messages: this.messages } = record(this.db));
   }
 
@@ -161,7 +163,7 @@ export class ClaudeAgent {
 
   /** Takes the thread's `claude-code` lease for the agent's lifetime: the
    * one writable owner. The token goes to the child's mod and nowhere else. */
-  static async open(options: { directory: string; threadId: string; workspace: Workspace; runtime: ClaudeRuntime; model: string }): Promise<ClaudeAgent> {
+  static async open(options: { directory: string; threadId: string; workspace: Workspace; runtime: ClaudeRuntime; model: string; skills?: string | null }): Promise<ClaudeAgent> {
     const lease = await options.workspace.lease({ owner: "claude-code" });
     let db: DatabaseSync | undefined;
     try {
@@ -183,7 +185,7 @@ export class ClaudeAgent {
       // cancelled too rather than left to finish unseen.
       const interrupted = new Set((db.prepare("SELECT seq FROM submission WHERE state='running'").all() as Array<{ seq: number }>).map(row => row.seq));
       db.prepare("UPDATE submission SET state='failed', error=? WHERE state='running'").run(INTERRUPTED);
-      const agent = new ClaudeAgent({ threadId: options.threadId, db, workspace: options.workspace, lease, runtime: options.runtime, cwd });
+      const agent = new ClaudeAgent({ threadId: options.threadId, db, workspace: options.workspace, lease, runtime: options.runtime, cwd, skills: options.skills ?? null });
       for (const message of agent.messages) if (interrupted.has(message.submission)) agent.track(message.data);
       // Background agents ran in a child that ended with the cubed before.
       agent.lose(CLOSED);
@@ -301,7 +303,8 @@ export class ClaudeAgent {
       CUBE_WORKSPACE_ROOT: this.cwd,
       // The same directory as the kernel names it (Claude Code's own cwd)
       // when the state path has a symlink in it.
-      CUBE_WORKSPACE_REAL_ROOT: fs.realpathSync(this.cwd) });
+      CUBE_WORKSPACE_REAL_ROOT: fs.realpathSync(this.cwd),
+      ...this.skills ? { CUBE_SKILLS_PROMPT: this.skills } : {} });
     const child = spawn(command!, [...prefix, ...claudeArguments(this.runtime.mod, this.model, session)], { cwd: this.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     const stderr: string[] = [];
     child.once("error", error => stderr.push(error.message));

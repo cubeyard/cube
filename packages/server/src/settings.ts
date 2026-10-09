@@ -1,20 +1,23 @@
-/** The host's settings chosen in the UI, kept in `<CUBED_STATE>/settings.json`.
- * Only what the settings page offers is here: OptChat's compactor model. */
+/** The host's settings, kept in `<CUBED_STATE>/settings.json`: OptChat's
+ * compactor model (the settings page) and the user's skill sources
+ * (`PUT /api/settings/skills`, docs/skills.md). */
 import fs from "node:fs";
 import path from "node:path";
 import * as Schema from "effect/Schema";
 import type { ModelSelection } from "./models.ts";
+import { NO_SKILLS_CONFIG, parseSkillsConfig, type SkillsConfig } from "./skills.ts";
 
 const Selection = Schema.Struct({ provider: Schema.String, id: Schema.String });
-const isFile = Schema.is(Schema.Struct({ version: Schema.Literal(1), optchat: Schema.Struct({ compactor: Schema.NullOr(Selection) }) }));
+const isFile = Schema.is(Schema.Struct({ version: Schema.Literal(1), optchat: Schema.Struct({ compactor: Schema.NullOr(Selection) }), skills: Schema.optional(Schema.Unknown) }));
 
 export interface Settings {
   /** null: the compactor follows the chat's model. */
   compactor: ModelSelection | null;
+  skills: SkillsConfig;
 }
 
 export class SettingsStore {
-  private current: Settings = { compactor: null };
+  private current: Settings = { compactor: null, skills: NO_SKILLS_CONFIG };
   /** Why the file could not be read; the defaults apply until a save replaces it. */
   error: string | null = null;
   readonly file: string;
@@ -30,19 +33,28 @@ export class SettingsStore {
     try { parsed = JSON.parse(text); } catch { parsed = undefined; }
     if (!isFile(parsed)) { this.error = `${path.basename(file)} could not be read; the defaults apply until a choice is saved`; return; }
     const compactor = parsed.optchat.compactor;
-    this.current = { compactor: compactor && { provider: compactor.provider, id: compactor.id } };
+    let skills = NO_SKILLS_CONFIG;
+    try { if (parsed.skills !== undefined) skills = parseSkillsConfig(parsed.skills); }
+    catch (error) { this.error = `${path.basename(file)}: ${(error as Error).message}; only the default skills apply until skills are saved`; }
+    this.current = { compactor: compactor && { provider: compactor.provider, id: compactor.id }, skills };
   }
 
-  get(): Settings { return { compactor: this.current.compactor && { ...this.current.compactor } }; }
+  get(): Settings { return structuredClone(this.current); }
+
+  setCompactor(compactor: ModelSelection | null): Settings {
+    return this.save({ ...this.current, compactor: compactor && { provider: compactor.provider, id: compactor.id } });
+  }
+
+  setSkills(skills: SkillsConfig): Settings { return this.save({ ...this.current, skills: structuredClone(skills) }); }
 
   /** Written whole and renamed into place, then applied. */
-  setCompactor(compactor: ModelSelection | null): Settings {
-    const next = { compactor: compactor && { provider: compactor.provider, id: compactor.id } };
+  private save(next: Settings): Settings {
     fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
     const temporary = `${this.file}.tmp`;
     // A left-over temporary file would keep its own mode through the rename.
     fs.rmSync(temporary, { force: true });
-    fs.writeFileSync(temporary, `${JSON.stringify({ version: 1, optchat: { compactor: next.compactor } }, null, 2)}\n`, { mode: 0o600 });
+    fs.writeFileSync(temporary, `${JSON.stringify({ version: 1, optchat: { compactor: next.compactor },
+      ...next.skills.sources.length || next.skills.disabled.length ? { skills: next.skills } : {} }, null, 2)}\n`, { mode: 0o600 });
     fs.renameSync(temporary, this.file);
     this.current = next;
     this.error = null;

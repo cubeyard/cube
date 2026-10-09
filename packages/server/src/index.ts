@@ -21,6 +21,7 @@ import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { SettingsStore, type SettingsView } from "./settings.ts";
+import { DEFAULT_SKILL_SOURCE, parseSkillsConfig, resolveSkills, type SkillSource } from "./skills.ts";
 import { UpdateService } from "./update-service.ts";
 import { versionInfo } from "./version.ts";
 import { OptChat, OptChatEvents } from "./optchat.ts";
@@ -223,6 +224,9 @@ export async function createCubed(options: {
   githubPulls?: GithubPulls;
   /** Artifact comment delivery retry, for tests. */
   artifactRetryMs?: number;
+  /** The skill source before the user's (docs/skills.md); none when absent.
+   * The cubed command passes DEFAULT_SKILL_SOURCE. */
+  skillSource?: SkillSource | null;
 }) {
   const { directory: run, socket, temporary: socketDirectory } = await runDirectory(options.state);
   const registry = new Registry(path.join(options.state, "registry.sqlite"));
@@ -445,7 +449,10 @@ export async function createCubed(options: {
         throw Object.assign(new Error(`fetching the latest ${repository.base ?? "default branch"} of ${repository.url} failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
       }
     }));
-    return { projectRevision: project.revision, repositories };
+    const skills = await resolveSkills(git, options.skillSource ?? null, settings.get().skills).catch(error => {
+      throw Object.assign(new Error(`resolving the skills failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
+    });
+    return { projectRevision: project.revision, repositories, skills };
   }
   const server = http.createServer(async (request, response) => {
     const json = (body: unknown, status = 200) => { response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); response.end(JSON.stringify(body)); };
@@ -638,6 +645,19 @@ export async function createCubed(options: {
           }
           settings.setCompactor(chosen);
           return json(await settingsView());
+        }
+        // The skills the next thread gets: GET resolves the saved sources,
+        // PUT `{sources, disabled}` saves them once they resolve.
+        if (parts.length === 3 && parts[2] === "skills" && (method === "GET" || method === "PUT")) {
+          let config = settings.get().skills;
+          if (method === "PUT") {
+            try { config = parseSkillsConfig(body); } catch (error) { return json({ error: (error as Error).message }, 400); }
+          }
+          let resolved;
+          try { resolved = await resolveSkills(git, options.skillSource ?? null, config); }
+          catch (error) { return json({ error: errorText(error), saved: settings.get().skills }, method === "PUT" ? 422 : 502); }
+          if (method === "PUT") settings.setSkills(config);
+          return json({ default: options.skillSource ?? null, saved: config, resolved });
         }
         return json({ error: "not found" }, 404);
       }
@@ -996,7 +1016,7 @@ async function main(argv: string[]): Promise<void> {
   if (options.command === "runners-enroll") { await runnersEnroll(options.state, options.config!); return; }
   if (options.command === "runners-init-local") { process.exitCode = await runnersInitLocal(options.state, options.local!); return; }
   process.env.CUBED_LOG_LEVEL = options.logLevel;
-  const app = await createCubed({ state: options.state, allowedHosts: options.allowedHosts });
+  const app = await createCubed({ state: options.state, allowedHosts: options.allowedHosts, skillSource: DEFAULT_SKILL_SOURCE });
   await new Promise<void>((resolve, reject) => {
     app.server.once("error", reject);
     app.server.listen(options.port, options.host, () => { app.server.off("error", reject); resolve(); });
