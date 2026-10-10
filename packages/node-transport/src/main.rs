@@ -23,6 +23,8 @@ use serde_json::json;
 const USAGE: &str = "usage:
   cube-runner init --home <NEW-directory> --image <debian-genericcloud.qcow2> --allow-peer <public-key> --node-id <node-id> --thread-id <thread-id> --env <integer> [--network loopback|direct|relay] [--listen <ip:port>] [--qemu <path>] [--firmware <path>] [--max-vcpus 4] [--max-memory-mib 8192] [--max-disk-gib 64]
   cube-runner run --home <directory> [--network loopback|direct|relay] [--max-active-vms auto|N]
+  cube-runner host --dir <directory> [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay] [--listen <ip:port>] [--python python3] [--max-machines 8] [--labels k=v,...]
+      UNSANDBOXED: each machine is a subdirectory of <directory>; commands run as you, with your logins (runner protocol 4)
   cube-runner version
   cube-runner verify-release --key <public-key.pem> --manifest <file> --signature <file>
   cube-runner idle --state <journal-directory>
@@ -35,6 +37,185 @@ const USAGE: &str = "usage:
   cube-runner runner-serve --key <private-file> --state <directory> [--listen 127.0.0.1:0] [--ready-file <absolute-file>] [--stop-policy wait|cancel] [--max-active-vms auto|N]
 network commands accept --network loopback|direct|relay (default loopback); direct requires explicit addresses; relay uses N0 discovery and relays
 --max-active-vms (or CUBE_RUNNER_MAX_ACTIVE_VMS) bounds concurrent thread VMs; auto (default) fits every VM at the installation's --max-vcpus and --max-memory-mib, 1 to 4";
+
+/// `DIRECTORY/.cube-runner/host.json`: written by the first `host` run.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct HostHome {
+    version: u32,
+    node_id: String,
+    allowed_peer: String,
+    network: NetworkMode,
+    listen: Option<String>,
+    labels: BTreeMap<String, String>,
+}
+
+const HOST_WARNING: &str = "UNSANDBOXED: threads routed to this runner run commands as you, on this host, with your files, network and logins (gh, git, ssh). Use it only to develop and debug cube runners.";
+
+#[cfg(unix)]
+async fn host(mut options: BTreeMap<String, String>, network: Option<NetworkMode>) -> Result<()> {
+    use std::os::unix::{fs::DirBuilderExt, io::AsRawFd};
+    let directory = PathBuf::from(take(&mut options, "--dir")?);
+    ensure!(directory.is_absolute(), "--dir must be an absolute path");
+    fs::create_dir_all(&directory)?;
+    let directory = fs::canonicalize(&directory)?;
+    let control = directory.join(".cube-runner");
+    if !control.exists() {
+        fs::DirBuilder::new().mode(0o700).create(&control)?;
+    }
+    let lock = File::create(control.join("lock"))?;
+    // SAFETY: flock on a descriptor this function owns.
+    ensure!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
+        "another cube-runner host runs in {}",
+        directory.display()
+    );
+    let manifest = control.join("host.json");
+    let allow = options.remove("--allow-peer");
+    let node = options.remove("--node-id");
+    let listen = options.remove("--listen");
+    let labels = options.remove("--labels");
+    let python = options
+        .remove("--python")
+        .unwrap_or_else(|| "python3".into());
+    let max_machines: u32 = number(&mut options, "--max-machines", 8)?;
+    no_extra(&options)?;
+    ensure!(
+        (1..=64).contains(&max_machines),
+        "--max-machines must be 1 through 64"
+    );
+    let home = if manifest.exists() {
+        let home: HostHome = serde_json::from_slice(&fs::read(&manifest)?)?;
+        ensure!(
+            home.version == 1,
+            "unsupported host runner version in {}",
+            manifest.display()
+        );
+        ensure!(
+            allow
+                .as_deref()
+                .is_none_or(|peer| peer == home.allowed_peer)
+                && node.as_deref().is_none_or(|node| node == home.node_id)
+                && labels.is_none(),
+            "{} already names this runner's control peer, node id and labels; a runner is never rebound",
+            manifest.display()
+        );
+        HostHome {
+            network: network.unwrap_or(home.network),
+            listen: listen.or(home.listen),
+            ..home
+        }
+    } else {
+        let allowed_peer = allow
+            .context("the first run needs --allow-peer (cubed's control key) and --node-id")?;
+        let node_id = node.context("the first run needs --node-id")?;
+        validate_node_id(&node_id)?;
+        let _: EndpointId = allowed_peer
+            .parse()
+            .context("--allow-peer must be a public key")?;
+        let mut parsed = BTreeMap::new();
+        for pair in labels
+            .iter()
+            .flat_map(|labels| labels.split(','))
+            .filter(|pair| !pair.is_empty())
+        {
+            let (key, value) = pair.split_once('=').context("--labels is k=v,k=v")?;
+            parsed.insert(key.to_owned(), value.to_owned());
+        }
+        let home = HostHome {
+            version: 1,
+            node_id,
+            allowed_peer,
+            network: network.unwrap_or_default(),
+            listen,
+            labels: parsed,
+        };
+        keygen(&control.join("runner.key"))?;
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&manifest)?;
+        file.write_all(serde_json::to_string_pretty(&home)?.as_bytes())?;
+        file.sync_all()?;
+        home
+    };
+    let python_ok = std::process::Command::new(&python)
+        .args([
+            "-c",
+            "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)",
+        ])
+        .status()
+        .is_ok_and(|status| status.success());
+    ensure!(
+        python_ok,
+        "{python} (Python 3.8 or newer) is needed to run the guest helper; pass --python"
+    );
+    let key = read_key(&control.join("runner.key"))?;
+    let allowed: EndpointId = home.allowed_peer.parse()?;
+    let listen = home
+        .listen
+        .as_deref()
+        .map(str::parse::<SocketAddr>)
+        .transpose()?;
+    let network_name = match home.network {
+        NetworkMode::Loopback => "loopback",
+        NetworkMode::Direct => "direct",
+        NetworkMode::Relay => "relay",
+    };
+    let runner = cube_node_transport::p4::host::HostRunner::open(
+        cube_node_transport::p4::host::HostOptions {
+            directory: directory.clone(),
+            node_id: home.node_id.clone(),
+            python,
+            network: network_name.into(),
+            max_machines,
+            labels: home.labels.clone(),
+        },
+    )?;
+    let endpoint = cube_node_transport::bind_alpns(
+        key,
+        home.network,
+        listen,
+        vec![cube_node_transport::p4::ALPN.to_vec()],
+    )
+    .await?;
+    eprintln!(
+        "cube-runner {SOFTWARE_VERSION} host (runner protocol {})",
+        cube_node_transport::p4::PROTOCOL
+    );
+    eprintln!("{HOST_WARNING}");
+    eprintln!("dir: {}", directory.display());
+    eprintln!("node: {}", home.node_id);
+    eprintln!("peer: {}", endpoint.id());
+    eprintln!("control peer: {}", home.allowed_peer);
+    eprintln!("network: {network_name}");
+    let addresses = endpoint
+        .addr()
+        .ip_addrs()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !addresses.is_empty() {
+        eprintln!("listen: {addresses}");
+    }
+    eprintln!(
+        "machines: {} (at most {max_machines} at once)",
+        runner.machine_count()
+    );
+    eprintln!("waiting for cubed; Ctrl-C stops the runner (commands it started keep running)");
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    let result = tokio::select! {
+        result = cube_node_transport::p4::serve_host(&endpoint, allowed, runner) => result,
+        _ = interrupt.recv() => Ok(()),
+        _ = terminate.recv() => Ok(()),
+    };
+    endpoint.close().await;
+    eprintln!("stopped");
+    drop(lock);
+    result
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -295,6 +476,9 @@ async fn main() -> Result<()> {
         Some("relay") => Some(NetworkMode::Relay),
         _ => bail!("invalid network mode"),
     };
+    if command == "host" {
+        return host(options, network_option).await;
+    }
     let direct_home = matches!(command.as_str(), "init" | "run")
         .then(|| take(&mut options, "--home"))
         .transpose()?

@@ -39,6 +39,9 @@ export interface RunnerReport {
 
 export interface RunnerObservation {
   id: string; nodeId: string; enrolledAt: number | null;
+  /** `host`: cube-runner host (protocol 4), unsandboxed; it takes only the
+   * threads started on it by name and is never part of the pool. */
+  kind: "vm" | "host";
   contact: { status: RunnerContactStatus; lastAttemptAt: number | null; lastContactAt: number | null; unreachableSince: number | null; error: string | null };
   /** The last report the runner sent; null if it never answered. */
   report: RunnerReport | null;
@@ -74,7 +77,9 @@ export function observeRunners(registry: Registry, probeIntervalMs: number, now 
     let report: RunnerReport | null = null;
     if (last) {
       const health = last.health;
-      const known = health.platform ? PLATFORMS[health.platform] : undefined;
+      const host = runner?.kind === "host";
+      const known = health.platform && !host ? PLATFORMS[health.platform] : undefined;
+      const [hostOs, hostArch] = host && health.platform ? health.platform.split("-") : [];
       const ageMs = Math.max(0, now - last.at);
       report = {
         at: last.at, ageMs, fresh: status.contactStatus === "reachable" && last.at >= (status.lastContactAt ?? 0) && ageMs <= FRESH_INTERVALS * probeIntervalMs,
@@ -82,24 +87,26 @@ export function observeRunners(registry: Registry, probeIntervalMs: number, now 
         lifecycle: health.lifecycle, draining: health.draining, error: health.error,
         activeVms: health.activeVms, runningVms: health.runningVms, maxActiveVms: health.maxActiveVms,
         retainedVms: health.retainedVms, retainedBytes: health.retainedBytes,
-        platform: health.platform ?? null, os: known?.os ?? null, arch: known?.arch ?? null, accelerator: known?.accelerator ?? null,
+        platform: health.platform ?? null, os: known?.os ?? hostOs ?? null, arch: known?.arch ?? hostArch ?? null, accelerator: known?.accelerator ?? null,
         capabilities: health.capabilities ? [...health.capabilities] : null,
         vmLimits: health.limits ? { maxVcpus: health.limits.maxVcpus, maxMemoryMiB: health.limits.maxMemoryMiB, maxDiskGiB: health.limits.maxDiskGiB } : null,
       };
       if (!health.platform) unknown.push("platform, capabilities and machine limits: the last report predates cubed keeping them; the next probe fills them in");
-      else if (!known) unknown.push(`os, architecture and accelerator: platform ${health.platform} is not one cubed knows`);
+      else if (!known && !host) unknown.push(`os, architecture and accelerator: platform ${health.platform} is not one cubed knows`);
       if (!report.fresh) unknown.push("current state: the report below is the last one received, not the runner's state now");
     } else unknown.push("everything the runner reports (version, platform, lifecycle, machines): it has not answered a probe");
     const retirement = status.retiredAt ? "retired" : status.allocationState === "retiring" ? "retiring" : "none";
-    const allocatable = retirement === "none";
+    const kind = runner?.kind === "host" ? "host" : "vm";
+    // The pool: what a thread started without naming a runner may get.
+    const allocatable = retirement === "none" && kind === "vm";
     const total = status.maxActiveVms;
     return {
-      id: status.id, nodeId: status.nodeId, enrolledAt: status.enrolledAt,
+      id: status.id, nodeId: status.nodeId, enrolledAt: status.enrolledAt, kind,
       contact: { status: status.contactStatus, lastAttemptAt: status.lastAttemptAt, lastContactAt: status.lastContactAt,
         unreachableSince: status.unreachableSince, error: status.error },
       report,
       slots: { total, totalSource: runner?.maxActiveVms === undefined ? "assumed" : "reported", reserved: status.activeThreads,
-        free: allocatable ? Math.max(0, total - status.activeThreads) : 0, allocatable },
+        free: allocatable || (kind === "host" && retirement === "none") ? Math.max(0, total - status.activeThreads) : 0, allocatable },
       retirement, unknown,
     };
   });
@@ -131,6 +138,11 @@ export function describeRunners(view: RunnersObservation): string {
   for (const runner of listed) {
     const { report, contact, slots } = runner;
     lines.push(`- ${runner.nodeId} (id ${runner.id}${runner.retirement === "retiring" ? "; retiring" : ""})`);
+    if (runner.kind === "host") {
+      lines.push("  HOST runner (cube-runner host, protocol 4): UNSANDBOXED, commands run as the user who started it on that host, with "
+        + "that user's files and gh/git logins; only for developing cube runners. It takes only threads started on it by name "
+        + "(never others); while it is down, its threads wait.");
+    }
     const contactText = contact.status === "reachable" ? "reachable"
       : contact.status === "unknown" ? "not probed yet"
       : `${contact.status}${contact.unreachableSince ? ` since ${ago(view.observedAt - contact.unreachableSince)}` : ""}${contact.error ? ` (${errorCode(contact.error)})` : ""}`;
@@ -144,7 +156,7 @@ export function describeRunners(view: RunnersObservation): string {
       if (report.vmLimits) lines.push(`  largest machine: ${report.vmLimits.maxVcpus} vCPUs, ${report.vmLimits.maxMemoryMiB} MiB, ${report.vmLimits.maxDiskGiB} GiB disk`);
     }
     lines.push(`  cubed's slots: ${slots.reserved} reserved by open threads of ${slots.total}${slots.totalSource === "assumed" ? " (assumed: the runner never advertised a bound)" : ""}, `
-      + `${slots.allocatable ? `${slots.free} free` : "not taking threads"}`);
+      + `${slots.allocatable ? `${slots.free} free` : runner.kind === "host" && runner.retirement === "none" ? `${slots.free} free for threads started on it by name` : "not taking threads"}`);
     for (const item of runner.unknown) lines.push(`  unknown: ${item}`);
   }
   lines.push(`pool: ${view.pool.free} of ${view.pool.slots} slots free across ${view.pool.allocatable} runners taking threads`);

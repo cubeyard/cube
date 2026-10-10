@@ -54,3 +54,87 @@ impl<'de> Deserialize<'de> for Timestamp {
         })
     }
 }
+
+pub mod host;
+
+use anyhow::{Result, ensure};
+use iroh::{Endpoint, EndpointId};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    task::JoinSet,
+    time::timeout,
+};
+
+pub const ALPN: &[u8] = b"cubeyard/runner/4";
+pub const PROTOCOL: u32 = 4;
+/// A header frame (`Open`, an answer, a watch event).
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_CONNECTIONS: usize = 16;
+
+pub fn refuse(code: proto::Code, reason: &str, message: &str) -> proto::Error {
+    proto::Error {
+        code: code as i32,
+        reason: reason.into(),
+        message: message.chars().take(1024).collect(),
+        completion_unknown: false,
+    }
+}
+
+/// u32 big-endian length, then that many bytes of proto3 JSON.
+pub async fn write_frame<T: Serialize>(
+    send: &mut iroh::endpoint::SendStream,
+    value: &T,
+) -> Result<()> {
+    let payload = serde_json::to_vec(value)?;
+    ensure!(payload.len() <= MAX_FRAME_BYTES, "frame exceeds limit");
+    let mut bytes = Vec::with_capacity(4 + payload.len());
+    bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&payload);
+    send.write_all(&bytes).await?;
+    Ok(())
+}
+
+pub async fn read_frame<T: serde::de::DeserializeOwned>(
+    recv: &mut (impl AsyncRead + Unpin),
+) -> Result<T> {
+    let size = recv.read_u32().await? as usize;
+    ensure!(size > 0 && size <= MAX_FRAME_BYTES, "invalid frame length");
+    let mut payload = vec![0; size];
+    recv.read_exact(&mut payload).await?;
+    Ok(serde_json::from_slice(&payload)?)
+}
+
+/// Accepts protocol-4 connections from `allowed` only; each stream is one
+/// call (see proto/runner.proto).
+pub async fn serve_host(
+    endpoint: &Endpoint,
+    allowed: EndpointId,
+    runner: std::sync::Arc<host::HostRunner>,
+) -> Result<()> {
+    runner.probe_all();
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            incoming = endpoint.accept() => {
+                let Some(incoming) = incoming else { break };
+                if connections.len() >= MAX_CONNECTIONS {
+                    incoming.refuse();
+                    continue;
+                }
+                let runner = runner.clone();
+                connections.spawn(async move {
+                    let Ok(Ok(connection)) = timeout(crate::REQUEST_TIMEOUT, incoming).await else { return };
+                    if connection.remote_id() != allowed || connection.alpn() != ALPN {
+                        connection.close(1u32.into(), b"UNAUTHORIZED");
+                        return;
+                    }
+                    host::serve_connection(runner, connection).await;
+                });
+            }
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
+        }
+    }
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
+    Ok(())
+}

@@ -15,7 +15,10 @@ const code = (expected: string) => (error: unknown) => {
   return true;
 };
 
-export async function workspaceContract(name: string, workspace: Workspace, owner: WorkspaceOwner): Promise<void> {
+/** `machinePaths(run)`: absolute paths outside the workspace that the
+ * agent may write (default: a VM's /home/agent and /tmp). */
+export async function workspaceContract(name: string, workspace: Workspace, owner: WorkspaceOwner,
+  options: { machinePaths?: (run: string) => string[] } = {}): Promise<void> {
   const other: WorkspaceOwner = owner === "pi" ? "claude-code" : "pi";
   // Guest journals keep every key and file; keep each run's identities fresh.
   const run = `contract-${randomUUID()}`;
@@ -93,7 +96,7 @@ export async function workspaceContract(name: string, workspace: Workspace, owne
     assert.ok(capabilities.includes("fs.absolute"), `${name}: fs.absolute`);
     await workspace.writeFile(token, `${run}-abs`, `/workspace/${dir}/abs.txt`, Buffer.from("abs\n"));
     assert.equal(text((await workspace.readFile(token, `${dir}/abs.txt`)).content), "abs\n", "/workspace is the workspace");
-    for (const machine of [`/home/agent/${run}/portal-runtime/start-portal.sh`, `/tmp/${run}/screens/shot.png`]) {
+    for (const machine of options.machinePaths?.(run) ?? [`/home/agent/${run}/portal-runtime/start-portal.sh`, `/tmp/${run}/screens/shot.png`]) {
       const placed = await workspace.writeFile(token, `${run}-m1-${machine}`, machine, Buffer.from("machine\n"), { createParents: true });
       assert.equal(text((await workspace.readFile(token, machine)).content), "machine\n", machine);
       assert.equal((await workspace.stat(token, machine)).sha256, placed.sha256, machine);

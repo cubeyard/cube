@@ -1142,12 +1142,14 @@ function checkouts(allocation: WorkspaceAllocation): Array<{ dir: string; url: s
 /** Shell helpers shared by the preparation and resume scripts. `hook NAME
  * FILE LOG` runs FILE (if it is executable) as the agent's account in
  * /workspace with its output in ~/.cache/cube/LOG (the previous try's moves
- * to LOG.prev) and prints `cube-hook NAME ok|failed:<exit>|absent <ms>`; the
+ * to LOG.prev; $CUBE_LOGS in place of ~/.cache/cube when set) and prints
+ * `cube-hook NAME ok|failed:<exit>|absent <ms>`; the
  * same line, with the time it ended, goes to ~/.cache/cube/NAME.status for
  * `cube hooks`. While it runs, `cube-hook-start NAME` is printed and
  * ~/.cache/cube/running names it and its log (what the thread shows live). */
 const HOOK_SHELL = [
-  "logs=\"${HOME:-/tmp}/.cache/cube\"",
+  // A host machine (cube-runner host) keeps its logs in its own directory.
+  "logs=\"${CUBE_LOGS:-${HOME:-/tmp}/.cache/cube}\"",
   "hooks=\"${CUBE_HOOKS:-/etc/cube/hooks}\"",
   "mkdir -p \"$logs\"",
   // A hook killed with its command (out of memory) left its marker: nothing runs yet.

@@ -40,13 +40,16 @@ import fcntl
 import hashlib
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
 import socket
 import stat
 import subprocess
+import signal
 import sys
+import threading
 import time
 
 VERSION = "1"
@@ -250,6 +253,154 @@ class SystemdServices:
         return result.stdout.decode(errors="replace")
 
 
+class ProcessLauncher:
+    """A detached supervisor process per command, in place of systemd: it
+    runs the wrapper in its own process group, enforces the timeout and then
+    calls `finish` with the variables systemd would set for ExecStopPost.
+    `prefix` runs this helper again in the same mode (`PREFIX supervise ID
+    MS`); `<state_root>/cgroup` stands in for the unit's cgroup when a test
+    writes one."""
+
+    def __init__(self, prefix, state_root):
+        self.prefix = list(prefix)
+        self.cgroup = os.path.join(state_root, "cgroup")
+        self.meminfo = os.path.join(state_root, "meminfo")
+
+    def start(self, op_id, timeout_ms):
+        child = subprocess.Popen(self.prefix + ["supervise", op_id, str(timeout_ms)],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+        write_atomic(op_path(op_id, "supervisor.pid"), str(child.pid).encode())
+
+    def _pid(self, op_id, name):
+        try:
+            with open(op_path(op_id, name)) as handle:
+                return int(handle.read().strip())
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def active(self, op_id):
+        pid = self._pid(op_id, "supervisor.pid")
+        return pid is not None and alive(pid)
+
+    def kill(self, op_id):
+        pid = self._pid(op_id, "wrap.pid")
+        if pid is not None:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def shutting_down(self):
+        return False
+
+    def memory(self, op_id):
+        return cgroup_memory(self.cgroup, self.meminfo)
+
+    def supervise(self, op_id, timeout_ms):
+        child = subprocess.Popen(self.prefix + ["wrap", op_id],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+        write_atomic(op_path(op_id, "wrap.pid"), str(child.pid).encode())
+        # A cancel that came before wrap.pid existed left only its marker.
+        if os.path.exists(op_path(op_id, "cancel")):
+            os.killpg(child.pid, signal.SIGKILL)
+        timed_out = threading.Event()
+
+        def expire():
+            timed_out.set()
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        timer = threading.Timer(timeout_ms / 1000, expire)
+        timer.start()
+        code = child.wait()
+        timer.cancel()
+        # Killed while the stand-in cgroup counts an OOM kill: as systemd says
+        # of a unit the kernel's OOM killer stopped.
+        oom = code < 0 and (self.memory(op_id) or {}).get("oomKills", 0) > 0
+        os.environ["SERVICE_RESULT"] = "timeout" if timed_out.is_set() else "oom-kill" if oom else "success" if code == 0 \
+            else "signal" if code < 0 else "exit-code"
+        os.environ["EXIT_CODE"] = "killed" if code < 0 else "exited"
+        os.environ["EXIT_STATUS"] = str(-code if code < 0 else code)
+        return finish(op_id)
+
+
+def alive(pid):
+    """Whether `pid` runs and is no zombie (without procfs, as on macOS,
+    kill(0) is the answer)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        with open("/proc/%d/stat" % pid) as handle:
+            return handle.read().split(") ")[-1].split()[0] != "Z"
+    except FileNotFoundError:
+        return True
+
+
+class ProcessServices:
+    """`cube service` services as detached process groups in place of
+    systemd units; their output goes to DIRECTORY/NAME.log. Nothing restarts
+    them when they stop, or after the host restarts."""
+
+    def __init__(self, prefix, directory):
+        self.prefix = list(prefix)
+        self.directory = directory
+
+    def _pid(self, name):
+        try:
+            with open(os.path.join(self.directory, name + ".pid")) as handle:
+                return int(handle.read().strip())
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def start(self, name):
+        self.stop(name)
+        os.makedirs(self.directory, exist_ok=True)
+        with open(os.path.join(self.directory, name + ".log"), "ab") as output:
+            child = subprocess.Popen(self.prefix + ["service-run", name],
+                                     stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        write_atomic(os.path.join(self.directory, name + ".pid"), str(child.pid).encode())
+
+    def restart(self, name):
+        self.start(name)
+
+    def stop(self, name):
+        pid = self._pid(name)
+        if pid is not None:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def remove(self, name):
+        self.stop(name)
+        try:
+            os.unlink(os.path.join(self.directory, name + ".pid"))
+        except FileNotFoundError:
+            pass
+
+    def state(self, name):
+        pid = self._pid(name)
+        if pid is None:
+            return {"active": "missing", "sub": "", "restarts": 0}
+        running = alive(pid)
+        return {"active": "active" if running else "failed", "sub": "running" if running else "exited", "restarts": 0}
+
+    def logs(self, name, lines, follow):
+        try:
+            with open(os.path.join(self.directory, name + ".log")) as handle:
+                return "".join(handle.readlines()[-lines:])
+        except FileNotFoundError:
+            return ""
+
+
 class Config:
     def __init__(self):
         self.state = "/var/lib/cube"
@@ -279,6 +430,17 @@ class Config:
         # (None: ~/.cache/cube of `user`, the account the hooks run as).
         self.hooks_dir = "/etc/cube/hooks"
         self.hook_logs = None
+        # The `cube` shim's text; None: CLI_SHIM.
+        self.cli_shim = None
+        # Host mode: an absolute path under this one names the workspace
+        # (a host has no /workspace of its own).
+        self.workspace_alias = None
+        # Host mode: commands get the runner's own environment (the user's
+        # PATH, HOME and logins) and `env`, not a VM's clean one.
+        self.inherit_env = False
+        self.env = {}
+        # This boot's id: a file (the VM kernel's), or the id itself.
+        self.boot_id = "/proc/sys/kernel/random/boot_id"
 
 
 CONFIG = Config()
@@ -478,6 +640,8 @@ def file_path(path, follow=True):
         raise Fail("INVALID_REQUEST", "path must be relative to the workspace or absolute, without ..")
     workspace = os.path.realpath(CONFIG.workspace)
     machine = os.path.realpath(CONFIG.root)
+    if CONFIG.workspace_alias and within(path, CONFIG.workspace_alias):
+        path = path[len(CONFIG.workspace_alias):].lstrip("/") or "."
     full = os.path.normpath(os.path.join(machine, path.lstrip("/")) if path.startswith("/") else os.path.join(workspace, path))
     resolved = os.path.realpath(full)
     # A write or stat acts on a final symlink itself, not on what it names.
@@ -574,9 +738,35 @@ def template_seal():
     return outcome if outcome.startswith("failed") else "ok"
 
 
+def boot_id():
+    if not CONFIG.boot_id or not CONFIG.boot_id.startswith("/"):
+        return CONFIG.boot_id or None
+    try:
+        with open(CONFIG.boot_id) as handle:
+            return handle.read().strip() or None
+    except OSError:
+        return None
+
+
+def hook_outcomes():
+    """Each hook's last outcome in this machine (`ok`, `failed:N`, ...), as
+    `cube hooks` reads it; a hook that never ran is left out."""
+    outcomes = {}
+    for name, _source, _log in HOOKS:
+        match = HOOK_STATUS.match((tail_lines(os.path.join(hook_logs(), name + ".status"), 1) or "").strip())
+        if match:
+            outcomes[name] = match.group(1)
+    return outcomes
+
+
 def op_hello(header, body):
+    system = platform.system().lower()
     answer = {"version": VERSION, "ready": ready(), "capabilities": CAPABILITIES, "limits": LIMITS, "epoch": current_epoch(),
-              "build": build()}
+              "build": build(), "os": "macos" if system == "darwin" else system, "kernel": platform.release(),
+              "hooks": hook_outcomes()}
+    boot = boot_id()
+    if boot:
+        answer["bootId"] = boot
     seal = template_seal()
     if seal is not None:
         answer["templateSeal"] = seal
@@ -787,16 +977,20 @@ def op_install(header, body):
     return {"build": build()}, b""
 
 
+def cli_shim():
+    return CONFIG.cli_shim or CLI_SHIM
+
+
 def install_cli():
     """The `cube` command: a shim that runs this helper's CLI."""
     try:
         with open(CONFIG.cli, "rb") as handle:
-            if handle.read() == CLI_SHIM.encode():
+            if handle.read() == cli_shim().encode():
                 return
     except FileNotFoundError:
         pass
     os.makedirs(os.path.dirname(CONFIG.cli), exist_ok=True)
-    write_atomic(CONFIG.cli, CLI_SHIM.encode(), 0o755)
+    write_atomic(CONFIG.cli, cli_shim().encode(), 0o755)
     os.chmod(CONFIG.cli, 0o755)
 
 
@@ -1423,9 +1617,12 @@ def cli(argv):
 
 def environment():
     owner = account()
-    env = {"PATH": STANDARD_PATH, "LANG": "C.UTF-8", "HOME": owner[2] if owner else os.environ.get("HOME", "/"),
-           "USER": CONFIG.user or os.environ.get("USER", ""), "LOGNAME": CONFIG.user or os.environ.get("USER", ""),
-           "SHELL": "/bin/bash", "TERM": "dumb", "GIT_TERMINAL_PROMPT": "0"}
+    if CONFIG.inherit_env:
+        env = dict(os.environ, TERM="dumb", GIT_TERMINAL_PROMPT="0", **CONFIG.env)
+    else:
+        env = {"PATH": STANDARD_PATH, "LANG": "C.UTF-8", "HOME": owner[2] if owner else os.environ.get("HOME", "/"),
+               "USER": CONFIG.user or os.environ.get("USER", ""), "LOGNAME": CONFIG.user or os.environ.get("USER", ""),
+               "SHELL": "/bin/bash", "TERM": "dumb", "GIT_TERMINAL_PROMPT": "0"}
     try:
         with open(CONFIG.env_file, "r") as handle:
             for line in handle:
@@ -1722,6 +1919,54 @@ def init():
     return 0
 
 
+# --- host mode -----------------------------------------------------------
+
+def configure_host(machine):
+    """A machine of `cube-runner host`: the directory MACHINE on the host
+    itself, with no VM and no isolation. Commands and file operations run
+    as the user who started the runner, with that user's environment and
+    logins; an absolute path is a path on the host, and /workspace names the
+    machine's workspace. MACHINE holds the journal (state), the workspace
+    and the repositories beside it (repos), this helper and its `cube` shim
+    (bin), the hooks and their logs (hooks, logs), per-boot markers (run)
+    and services. The runner names the boot (CUBE_HOST_BOOT_ID): one per
+    run of the runner."""
+    machine = os.path.realpath(machine)
+    prefix = [sys.executable or "python3", os.path.join(machine, "bin", "cube-guest"), "host", machine]
+    boot = os.environ.get("CUBE_HOST_BOOT_ID") or "unknown"
+    configure(root="/", state=os.path.join(machine, "state"), workspace=os.path.join(machine, "workspace"),
+              env_file=os.path.join(machine, "env"), user=None, ready_files=[], commands=[],
+              launcher=ProcessLauncher(prefix, machine), helper=os.path.join(machine, "bin", "cube-guest"),
+              cli=os.path.join(machine, "bin", "cube"),
+              cli_shim="#!/bin/sh\nexec %s cli \"$@\"\n" % " ".join(shlex.quote(part) for part in prefix),
+              portal_file=os.path.join(machine, "portal.json"), services=ProcessServices(prefix, os.path.join(machine, "services")),
+              service_host="127.0.0.1", hooks_dir=os.path.join(machine, "hooks"), hook_logs=os.path.join(machine, "logs"),
+              workspace_alias="/workspace", inherit_env=True, boot_id=boot,
+              env={"PATH": os.path.join(machine, "bin") + os.pathsep + os.environ.get("PATH", STANDARD_PATH),
+                   "CUBE_HOOKS": os.path.join(machine, "hooks"), "CUBE_LOGS": os.path.join(machine, "logs"),
+                   "CUBE_RUN": os.path.join(machine, "run", boot)})
+    for directory in (CONFIG.state, CONFIG.workspace, os.path.join(machine, "repos"), os.path.join(machine, "logs")):
+        os.makedirs(directory, mode=0o700 if directory == CONFIG.state else 0o755, exist_ok=True)
+    # The agent's `cube` command, first on its PATH.
+    install_cli()
+
+
+def host_main(argv):
+    """`cube-guest host MACHINE COMMAND...`: COMMAND as `main` runs it, for
+    the host machine MACHINE, and `supervise`, which stands in for systemd."""
+    if len(argv) < 2:
+        sys.stderr.write("usage: cube-guest host MACHINE call OP | cli ... | supervise ID MS | wrap ID | service-run NAME\n")
+        return 2
+    configure_host(argv[0])
+    command = argv[1:]
+    if command[0] == "supervise" and len(command) == 3 and ID.match(command[1]) and command[2].isdigit():
+        return CONFIG.launcher.supervise(command[1], int(command[2]))
+    if command[0] in ("ssh", "recover", "init", "seal", "seal-final", "packages"):
+        sys.stderr.write("cube-guest: %s is not for a host machine\n" % command[0])
+        return 2
+    return main(command)
+
+
 # --- entry ---------------------------------------------------------------
 
 def read_request(stream):
@@ -1783,10 +2028,12 @@ def main(argv):
         return cli(argv[1:])
     if command == "service-run" and len(argv) == 2:
         return service_run(argv[1])
+    if command == "host":
+        return host_main(argv[1:])
     if command == "--version":
         print("cube-guest %s" % VERSION)
         return 0
-    sys.stderr.write("usage: cube-guest ssh | call OP | wrap ID | finish ID | recover | init | seal | seal-final | packages | cli ... | service-run NAME | --version\n")
+    sys.stderr.write("usage: cube-guest ssh | call OP | host MACHINE ... | wrap ID | finish ID | recover | init | seal | seal-final | packages | cli ... | service-run NAME | --version\n")
     return 2
 
 

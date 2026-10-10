@@ -400,11 +400,12 @@ export class Registry {
       LEFT JOIN (SELECT runner_id,count(*) AS active,sum(json_extract(data, '$.workspaceState')='failed') AS failed
         FROM thread WHERE ${OPEN_THREAD} GROUP BY runner_id) t ON t.runner_id=r.id
       WHERE o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired' ORDER BY r.rowid`).all() as Array<Record<string, unknown>>;
-    return rows.map(row => {
-      const runner = JSON.parse(String(row.data)) as Runner;
-      const { fitness } = runnerFitness(observation(row), now);
-      return { id: String(row.id), runner, slots: runnerSlots(runner), active: Number(row.active), failed: Number(row.failed), fitness };
-    }).sort((a, b) => FITNESS_ORDER[a.fitness] - FITNESS_ORDER[b.fitness] || Number(a.failed > 0) - Number(b.failed > 0)
+    return rows.map(row => ({ row, runner: JSON.parse(String(row.data)) as Runner }))
+      // A host runner takes only the threads started on it by name.
+      .filter(({ runner }) => runner.kind !== "host").map(({ row, runner }) => {
+        const { fitness } = runnerFitness(observation(row), now);
+        return { id: String(row.id), runner, slots: runnerSlots(runner), active: Number(row.active), failed: Number(row.failed), fitness };
+      }).sort((a, b) => FITNESS_ORDER[a.fitness] - FITNESS_ORDER[b.fitness] || Number(a.failed > 0) - Number(b.failed > 0)
       || a.active / a.slots - b.active / b.slots || (b.slots - b.active) - (a.slots - a.active));
   }
   /** A runner's last observation and what placement may do with it. */
