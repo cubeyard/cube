@@ -1030,18 +1030,24 @@ export class ThreadVms implements ThreadMachines, EgressVms {
 
   private keys(thread: Thread): Promise<MachineKeys> { return generateKeys(this.keyDirectory(thread), machine(thread).vmId); }
 
-  /** The thread's VM epoch: increasing for every runner mutation, and at
-   * least the wall clock, so a lost file still fences an older cubed. */
-  private epoch(thread: Thread): number {
-    const directory = this.keyDirectory(thread);
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const file = path.join(directory, "epoch");
-    const previous = fs.existsSync(file) ? Number(fs.readFileSync(file, "utf8").trim()) || 0 : 0;
-    const next = Math.max(previous + 1, Date.now());
-    fs.writeFileSync(`${file}.tmp`, String(next), { mode: 0o600 });
-    fs.renameSync(`${file}.tmp`, file);
-    return next;
-  }
+  private epoch(thread: Thread): number { return nextMachineEpoch(this.keyDirectory(thread)); }
+}
+
+/** A thread's VM epoch, kept in `<directory>/epoch`: increasing for every
+ * runner mutation, and at least the wall clock, so a lost file still fences
+ * an older cubed. */
+export function nextMachineEpoch(directory: string): number {
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const file = path.join(directory, "epoch");
+  const next = Math.max(currentMachineEpoch(directory) + 1, Date.now());
+  fs.writeFileSync(`${file}.tmp`, String(next), { mode: 0o600 });
+  fs.renameSync(`${file}.tmp`, file);
+  return next;
+}
+/** The newest epoch `nextMachineEpoch` gave out (0: none yet). */
+export function currentMachineEpoch(directory: string): number {
+  const file = path.join(directory, "epoch");
+  return fs.existsSync(file) ? Number(fs.readFileSync(file, "utf8").trim()) || 0 : 0;
 }
 
 /** The thread's machine waits for a runner: none with a free slot can take
@@ -1136,12 +1142,14 @@ function checkouts(allocation: WorkspaceAllocation): Array<{ dir: string; url: s
 /** Shell helpers shared by the preparation and resume scripts. `hook NAME
  * FILE LOG` runs FILE (if it is executable) as the agent's account in
  * /workspace with its output in ~/.cache/cube/LOG (the previous try's moves
- * to LOG.prev) and prints `cube-hook NAME ok|failed:<exit>|absent <ms>`; the
+ * to LOG.prev; $CUBE_LOGS in place of ~/.cache/cube when set) and prints
+ * `cube-hook NAME ok|failed:<exit>|absent <ms>`; the
  * same line, with the time it ended, goes to ~/.cache/cube/NAME.status for
  * `cube hooks`. While it runs, `cube-hook-start NAME` is printed and
  * ~/.cache/cube/running names it and its log (what the thread shows live). */
 const HOOK_SHELL = [
-  "logs=\"${HOME:-/tmp}/.cache/cube\"",
+  // A host machine (berth host) keeps its logs in its own directory.
+  "logs=\"${CUBE_LOGS:-${HOME:-/tmp}/.cache/cube}\"",
   "hooks=\"${CUBE_HOOKS:-/etc/cube/hooks}\"",
   "mkdir -p \"$logs\"",
   // A hook killed with its command (out of memory) left its marker: nothing runs yet.

@@ -1,6 +1,7 @@
 packages:
   - packages/*
 allowBuilds:
+  '@bufbuild/buf': false
   '@google/genai': false
   esbuild: true
   protobufjs: false

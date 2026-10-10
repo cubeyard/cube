@@ -12,12 +12,14 @@ OFFLINE_TESTS=(
   packages/server/test/registry-test.ts
   packages/server/test/runner-slots-test.ts
   packages/server/test/runner-placement-test.ts
+  packages/server/test/runner-host-placement-test.ts
   packages/server/test/runner-probe-test.ts
   packages/server/test/runner-observe-test.ts
   packages/server/test/api-test.ts
   packages/server/test/models-test.ts
   packages/server/test/model-auth-test.ts
   packages/server/test/iroh-node-test.ts
+  packages/server/test/runner-proto-test.ts
   packages/server/test/runner-enroll-test.ts
   packages/server/test/guest-helper-test.ts
   packages/server/test/workspace-test.ts
@@ -77,7 +79,7 @@ OFFLINE_TESTS=(
   packages/git/test/git-service-test.ts
 )
 # shellcheck disable=SC2034
-RUST_OFFLINE_PACKAGES=(cube-runner cube-gateway)
+RUST_OFFLINE_PACKAGES=(cube-runner cube-gateway cube-runner-protocol berth)
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -uo pipefail
   cd "$(dirname "$0")/.." || exit 1

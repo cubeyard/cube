@@ -1,0 +1,472 @@
+// Runner protocol 4: cubed <-> cube-runner over one Iroh connection per
+// runner (ALPN `cubeyard/runner/4`), one QUIC stream per call.
+//
+// Every stream opens with one frame: u32 big-endian length, then an `Open`
+// message as proto3 JSON. What follows depends on the stream:
+//   hello   one `HelloAnswer` frame, then FIN.
+//   call    one `CallResult` frame, then FIN.
+//   watch   `WatchEvent` frames until either side resets the stream.
+//   guest   request: the guest operation's own bytes (one JSON line and a
+//           raw body, as `cube-guest call OP` reads them), then FIN.
+//           answer: one `StreamAnswer` frame, then (when it has no error)
+//           the operation's answer bytes as the helper wrote them, then FIN.
+//   dial    one `StreamAnswer` frame, then raw TCP both ways.
+// A runner never interprets the guest bytes (`OPERATIONS` in cube-guest).
+//
+// This file is the only schema. Rust types are generated at build time
+// (packages/runner-protocol/build.rs); TypeScript types are generated into
+// packages/server/src/gen by `pnpm proto:generate` and checked by
+// `pnpm proto:check`.
+syntax = "proto3";
+package cube.runner.v4;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+// ---------- shared ----------
+
+// A machine: `owner` is cubed's (a thread id), `id` is 16 hex characters
+// and never reused.
+message Ref {
+  string owner = 1;
+  string id = 2;
+}
+
+// The owner's newest epoch. A mutation, `guest` or `dial` with an older one
+// is FAILED_PRECONDITION/stale_epoch.
+message Fence {
+  int64 epoch = 1;
+}
+
+message Meta {
+  int64 version = 1;
+  google.protobuf.Timestamp updated = 2;
+}
+
+message Condition {
+  string type = 1;
+  bool status = 2;
+  string reason = 3;
+  string message = 4;
+  google.protobuf.Timestamp since = 5;
+}
+
+enum Code {
+  CODE_UNSPECIFIED = 0;
+  NOT_FOUND = 1;
+  ALREADY_EXISTS = 2;
+  FAILED_PRECONDITION = 3;
+  RESOURCE_EXHAUSTED = 4;
+  UNAVAILABLE = 5;
+  PERMISSION_DENIED = 6;
+  INVALID_ARGUMENT = 7;
+  UNIMPLEMENTED = 8;
+  INTERNAL = 9;
+  ABORTED = 10;
+}
+
+message Error {
+  Code code = 1;
+  string reason = 2;
+  string message = 3;
+  // The request may have taken effect; repeat it (every verb is idempotent).
+  bool completion_unknown = 4;
+}
+
+message Empty {}
+
+// ---------- streams ----------
+
+// The first frame of every stream says what the stream is.
+message Open {
+  oneof kind {
+    Hello hello = 1;
+    Call call = 2;
+    WatchRequest watch = 3;
+    GuestHeader guest = 4;
+    DialHeader dial = 5;
+  }
+}
+
+// The answer frame of a `guest` or `dial` stream; no error means the bytes
+// that follow are the machine's.
+message StreamAnswer {
+  Error error = 1;
+}
+
+// ---------- hello ----------
+
+message Hello {
+  uint32 protocol = 1;
+  string expect_node = 2;
+  string cubed_version = 3;
+}
+
+message HelloAnswer {
+  uint32 protocol = 1;
+  repeated string capabilities = 2;
+  Runner runner = 3;
+}
+
+// ---------- runner: everything cubed needs to choose one ----------
+
+message Runner {
+  string node_id = 1;
+  string software_version = 2;
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    VM = 1;
+    // A foreground process on a Mac or Linux host: each machine is a
+    // directory, commands run as the user who started it, unsandboxed.
+    HOST = 2;
+  }
+  Kind kind = 3;
+  Platform platform = 4;
+  Limits limits = 5;
+  Capacity capacity = 6;
+  enum Lifecycle {
+    LIFECYCLE_UNSPECIFIED = 0;
+    READY = 1;
+    DRAINING = 2;
+    FAULTED = 3;
+    RECOVERY_REQUIRED = 4;
+  }
+  Lifecycle lifecycle = 7;
+  Network network = 8;
+  repeated TemplateSummary templates = 9;
+  map<string, string> labels = 10;
+  // VM runners: the runner's egress CA (public).
+  string ca_pem = 11;
+  Meta meta = 12;
+  google.protobuf.Timestamp started_at = 13;
+}
+
+message Platform {
+  // linux | macos
+  string os = 1;
+  // x86_64 | aarch64
+  string arch = 2;
+  // kvm | hvf | none
+  string accelerator = 3;
+  string qemu_version = 4;
+  string base_image_sha256 = 5;
+  string base_image_name = 6;
+  // Shown to people, never an identity.
+  string host_name = 7;
+}
+
+message Limits {
+  uint32 max_vcpus = 1;
+  uint32 max_memory_mib = 2;
+  uint32 max_disk_gib = 3;
+  uint32 max_machines = 4;
+  uint32 max_boot_bytes = 5;
+  uint32 max_frame_bytes = 6;
+}
+
+message Capacity {
+  uint32 machines_active = 1;
+  uint32 machines_running = 2;
+  uint32 slots_free = 3;
+  uint32 host_cpus = 4;
+  uint64 host_memory_mib = 5;
+  uint64 host_memory_free_mib = 6;
+  uint64 disk_free_gib = 7;
+  uint32 retained = 8;
+  uint64 retained_bytes = 9;
+}
+
+message Network {
+  // loopback | direct | relay
+  string mode = 1;
+  google.protobuf.Duration rtt_to_cubed = 2;
+  // VM runners: the runner lets guest traffic out itself.
+  bool egress = 3;
+}
+
+message TemplateSummary {
+  string id = 1;
+  string key = 2;
+  Template.State state = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+// ---------- machine ----------
+
+message Machine {
+  Ref ref = 1;
+  MachineSpec spec = 2;
+  MachineStatus status = 3;
+  Meta meta = 4;
+  int64 fence_epoch = 5;
+}
+
+message MachineSpec {
+  oneof source {
+    bool base = 1;
+    string template_id = 2;
+  }
+  Size size = 3;
+  Boot boot = 4;
+}
+
+message Size {
+  uint32 vcpus = 1;
+  uint32 memory_mib = 2;
+  uint32 disk_gib = 3;
+}
+
+// Boot data for the machine; its content is the image's business.
+message Boot {
+  map<string, bytes> documents = 1;
+  string mac = 2;
+}
+
+message MachineStatus {
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    CREATING = 1;
+    STOPPED = 2;
+    STARTING = 3;
+    RUNNING = 4;
+    STOPPING = 5;
+    RETAINED = 6;
+    DELETED = 7;
+    FAILED = 8;
+  }
+  Phase phase = 1;
+  repeated Condition conditions = 2;
+  string boot_id = 3;
+  uint64 disk_bytes = 4;
+  string error = 5;
+  google.protobuf.Timestamp started_at = 6;
+  // The guest's own status, as the guest reported it.
+  GuestInfo guest = 7;
+  // Suspend and request parking, later.
+  reserved 20 to 29;
+}
+
+// The same fields as the guest helper's `hello` answer.
+message GuestInfo {
+  bool connected = 1;
+  bool ready = 2;
+  // sha256 of the helper.
+  string build = 3;
+  string version = 4;
+  repeated string capabilities = 5;
+  string os = 6;
+  string kernel = 7;
+  string boot_id = 8;
+  // hook -> ok | failed:N | skipped | notrun | absent
+  map<string, string> hooks = 9;
+  string template_seal = 10;
+  google.protobuf.Timestamp since = 11;
+}
+
+// ---------- egress (VM runners) ----------
+
+message EgressPolicy {
+  enum Default {
+    DEFAULT_UNSPECIFIED = 0;
+    DENY = 1;
+    ALLOW_PUBLIC_HTTP = 2;
+  }
+  Default default = 1;
+  repeated string deny_hosts = 2;
+  repeated Rule rules = 3;
+  google.protobuf.Duration lease = 4;
+  message Rule {
+    repeated string hosts = 1;
+    repeated uint32 ports = 2;
+    oneof kind {
+      Https https = 3;
+      Http http = 4;
+      Decide decide = 5;
+    }
+  }
+  message Https {
+    Credential credential = 1;
+  }
+  message Http {}
+  message Decide {}
+  message Credential {
+    string name = 1;
+  }
+}
+
+// ---------- templates (VM runners) ----------
+
+message Template {
+  string id = 1;
+  string key = 2;
+  string meta = 3;
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    READY = 1;
+    REMOVING = 2;
+  }
+  State state = 4;
+  uint32 disk_gib = 5;
+  uint64 bytes = 6;
+  uint32 users = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+// ---------- verbs ----------
+
+message Call {
+  oneof verb {
+    Empty runner_get = 1;
+    MachineCreate machine_create = 10;
+    MachineStart machine_start = 11;
+    MachineRef machine_stop = 12;
+    MachineDelete machine_delete = 13;
+    MachineRef machine_discard = 14;
+    MachineRef machine_get = 15;
+    Empty machine_list = 16;
+    MachineRef machine_diagnose = 17;
+    TemplatePublish template_publish = 20;
+    Empty template_list = 21;
+    TemplateRef template_delete = 22;
+  }
+}
+
+message MachineRef {
+  Ref ref = 1;
+  Fence fence = 2;
+}
+
+message MachineCreate {
+  Ref ref = 1;
+  Fence fence = 2;
+  MachineSpec spec = 3;
+}
+
+message MachineStart {
+  Ref ref = 1;
+  Fence fence = 2;
+  Size size = 3;
+  Boot boot = 4;
+  EgressPolicy policy = 5;
+}
+
+message MachineDelete {
+  Ref ref = 1;
+  Fence fence = 2;
+  bool retain = 3;
+}
+
+message TemplatePublish {
+  Ref from = 1;
+  Fence fence = 2;
+  string key = 3;
+  string meta = 4;
+}
+
+message TemplateRef {
+  string id = 1;
+}
+
+message CallResult {
+  oneof result {
+    Error error = 1;
+    Runner runner = 2;
+    Machine machine = 3;
+    Machines machines = 4;
+    Template template = 5;
+    Templates templates = 6;
+    Diagnosis diagnosis = 7;
+  }
+}
+
+message Machines {
+  repeated Machine items = 1;
+  int64 version = 2;
+}
+
+message Templates {
+  repeated Template items = 1;
+}
+
+message Diagnosis {
+  string json = 1;
+}
+
+// ---------- watch ----------
+
+message WatchRequest {
+  int64 since_version = 1;
+}
+
+message WatchEvent {
+  enum Type {
+    TYPE_UNSPECIFIED = 0;
+    PUT = 1;
+    DELETE = 2;
+    BOOKMARK = 3;
+    // The runner cannot replay from `since_version`: every resource follows
+    // as PUT, then a BOOKMARK.
+    RESET = 4;
+  }
+  Type type = 1;
+  int64 version = 2;
+  oneof resource {
+    Machine machine = 3;
+    Template template = 4;
+    Runner runner = 5;
+  }
+}
+
+// ---------- stream headers ----------
+
+message GuestHeader {
+  Ref ref = 1;
+  Fence fence = 2;
+  // A cube-guest operation name (hello, exec, get, ...).
+  string op = 3;
+}
+
+message DialHeader {
+  Ref ref = 1;
+  Fence fence = 2;
+  uint32 port = 3;
+}
+
+message CredentialHeader {
+  Ref ref = 1;
+  string credential = 2;
+  string sni = 3;
+  string method = 4;
+  string host = 5;
+  uint32 port = 6;
+  string path = 7;
+  repeated Header headers = 8;
+}
+
+message Header {
+  string name = 1;
+  bytes value = 2;
+}
+
+message ReportHeader {}
+
+message EgressReport {
+  Ref ref = 1;
+  string host = 2;
+  string reason = 3;
+  uint64 dropped_before = 4;
+  google.protobuf.Timestamp at = 5;
+}
+
+// ---------- guest daemon <-> runner (the same schema, JSON on the port) ----------
+
+message DaemonFrame {
+  uint32 ch = 1;
+  oneof t {
+    GuestInfo hello = 2;
+    GuestInfo status = 3;
+    bytes req = 4;
+    bytes ans = 5;
+    Empty abort = 6;
+  }
+}

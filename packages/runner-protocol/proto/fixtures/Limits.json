@@ -1,0 +1,8 @@
+{
+  "maxVcpus": 2,
+  "maxMemoryMib": 3,
+  "maxDiskGib": 4,
+  "maxMachines": 5,
+  "maxBootBytes": 6,
+  "maxFrameBytes": 7
+}

@@ -13,6 +13,11 @@
   at once (allocate, start, stop, inspect, release; protocol 3) and the frame pump that carries the VM's Ethernet frames
   to the gateway. It runs no command of its own and cannot read Pi sessions or
   model credentials through the protocol.
+- **host runner (protocol 4):** `berth host --dir DIRECTORY`, a
+  foreground process a person starts on a Mac or Linux host. Its machines
+  are subdirectories of DIRECTORY; each guest operation runs
+  `cube-guest host MACHINE call OP` as a child, unsandboxed, as that user.
+  See "Runner protocol 4 and the host runner".
 - **thread VM:** the workspace (`/workspace`) and, in its guest helper
   `cube-guest`, durable deduplication and result retention for commands and
   writes, and the agent's `cube service` (supervised web servers and their
@@ -529,6 +534,51 @@ Pi, codemode's worker and Claude Code run on the cubed host, outside any VM.
 Keep host Git/model credentials out of runner accounts. Browser access is loopback, an access-controlled
 private network, or an authenticated private proxy; Iroh authenticates runner
 and gateway communication, not browser users.
+
+## Runner protocol 4 and the host runner
+
+Protocol 4 (`cubeyard/runner/4`) is the runner protocol cube moves to; its
+one schema is `packages/runner-protocol/proto/runner.proto`. Rust types are
+generated at build time; TypeScript types are committed under
+`packages/server/src/gen` and `pnpm proto:check` fails when they differ.
+`proto/fixtures` holds one proto3-JSON document per message and oneof case,
+and both languages round-trip every one (`runner-proto-test.ts`,
+`tests/proto_round_trip.rs`).
+
+```text
+cubed                                       berth host --dir DIRECTORY
+RunnerSession ── one Iroh connection ──────▶ accept from the enrolled control peer only
+  hello   Open{hello}  → HelloAnswer{Runner: kind HOST, platform, limits, capacity, labels}
+  call    Open{call}   → CallResult (machine_create/start/stop/delete/get/list, runner_get)
+  watch   Open{watch}  → WatchEvent… (RESET, PUT runner and machines, BOOKMARK, changes)
+  guest   Open{guest}+request bytes → StreamAnswer + `cube-guest host MACHINE call OP` answer
+```
+
+- `runner-select.ts` is the one place cubed chooses: a thread whose runner
+  was enrolled with `"protocol": 4` gets `RunnerMachines` and a
+  `RunnerGuestTransport`; every other thread keeps `ThreadVms`, SSH and the
+  gateway, unchanged. Runner health for placement and `cubed runners status`
+  goes through the same module.
+- A machine on a host runner is `DIRECTORY/<vm id>`: `workspace/` and
+  `repos/` beside it, the journal in `state/`, the helper and the agent's
+  `cube` in `bin/`, hook logs in `logs/`. `/workspace` in a file tool names
+  the machine's workspace; any other absolute path is a path on that host.
+  Commands get the runner's own environment (the user's PATH, HOME, gh and
+  git logins). Readiness is the guest helper's own `hello`, which the runner
+  asks and reports in the machine's `status.guest`; cubed waits for it in
+  the watch and never polls the guest for it. A runner run is one boot.
+- The host runner never deletes a directory: deleting a machine retains it.
+  It has no templates, egress policy, credential path, report stream,
+  diagnosis or dial: those answer UNIMPLEMENTED. The project's external
+  pre-setup and pre-resume hooks are not delivered to a host machine; the
+  repository's `.agents/setup` and `.agents/resume` run there as on a VM.
+- Placement: a host runner is never in the pool. A thread is created on it
+  only by naming it (OptChat `spawn` with `runner`); such a thread is pinned,
+  never moves, and waits (RunnerWait) while the runner is down.
+
+Not built yet (later stages): protocol-4 VM runners, the guest daemon over
+virtio-serial, the runner's network stack, the credential proxy and the
+`dial`, `credential` and `report` streams.
 
 ## Machine templates and hooks
 

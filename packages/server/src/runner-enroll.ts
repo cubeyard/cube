@@ -13,12 +13,14 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { Registry } from "./registry.ts";
 import { IrohRunnerClient, RUNNER_CONFIG_VERSION } from "./iroh-node.ts";
+import { Runner_Kind } from "./gen/runner_pb.js";
+import { loadSessionConfig, RunnerSession } from "./runner-session.ts";
 
 const run = promisify(execFile);
 
 export interface Enrollment {
   nodeId: string; threadId: string; environmentId: number;
-  profile: "vm-runner"; admitted: true;
+  profile: "vm-runner" | "host-runner"; admitted: true;
   softwareVersion: string; platform: string; baseImageSha256: string; maxActiveVms: number;
   next: string;
 }
@@ -30,17 +32,13 @@ export interface Enrollment {
 export async function enrollRunner(options: { state: string; configPath: string }): Promise<Enrollment> {
   const { state, configPath } = options;
   if (!path.isAbsolute(state) || !path.isAbsolute(configPath)) throw new Error("the state directory and the runner config must be absolute paths");
+  let protocol: unknown;
+  try { protocol = (JSON.parse(fs.readFileSync(configPath, "utf8")) as { protocol?: unknown }).protocol; } catch { protocol = undefined; }
+  if (protocol === 4) return enrollProtocol4(state, configPath);
   const client = new IrohRunnerClient({ configPath });
   const registry = new Registry(path.join(state, "registry.sqlite"));
   try {
-    const controlKey = (file: string): Buffer | undefined => {
-      try { return fs.readFileSync(JSON.parse(fs.readFileSync(file, "utf8")).controlKey); } catch { return undefined; }
-    };
-    const mine = controlKey(configPath);
-    const retired = new Set(registry.runnerStatuses().filter(status => status.retiredAt).map(status => status.id));
-    const shared = registry.listRunners().find(runner => runner.nodeId !== client.binding.nodeId && !retired.has(runner.threadId)
-      && mine && controlKey(runner.configPath)?.equals(mine));
-    if (shared) throw new Error(`control key already used by runner ${shared.nodeId}; create a separate control key for each runner`);
+    sharedControlKey(registry, configPath, client.binding.nodeId);
     const described = await client.describe();
     const health = await client.health();
     registry.enrollRunner({ ...client.binding, configPath, configHash: client.configHash, maxActiveVms: health.maxActiveVms });
@@ -48,6 +46,41 @@ export async function enrollRunner(options: { state: string; configPath: string 
       platform: described.platform, baseImageSha256: described.baseImageSha256, maxActiveVms: health.maxActiveVms,
       next: "restart cubed if this runner's network mode is wider than the others; start a thread in any ready project" };
   } finally { registry.close(); }
+}
+
+function sharedControlKey(registry: Registry, configPath: string, nodeId: string): void {
+  const controlKey = (file: string): Buffer | undefined => {
+    try { return fs.readFileSync(JSON.parse(fs.readFileSync(file, "utf8")).controlKey); } catch { return undefined; }
+  };
+  const mine = controlKey(configPath);
+  const retired = new Set(registry.runnerStatuses().filter(status => status.retiredAt).map(status => status.id));
+  const shared = registry.listRunners().find(runner => runner.nodeId !== nodeId && !retired.has(runner.threadId)
+    && mine && controlKey(runner.configPath)?.equals(mine));
+  if (shared) throw new Error(`control key already used by runner ${shared.nodeId}; create a separate control key for each runner`);
+}
+
+/** A protocol-4 runner (`"protocol": 4` in its config; today `cube-runner
+ * host`): admitted after an authenticated hello. A host runner never joins
+ * the default pool: only threads started on it by name run there. */
+async function enrollProtocol4(state: string, configPath: string): Promise<Enrollment> {
+  const { config, hash } = loadSessionConfig(configPath);
+  const registry = new Registry(path.join(state, "registry.sqlite"));
+  const session = new RunnerSession(config);
+  try {
+    sharedControlKey(registry, configPath, config.binding.nodeId);
+    const runner = (await session.hello()).runner!;
+    const host = runner.kind === Runner_Kind.HOST;
+    const maxActiveVms = Math.max(1, runner.limits?.maxMachines ?? 1);
+    registry.enrollRunner({ ...config.binding, configPath, configHash: hash, maxActiveVms, protocol: 4, kind: host ? "host" : "vm" });
+    return { ...config.binding, profile: host ? "host-runner" : "vm-runner", admitted: true, softwareVersion: runner.softwareVersion,
+      platform: [runner.platform?.os, runner.platform?.arch].filter(Boolean).join("/"), baseImageSha256: runner.platform?.baseImageSha256 ?? "",
+      maxActiveVms,
+      next: host ? `start a thread on it by name: ask OptChat to start one on runner ${config.binding.nodeId} (it runs unsandboxed on that host)`
+        : "start a thread in any ready project" };
+  } finally {
+    await session.close();
+    registry.close();
+  }
 }
 
 export interface LocalRunnerOptions {

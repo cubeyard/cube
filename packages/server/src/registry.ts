@@ -103,6 +103,11 @@ export interface Runner extends NodeBinding {
   /** The project this installation template belonged to before runners became
    * global. It is migration/audit context, never a scheduling constraint. */
   legacyProjectId?: string;
+  /** The runner protocol it was enrolled with; absent: 3 (VM runners). */
+  protocol?: 4;
+  /** `host`: `berth host`, machines are directories on that host and
+   * nothing is sandboxed. Only a thread started on it by name runs there. */
+  kind?: "vm" | "host";
 }
 export interface WorkspaceRepository {
   url: string; base: string; baseOid: string; checkoutName: string;
@@ -148,6 +153,9 @@ export interface Thread {
   workspaceBase?: { remote: string; ref: string; oid: string } | null;
   /** The thread's machine, fixed at creation. */
   vm?: ThreadVm;
+  /** Started on this runner by name: it never moves, and waits while the
+   * runner is down. */
+  pinned?: true;
 }
 /** Where the thread's own machine stands on `thread.runnerId`:
  * `provisional`: no `vm.allocate` for it ever reached that runner, so the
@@ -395,12 +403,24 @@ export class Registry {
       LEFT JOIN (SELECT runner_id,count(*) AS active,sum(json_extract(data, '$.workspaceState')='failed') AS failed
         FROM thread WHERE ${OPEN_THREAD} GROUP BY runner_id) t ON t.runner_id=r.id
       WHERE o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired' ORDER BY r.rowid`).all() as Array<Record<string, unknown>>;
-    return rows.map(row => {
-      const runner = JSON.parse(String(row.data)) as Runner;
-      const { fitness } = runnerFitness(observation(row), now);
-      return { id: String(row.id), runner, slots: runnerSlots(runner), active: Number(row.active), failed: Number(row.failed), fitness };
-    }).sort((a, b) => FITNESS_ORDER[a.fitness] - FITNESS_ORDER[b.fitness] || Number(a.failed > 0) - Number(b.failed > 0)
+    return rows.map(row => ({ row, runner: JSON.parse(String(row.data)) as Runner }))
+      // A host runner takes only the threads started on it by name.
+      .filter(({ runner }) => runner.kind !== "host").map(({ row, runner }) => {
+        const { fitness } = runnerFitness(observation(row), now);
+        return { id: String(row.id), runner, slots: runnerSlots(runner), active: Number(row.active), failed: Number(row.failed), fitness };
+      }).sort((a, b) => FITNESS_ORDER[a.fitness] - FITNESS_ORDER[b.fitness] || Number(a.failed > 0) - Number(b.failed > 0)
       || a.active / a.slots - b.active / b.slots || (b.slots - b.active) - (a.slots - a.active));
+  }
+  /** A runner a thread is started on by name: enrolled, not retiring, with a
+   * free slot (whether it answers now or not: the thread waits for it). */
+  private namedRunner(id: string): { id: string } {
+    const row = this.db.prepare(`SELECT r.id,r.data,(SELECT count(*) FROM thread WHERE runner_id=r.id AND ${OPEN_THREAD}) AS active
+      FROM runner r JOIN runner_operator o ON o.runner_id=r.id
+      WHERE r.id=? AND o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired'`).get(id);
+    if (!row) throw new Error(`no enrolled runner ${id} that takes threads`);
+    const runner = JSON.parse(String(row.data)) as Runner;
+    if (Number(row.active) >= runnerSlots(runner)) throw new Error(`runner ${runner.nodeId} has no free thread machine (${row.active} of ${runnerSlots(runner)} in use); archive one of its threads first`);
+    return { id: String(row.id) };
   }
   /** A runner's last observation and what placement may do with it. */
   runnerFitness(id: string, now = Date.now()): { fitness: RunnerFitness; retryAt: number | null; lastContactAt: number | null; unreachableSince: number | null; error: string | null; health: TrustedRunnerHealth | null; retired: boolean } | null {
@@ -421,7 +441,7 @@ export class Registry {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const thread = this.getThread(threadId);
-      if (!thread || thread.archived || thread.workspaceState === "available" || thread.workspaceState === "releasing" || placement(thread) !== "provisional") {
+      if (!thread || thread.archived || thread.pinned || thread.workspaceState === "available" || thread.workspaceState === "releasing" || placement(thread) !== "provisional") {
         this.db.exec("COMMIT");
         return null;
       }
@@ -719,7 +739,8 @@ export class Registry {
    * pinned to then. A new thread is pinned to `resolved`, the commits just
    * resolved against upstream for it; without it (fixtures only) to the
    * commits of the project's last check. */
-  createThread(projectId: string, requestId: string, model: ModelSelection, text: string, agent: ThreadAgent = "pi", resolved?: ResolvedRepositories): Thread {
+  createThread(projectId: string, requestId: string, model: ModelSelection, text: string, agent: ThreadAgent = "pi", resolved?: ResolvedRepositories,
+    options: { runnerId?: string } = {}): Thread {
     const payload = JSON.stringify({ model, text });
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -745,9 +766,10 @@ export class Registry {
       // Counting open threads and inserting this one in one IMMEDIATE
       // transaction is the slot reservation: no two creations, in this or
       // another process, can take a runner's last slot.
-      const load = this.runnerLoads().find(candidate => candidate.active < candidate.slots);
+      const load = options.runnerId !== undefined ? this.namedRunner(options.runnerId)
+        : this.runnerLoads().find(candidate => candidate.active < candidate.slots);
       if (!load) throw new Error("no free thread machine in the global runner pool — archive an idle thread, register another trusted runner or raise a runner's --max-active-vms");
-      const thread: Thread = { id: randomUUID(), projectId, runnerId: load.id,
+      const thread: Thread = { id: randomUUID(), projectId, runnerId: load.id, ...(options.runnerId !== undefined ? { pinned: true as const } : {}),
         title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, agent, archived: false, createdAt: Date.now(),
         allocation: { projectId, projectRevision: project.revision, repositories, hooks: { ...NO_HOOKS, ...project.hooks },
           ...(project.machine && Object.keys(project.machine).length ? { machine: { ...project.machine } } : {}),

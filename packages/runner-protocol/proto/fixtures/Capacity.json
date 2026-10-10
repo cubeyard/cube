@@ -1,0 +1,11 @@
+{
+  "machinesActive": 2,
+  "machinesRunning": 3,
+  "slotsFree": 4,
+  "hostCpus": 5,
+  "hostMemoryMib": "1005",
+  "hostMemoryFreeMib": "1006",
+  "diskFreeGib": "1007",
+  "retained": 9,
+  "retainedBytes": "1009"
+}

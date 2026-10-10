@@ -1,0 +1,63 @@
+{
+  "items": [
+    {
+      "ref": {
+        "owner": "owner-1",
+        "id": "id-2"
+      },
+      "spec": {
+        "base": true,
+        "size": {
+          "vcpus": 2,
+          "memoryMib": 3,
+          "diskGib": 4
+        },
+        "boot": {
+          "documents": {
+            "documents-key": "ZG9jdW1lbnRzLTE="
+          },
+          "mac": "mac-2"
+        }
+      },
+      "status": {
+        "phase": "FAILED",
+        "conditions": [
+          {
+            "type": "type-1",
+            "status": true,
+            "reason": "reason-3",
+            "message": "message-4",
+            "since": "2026-10-10T00:00:00Z"
+          }
+        ],
+        "bootId": "boot_id-3",
+        "diskBytes": "1004",
+        "error": "error-5",
+        "startedAt": "2026-10-10T00:00:00Z",
+        "guest": {
+          "connected": true,
+          "ready": true,
+          "build": "build-3",
+          "version": "version-4",
+          "capabilities": [
+            "capabilities-5"
+          ],
+          "os": "os-6",
+          "kernel": "kernel-7",
+          "bootId": "boot_id-8",
+          "hooks": {
+            "hooks-key": "hooks-9"
+          },
+          "templateSeal": "template_seal-10",
+          "since": "2026-10-10T00:00:00Z"
+        }
+      },
+      "meta": {
+        "version": "1001",
+        "updated": "2026-10-10T00:00:00Z"
+      },
+      "fenceEpoch": "1005"
+    }
+  ],
+  "version": "1002"
+}

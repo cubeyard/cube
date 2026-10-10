@@ -1,0 +1,9 @@
+{
+  "os": "os-1",
+  "arch": "arch-2",
+  "accelerator": "accelerator-3",
+  "qemuVersion": "qemu_version-4",
+  "baseImageSha256": "base_image_sha256-5",
+  "baseImageName": "base_image_name-6",
+  "hostName": "host_name-7"
+}

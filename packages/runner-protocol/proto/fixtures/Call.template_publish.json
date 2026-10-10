@@ -1,0 +1,13 @@
+{
+  "templatePublish": {
+    "from": {
+      "owner": "owner-1",
+      "id": "id-2"
+    },
+    "fence": {
+      "epoch": "1001"
+    },
+    "key": "key-3",
+    "meta": "meta-4"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "ch": 2,
+  "status": {
+    "connected": true,
+    "ready": true,
+    "build": "build-3",
+    "version": "version-4",
+    "capabilities": [
+      "capabilities-5"
+    ],
+    "os": "os-6",
+    "kernel": "kernel-7",
+    "bootId": "boot_id-8",
+    "hooks": {
+      "hooks-key": "hooks-9"
+    },
+    "templateSeal": "template_seal-10",
+    "since": "2026-10-10T00:00:00Z"
+  }
+}

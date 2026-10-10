@@ -1,0 +1,10 @@
+{
+  "id": "id-1",
+  "key": "key-2",
+  "meta": "meta-3",
+  "state": "REMOVING",
+  "diskGib": 6,
+  "bytes": "1006",
+  "users": 8,
+  "createdAt": "2026-10-10T00:00:00Z"
+}
