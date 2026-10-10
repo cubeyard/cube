@@ -112,6 +112,10 @@ power-off. It is small on purpose: if PID 1 dies the kernel panics and the
 machine is gone. References: nerdbox's `vminitd` (`pkg/vminit/initd`) for the
 bring-up, libkrun's init for a small VM init (C through v1.15, Rust on
 `main`), tini for PID 1 behaviour; all Apache-2.0 or MIT.
+Considered and not used: tini exits when its child exits, so an agent crash
+would take PID 1 and the machine with it, and it does no mounts or power-off;
+s6 (`s6-svscan` with `s6-linux-init`) would do the job but brings a
+configuration format and several binaries for a short fixed list of tasks.
 
 **Workload root.** The base root is fixed and the same for every machine; the
 project's root is assembled after boot, the way nerdbox does it: its
