@@ -54,8 +54,10 @@ per thread machine
          image layers (OCI, converted to EROFS, cached by digest)
   vdc  rw.qcow2 (ext4)                 writable, the thread's own, retained
 
-guest root = overlayfs(lower = template, image layers N..1; upper = vdc)
-cube-init and cube-agent are bind-mounted into it from vda
+base root (vda, read-only): cube-init (PID 1) and cube-agent run here
+workload root = overlayfs(lower = template, image layers N..1; upper = vdc),
+  assembled by cube-agent when the runner sends the machine's layer list over
+  the channel; commands and services run inside it
 ```
 
 QEMU, the same on both platforms apart from machine and console:
@@ -74,8 +76,10 @@ QEMU, the same on both platforms apart from machine and console:
 -netdev ... -device virtio-net-pci,...   (the runner's network, protocol 4)
 ```
 
-No firmware, no seed drive, no machine data on the kernel command line:
-identity and boot documents arrive over the control channel (below).
+No firmware and no seed drive. The kernel command line carries only settings
+that are the same for every machine (console, the fixed guest address, clock
+sync); identity, boot documents and the layer list arrive over the control
+channel after the agent connects (below).
 
 ## How each piece works
 
@@ -101,16 +105,26 @@ nerdbox switches to this form above 8 layers because virtio-blk has only
 silently ignores `RW <n> ZERO` extent lines**, which nerdbox writes as
 padding, so cube pads with a zero-filled file as a `FLAT` extent.
 
-**cube-init** (C, static, PID 1). Mounts proc, sys, dev and the cgroup2
-hierarchy; mounts each layer partition read-only as EROFS; formats the
-writable disk on first boot if it is blank and mounts it; mounts overlayfs
-(first `lowerdir` is topmost); bind-mounts itself and `cube-agent` into the
-new root; `switch_root`. Then it stays PID 1: it starts `cube-agent`, starts
-it again if it dies, reaps orphaned processes and handles power-off. It is
-small on purpose: if PID 1 dies the kernel panics and the machine is gone.
-References: nerdbox's `internal/vminit/ctrfs` for the mount sequence,
-libkrun's init for a small VM init (C through v1.15, Rust on `main`), tini for
-PID 1 behaviour; all Apache-2.0 or MIT.
+**cube-init** (C, static, PID 1, in the base root). Does the bring-up below
+that must happen before anything else (mounts, cgroup2, loopback), starts
+`cube-agent`, starts it again if it dies, reaps orphaned processes and handles
+power-off. It is small on purpose: if PID 1 dies the kernel panics and the
+machine is gone. References: nerdbox's `vminitd` (`pkg/vminit/initd`) for the
+bring-up, libkrun's init for a small VM init (C through v1.15, Rust on
+`main`), tini for PID 1 behaviour; all Apache-2.0 or MIT.
+
+**Workload root.** The base root is fixed and the same for every machine; the
+project's root is assembled after boot, the way nerdbox does it: its
+`vminitd` runs from its own base image and the host sends `Mount.MountAll`
+(type, in-VM source such as `/dev/vdb3`, target, options) and
+`Bundle.Create` (files, such as the image configuration) over the channel
+once connected. keel does the same over `DaemonFrame`: the runner sends the
+partition-to-layer list, overlay order and image configuration; the agent
+mounts each partition read-only as EROFS, formats the writable disk on first
+use if it is blank, mounts overlayfs (first `lowerdir` is topmost) and runs
+commands and services in that root (its own mount namespace, `pivot_root`).
+This needs no manifest on disk, keeps the base snapshot-able before any
+project data is mounted, and lets one booted base serve any image.
 
 **cube-agent** (Rust, static, musl). The guest daemon of protocol 4 and the
 replacement for `cube-guest`, sshd, cloud-init and systemd:
@@ -141,16 +155,59 @@ replacement for `cube-guest`, sshd, cloud-init and systemd:
 - An agent that restarts (crash or upgrade) finds running operations again by
   their cgroups, as systemd finds units today; their children were reparented
   to `cube-init`.
-- It is one static binary, so images need no Python, systemd or sshd.
+- It is one static binary that stays in the base root, so images need no
+  Python, systemd, sshd or cube files. The guest's `cube` command
+  (`cube service`, `cube hooks`) is the same binary under another name, made
+  visible in the workload root.
 
 The kernel already has what this needs: cgroup v2 with memory, pids and
 freezer controllers, cgroup BPF, PSI, `FHANDLE`, inotify, signalfd/timerfd.
 
+**Guest bring-up without cloud-init and systemd.** What the seed and systemd
+do today, split between `cube-init` (before the agent) and `cube-agent`
+(after the runner has sent the machine's data):
+
+- Mounts: proc, sysfs, devtmpfs, devpts, `/dev/shm`, tmpfs on `/run` and
+  `/tmp`, cgroup2 on `/sys/fs/cgroup` with `+cpu +cpuset +io +memory +pids`
+  in `cgroup.subtree_control` (as nerdbox's `vminitd`), loopback up.
+- Network: every machine gets the **same fixed address** on its own private
+  link to the runner (one address for all, for example `192.168.127.2/24`
+  with the runner at `.1`, and one IPv6 ULA pair), set from the kernel command
+  line (`ip=` autoconfiguration, built in) or by the agent with netlink. The
+  runner's address is the default route and the only nameserver;
+  `/etc/hosts` holds localhost and the machine's hostname. No DHCP client, and
+  nothing about the address identifies the machine, so a snapshot can be
+  restored as any machine.
+- Hostname, the `agent` account (added to the image's `/etc/passwd` and
+  `/etc/group` in the writable layer, with sudo as today), placeholders and
+  hooks: from the identity the runner sends after connect.
+- The runner's egress CA (protocol 4's `Runner.ca_pem`): appended to the
+  image's bundle (`/etc/ssl/certs/ca-certificates.crt`, or the distribution's
+  equivalent) between marker lines so a restart replaces it instead of adding
+  another copy; a hash symlink in `/etc/ssl/certs` for `-CApath` users; the
+  Java keystore when the image has one. Calling `update-ca-certificates`
+  instead costs most of a second when a JVM hook is installed. The same
+  environment variables as today's seed (`NODE_EXTRA_CA_CERTS`,
+  `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, kept through sudo).
+- Clock: the agent keeps `CLOCK_REALTIME` in step with the virtio-rtc PTP
+  clock (`/dev/ptp0`) all the time, not only after a resume, so a resume needs
+  no special message for time.
+
 **Images.** The default image is an ordinary OCI image cube publishes (Debian
 plus git and the tools threads use today). A project may name its own image;
-it is pinned by digest, never by tag. The runner fetches manifest and layers,
-converts each layer once (`layers/sha256:<diff_id>.erofs`) and passes the
-image configuration (Env, User, WorkingDir) to the agent. Minimum image
+it is pinned by digest, never by tag. The runner resolves the image index to
+the manifest for its platform (`linux/arm64` or `linux/amd64`), fetches the
+layers (anonymous bearer tokens for public registries), converts each layer
+once (`layers/sha256:<diff_id>.erofs`) and passes the image configuration
+(Env, User, WorkingDir) to the agent. Conversion follows containerd's EROFS
+differ (`plugins/diff/erofs`, `internal/erofsutils`): decompress the layer
+(gzip or zstd) as a stream, hash the uncompressed tar on the way to check the
+`diff_id`, and pipe it into `mkfs.erofs --tar=f --aufs --quiet
+-Enoinline_data -b4096 -U <uuid>` with a UUID derived from the layer digest,
+so the same layer always gives the same file. containerd's faster
+alternative, `--tar=i`, writes only a metadata index in front of the original
+tar data; measure it before choosing. A registry that serves native EROFS
+layers can skip conversion. Minimum image
 requirements: `/bin/sh` and `git`; document them. Registry credentials never
 reach a runner or a guest.
 
@@ -164,7 +221,13 @@ directory, so the seal's checks remain for the template layer.
 **Network.** The guest has one virtio-net device. Under protocol 4 the VM
 runner's own network stack carries it, with the egress policy cubed sends in
 `MachineStart` and credentials substituted through the `credential` stream;
-keel only needs the device and the kernel's IPv4/IPv6 stack.
+keel only needs the device and the kernel's IPv4/IPv6 stack. The shape that
+works for this, and that cube-gateway already follows: a user-space TCP/IP
+stack per machine on the host side (ARP, DHCP if wanted, DNS, TCP and UDP
+termination, an ICMP echo proxy), one egress decision per new connection
+before the host dials out, and interception of HTTP and HTTPS on the ports
+the policy names by peeking at the Host header or the TLS SNI, without
+relying on proxy environment variables in the guest.
 
 **Kernel.** Linux **7.2.9** (stable) for now, moving to the next longterm
 release when kernel.org announces it; 7.0 itself is no longer maintained
@@ -227,14 +290,20 @@ Suspending idle threads to a file and resuming them comes soon after this
 layout (protocol 4 reserves `MachineStatus` fields 20–29 for it), so keel is
 designed for it from the start:
 
-- **Clock.** The guest's clocks stop while it is suspended. After every resume
-  the runner tells the agent over the channel, and the agent steps
-  `CLOCK_REALTIME` from `/dev/ptp0`. Timeouts on `CLOCK_MONOTONIC` do not
-  count suspended time; decide per timeout whether that is wanted.
-- **Channel.** The host end is a new socket after restore and anything in
-  flight at the snapshot is lost; a guest write fails until the runner is
-  connected again. The agent reconnects, and every operation is idempotent by
-  key with epoch fencing, as today.
+- **Clock.** The guest's clocks stop while it is suspended. The agent's
+  continuous sync from `/dev/ptp0` (bring-up above) corrects
+  `CLOCK_REALTIME` within one sync interval of resuming. Timeouts on
+  `CLOCK_MONOTONIC` do not count suspended time; decide per timeout whether
+  that is wanted.
+- **Before saving.** The runner asks the agent to prepare: finish or park what
+  it is writing, `sync`, drop the page cache (`/proc/sys/vm/drop_caches`) and
+  let free page reporting return memory, so the file holds little more than
+  the processes' own memory. The agent answers when it has settled, and holds
+  new operations until the runner has saved.
+- **Channel.** The host end is a new socket after restore; every channel that
+  was open at the snapshot is closed, and the guest sees it close. The agent
+  reconnects and the runner opens channels again; every operation is
+  idempotent by key with epoch fencing, as today.
 - **Disks.** Base and layer disks are read-only and always match. The writable
   disk must be exactly the state saved with the memory: suspend is stop, save,
   quit, and a machine is never booted from that disk while its memory file
@@ -243,9 +312,13 @@ designed for it from the start:
 - **Same machine on restore.** Pin the machine type and record the QEMU
   version and keel version with each snapshot; after an upgrade old snapshots
   are dropped and the machine boots cold. `-cpu host` ties a snapshot to its
-  runner, which is where it stays.
+  runner, which is where it stays; a snapshot also cannot move between
+  hypervisors (KVM and HVF register state differ).
 - **Memory.** The file holds the pages in use; free page reporting keeps that
-  small. `mapped-ram` loads faster and gives fixed offsets.
+  small. `mapped-ram` loads faster and gives fixed offsets. Later, repeated
+  saves of the same machine can write only the pages dirtied since the last
+  one; a device that writes guest memory outside QEMU's dirty tracking (a
+  GPU) would make that unsafe, and keel has none.
 - **Identity after boot, not at boot.** VM id, epoch, hostname, placeholders
   and protocol 4's `Boot.documents` reach the agent over the channel after it
   connects, never on the kernel command line or a seed disk. A snapshot of a
@@ -254,10 +327,17 @@ designed for it from the start:
   x86-64, so the runner sends entropy and the agent reseeds on both
   architectures.
 
-What `DaemonFrame` needs beyond PR #142 for this: a resume notice, delivery of
-identity, boot documents and entropy after (re)connect, and a version
-handshake so a runner and an older or newer keel can tell what the other
-supports.
+What `DaemonFrame` needs beyond PR #142 for keel:
+
+- a version handshake: keel version, kernel version and capabilities, as
+  nerdbox's `System.Info` (`version`, `kernel_version`) and protocol 4's
+  `GuestInfo` already sketch;
+- after every (re)connect: identity, `Boot.documents`, entropy and the
+  machine's layer list and image configuration (nerdbox's `Mount.MountAll`
+  and `Bundle.Create`), each idempotent so a reconnect after restore can send
+  them again;
+- prepare-for-snapshot and settled answers (above);
+- channel close semantics on restore (above).
 
 ## Decisions
 
@@ -267,7 +347,11 @@ supports.
 - QEMU stays the VMM. The control channel is virtio-serial, carrying protocol
   4's `DaemonFrame`; no vsock.
 - No SSH, cloud-init, seed disk, systemd or Python in the guest. `cube-init`
-  (C) is PID 1; `cube-agent` (Rust) supervises with cgroup v2.
+  (C) is PID 1; `cube-agent` (Rust) supervises with cgroup v2. Both run from
+  the base root; the agent assembles the workload root after the runner sends
+  the layer list.
+- Every machine has the same fixed guest address on its private link; nothing
+  in the guest's network identifies the machine.
 - Kernel: nerdbox v0.2.5's config as a defconfig, without its libkrun patches,
   on Linux 7.2.9 until the next longterm release.
 - OCI is the build and distribution format for images; the layer disk is
@@ -292,11 +376,12 @@ diff ID with atomic publish; GPT header and VMDK descriptor writer with
 `FLAT` padding. Thread. Done: unit tests, including a `qemu-img convert` byte
 comparison and a regression test that no descriptor contains `ZERO`.
 
-**3. cube-init and base.erofs.** As above, with clear failure output on the
-console. Thread (TCG). Done: the default image boots from a layer disk and a
-writable disk to a running agent under TCG, KVM and HVF; a second boot keeps
-the writable disk's changes. This replaces the throwaway boot tests as keel's
-boot check.
+**3. cube-init and base.erofs.** Bring-up and supervision of the agent, with
+clear failure output on the console; a minimal agent stand-in that mounts a
+layer disk and the writable disk into a workload root. Thread (TCG). Done:
+the default image's layers mount as a workload root under TCG, KVM and HVF;
+a second boot keeps the writable disk's changes. This replaces the throwaway
+boot tests as keel's boot check.
 
 **4. cube-agent.** `DaemonFrame` over virtio-serial and the extensions above;
 the operations of `cube-guest`; cgroup supervision; services; clock step on
@@ -350,3 +435,5 @@ not runner acceptance.
 - Kernel updates: when to move from 7.2.y to the next longterm release, and
   who watches stable releases for security fixes until then.
 - Whether suspended time should count against command timeouts.
+- `--tar=f` against `--tar=i` for layer conversion: speed and disk use with
+  real images.
