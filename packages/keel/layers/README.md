@@ -7,7 +7,7 @@ A library; no runner calls it yet (`berth vm` will, from B-7 on).
 ```text
 registry blob (tar, tar+gzip, tar+zstd)
   convert  decompress as a stream, check the diff_id, pipe into
-           mkfs.erofs -b4096 -zlz4hc --tar=f -T0 --all-time --aufs -U <uuid from diff_id>
+           mkfs.erofs -b4096 -zlz4hc --tar=f -T0 --aufs -U <uuid from diff_id>
   cache    <dir>/sha256:<diff_id>.erofs, built under .tmp-*, made read-only,
            synced, renamed into place; LRU eviction over unreferenced layers
   disk     <machine>/layers.vmdk: layers.head (MBR + GPT) | layer files |
@@ -15,8 +15,10 @@ registry blob (tar, tar+gzip, tar+zstd)
            every extent FLAT, partition N = layer N
 ```
 
-- **Same layer, same bytes.** `-T0 --all-time` and a UUID derived from the
-  `diff_id` make conversion reproducible: a layer gives the same file from
+- **Same layer, same bytes.** `-T0` (build time and every file's time 0,
+  on erofs-utils 1.7.1, Ubuntu 24.04's, through 1.9; `--all-time`, which
+  1.8 added for the same, is left out because 1.7.1 refuses it) and a UUID
+  derived from the `diff_id` make conversion reproducible: a layer gives the same file from
   plain, gzip or zstd blobs (tested). The layer disk depends only on the
   layers' names and sizes.
 - **Checked input.** The uncompressed tar's SHA-256 must equal the

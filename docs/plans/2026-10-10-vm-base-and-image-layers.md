@@ -115,7 +115,8 @@ OCI whiteouts (`.wh.*`) into overlayfs whiteouts so each OCI layer is a valid
 overlay lower layer. Always pass `-b4096`: on Apple Silicon the default block
 size follows the host's 16 KiB pages and a 4 KiB guest kernel rejects it
 (nerdbox documents the same). `-zlz4hc` decompresses fastest, `-zzstd` gives
-smaller layers; the kernel has both. `-T0 --all-time` makes digests
+smaller layers; the kernel has both. `-T0` (with `--all-time` on 1.8 and
+later, which 1.7.1 lacks and a tar input does not need) makes digests
 reproducible. erofs-utils is in Homebrew (1.9.4) and Debian 13 (1.8.6, which
 has `--quiet` but no `-q`).
 
@@ -544,7 +545,7 @@ layer list, image configuration, runner version), `snapshot_prepare` and
 and TypeScript (`pnpm proto:check`, `tests/proto_round_trip.rs`).
 
 **3. Layer tooling (Rust, runner side).** OCI layer tar to EROFS by calling
-`mkfs.erofs -b4096 -zlz4hc -T0 --all-time --tar=f --aufs`, cache keyed by
+`mkfs.erofs -b4096 -zlz4hc -T0 --tar=f --aufs`, cache keyed by
 diff ID with atomic publish; GPT header and VMDK descriptor writer with
 `FLAT` padding. Thread. Done: unit tests, including a `qemu-img convert` byte
 comparison and a regression test that no descriptor contains `ZERO`. Built:

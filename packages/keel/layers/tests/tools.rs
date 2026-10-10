@@ -62,7 +62,8 @@ fn tar(entries: &[(&str, Option<&[u8]>)]) -> Vec<u8> {
         header[108..115].copy_from_slice(b"0000000");
         header[116..123].copy_from_slice(b"0000000");
         header[124..135].copy_from_slice(format!("{size:011o}").as_bytes());
-        header[136..147].copy_from_slice(b"00000000000");
+        // 2023-11-14: conversion must set it to 0 (see `files_have_time_0`).
+        header[136..147].copy_from_slice(format!("{:011o}", 1_700_000_000).as_bytes());
         header[156] = kind;
         header[257..263].copy_from_slice(b"ustar\0");
         header[263..265].copy_from_slice(b"00");
@@ -230,6 +231,50 @@ fn whiteouts_become_overlayfs_whiteouts() {
     assert!(
         !missing.status.success() || String::from_utf8_lossy(&missing.stderr).contains("failed")
     );
+}
+
+#[test]
+fn files_have_time_0_and_conversion_is_reproducible() {
+    let (Some(mkfs), Some(dump)) = (tool("mkfs.erofs"), tool("dump.erofs")) else {
+        return;
+    };
+    let mkfs = Mkfs::new(mkfs);
+    let dir = tempfile::tempdir().unwrap();
+    let layer = files_layer();
+    let mut images = Vec::new();
+    for (i, mode) in [TarMode::Full, TarMode::Full, TarMode::Index, TarMode::Index]
+        .into_iter()
+        .enumerate()
+    {
+        if i % 2 == 1 {
+            // A clock that leaked into the image would differ by now.
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+        }
+        let out = dir.path().join(format!("{i}.erofs"));
+        convert::convert(
+            &mkfs,
+            mode,
+            &layer[..],
+            Compression::None,
+            &diff_id(&layer),
+            &out,
+        )
+        .unwrap();
+        images.push(fs::read(&out).unwrap());
+        let image = out.to_str().unwrap();
+        let shown = Command::new(&dump)
+            .env("TZ", "UTC")
+            .args(["--path=/etc/hello", image])
+            .output()
+            .unwrap();
+        let shown = String::from_utf8_lossy(&shown.stdout);
+        assert!(
+            shown.contains("Timestamp: 1970-01-01 00:00:00"),
+            "{mode:?}: {shown}"
+        );
+    }
+    assert!(images[0] == images[1], "--tar=f is not reproducible");
+    assert!(images[2] == images[3], "--tar=i is not reproducible");
 }
 
 #[test]

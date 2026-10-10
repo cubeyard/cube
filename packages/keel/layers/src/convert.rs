@@ -2,8 +2,11 @@
 //! it: decompress the blob as a stream, hash the uncompressed tar on the way
 //! to check the `diff_id`, and pipe it into `mkfs.erofs` with `--aufs`, so
 //! OCI whiteouts become overlayfs whiteouts and each file is a valid
-//! overlayfs lower layer. `-T0 --all-time` and a UUID derived from the
-//! `diff_id` make the same layer give the same bytes every time.
+//! overlayfs lower layer. `-T0` and a UUID derived from the `diff_id` make
+//! the same layer give the same bytes every time: with a tar as input, `-T0`
+//! sets the build time and every file's time to 0 on erofs-utils 1.7 and
+//! later. (1.8 added `--all-time` for the same; 1.7.1, Ubuntu 24.04's, does
+//! not know it, and on 1.8.6 the image is byte-identical without it.)
 //!
 //! Two forms (U5 in the masterplan; the numbers are in this package's
 //! README):
@@ -88,7 +91,7 @@ impl Mkfs {
             TarMode::Index => &["--tar=i"],
         };
         let mut arguments: Vec<String> = mode_arguments.iter().map(|a| a.to_string()).collect();
-        arguments.extend(["-T0", "--all-time", "--aufs", "-U"].map(String::from));
+        arguments.extend(["-T0", "--aufs", "-U"].map(String::from));
         arguments.push(uuid(diff_id));
         arguments
     }
@@ -350,11 +353,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             Mkfs::arguments(TarMode::Full, &id).join(" "),
-            "-b4096 -zlz4hc --tar=f -T0 --all-time --aufs -U 00112233-4455-4677-8899-aabbccddeeff"
+            "-b4096 -zlz4hc --tar=f -T0 --aufs -U 00112233-4455-4677-8899-aabbccddeeff"
         );
         assert_eq!(
             Mkfs::arguments(TarMode::Index, &id).join(" "),
-            "--tar=i -T0 --all-time --aufs -U 00112233-4455-4677-8899-aabbccddeeff"
+            "--tar=i -T0 --aufs -U 00112233-4455-4677-8899-aabbccddeeff"
         );
     }
 }
