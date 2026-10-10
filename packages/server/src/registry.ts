@@ -153,6 +153,9 @@ export interface Thread {
   workspaceBase?: { remote: string; ref: string; oid: string } | null;
   /** The thread's machine, fixed at creation. */
   vm?: ThreadVm;
+  /** Started on this runner by name: it never moves, and waits while the
+   * runner is down. */
+  pinned?: true;
 }
 /** Where the thread's own machine stands on `thread.runnerId`:
  * `provisional`: no `vm.allocate` for it ever reached that runner, so the
@@ -408,6 +411,17 @@ export class Registry {
       }).sort((a, b) => FITNESS_ORDER[a.fitness] - FITNESS_ORDER[b.fitness] || Number(a.failed > 0) - Number(b.failed > 0)
       || a.active / a.slots - b.active / b.slots || (b.slots - b.active) - (a.slots - a.active));
   }
+  /** A runner a thread is started on by name: enrolled, not retiring, with a
+   * free slot (whether it answers now or not: the thread waits for it). */
+  private namedRunner(id: string): { id: string } {
+    const row = this.db.prepare(`SELECT r.id,r.data,(SELECT count(*) FROM thread WHERE runner_id=r.id AND ${OPEN_THREAD}) AS active
+      FROM runner r JOIN runner_operator o ON o.runner_id=r.id
+      WHERE r.id=? AND o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired'`).get(id);
+    if (!row) throw new Error(`no enrolled runner ${id} that takes threads`);
+    const runner = JSON.parse(String(row.data)) as Runner;
+    if (Number(row.active) >= runnerSlots(runner)) throw new Error(`runner ${runner.nodeId} has no free thread machine (${row.active} of ${runnerSlots(runner)} in use); archive one of its threads first`);
+    return { id: String(row.id) };
+  }
   /** A runner's last observation and what placement may do with it. */
   runnerFitness(id: string, now = Date.now()): { fitness: RunnerFitness; retryAt: number | null; lastContactAt: number | null; unreachableSince: number | null; error: string | null; health: TrustedRunnerHealth | null; retired: boolean } | null {
     const row = this.db.prepare("SELECT last_attempt_at,last_contact_at,unreachable_since,last_error,health,retired_at FROM runner_operator WHERE runner_id=?").get(id);
@@ -427,7 +441,7 @@ export class Registry {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const thread = this.getThread(threadId);
-      if (!thread || thread.archived || thread.workspaceState === "available" || thread.workspaceState === "releasing" || placement(thread) !== "provisional") {
+      if (!thread || thread.archived || thread.pinned || thread.workspaceState === "available" || thread.workspaceState === "releasing" || placement(thread) !== "provisional") {
         this.db.exec("COMMIT");
         return null;
       }
@@ -725,7 +739,8 @@ export class Registry {
    * pinned to then. A new thread is pinned to `resolved`, the commits just
    * resolved against upstream for it; without it (fixtures only) to the
    * commits of the project's last check. */
-  createThread(projectId: string, requestId: string, model: ModelSelection, text: string, agent: ThreadAgent = "pi", resolved?: ResolvedRepositories): Thread {
+  createThread(projectId: string, requestId: string, model: ModelSelection, text: string, agent: ThreadAgent = "pi", resolved?: ResolvedRepositories,
+    options: { runnerId?: string } = {}): Thread {
     const payload = JSON.stringify({ model, text });
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -751,9 +766,10 @@ export class Registry {
       // Counting open threads and inserting this one in one IMMEDIATE
       // transaction is the slot reservation: no two creations, in this or
       // another process, can take a runner's last slot.
-      const load = this.runnerLoads().find(candidate => candidate.active < candidate.slots);
+      const load = options.runnerId !== undefined ? this.namedRunner(options.runnerId)
+        : this.runnerLoads().find(candidate => candidate.active < candidate.slots);
       if (!load) throw new Error("no free thread machine in the global runner pool — archive an idle thread, register another trusted runner or raise a runner's --max-active-vms");
-      const thread: Thread = { id: randomUUID(), projectId, runnerId: load.id,
+      const thread: Thread = { id: randomUUID(), projectId, runnerId: load.id, ...(options.runnerId !== undefined ? { pinned: true as const } : {}),
         title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, agent, archived: false, createdAt: Date.now(),
         allocation: { projectId, projectRevision: project.revision, repositories, hooks: { ...NO_HOOKS, ...project.hooks },
           ...(project.machine && Object.keys(project.machine).length ? { machine: { ...project.machine } } : {}),

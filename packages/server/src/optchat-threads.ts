@@ -1,5 +1,6 @@
 /** OptChat's threads are cube's own: started in a project like any thread
- * from the UI, on a runner from the global pool, with its own machine. */
+ * from the UI, on a runner from the global pool (or the runner the user
+ * named: the only way onto a host runner), with its own machine. */
 import { agents, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { releaseUnfinished, ThreadArchiving, ThreadWorking, type Conversations } from "./conversation.ts";
 import { preferredModel, type ModelSelection } from "./models.ts";
@@ -72,8 +73,15 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         : preferredModel(models);
       if (!model) throw new Error(task.model ? `model ${task.model} unavailable` : "connect a model provider first");
       const text = `${task.task}\n\n${THREAD_NOTE}`;
+      let runnerId: string | undefined;
+      if (task.runner) {
+        const named = task.runner.trim();
+        const runner = registry.listRunners().find(candidate => candidate.nodeId === named || candidate.threadId === named);
+        if (!runner) throw new Error(`no runner ${named}; runners lists them`);
+        runnerId = runner.threadId;
+      }
       let thread = registry.createThread(project.id, requestId, model, text, model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi",
-        await options.latestCommits(project.id));
+        await options.latestCommits(project.id), runnerId === undefined ? {} : { runnerId });
       // The title comes from the task alone, unless the user renamed it since.
       const title = task.task.replace(/\s+/g, " ").slice(0, 80) || null;
       if (thread.title === text.replace(/\s+/g, " ").slice(0, 80) && thread.title !== title) registry.saveThread(thread = { ...thread, title });

@@ -141,7 +141,7 @@ export function describeRunners(view: RunnersObservation): string {
     if (runner.kind === "host") {
       lines.push("  HOST runner (cube-runner host, protocol 4): UNSANDBOXED, commands run as the user who started it on that host, with "
         + "that user's files and gh/git logins; only for developing cube runners. It takes only threads started on it by name "
-        + "(never others); while it is down, its threads wait.");
+        + "(spawn with runner), never others; while it is down, its threads wait.");
     }
     const contactText = contact.status === "reachable" ? "reachable"
       : contact.status === "unknown" ? "not probed yet"

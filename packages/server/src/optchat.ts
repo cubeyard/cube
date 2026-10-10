@@ -153,7 +153,9 @@ export interface OptThreads {
   /** Each runner's last report (version, platform, machines) and what is unknown, as text. */
   runners(): Promise<string>;
   /** Starts one thread; the same request id finds the same thread again. */
-  spawn(task: { project: string; task: string; model?: string | undefined }, requestId: string): Promise<{ id: string; title: string }>;
+  /** `runner`: a runner's node id or id; the thread starts there and stays
+   * (a host runner takes no other threads). Absent: the pool chooses. */
+  spawn(task: { project: string; task: string; model?: string | undefined; runner?: string | undefined }, requestId: string): Promise<{ id: string; title: string }>;
   /** A message to a thread; refused while it works. */
   tell(id: string, text: string, requestId: string): Promise<void>;
   /** One line per thread: its state and title. */
@@ -1133,6 +1135,8 @@ export class OptChat {
         project: Type.String({ description: "Project name or id" }),
         task: Type.String({ description: "The whole task, self-contained" }),
         model: Type.Optional(Type.String({ description: "provider/model; default: the host's preferred model" })),
+        runner: Type.Optional(Type.String({ description: "A runner's node id (see runners), only when the user asks for that runner. "
+          + "The thread starts there and never moves; it waits while that runner is down. A HOST runner is unsandboxed and takes only threads named to it." })),
       }), { minItems: 1 }) }),
       // A request id per call and task: a rerun finds the same threads.
       replay: "safe",

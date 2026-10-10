@@ -21,9 +21,11 @@ done
 cargo build --locked --offline -p cube-runner -p cube-gateway -j 2
 node scripts/runner-production-test.ts
 # Runner protocol 4 with the real cube-runner host (loopback, a temporary
-# directory, unsandboxed by design): the session and the Workspace contract
-# over guest streams.
+# directory, unsandboxed by design): the session, the Workspace contract over
+# guest streams, and cubed placing, preparing, waiting for and archiving
+# threads named to it.
 node packages/server/test/runner-host-test.ts "${CARGO_TARGET_DIR:-target}/debug/cube-runner"
+node packages/server/test/runner-host-cubed-test.ts "${CARGO_TARGET_DIR:-target}/debug/cube-runner"
 # cubed's local runner setup with the real cube-runner and the fake QEMU.
 node scripts/test-local-runner.ts "${CARGO_TARGET_DIR:-target}/debug/cube-runner"
 for script in scripts/runner/*.sh; do bash -n "$script"; done
