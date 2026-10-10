@@ -1,0 +1,18 @@
+[package]
+name = "keel-layers"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "keel's image layers on the runner: OCI layer tar to EROFS, the layer cache, and the GPT + VMDK layer disk"
+
+[dependencies]
+anyhow = "1"
+crc32fast = "1"
+flate2 = "1"
+sha2 = "0.11"
+zstd = { version = "0.13", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
