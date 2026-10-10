@@ -284,6 +284,23 @@ Not verified: anything on Linux/KVM, the layer disk inside a guest, overlay
 of real OCI layers, balloon memory release, a snapshot with a writable disk
 attached.
 
+How it was measured, so package 3 can rebuild it as keel's boot check: a
+static C init as PID 1 in an initramfs (`-initrd`), two EROFS images on
+read-only virtio-blk, `-device virtio-rtc-pci`, and a virtio-serial port
+named `cube.0` whose host end is a QEMU `server=on,wait=off` socket. The boot
+test mounts both layers, overlays them on a tmpfs upper, writes through the
+overlay and calls `reboot(RB_POWER_OFF)` with `-no-reboot`; time is QEMU start
+to exit. The snapshot test's init writes one line every 200 ms to the port
+(counter, `CLOCK_MONOTONIC`, `CLOCK_REALTIME`, the PTP clock read through
+`FD_TO_CLOCKID` on `/dev/ptp0`, and a re-read of a file on the EROFS disk
+after `POSIX_FADV_DONTNEED`). Over QMP the host runs `stop`,
+`migrate uri=file:<path>` (optionally after `migrate-set-capabilities`
+`mapped-ram` on both sides), polls `query-migrate` until `completed` and
+`quit`s; a new QEMU with the same arguments plus `-S -incoming defer` gets
+`migrate-incoming` and `cont`. Two traps: QEMU removes its socket files when
+it quits, and a QEMU child that inherits the test's stdout keeps a shell pipe
+open after the test dies.
+
 ## Built for snapshot and resume
 
 Suspending idle threads to a file and resuming them comes soon after this
