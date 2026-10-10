@@ -476,6 +476,8 @@ const first = newMachineDir("first");
   const controllers = (await read("cat /sys/fs/cgroup/cgroup.subtree_control")).split(" ");
   check(["cpu", "cpuset", "io", "memory", "pids"].every((c) => controllers.includes(c)), "cgroup2 with cpu cpuset io memory pids", controllers.join(" "));
   check((await read("cat /sys/class/net/lo/flags")) === "0x9", "loopback is up");
+  const tty = await read("script -qec tty /dev/null");
+  check(/^\/dev\/pts\/\d+/.test(tty.trim()), "a pseudo-terminal opens (devpts)", tty);
   const tcp = await channel.run("/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/9' 2>&1");
   check(/Connection refused/.test(tcp.output), "127.0.0.1 answers (connection refused, not unreachable)", tcp.output);
   await read(`echo ${token} > /workspace/persist && echo ${token} > /var/lib/cube/token && sync`);

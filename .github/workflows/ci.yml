@@ -42,7 +42,7 @@ jobs:
         run: |
           set -e
           for f in packages/keel/init/*.c; do
-            gcc -static -O2 -Wall -Wextra -Werror -o /dev/null "$f"
+            gcc -static -O2 -D_FORTIFY_SOURCE=2 -Wall -Wextra -Werror -o /dev/null "$f"
           done
 
   test:

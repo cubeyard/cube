@@ -108,11 +108,15 @@ static int bring_up(void) {
 	failed |= mount_one("cgroup2", "/sys/fs/cgroup", "cgroup2", secure, "nsdelegate");
 
 	/* devtmpfs has no fd links; programs expect them. */
-	symlink("/proc/self/fd", "/dev/fd");
-	symlink("/proc/self/fd/0", "/dev/stdin");
-	symlink("/proc/self/fd/1", "/dev/stdout");
-	symlink("/proc/self/fd/2", "/dev/stderr");
-	symlink("pts/ptmx", "/dev/ptmx");
+	static const char *links[][2] = {
+		{"/proc/self/fd", "/dev/fd"},
+		{"/proc/self/fd/0", "/dev/stdin"},
+		{"/proc/self/fd/1", "/dev/stdout"},
+		{"/proc/self/fd/2", "/dev/stderr"},
+	};
+	for (size_t i = 0; i < sizeof links / sizeof *links; i++)
+		if (symlink(links[i][0], links[i][1]) < 0 && errno != EEXIST)
+			say("link %s: %s", links[i][1], strerror(errno));
 
 	/* One controller at a time, so a missing one is named. */
 	char controllers[] = CONTROLLERS;

@@ -390,10 +390,10 @@ comparable either.
 
 | TCG, 20 boots / 10 snapshots, median (min–max) | x86-64 | arm64 |
 |---|---|---|
-| QEMU start to the agent's first line on `cube.0` | 2182 ms (2143–2259) | 1280 ms (1240–1378) |
-| that line to workload root assembled (formatted disk) | 274 ms (261–308) | 283 ms (272–312) |
-| save: `stop` + `migrate file:` (`mapped-ram`) | 562 ms (554–620) | 348 ms (336–368) |
-| load: `migrate-incoming` | 30 ms (26–36) | 21 ms (20–25) |
+| QEMU start to the agent's first line on `cube.0` | 2178 ms (2112–2310) | 1272 ms (1234–1305) |
+| that line to workload root assembled (formatted disk) | 279 ms (266–336) | 279 ms (271–314) |
+| save: `stop` + `migrate file:` (`mapped-ram`) | 560 ms (550–588) | 346 ms (337–358) |
+| load: `migrate-incoming` | 28 ms (26–32) | 21 ms (20–24) |
 | memory file on disk (apparent size) | 67 MiB (518 MiB) | 43 MiB (646 MiB) |
 
 Found there: **QEMU's vmdk driver blocks migration in mode `normal`**
