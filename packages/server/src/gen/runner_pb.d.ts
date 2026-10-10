@@ -36,7 +36,8 @@
 // sends `machine_setup` again, and operations that were running are found
 // by their keys, as `OPERATIONS` already requires.
 //
-// The QEMU a VM runner needs (checked when it starts, refused below it):
+// The QEMU a VM runner needs (checked when it starts on the binary it is
+// given by path, never one it searches for; refused below it):
 // `virtio-rtc-pci`, `virtio-serial-pci` with `virtserialport`,
 // `virtio-balloon-pci` with `free-page-reporting`, versioned machine types,
 // `-kernel` boot on arm64 and x86-64, `migrate` to `file:` with the
@@ -491,6 +492,9 @@ export declare type Platform = Message<"cube.runner.v4.Platform"> & {
   accelerator: string;
 
   /**
+   * VM runners: the version and path of the QEMU binary it runs, which it
+   * is given by path (`11.1.2 /opt/qemu/bin/qemu-system-x86_64`).
+   *
    * @generated from field: string qemu_version = 4;
    */
   qemuVersion: string;
