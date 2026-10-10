@@ -122,8 +122,9 @@ project's root is assembled after boot, the way nerdbox does it: its
 `vminitd` runs from its own base image and the host sends `Mount.MountAll`
 (type, in-VM source such as `/dev/vdb3`, target, options) and
 `Bundle.Create` (files, such as the image configuration) over the channel
-once connected. keel does the same over `DaemonFrame`: the runner sends the
-partition-to-layer list, overlay order and image configuration; the agent
+once connected. keel does the same with one operation on the guest channel
+(`machine.setup`, below): the runner sends the partition-to-layer list,
+overlay order and image configuration; the agent
 mounts each partition read-only as EROFS, formats the writable disk on first
 use if it is blank, mounts overlayfs (first `lowerdir` is topmost) and runs
 commands and services in that root (its own mount namespace, `pivot_root`).
@@ -316,11 +317,13 @@ designed for it from the start:
   `CLOCK_REALTIME` within one sync interval of resuming. Timeouts on
   `CLOCK_MONOTONIC` do not count suspended time; decide per timeout whether
   that is wanted.
-- **Before saving.** The runner asks the agent to prepare: finish or park what
-  it is writing, `sync`, drop the page cache (`/proc/sys/vm/drop_caches`) and
-  let free page reporting return memory, so the file holds little more than
-  the processes' own memory. The agent answers when it has settled, and holds
-  new operations until the runner has saved.
+- **Before saving.** The runner sends `snapshot.prepare` (below): the agent
+  finishes or parks what it is writing, runs `sync`, drops the page cache
+  (`/proc/sys/vm/drop_caches`) and lets free page reporting return memory, so
+  the file holds little more than the processes' own memory. It answers when
+  it has settled and holds new operations until the channel closes (the
+  machine was saved and stopped) or `snapshot.done` arrives (the save failed,
+  or the machine keeps running).
 - **Channel.** The host end is a new socket after restore; every channel that
   was open at the snapshot is closed, and the guest sees it close. The agent
   reconnects and the runner opens channels again; every operation is
@@ -348,17 +351,47 @@ designed for it from the start:
   x86-64, so the runner sends entropy and the agent reseeds on both
   architectures.
 
-What `DaemonFrame` needs beyond PR #142 for keel:
+## The guest channel: what keel adds to protocol 4
 
-- a version handshake: keel version, kernel version and capabilities, as
-  nerdbox's `System.Info` (`version`, `kernel_version`) and protocol 4's
-  `GuestInfo` already sketch;
-- after every (re)connect: identity, `Boot.documents`, entropy and the
-  machine's layer list and image configuration (nerdbox's `Mount.MountAll`
-  and `Bundle.Create`), each idempotent so a reconnect after restore can send
-  them again;
-- prepare-for-snapshot and settled answers (above);
-- channel close semantics on restore (above).
+Protocol 4 (PR #142) already defines the frame on the virtio-serial port:
+
+```proto
+message DaemonFrame {
+  uint32 ch = 1;              // channel: one per operation in flight
+  oneof t {
+    GuestInfo hello = 2;      // the agent introduces itself on connect
+    GuestInfo status = 3;     // the agent reports changes (ready, hooks)
+    bytes req = 4;            // a guest operation, as cubed sent it
+    bytes ans = 5;            // its answer
+    Empty abort = 6;          // cancel the operation on this channel
+  }
+}
+```
+
+The port is one byte stream per machine; `ch` multiplexes the operations
+that run at once (commands, file reads, streamed output), the job SSH
+sessions over a ControlMaster do today. keel keeps the frame as it is. What
+it needs on top is two operations and two clarifications, not new frame types:
+
+- **`machine.setup`**, runner to agent, after every connect and reconnect:
+  identity (VM id, epoch, hostname, placeholders), `Boot.documents`, entropy,
+  the partition-to-layer list with overlay order, and the image
+  configuration (the counterpart of nerdbox's `Mount.MountAll` and
+  `Bundle.Create`). Idempotent: after a restore or an agent restart the
+  runner sends it again and the agent applies only what changed.
+- **`snapshot.prepare`** and **`snapshot.done`**, runner to agent (above).
+- **Versions.** `hello` already carries the agent's version, capabilities,
+  kernel and boot id (`GuestInfo`, like nerdbox's `System.Info`); the runner's
+  side is missing. `machine.setup` carries the runner's protocol version and
+  the capabilities it uses, so a runner and an older or newer keel can tell
+  what the other supports.
+- **Framing on the port.** PR #142 says only "JSON on the port". With `req`
+  and `ans` as bytes, a length prefix per frame, as on protocol 4's QUIC
+  streams (u32 big-endian, then the message), is the safe choice.
+- **Disconnects.** After a restore or an agent restart every channel is
+  closed. The agent sends `hello` again, the runner sends `machine.setup`
+  again, and operations that were running are found again by their keys, as
+  today.
 
 ## Decisions
 
@@ -404,9 +437,10 @@ the default image's layers mount as a workload root under TCG, KVM and HVF;
 a second boot keeps the writable disk's changes. This replaces the throwaway
 boot tests as keel's boot check.
 
-**4. cube-agent.** `DaemonFrame` over virtio-serial and the extensions above;
-the operations of `cube-guest`; cgroup supervision; services; clock step on
-resume; reconnect. Depends on PR #142 and the extensions agreed in it. Thread
+**4. cube-agent.** `DaemonFrame` over virtio-serial with the two operations
+and two clarifications in "The guest channel"; the operations of
+`cube-guest`; cgroup supervision; services; clock sync; reconnect. Depends on
+PR #142 and on agreeing those additions in its line of work. Thread
 for the code (TCG). Done: the Workspace contract tests of
 `runner-host-test.ts` pass against a keel machine.
 
@@ -434,8 +468,8 @@ memory falls after the guest frees memory, on both platforms.
 **Later.** Template snapshots restored as many machines; private images;
 virtio-pmem/DAX on Linux.
 
-Packages 2 and 3 are independent and can run in parallel; 4 needs the
-`DaemonFrame` extensions settled in PR #142's line of work.
+Packages 2 and 3 are independent and can run in parallel; 4 needs the guest
+channel additions agreed in PR #142's line of work.
 
 ## Where the work can run
 
