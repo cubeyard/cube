@@ -194,21 +194,36 @@ async function readFloor(): Promise<Floor> {
 
 // ---------------------------------------------------------------- layers
 
-/** A tar of FILES (path -> content; null makes a directory), written with
- * fixed owners and times so its digest is stable. */
+/** A tar of FILES (path -> content; null makes a directory), written here
+ * as ustar with owner 0, time 0 and sorted names, so its digest is stable and
+ * no host tar (GNU or BSD) is needed. */
 function makeTar(name: string, files: Record<string, string | null>): { path: string; diffId: string } {
-  const stage = join(out, "stage", name);
-  rmSync(stage, { recursive: true, force: true });
-  for (const [path, content] of Object.entries(files)) {
-    const full = join(stage, path);
-    if (content === null) mkdirSync(full, { recursive: true });
-    else {
-      mkdirSync(join(full, ".."), { recursive: true });
-      writeFileSync(full, content);
-    }
+  const blocks: Buffer[] = [];
+  for (const path of Object.keys(files).sort()) {
+    const content = files[path];
+    const data = Buffer.from(content ?? "");
+    const header = Buffer.alloc(512);
+    const field = (offset: number, length: number, value: string) => header.write(value, offset, length, "ascii");
+    const octal = (offset: number, length: number, value: number) => field(offset, length, value.toString(8).padStart(length - 1, "0"));
+    field(0, 100, content === null ? path.replace(/\/?$/, "/") : path);
+    octal(100, 8, content === null ? 0o755 : 0o644);
+    octal(108, 8, 0);
+    octal(116, 8, 0);
+    octal(124, 12, data.length);
+    octal(136, 12, 0);
+    field(148, 8, "        ");
+    field(156, 1, content === null ? "5" : "0");
+    field(257, 6, "ustar");
+    field(263, 2, "00");
+    let sum = 0;
+    for (const byte of header) sum += byte;
+    field(148, 8, `${sum.toString(8).padStart(6, "0")}\0 `);
+    blocks.push(header, data, Buffer.alloc((512 - (data.length % 512)) % 512));
   }
+  blocks.push(Buffer.alloc(1024));
+  mkdirSync(join(out, "stage"), { recursive: true });
   const tar = join(out, "stage", `${name}.tar`);
-  execFileSync("tar", ["--sort=name", "--mtime=@0", "--owner=0", "--group=0", "--numeric-owner", "--format=gnu", "-C", stage, "-cf", tar, "."]);
+  writeFileSync(tar, Buffer.concat(blocks));
   return { path: tar, diffId: `sha256:${sha256(tar)}` };
 }
 
@@ -390,7 +405,7 @@ if (floor.missing.length) {
 const ociArch = arch === "x86_64" ? "amd64" : "arm64";
 log(`fetching ${values.image} (linux/${ociArch})`);
 const image = await fetchImage(values.image!, ociArch, join(out, "blobs"));
-const imageListing = image.layers.map((l) => execFileSync("tar", ["-tzf", l.path], { encoding: "utf8", maxBuffer: 1 << 28 })).join("\n");
+const imageListing = image.layers.map((l) => execFileSync("tar", ["-tf", l.path], { encoding: "utf8", maxBuffer: 1 << 28 })).join("\n");
 check(/^(\.\/)?etc\/issue\.net$/m.test(imageListing), "the image has /etc/issue.net (whited out by the top layer)");
 const aptConf = imageListing.split("\n").filter((p) => /^(\.\/)?etc\/apt\/apt\.conf\.d\/[^/]+$/.test(p));
 check(aptConf.length > 0, "the image has files in /etc/apt/apt.conf.d (made opaque by the top layer)", "");
