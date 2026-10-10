@@ -298,10 +298,11 @@ it on a phone) shows every thread this chat started. Nobody keeps it:
   its title and its own state as cubed records it when the panel reads
   `GET /api/optchat/threads` (`working`, `turn ended`, `waiting on a
   background agent`, `failed`, `stopped`, `starting`, `waiting for a
-  runner`, `machine error`, …), and the 8 newest archived threads with how
-  their last run ended (`archived · stopped`; read once per thread, since an
-  archived thread runs no more). Older archived threads are
-  counted, as are threads cubed no longer has. States are read like
+  runner`, `machine error`, …). Archived threads are not listed, only
+  counted (`3 archived not shown`), as are threads cubed no longer has; a
+  thread archived while the page is open leaves the list on the next read.
+  Archiving keeps what it kept before, and OptChat's `threads` and `history`
+  tools still read archived threads. States are read like
   `history`: the stored run state, no agent opened, no lease taken, no
   machine waited for; one store slower than 2 s reads as `unknown`.
 - **What it does not say.** A turn that ended is not work done; an archived

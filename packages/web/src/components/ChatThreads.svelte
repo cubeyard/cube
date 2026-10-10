@@ -8,8 +8,8 @@
 
   // The threads OptChat started, found from its own spawns, each with its
   // own state as cubed records it: nobody keeps this list by hand. A thread
-  // whose turn ended has not necessarily done its work, and an archived one
-  // is not a goal met.
+  // whose turn ended has not necessarily done its work. Archived threads are
+  // only counted: they stay in cube, just not in this list.
   let { busy = false }: { busy?: boolean } = $props();
 
   let overview = $state<ThreadOverview | null>(null);
@@ -22,17 +22,17 @@
   // folded on a phone so the conversation keeps the screen.
   let open = $state(!matchMedia(COMPACT_MEDIA).matches);
 
+  const active = $derived(overview?.threads.filter((thread) => !thread.archived) ?? []);
   // By project, in the order of each project's newest thread.
   const groups = $derived.by(() => {
     const out: Array<{ id: string; name: string; threads: OverviewThread[] }> = [];
-    for (const thread of overview?.threads ?? []) {
+    for (const thread of active) {
       const group = out.find((item) => item.id === thread.project.id);
       if (group) group.threads.push(thread);
       else out.push({ id: thread.project.id, name: thread.project.name, threads: [thread] });
     }
     return out;
   });
-  const active = $derived(overview?.threads.filter((thread) => !thread.archived) ?? []);
   const moving = (state: string) => state === "working" || state === "starting" || state === "being archived" || state.startsWith("waiting");
   const summary = $derived(!overview ? "" : !overview.threads.length ? "none yet" : [
     `${active.length} open`,
@@ -53,12 +53,8 @@
   }
 
   // A thread's own state, in the words the panel uses.
-  const stateText = (thread: OverviewThread) => {
-    const state = thread.state === "completed" ? "turn ended" : thread.state;
-    return thread.archived ? `archived · ${state === "archived" ? "last run not read" : state}` : state;
-  };
-  const lamp = (thread: OverviewThread) => thread.archived ? ""
-    : moving(thread.state) ? "on-amber"
+  const stateText = (thread: OverviewThread) => thread.state === "completed" ? "turn ended" : thread.state;
+  const lamp = (thread: OverviewThread) => moving(thread.state) ? "on-amber"
     : thread.state === "failed" || thread.state.includes("error") || thread.state.includes("failed") ? "on-red" : "";
 
   // Read again when a turn ends (a spawn or a report happens in one) and
@@ -114,14 +110,10 @@
           <h3>{group.name}</h3>
           <ul class="work-list">
             {#each group.threads as thread (thread.id)}
-              <li class="work-thread" class:archived={thread.archived}>
+              <li class="work-thread">
                 <span class="lamp {lamp(thread)}" aria-hidden="true"></span>
                 <div class="work-thread-text">
-                  {#if thread.archived}
-                    <span class="work-title" title={thread.title ?? undefined}>{thread.title ?? "untitled"}</span>
-                  {:else}
-                    <a class="work-title" href="#/t/{thread.id}" title={thread.title ?? undefined}>{thread.title ?? "untitled"}</a>
-                  {/if}
+                  <a class="work-title" href="#/t/{thread.id}" title={thread.title ?? undefined}>{thread.title ?? "untitled"}</a>
                   <span class="work-state" title="the thread's own state as cube records it now">{thread.id.slice(0, 8)} · {stateText(thread)}</span>
                 </div>
               </li>
@@ -129,8 +121,8 @@
           </ul>
         </section>
       {/each}
-      {#if overview.archived.total > overview.archived.shown}
-        <p class="work-note">{overview.archived.total - overview.archived.shown} older archived not shown</p>
+      {#if overview.archived.total}
+        <p class="work-note">{overview.archived.total} archived not shown</p>
       {/if}
       {#if overview.unknown}
         <p class="work-note">{overview.unknown} no longer known to cube</p>
