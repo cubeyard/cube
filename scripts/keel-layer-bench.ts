@@ -10,13 +10,11 @@
 // Public images only, fetched anonymously and checked against their digests;
 // blobs stay in OUT/blobs between runs. Every run converts into an empty
 // cache. Prints a Markdown table and writes OUT/results.json.
-import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Readable, Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import { parseArgs } from "node:util";
+import { fetchImage } from "./keel-oci.ts";
 
 const { values, positionals } = parseArgs({
   allowPositionals: true,
@@ -36,71 +34,6 @@ const runs = Number(values.runs);
 const { mkfs, layers: layersTool, out } = values;
 mkdirSync(join(out, "blobs"), { recursive: true });
 
-const INDEX_TYPES = ["application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json"];
-const MANIFEST_TYPES = ["application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"];
-
-type Descriptor = { mediaType: string; digest: string; size: number; platform?: { os: string; architecture: string } };
-
-function parseReference(reference: string) {
-  const match = /^([^/]+)\/(.+?)(?::([^:@/]+))?(?:@(sha256:[0-9a-f]{64}))?$/.exec(reference);
-  if (!match) throw new Error(`not an image reference: ${reference}`);
-  const host = match[1] === "docker.io" ? "registry-1.docker.io" : match[1];
-  return { host, repository: match[2], reference: match[4] ?? match[3] ?? "latest" };
-}
-
-const tokens = new Map<string, string>();
-
-async function registryFetch(host: string, repository: string, path: string, accept: string[]): Promise<Response> {
-  const url = `https://${host}/v2/${repository}/${path}`;
-  const headers: Record<string, string> = { accept: accept.join(", ") };
-  const token = tokens.get(`${host}/${repository}`);
-  if (token) headers.authorization = `Bearer ${token}`;
-  const response = await fetch(url, { headers });
-  if (response.status === 401 && !token) {
-    // Anonymous bearer token, as public registries hand out.
-    const challenge = response.headers.get("www-authenticate") ?? "";
-    const field = (name: string) => new RegExp(`${name}="([^"]*)"`).exec(challenge)?.[1];
-    const realm = field("realm");
-    if (!realm) throw new Error(`${url}: 401 without a bearer challenge`);
-    const query = new URLSearchParams({ scope: `repository:${repository}:pull` });
-    const service = field("service");
-    if (service) query.set("service", service);
-    const answer = (await (await fetch(`${realm}?${query}`)).json()) as { token?: string; access_token?: string };
-    tokens.set(`${host}/${repository}`, answer.token ?? answer.access_token ?? "");
-    return registryFetch(host, repository, path, accept);
-  }
-  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
-  return response;
-}
-
-async function json(host: string, repository: string, path: string, accept: string[]) {
-  const response = await registryFetch(host, repository, path, accept);
-  const body = Buffer.from(await response.arrayBuffer());
-  return { body: JSON.parse(body.toString("utf8")), digest: `sha256:${createHash("sha256").update(body).digest("hex")}` };
-}
-
-async function blob(host: string, repository: string, descriptor: Descriptor): Promise<string> {
-  const path = join(out, "blobs", descriptor.digest);
-  if (existsSync(path)) return path;
-  const response = await registryFetch(host, repository, `blobs/${descriptor.digest}`, ["*/*"]);
-  const hash = createHash("sha256");
-  const partial = `${path}.partial`;
-  await pipeline(
-    Readable.fromWeb(response.body as never),
-    new Transform({
-      transform(chunk, _encoding, done) {
-        hash.update(chunk);
-        done(null, chunk);
-      },
-    }),
-    createWriteStream(partial),
-  );
-  const digest = `sha256:${hash.digest("hex")}`;
-  if (digest !== descriptor.digest) throw new Error(`${descriptor.digest}: downloaded ${digest}`);
-  renameSync(partial, path);
-  return path;
-}
-
 type Converted = { diffId: string; tarBytes: number; imageBytes: number; seconds: number };
 
 const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
@@ -109,23 +42,12 @@ const results = [];
 const mkfsVersion = execFileSync(mkfs, ["--version"], { encoding: "utf8" }).trim().split("\n")[0];
 
 for (const image of positionals) {
-  const { host, repository, reference } = parseReference(image);
-  let manifest = await json(host, repository, `manifests/${reference}`, [...INDEX_TYPES, ...MANIFEST_TYPES]);
-  const indexDigest = manifest.digest;
-  if (INDEX_TYPES.includes(manifest.body.mediaType) || manifest.body.manifests) {
-    const chosen = (manifest.body.manifests as Descriptor[]).find(
-      (m) => m.platform?.os === "linux" && m.platform.architecture === values.arch,
-    );
-    if (!chosen) throw new Error(`${image}: no linux/${values.arch} manifest`);
-    manifest = await json(host, repository, `manifests/${chosen.digest}`, MANIFEST_TYPES);
-    if (manifest.digest !== chosen.digest) throw new Error(`${image}: manifest digest mismatch`);
-  }
-  const config = JSON.parse(readFileSync(await blob(host, repository, manifest.body.config), "utf8"));
-  const layers = manifest.body.layers as Descriptor[];
-  const diffIds = config.rootfs.diff_ids as string[];
-  if (layers.length !== diffIds.length) throw new Error(`${image}: ${layers.length} layers, ${diffIds.length} diff_ids`);
-  const blobs: string[] = [];
-  for (const layer of layers) blobs.push(await blob(host, repository, layer));
+  const fetched = await fetchImage(image, values.arch, join(out, "blobs"));
+  const layers = fetched.layers.map((l) => l.descriptor);
+  const diffIds = fetched.layers.map((l) => l.diffId);
+  const blobs = fetched.layers.map((l) => l.path);
+  const indexDigest = fetched.index;
+  const manifest = { digest: fetched.manifest };
 
   const modes: Record<string, Converted[][]> = { f: [], i: [] };
   for (let run = 0; run < runs; run++) {
