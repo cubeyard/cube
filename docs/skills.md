@@ -32,10 +32,16 @@ the new release carries.
   credentials (`user@` or `user:token@` is refused, and never saved), a full
   40-character commit (never a branch or tag) and the directory holding
   skill folders (`<path>/<name>/SKILL.md`; empty for the repository root).
-- For each skill name, **the last source that has it wins**, whatever its
-  surface. To change one default skill without forking, add a source with a
-  skill of the same name. The winner records the source it overrides.
-- `skills.disabled` lists names that are left out after precedence.
+- A skill's **id** is its folder's name. The `name` in its `SKILL.md` is
+  its display name, shown on the settings page; it may differ from the id
+  in case, spaces or wording (cursor/plugins' `pstack/skills/poteto-mode`
+  names itself `Poteto Mode`), and two skills may share one. Precedence,
+  `skills.disabled`, the install path and the prompt use the id only.
+- For each skill id, **the last source that has it wins**, whatever its
+  surface or display name. To change one default skill without forking, add
+  a source with a folder of the same name. The winner records the source it
+  overrides.
+- `skills.disabled` lists ids that are left out after precedence.
 - Folders are read in name order. A thread lists its skills sorted by name.
 
 ## Surface
@@ -85,8 +91,9 @@ sequenceDiagram
 ## Checks and limits
 
 A folder is skipped, with its reason in `skipped`, when its name is not a
-skill name (lowercase letters, digits, inner hyphens, at most 64), its
-`SKILL.md` names another skill, its description is empty or over 1024
+skill id (lowercase letters, digits, inner hyphens, at most 64), its
+`SKILL.md` name is missing, over 64 characters or has control characters,
+its description is empty or over 1024
 characters, its surface is unknown, or it holds a symlink or submodule. A
 thread installs at most 64 skills, 2000 files and 8 MiB, and each source's
 install command must fit the machine's 8 KiB command limit. The path is

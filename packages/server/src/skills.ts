@@ -5,9 +5,13 @@
  * listed in its prompt by name and description only; the agent reads a
  * SKILL.md, and what it links to, when a task needs it.
  *
+ * A skill's id is its folder's name: precedence, disabled names, its
+ * install path and the prompt use it. Its SKILL.md `name` is only what the
+ * settings page shows, and may differ ("Poteto Mode" in `poteto-mode/`).
+ *
  * Precedence: cube's default source, then the user's sources in their order;
- * for each skill name the last source that has it wins, whatever its
- * surface, and a disabled name is left out. docs/skills.md. */
+ * for each skill id the last source that has it wins, whatever its
+ * surface, and a disabled id is left out. docs/skills.md. */
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { GUEST_HOME } from "../../claude-mod/hooks/tools.ts";
 
@@ -22,15 +26,19 @@ export type SkillSurface = "thread" | "optchat" | "both";
 export interface SkillsConfig { sources: SkillSource[]; disabled: string[]; defaultCommit?: string }
 export const NO_SKILLS_CONFIG: SkillsConfig = { sources: [], disabled: [] };
 
-/** The skill that won its name, with where it came from. */
+/** The skill that won its id, with where it came from. */
 export interface ResolvedSkill {
-  name: string; description: string; surface: SkillSurface;
+  /** Its id: the folder's name. */
+  name: string;
+  /** Its SKILL.md name, when that is not its id; shown, never a path. */
+  displayName?: string;
+  description: string; surface: SkillSurface;
   /** Installed, but left out of the prompt (`disable-model-invocation: true`). */
   hidden?: true;
   url: string; commit: string;
   /** Its folder in the repository. */
   dir: string;
-  /** Another source's skill of the same name that this one overrides. */
+  /** Another source's skill of the same id that this one overrides. */
   overrides?: { url: string; commit: string };
 }
 /** A thread's skills, fixed at its start. */
@@ -47,7 +55,7 @@ export const DEFAULT_SKILL_SOURCE: SkillSource = {
 export const SKILLS_ROOT = `${GUEST_HOME}/.cube/skills`;
 /** The largest command the guest helper runs (cube-guest.py maxCommandBytes). */
 export const GUEST_COMMAND_BYTES = 8192;
-export const SKILL_LIMITS = { skills: 64, files: 2000, bytes: 8 * 2 ** 20, description: 1024 };
+export const SKILL_LIMITS = { skills: 64, files: 2000, bytes: 8 * 2 ** 20, description: 1024, displayName: 64 };
 const NAME = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const COMMIT = /^[0-9a-f]{40}$/;
 const SURFACES = new Set<SkillSurface>(["thread", "optchat", "both"]);
@@ -154,14 +162,17 @@ export async function resolveSkills(git: SkillGit, defaultSource: SkillSource | 
       let frontmatter: Record<string, unknown>;
       try { frontmatter = parseFrontmatter(text ?? "").frontmatter as Record<string, unknown>; }
       catch (error) { skip(`SKILL.md frontmatter is not YAML: ${(error as Error).message}`); continue; }
-      if (frontmatter.name !== name) { skip(`SKILL.md names ${JSON.stringify(frontmatter.name)}, not its folder ${name}`); continue; }
+      const displayName = typeof frontmatter.name === "string" ? frontmatter.name.replace(/\s+/g, " ").trim() : "";
+      if (!displayName || displayName.length > SKILL_LIMITS.displayName || /[\p{Cc}\p{Cf}]/u.test(displayName)) {
+        skip(`SKILL.md name must be 1 to ${SKILL_LIMITS.displayName} characters without control characters`); continue;
+      }
       const description = typeof frontmatter.description === "string" ? frontmatter.description.replace(/\s+/g, " ").trim() : "";
       if (!description || description.length > SKILL_LIMITS.description) { skip(`description must be 1 to ${SKILL_LIMITS.description} characters`); continue; }
       const metadata = frontmatter.metadata as { cube?: { surface?: unknown } } | undefined;
       const surface = metadata?.cube?.surface ?? "thread";
       if (!SURFACES.has(surface as SkillSurface)) { skip(`metadata.cube.surface ${JSON.stringify(surface)} is not thread, optchat or both`); continue; }
       const previous = winners.get(name);
-      winners.set(name, { name, description, surface: surface as SkillSurface, ...frontmatter["disable-model-invocation"] === true ? { hidden: true as const } : {},
+      winners.set(name, { name, ...displayName === name ? {} : { displayName }, description, surface: surface as SkillSurface, ...frontmatter["disable-model-invocation"] === true ? { hidden: true as const } : {},
         url: source.url, commit: source.commit, dir, ...previous ? { overrides: { url: previous.url, commit: previous.commit } } : {} });
       sizes.set(name, { files: files.length, bytes: files.reduce((sum, file) => sum + file.size, 0) });
     }
@@ -181,7 +192,7 @@ export async function resolveSkills(git: SkillGit, defaultSource: SkillSource | 
 }
 
 /** The prompt section a thread's agent gets (Pi and Claude Code alike):
- * name, description and SKILL.md path of each listed skill, the shape the
+ * id, description and SKILL.md path of each listed skill, the shape the
  * Agent Skills standard and Pi use. Null when none is listed. */
 export function skillsPrompt(skills: ThreadSkills | undefined): string | null {
   const listed = skills?.skills.filter(skill => !skill.hidden && skill.surface !== "optchat") ?? [];
