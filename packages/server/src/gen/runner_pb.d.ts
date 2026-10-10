@@ -13,6 +13,35 @@
 //   dial    one `StreamAnswer` frame, then raw TCP both ways.
 // A runner never interprets the guest bytes (`OPERATIONS` in cube-guest).
 //
+// The guest channel (`berth vm` <-> keel's cube-agent): one virtio-serial
+// port named `cube.0` per machine, a Unix socket on the runner's side. It
+// carries `DaemonFrame`s framed as on the streams above (u32 big-endian
+// length, 1 to `Limits.max_frame_bytes` bytes, then proto3 JSON). A frame
+// over the limit, a zero length, JSON that does not parse or a frame that
+// breaks the channel rules below ends the connection; the runner treats the
+// guest's side as hostile.
+//   ch 0    the connection: the agent sends `hello` once it is connected
+//           and `status` whenever its `GuestInfo` changes, each at most
+//           MAX_GUEST_INFO_BYTES (64 KiB) so it fits a watch event.
+//   ch > 0  one operation: the runner opens it with one `req` and never
+//           reuses the number on this connection; the agent closes it with
+//           one `ans`. `abort` from the runner stops the wait, not the
+//           operation (as a closed stream does today); an `ans` that comes
+//           after it is dropped. Each `req` and `ans` is one frame, so the
+//           agent's limits must keep a guest request or answer under
+//           `max_frame_bytes` once its bytes are base64 (512 KiB reads and
+//           writes do).
+// A disconnect (agent restart, socket closed, machine restored from a
+// snapshot) closes every channel. The agent sends `hello` again, the runner
+// sends `machine_setup` again, and operations that were running are found
+// by their keys, as `OPERATIONS` already requires.
+//
+// The QEMU a VM runner needs (checked when it starts, refused below it):
+// `virtio-rtc-pci`, `virtio-serial-pci` with `virtserialport`,
+// `virtio-balloon-pci` with `free-page-reporting`, versioned machine types,
+// `-kernel` boot on arm64 and x86-64, `migrate` to `file:` with the
+// `mapped-ram` capability. One set of QEMU arguments on Linux and macOS.
+//
 // This file is the only schema. Rust types are generated at build time
 // (packages/runner-protocol/build.rs); TypeScript types are generated into
 // packages/server/src/gen by `pnpm proto:generate` and checked by
@@ -749,7 +778,20 @@ export declare type Size = Message<"cube.runner.v4.Size"> & {
 export declare const SizeSchema: GenMessage<Size>;
 
 /**
- * Boot data for the machine; its content is the image's business.
+ * Boot data for the machine; its content is the image's business. A keel
+ * machine gets the documents over its guest channel (`MachineSetup`), never
+ * on the kernel command line or a disk. Their names replace today's seed:
+ *   hostname          the machine's host name, one line.
+ *   env               `NAME=value` lines for every command's environment:
+ *                     the secret placeholders (`GH_TOKEN`,
+ *                     `CUBE_SECRET_<NAME>`). keel adds its own fixed lines
+ *                     (the CA variables, `GIT_TERMINAL_PROMPT=0`, ...).
+ *   hooks/pre-setup   the project's external hooks, as executable scripts;
+ *   hooks/pre-resume  a missing document means no hook.
+ * The agent refuses a setup with a name it does not know. Everything else
+ * the seed carries today is keel's own (the agent account, sudoers, git's
+ * credential helper) or the runner's (its CA, `MachineSetup.ca_pem`), and
+ * the image brings its packages. `berth host` ignores `Boot`.
  *
  * @generated from message cube.runner.v4.Boot
  */
@@ -886,6 +928,16 @@ export declare type GuestInfo = Message<"cube.runner.v4.GuestInfo"> & {
   connected: boolean;
 
   /**
+   * Whether the guest takes `OPERATIONS`. cube-guest: its own check. A
+   * keel agent says true once, for the current boot and connection, the
+   * newest `MachineSetup` is applied (layers mounted, writable disk checked
+   * and mounted, overlay assembled, `/var/lib/cube` and `/etc/cube` bound,
+   * generated files and the runner's CA in place), its journal is
+   * recovered, and the workload root has bash, sudo, flock, git, gh, curl
+   * and a CA bundle. Until then it refuses guest operations other than
+   * `hello` (UNAVAILABLE/not_ready) and `reason` says what is missing.
+   * Hooks and services are not part of it.
+   *
    * @generated from field: bool ready = 2;
    */
   ready: boolean;
@@ -938,6 +990,26 @@ export declare type GuestInfo = Message<"cube.runner.v4.GuestInfo"> & {
    * @generated from field: google.protobuf.Timestamp since = 11;
    */
   since?: Timestamp | undefined;
+
+  /**
+   * @generated from field: cube.runner.v4.GuestLimits limits = 12;
+   */
+  limits?: GuestLimits | undefined;
+
+  /**
+   * The newest workspace lease epoch the guest's journal has seen (the
+   * `epoch` of `OPERATIONS`), not the machine's fence epoch.
+   *
+   * @generated from field: int64 epoch = 13;
+   */
+  epoch: bigint;
+
+  /**
+   * When `ready` is false: why, for people.
+   *
+   * @generated from field: string reason = 14;
+   */
+  reason: string;
 };
 
 /**
@@ -945,6 +1017,64 @@ export declare type GuestInfo = Message<"cube.runner.v4.GuestInfo"> & {
  * Use `create(GuestInfoSchema)` to create a new message.
  */
 export declare const GuestInfoSchema: GenMessage<GuestInfo>;
+
+/**
+ * What one guest operation may carry; cubed's `WorkspaceLimits`.
+ *
+ * @generated from message cube.runner.v4.GuestLimits
+ */
+export declare type GuestLimits = Message<"cube.runner.v4.GuestLimits"> & {
+  /**
+   * @generated from field: uint32 max_frame_bytes = 1;
+   */
+  maxFrameBytes: number;
+
+  /**
+   * @generated from field: uint32 request_timeout_ms = 2;
+   */
+  requestTimeoutMs: number;
+
+  /**
+   * @generated from field: uint32 max_command_bytes = 3;
+   */
+  maxCommandBytes: number;
+
+  /**
+   * @generated from field: uint32 max_path_bytes = 4;
+   */
+  maxPathBytes: number;
+
+  /**
+   * @generated from field: uint32 max_exec_timeout_ms = 5;
+   */
+  maxExecTimeoutMs: number;
+
+  /**
+   * @generated from field: uint32 max_output_bytes = 6;
+   */
+  maxOutputBytes: number;
+
+  /**
+   * @generated from field: uint32 output_page_bytes = 7;
+   */
+  outputPageBytes: number;
+
+  /**
+   * @generated from field: uint32 max_read_bytes = 8;
+   */
+  maxReadBytes: number;
+
+  /**
+   * @generated from field: uint32 max_write_bytes = 9;
+   */
+  maxWriteBytes: number;
+};
+
+/**
+ * Describes the message cube.runner.v4.GuestLimits.
+ * Use `create(GuestLimitsSchema)` to create a new message.
+ */
+export declare const GuestLimitsSchema: GenMessage<GuestLimits>;
 
 /**
  * @generated from message cube.runner.v4.EgressPolicy
@@ -1831,15 +1961,15 @@ export declare type DaemonFrame = Message<"cube.runner.v4.DaemonFrame"> & {
     case: "status";
   } | {
     /**
-     * @generated from field: bytes req = 4;
+     * @generated from field: cube.runner.v4.DaemonRequest req = 4;
      */
-    value: Uint8Array;
+    value: DaemonRequest;
     case: "req";
   } | {
     /**
-     * @generated from field: bytes ans = 5;
+     * @generated from field: cube.runner.v4.DaemonAnswer ans = 5;
      */
-    value: Uint8Array;
+    value: DaemonAnswer;
     case: "ans";
   } | {
     /**
@@ -1855,6 +1985,266 @@ export declare type DaemonFrame = Message<"cube.runner.v4.DaemonFrame"> & {
  * Use `create(DaemonFrameSchema)` to create a new message.
  */
 export declare const DaemonFrameSchema: GenMessage<DaemonFrame>;
+
+/**
+ * @generated from message cube.runner.v4.DaemonRequest
+ */
+export declare type DaemonRequest = Message<"cube.runner.v4.DaemonRequest"> & {
+  /**
+   * @generated from oneof cube.runner.v4.DaemonRequest.op
+   */
+  op: {
+    /**
+     * A `guest` stream's operation, forwarded as cubed sent it.
+     *
+     * @generated from field: cube.runner.v4.GuestRequest guest = 1;
+     */
+    value: GuestRequest;
+    case: "guest";
+  } | {
+    /**
+     * The runner's own, sent after every `hello`. Idempotent: the agent
+     * applies what changed. Layers cannot change under a running workload
+     * (FAILED_PRECONDITION/layers_changed; the runner boots it cold).
+     *
+     * @generated from field: cube.runner.v4.MachineSetup machine_setup = 2;
+     */
+    value: MachineSetup;
+    case: "machineSetup";
+  } | {
+    /**
+     * Before a save: the agent finishes or parks its writes, syncs, drops
+     * the page cache and lets free page reporting return memory, then
+     * answers. It holds new operations until the connection closes (the
+     * machine was saved) or `snapshot_done` comes (the save failed, or the
+     * machine keeps running).
+     *
+     * @generated from field: cube.runner.v4.Empty snapshot_prepare = 3;
+     */
+    value: Empty;
+    case: "snapshotPrepare";
+  } | {
+    /**
+     * @generated from field: cube.runner.v4.Empty snapshot_done = 4;
+     */
+    value: Empty;
+    case: "snapshotDone";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message cube.runner.v4.DaemonRequest.
+ * Use `create(DaemonRequestSchema)` to create a new message.
+ */
+export declare const DaemonRequestSchema: GenMessage<DaemonRequest>;
+
+/**
+ * @generated from message cube.runner.v4.GuestRequest
+ */
+export declare type GuestRequest = Message<"cube.runner.v4.GuestRequest"> & {
+  /**
+   * `GuestHeader.op`: lowercase ASCII letters.
+   *
+   * @generated from field: string op = 1;
+   */
+  op: string;
+
+  /**
+   * The operation's request bytes (one JSON line and a raw body).
+   *
+   * @generated from field: bytes data = 2;
+   */
+  data: Uint8Array;
+};
+
+/**
+ * Describes the message cube.runner.v4.GuestRequest.
+ * Use `create(GuestRequestSchema)` to create a new message.
+ */
+export declare const GuestRequestSchema: GenMessage<GuestRequest>;
+
+/**
+ * @generated from message cube.runner.v4.DaemonAnswer
+ */
+export declare type DaemonAnswer = Message<"cube.runner.v4.DaemonAnswer"> & {
+  /**
+   * @generated from oneof cube.runner.v4.DaemonAnswer.result
+   */
+  result: {
+    /**
+     * A guest operation's answer bytes as the agent wrote them; its own
+     * errors are inside, as `OPERATIONS` writes them.
+     *
+     * @generated from field: bytes guest = 1;
+     */
+    value: Uint8Array;
+    case: "guest";
+  } | {
+    /**
+     * The agent could not take the request (not ready, prepared for a
+     * snapshot, a setup it refuses). The runner answers a `guest` stream
+     * with it in `StreamAnswer`.
+     *
+     * @generated from field: cube.runner.v4.Error error = 2;
+     */
+    value: Error;
+    case: "error";
+  } | {
+    /**
+     * A runner operation is done.
+     *
+     * @generated from field: cube.runner.v4.Empty done = 3;
+     */
+    value: Empty;
+    case: "done";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message cube.runner.v4.DaemonAnswer.
+ * Use `create(DaemonAnswerSchema)` to create a new message.
+ */
+export declare const DaemonAnswerSchema: GenMessage<DaemonAnswer>;
+
+/**
+ * What the agent needs to assemble the machine; nothing in it is secret
+ * (placeholders are not secrets).
+ *
+ * @generated from message cube.runner.v4.MachineSetup
+ */
+export declare type MachineSetup = Message<"cube.runner.v4.MachineSetup"> & {
+  /**
+   * @generated from field: cube.runner.v4.Ref ref = 1;
+   */
+  ref?: Ref | undefined;
+
+  /**
+   * `Boot.documents` from `MachineStart`, unchanged.
+   *
+   * @generated from field: map<string, bytes> documents = 2;
+   */
+  documents: { [key: string]: Uint8Array };
+
+  /**
+   * At least 32 fresh bytes per send, mixed into the guest's random pool:
+   * a machine restored from a snapshot must not repeat another's numbers.
+   *
+   * @generated from field: bytes entropy = 3;
+   */
+  entropy: Uint8Array;
+
+  /**
+   * The workload root's lower layers, topmost first (overlayfs `lowerdir`
+   * order). Disks are fixed by keel's QEMU arguments: vda the base, vdb the
+   * layer disk, vdc the writable disk.
+   *
+   * @generated from field: repeated cube.runner.v4.Layer layers = 4;
+   */
+  layers: Layer[];
+
+  /**
+   * @generated from field: cube.runner.v4.ImageConfig image = 5;
+   */
+  image?: ImageConfig | undefined;
+
+  /**
+   * The runner's egress CA (`Runner.ca_pem`), added to the image's bundle.
+   *
+   * @generated from field: string ca_pem = 6;
+   */
+  caPem: string;
+
+  /**
+   * @generated from field: string runner_version = 7;
+   */
+  runnerVersion: string;
+
+  /**
+   * @generated from field: uint32 protocol = 8;
+   */
+  protocol: number;
+
+  /**
+   * What the runner uses of the agent, so either side can tell an older or
+   * newer other side.
+   *
+   * @generated from field: repeated string capabilities = 9;
+   */
+  capabilities: string[];
+};
+
+/**
+ * Describes the message cube.runner.v4.MachineSetup.
+ * Use `create(MachineSetupSchema)` to create a new message.
+ */
+export declare const MachineSetupSchema: GenMessage<MachineSetup>;
+
+/**
+ * @generated from message cube.runner.v4.Layer
+ */
+export declare type Layer = Message<"cube.runner.v4.Layer"> & {
+  /**
+   * The GPT partition on the layer disk (vdb1 is 1), EROFS.
+   *
+   * @generated from field: uint32 partition = 1;
+   */
+  partition: number;
+
+  /**
+   * @generated from oneof cube.runner.v4.Layer.source
+   */
+  source: {
+    /**
+     * An OCI layer's uncompressed digest, `sha256:<hex>`.
+     *
+     * @generated from field: string diff_id = 2;
+     */
+    value: string;
+    case: "diffId";
+  } | {
+    /**
+     * A template published on this runner.
+     *
+     * @generated from field: string template_id = 3;
+     */
+    value: string;
+    case: "templateId";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message cube.runner.v4.Layer.
+ * Use `create(LayerSchema)` to create a new message.
+ */
+export declare const LayerSchema: GenMessage<Layer>;
+
+/**
+ * The parts of the image's OCI configuration keel uses. `User` and
+ * `WorkingDir` are not: commands run as `agent` in `/workspace`.
+ *
+ * @generated from message cube.runner.v4.ImageConfig
+ */
+export declare type ImageConfig = Message<"cube.runner.v4.ImageConfig"> & {
+  /**
+   * The manifest's digest, `sha256:<hex>`.
+   *
+   * @generated from field: string digest = 1;
+   */
+  digest: string;
+
+  /**
+   * `NAME=value`, applied before cube's environment.
+   *
+   * @generated from field: repeated string env = 2;
+   */
+  env: string[];
+};
+
+/**
+ * Describes the message cube.runner.v4.ImageConfig.
+ * Use `create(ImageConfigSchema)` to create a new message.
+ */
+export declare const ImageConfigSchema: GenMessage<ImageConfig>;
 
 /**
  * @generated from enum cube.runner.v4.Code

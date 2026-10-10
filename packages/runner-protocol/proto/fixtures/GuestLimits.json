@@ -1,0 +1,11 @@
+{
+  "maxFrameBytes": 2,
+  "requestTimeoutMs": 3,
+  "maxCommandBytes": 4,
+  "maxPathBytes": 5,
+  "maxExecTimeoutMs": 6,
+  "maxOutputBytes": 7,
+  "outputPageBytes": 8,
+  "maxReadBytes": 9,
+  "maxWriteBytes": 10
+}

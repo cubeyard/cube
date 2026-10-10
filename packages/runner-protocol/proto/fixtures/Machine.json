@@ -47,7 +47,20 @@
         "hooks-key": "hooks-9"
       },
       "templateSeal": "template_seal-10",
-      "since": "2026-10-10T00:00:00Z"
+      "since": "2026-10-10T00:00:00Z",
+      "limits": {
+        "maxFrameBytes": 2,
+        "requestTimeoutMs": 3,
+        "maxCommandBytes": 4,
+        "maxPathBytes": 5,
+        "maxExecTimeoutMs": 6,
+        "maxOutputBytes": 7,
+        "outputPageBytes": 8,
+        "maxReadBytes": 9,
+        "maxWriteBytes": 10
+      },
+      "epoch": "1013",
+      "reason": "reason-14"
     }
   },
   "meta": {

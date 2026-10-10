@@ -13,6 +13,35 @@
 //   dial    one `StreamAnswer` frame, then raw TCP both ways.
 // A runner never interprets the guest bytes (`OPERATIONS` in cube-guest).
 //
+// The guest channel (`berth vm` <-> keel's cube-agent): one virtio-serial
+// port named `cube.0` per machine, a Unix socket on the runner's side. It
+// carries `DaemonFrame`s framed as on the streams above (u32 big-endian
+// length, 1 to `Limits.max_frame_bytes` bytes, then proto3 JSON). A frame
+// over the limit, a zero length, JSON that does not parse or a frame that
+// breaks the channel rules below ends the connection; the runner treats the
+// guest's side as hostile.
+//   ch 0    the connection: the agent sends `hello` once it is connected
+//           and `status` whenever its `GuestInfo` changes, each at most
+//           MAX_GUEST_INFO_BYTES (64 KiB) so it fits a watch event.
+//   ch > 0  one operation: the runner opens it with one `req` and never
+//           reuses the number on this connection; the agent closes it with
+//           one `ans`. `abort` from the runner stops the wait, not the
+//           operation (as a closed stream does today); an `ans` that comes
+//           after it is dropped. Each `req` and `ans` is one frame, so the
+//           agent's limits must keep a guest request or answer under
+//           `max_frame_bytes` once its bytes are base64 (512 KiB reads and
+//           writes do).
+// A disconnect (agent restart, socket closed, machine restored from a
+// snapshot) closes every channel. The agent sends `hello` again, the runner
+// sends `machine_setup` again, and operations that were running are found
+// by their keys, as `OPERATIONS` already requires.
+//
+// The QEMU a VM runner needs (checked when it starts, refused below it):
+// `virtio-rtc-pci`, `virtio-serial-pci` with `virtserialport`,
+// `virtio-balloon-pci` with `free-page-reporting`, versioned machine types,
+// `-kernel` boot on arm64 and x86-64, `migrate` to `file:` with the
+// `mapped-ram` capability. One set of QEMU arguments on Linux and macOS.
+//
 // This file is the only schema. Rust types are generated at build time
 // (packages/runner-protocol/build.rs); TypeScript types are generated into
 // packages/server/src/gen by `pnpm proto:generate` and checked by
@@ -29,7 +58,7 @@ import { file_google_protobuf_duration, file_google_protobuf_timestamp } from "@
  * Describes the file runner.proto.
  */
 export const file_runner = /*@__PURE__*/
-  fileDesc("CgxydW5uZXIucHJvdG8SDmN1YmUucnVubmVyLnY0IiAKA1JlZhINCgVvd25lchgBIAEoCRIKCgJpZBgCIAEoCSIWCgVGZW5jZRINCgVlcG9jaBgBIAEoAyJECgRNZXRhEg8KB3ZlcnNpb24YASABKAMSKwoHdXBkYXRlZBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAidQoJQ29uZGl0aW9uEgwKBHR5cGUYASABKAkSDgoGc3RhdHVzGAIgASgIEg4KBnJlYXNvbhgDIAEoCRIPCgdtZXNzYWdlGAQgASgJEikKBXNpbmNlGAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJoCgVFcnJvchIiCgRjb2RlGAEgASgOMhQuY3ViZS5ydW5uZXIudjQuQ29kZRIOCgZyZWFzb24YAiABKAkSDwoHbWVzc2FnZRgDIAEoCRIaChJjb21wbGV0aW9uX3Vua25vd24YBCABKAgiBwoFRW1wdHki5QEKBE9wZW4SJgoFaGVsbG8YASABKAsyFS5jdWJlLnJ1bm5lci52NC5IZWxsb0gAEiQKBGNhbGwYAiABKAsyFC5jdWJlLnJ1bm5lci52NC5DYWxsSAASLQoFd2F0Y2gYAyABKAsyHC5jdWJlLnJ1bm5lci52NC5XYXRjaFJlcXVlc3RIABIsCgVndWVzdBgEIAEoCzIbLmN1YmUucnVubmVyLnY0Lkd1ZXN0SGVhZGVySAASKgoEZGlhbBgFIAEoCzIaLmN1YmUucnVubmVyLnY0LkRpYWxIZWFkZXJIAEIGCgRraW5kIjQKDFN0cmVhbUFuc3dlchIkCgVlcnJvchgBIAEoCzIVLmN1YmUucnVubmVyLnY0LkVycm9yIkUKBUhlbGxvEhAKCHByb3RvY29sGAEgASgNEhMKC2V4cGVjdF9ub2RlGAIgASgJEhUKDWN1YmVkX3ZlcnNpb24YAyABKAkiXQoLSGVsbG9BbnN3ZXISEAoIcHJvdG9jb2wYASABKA0SFAoMY2FwYWJpbGl0aWVzGAIgAygJEiYKBnJ1bm5lchgDIAEoCzIWLmN1YmUucnVubmVyLnY0LlJ1bm5lciLNBQoGUnVubmVyEg8KB25vZGVfaWQYASABKAkSGAoQc29mdHdhcmVfdmVyc2lvbhgCIAEoCRIpCgRraW5kGAMgASgOMhsuY3ViZS5ydW5uZXIudjQuUnVubmVyLktpbmQSKgoIcGxhdGZvcm0YBCABKAsyGC5jdWJlLnJ1bm5lci52NC5QbGF0Zm9ybRImCgZsaW1pdHMYBSABKAsyFi5jdWJlLnJ1bm5lci52NC5MaW1pdHMSKgoIY2FwYWNpdHkYBiABKAsyGC5jdWJlLnJ1bm5lci52NC5DYXBhY2l0eRIzCglsaWZlY3ljbGUYByABKA4yIC5jdWJlLnJ1bm5lci52NC5SdW5uZXIuTGlmZWN5Y2xlEigKB25ldHdvcmsYCCABKAsyFy5jdWJlLnJ1bm5lci52NC5OZXR3b3JrEjIKCXRlbXBsYXRlcxgJIAMoCzIfLmN1YmUucnVubmVyLnY0LlRlbXBsYXRlU3VtbWFyeRIyCgZsYWJlbHMYCiADKAsyIi5jdWJlLnJ1bm5lci52NC5SdW5uZXIuTGFiZWxzRW50cnkSDgoGY2FfcGVtGAsgASgJEiIKBG1ldGEYDCABKAsyFC5jdWJlLnJ1bm5lci52NC5NZXRhEi4KCnN0YXJ0ZWRfYXQYDSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wGi0KC0xhYmVsc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiLgoES2luZBIUChBLSU5EX1VOU1BFQ0lGSUVEEAASBgoCVk0QARIICgRIT1NUEAIiYwoJTGlmZWN5Y2xlEhkKFUxJRkVDWUNMRV9VTlNQRUNJRklFRBAAEgkKBVJFQURZEAESDAoIRFJBSU5JTkcQAhILCgdGQVVMVEVEEAMSFQoRUkVDT1ZFUllfUkVRVUlSRUQQBCKWAQoIUGxhdGZvcm0SCgoCb3MYASABKAkSDAoEYXJjaBgCIAEoCRITCgthY2NlbGVyYXRvchgDIAEoCRIUCgxxZW11X3ZlcnNpb24YBCABKAkSGQoRYmFzZV9pbWFnZV9zaGEyNTYYBSABKAkSFwoPYmFzZV9pbWFnZV9uYW1lGAYgASgJEhEKCWhvc3RfbmFtZRgHIAEoCSKQAQoGTGltaXRzEhEKCW1heF92Y3B1cxgBIAEoDRIWCg5tYXhfbWVtb3J5X21pYhgCIAEoDRIUCgxtYXhfZGlza19naWIYAyABKA0SFAoMbWF4X21hY2hpbmVzGAQgASgNEhYKDm1heF9ib290X2J5dGVzGAUgASgNEhcKD21heF9mcmFtZV9ieXRlcxgGIAEoDSLcAQoIQ2FwYWNpdHkSFwoPbWFjaGluZXNfYWN0aXZlGAEgASgNEhgKEG1hY2hpbmVzX3J1bm5pbmcYAiABKA0SEgoKc2xvdHNfZnJlZRgDIAEoDRIRCglob3N0X2NwdXMYBCABKA0SFwoPaG9zdF9tZW1vcnlfbWliGAUgASgEEhwKFGhvc3RfbWVtb3J5X2ZyZWVfbWliGAYgASgEEhUKDWRpc2tfZnJlZV9naWIYByABKAQSEAoIcmV0YWluZWQYCCABKA0SFgoOcmV0YWluZWRfYnl0ZXMYCSABKAQiWAoHTmV0d29yaxIMCgRtb2RlGAEgASgJEi8KDHJ0dF90b19jdWJlZBgCIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbhIOCgZlZ3Jlc3MYAyABKAgiiQEKD1RlbXBsYXRlU3VtbWFyeRIKCgJpZBgBIAEoCRILCgNrZXkYAiABKAkSLQoFc3RhdGUYAyABKA4yHi5jdWJlLnJ1bm5lci52NC5UZW1wbGF0ZS5TdGF0ZRIuCgpjcmVhdGVkX2F0GAQgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCK+AQoHTWFjaGluZRIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSKQoEc3BlYxgCIAEoCzIbLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVTcGVjEi0KBnN0YXR1cxgDIAEoCzIdLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVTdGF0dXMSIgoEbWV0YRgEIAEoCzIULmN1YmUucnVubmVyLnY0Lk1ldGESEwoLZmVuY2VfZXBvY2gYBSABKAMihgEKC01hY2hpbmVTcGVjEg4KBGJhc2UYASABKAhIABIVCgt0ZW1wbGF0ZV9pZBgCIAEoCUgAEiIKBHNpemUYAyABKAsyFC5jdWJlLnJ1bm5lci52NC5TaXplEiIKBGJvb3QYBCABKAsyFC5jdWJlLnJ1bm5lci52NC5Cb290QggKBnNvdXJjZSI7CgRTaXplEg0KBXZjcHVzGAEgASgNEhIKCm1lbW9yeV9taWIYAiABKA0SEAoIZGlza19naWIYAyABKA0ifQoEQm9vdBI2Cglkb2N1bWVudHMYASADKAsyIy5jdWJlLnJ1bm5lci52NC5Cb290LkRvY3VtZW50c0VudHJ5EgsKA21hYxgCIAEoCRowCg5Eb2N1bWVudHNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAw6AjgBIpIDCg1NYWNoaW5lU3RhdHVzEjIKBXBoYXNlGAEgASgOMiMuY3ViZS5ydW5uZXIudjQuTWFjaGluZVN0YXR1cy5QaGFzZRItCgpjb25kaXRpb25zGAIgAygLMhkuY3ViZS5ydW5uZXIudjQuQ29uZGl0aW9uEg8KB2Jvb3RfaWQYAyABKAkSEgoKZGlza19ieXRlcxgEIAEoBBINCgVlcnJvchgFIAEoCRIuCgpzdGFydGVkX2F0GAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIoCgVndWVzdBgHIAEoCzIZLmN1YmUucnVubmVyLnY0Lkd1ZXN0SW5mbyKJAQoFUGhhc2USFQoRUEhBU0VfVU5TUEVDSUZJRUQQABIMCghDUkVBVElORxABEgsKB1NUT1BQRUQQAhIMCghTVEFSVElORxADEgsKB1JVTk5JTkcQBBIMCghTVE9QUElORxAFEgwKCFJFVEFJTkVEEAYSCwoHREVMRVRFRBAHEgoKBkZBSUxFRBAISgQIFBAeIrUCCglHdWVzdEluZm8SEQoJY29ubmVjdGVkGAEgASgIEg0KBXJlYWR5GAIgASgIEg0KBWJ1aWxkGAMgASgJEg8KB3ZlcnNpb24YBCABKAkSFAoMY2FwYWJpbGl0aWVzGAUgAygJEgoKAm9zGAYgASgJEg4KBmtlcm5lbBgHIAEoCRIPCgdib290X2lkGAggASgJEjMKBWhvb2tzGAkgAygLMiQuY3ViZS5ydW5uZXIudjQuR3Vlc3RJbmZvLkhvb2tzRW50cnkSFQoNdGVtcGxhdGVfc2VhbBgKIAEoCRIpCgVzaW5jZRgLIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAaLAoKSG9va3NFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIrwECgxFZ3Jlc3NQb2xpY3kSNQoHZGVmYXVsdBgBIAEoDjIkLmN1YmUucnVubmVyLnY0LkVncmVzc1BvbGljeS5EZWZhdWx0EhIKCmRlbnlfaG9zdHMYAiADKAkSMAoFcnVsZXMYAyADKAsyIS5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kuUnVsZRIoCgVsZWFzZRgEIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbhrLAQoEUnVsZRINCgVob3N0cxgBIAMoCRINCgVwb3J0cxgCIAMoDRIzCgVodHRwcxgDIAEoCzIiLmN1YmUucnVubmVyLnY0LkVncmVzc1BvbGljeS5IdHRwc0gAEjEKBGh0dHAYBCABKAsyIS5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kuSHR0cEgAEjUKBmRlY2lkZRgFIAEoCzIjLmN1YmUucnVubmVyLnY0LkVncmVzc1BvbGljeS5EZWNpZGVIAEIGCgRraW5kGkQKBUh0dHBzEjsKCmNyZWRlbnRpYWwYASABKAsyJy5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kuQ3JlZGVudGlhbBoGCgRIdHRwGggKBkRlY2lkZRoaCgpDcmVkZW50aWFsEgwKBG5hbWUYASABKAkiQwoHRGVmYXVsdBIXChNERUZBVUxUX1VOU1BFQ0lGSUVEEAASCAoEREVOWRABEhUKEUFMTE9XX1BVQkxJQ19IVFRQEAIi+QEKCFRlbXBsYXRlEgoKAmlkGAEgASgJEgsKA2tleRgCIAEoCRIMCgRtZXRhGAMgASgJEi0KBXN0YXRlGAQgASgOMh4uY3ViZS5ydW5uZXIudjQuVGVtcGxhdGUuU3RhdGUSEAoIZGlza19naWIYBSABKA0SDQoFYnl0ZXMYBiABKAQSDQoFdXNlcnMYByABKA0SLgoKY3JlYXRlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAiNwoFU3RhdGUSFQoRU1RBVEVfVU5TUEVDSUZJRUQQABIJCgVSRUFEWRABEgwKCFJFTU9WSU5HEAIijgUKBENhbGwSKwoKcnVubmVyX2dldBgBIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SAASNwoObWFjaGluZV9jcmVhdGUYCiABKAsyHS5jdWJlLnJ1bm5lci52NC5NYWNoaW5lQ3JlYXRlSAASNQoNbWFjaGluZV9zdGFydBgLIAEoCzIcLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVTdGFydEgAEjIKDG1hY2hpbmVfc3RvcBgMIAEoCzIaLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVSZWZIABI3Cg5tYWNoaW5lX2RlbGV0ZRgNIAEoCzIdLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVEZWxldGVIABI1Cg9tYWNoaW5lX2Rpc2NhcmQYDiABKAsyGi5jdWJlLnJ1bm5lci52NC5NYWNoaW5lUmVmSAASMQoLbWFjaGluZV9nZXQYDyABKAsyGi5jdWJlLnJ1bm5lci52NC5NYWNoaW5lUmVmSAASLQoMbWFjaGluZV9saXN0GBAgASgLMhUuY3ViZS5ydW5uZXIudjQuRW1wdHlIABI2ChBtYWNoaW5lX2RpYWdub3NlGBEgASgLMhouY3ViZS5ydW5uZXIudjQuTWFjaGluZVJlZkgAEjsKEHRlbXBsYXRlX3B1Ymxpc2gYFCABKAsyHy5jdWJlLnJ1bm5lci52NC5UZW1wbGF0ZVB1Ymxpc2hIABIuCg10ZW1wbGF0ZV9saXN0GBUgASgLMhUuY3ViZS5ydW5uZXIudjQuRW1wdHlIABI2Cg90ZW1wbGF0ZV9kZWxldGUYFiABKAsyGy5jdWJlLnJ1bm5lci52NC5UZW1wbGF0ZVJlZkgAQgYKBHZlcmIiVAoKTWFjaGluZVJlZhIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZSKCAQoNTWFjaGluZUNyZWF0ZRIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZRIpCgRzcGVjGAMgASgLMhsuY3ViZS5ydW5uZXIudjQuTWFjaGluZVNwZWMizAEKDE1hY2hpbmVTdGFydBIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZRIiCgRzaXplGAMgASgLMhQuY3ViZS5ydW5uZXIudjQuU2l6ZRIiCgRib290GAQgASgLMhQuY3ViZS5ydW5uZXIudjQuQm9vdBIsCgZwb2xpY3kYBSABKAsyHC5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kiZwoNTWFjaGluZURlbGV0ZRIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZRIOCgZyZXRhaW4YAyABKAgidQoPVGVtcGxhdGVQdWJsaXNoEiEKBGZyb20YASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZRILCgNrZXkYAyABKAkSDAoEbWV0YRgEIAEoCSIZCgtUZW1wbGF0ZVJlZhIKCgJpZBgBIAEoCSLQAgoKQ2FsbFJlc3VsdBImCgVlcnJvchgBIAEoCzIVLmN1YmUucnVubmVyLnY0LkVycm9ySAASKAoGcnVubmVyGAIgASgLMhYuY3ViZS5ydW5uZXIudjQuUnVubmVySAASKgoHbWFjaGluZRgDIAEoCzIXLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVIABIsCghtYWNoaW5lcxgEIAEoCzIYLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVzSAASLAoIdGVtcGxhdGUYBSABKAsyGC5jdWJlLnJ1bm5lci52NC5UZW1wbGF0ZUgAEi4KCXRlbXBsYXRlcxgGIAEoCzIZLmN1YmUucnVubmVyLnY0LlRlbXBsYXRlc0gAEi4KCWRpYWdub3NpcxgHIAEoCzIZLmN1YmUucnVubmVyLnY0LkRpYWdub3Npc0gAQggKBnJlc3VsdCJDCghNYWNoaW5lcxImCgVpdGVtcxgBIAMoCzIXLmN1YmUucnVubmVyLnY0Lk1hY2hpbmUSDwoHdmVyc2lvbhgCIAEoAyI0CglUZW1wbGF0ZXMSJwoFaXRlbXMYASADKAsyGC5jdWJlLnJ1bm5lci52NC5UZW1wbGF0ZSIZCglEaWFnbm9zaXMSDAoEanNvbhgBIAEoCSIlCgxXYXRjaFJlcXVlc3QSFQoNc2luY2VfdmVyc2lvbhgBIAEoAyKoAgoKV2F0Y2hFdmVudBItCgR0eXBlGAEgASgOMh8uY3ViZS5ydW5uZXIudjQuV2F0Y2hFdmVudC5UeXBlEg8KB3ZlcnNpb24YAiABKAMSKgoHbWFjaGluZRgDIAEoCzIXLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVIABIsCgh0ZW1wbGF0ZRgEIAEoCzIYLmN1YmUucnVubmVyLnY0LlRlbXBsYXRlSAASKAoGcnVubmVyGAUgASgLMhYuY3ViZS5ydW5uZXIudjQuUnVubmVySAAiSgoEVHlwZRIUChBUWVBFX1VOU1BFQ0lGSUVEEAASBwoDUFVUEAESCgoGREVMRVRFEAISDAoIQk9PS01BUksQAxIJCgVSRVNFVBAEQgoKCHJlc291cmNlImEKC0d1ZXN0SGVhZGVyEiAKA3JlZhgBIAEoCzITLmN1YmUucnVubmVyLnY0LlJlZhIkCgVmZW5jZRgCIAEoCzIVLmN1YmUucnVubmVyLnY0LkZlbmNlEgoKAm9wGAMgASgJImIKCkRpYWxIZWFkZXISIAoDcmVmGAEgASgLMhMuY3ViZS5ydW5uZXIudjQuUmVmEiQKBWZlbmNlGAIgASgLMhUuY3ViZS5ydW5uZXIudjQuRmVuY2USDAoEcG9ydBgDIAEoDSK4AQoQQ3JlZGVudGlhbEhlYWRlchIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSEgoKY3JlZGVudGlhbBgCIAEoCRILCgNzbmkYAyABKAkSDgoGbWV0aG9kGAQgASgJEgwKBGhvc3QYBSABKAkSDAoEcG9ydBgGIAEoDRIMCgRwYXRoGAcgASgJEicKB2hlYWRlcnMYCCADKAsyFi5jdWJlLnJ1bm5lci52NC5IZWFkZXIiJQoGSGVhZGVyEgwKBG5hbWUYASABKAkSDQoFdmFsdWUYAiABKAwiDgoMUmVwb3J0SGVhZGVyIo4BCgxFZ3Jlc3NSZXBvcnQSIAoDcmVmGAEgASgLMhMuY3ViZS5ydW5uZXIudjQuUmVmEgwKBGhvc3QYAiABKAkSDgoGcmVhc29uGAMgASgJEhYKDmRyb3BwZWRfYmVmb3JlGAQgASgEEiYKAmF0GAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCK9AQoLRGFlbW9uRnJhbWUSCgoCY2gYASABKA0SKgoFaGVsbG8YAiABKAsyGS5jdWJlLnJ1bm5lci52NC5HdWVzdEluZm9IABIrCgZzdGF0dXMYAyABKAsyGS5jdWJlLnJ1bm5lci52NC5HdWVzdEluZm9IABINCgNyZXEYBCABKAxIABINCgNhbnMYBSABKAxIABImCgVhYm9ydBgGIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SABCAwoBdCrcAQoEQ29kZRIUChBDT0RFX1VOU1BFQ0lGSUVEEAASDQoJTk9UX0ZPVU5EEAESEgoOQUxSRUFEWV9FWElTVFMQAhIXChNGQUlMRURfUFJFQ09ORElUSU9OEAMSFgoSUkVTT1VSQ0VfRVhIQVVTVEVEEAQSDwoLVU5BVkFJTEFCTEUQBRIVChFQRVJNSVNTSU9OX0RFTklFRBAGEhQKEElOVkFMSURfQVJHVU1FTlQQBxIRCg1VTklNUExFTUVOVEVEEAgSDAoISU5URVJOQUwQCRILCgdBQk9SVEVEEApiBnByb3RvMw", [file_google_protobuf_duration, file_google_protobuf_timestamp]);
+  fileDesc("CgxydW5uZXIucHJvdG8SDmN1YmUucnVubmVyLnY0IiAKA1JlZhINCgVvd25lchgBIAEoCRIKCgJpZBgCIAEoCSIWCgVGZW5jZRINCgVlcG9jaBgBIAEoAyJECgRNZXRhEg8KB3ZlcnNpb24YASABKAMSKwoHdXBkYXRlZBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAidQoJQ29uZGl0aW9uEgwKBHR5cGUYASABKAkSDgoGc3RhdHVzGAIgASgIEg4KBnJlYXNvbhgDIAEoCRIPCgdtZXNzYWdlGAQgASgJEikKBXNpbmNlGAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJoCgVFcnJvchIiCgRjb2RlGAEgASgOMhQuY3ViZS5ydW5uZXIudjQuQ29kZRIOCgZyZWFzb24YAiABKAkSDwoHbWVzc2FnZRgDIAEoCRIaChJjb21wbGV0aW9uX3Vua25vd24YBCABKAgiBwoFRW1wdHki5QEKBE9wZW4SJgoFaGVsbG8YASABKAsyFS5jdWJlLnJ1bm5lci52NC5IZWxsb0gAEiQKBGNhbGwYAiABKAsyFC5jdWJlLnJ1bm5lci52NC5DYWxsSAASLQoFd2F0Y2gYAyABKAsyHC5jdWJlLnJ1bm5lci52NC5XYXRjaFJlcXVlc3RIABIsCgVndWVzdBgEIAEoCzIbLmN1YmUucnVubmVyLnY0Lkd1ZXN0SGVhZGVySAASKgoEZGlhbBgFIAEoCzIaLmN1YmUucnVubmVyLnY0LkRpYWxIZWFkZXJIAEIGCgRraW5kIjQKDFN0cmVhbUFuc3dlchIkCgVlcnJvchgBIAEoCzIVLmN1YmUucnVubmVyLnY0LkVycm9yIkUKBUhlbGxvEhAKCHByb3RvY29sGAEgASgNEhMKC2V4cGVjdF9ub2RlGAIgASgJEhUKDWN1YmVkX3ZlcnNpb24YAyABKAkiXQoLSGVsbG9BbnN3ZXISEAoIcHJvdG9jb2wYASABKA0SFAoMY2FwYWJpbGl0aWVzGAIgAygJEiYKBnJ1bm5lchgDIAEoCzIWLmN1YmUucnVubmVyLnY0LlJ1bm5lciLNBQoGUnVubmVyEg8KB25vZGVfaWQYASABKAkSGAoQc29mdHdhcmVfdmVyc2lvbhgCIAEoCRIpCgRraW5kGAMgASgOMhsuY3ViZS5ydW5uZXIudjQuUnVubmVyLktpbmQSKgoIcGxhdGZvcm0YBCABKAsyGC5jdWJlLnJ1bm5lci52NC5QbGF0Zm9ybRImCgZsaW1pdHMYBSABKAsyFi5jdWJlLnJ1bm5lci52NC5MaW1pdHMSKgoIY2FwYWNpdHkYBiABKAsyGC5jdWJlLnJ1bm5lci52NC5DYXBhY2l0eRIzCglsaWZlY3ljbGUYByABKA4yIC5jdWJlLnJ1bm5lci52NC5SdW5uZXIuTGlmZWN5Y2xlEigKB25ldHdvcmsYCCABKAsyFy5jdWJlLnJ1bm5lci52NC5OZXR3b3JrEjIKCXRlbXBsYXRlcxgJIAMoCzIfLmN1YmUucnVubmVyLnY0LlRlbXBsYXRlU3VtbWFyeRIyCgZsYWJlbHMYCiADKAsyIi5jdWJlLnJ1bm5lci52NC5SdW5uZXIuTGFiZWxzRW50cnkSDgoGY2FfcGVtGAsgASgJEiIKBG1ldGEYDCABKAsyFC5jdWJlLnJ1bm5lci52NC5NZXRhEi4KCnN0YXJ0ZWRfYXQYDSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wGi0KC0xhYmVsc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiLgoES2luZBIUChBLSU5EX1VOU1BFQ0lGSUVEEAASBgoCVk0QARIICgRIT1NUEAIiYwoJTGlmZWN5Y2xlEhkKFUxJRkVDWUNMRV9VTlNQRUNJRklFRBAAEgkKBVJFQURZEAESDAoIRFJBSU5JTkcQAhILCgdGQVVMVEVEEAMSFQoRUkVDT1ZFUllfUkVRVUlSRUQQBCKWAQoIUGxhdGZvcm0SCgoCb3MYASABKAkSDAoEYXJjaBgCIAEoCRITCgthY2NlbGVyYXRvchgDIAEoCRIUCgxxZW11X3ZlcnNpb24YBCABKAkSGQoRYmFzZV9pbWFnZV9zaGEyNTYYBSABKAkSFwoPYmFzZV9pbWFnZV9uYW1lGAYgASgJEhEKCWhvc3RfbmFtZRgHIAEoCSKQAQoGTGltaXRzEhEKCW1heF92Y3B1cxgBIAEoDRIWCg5tYXhfbWVtb3J5X21pYhgCIAEoDRIUCgxtYXhfZGlza19naWIYAyABKA0SFAoMbWF4X21hY2hpbmVzGAQgASgNEhYKDm1heF9ib290X2J5dGVzGAUgASgNEhcKD21heF9mcmFtZV9ieXRlcxgGIAEoDSLcAQoIQ2FwYWNpdHkSFwoPbWFjaGluZXNfYWN0aXZlGAEgASgNEhgKEG1hY2hpbmVzX3J1bm5pbmcYAiABKA0SEgoKc2xvdHNfZnJlZRgDIAEoDRIRCglob3N0X2NwdXMYBCABKA0SFwoPaG9zdF9tZW1vcnlfbWliGAUgASgEEhwKFGhvc3RfbWVtb3J5X2ZyZWVfbWliGAYgASgEEhUKDWRpc2tfZnJlZV9naWIYByABKAQSEAoIcmV0YWluZWQYCCABKA0SFgoOcmV0YWluZWRfYnl0ZXMYCSABKAQiWAoHTmV0d29yaxIMCgRtb2RlGAEgASgJEi8KDHJ0dF90b19jdWJlZBgCIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbhIOCgZlZ3Jlc3MYAyABKAgiiQEKD1RlbXBsYXRlU3VtbWFyeRIKCgJpZBgBIAEoCRILCgNrZXkYAiABKAkSLQoFc3RhdGUYAyABKA4yHi5jdWJlLnJ1bm5lci52NC5UZW1wbGF0ZS5TdGF0ZRIuCgpjcmVhdGVkX2F0GAQgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCK+AQoHTWFjaGluZRIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSKQoEc3BlYxgCIAEoCzIbLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVTcGVjEi0KBnN0YXR1cxgDIAEoCzIdLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVTdGF0dXMSIgoEbWV0YRgEIAEoCzIULmN1YmUucnVubmVyLnY0Lk1ldGESEwoLZmVuY2VfZXBvY2gYBSABKAMihgEKC01hY2hpbmVTcGVjEg4KBGJhc2UYASABKAhIABIVCgt0ZW1wbGF0ZV9pZBgCIAEoCUgAEiIKBHNpemUYAyABKAsyFC5jdWJlLnJ1bm5lci52NC5TaXplEiIKBGJvb3QYBCABKAsyFC5jdWJlLnJ1bm5lci52NC5Cb290QggKBnNvdXJjZSI7CgRTaXplEg0KBXZjcHVzGAEgASgNEhIKCm1lbW9yeV9taWIYAiABKA0SEAoIZGlza19naWIYAyABKA0ifQoEQm9vdBI2Cglkb2N1bWVudHMYASADKAsyIy5jdWJlLnJ1bm5lci52NC5Cb290LkRvY3VtZW50c0VudHJ5EgsKA21hYxgCIAEoCRowCg5Eb2N1bWVudHNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAw6AjgBIpIDCg1NYWNoaW5lU3RhdHVzEjIKBXBoYXNlGAEgASgOMiMuY3ViZS5ydW5uZXIudjQuTWFjaGluZVN0YXR1cy5QaGFzZRItCgpjb25kaXRpb25zGAIgAygLMhkuY3ViZS5ydW5uZXIudjQuQ29uZGl0aW9uEg8KB2Jvb3RfaWQYAyABKAkSEgoKZGlza19ieXRlcxgEIAEoBBINCgVlcnJvchgFIAEoCRIuCgpzdGFydGVkX2F0GAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIoCgVndWVzdBgHIAEoCzIZLmN1YmUucnVubmVyLnY0Lkd1ZXN0SW5mbyKJAQoFUGhhc2USFQoRUEhBU0VfVU5TUEVDSUZJRUQQABIMCghDUkVBVElORxABEgsKB1NUT1BQRUQQAhIMCghTVEFSVElORxADEgsKB1JVTk5JTkcQBBIMCghTVE9QUElORxAFEgwKCFJFVEFJTkVEEAYSCwoHREVMRVRFRBAHEgoKBkZBSUxFRBAISgQIFBAeIoEDCglHdWVzdEluZm8SEQoJY29ubmVjdGVkGAEgASgIEg0KBXJlYWR5GAIgASgIEg0KBWJ1aWxkGAMgASgJEg8KB3ZlcnNpb24YBCABKAkSFAoMY2FwYWJpbGl0aWVzGAUgAygJEgoKAm9zGAYgASgJEg4KBmtlcm5lbBgHIAEoCRIPCgdib290X2lkGAggASgJEjMKBWhvb2tzGAkgAygLMiQuY3ViZS5ydW5uZXIudjQuR3Vlc3RJbmZvLkhvb2tzRW50cnkSFQoNdGVtcGxhdGVfc2VhbBgKIAEoCRIpCgVzaW5jZRgLIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASKwoGbGltaXRzGAwgASgLMhsuY3ViZS5ydW5uZXIudjQuR3Vlc3RMaW1pdHMSDQoFZXBvY2gYDSABKAMSDgoGcmVhc29uGA4gASgJGiwKCkhvb2tzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASL4AQoLR3Vlc3RMaW1pdHMSFwoPbWF4X2ZyYW1lX2J5dGVzGAEgASgNEhoKEnJlcXVlc3RfdGltZW91dF9tcxgCIAEoDRIZChFtYXhfY29tbWFuZF9ieXRlcxgDIAEoDRIWCg5tYXhfcGF0aF9ieXRlcxgEIAEoDRIbChNtYXhfZXhlY190aW1lb3V0X21zGAUgASgNEhgKEG1heF9vdXRwdXRfYnl0ZXMYBiABKA0SGQoRb3V0cHV0X3BhZ2VfYnl0ZXMYByABKA0SFgoObWF4X3JlYWRfYnl0ZXMYCCABKA0SFwoPbWF4X3dyaXRlX2J5dGVzGAkgASgNIrwECgxFZ3Jlc3NQb2xpY3kSNQoHZGVmYXVsdBgBIAEoDjIkLmN1YmUucnVubmVyLnY0LkVncmVzc1BvbGljeS5EZWZhdWx0EhIKCmRlbnlfaG9zdHMYAiADKAkSMAoFcnVsZXMYAyADKAsyIS5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kuUnVsZRIoCgVsZWFzZRgEIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbhrLAQoEUnVsZRINCgVob3N0cxgBIAMoCRINCgVwb3J0cxgCIAMoDRIzCgVodHRwcxgDIAEoCzIiLmN1YmUucnVubmVyLnY0LkVncmVzc1BvbGljeS5IdHRwc0gAEjEKBGh0dHAYBCABKAsyIS5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kuSHR0cEgAEjUKBmRlY2lkZRgFIAEoCzIjLmN1YmUucnVubmVyLnY0LkVncmVzc1BvbGljeS5EZWNpZGVIAEIGCgRraW5kGkQKBUh0dHBzEjsKCmNyZWRlbnRpYWwYASABKAsyJy5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kuQ3JlZGVudGlhbBoGCgRIdHRwGggKBkRlY2lkZRoaCgpDcmVkZW50aWFsEgwKBG5hbWUYASABKAkiQwoHRGVmYXVsdBIXChNERUZBVUxUX1VOU1BFQ0lGSUVEEAASCAoEREVOWRABEhUKEUFMTE9XX1BVQkxJQ19IVFRQEAIi+QEKCFRlbXBsYXRlEgoKAmlkGAEgASgJEgsKA2tleRgCIAEoCRIMCgRtZXRhGAMgASgJEi0KBXN0YXRlGAQgASgOMh4uY3ViZS5ydW5uZXIudjQuVGVtcGxhdGUuU3RhdGUSEAoIZGlza19naWIYBSABKA0SDQoFYnl0ZXMYBiABKAQSDQoFdXNlcnMYByABKA0SLgoKY3JlYXRlZF9hdBgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAiNwoFU3RhdGUSFQoRU1RBVEVfVU5TUEVDSUZJRUQQABIJCgVSRUFEWRABEgwKCFJFTU9WSU5HEAIijgUKBENhbGwSKwoKcnVubmVyX2dldBgBIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SAASNwoObWFjaGluZV9jcmVhdGUYCiABKAsyHS5jdWJlLnJ1bm5lci52NC5NYWNoaW5lQ3JlYXRlSAASNQoNbWFjaGluZV9zdGFydBgLIAEoCzIcLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVTdGFydEgAEjIKDG1hY2hpbmVfc3RvcBgMIAEoCzIaLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVSZWZIABI3Cg5tYWNoaW5lX2RlbGV0ZRgNIAEoCzIdLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVEZWxldGVIABI1Cg9tYWNoaW5lX2Rpc2NhcmQYDiABKAsyGi5jdWJlLnJ1bm5lci52NC5NYWNoaW5lUmVmSAASMQoLbWFjaGluZV9nZXQYDyABKAsyGi5jdWJlLnJ1bm5lci52NC5NYWNoaW5lUmVmSAASLQoMbWFjaGluZV9saXN0GBAgASgLMhUuY3ViZS5ydW5uZXIudjQuRW1wdHlIABI2ChBtYWNoaW5lX2RpYWdub3NlGBEgASgLMhouY3ViZS5ydW5uZXIudjQuTWFjaGluZVJlZkgAEjsKEHRlbXBsYXRlX3B1Ymxpc2gYFCABKAsyHy5jdWJlLnJ1bm5lci52NC5UZW1wbGF0ZVB1Ymxpc2hIABIuCg10ZW1wbGF0ZV9saXN0GBUgASgLMhUuY3ViZS5ydW5uZXIudjQuRW1wdHlIABI2Cg90ZW1wbGF0ZV9kZWxldGUYFiABKAsyGy5jdWJlLnJ1bm5lci52NC5UZW1wbGF0ZVJlZkgAQgYKBHZlcmIiVAoKTWFjaGluZVJlZhIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZSKCAQoNTWFjaGluZUNyZWF0ZRIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZRIpCgRzcGVjGAMgASgLMhsuY3ViZS5ydW5uZXIudjQuTWFjaGluZVNwZWMizAEKDE1hY2hpbmVTdGFydBIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZRIiCgRzaXplGAMgASgLMhQuY3ViZS5ydW5uZXIudjQuU2l6ZRIiCgRib290GAQgASgLMhQuY3ViZS5ydW5uZXIudjQuQm9vdBIsCgZwb2xpY3kYBSABKAsyHC5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kiZwoNTWFjaGluZURlbGV0ZRIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZRIOCgZyZXRhaW4YAyABKAgidQoPVGVtcGxhdGVQdWJsaXNoEiEKBGZyb20YASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZRILCgNrZXkYAyABKAkSDAoEbWV0YRgEIAEoCSIZCgtUZW1wbGF0ZVJlZhIKCgJpZBgBIAEoCSLQAgoKQ2FsbFJlc3VsdBImCgVlcnJvchgBIAEoCzIVLmN1YmUucnVubmVyLnY0LkVycm9ySAASKAoGcnVubmVyGAIgASgLMhYuY3ViZS5ydW5uZXIudjQuUnVubmVySAASKgoHbWFjaGluZRgDIAEoCzIXLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVIABIsCghtYWNoaW5lcxgEIAEoCzIYLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVzSAASLAoIdGVtcGxhdGUYBSABKAsyGC5jdWJlLnJ1bm5lci52NC5UZW1wbGF0ZUgAEi4KCXRlbXBsYXRlcxgGIAEoCzIZLmN1YmUucnVubmVyLnY0LlRlbXBsYXRlc0gAEi4KCWRpYWdub3NpcxgHIAEoCzIZLmN1YmUucnVubmVyLnY0LkRpYWdub3Npc0gAQggKBnJlc3VsdCJDCghNYWNoaW5lcxImCgVpdGVtcxgBIAMoCzIXLmN1YmUucnVubmVyLnY0Lk1hY2hpbmUSDwoHdmVyc2lvbhgCIAEoAyI0CglUZW1wbGF0ZXMSJwoFaXRlbXMYASADKAsyGC5jdWJlLnJ1bm5lci52NC5UZW1wbGF0ZSIZCglEaWFnbm9zaXMSDAoEanNvbhgBIAEoCSIlCgxXYXRjaFJlcXVlc3QSFQoNc2luY2VfdmVyc2lvbhgBIAEoAyKoAgoKV2F0Y2hFdmVudBItCgR0eXBlGAEgASgOMh8uY3ViZS5ydW5uZXIudjQuV2F0Y2hFdmVudC5UeXBlEg8KB3ZlcnNpb24YAiABKAMSKgoHbWFjaGluZRgDIAEoCzIXLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVIABIsCgh0ZW1wbGF0ZRgEIAEoCzIYLmN1YmUucnVubmVyLnY0LlRlbXBsYXRlSAASKAoGcnVubmVyGAUgASgLMhYuY3ViZS5ydW5uZXIudjQuUnVubmVySAAiSgoEVHlwZRIUChBUWVBFX1VOU1BFQ0lGSUVEEAASBwoDUFVUEAESCgoGREVMRVRFEAISDAoIQk9PS01BUksQAxIJCgVSRVNFVBAEQgoKCHJlc291cmNlImEKC0d1ZXN0SGVhZGVyEiAKA3JlZhgBIAEoCzITLmN1YmUucnVubmVyLnY0LlJlZhIkCgVmZW5jZRgCIAEoCzIVLmN1YmUucnVubmVyLnY0LkZlbmNlEgoKAm9wGAMgASgJImIKCkRpYWxIZWFkZXISIAoDcmVmGAEgASgLMhMuY3ViZS5ydW5uZXIudjQuUmVmEiQKBWZlbmNlGAIgASgLMhUuY3ViZS5ydW5uZXIudjQuRmVuY2USDAoEcG9ydBgDIAEoDSK4AQoQQ3JlZGVudGlhbEhlYWRlchIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSEgoKY3JlZGVudGlhbBgCIAEoCRILCgNzbmkYAyABKAkSDgoGbWV0aG9kGAQgASgJEgwKBGhvc3QYBSABKAkSDAoEcG9ydBgGIAEoDRIMCgRwYXRoGAcgASgJEicKB2hlYWRlcnMYCCADKAsyFi5jdWJlLnJ1bm5lci52NC5IZWFkZXIiJQoGSGVhZGVyEgwKBG5hbWUYASABKAkSDQoFdmFsdWUYAiABKAwiDgoMUmVwb3J0SGVhZGVyIo4BCgxFZ3Jlc3NSZXBvcnQSIAoDcmVmGAEgASgLMhMuY3ViZS5ydW5uZXIudjQuUmVmEgwKBGhvc3QYAiABKAkSDgoGcmVhc29uGAMgASgJEhYKDmRyb3BwZWRfYmVmb3JlGAQgASgEEiYKAmF0GAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCL6AQoLRGFlbW9uRnJhbWUSCgoCY2gYASABKA0SKgoFaGVsbG8YAiABKAsyGS5jdWJlLnJ1bm5lci52NC5HdWVzdEluZm9IABIrCgZzdGF0dXMYAyABKAsyGS5jdWJlLnJ1bm5lci52NC5HdWVzdEluZm9IABIsCgNyZXEYBCABKAsyHS5jdWJlLnJ1bm5lci52NC5EYWVtb25SZXF1ZXN0SAASKwoDYW5zGAUgASgLMhwuY3ViZS5ydW5uZXIudjQuRGFlbW9uQW5zd2VySAASJgoFYWJvcnQYBiABKAsyFS5jdWJlLnJ1bm5lci52NC5FbXB0eUgAQgMKAXQi3gEKDURhZW1vblJlcXVlc3QSLQoFZ3Vlc3QYASABKAsyHC5jdWJlLnJ1bm5lci52NC5HdWVzdFJlcXVlc3RIABI1Cg1tYWNoaW5lX3NldHVwGAIgASgLMhwuY3ViZS5ydW5uZXIudjQuTWFjaGluZVNldHVwSAASMQoQc25hcHNob3RfcHJlcGFyZRgDIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SAASLgoNc25hcHNob3RfZG9uZRgEIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SABCBAoCb3AiKAoMR3Vlc3RSZXF1ZXN0EgoKAm9wGAEgASgJEgwKBGRhdGEYAiABKAwieAoMRGFlbW9uQW5zd2VyEg8KBWd1ZXN0GAEgASgMSAASJgoFZXJyb3IYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5FcnJvckgAEiUKBGRvbmUYAyABKAsyFS5jdWJlLnJ1bm5lci52NC5FbXB0eUgAQggKBnJlc3VsdCLWAgoMTWFjaGluZVNldHVwEiAKA3JlZhgBIAEoCzITLmN1YmUucnVubmVyLnY0LlJlZhI+Cglkb2N1bWVudHMYAiADKAsyKy5jdWJlLnJ1bm5lci52NC5NYWNoaW5lU2V0dXAuRG9jdW1lbnRzRW50cnkSDwoHZW50cm9weRgDIAEoDBIlCgZsYXllcnMYBCADKAsyFS5jdWJlLnJ1bm5lci52NC5MYXllchIqCgVpbWFnZRgFIAEoCzIbLmN1YmUucnVubmVyLnY0LkltYWdlQ29uZmlnEg4KBmNhX3BlbRgGIAEoCRIWCg5ydW5uZXJfdmVyc2lvbhgHIAEoCRIQCghwcm90b2NvbBgIIAEoDRIUCgxjYXBhYmlsaXRpZXMYCSADKAkaMAoORG9jdW1lbnRzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgMOgI4ASJOCgVMYXllchIRCglwYXJ0aXRpb24YASABKA0SEQoHZGlmZl9pZBgCIAEoCUgAEhUKC3RlbXBsYXRlX2lkGAMgASgJSABCCAoGc291cmNlIioKC0ltYWdlQ29uZmlnEg4KBmRpZ2VzdBgBIAEoCRILCgNlbnYYAiADKAkq3AEKBENvZGUSFAoQQ09ERV9VTlNQRUNJRklFRBAAEg0KCU5PVF9GT1VORBABEhIKDkFMUkVBRFlfRVhJU1RTEAISFwoTRkFJTEVEX1BSRUNPTkRJVElPThADEhYKElJFU09VUkNFX0VYSEFVU1RFRBAEEg8KC1VOQVZBSUxBQkxFEAUSFQoRUEVSTUlTU0lPTl9ERU5JRUQQBhIUChBJTlZBTElEX0FSR1VNRU5UEAcSEQoNVU5JTVBMRU1FTlRFRBAIEgwKCElOVEVSTkFMEAkSCwoHQUJPUlRFRBAKYgZwcm90bzM", [file_google_protobuf_duration, file_google_protobuf_timestamp]);
 
 /**
  * Describes the message cube.runner.v4.Ref.
@@ -222,52 +251,59 @@ export const GuestInfoSchema = /*@__PURE__*/
   messageDesc(file_runner, 21);
 
 /**
+ * Describes the message cube.runner.v4.GuestLimits.
+ * Use `create(GuestLimitsSchema)` to create a new message.
+ */
+export const GuestLimitsSchema = /*@__PURE__*/
+  messageDesc(file_runner, 22);
+
+/**
  * Describes the message cube.runner.v4.EgressPolicy.
  * Use `create(EgressPolicySchema)` to create a new message.
  */
 export const EgressPolicySchema = /*@__PURE__*/
-  messageDesc(file_runner, 22);
+  messageDesc(file_runner, 23);
 
 /**
  * Describes the message cube.runner.v4.EgressPolicy.Rule.
  * Use `create(EgressPolicy_RuleSchema)` to create a new message.
  */
 export const EgressPolicy_RuleSchema = /*@__PURE__*/
-  messageDesc(file_runner, 22, 0);
+  messageDesc(file_runner, 23, 0);
 
 /**
  * Describes the message cube.runner.v4.EgressPolicy.Https.
  * Use `create(EgressPolicy_HttpsSchema)` to create a new message.
  */
 export const EgressPolicy_HttpsSchema = /*@__PURE__*/
-  messageDesc(file_runner, 22, 1);
+  messageDesc(file_runner, 23, 1);
 
 /**
  * Describes the message cube.runner.v4.EgressPolicy.Http.
  * Use `create(EgressPolicy_HttpSchema)` to create a new message.
  */
 export const EgressPolicy_HttpSchema = /*@__PURE__*/
-  messageDesc(file_runner, 22, 2);
+  messageDesc(file_runner, 23, 2);
 
 /**
  * Describes the message cube.runner.v4.EgressPolicy.Decide.
  * Use `create(EgressPolicy_DecideSchema)` to create a new message.
  */
 export const EgressPolicy_DecideSchema = /*@__PURE__*/
-  messageDesc(file_runner, 22, 3);
+  messageDesc(file_runner, 23, 3);
 
 /**
  * Describes the message cube.runner.v4.EgressPolicy.Credential.
  * Use `create(EgressPolicy_CredentialSchema)` to create a new message.
  */
 export const EgressPolicy_CredentialSchema = /*@__PURE__*/
-  messageDesc(file_runner, 22, 4);
+  messageDesc(file_runner, 23, 4);
 
 /**
  * Describes the enum cube.runner.v4.EgressPolicy.Default.
  */
 export const EgressPolicy_DefaultSchema = /*@__PURE__*/
-  enumDesc(file_runner, 22, 0);
+  enumDesc(file_runner, 23, 0);
 
 /**
  * @generated from enum cube.runner.v4.EgressPolicy.Default
@@ -280,13 +316,13 @@ export const EgressPolicy_Default = /*@__PURE__*/
  * Use `create(TemplateSchema)` to create a new message.
  */
 export const TemplateSchema = /*@__PURE__*/
-  messageDesc(file_runner, 23);
+  messageDesc(file_runner, 24);
 
 /**
  * Describes the enum cube.runner.v4.Template.State.
  */
 export const Template_StateSchema = /*@__PURE__*/
-  enumDesc(file_runner, 23, 0);
+  enumDesc(file_runner, 24, 0);
 
 /**
  * @generated from enum cube.runner.v4.Template.State
@@ -299,97 +335,97 @@ export const Template_State = /*@__PURE__*/
  * Use `create(CallSchema)` to create a new message.
  */
 export const CallSchema = /*@__PURE__*/
-  messageDesc(file_runner, 24);
+  messageDesc(file_runner, 25);
 
 /**
  * Describes the message cube.runner.v4.MachineRef.
  * Use `create(MachineRefSchema)` to create a new message.
  */
 export const MachineRefSchema = /*@__PURE__*/
-  messageDesc(file_runner, 25);
+  messageDesc(file_runner, 26);
 
 /**
  * Describes the message cube.runner.v4.MachineCreate.
  * Use `create(MachineCreateSchema)` to create a new message.
  */
 export const MachineCreateSchema = /*@__PURE__*/
-  messageDesc(file_runner, 26);
+  messageDesc(file_runner, 27);
 
 /**
  * Describes the message cube.runner.v4.MachineStart.
  * Use `create(MachineStartSchema)` to create a new message.
  */
 export const MachineStartSchema = /*@__PURE__*/
-  messageDesc(file_runner, 27);
+  messageDesc(file_runner, 28);
 
 /**
  * Describes the message cube.runner.v4.MachineDelete.
  * Use `create(MachineDeleteSchema)` to create a new message.
  */
 export const MachineDeleteSchema = /*@__PURE__*/
-  messageDesc(file_runner, 28);
+  messageDesc(file_runner, 29);
 
 /**
  * Describes the message cube.runner.v4.TemplatePublish.
  * Use `create(TemplatePublishSchema)` to create a new message.
  */
 export const TemplatePublishSchema = /*@__PURE__*/
-  messageDesc(file_runner, 29);
+  messageDesc(file_runner, 30);
 
 /**
  * Describes the message cube.runner.v4.TemplateRef.
  * Use `create(TemplateRefSchema)` to create a new message.
  */
 export const TemplateRefSchema = /*@__PURE__*/
-  messageDesc(file_runner, 30);
+  messageDesc(file_runner, 31);
 
 /**
  * Describes the message cube.runner.v4.CallResult.
  * Use `create(CallResultSchema)` to create a new message.
  */
 export const CallResultSchema = /*@__PURE__*/
-  messageDesc(file_runner, 31);
+  messageDesc(file_runner, 32);
 
 /**
  * Describes the message cube.runner.v4.Machines.
  * Use `create(MachinesSchema)` to create a new message.
  */
 export const MachinesSchema = /*@__PURE__*/
-  messageDesc(file_runner, 32);
+  messageDesc(file_runner, 33);
 
 /**
  * Describes the message cube.runner.v4.Templates.
  * Use `create(TemplatesSchema)` to create a new message.
  */
 export const TemplatesSchema = /*@__PURE__*/
-  messageDesc(file_runner, 33);
+  messageDesc(file_runner, 34);
 
 /**
  * Describes the message cube.runner.v4.Diagnosis.
  * Use `create(DiagnosisSchema)` to create a new message.
  */
 export const DiagnosisSchema = /*@__PURE__*/
-  messageDesc(file_runner, 34);
+  messageDesc(file_runner, 35);
 
 /**
  * Describes the message cube.runner.v4.WatchRequest.
  * Use `create(WatchRequestSchema)` to create a new message.
  */
 export const WatchRequestSchema = /*@__PURE__*/
-  messageDesc(file_runner, 35);
+  messageDesc(file_runner, 36);
 
 /**
  * Describes the message cube.runner.v4.WatchEvent.
  * Use `create(WatchEventSchema)` to create a new message.
  */
 export const WatchEventSchema = /*@__PURE__*/
-  messageDesc(file_runner, 36);
+  messageDesc(file_runner, 37);
 
 /**
  * Describes the enum cube.runner.v4.WatchEvent.Type.
  */
 export const WatchEvent_TypeSchema = /*@__PURE__*/
-  enumDesc(file_runner, 36, 0);
+  enumDesc(file_runner, 37, 0);
 
 /**
  * @generated from enum cube.runner.v4.WatchEvent.Type
@@ -402,49 +438,91 @@ export const WatchEvent_Type = /*@__PURE__*/
  * Use `create(GuestHeaderSchema)` to create a new message.
  */
 export const GuestHeaderSchema = /*@__PURE__*/
-  messageDesc(file_runner, 37);
+  messageDesc(file_runner, 38);
 
 /**
  * Describes the message cube.runner.v4.DialHeader.
  * Use `create(DialHeaderSchema)` to create a new message.
  */
 export const DialHeaderSchema = /*@__PURE__*/
-  messageDesc(file_runner, 38);
+  messageDesc(file_runner, 39);
 
 /**
  * Describes the message cube.runner.v4.CredentialHeader.
  * Use `create(CredentialHeaderSchema)` to create a new message.
  */
 export const CredentialHeaderSchema = /*@__PURE__*/
-  messageDesc(file_runner, 39);
+  messageDesc(file_runner, 40);
 
 /**
  * Describes the message cube.runner.v4.Header.
  * Use `create(HeaderSchema)` to create a new message.
  */
 export const HeaderSchema = /*@__PURE__*/
-  messageDesc(file_runner, 40);
+  messageDesc(file_runner, 41);
 
 /**
  * Describes the message cube.runner.v4.ReportHeader.
  * Use `create(ReportHeaderSchema)` to create a new message.
  */
 export const ReportHeaderSchema = /*@__PURE__*/
-  messageDesc(file_runner, 41);
+  messageDesc(file_runner, 42);
 
 /**
  * Describes the message cube.runner.v4.EgressReport.
  * Use `create(EgressReportSchema)` to create a new message.
  */
 export const EgressReportSchema = /*@__PURE__*/
-  messageDesc(file_runner, 42);
+  messageDesc(file_runner, 43);
 
 /**
  * Describes the message cube.runner.v4.DaemonFrame.
  * Use `create(DaemonFrameSchema)` to create a new message.
  */
 export const DaemonFrameSchema = /*@__PURE__*/
-  messageDesc(file_runner, 43);
+  messageDesc(file_runner, 44);
+
+/**
+ * Describes the message cube.runner.v4.DaemonRequest.
+ * Use `create(DaemonRequestSchema)` to create a new message.
+ */
+export const DaemonRequestSchema = /*@__PURE__*/
+  messageDesc(file_runner, 45);
+
+/**
+ * Describes the message cube.runner.v4.GuestRequest.
+ * Use `create(GuestRequestSchema)` to create a new message.
+ */
+export const GuestRequestSchema = /*@__PURE__*/
+  messageDesc(file_runner, 46);
+
+/**
+ * Describes the message cube.runner.v4.DaemonAnswer.
+ * Use `create(DaemonAnswerSchema)` to create a new message.
+ */
+export const DaemonAnswerSchema = /*@__PURE__*/
+  messageDesc(file_runner, 47);
+
+/**
+ * Describes the message cube.runner.v4.MachineSetup.
+ * Use `create(MachineSetupSchema)` to create a new message.
+ */
+export const MachineSetupSchema = /*@__PURE__*/
+  messageDesc(file_runner, 48);
+
+/**
+ * Describes the message cube.runner.v4.Layer.
+ * Use `create(LayerSchema)` to create a new message.
+ */
+export const LayerSchema = /*@__PURE__*/
+  messageDesc(file_runner, 49);
+
+/**
+ * Describes the message cube.runner.v4.ImageConfig.
+ * Use `create(ImageConfigSchema)` to create a new message.
+ */
+export const ImageConfigSchema = /*@__PURE__*/
+  messageDesc(file_runner, 50);
 
 /**
  * Describes the enum cube.runner.v4.Code.

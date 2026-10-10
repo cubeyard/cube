@@ -89,6 +89,7 @@ try {
   assert.equal(guestInfo.os, process.platform === "darwin" ? "macos" : "linux");
   assert.equal(guestInfo.bootId, ready.status!.bootId, "the runner's run is the host machine's boot");
   assert.ok(guestInfo.capabilities.includes("fs.absolute"));
+  assert.equal(guestInfo.limits?.maxReadBytes, 524288, "the helper's limits reach status.guest");
   // the same create again changes nothing; another owner may not take the id
   assert.equal((await session.machine({ case: "machineCreate", value: { ref, fence: { epoch: BigInt(epoch) } } })).ref?.id, ref.id);
   await assert.rejects(session.call({ case: "machineCreate", value: { ref: { owner: "thread-2", id: ref.id }, fence: { epoch: BigInt(epoch) } } }),
@@ -140,6 +141,7 @@ try {
   const again = await session.until(ref, machine => machine.status?.guest?.ready === true && machine.status.bootId !== firstBoot, 30000);
   assert.equal(again.fenceEpoch, BigInt(epoch), "the fence survives a restart");
   assert.equal(again.status?.guest?.bootId, again.status?.bootId);
+  assert.equal(again.status?.guest?.epoch, BigInt(lease.epoch), "status.guest has the newest lease epoch the guest saw");
 
   // delete keeps the directory: the machine is retained
   const deleted = await session.machine({ case: "machineDelete", value: { ref, fence: { epoch: BigInt(epoch) }, retain: false } });

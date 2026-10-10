@@ -16,7 +16,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { create, fromJson, toJson, type DescMessage, type DescField, type JsonValue } from "@bufbuild/protobuf";
-import { file_runner } from "../src/gen/runner_pb.js";
+import { DaemonFrameSchema, file_runner, GuestInfoSchema, GuestLimitsSchema } from "../src/gen/runner_pb.js";
+import { WORKSPACE_LIMIT_KEYS } from "../src/workspace.ts";
 
 const FIXTURES = path.join(import.meta.dirname, "../../runner-protocol/proto/fixtures");
 
@@ -125,4 +126,23 @@ const open = JSON.parse(fs.readFileSync(path.join(FIXTURES, "Open.guest.json"), 
 assert.deepEqual(Object.keys(open), ["guest"], "a oneof writes only its case");
 assert.equal(open.guest.op, "op-3");
 assert.ok(committed.length >= 70, `${committed.length} documents`);
+
+// A guest's limits in `status.guest` read as the `WorkspaceLimits` cubed
+// takes from the helper's own hello: the same names, in proto3 JSON.
+assert.deepEqual(GuestLimitsSchema.fields.map(field => field.jsonName), [...WORKSPACE_LIMIT_KEYS]);
+// The line cube-guest.py writes in host mode after an `exec` with lease epoch 7.
+const helperHello = JSON.parse(`{"version":"1","ready":true,"capabilities":["exec.start","fs.read"],"limits":{"maxFrameBytes":1048576,
+  "requestTimeoutMs":30000,"maxCommandBytes":8192,"maxPathBytes":4096,"maxExecTimeoutMs":1800000,"maxOutputBytes":262144,"outputPageBytes":65536,
+  "maxReadBytes":524288,"maxWriteBytes":524288},"epoch":7,"os":"linux","kernel":"6.12.111","hooks":{},"bootId":"boot-1"}`) as JsonValue;
+const guest = fromJson(GuestInfoSchema, helperHello);
+assert.equal(guest.epoch, 7n);
+assert.equal(guest.limits?.maxReadBytes, 524288);
+assert.equal((toJson(GuestInfoSchema, guest) as Record<string, unknown>).epoch, "7", "int64 is a JSON string in status.guest");
+// A keel machine's setup on the guest channel, as the runner writes it.
+const setup = fromJson(DaemonFrameSchema, { ch: 1, req: { machineSetup: { documents: { hostname: "Y3ViZS0wMTIzNDU2Nwo=" },
+  layers: [{ partition: 2, templateId: "tpl" }, { partition: 1, diffId: "sha256:ab" }] } } });
+assert.ok(setup.t.case === "req" && setup.t.value.op.case === "machineSetup");
+const { documents, layers } = setup.t.value.op.value;
+assert.equal(new TextDecoder().decode(documents.hostname), "cube-01234567\n");
+assert.deepEqual(layers.map(layer => [layer.partition, layer.source.case, layer.source.value]), [[2, "templateId", "tpl"], [1, "diffId", "sha256:ab"]]);
 console.log(`runner proto: ${committed.length} documents (${expected.size} derived), ${fields} top-level fields, all round-trip in TypeScript`);

@@ -1,4 +1,9 @@
 {
   "ch": 2,
-  "req": "cmVxLTQ="
+  "req": {
+    "guest": {
+      "op": "op-1",
+      "data": "ZGF0YS0y"
+    }
+  }
 }
