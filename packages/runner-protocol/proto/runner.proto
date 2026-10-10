@@ -13,6 +13,36 @@
 //   dial    one `StreamAnswer` frame, then raw TCP both ways.
 // A runner never interprets the guest bytes (`OPERATIONS` in cube-guest).
 //
+// The guest channel (`berth vm` <-> keel's cube-agent): one virtio-serial
+// port named `cube.0` per machine, a Unix socket on the runner's side. It
+// carries `DaemonFrame`s framed as on the streams above (u32 big-endian
+// length, 1 to `Limits.max_frame_bytes` bytes, then proto3 JSON). A frame
+// over the limit, a zero length, JSON that does not parse or a frame that
+// breaks the channel rules below ends the connection; the runner treats the
+// guest's side as hostile.
+//   ch 0    the connection: the agent sends `hello` once it is connected
+//           and `status` whenever its `GuestInfo` changes, each at most
+//           MAX_GUEST_INFO_BYTES (64 KiB) so it fits a watch event.
+//   ch > 0  one operation: the runner opens it with one `req` and never
+//           reuses the number on this connection; the agent closes it with
+//           one `ans`. `abort` from the runner stops the wait, not the
+//           operation (as a closed stream does today); an `ans` that comes
+//           after it is dropped. Each `req` and `ans` is one frame, so the
+//           agent's limits must keep a guest request or answer under
+//           `max_frame_bytes` once its bytes are base64 (512 KiB reads and
+//           writes do).
+// A disconnect (agent restart, socket closed, machine restored from a
+// snapshot) closes every channel. The agent sends `hello` again, the runner
+// sends `machine_setup` again, and operations that were running are found
+// by their keys, as `OPERATIONS` already requires.
+//
+// The QEMU a VM runner needs (checked when it starts on the binary it is
+// given by path, never one it searches for; refused below it):
+// `virtio-rtc-pci`, `virtio-serial-pci` with `virtserialport`,
+// `virtio-balloon-pci` with `free-page-reporting`, versioned machine types,
+// `-kernel` boot on arm64 and x86-64, `migrate` to `file:` with the
+// `mapped-ram` capability. One set of QEMU arguments on Linux and macOS.
+//
 // This file is the only schema. Rust types are generated at build time
 // (packages/runner-protocol/build.rs); TypeScript types are generated into
 // packages/server/src/gen by `pnpm proto:generate` and checked by
@@ -148,6 +178,8 @@ message Platform {
   string arch = 2;
   // kvm | hvf | none
   string accelerator = 3;
+  // VM runners: the version and path of the QEMU binary it runs, which it
+  // is given by path (`11.1.2 /opt/qemu/bin/qemu-system-x86_64`).
   string qemu_version = 4;
   string base_image_sha256 = 5;
   string base_image_name = 6;
@@ -216,7 +248,20 @@ message Size {
   uint32 disk_gib = 3;
 }
 
-// Boot data for the machine; its content is the image's business.
+// Boot data for the machine; its content is the image's business. A keel
+// machine gets the documents over its guest channel (`MachineSetup`), never
+// on the kernel command line or a disk. Their names replace today's seed:
+//   hostname          the machine's host name, one line.
+//   env               `NAME=value` lines for every command's environment:
+//                     the secret placeholders (`GH_TOKEN`,
+//                     `CUBE_SECRET_<NAME>`). keel adds its own fixed lines
+//                     (the CA variables, `GIT_TERMINAL_PROMPT=0`, ...).
+//   hooks/pre-setup   the project's external hooks, as executable scripts;
+//   hooks/pre-resume  a missing document means no hook.
+// The agent refuses a setup with a name it does not know. Everything else
+// the seed carries today is keel's own (the agent account, sudoers, git's
+// credential helper) or the runner's (its CA, `MachineSetup.ca_pem`), and
+// the image brings its packages. `berth host` ignores `Boot`.
 message Boot {
   map<string, bytes> documents = 1;
   string mac = 2;
@@ -249,6 +294,15 @@ message MachineStatus {
 // The same fields as the guest helper's `hello` answer.
 message GuestInfo {
   bool connected = 1;
+  // Whether the guest takes `OPERATIONS`. cube-guest: its own check. A
+  // keel agent says true once, for the current boot and connection, the
+  // newest `MachineSetup` is applied (layers mounted, writable disk checked
+  // and mounted, overlay assembled, `/var/lib/cube` and `/etc/cube` bound,
+  // generated files and the runner's CA in place), its journal is
+  // recovered, and the workload root has bash, sudo, flock, git, gh, curl
+  // and a CA bundle. Until then it refuses guest operations other than
+  // `hello` (UNAVAILABLE/not_ready) and `reason` says what is missing.
+  // Hooks and services are not part of it.
   bool ready = 2;
   // sha256 of the helper.
   string build = 3;
@@ -261,6 +315,25 @@ message GuestInfo {
   map<string, string> hooks = 9;
   string template_seal = 10;
   google.protobuf.Timestamp since = 11;
+  GuestLimits limits = 12;
+  // The newest workspace lease epoch the guest's journal has seen (the
+  // `epoch` of `OPERATIONS`), not the machine's fence epoch.
+  int64 epoch = 13;
+  // When `ready` is false: why, for people.
+  string reason = 14;
+}
+
+// What one guest operation may carry; cubed's `WorkspaceLimits`.
+message GuestLimits {
+  uint32 max_frame_bytes = 1;
+  uint32 request_timeout_ms = 2;
+  uint32 max_command_bytes = 3;
+  uint32 max_path_bytes = 4;
+  uint32 max_exec_timeout_ms = 5;
+  uint32 max_output_bytes = 6;
+  uint32 output_page_bytes = 7;
+  uint32 max_read_bytes = 8;
+  uint32 max_write_bytes = 9;
 }
 
 // ---------- egress (VM runners) ----------
@@ -458,15 +531,97 @@ message EgressReport {
   google.protobuf.Timestamp at = 5;
 }
 
-// ---------- guest daemon <-> runner (the same schema, JSON on the port) ----------
+// ---------- guest daemon <-> runner (the guest channel, see the header) ----------
 
 message DaemonFrame {
   uint32 ch = 1;
   oneof t {
     GuestInfo hello = 2;
     GuestInfo status = 3;
-    bytes req = 4;
-    bytes ans = 5;
+    DaemonRequest req = 4;
+    DaemonAnswer ans = 5;
     Empty abort = 6;
   }
+}
+
+message DaemonRequest {
+  oneof op {
+    // A `guest` stream's operation, forwarded as cubed sent it.
+    GuestRequest guest = 1;
+    // The runner's own, sent after every `hello`. Idempotent: the agent
+    // applies what changed. Layers cannot change under a running workload
+    // (FAILED_PRECONDITION/layers_changed; the runner boots it cold).
+    MachineSetup machine_setup = 2;
+    // Before a save: the agent finishes or parks its writes, syncs, drops
+    // the page cache and lets free page reporting return memory, then
+    // answers. It holds new operations until the connection closes (the
+    // machine was saved) or `snapshot_done` comes (the save failed, or the
+    // machine keeps running).
+    Empty snapshot_prepare = 3;
+    Empty snapshot_done = 4;
+  }
+}
+
+message GuestRequest {
+  // `GuestHeader.op`: lowercase ASCII letters.
+  string op = 1;
+  // The operation's request bytes (one JSON line and a raw body).
+  bytes data = 2;
+}
+
+message DaemonAnswer {
+  oneof result {
+    // A guest operation's answer bytes as the agent wrote them; its own
+    // errors are inside, as `OPERATIONS` writes them.
+    bytes guest = 1;
+    // The agent could not take the request (not ready, prepared for a
+    // snapshot, a setup it refuses). The runner answers a `guest` stream
+    // with it in `StreamAnswer`.
+    Error error = 2;
+    // A runner operation is done.
+    Empty done = 3;
+  }
+}
+
+// What the agent needs to assemble the machine; nothing in it is secret
+// (placeholders are not secrets).
+message MachineSetup {
+  Ref ref = 1;
+  // `Boot.documents` from `MachineStart`, unchanged.
+  map<string, bytes> documents = 2;
+  // At least 32 fresh bytes per send, mixed into the guest's random pool:
+  // a machine restored from a snapshot must not repeat another's numbers.
+  bytes entropy = 3;
+  // The workload root's lower layers, topmost first (overlayfs `lowerdir`
+  // order). Disks are fixed by keel's QEMU arguments: vda the base, vdb the
+  // layer disk, vdc the writable disk.
+  repeated Layer layers = 4;
+  ImageConfig image = 5;
+  // The runner's egress CA (`Runner.ca_pem`), added to the image's bundle.
+  string ca_pem = 6;
+  string runner_version = 7;
+  uint32 protocol = 8;
+  // What the runner uses of the agent, so either side can tell an older or
+  // newer other side.
+  repeated string capabilities = 9;
+}
+
+message Layer {
+  // The GPT partition on the layer disk (vdb1 is 1), EROFS.
+  uint32 partition = 1;
+  oneof source {
+    // An OCI layer's uncompressed digest, `sha256:<hex>`.
+    string diff_id = 2;
+    // A template published on this runner.
+    string template_id = 3;
+  }
+}
+
+// The parts of the image's OCI configuration keel uses. `User` and
+// `WorkingDir` are not: commands run as `agent` in `/workspace`.
+message ImageConfig {
+  // The manifest's digest, `sha256:<hex>`.
+  string digest = 1;
+  // `NAME=value`, applied before cube's environment.
+  repeated string env = 2;
 }

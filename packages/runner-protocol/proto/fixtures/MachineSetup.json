@@ -1,0 +1,28 @@
+{
+  "ref": {
+    "owner": "owner-1",
+    "id": "id-2"
+  },
+  "documents": {
+    "documents-key": "ZG9jdW1lbnRzLTI="
+  },
+  "entropy": "ZW50cm9weS0z",
+  "layers": [
+    {
+      "partition": 2,
+      "diffId": "diff_id-2"
+    }
+  ],
+  "image": {
+    "digest": "digest-1",
+    "env": [
+      "env-2"
+    ]
+  },
+  "caPem": "ca_pem-6",
+  "runnerVersion": "runner_version-7",
+  "protocol": 9,
+  "capabilities": [
+    "capabilities-9"
+  ]
+}

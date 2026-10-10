@@ -58,7 +58,7 @@ impl<'de> Deserialize<'de> for Timestamp {
     }
 }
 
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const ALPN: &[u8] = b"cubeyard/runner/4";
@@ -92,11 +92,49 @@ pub async fn write_frame<T: Serialize>(
 pub async fn read_frame<T: serde::de::DeserializeOwned>(
     recv: &mut (impl AsyncRead + Unpin),
 ) -> Result<T> {
+    Ok(serde_json::from_slice(&read_payload(recv).await?)?)
+}
+
+async fn read_payload(recv: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>> {
     let size = recv.read_u32().await? as usize;
     ensure!(size > 0 && size <= MAX_FRAME_BYTES, "invalid frame length");
     let mut payload = vec![0; size];
     recv.read_exact(&mut payload).await?;
-    Ok(serde_json::from_slice(&payload)?)
+    Ok(payload)
+}
+
+/// A guest's `hello` or `status` at most: the runner passes it on in a
+/// watch event.
+pub const MAX_GUEST_INFO_BYTES: usize = 64 * 1024;
+
+/// One `DaemonFrame` from the guest channel, held to the channel's rules
+/// (runner.proto's header): `hello` and `status` on channel 0 and at most
+/// MAX_GUEST_INFO_BYTES, everything else on a channel above 0, and a
+/// request or answer that says what it is. An error ends the connection.
+pub async fn read_daemon_frame(recv: &mut (impl AsyncRead + Unpin)) -> Result<proto::DaemonFrame> {
+    use proto::daemon_frame::T;
+    let payload = read_payload(recv).await?;
+    let frame: proto::DaemonFrame = serde_json::from_slice(&payload)?;
+    match &frame.t {
+        None => bail!("a frame of no known kind"),
+        Some(T::Hello(_) | T::Status(_)) => {
+            ensure!(frame.ch == 0, "hello and status belong on channel 0");
+            ensure!(
+                payload.len() <= MAX_GUEST_INFO_BYTES,
+                "the guest's status is too large"
+            );
+        }
+        Some(T::Req(request)) => {
+            ensure!(frame.ch > 0, "an operation needs a channel above 0");
+            ensure!(request.op.is_some(), "a request of no known kind");
+        }
+        Some(T::Ans(answer)) => {
+            ensure!(frame.ch > 0, "an operation needs a channel above 0");
+            ensure!(answer.result.is_some(), "an answer of no known kind");
+        }
+        Some(T::Abort(_)) => ensure!(frame.ch > 0, "an operation needs a channel above 0"),
+    }
+    Ok(frame)
 }
 
 #[cfg(test)]
@@ -126,5 +164,148 @@ mod tests {
                 .is_err(),
             "an empty frame is refused"
         );
+    }
+
+    fn framed(json: &[u8]) -> Vec<u8> {
+        let mut bytes = (json.len() as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(json);
+        bytes
+    }
+
+    #[tokio::test]
+    async fn the_guest_channel_frames_as_the_streams_do() {
+        use proto::{daemon_frame::T, daemon_request::Op};
+        let frame = proto::DaemonFrame {
+            ch: 3,
+            t: Some(T::Req(proto::DaemonRequest {
+                op: Some(Op::Guest(proto::GuestRequest {
+                    op: "hello".into(),
+                    data: b"{}\n".to_vec(),
+                })),
+            })),
+        };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &frame).await.unwrap();
+        let json = br#"{"ch":3,"req":{"guest":{"op":"hello","data":"e30K"}}}"#;
+        assert_eq!(bytes, framed(json));
+        assert_eq!(&bytes[..4], &[0, 0, 0, 53]);
+        assert_eq!(read_daemon_frame(&mut &bytes[..]).await.unwrap(), frame);
+
+        let setup = br#"{"ch":1,"req":{"machineSetup":{"ref":{"owner":"t1","id":"0123456789abcdef"},"documents":{"hostname":"Y3ViZS0wMTIzNDU2Nwo=","env":"R0hfVE9LRU49Y3ViZV9waF9naXRodWJfeAo="},"entropy":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=","layers":[{"partition":2,"templateId":"tpl"},{"partition":1,"diffId":"sha256:ab"}],"protocol":4}}}"#;
+        let read = read_daemon_frame(&mut &framed(setup)[..]).await.unwrap();
+        let Some(T::Req(proto::DaemonRequest {
+            op: Some(Op::MachineSetup(setup)),
+        })) = read.t
+        else {
+            panic!("expected a machine setup, got {read:?}");
+        };
+        assert_eq!(setup.documents["hostname"], b"cube-01234567\n");
+        assert_eq!(setup.documents["env"], b"GH_TOKEN=cube_ph_github_x\n");
+        assert_eq!(setup.entropy, (0u8..32).collect::<Vec<_>>());
+        let sources: Vec<_> = setup
+            .layers
+            .iter()
+            .map(|layer| (layer.partition, layer.source.clone()))
+            .collect();
+        assert_eq!(
+            sources,
+            [
+                (2, Some(proto::layer::Source::TemplateId("tpl".into()))),
+                (1, Some(proto::layer::Source::DiffId("sha256:ab".into()))),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_guest_channel_refuses_what_breaks_its_rules() {
+        let big_hello = format!(
+            r#"{{"ch":0,"hello":{{"reason":"{}"}}}}"#,
+            "x".repeat(MAX_GUEST_INFO_BYTES)
+        );
+        let cases: Vec<(Vec<u8>, &str)> = vec![
+            (vec![0, 0, 0, 0], "invalid frame length"),
+            (
+                (MAX_FRAME_BYTES as u32 + 1).to_be_bytes().to_vec(),
+                "invalid frame length",
+            ),
+            (vec![0, 0, 0, 10, b'{', b'}'], "early eof"),
+            (framed(b"not json"), "expected ident"),
+            (
+                framed(br#"{"ch":1,"shout":{}}"#),
+                "a frame of no known kind",
+            ),
+            (
+                framed(br#"{"ch":1,"hello":{"ready":true}}"#),
+                "hello and status belong on channel 0",
+            ),
+            (
+                framed(br#"{"ch":2,"status":{}}"#),
+                "hello and status belong on channel 0",
+            ),
+            (
+                framed(br#"{"ch":0,"req":{"snapshotDone":{}}}"#),
+                "an operation needs a channel above 0",
+            ),
+            (
+                framed(br#"{"ch":0,"abort":{}}"#),
+                "an operation needs a channel above 0",
+            ),
+            (
+                framed(br#"{"ch":4,"req":{}}"#),
+                "a request of no known kind",
+            ),
+            (
+                framed(br#"{"ch":4,"ans":{"later":{}}}"#),
+                "an answer of no known kind",
+            ),
+            (
+                framed(big_hello.as_bytes()),
+                "the guest's status is too large",
+            ),
+        ];
+        for (bytes, why) in cases {
+            let error = read_daemon_frame(&mut &bytes[..]).await.unwrap_err();
+            assert!(error.to_string().contains(why), "{why}: got {error}");
+        }
+        let hello = framed(br#"{"ch":0,"hello":{"ready":false,"reason":"gh is missing"}}"#);
+        let read = read_daemon_frame(&mut &hello[..]).await.unwrap();
+        let Some(proto::daemon_frame::T::Hello(info)) = read.t else {
+            panic!("{read:?}")
+        };
+        assert_eq!((info.ready, info.reason.as_str()), (false, "gh is missing"));
+    }
+
+    #[tokio::test]
+    async fn a_largest_guest_write_and_read_fit_one_frame() {
+        use proto::{daemon_answer::Result as Answer, daemon_frame::T, daemon_request::Op};
+        // cube-guest's limits: 512 KiB reads and writes, 4 KiB paths.
+        let header = format!(
+            r#"{{"key":"{}","path":"{}","epoch":1}}"#,
+            "k".repeat(128),
+            "p".repeat(4096)
+        );
+        let mut data = format!("{header}\n").into_bytes();
+        data.extend(std::iter::repeat_n(0xff, 512 * 1024));
+        let request = proto::DaemonFrame {
+            ch: u32::MAX,
+            t: Some(T::Req(proto::DaemonRequest {
+                op: Some(Op::Guest(proto::GuestRequest {
+                    op: "write".into(),
+                    data: data.clone(),
+                })),
+            })),
+        };
+        let answer = proto::DaemonFrame {
+            ch: u32::MAX,
+            t: Some(T::Ans(proto::DaemonAnswer {
+                result: Some(Answer::Guest(data)),
+            })),
+        };
+        for frame in [request, answer] {
+            let mut bytes = Vec::new();
+            write_frame(&mut bytes, &frame).await.unwrap();
+            assert!(bytes.len() < 800 * 1024, "{} bytes", bytes.len());
+            assert_eq!(read_daemon_frame(&mut &bytes[..]).await.unwrap(), frame);
+        }
     }
 }
