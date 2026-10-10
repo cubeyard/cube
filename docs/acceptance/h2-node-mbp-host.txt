@@ -1,0 +1,6 @@
+H-2 acceptance probe (disposable branch, not for merge).
+runner: node-mbp-host (berth host, protocol 4)
+hostname: Didriks-MBP14
+platform: Darwin arm64, macOS 26.3
+thread: d85452b7-057b-48fc-9483-06169428922d (dir dbd2acd78c6f6815)
+utc: 2026-10-10T15:16:18Z
