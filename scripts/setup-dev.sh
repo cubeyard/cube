@@ -20,7 +20,8 @@ case "$(uname -s)/$(uname -m)" in
 esac
 
 log 'native build dependencies'
-packages=(build-essential pkg-config libssl-dev ca-certificates curl xz-utils)
+# erofs-utils and qemu-utils: keel-layers' tests convert layers and read the layer disk.
+packages=(build-essential pkg-config libssl-dev ca-certificates curl xz-utils erofs-utils qemu-utils)
 missing=()
 for package in "${packages[@]}"; do
   if [[ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" != 'install ok installed' ]]; then
