@@ -16,6 +16,8 @@ export default defineConfig([
     ".agents/",
     // Laid by Claude Code when it loads the mod from a checkout.
     "packages/claude-mod/.claude-plugin/types/",
+    // Generated from packages/node-transport/proto/runner.proto (pnpm proto:check).
+    "packages/server/src/gen/",
   ]),
   js.configs.recommended,
   tseslint.configs.recommended,

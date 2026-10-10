@@ -1,0 +1,13 @@
+{
+  "hosts": [
+    "hosts-1"
+  ],
+  "ports": [
+    3
+  ],
+  "https": {
+    "credential": {
+      "name": "name-1"
+    }
+  }
+}

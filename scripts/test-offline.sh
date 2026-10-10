@@ -18,6 +18,7 @@ OFFLINE_TESTS=(
   packages/server/test/models-test.ts
   packages/server/test/model-auth-test.ts
   packages/server/test/iroh-node-test.ts
+  packages/server/test/runner-proto-test.ts
   packages/server/test/runner-enroll-test.ts
   packages/server/test/guest-helper-test.ts
   packages/server/test/workspace-test.ts

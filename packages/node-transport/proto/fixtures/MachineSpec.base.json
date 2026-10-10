@@ -1,0 +1,14 @@
+{
+  "base": true,
+  "size": {
+    "vcpus": 2,
+    "memoryMib": 3,
+    "diskGib": 4
+  },
+  "boot": {
+    "documents": {
+      "documents-key": "ZG9jdW1lbnRzLTE="
+    },
+    "mac": "mac-2"
+  }
+}

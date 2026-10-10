@@ -1,0 +1,10 @@
+{
+  "ref": {
+    "owner": "owner-1",
+    "id": "id-2"
+  },
+  "host": "host-2",
+  "reason": "reason-3",
+  "droppedBefore": "1004",
+  "at": "2026-10-10T00:00:00Z"
+}

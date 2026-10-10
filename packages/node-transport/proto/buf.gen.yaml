@@ -1,0 +1,12 @@
+# TypeScript types for runner.proto (`pnpm proto:generate`). JavaScript
+# plus declarations: Node runs TypeScript by stripping types, which
+# protoc-gen-es's TypeScript enums would not survive.
+version: v2
+inputs:
+  - directory: .
+plugins:
+  - local: protoc-gen-es
+    out: ../../server/src/gen
+    opt:
+      - target=js+dts
+      - import_extension=js

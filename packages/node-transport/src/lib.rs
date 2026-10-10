@@ -4,6 +4,7 @@
 pub mod diagnose;
 pub mod journal;
 pub mod l2;
+pub mod p4;
 pub mod pump;
 pub mod release;
 pub mod runner;

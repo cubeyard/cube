@@ -1,0 +1,44 @@
+{
+  "machineStart": {
+    "ref": {
+      "owner": "owner-1",
+      "id": "id-2"
+    },
+    "fence": {
+      "epoch": "1001"
+    },
+    "size": {
+      "vcpus": 2,
+      "memoryMib": 3,
+      "diskGib": 4
+    },
+    "boot": {
+      "documents": {
+        "documents-key": "ZG9jdW1lbnRzLTE="
+      },
+      "mac": "mac-2"
+    },
+    "policy": {
+      "default": "ALLOW_PUBLIC_HTTP",
+      "denyHosts": [
+        "deny_hosts-2"
+      ],
+      "rules": [
+        {
+          "hosts": [
+            "hosts-1"
+          ],
+          "ports": [
+            3
+          ],
+          "https": {
+            "credential": {
+              "name": "name-1"
+            }
+          }
+        }
+      ],
+      "lease": "2.500s"
+    }
+  }
+}

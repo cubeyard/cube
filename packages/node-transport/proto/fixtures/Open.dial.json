@@ -1,0 +1,12 @@
+{
+  "dial": {
+    "ref": {
+      "owner": "owner-1",
+      "id": "id-2"
+    },
+    "fence": {
+      "epoch": "1001"
+    },
+    "port": 4
+  }
+}

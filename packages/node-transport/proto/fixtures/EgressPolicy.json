@@ -1,0 +1,22 @@
+{
+  "default": "ALLOW_PUBLIC_HTTP",
+  "denyHosts": [
+    "deny_hosts-2"
+  ],
+  "rules": [
+    {
+      "hosts": [
+        "hosts-1"
+      ],
+      "ports": [
+        3
+      ],
+      "https": {
+        "credential": {
+          "name": "name-1"
+        }
+      }
+    }
+  ],
+  "lease": "2.500s"
+}

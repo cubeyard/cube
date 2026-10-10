@@ -1,0 +1,60 @@
+{
+  "type": "RESET",
+  "version": "1002",
+  "runner": {
+    "nodeId": "node_id-1",
+    "softwareVersion": "software_version-2",
+    "kind": "HOST",
+    "platform": {
+      "os": "os-1",
+      "arch": "arch-2",
+      "accelerator": "accelerator-3",
+      "qemuVersion": "qemu_version-4",
+      "baseImageSha256": "base_image_sha256-5",
+      "baseImageName": "base_image_name-6",
+      "hostName": "host_name-7"
+    },
+    "limits": {
+      "maxVcpus": 2,
+      "maxMemoryMib": 3,
+      "maxDiskGib": 4,
+      "maxMachines": 5,
+      "maxBootBytes": 6,
+      "maxFrameBytes": 7
+    },
+    "capacity": {
+      "machinesActive": 2,
+      "machinesRunning": 3,
+      "slotsFree": 4,
+      "hostCpus": 5,
+      "hostMemoryMib": "1005",
+      "hostMemoryFreeMib": "1006",
+      "diskFreeGib": "1007",
+      "retained": 9,
+      "retainedBytes": "1009"
+    },
+    "lifecycle": "RECOVERY_REQUIRED",
+    "network": {
+      "mode": "mode-1",
+      "rttToCubed": "2.500s",
+      "egress": true
+    },
+    "templates": [
+      {
+        "id": "id-1",
+        "key": "key-2",
+        "state": "REMOVING",
+        "createdAt": "2026-10-10T00:00:00Z"
+      }
+    ],
+    "labels": {
+      "labels-key": "labels-10"
+    },
+    "caPem": "ca_pem-11",
+    "meta": {
+      "version": "1001",
+      "updated": "2026-10-10T00:00:00Z"
+    },
+    "startedAt": "2026-10-10T00:00:00Z"
+  }
+}
