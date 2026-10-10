@@ -18,6 +18,10 @@ browser.
 - **cube-runner** hosts the thread machines: one QEMU VM per active thread,
   several per runner, on Linux with KVM or on an Apple Silicon Mac with
   Hypervisor.framework.
+- **keel** (in development, [packages/keel](packages/keel/README.md)) is what
+  runs inside a thread machine: a guest kernel, a small init and the guest
+  agent, booted directly with OCI images as read-only layers, in about 0.1 s
+  and built for suspend and resume. The runner does not use it yet.
 - Threads run `read`, `write`, `edit`, bounded `bash`, `codemode` (one
   model-written script calling those tools) and `cube service` (web servers
   with a URL for you). They write [artifacts](docs/artifacts.md): documents

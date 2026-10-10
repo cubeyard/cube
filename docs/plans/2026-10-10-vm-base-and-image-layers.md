@@ -1,7 +1,7 @@
-# VM base and image layers: one guest layout on Linux and macOS
+# keel: VM base and image layers, one guest layout on Linux and macOS
 
 Status 2026-10-10: research and plan. Work package 1 (kernel) is built and
-boot-tested on the maintainer's Mac (`packages/vm-base/`); nothing else is
+boot-tested on the maintainer's Mac (`packages/keel/`); nothing else is
 built and the runner does not use it yet. Written with the
 maintainer before implementation; it settles the direction and the order of
 work, not every interface. The work packages are sized so that cube threads
@@ -26,7 +26,8 @@ identity (ARCHITECTURE.md, "Templates"). That works, but:
 
 The target is the layout used by containerd's VM runtime
 [nerdbox](https://github.com/containerd/nerdbox): a small, versioned **VM
-base** (kernel plus an init that cube owns) and the guest's root filesystem
+base** (kernel plus an init that cube owns; cube calls it **keel**,
+`packages/keel`) and the guest's root filesystem
 assembled from **read-only EROFS layers** converted from OCI images, with
 overlayfs and one writable disk on top. The same layout, QEMU arguments and
 guest init run on both platforms; only the kernel and base image are built
@@ -36,7 +37,7 @@ per architecture.
 
 ```
 published by cube (versioned, digest-pinned, per architecture)
-  cube-vm-base: kernel + base.erofs (cube-init, cube-guest)
+  keel: kernel + base.erofs (cube-init, guest agent)
 
 per thread machine
   vda  base.erofs                      read-only, shared by every VM
@@ -126,7 +127,7 @@ GPT partitions, cgroups, user namespaces, seccomp. Notes:
 - nerdbox's x86-64 config has no ACPI; cube enables it for q35.
 - cube's additions are fragments merged before `make olddefconfig`; the build
   fails if a requested option does not survive or if modules are enabled
-  (`packages/vm-base/README.md`).
+  (`packages/keel/README.md`).
 - virtio-rtc appears in the guest as a PTP clock (`/dev/ptp0`, "Virtio PTP"),
   not as an RTC device; time sync after restore reads that clock (for example
   chrony's PHC reference clock).
@@ -144,9 +145,9 @@ On the maintainer's Mac (Apple Silicon, QEMU 11.1.1 from Homebrew, HVF),
 | `memory-backend-shm` | present |
 | vsock, vhost-user devices, virtio-pmem | absent in this build |
 | `migrate file:` and `-incoming file:` under HVF | completed and restored (paused) for an empty VM without a kernel; not yet with a running Linux guest |
-| cube's 7.2.9 kernel, direct boot with `-kernel`/`-initrd`, arm64 under HVF and TCG, x86-64 (q35) under TCG | QEMU start to power-off with the whole smoke: 0.08–0.15 s arm64/HVF, 0.8 s arm64/TCG, 1.6 s x86-64/TCG; virtio-rtc binds; LZ4 and zstd EROFS layers mount from virtio-blk; overlayfs of both with a tmpfs upper reads and writes correctly; clean power-off (`packages/vm-base/smoke/`) |
+| cube's 7.2.9 kernel, direct boot with `-kernel`/`-initrd`, arm64 under HVF and TCG, x86-64 (q35) under TCG | QEMU start to power-off with the whole smoke: 0.08–0.15 s arm64/HVF, 0.8 s arm64/TCG, 1.6 s x86-64/TCG; virtio-rtc binds; LZ4 and zstd EROFS layers mount from virtio-blk; overlayfs of both with a tmpfs upper reads and writes correctly; clean power-off (`packages/keel/smoke/`) |
 
-| Snapshot and resume of a running guest, arm64/HVF, 512 MiB (`packages/vm-base/snapshot/test.py`) | boot to first message 0.07 s; `stop` + `migrate file:` 0.24 s, file 36 MiB (mostly zero pages skipped; 53 MiB on disk with `mapped-ram`); new QEMU loads the state in 0.07–0.15 s; the guest continues with the next message on virtio-serial, EROFS reads keep working. Guest `CLOCK_MONOTONIC` and `CLOCK_REALTIME` do not advance while suspended (realtime is behind by the pause); the virtio-rtc PTP clock is within 1–7 ms of the host. Same result under TCG. |
+| Snapshot and resume of a running guest, arm64/HVF, 512 MiB (`packages/keel/snapshot/test.py`) | boot to first message 0.07 s; `stop` + `migrate file:` 0.24 s, file 36 MiB (mostly zero pages skipped; 53 MiB on disk with `mapped-ram`); new QEMU loads the state in 0.07–0.15 s; the guest continues with the next message on virtio-serial, EROFS reads keep working. Guest `CLOCK_MONOTONIC` and `CLOCK_REALTIME` do not advance while suspended (realtime is behind by the pause); the virtio-rtc PTP clock is within 1–7 ms of the host. Same result under TCG. |
 
 Not verified: anything on Linux/KVM (x86-64 was only booted under TCG on the
 Mac), the layer disk (GPT + VMDK) inside a guest, overlay of real OCI layers,
@@ -208,9 +209,9 @@ add its row to `repos/README.md`, and make `pnpm check:references` accept a
 reference without a consuming package (today every row has consumers).
 Thread. Done: subtree present, check passes.
 
-**1. Kernel build.** Built: `packages/vm-base/kernel/build.sh` (Linux 7.2.9,
+**1. Kernel build.** Built: `packages/keel/kernel/build.sh` (Linux 7.2.9,
 pinned source hash, digest-pinned Debian builder, about 2 minutes per
-architecture on the Mac) and `packages/vm-base/smoke/`. Done on the Mac (HVF
+architecture on the Mac) and `packages/keel/smoke/`. Done on the Mac (HVF
 and TCG). Remaining: the smoke under KVM on the Linux runner host, and a
 rebuild check that two builds give the same `vmlinuz` hash.
 
@@ -226,7 +227,7 @@ on the console. Thread (TCG). Done: the default image boots to a shell from
 layers + writable disk under TCG, KVM and HVF; a second boot keeps the
 writable disk's changes.
 
-**4. VM base and default image.** CI builds `cube-vm-base` (kernel +
+**4. keel release and default image.** CI builds `keel` (kernel +
 `base.erofs`) and the default OCI image per architecture, with digests.
 Publishing to a registry or a release needs explicit authorization. Thread
 for the build; publishing by the maintainer. Done: digests reproducible

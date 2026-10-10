@@ -50,6 +50,6 @@ target/
 .worktrees/
 __pycache__/
 
-# VM base build inputs and outputs.
-packages/vm-base/.cache/
-packages/vm-base/out/
+# keel build inputs and outputs.
+packages/keel/.cache/
+packages/keel/out/

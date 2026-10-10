@@ -28,11 +28,11 @@ files retain their upstream notices and licenses.
 
 ## nerdbox kernel configuration
 
-`packages/vm-base/kernel/nerdbox-v0.2.5/` contains the unmodified kernel
+`packages/keel/kernel/nerdbox-v0.2.5/` contains the unmodified kernel
 configuration files `config-6.12.44-arm64` and `config-6.12.44-x86_64` from
 [nerdbox](https://github.com/containerd/nerdbox) v0.2.5
 (`28c86e8e16c62a08079531ebe99e24a7bdad3d62`). cube's guest kernel
-configuration is derived from them (`packages/vm-base/README.md`).
+configuration is derived from them (`packages/keel/README.md`).
 
 Copyright The containerd Authors
 
