@@ -1,5 +1,5 @@
-//! `cube-runner host`: a runner whose machines are directories on the host
-//! it runs on. A guest call runs `cube-guest host MACHINE call OP` as a child
+//! `berth host`: a runner whose machines are directories on the host it
+//! runs on. A guest call runs `cube-guest host MACHINE call OP` as a child
 //! process of the user who started the runner, with that user's environment
 //! and logins. There is no VM, no sandbox and no egress policy: it exists to
 //! develop and debug real runners from a cube thread.
@@ -22,15 +22,17 @@ use tokio::{
     sync::broadcast,
 };
 
-use super::{
-    PROTOCOL, Timestamp,
+use cube_runner_protocol::{
+    ALPN, MAX_FRAME_BYTES, PROTOCOL, Timestamp,
     proto::{self, Code, call::Verb, call_result, machine_status::Phase, open, watch_event},
     read_frame, refuse, write_frame,
 };
+use iroh::{Endpoint, EndpointId};
+use tokio::{task::JoinSet, time::timeout};
 
 /// The guest helper this runner ships; written into a machine that has
 /// none. cubed replaces it with its own (`install`) when they differ.
-pub const GUEST_HELPER: &str = include_str!("../../../server/guest/cube-guest.py");
+pub const GUEST_HELPER: &str = include_str!("../../server/guest/cube-guest.py");
 /// What one guest request may carry (a header line and a write's body).
 const MAX_GUEST_REQUEST: u64 = 8 * 1024 * 1024;
 /// What one guest answer may carry.
@@ -214,7 +216,7 @@ impl HostRunner {
             }),
             limits: Some(proto::Limits {
                 max_machines: self.options.max_machines,
-                max_frame_bytes: super::MAX_FRAME_BYTES as u32,
+                max_frame_bytes: MAX_FRAME_BYTES as u32,
                 ..Default::default()
             }),
             capacity: Some(proto::Capacity {
@@ -303,7 +305,7 @@ impl HostRunner {
                 Code::FailedPrecondition,
                 "incompatible_protocol",
                 &format!(
-                    "cube-runner host speaks runner protocol {PROTOCOL}, not {}",
+                    "berth host speaks runner protocol {PROTOCOL}, not {}",
                     hello.protocol
                 ),
             ));
@@ -857,5 +859,45 @@ async fn stream(
         }
     }
     send.finish()?;
+    Ok(())
+}
+
+/// At most this many connections at once (cubed keeps one).
+const MAX_CONNECTIONS: usize = 16;
+/// A connection must finish its handshake within this.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Accepts protocol-4 connections from `allowed` only; each stream is one
+/// call (see packages/runner-protocol/proto/runner.proto).
+pub async fn serve(
+    endpoint: &Endpoint,
+    allowed: EndpointId,
+    runner: Arc<HostRunner>,
+) -> Result<()> {
+    runner.probe_all();
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            incoming = endpoint.accept() => {
+                let Some(incoming) = incoming else { break };
+                if connections.len() >= MAX_CONNECTIONS {
+                    incoming.refuse();
+                    continue;
+                }
+                let runner = runner.clone();
+                connections.spawn(async move {
+                    let Ok(Ok(connection)) = timeout(HANDSHAKE_TIMEOUT, incoming).await else { return };
+                    if connection.remote_id() != allowed || connection.alpn() != ALPN {
+                        connection.close(1u32.into(), b"UNAUTHORIZED");
+                        return;
+                    }
+                    serve_connection(runner, connection).await;
+                });
+            }
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
+        }
+    }
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
     Ok(())
 }

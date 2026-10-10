@@ -14,9 +14,13 @@ DEVELOPING.md before changing behavior.
 - `packages/server/src/vm*.ts`, `guest-ssh.ts`, `egress-policy.ts`, `guest/`:
   thread machines, tool execution over SSH, the egress policy and the guest
   helper `cube-guest`.
-- `packages/node-transport`: Linux/macOS VM runner (protocol 3), the `cube/l2/1`
-  frame channel and the Iroh protocol; `proto/runner.proto` (runner protocol 4,
-  generated Rust and TypeScript types) and `cube-runner host`.
+- `packages/node-transport`: `cube-runner`, the Linux/macOS VM runner on
+  protocol 3, the `cube/l2/1` frame channel and the Iroh protocol. Kept until
+  protocol 3 is retired; new runner work goes to `berth`.
+- `packages/runner-protocol`: runner protocol 4, `proto/runner.proto` (the
+  one schema), its fixtures and the `cube-runner-protocol` crate (generated
+  Rust types and stream framing). TypeScript types go to `packages/server/src/gen`.
+- `packages/berth`: `berth`, the protocol-4 runner. Today only `berth host`.
 - `packages/server/src/runner-select.ts`: the one place cubed picks protocol 3
   or 4 for a thread, by its runner's enrolled protocol.
 - `packages/gateway`: `cube-gateway`, supervised by cubed; each VM's only
@@ -28,18 +32,18 @@ A thread's tools run in its own QEMU VM, never as the runner account. The
 guest is a sandbox for the agent's commands, files and network; the runner
 host as a whole is not (QEMU runs as the runner account, hardened only by
 `-sandbox on`). Never invent an optional legacy backend, a same-UID shell path
-or a local execution fallback.
+or a local execution fallback. One session has one writable owner; preserve
+lifetime locking, stable invocation identity, epoch fencing and retained VM
+disks.
 
-One deliberate exception, for developing runners only: `cube-runner host`
+One deliberate exception, for developing runners only: `berth host`
 (runner protocol 4) runs a thread's tools unsandboxed, as the user who
 started it, on that host, in a subdirectory of its `--dir`. A thread gets
 there only when it is started on that runner by name (OptChat `spawn` with
 `runner`); a host runner is never in the pool and never a fallback, and its
 threads wait while it is down. Do not extend this path to anything else, do
 not call it a sandbox, and keep cubed's secrets, proxy and egress policy out
-of it (it uses that host's own gh/git logins). One session has one writable owner; preserve
-lifetime locking, stable invocation identity, epoch fencing and retained VM
-disks.
+of it (it uses that host's own gh/git logins).
 
 ## Development
 

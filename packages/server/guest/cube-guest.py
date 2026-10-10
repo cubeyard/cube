@@ -1922,7 +1922,7 @@ def init():
 # --- host mode -----------------------------------------------------------
 
 def configure_host(machine):
-    """A machine of `cube-runner host`: the directory MACHINE on the host
+    """A machine of `berth host`: the directory MACHINE on the host
     itself, with no VM and no isolation. Commands and file operations run
     as the user who started the runner, with that user's environment and
     logins; an absolute path is a path on the host, and /workspace names the

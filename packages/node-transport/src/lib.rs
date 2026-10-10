@@ -4,7 +4,6 @@
 pub mod diagnose;
 pub mod journal;
 pub mod l2;
-pub mod p4;
 pub mod pump;
 pub mod release;
 pub mod runner;
@@ -382,31 +381,6 @@ fn check_listener(listen: SocketAddr, mode: NetworkMode) -> Result<()> {
         "non-loopback listener requires explicit direct mode"
     );
     Ok(())
-}
-/// An endpoint that accepts `alpns` only: loopback or direct at `listen`
-/// (loopback default 127.0.0.1:0), or N0 relay without a listener.
-pub async fn bind_alpns(
-    key: SecretKey,
-    network: NetworkMode,
-    listen: Option<SocketAddr>,
-    alpns: Vec<Vec<u8>>,
-) -> Result<Endpoint> {
-    match network {
-        NetworkMode::Relay => {
-            ensure!(listen.is_none(), "relay mode does not accept --listen");
-            bind_relay_transport(key, alpns).await
-        }
-        NetworkMode::Direct => {
-            let listen = listen.context("direct mode requires --listen")?;
-            check_listener(listen, network)?;
-            bind_transport(key, listen, alpns).await
-        }
-        NetworkMode::Loopback => {
-            let listen = listen.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
-            check_listener(listen, network)?;
-            bind_transport(key, listen, alpns).await
-        }
-    }
 }
 pub async fn bind_loopback(key: SecretKey, listen: SocketAddr) -> Result<Endpoint> {
     bind_node(key, listen, NetworkMode::Loopback).await

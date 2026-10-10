@@ -14,7 +14,7 @@
 // A runner never interprets the guest bytes (`OPERATIONS` in cube-guest).
 //
 // This file is the only schema. Rust types are generated at build time
-// (packages/node-transport/build.rs); TypeScript types are generated into
+// (packages/runner-protocol/build.rs); TypeScript types are generated into
 // packages/server/src/gen by `pnpm proto:generate` and checked by
 // `pnpm proto:check`.
 

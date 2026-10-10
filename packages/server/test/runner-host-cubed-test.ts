@@ -1,4 +1,4 @@
-/** cubed with a real `cube-runner host` (protocol 4) beside a protocol-3
+/** cubed with a real `berth host` (protocol 4) beside a protocol-3
  * pool: enrollment, OptChat's spawn naming the host runner, the thread's
  * checkout and hooks in a directory on this host, a thread started without
  * a runner never landing there, a pinned thread waiting while its runner
@@ -6,7 +6,7 @@
  * local guest (no VM); the host runner is real, on loopback, unsandboxed,
  * in a temporary directory.
  *
- *   node packages/server/test/runner-host-cubed-test.ts target/debug/cube-runner */
+ *   node packages/server/test/runner-host-cubed-test.ts target/debug/berth */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -24,8 +24,8 @@ import { RunnerMachines } from "../src/runner-machines.ts";
 import { ProtocolMachines, runnerHealth } from "../src/runner-select.ts";
 import { LocalMachines } from "./local-guest.ts";
 
-const binary = path.resolve(process.argv[2] ?? "target/debug/cube-runner");
-assert.ok(fs.existsSync(binary), `${binary}: build cube-runner first`);
+const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
+assert.ok(fs.existsSync(binary), `${binary}: build berth first (cargo build -p berth)`);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-host-cubed-"));
 const directory = path.join(root, "host");
 const state = path.join(root, "state");
@@ -50,7 +50,7 @@ async function start(first: boolean): Promise<{ child: ChildProcess; peer: strin
   child.stderr!.setEncoding("utf8");
   await new Promise<void>((resolve, reject) => {
     child.stderr!.on("data", chunk => { banner += chunk; if (banner.includes("waiting for cubed")) resolve(); });
-    child.once("exit", code => reject(new Error(`cube-runner host exited (${code}): ${banner}`)));
+    child.once("exit", code => reject(new Error(`berth host exited (${code}): ${banner}`)));
   });
   const field = (name: string) => banner.match(new RegExp(`^${name}: (.+)$`, "m"))?.[1]?.trim() ?? "";
   return { child, peer: field("peer"), address: field("listen").split(", ")[0]! };
@@ -91,7 +91,7 @@ try {
   assert.equal(health.maxActiveVms, 8);
   app.registry.recordRunnerProbe(node, { health });
   const overview = describeRunners(observeRunners(app.registry, 60_000));
-  assert.match(overview, /HOST runner \(cube-runner host, protocol 4\): UNSANDBOXED/);
+  assert.match(overview, /HOST runner \(berth host, protocol 4\): UNSANDBOXED/);
   assert.match(overview, /pool: 4 of 4 slots free across 1 runners/, "a host runner is not in the pool");
 
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
@@ -151,7 +151,7 @@ try {
   }
   assert.equal(archived.retained, true, JSON.stringify(archived));
   assert.ok(fs.existsSync(path.join(machine, "workspace", "README")), "archive never deletes a host machine's directory");
-  console.log("ok: cubed with cube-runner host: enrollment, spawn by runner name, checkout and hooks in the host directory, pool threads elsewhere, a pinned thread waits, archive retains");
+  console.log("ok: cubed with berth host: enrollment, spawn by runner name, checkout and hooks in the host directory, pool threads elsewhere, a pinned thread waits, archive retains");
 } finally {
   app.server.closeAllConnections();
   await app.close();

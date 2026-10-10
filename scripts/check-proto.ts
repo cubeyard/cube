@@ -1,5 +1,5 @@
 /** `pnpm proto:check`: the committed TypeScript types are what buf
- * generates from packages/node-transport/proto/runner.proto now. With
+ * generates from packages/runner-protocol/proto/runner.proto now. With
  * `--write` (`pnpm proto:generate`) it regenerates them instead. */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -8,7 +8,7 @@ import path from "node:path";
 import { parse } from "yaml";
 
 const root = path.join(import.meta.dirname, "..");
-const proto = path.join(root, "packages/node-transport/proto");
+const proto = path.join(root, "packages/runner-protocol/proto");
 const committed = path.join(root, "packages/server/src/gen");
 const buf = path.join(root, "node_modules/.bin/buf");
 const template = parse(fs.readFileSync(path.join(proto, "buf.gen.yaml"), "utf8")) as { plugins: Array<{ out: string }> };

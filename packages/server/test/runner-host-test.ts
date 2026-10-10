@@ -1,10 +1,10 @@
-/** Runner protocol 4 against the real `cube-runner host`: cubed's
+/** Runner protocol 4 against the real `berth host`: cubed's
  * RunnerSession (one Iroh connection, call, watch and guest streams) and the
  * Workspace contract over RunnerGuestTransport into a host machine, which is
  * a directory under a temporary DIRECTORY on this host. Loopback only; the
  * machine is this host, unsandboxed, as the user running the test.
  *
- *   node packages/server/test/runner-host-test.ts target/debug/cube-runner */
+ *   node packages/server/test/runner-host-test.ts target/debug/berth */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -19,8 +19,8 @@ import { VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
 import { workspaceContract } from "./workspace-contract.ts";
 
-const binary = path.resolve(process.argv[2] ?? "target/debug/cube-runner");
-assert.ok(fs.existsSync(binary), `${binary}: build cube-runner first`);
+const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
+assert.ok(fs.existsSync(binary), `${binary}: build berth first (cargo build -p berth)`);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-host-runner-"));
 const directory = path.join(root, "machines");
 const controlKey = path.join(root, "control.key");
@@ -32,7 +32,7 @@ async function start(args: string[]): Promise<{ child: ChildProcess; peer: strin
   child.stderr!.setEncoding("utf8");
   await new Promise<void>((resolve, reject) => {
     child.stderr!.on("data", chunk => { banner += chunk; if (banner.includes("waiting for cubed")) resolve(); });
-    child.once("exit", code => reject(new Error(`cube-runner host exited (${code}): ${banner}`)));
+    child.once("exit", code => reject(new Error(`berth host exited (${code}): ${banner}`)));
   });
   const field = (name: string) => banner.match(new RegExp(`^${name}: (.+)$`, "m"))?.[1]?.trim() ?? "";
   return { child, peer: field("peer"), address: field("listen").split(", ")[0]!, banner };
@@ -99,7 +99,7 @@ try {
   const leases = new LeaseStore(path.join(root, "thread"));
   const workspace = new VmWorkspace({ guest: transport, leases, owner: "pi", binding: `host-${ref.id}` });
   const scratch = path.join(root, "scratch");
-  await workspaceContract("VmWorkspace -> RunnerGuestTransport -> cube-runner host", workspace, "pi",
+  await workspaceContract("VmWorkspace -> RunnerGuestTransport -> berth host", workspace, "pi",
     { machinePaths: run => [path.join(scratch, run, "portal-runtime", "start-portal.sh"), path.join(scratch, run, "screens", "shot.png")] });
   assert.ok(fs.readdirSync(path.join(machineDir, "workspace")).some(name => name.startsWith("contract-")), "the workspace is DIRECTORY/<id>/workspace");
 
@@ -146,7 +146,7 @@ try {
   assert.equal(deleted.status?.phase, MachineStatus_Phase.RETAINED);
   assert.ok(fs.existsSync(path.join(machineDir, "workspace")), "a host runner never deletes a machine directory");
   await assert.rejects(session.guest(ref, () => epoch).call("hello", {}), GuestTransportError);
-  console.log("ok: cube-runner host over protocol 4: hello, watch readiness, create, Workspace contract, user environment, fencing, UNIMPLEMENTED, restart, retained delete");
+  console.log("ok: berth host over protocol 4: hello, watch readiness, create, Workspace contract, user environment, fencing, UNIMPLEMENTED, restart, retained delete");
 } finally {
   await Promise.allSettled(sessions.map(session => session.close()));
   await stop(runner.child);

@@ -13,7 +13,7 @@
   at once (allocate, start, stop, inspect, release; protocol 3) and the frame pump that carries the VM's Ethernet frames
   to the gateway. It runs no command of its own and cannot read Pi sessions or
   model credentials through the protocol.
-- **host runner (protocol 4):** `cube-runner host --dir DIRECTORY`, a
+- **host runner (protocol 4):** `berth host --dir DIRECTORY`, a
   foreground process a person starts on a Mac or Linux host. Its machines
   are subdirectories of DIRECTORY; each guest operation runs
   `cube-guest host MACHINE call OP` as a child, unsandboxed, as that user.
@@ -538,7 +538,7 @@ and gateway communication, not browser users.
 ## Runner protocol 4 and the host runner
 
 Protocol 4 (`cubeyard/runner/4`) is the runner protocol cube moves to; its
-one schema is `packages/node-transport/proto/runner.proto`. Rust types are
+one schema is `packages/runner-protocol/proto/runner.proto`. Rust types are
 generated at build time; TypeScript types are committed under
 `packages/server/src/gen` and `pnpm proto:check` fails when they differ.
 `proto/fixtures` holds one proto3-JSON document per message and oneof case,
@@ -546,7 +546,7 @@ and both languages round-trip every one (`runner-proto-test.ts`,
 `tests/proto_round_trip.rs`).
 
 ```text
-cubed                                       cube-runner host --dir DIRECTORY
+cubed                                       berth host --dir DIRECTORY
 RunnerSession ── one Iroh connection ──────▶ accept from the enrolled control peer only
   hello   Open{hello}  → HelloAnswer{Runner: kind HOST, platform, limits, capacity, labels}
   call    Open{call}   → CallResult (machine_create/start/stop/delete/get/list, runner_get)

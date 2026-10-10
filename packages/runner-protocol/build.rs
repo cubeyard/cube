@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .compile_well_known_types()
         // pbjson-types writes timestamps as `+00:00`; proto3 JSON (and
         // protobuf-es) writes `Z`.
-        .extern_path(".google.protobuf.Timestamp", "crate::p4::Timestamp")
+        .extern_path(".google.protobuf.Timestamp", "crate::Timestamp")
         .extern_path(".google.protobuf", "::pbjson_types")
         .btree_map(["."])
         .compile_protos(&["proto/runner.proto"], &["proto"])?;

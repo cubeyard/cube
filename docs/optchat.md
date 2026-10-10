@@ -460,7 +460,7 @@ not measured on a live provider.
 - A spawned thread goes to the runner pool unless the task names a `runner`
   (its node id, from `runners`); then it starts on that runner and never
   moves, and waits while it is down. That is the only way onto a host
-  runner (`cube-runner host`, unsandboxed), which OptChat names only when the
+  runner (`berth host`, unsandboxed), which OptChat names only when the
   user asks for it.
 - A spawned thread runs on the host's preferred model unless the task names
   one; `claude · max` models start Claude Code threads.

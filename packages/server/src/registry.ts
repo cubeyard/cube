@@ -105,7 +105,7 @@ export interface Runner extends NodeBinding {
   legacyProjectId?: string;
   /** The runner protocol it was enrolled with; absent: 3 (VM runners). */
   protocol?: 4;
-  /** `host`: `cube-runner host`, machines are directories on that host and
+  /** `host`: `berth host`, machines are directories on that host and
    * nothing is sandboxed. Only a thread started on it by name runs there. */
   kind?: "vm" | "host";
 }

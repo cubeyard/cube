@@ -39,7 +39,7 @@ export interface RunnerReport {
 
 export interface RunnerObservation {
   id: string; nodeId: string; enrolledAt: number | null;
-  /** `host`: cube-runner host (protocol 4), unsandboxed; it takes only the
+  /** `host`: berth host (protocol 4), unsandboxed; it takes only the
    * threads started on it by name and is never part of the pool. */
   kind: "vm" | "host";
   contact: { status: RunnerContactStatus; lastAttemptAt: number | null; lastContactAt: number | null; unreachableSince: number | null; error: string | null };
@@ -139,7 +139,7 @@ export function describeRunners(view: RunnersObservation): string {
     const { report, contact, slots } = runner;
     lines.push(`- ${runner.nodeId} (id ${runner.id}${runner.retirement === "retiring" ? "; retiring" : ""})`);
     if (runner.kind === "host") {
-      lines.push("  HOST runner (cube-runner host, protocol 4): UNSANDBOXED, commands run as the user who started it on that host, with "
+      lines.push("  HOST runner (berth host, protocol 4): UNSANDBOXED, commands run as the user who started it on that host, with "
         + "that user's files and gh/git logins; only for developing cube runners. It takes only threads started on it by name "
         + "(spawn with runner), never others; while it is down, its threads wait.");
     }

@@ -1,4 +1,4 @@
-/** Placement with a host runner (cube-runner host, protocol 4): it is never
+/** Placement with a host runner (berth host, protocol 4): it is never
  * in the pool, a thread gets there only by naming it, and a thread started
  * on a runner by name never moves. Registry only; offline. */
 import assert from "node:assert/strict";

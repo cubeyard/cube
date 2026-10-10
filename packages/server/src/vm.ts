@@ -1148,7 +1148,7 @@ function checkouts(allocation: WorkspaceAllocation): Array<{ dir: string; url: s
  * `cube hooks`. While it runs, `cube-hook-start NAME` is printed and
  * ~/.cache/cube/running names it and its log (what the thread shows live). */
 const HOOK_SHELL = [
-  // A host machine (cube-runner host) keeps its logs in its own directory.
+  // A host machine (berth host) keeps its logs in its own directory.
   "logs=\"${CUBE_LOGS:-${HOME:-/tmp}/.cache/cube}\"",
   "hooks=\"${CUBE_HOOKS:-/etc/cube/hooks}\"",
   "mkdir -p \"$logs\"",

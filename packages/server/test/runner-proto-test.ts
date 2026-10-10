@@ -1,12 +1,12 @@
 /** Protocol 4's schema in TypeScript and Rust agree on every message.
  *
- * packages/node-transport/proto/fixtures holds one proto3-JSON document per
+ * packages/runner-protocol/proto/fixtures holds one proto3-JSON document per
  * message of runner.proto, and one per case of each oneof, with every field
  * set to a value that is not its default (so none is left out of the JSON).
  * This test derives that corpus from the generated descriptors and checks
  * the committed one is the same, then parses each document with the
  * generated TypeScript types and writes it back unchanged. The Rust test
- * (packages/node-transport/tests/proto_round_trip.rs) parses and writes the
+ * (packages/runner-protocol/tests/proto_round_trip.rs) parses and writes the
  * same files with the generated Rust types. Together: both sides read and
  * write the same bytes for every message.
  *
@@ -18,7 +18,7 @@ import path from "node:path";
 import { create, fromJson, toJson, type DescMessage, type DescField, type JsonValue } from "@bufbuild/protobuf";
 import { file_runner } from "../src/gen/runner_pb.js";
 
-const FIXTURES = path.join(import.meta.dirname, "../../node-transport/proto/fixtures");
+const FIXTURES = path.join(import.meta.dirname, "../../runner-protocol/proto/fixtures");
 
 function allMessages(): DescMessage[] {
   const out: DescMessage[] = [];

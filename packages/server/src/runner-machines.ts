@@ -1,5 +1,5 @@
 /** Thread machines on protocol-4 runners (runner-session.ts). The only
- * protocol-4 runner today is `cube-runner host`: a thread's machine is the
+ * protocol-4 runner today is `berth host`: a thread's machine is the
  * directory DIRECTORY/<vm id> on that host, its commands run unsandboxed
  * as the user who started the runner, and the runner reports the guest's
  * readiness in its watch (cubed never polls the guest's hello for it).
@@ -71,7 +71,7 @@ export class RunnerMachines implements ThreadMachines {
     if (!(error instanceof RunnerError && error.code === "UNAVAILABLE")) return error;
     const node = this.options.registry.getRunner(thread.runnerId)?.nodeId ?? thread.runnerId;
     return new RunnerWait(`waiting for runner ${node}: it does not answer; this thread was started on it by name and stays there `
-      + "(a host runner runs only while someone runs cube-runner host)", { cause: error });
+      + "(a host runner runs only while someone runs berth host)", { cause: error });
   }
 
   private async boot(thread: Thread, options: StartOptions): Promise<MachineStart> {

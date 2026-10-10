@@ -223,30 +223,3 @@ process test (runner SIGKILL takes QEMU down; restart marks the VM
 interrupted; SIGTERM powers it down) that runs where `/dev/kvm` is usable.
 `tests/runner_templates.rs` covers publish, allocation on a template, removal
 while VMs depend on it and collection with the last one, and restarts.
-
-## Host runner (protocol 4, unsandboxed)
-
-`cube-runner host --dir DIRECTORY` serves runner protocol 4
-(`cubeyard/runner/4`, schema `proto/runner.proto`) in the foreground. It
-is for developing and debugging cube runners from a thread, on a Mac or a
-Linux host, and it is **not a sandbox**: a thread named to it runs as the
-user who started it, on that host.
-
-```text
-cube-runner keygen --key /abs/control.key            # on the cubed host: prints cubed's control peer
-cube-runner host --dir ~/cube-dev --allow-peer <control peer> --node-id node-<name> \
-  [--network loopback|direct|relay] [--listen ip:port] [--labels k=v,...] [--max-machines 8] [--python python3]
-```
-
-The first run writes `DIRECTORY/.cube-runner/` (its key, `host.json`, a
-lock) and prints its `peer`; later runs need only `--dir` (`--network` and
-`--listen` may change). Each machine is `DIRECTORY/<16 hex>`; nothing is
-ever deleted. Each guest operation runs `python3 DIRECTORY/<id>/bin/cube-guest
-host DIRECTORY/<id> call OP` as a child that outlives the stream. Python 3.8
-or newer, git and (for pushes) gh logged in are the host's own business.
-
-Capabilities: `runner.get`, `machine.create|start|stop|delete|get|list`,
-`watch`, `guest`. Templates, discard, diagnosis, policy, `dial`,
-`credential` and `report` answer `UNIMPLEMENTED`. Mutations and guest
-streams are fenced by `fence.epoch` per machine (older: FAILED_PRECONDITION
-`stale_epoch`); only the enrolled control peer may connect.

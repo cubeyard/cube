@@ -16,6 +16,12 @@ on:
       - rust-toolchain.toml
       - packages/node-transport/**
       - packages/gateway/**
+      - packages/runner-protocol/**
+      - packages/berth/**
+      # berth embeds the guest helper; the host tests drive cubed's client.
+      - packages/server/guest/**
+      - packages/server/src/runner-*.ts
+      - packages/server/test/runner-host-*.ts
       - scripts/test-node-transport.sh
       - scripts/test-local-runner.ts
       - scripts/runner-production-test.ts

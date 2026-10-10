@@ -1,7 +1,7 @@
 /** The one place cubed chooses between runner protocols, by the protocol a
  * runner was enrolled with: protocol 3 (`cubeyard/node/1`, VM runners,
  * ThreadVms over SSH and cube-gateway) or protocol 4 (`cubeyard/runner/4`,
- * RunnerMachines over one RunnerSession; today `cube-runner host` only).
+ * RunnerMachines over one RunnerSession; today `berth host` only).
  * Threads on a protocol-3 runner stay on protocol 3. */
 import type net from "node:net";
 import { Runner_Kind, Runner_Lifecycle } from "./gen/runner_pb.js";

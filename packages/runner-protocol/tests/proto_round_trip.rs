@@ -8,7 +8,7 @@
 //! the same, so both sides read and write the same bytes.
 use std::{collections::BTreeSet, fs, path::Path};
 
-use cube_node_transport::p4::proto::{self, egress_policy};
+use cube_runner_protocol::proto::{self, egress_policy};
 use prost::Message;
 use serde::{Serialize, de::DeserializeOwned};
 

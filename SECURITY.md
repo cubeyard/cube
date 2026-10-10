@@ -71,7 +71,7 @@ runner account no control-plane, provider, GitHub, SSH or cloud credentials,
 no sudo and no privileged group other than `kvm`. A retained machine disk
 (a thread archived with changes) stays readable by the runner account.
 
-**The host runner is not a sandbox.** `cube-runner host --dir DIRECTORY`
+**The host runner is not a sandbox.** `berth host --dir DIRECTORY`
 (runner protocol 4) exists only to develop and debug cube runners from a
 thread. A thread started on it by name runs its commands and file
 operations directly on that host, as the user who started the runner, with
