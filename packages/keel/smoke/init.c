@@ -1,5 +1,5 @@
 // Smoke-test init for cube's guest kernel. Runs as PID 1 from an initramfs,
-// checks what the VM base relies on and powers the machine off. Every line
+// checks what keel relies on and powers the machine off. Every line
 // it prints starts with "cube-smoke:"; the last one is "ok" or "FAIL".
 //
 // Expected devices: /dev/vda = LZ4 EROFS layer, /dev/vdb = zstd EROFS layer

@@ -7,7 +7,7 @@ waits, restores it in a new QEMU process and checks that the ticks continue
 where they stopped: same counter, the EROFS disk still readable, and the guest
 clocks compared with the host's. Run smoke/build.sh first.
 
-Usage: packages/vm-base/snapshot/test.py <arm64|x86_64> [accel] [--mapped-ram] [--pause SECONDS]
+Usage: packages/keel/snapshot/test.py <arm64|x86_64> [accel] [--mapped-ram] [--pause SECONDS]
 """
 import argparse
 import json

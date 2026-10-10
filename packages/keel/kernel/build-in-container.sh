@@ -1,13 +1,13 @@
 #!/bin/sh
 # Builds cube's guest kernel for one architecture. Runs inside the pinned
-# Debian container started by build.sh, with packages/vm-base mounted at
-# /vm-base and the verified source tarball at /vm-base/.cache.
+# Debian container started by build.sh, with packages/keel mounted at
+# /keel and the verified source tarball at /keel/.cache.
 set -eu
 
 arch=$1 # arm64 | x86_64
 version=$2
-base=/vm-base/kernel
-out=/vm-base/out/$arch
+base=/keel/kernel
+out=/keel/out/$arch
 
 case "$arch" in
 arm64) image=arch/arm64/boot/Image; cross=aarch64-linux-gnu- ;;
@@ -22,7 +22,7 @@ esac
 work=/tmp/linux-$arch
 rm -rf "$work"
 mkdir -p "$work" "$out"
-tar -xJf "/vm-base/.cache/linux-$version.tar.xz" -C "$work" --strip-components=1
+tar -xJf "/keel/.cache/linux-$version.tar.xz" -C "$work" --strip-components=1
 cd "$work"
 
 cp "$base/nerdbox-v0.2.5/config-6.12.44-$arch" .config

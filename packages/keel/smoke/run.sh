@@ -1,7 +1,7 @@
 #!/bin/sh
 # Boots cube's guest kernel with the smoke initramfs under QEMU and checks
 # that the guest printed "cube-smoke: ok".
-# Usage: packages/vm-base/smoke/run.sh <arm64|x86_64> [accel]
+# Usage: packages/keel/smoke/run.sh <arm64|x86_64> [accel]
 # accel defaults to the native one (hvf on macOS arm64, kvm on Linux) for the
 # host's own architecture and tcg otherwise.
 set -eu

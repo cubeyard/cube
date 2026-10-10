@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds cube's guest kernels (arm64 and x86-64) in a pinned Debian container.
-# Usage: packages/vm-base/kernel/build.sh [arm64|x86_64 ...]
-# Output: packages/vm-base/out/<arch>/{vmlinuz,config,vmlinuz.sha256}; the
+# Usage: packages/keel/kernel/build.sh [arm64|x86_64 ...]
+# Output: packages/keel/out/<arch>/{vmlinuz,config,vmlinuz.sha256}; the
 # resolved config is also written to kernel/config-<version>-<arch> so a
 # version or fragment change shows up in review.
 set -eu
@@ -31,7 +31,7 @@ if [ "$actual" != "$sha256" ]; then
 fi
 
 docker run --rm -e SOURCE_DATE_EPOCH="$source_date_epoch" \
-	-v "$root:/vm-base" "$builder" sh -euc '
+	-v "$root:/keel" "$builder" sh -euc '
 		apt-get update -qq >/dev/null
 		case "$(uname -m)" in
 		aarch64) cross=crossbuild-essential-amd64 ;;
@@ -41,6 +41,6 @@ docker run --rm -e SOURCE_DATE_EPOCH="$source_date_epoch" \
 			build-essential "$cross" bc bison flex libelf-dev libssl-dev \
 			xz-utils cpio python3 >/dev/null
 		for arch in "$@"; do
-			sh /vm-base/kernel/build-in-container.sh "$arch" "'"$version"'"
+			sh /keel/kernel/build-in-container.sh "$arch" "'"$version"'"
 		done
 	' sh "$@"

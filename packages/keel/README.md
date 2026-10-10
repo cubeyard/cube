@@ -1,9 +1,26 @@
-# VM base
+# keel
 
-The guest kernel (and later the base image with `cube-init`) that thread
-machines boot directly, without firmware. See
+keel is everything cube puts inside a thread machine before the project's
+own software: the part the rest is built on, as a ship's keel is laid first.
+A runner boots it directly with QEMU, without firmware, on Linux (KVM, x86-64
+guests) and macOS (HVF, arm64 guests) alike:
+
+- **the guest kernel** (built here today);
+- **`cube-init`**, a small PID 1 that assembles the root filesystem from the
+  machine's read-only EROFS image layers and its writable disk with overlayfs
+  (planned);
+- **the guest agent** that runs commands and services for cubed over a
+  virtio-serial control channel, replacing SSH, cloud-init and systemd in the
+  guest (planned);
+- the layer format: OCI images converted to EROFS and stacked as one disk.
+
+keel is designed for fast boot and for QEMU snapshot and resume: a guest
+starts in about 0.1 s and a suspended one resumes in about the same
+(measurements in the plan). It will be versioned and released on its own, since
+kernel security fixes do not follow cubed's releases, and cube will pin a keel
+version. See
 [docs/plans/2026-10-10-vm-base-and-image-layers.md](../../docs/plans/2026-10-10-vm-base-and-image-layers.md)
-for the design. Nothing in the runner uses this yet.
+for the design and the work packages. Nothing in the runner uses keel yet.
 
 ## Kernel
 
@@ -23,8 +40,8 @@ or if modules are enabled, and writes the resolved configuration to
 `kernel/config-<version>-<arch>` so every change is visible in review.
 
 ```sh
-packages/vm-base/kernel/build.sh            # both architectures
-packages/vm-base/kernel/build.sh arm64      # one
+packages/keel/kernel/build.sh            # both architectures
+packages/keel/kernel/build.sh arm64      # one
 ```
 
 Requirements: Docker (or OrbStack) and network access to cdn.kernel.org.
@@ -40,10 +57,10 @@ mounts both layers, stacks them with overlayfs on a tmpfs upper, writes through
 the overlay and powers off. It prints `cube-smoke: ok` on success.
 
 ```sh
-packages/vm-base/smoke/build.sh             # initramfs + layers, both architectures
-packages/vm-base/smoke/run.sh arm64         # hvf on an Apple Silicon Mac
-packages/vm-base/smoke/run.sh x86_64        # kvm on Linux x86-64, tcg elsewhere
-packages/vm-base/smoke/run.sh arm64 tcg     # force software emulation
+packages/keel/smoke/build.sh             # initramfs + layers, both architectures
+packages/keel/smoke/run.sh arm64         # hvf on an Apple Silicon Mac
+packages/keel/smoke/run.sh x86_64        # kvm on Linux x86-64, tcg elsewhere
+packages/keel/smoke/run.sh arm64 tcg     # force software emulation
 ```
 
 ## Snapshot test
@@ -55,9 +72,9 @@ the messages continue, the EROFS disk still reads and how the guest clocks
 compare with the host's.
 
 ```sh
-packages/vm-base/snapshot/test.py arm64                  # hvf on an Apple Silicon Mac
-packages/vm-base/snapshot/test.py arm64 --mapped-ram
-packages/vm-base/snapshot/test.py x86_64                 # kvm on Linux x86-64
+packages/keel/snapshot/test.py arm64                  # hvf on an Apple Silicon Mac
+packages/keel/snapshot/test.py arm64 --mapped-ram
+packages/keel/snapshot/test.py x86_64                 # kvm on Linux x86-64
 ```
 
 The QEMU build must have the `virtio-rtc-pci` device (Homebrew's QEMU 11.1.1
