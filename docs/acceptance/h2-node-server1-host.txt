@@ -1,0 +1,4 @@
+Disposable H-2 acceptance commit (masterplan e5135ceb phase 0).
+Runner: node-server1-host (berth host, protocol 4), hostname server1, linux-x86_64.
+Thread: 7801912c-0ad4-44d5-a047-ee6c2a3ed00c, machine dir 236ba39a1827e2db.
+Pushed with the host's own gh login. Not for merge.
