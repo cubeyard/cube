@@ -103,7 +103,11 @@ features it uses, not a distribution or version: `virtio-rtc-pci`,
 `virtio-serial-pci` with `virtserialport`, `virtio-balloon-pci` with
 `free-page-reporting`, versioned machine types, `-kernel` boot on arm64 and
 x86-64, and `migrate` to `file:` with the `mapped-ram` capability (required:
-one snapshot format on both platforms). The runner is given its QEMU binary
+one snapshot format on both platforms) in migration mode `cpr-reboot` (since
+QEMU 8.2; `mapped-ram` since 9.0), because QEMU's vmdk driver blocks mode
+`normal` (conditionally approved: it stands only if the boot check passes
+under KVM on the Linux host and HVF on the Mac; shown under TCG and nested
+KVM so far). The runner is given its QEMU binary
 by path, never searches for one, checks the floor on that binary when it
 starts and refuses to start below it (package 8). The list is in
 `runner.proto`'s header.
@@ -674,6 +678,8 @@ not runner acceptance.
 - `--tar=f` against `--tar=i` for layer conversion: decided, `--tar=f`
   (measurements in `packages/keel/layers/README.md`).
 - Suspend with `layers.vmdk` attached: QEMU's vmdk driver blocks migration
-  mode `normal`. Either the floor gains migration mode `cpr-reboot` (what
-  the boot check uses, with `mapped-ram`), or the layers stop being one VMDK
-  disk (one raw drive per layer, as nerdbox does up to 8 layers).
+  mode `normal`. Conditionally decided: the floor gains migration mode
+  `cpr-reboot` (what the boot check uses, with `mapped-ram`) if the boot
+  check passes under KVM and HVF on the hosts; otherwise the layers stop
+  being one VMDK disk (one raw drive per layer, as nerdbox does up to 8
+  layers).

@@ -45,7 +45,9 @@
 // `virtio-rtc-pci`, `virtio-serial-pci` with `virtserialport`,
 // `virtio-balloon-pci` with `free-page-reporting`, versioned machine types,
 // `-kernel` boot on arm64 and x86-64, `migrate` to `file:` with the
-// `mapped-ram` capability. One set of QEMU arguments on Linux and macOS.
+// `mapped-ram` capability in migration mode `cpr-reboot` (QEMU's vmdk
+// driver blocks mode `normal`, and the layer disk is a VMDK descriptor).
+// One set of QEMU arguments on Linux and macOS.
 //
 // This file is the only schema. Rust types are generated at build time
 // (packages/runner-protocol/build.rs); TypeScript types are generated into
