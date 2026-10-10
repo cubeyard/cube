@@ -363,6 +363,29 @@ OptChat reading `optchat`/`both` skills, the repository's own
 `.agents/skills`, a real model choosing to read a skill. A private source outside GitHub resolves on the host but
 fails in the machine, which has no credentials for it.
 
+## Runner protocol 4, berth and keel (2026-10-10)
+
+- **Runner protocol 4** (`cubeyard/runner/4`, one schema in
+  `packages/runner-protocol/proto/runner.proto`) and the host runner
+  **`berth host`** (`packages/berth`, PR #142) are merged. cubed's p4 side
+  (enrolling a p4 runner, threads started on it by name) shipped in v0.3.26;
+  berth itself is not in a release yet and is built from source. A host
+  runner is unsandboxed and never in the pool (AGENTS.md, ARCHITECTURE.md
+  "Runner protocol 4 and the host runner").
+- **keel** is the guest for protocol-4 VM runners: a kernel booted directly
+  by QEMU, `cube-init`, `cube-agent` and EROFS layers from OCI images, with
+  no SSH, cloud-init, systemd or Python
+  (docs/plans/2026-10-10-vm-base-and-image-layers.md, PR #143). Only the
+  kernel is built (`packages/keel/kernel`).
+- **The guest channel contract** (keel's work package 2, PR #144) is in
+  `runner.proto`: `DaemonFrame` framing and channel rules, `machine_setup`,
+  `snapshot_prepare`/`snapshot_done`, `GuestInfo.limits`/`epoch`, what
+  `ready` means for keel, the `Boot.documents` names that replace the seed,
+  and the QEMU floor (with `mapped-ram` required).
+- Protocol 3 (`cube-runner` 0.8.x) is unchanged and keeps serving every
+  thread that is not on a p4 runner. Next: keel's layer tooling and
+  `cube-init` (packages 3 and 4), then `cube-agent` and `berth vm`.
+
 ## Known gaps and next steps
 
 - **Machine templates:** built on `vm-snapshots`, verified on Linux/KVM only
