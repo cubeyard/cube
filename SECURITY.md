@@ -71,6 +71,19 @@ runner account no control-plane, provider, GitHub, SSH or cloud credentials,
 no sudo and no privileged group other than `kvm`. A retained machine disk
 (a thread archived with changes) stays readable by the runner account.
 
+**The host runner is not a sandbox.** `cube-runner host --dir DIRECTORY`
+(runner protocol 4) exists only to develop and debug cube runners from a
+thread. A thread started on it by name runs its commands and file
+operations directly on that host, as the user who started the runner, with
+that user's files, network, SSH keys and gh/git logins; nothing isolates it,
+and no egress policy applies. If it runs on the same machine as cubed, the
+agent can also reach cubed's unauthenticated API. cubed sends it no
+secrets, placeholders or proxy (it uses the host's own logins), never places
+a thread there that was not named to it, and never moves a thread there.
+Run it only in a terminal you watch, on a host and account whose authority
+you accept for the agent, and stop it with Ctrl-C when done; commands it
+started keep running until they end.
+
 A guest's only network is raw Ethernet frames, carried by the runner over Iroh
 to `cube-gateway` next to cubed. The gateway gives each VM a private LAN and
 terminates every TCP connection: only ports 80 and 443 are served, other TCP
