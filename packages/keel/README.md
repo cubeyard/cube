@@ -13,7 +13,8 @@ guests) and macOS (HVF, arm64 guests) alike:
   the machine's read-only EROFS image layers and its writable disk with
   overlayfs, and runs commands and services, replacing SSH, cloud-init,
   systemd and the Python helper in the guest (planned);
-- the layer format: OCI images converted to EROFS and stacked as one disk.
+- **the layer format**: OCI images converted to EROFS and stacked as one
+  disk, built on the runner by [`layers/`](layers) (`keel-layers`).
 
 keel is designed for fast boot and for QEMU snapshot and resume: a guest
 starts in about 0.1 s and a suspended one resumes in about the same
@@ -56,3 +57,10 @@ give the same `vmlinuz`. Output: `out/<arch>/vmlinuz`, `config` and
 `vmlinuz.sha256` (`out/` and `.cache/` are ignored by git).
 
 QEMU needs the `virtio-rtc-pci` device (Homebrew's QEMU 11.1.1 has it).
+
+## Layers
+
+[`layers/`](layers) is the runner's side of the layer format, a Rust
+library: an OCI layer to EROFS with `mkfs.erofs --tar=f`, the layer cache
+by `diff_id`, and a machine's layer disk (GPT + VMDK descriptor, `FLAT`
+extents only). Its README has the measurements behind `--tar=f`.

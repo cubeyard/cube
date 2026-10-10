@@ -18,6 +18,7 @@ on:
       - packages/gateway/**
       - packages/runner-protocol/**
       - packages/berth/**
+      - packages/keel/layers/**
       # berth embeds the guest helper; the host tests drive cubed's client.
       - packages/server/guest/**
       - packages/server/src/runner-*.ts
@@ -46,8 +47,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: ./.github/actions/node-deps
       - uses: ./.github/actions/rust-deps
+      # keel-layers converts with Homebrew's erofs-utils, as a Mac runner
+      # will; the qemu-img byte comparison runs on Linux.
+      - name: erofs-utils for keel-layers
+        run: brew install erofs-utils
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
       - name: real-QUIC Rust and in-process Node interoperability
         run: bash scripts/test-node-transport.sh
+        env:
+          CUBE_TEST_LAYER_TOOLS: mkfs.erofs,fsck.erofs,dump.erofs
 
   # The Homebrew formulas this checkout generates, installed from the latest
   # published release on a real Mac: install, audit, formula tests, the
