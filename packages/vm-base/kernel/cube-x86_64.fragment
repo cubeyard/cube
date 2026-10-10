@@ -1,0 +1,3 @@
+# x86-64 only: nerdbox's x86-64 config has no ACPI. QEMU's q35 machine needs
+# it for a clean power-off at the end of a guest's life.
+CONFIG_ACPI=y
