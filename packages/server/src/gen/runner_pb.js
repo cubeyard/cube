@@ -16,14 +16,14 @@
 // The guest channel (`berth vm` <-> keel's cube-agent): one virtio-serial
 // port named `cube.0` per machine, a Unix socket on the runner's side. It
 // carries `DaemonFrame`s framed as on the streams above (u32 big-endian
-// length, 1 to MAX_FRAME_BYTES (1 MiB, the protocol's own limit, the same
-// on every stream and on the port) bytes, then proto3 JSON). Neither end
-// learns it from the other: `Limits.max_frame_bytes` only reports it to
-// cubed, and `GuestLimits.max_frame_bytes` is the guest's own limit for an
-// operation, which must stay below it. A frame
-// over the limit, a zero length, JSON that does not parse or a frame that
-// breaks the channel rules below ends the connection; the runner treats the
-// guest's side as hostile.
+// length, 1 to MAX_FRAME_BYTES bytes, then proto3 JSON). MAX_FRAME_BYTES is
+// the protocol's own 1 MiB limit, the same on every stream and on the port;
+// neither end learns it from the other. `Limits.max_frame_bytes` only
+// reports it to cubed, and `GuestLimits.max_frame_bytes` is the guest's own
+// limit for an operation, which must not exceed it. A frame over the limit,
+// a zero length, JSON that does not parse or a frame that breaks the channel
+// rules below ends the connection; the runner treats the guest's side as
+// hostile.
 //   ch 0    the connection: the agent sends `hello` once it is connected
 //           and `status` whenever its `GuestInfo` changes, each at most
 //           MAX_GUEST_INFO_BYTES (64 KiB) so it fits a watch event.
