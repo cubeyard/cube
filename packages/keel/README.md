@@ -6,12 +6,13 @@ A runner boots it directly with QEMU, without firmware, on Linux (KVM, x86-64
 guests) and macOS (HVF, arm64 guests) alike:
 
 - **the guest kernel** (built here today);
-- **`cube-init`**, a small PID 1 that assembles the root filesystem from the
-  machine's read-only EROFS image layers and its writable disk with overlayfs
-  (planned);
-- **the guest agent** that runs commands and services for cubed over a
-  virtio-serial control channel, replacing SSH, cloud-init and systemd in the
-  guest (planned);
+- **`cube-init`**, a small PID 1 in C that brings the machine up, starts the
+  guest agent and starts it again if it dies (planned);
+- **`cube-agent`**, the guest agent in Rust: it talks to the runner over a
+  virtio-serial control channel, assembles the project's root filesystem from
+  the machine's read-only EROFS image layers and its writable disk with
+  overlayfs, and runs commands and services, replacing SSH, cloud-init,
+  systemd and the Python helper in the guest (planned);
 - the layer format: OCI images converted to EROFS and stacked as one disk.
 
 keel is designed for fast boot and for QEMU snapshot and resume: a guest
@@ -33,7 +34,8 @@ writes it (only what differs from the kernel's defaults). It was derived from
 [nerdbox](https://github.com/containerd/nerdbox) v0.2.5's kernel config
 (`28c86e8e16c62a08079531ebe99e24a7bdad3d62`, Apache-2.0) with these changes:
 virtio-rtc (the guest clock after pause or snapshot restore), zstd EROFS
-layers, ACPI on x86-64, and none of nerdbox's libkrun patches. The kernel is
+layers, ACPI on x86-64, `VMGENID`, vsock off, and none of nerdbox's libkrun
+patches. The kernel is
 self-contained: no modules.
 
 ```sh
