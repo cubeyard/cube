@@ -103,6 +103,11 @@ export interface Runner extends NodeBinding {
   /** The project this installation template belonged to before runners became
    * global. It is migration/audit context, never a scheduling constraint. */
   legacyProjectId?: string;
+  /** The runner protocol it was enrolled with; absent: 3 (VM runners). */
+  protocol?: 4;
+  /** `host`: `cube-runner host`, machines are directories on that host and
+   * nothing is sandboxed. Only a thread started on it by name runs there. */
+  kind?: "vm" | "host";
 }
 export interface WorkspaceRepository {
   url: string; base: string; baseOid: string; checkoutName: string;

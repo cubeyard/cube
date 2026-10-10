@@ -1030,18 +1030,24 @@ export class ThreadVms implements ThreadMachines, EgressVms {
 
   private keys(thread: Thread): Promise<MachineKeys> { return generateKeys(this.keyDirectory(thread), machine(thread).vmId); }
 
-  /** The thread's VM epoch: increasing for every runner mutation, and at
-   * least the wall clock, so a lost file still fences an older cubed. */
-  private epoch(thread: Thread): number {
-    const directory = this.keyDirectory(thread);
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const file = path.join(directory, "epoch");
-    const previous = fs.existsSync(file) ? Number(fs.readFileSync(file, "utf8").trim()) || 0 : 0;
-    const next = Math.max(previous + 1, Date.now());
-    fs.writeFileSync(`${file}.tmp`, String(next), { mode: 0o600 });
-    fs.renameSync(`${file}.tmp`, file);
-    return next;
-  }
+  private epoch(thread: Thread): number { return nextMachineEpoch(this.keyDirectory(thread)); }
+}
+
+/** A thread's VM epoch, kept in `<directory>/epoch`: increasing for every
+ * runner mutation, and at least the wall clock, so a lost file still fences
+ * an older cubed. */
+export function nextMachineEpoch(directory: string): number {
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const file = path.join(directory, "epoch");
+  const next = Math.max(currentMachineEpoch(directory) + 1, Date.now());
+  fs.writeFileSync(`${file}.tmp`, String(next), { mode: 0o600 });
+  fs.renameSync(`${file}.tmp`, file);
+  return next;
+}
+/** The newest epoch `nextMachineEpoch` gave out (0: none yet). */
+export function currentMachineEpoch(directory: string): number {
+  const file = path.join(directory, "epoch");
+  return fs.existsSync(file) ? Number(fs.readFileSync(file, "utf8").trim()) || 0 : 0;
 }
 
 /** The thread's machine waits for a runner: none with a free slot can take

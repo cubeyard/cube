@@ -12,10 +12,12 @@ import { NO_HOOKS, projectHooks, projectMachine, Registry, threadAgent, type Pro
 import { CLAUDE_MODELS, CLAUDE_PROVIDER } from "./claude-agent.ts";
 import { Conversations } from "./conversation.ts";
 import { workspaceRoute } from "./workspace-http.ts";
-import { IrohRunnerClient, loadRunnerConfig, runnerClient, type RunnerNetwork, type TrustedRunnerHealth } from "./iroh-node.ts";
+import { loadRunnerConfig, type RunnerNetwork, type TrustedRunnerHealth } from "./iroh-node.ts";
 import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./egress-policy.ts";
 import { GatewaySupervisor, locateGateway, widestNetwork } from "./gateway.ts";
 import { errorText, machineFor, ThreadVms, vmSizes, type ThreadMachines } from "./vm.ts";
+import { RunnerMachines } from "./runner-machines.ts";
+import { ProtocolMachines, runnerHealth as protocolRunnerHealth } from "./runner-select.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
@@ -210,9 +212,10 @@ export async function createCubed(options: {
   claude?: readonly string[] | null;
   /** Claude Code process tuning, for tests. */
   claudeOptions?: { idleMs?: number; stopGraceMs?: number };
-  /** Thread machines; default: VMs on the threads' runners through a
-   * supervised cube-gateway. Offline tests pass local guests. */
-  machines?: ThreadMachines;
+  /** Thread machines; default: each thread on its runner's protocol (VMs
+   * through a supervised cube-gateway, or protocol-4 host machines).
+   * Offline tests pass local guests, or a factory given the registry. */
+  machines?: ThreadMachines | ((registry: Registry, threads: string) => ThreadMachines);
   /** The cube-gateway binary (null: none); default: locateGateway(). */
   gateway?: string | null;
   /** Secrets the egress policy substitutes; default: the host's GitHub token. */
@@ -242,13 +245,16 @@ export async function createCubed(options: {
   });
   const egress = await serveEgress(path.join(run, "egress.sock"), policy);
   let gateway: GatewaySupervisor | null = null;
-  let machines = options.machines;
+  const threadsDirectory = path.join(options.state, "threads");
+  let machines = typeof options.machines === "function" ? options.machines(registry, threadsDirectory) : options.machines;
   if (!machines) {
     gateway = new GatewaySupervisor({ state: path.join(options.state, "gateway"), control: path.join(run, "gateway.sock"),
       decide: path.join(run, "egress.sock"), network: gatewayNetwork(registry), extraArgs: gatewayTestArgs(process.env),
       ...(options.gateway === undefined ? {} : { binary: options.gateway }) });
     gateway.start();
-    machines = new ThreadVms({ registry, threads: path.join(options.state, "threads"), run, gateway });
+    // Each thread on its runner's protocol (runner-select.ts).
+    machines = new ProtocolMachines({ registry, p3: new ThreadVms({ registry, threads: threadsDirectory, run, gateway }),
+      p4: new RunnerMachines({ registry, threads: threadsDirectory }) });
   }
   let portal: Portal | null = null;
   let artifacts: Artifacts | null = null;
@@ -268,7 +274,7 @@ export async function createCubed(options: {
   const onboarding = path.join(options.state, "onboarding.json");
   const configuredHosts = options.allowedHosts ?? process.env.CUBED_ALLOWED_HOSTS?.split(",") ?? [];
   const allowedHosts = new Set(["localhost", "127.0.0.1", "[::1]", ...configuredHosts.map(host => host.trim()).filter(Boolean)]);
-  const runnerHealth = options.runnerHealth ?? (runner => runnerClient(runner).health());
+  const runnerHealth = options.runnerHealth ?? protocolRunnerHealth;
   /** A machine that waits for a runner is still starting (`waiting` says
    * why), unless its agent is open on it already. */
   const threadState = (id: string) => conversations.error(id) ? "error"
@@ -1006,7 +1012,7 @@ async function runnersStatus(state: string): Promise<number> {
     }
     const results = await Promise.all(runners.map(async runner => {
       try {
-        const health = await new IrohRunnerClient({ configPath: runner.configPath, configHash: runner.configHash }).health();
+        const health = await protocolRunnerHealth(runner);
         return { runner, reachable: true as const, health };
       } catch (error) {
         return { runner, reachable: false as const, error: error instanceof Error ? error.message : String(error) };

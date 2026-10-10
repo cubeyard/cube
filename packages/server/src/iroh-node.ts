@@ -74,7 +74,9 @@ export interface TrustedRunnerHealth {
   retainedVms: number;
   retainedBytes: number;
   softwareVersion: string;
-  protocolVersion: 3;
+  protocolVersion: 3 | 4;
+  /** Protocol 4: `host` for cube-runner host (absent: a VM runner). */
+  kind?: "vm" | "host";
   /** From the same exchange's authenticated hello; absent in health
    * recorded before cubed kept it. */
   platform?: string;
