@@ -163,9 +163,35 @@ export class Artifacts {
     };
   }
 
-  /** One artifact whole (or a list without `id`) for an agent; the revision
-   * it reads is the base of its next write of that artifact. */
-  read(scope: ArtifactScope, id: string | undefined, revision?: number): string {
+  /** Replaces `oldString` in the newest revision of an artifact in `scope`
+   * (Claude Code's Edit), written as `write` writes a revision: on the one
+   * the agent last read, refused when another is newer. */
+  edit(scope: ArtifactScope, input: { id?: string | undefined; name?: string | undefined; oldString: string; newString: string; replaceAll?: boolean | undefined },
+    provenance: Provenance, requestId: string): { text: string; id: string; revision: number } {
+    const { agent } = scope;
+    const existing = input.id ? this.store.get(input.id) : input.name ? this.store.named(agent, input.name) : null;
+    if (!existing || !this.reaches(scope, existing)) throw new ArtifactError(`no artifact ${input.id ?? input.name} you can read; write it whole first`, 404);
+    // A replayed call finds the revision it wrote, whose text no longer matches.
+    const replayed = this.store.requested(agent, requestId);
+    if (replayed) return this.write(scope, { id: replayed.artifact, body: replayed.body }, provenance, requestId);
+    if (!input.oldString) throw new ArtifactError("old_string is empty; Edit replaces text in the artifact, and Write replaces the whole document");
+    if (input.oldString === input.newString) throw new ArtifactError("No changes to make: old_string and new_string are exactly the same.");
+    const head = this.store.revision(existing.id, existing.head)!;
+    const base = this.reads.get(`${authorKey(agent)}|${existing.id}`) ?? (sameAuthor(head.editor, agent) ? head.number : undefined);
+    if (base === undefined) throw new ArtifactError(`revision ${head.number} of artifact ${existing.id} was written by ${authorText(head.editor)}; Read it first, then Edit it`, 409);
+    if (base !== head.number) throw new ArtifactError(`revision ${head.number} (by ${authorText(head.editor)}) is newer than revision ${base} you read; Read the part you change again and redo the Edit on it`, 409);
+    const matches = head.body.split(input.oldString).length - 1;
+    if (!matches) throw new ArtifactError(`String to replace not found in revision ${head.number}.\nString: ${input.oldString}`);
+    if (matches > 1 && !input.replaceAll) throw new ArtifactError(`Found ${matches} matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.\nString: ${input.oldString}`);
+    const body = input.replaceAll ? head.body.split(input.oldString).join(input.newString) : head.body.replace(input.oldString, () => input.newString);
+    const title = /^#\s+(.+)$/m.exec(body)?.[1]?.trim() || head.title;
+    return this.write(scope, { id: existing.id, base: head.number, title, body }, provenance, requestId);
+  }
+
+  /** One artifact whole (or a list without `id`) for an agent, its body cut
+   * at READ_BODY_CHARS unless `whole` (the Claude Code mod pages it itself);
+   * the revision it reads is the base of its next write of that artifact. */
+  read(scope: ArtifactScope, id: string | undefined, revision?: number, options: { whole?: boolean } = {}): string {
     if (!id) {
       const list = this.store.list({ authors: scope.authors, project: this.threadProject(scope.agent) });
       if (!list.length) return "no artifacts yet";
@@ -182,7 +208,7 @@ export class Artifacts {
     const comments = this.store.comments(id).filter(comment => comment.state !== "draft");
     const runs = this.store.actionRuns(id);
     const notices = this.store.notices(id).filter(notice => notice.state !== "skipped");
-    const body = shown.body.length > READ_BODY_CHARS ? `${shown.body.slice(0, READ_BODY_CHARS)}\n[cut at ${READ_BODY_CHARS} characters]` : shown.body;
+    const body = !options.whole && shown.body.length > READ_BODY_CHARS ? `${shown.body.slice(0, READ_BODY_CHARS)}\n[cut at ${READ_BODY_CHARS} characters]` : shown.body;
     return [
       `artifact ${id} "${shown.title}" · revision ${number} of ${artifact.head} · by ${authorText(artifact.author)}${edited}${project ? ` · project ${project.name}` : ""} · open it at #/a/${id}`,
       shown.actions.length ? `actions: ${shown.actions.map(actionText).join("; ")}` : "actions: none",
@@ -199,7 +225,7 @@ export class Artifacts {
     const batch = this.store.queue(id, requestId, artifact => {
       const thread = artifact.author.kind === "thread" ? this.registry.getThread(artifact.author.thread) : null;
       return thread && threadAgent(thread) === "claude-code" && artifact.name
-        ? `Write /cube/artifacts/${artifact.name}.md; Read it for the whole document`
+        ? `Edit /cube/artifacts/${artifact.name}.md for a part, or Write it whole; Read it (offset and limit page a long one)`
         : `artifact_write with id ${artifact.id}; artifact_read reads it whole`;
     });
     void this.pump();

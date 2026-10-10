@@ -120,11 +120,41 @@ export function artifactPath(file: unknown): ArtifactPath | Denied | null {
   return { kind: match[2] as "md" | "json", name: match[1]! };
 }
 
+/** Read's lines of an artifact, as of a file (offset and limit), at most this many characters at once. */
+export const ARTIFACT_READ_CHARS = 120_000;
+
 export async function readArtifact(scope: ToolScope, target: ArtifactPath, input: ReadInput): Promise<ReadResult | Denied> {
   try {
     const { text } = await scope.client.artifact(scope.token, target.kind === "list" ? undefined : target.name);
     const lines = text.split("\n");
-    return { type: "text", file: { filePath: input.file_path, content: text, numLines: lines.length, startLine: 1, totalLines: lines.length } };
+    const startLine = Math.max(1, Math.floor(input.offset ?? 1));
+    const count = Math.max(1, Math.floor(input.limit ?? READ_DEFAULT_LINES));
+    const shown: string[] = [];
+    let chars = 0;
+    for (const line of lines.slice(startLine - 1, startLine - 1 + count)) {
+      if (shown.length && chars + line.length + 1 > ARTIFACT_READ_CHARS) break;
+      shown.push(line.slice(0, ARTIFACT_READ_CHARS));
+      chars += line.length + 1;
+    }
+    const end = startLine - 1 + shown.length;
+    // Write replaces the whole document: a part read must say it is one.
+    const rest = !shown.length ? [`[the artifact has ${lines.length} lines; Read it with a smaller offset]`]
+      : end < lines.length ? [`[lines ${startLine}-${end} of ${lines.length}; Read with offset ${end + 1} for the rest. Write replaces the whole document, so read all of it before writing it, or change a part with Edit]`] : [];
+    const content = [...shown, ...rest].join("\n");
+    return { type: "text", file: { filePath: input.file_path, content, numLines: shown.length, startLine, totalLines: lines.length } };
+  } catch (error) { return denied(error, input.file_path); }
+}
+
+/** Edit on an artifact is a new revision cubed writes on the newest one,
+ * the one the agent last read: a small change without the whole document. */
+export async function editArtifact(scope: ToolScope, toolUseId: string, target: ArtifactPath, input: EditInput): Promise<EditResult | Denied> {
+  if (target.kind !== "md") return { deny: `Edit reaches ${ARTIFACT_ROOT}/<name>.md; write ${target.kind === "json" ? "a .json artifact whole with Write" : `${ARTIFACT_ROOT}/<name>.md, not the folder`}` };
+  if (typeof input.old_string !== "string" || typeof input.new_string !== "string") return { deny: "old_string and new_string are required" };
+  if (input.old_string === input.new_string) return { deny: "No changes to make: old_string and new_string are exactly the same." };
+  const replaceAll = input.replace_all === true;
+  try {
+    await scope.client.editArtifact(scope.token, { name: target.name, requestId: key(toolUseId, "artifact"), call: toolUseId, edit: { oldString: input.old_string, newString: input.new_string, replaceAll } });
+    return { filePath: input.file_path, oldString: input.old_string, newString: input.new_string, originalFile: null, structuredPatch: [], userModified: false, replaceAll };
   } catch (error) { return denied(error, input.file_path); }
 }
 

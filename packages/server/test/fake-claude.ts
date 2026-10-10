@@ -26,7 +26,7 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { WorkspaceClient } from "../../claude-mod/hooks/workspace.ts";
-import { artifactPath, bash, edit, read, readArtifact, write, writeArtifact, type ToolScope } from "../../claude-mod/hooks/tools.ts";
+import { artifactPath, bash, edit, editArtifact, read, readArtifact, write, writeArtifact, type ToolScope } from "../../claude-mod/hooks/tools.ts";
 import { unixTransport } from "./unix-transport.ts";
 
 const args = process.argv.slice(2);
@@ -107,9 +107,10 @@ async function tool(id: string, name: string, toolInput: Record<string, unknown>
   const scope: ToolScope = { client, token: env.CUBE_WORKSPACE_TOKEN!, root: env.CUBE_WORKSPACE_ROOT!,
     ...(env.CUBE_WORKSPACE_REAL_ROOT ? { realRoot: env.CUBE_WORKSPACE_REAL_ROOT } : {}), signal };
   // As register.ts: /cube/artifacts paths are the thread's artifacts.
-  const artifact = name === "Read" || name === "Write" ? artifactPath(toolInput.file_path) : null;
+  const artifact = artifactPath(toolInput.file_path);
   const result = artifact && "deny" in artifact ? artifact
-    : artifact ? name === "Write" ? await writeArtifact(scope, id, artifact, toolInput as never) : await readArtifact(scope, artifact, toolInput as never)
+    : artifact ? name === "Write" ? await writeArtifact(scope, id, artifact, toolInput as never)
+      : name === "Edit" ? await editArtifact(scope, id, artifact, toolInput as never) : await readArtifact(scope, artifact, toolInput as never)
     : name === "Bash" ? await bash(scope, id, toolInput as never)
     : name === "Write" ? await write(scope, id, toolInput as never)
     : name === "Edit" ? await edit(scope, id, toolInput as never)
@@ -121,7 +122,7 @@ async function tool(id: string, name: string, toolInput: Record<string, unknown>
     : image ? [{ type: "image", source: { type: "base64", data: image.base64, media_type: image.type } }]
     : name === "Bash" ? [(result as { stdout: string }).stdout, (result as { stderr: string }).stderr].filter(Boolean).join("\n")
     : name === "Read" ? (result as { file: { content: string } }).file.content
-    : artifact ? (result as { content: string }).content
+    : artifact && name === "Write" ? (result as { content: string }).content
     : `${name} ok: ${String(toolInput.file_path)}`;
   emit({ type: "user", parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content, is_error: "deny" in result }] }, ...image ? { tool_use_result: result } : {} });
 }
@@ -164,7 +165,9 @@ async function turn(text: string, prompted = true): Promise<void> {
       else if (verb === "read") await tool(id, "Read", { file_path: `${env.CUBE_WORKSPACE_ROOT}/${rest[0]}` }, controller.signal);
       // An absolute path (the mod's /cube/artifacts); "\n" in the text is a line break.
       else if (verb === "write-at") await tool(id, "Write", { file_path: rest[0], content: rest.slice(1).join(" ").replace(/\\n/g, "\n") }, controller.signal);
-      else if (verb === "read-at") await tool(id, "Read", { file_path: rest[0] }, controller.signal);
+      // read-at <path> [offset [limit]]; edit-at <path> <old> <new>, "_" a space.
+      else if (verb === "read-at") await tool(id, "Read", { file_path: rest[0], ...rest[1] ? { offset: Number(rest[1]) } : {}, ...rest[2] ? { limit: Number(rest[2]) } : {} }, controller.signal);
+      else if (verb === "edit-at") await tool(id, "Edit", { file_path: rest[0], old_string: rest[1]!.replace(/_/g, " "), new_string: rest[2]!.replace(/_/g, " ") }, controller.signal);
       else if (verb === "hang") await new Promise(() => {});
       else if (verb === "background" || verb === "background-quiet" || verb === "background-later") background(id, rest[0]!, Number(rest[1]), rest.slice(2).join(" "), verb !== "background-quiet", verb === "background-later");
       else if (verb === "monitor") emit({ type: "system", subtype: "task_started", task_id: rest[0], description: "watch a log", task_type: "monitor", is_backgrounded: true });

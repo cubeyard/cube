@@ -42,8 +42,15 @@ its project. The Claude Code mod reaches cubed on the private workspace
 socket; the thread's lease token, which cubed holds for that Claude Code
 child, is the authorization, and the routes refuse a Pi thread's lease. A
 name in the form of an artifact id (`/cube/artifacts/<id>.md`) is that
-artifact, never a new one. `/cube/artifacts` is not in the machine: Edit and
-Bash do not reach it.
+artifact, never a new one. `/cube/artifacts` is not in the machine: Bash
+does not reach it. Read pages an artifact's text (header and body, uncut)
+with `offset` and `limit` like a file, at most 2,000 lines and 120,000
+characters at once, and says which lines it showed when it is not the end.
+Edit on `<name>.md` is a new revision cubed writes on the newest one, by
+the same rules as a write: on the revision the agent last read, refused
+(409) when another is newer, once per `tool_use_id`, actions kept. A long
+artifact changes by a few lines without the whole document being read or
+written again.
 
 Every write is a whole new revision; older ones stay readable at
 `#/a/<id>?rev=<n>`, with their body and actions as written. A write with the
@@ -247,6 +254,14 @@ journaled there.
   spawned, to the thread once and to the chat, also once that thread is
   archived; everything across a restart; an archived thread's comments
   undeliverable.
+- `packages/server/test/claude-artifact-edit-test.ts`: the mod's Read and
+  Edit over the service with a real store: a 125,573-character artifact
+  read in a 20-line window (3,077 characters; the whole text before), two
+  pages reaching its last line, Edit as the reviewer's revision with the
+  author and actions kept, a replayed Edit writing once, an Edit after the
+  author's newer revision refused and then landing on it after a reread,
+  unread, ambiguous, missing and other-project Edits refused, writing
+  nothing.
 - `packages/server/test/artifact-sharing-test.ts`: the service over a real
   store with fakes: a thread revising OptChat's artifact and another
   thread's of its project, OptChat its thread's; another project's thread
@@ -293,8 +308,8 @@ heavily rewritten documents.
   turn (its machine starts if it was stopped), and OptChat hears both the
   notice and the thread's report of its answer.
 - The page reads the artifact every 4 s while visible; there is no stream.
-- Revising is whole-document and refuses a stale write; there is no merge
-  of concurrent edits. The reads it bases a write on are in cubed's memory,
+- Revising refuses a stale write or Edit; there is no merge of concurrent
+  edits. Pi and OptChat still write the whole document. The reads it bases a write on are in cubed's memory,
   so after a restart an agent reads again (or names `base`).
 - Since shared editing, a revision that leaves `actions` out keeps the
   newest revision's; before, it dropped them. A Claude Code artifact whose
