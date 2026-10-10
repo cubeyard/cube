@@ -1,9 +1,9 @@
 #!/bin/sh
-# Builds cube's guest kernels (arm64 and x86-64) in a pinned Debian container.
+# Builds keel's guest kernels (arm64 and x86-64) in a pinned Debian container
+# from kernel/defconfig-<arch>.
 # Usage: packages/keel/kernel/build.sh [arm64|x86_64 ...]
-# Output: packages/keel/out/<arch>/{vmlinuz,config,vmlinuz.sha256}; the
-# resolved config is also written to kernel/config-<version>-<arch> so a
-# version or fragment change shows up in review.
+#        KEEL_REFRESH=1 packages/keel/kernel/build.sh   # after a version bump
+# Output: packages/keel/out/<arch>/{vmlinuz,config,vmlinuz.sha256}.
 set -eu
 
 version=7.2.9
@@ -30,7 +30,7 @@ if [ "$actual" != "$sha256" ]; then
 	exit 1
 fi
 
-docker run --rm -e SOURCE_DATE_EPOCH="$source_date_epoch" \
+docker run --rm -e SOURCE_DATE_EPOCH="$source_date_epoch" -e KEEL_REFRESH="${KEEL_REFRESH:-0}" \
 	-v "$root:/keel" "$builder" sh -euc '
 		apt-get update -qq >/dev/null
 		case "$(uname -m)" in

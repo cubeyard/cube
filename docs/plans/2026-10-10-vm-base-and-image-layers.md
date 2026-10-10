@@ -125,8 +125,9 @@ GPT partitions, cgroups, user namespaces, seccomp. Notes:
   serve nerdbox's libkrun VMM, not QEMU. Drop them and set `CONFIG_TSI` off.
 - nerdbox's EROFS has LZ4 only; cube adds zstd.
 - nerdbox's x86-64 config has no ACPI; cube enables it for q35.
-- cube's additions are fragments merged before `make olddefconfig`; the build
-  fails if a requested option does not survive or if modules are enabled
+- The result is kept as one `make savedefconfig` file per architecture
+  (`packages/keel/kernel/defconfig-<arch>`, about 500 lines); the build fails
+  if it no longer describes the kernel exactly or if modules are enabled
   (`packages/keel/README.md`).
 - virtio-rtc appears in the guest as a PTP clock (`/dev/ptp0`, "Virtio PTP"),
   not as an RTC device; time sync after restore reads that clock (for example
@@ -135,7 +136,7 @@ GPT partitions, cgroups, user namespaces, seccomp. Notes:
 ## Verified so far
 
 On the maintainer's Mac (Apple Silicon, QEMU 11.1.1 from Homebrew, HVF),
-2026-10-10:
+2026-10-10, with throwaway test inits that are not kept in the repository:
 
 | Question | Result |
 |---|---|
@@ -145,9 +146,9 @@ On the maintainer's Mac (Apple Silicon, QEMU 11.1.1 from Homebrew, HVF),
 | `memory-backend-shm` | present |
 | vsock, vhost-user devices, virtio-pmem | absent in this build |
 | `migrate file:` and `-incoming file:` under HVF | completed and restored (paused) for an empty VM without a kernel; not yet with a running Linux guest |
-| cube's 7.2.9 kernel, direct boot with `-kernel`/`-initrd`, arm64 under HVF and TCG, x86-64 (q35) under TCG | QEMU start to power-off with the whole smoke: 0.08–0.15 s arm64/HVF, 0.8 s arm64/TCG, 1.6 s x86-64/TCG; virtio-rtc binds; LZ4 and zstd EROFS layers mount from virtio-blk; overlayfs of both with a tmpfs upper reads and writes correctly; clean power-off (`packages/keel/smoke/`) |
+| cube's 7.2.9 kernel, direct boot with `-kernel`/`-initrd`, arm64 under HVF and TCG, x86-64 (q35) under TCG | QEMU start to power-off with the whole smoke: 0.08–0.15 s arm64/HVF, 0.8 s arm64/TCG, 1.6 s x86-64/TCG; virtio-rtc binds; LZ4 and zstd EROFS layers mount from virtio-blk; overlayfs of both with a tmpfs upper reads and writes correctly; clean power-off |
 
-| Snapshot and resume of a running guest, arm64/HVF, 512 MiB (`packages/keel/snapshot/test.py`) | boot to first message 0.07 s; `stop` + `migrate file:` 0.24 s, file 36 MiB (mostly zero pages skipped; 53 MiB on disk with `mapped-ram`); new QEMU loads the state in 0.07–0.15 s; the guest continues with the next message on virtio-serial, EROFS reads keep working. Guest `CLOCK_MONOTONIC` and `CLOCK_REALTIME` do not advance while suspended (realtime is behind by the pause); the virtio-rtc PTP clock is within 1–7 ms of the host. Same result under TCG. |
+| Snapshot and resume of a running guest, arm64/HVF, 512 MiB | boot to first message 0.07 s; `stop` + `migrate file:` 0.24 s, file 36 MiB (mostly zero pages skipped; 53 MiB on disk with `mapped-ram`); new QEMU loads the state in 0.07–0.15 s; the guest continues with the next message on virtio-serial, EROFS reads keep working. Guest `CLOCK_MONOTONIC` and `CLOCK_REALTIME` do not advance while suspended (realtime is behind by the pause); the virtio-rtc PTP clock is within 1–7 ms of the host. Same result under TCG. |
 
 Not verified: anything on Linux/KVM (x86-64 was only booted under TCG on the
 Mac), the layer disk (GPT + VMDK) inside a guest, overlay of real OCI layers,
@@ -211,9 +212,8 @@ Thread. Done: subtree present, check passes.
 
 **1. Kernel build.** Built: `packages/keel/kernel/build.sh` (Linux 7.2.9,
 pinned source hash, digest-pinned Debian builder, about 2 minutes per
-architecture on the Mac) and `packages/keel/smoke/`. Done on the Mac (HVF
-and TCG). Remaining: the smoke under KVM on the Linux runner host, and a
-rebuild check that two builds give the same `vmlinuz` hash.
+architecture on the Mac; a rebuild gives the same `vmlinuz` hash). Booted on
+the Mac (HVF and TCG). Remaining: a boot under KVM on the Linux runner host.
 
 **2. Layer tooling (Rust, runner side).** OCI layer tar to EROFS by calling
 `mkfs.erofs -b4096 -zlz4hc -T0 --all-time --tar=f --aufs`, cache keyed by

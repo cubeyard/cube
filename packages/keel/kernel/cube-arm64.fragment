@@ -1,2 +1,0 @@
-# arm64 only: virtio-rtc's Arm generic timer cross-timestamping.
-CONFIG_VIRTIO_RTC_ARM=y
