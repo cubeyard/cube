@@ -28,8 +28,10 @@ DEVELOPING.md before changing behavior.
 - `packages/git`: host-side repository capabilities; credentials stay here.
 - `packages/web`: Svelte 5/Vite UI, built to `packages/web/dist`.
 - `packages/keel`: keel, what runs inside a thread machine: the guest kernel
-  (one `defconfig` per architecture, derived from nerdbox's), and planned `cube-init`, guest
-  agent over virtio-serial and EROFS image layers. Booted directly by QEMU,
+  (one `defconfig` per architecture, derived from nerdbox's), the image layer
+  format (`packages/keel/layers`, `keel-layers`: OCI layer to EROFS, the
+  runner's layer cache and the GPT + VMDK layer disk), and planned `cube-init`
+  and guest agent over virtio-serial. Booted directly by QEMU,
   built for fast boot and snapshot/resume, versioned apart from cubed. Not
   used by the runner yet (docs/plans/2026-10-10-vm-base-and-image-layers.md).
 

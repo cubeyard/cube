@@ -42,6 +42,14 @@ work directories. The real-VM scripts keep their state under `TMPDIR` (`/tmp`
 by default); where that is a small tmpfs, point `TMPDIR` at a disk: VM disks
 grow there and the runner refuses a new VM below 4 GiB free.
 
+`keel-layers` (`packages/keel/layers`) tests its conversion and layer disk
+with the real erofs-utils (`mkfs.erofs`, `fsck.erofs`, `dump.erofs`) and
+`qemu-img` from `PATH` (`scripts/setup-dev.sh` installs them on Linux;
+`brew install erofs-utils qemu` on macOS). Without them those tests print a
+SKIP notice; `CUBE_TEST_LAYER_TOOLS=required` (set in CI on Linux) makes that
+a failure. `scripts/keel-layer-bench.ts` measures conversion on real public
+images (its header has the command).
+
 UI behavior is checked in a real browser: `scripts/test-browser.sh` (the end of
 `pnpm test`; `pnpm test:browser` alone) builds the UI and drives Chromium. CI
 installs Chromium; elsewhere install it once with `pnpm --filter @cube/web exec

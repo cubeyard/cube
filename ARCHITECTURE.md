@@ -583,6 +583,11 @@ the virtio-serial port `cube.0`, and `read_daemon_frame` in
 `cube-runner-protocol` holds a frame to its rules. The guest those runners
 boot is keel (docs/plans/2026-10-10-vm-base-and-image-layers.md).
 
+keel's layer tooling is a library, `keel-layers` (`packages/keel/layers`):
+an OCI layer converted to EROFS by `mkfs.erofs`, a cache by `diff_id` with
+atomic publish and LRU eviction, and the per-machine layer disk (GPT, VMDK
+descriptor with `FLAT` extents only). No runner calls it yet.
+
 Not built yet (later stages): protocol-4 VM runners (`berth vm`), keel's
 `cube-init` and `cube-agent`, the runner's network stack, the credential
 proxy and the `dial`, `credential` and `report` streams.

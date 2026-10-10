@@ -4,8 +4,9 @@ Status 2026-10-10: research and plan. The kernel (work package 1) is built in
 `packages/keel/` and was booted and snapshot-tested on the maintainer's Mac;
 the guest contract (work package 2) is in
 `packages/runner-protocol/proto/runner.proto` (PR #144), which is the
-reference for every field this plan names. Nothing else is built and no
-runner uses keel yet. Written with the maintainer before implementation; it
+reference for every field this plan names; the layer tooling (work package
+3) is `packages/keel/layers`. Nothing else is built and no runner uses keel
+yet. Written with the maintainer before implementation; it
 settles the direction and the order of work, not every interface. It builds
 on runner protocol 4 (PR #142), whose later stages are the VM runner, the
 guest daemon over virtio-serial, the runner's network stack and the
@@ -269,7 +270,9 @@ differ (`plugins/diff/erofs`, `internal/erofsutils`): decompress the layer
 -Enoinline_data -b4096 -U <uuid>` with a UUID derived from the layer digest,
 so the same layer always gives the same file. containerd's faster
 alternative, `--tar=i`, writes only a metadata index in front of the original
-tar data; measure it before choosing. A registry that serves native EROFS
+tar data; measured on real images it converts 1.7–1.8 times faster but takes
+about twice the disk and reads no faster, so keel uses `--tar=f`
+(`packages/keel/layers/README.md`). A registry that serves native EROFS
 layers can skip conversion. Registry credentials never reach a runner or a
 guest.
 
@@ -544,7 +547,9 @@ and TypeScript (`pnpm proto:check`, `tests/proto_round_trip.rs`).
 `mkfs.erofs -b4096 -zlz4hc -T0 --all-time --tar=f --aufs`, cache keyed by
 diff ID with atomic publish; GPT header and VMDK descriptor writer with
 `FLAT` padding. Thread. Done: unit tests, including a `qemu-img convert` byte
-comparison and a regression test that no descriptor contains `ZERO`.
+comparison and a regression test that no descriptor contains `ZERO`. Built:
+`packages/keel/layers` (`keel-layers`), with the cache's LRU eviction over
+unreferenced layers and the `--tar=f`/`--tar=i` measurement in its README.
 
 **4. cube-init and base.erofs.** Bring-up, supervision of the agent, clear
 failure output on the console; static `mke2fs`, `e2fsck` and `mkfs.erofs` in
@@ -616,11 +621,13 @@ not runner acceptance.
 
 - Who fetches private images, and where their credentials live.
 - Image allow-listing per installation or project.
-- Layer cache size limits and when unused layers are deleted.
+- Layer cache size limits and when unused layers are deleted. Decided: a
+  limit per runner in `host.json`, least recently used first over layers no
+  machine references (eviction in `keel-layers`; the setting is package 8's).
 - Whether to keep qcow2 templates during a transition or switch at once (a new
   `CUBED_STATE` either way).
 - Kernel updates: when to move from 7.2.y to the next longterm release, and
   who watches stable releases for security fixes until then.
 - Whether suspended time should count against command timeouts.
-- `--tar=f` against `--tar=i` for layer conversion: speed and disk use with
-  real images.
+- `--tar=f` against `--tar=i` for layer conversion: decided, `--tar=f`
+  (measurements in `packages/keel/layers/README.md`).
