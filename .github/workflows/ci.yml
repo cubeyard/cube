@@ -38,6 +38,12 @@ jobs:
         with:
           scandir: ./scripts
           severity: warning
+      - name: keel C sources (cube-init and the boot check's agent stand-in)
+        run: |
+          set -e
+          for f in packages/keel/init/*.c; do
+            gcc -static -O2 -Wall -Wextra -Werror -o /dev/null "$f"
+          done
 
   test:
     name: test (${{ matrix.shard }}/4)
