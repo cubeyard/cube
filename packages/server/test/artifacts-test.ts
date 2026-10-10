@@ -272,7 +272,9 @@ try {
 
   // A Claude Code thread: the mod's /cube/artifacts paths.
   const claudeThread = (await call("/api/threads", { projectId: project.body.project.id, requestId: "t-claude", model: { provider: "claude-code", id: "fable" },
-    text: ["write-at /cube/artifacts/design.md # design notes\\n\\n```mermaid\\ngraph TD; A-->B\\n```", "read-at /cube/artifacts/design.md", "write-at /cube/artifacts/../x.md nope",
+    text: ["write-at /cube/artifacts/design.md # design notes\\n\\n```mermaid\\ngraph TD; A-->B\\n```", "read-at /cube/artifacts/design.md",
+      // A part read and an Edit, through the real route: revision 2 on the one read.
+      "read-at /cube/artifacts/design.md 7 2", "edit-at /cube/artifacts/design.md A-->B A-->C", "write-at /cube/artifacts/../x.md nope",
       "write-at /cube/elsewhere.md nope", "read-at /cube/artifacts",
       // Another thread's artifact of the project: refused unread, then read and revised by id; another project's is not there.
       `write-at /cube/artifacts/${threadArtifact.id}.md # thread notes\\n\\nblind`, `read-at /cube/artifacts/${threadArtifact.id}.md`,
@@ -287,6 +289,11 @@ try {
   const design = list.body.artifacts.find((item: any) => item.title === "design notes");
   assert.equal(design.author.thread, claudeThread);
   assert.equal((await call(`/api/artifacts/${design.id}`)).body.revisions[0].provenance.agent, "claude-code");
+  assert.match(claudeText, /\[lines 7-8 of \d+; Read with offset 9 for the rest/);
+  assert.match(claudeText, /Edit ok: \/cube\/artifacts\/design\.md/);
+  const designed = (await call(`/api/artifacts/${design.id}/revisions/2`)).body;
+  assert.equal(designed.revision.body, "# design notes\n\n```mermaid\ngraph TD; A-->C\n```", "the Edit is revision 2");
+  assert.equal(designed.revision.provenance.agent, "claude-code");
   assert.match(claudeText, new RegExp(`revision 1 of artifact ${threadArtifact.id} was written by thread \\[${piThread.slice(0, 8)}\\]; read its newest revision first`));
   assert.match(claudeText, new RegExp(`wrote revision 2\\. .*it stays thread \\[${piThread.slice(0, 8)}\\]'s artifact`));
   assert.equal((claudeText.match(new RegExp(`File does not exist: /cube/artifacts/${review.id}\\.md`, "g")) ?? []).length, 2, "another project's artifact is neither read nor written, as if there were none");

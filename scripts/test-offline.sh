@@ -65,6 +65,7 @@ OFFLINE_TESTS=(
   packages/server/test/artifact-notices-test.ts
   packages/server/test/artifact-tools-test.ts
   packages/server/test/artifact-sharing-test.ts
+  packages/server/test/claude-artifact-edit-test.ts
   scripts/smoke-local.ts
   packages/web/test/transcript-test.ts
   packages/web/test/markdown-test.ts

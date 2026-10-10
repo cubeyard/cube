@@ -12,7 +12,7 @@
  * and is not sandboxed. */
 import type { EngineInterface, Register } from 'claude-code'
 import { WorkspaceClient } from './workspace.ts'
-import { ALLOWED_TOOLS, ARTIFACT_GUIDE, ARTIFACT_ROOT, NO_SUBAGENTS, PROJECT_HOOKS_NOTE, SUBAGENT_TOOLS, artifactPath, bash, edit, GUEST_HOME, instructions, read, readArtifact, write, writeArtifact, VIRTUAL_ROOT, type ToolScope } from './tools.ts'
+import { ALLOWED_TOOLS, ARTIFACT_GUIDE, ARTIFACT_ROOT, NO_SUBAGENTS, PROJECT_HOOKS_NOTE, SUBAGENT_TOOLS, artifactPath, bash, edit, editArtifact, GUEST_HOME, instructions, read, readArtifact, write, writeArtifact, VIRTUAL_ROOT, type ToolScope } from './tools.ts'
 
 const ALLOWED = new Set(ALLOWED_TOOLS)
 const SUBAGENTS = new Set(SUBAGENT_TOOLS)
@@ -80,10 +80,10 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
     const scope = await workspace($, next.signal)
     if (!scope) return { deny: UNCONFIGURED }
-    // Artifacts are cube's, not the machine's: revised whole with Write.
+    // Artifacts are cube's, not the machine's: cubed writes the edited revision.
     const artifact = artifactPath(e.file_path)
-    if (artifact) return 'deny' in artifact ? artifact : { deny: `artifacts are revised with Write ${ARTIFACT_ROOT}/<name>.md (the whole document); Edit does not reach them` }
-    const result = await edit(scope, e.tool_use_id, e)
+    if (artifact && 'deny' in artifact) return artifact
+    const result = artifact ? await editArtifact(scope, e.tool_use_id, artifact, e) : await edit(scope, e.tool_use_id, e)
     return 'deny' in result ? result : { result }
   })
 
@@ -103,7 +103,8 @@ export const register: Register = on => {
       `Work artifacts: Write ${ARTIFACT_ROOT}/<name>.md to create a document for the user, or a new revision of it (the whole document each time; its title is the first # heading); ` +
       `Write ${ARTIFACT_ROOT}/<name>.json as {"title"?, "body", "actions"?} to offer actions; Read ${ARTIFACT_ROOT}/<name>.md for the newest revision with the comments sent to you, and Read ${ARTIFACT_ROOT} for the list. ` +
       `To revise an existing artifact by its id (yours, another thread's or OptChat's in this project), Read ${ARTIFACT_ROOT}/<id>.md, then Write ${ARTIFACT_ROOT}/<id>.md with the whole document. ` +
-      'These paths are kept by cube, not in the machine; Edit and Bash do not reach them. ' + ARTIFACT_GUIDE,
+      `Read takes offset and limit there as for a file; to change part of a long artifact, Edit ${ARTIFACT_ROOT}/<name or id>.md instead of writing it whole (a new revision on the one you last read). ` +
+      'These paths are kept by cube, not in the machine; Bash does not reach them. ' + ARTIFACT_GUIDE,
     ]
     for (const file of INSTRUCTION_FILES) {
       const text = await instructions(scope, file).catch(() => null)

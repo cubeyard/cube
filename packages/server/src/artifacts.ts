@@ -311,6 +311,12 @@ export class ArtifactStore {
     return { artifact: id, number, title: String(row.title), body: String(row.body), actions: JSON.parse(String(row.actions)) as ArtifactAction[],
       provenance, createdAt: Number(row.created_at), editor: editorOf(provenance) };
   }
+  /** The revision `editor` wrote with `requestId`, if any. */
+  requested(editor: ArtifactAuthor, requestId: string): Revision | null {
+    const row = this.db.prepare("SELECT artifact, number FROM revisions WHERE request_id = ?").get(requestId) as Row | undefined;
+    const revision = row ? this.revision(String(row.artifact), Number(row.number)) : null;
+    return revision && sameAuthor(revision.editor, editor) ? revision : null;
+  }
   /** Every revision without its body, oldest first. */
   revisions(id: string): Array<Omit<Revision, "body" | "actions"> & { bytes: number; actions: number }> {
     return (this.db.prepare("SELECT number, title, length(CAST(body AS BLOB)) AS bytes, actions, provenance, created_at FROM revisions WHERE artifact = ? ORDER BY number").all(id) as Row[])

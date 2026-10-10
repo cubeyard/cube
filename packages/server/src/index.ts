@@ -837,15 +837,26 @@ export async function createCubed(options: {
             const artifact = isArtifactId(name) ? artifactService.store.get(name) : isArtifactName(name) ? artifactService.store.named(author, name) : null;
             if (!artifact) return json({ error: `no artifact named ${name}; write /cube/artifacts/${name}.md to create it`, code: "NOT_FOUND", completionUnknown: false }, 404);
             const revision = url.searchParams.get("revision");
-            return json({ text: artifactService.read(scope, artifact.id, revision ? Number(revision) : undefined) });
+            // Whole: the mod pages it with Read's offset and limit.
+            return json({ text: artifactService.read(scope, artifact.id, revision ? Number(revision) : undefined, { whole: true }) });
           }
           if (request.method === "POST") {
             if (!isArtifactName(body.name)) throw new ArtifactError("a name is 1 to 64 lowercase letters, digits, dots, dashes or underscores");
+            const provenance = { agent: "claude-code" as const, thread: thread.id, ...typeof body.call === "string" ? { call: body.call.slice(0, 200) } : {} };
+            if (body.edit !== undefined) {
+              const edit = body.edit as Record<string, unknown> | null;
+              if (typeof body.requestId !== "string" || !edit || typeof edit.oldString !== "string" || typeof edit.newString !== "string" || (edit.replaceAll !== undefined && typeof edit.replaceAll !== "boolean")) {
+                throw new ArtifactError("requestId and edit {oldString, newString, replaceAll?} are required");
+              }
+              const target = isArtifactId(body.name) ? { id: body.name } : { name: body.name };
+              const written = artifactService.edit(scope, { ...target, oldString: edit.oldString, newString: edit.newString, replaceAll: edit.replaceAll as boolean | undefined }, provenance, body.requestId);
+              return json({ text: written.text, id: written.id, revision: written.revision });
+            }
             if (typeof body.requestId !== "string" || typeof body.body !== "string") throw new ArtifactError("requestId and body are required");
             if (body.base !== undefined && typeof body.base !== "number") throw new ArtifactError("base must be a revision number");
             const target = isArtifactId(body.name) ? { id: body.name } : { name: body.name };
             const written = artifactService.write(scope, { ...target, base: body.base, title: typeof body.title === "string" ? body.title : undefined, body: body.body, actions: body.actions },
-              { agent: "claude-code", thread: thread.id, ...typeof body.call === "string" ? { call: body.call.slice(0, 200) } : {} }, body.requestId);
+              provenance, body.requestId);
             return json({ text: written.text, id: written.id, revision: written.revision });
           }
         } catch (error) {

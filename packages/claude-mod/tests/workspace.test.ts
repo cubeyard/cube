@@ -175,7 +175,10 @@ describe('workspace tools', () => {
     const shot = await $.tool.call({ tool: 'Read', file_path: '/tmp/screens/../screens/shot.png' })
     expect((shot.result as { type: string }).type).toBe('image')
     expect(refusal(await $.tool.call({ tool: 'Write', file_path: '/', content: 'x' }))).toMatch(/root directory, not a file/)
-    expect(refusal(await $.tool.call({ tool: 'Edit', file_path: '/cube/artifacts/plan.md', old_string: 'a', new_string: 'b' }))).toMatch(/revised with Write/)
+    // An artifact's Edit goes to cubed's /artifacts route (none here), never to a machine file.
+    expect(refusal(await $.tool.call({ tool: 'Edit', file_path: '/cube/artifacts/plan.md', old_string: 'a', new_string: 'b' }))).toMatch(/File does not exist: \/cube\/artifacts\/plan\.md/)
+    expect(workspace.requests.some(request => request.path === `${BASE}/artifacts` && request.body?.edit !== undefined)).toBe(true)
+    expect(refusal(await $.tool.call({ tool: 'Edit', file_path: '/cube/artifacts/plan.json', old_string: 'a', new_string: 'b' }))).toMatch(/Edit reaches/)
     expect(refusal(await $.tool.call({ tool: 'Edit', file_path: '/cube/x', old_string: 'a', new_string: 'b' }))).toMatch(/not an artifact path/)
     expect(reached).toEqual([])
   })

@@ -100,6 +100,10 @@ export class WorkspaceClient {
   writeArtifact(token: string, request: { name: string; requestId: string; call: string; body: string; title?: string; actions?: unknown; base?: number }): Promise<{ text: string; id: string; revision: number }> {
     return this.call("POST", "/artifacts", { token, body: request });
   }
+  /** Replaces text in the named artifact's newest revision, as its next revision. */
+  editArtifact(token: string, request: { name: string; requestId: string; call: string; edit: { oldString: string; newString: string; replaceAll: boolean } }): Promise<{ text: string; id: string; revision: number }> {
+    return this.call("POST", "/artifacts", { token, body: request });
+  }
   stat(token: string, file: string): Promise<WorkspaceStat> {
     return this.call("GET", `/stat?${new URLSearchParams({ path: file })}`, { token });
   }
