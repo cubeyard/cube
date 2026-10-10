@@ -2,11 +2,14 @@
 
 Status 2026-10-10: research and plan. The kernel (work package 1) is built in
 `packages/keel/` and was booted and snapshot-tested on the maintainer's Mac;
-nothing else is built and no runner uses keel yet. Written with the
-maintainer before implementation; it settles the direction and the order of
-work, not every interface. It builds on runner protocol 4 (PR #142, open),
-whose later stages are the VM runner, the guest daemon over virtio-serial,
-the runner's network stack and the credential proxy. The work packages are
+the guest contract (work package 2) is in
+`packages/runner-protocol/proto/runner.proto` (PR #144), which is the
+reference for every field this plan names. Nothing else is built and no
+runner uses keel yet. Written with the maintainer before implementation; it
+settles the direction and the order of work, not every interface. It builds
+on runner protocol 4 (PR #142), whose later stages are the VM runner, the
+guest daemon over virtio-serial, the runner's network stack and the
+credential proxy. The work packages are
 sized so that cube threads can build most of them; runner acceptance still
 needs a Linux host with KVM and a Mac (see "Where the work can run").
 
@@ -92,10 +95,15 @@ settings that are the same for every machine (console, the fixed guest
 address, clock sync); identity, boot documents and the layer list arrive over
 the control channel after the agent connects (below).
 
-**QEMU floor.** Today's runners accept QEMU 7.2. keel needs `virtio-rtc-pci`
-(present in Homebrew's 11.1.1), versioned machine types and `migrate file:`;
-package 8 sets the new minimum per platform after checking the QEMU that
-Debian 13 and Homebrew ship, and the runner refuses to start below it.
+**QEMU floor.** Today's runners accept QEMU 7.2. keel's floor is the list of
+features it uses, not a distribution or version: `virtio-rtc-pci`,
+`virtio-serial-pci` with `virtserialport`, `virtio-balloon-pci` with
+`free-page-reporting`, versioned machine types, `-kernel` boot on arm64 and
+x86-64, and `migrate` to `file:` with the `mapped-ram` capability (required:
+one snapshot format on both platforms). The runner is given its QEMU binary
+by path, never searches for one, checks the floor on that binary when it
+starts and refuses to start below it (package 8). The list is in
+`runner.proto`'s header.
 
 ## How each piece works
 
@@ -140,7 +148,7 @@ project's root is assembled after boot, the way nerdbox does it: its
 (type, in-VM source such as `/dev/vdb3`, target, options) and
 `Bundle.Create` (files, such as the image configuration) over the channel
 once connected. keel does the same with one operation on the guest channel
-(`machine.setup`, below): the runner sends the partition-to-layer list,
+(`machine_setup`, below): the runner sends the partition-to-layer list,
 overlay order and image configuration; the agent
 mounts each partition read-only as EROFS, formats the writable disk on first
 use if it is blank (`mke2fs`; `e2fsck` after an unclean stop), mounts
@@ -171,7 +179,7 @@ replacement for `cube-guest`, sshd, cloud-init and systemd:
 
 - It speaks protocol 4's `DaemonFrame` over the virtio-serial port `cube.0`
   (`hello`, `status`, `req`/`ans` per channel, `abort`; schema in
-  `packages/node-transport/proto/runner.proto`, PR #142). The runner forwards
+  `packages/runner-protocol/proto/runner.proto`). The runner forwards
   `guest` streams to it without interpreting them, and it implements the same
   operations as `cube-guest` (`OPERATIONS`: keys journaled before anything
   happens, lease epochs, nothing run twice), so cubed's
@@ -202,11 +210,12 @@ replacement for `cube-guest`, sshd, cloud-init and systemd:
   visible in the workload root; it runs as `agent` there and talks to the
   agent over a Unix socket bind-mounted at `/run/cube/agent.sock`, instead of
   editing files and calling `systemctl` as today. Registered services start
-  again after every boot once `machine.setup` has assembled the root.
+  again after every boot once `machine_setup` has assembled the root.
 - Its `hello` answer must give cubed what it reads today
   (`guestDescription`: `version`, `ready`, `capabilities`, `limits`, `epoch`;
-  protocol 4's `GuestInfo` has no `limits` or `epoch` yet), and `ready` means
-  the workload root is assembled and the image's required tools are present.
+  `GuestInfo` carries all of them), and `ready` means the workload root is
+  assembled and the image's required tools are present (the exact definition
+  is the comment on `GuestInfo.ready` in `runner.proto`).
   The runner bounds the size of `hello` and `status` before passing them on.
 
 The kernel already has what this needs: cgroup v2 with memory, pids and
@@ -232,7 +241,7 @@ do today, split between `cube-init` (before the agent) and `cube-agent`
   passwordless sudo as in today's seed), placeholders, hooks and the files
   today's seed writes (`/etc/cube/env`, the git credential helper in
   `/etc/gitconfig`, `/etc/environment`, sudoers `env_keep`): from
-  `machine.setup` after connect, laid out as described under "Workload root".
+  `machine_setup` after connect, laid out as described under "Workload root".
 - The runner's egress CA (protocol 4's `Runner.ca_pem`): appended to the
   image's bundle (`/etc/ssl/certs/ca-certificates.crt`, or the distribution's
   equivalent) between marker lines so a restart replaces it instead of adding
@@ -389,12 +398,12 @@ designed for it from the start:
   `CLOCK_REALTIME` within one sync interval of resuming. Timeouts on
   `CLOCK_MONOTONIC` do not count suspended time; decide per timeout whether
   that is wanted.
-- **Before saving.** The runner sends `snapshot.prepare` (below): the agent
+- **Before saving.** The runner sends `snapshot_prepare` (below): the agent
   finishes or parks what it is writing, runs `sync`, drops the page cache
   (`/proc/sys/vm/drop_caches`) and lets free page reporting return memory, so
   the file holds little more than the processes' own memory. It answers when
   it has settled and holds new operations until the channel closes (the
-  machine was saved and stopped) or `snapshot.done` arrives (the save failed,
+  machine was saved and stopped) or `snapshot_done` arrives (the save failed,
   or the machine keeps running).
 - **Channel.** The host end is a new socket after restore; every channel that
   was open at the snapshot is closed, and the guest sees it close. The agent
@@ -428,66 +437,69 @@ designed for it from the start:
   runner, which is where it stays; a snapshot also cannot move between
   hypervisors (KVM and HVF register state differ).
 - **Memory.** The file holds the pages in use; free page reporting keeps that
-  small. `mapped-ram` loads faster and gives fixed offsets. Later, repeated
+  small. Saves always use `mapped-ram` (part of the QEMU floor, one format
+  on both platforms): it loads faster and gives fixed offsets. Later, repeated
   saves of the same machine can write only the pages dirtied since the last
   one; a device that writes guest memory outside QEMU's dirty tracking (a
   GPU) would make that unsafe, and keel has none.
-- **Identity after boot, not at boot.** VM id, epoch, hostname, placeholders
+- **Identity after boot, not at boot.** VM id, hostname, placeholders
   and protocol 4's `Boot.documents` reach the agent over the channel after it
   connects, never on the kernel command line or a seed disk. A snapshot of a
   booted template can then later be restored as many machines, faster than
   any boot. Clones also need a fresh random seed: on x86-64 QEMU's `vmgenid`
   device and the kernel's `VMGENID` driver reseed it; arm64 has no such
-  device, so the runner sends entropy in `machine.setup` and the agent
+  device, so the runner sends entropy in `machine_setup` and the agent
   reseeds on both architectures.
 
 ## The guest channel: what keel adds to protocol 4
 
-Protocol 4 (PR #142) already defines the frame on the virtio-serial port:
+The contract is in `packages/runner-protocol/proto/runner.proto` (PR #144):
+its header holds the framing and channel rules, and the messages hold the
+fields. This section is the summary; where they differ, `runner.proto` is
+right.
 
 ```proto
 message DaemonFrame {
-  uint32 ch = 1;              // channel: one per operation in flight
+  uint32 ch = 1;                 // 0: the connection; > 0: one operation
   oneof t {
-    GuestInfo hello = 2;      // the agent introduces itself on connect
-    GuestInfo status = 3;     // the agent reports changes (ready, hooks)
-    bytes req = 4;            // a guest operation, as cubed sent it
-    bytes ans = 5;            // its answer
-    Empty abort = 6;          // cancel the operation on this channel
+    GuestInfo hello = 2;         // the agent introduces itself on connect
+    GuestInfo status = 3;        // the agent reports changes (ready, hooks)
+    DaemonRequest req = 4;       // guest {op, data} | machine_setup |
+                                 // snapshot_prepare | snapshot_done
+    DaemonAnswer ans = 5;        // guest bytes | error | done
+    Empty abort = 6;             // stop waiting on this channel
   }
 }
 ```
 
 The port is one byte stream per machine; `ch` multiplexes the operations
 that run at once (commands, file reads, streamed output), the job SSH
-sessions over a ControlMaster do today. keel keeps the frame as it is. What
-it needs on top is two operations and two clarifications, not new frame types:
+sessions over a ControlMaster do today. keel adds two operations, not new
+frame types; they are cases of `req`, beside the guest operation that
+carries `GuestHeader.op` and the request bytes cubed sent:
 
-- **`machine.setup`**, runner to agent, after every connect and reconnect:
-  identity (VM id, epoch, hostname, placeholders), `Boot.documents`, entropy,
-  the partition-to-layer list with overlay order, and the image
-  configuration (the counterpart of nerdbox's `Mount.MountAll` and
-  `Bundle.Create`). Idempotent: after a restore or an agent restart the
-  runner sends it again and the agent applies only what changed.
-- **`snapshot.prepare`** and **`snapshot.done`**, runner to agent (above).
-- **Versions and readiness.** `hello` already carries the agent's version,
-  capabilities, kernel and boot id (`GuestInfo`, like nerdbox's
-  `System.Info`); it still needs `limits` and `epoch`, which cubed reads
-  today, and the runner's side is missing. `machine.setup` carries the runner's protocol version and
-  the capabilities it uses, so a runner and an older or newer keel can tell
-  what the other supports.
-- **Framing on the port.** PR #142 says only "JSON on the port". With `req`
-  and `ans` as bytes, a length prefix per frame, as on protocol 4's QUIC
-  streams (u32 big-endian, then the message), is the safe choice.
+- **`machine_setup`**, runner to agent, after every `hello`: the machine's
+  `ref`, `Boot.documents` (`hostname`, `env`, `hooks/pre-setup`,
+  `hooks/pre-resume`, replacing today's seed files), entropy, the
+  partition-to-layer list topmost first, the image configuration (digest and
+  `Env`), the runner's CA, and the runner's version, protocol and
+  capabilities (the counterpart of nerdbox's `Mount.MountAll` and
+  `Bundle.Create`). It carries no epoch: the lease epoch travels in each
+  `OPERATIONS` request as today, and the fence epoch stays between cubed and
+  the runner. Idempotent: after a restore or an agent restart the runner
+  sends it again and the agent applies only what changed; layers cannot
+  change under a running workload.
+- **`snapshot_prepare`** and **`snapshot_done`**, runner to agent (above).
+- **Versions and readiness.** `hello` carries the agent's version,
+  capabilities, kernel, boot id, `limits` and `epoch` (`GuestInfo`, like
+  nerdbox's `System.Info`), and `reason` when it is not ready.
+- **Framing on the port.** As on protocol 4's QUIC streams: u32 big-endian
+  length (1 to 1 MiB), then proto3 JSON. `hello` and `status` are at most
+  64 KiB; one `req` and one `ans` per channel, each one frame.
 - **Disconnects.** After a restore or an agent restart every channel is
-  closed. The agent sends `hello` again, the runner sends `machine.setup`
+  closed. The agent sends `hello` again, the runner sends `machine_setup`
   again, and operations that were running are found again by their keys, as
   today.
-
-The exact fields of `machine.setup` (including the names of the
-`Boot.documents` that replace today's seed files), the `hello` answer and
-the snapshot operations are package 2, with fixtures in `runner.proto`'s
-corpus, before the agent and the runner are built against them.
 
 ## Decisions
 
@@ -520,10 +532,10 @@ Each package lists where it can be done (see below) and what counts as done.
 **1. Kernel.** Built: `packages/keel/kernel/build.sh`. Remaining: a boot under
 KVM on the Linux runner host (comes with package 4).
 
-**2. Guest contract.** In PR #142's line of work: `machine.setup` (identity,
+**2. Guest contract.** Done in PR #144 (`runner.proto`). `machine_setup` (identity,
 the `Boot.documents` names and contents that replace today's seed, entropy,
-layer list, image configuration, runner version), `snapshot.prepare` and
-`snapshot.done`, the `hello` answer cubed needs (`limits`, `epoch`, what
+layer list, image configuration, runner version), `snapshot_prepare` and
+`snapshot_done`, the `hello` answer cubed needs (`limits`, `epoch`, what
 `ready` means), framing on the port and disconnect rules, as messages in
 `runner.proto`. Thread. Done: fixtures for every message round-trip in Rust
 and TypeScript (`pnpm proto:check`, `tests/proto_round_trip.rs`).
@@ -569,7 +581,7 @@ needs explicit authorization. Done: digests reproducible across two builds.
 floor, the machine type recorded per machine, per-machine `layers.vmdk`,
 retained writable disk, image fetch and layer cache with garbage collection
 under the journal's retention rules, the template output disk and template
-publishing, `machine.setup` delivered over the channel, bounded `hello`. A
+publishing, `machine_setup` delivered over the channel, bounded `hello`. A
 new `CUBED_STATE` (old registries are not migrated; p3 runners keep working
 until they are re-enrolled), CI for keel, and updates to ARCHITECTURE.md,
 docs/platforms.md, docs/runner-operations.md and SECURITY.md (the channel is

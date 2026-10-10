@@ -576,9 +576,16 @@ RunnerSession ── one Iroh connection ──────▶ accept from the e
   only by naming it (OptChat `spawn` with `runner`); such a thread is pinned,
   never moves, and waits (RunnerWait) while the runner is down.
 
-Not built yet (later stages): protocol-4 VM runners, the guest daemon over
-virtio-serial, the runner's network stack, the credential proxy and the
-`dial`, `credential` and `report` streams.
+The guest channel of a protocol-4 VM runner is specified but not built:
+`runner.proto`'s header and `DaemonFrame`, `DaemonRequest`, `DaemonAnswer`
+and `MachineSetup` define how the runner talks to keel's `cube-agent` over
+the virtio-serial port `cube.0`, and `read_daemon_frame` in
+`cube-runner-protocol` holds a frame to its rules. The guest those runners
+boot is keel (docs/plans/2026-10-10-vm-base-and-image-layers.md).
+
+Not built yet (later stages): protocol-4 VM runners (`berth vm`), keel's
+`cube-init` and `cube-agent`, the runner's network stack, the credential
+proxy and the `dial`, `credential` and `report` streams.
 
 ## Machine templates and hooks
 

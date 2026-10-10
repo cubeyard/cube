@@ -16,7 +16,11 @@
 // The guest channel (`berth vm` <-> keel's cube-agent): one virtio-serial
 // port named `cube.0` per machine, a Unix socket on the runner's side. It
 // carries `DaemonFrame`s framed as on the streams above (u32 big-endian
-// length, 1 to `Limits.max_frame_bytes` bytes, then proto3 JSON). A frame
+// length, 1 to MAX_FRAME_BYTES (1 MiB, the protocol's own limit, the same
+// on every stream and on the port) bytes, then proto3 JSON). Neither end
+// learns it from the other: `Limits.max_frame_bytes` only reports it to
+// cubed, and `GuestLimits.max_frame_bytes` is the guest's own limit for an
+// operation, which must stay below it. A frame
 // over the limit, a zero length, JSON that does not parse or a frame that
 // breaks the channel rules below ends the connection; the runner treats the
 // guest's side as hostile.
@@ -29,7 +33,7 @@
 //           operation (as a closed stream does today); an `ans` that comes
 //           after it is dropped. Each `req` and `ans` is one frame, so the
 //           agent's limits must keep a guest request or answer under
-//           `max_frame_bytes` once its bytes are base64 (512 KiB reads and
+//           MAX_FRAME_BYTES once its bytes are base64 (512 KiB reads and
 //           writes do).
 // A disconnect (agent restart, socket closed, machine restored from a
 // snapshot) closes every channel. The agent sends `hello` again, the runner
