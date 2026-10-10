@@ -27,6 +27,11 @@ DEVELOPING.md before changing behavior.
   network (LAN, HTTP/HTTPS egress, TLS interception, secret substitution).
 - `packages/git`: host-side repository capabilities; credentials stay here.
 - `packages/web`: Svelte 5/Vite UI, built to `packages/web/dist`.
+- `packages/keel`: keel, what runs inside a thread machine: the guest kernel
+  (one `defconfig` per architecture, derived from nerdbox's), and planned `cube-init`, guest
+  agent over virtio-serial and EROFS image layers. Booted directly by QEMU,
+  built for fast boot and snapshot/resume, versioned apart from cubed. Not
+  used by the runner yet (docs/plans/2026-10-10-vm-base-and-image-layers.md).
 
 A thread's tools run in its own QEMU VM, never as the runner account. The
 guest is a sandbox for the agent's commands, files and network; the runner
@@ -54,6 +59,8 @@ belong in `scripts/test-offline.sh`. Runner, gateway and VM changes also need
 `CUBE_TEST_VM_IMAGE=<debian-13-genericcloud.qcow2> CUBE_TEST_VM=required bash
 scripts/test-node-transport.sh` on Linux with KVM; mocks are not runner
 acceptance.
+keel kernel changes need `packages/keel/kernel/build.sh` for both
+architectures and a boot under KVM and HVF.
 Inspect rendered UI at desktop/phone sizes for appearance changes; behavior
 changes to the chat or transcript need a `pnpm test:browser` scenario.
 
