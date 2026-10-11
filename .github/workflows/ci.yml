@@ -94,3 +94,10 @@ jobs:
         run: bash scripts/test-node-transport.sh
         env:
           CUBE_TEST_LAYER_TOOLS: required
+      # Last: root's build output stays in its own target directory.
+      - name: cube-agent's root-only tests, as root
+        run: |
+          sudo env "PATH=$PATH" "HOME=$HOME" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" CUBE_AGENT_ROOT_TESTS=1 \
+            cargo test --locked --offline -p cube-agent --lib --target-dir target/as-root -- \
+            out_of_the_workspace_the_agent_account_acts hooks_are_read_as_the_caller

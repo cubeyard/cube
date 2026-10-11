@@ -8,6 +8,9 @@
 //! streams the output back. Only the `agent` account and root may use the
 //! socket (`SO_PEERCRED`); services run as `agent` whoever asked.
 //!
+//! `cube hooks` shows the hooks this machine runs (hooks.rs), read with the
+//! caller's own permissions.
+//!
 //! On the socket: one JSON line `{"argv": [...], "cwd": "..."}` from the
 //! client, then JSON lines from the agent, `{"out": TEXT}` (stdout),
 //! `{"err": TEXT}` (stderr) and last `{"exit": N}`.
@@ -38,6 +41,7 @@ pub const SOCKET: &str = "/run/cube/agent.sock";
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 
 pub const USAGE: &str = "usage: cube service <command> [options]
+       cube hooks [-n LINES] [--json]
 
 Runs web servers in this machine as supervised services that outlive the
 command that started them, and opens them in cube's portal.
@@ -53,6 +57,9 @@ command that started them, and opens them in cube's portal.
   cube service restart NAME [--wait SECONDS] [--json]
   cube service stop NAME [--json]
       stop the service and remove it from the portal
+  cube hooks [-n LINES] [--json]
+      the hooks this machine runs, their last outcomes and logs (read only;
+      cube hooks --help)
 
 A service gets PORT and HOST=0.0.0.0 in its environment and must listen on
 0.0.0.0 (or this machine's address), not only on 127.0.0.1: the portal
@@ -187,7 +194,7 @@ fn serve(services: &Services, stream: UnixStream, account: Option<u32>) {
         out.exit(2);
         return;
     };
-    let code = cli(services, &argv, cwd, &mut out);
+    let code = cli(services, &argv, cwd, uid == Some(0), &mut out);
     out.exit(code);
 }
 
@@ -252,8 +259,15 @@ impl From<Fail> for Problem {
     }
 }
 
-/// `cube ARGV` from `caller_cwd`; the exit status.
-pub fn cli(services: &Services, argv: &[String], caller_cwd: &str, out: &mut Out) -> i32 {
+/// `cube ARGV` from `caller_cwd` (root's or the agent account's); the exit
+/// status.
+pub fn cli(
+    services: &Services,
+    argv: &[String],
+    caller_cwd: &str,
+    root_caller: bool,
+    out: &mut Out,
+) -> i32 {
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     match args.first().copied() {
         None => {
@@ -268,10 +282,17 @@ pub fn cli(services: &Services, argv: &[String], caller_cwd: &str, out: &mut Out
             out.out(&format!("cube (cube-agent {})\n", crate::agent::VERSION));
             0
         }
-        Some("hooks") => {
-            out.err("cube hooks: this machine does not run hooks yet\n");
-            2
-        }
+        Some("hooks") => match hooks(services, &args[1..], root_caller, out) {
+            Ok(code) => code,
+            Err(Problem::Usage(Usage(text))) => {
+                out.err(&format!("cube hooks: {text}\n"));
+                2
+            }
+            Err(Problem::Fail(fail)) => {
+                out.err(&format!("cube hooks: {}\n", fail.message));
+                1
+            }
+        },
         Some("service") => match service(services, &args[1..], caller_cwd, out) {
             Ok(code) => code,
             Err(Problem::Usage(Usage(text))) => {
@@ -391,6 +412,50 @@ impl<'a> Options<'a> {
                 .ok_or_else(|| "--wait is 0-600 seconds".into()),
         }
     }
+}
+
+/// cube-guest's `cli_hooks`: read only, as the caller.
+fn hooks(
+    services: &Services,
+    args: &[&str],
+    root_caller: bool,
+    out: &mut Out,
+) -> Result<i32, Problem> {
+    if matches!(args.first(), Some(&("-h" | "--help" | "help"))) {
+        out.out(crate::hooks::USAGE);
+        return Ok(0);
+    }
+    let options = Options::parse(args, &["--json"], &["-n", "--lines"])?;
+    if !options.positionals.is_empty() || options.rest.is_some() {
+        return Err(Usage::from("hooks takes no arguments").into());
+    }
+    let raw = options
+        .value(&["-n"])
+        .or_else(|| options.value(&["--lines"]))
+        .unwrap_or("20");
+    let lines: usize = match raw.parse() {
+        Ok(lines) if raw.bytes().all(|b| b.is_ascii_digit()) && lines <= 200 => lines,
+        _ => return Err(Usage::from("-n is 0-200 lines").into()),
+    };
+    let Some(account) = services.account() else {
+        return Err(Fail::new("UNAVAILABLE", "the machine is not set up yet").into());
+    };
+    let views = crate::hooks::Hooks {
+        root: &services.paths.root,
+        account: &account,
+        reader: (!root_caller).then_some(&account),
+    }
+    .views(lines)
+    .map_err(|error| Fail::new("IO_ERROR", error.to_string()))?;
+    out.json = options.flag("--json");
+    let text = views
+        .iter()
+        .map(crate::hooks::describe)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n\nthe project's hooks are changed in cube's projects, not here; see cube hooks --help";
+    out.result(&json!({"hooks": views}), &text);
+    Ok(0)
 }
 
 fn indent(text: &str) -> String {

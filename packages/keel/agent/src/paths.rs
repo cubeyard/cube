@@ -10,9 +10,15 @@ use std::{
 
 /// Opens `path` (relative to `root`) as `O_PATH`, resolved inside `root`.
 pub fn open_in_root(root: &fs::File, path: &str) -> io::Result<OwnedFd> {
+    open_in_root_with(root, path, libc::O_PATH)
+}
+
+/// Opens `path` with `flags`, resolved inside `root` as a process in that
+/// root resolves it: links are followed, an absolute one from `root`.
+pub fn open_in_root_with(root: &fs::File, path: &str, flags: i32) -> io::Result<OwnedFd> {
     let name = CString::new(path.trim_start_matches('/')).map_err(io::Error::other)?;
     let mut how: libc::open_how = unsafe { std::mem::zeroed() };
-    how.flags = (libc::O_PATH | libc::O_CLOEXEC) as u64;
+    how.flags = (flags | libc::O_CLOEXEC) as u64;
     how.resolve = libc::RESOLVE_IN_ROOT | libc::RESOLVE_NO_MAGICLINKS;
     let fd = unsafe {
         libc::syscall(
@@ -27,6 +33,27 @@ pub fn open_in_root(root: &fs::File, path: &str) -> io::Result<OwnedFd> {
         return Err(io::Error::last_os_error());
     }
     Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
+/// Gives the calling thread, and it alone, `account`'s ids (the raw system
+/// calls act on one thread; libc's change every thread of the process).
+/// Its effective capabilities go with root's uid, so `DAC_OVERRIDE` too.
+/// Call it on a thread that ends with the work.
+pub fn become_account(account: &crate::journal::Account) -> io::Result<()> {
+    let none = libc::uid_t::MAX;
+    unsafe {
+        if libc::syscall(
+            libc::SYS_setgroups,
+            account.groups.len(),
+            account.groups.as_ptr(),
+        ) != 0
+            || libc::syscall(libc::SYS_setresgid, none, account.gid, none) != 0
+            || libc::syscall(libc::SYS_setresuid, none, account.uid, none) != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// Opens `components` (below `root`, every link already resolved) with

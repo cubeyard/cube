@@ -21,7 +21,7 @@
 //! not a runner: no network, no secrets, one machine at a time. It writes
 //! DIR/results.json and kills every QEMU it started when it ends.
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
     process::Stdio,
@@ -65,12 +65,14 @@ struct Options {
     control: Option<Control>,
 }
 
-/// The one place a negative control leaves the reset on channel 0 out.
+/// A negative control: the one place the reset on channel 0 is left out,
+/// or (`clock`) the machine without virtio-rtc.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Control {
     Reconnect,
     LateHello,
     Restore,
+    Clock,
 }
 
 fn options() -> Result<Options> {
@@ -122,7 +124,10 @@ fn options() -> Result<Options> {
         ("off", None | Some("reconnect")) | ("on", Some("reconnect")) => Some(Control::Reconnect),
         ("on", Some("late-hello")) => Some(Control::LateHello),
         ("on", Some("restore")) => Some(Control::Restore),
-        _ => bail!("--control is reconnect, late-hello or restore (and --reset off is reconnect)"),
+        ("on", Some("clock")) => Some(Control::Clock),
+        _ => bail!(
+            "--control is reconnect, late-hello, restore or clock (and --reset off is reconnect)"
+        ),
     };
     Ok(Options {
         control,
@@ -349,6 +354,27 @@ while (my $c = $s->accept) {
 }
 "#;
 /// The pid of the `keep` service's server (empty when none runs).
+/// The runner's CA in every setup: a throwaway self-signed certificate (its
+/// key was never kept); only its text matters.
+const TEST_CA: &str = "-----BEGIN CERTIFICATE-----
+MIIByTCCAW+gAwIBAgIUYGCQ1sdCMj23aBebvDb0lf8BeaUwCgYIKoZIzj0EAwIw
+OTE3MDUGA1UEAwwua2VlbC1hZ2VudC1jaGVjayB0ZXN0IENBIChubyBwcml2YXRl
+IGtleSBrZXB0KTAgFw0yNjEwMTExMTIzMzJaGA8yMTI2MDkxNzExMjMzMlowOTE3
+MDUGA1UEAwwua2VlbC1hZ2VudC1jaGVjayB0ZXN0IENBIChubyBwcml2YXRlIGtl
+eSBrZXB0KTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABD0KP9cpkzDCrJu5ysZ8
+F4ffGJZtFjbxgV/VF/NQsfaewZlAX33TGXwFRMwoimGQGCVWQnNtyiZ53q1CSOBD
+wWKjUzBRMB0GA1UdDgQWBBQPgA8fy5tZfD175gjk8QsV/rJL8DAfBgNVHSMEGDAW
+gBQPgA8fy5tZfD175gjk8QsV/rJL8DAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49
+BAMCA0gAMEUCIQD65YEKd62BBay48IZq/x1b+rcj1JeDKj6W99kIgg5a3gIgaYs/
+h7a4hHplJXlEJ+aP+giyDKZu+FDDJAW+xNWg6Do=
+-----END CERTIFICATE-----
+";
+/// The project's pre-resume hook in every setup (the boot document).
+const PRE_RESUME: &[u8] =
+    b"#!/bin/bash\necho \"pre-resume as $(id -un) in $(pwd) token=$GH_TOKEN\"\n";
+/// A guest's realtime may be this far from the host's after a pause.
+const CLOCK_TOLERANCE: f64 = 1.0;
+const PAUSE: Duration = Duration::from_secs(3);
 const SERVICE_PID: &str = "pgrep -u agent -f '^perl server.pl' | head -1";
 /// Waits (20 s) until the `keep` service listens.
 const WAIT_LISTENING: &str = "for i in $(seq 100); do cube service status keep --json 2>/dev/null | grep -q '\"listening\":true' && break; sleep 0.2; done";
@@ -592,6 +618,25 @@ impl Channel {
         Ok((header, String::from_utf8_lossy(&body).into_owned()))
     }
 
+    /// The guest's realtime minus the host's, in seconds: `date` in a
+    /// command, against the middle of the host's time around the call.
+    async fn clock_offset(&self, id: &str, epoch: i64) -> Result<f64> {
+        let now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64()
+        };
+        let before = now();
+        let (_, output) = self.run(id, "date +%s.%N", epoch).await?;
+        let after = now();
+        let guest: f64 = output
+            .trim()
+            .parse()
+            .with_context(|| format!("date: {output:?}"))?;
+        Ok(guest - (before + after) / 2.0)
+    }
+
     /// The agent's own CPU time and age in seconds, from the guest's /proc
     /// (utime + stime of all its threads; its children are not counted).
     async fn agent_cpu(&self, id: &str, epoch: i64) -> Result<(f64, f64)> {
@@ -753,7 +798,6 @@ impl Lab {
             "-device", "virtio-serial-pci",
             "-chardev", &format!("socket,id=ctl,path={},server=on,wait=off", self.sockets.join("ctl.sock").display()),
             "-device", "virtserialport,chardev=ctl,name=cube.0",
-            "-device", "virtio-rtc-pci",
             "-device", "virtio-balloon-pci,free-page-reporting=on",
             "-serial", &format!("file:{}", dir.join(format!("console-{boot}.log")).display()),
             "-qmp", &format!("unix:{},server=on,wait=off", self.sockets.join("qmp.sock").display()),
@@ -761,6 +805,9 @@ impl Lab {
         .iter()
         .map(|s| s.to_string())
         .collect();
+        if self.o.control != Some(Control::Clock) {
+            args.extend(["-device".into(), "virtio-rtc-pci".into()]);
+        }
         if cfg!(target_os = "linux") {
             args.extend(["-sandbox".into(), "on".into()]);
         }
@@ -895,7 +942,7 @@ fn setup(layers: &[proto::Layer], documents: &[(&str, &[u8])]) -> Op {
             digest: String::new(),
             env: vec!["IMAGE_ONLY=from-image".into()],
         }),
-        ca_pem: String::new(),
+        ca_pem: TEST_CA.into(),
         runner_version: "keel-agent-check".into(),
         protocol: 4,
         capabilities: vec![],
@@ -991,7 +1038,11 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         sockets: sockets.into(),
     };
     let env: &[u8] = b"GH_TOKEN=cube_ph_github_keelcheck\nCUBE_SECRET_X=cube_ph_x\n";
-    let documents: &[(&str, &[u8])] = &[("hostname", b"keel-check\n"), ("env", env)];
+    let documents: &[(&str, &[u8])] = &[
+        ("hostname", b"keel-check\n"),
+        ("env", env),
+        ("hooks/pre-resume", PRE_RESUME),
+    ];
 
     // 1. The bare layer: hello, refusals before setup, an image that is not ready.
     {
@@ -1294,7 +1345,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             serving.abort();
             checks.ok(
                 status.success(),
-                "the Workspace contract (leases, files, commands, services) passes over DaemonFrame",
+                "the Workspace contract (leases, files, commands, services, the resume hook) passes over DaemonFrame",
                 status,
             )?;
         }
@@ -1493,6 +1544,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
     // and comes back: the agent waits without spinning and says hello again.
     let mut idle = json!({});
     let mut restore = json!({});
+    let clock;
     {
         let m = lab.start(&dir, &image_disk)?;
         let late = Duration::from_millis(image_hello_ms as u64 * 2 + 2000);
@@ -2039,6 +2091,179 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             format!("{portal} | {listed} | {stopped:?} | {empty}"),
         )?;
 
+        // K-5d: what keel writes for cube (generated files, the runner's CA,
+        // git's credential helper), the hooks, and the clock.
+        let (_, files) = ch
+            .run(
+                "k5d-files",
+                "cat /etc/hostname; grep -c . /etc/hosts; grep -x '127.0.1.1.keel-check' /etc/hosts; grep nameserver /etc/resolv.conf; \
+                 stat -c '%U %a' /etc/sudoers.d/cube /etc/cube/env /etc/cube/hooks/pre-resume; \
+                 sudo -n true 2>&1 | wc -c; sudo -n touch /etc/cube/x 2>&1 | grep -c 'Read-only file system'; \
+                 awk '$5 == \"/etc/hosts\" || $5 == \"/etc/hostname\" || $5 == \"/etc/resolv.conf\" || $5 == \"/etc/sudoers.d/cube\" || $5 == \"/etc/cube\" {print $5}' /proc/self/mountinfo | sort | tr '\\n' ' '; echo; \
+                 grep -cx 'GH_TOKEN=cube_ph_github_keelcheck' /etc/cube/env; cmp -s /etc/cube/hooks/pre-resume - <<'EOF' && echo hook-is-document\n#!/bin/bash\necho \"pre-resume as $(id -un) in $(pwd) token=$GH_TOKEN\"\nEOF",
+                epoch,
+            )
+            .await?;
+        checks.ok(
+            files
+                == "keel-check\n3\n127.0.1.1\tkeel-check\nnameserver 192.168.127.1\nroot 440\nroot 644\nroot 755\n0\n1\n/etc/cube /etc/hostname /etc/hosts /etc/resolv.conf /etc/sudoers.d/cube \n1\nhook-is-document\n",
+            "generated files: /etc/hosts (localhost and the hostname, so sudo resolves it), /etc/hostname, /etc/resolv.conf and /etc/sudoers.d/cube bound over their paths; /etc/cube read-only with cube's env and the pre-resume document",
+            format!("{files:?}"),
+        )?;
+
+        let ca_head = "MIIByTCCAW+gAwIBAgIU";
+        let ca_script = format!(
+            "b=$SSL_CERT_FILE; echo $b; [ \"$NODE_EXTRA_CA_CERTS $REQUESTS_CA_BUNDLE $CURL_CA_BUNDLE\" = \"$b $b $b\" ] && echo variables; \
+             grep -c '^# cube: begin' $b; grep -c '{ca_head}' $b; \
+             sed -n '/^# cube: begin/,/^# cube: end/p' $b | sed '1d;$d' | cmp -s - /etc/cube/ca.pem && echo block-is-ca; \
+             cmp -s /etc/cube/ca.pem /usr/local/share/ca-certificates/cube-runner.crt && echo crt; \
+             grep -c \"^SSL_CERT_FILE=$b$\" /etc/environment; sudo -n sh -c 'echo $SSL_CERT_FILE'"
+        );
+        let (_, ca) = ch.run("k5d-ca", &ca_script, epoch).await?;
+        let bundle = ca.lines().next().unwrap_or_default().to_string();
+        let ca_ok = !bundle.is_empty()
+            && ca == format!("{bundle}\nvariables\n1\n1\nblock-is-ca\ncrt\n1\n{bundle}\n");
+        // update-ca-certificates writes the bundle again: the CA stays (from
+        // cube-runner.crt), and the next setup puts cube's block back once.
+        let (_, updated) = ch
+            .run(
+                "k5d-update-ca",
+                &format!("sudo -n update-ca-certificates >/dev/null 2>&1; echo $?; grep -c '^# cube: begin' $SSL_CERT_FILE; grep -c '{ca_head}' $SSL_CERT_FILE"),
+                epoch,
+            )
+            .await?;
+        let done = ch.request(setup(&image_layers, documents)).await?;
+        let status = ch.info("status", TIMEOUT).await?;
+        let (_, again) = ch.run("k5d-ca-again", &ca_script, epoch).await?;
+        checks.ok(
+            ca_ok
+                && updated == "0\n0\n1\n"
+                && matches!(done, Answer::Done(_))
+                && status.ready
+                && again == format!("{bundle}\nvariables\n1\n2\nblock-is-ca\ncrt\n1\n{bundle}\n"),
+            "the runner's CA: in the image's bundle once between cube's markers, in /etc/cube/ca.pem and cube-runner.crt; the CA variables name the bundle, also through sudo; after update-ca-certificates it stays, and the next setup puts the block back once",
+            format!("{ca:?} | {updated:?} | {done:?} | {again:?}"),
+        )?;
+
+        let (_, git) = ch
+            .run(
+                "k5d-git",
+                "printf 'protocol=https\\nhost=github.com\\n\\n' | git credential fill; git config --system init.defaultBranch; echo $GH_PROMPT_DISABLED",
+                epoch,
+            )
+            .await?;
+        checks.ok(
+            git == "protocol=https\nhost=github.com\nusername=x-access-token\npassword=cube_ph_github_keelcheck\nmain\n1\n",
+            "git's credential helper for github.com (cube's block in /etc/gitconfig) answers with the placeholder; keel's own lines are in the environment",
+            format!("{git:?}"),
+        )?;
+
+        // The hooks: the contract ran cubed's resume script, which ran the
+        // pre-resume document; the agent reports what is in this machine.
+        let contract = lab.o.contract.is_some();
+        let _ = ch.request(setup(&image_layers, documents)).await?;
+        let status = ch.info("status", TIMEOUT).await?;
+        let reported: BTreeMap<String, String> = status.hooks.clone().into_iter().collect();
+        let (_, shown) = ch
+            .run("k5d-hooks", "cube hooks --json -n 5; cube hooks | tail -n 1; cube hooks -n 999 2>&1; echo \"exit=$?\"", epoch)
+            .await?;
+        let mut shown_lines = shown.lines();
+        let views: Value =
+            serde_json::from_str(shown_lines.next().unwrap_or_default()).unwrap_or(Value::Null);
+        let rest: Vec<&str> = shown_lines.collect();
+        let view = |name: &str| {
+            views["hooks"]
+                .as_array()
+                .and_then(|all| all.iter().find(|v| v["name"] == name))
+                .cloned()
+                .unwrap_or(Value::Null)
+        };
+        let pre = view("pre-resume");
+        let ran = "pre-resume as agent in /workspace token=cube_ph_github_keelcheck";
+        let expected: BTreeMap<String, String> = if contract {
+            [("pre-resume", "ok"), ("resume", "absent")]
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .into()
+        } else {
+            BTreeMap::new()
+        };
+        checks.ok(
+            reported == expected
+                && views["hooks"].as_array().map(Vec::len) == Some(4)
+                && pre["present"] == true
+                && pre["path"] == "/etc/cube/hooks/pre-resume"
+                && pre["sha256"] == hex(&Sha256::digest(PRE_RESUME)).as_str()
+                && view("setup")["present"] == false
+                && (if contract {
+                    pre["last"]["status"] == "ok" && pre["logTail"] == ran
+                } else {
+                    pre["last"].is_null()
+                })
+                && rest
+                    == [
+                        "the project's hooks are changed in cube's projects, not here; see cube hooks --help",
+                        "cube hooks: -n is 0-200 lines",
+                        "exit=2",
+                    ],
+            "the hooks: cube hooks shows the project's pre-resume (the boot document), its last outcome and log from ~/.cache/cube (it ran as agent in /workspace with the placeholder); status.guest.hooks has the outcomes",
+            format!("{reported:?} | {shown:?}"),
+        )?;
+
+        let mut bad = setup(&image_layers, documents);
+        if let Op::MachineSetup(s) = &mut bad {
+            s.ca_pem =
+                "-----BEGIN CERTIFICATE-----\nnot base64!\n-----END CERTIFICATE-----\n".into();
+        }
+        let refused = ch.request(bad).await?;
+        let not_ready = ch.info("status", TIMEOUT).await?;
+        let _ = ch.request(setup(&image_layers, documents)).await?;
+        let ready = ch.info("status", TIMEOUT).await?;
+        checks.ok(
+            refusal(&refused) == Some((proto::Code::InvalidArgument as i32, "bad_ca".into()))
+                && !not_ready.ready
+                && ready.ready,
+            "a setup whose CA is not PEM certificates is refused (bad_ca) and the machine is not ready until a good one",
+            format!("{refused:?} {not_ready:?}"),
+        )?;
+
+        // The clock: the guest's clocks stop while the machine is paused;
+        // the agent follows the host's PTP clock and puts realtime right
+        // within its interval of cont.
+        // The agent says which clock it follows when it starts (this boot's
+        // first console; a restored QEMU writes a new one).
+        let mut consoles = vec![];
+        for boot in 1.. {
+            match fs::read_to_string(dir.join(format!("console-{boot}.log"))) {
+                Ok(text) => consoles.push(text),
+                Err(_) => break,
+            }
+        }
+        let source = consoles
+            .iter()
+            .flat_map(|text| text.lines())
+            .filter_map(|line| line.split("cube-agent: clock: ").nth(1))
+            .filter(|said| !said.starts_with("stepped"))
+            .next_back()
+            .unwrap_or("no line from the agent")
+            .to_string();
+        let before = ch.clock_offset("clock-before", epoch).await?;
+        let mut qmp = Qmp::open(&m.qmp).await?;
+        qmp.execute("stop", Value::Null).await?;
+        tokio::time::sleep(PAUSE).await;
+        qmp.execute("cont", Value::Null).await?;
+        // QEMU serves one QMP client at a time; `quit` below opens its own.
+        drop(qmp);
+        let at_cont = ch.clock_offset("clock-cont", epoch).await?;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let after = ch.clock_offset("clock-after", epoch).await?;
+        clock = json!({"source": source, "beforeS": before, "pausedS": PAUSE.as_secs_f64(), "atContS": at_cont, "afterS": after});
+        log(&format!("clock: {clock}"));
+        checks.ok(
+            before.abs() < CLOCK_TOLERANCE && after.abs() < CLOCK_TOLERANCE,
+            "the clock: the guest's realtime is within 1 s of the host's, also 1.5 s after a 3 s pause (the agent follows the host's PTP clock)",
+            &clock,
+        )?;
+
         timings
             .push(json!({"run": "second boot", "helloMs": hello_ms, "setupToReadyMs": ready_ms}));
         quit(&mut m).await?;
@@ -2053,6 +2278,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         "checks": checks.0,
         "idle": idle,
         "restore": restore,
+        "clock": clock,
         "timings": timings,
     });
     fs::write(

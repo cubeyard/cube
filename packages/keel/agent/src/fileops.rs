@@ -141,16 +141,7 @@ fn as_agent<T: Send>(
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
-                let groups: Vec<libc::gid_t> = account.groups.clone();
-                let none = libc::uid_t::MAX;
-                unsafe {
-                    if libc::syscall(libc::SYS_setgroups, groups.len(), groups.as_ptr()) != 0
-                        || libc::syscall(libc::SYS_setresgid, none, account.gid, none) != 0
-                        || libc::syscall(libc::SYS_setresuid, none, account.uid, none) != 0
-                    {
-                        return Err(io_fail(io::Error::last_os_error()));
-                    }
-                }
+                crate::paths::become_account(account).map_err(io_fail)?;
                 work().map_err(denied)
             })
             .join()
@@ -482,7 +473,11 @@ fn replace(
 
 /// Makes the missing directories of `parent` (mode 0755, given to `give`);
 /// returns the last one.
-fn make_parents(root: &fs::File, parent: &[String], give: Option<&Account>) -> io::Result<OwnedFd> {
+pub(crate) fn make_parents(
+    root: &fs::File,
+    parent: &[String],
+    give: Option<&Account>,
+) -> io::Result<OwnedFd> {
     let mut at = open_resolved(root, &[], libc::O_PATH | libc::O_DIRECTORY, 0)?;
     for depth in 0..parent.len() {
         let prefix = &parent[..=depth];
@@ -513,7 +508,7 @@ fn make_parents(root: &fs::File, parent: &[String], give: Option<&Account>) -> i
 /// `files::write_atomic` in a directory given by descriptor: a temporary
 /// file made anew (never one found there), fsync, rename, fsync of the
 /// directory.
-fn write_atomic_at(
+pub(crate) fn write_atomic_at(
     directory: &OwnedFd,
     name: &str,
     content: &[u8],
@@ -948,6 +943,10 @@ mod tests {
     #[test]
     fn out_of_the_workspace_the_agent_account_acts() {
         if unsafe { libc::geteuid() } != 0 {
+            assert!(
+                std::env::var_os("CUBE_AGENT_ROOT_TESTS").is_none(),
+                "CUBE_AGENT_ROOT_TESTS is set: run this test as root"
+            );
             eprintln!("skipped: needs root");
             return;
         }

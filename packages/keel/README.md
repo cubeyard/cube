@@ -140,8 +140,9 @@ and a forced late `hello` recovered by the reset on channel 0, three
 restores with the runner connected before `cont`, file operations that
 stay in the workload root and act as `agent` out of the workspace,
 services started with `cube` (across an agent restart, after a boot, killed,
-failing and done), and the Workspace contract (leases, files, commands,
-services) over the channel. The command
+failing and done), the generated files and the runner's CA, `cube hooks`,
+the clock after a pause, and the Workspace contract (leases, files,
+commands, services, the resume hook) over the channel. The command
 is in [`agent/README.md`](agent/README.md).
 
 ## Layers

@@ -209,6 +209,22 @@ impl Services {
         Ok(services)
     }
 
+    /// The agent account of the newest setup (None before the first).
+    pub fn account(&self) -> Option<crate::journal::Account> {
+        let launch = self.launch.lock().unwrap();
+        let account = launch.as_ref()?.get("account")?;
+        Some(crate::journal::Account {
+            uid: account["uid"].as_u64()? as u32,
+            gid: account["gid"].as_u64()? as u32,
+            groups: account["groups"]
+                .as_array()?
+                .iter()
+                .filter_map(|g| g.as_u64().map(|g| g as u32))
+                .collect(),
+            home: account["home"].as_str()?.to_string(),
+        })
+    }
+
     /// The launch spec from `machine_setup`. The first one of a boot starts
     /// every registered command; later ones (another connection, an agent
     /// restart) only replace the spec.
@@ -921,5 +937,254 @@ mod tests {
             "it answers, but not with HTTP/1.x"
         );
         assert_eq!(answer(b"").1, "it closed the connection without an answer");
+    }
+
+    /// The supervisor against a scripted domain (T1): no process runs; the
+    /// test says which groups are populated and how each process ended.
+    #[derive(Default)]
+    struct Script {
+        populated: Mutex<std::collections::HashSet<String>>,
+        starts: Mutex<Vec<String>>,
+        refuse: std::sync::atomic::AtomicBool,
+    }
+    impl Domain for Script {
+        fn start(&self, id: &str, _: &Path, _: &[&OsStr]) -> io::Result<()> {
+            if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(io::Error::other("refused"));
+            }
+            self.starts.lock().unwrap().push(id.into());
+            self.populated.lock().unwrap().insert(id.into());
+            Ok(())
+        }
+        fn exists(&self, id: &str) -> bool {
+            self.populated(id)
+        }
+        fn populated(&self, id: &str) -> bool {
+            self.populated.lock().unwrap().contains(id)
+        }
+        fn kill(&self, id: &str) {
+            self.populated.lock().unwrap().remove(id);
+        }
+        fn memory(&self, _: &str) -> Option<Value> {
+            None
+        }
+        fn remove(&self, _: &str) {}
+    }
+
+    struct Bench {
+        _dir: tempfile::TempDir,
+        paths: Paths,
+        script: Arc<Script>,
+    }
+
+    impl Bench {
+        fn new(names: &[&str]) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = Paths {
+                registry: dir.path().join("registry"),
+                run: dir.path().join("run"),
+                portal: dir.path().join("portal.json"),
+                root: dir.path().join("root"),
+            };
+            fs::create_dir_all(&paths.registry).unwrap();
+            for (i, name) in names.iter().enumerate() {
+                write_json(
+                    &paths.registry.join(format!("{name}.json")),
+                    &json!({"name": name, "port": 8000 + i, "kind": "command", "command": "x", "cwd": "/workspace"}),
+                )
+                .unwrap();
+            }
+            Self {
+                _dir: dir,
+                paths,
+                script: Arc::new(Script::default()),
+            }
+        }
+        fn open(&self) -> Arc<Services> {
+            Services::open(
+                self.paths.clone(),
+                self.script.clone(),
+                "/sbin/cube-agent".into(),
+                Some("127.0.0.1".into()),
+            )
+            .unwrap()
+        }
+        fn launch(&self, services: &Services) {
+            services
+                .set_launch(&Launch {
+                    workspace: "/workspace".into(),
+                    namespace: None,
+                    account: None,
+                    env: Default::default(),
+                })
+                .unwrap();
+        }
+        /// The service's process ends with `code`, as `service-run` records it.
+        fn end(&self, name: &str, code: i64) {
+            write_json(
+                &self.paths.run.join(format!("{name}.exit")),
+                &json!({"exitCode": code}),
+            )
+            .unwrap();
+            self.script.populated.lock().unwrap().remove(name);
+        }
+        fn starts(&self) -> usize {
+            self.script.starts.lock().unwrap().len()
+        }
+    }
+
+    fn state(services: &Services, name: &str) -> (State, u32) {
+        let units = services.units.lock().unwrap();
+        let unit = &units[name];
+        (unit.state, unit.restarts)
+    }
+
+    /// The retry is due now (instead of RESTART_DELAY from now).
+    fn due(services: &Services, name: &str) {
+        let mut units = services.units.lock().unwrap();
+        let unit = units.get_mut(name).unwrap();
+        assert!(unit.retry.is_some(), "a retry is set");
+        unit.retry = Some(Instant::now());
+    }
+
+    #[test]
+    fn a_service_that_exits_0_is_not_started_again() {
+        let bench = Bench::new(&["web"]);
+        let services = bench.open();
+        bench.launch(&services);
+        assert_eq!(state(&services, "web"), (State::Active, 0));
+        assert_eq!(bench.starts(), 1, "the boot's first setup starts it");
+        bench.launch(&services);
+        assert_eq!(bench.starts(), 1, "a later setup does not");
+        services.tick();
+        assert_eq!(state(&services, "web"), (State::Active, 0), "still running");
+        bench.end("web", 0);
+        services.tick();
+        assert_eq!(state(&services, "web"), (State::Inactive, 0));
+        services.tick();
+        assert_eq!(bench.starts(), 1);
+    }
+
+    #[test]
+    fn a_failed_service_starts_again_after_the_delay() {
+        let bench = Bench::new(&["web"]);
+        let services = bench.open();
+        bench.launch(&services);
+        bench.end("web", 3);
+        services.tick();
+        assert_eq!(state(&services, "web"), (State::Activating, 0));
+        services.tick();
+        assert_eq!(bench.starts(), 1, "not before the delay");
+        due(&services, "web");
+        services.tick();
+        assert_eq!(state(&services, "web"), (State::Active, 1));
+        assert_eq!(bench.starts(), 2);
+        // No exit file (killed): a failure too.
+        bench.script.populated.lock().unwrap().remove("web");
+        services.tick();
+        assert_eq!(state(&services, "web"), (State::Activating, 1));
+    }
+
+    #[test]
+    fn five_starts_in_a_minute_are_the_limit() {
+        let bench = Bench::new(&["web"]);
+        let services = bench.open();
+        bench.launch(&services);
+        for restart in 1..START_LIMIT as u32 {
+            bench.end("web", 1);
+            services.tick();
+            due(&services, "web");
+            services.tick();
+            assert_eq!(state(&services, "web"), (State::Active, restart));
+        }
+        assert_eq!(bench.starts(), START_LIMIT);
+        bench.end("web", 1);
+        services.tick();
+        assert_eq!(state(&services, "web"), (State::Failed, 4));
+        services.tick();
+        assert_eq!(bench.starts(), START_LIMIT, "failed stays failed");
+        // `cube service start` starts it over: the count and the limit reset.
+        services.start("web").unwrap();
+        assert_eq!(state(&services, "web"), (State::Active, 0));
+        // A start the domain refuses is failed at once.
+        bench
+            .script
+            .refuse
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(services.start("web").is_err());
+        assert_eq!(state(&services, "web"), (State::Failed, 0));
+    }
+
+    #[test]
+    fn a_service_stopped_while_it_waits_is_forgotten() {
+        let bench = Bench::new(&["web"]);
+        let services = bench.open();
+        bench.launch(&services);
+        bench.end("web", 1);
+        services.tick();
+        assert!(services.drop_registration("web").is_some());
+        due(&services, "web");
+        services.tick();
+        assert!(!services.units.lock().unwrap().contains_key("web"));
+        assert_eq!(bench.starts(), 1, "never started again");
+    }
+
+    #[test]
+    fn an_agent_that_starts_again_takes_up_this_boot_s_state() {
+        let bench = Bench::new(&["gone", "kept", "stopped", "waiting"]);
+        let services = bench.open();
+        bench.launch(&services);
+        assert_eq!(bench.starts(), 4);
+        bench.end("stopped", 0);
+        services.tick();
+        assert_eq!(state(&services, "stopped"), (State::Inactive, 0));
+        drop(services);
+        // While no agent watches: `kept` runs on, `gone` ends with a failure
+        // (its saved state still says active), `waiting` was waiting for its
+        // retry with 2 restarts.
+        bench.end("gone", 9);
+        write_json(
+            &bench.paths.run.join("gone.state"),
+            &json!({"state": "active", "restarts": 1}),
+        )
+        .unwrap();
+        bench.script.populated.lock().unwrap().remove("waiting");
+        write_json(
+            &bench.paths.run.join("waiting.state"),
+            &json!({"state": "activating", "restarts": 2}),
+        )
+        .unwrap();
+
+        let again = bench.open();
+        assert_eq!(
+            state(&again, "kept"),
+            (State::Active, 0),
+            "found by its group"
+        );
+        assert_eq!(
+            state(&again, "gone"),
+            (State::Activating, 1),
+            "ended as if now; the restart count kept"
+        );
+        assert_eq!(state(&again, "stopped"), (State::Inactive, 0));
+        assert_eq!(state(&again, "waiting"), (State::Activating, 2));
+        again.tick();
+        assert_eq!(
+            state(&again, "waiting"),
+            (State::Active, 3),
+            "its retry is due at once"
+        );
+        assert_eq!(bench.starts(), 5, "only `waiting` started; nothing twice");
+        drop(again);
+
+        // The next boot: /run is empty; its first setup starts every command.
+        fs::remove_dir_all(&bench.paths.run).unwrap();
+        let boot = bench.open();
+        assert!(
+            boot.units.lock().unwrap().is_empty(),
+            "nothing before the setup"
+        );
+        bench.launch(&boot);
+        assert_eq!(bench.starts(), 9);
     }
 }
