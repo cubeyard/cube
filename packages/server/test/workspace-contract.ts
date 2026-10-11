@@ -7,7 +7,7 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { workspaceRoute } from "../src/workspace-http.ts";
-import { settleOperation, WORKSPACE_CAPABILITIES, WorkspaceError, type Workspace, type WorkspaceOwner } from "../src/workspace.ts";
+import { settleOperation, WORKSPACE_CAPABILITIES, WorkspaceError, type Workspace, type WorkspaceLimits, type WorkspaceOwner } from "../src/workspace.ts";
 
 const code = (expected: string) => (error: unknown) => {
   assert.ok(error instanceof WorkspaceError, `expected WorkspaceError ${expected}, got ${String(error)}`);
@@ -19,7 +19,6 @@ const code = (expected: string) => (error: unknown) => {
  * agent may write (default: a VM's /home/agent and /tmp). */
 export async function workspaceContract(name: string, workspace: Workspace, owner: WorkspaceOwner,
   options: { machinePaths?: (run: string) => string[] } = {}): Promise<void> {
-  const other: WorkspaceOwner = owner === "pi" ? "claude-code" : "pi";
   // Guest journals keep every key and file; keep each run's identities fresh.
   const run = `contract-${randomUUID()}`;
   const dir = run;
@@ -28,39 +27,8 @@ export async function workspaceContract(name: string, workspace: Workspace, owne
   // capabilities and limits
   const capabilities = await workspace.capabilities();
   for (const capability of WORKSPACE_CAPABILITIES) assert.ok(capabilities.includes(capability), `${name}: ${capability}`);
-  const limits = await workspace.limits();
-  for (const key of ["maxCommandBytes", "maxPathBytes", "maxExecTimeoutMs", "maxOutputBytes", "outputPageBytes", "maxReadBytes", "maxWriteBytes"] as const) {
-    assert.ok(Number.isSafeInteger(limits[key]) && limits[key] > 0, `${name}: limit ${key}`);
-  }
-  assert.ok(limits.maxExecTimeoutMs > 60000, "commands may run longer than 60 seconds");
-
-  // lease conflict, renewal, release and the epoch
-  await assert.rejects(workspace.lease({ owner: other }), code("CONFLICT"), "the agent is fixed for the thread");
-  await assert.rejects(workspace.lease({ owner, ttlMs: 10 }), code("INVALID_REQUEST"));
-  const first = await workspace.lease({ owner });
-  assert.equal(first.owner, owner);
-  assert.match(first.token, /^[0-9a-f]{64}$/);
-  assert.ok(Number.isSafeInteger(first.epoch) && first.epoch >= 1);
-  await assert.rejects(workspace.lease({ owner }), code("LEASE_HELD"), "one writable owner");
-  for (const token of ["0".repeat(64), "not-a-token", ""]) {
-    await assert.rejects(workspace.stat(token, "."), code("LEASE_STALE"));
-    await assert.rejects(workspace.writeFile(token, `${run}-forged`, `${dir}/forged`, Buffer.from("x"), { createParents: true }), code("LEASE_STALE"));
-  }
-  const renewed = await workspace.lease({ token: first.token });
-  assert.equal(renewed.epoch, first.epoch);
-  assert.equal(renewed.token, first.token);
-  await workspace.release(first.token);
-  await assert.rejects(workspace.release(first.token), code("LEASE_STALE"));
-  await assert.rejects(workspace.exec(first.token, `${run}-released`, { command: "touch must-not-run", timeoutMs: 1000 }), code("LEASE_STALE"));
-  const timed = await workspace.lease({ owner, ttlMs: 1000 });
-  assert.ok(timed.epoch > first.epoch, "every new holder gets a newer epoch");
-  assert.ok(typeof timed.expiresAt === "number" && timed.expiresAt > Date.now());
-  await delay(1200);
-  await assert.rejects(workspace.stat(timed.token, "."), code("LEASE_STALE"), "a missed heartbeat ends the lease");
-  await assert.rejects(workspace.lease({ token: timed.token }), code("LEASE_STALE"));
-  const lease = await workspace.lease({ owner });
-  assert.ok(lease.epoch > timed.epoch);
-  const token = lease.token;
+  const limits = await checkLimits(name, workspace);
+  const token = await leaseContract(workspace, owner, run, dir);
 
   try {
     // files, repeated keys and expectedSha
@@ -109,52 +77,145 @@ export async function workspaceContract(name: string, workspace: Workspace, owne
       await assert.rejects(workspace.readFile(token, pseudo), code("INVALID_REQUEST"), pseudo);
       await assert.rejects(workspace.writeFile(token, `${run}-pseudo-${pseudo}`, pseudo, Buffer.from("x")), code("INVALID_REQUEST"), pseudo);
     }
-    await assert.rejects(workspace.exec(token, `${run}-cwd`, { command: "touch must-not-run", cwd: "..", timeoutMs: 1000 }), code("INVALID_REQUEST"));
-    await assert.rejects(workspace.exec(token, `${run}-cwd-abs`, { command: "touch must-not-run", cwd: "/tmp", timeoutMs: 1000 }), code("INVALID_REQUEST"), "a command's cwd stays in the workspace");
     await assert.rejects(workspace.stat(token, `${dir}/missing`), code("NOT_FOUND"));
     await assert.rejects(workspace.readFile(token, `${dir}/missing`), code("NOT_FOUND"));
 
     // limits
     await assert.rejects(workspace.writeFile(token, `${run}-big`, `${dir}/big`, Buffer.alloc(limits.maxWriteBytes + 1)), code("INVALID_REQUEST"));
     await assert.rejects(workspace.readFile(token, path, { limit: limits.maxReadBytes + 1 }), code("INVALID_REQUEST"));
-    await assert.rejects(workspace.exec(token, `${run}-slow`, { command: "true", timeoutMs: limits.maxExecTimeoutMs + 1 }), code("INVALID_REQUEST"));
-    await assert.rejects(workspace.exec(token, `${run}-long`, { command: "x".repeat(limits.maxCommandBytes + 1), timeoutMs: 1000 }), code("INVALID_REQUEST"));
-    await assert.rejects(workspace.exec(token, "bad key", { command: "true", timeoutMs: 1000 }), code("INVALID_REQUEST"));
-
-    // exec under a key, repeated key, paged output
-    const spec = { command: `printf once >> ${dir}/count; printf hello`, timeoutMs: 10000 };
-    await workspace.exec(token, `${run}-e1`, spec);
-    const result = await settleOperation(workspace, token, `${run}-e1`);
-    assert.equal(result.state, "succeeded");
-    assert.ok(result.state === "succeeded");
-    assert.equal(text(result.output), "hello");
-    assert.equal(result.exitCode, 0);
-    const again = await workspace.exec(token, `${run}-e1`, spec);
-    assert.equal(again.state, "succeeded");
-    assert.equal(text((await workspace.readFile(token, `${dir}/count`)).content), "once", "a repeated key never runs again");
-    await assert.rejects(workspace.exec(token, `${run}-e1`, { ...spec, command: "touch must-not-run" }), code("CONFLICT"));
-    await assert.rejects(workspace.exec(token, `${run}-w1`, spec), code("CONFLICT"), "a write key cannot become a command");
-    await assert.rejects(workspace.operation(token, `${run}-never`), code("NOT_FOUND"));
-    await assert.rejects(workspace.stat(token, "must-not-run"), code("NOT_FOUND"));
-    const bytes = 150000;
-    await workspace.exec(token, `${run}-paged`, { command: `head -c ${bytes} /dev/zero | tr '\\0' b`, timeoutMs: 10000 });
-    const paged = await settleOperation(workspace, token, `${run}-paged`);
-    assert.ok(paged.state === "succeeded");
-    assert.equal(paged.output.length, bytes);
-    assert.ok(paged.output.every(byte => byte === 98));
-    const page = await workspace.operation(token, `${run}-paged`, { cursor: limits.outputPageBytes });
-    assert.ok(page.state === "succeeded" && page.outputOffset === limits.outputPageBytes);
-
-    // real cancellation
-    await workspace.exec(token, `${run}-cancel`, { command: `sleep 30; touch ${dir}/not-cancelled`, timeoutMs: limits.maxExecTimeoutMs });
-    await workspace.cancel(token, `${run}-cancel`);
-    const cancelled = await settleOperation(workspace, token, `${run}-cancel`, { intervalMs: 50 });
-    assert.deepEqual(cancelled, { key: `${run}-cancel`, state: "failed", error: "CANCELLED", completionUnknown: false });
-    await assert.rejects(workspace.stat(token, `${dir}/not-cancelled`), code("NOT_FOUND"));
+    await execContract(workspace, token, run, dir, limits, {
+      read: async path => text((await workspace.readFile(token, path)).content),
+      missing: async path => { await assert.rejects(workspace.stat(token, path), code("NOT_FOUND"), path); },
+      writeKey: `${run}-w1`,
+    });
   } finally {
     await workspace.release(token);
   }
   console.log(`ok: workspace contract (${name}): lease conflict and expiry, repeated key, expectedSha, cancel, limits, workspace and machine paths`);
+}
+
+async function checkLimits(name: string, workspace: Workspace): Promise<WorkspaceLimits> {
+  const limits = await workspace.limits();
+  for (const key of ["maxCommandBytes", "maxPathBytes", "maxExecTimeoutMs", "maxOutputBytes", "outputPageBytes", "maxReadBytes", "maxWriteBytes"] as const) {
+    assert.ok(Number.isSafeInteger(limits[key]) && limits[key] > 0, `${name}: limit ${key}`);
+  }
+  assert.ok(limits.maxExecTimeoutMs > 60000, "commands may run longer than 60 seconds");
+  return limits;
+}
+
+/** Lease conflict, renewal, release and the epoch; returns a held lease's token. */
+async function leaseContract(workspace: Workspace, owner: WorkspaceOwner, run: string, dir: string): Promise<string> {
+  const other: WorkspaceOwner = owner === "pi" ? "claude-code" : "pi";
+  await assert.rejects(workspace.lease({ owner: other }), code("CONFLICT"), "the agent is fixed for the thread");
+  await assert.rejects(workspace.lease({ owner, ttlMs: 10 }), code("INVALID_REQUEST"));
+  const first = await workspace.lease({ owner });
+  assert.equal(first.owner, owner);
+  assert.match(first.token, /^[0-9a-f]{64}$/);
+  assert.ok(Number.isSafeInteger(first.epoch) && first.epoch >= 1);
+  await assert.rejects(workspace.lease({ owner }), code("LEASE_HELD"), "one writable owner");
+  for (const token of ["0".repeat(64), "not-a-token", ""]) {
+    await assert.rejects(workspace.stat(token, "."), code("LEASE_STALE"));
+    await assert.rejects(workspace.writeFile(token, `${run}-forged`, `${dir}/forged`, Buffer.from("x"), { createParents: true }), code("LEASE_STALE"));
+  }
+  const renewed = await workspace.lease({ token: first.token });
+  assert.equal(renewed.epoch, first.epoch);
+  assert.equal(renewed.token, first.token);
+  await workspace.release(first.token);
+  await assert.rejects(workspace.release(first.token), code("LEASE_STALE"));
+  await assert.rejects(workspace.exec(first.token, `${run}-released`, { command: "touch must-not-run", timeoutMs: 1000 }), code("LEASE_STALE"));
+  const timed = await workspace.lease({ owner, ttlMs: 1000 });
+  assert.ok(timed.epoch > first.epoch, "every new holder gets a newer epoch");
+  assert.ok(typeof timed.expiresAt === "number" && timed.expiresAt > Date.now());
+  await delay(1200);
+  await assert.rejects(workspace.stat(timed.token, "."), code("LEASE_STALE"), "a missed heartbeat ends the lease");
+  await assert.rejects(workspace.lease({ token: timed.token }), code("LEASE_STALE"));
+  const lease = await workspace.lease({ owner });
+  assert.ok(lease.epoch > timed.epoch);
+  const token = lease.token;
+  return token;
+}
+
+/** How the exec part reads a workspace file's text and checks that a path
+ * does not exist: with the file operations, or with commands where the
+ * guest has none yet. `writeKey` is a key a file write used. */
+interface ContractFiles { read(path: string): Promise<string>; missing(path: string): Promise<void>; writeKey?: string }
+
+/** Commands: cwd, limits, a key that runs once, paged output, real cancellation. */
+async function execContract(workspace: Workspace, token: string, run: string, dir: string, limits: WorkspaceLimits, files: ContractFiles): Promise<void> {
+  const text = (bytes: Uint8Array) => Buffer.from(bytes).toString("utf8");
+  await assert.rejects(workspace.exec(token, `${run}-cwd`, { command: "touch must-not-run", cwd: "..", timeoutMs: 1000 }), code("INVALID_REQUEST"));
+  await assert.rejects(workspace.exec(token, `${run}-cwd-abs`, { command: "touch must-not-run", cwd: "/tmp", timeoutMs: 1000 }), code("INVALID_REQUEST"), "a command's cwd stays in the workspace");
+  await assert.rejects(workspace.exec(token, `${run}-slow`, { command: "true", timeoutMs: limits.maxExecTimeoutMs + 1 }), code("INVALID_REQUEST"));
+  await assert.rejects(workspace.exec(token, `${run}-long`, { command: "x".repeat(limits.maxCommandBytes + 1), timeoutMs: 1000 }), code("INVALID_REQUEST"));
+  await assert.rejects(workspace.exec(token, "bad key", { command: "true", timeoutMs: 1000 }), code("INVALID_REQUEST"));
+
+  // exec under a key, repeated key, paged output
+  const spec = { command: `printf once >> ${dir}/count; printf hello`, timeoutMs: 10000 };
+  await workspace.exec(token, `${run}-e1`, spec);
+  const result = await settleOperation(workspace, token, `${run}-e1`);
+  assert.equal(result.state, "succeeded");
+  assert.ok(result.state === "succeeded");
+  assert.equal(text(result.output), "hello");
+  assert.equal(result.exitCode, 0);
+  const again = await workspace.exec(token, `${run}-e1`, spec);
+  assert.equal(again.state, "succeeded");
+  assert.equal(await files.read(`${dir}/count`), "once", "a repeated key never runs again");
+  await assert.rejects(workspace.exec(token, `${run}-e1`, { ...spec, command: "touch must-not-run" }), code("CONFLICT"));
+  if (files.writeKey) await assert.rejects(workspace.exec(token, files.writeKey, spec), code("CONFLICT"), "a write key cannot become a command");
+  await assert.rejects(workspace.operation(token, `${run}-never`), code("NOT_FOUND"));
+  await files.missing("must-not-run");
+  const bytes = 150000;
+  await workspace.exec(token, `${run}-paged`, { command: `head -c ${bytes} /dev/zero | tr '\\0' b`, timeoutMs: 10000 });
+  const paged = await settleOperation(workspace, token, `${run}-paged`);
+  assert.ok(paged.state === "succeeded");
+  assert.equal(paged.output.length, bytes);
+  assert.ok(paged.output.every(byte => byte === 98));
+  const page = await workspace.operation(token, `${run}-paged`, { cursor: limits.outputPageBytes });
+  assert.ok(page.state === "succeeded" && page.outputOffset === limits.outputPageBytes);
+
+  // real cancellation
+  await workspace.exec(token, `${run}-cancel`, { command: `sleep 30; touch ${dir}/not-cancelled`, timeoutMs: limits.maxExecTimeoutMs });
+  await workspace.cancel(token, `${run}-cancel`);
+  const cancelled = await settleOperation(workspace, token, `${run}-cancel`, { intervalMs: 50 });
+  assert.deepEqual(cancelled, { key: `${run}-cancel`, state: "failed", error: "CANCELLED", completionUnknown: false });
+  await files.missing(`${dir}/not-cancelled`);
+}
+
+/** The contract's lease and exec parts alone, for a guest that takes
+ * commands but no file operations yet (keel's cube-agent before K-5b):
+ * files are read and checked with commands. */
+export async function workspaceExecContract(name: string, workspace: Workspace, owner: WorkspaceOwner): Promise<void> {
+  const run = `contract-${randomUUID()}`;
+  const dir = run;
+  const capabilities = await workspace.capabilities();
+  for (const capability of ["exec.start", "exec.cancel", "operation.get"]) assert.ok(capabilities.includes(capability), `${name}: ${capability}`);
+  const limits = await checkLimits(name, workspace);
+  const token = await leaseContract(workspace, owner, run, dir);
+  let n = 0;
+  const command = async (line: string) => {
+    const key = `${run}-files-${n++}`;
+    await workspace.exec(token, key, { command: line, timeoutMs: 10000 });
+    const done = await settleOperation(workspace, token, key);
+    assert.ok(done.state === "succeeded", `${line}: ${JSON.stringify(done)}`);
+    return done;
+  };
+  try {
+    await command(`mkdir -p ${dir}`);
+    await execContract(workspace, token, run, dir, limits, {
+      read: async path => {
+        const done = await command(`cat ${path}`);
+        assert.ok(done.state === "succeeded" && done.exitCode === 0, path);
+        return Buffer.from(done.output).toString("utf8");
+      },
+      missing: async path => {
+        const done = await command(`test ! -e ${path}`);
+        assert.ok(done.state === "succeeded" && done.exitCode === 0, `${path} must not exist`);
+      },
+    });
+  } finally {
+    await workspace.release(token);
+  }
+  console.log(`ok: workspace contract, exec part (${name}): lease conflict and expiry, repeated key, paged output, cancel, limits`);
 }
 
 /** A bare HTTP server over the workspace routes, as cubed mounts them. */

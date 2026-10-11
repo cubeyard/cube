@@ -1,11 +1,13 @@
-// keel's boot check (work package 4, masterplan K-4): boots base.erofs with
-// cube-init and the agent stand-in on a real image's layers and a writable
+// keel's boot check (work package 4, masterplan K-4): boots base-standin.erofs
+// (keel's base with the agent stand-in as /sbin/cube-agent; base.erofs carries
+// cube-agent, checked by packages/keel/agent-check) with
+// cube-init and the stand-in on a real image's layers and a writable
 // disk, checks the workload root, and measures boot and snapshot (`migrate`
 // to `file:` with `mapped-ram`). One driver and one set of QEMU arguments on
 // Linux and macOS; only the accelerator, machine type and console differ.
 //
 //   node scripts/keel-boot-check.ts --qemu PATH --qemu-img PATH \
-//     --kernel packages/keel/out/x86_64/vmlinuz --base packages/keel/out/x86_64/base.erofs \
+//     --kernel packages/keel/out/x86_64/vmlinuz --base packages/keel/out/x86_64/base-standin.erofs \
 //     --mkfs /usr/bin/mkfs.erofs --layers target/release/examples/layers \
 //     --out /var/tmp/keel-boot [--arch x86_64|arm64] [--accel tcg|kvm|hvf] \
 //     [--image REF@sha256:...] [--boots 10] [--snapshots 5] [--smp 2] [--memory 512]
@@ -21,7 +23,7 @@ import { connect, type Socket } from "node:net";
 import { cpus, loadavg, platform, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { Owned, ZOMBIE_SCAN } from "./keel-boot-check-lib.ts";
+import { awaitProgress, Owned, ZOMBIE_SCAN } from "./keel-boot-check-lib.ts";
 import { fetchImage } from "./keel-oci.ts";
 
 const { values } = parseArgs({
@@ -648,13 +650,9 @@ for (let i = 0; i < Number(values.snapshots); i++) {
   // the counter first moved past its value at the save. A frozen workload still fails.
   const tickAfter = Number((await channel.run("cat /tmp/tick")).output);
   check(tickAfter >= tickBefore, `snapshot ${i}: the workload's state survives the restore`, `${tickBefore} ${tickAfter}`);
-  let tick = tickAfter;
-  let progressMs = tickAfter > tickBefore ? now() - resumed : -1;
-  while (tick < tickAfter + 5 && now() - resumed < PROGRESS_LIMIT_MS) {
-    await sleep(50);
-    tick = Number((await channel.run("cat /tmp/tick")).output);
-    if (progressMs < 0 && tick > tickBefore) progressMs = now() - resumed;
-  }
+  const { tick, progressMs } = await awaitProgress(async () => Number((await channel.run("cat /tmp/tick")).output), {
+    before: tickBefore, after: tickAfter, resumedAt: resumed, limitMs: PROGRESS_LIMIT_MS, now,
+  });
   check(tick >= tickAfter + 5, `snapshot ${i}: a process running at the save keeps running (within ${PROGRESS_LIMIT_MS} ms of cont)`, `${tickBefore} ${tickAfter} ${tick}`);
   check((await channel.run("cat /workspace/persist")).output === token, `snapshot ${i}: the writable disk is readable after resume`);
   const spontaneous = channel.extraHellos;

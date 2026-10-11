@@ -13,7 +13,8 @@ guests) and macOS (HVF, arm64 guests) alike:
   virtio-serial control channel, assembles the project's root filesystem from
   the machine's read-only EROFS image layers and its writable disk with
   overlayfs, and runs commands and services, replacing SSH, cloud-init,
-  systemd and the Python helper in the guest (planned);
+  systemd and the Python helper in the guest ([`agent/`](agent): channel,
+  `machine_setup` and commands so far; files, services and the rest follow);
 - **the layer format**: OCI images converted to EROFS and stacked as one
   disk, built on the runner by [`layers/`](layers) (`keel-layers`).
 
@@ -73,7 +74,10 @@ packages/keel/base/build.sh x86_64               # one
 ```
 
 Output: `out/<arch>/base.erofs`, `base.erofs.sha256` and `base.txt` (the
-files and their digests). Two builds of the same inputs give the same image.
+files and their digests), and `base-standin.erofs` (below). Two builds of
+the same inputs give the same image. `cube-agent` is built in the same
+container with the Rust of `rust-toolchain.toml` (rustup-init pinned by
+sha256), static musl, linked by the toolchain's `rust-lld`.
 
 [`init/cube-init.c`](init/cube-init.c) is PID 1: proc, sysfs, devtmpfs,
 devpts, `/dev/shm`, tmpfs on `/run` and `/tmp`, cgroup2 with `cpu cpuset io
@@ -84,19 +88,23 @@ SIGPWR powers off (SIGINT, Ctrl-Alt-Del, reboots): SIGTERM to the agent,
 then to everything, SIGKILL, sync, unmount, `reboot(2)`. Its messages start
 with `cube-init:` on the console, also with `quiet`.
 
-Until `cube-agent` exists, `/sbin/cube-agent` in the base is a **stand-in**
-for the boot check ([`init/agent-standin.c`](init/agent-standin.c)), not the
-agent: a line protocol on the `cube.0` port instead of `DaemonFrame`. It does
-with the disks what `machine_setup` will: mounts the layer disk's partitions
-read-only as EROFS in the order the runner gives (topmost first; partition N
-is layer N of `MachineSetup.layers`), formats the writable disk with `mke2fs`
-when it is blank or checks it with `e2fsck -p`, and mounts the overlay
-(`upper/`, `work/` on `vdc`, `state/` bound at `/var/lib/cube`) at
-`/run/keel/root`, where it runs commands.
+`/sbin/cube-agent` is [`agent/`](agent): protocol 4's `DaemonFrame` on the
+`cube.0` port, `machine_setup` (the layer disk's partitions read-only as
+EROFS in the runner's order, topmost first; the writable disk formatted when
+blank or checked with `e2fsck -p`; the overlay with `upper/`, `work/` on
+`vdc` and `state/` at `/var/lib/cube`, in a mount namespace of its own) and
+`OPERATIONS`' commands with cube-guest's journal. Its README says what it
+does and what later rows add.
+
+`base-standin.erofs` is the same root with the boot check's **stand-in**
+([`init/agent-standin.c`](init/agent-standin.c)) as `/sbin/cube-agent`: a
+line protocol on `cube.0` that sets up the same disks and runs commands as
+root, for `scripts/keel-boot-check.ts` only. It is never a keel asset; a
+release ships `base.erofs`.
 
 ## Boot check
 
-`scripts/keel-boot-check.ts` boots the base with the kernel on a public
+`scripts/keel-boot-check.ts` boots `base-standin.erofs` with the kernel on a public
 image's layers (default `debian:trixie`, pinned by digest) plus two test
 layers (a file shadowed across layers, whiteouts, opaque directories),
 converted and stacked with `keel-layers`, and a blank `rw.qcow2`. It checks
@@ -106,7 +114,7 @@ unclean stop, and snapshots, then measures boot and snapshot times:
 ```sh
 cargo build --release -p keel-layers --example layers
 node scripts/keel-boot-check.ts --qemu PATH/qemu-system-x86_64 --qemu-img PATH/qemu-img \
-  --kernel packages/keel/out/x86_64/vmlinuz --base packages/keel/out/x86_64/base.erofs \
+  --kernel packages/keel/out/x86_64/vmlinuz --base packages/keel/out/x86_64/base-standin.erofs \
   --mkfs /usr/bin/mkfs.erofs --layers target/release/examples/layers \
   --out /var/tmp/keel-boot --arch x86_64 --accel tcg|kvm|hvf --boots 20 --snapshots 10
 ```
@@ -118,6 +126,15 @@ with `mapped-ram` in migration mode `cpr-reboot`, `quit`, and load in a new
 QEMU with `-incoming defer`: QEMU's vmdk driver blocks migration in mode
 `normal`, and the layer disk is a VMDK descriptor. Results go to
 `OUT/results.json`, with each boot's argv and console log under `OUT/runs`.
+
+## Agent check
+
+`keel-agent-check` ([`agent-check/`](agent-check)) boots `base.erofs` with
+the real agent and talks `DaemonFrame` to it as a VM runner will: hello and
+status, setups it refuses and applies, readiness, the workload root, the
+journal, an agent restart under a running command, a power-off and a second
+boot, and the Workspace contract's exec part over the channel. The command
+is in [`agent/README.md`](agent/README.md).
 
 ## Layers
 

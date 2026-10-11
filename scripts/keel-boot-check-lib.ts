@@ -45,3 +45,26 @@ export class Owned {
     this.dirs.clear();
   }
 }
+
+/** After a restore: reads the workload's counter until it has moved `need`
+ * ticks past `after` (its value right after `cont`) or `limitMs` have passed
+ * since `resumedAt`. Returns the last value read and how long after
+ * `resumedAt` it first moved past `before` (its value at the save), -1 if it
+ * never did. A frozen workload returns `after` itself, and the boot check
+ * fails it. */
+export async function awaitProgress(read: () => Promise<number>, o: {
+  before: number; after: number; resumedAt: number; limitMs: number; need?: number;
+  now?: () => number; sleep?: (ms: number) => Promise<unknown>;
+}): Promise<{ tick: number; progressMs: number }> {
+  const now = o.now ?? (() => performance.now());
+  const sleep = o.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+  const need = o.need ?? 5;
+  let tick = o.after;
+  let progressMs = o.after > o.before ? now() - o.resumedAt : -1;
+  while (tick < o.after + need && now() - o.resumedAt < o.limitMs) {
+    await sleep(50);
+    tick = await read();
+    if (progressMs < 0 && tick > o.before) progressMs = now() - o.resumedAt;
+  }
+  return { tick, progressMs };
+}

@@ -469,6 +469,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cube-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cube-runner-protocol",
+ "libc",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "cube-gateway"
 version = "0.1.0"
 dependencies = [
@@ -1689,6 +1702,18 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "keel-agent-check"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cube-runner-protocol",
+ "keel-layers",
+ "serde_json",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]

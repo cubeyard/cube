@@ -1,0 +1,16 @@
+[package]
+name = "keel-agent-check"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "keel's agent check: boots a disposable keel machine under QEMU and talks to cube-agent over DaemonFrame"
+
+[dependencies]
+anyhow = "1"
+cube-runner-protocol = { path = "../../runner-protocol" }
+keel-layers = { path = "../layers" }
+serde_json = "1"
+sha2 = "0.11"
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }

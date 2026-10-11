@@ -593,15 +593,22 @@ mounts the pseudo filesystems, enables the cgroup v2 controllers, brings up
 loopback, starts `/sbin/cube-agent` and starts it again when it dies, reaps
 orphans and powers off on a signal. It runs from `base.erofs`
 (`packages/keel/base/build.sh`), the read-only root on `vda` that also holds
-static `mke2fs`, `e2fsck` and `mkfs.erofs`. Until `cube-agent` exists, the
-base carries a stand-in (`init/agent-standin.c`, a line protocol on `cube.0`,
-not `DaemonFrame`) that assembles the workload root from the layer disk and
-the writable disk; `scripts/keel-boot-check.ts` boots it and checks the root,
-a second boot and a snapshot.
+static `mke2fs`, `e2fsck` and `mkfs.erofs`, and `cube-agent`
+(`packages/keel/agent`, static musl Rust). The agent speaks `DaemonFrame` on
+`cube.0` with `cube-runner-protocol`'s framing, applies `machine_setup`
+(layers read-only as EROFS, the writable disk formatted or checked, the
+overlay in a mount namespace of its own, the `agent` account) and keeps
+`OPERATIONS`' `hello`, `exec`, `get` and `cancel` with cube-guest's journal,
+one cgroup per operation; it advertises only those. `keel-agent-check`
+(`packages/keel/agent-check`) boots it under QEMU and runs the Workspace
+contract's exec part over the channel. `base-standin.erofs` carries the
+older line-protocol stand-in (`init/agent-standin.c`) in its place, for
+`scripts/keel-boot-check.ts` only (the root, a second boot, snapshots).
 
-Not built yet (later stages): protocol-4 VM runners (`berth vm`), keel's
-`cube-agent`, the runner's network stack, the credential
-proxy and the `dial`, `credential` and `report` streams.
+Not built yet (later stages): protocol-4 VM runners (`berth vm`), the rest
+of keel's `cube-agent` (files, services, generated files and the runner's
+CA, clock, hooks, templates, snapshots), the runner's network stack, the
+credential proxy and the `dial`, `credential` and `report` streams.
 
 ## Machine templates and hooks
 
