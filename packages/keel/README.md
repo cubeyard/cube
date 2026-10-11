@@ -15,8 +15,8 @@ guests) and macOS (HVF, arm64 guests) alike:
   overlayfs, and runs commands and services, replacing SSH, cloud-init,
   systemd and the Python helper in the guest ([`agent/`](agent): channel,
   `machine_setup`, commands, files, services, the `cube` command,
-  generated files, the runner's CA, the clock, hooks and template
-  publishing so far; snapshots follow);
+  generated files, the runner's CA, the clock, hooks, template
+  publishing and the snapshot hooks `snapshot_prepare`/`snapshot_done`);
 - **the layer format**: OCI images converted to EROFS and stacked as one
   disk, built on the runner by [`layers/`](layers) (`keel-layers`).
 
@@ -138,7 +138,9 @@ journal, an agent restart under a running command, a power-off and a second
 boot with no runner connected while it boots, a runner that disconnects and
 connects again (the agent must not spin meanwhile), immediate reconnects
 and a forced late `hello` recovered by the reset on channel 0, three
-restores with the runner connected before `cont`, file operations that
+restores with the runner connected before `cont`, each after
+`snapshot_prepare` with an operation held and never run, a failed save
+after which `snapshot_done` lets the held operation run, file operations that
 stay in the workload root and act as `agent` out of the workspace,
 services started with `cube` (across an agent restart, after a boot, killed,
 failing and done), the generated files and the runner's CA, `cube hooks`,

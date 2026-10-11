@@ -465,13 +465,20 @@ designed for it from the start:
   `CLOCK_REALTIME` within one sync interval of resuming. Timeouts on
   `CLOCK_MONOTONIC` do not count suspended time; decide per timeout whether
   that is wanted.
-- **Before saving.** The runner sends `snapshot_prepare` (below): the agent
-  finishes or parks what it is writing, runs `sync`, drops the page cache
-  (`/proc/sys/vm/drop_caches`) and lets free page reporting return memory, so
-  the file holds little more than the processes' own memory. It answers when
-  it has settled and holds new operations until the channel closes (the
-  machine was saved and stopped) or `snapshot_done` arrives (the save failed,
-  or the machine keeps running).
+- **Before saving.** The runner sends `snapshot_prepare` (below) right
+  before `stop`: the agent waits for the requests that write to answer,
+  runs `sync`, drops the page cache (`/proc/sys/vm/drop_caches`) and
+  compacts memory, so free page reporting can return whole free blocks and
+  the file holds little more than the processes' own memory. It answers
+  `done` when it has settled, with a `status` that is not ready, and holds
+  every new request (and the answer of a read still running) until the
+  connection ends (the machine was saved: what was held is dropped, never
+  run, and the runner asks again by key after the restore) or
+  `snapshot_done` arrives (the save failed and the runner sent `cont`, or
+  the machine keeps running: what was held goes on). A prepare that cannot
+  settle the machine is refused and leaves it unprepared. The agent does
+  not wait for free page reporting (about 2 s after the pages are freed);
+  how much memory the balloon gives back is package 10's measurement.
 - **Channel.** The host end is a new socket after restore, and every channel
   that was open at the snapshot is closed, but the guest may not see it
   close: a runner that connects to the new QEMU before `cont` gives it no
@@ -696,7 +703,11 @@ machine booted with it as its topmost layer. With keel's overlay defaults
 image file leaves a metacopy inode without data in `upper/` and a `mv` a
 redirect; the check asserts both in the layer and that the new machine
 reads the mode, owner, data and moved entries through the image layer
-below, with a control whose redirects point at nothing.
+below, with a control whose redirects point at nothing. K-5f adds
+`snapshot_prepare` and `snapshot_done`; the check sends the prepare
+before each of its three saves, holds an operation sent after it (never
+run once the save ends the connection), and lets a held operation run
+after a save that fails and `snapshot_done`.
 
 **6. cubed for keel machines.** Agent upgrades are keel releases (a cold boot
 on the new version), so `helper.install` and the helper-hash check in
