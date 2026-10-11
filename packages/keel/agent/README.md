@@ -70,7 +70,9 @@ Generated files (`/etc/hosts`, `/etc/hostname`, sudoers, `/etc/cube/env`),
 the runner's CA in the bundle, the clock from PTP, hooks and `recover`
 output for `cube hooks` (K-5d); file operations (K-5b); services and the
 `cube` command (K-5c); templates (K-5e); snapshots and reconnecting every
-channel after a restore (K-5f). `ready` will include the generated files and
+channel after a restore (K-5f), including a runner that connects again right
+after it closed (the guest sees both at once, the agent reads no EOF and
+says no `hello`). `ready` will include the generated files and
 the CA once K-5d writes them.
 
 ## Tests

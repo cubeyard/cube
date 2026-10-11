@@ -5,7 +5,10 @@
 //! (the runner closed its socket, a restore gave it a new one) ends every
 //! channel; operations keep running and are found by their keys. A frame
 //! that breaks the channel rules ends the connection: the agent closes the
-//! port and opens it again, and says `hello` again.
+//! port and opens it again, and says `hello` again. A reconnect that comes
+//! right after the disconnect, so the guest learns of both at once, leaves
+//! no EOF to read: the agent keeps the old connection and sends no `hello`
+//! (masterplan K-5f).
 use std::{
     collections::HashSet,
     fs,
