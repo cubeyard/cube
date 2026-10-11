@@ -7,8 +7,11 @@
 //! that breaks the channel rules ends the connection: the agent closes the
 //! port and opens it again, and says `hello` again. A reconnect that comes
 //! right after the disconnect, so the guest learns of both at once, leaves
-//! no EOF to read: the agent keeps the old connection and sends no `hello`
-//! (masterplan K-5f).
+//! no EOF to read: the agent keeps the old connection and sends no `hello`.
+//! Any frame from the runner on channel 0 breaks the rules, so it is the
+//! runner's way out (runner.proto's header): with no `hello` 500 ms after a
+//! connect, it sends a `req` on channel 0, and the agent ends the stale
+//! connection and says `hello` about 100 ms later.
 use std::{
     collections::HashSet,
     fs,
@@ -225,5 +228,87 @@ async fn handle(agent: &Arc<Agent>, request: proto::DaemonRequest) -> (AnswerKin
             )),
             false,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::net::UnixStream;
+
+    use tokio::io::AsyncWriteExt;
+
+    use super::*;
+
+    /// One end of a socket pair as the agent's port, the other as the
+    /// runner's socket.
+    fn port() -> (fs::File, tokio::net::UnixStream) {
+        let (agent, runner) = UnixStream::pair().unwrap();
+        agent.set_nonblocking(true).unwrap();
+        runner.set_nonblocking(true).unwrap();
+        (
+            fs::File::from(OwnedFd::from(agent)),
+            tokio::net::UnixStream::from_std(runner).unwrap(),
+        )
+    }
+
+    fn guest_hello(ch: u32) -> proto::DaemonFrame {
+        proto::DaemonFrame {
+            ch,
+            t: Some(T::Req(proto::DaemonRequest {
+                op: Some(Op::Guest(proto::GuestRequest {
+                    op: "hello".into(),
+                    data: Vec::new(),
+                })),
+            })),
+        }
+    }
+
+    async fn hello(runner: &mut tokio::net::UnixStream) {
+        let frame = read_daemon_frame(runner).await.unwrap();
+        assert!(
+            frame.ch == 0 && matches!(frame.t, Some(T::Hello(_))),
+            "{frame:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_req_on_channel_0_ends_the_connection() {
+        let agent = Agent::start();
+        let (port, mut runner) = port();
+        let served = tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move { connection(&agent, &port).await }
+        });
+        hello(&mut runner).await;
+        // The connection works: an operation on channel 1 is answered.
+        write_frame(&mut runner, &guest_hello(1)).await.unwrap();
+        let answer = read_daemon_frame(&mut runner).await.unwrap();
+        assert!(
+            answer.ch == 1 && matches!(answer.t, Some(T::Ans(_))),
+            "{answer:?}"
+        );
+        // The runner's way out of a stale connection.
+        write_frame(&mut runner, &guest_hello(0)).await.unwrap();
+        let ended = served.await.unwrap();
+        assert!(
+            ended
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("channel above 0")),
+            "{ended:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn eof_is_the_end_of_a_connection_not_an_error() {
+        let agent = Agent::start();
+        let (port, mut runner) = port();
+        let served = tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move { connection(&agent, &port).await }
+        });
+        hello(&mut runner).await;
+        runner.shutdown().await.unwrap();
+        drop(runner);
+        assert!(served.await.unwrap().is_ok());
     }
 }
