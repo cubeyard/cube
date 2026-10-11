@@ -817,7 +817,14 @@ mod tests {
         let again = ensure_account(root).unwrap();
         assert_eq!(again, account);
         let passwd = fs::read_to_string(root.join("etc/passwd")).unwrap();
-        assert_eq!(passwd.matches("agent:").count(), 1, "{passwd}");
+        assert_eq!(
+            passwd
+                .lines()
+                .filter(|line| line.starts_with("agent:"))
+                .count(),
+            1,
+            "{passwd}"
+        );
         assert!(
             fs::read_to_string(root.join("etc/shadow"))
                 .unwrap()
