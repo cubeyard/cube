@@ -83,6 +83,7 @@ impl Agent {
             kernel: read_trimmed("/proc/sys/kernel/osrelease"),
             boot_id: read_trimmed("/proc/sys/kernel/random/boot_id"),
         });
+        crate::clock::spawn();
         if setup::is_mounted(setup::ROOT) {
             if let Err(error) = agent.open_journal() {
                 eprintln!("cube-agent: {error}");
@@ -203,7 +204,23 @@ impl Agent {
         self.journal().map_or(0, |journal| journal.current_epoch())
     }
 
+    /// Each hook's last outcome in this machine, read as the agent account
+    /// (from ~/.cache/cube in the workload root); nothing before a setup.
+    fn hooks(&self) -> std::collections::BTreeMap<String, String> {
+        let account = self.services().and_then(|services| services.account());
+        match account {
+            Some(account) if setup::is_mounted(setup::ROOT) => crate::hooks::Hooks {
+                root: Path::new(setup::ROOT),
+                account: &account,
+                reader: Some(&account),
+            }
+            .outcomes(),
+            _ => Default::default(),
+        }
+    }
+
     pub fn info(&self) -> proto::GuestInfo {
+        let hooks = self.hooks().into_iter().collect();
         let status = self.status.lock().unwrap();
         proto::GuestInfo {
             connected: true,
@@ -214,6 +231,7 @@ impl Agent {
             os: "linux".into(),
             kernel: self.kernel.clone(),
             boot_id: self.boot_id.clone(),
+            hooks,
             since: Some(status.since),
             limits: Some(proto::GuestLimits {
                 max_frame_bytes: Limits::MAX_FRAME_BYTES,
@@ -242,7 +260,7 @@ impl Agent {
         json!({
             "version": info.version, "ready": info.ready, "capabilities": info.capabilities,
             "limits": Limits::json(), "epoch": info.epoch, "build": info.build, "os": info.os,
-            "kernel": info.kernel, "hooks": {}, "bootId": info.boot_id,
+            "kernel": info.kernel, "hooks": info.hooks, "bootId": info.boot_id,
         })
     }
 

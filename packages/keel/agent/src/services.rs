@@ -209,6 +209,22 @@ impl Services {
         Ok(services)
     }
 
+    /// The agent account of the newest setup (None before the first).
+    pub fn account(&self) -> Option<crate::journal::Account> {
+        let launch = self.launch.lock().unwrap();
+        let account = launch.as_ref()?.get("account")?;
+        Some(crate::journal::Account {
+            uid: account["uid"].as_u64()? as u32,
+            gid: account["gid"].as_u64()? as u32,
+            groups: account["groups"]
+                .as_array()?
+                .iter()
+                .filter_map(|g| g.as_u64().map(|g| g as u32))
+                .collect(),
+            home: account["home"].as_str()?.to_string(),
+        })
+    }
+
     /// The launch spec from `machine_setup`. The first one of a boot starts
     /// every registered command; later ones (another connection, an agent
     /// restart) only replace the spec.

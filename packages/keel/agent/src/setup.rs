@@ -13,6 +13,7 @@
 //!   /run/keel/workload.mnt  the workload's mount namespace (pivot_root into
 //!                        the root), which commands enter
 //!   /run/keel/setup.json the layers this boot assembled
+//!   /etc/cube, /etc/hosts, ... cube's generated files (generated.rs)
 //!
 //! The layers cannot change under a running workload: another list is
 //! FAILED_PRECONDITION/layers_changed (the runner boots the machine cold).
@@ -47,7 +48,7 @@ const MAX_LAYERS: u32 = 128;
 const DOCUMENTS: [&str; 4] = ["hostname", "env", "hooks/pre-setup", "hooks/pre-resume"];
 /// What `ready` needs in the workload root (runner.proto, `GuestInfo.ready`).
 const COMMANDS: [&str; 6] = ["bash", "sudo", "flock", "git", "gh", "curl"];
-const CA_BUNDLES: [&str; 3] = [
+pub const CA_BUNDLES: [&str; 3] = [
     "etc/ssl/certs/ca-certificates.crt",
     "etc/pki/tls/certs/ca-bundle.crt",
     "etc/ssl/cert.pem",
@@ -124,10 +125,12 @@ fn env_lines(text: &str, what: &str) -> Result<Vec<(String, String)>, Refusal> {
 }
 
 /// A command's environment: a clean one for the agent account, then the
-/// image's `Env`, then the account's own variables, then cube's (the `env`
-/// document: placeholders and keel's fixed lines) on top.
+/// image's `Env`, then the account's own variables, then cube's on top:
+/// keel's fixed lines (`cube`, the CA variables, ...) and the `env`
+/// document (the placeholders).
 pub fn environment(
     image_env: &[String],
+    cube: &[(String, String)],
     document: Option<&[u8]>,
     home: &str,
 ) -> Result<BTreeMap<String, String>, Refusal> {
@@ -146,6 +149,7 @@ pub fn environment(
     ] {
         env.insert(name.into(), value.into());
     }
+    env.extend(cube.iter().cloned());
     if let Some(document) = document {
         let text =
             std::str::from_utf8(document).map_err(|_| invalid("bad_env", "env: not UTF-8"))?;
@@ -299,7 +303,7 @@ fn c(path: &str) -> CString {
     CString::new(path).unwrap()
 }
 
-fn mount(
+pub(crate) fn mount(
     source: &str,
     target: &str,
     kind: Option<&str>,
@@ -559,6 +563,7 @@ fn assemble(layers: &[proto::Layer]) -> Result<bool, Refusal> {
         if let Err(error) = bind_cli(Path::new(ROOT)) {
             eprintln!("cube-agent: no cube command in the workload: {error}");
         }
+        crate::generated::bind_all(Path::new(ROOT))?;
     }
     Ok(formatted)
 }
@@ -703,13 +708,16 @@ pub fn apply(setup: &proto::MachineSetup) -> Result<Applied, Refusal> {
         ));
     }
     let key = layer_key(&setup.layers)?;
+    let ca = crate::generated::check_ca(&setup.ca_pem)?;
     let env_document = setup.documents.get("env").map(Vec::as_slice);
     // Validate the environment before anything is mounted.
     environment(
         setup.image.as_ref().map_or(&[][..], |i| &i.env),
+        &[],
         env_document,
         "/home/agent",
     )?;
+    crate::generated::protect_links();
     // Mixed into the pool without crediting it: a restored machine must not
     // repeat another's random numbers.
     fs::OpenOptions::new()
@@ -741,17 +749,48 @@ pub fn apply(setup: &proto::MachineSetup) -> Result<Applied, Refusal> {
         formatted
     };
     namespace()?;
-    if let Some(name) = hostname
+    if let Some(name) = &hostname
         && unsafe { libc::sethostname(name.as_ptr().cast(), name.len()) } != 0
     {
         return Err(internal("hostname", io::Error::last_os_error().to_string()));
     }
     let account = ensure_account(Path::new(ROOT))
         .map_err(|error| internal("account", format!("the agent account: {error}")))?;
+    let bundle = crate::generated::bundle(Path::new(ROOT));
+    let mut cube = crate::generated::cube_lines(bundle.as_deref());
+    if let Some(document) = env_document {
+        // Validated above.
+        cube.extend(env_lines(&String::from_utf8_lossy(document), "env")?);
+    }
     let env = environment(
         setup.image.as_ref().map_or(&[][..], |i| &i.env),
-        env_document,
+        &cube,
+        None,
         &account.home,
+    )?;
+    let hostname = match hostname {
+        Some(name) => name,
+        None => fs::read_to_string("/proc/sys/kernel/hostname")
+            .map(|name| name.trim().to_string())
+            .unwrap_or_else(|_| "localhost".into()),
+    };
+    crate::generated::write_all(
+        Path::new(ROOT),
+        &crate::generated::Files {
+            hostname: &hostname,
+            env: &cube,
+            hooks: [
+                (
+                    "pre-setup",
+                    setup.documents.get("hooks/pre-setup").map(Vec::as_slice),
+                ),
+                (
+                    "pre-resume",
+                    setup.documents.get("hooks/pre-resume").map(Vec::as_slice),
+                ),
+            ],
+            ca: ca.as_deref(),
+        },
     )?;
     Ok(Applied {
         launch: Launch {
@@ -820,6 +859,7 @@ mod tests {
                 "HOME=/root".into(),
                 "NODE_VERSION=24".into(),
             ],
+            &crate::generated::cube_lines(Some("/etc/ssl/certs/ca-certificates.crt")),
             Some(b"GH_TOKEN=cube_ph_github_x\n# comment\nCUBE_SECRET_A=cube_ph_a\n"),
             "/home/agent",
         )
@@ -836,12 +876,19 @@ mod tests {
         assert_eq!(env["GH_TOKEN"], "cube_ph_github_x");
         assert_eq!(env["CUBE_SECRET_A"], "cube_ph_a");
         assert_eq!(env["GIT_TERMINAL_PROMPT"], "0");
+        assert_eq!(env["GH_PROMPT_DISABLED"], "1");
         assert_eq!(
-            environment(&[], Some(b"1BAD=x"), "/h").unwrap_err().reason,
+            env["SSL_CERT_FILE"], "/etc/ssl/certs/ca-certificates.crt",
+            "keel's own lines"
+        );
+        assert_eq!(
+            environment(&[], &[], Some(b"1BAD=x"), "/h")
+                .unwrap_err()
+                .reason,
             "bad_env"
         );
         assert_eq!(
-            environment(&["NOEQUALS".into()], None, "/h")
+            environment(&["NOEQUALS".into()], &[], None, "/h")
                 .unwrap_err()
                 .reason,
             "bad_env"

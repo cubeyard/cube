@@ -8,9 +8,12 @@
 pub mod agent;
 pub mod channel;
 pub mod cli;
+pub mod clock;
 pub mod domain;
 pub mod fileops;
 pub mod files;
+pub mod generated;
+pub mod hooks;
 pub mod journal;
 pub mod ops;
 pub mod paths;
