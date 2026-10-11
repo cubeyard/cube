@@ -8,6 +8,7 @@
 pub mod agent;
 pub mod channel;
 pub mod domain;
+pub mod fileops;
 pub mod files;
 pub mod journal;
 pub mod ops;

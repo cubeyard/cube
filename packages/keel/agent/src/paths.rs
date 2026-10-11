@@ -29,6 +29,45 @@ pub fn open_in_root(root: &fs::File, path: &str) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
 
+/// Opens `components` (below `root`, every link already resolved) with
+/// `flags`, refusing any link on the way (`RESOLVE_NO_SYMLINKS`): what is
+/// opened is what was resolved and checked, or `ELOOP` if a link was put
+/// there since. Never leaves `root`.
+pub fn open_resolved(
+    root: &fs::File,
+    components: &[String],
+    flags: i32,
+    mode: u32,
+) -> io::Result<OwnedFd> {
+    let path = if components.is_empty() {
+        ".".to_string()
+    } else {
+        components.join("/")
+    };
+    let name = CString::new(path).map_err(io::Error::other)?;
+    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+    how.flags = (flags | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u64;
+    how.mode = if flags & libc::O_CREAT != 0 {
+        mode as u64
+    } else {
+        0
+    };
+    how.resolve = libc::RESOLVE_IN_ROOT | libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_NO_MAGICLINKS;
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            root.as_raw_fd(),
+            name.as_ptr(),
+            &how as *const libc::open_how,
+            std::mem::size_of::<libc::open_how>(),
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
 /// `path` resolved as realpath(3) would resolve it with `root` as `/`:
 /// every link that exists is followed (an absolute one from `root`), what
 /// does not exist yet is kept as named, and `..` never leaves `root`.
@@ -67,7 +106,10 @@ pub fn resolve_in_root(root: &fs::File, path: &str) -> io::Result<Vec<String>> {
         };
         if fd < 0 {
             let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::NotFound {
+            // Below a file nothing exists either (realpath(3) keeps going).
+            if error.kind() != io::ErrorKind::NotFound
+                && error.raw_os_error() != Some(libc::ENOTDIR)
+            {
                 return Err(error);
             }
             resolved.push(part);

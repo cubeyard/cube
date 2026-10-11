@@ -156,7 +156,7 @@ pub fn integer(value: Option<&Value>, minimum: i64, maximum: Option<i64>) -> Opt
     (number >= minimum && maximum.is_none_or(|max| number <= max)).then_some(number)
 }
 
-fn op_id(header: &Value) -> Result<String, Fail> {
+pub(crate) fn op_id(header: &Value) -> Result<String, Fail> {
     match header.get("id").and_then(Value::as_str) {
         Some(id) if valid_id(id) => Ok(id.into()),
         _ => Err(Fail::invalid("invalid operation id")),
@@ -173,9 +173,9 @@ pub fn monotonic_ms() -> i64 {
 }
 
 /// `flock` on `state/lock`: one journal mutation at a time.
-struct Lock(#[allow(dead_code)] fs::File);
+pub(crate) struct Lock(#[allow(dead_code)] fs::File);
 impl Lock {
-    fn take(state: &Path) -> io::Result<Self> {
+    pub(crate) fn take(state: &Path) -> io::Result<Self> {
         fs::create_dir_all(state)?;
         let file = fs::OpenOptions::new()
             .read(true)
@@ -210,10 +210,15 @@ impl Journal {
         *self.launch.lock().unwrap() = Some(launch);
     }
 
+    /// The account commands run as; None before `machine_setup` and in tests.
+    pub(crate) fn account(&self) -> Option<Account> {
+        self.launch.lock().unwrap().as_ref()?.account.clone()
+    }
+
     fn ops(&self) -> PathBuf {
         self.state.join("ops")
     }
-    fn op(&self, id: &str) -> PathBuf {
+    pub(crate) fn op(&self, id: &str) -> PathBuf {
         self.ops().join(id)
     }
 
@@ -225,7 +230,7 @@ impl Journal {
     }
 
     /// Lease epochs never go back; call with the lock held.
-    fn fence(&self, header: &Value) -> Result<(), Fail> {
+    pub(crate) fn fence(&self, header: &Value) -> Result<(), Fail> {
         let epoch = integer(header.get("epoch"), 1, None)
             .ok_or_else(|| Fail::invalid("epoch must be a positive integer"))?;
         let current = self.current_epoch();
@@ -245,7 +250,7 @@ impl Journal {
         Ok(())
     }
 
-    fn count_records(&self) -> usize {
+    pub(crate) fn count_records(&self) -> usize {
         fs::read_dir(self.ops())
             .map(|entries| entries.count())
             .unwrap_or(0)
@@ -253,7 +258,7 @@ impl Journal {
 
     /// Creates the record of a new key (true), or finds the existing one
     /// (false). CONFLICT when the key was used for a different request.
-    fn new_record(&self, id: &str, request: Value) -> Result<bool, Fail> {
+    pub(crate) fn new_record(&self, id: &str, request: Value) -> Result<bool, Fail> {
         let digest = canonical(&request);
         fs::create_dir_all(self.ops())?;
         match fs::create_dir(self.op(id)) {
