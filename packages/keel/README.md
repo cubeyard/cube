@@ -133,7 +133,8 @@ QEMU with `-incoming defer`: QEMU's vmdk driver blocks migration in mode
 the real agent and talks `DaemonFrame` to it as a VM runner will: hello and
 status, setups it refuses and applies, readiness, the workload root, the
 journal, an agent restart under a running command, a power-off and a second
-boot, and the Workspace contract's exec part over the channel. The command
+boot with no runner connected while it boots, a runner that disconnects and
+connects again (the agent must not spin meanwhile), and the Workspace contract's exec part over the channel. The command
 is in [`agent/README.md`](agent/README.md).
 
 ## Layers

@@ -81,13 +81,16 @@ the CA once K-5d writes them.
 - `keel-agent-check` (`packages/keel/agent-check`): boots a disposable keel
   machine under QEMU (TCG, KVM or HVF), talks `DaemonFrame` to the agent,
   checks setup, readiness, the workload root, the journal, an agent restart
-  under a running command and a power-off, and runs the Workspace contract's
-  exec part (`packages/server/test/keel-agent-contract-test.ts`) over the
-  channel:
+  under a running command and a power-off, a boot with no runner connected
+  and a runner that goes away and comes back (a fresh `hello`, working
+  channels, and the agent's CPU time from `/proc` while it waits), and runs
+  the Workspace contract's exec part
+  (`packages/server/test/keel-agent-contract-test.ts`) over the channel:
 
   ```sh
+  pnpm install --frozen-lockfile    # the contract test imports cubed's src
   packages/keel/kernel/build.sh x86_64 && packages/keel/base/build.sh x86_64
-  packages/keel/agent-check/test-image.sh x86_64 /var/tmp/kac/image-x86_64.tar
+  sh packages/keel/agent-check/test-image.sh x86_64 /var/tmp/kac/image-x86_64.tar
   cargo build --release -p keel-agent-check
   target/release/keel-agent-check --qemu ~/.local/opt/qemu-11.1.2/bin/qemu-system-x86_64 \
     --qemu-img ~/.local/opt/qemu-11.1.2/bin/qemu-img \

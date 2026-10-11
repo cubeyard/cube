@@ -283,6 +283,14 @@ struct Channel {
     pending: Arc<Mutex<HashMap<u32, oneshot::Sender<Answer>>>>,
     infos: tokio::sync::Mutex<mpsc::UnboundedReceiver<(&'static str, proto::GuestInfo)>>,
     next: AtomicU32,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+/// Dropping the last handle closes the socket: the runner's end disconnects.
+impl Drop for Channel {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
 }
 
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -293,7 +301,7 @@ impl Channel {
         let pending: Arc<Mutex<HashMap<u32, oneshot::Sender<Answer>>>> = Arc::default();
         let (infos, receiver) = mpsc::unbounded_channel();
         let waiting = Arc::clone(&pending);
-        tokio::spawn(async move {
+        let reader = tokio::spawn(async move {
             let mut reader = BufReader::new(read);
             loop {
                 // The agent's frames must keep the channel rules the runner holds it to.
@@ -325,6 +333,7 @@ impl Channel {
             pending,
             infos: tokio::sync::Mutex::new(receiver),
             next: AtomicU32::new(1),
+            reader,
         }))
     }
 
@@ -426,7 +435,27 @@ impl Channel {
         let (header, body) = self.settle(id).await?;
         Ok((header, String::from_utf8_lossy(&body).into_owned()))
     }
+
+    /// The agent's own CPU time and age in seconds, from the guest's /proc
+    /// (utime + stime of all its threads; its children are not counted).
+    async fn agent_cpu(&self, id: &str, epoch: i64) -> Result<(f64, f64)> {
+        let (header, output) = self
+            .run(id, "for p in /proc/[0-9]*; do [ \"$(cat $p/comm 2>/dev/null)\" = cube-agent ] && [ \"$(cat $p/cgroup 2>/dev/null)\" = 0::/ ] && pid=${p#/proc/}; done; read -r up _ < /proc/uptime; echo $(cut -d' ' -f14,15,22 /proc/$pid/stat) $up $(getconf CLK_TCK)", epoch)
+            .await?;
+        let fields: Vec<f64> = output
+            .split_whitespace()
+            .map(|f| f.parse())
+            .collect::<Result<_, _>>()
+            .with_context(|| format!("agent cpu: {header} {output:?}"))?;
+        ensure!(fields.len() == 5, "agent cpu: {output:?}");
+        let tick = fields[4];
+        Ok(((fields[0] + fields[1]) / tick, fields[3] - fields[2] / tick))
+    }
 }
+
+/// How much of a vCPU the agent may use while the runner is away: it looks
+/// for the runner every 20 ms; the bug this guards against was a whole vCPU.
+const IDLE_SHARE: f64 = 0.25;
 
 // ---------------------------------------------------------------- layers
 
@@ -856,11 +885,13 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
     let token = hex(&Sha256::digest(format!("{:?}", Instant::now())))[..16].to_string();
     let first_ready_ms;
     let epoch: i64;
+    let image_hello_ms;
     {
         let mut m = lab.start(&dir, &image_disk)?;
         let ch = Channel::open(&m.ctl).await?;
         let _ = ch.info("hello", TIMEOUT).await?;
         let hello_ms = m.started.elapsed().as_millis();
+        image_hello_ms = hello_ms;
         let t = Instant::now();
         let done = ch.request(setup(&image_layers, documents)).await?;
         checks.ok(
@@ -1174,8 +1205,15 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
 
     // 3. The same disk boots again: the journal and the workload's files stay;
     // the command cut off by the power-off is interrupted and never runs again.
+    // No runner is connected while it boots, and later the runner goes away
+    // and comes back: the agent waits without spinning and says hello again.
+    let mut idle = json!({});
     {
         let mut m = lab.start(&dir, &image_disk)?;
+        let late = Duration::from_millis(image_hello_ms as u64 * 2 + 2000);
+        log(&format!("connecting {late:?} after the start"));
+        tokio::time::sleep(late).await;
+        let connected = Instant::now();
         let ch = Channel::open(&m.ctl).await?;
         let hello = ch.info("hello", TIMEOUT).await?;
         let hello_ms = m.started.elapsed().as_millis();
@@ -1192,6 +1230,16 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             hello.epoch == 0 || hello.epoch == epoch,
             "hello before setup (journal not mounted yet)",
             hello.epoch,
+        )?;
+        // All of the agent's CPU time so far, the setup included, against the
+        // time it spent with nobody on the runner's end.
+        let (cpu, age) = ch.agent_cpu("cpu-boot", epoch).await?;
+        let alone = age - connected.elapsed().as_secs_f64();
+        idle["boot"] = json!({"agentCpuS": cpu, "agentAgeS": age, "disconnectedS": alone});
+        checks.ok(
+            alone >= 1.0 && cpu < IDLE_SHARE * alone,
+            "booted with no runner connected, the agent waits without spinning (its CPU time from /proc)",
+            format!("{cpu:.2} s CPU in {age:.2} s, {alone:.2} s of them disconnected"),
         )?;
         let (cut, _) = ch.guest("get", json!({"id": "cut"})).await?;
         checks.ok(
@@ -1212,6 +1260,70 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             "a result recorded before the boot is still there",
             &e1,
         )?;
+
+        // The runner closes its socket and connects again 2 s later.
+        let (before, _) = ch.agent_cpu("cpu-connected", epoch).await?;
+        drop(ch);
+        let closed = Instant::now();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let away = closed.elapsed().as_secs_f64();
+        let ch = Channel::open(&m.ctl).await?;
+        let hello = ch.info("hello", TIMEOUT).await?;
+        checks.ok(
+            !hello.ready && hello.epoch == epoch,
+            "the runner connects again: a fresh hello (not ready until the next setup, epoch kept)",
+            format!("{hello:?}"),
+        )?;
+        let done = ch.request(setup(&image_layers, documents)).await?;
+        let status = ch.info("status", TIMEOUT).await?;
+        let (after, _) = ch.agent_cpu("cpu-reconnect", epoch).await?;
+        let (_, output) = ch.run("reconnected", "cat persist", epoch).await?;
+        checks.ok(
+            matches!(done, Answer::Done(_)) && status.ready && output == format!("{token}\n"),
+            "after the reconnect the channels work again: setup on channel 1, then commands",
+            format!("{done:?} {output:?}"),
+        )?;
+        idle["reconnect"] = json!({"agentCpuS": after - before, "disconnectedS": away});
+        checks.ok(
+            after - before < IDLE_SHARE * away,
+            "while the runner is away the agent waits without spinning (its CPU time from /proc)",
+            format!(
+                "{:.2} s CPU over {away:.2} s away, the setup again included",
+                after - before
+            ),
+        )?;
+
+        // Information, not a check: the runner connects again at once. A
+        // disconnect the agent does not see before the next connect (the
+        // read finds the new connection, not EOF) is K-5f's gap, so a missed
+        // hello here is reported, not failed.
+        let mut ch = ch;
+        let tries = 5;
+        let mut hellos = 0;
+        for _ in 0..tries {
+            drop(ch);
+            ch = Channel::open(&m.ctl).await?;
+            if ch.info("hello", Duration::from_secs(10)).await.is_err() {
+                break;
+            }
+            let done = ch.request(setup(&image_layers, documents)).await?;
+            if !matches!(done, Answer::Done(_)) || !ch.info("status", TIMEOUT).await?.ready {
+                break;
+            }
+            hellos += 1;
+        }
+        if hellos == tries {
+            let (_, output) = ch.run("immediate", "cat persist", epoch).await?;
+            ensure!(
+                output == format!("{token}\n"),
+                "after immediate reconnects: {output:?}"
+            );
+        }
+        log(&format!(
+            "immediate reconnect: {hellos} of {tries} got a fresh hello and a working setup"
+        ));
+        idle["immediateReconnect"] = json!({"tries": tries, "hellos": hellos});
+
         timings
             .push(json!({"run": "second boot", "helloMs": hello_ms, "setupToReadyMs": ready_ms}));
         quit(&mut m).await?;
@@ -1224,6 +1336,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         "base": {"path": lab.o.base, "sha256": sha256_file(&lab.o.base)?},
         "image": {"tar": lab.o.tar, "diffId": image.0.to_string()},
         "checks": checks.0,
+        "idle": idle,
         "timings": timings,
     });
     fs::write(
