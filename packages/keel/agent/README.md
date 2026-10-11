@@ -70,7 +70,9 @@ Generated files (`/etc/hosts`, `/etc/hostname`, sudoers, `/etc/cube/env`),
 the runner's CA in the bundle, the clock from PTP, hooks and `recover`
 output for `cube hooks` (K-5d); file operations (K-5b); services and the
 `cube` command (K-5c); templates (K-5e); snapshots and reconnecting every
-channel after a restore (K-5f). `ready` will include the generated files and
+channel after a restore (K-5f), including a runner that connects again right
+after it closed (the guest sees both at once, the agent reads no EOF and
+says no `hello`). `ready` will include the generated files and
 the CA once K-5d writes them.
 
 ## Tests
@@ -81,13 +83,16 @@ the CA once K-5d writes them.
 - `keel-agent-check` (`packages/keel/agent-check`): boots a disposable keel
   machine under QEMU (TCG, KVM or HVF), talks `DaemonFrame` to the agent,
   checks setup, readiness, the workload root, the journal, an agent restart
-  under a running command and a power-off, and runs the Workspace contract's
-  exec part (`packages/server/test/keel-agent-contract-test.ts`) over the
-  channel:
+  under a running command and a power-off, a boot with no runner connected
+  and a runner that goes away and comes back (a fresh `hello`, working
+  channels, and the agent's CPU time from `/proc` while it waits), and runs
+  the Workspace contract's exec part
+  (`packages/server/test/keel-agent-contract-test.ts`) over the channel:
 
   ```sh
+  pnpm install --frozen-lockfile    # the contract test imports cubed's src
   packages/keel/kernel/build.sh x86_64 && packages/keel/base/build.sh x86_64
-  packages/keel/agent-check/test-image.sh x86_64 /var/tmp/kac/image-x86_64.tar
+  sh packages/keel/agent-check/test-image.sh x86_64 /var/tmp/kac/image-x86_64.tar
   cargo build --release -p keel-agent-check
   target/release/keel-agent-check --qemu ~/.local/opt/qemu-11.1.2/bin/qemu-system-x86_64 \
     --qemu-img ~/.local/opt/qemu-11.1.2/bin/qemu-img \

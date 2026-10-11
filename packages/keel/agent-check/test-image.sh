@@ -4,7 +4,7 @@
 # sudo, flock, git, gh, curl, a CA bundle) and passwordless sudo for
 # `agent`, the line cube-agent will write itself with K-5d. A test image, not
 # cube's default image (R-1). Writes one flat, uncompressed tar.
-# Usage: packages/keel/agent-check/test-image.sh arm64|x86_64 OUT.tar
+# Usage: sh packages/keel/agent-check/test-image.sh arm64|x86_64 OUT.tar
 set -eu
 
 base=debian:trixie@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5
@@ -29,4 +29,9 @@ container=$(docker create --platform "$platform" "$tag" /bin/true)
 docker export "$container" >"$out.part"
 docker rm "$container" >/dev/null
 mv "$out.part" "$out"
-echo "$1: $out $(sha256sum "$out" | cut -d' ' -f1)"
+if command -v sha256sum >/dev/null; then
+  digest=$(sha256sum "$out")
+else
+  digest=$(shasum -a 256 "$out") # macOS
+fi
+echo "$1: $out ${digest%% *}"
