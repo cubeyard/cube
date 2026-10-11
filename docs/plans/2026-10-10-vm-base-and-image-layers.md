@@ -689,7 +689,8 @@ exclusion list below and checked, and written to vdd with the base's
 `mkfs.erofs`; the machine refuses everything afterwards. A target the image
 has no place for makes the machine not ready, and a file over 16 MiB is not
 rewritten. The check adds a build machine's setup, the published layer
-checked with `fsck.erofs` and searched for anything of cube's, and a new
+checked with `fsck.erofs`, read in place (no extraction, so no root or
+`mknod` on the host) and searched for anything of cube's, and a new
 machine booted with it as its topmost layer.
 
 **6. cubed for keel machines.** Agent upgrades are keel releases (a cold boot

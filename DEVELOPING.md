@@ -47,8 +47,10 @@ with the real erofs-utils (`mkfs.erofs`, `fsck.erofs`, `dump.erofs`) and
 `qemu-img` from `PATH` (`scripts/setup-dev.sh` installs them on Linux;
 `brew install erofs-utils qemu` on macOS). Without them those tests print a
 SKIP notice; `CUBE_TEST_LAYER_TOOLS=required` (set in CI on Linux) makes that
-a failure. `scripts/keel-layer-bench.ts` measures conversion on real public
-images (its header has the command).
+a failure. `keel-agent-check`'s EROFS reader (it reads the template layer
+in place) is tested the same way, with `mkfs.erofs`.
+`scripts/keel-layer-bench.ts` measures conversion on real public images (its
+header has the command).
 
 UI behavior is checked in a real browser: `scripts/test-browser.sh` (the end of
 `pnpm test`; `pnpm test:browser` alone) builds the UI and drives Chromium. CI
