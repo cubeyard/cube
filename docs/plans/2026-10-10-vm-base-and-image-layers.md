@@ -406,8 +406,15 @@ Found there: **QEMU's vmdk driver blocks migration in mode `normal`**
 migration mode `cpr-reboot` (QEMU's mode for stop, save to a file, quit and
 restart on the same host with the same disks), where the vmdk blocker does
 not apply, still with `mapped-ram`. And a guest does not see its port's host
-end change across a restore: the agent must be told (the runner speaks
-first), it cannot wait for a disconnect.
+end change across a restore when the runner connects before `cont` or right
+after it (QEMU sends the port event from a post-load timer); closing and
+reopening the host end after `cont` made the guest say hello again every
+time on KVM and HVF (host runs on PR #148), so that is the runner's order.
+On real KVM (Linux 6.8 host), a guest saved about 1 s after boot fired its
+pending timers about 0.6 s late after the restore, then ran normally; older
+guests did not (cause not proven; a TSC synchronisation heuristic is the
+guess). The boot check therefore waits a bounded 5 s for a workload to run
+again after `cont` and records when it did.
 
 Not verified: anything on Linux/KVM or macOS/HVF with keel's base, balloon
 memory release, a layer over 2 GiB in one `FLAT` extent.

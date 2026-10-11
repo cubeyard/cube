@@ -65,6 +65,9 @@ mkdirSync(out, { recursive: true });
 const sockets = mkdtempSync(join(tmpdir(), "kbc-"));
 
 const sha256 = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
+// How long a workload may take to run again after cont before the snapshot
+// counts as frozen.
+const PROGRESS_LIMIT_MS = 5000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const now = () => performance.now();
 function log(message: string) {
@@ -297,6 +300,8 @@ class Channel {
   lines: { at: number; line: string }[] = [];
   buffer = "";
   wake: (() => void) | null = null;
+  /** hello lines that arrived while a command ran (a guest that noticed a reconnect). */
+  extraHellos = 0;
   static async open(path: string): Promise<Channel> {
     const channel = new Channel();
     channel.socket = await connectWhenReady(path);
@@ -337,7 +342,8 @@ class Channel {
     const output: string[] = [];
     for (;;) {
       const { line } = await this.next();
-      if (line.startsWith("out ")) output.push(line.slice(4));
+      if (line.startsWith("hello ")) this.extraHellos++;
+      else if (line.startsWith("out ")) output.push(line.slice(4));
       else if (line.startsWith("exit ")) return { code: Number(line.slice(5)), output: output.join("\n") };
       else throw new Error(`unexpected "${line}" while running ${command}`);
     }
@@ -624,20 +630,30 @@ for (let i = 0; i < Number(values.snapshots); i++) {
   const loaded = now();
   await qmp.execute("cont");
   const resumed = now();
-  // Ask at once; a guest does not see the socket change across a restore
-  // unless it is told (counted: a spontaneous hello would come as well).
+  // Ask at once. The channel was connected before migrate-incoming, so the
+  // guest sees no disconnect and does not say hello by itself (A23); one
+  // that did is counted as an extra hello.
   channel.send("hello");
   const line = await channel.expect("hello ");
   const answered = line.at;
-  await sleep(300);
-  const spontaneous = channel.lines.filter((l) => l.line.startsWith("hello ")).length;
-  channel.lines = channel.lines.filter((l) => !l.line.startsWith("hello "));
   check(fields(line.line).boot_id === bootId, `snapshot ${i}: same boot after resume (not a boot)`);
+  // The process sleeping at the save must make progress again, within a
+  // bound: on real KVM a guest saved about 1 s after boot fired its pending
+  // timers about 0.6 s late after the restore (node-server1-host), so the
+  // check waits up to PROGRESS_LIMIT_MS for 5 more ticks and records when
+  // the counter first moved past its value at the save. A frozen workload still fails.
   const tickAfter = Number((await channel.run("cat /tmp/tick")).output);
-  await sleep(300);
-  const tickLater = Number((await channel.run("cat /tmp/tick")).output);
-  check(tickAfter >= tickBefore && tickLater > tickAfter, `snapshot ${i}: a process running at the save keeps running`, `${tickBefore} ${tickAfter} ${tickLater}`);
+  check(tickAfter >= tickBefore, `snapshot ${i}: the workload's state survives the restore`, `${tickBefore} ${tickAfter}`);
+  let tick = tickAfter;
+  let progressMs = tickAfter > tickBefore ? now() - resumed : -1;
+  while (tick < tickAfter + 5 && now() - resumed < PROGRESS_LIMIT_MS) {
+    await sleep(50);
+    tick = Number((await channel.run("cat /tmp/tick")).output);
+    if (progressMs < 0 && tick > tickBefore) progressMs = now() - resumed;
+  }
+  check(tick >= tickAfter + 5, `snapshot ${i}: a process running at the save keeps running (within ${PROGRESS_LIMIT_MS} ms of cont)`, `${tickBefore} ${tickAfter} ${tick}`);
   check((await channel.run("cat /workspace/persist")).output === token, `snapshot ${i}: the writable disk is readable after resume`);
+  const spontaneous = channel.extraHellos;
   await channel.run(`echo after-${i} > /workspace/after-resume && sync`);
   qmp.close();
   await powerOff(n, channel);
@@ -648,6 +664,7 @@ for (let i = 0; i < Number(values.snapshots); i++) {
     loadMs: loaded - l0,
     contToAnswerMs: answered - resumed,
     spontaneousHello: spontaneous,
+    contToProgressMs: progressMs,
   });
   log(`snapshot ${i}: save ${(saved - t0).toFixed(0)} ms, load ${(loaded - l0).toFixed(0)} ms, ${(size.blocks / 2048).toFixed(1)} MiB on disk`);
   // The disk written after the resume boots cold.
@@ -670,6 +687,7 @@ const summary = {
   saveMs: stats(snapshots.map((s) => s.saveMs)),
   loadMs: stats(snapshots.map((s) => s.loadMs)),
   contToAnswerMs: stats(snapshots.map((s) => s.contToAnswerMs)),
+  contToProgressMs: stats(snapshots.map((s) => s.contToProgressMs)),
   memoryFileMiB: stats(snapshots.map((s) => s.fileBytes / 2 ** 20)),
   memoryOnDiskMiB: stats(snapshots.map((s) => s.diskBytes / 2 ** 20)),
 };
@@ -689,6 +707,7 @@ console.log(row("poweroff → QEMU exit", summary.poweroffToExitMs));
 console.log(row("save: stop + migrate file: (mapped-ram)", summary.saveMs));
 console.log(row("load: migrate-incoming (mapped-ram)", summary.loadMs));
 console.log(row("cont → first answer", summary.contToAnswerMs));
+console.log(row("cont → workload counter moved", summary.contToProgressMs));
 console.log(row("memory file, apparent size", summary.memoryFileMiB, "MiB"));
 console.log(row("memory file, on disk", summary.memoryOnDiskMiB, "MiB"));
 console.log(`\nfirst boot format (mke2fs + assemble): ${(results.first as { formatMs: number }).formatMs} ms (guest clock)`);
