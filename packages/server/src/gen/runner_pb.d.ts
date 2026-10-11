@@ -2050,6 +2050,20 @@ export declare type DaemonRequest = Message<"cube.runner.v4.DaemonRequest"> & {
      */
     value: Empty;
     case: "snapshotDone";
+  } | {
+    /**
+     * A build machine only (its template disk, vdd): the agent kills the
+     * workload, cleans the overlay's writable layer of cube's files (the
+     * runner's CA in any form, marker blocks, mount points, the agent
+     * account, identity), checks it and writes it to vdd as one EROFS
+     * layer, then answers `done`; the runner checks the superblock and keeps
+     * the disk as the template. The machine refuses everything afterwards
+     * and is powered off; a repeated request gets the same outcome.
+     *
+     * @generated from field: cube.runner.v4.Empty template_publish = 5;
+     */
+    value: Empty;
+    case: "templatePublish";
   } | { case: undefined; value?: undefined };
 };
 
