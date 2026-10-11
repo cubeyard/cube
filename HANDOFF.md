@@ -375,8 +375,11 @@ fails in the machine, which has no credentials for it.
 - **keel** is the guest for protocol-4 VM runners: a kernel booted directly
   by QEMU, `cube-init`, `cube-agent` and EROFS layers from OCI images, with
   no SSH, cloud-init, systemd or Python
-  (docs/plans/2026-10-10-vm-base-and-image-layers.md, PR #143). Only the
-  kernel is built (`packages/keel/kernel`).
+  (docs/plans/2026-10-10-vm-base-and-image-layers.md, PR #143). Built: the
+  kernel (`packages/keel/kernel`), the layer tooling (`packages/keel/layers`)
+  and `cube-init` with base.erofs and a boot-check agent stand-in
+  (`packages/keel/init`, `packages/keel/base`, `scripts/keel-boot-check.ts`;
+  checked under TCG only so far).
 - **The guest channel contract** (keel's work package 2, PR #144) is in
   `runner.proto`: `DaemonFrame` framing and channel rules, `machine_setup`,
   `snapshot_prepare`/`snapshot_done`, `GuestInfo.limits`/`epoch`, what

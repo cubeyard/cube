@@ -5,8 +5,10 @@ Status 2026-10-10: research and plan. The kernel (work package 1) is built in
 the guest contract (work package 2) is in
 `packages/runner-protocol/proto/runner.proto` (PR #144), which is the
 reference for every field this plan names; the layer tooling (work package
-3) is `packages/keel/layers`. Nothing else is built and no runner uses keel
-yet. Written with the maintainer before implementation; it
+3) is `packages/keel/layers`; `cube-init`, `base.erofs` and the boot check
+(work package 4) are `packages/keel/init`, `packages/keel/base` and
+`scripts/keel-boot-check.ts`, checked under TCG so far. `cube-agent` is not
+built and no runner uses keel yet. Written with the maintainer before implementation; it
 settles the direction and the order of work, not every interface. It builds
 on runner protocol 4 (PR #142), whose later stages are the VM runner, the
 guest daemon over virtio-serial, the runner's network stack and the
@@ -101,7 +103,11 @@ features it uses, not a distribution or version: `virtio-rtc-pci`,
 `virtio-serial-pci` with `virtserialport`, `virtio-balloon-pci` with
 `free-page-reporting`, versioned machine types, `-kernel` boot on arm64 and
 x86-64, and `migrate` to `file:` with the `mapped-ram` capability (required:
-one snapshot format on both platforms). The runner is given its QEMU binary
+one snapshot format on both platforms) in migration mode `cpr-reboot` (since
+QEMU 8.2; `mapped-ram` since 9.0), because QEMU's vmdk driver blocks mode
+`normal` (conditionally approved: it stands only if the boot check passes
+under KVM on the Linux host and HVF on the Mac; shown under TCG and nested
+KVM so far). The runner is given its QEMU binary
 by path, never searches for one, checks the floor on that binary when it
 starts and refuses to start below it (package 8). The list is in
 `runner.proto`'s header.
@@ -143,6 +149,9 @@ Considered and not used: tini exits when its child exits, so an agent crash
 would take PID 1 and the machine with it, and it does no mounts or power-off;
 s6 (`s6-svscan` with `s6-linux-init`) would do the job but brings a
 configuration format and several binaries for a short fixed list of tasks.
+Built: `packages/keel/init/cube-init.c`. It powers off on SIGTERM, SIGUSR2
+or SIGPWR and reboots on SIGINT (Ctrl-Alt-Del); the agent asks for a
+power-off by signalling PID 1.
 
 **Workload root.** The base root is fixed and the same for every machine; the
 project's root is assembled after boot, the way nerdbox does it: its
@@ -370,9 +379,45 @@ snapshot measurements with the current kernel.
 | A `RW <n> ZERO` extent line | ignored without an error: virtual size 12 → 8 KiB, layer 2 moved |
 | Devices in Homebrew's QEMU 11.1.1 | present: `virtio-serial-pci`, `virtserialport`, `virtio-balloon-pci` (`free-page-reporting`), `virtio-rtc-pci`, `memory-backend-shm`, `in_order` on virtio-blk/net; absent: vsock, vhost-user devices, virtio-pmem, `vmgenid` on arm64 (`qemu-system-x86_64` has it), virtio-mem |
 
-Not verified: anything on Linux/KVM, the layer disk inside a guest, overlay
-of real OCI layers, balloon memory release, a snapshot with a writable disk
-attached.
+Package 4's boot check (`scripts/keel-boot-check.ts`, 2026-10-10) then ran
+in a cube thread's own VM (x86-64, 2 vCPUs, no accelerator used), under
+**TCG only**, with QEMU 11.1.2 built from source for both targets: base.erofs
+as the root with `cube-init` and the agent stand-in, `debian:trixie`'s layer
+plus two test layers in `layers.vmdk` read through QEMU 11.1.2's vmdk driver
+(`readonly=on`), a blank `rw.qcow2` formatted on first use, kept on a second
+boot and checked by `e2fsck` after an unclean stop, whiteouts and opaque
+directories in the guest's overlay, and 10 snapshots per architecture with
+the writable disk attached and a process running across each. All checks
+passed on x86-64 (`pc-q35-11.1`) and arm64 (`virt-11.1`); TCG times are no
+evidence for KVM or HVF, and the two architectures under TCG are not
+comparable either.
+
+| TCG, 20 boots / 10 snapshots, median (min–max) | x86-64 | arm64 |
+|---|---|---|
+| QEMU start to the agent's first line on `cube.0` | 2178 ms (2112–2310) | 1272 ms (1234–1305) |
+| that line to workload root assembled (formatted disk) | 279 ms (266–336) | 279 ms (271–314) |
+| save: `stop` + `migrate file:` (`mapped-ram`) | 560 ms (550–588) | 346 ms (337–358) |
+| load: `migrate-incoming` | 28 ms (26–32) | 21 ms (20–24) |
+| memory file on disk (apparent size) | 67 MiB (518 MiB) | 43 MiB (646 MiB) |
+
+Found there: **QEMU's vmdk driver blocks migration in mode `normal`**
+("The vmdk format ... does not support live migration"), so with
+`layers.vmdk` attached a plain `migrate` is refused. The boot check saves in
+migration mode `cpr-reboot` (QEMU's mode for stop, save to a file, quit and
+restart on the same host with the same disks), where the vmdk blocker does
+not apply, still with `mapped-ram`. And a guest does not see its port's host
+end change across a restore when the runner connects before `cont` or right
+after it (QEMU sends the port event from a post-load timer); closing and
+reopening the host end after `cont` made the guest say hello again every
+time on KVM and HVF (host runs on PR #148), so that is the runner's order.
+On real KVM (Linux 6.8 host), a guest saved about 1 s after boot fired its
+pending timers about 0.6 s late after the restore, then ran normally; older
+guests did not (cause not proven; a TSC synchronisation heuristic is the
+guess). The boot check therefore waits a bounded 5 s for a workload to run
+again after `cont` and records when it did.
+
+Not verified: anything on Linux/KVM or macOS/HVF with keel's base, balloon
+memory release, a layer over 2 GiB in one `FLAT` extent.
 
 How it was measured, so package 4 can rebuild it as keel's boot check: a
 static C init as PID 1 in an initramfs (`-initrd`), two EROFS images on
@@ -442,7 +487,10 @@ designed for it from the start:
   hypervisors (KVM and HVF register state differ).
 - **Memory.** The file holds the pages in use; free page reporting keeps that
   small. Saves always use `mapped-ram` (part of the QEMU floor, one format
-  on both platforms): it loads faster and gives fixed offsets. Later, repeated
+  on both platforms): it loads faster and gives fixed offsets. Package 4
+  found that QEMU's vmdk driver blocks migration mode `normal`; the boot
+  check saves in mode `cpr-reboot`, which fits suspend (the old and new QEMU
+  never run at once) and is not blocked (see "Open questions"). Later, repeated
   saves of the same machine can write only the pages dirtied since the last
   one; a device that writes guest memory outside QEMU's dirty tracking (a
   GPU) would make that unsafe, and keel has none.
@@ -559,7 +607,11 @@ disk (`upper/`, `work/`, `state/`) into a workload root. Thread (TCG). Done:
 the default image's layers mount as a workload root under TCG, KVM and HVF;
 a second boot keeps the writable disk's changes; the boot and snapshot
 measurements above are repeated with the current kernel. This replaces the
-throwaway tests as keel's boot check.
+throwaway tests as keel's boot check. Built: `packages/keel/init`
+(`cube-init.c`, `agent-standin.c`), `packages/keel/base/build.sh`,
+`scripts/keel-boot-check.ts`; passed under TCG on x86-64 and arm64 with
+`debian:trixie` (cube's default image does not exist yet, package 7).
+Remaining: the same check under KVM on the Linux host and HVF on the Mac.
 
 **5. cube-agent.** `DaemonFrame` over virtio-serial with package 2's
 operations; the operations of `cube-guest` (journal, keys, epochs, wrappers);
@@ -632,3 +684,9 @@ not runner acceptance.
 - Whether suspended time should count against command timeouts.
 - `--tar=f` against `--tar=i` for layer conversion: decided, `--tar=f`
   (measurements in `packages/keel/layers/README.md`).
+- Suspend with `layers.vmdk` attached: QEMU's vmdk driver blocks migration
+  mode `normal`. Conditionally decided: the floor gains migration mode
+  `cpr-reboot` (what the boot check uses, with `mapped-ram`) if the boot
+  check passes under KVM and HVF on the hosts; otherwise the layers stop
+  being one VMDK disk (one raw drive per layer, as nerdbox does up to 8
+  layers).

@@ -8,6 +8,7 @@ OFFLINE_TESTS=(
   scripts/homebrew-formula-test.ts
   scripts/cubed-update-test.ts
   scripts/runner-production-test.ts
+  scripts/keel-boot-check-test.ts
   packages/server/test/log-test.ts
   packages/server/test/registry-test.ts
   packages/server/test/runner-slots-test.ts

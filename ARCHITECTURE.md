@@ -588,8 +588,19 @@ an OCI layer converted to EROFS by `mkfs.erofs`, a cache by `diff_id` with
 atomic publish and LRU eviction, and the per-machine layer disk (GPT, VMDK
 descriptor with `FLAT` extents only). No runner calls it yet.
 
+keel's PID 1 is `cube-init` (`packages/keel/init/cube-init.c`, static C): it
+mounts the pseudo filesystems, enables the cgroup v2 controllers, brings up
+loopback, starts `/sbin/cube-agent` and starts it again when it dies, reaps
+orphans and powers off on a signal. It runs from `base.erofs`
+(`packages/keel/base/build.sh`), the read-only root on `vda` that also holds
+static `mke2fs`, `e2fsck` and `mkfs.erofs`. Until `cube-agent` exists, the
+base carries a stand-in (`init/agent-standin.c`, a line protocol on `cube.0`,
+not `DaemonFrame`) that assembles the workload root from the layer disk and
+the writable disk; `scripts/keel-boot-check.ts` boots it and checks the root,
+a second boot and a snapshot.
+
 Not built yet (later stages): protocol-4 VM runners (`berth vm`), keel's
-`cube-init` and `cube-agent`, the runner's network stack, the credential
+`cube-agent`, the runner's network stack, the credential
 proxy and the `dial`, `credential` and `report` streams.
 
 ## Machine templates and hooks
