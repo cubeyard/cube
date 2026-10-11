@@ -1,12 +1,13 @@
 /** keel's boot check: the zombie scan ignores processes that exit while it
- * runs, and a failing or interrupted check leaves none of its own processes
- * or directories behind (and touches nobody else's). */
+ * runs, a failing or interrupted check leaves none of its own processes or
+ * directories behind (and touches nobody else's), and the snapshot check's
+ * bounded wait for progress still fails a frozen workload. */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ZOMBIE_SCAN, zombieScan } from "./keel-boot-check-lib.ts";
+import { awaitProgress, ZOMBIE_SCAN, zombieScan } from "./keel-boot-check-lib.ts";
 
 const alive = (pid: number) => {
   try {
@@ -109,4 +110,30 @@ try {
 } finally {
   rmSync(work, { recursive: true, force: true });
 }
-console.log("keel boot check: zombie scan and cleanup ok");
+// The progress wait after a restore (the bound that lets a late first tick
+// on real KVM pass) on a virtual clock: a counter that never moves after the
+// restore is returned as it was, so the check `tick >= after + 5` fails it
+// (the negative control); a moving counter and one that starts late pass.
+{
+  const progress = async (counter: (ms: number) => number, before: number) => {
+    let clock = 0;
+    const after = counter(0);
+    return awaitProgress(async () => counter(clock), {
+      before, after, resumedAt: 0, limitMs: 5000,
+      now: () => clock, sleep: async (ms) => { clock += ms; },
+    }).then((r) => ({ ...r, after, clock }));
+  };
+  const frozen = await progress(() => 40, 40);
+  assert.equal(frozen.tick, 40, "a frozen counter is returned as it was");
+  assert.equal(frozen.progressMs, -1, "a frozen counter never moved");
+  assert.ok(!(frozen.tick >= frozen.after + 5), "the boot check's condition fails a frozen workload");
+  assert.ok(frozen.clock >= 5000 && frozen.clock < 5100, "it waited the whole bound, no longer");
+  const moving = await progress((ms) => 40 + Math.floor(ms / 100), 40);
+  assert.ok(moving.tick >= moving.after + 5 && moving.progressMs === 100 && moving.clock <= 600, JSON.stringify(moving));
+  const late = await progress((ms) => (ms < 900 ? 40 : 40 + Math.floor((ms - 900) / 100) + 1), 40);
+  assert.ok(late.tick >= late.after + 5 && late.progressMs === 900, JSON.stringify(late));
+  // Frozen at the save but already past it after cont: progress at once, then stuck.
+  const stuck = await progress(() => 41, 40);
+  assert.ok(stuck.progressMs === 0 && !(stuck.tick >= stuck.after + 5), JSON.stringify(stuck));
+}
+console.log("keel boot check: zombie scan, cleanup and the frozen-counter control ok");
