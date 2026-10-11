@@ -1022,7 +1022,11 @@ mod tests {
                 T::File(vec![b'a' + i; usize::from(i)]),
             );
             f.xattrs.push(("user.same", b"shared value".to_vec()));
-            f.xattrs.push(("trusted.overlay.origin", vec![0, 0xfb, i]));
+            // Distinct before the last byte: erofs-utils 1.7.1 (Ubuntu
+            // 24.04, CI) shares xattrs whose values differ only there, as
+            // it compares one byte short (fixed in 1.8).
+            f.xattrs
+                .push(("trusted.overlay.origin", vec![0, 0xfb, i, 0x2a]));
             all.push(f);
         }
         // Enough names for directories of several blocks.
