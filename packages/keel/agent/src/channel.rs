@@ -8,14 +8,15 @@
 //! port and opens it again, and says `hello` again.
 use std::{
     collections::HashSet,
-    fs, io,
+    fs,
+    io::{self, Read},
     os::{
         fd::{AsRawFd, OwnedFd},
         unix::fs::OpenOptionsExt,
     },
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use cube_runner_protocol::{
@@ -36,7 +37,14 @@ pub fn find_port() -> Option<PathBuf> {
     None
 }
 
-/// Whether the runner's end of the port is connected (no POLLHUP).
+/// How often the agent looks for the runner while its end is closed: the
+/// port has no event for "connected again" (below).
+const RECONNECT_POLL: Duration = Duration::from_millis(20);
+
+/// Whether the runner's end of the port is connected. The guest driver sets
+/// POLLHUP while the host's end is closed, and POLLIN with it, because a
+/// read would not block then (it returns what is left, then EOF), so POLLIN
+/// says nothing about a connection.
 fn host_connected(port: &fs::File) -> bool {
     let mut poll = libc::pollfd {
         fd: port.as_raw_fd(),
@@ -44,7 +52,28 @@ fn host_connected(port: &fs::File) -> bool {
         revents: 0,
     };
     let n = unsafe { libc::poll(&mut poll, 1, 0) };
-    n >= 0 && (poll.revents & libc::POLLHUP == 0 || poll.revents & libc::POLLIN != 0)
+    n >= 0 && poll.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) == 0
+}
+
+/// Waits until the runner's end is connected, looking every
+/// RECONNECT_POLL. Bytes a closed connection left unread are dropped on
+/// the way: they belong to channels the disconnect ended, and the next
+/// connection starts with `hello` (the runner speaks after it).
+async fn wait_for_host(port: &fs::File) {
+    let mut buffer = [0u8; 4096];
+    let mut dropped = 0;
+    while !host_connected(port) {
+        loop {
+            match (&*port).read(&mut buffer) {
+                Ok(n) if n > 0 => dropped += n,
+                _ => break, // EOF (nothing left), or connected again (EAGAIN)
+            }
+        }
+        tokio::time::sleep(RECONNECT_POLL).await;
+    }
+    if dropped > 0 {
+        eprintln!("cube-agent: dropped {dropped} bytes a closed connection left unread");
+    }
 }
 
 fn dup(port: &fs::File) -> io::Result<OwnedFd> {
@@ -66,11 +95,12 @@ pub async fn serve(agent: Arc<Agent>) -> io::Result<()> {
             .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(&path)?;
         loop {
-            while !host_connected(&port) {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
+            wait_for_host(&port).await;
+            let started = Instant::now();
             match connection(&agent, &port).await {
-                Ok(()) => continue, // the runner went away; wait for the next
+                // The runner went away; wait for the next. Never more than one
+                // connection per RECONNECT_POLL, whatever the port reports.
+                Ok(()) => tokio::time::sleep_until((started + RECONNECT_POLL).into()).await,
                 Err(error) => {
                     eprintln!("cube-agent: ending the connection: {error}");
                     break; // reopen the port
