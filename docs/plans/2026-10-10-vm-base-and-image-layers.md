@@ -411,7 +411,11 @@ not apply, still with `mapped-ram`. And a guest does not see its port's host
 end change across a restore when the runner connects before `cont` or right
 after it (QEMU sends the port event from a post-load timer); closing and
 reopening the host end after `cont` made the guest say hello again every
-time on KVM and HVF (host runs on PR #148), so that is the runner's order.
+time on KVM and HVF (host runs on PR #148, the boot check's stand-in). With
+cube-agent that order is not enough either: a close and an immediate
+connect can reach the guest as one event (PR #150), so the runner keeps
+runner.proto's connect rule after every connect and every `cont` (the
+channel bullet below).
 On real KVM (Linux 6.8 host), a guest saved about 1 s after boot fired its
 pending timers about 0.6 s late after the restore, then ran normally; older
 guests did not (cause not proven; a TSC synchronisation heuristic is the
@@ -456,10 +460,20 @@ designed for it from the start:
   it has settled and holds new operations until the channel closes (the
   machine was saved and stopped) or `snapshot_done` arrives (the save failed,
   or the machine keeps running).
-- **Channel.** The host end is a new socket after restore; every channel that
-  was open at the snapshot is closed, and the guest sees it close. The agent
-  reconnects and the runner opens channels again; every operation is
-  idempotent by key with epoch fencing, as today.
+- **Channel.** The host end is a new socket after restore, and every channel
+  that was open at the snapshot is closed, but the guest may not see it
+  close: a runner that connects to the new QEMU before `cont` gives it no
+  port event (the host end was connected at the save and is again, so
+  QEMU's post-load path sends nothing), and a close followed at once by a
+  connect can reach it as one event. So after every `cont`, as after every
+  connect, the runner keeps runner.proto's connect rule: `hello` within
+  500 ms, else one `req` on channel 0, which ends the agent's connection
+  (it opens the port again and says `hello`), then `hello` within 2 s,
+  else the machine is unhealthy; nothing else before a `hello`. Then
+  `machine_setup` again, `ready` from the `status` after its answer, and
+  operations that were running are found by their keys; every operation is
+  idempotent by key with epoch fencing, as today. `keel-agent-check`
+  restores a machine three times this way (K-5f).
 - **Commands across a suspend.** A running command is frozen with the machine
   and continues after resume; its output stream was closed with the channel,
   and cubed attaches to it again by key, as it does after a gateway restart
