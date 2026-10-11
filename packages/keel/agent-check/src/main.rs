@@ -8,11 +8,14 @@
 //!   keel-agent-check --qemu PATH --qemu-img PATH --kernel PATH --base PATH \
 //!     --mkfs PATH --tar IMAGE.tar --out DIR [--arch x86_64|arm64] \
 //!     [--accel tcg|kvm|hvf] [--contract COMMAND] [--smp 2] [--memory 1024] \
-//!     [--reset on|off]
+//!     [--control reconnect|late-hello|restore]
 //!
-//! `--reset off` is a negative control: the immediate reconnects wait for
-//! the plain `hello` only, without the reset on channel 0, and are expected
-//! to fail.
+//! `--control` runs one negative control, expected to fail at its check:
+//! `reconnect` (also `--reset off`): the immediate reconnects wait for the
+//! plain `hello` only, without the reset on channel 0. `late-hello`: the
+//! forced late `hello` is not forced (no reset before the setup).
+//! `restore`: after each restore the runner waits for the plain `hello`
+//! only.
 //!
 //! QEMU and every tool are given by path, never searched for. The driver is
 //! not a runner: no network, no secrets, one machine at a time. It writes
@@ -24,7 +27,7 @@ use std::{
     process::Stdio,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -59,7 +62,15 @@ struct Options {
     contract: Option<String>,
     smp: String,
     memory: String,
-    reset: bool,
+    control: Option<Control>,
+}
+
+/// The one place a negative control leaves the reset on channel 0 out.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Control {
+    Reconnect,
+    LateHello,
+    Restore,
 }
 
 fn options() -> Result<Options> {
@@ -106,8 +117,15 @@ fn options() -> Result<Options> {
     );
     let reset = values.get("reset").map_or("on", String::as_str);
     ensure!(reset == "on" || reset == "off", "--reset is on or off");
+    let control = match (reset, values.get("control").map(String::as_str)) {
+        ("on", None) => None,
+        ("off", None | Some("reconnect")) | ("on", Some("reconnect")) => Some(Control::Reconnect),
+        ("on", Some("late-hello")) => Some(Control::LateHello),
+        ("on", Some("restore")) => Some(Control::Restore),
+        _ => bail!("--control is reconnect, late-hello or restore (and --reset off is reconnect)"),
+    };
     Ok(Options {
-        reset: reset == "on",
+        control,
         qemu: path("qemu")?,
         qemu_img: path("qemu-img")?,
         kernel: path("kernel")?,
@@ -293,6 +311,11 @@ struct Channel {
     infos: tokio::sync::Mutex<mpsc::UnboundedReceiver<(&'static str, proto::GuestInfo)>>,
     next: AtomicU32,
     reader: tokio::task::JoinHandle<()>,
+    /// Set by the reader on the first `hello`.
+    helloed: Arc<AtomicBool>,
+    /// What the driver sent before that `hello`: the runner's rule allows
+    /// only the reset on channel 0.
+    early: Mutex<Vec<String>>,
 }
 
 impl Drop for Channel {
@@ -317,6 +340,8 @@ impl Channel {
         let pending: Arc<Mutex<HashMap<u32, oneshot::Sender<Answer>>>> = Arc::default();
         let (infos, receiver) = mpsc::unbounded_channel();
         let waiting = Arc::clone(&pending);
+        let helloed = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&helloed);
         let reader = tokio::spawn(async move {
             let mut reader = BufReader::new(read);
             loop {
@@ -331,7 +356,10 @@ impl Channel {
                     }
                 };
                 match frame.t {
-                    Some(T::Hello(info)) => drop(infos.send(("hello", info))),
+                    Some(T::Hello(info)) => {
+                        seen.store(true, Ordering::SeqCst);
+                        drop(infos.send(("hello", info)))
+                    }
                     Some(T::Status(info)) => drop(infos.send(("status", info))),
                     Some(T::Ans(answer)) => {
                         if let (Some(sender), Some(result)) =
@@ -350,6 +378,8 @@ impl Channel {
             infos: tokio::sync::Mutex::new(receiver),
             next: AtomicU32::new(1),
             reader,
+            helloed,
+            early: Mutex::default(),
         }))
     }
 
@@ -371,7 +401,21 @@ impl Channel {
     }
 
     async fn send(&self, frame: &proto::DaemonFrame) -> Result<()> {
+        if !self.helloed.load(Ordering::SeqCst) {
+            self.early.lock().unwrap().push(describe(frame));
+        }
         write_frame(&mut *self.writer.lock().await, frame).await
+    }
+
+    /// The frames sent before the first `hello`, as `describe` names them.
+    fn sent_before_hello(&self) -> Vec<String> {
+        self.early.lock().unwrap().clone()
+    }
+
+    /// The reset: a `req` on channel 0, which breaks the channel rules, so
+    /// the agent ends the connection and says `hello` again.
+    async fn reset(&self) -> Result<()> {
+        self.send(&reset_frame()).await
     }
 
     /// Sends a request on channel `ch` (a fresh one when None); the answer
@@ -417,20 +461,11 @@ impl Channel {
         if !reset {
             return Ok((self.info("hello", RESET_HELLO).await?, false));
         }
-        self.send(&proto::DaemonFrame {
-            ch: 0,
-            t: Some(T::Req(proto::DaemonRequest {
-                op: Some(Op::Guest(proto::GuestRequest {
-                    op: "hello".into(),
-                    data: Vec::new(),
-                })),
-            })),
-        })
-        .await?;
+        self.reset().await?;
         let hello = self
             .info("hello", RESET_HELLO)
             .await
-            .context("after the reset on channel 0")?;
+            .context("after the reset on channel 0 (a second miss: the machine is unhealthy)")?;
         Ok((hello, true))
     }
 
@@ -535,6 +570,34 @@ impl Channel {
     }
 }
 
+fn reset_frame() -> proto::DaemonFrame {
+    proto::DaemonFrame {
+        ch: 0,
+        t: Some(T::Req(proto::DaemonRequest {
+            op: Some(Op::Guest(proto::GuestRequest {
+                op: "hello".into(),
+                data: Vec::new(),
+            })),
+        })),
+    }
+}
+
+/// A frame by channel and kind (and operation), for `sent_before_hello`.
+fn describe(frame: &proto::DaemonFrame) -> String {
+    let kind = match &frame.t {
+        Some(T::Req(proto::DaemonRequest {
+            op: Some(Op::Guest(g)),
+        })) => format!("req guest.{}", g.op),
+        Some(T::Req(proto::DaemonRequest {
+            op: Some(Op::MachineSetup(_)),
+        })) => "req machine_setup".into(),
+        Some(T::Req(_)) => "req".into(),
+        Some(T::Abort(_)) => "abort".into(),
+        other => format!("{other:?}"),
+    };
+    format!("ch {} {kind}", frame.ch)
+}
+
 /// How much of a vCPU the agent may use while the runner is away: it looks
 /// for the runner every 20 ms; the bug this guards against was a whole vCPU.
 const IDLE_SHARE: f64 = 0.25;
@@ -547,6 +610,8 @@ const PLAIN_HELLO: Duration = Duration::from_millis(500);
 const RESET_HELLO: Duration = Duration::from_secs(2);
 /// Immediate reconnects in a row, each one recovered.
 const RECONNECTS: usize = 10;
+/// Restores in a row into a new QEMU, the runner connected before `cont`.
+const RESTORES: usize = 3;
 
 // ---------------------------------------------------------------- layers
 
@@ -677,6 +742,12 @@ impl Lab {
     }
 
     fn start(&self, dir: &Path, layers: &Path) -> Result<Machine> {
+        self.start_with(dir, layers, &[])
+    }
+
+    /// `extra` goes after the machine's own arguments (`-S -incoming defer`
+    /// for a restore).
+    fn start_with(&self, dir: &Path, layers: &Path, extra: &[&str]) -> Result<Machine> {
         for s in ["ctl.sock", "qmp.sock"] {
             let _ = fs::remove_file(self.sockets.join(s));
         }
@@ -684,7 +755,8 @@ impl Lab {
         while dir.join(format!("console-{boot}.log")).exists() {
             boot += 1;
         }
-        let args = self.argv(dir, layers, boot);
+        let mut args = self.argv(dir, layers, boot);
+        args.extend(extra.iter().map(|s| s.to_string()));
         fs::write(
             dir.join(format!("argv-{boot}.json")),
             serde_json::to_string_pretty(&json!([self.o.qemu, args]))?,
@@ -705,6 +777,54 @@ impl Lab {
             console: dir.join(format!("console-{boot}.log")),
             started: Instant::now(),
         })
+    }
+}
+
+/// Suspends as a runner will: `stop`, `migrate` to `file:` with
+/// `mapped-ram` in mode `cpr-reboot` (QEMU's vmdk driver refuses mode
+/// `normal`, and the layer disk is a VMDK), the file renamed once QEMU says
+/// `completed`, then `quit`. The runner's socket stays connected throughout.
+async fn save(machine: &mut Machine, memory: &Path) -> Result<Duration> {
+    let mut qmp = Qmp::open(&machine.qmp).await?;
+    let t = Instant::now();
+    qmp.execute("stop", Value::Null).await?;
+    migration_mode(&mut qmp).await?;
+    let part = memory.with_extension("part");
+    qmp.execute(
+        "migrate",
+        json!({"uri": format!("file:{}", part.display())}),
+    )
+    .await?;
+    await_migration(&mut qmp).await?;
+    let took = t.elapsed();
+    fs::rename(&part, memory)?;
+    let _ = qmp.execute("quit", Value::Null).await;
+    let _ = tokio::time::timeout(Duration::from_secs(30), machine.child.wait()).await;
+    let _ = machine.child.kill().await;
+    Ok(took)
+}
+
+async fn migration_mode(qmp: &mut Qmp) -> Result<()> {
+    qmp.execute(
+        "migrate-set-capabilities",
+        json!({"capabilities": [{"capability": "mapped-ram", "state": true}]}),
+    )
+    .await?;
+    qmp.execute("migrate-set-parameters", json!({"mode": "cpr-reboot"}))
+        .await?;
+    Ok(())
+}
+
+async fn await_migration(qmp: &mut Qmp) -> Result<()> {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let status = qmp.execute("query-migrate", Value::Null).await?;
+        match status["status"].as_str() {
+            Some("completed") => return Ok(()),
+            Some("failed" | "cancelled") => bail!("migration: {status}"),
+            _ => ensure!(Instant::now() < deadline, "migration: {status}"),
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
 }
 
@@ -1299,8 +1419,9 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
     // No runner is connected while it boots, and later the runner goes away
     // and comes back: the agent waits without spinning and says hello again.
     let mut idle = json!({});
+    let mut restore = json!({});
     {
-        let mut m = lab.start(&dir, &image_disk)?;
+        let m = lab.start(&dir, &image_disk)?;
         let late = Duration::from_millis(image_hello_ms as u64 * 2 + 2000);
         log(&format!("connecting {late:?} after the start"));
         tokio::time::sleep(late).await;
@@ -1396,7 +1517,10 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             close(ch).await?;
             ch = Channel::open(&m.ctl).await?;
             let connected = Instant::now();
-            match ch.hello_or_reset(lab.o.reset).await {
+            match ch
+                .hello_or_reset(lab.o.control != Some(Control::Reconnect))
+                .await
+            {
                 Ok((hello, _)) if hello.ready || hello.epoch != epoch => {
                     failed = Some(format!("reconnect {i}: {hello:?}"));
                 }
@@ -1423,7 +1547,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         log(&format!(
             "immediate reconnect: {hellos} of {RECONNECTS} had the plain hello, {resets} the reset on channel 0, {late} a late hello"
         ));
-        idle["immediateReconnect"] = json!({"tries": RECONNECTS, "hellos": hellos, "resets": resets, "lateHellos": late, "reset": lab.o.reset});
+        idle["immediateReconnect"] = json!({"tries": RECONNECTS, "hellos": hellos, "resets": resets, "lateHellos": late, "reset": lab.o.control != Some(Control::Reconnect)});
         checks.ok(
             hellos + resets == RECONNECTS,
             "the runner connects again at once, 10 times: a fresh hello each time (not ready, epoch kept), after a reset on channel 0 when none came in 500 ms",
@@ -1434,6 +1558,176 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             output == format!("{token}\n"),
             "after each of those reconnects a setup makes the agent ready; commands work",
             &output,
+        )?;
+
+        // 4. A late hello, forced: right after a plain hello the runner
+        // sends the reset on channel 0 and then machine_setup at once. The
+        // agent reads the reset first and ends that connection, so its next
+        // hello comes while the setup waits: the setup goes again on a new
+        // channel (setup_after_hello's late branch), deterministically.
+        close(ch).await?;
+        let ch = Channel::open(&m.ctl).await?;
+        let (hello, _) = ch.hello_or_reset(true).await?;
+        let force = lab.o.control != Some(Control::LateHello);
+        if force {
+            ch.reset().await?;
+        }
+        let late = ch
+            .setup_after_hello(|| setup(&image_layers, documents))
+            .await;
+        let output = match &late {
+            Ok(_) => ch.run("late-hello", "cat persist", epoch).await?.1,
+            Err(_) => String::new(),
+        };
+        restore["lateHello"] = json!({"lateHellos": late.as_ref().ok(), "reset": force});
+        checks.ok(
+            !hello.ready
+                && late.as_ref().is_ok_and(|n| *n == 1)
+                && output == format!("{token}\n"),
+            "a reset right after hello, then machine_setup at once: the next hello comes while the setup waits; the setup goes again on a new channel, its status makes the agent ready and commands work",
+            format!("late hellos {late:?}, output {output:?}"),
+        )?;
+
+        // 5. Restores. The runner saves the machine with its socket still
+        // connected, starts a new QEMU with -incoming defer and connects to
+        // it before migrate-incoming and cont. QEMU's post-load path sends
+        // the guest no port event then (the host end was connected at the
+        // save and is again), so the agent reads no EOF and says no hello by
+        // itself. The runner's rule brings it: hello within 500 ms of cont,
+        // else the reset on channel 0 and hello within 2 s, else unhealthy;
+        // nothing else before the hello. Then machine_setup, ready from its
+        // status, and the command that ran at the save is found by its key.
+        let boot_id = hello.boot_id.clone();
+        let reset = lab.o.control != Some(Control::Restore);
+        let (mut ch, mut m) = (ch, m);
+        let mut restores: Vec<Value> = vec![];
+        // (which check, why); the loop stops at the first failure.
+        let mut failed: Option<(u8, String)> = None;
+        for i in 0..RESTORES {
+            let key = format!("tick-{i}");
+            let (started, _) = ch.guest("exec", json!({"id": key, "epoch": epoch, "command": format!("i=0; while [ $i -lt 30 ]; do i=$((i+1)); echo $i > {key}; sleep 0.1; done; printf ticked"), "timeoutMs": 60000})).await?;
+            ensure!(started["state"] == "Running", "exec {key}: {started}");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let memory = dir.join("memory");
+            let saved = save(&mut m, &memory).await?;
+            close(ch).await?;
+            let file = fs::metadata(&memory)?;
+            m = lab.start_with(&dir, &image_disk, &["-S", "-incoming", "defer"])?;
+            // Connected before migrate-incoming and cont.
+            ch = Channel::open(&m.ctl).await?;
+            let mut qmp = Qmp::open(&m.qmp).await?;
+            let t = Instant::now();
+            migration_mode(&mut qmp).await?;
+            qmp.execute(
+                "migrate-incoming",
+                json!({"uri": format!("file:{}", memory.display())}),
+            )
+            .await?;
+            await_migration(&mut qmp).await?;
+            let loaded = t.elapsed();
+            qmp.execute("cont", Value::Null).await?;
+            let resumed = Instant::now();
+            let got = ch.hello_or_reset(reset).await;
+            let hello_ms = resumed.elapsed().as_millis();
+            let early = ch.sent_before_hello();
+            fs::remove_file(&memory)?;
+            let (hello, was_reset) = match got {
+                Ok(got) => got,
+                Err(error) => {
+                    failed = Some((
+                        1,
+                        format!("restore {i}: {error:#} ({hello_ms} ms after cont)"),
+                    ));
+                    break;
+                }
+            };
+            let allowed: &[&str] = if was_reset {
+                &["ch 0 req guest.hello"]
+            } else {
+                &[]
+            };
+            if hello.ready || hello.epoch != epoch || hello.boot_id != boot_id || early != allowed {
+                failed = Some((
+                    1,
+                    format!("restore {i}: {hello:?}; sent before it: {early:?}"),
+                ));
+                break;
+            }
+            let refused = ch
+                .guest_raw(
+                    "exec",
+                    format!("{}\n", json!({"id": format!("early-{i}"), "epoch": epoch, "command": "true", "timeoutMs": 1000})).into_bytes(),
+                )
+                .await?;
+            let late = ch
+                .setup_after_hello(|| setup(&image_layers, documents))
+                .await;
+            let not_ready = refused.as_ref().is_err_and(|e| {
+                e.code == proto::Code::Unavailable as i32 && e.reason == "not_ready"
+            });
+            if !not_ready || late.is_err() {
+                failed = Some((
+                    2,
+                    format!("restore {i}: before the setup {refused:?}; the setup {late:?}"),
+                ));
+                break;
+            }
+            let (state, body) = ch.settle(&key).await?;
+            let (_, persist) = ch
+                .run(&format!("persist-{i}"), "cat persist", epoch)
+                .await?;
+            if state["state"] != "Succeeded" || body != b"ticked" || persist != format!("{token}\n")
+            {
+                failed = Some((
+                    3,
+                    format!(
+                        "restore {i}: {key} {state} {:?}, persist {persist:?}",
+                        String::from_utf8_lossy(&body)
+                    ),
+                ));
+                break;
+            }
+            log(&format!(
+                "restore {i}: save {} ms, load {} ms, hello {hello_ms} ms after cont{}",
+                saved.as_millis(),
+                loaded.as_millis(),
+                if was_reset {
+                    " (after the reset)"
+                } else {
+                    " (plain)"
+                }
+            ));
+            restores.push(json!({
+                "saveMs": saved.as_millis(), "loadMs": loaded.as_millis(),
+                "contToHelloMs": hello_ms, "reset": was_reset, "lateHellos": late.ok(),
+                "memoryFileMiB": file.len() / (1 << 20),
+                "memoryOnDiskMiB": std::os::unix::fs::MetadataExt::blocks(&file) / 2048,
+            }));
+        }
+        let resets = restores.iter().filter(|r| r["reset"] == true).count();
+        log(&format!(
+            "restores: {} of {RESTORES}, {resets} needed the reset on channel 0",
+            restores.len()
+        ));
+        restore["restores"] = json!({"tries": RESTORES, "done": restores.len(), "resets": resets, "reset": reset, "each": restores});
+        let detail = failed
+            .as_ref()
+            .map(|(_, why)| why.as_str())
+            .unwrap_or_default();
+        checks.ok(
+            failed.as_ref().is_none_or(|(k, _)| *k != 1),
+            "restored into a new QEMU with the runner connected before cont, 3 times: hello (same boot, not ready, epoch kept) within 500 ms of cont, or within 2 s of the reset on channel 0; the runner sent nothing else before it",
+            detail,
+        )?;
+        checks.ok(
+            failed.as_ref().is_none_or(|(k, _)| *k != 2),
+            "after each restore guest operations are UNAVAILABLE/not_ready until machine_setup, and the status after its answer says ready",
+            detail,
+        )?;
+        checks.ok(
+            failed.is_none() && restores.len() == RESTORES,
+            "after each restore the command running at the save is found by its key and finishes; the disk is the one saved",
+            detail,
         )?;
 
         timings
@@ -1449,6 +1743,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         "image": {"tar": lab.o.tar, "diffId": image.0.to_string()},
         "checks": checks.0,
         "idle": idle,
+        "restore": restore,
         "timings": timings,
     });
     fs::write(
@@ -1527,6 +1822,59 @@ mod tests {
         let ch = Channel::open(&path).await.unwrap();
         let _s = agent.await.unwrap();
         assert!(ch.hello_or_reset(false).await.is_err());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn a_second_miss_after_the_reset_is_unhealthy() {
+        let (path, listener) = agent_end("unhealthy").await;
+        let agent = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            // Reads the reset and stays silent.
+            let frame = read_any(&mut s).await;
+            assert_eq!(frame.ch, 0);
+            s
+        });
+        let ch = Channel::open(&path).await.unwrap();
+        let t = Instant::now();
+        let error = ch.hello_or_reset(true).await.unwrap_err();
+        assert!(
+            t.elapsed() >= PLAIN_HELLO + RESET_HELLO,
+            "{:?}",
+            t.elapsed()
+        );
+        assert!(format!("{error:#}").contains("unhealthy"), "{error:#}");
+        assert_eq!(ch.sent_before_hello(), ["ch 0 req guest.hello"]);
+        drop(agent.await.unwrap());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn frames_before_the_first_hello_are_recorded() {
+        let (path, listener) = agent_end("early").await;
+        let agent = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let _ = read_any(&mut s).await;
+            say(&mut s, 0, T::Hello(info())).await;
+            let _ = read_any(&mut s).await;
+            s
+        });
+        let ch = Channel::open(&path).await.unwrap();
+        // A runner that breaks the rule: an operation before hello.
+        let (_, _) = ch
+            .start(
+                None,
+                Op::Guest(proto::GuestRequest {
+                    op: "exec".into(),
+                    data: Vec::new(),
+                }),
+            )
+            .await
+            .unwrap();
+        let _ = ch.info("hello", RESET_HELLO).await.unwrap();
+        ch.reset().await.unwrap();
+        assert_eq!(ch.sent_before_hello(), ["ch 1 req guest.exec"]);
+        drop(agent.await.unwrap());
         let _ = fs::remove_file(&path);
     }
 
