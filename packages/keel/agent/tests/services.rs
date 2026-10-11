@@ -86,9 +86,17 @@ struct Machine {
 }
 
 impl Drop for Machine {
+    /// Registrations first, so no supervisor starts a service again.
     fn drop(&mut self) {
-        for record in self.services.registrations() {
-            self.groups.kill(record["name"].as_str().unwrap());
+        let names: Vec<String> = self
+            .services
+            .registrations()
+            .iter()
+            .map(|record| record["name"].as_str().unwrap().to_string())
+            .collect();
+        let _ = fs::remove_dir_all(&self.services.paths.registry);
+        for name in names {
+            self.groups.kill(&name);
         }
     }
 }
@@ -410,24 +418,44 @@ fn services_start_again_after_a_boot_and_are_found_again_after_an_agent_restart(
     std::thread::sleep(Duration::from_millis(600));
     assert_eq!(machine.groups.group("web"), Some(group));
 
-    // A new boot: nothing runs, /run is empty; the first setup starts it.
-    machine.groups.kill("web");
-    until("the old process to end", 5, || {
-        !machine.groups.populated("web")
-    });
-    let booted = open(machine.dir.path(), &machine.groups, "run-2");
+    // A new boot of the same disk: a copy of its state (its own port, so
+    // the first machine's process stays apart), no cgroups and an empty
+    // /run. Nothing runs before the setup; the first setup starts it.
+    let disk = tempfile::tempdir().unwrap();
+    fs::create_dir_all(disk.path().join("root/workspace")).unwrap();
+    fs::create_dir_all(disk.path().join("root/var/lib/cube/services")).unwrap();
+    fs::create_dir_all(disk.path().join("groups")).unwrap();
+    let mut record: Value = serde_json::from_slice(
+        &fs::read(machine.services.paths.registry.join("web.json")).unwrap(),
+    )
+    .unwrap();
+    let port = free_port();
+    record["port"] = json!(port);
+    fs::write(
+        disk.path().join("root/var/lib/cube/services/web.json"),
+        record.to_string(),
+    )
+    .unwrap();
+    let groups = Arc::new(ProcessGroups(disk.path().join("groups")));
+    let booted = open(disk.path(), &groups, "run");
     assert_eq!(
         listed(&booted)[0]["state"],
         "missing",
         "nothing before the setup"
     );
-    booted.set_launch(&launch(machine.dir.path())).unwrap();
+    booted.set_launch(&launch(disk.path())).unwrap();
     until("the service after the boot", 10, || {
         let list = listed(&booted);
         list[0]["state"] == "active" && list[0]["listening"] == true
     });
     assert_eq!(listed(&booted)[0]["restarts"], 0);
-    machine.groups.kill("web");
+    assert_eq!(
+        machine.groups.group("web"),
+        Some(group),
+        "the first machine's own"
+    );
+    fs::remove_file(disk.path().join("root/var/lib/cube/services/web.json")).unwrap();
+    groups.kill("web");
 }
 
 #[test]

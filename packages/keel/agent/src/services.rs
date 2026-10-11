@@ -295,6 +295,11 @@ impl Services {
             match unit.state {
                 State::Active if !self.domain.populated(&name) => self.ended(&name, unit),
                 State::Activating if unit.retry.is_some_and(|at| Instant::now() >= at) => {
+                    // Stopped meanwhile: nothing to start again.
+                    if self.registration(&name).is_none() {
+                        units.remove(&name);
+                        continue;
+                    }
                     unit.restarts += 1;
                     self.launch_unit(&name, unit);
                 }
