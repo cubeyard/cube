@@ -21,6 +21,7 @@ import { connect, type Socket } from "node:net";
 import { cpus, loadavg, platform, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { Owned, ZOMBIE_SCAN } from "./keel-boot-check-lib.ts";
 import { fetchImage } from "./keel-oci.ts";
 
 const { values } = parseArgs({
@@ -62,7 +63,10 @@ if (!["x86_64", "arm64"].includes(arch)) throw new Error(`--arch is x86_64 or ar
 if (!["tcg", "kvm", "hvf"].includes(accel)) throw new Error(`--accel is tcg, kvm or hvf, not ${accel}`);
 mkdirSync(out, { recursive: true });
 // Unix socket paths are short; QEMU's sockets live in a short temporary directory.
-const sockets = mkdtempSync(join(tmpdir(), "kbc-"));
+// Every QEMU this script starts, and that directory, go when it ends,
+// also when a check fails.
+const owned = new Owned();
+const sockets = owned.dir(mkdtempSync(join(tmpdir(), "kbc-")));
 
 const sha256 = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
 // How long a workload may take to run again after cont before the snapshot
@@ -143,9 +147,9 @@ type Floor = { version: string; path: string; sha256: string; machine: string; m
 /** Reads the floor from the QEMU at the given path, as the runner will (A17). */
 async function readFloor(): Promise<Floor> {
   const qmpPath = join(sockets, "floor.qmp");
-  const child = spawn(qemu, ["-machine", "none", "-S", "-nodefaults", "-no-user-config", "-display", "none", "-qmp", `unix:${qmpPath},server=on,wait=off`], {
+  const child = owned.child(spawn(qemu, ["-machine", "none", "-S", "-nodefaults", "-no-user-config", "-display", "none", "-qmp", `unix:${qmpPath},server=on,wait=off`], {
     stdio: ["ignore", "ignore", "inherit"],
-  });
+  }));
   try {
     const qmp = await Qmp.open(qmpPath);
     const version = await qmp.execute("query-version");
@@ -282,7 +286,7 @@ function start(dir: string, extra: string[] = []): Machine {
   const args = argv(dir, extra, boot);
   writeFileSync(join(dir, `argv-${boot}.json`), JSON.stringify([qemu, ...args], null, 1));
   const started = now();
-  const child = spawn(qemu, args, { stdio: ["ignore", "ignore", "pipe"] });
+  const child = owned.child(spawn(qemu, args, { stdio: ["ignore", "ignore", "pipe"] }));
   let stderr = "";
   child.stderr!.on("data", (d) => (stderr += d));
   const exited = new Promise<number | null>((r) =>
@@ -505,7 +509,7 @@ const first = newMachineDir("first");
   // Orphans: five background sleeps outlive their shell and are reparented to PID 1.
   await read("for i in 1 2 3 4 5; do (sleep 1 &) ; done");
   await sleep(arch === "x86_64" && accel === "tcg" ? 4000 : 2500);
-  const zombies = await read("for f in /proc/[0-9]*/stat; do read -r s < $f 2>/dev/null; case \"${s##*) }\" in Z*) echo \"$s\";; esac; done; true");
+  const zombies = await read(ZOMBIE_SCAN);
   check(zombies === "", "orphans are reaped by cube-init (no zombies)", zombies);
   // The agent dies; cube-init starts it again and setup is a no-op.
   channel.send("crash");
@@ -693,7 +697,7 @@ const summary = {
 };
 Object.assign(results, { checks, boots, snapshots, summary, finished: new Date().toISOString(), loadAfter: loadavg() });
 writeFileSync(join(out, "results.json"), JSON.stringify(results, null, 2));
-rmSync(sockets, { recursive: true, force: true });
+owned.release();
 
 const row = (name: string, s: ReturnType<typeof stats>, unit = "ms") =>
   `| ${name} | ${s.n} | ${s.median.toFixed(1)} | ${s.min.toFixed(1)}–${s.max.toFixed(1)} | ${s.p25.toFixed(1)}–${s.p75.toFixed(1)} | ${s.sd.toFixed(1)} | ${unit} |`;
