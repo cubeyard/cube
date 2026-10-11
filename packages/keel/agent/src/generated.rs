@@ -19,7 +19,9 @@
 //! place on every setup, so the bound inode stays. Paths in the root are
 //! resolved inside it and opened with every link refused. What lands in the
 //! overlay (the blocks, the certificate file, empty mount points) is cube's,
-//! and template publishing leaves it out (K-5e).
+//! and template publishing leaves it out (template.rs): the mount points
+//! this agent made are listed in `state/mount-points`, and every CA a setup
+//! brought is kept in `state/runner-cas.pem`.
 use std::{
     fs,
     io::{self, Read, Write},
@@ -51,10 +53,16 @@ const BOUND: [(&str, &str, u32); 4] = [
 ];
 /// The runner's address on the machine's private link: DNS (B-4).
 pub const RUNNER_IP: &str = "192.168.127.1";
-const BEGIN: &str = "# cube: begin (keel writes this block on every machine_setup)";
+pub const BEGIN: &str = "# cube: begin (keel writes this block on every machine_setup)";
 const END: &str = "# cube: end";
 /// What update-ca-certificates adds to the bundle it writes.
-const CA_FILE: &str = "usr/local/share/ca-certificates/cube-runner.crt";
+pub const CA_FILE: &str = "usr/local/share/ca-certificates/cube-runner.crt";
+/// The mount points this agent made in the root, one path a line.
+pub const MOUNT_POINTS: &str = "mount-points";
+/// Every CA a setup brought to this machine (PEM), for template publishing.
+pub const RUNNER_CAS: &str = "runner-cas.pem";
+/// The largest file cube rewrites to put a block in; a larger one is refused.
+const MAX_FILE_BYTES: u64 = 16 << 20;
 const MAX_CA_BYTES: usize = 64 * 1024;
 /// The variables tools with their own CA list read, kept through sudo.
 const CA_VARIABLES: [&str; 4] = [
@@ -193,8 +201,15 @@ fn read_resolved(root: &fs::File, components: &[String]) -> io::Result<Option<(S
     if !meta.is_file() {
         return Ok(None);
     }
+    let too_large = || io::Error::other("larger than 16 MiB; not rewritten");
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(too_large());
+    }
     let mut text = String::new();
-    (&file).take(16 << 20).read_to_string(&mut text)?;
+    (&file).take(MAX_FILE_BYTES + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_FILE_BYTES {
+        return Err(too_large());
+    }
     Ok(Some((text, meta.permissions().mode() & 0o7777)))
 }
 
@@ -284,12 +299,32 @@ fn mount_point(
             if !directory {
                 unsafe { libc::close(made) };
             }
+            record_mount_point(&components);
             Ok(Some((
                 open_resolved(root, &components, libc::O_PATH, 0)?,
                 components,
             )))
         }
         Err(error) => Err(error),
+    }
+}
+
+/// Notes a mount point this agent made in the root (`state/mount-points`),
+/// so template publishing leaves it out.
+pub fn record_mount_point(components: &[String]) {
+    let path = Path::new(STATE).join(MOUNT_POINTS);
+    let line = components.join("/");
+    if fs::read_to_string(&path).is_ok_and(|known| known.lines().any(|known| known == line)) {
+        return;
+    }
+    let result = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| writeln!(file, "{line}"));
+    if let Err(error) = result {
+        eprintln!("cube-agent: {}: {error}", path.display());
     }
 }
 
@@ -323,8 +358,11 @@ fn bind(
 }
 
 /// Once per boot, before the workload namespace: /etc/cube and the
-/// generated files bound over their paths in `root`.
-pub fn bind_all(root: &Path) -> Result<(), Refusal> {
+/// generated files bound over their paths in `root`. Returns the paths that
+/// could not be bound (the image has no place for them); the machine is not
+/// ready then.
+pub fn bind_all(root: &Path) -> Result<Vec<String>, Refusal> {
+    let mut unbound = vec![];
     let state = Path::new(STATE);
     let etc_cube = state.join(ETC_CUBE);
     let generated = state.join(GENERATED);
@@ -342,7 +380,10 @@ pub fn bind_all(root: &Path) -> Result<(), Refusal> {
         Ok(Some(at)) => {
             bind(&etc_cube, &at, root, true).map_err(|error| internal("/etc/cube", error))?
         }
-        Ok(None) => eprintln!("cube-agent: /etc/cube is not a directory in this image"),
+        Ok(None) => {
+            eprintln!("cube-agent: /etc/cube is not a directory in this image");
+            unbound.push("/etc/cube".to_string());
+        }
         Err(error) => return Err(internal("/etc/cube", error)),
     }
     for (name, path, mode) in BOUND {
@@ -359,11 +400,14 @@ pub fn bind_all(root: &Path) -> Result<(), Refusal> {
             Ok(Some(at)) => {
                 bind(&source, &at, root, false).map_err(|error| internal(path, error))?
             }
-            Ok(None) => eprintln!("cube-agent: no /{path} in this image (not bound)"),
+            Ok(None) => {
+                eprintln!("cube-agent: no /{path} in this image (not bound)");
+                unbound.push(format!("/{path}"));
+            }
             Err(error) => return Err(internal(path, error)),
         }
     }
-    Ok(())
+    Ok(unbound)
 }
 
 /// Writes a bound file in place when its content changed.
@@ -449,7 +493,11 @@ pub fn write_all(root: &Path, files: &Files) -> Result<(), Refusal> {
         }
     }
     match files.ca {
-        Some(ca) => write(&etc_cube.join("ca.pem"), ca.as_bytes(), 0o644)?,
+        Some(ca) => {
+            write(&etc_cube.join("ca.pem"), ca.as_bytes(), 0o644)?;
+            remember_ca(&state.join(RUNNER_CAS), ca)
+                .map_err(|error| internal(RUNNER_CAS, error))?;
+        }
         None => remove(&etc_cube.join("ca.pem"))?,
     }
 
@@ -481,6 +529,109 @@ pub fn write_all(root: &Path, files: &Files) -> Result<(), Refusal> {
     )
     .map_err(|error| internal("/etc/environment", error))?;
     Ok(())
+}
+
+/// Adds the certificates of `ca` that `path` lacks (by DER), so template
+/// publishing knows every CA this machine was given, a replaced one too.
+fn remember_ca(path: &Path, ca: &str) -> io::Result<()> {
+    let mut known = fs::read(path).unwrap_or_default();
+    let have = pem_certificates(&known);
+    let mut changed = false;
+    for (der, lines) in pem_blocks(ca.as_bytes()) {
+        if !have.contains(&der) {
+            known.extend_from_slice(&lines);
+            changed = true;
+        }
+    }
+    if changed {
+        crate::files::write_atomic(path, &known, 0o600)?;
+    }
+    Ok(())
+}
+
+fn decode(body: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(body).ok()
+}
+
+/// The PEM certificates in `data`: each one's DER and its lines, from BEGIN
+/// to END as they are in `data`. One that does not decode is left out.
+fn pem_blocks(data: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut out = vec![];
+    let mut current: Option<(String, Vec<u8>)> = None;
+    for line in data.split_inclusive(|&b| b == b'\n') {
+        let bare = line.trim_ascii();
+        match &mut current {
+            None if bare == b"-----BEGIN CERTIFICATE-----" => {
+                current = Some((String::new(), line.to_vec()));
+            }
+            None => {}
+            Some((body, lines)) => {
+                lines.extend_from_slice(line);
+                if bare == b"-----END CERTIFICATE-----" {
+                    if !lines.ends_with(b"\n") {
+                        lines.push(b'\n');
+                    }
+                    if let Some(der) = decode(body) {
+                        out.push((der, std::mem::take(lines)));
+                    }
+                    current = None;
+                } else {
+                    body.push_str(&String::from_utf8_lossy(bare));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The DER of every PEM certificate in `data`.
+pub fn pem_certificates(data: &[u8]) -> Vec<Vec<u8>> {
+    pem_blocks(data).into_iter().map(|(der, _)| der).collect()
+}
+
+/// `data` without cube's marker blocks and without every PEM certificate
+/// whose DER is one of `ders`, marked or not (update-ca-certificates copies
+/// `cube-runner.crt` into the bundle it writes again, without markers). The
+/// rest stays byte for byte. Template publishing removes the runner's CA
+/// with it; a CA rotation can use it the same way.
+pub fn without_runner_cas(data: &[u8], ders: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut block = false;
+    let mut cert: Option<(String, Vec<u8>)> = None;
+    for line in data.split_inclusive(|&b| b == b'\n') {
+        let bare = line.strip_suffix(b"\n").unwrap_or(line);
+        if block {
+            block = bare != END.as_bytes();
+            continue;
+        }
+        if bare == BEGIN.as_bytes() {
+            block = true;
+            continue;
+        }
+        let trimmed = line.trim_ascii();
+        match &mut cert {
+            Some((body, lines)) => {
+                lines.extend_from_slice(line);
+                if trimmed == b"-----END CERTIFICATE-----" {
+                    if !decode(body).is_some_and(|der| ders.contains(&der)) {
+                        out.extend_from_slice(lines);
+                    }
+                    cert = None;
+                } else {
+                    body.push_str(&String::from_utf8_lossy(trimmed));
+                }
+            }
+            None if trimmed == b"-----BEGIN CERTIFICATE-----" => {
+                cert = Some((String::new(), line.to_vec()));
+            }
+            None => out.extend_from_slice(line),
+        }
+    }
+    if let Some((_, lines)) = cert {
+        out.extend_from_slice(&lines); // an unfinished certificate stays as it was
+    }
+    out
 }
 
 /// The sysctls systemd sets: a link or hard link in a sticky or another
@@ -622,6 +773,41 @@ mod tests {
         assert!(!root.join("etc/sudoers.d").exists());
         assert!(mount_point(&file, "etc/cube", true).unwrap().is_some());
         assert!(root.join("etc/cube").is_dir());
+    }
+
+    #[test]
+    fn a_file_too_large_to_rewrite_is_refused_not_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("etc")).unwrap();
+        let big = vec![b'x'; (MAX_FILE_BYTES + 1) as usize];
+        fs::write(root.join("etc/environment"), &big).unwrap();
+        let file = fs::File::open(root).unwrap();
+        assert!(put_block(&file, "etc/environment", Some("A=b\n"), true).is_err());
+        assert_eq!(
+            fs::read(root.join("etc/environment")).unwrap().len(),
+            big.len()
+        );
+    }
+
+    #[test]
+    fn every_ca_a_setup_brought_is_remembered_once() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RUNNER_CAS);
+        let pem = |der: &[u8]| {
+            format!(
+                "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+                base64::engine::general_purpose::STANDARD.encode(der)
+            )
+        };
+        remember_ca(&path, &pem(b"first")).unwrap();
+        remember_ca(&path, &pem(b"first")).unwrap();
+        remember_ca(&path, &format!("{}{}", pem(b"first"), pem(b"second"))).unwrap();
+        assert_eq!(
+            pem_certificates(&fs::read(&path).unwrap()),
+            vec![b"first".to_vec(), b"second".to_vec()]
+        );
     }
 
     #[test]

@@ -135,9 +135,14 @@ cube-init (PID 1)
   placeholder in `GH_TOKEN`) and `/etc/environment` the CA variables, each
   as such a block. `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`,
   `SSL_CERT_FILE` and `CURL_CA_BUNDLE` name the image's bundle. Paths in the
-  root are resolved inside it and written with every link refused. Template
-  publishing (K-5e) leaves cube's blocks, `cube-runner.crt` and the empty
-  mount points out. Not done: the `-CApath` hash link and a Java keystore.
+  root are resolved inside it and written with every link refused. A file
+  over 16 MiB is refused rather than rewritten. A target the image has no
+  place for (no `/etc/sudoers.d`, a file at `/etc/cube`) is not bound, and
+  the machine is not ready ("the image lacks a place for …"). Every CA a
+  setup brings is also kept in `state/runner-cas.pem` and every mount point
+  the agent makes in `state/mount-points`, for template publishing. Not
+  done: the `-CApath` hash link, a Java keystore, and taking a replaced CA
+  out of a bundle `update-ca-certificates` wrote (a later follow-up).
   The agent also sets `fs.protected_hardlinks` and `fs.protected_symlinks`.
 - **Hooks**: cubed runs them as commands (its preparation and resume
   scripts); the agent writes the project's two from the boot documents and
@@ -154,14 +159,38 @@ cube-init (PID 1)
 - **recover before answering**: an agent that starts with the root
   assembled recovers its journal before it serves the channel, and every
   setup recovers it before `ready`.
+- **Template publishing** (`template.rs`, the runner's
+  `DaemonRequest.template_publish`): a build machine (one with a template
+  disk, vdd) turns its `upper/` into an EROFS layer on vdd, which the
+  runner keeps as a template and later machines mount as their topmost
+  layer. Refused while a command runs (`FAILED_PRECONDITION/busy`), on a
+  machine without vdd (`no_template_disk`) and before a setup. Then the
+  machine is used up, as a sealed p3 build machine is powered off: the
+  services' supervisor stops, every process of the workload is killed, the
+  workload's namespace and root are detached, and `upper/` is cleaned in
+  place of what is cube's: marker blocks and every PEM certificate equal to
+  a CA a setup brought (`state/runner-cas.pem`), in any file; `cube-runner.crt`,
+  `cube-runner.pem` and the links to it; the mount points the agent made
+  and the paths it binds in every machine (`/etc/hosts`, `/etc/hostname`,
+  `/etc/resolv.conf`, `/etc/sudoers.d/cube`, `/usr/local/bin/cube`); the
+  `agent` account's lines the layers below lack (a file left equal to the
+  layer below goes); and what cube-guest's `seal_final` removes that a keel
+  root can have (`/var/lib/cube`, `/etc/cube`, hook logs, shell histories,
+  ssh host keys, the machine ids, the random seed). The seal's check then
+  looks at every file for a marker line, a runner CA's DER or the start of
+  its base64, and refuses (`seal_failed`, nothing written) when any is left,
+  or when the build changed a Java keystore while a runner CA was installed
+  (keel cannot clean one yet). The base's `mkfs.erofs` writes the layer
+  (lz4hc, owners, times and xattrs kept, so whiteouts and opaque
+  directories stay overlay's); the agent answers `done` and refuses every
+  operation and setup until the machine powers off. A repeated request
+  answers as the first; the outcome is kept in `/run/keel/published.json`.
 - `install` never exists for keel.
   `snapshot_prepare` and `snapshot_done` are `UNIMPLEMENTED` (K-5f).
 
 ## Not yet (later K-5 rows)
 
-Templates (K-5e, which also leaves `/usr/local/bin/cube`'s mount point and
-cube's generated lines and files out of a template); `snapshot_prepare`/`snapshot_done`
-(K-5f).
+`snapshot_prepare`/`snapshot_done` (K-5f).
 
 ## Tests
 
@@ -192,7 +221,18 @@ cube's generated lines and files out of a template); `snapshot_prepare`/`snapsho
   the generated files, the runner's CA (also across
   `update-ca-certificates`), git's credential helper, `cube hooks`, a
   refused CA, and the guest's realtime within 1 s of the host's after a 3 s
-  pause (`results.json` `clock`), and runs the Workspace contract (leases,
+  pause (`results.json` `clock`), then template publishing: a build
+  machine with a template disk runs a setup (a file with its time, a
+  deleted image file, a directory made again, a group,
+  `update-ca-certificates`, a copy of the bundle in the project, a history,
+  hook logs, an ssh host key, a machine id, a running service), is refused
+  while a command runs, publishes, and refuses everything afterwards; the
+  driver checks the layer with `fsck.erofs` (`--fsck`), extracts it and
+  finds nothing of cube's in it (no marker or runner CA in any file, as DER
+  or base64; no `cube-runner.*`; no mount point, account line, history,
+  hook log, host key or machine id) but the setup's work, and a new machine
+  boots with it as its topmost layer (`results.json` `template`). And it
+  runs the Workspace contract (leases,
   files, commands, services, and cubed's resume script running the
   pre-resume hook) (`packages/server/test/keel-agent-contract-test.ts`)
   over the channel:
@@ -205,7 +245,7 @@ cube's generated lines and files out of a template); `snapshot_prepare`/`snapsho
   target/release/keel-agent-check --qemu ~/.local/opt/qemu-11.1.2/bin/qemu-system-x86_64 \
     --qemu-img ~/.local/opt/qemu-11.1.2/bin/qemu-img \
     --kernel packages/keel/out/x86_64/vmlinuz --base packages/keel/out/x86_64/base.erofs \
-    --mkfs /usr/bin/mkfs.erofs --tar /var/tmp/kac/image-x86_64.tar --out /var/tmp/kac/x86_64-tcg \
+    --mkfs /usr/bin/mkfs.erofs --fsck /usr/bin/fsck.erofs --tar /var/tmp/kac/image-x86_64.tar --out /var/tmp/kac/x86_64-tcg \
     --arch x86_64 --accel tcg --contract "node packages/server/test/keel-agent-contract-test.ts"
   ```
 
@@ -214,7 +254,9 @@ cube's generated lines and files out of a template); `snapshot_prepare`/`snapsho
   expected to fail at that place's check; `--control clock` boots without
   `virtio-rtc-pci` and is expected to fail at the clock check under TCG
   and HVF (under KVM the agent follows "KVM virtual PTP" instead, so it
-  passes there and says so in `clock.source`). A failed run writes no
+  passes there and says so in `clock.source`); `--control seal` makes the
+  build machine's setup leave the runner's CA as DER in a file, so the
+  agent refuses to publish (`seal_failed`). A failed run writes no
   `results.json`.
 
   `test-image.sh` needs Docker (and binfmt for the other architecture); it

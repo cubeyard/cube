@@ -51,6 +51,15 @@ pub struct Agent {
     boot_id: String,
 }
 
+/// What a machine says once it was published (or failed to be).
+fn published_reason(record: &Value) -> String {
+    match record["outcome"].as_str() {
+        Some("ok") => "this machine was published as a template; power it off".into(),
+        Some(failure) => format!("template publishing {failure}; power it off"),
+        None => "template publishing did not finish; power it off".into(),
+    }
+}
+
 fn read_trimmed(path: &str) -> String {
     std::fs::read_to_string(path)
         .map(|s| s.trim().to_string())
@@ -84,6 +93,11 @@ impl Agent {
             boot_id: read_trimmed("/proc/sys/kernel/random/boot_id"),
         });
         crate::clock::spawn();
+        if let Some(record) = crate::template::published() {
+            // Published in this boot: nothing runs here again.
+            agent.set_status(false, published_reason(&record));
+            return agent;
+        }
         if setup::is_mounted(setup::ROOT) {
             if let Err(error) = agent.open_journal() {
                 eprintln!("cube-agent: {error}");
@@ -185,7 +199,10 @@ impl Agent {
 
     /// A new connection: ready again only once its setup is applied.
     pub fn connected(&self) {
-        self.set_status(false, "waiting for machine_setup");
+        match crate::template::published() {
+            Some(record) => self.set_status(false, published_reason(&record)),
+            None => self.set_status(false, "waiting for machine_setup"),
+        }
     }
 
     pub fn ready(&self) -> bool {
@@ -288,12 +305,47 @@ impl Agent {
         ))
     }
 
+    /// Publishes this build machine as a template (template.rs), under the
+    /// setup lock; Ok means `done`. A repeated request answers as the first.
+    pub async fn template_publish(self: &Arc<Self>) -> Result<(), proto::Error> {
+        let _one = self.setup.lock().await;
+        if let Some(record) = crate::template::published() {
+            return crate::template::outcome(&record);
+        }
+        crate::template::precheck()?;
+        self.set_status(false, "publishing the template");
+        let agent = Arc::clone(self);
+        let result = tokio::task::spawn_blocking(move || {
+            let services = agent.services();
+            let home = services
+                .as_ref()
+                .and_then(|services| services.account())
+                .map_or_else(|| "/home/agent".to_string(), |account| account.home);
+            if let Some(services) = services {
+                services.halt();
+            }
+            crate::template::publish(&home)
+        })
+        .await
+        .unwrap_or_else(|error| Err(refuse(Code::Internal, "publish_failed", &error.to_string())));
+        let record = crate::template::published().unwrap_or_default();
+        self.set_status(false, published_reason(&record));
+        result.map(|_| ())
+    }
+
     /// Applies a setup, one at a time; Ok means `done`.
     pub async fn machine_setup(
         self: &Arc<Self>,
         request: proto::MachineSetup,
     ) -> Result<(), proto::Error> {
         let _one = self.setup.lock().await;
+        if let Some(record) = crate::template::published() {
+            return Err(refuse(
+                Code::FailedPrecondition,
+                "published",
+                &published_reason(&record),
+            ));
+        }
         self.set_status(false, "applying machine_setup");
         let agent = Arc::clone(self);
         let outcome = tokio::task::spawn_blocking(move || -> Result<Vec<String>, proto::Error> {

@@ -473,8 +473,10 @@ name = "cube-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "cube-runner-protocol",
  "libc",
+ "memchr",
  "serde_json",
  "sha2",
  "tempfile",
@@ -1709,6 +1711,7 @@ name = "keel-agent-check"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "cube-runner-protocol",
  "keel-layers",
  "serde_json",

@@ -9,8 +9,10 @@ description = "keel's guest agent: protocol 4's DaemonFrame on the virtio-serial
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 cube-runner-protocol = { path = "../../runner-protocol" }
 libc = "0.2"
+memchr = "2"
 serde_json = "1"
 sha2 = "0.11"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
