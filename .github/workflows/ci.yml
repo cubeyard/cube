@@ -81,6 +81,15 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends erofs-utils qemu-utils
+      - name: cube-agent, static musl as base.erofs builds it (both architectures)
+        run: |
+          set -e
+          rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            RUSTFLAGS="-C linker=rust-lld -C target-feature=+crt-static" \
+              cargo build --locked --offline --release -p cube-agent --target "$target"
+            file "target/$target/release/cube-agent" | tee /dev/stderr | grep -q 'statically linked\|static-pie linked'
+          done
       - name: real-QUIC Rust and in-process Node interoperability
         run: bash scripts/test-node-transport.sh
         env:

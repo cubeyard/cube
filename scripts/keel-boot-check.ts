@@ -1,5 +1,7 @@
-// keel's boot check (work package 4, masterplan K-4): boots base.erofs with
-// cube-init and the agent stand-in on a real image's layers and a writable
+// keel's boot check (work package 4, masterplan K-4): boots base-standin.erofs
+// (keel's base with the agent stand-in as /sbin/cube-agent; base.erofs carries
+// cube-agent, checked by packages/keel/agent-check) with
+// cube-init and the stand-in on a real image's layers and a writable
 // disk, checks the workload root, and measures boot and snapshot (`migrate`
 // to `file:` with `mapped-ram`). One driver and one set of QEMU arguments on
 // Linux and macOS; only the accelerator, machine type and console differ.
