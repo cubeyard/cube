@@ -16,6 +16,7 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use cube_runner_protocol::{
@@ -180,9 +181,11 @@ async fn wait(changes: &mut watch::Receiver<State>, ended: &mut watch::Receiver<
     let_go && !*ended.borrow()
 }
 
-/// The kernel's knobs a prepare writes.
+/// What a prepare does to the kernel: `sync`, then the knobs it writes.
+/// Tests give their own sync, so they never wait for the host's disks.
 #[derive(Clone)]
 pub struct Settle {
+    pub sync: Arc<dyn Fn() + Send + Sync>,
     pub drop_caches: PathBuf,
     pub compact_memory: PathBuf,
 }
@@ -190,6 +193,7 @@ pub struct Settle {
 impl Default for Settle {
     fn default() -> Self {
         Self {
+            sync: Arc::new(|| unsafe { libc::sync() }),
             drop_caches: "/proc/sys/vm/drop_caches".into(),
             compact_memory: "/proc/sys/vm/compact_memory".into(),
         }
@@ -201,7 +205,7 @@ impl Settle {
     /// so after the sync all of it) and compacts memory. An error means the
     /// machine is not settled.
     pub fn run(&self) -> io::Result<()> {
-        unsafe { libc::sync() };
+        (self.sync)();
         write(&self.drop_caches, "3")?;
         write(&self.compact_memory, "1")
     }
@@ -213,10 +217,28 @@ fn write(path: &Path, value: &str) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::{sync::Arc, time::Duration};
+pub(crate) mod tests {
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     use super::*;
+
+    /// A sync that counts its calls and checks it runs before either knob
+    /// is written, as `sync; drop_caches` needs.
+    pub(crate) fn recording_sync(dir: &Path) -> (Arc<AtomicUsize>, Arc<dyn Fn() + Send + Sync>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (counted, dir) = (Arc::clone(&calls), dir.to_path_buf());
+        let sync = Arc::new(move || {
+            assert!(
+                !dir.join("drop_caches").exists() && !dir.join("compact_memory").exists(),
+                "sync after a knob was written"
+            );
+            counted.fetch_add(1, Ordering::SeqCst);
+        });
+        (calls, sync)
+    }
 
     fn guest(op: &str) -> proto::DaemonRequest {
         proto::DaemonRequest {
@@ -352,18 +374,29 @@ mod tests {
     #[test]
     fn settling_fails_closed_when_a_knob_cannot_be_written() {
         let dir = tempfile::tempdir().unwrap();
+        let (calls, sync) = recording_sync(dir.path());
         let ok = Settle {
+            sync,
             drop_caches: dir.path().join("drop_caches"),
             compact_memory: dir.path().join("compact_memory"),
         };
         ok.run().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "synced once, first");
         assert_eq!(std::fs::read_to_string(&ok.drop_caches).unwrap(), "3");
         assert_eq!(std::fs::read_to_string(&ok.compact_memory).unwrap(), "1");
+        let other = tempfile::tempdir().unwrap();
+        let (calls, sync) = recording_sync(other.path());
         let missing = Settle {
-            compact_memory: dir.path().join("no/such/knob"),
-            ..ok
+            sync,
+            drop_caches: other.path().join("drop_caches"),
+            compact_memory: other.path().join("no/such/knob"),
         };
         let error = missing.run().unwrap_err();
         assert!(error.to_string().contains("no/such/knob"), "{error}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "synced before the knob failed"
+        );
     }
 }

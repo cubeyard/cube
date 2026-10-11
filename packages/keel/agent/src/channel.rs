@@ -349,18 +349,29 @@ mod tests {
         }
     }
 
-    /// An agent whose prepare writes its kernel knobs into DIR (or fails
-    /// to, when DIR lacks them and `writable` is false).
-    fn agent_settling_in(dir: &std::path::Path, writable: bool) -> Arc<Agent> {
+    /// An agent whose prepare syncs with a recording stand-in (never the
+    /// host's disks) and writes its kernel knobs into DIR (or fails to, when
+    /// `writable` is false); the count is its syncs.
+    fn agent_settling_in(
+        dir: &std::path::Path,
+        writable: bool,
+    ) -> (Arc<Agent>, Arc<std::sync::atomic::AtomicUsize>) {
         let knobs = if writable {
             dir.to_path_buf()
         } else {
             dir.join("missing")
         };
-        Agent::start_with(snapshot::Settle {
+        let (syncs, sync) = snapshot::tests::recording_sync(&knobs);
+        let agent = Agent::start_with(snapshot::Settle {
+            sync,
             drop_caches: knobs.join("drop_caches"),
             compact_memory: knobs.join("compact_memory"),
-        })
+        });
+        (agent, syncs)
+    }
+
+    fn synced(syncs: &std::sync::atomic::AtomicUsize) -> usize {
+        syncs.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     async fn frame(runner: &mut tokio::net::UnixStream) -> proto::DaemonFrame {
@@ -389,7 +400,7 @@ mod tests {
     #[tokio::test]
     async fn snapshot_done_releases_what_the_prepare_held_in_order() {
         let dir = tempfile::tempdir().unwrap();
-        let agent = agent_settling_in(dir.path(), true);
+        let (agent, syncs) = agent_settling_in(dir.path(), true);
         let (port, mut runner) = port();
         tokio::spawn({
             let agent = Arc::clone(&agent);
@@ -403,6 +414,7 @@ mod tests {
         .await
         .unwrap();
         let done = frame(&mut runner).await;
+        assert_eq!(synced(&syncs), 1, "done after one sync, before the knobs");
         assert!(
             matches!(answer(&done), Some((1, AnswerKind::Done(_)))),
             "{done:?}"
@@ -455,7 +467,7 @@ mod tests {
     #[tokio::test]
     async fn the_end_of_the_connection_ends_a_prepare_and_drops_what_it_held() {
         let dir = tempfile::tempdir().unwrap();
-        let agent = agent_settling_in(dir.path(), true);
+        let (agent, syncs) = agent_settling_in(dir.path(), true);
         let (stale, mut runner) = port();
         let served = tokio::spawn({
             let agent = Arc::clone(&agent);
@@ -470,6 +482,7 @@ mod tests {
         .unwrap();
         frame(&mut runner).await;
         frame(&mut runner).await;
+        assert_eq!(synced(&syncs), 1);
         write_frame(&mut runner, &guest_hello(2)).await.unwrap();
         // A restored machine's stale connection: the runner's reset ends it.
         write_frame(&mut runner, &guest_hello(0)).await.unwrap();
@@ -500,7 +513,7 @@ mod tests {
     #[tokio::test]
     async fn a_prepare_that_cannot_settle_the_machine_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
-        let agent = agent_settling_in(dir.path(), false);
+        let (agent, syncs) = agent_settling_in(dir.path(), false);
         let (port, mut runner) = port();
         tokio::spawn({
             let agent = Arc::clone(&agent);
@@ -522,6 +535,7 @@ mod tests {
             (Code::Internal as i32, "snapshot_prepare"),
             "{error:?}"
         );
+        assert_eq!(synced(&syncs), 1, "synced, then the knob failed");
         let info = frame(&mut runner).await;
         assert_ne!(status(&info).unwrap().reason, "prepared for a snapshot");
         assert!(!agent.gate().prepared());
