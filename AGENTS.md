@@ -32,9 +32,11 @@ DEVELOPING.md before changing behavior.
   format (`packages/keel/layers`, `keel-layers`: OCI layer to EROFS, the
   runner's layer cache and the GPT + VMDK layer disk), `cube-init` and the
   base root (`packages/keel/init`, `packages/keel/base`: PID 1 in C and
-  base.erofs, with a boot-check stand-in where the guest agent will be;
-  `scripts/keel-boot-check.ts`), and the planned guest agent over
-  virtio-serial. Booted directly by QEMU,
+  base.erofs; base-standin.erofs carries the boot check's stand-in for
+  `scripts/keel-boot-check.ts` only), and `cube-agent`, the guest agent over
+  virtio-serial (`packages/keel/agent`: DaemonFrame, `machine_setup`,
+  `OPERATIONS` commands so far; `packages/keel/agent-check` boots it under
+  QEMU). Booted directly by QEMU,
   built for fast boot and snapshot/resume, versioned apart from cubed. Not
   used by the runner yet (docs/plans/2026-10-10-vm-base-and-image-layers.md).
 

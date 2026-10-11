@@ -377,17 +377,20 @@ fails in the machine, which has no credentials for it.
   no SSH, cloud-init, systemd or Python
   (docs/plans/2026-10-10-vm-base-and-image-layers.md, PR #143). Built: the
   kernel (`packages/keel/kernel`), the layer tooling (`packages/keel/layers`)
-  and `cube-init` with base.erofs and a boot-check agent stand-in
-  (`packages/keel/init`, `packages/keel/base`, `scripts/keel-boot-check.ts`;
-  checked under TCG only so far).
+  and `cube-init` with base.erofs (`packages/keel/init`,
+  `packages/keel/base`, `scripts/keel-boot-check.ts` on base-standin.erofs;
+  accepted under KVM and HVF), and `cube-agent` (`packages/keel/agent`:
+  DaemonFrame, `machine_setup`, `OPERATIONS`' commands; checked by
+  `keel-agent-check` under TCG so far; files, services, generated files and
+  snapshots follow).
 - **The guest channel contract** (keel's work package 2, PR #144) is in
   `runner.proto`: `DaemonFrame` framing and channel rules, `machine_setup`,
   `snapshot_prepare`/`snapshot_done`, `GuestInfo.limits`/`epoch`, what
   `ready` means for keel, the `Boot.documents` names that replace the seed,
   and the QEMU floor (with `mapped-ram` required).
 - Protocol 3 (`cube-runner` 0.8.x) is unchanged and keeps serving every
-  thread that is not on a p4 runner. Next: keel's layer tooling and
-  `cube-init` (packages 3 and 4), then `cube-agent` and `berth vm`.
+  thread that is not on a p4 runner. Next: the rest of `cube-agent`, then
+  `berth vm`.
 
 ## Known gaps and next steps
 

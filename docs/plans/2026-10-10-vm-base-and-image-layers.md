@@ -7,8 +7,10 @@ the guest contract (work package 2) is in
 reference for every field this plan names; the layer tooling (work package
 3) is `packages/keel/layers`; `cube-init`, `base.erofs` and the boot check
 (work package 4) are `packages/keel/init`, `packages/keel/base` and
-`scripts/keel-boot-check.ts`, checked under TCG so far. `cube-agent` is not
-built and no runner uses keel yet. Written with the maintainer before implementation; it
+`scripts/keel-boot-check.ts`, accepted under KVM and HVF; `cube-agent`
+(work package 5) is `packages/keel/agent` with its channel, `machine_setup`
+and the commands of `OPERATIONS` so far (K-5a), checked by
+`packages/keel/agent-check` under TCG. No runner uses keel yet. Written with the maintainer before implementation; it
 settles the direction and the order of work, not every interface. It builds
 on runner protocol 4 (PR #142), whose later stages are the VM runner, the
 guest daemon over virtio-serial, the runner's network stack and the
@@ -611,7 +613,9 @@ throwaway tests as keel's boot check. Built: `packages/keel/init`
 (`cube-init.c`, `agent-standin.c`), `packages/keel/base/build.sh`,
 `scripts/keel-boot-check.ts`; passed under TCG on x86-64 and arm64 with
 `debian:trixie` (cube's default image does not exist yet, package 7).
-Remaining: the same check under KVM on the Linux host and HVF on the Mac.
+Accepted under KVM on the Linux host and HVF on the Mac (PR #148). The
+stand-in now lives only in `base-standin.erofs`, which the boot check boots;
+`base.erofs` carries `cube-agent`.
 
 **5. cube-agent.** `DaemonFrame` over virtio-serial with package 2's
 operations; the operations of `cube-guest` (journal, keys, epochs, wrappers);
@@ -620,7 +624,14 @@ file operations inside the workload root; generated files and the CA; clock
 sync; template publishing; reconnect. Thread (TCG). Done: a Rust test driver
 boots QEMU, speaks `DaemonFrame` on the port socket and passes the Workspace
 operations (exec, files, services, hooks, release check), an agent restart
-mid-command and a reconnect; no runner needed.
+mid-command and a reconnect; no runner needed. Built so far (K-5a):
+`packages/keel/agent` (`DaemonFrame` with `cube-runner-protocol`'s framing,
+`hello`/`status`, `machine_setup` with `layers_changed`, the workload root in
+a mount namespace of its own (`pivot_root`), the `agent` account, and
+`OPERATIONS`' `hello`, `exec`, `get`, `cancel` with cube-guest's journal, one
+cgroup per operation, a wrapper per command and adoption after an agent
+restart) and `packages/keel/agent-check`, which boots it under QEMU and runs
+the Workspace contract's exec part over the channel.
 
 **6. cubed for keel machines.** Agent upgrades are keel releases (a cold boot
 on the new version), so `helper.install` and the helper-hash check in
