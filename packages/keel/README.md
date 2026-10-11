@@ -14,8 +14,9 @@ guests) and macOS (HVF, arm64 guests) alike:
   the machine's read-only EROFS image layers and its writable disk with
   overlayfs, and runs commands and services, replacing SSH, cloud-init,
   systemd and the Python helper in the guest ([`agent/`](agent): channel,
-  `machine_setup`, commands, files, services and the `cube` command so
-  far; generated files, hooks, templates and snapshots follow);
+  `machine_setup`, commands, files, services, the `cube` command,
+  generated files, the runner's CA, the clock, hooks and template
+  publishing so far; snapshots follow);
 - **the layer format**: OCI images converted to EROFS and stacked as one
   disk, built on the runner by [`layers/`](layers) (`keel-layers`).
 
