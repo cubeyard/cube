@@ -136,8 +136,9 @@ journal, an agent restart under a running command, a power-off and a second
 boot with no runner connected while it boots, a runner that disconnects and
 connects again (the agent must not spin meanwhile), immediate reconnects
 and a forced late `hello` recovered by the reset on channel 0, three
-restores with the runner connected before `cont`, and the Workspace
-contract's exec part over the channel. The command
+restores with the runner connected before `cont`, file operations that
+stay in the workload root and act as `agent` out of the workspace, and the
+Workspace contract (leases, files, commands) over the channel. The command
 is in [`agent/README.md`](agent/README.md).
 
 ## Layers

@@ -644,8 +644,14 @@ mid-command and a reconnect; no runner needed. Built so far (K-5a):
 a mount namespace of its own (`pivot_root`), the `agent` account, and
 `OPERATIONS`' `hello`, `exec`, `get`, `cancel` with cube-guest's journal, one
 cgroup per operation, a wrapper per command and adoption after an agent
-restart) and `packages/keel/agent-check`, which boots it under QEMU and runs
-the Workspace contract's exec part over the channel.
+restart) and `packages/keel/agent-check`, which boots it under QEMU. K-5b
+adds `read`, `write` and `stat`: paths resolved inside the workload root
+(`openat2` with `RESOLVE_IN_ROOT`, then opened with every link refused),
+cube-guest's rules (relative is the workspace, absolute is anywhere in the
+workload root but `/proc`, `/sys` and `/dev`, never `..`), the `agent`
+account's permissions out of the workspace, writes journaled under their
+key; the check runs the whole Workspace contract (leases, files, commands)
+over the channel.
 
 **6. cubed for keel machines.** Agent upgrades are keel releases (a cold boot
 on the new version), so `helper.install` and the helper-hash check in

@@ -599,14 +599,16 @@ static `mke2fs`, `e2fsck` and `mkfs.erofs`, and `cube-agent`
 (layers read-only as EROFS, the writable disk formatted or checked, the
 overlay in a mount namespace of its own, the `agent` account) and keeps
 `OPERATIONS`' `hello`, `exec`, `get` and `cancel` with cube-guest's journal,
-one cgroup per operation; it advertises only those. `keel-agent-check`
+one cgroup per operation, and `read`, `write` and `stat` resolved inside the
+workload root (`openat2` with `RESOLVE_IN_ROOT`), with the `agent` account's
+permissions out of the workspace; it advertises only those. `keel-agent-check`
 (`packages/keel/agent-check`) boots it under QEMU and runs the Workspace
-contract's exec part over the channel. `base-standin.erofs` carries the
+contract (leases, files, commands) over the channel. `base-standin.erofs` carries the
 older line-protocol stand-in (`init/agent-standin.c`) in its place, for
 `scripts/keel-boot-check.ts` only (the root, a second boot, snapshots).
 
 Not built yet (later stages): protocol-4 VM runners (`berth vm`), the rest
-of keel's `cube-agent` (files, services, generated files and the runner's
+of keel's `cube-agent` (services, generated files and the runner's
 CA, clock, hooks, templates, snapshots), the runner's network stack, the
 credential proxy and the `dial`, `credential` and `report` streams.
 
