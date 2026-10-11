@@ -286,11 +286,18 @@ struct Channel {
     reader: tokio::task::JoinHandle<()>,
 }
 
-/// Dropping the last handle closes the socket: the runner's end disconnects.
 impl Drop for Channel {
     fn drop(&mut self) {
         self.reader.abort();
     }
+}
+
+/// Closes the socket before it returns: the runner's end disconnects.
+async fn close(ch: Arc<Channel>) -> Result<()> {
+    let mut ch = Arc::into_inner(ch).ok_or_else(|| anyhow!("the channel is still in use"))?;
+    ch.reader.abort();
+    let _ = (&mut ch.reader).await;
+    Ok(())
 }
 
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -1263,7 +1270,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
 
         // The runner closes its socket and connects again 2 s later.
         let (before, _) = ch.agent_cpu("cpu-connected", epoch).await?;
-        drop(ch);
+        close(ch).await?;
         let closed = Instant::now();
         tokio::time::sleep(Duration::from_secs(2)).await;
         let away = closed.elapsed().as_secs_f64();
@@ -1293,15 +1300,15 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             ),
         )?;
 
-        // Information, not a check: the runner connects again at once. A
-        // disconnect the agent does not see before the next connect (the
-        // read finds the new connection, not EOF) is K-5f's gap, so a missed
-        // hello here is reported, not failed.
+        // Information, not a check: the runner connects again right after
+        // its socket closed. A disconnect the agent does not see before the
+        // next connect (the read finds the new connection, not EOF) is
+        // K-5f's gap, so a missed hello here is reported, not failed.
         let mut ch = ch;
         let tries = 5;
         let mut hellos = 0;
         for _ in 0..tries {
-            drop(ch);
+            close(ch).await?;
             ch = Channel::open(&m.ctl).await?;
             if ch.info("hello", Duration::from_secs(10)).await.is_err() {
                 break;
