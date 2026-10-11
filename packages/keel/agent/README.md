@@ -33,7 +33,8 @@ cube-init (PID 1)
 - **hello and status.** `hello` on channel 0 when the runner's end connects
   (`GuestInfo`: `ready`, `reason`, `limits` (cube-guest's), `epoch` (the
   journal's lease epoch), `capabilities`, `build` (sha256 of the binary),
-  `kernel`, `boot_id`). Every new connection starts not ready ("waiting for
+  `kernel`, `boot_id`, `hooks`: each hook's last outcome in this machine).
+  Every new connection starts not ready ("waiting for
   machine_setup"); `status` follows each `machine_setup` answer.
 - **reset by the runner.** Any runner frame on channel 0 breaks the channel
   rules: the agent ends the connection, opens the port again and says
@@ -57,11 +58,13 @@ cube-init (PID 1)
   `/run/keel/workload.mnt`, adds the `agent` account in `upper/` when the
   image has none (uid 1000 unless taken), sets the host name, and composes
   the command environment (defaults, then the image's `Env`, then the
-  account's own variables, then the `env` document). Another layer list
+  account's own variables, then keel's fixed lines and the `env` document).
+  It writes what today's seed writes (below, "Generated files"). Another layer list
   under an assembled root is `FAILED_PRECONDITION/layers_changed`; the list is
   kept in `/run/keel/setup.json`, so this holds across agent restarts.
-- **ready** once the setup is applied, the journal is recovered, and the
-  workload root has bash, sudo, flock, git, gh, curl and a CA bundle;
+- **ready** once the setup is applied (with the generated files and the
+  runner's CA), the journal is recovered, and the workload root has bash,
+  sudo, flock, git, gh, curl and a CA bundle;
   otherwise `reason` names what is missing. Until then every guest operation
   but `hello` is `UNAVAILABLE/not_ready`.
 - **OPERATIONS** `hello`, `exec`, `get`, `cancel` with cube-guest's semantics
@@ -111,19 +114,54 @@ cube-init (PID 1)
   reason there is none (`/var/lib/cube/portal.json`). The address the
   portal will reach is the machine's on its private link; until the
   runner's network exists (B-4) that is 127.0.0.1, so "listens only on
-  127.0.0.1" is not caught yet. `cube hooks` comes with the hooks (K-5d).
+  127.0.0.1" is not caught yet.
+- **Generated files** (`generated.rs`), on every `machine_setup`:
+  `/etc/cube` is `state/etc-cube`, bound read-only, with `env` (keel's
+  lines and the `env` document, for every command), `hooks/pre-setup` and
+  `hooks/pre-resume` (the boot documents, 0755; removed when the setup has
+  none) and `ca.pem`; `/etc/hosts` (localhost and the host name),
+  `/etc/hostname`, `/etc/resolv.conf` (the runner, `192.168.127.1`) and
+  `/etc/sudoers.d/cube` (passwordless sudo for `agent`, the CA variables
+  kept) are files in `state/generated`, each bound over its path (an empty
+  file in `upper/` is the mount point when the image has none; no
+  `/etc/sudoers.d`, no sudoers file). The binds are made once per boot,
+  before the workload namespace; the files behind them are rewritten in
+  place. The runner's CA (`ca_pem`, PEM certificates only, else
+  `INVALID_ARGUMENT/bad_ca`) goes into the image's bundle as a block
+  between `# cube: begin` and `# cube: end` lines, replaced on every setup,
+  and into `/usr/local/share/ca-certificates/cube-runner.crt`, so
+  `update-ca-certificates` keeps it in the bundle it writes again;
+  `/etc/gitconfig` gets git's credential helper for github.com (the
+  placeholder in `GH_TOKEN`) and `/etc/environment` the CA variables, each
+  as such a block. `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`,
+  `SSL_CERT_FILE` and `CURL_CA_BUNDLE` name the image's bundle. Paths in the
+  root are resolved inside it and written with every link refused. Template
+  publishing (K-5e) leaves cube's blocks, `cube-runner.crt` and the empty
+  mount points out. Not done: the `-CApath` hash link and a Java keystore.
+  The agent also sets `fs.protected_hardlinks` and `fs.protected_symlinks`.
+- **Hooks**: cubed runs them as commands (its preparation and resume
+  scripts); the agent writes the project's two from the boot documents and
+  reports each hook's last outcome from the agent account's
+  `~/.cache/cube/NAME.status` in `hello` and `status.guest.hooks`.
+  `cube hooks [-n LINES] [--json]` is cube-guest's: the four hooks, their
+  last outcomes and log tails, read inside the workload root with the
+  caller's own permissions (`hooks.rs`).
+- **Clock** (`clock.rs`): every 500 ms the agent compares `CLOCK_REALTIME`
+  with the host's PTP clock ("Virtio PTP", else "KVM virtual PTP", picked
+  by `/sys/class/ptp/*/clock_name`) and steps it when they are 20 ms or more
+  apart, so realtime is right again within that interval after a pause or a
+  restore. Without a PTP clock it says so on the console.
+- **recover before answering**: an agent that starts with the root
+  assembled recovers its journal before it serves the channel, and every
+  setup recovers it before `ready`.
 - `install` never exists for keel.
   `snapshot_prepare` and `snapshot_done` are `UNIMPLEMENTED` (K-5f).
 
 ## Not yet (later K-5 rows)
 
-Generated files (`/etc/hosts`, `/etc/hostname`, sudoers, `/etc/cube/env`),
-the runner's CA in the bundle, the clock from PTP, hooks and `recover`
-output for `cube hooks` (K-5d); templates (K-5e, which also leaves
-`/usr/local/bin/cube`'s mount point out of a template); `snapshot_prepare`/`snapshot_done`
-(K-5f). `ready` will
-include the generated files and
-the CA once K-5d writes them.
+Templates (K-5e, which also leaves `/usr/local/bin/cube`'s mount point and
+cube's generated lines and files out of a template); `snapshot_prepare`/`snapshot_done`
+(K-5f).
 
 ## Tests
 
@@ -150,9 +188,14 @@ the CA once K-5d writes them.
   its key (`restore.restores`), file operations over the channel (a write
   kept across the boot and the restores; links that stay in the workload
   root; `/proc`, `/sys`, `/dev` and `..` refused; `/etc` refused and
-  `/tmp`, `/home/agent` owned by `agent` out of the workspace), and runs
-  the Workspace contract (leases, files, commands)
-  (`packages/server/test/keel-agent-contract-test.ts`) over the channel:
+  `/tmp`, `/home/agent` owned by `agent` out of the workspace), services,
+  the generated files, the runner's CA (also across
+  `update-ca-certificates`), git's credential helper, `cube hooks`, a
+  refused CA, and the guest's realtime within 1 s of the host's after a 3 s
+  pause (`results.json` `clock`), and runs the Workspace contract (leases,
+  files, commands, services, and cubed's resume script running the
+  pre-resume hook) (`packages/server/test/keel-agent-contract-test.ts`)
+  over the channel:
 
   ```sh
   pnpm install --frozen-lockfile    # the contract test imports cubed's src
@@ -168,9 +211,12 @@ the CA once K-5d writes them.
 
   `--control reconnect|late-hello|restore` (`--reset off` is `reconnect`)
   leaves the reset out of one of those three places, a negative control
-  expected to fail at that place's check; a failed run writes no
+  expected to fail at that place's check; `--control clock` boots without
+  `virtio-rtc-pci` and is expected to fail at the clock check under TCG
+  and HVF (under KVM the agent follows "KVM virtual PTP" instead, so it
+  passes there and says so in `clock.source`). A failed run writes no
   `results.json`.
 
   `test-image.sh` needs Docker (and binfmt for the other architecture); it
   builds Debian trixie with sudo, git, gh and curl and passwordless sudo for
-  `agent` (the line K-5d will write). It is a test image, not cube's.
+  `agent` (keel writes the same line). It is a test image, not cube's.

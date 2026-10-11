@@ -175,8 +175,10 @@ reaches a template: `state/` on the writable disk is bind-mounted at
 `/var/lib/cube` (journal, epoch, service registrations, hook logs) and
 `/etc/cube` (identity, placeholders, hooks) in the workload root, and the
 agent writes the files it generates (`/etc/hosts`, `/etc/hostname`,
-`/etc/resolv.conf`, `/etc/sudoers.d/cube`, the CA bundle, cube's environment
-file) under `state/` and bind-mounts each over its path. `/tmp` and `/run`
+`/etc/resolv.conf`, `/etc/sudoers.d/cube`, cube's environment file) under
+`state/` and bind-mounts each over its path; the image's own files it adds
+to (the CA bundle, `/etc/gitconfig`, `/etc/environment`) get a block between
+marker lines instead (K-5d). `/tmp` and `/run`
 are tmpfs. The `agent` account is the exception: it is added to the image's
 `/etc/passwd`, `/etc/group` and `/etc/shadow` in `upper/`, because setup may
 add users too, and the template build removes cube's lines (below).
@@ -657,7 +659,20 @@ to the agent over `/run/cube/agent.sock` (the `agent` account and root
 only); services in a cgroup each, a 1 MiB log and one older, restarted on
 failure with systemd's limits, found again after an agent restart and
 started again after every boot's first `machine_setup`; the check runs the
-contract's service part and the restart, boot and failure cases.
+contract's service part and the restart, boot and failure cases. K-5d
+adds what today's seed writes: `/etc/cube` (`state/etc-cube`, read-only:
+cube's env file, the two hook documents, the runner's CA) and `/etc/hosts`,
+`/etc/hostname`, `/etc/resolv.conf`, `/etc/sudoers.d/cube`, each bound from
+`state/`; the runner's CA, git's credential helper and the CA variables as a
+block between marker lines in the image's bundle, `/etc/gitconfig` and
+`/etc/environment` (a bound bundle would break `update-ca-certificates`,
+which renames over it; the CA also goes to
+`/usr/local/share/ca-certificates`, so that tool keeps it); `ready` now
+includes them. `cube hooks` and `hello.hooks` report the hooks cubed runs as
+commands; the agent follows the host's PTP clock every 500 ms. The check
+adds the files, the CA across `update-ca-certificates`, git's helper, the
+hooks (cubed's resume script in the contract), a refused CA and realtime
+within 1 s after a pause.
 
 **6. cubed for keel machines.** Agent upgrades are keel releases (a cold boot
 on the new version), so `helper.install` and the helper-hash check in
