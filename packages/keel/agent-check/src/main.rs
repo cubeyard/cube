@@ -1511,7 +1511,6 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             "the second boot is ready on the kept disk; the journal's epoch is kept",
             format!("{done:?} {status:?}"),
         )?;
-        let (_, keep_boot) = ch.run("svc-boot", &format!("{WAIT_LISTENING}; {SERVICE_PID}; cube service status keep --json; cube service logs keep -n 50"), epoch).await?;
         checks.ok(
             hello.epoch == 0 || hello.epoch == epoch,
             "hello before setup (journal not mounted yet)",
@@ -1546,6 +1545,9 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             "a result recorded before the boot is still there",
             &e1,
         )?;
+
+        // After the idle sample above: `cube` calls cost the agent CPU.
+        let (_, keep_boot) = ch.run("svc-boot", &format!("{WAIT_LISTENING}; {SERVICE_PID}; cube service status keep --json; cube service logs keep -n 50"), epoch).await?;
 
         // The runner closes its socket and connects again 2 s later.
         let (before, _) = ch.agent_cpu("cpu-connected", epoch).await?;
