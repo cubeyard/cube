@@ -1345,7 +1345,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             serving.abort();
             checks.ok(
                 status.success(),
-                "the Workspace contract (leases, files, commands, services) passes over DaemonFrame",
+                "the Workspace contract (leases, files, commands, services, the resume hook) passes over DaemonFrame",
                 status,
             )?;
         }
