@@ -30,6 +30,15 @@ cube-init (PID 1)
   journal's lease epoch), `capabilities`, `build` (sha256 of the binary),
   `kernel`, `boot_id`). Every new connection starts not ready ("waiting for
   machine_setup"); `status` follows each `machine_setup` answer.
+- **reset by the runner.** Any runner frame on channel 0 breaks the channel
+  rules: the agent ends the connection, opens the port again and says
+  `hello` about 100 ms later. A runner uses this when no `hello` comes
+  500 ms after a connect (runner.proto's header): it sends a `req` with
+  `guest.op = "hello"` on channel 0 and waits 2 s for `hello`. The guest
+  misses a disconnect when the runner connects again right after it
+  closed (both reach the guest at once and the agent reads no EOF), and
+  after a restore the runner connected to before `cont` (QEMU sends no
+  `PORT_OPEN` then).
 - **machine_setup**, idempotent: validates the documents (`hostname`, `env`,
   `hooks/pre-setup`, `hooks/pre-resume`; anything else is
   `INVALID_ARGUMENT/unknown_document`), needs at least 32 bytes of entropy
@@ -69,10 +78,9 @@ cube-init (PID 1)
 Generated files (`/etc/hosts`, `/etc/hostname`, sudoers, `/etc/cube/env`),
 the runner's CA in the bundle, the clock from PTP, hooks and `recover`
 output for `cube hooks` (K-5d); file operations (K-5b); services and the
-`cube` command (K-5c); templates (K-5e); snapshots and reconnecting every
-channel after a restore (K-5f), including a runner that connects again right
-after it closed (the guest sees both at once, the agent reads no EOF and
-says no `hello`). `ready` will include the generated files and
+`cube` command (K-5c); templates (K-5e); `snapshot_prepare`/`snapshot_done`
+and a driver check of the reset after a restore (K-5f). `ready` will
+include the generated files and
 the CA once K-5d writes them.
 
 ## Tests
@@ -85,7 +93,10 @@ the CA once K-5d writes them.
   checks setup, readiness, the workload root, the journal, an agent restart
   under a running command and a power-off, a boot with no runner connected
   and a runner that goes away and comes back (a fresh `hello`, working
-  channels, and the agent's CPU time from `/proc` while it waits), and runs
+  channels, and the agent's CPU time from `/proc` while it waits), ten
+  immediate reconnects, each recovered by the reset above when the plain
+  `hello` does not come (`results.json` `idle.immediateReconnect` counts
+  both; the plain count is information only), and runs
   the Workspace contract's exec part
   (`packages/server/test/keel-agent-contract-test.ts`) over the channel:
 

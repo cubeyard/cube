@@ -39,6 +39,17 @@
 // snapshot) closes every channel. The agent sends `hello` again, the runner
 // sends `machine_setup` again, and operations that were running are found
 // by their keys, as `OPERATIONS` already requires.
+// The guest may miss a disconnect: a runner that connects again right after
+// it closed, or one that connected to a restored machine before `cont`,
+// gives it no event to read, and no `hello` comes. So after every connect
+// the runner waits for `hello` (500 ms is ample); without one it sends one
+// frame on channel 0 (a `req` with `guest.op = "hello"`). That breaks the
+// rules above, so the agent ends the connection, opens the port again and
+// sends `hello`; the runner waits for it again (2 s), and a second miss
+// means the machine is unhealthy. The runner never sends anything else
+// before a `hello`, and any `hello` on a socket it already had means every
+// channel closed: `machine_setup` again, and `ready` from the `status`
+// that follows its `ans`.
 //
 // The QEMU a VM runner needs (checked when it starts on the binary it is
 // given by path, never one it searches for; refused below it):

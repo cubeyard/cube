@@ -7,7 +7,12 @@
 //!
 //!   keel-agent-check --qemu PATH --qemu-img PATH --kernel PATH --base PATH \
 //!     --mkfs PATH --tar IMAGE.tar --out DIR [--arch x86_64|arm64] \
-//!     [--accel tcg|kvm|hvf] [--contract COMMAND] [--smp 2] [--memory 1024]
+//!     [--accel tcg|kvm|hvf] [--contract COMMAND] [--smp 2] [--memory 1024] \
+//!     [--reset on|off]
+//!
+//! `--reset off` is a negative control: the immediate reconnects wait for
+//! the plain `hello` only, without the reset on channel 0, and are expected
+//! to fail.
 //!
 //! QEMU and every tool are given by path, never searched for. The driver is
 //! not a runner: no network, no secrets, one machine at a time. It writes
@@ -54,6 +59,7 @@ struct Options {
     contract: Option<String>,
     smp: String,
     memory: String,
+    reset: bool,
 }
 
 fn options() -> Result<Options> {
@@ -98,7 +104,10 @@ fn options() -> Result<Options> {
         ["tcg", "kvm", "hvf"].contains(&accel.as_str()),
         "--accel is tcg, kvm or hvf"
     );
+    let reset = values.get("reset").map_or("on", String::as_str);
+    ensure!(reset == "on" || reset == "off", "--reset is on or off");
     Ok(Options {
+        reset: reset == "on",
         qemu: path("qemu")?,
         qemu_img: path("qemu-img")?,
         kernel: path("kernel")?,
@@ -365,8 +374,9 @@ impl Channel {
         write_frame(&mut *self.writer.lock().await, frame).await
     }
 
-    /// Sends a request on channel `ch` (a fresh one when None).
-    async fn request_on(&self, ch: Option<u32>, op: Op, timeout: Duration) -> Result<Answer> {
+    /// Sends a request on channel `ch` (a fresh one when None); the answer
+    /// comes on the receiver.
+    async fn start(&self, ch: Option<u32>, op: Op) -> Result<(u32, oneshot::Receiver<Answer>)> {
         let ch = ch.unwrap_or_else(|| self.next.fetch_add(1, Ordering::SeqCst));
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().unwrap().insert(ch, sender);
@@ -375,6 +385,12 @@ impl Channel {
             t: Some(T::Req(proto::DaemonRequest { op: Some(op) })),
         })
         .await?;
+        Ok((ch, receiver))
+    }
+
+    /// Sends a request on channel `ch` (a fresh one when None).
+    async fn request_on(&self, ch: Option<u32>, op: Op, timeout: Duration) -> Result<Answer> {
+        let (ch, receiver) = self.start(ch, op).await?;
         match tokio::time::timeout(timeout, receiver).await {
             Ok(Ok(answer)) => Ok(answer),
             Ok(Err(_)) => bail!("the channel closed before channel {ch} was answered"),
@@ -387,6 +403,65 @@ impl Channel {
 
     async fn request(&self, op: Op) -> Result<Answer> {
         self.request_on(None, op, TIMEOUT).await
+    }
+
+    /// The runner's connect rule (runner.proto's header): `hello` within
+    /// PLAIN_HELLO of the connect; without one, a `req` on channel 0, which
+    /// makes the agent end the connection and say `hello` again, within
+    /// RESET_HELLO. True when the reset was needed. With `reset` false (the
+    /// negative control) it only waits, as long.
+    async fn hello_or_reset(&self, reset: bool) -> Result<(proto::GuestInfo, bool)> {
+        if let Ok(hello) = self.info("hello", PLAIN_HELLO).await {
+            return Ok((hello, false));
+        }
+        if !reset {
+            return Ok((self.info("hello", RESET_HELLO).await?, false));
+        }
+        self.send(&proto::DaemonFrame {
+            ch: 0,
+            t: Some(T::Req(proto::DaemonRequest {
+                op: Some(Op::Guest(proto::GuestRequest {
+                    op: "hello".into(),
+                    data: Vec::new(),
+                })),
+            })),
+        })
+        .await?;
+        let hello = self
+            .info("hello", RESET_HELLO)
+            .await
+            .context("after the reset on channel 0")?;
+        Ok((hello, true))
+    }
+
+    /// `machine_setup` until `status` says ready. A `hello` while it waits
+    /// means the agent ended the connection and every channel closed (a
+    /// plain `hello` that came after PLAIN_HELLO, then the reset), so the
+    /// setup goes again on a new channel. Returns how many such `hello`s came.
+    async fn setup_after_hello(&self, op: impl Fn() -> Op) -> Result<u32> {
+        let mut hellos = 0;
+        loop {
+            let (ch, answer) = self.start(None, op()).await?;
+            // The answer first: the `status` after it must stay queued.
+            let answer = tokio::select! {
+                biased;
+                answer = answer => Some(answer.map_err(|_| anyhow!("channel {ch} closed"))?),
+                hello = self.info("hello", TIMEOUT) => { hello?; None }
+            };
+            match answer {
+                Some(Answer::Done(_)) => {
+                    let status = self.info("status", TIMEOUT).await?;
+                    ensure!(status.ready, "not ready after the setup: {}", status.reason);
+                    return Ok(hellos);
+                }
+                Some(other) => bail!("machine_setup on channel {ch}: {other:?}"),
+                None => {
+                    self.pending.lock().unwrap().remove(&ch);
+                    hellos += 1;
+                    ensure!(hellos < 3, "{hellos} hellos instead of a setup answer");
+                }
+            }
+        }
     }
 
     /// A guest operation's raw answer, or the agent's refusal.
@@ -463,6 +538,15 @@ impl Channel {
 /// How much of a vCPU the agent may use while the runner is away: it looks
 /// for the runner every 20 ms; the bug this guards against was a whole vCPU.
 const IDLE_SHARE: f64 = 0.25;
+
+/// How long a runner waits for the plain `hello` after a connect: the
+/// agent looks for the runner every 20 ms.
+const PLAIN_HELLO: Duration = Duration::from_millis(500);
+/// How long it waits for `hello` after the reset on channel 0: the agent
+/// opens the port again after 100 ms, then looks every 20 ms.
+const RESET_HELLO: Duration = Duration::from_secs(2);
+/// Immediate reconnects in a row, each one recovered.
+const RECONNECTS: usize = 10;
 
 // ---------------------------------------------------------------- layers
 
@@ -1300,36 +1384,57 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             ),
         )?;
 
-        // Information, not a check: the runner connects again right after
-        // its socket closed. A disconnect the agent does not see before the
-        // next connect (the read finds the new connection, not EOF) is
-        // K-5f's gap, so a missed hello here is reported, not failed.
+        // The runner connects again right after its socket closed. The guest
+        // may learn of both at once; the agent then reads no EOF and says no
+        // hello. So each connect keeps the runner's rule (hello_or_reset),
+        // and every one must recover. How many got the plain hello is
+        // information only.
         let mut ch = ch;
-        let tries = 5;
-        let mut hellos = 0;
-        for _ in 0..tries {
+        let (mut hellos, mut resets, mut late) = (0, 0, 0);
+        let mut failed = None;
+        for i in 0..RECONNECTS {
             close(ch).await?;
             ch = Channel::open(&m.ctl).await?;
-            if ch.info("hello", Duration::from_secs(10)).await.is_err() {
+            let connected = Instant::now();
+            match ch.hello_or_reset(lab.o.reset).await {
+                Ok((hello, _)) if hello.ready || hello.epoch != epoch => {
+                    failed = Some(format!("reconnect {i}: {hello:?}"));
+                }
+                Ok((_, reset)) => *(if reset { &mut resets } else { &mut hellos }) += 1,
+                Err(error) => {
+                    let after = connected.elapsed();
+                    failed = Some(format!("reconnect {i}: {error:#} ({after:?})"));
+                }
+            }
+            if failed.is_some() {
                 break;
             }
-            let done = ch.request(setup(&image_layers, documents)).await?;
-            if !matches!(done, Answer::Done(_)) || !ch.info("status", TIMEOUT).await?.ready {
-                break;
+            match ch
+                .setup_after_hello(|| setup(&image_layers, documents))
+                .await
+            {
+                Ok(n) => late += n,
+                Err(error) => {
+                    failed = Some(format!("reconnect {i}: setup: {error:#}"));
+                    break;
+                }
             }
-            hellos += 1;
-        }
-        if hellos == tries {
-            let (_, output) = ch.run("immediate", "cat persist", epoch).await?;
-            ensure!(
-                output == format!("{token}\n"),
-                "after immediate reconnects: {output:?}"
-            );
         }
         log(&format!(
-            "immediate reconnect: {hellos} of {tries} got a fresh hello and a working setup"
+            "immediate reconnect: {hellos} of {RECONNECTS} had the plain hello, {resets} the reset on channel 0, {late} a late hello"
         ));
-        idle["immediateReconnect"] = json!({"tries": tries, "hellos": hellos});
+        idle["immediateReconnect"] = json!({"tries": RECONNECTS, "hellos": hellos, "resets": resets, "lateHellos": late, "reset": lab.o.reset});
+        checks.ok(
+            hellos + resets == RECONNECTS,
+            "the runner connects again at once, 10 times: a fresh hello each time (not ready, epoch kept), after a reset on channel 0 when none came in 500 ms",
+            failed.as_deref().unwrap_or_default(),
+        )?;
+        let (_, output) = ch.run("immediate", "cat persist", epoch).await?;
+        checks.ok(
+            output == format!("{token}\n"),
+            "after each of those reconnects a setup makes the agent ready; commands work",
+            &output,
+        )?;
 
         timings
             .push(json!({"run": "second boot", "helloMs": hello_ms, "setupToReadyMs": ready_ms}));
@@ -1361,4 +1466,111 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         serde_json::to_string(&timings)?
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! The runner's connect rule against a scripted agent on a Unix socket
+    //! (a stand-in; the real agent is checked in the machine).
+    use super::*;
+
+    fn info() -> proto::GuestInfo {
+        proto::GuestInfo::default()
+    }
+
+    async fn agent_end(name: &str) -> (PathBuf, UnixListener) {
+        let path =
+            std::env::temp_dir().join(format!("kac-test-{}-{name}.sock", std::process::id()));
+        let _ = fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        (path, listener)
+    }
+
+    async fn say(stream: &mut UnixStream, ch: u32, t: T) {
+        write_frame(stream, &proto::DaemonFrame { ch, t: Some(t) })
+            .await
+            .unwrap();
+    }
+
+    async fn read_any(stream: &mut UnixStream) -> proto::DaemonFrame {
+        // The agent's own reader would refuse a req on channel 0; read the raw frame.
+        cube_runner_protocol::read_frame(stream).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn no_hello_brings_a_reset_on_channel_0_then_hello() {
+        let (path, listener) = agent_end("reset").await;
+        let agent = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            // A stale connection: no hello until the runner breaks the rules.
+            let frame = read_any(&mut s).await;
+            assert!(
+                frame.ch == 0
+                    && matches!(&frame.t, Some(T::Req(r)) if matches!(&r.op, Some(Op::Guest(g)) if g.op == "hello")),
+                "{frame:?}"
+            );
+            say(&mut s, 0, T::Hello(info())).await;
+            s
+        });
+        let ch = Channel::open(&path).await.unwrap();
+        let t = Instant::now();
+        let (_, reset) = ch.hello_or_reset(true).await.unwrap();
+        assert!(reset && t.elapsed() >= PLAIN_HELLO);
+        drop(agent.await.unwrap());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn without_the_reset_a_missing_hello_fails() {
+        let (path, listener) = agent_end("off").await;
+        let agent = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+        let ch = Channel::open(&path).await.unwrap();
+        let _s = agent.await.unwrap();
+        assert!(ch.hello_or_reset(false).await.is_err());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn a_hello_during_the_setup_means_the_setup_again() {
+        let (path, listener) = agent_end("late").await;
+        let agent = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            say(&mut s, 0, T::Hello(info())).await;
+            // The first setup is lost with the connection the reset ended.
+            let first = read_any(&mut s).await;
+            say(&mut s, 0, T::Hello(info())).await;
+            let second = read_any(&mut s).await;
+            assert!(second.ch > first.ch, "{first:?} {second:?}");
+            say(
+                &mut s,
+                second.ch,
+                T::Ans(proto::DaemonAnswer {
+                    result: Some(Answer::Done(proto::Empty {})),
+                }),
+            )
+            .await;
+            say(
+                &mut s,
+                0,
+                T::Status(proto::GuestInfo {
+                    ready: true,
+                    ..info()
+                }),
+            )
+            .await;
+            s
+        });
+        let ch = Channel::open(&path).await.unwrap();
+        let (_, reset) = ch.hello_or_reset(true).await.unwrap();
+        assert!(!reset);
+        let op = || {
+            Op::Guest(proto::GuestRequest {
+                op: "hello".into(),
+                data: Vec::new(),
+            })
+        };
+        assert_eq!(ch.setup_after_hello(op).await.unwrap(), 1);
+        drop(agent.await.unwrap());
+        let _ = fs::remove_file(&path);
+    }
 }
