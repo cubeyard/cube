@@ -691,7 +691,12 @@ has no place for makes the machine not ready, and a file over 16 MiB is not
 rewritten. The check adds a build machine's setup, the published layer
 checked with `fsck.erofs`, read in place (no extraction, so no root or
 `mknod` on the host) and searched for anything of cube's, and a new
-machine booted with it as its topmost layer.
+machine booted with it as its topmost layer. With keel's overlay defaults
+(metacopy, so redirect_dir, and index on) a setup's `chmod` or `chown` of an
+image file leaves a metacopy inode without data in `upper/` and a `mv` a
+redirect; the check asserts both in the layer and that the new machine
+reads the mode, owner, data and moved entries through the image layer
+below, with a control whose redirects point at nothing.
 
 **6. cubed for keel machines.** Agent upgrades are keel releases (a cold boot
 on the new version), so `helper.install` and the helper-hash check in

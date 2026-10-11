@@ -225,7 +225,8 @@ cube-init (PID 1)
   machine with a template disk runs a setup (a file with its time, a
   deleted image file, a directory made again, a group,
   `update-ca-certificates`, a copy of the bundle in the project, a history,
-  hook logs, an ssh host key, a machine id, a running service), is refused
+  hook logs, an ssh host key, a machine id, a running service, and a
+  `chmod`, a `chown` and two `mv`s of image files), is refused
   while a command runs, publishes, and refuses everything afterwards; the
   driver checks the layer with `fsck.erofs` (`--fsck`), reads it in place
   (no extraction, so no root or `mknod` on the host, macOS included) and
@@ -233,7 +234,11 @@ cube-init (PID 1)
   xattr, as DER or base64; no `cube-runner.*`; no mount point, account
   line, history, hook log, host key or machine id) but the setup's work
   (with the 0/0 whiteout and the opaque directory), and a new machine
-  boots with it as its topmost layer (`results.json` `template`). And it
+  boots with it as its topmost layer (`results.json` `template`). The
+  changed image files are in the layer as overlayfs keeps them (metacopy
+  inodes without data, redirects to the old names, whiteouts there), and
+  the new machine finds their mode, owner, data and entries through the
+  image layer below (`template.moves`). And it
   runs the Workspace contract (leases,
   files, commands, services, and cubed's resume script running the
   pre-resume hook) (`packages/server/test/keel-agent-contract-test.ts`)
@@ -258,8 +263,12 @@ cube-init (PID 1)
   and HVF (under KVM the agent follows "KVM virtual PTP" instead, so it
   passes there and says so in `clock.source`); `--control seal` makes the
   build machine's setup leave the runner's CA as DER in a file, so the
-  agent refuses to publish (`seal_failed`). A failed run writes no
-  `results.json`.
+  agent refuses to publish (`seal_failed`); `--control redirect` points
+  the published layer's redirects at names that do not exist (the
+  superblock summed again, so the layer stays valid) before the new
+  machine boots, which is expected to fail at the last check (the moved
+  file cannot be read, the moved directory is empty). A failed run writes
+  no `results.json`.
 
   `test-image.sh` needs Docker (and binfmt for the other architecture); it
   builds Debian trixie with sudo, git, gh and curl and passwordless sudo for
