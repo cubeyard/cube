@@ -1705,6 +1705,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "keel-agent-check"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cube-runner-protocol",
+ "keel-layers",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "keel-layers"
 version = "0.1.0"
 dependencies = [
