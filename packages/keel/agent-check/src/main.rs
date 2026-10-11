@@ -76,7 +76,9 @@ struct Options {
 }
 
 /// A negative control: the one place the reset on channel 0 is left out,
-/// or (`clock`) the machine without virtio-rtc.
+/// (`clock`) the machine without virtio-rtc, (`seal`) a build setup that
+/// leaves the runner's CA behind, or (`redirect`) a template whose
+/// redirects point at nothing.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Control {
     Reconnect,
@@ -84,6 +86,7 @@ enum Control {
     Restore,
     Clock,
     Seal,
+    Redirect,
 }
 
 fn options() -> Result<Options> {
@@ -137,8 +140,9 @@ fn options() -> Result<Options> {
         ("on", Some("restore")) => Some(Control::Restore),
         ("on", Some("clock")) => Some(Control::Clock),
         ("on", Some("seal")) => Some(Control::Seal),
+        ("on", Some("redirect")) => Some(Control::Redirect),
         _ => bail!(
-            "--control is reconnect, late-hello, restore, clock or seal (and --reset off is reconnect)"
+            "--control is reconnect, late-hello, restore, clock, seal or redirect (and --reset off is reconnect)"
         ),
     };
     Ok(Options {
@@ -2328,7 +2332,11 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
 /// keeps (a file with its time, a deleted image file, a directory made
 /// again, a group) and what cube's scrub must take out (the runner's CA as
 /// update-ca-certificates spreads it and in a project's copy of the bundle,
-/// a shell history, hook logs, an ssh host key, a machine id).
+/// a shell history, hook logs, an ssh host key, a machine id). It also
+/// changes image files in place (W1): with keel's overlay defaults a
+/// `chmod` or `chown` leaves a metacopy inode without data in `upper/`, and
+/// a `mv` a redirect and a whiteout at the old name; `app/w1.expect` is what
+/// those files held before, for the next machine to compare.
 const BUILD_SETUP: &str = r#"set -e
 mkdir -p app && printf built > app/out.txt && touch -d @1700000000 app/out.txt
 test -f /etc/issue && sudo rm /etc/issue
@@ -2342,8 +2350,27 @@ echo ls > ~/.bash_history
 mkdir -p ~/.cache/cube && echo 'token=cube_ph_github_keelcheck' > ~/.cache/cube/resume.log
 sudo mkdir -p /etc/ssh && echo key | sudo tee /etc/ssh/ssh_host_ed25519_key >/dev/null
 echo 0123456789abcdef | sudo tee /etc/machine-id >/dev/null
+for f in GPL-3 Apache-2.0 MPL-2.0; do test -f /usr/share/common-licenses/$f; done
+test -d /usr/share/base-files
+(stat -c '%a %u:%g %s' /usr/share/common-licenses/MPL-2.0 && cd /usr/share/common-licenses && sha256sum GPL-3 Apache-2.0 MPL-2.0 | cut -d' ' -f1 && cd ../base-files && find . | LC_ALL=C sort && find . -type f | LC_ALL=C sort | xargs sha256sum) > app/w1.expect
+sudo chmod 600 /usr/share/common-licenses/GPL-3
+sudo chown 1500:1500 /usr/share/common-licenses/Apache-2.0
+sudo mv /usr/share/common-licenses/MPL-2.0 /usr/local/share/MPL-2.0.moved
+sudo mv /usr/share/base-files /usr/share/base-files.moved
 mkdir -p svc
 echo setup-done
+"#;
+
+/// The same files read in a machine booted from the template: the mode and
+/// owner from the metacopy inodes, the old names gone, and the data and
+/// the moved directory's entries as before (found through the metacopy
+/// and redirect inodes in the image layer below).
+const W1_NEXT: &str = r#"stat -c %a /usr/share/common-licenses/GPL-3
+stat -c %u:%g /usr/share/common-licenses/Apache-2.0
+test -e /usr/share/common-licenses/MPL-2.0 || echo no-old-file
+test -e /usr/share/base-files || echo no-old-dir
+(stat -c '%a %u:%g %s' /usr/local/share/MPL-2.0.moved && cd /usr/share/common-licenses && sudo sha256sum GPL-3 Apache-2.0 /usr/local/share/MPL-2.0.moved | cut -d' ' -f1 && cd ../base-files.moved && find . | LC_ALL=C sort && find . -type f | LC_ALL=C sort | xargs sha256sum) > /tmp/w1.now 2>&1
+diff app/w1.expect /tmp/w1.now && echo same-as-before
 "#;
 
 /// What must never be in a published template, below its root.
@@ -2506,6 +2533,128 @@ fn template_work(tree: &[erofs::Entry]) -> (bool, Value) {
     )
 }
 
+/// Where an overlayfs redirect on `path` points, below the root: an
+/// absolute one names the path, a relative one a name in the same
+/// directory.
+fn redirect_target(path: &str, value: &[u8]) -> Option<String> {
+    let value = std::str::from_utf8(value).ok()?;
+    if let Some(absolute) = value.strip_prefix('/') {
+        return Some(absolute.into());
+    }
+    Some(match path.rsplit_once('/') {
+        Some((parent, _)) => format!("{parent}/{value}"),
+        None => value.into(),
+    })
+}
+
+/// The image files the build setup changed in place (W1), as the layer
+/// holds them: the `chmod`ed and `chown`ed files and the moved file as
+/// metacopy inodes whose data is all zeros (so a reader must find it in
+/// the image layer), the moved file and directory with redirects to their
+/// old names, 0/0 whiteouts there, and nothing below the moved directory.
+fn template_moves(tree: &[erofs::Entry]) -> (bool, Value) {
+    let at = |rel: &str| tree.iter().find(|e| e.path == rel);
+    let metacopy = |rel: &str| {
+        at(rel).is_some_and(|e| {
+            e.kind == erofs::Kind::File
+                && e.xattr("trusted.overlay.metacopy").is_some()
+                && !e.data.is_empty()
+                && e.data.iter().all(|&b| b == 0)
+        })
+    };
+    let redirect = |rel: &str| {
+        at(rel)
+            .and_then(|e| e.xattr("trusted.overlay.redirect"))
+            .and_then(|v| redirect_target(rel, v))
+    };
+    let whiteout = |rel: &str| at(rel).is_some_and(erofs::Entry::is_whiteout);
+    let (gpl, apache, file, dir) = (
+        "usr/share/common-licenses/GPL-3",
+        "usr/share/common-licenses/Apache-2.0",
+        "usr/local/share/MPL-2.0.moved",
+        "usr/share/base-files.moved",
+    );
+    let inside: Vec<&str> = tree
+        .iter()
+        .filter_map(|e| e.path.strip_prefix(dir)?.strip_prefix('/'))
+        .collect();
+    let seen = json!({
+        "chmod": at(gpl).map(|e| format!("{:o} metacopy {}", e.mode, metacopy(gpl))),
+        "chown": at(apache).map(|e| format!("{}:{} metacopy {}", e.uid, e.gid, metacopy(apache))),
+        "movedFile": {"metacopy": metacopy(file), "redirect": redirect(file), "oldWhiteout": whiteout("usr/share/common-licenses/MPL-2.0")},
+        "movedDir": {"dir": at(dir).map(|e| format!("{:?}", e.kind)), "redirect": redirect(dir), "oldWhiteout": whiteout("usr/share/base-files"), "inside": inside},
+    });
+    let ok = metacopy(gpl)
+        && at(gpl).is_some_and(|e| e.mode == 0o600)
+        && metacopy(apache)
+        && at(apache).is_some_and(|e| (e.uid, e.gid) == (1500, 1500))
+        && metacopy(file)
+        && redirect(file).as_deref() == Some("usr/share/common-licenses/MPL-2.0")
+        && whiteout("usr/share/common-licenses/MPL-2.0")
+        && at(dir).is_some_and(|e| e.kind == erofs::Kind::Dir)
+        && redirect(dir).as_deref() == Some("usr/share/base-files")
+        && whiteout("usr/share/base-files")
+        && inside.is_empty();
+    (ok, seen)
+}
+
+/// CRC-32C as EROFS sums its superblock (seed !0, no final inversion).
+fn crc32c(mut crc: u32, data: &[u8]) -> u32 {
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0x82F6_3B78 & (crc & 1).wrapping_neg());
+        }
+    }
+    crc
+}
+
+/// `--control redirect`: points every `trusted.overlay.redirect` in an
+/// EROFS image at a name that does not exist (the value's last byte made
+/// `~`) and sums the superblock again, so the image stays valid for
+/// `fsck.erofs` and the kernel but the moved file's data and the moved
+/// directory's entries can no longer be found. Returns how many it changed.
+fn break_redirects(image: &mut [u8]) -> Result<usize> {
+    // An xattr entry: name length, index 4 (trusted.), value size, name, value.
+    let name = b"overlay.redirect";
+    let mut changed = 0;
+    let mut at = 0;
+    while at + 4 + name.len() <= image.len() {
+        if image[at] == name.len() as u8
+            && image[at + 1] == 4
+            && &image[at + 4..at + 4 + name.len()] == name
+        {
+            let size = usize::from(u16::from_le_bytes([image[at + 2], image[at + 3]]));
+            let end = at + 4 + name.len() + size;
+            ensure!(
+                size > 0 && end <= image.len(),
+                "a redirect xattr at {at} runs past the image"
+            );
+            image[end - 1] = if image[end - 1] == b'~' { b'-' } else { b'~' };
+            changed += 1;
+            at = end;
+        } else {
+            at += 1;
+        }
+    }
+    let sb = 1024;
+    ensure!(
+        image.len() >= sb + 128 && image[sb..sb + 4] == 0xE0F5E1E2u32.to_le_bytes(),
+        "no EROFS superblock"
+    );
+    if u32::from_le_bytes(image[sb + 8..sb + 12].try_into().unwrap()) & 1 != 0 {
+        let block = 1usize << image[sb + 12];
+        ensure!(
+            block > sb && image.len() >= block,
+            "a block of {block} bytes"
+        );
+        image[sb + 4..sb + 8].fill(0);
+        let crc = crc32c(!0, &image[sb..block]);
+        image[sb + 4..sb + 8].copy_from_slice(&crc.to_le_bytes());
+    }
+    Ok(changed)
+}
+
 /// The console's `cube-agent: template:` lines.
 fn template_lines(dir: &Path) -> Vec<String> {
     (1..)
@@ -2665,6 +2814,16 @@ async fn template_checks(
         "the setup's work is in the layer: a file with its time, a 0/0 whiteout for a deleted image file, an opaque directory made again holding only its new file, a new group, the project's copy of the bundle (without the runner's CA)",
         seen,
     )?;
+    // Checked after 78, so 73-78 keep their numbers.
+    let (moves, moves_seen) = template_moves(&tree);
+    if lab.o.control == Some(Control::Redirect) {
+        let mut image = fs::read(&layer)?;
+        let changed = break_redirects(&mut image)?;
+        fs::write(&layer, &image)?;
+        log(&format!(
+            "control redirect: {changed} redirects in the template now point at nothing"
+        ));
+    }
 
     // A new machine with the template as its topmost layer.
     let template_id: DiffId = format!("sha256:{}", sha256_file(&layer)?).parse()?;
@@ -2686,6 +2845,7 @@ async fn template_checks(
             epoch,
         )
         .await?;
+    let (_, w1) = ch.run("tpl-w1", W1_NEXT, epoch).await?;
     let refused = ch.request(Op::TemplatePublish(proto::Empty {})).await?;
     let _ = ch.info("status", TIMEOUT).await;
     checks.ok(
@@ -2705,6 +2865,17 @@ async fn template_checks(
         "a machine without a template disk refuses template_publish (no_template_disk)",
         format!("{refused:?}"),
     )?;
+    checks.ok(
+        moves,
+        "the image files the setup changed in place are in the layer as overlayfs keeps them: the chmod and chown as metacopy inodes without data, a moved file (metacopy) and a moved directory with redirects to their old names, whiteouts there, nothing below the moved directory",
+        moves_seen.clone(),
+    )?;
+    let w1_ok = w1 == "600\n1500:1500\nno-old-file\nno-old-dir\nsame-as-before\n";
+    checks.ok(
+        w1_ok,
+        "in the machine booted from the template those files resolve through the image layer below: the new mode and owner, the old names gone, the data of all three and the moved directory's entries and data as before the setup",
+        &w1,
+    )?;
     quit(&mut m).await?;
     Ok(json!({
         "bytes": bytes,
@@ -2712,6 +2883,7 @@ async fn template_checks(
         "publishMs": publish_ms,
         "files": files,
         "agent": lines,
+        "moves": moves_seen,
     }))
 }
 
@@ -2921,6 +3093,261 @@ mod tests {
         for (what, entries) in missing {
             let (ok, seen) = template_work(&read("work", &entries).unwrap());
             assert!(!ok, "{what}: {seen}");
+        }
+    }
+
+    /// The W1 part of a build machine's layer as overlayfs leaves it (as
+    /// seen on a real overlay over an EROFS lower): metacopy files hold
+    /// zeros of the full size, a moved file's redirect is absolute (another
+    /// directory) and a moved directory's relative (the same one).
+    fn moves_like() -> Vec<erofs::testing::E> {
+        use erofs::testing::{T, e};
+        let meta = |path: &str| {
+            let mut entry = e(path, T::File(vec![0; 35_149]));
+            entry.xattrs = vec![
+                ("trusted.overlay.metacopy", vec![]),
+                ("trusted.overlay.origin", vec![0, 0xfb, 0x21, 0, 0x81]),
+            ];
+            entry
+        };
+        let mut gpl = meta("usr/share/common-licenses/GPL-3");
+        gpl.mode = 0o600;
+        let mut apache = meta("usr/share/common-licenses/Apache-2.0");
+        (apache.uid, apache.gid) = (1500, 1500);
+        let mut file = meta("usr/local/share/MPL-2.0.moved");
+        file.xattrs.push((
+            "trusted.overlay.redirect",
+            b"/usr/share/common-licenses/MPL-2.0".to_vec(),
+        ));
+        let mut dir = e("usr/share/base-files.moved", T::Dir);
+        dir.xattrs = vec![("trusted.overlay.redirect", b"base-files".to_vec())];
+        vec![
+            e("usr", T::Dir),
+            e("usr/share", T::Dir),
+            e("usr/share/common-licenses", T::Dir),
+            gpl,
+            apache,
+            e("usr/share/common-licenses/MPL-2.0", T::Char(0, 0)),
+            e("usr/share/base-files", T::Char(0, 0)),
+            dir,
+            e("usr/local", T::Dir),
+            e("usr/local/share", T::Dir),
+            file,
+        ]
+    }
+
+    /// Check 79 against real layers: the W1 changes pass (and a template
+    /// without them would not), each way overlayfs or the scrub could have
+    /// lost one fails.
+    #[test]
+    fn check_79_on_real_layers_passes_metacopy_and_redirects_and_fails_each_gap() {
+        use erofs::testing::{E, T, e, image};
+        let read = |name: &str, entries: &[E]| {
+            image(name, &["-b4096", "-zlz4hc"], entries).map(|i| erofs::read_tree(&i).unwrap())
+        };
+        let mut base = template_like();
+        base.extend(moves_like());
+        let Some(tree) = read("moves", &base) else {
+            return;
+        };
+        let (ok, seen) = template_moves(&tree);
+        assert!(ok, "{seen}");
+        // Checks 75 and 76 are not disturbed by the W1 entries.
+        assert!(template_findings(&tree, &test_ca_der()).0.is_empty());
+        assert!(template_work(&tree).0);
+        // The absolute form of the directory's redirect means the same.
+        let mut absolute = base.clone();
+        absolute
+            .iter_mut()
+            .filter(|e| e.path == "usr/share/base-files.moved")
+            .for_each(|e| {
+                e.xattrs = vec![(
+                    "trusted.overlay.redirect",
+                    b"/usr/share/base-files".to_vec(),
+                )]
+            });
+        let (ok, seen) = template_moves(&read("absolute", &absolute).unwrap());
+        assert!(ok, "{seen}");
+        assert!(!template_moves(&read("none", &template_like()).unwrap()).0);
+
+        let change = |path: &str, f: &dyn Fn(&mut E)| {
+            let mut entries = base.clone();
+            assert!(entries.iter().any(|e| e.path == path), "{path}");
+            entries.iter_mut().filter(|e| e.path == path).for_each(f);
+            entries
+        };
+        let without = |path: &str| {
+            let mut entries = base.clone();
+            entries.retain(|e| e.path != path);
+            entries
+        };
+        let xattr = |name: &'static str, value: Option<&'static [u8]>| {
+            move |e: &mut E| {
+                e.xattrs.retain(|(n, _)| *n != name);
+                if let Some(value) = value {
+                    e.xattrs.push((name, value.to_vec()));
+                }
+            }
+        };
+        let gpl = "usr/share/common-licenses/GPL-3";
+        let apache = "usr/share/common-licenses/Apache-2.0";
+        let file = "usr/local/share/MPL-2.0.moved";
+        let dir = "usr/share/base-files.moved";
+        let gaps: Vec<(&str, Vec<E>)> = vec![
+            (
+                "chmod copied with its data",
+                change(gpl, &|e| e.t = T::File(b"GNU".repeat(100))),
+            ),
+            (
+                "chmod without metacopy",
+                change(gpl, &xattr("trusted.overlay.metacopy", None)),
+            ),
+            ("chmod lost", change(gpl, &|e| e.mode = 0o644)),
+            ("chmod empty", change(gpl, &|e| e.t = T::File(vec![]))),
+            ("chown lost", change(apache, &|e| (e.uid, e.gid) = (0, 0))),
+            (
+                "chown without metacopy",
+                change(apache, &xattr("trusted.overlay.metacopy", None)),
+            ),
+            (
+                "moved file copied with its data",
+                change(file, &|e| e.t = T::File(vec![1; 100])),
+            ),
+            (
+                "moved file without metacopy",
+                change(file, &xattr("trusted.overlay.metacopy", None)),
+            ),
+            (
+                "moved file without redirect",
+                change(file, &xattr("trusted.overlay.redirect", None)),
+            ),
+            (
+                "moved file to the wrong name",
+                change(
+                    file,
+                    &xattr(
+                        "trusted.overlay.redirect",
+                        Some(b"/usr/share/common-licenses/MPL-2.~"),
+                    ),
+                ),
+            ),
+            (
+                "moved file, relative to the wrong directory",
+                change(file, &xattr("trusted.overlay.redirect", Some(b"MPL-2.0"))),
+            ),
+            ("moved file not there", without(file)),
+            (
+                "old file name without whiteout",
+                without("usr/share/common-licenses/MPL-2.0"),
+            ),
+            (
+                "old file name a file",
+                change("usr/share/common-licenses/MPL-2.0", &|e| {
+                    e.t = T::File(vec![])
+                }),
+            ),
+            (
+                "moved dir without redirect",
+                change(dir, &|e| e.xattrs.clear()),
+            ),
+            (
+                "moved dir to the wrong name",
+                change(dir, &xattr("trusted.overlay.redirect", Some(b"base-file~"))),
+            ),
+            (
+                "old dir name without whiteout",
+                without("usr/share/base-files"),
+            ),
+            (
+                "old dir name 1/3",
+                change("usr/share/base-files", &|e| e.t = T::Char(1, 3)),
+            ),
+            ("moved dir copied with its entries", {
+                let mut entries = base.clone();
+                entries.push(e(
+                    "usr/share/base-files.moved/motd",
+                    T::File(b"hi\n".to_vec()),
+                ));
+                entries
+            }),
+        ];
+        for (what, entries) in gaps {
+            let (ok, seen) = template_moves(&read("gap", &entries).unwrap());
+            assert!(!ok, "{what}: {seen}");
+        }
+    }
+
+    #[test]
+    fn crc32c_is_the_castagnoli_crc() {
+        assert_eq!(!crc32c(!0, b"123456789"), 0xE306_9283);
+    }
+
+    /// `--control redirect` on a real layer: both redirects point at
+    /// names that do not exist, everything else is as it was, and the
+    /// image is still valid (`fsck.erofs`, with the superblock summed
+    /// again); left unsummed, `fsck.erofs` refuses it.
+    #[test]
+    fn the_redirect_control_breaks_both_redirects_and_keeps_the_image_valid() {
+        use erofs::testing::{image, tool};
+        let mut entries = template_like();
+        entries.extend(moves_like());
+        let Some(clean) = image("control", &["-b4096", "-zlz4hc"], &entries) else {
+            return;
+        };
+        let Some(fsck) = tool("fsck.erofs") else {
+            return;
+        };
+        let fsck_ok = |name: &str, bytes: &[u8]| {
+            let path = std::env::temp_dir()
+                .join(format!("kac-control-{}-{name}.erofs", std::process::id()));
+            fs::write(&path, bytes).unwrap();
+            let output = std::process::Command::new(&fsck)
+                .arg(&path)
+                .output()
+                .unwrap();
+            let _ = fs::remove_file(&path);
+            // fsck.erofs (1.8.6) reports a wrong superblock sum as an
+            // error line but exits 0.
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.status.success() && !said.contains("<E>")
+        };
+        assert!(fsck_ok("clean", &clean));
+        let mut broken = clean.clone();
+        assert_eq!(break_redirects(&mut broken).unwrap(), 2);
+        assert!(fsck_ok("broken", &broken));
+        let before = erofs::read_tree(&clean).unwrap();
+        let after = erofs::read_tree(&broken).unwrap();
+        assert_eq!(before.len(), after.len());
+        for (b, a) in before.iter().zip(&after) {
+            let redirect =
+                |e: &erofs::Entry| e.xattr("trusted.overlay.redirect").map(<[u8]>::to_vec);
+            match a.path.as_str() {
+                "usr/local/share/MPL-2.0.moved" => {
+                    assert_eq!(redirect(a).unwrap(), b"/usr/share/common-licenses/MPL-2.~")
+                }
+                "usr/share/base-files.moved" => assert_eq!(redirect(a).unwrap(), b"base-file~"),
+                _ => assert_eq!(redirect(a), redirect(b), "{}", a.path),
+            }
+            assert_eq!(
+                (&a.path, a.kind, a.mode, a.uid, a.gid, a.mtime, &a.data),
+                (&b.path, b.kind, b.mode, b.uid, b.gid, b.mtime, &b.data)
+            );
+        }
+        let (ok, seen) = template_moves(&after);
+        assert!(!ok, "{seen}");
+        // The sum is mkfs.erofs' own, and fsck.erofs checks it: a byte
+        // changed in the summed block without a new sum is refused.
+        if u32::from_le_bytes(clean[1032..1036].try_into().unwrap()) & 1 != 0 {
+            let mut zeroed = clean[1024..4096].to_vec();
+            zeroed[4..8].fill(0);
+            assert_eq!(crc32c(!0, &zeroed).to_le_bytes(), clean[1028..1032]);
+            let mut unsummed = clean.clone();
+            unsummed[1024 + 127] ^= 1;
+            assert!(!fsck_ok("unsummed", &unsummed));
         }
     }
 
