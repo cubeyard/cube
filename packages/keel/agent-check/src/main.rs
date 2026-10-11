@@ -19,9 +19,10 @@
 //! setup leaves the runner's CA (DER) in a file, so publishing is refused.
 //!
 //! Last, a build machine with a template disk publishes its `upper/` as a
-//! template layer (`template_publish`); `fsck.erofs` (`--fsck`) checks and
-//! extracts it here, the driver looks for anything of cube's in it, and a
-//! new machine boots with it as its topmost layer.
+//! template layer (`template_publish`); `fsck.erofs` (`--fsck`) checks it,
+//! the driver reads it in place (erofs.rs: no extraction, so no root and no
+//! `mknod` on the host, macOS included) and looks for anything of cube's in
+//! it, and a new machine boots with it as its topmost layer.
 //!
 //! QEMU and every tool are given by path, never searched for. The driver is
 //! not a runner: no network, no secrets, one machine at a time. It writes
@@ -52,6 +53,8 @@ use tokio::{
     process::{Child, Command},
     sync::{mpsc, oneshot},
 };
+
+mod erofs;
 
 // ---------------------------------------------------------------- options
 
@@ -2386,64 +2389,121 @@ fn erofs_bytes(disk: &Path) -> Result<Option<u64>> {
     Ok(Some(u64::from(blocks) << sb[12]))
 }
 
-/// Everything of cube's found in an extracted template at `root`: files
-/// that hold a marker line, the CA's DER or the start of its base64; files
-/// and links named for the runner's CA; the paths on NEVER_IN_A_TEMPLATE;
-/// `agent` lines in the account files; a machine id. Also how many files it
-/// read, so an empty extraction cannot pass.
-fn template_findings(root: &Path, der: &[u8]) -> Result<(Vec<String>, usize)> {
+/// Everything of cube's found in a template's tree (read from the image,
+/// see erofs.rs): files or xattrs that hold a marker line, the CA's DER or
+/// the start of its base64; entries and links named for the runner's CA;
+/// the paths on NEVER_IN_A_TEMPLATE; `agent` lines in the account files; a
+/// machine id. Also how many files it read, so an empty layer cannot pass.
+fn template_findings(tree: &[erofs::Entry], der: &[u8]) -> (Vec<String>, usize) {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&der[..der.len().min(48)]);
     let needles: [&[u8]; 3] = [MARKER.as_bytes(), der, b64.as_bytes()];
+    let holds = |data: &[u8]| {
+        needles
+            .iter()
+            .any(|n| data.windows(n.len()).any(|w| w == *n))
+    };
     let mut found = vec![];
     let mut read = 0;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
-            let (path, kind) = (entry.path(), entry.file_type()?);
-            let rel = path.strip_prefix(root)?.to_string_lossy().into_owned();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with("cube-runner") {
-                found.push(format!("/{rel} is named for the runner's CA"));
-            }
-            if kind.is_symlink() {
-                if fs::read_link(&path)?
-                    .to_string_lossy()
-                    .contains("cube-runner")
-                {
+    for entry in tree {
+        let rel = &entry.path;
+        if rel
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .starts_with("cube-runner")
+        {
+            found.push(format!("/{rel} is named for the runner's CA"));
+        }
+        match entry.kind {
+            erofs::Kind::Symlink => {
+                if entry.data.windows(11).any(|w| w == b"cube-runner") {
                     found.push(format!("/{rel} links to the runner's CA"));
                 }
-            } else if kind.is_dir() {
-                stack.push(path);
-            } else if kind.is_file() {
+            }
+            erofs::Kind::File => {
                 read += 1;
-                let data = fs::read(&path)?;
-                if needles
-                    .iter()
-                    .any(|n| data.windows(n.len()).any(|w| w == *n))
-                {
+                if holds(&entry.data) {
                     found.push(format!("/{rel} holds cube's block or the runner's CA"));
                 }
             }
+            _ => {}
+        }
+        for (name, value) in &entry.xattrs {
+            if holds(value) {
+                found.push(format!(
+                    "/{rel}'s {name} holds cube's block or the runner's CA"
+                ));
+            }
         }
     }
+    let at = |rel: &str| tree.iter().find(|e| e.path == rel);
     for rel in NEVER_IN_A_TEMPLATE {
-        if fs::symlink_metadata(root.join(rel)).is_ok() {
+        if at(rel).is_some() {
             found.push(format!("/{rel} is in the template"));
         }
     }
     for rel in ["etc/passwd", "etc/group", "etc/shadow", "etc/gshadow"] {
-        if fs::read_to_string(root.join(rel))
-            .is_ok_and(|text| text.lines().any(|line| line.starts_with("agent:")))
-        {
+        if at(rel).is_some_and(|e| {
+            String::from_utf8_lossy(&e.data)
+                .lines()
+                .any(|line| line.starts_with("agent:"))
+        }) {
             found.push(format!("/{rel} has the agent account"));
         }
     }
-    if fs::metadata(root.join("etc/machine-id")).is_ok_and(|m| m.len() > 0) {
+    if at("etc/machine-id").is_some_and(|e| {
+        e.kind == erofs::Kind::Symlink || (e.kind == erofs::Kind::File && !e.data.is_empty())
+    }) {
         found.push("/etc/machine-id is not empty".into());
     }
-    Ok((found, read))
+    (found, read)
+}
+
+/// The build setup's work, as the layer holds it: whether all of it is
+/// there, and what was seen.
+fn template_work(tree: &[erofs::Entry]) -> (bool, Value) {
+    let at = |rel: &str| tree.iter().find(|e| e.path == rel);
+    let text = |rel: &str| {
+        at(rel)
+            .filter(|e| e.kind == erofs::Kind::File)
+            .map(|e| String::from_utf8_lossy(&e.data).into_owned())
+            .unwrap_or_default()
+    };
+    let out = at("workspace/app/out.txt");
+    let mtime = out.map(|e| e.mtime);
+    let owner = out.map(|e| format!("{}:{} {:o}", e.uid, e.gid, e.mode));
+    let issue = at("etc/issue").map(|e| format!("{:?}", e.kind));
+    let whiteout = at("etc/issue").is_some_and(erofs::Entry::is_whiteout);
+    let dir = "etc/apt/apt.conf.d";
+    let opaque = at(dir).is_some_and(|e| {
+        e.kind == erofs::Kind::Dir && e.xattr("trusted.overlay.opaque") == Some(b"y".as_slice())
+    });
+    let inside: Vec<&str> = tree
+        .iter()
+        .filter_map(|e| e.path.strip_prefix(dir)?.strip_prefix('/'))
+        .collect();
+    let copy = text("workspace/app/bundle-copy.pem");
+    let ok = text("workspace/app/out.txt") == "built"
+        && mtime == Some(1700000000)
+        && whiteout
+        && opaque
+        && inside == ["only"]
+        && text("etc/apt/apt.conf.d/only") == "mine\n"
+        && text("etc/group").contains("\nproject:x:1500:")
+        && copy.contains("BEGIN CERTIFICATE");
+    (
+        ok,
+        json!({
+            "mtime": mtime,
+            "owner": owner,
+            "issue": issue,
+            "whiteout": whiteout,
+            "opaque": opaque,
+            "aptConfD": inside,
+            "copyCerts": copy.matches("BEGIN CERTIFICATE").count(),
+        }),
+    )
 }
 
 /// The console's `cube-agent: template:` lines.
@@ -2581,48 +2641,29 @@ async fn template_checks(
         fs::File::open(&vdd)?.take(bytes).read_to_end(&mut data)?;
         fs::write(&layer, data)?;
     }
+    // fsck.erofs checks the image; the driver reads it in place (no
+    // extraction, so no mknod for the whiteouts, and the xattrs are seen).
     let fsck = std::process::Command::new(&lab.o.fsck)
         .arg(&layer)
         .output()?;
-    let extracted = dir.join("template-extracted");
-    let _ = fs::remove_dir_all(&extracted);
-    let extract = std::process::Command::new(&lab.o.fsck)
-        .arg(format!("--extract={}", extracted.display()))
-        .arg("--no-preserve")
-        .arg(&layer)
-        .output()?;
     ensure!(
-        fsck.status.success() && extract.status.success(),
-        "fsck.erofs: {} {}",
-        String::from_utf8_lossy(&fsck.stderr),
-        String::from_utf8_lossy(&extract.stderr)
+        fsck.status.success(),
+        "fsck.erofs: {}{}",
+        String::from_utf8_lossy(&fsck.stdout),
+        String::from_utf8_lossy(&fsck.stderr)
     );
-    let (found, files) = template_findings(&extracted, &test_ca_der())?;
+    let tree = erofs::read_tree(&fs::read(&layer)?).context("reading the template layer")?;
+    let (found, files) = template_findings(&tree, &test_ca_der());
     checks.ok(
         found.is_empty() && files > 0,
-        "the template layer (fsck.erofs clean) holds nothing of cube's: no marker block or runner CA in any file (DER or base64), no cube-runner.crt/.pem or link to it, no mount point, /etc/cube, /var/lib/cube, agent account line, hook log, shell history, ssh host key or machine id",
+        "the template layer (fsck.erofs clean, read in place) holds nothing of cube's: no marker block or runner CA in any file or xattr (DER or base64), no cube-runner.crt/.pem or link to it, no mount point, /etc/cube, /var/lib/cube, agent account line, hook log, shell history, ssh host key or machine id",
         json!({"found": found, "files": files}),
     )?;
-    let read = |rel: &str| fs::read_to_string(extracted.join(rel)).unwrap_or_default();
-    let mtime = fs::metadata(extracted.join("workspace/app/out.txt"))
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs());
-    let whiteout = fs::symlink_metadata(extracted.join("etc/issue")).is_ok_and(|m| {
-        use std::os::unix::fs::{FileTypeExt, MetadataExt};
-        m.file_type().is_char_device() && m.rdev() == 0
-    });
-    let copy = read("workspace/app/bundle-copy.pem");
+    let (work, seen) = template_work(&tree);
     checks.ok(
-        read("workspace/app/out.txt") == "built"
-            && mtime == Some(1700000000)
-            && whiteout
-            && read("etc/apt/apt.conf.d/only") == "mine\n"
-            && read("etc/group").contains("\nproject:x:1500:")
-            && copy.contains("BEGIN CERTIFICATE"),
-        "the setup's work is in the layer: a file with its time, a whiteout for a deleted image file, a directory made again, a new group, the project's copy of the bundle (without the runner's CA)",
-        json!({"mtime": mtime, "whiteout": whiteout, "copyCerts": copy.matches("BEGIN CERTIFICATE").count()}),
+        work,
+        "the setup's work is in the layer: a file with its time, a 0/0 whiteout for a deleted image file, an opaque directory made again holding only its new file, a new group, the project's copy of the bundle (without the runner's CA)",
+        seen,
     )?;
 
     // A new machine with the template as its topmost layer.
@@ -2703,43 +2744,184 @@ mod tests {
         cube_runner_protocol::read_frame(stream).await.unwrap()
     }
 
-    #[test]
-    fn the_template_scan_finds_each_kind_of_leftover() {
+    fn entry(path: &str, kind: erofs::Kind, data: &[u8]) -> erofs::Entry {
+        erofs::Entry {
+            path: path.into(),
+            kind,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+            xattrs: vec![],
+            data: data.to_vec(),
+        }
+    }
+
+    /// The leftovers check 75 must find, each as (path, kind, data).
+    fn leftovers(der: &[u8]) -> Vec<(&'static str, erofs::Kind, Vec<u8>)> {
         use base64::Engine;
-        let dir = std::env::temp_dir().join(format!("kac-scan-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        let der = test_ca_der();
-        let put = |rel: &str, data: &[u8]| {
-            let path = dir.join(rel);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, data).unwrap();
-        };
-        put("workspace/app/out.txt", b"built");
-        put("etc/passwd", b"root:x:0:0::/root:/bin/bash\n");
-        let (found, files) = template_findings(&dir, &der).unwrap();
-        assert_eq!((found.len(), files), (0, 2), "{found:?}");
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
-        let cases: [(&str, Vec<u8>); 7] = [
-            ("etc/gitconfig", format!("{MARKER}\n").into_bytes()),
-            ("opt/x.der", der.clone()),
+        use erofs::Kind::{Char, File, Symlink};
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+        let mut deep = erofs::testing::mixed(300_000, 11);
+        // Across lclusters and pclusters, deep in a compressed file.
+        deep.splice(150_000..150_000, format!("x{MARKER}y").into_bytes());
+        vec![
+            ("etc/gitconfig", File, format!("{MARKER}\n").into_bytes()),
+            ("opt/x.der", File, der.to_vec()),
             (
                 "opt/x.pem",
+                File,
                 format!("-----BEGIN CERTIFICATE-----\n{}\n", &b64[..64]).into_bytes(),
             ),
-            ("etc/ssl/certs/cube-runner.pem", b"x".to_vec()),
-            ("etc/hosts", vec![]),
-            ("etc/shadow", b"agent:!:1:0:99999:7:::\n".to_vec()),
-            ("etc/machine-id", b"0123\n".to_vec()),
+            ("opt/deep.bin", File, deep),
+            ("etc/ssl/certs/cube-runner.pem", File, b"x".to_vec()),
+            ("etc/ssl/certs/abcd.0", Symlink, b"cube-runner.pem".to_vec()),
+            ("etc/hosts", File, vec![]),
+            // A whiteout on a never-path is still that path in the layer.
+            ("etc/resolv.conf", Char(0), vec![]),
+            ("etc/shadow", File, b"agent:!:1:0:99999:7:::\n".to_vec()),
+            ("etc/machine-id", File, b"0123\n".to_vec()),
+        ]
+    }
+
+    #[test]
+    fn the_template_scan_finds_each_kind_of_leftover() {
+        use erofs::Kind::{Dir, File};
+        let der = test_ca_der();
+        let clean = vec![
+            entry("", Dir, b""),
+            entry("workspace/app/out.txt", File, b"built"),
+            entry("etc/passwd", File, b"root:x:0:0::/root:/bin/bash\n"),
+            entry("etc/machine-id", File, b""),
         ];
-        for (rel, data) in cases {
-            put(rel, &data);
-            let (found, _) = template_findings(&dir, &der).unwrap();
+        let (found, files) = template_findings(&clean, &der);
+        assert_eq!((found.len(), files), (0, 3), "{found:?}");
+        for (rel, kind, data) in leftovers(&der) {
+            let mut tree = clean.clone();
+            tree.retain(|e| e.path != rel);
+            tree.push(entry(rel, kind, &data));
+            let (found, _) = template_findings(&tree, &der);
             assert_eq!(found.len(), 1, "{rel}: {found:?}");
-            fs::remove_file(dir.join(rel)).unwrap();
         }
-        std::os::unix::fs::symlink("cube-runner.pem", dir.join("etc/ssl/certs/abcd.0")).unwrap();
-        assert_eq!(template_findings(&dir, &der).unwrap().0.len(), 1);
-        let _ = fs::remove_dir_all(&dir);
+        // The CA in an xattr's value.
+        let mut tree = clean.clone();
+        tree[1].xattrs.push(("user.ca".into(), der.clone()));
+        assert_eq!(template_findings(&tree, &der).0.len(), 1);
+        // No files read: check 75 cannot pass on an empty layer.
+        assert_eq!(template_findings(&clean[..1], &der).1, 0);
+    }
+
+    /// A layer like the build machine's, as a tar for mkfs.erofs.
+    fn template_like() -> Vec<erofs::testing::E> {
+        use erofs::testing::{T, e};
+        let mut out = e("workspace/app/out.txt", T::File(b"built".to_vec()));
+        (out.uid, out.gid, out.mtime) = (1000, 1000, 1_700_000_000);
+        let mut apt = e("etc/apt/apt.conf.d", T::Dir);
+        apt.xattrs.push(("trusted.overlay.opaque", b"y".to_vec()));
+        vec![
+            e("etc", T::Dir),
+            e("etc/issue", T::Char(0, 0)),
+            e("etc/apt", T::Dir),
+            apt,
+            e("etc/apt/apt.conf.d/only", T::File(b"mine\n".to_vec())),
+            e(
+                "etc/group",
+                T::File(b"root:x:0:\nproject:x:1500:\n".to_vec()),
+            ),
+            e("etc/machine-id", T::File(vec![])),
+            e("workspace", T::Dir),
+            e("workspace/app", T::Dir),
+            out,
+            e(
+                "workspace/app/bundle-copy.pem",
+                T::File(b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".to_vec()),
+            ),
+            e(
+                "workspace/app/big",
+                T::File(erofs::testing::mixed(300_000, 5)),
+            ),
+        ]
+    }
+
+    /// Checks 75 and 76 against real layers from `mkfs.erofs` in the agent's
+    /// form: a clean one passes both; each leftover fails 75; each missing
+    /// piece of work (a whiteout that is a file or another device, a
+    /// directory that is not opaque, a lost time, an extra file) fails 76.
+    #[test]
+    fn checks_75_and_76_on_real_layers_pass_clean_and_fail_dirty() {
+        use erofs::testing::{E, T, e, image};
+        let der = test_ca_der();
+        let read = |name: &str, entries: &[E]| {
+            image(name, &["-b4096", "-zlz4hc"], entries).map(|i| erofs::read_tree(&i).unwrap())
+        };
+        let base = template_like();
+        let Some(tree) = read("clean", &base) else {
+            return;
+        };
+        let (found, files) = template_findings(&tree, &der);
+        assert!(found.is_empty() && files == 6, "{found:?} {files}");
+        let (ok, seen) = template_work(&tree);
+        assert!(ok, "{seen}");
+
+        for (rel, kind, data) in leftovers(&der) {
+            let mut entries = base.clone();
+            entries.retain(|e| e.path != rel);
+            for dir in ["opt", "etc/ssl", "etc/ssl/certs"] {
+                if rel.starts_with(&format!("{dir}/")) && !entries.iter().any(|e| e.path == dir) {
+                    entries.push(e(dir, T::Dir));
+                }
+            }
+            entries.push(e(
+                rel,
+                match kind {
+                    erofs::Kind::Symlink => T::Link("cube-runner.pem"),
+                    erofs::Kind::Char(_) => T::Char(0, 0),
+                    _ => T::File(data),
+                },
+            ));
+            let tree = read("dirty", &entries).unwrap();
+            let (found, _) = template_findings(&tree, &der);
+            assert_eq!(found.len(), 1, "{rel}: {found:?}");
+        }
+
+        let change = |path: &str, f: &dyn Fn(&mut E)| {
+            let mut entries = base.clone();
+            entries.iter_mut().filter(|e| e.path == path).for_each(f);
+            entries
+        };
+        let missing: [(&str, Vec<E>); 6] = [
+            (
+                "issue is a file",
+                change("etc/issue", &|e| e.t = T::File(vec![])),
+            ),
+            (
+                "issue is 1/3",
+                change("etc/issue", &|e| e.t = T::Char(1, 3)),
+            ),
+            (
+                "not opaque",
+                change("etc/apt/apt.conf.d", &|e| e.xattrs.clear()),
+            ),
+            (
+                "opaque n",
+                change("etc/apt/apt.conf.d", &|e| {
+                    e.xattrs = vec![("trusted.overlay.opaque", b"n".to_vec())]
+                }),
+            ),
+            (
+                "time lost",
+                change("workspace/app/out.txt", &|e| e.mtime = 1_700_000_001),
+            ),
+            ("an extra file", {
+                let mut entries = base.clone();
+                entries.push(e("etc/apt/apt.conf.d/more", T::File(vec![])));
+                entries
+            }),
+        ];
+        for (what, entries) in missing {
+            let (ok, seen) = template_work(&read("work", &entries).unwrap());
+            assert!(!ok, "{what}: {seen}");
+        }
     }
 
     #[tokio::test]
