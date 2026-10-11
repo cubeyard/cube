@@ -8,15 +8,18 @@
 //!   keel-agent-check --qemu PATH --qemu-img PATH --kernel PATH --base PATH \
 //!     --mkfs PATH --fsck PATH --tar IMAGE.tar --out DIR [--arch x86_64|arm64] \
 //!     [--accel tcg|kvm|hvf] [--contract COMMAND] [--smp 2] [--memory 1024] \
-//!     [--control reconnect|late-hello|restore|clock|seal]
+//!     [--control reconnect|late-hello|restore|prepare|clock|seal|redirect]
 //!
 //! `--control` runs one negative control, expected to fail at its check:
 //! `reconnect` (also `--reset off`): the immediate reconnects wait for the
 //! plain `hello` only, without the reset on channel 0. `late-hello`: the
 //! forced late `hello` is not forced (no reset before the setup).
 //! `restore`: after each restore the runner waits for the plain `hello`
-//! only. `clock`: the machine has no virtio-rtc. `seal`: the build machine's
-//! setup leaves the runner's CA (DER) in a file, so publishing is refused.
+//! only. `prepare`: no `snapshot_prepare` before the saves, so the request
+//! sent then is not held. `clock`: the machine has no virtio-rtc. `seal`:
+//! the build machine's setup leaves the runner's CA (DER) in a file, so
+//! publishing is refused. `redirect`: the template's redirects point at
+//! nothing.
 //!
 //! Last, a build machine with a template disk publishes its `upper/` as a
 //! template layer (`template_publish`); `fsck.erofs` (`--fsck`) checks it,
@@ -87,6 +90,7 @@ enum Control {
     Clock,
     Seal,
     Redirect,
+    Prepare,
 }
 
 fn options() -> Result<Options> {
@@ -141,8 +145,9 @@ fn options() -> Result<Options> {
         ("on", Some("clock")) => Some(Control::Clock),
         ("on", Some("seal")) => Some(Control::Seal),
         ("on", Some("redirect")) => Some(Control::Redirect),
+        ("on", Some("prepare")) => Some(Control::Prepare),
         _ => bail!(
-            "--control is reconnect, late-hello, restore, clock, seal or redirect (and --reset off is reconnect)"
+            "--control is reconnect, late-hello, restore, prepare, clock, seal or redirect (and --reset off is reconnect)"
         ),
     };
     Ok(Options {
@@ -467,6 +472,27 @@ impl Channel {
             self.early.lock().unwrap().push(describe(frame));
         }
         write_frame(&mut *self.writer.lock().await, frame).await
+    }
+
+    /// Drops the `hello`s and `status`es queued so far, so the next `status`
+    /// is the one a request brings.
+    fn drop_infos(&self) {
+        if let Ok(mut infos) = self.infos.try_lock() {
+            while let Ok((kind, info)) = infos.try_recv() {
+                log(&format!(
+                    "(dropped a queued {kind}: ready={} {})",
+                    info.ready, info.reason
+                ));
+            }
+        }
+    }
+
+    /// `snapshot_prepare`: its answer and the `status` after it.
+    async fn prepare(&self) -> Result<(Answer, proto::GuestInfo)> {
+        self.drop_infos();
+        let answer = self.request(Op::SnapshotPrepare(proto::Empty {})).await?;
+        let status = self.info("status", TIMEOUT).await?;
+        Ok((answer, status))
     }
 
     /// The frames sent before the first `hello`, as `describe` names them.
@@ -938,6 +964,115 @@ async fn quit(machine: &mut Machine) -> Result<()> {
     let _ = tokio::time::timeout(Duration::from_secs(30), machine.child.wait()).await;
     let _ = machine.child.kill().await;
     Ok(())
+}
+
+fn count_in(path: &Path, needle: &str) -> usize {
+    fs::read_to_string(path).map_or(0, |text| text.matches(needle).count())
+}
+
+/// Waits (10 s) until the console holds more lines with NEEDLE than
+/// BEFORE: the agent says there what the gate holds.
+async fn await_console(path: &Path, needle: &str, before: usize) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while count_in(path, needle) <= before {
+        ensure!(
+            Instant::now() < deadline,
+            "no {needle:?} on the console in 10 s"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Ok(())
+}
+
+/// What the agent prints when it holds a request (snapshot.rs).
+const HOLDING: &str = "cube-agent: snapshot: holding channel";
+
+/// An exec request on a channel of its own, not waited for: the answer
+/// comes on the receiver.
+async fn exec_held(
+    ch: &Channel,
+    id: &str,
+    command: &str,
+    epoch: i64,
+) -> Result<(u32, oneshot::Receiver<Answer>)> {
+    let header = json!({"id": id, "epoch": epoch, "command": command, "timeoutMs": 60000});
+    ch.start(
+        None,
+        Op::Guest(proto::GuestRequest {
+            op: "exec".into(),
+            data: format!("{header}\n").into_bytes(),
+        }),
+    )
+    .await
+}
+
+/// snapshot_prepare, an exec that must be held, `stop`, a `migrate` to a
+/// file QEMU cannot create (the save fails), `cont`, `snapshot_done`: the
+/// held exec runs then.
+async fn save_that_fails(ch: &Channel, m: &Machine, dir: &Path, epoch: i64) -> Result<Value> {
+    let t = Instant::now();
+    let (answer, status) = ch.prepare().await?;
+    ensure!(
+        prepared(&answer, &status),
+        "the prepare: {answer:?} {status:?}"
+    );
+    let prepare_ms = t.elapsed().as_millis();
+    let before = count_in(&m.console, HOLDING);
+    let (_, mut held) = exec_held(ch, "held-released", "echo released > released", epoch).await?;
+    await_console(&m.console, HOLDING, before).await?;
+    let mut qmp = Qmp::open(&m.qmp).await?;
+    qmp.execute("stop", Value::Null).await?;
+    migration_mode(&mut qmp).await?;
+    let nowhere = dir.join("no-such-directory").join("memory");
+    let migrated = match qmp
+        .execute(
+            "migrate",
+            json!({"uri": format!("file:{}", nowhere.display())}),
+        )
+        .await
+    {
+        Ok(_) => await_migration(&mut qmp).await,
+        Err(error) => Err(error),
+    };
+    let Err(migrate_error) = migrated else {
+        bail!("the migrate to {} did not fail", nowhere.display());
+    };
+    ensure!(
+        matches!(held.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+        "the held exec was answered while prepared"
+    );
+    qmp.execute("cont", Value::Null).await?;
+    drop(qmp);
+    let done = ch.request(Op::SnapshotDone(proto::Empty {})).await?;
+    let status = ch.info("status", TIMEOUT).await?;
+    ensure!(
+        matches!(done, Answer::Done(_)) && status.ready,
+        "snapshot_done: {done:?} {status:?}"
+    );
+    let answer = tokio::time::timeout(TIMEOUT, held)
+        .await
+        .map_err(|_| anyhow!("the held exec had no answer after snapshot_done"))??;
+    let Answer::Guest(bytes) = &answer else {
+        bail!("the held exec: {answer:?}");
+    };
+    ensure!(
+        bytes.starts_with(br#"{"state":"Running"}"#),
+        "the held exec: {}",
+        String::from_utf8_lossy(bytes)
+    );
+    let (state, _) = ch.settle("held-released").await?;
+    let (_, out) = ch.run("released-out", "cat released", epoch).await?;
+    ensure!(
+        state["state"] == "Succeeded" && out == "released\n",
+        "the held exec ran: {state} {out:?}"
+    );
+    Ok(
+        json!({"prepareMs": prepare_ms, "migrateError": format!("{migrate_error:#}"), "held": "ran after snapshot_done"}),
+    )
+}
+
+fn prepared(answer: &Answer, status: &proto::GuestInfo) -> bool {
+    matches!(answer, Answer::Done(_)) && !status.ready && status.reason == "prepared for a snapshot"
 }
 
 fn setup(layers: &[proto::Layer], documents: &[(&str, &[u8])]) -> Op {
@@ -1561,6 +1696,8 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
     // and comes back: the agent waits without spinning and says hello again.
     let mut idle = json!({});
     let mut restore = json!({});
+    let mut snapshot = json!({});
+    let failed_save_error: Option<String>;
     let clock;
     {
         let m = lab.start(&dir, &image_disk)?;
@@ -1742,17 +1879,80 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         // else the reset on channel 0 and hello within 2 s, else unhealthy;
         // nothing else before the hello. Then machine_setup, ready from its
         // status, and the command that ran at the save is found by its key.
+        // Before each save the runner sends snapshot_prepare: the agent
+        // answers done once settled and holds what comes after it until
+        // snapshot_done or the end of the connection. First a save that
+        // fails, so the machine goes on: snapshot_done lets the held
+        // operation run (its check comes last, after the templates).
+        let failed_save = save_that_fails(&ch, &m, &dir, epoch).await;
+        if failed_save.is_err() {
+            // Leave the machine running and let go, whatever happened.
+            if let Ok(mut qmp) = Qmp::open(&m.qmp).await {
+                let _ = qmp.execute("cont", Value::Null).await;
+            }
+            let _ = ch
+                .request_on(
+                    None,
+                    Op::SnapshotDone(proto::Empty {}),
+                    Duration::from_secs(10),
+                )
+                .await;
+        }
+        log(&format!("a save that fails: {failed_save:?}"));
+        failed_save_error = failed_save.as_ref().err().map(|error| format!("{error:#}"));
+        snapshot["failedSave"] = match &failed_save {
+            Ok(value) => value.clone(),
+            Err(error) => json!({"error": format!("{error:#}")}),
+        };
+        // In memory only: a restore keeps it, a boot would not.
+        ch.run(
+            "shm-mark",
+            &format!("mkdir -p /dev/shm/cube-check && echo {token} > /dev/shm/cube-check/mark"),
+            epoch,
+        )
+        .await?;
+
         let boot_id = hello.boot_id.clone();
         let reset = lab.o.control != Some(Control::Restore);
+        let prepare = lab.o.control != Some(Control::Prepare);
         let (mut ch, mut m) = (ch, m);
         let mut restores: Vec<Value> = vec![];
         // (which check, why); the loop stops at the first failure.
         let mut failed: Option<(u8, String)> = None;
         for i in 0..RESTORES {
             let key = format!("tick-{i}");
-            let (started, _) = ch.guest("exec", json!({"id": key, "epoch": epoch, "command": format!("i=0; while [ $i -lt 30 ]; do i=$((i+1)); echo $i > {key}; sleep 0.1; done; printf ticked"), "timeoutMs": 60000})).await?;
+            let (started, _) = ch.guest("exec", json!({"id": key, "epoch": epoch, "command": format!("i=0; while [ $i -lt 50 ]; do i=$((i+1)); echo $i > {key}; sleep 0.1; done; printf ticked"), "timeoutMs": 60000})).await?;
             ensure!(started["state"] == "Running", "exec {key}: {started}");
             tokio::time::sleep(Duration::from_millis(500)).await;
+            // snapshot_prepare, then an operation the agent must hold: the
+            // save ends the connection, so it never runs.
+            let t = Instant::now();
+            if prepare {
+                let (answer, status) = ch.prepare().await?;
+                if !prepared(&answer, &status) {
+                    failed = Some((
+                        1,
+                        format!("restore {i}: the prepare: {answer:?} {status:?}"),
+                    ));
+                    break;
+                }
+            }
+            let prepare_ms = t.elapsed().as_millis();
+            let held_key = format!("held-{i}");
+            let before = count_in(&m.console, HOLDING);
+            let (_, mut held) =
+                exec_held(&ch, &held_key, &format!("echo ran > {held_key}"), epoch).await?;
+            if let Err(error) = await_console(&m.console, HOLDING, before).await {
+                failed = Some((2, format!("restore {i}: {held_key}: {error:#}")));
+                break;
+            }
+            if !matches!(held.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
+                failed = Some((
+                    2,
+                    format!("restore {i}: {held_key} was answered while prepared"),
+                ));
+                break;
+            }
             let memory = dir.join("memory");
             let saved = save(&mut m, &memory).await?;
             close(ch).await?;
@@ -1791,25 +1991,33 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             } else {
                 &[]
             };
-            if hello.ready || hello.epoch != epoch || hello.boot_id != boot_id || early != allowed {
+            if hello.ready
+                || hello.reason != "waiting for machine_setup"
+                || hello.epoch != epoch
+                || hello.boot_id != boot_id
+                || early != allowed
+            {
                 failed = Some((
                     1,
                     format!("restore {i}: {hello:?}; sent before it: {early:?}"),
                 ));
                 break;
             }
+            // Answered at once, not held: the prepare ended with the old connection.
             let refused = ch
-                .guest_raw(
-                    "exec",
-                    format!("{}\n", json!({"id": format!("early-{i}"), "epoch": epoch, "command": "true", "timeoutMs": 1000})).into_bytes(),
+                .request_on(
+                    None,
+                    Op::Guest(proto::GuestRequest {
+                        op: "exec".into(),
+                        data: format!("{}\n", json!({"id": format!("early-{i}"), "epoch": epoch, "command": "true", "timeoutMs": 1000})).into_bytes(),
+                    }),
+                    Duration::from_secs(10),
                 )
-                .await?;
+                .await;
             let late = ch
                 .setup_after_hello(|| setup(&image_layers, documents))
                 .await;
-            let not_ready = refused.as_ref().is_err_and(|e| {
-                e.code == proto::Code::Unavailable as i32 && e.reason == "not_ready"
-            });
+            let not_ready = matches!(&refused, Ok(Answer::Error(e)) if e.code == proto::Code::Unavailable as i32 && e.reason == "not_ready");
             if !not_ready || late.is_err() {
                 failed = Some((
                     2,
@@ -1817,16 +2025,42 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
                 ));
                 break;
             }
+            // The command running at the save still runs (Q1); the
+            // operation held at the save never ran.
+            let (ticking, _) = ch.guest("get", json!({"id": key})).await?;
+            let (held_state, _) = ch.guest("get", json!({"id": held_key})).await?;
+            let (_, held_file) = ch
+                .run(
+                    &format!("held-file-{i}"),
+                    &format!("test -e {held_key} && echo ran || echo never"),
+                    epoch,
+                )
+                .await?;
+            if held_state != json!({"state": "Unknown"}) || held_file != "never\n" {
+                failed = Some((
+                    2,
+                    format!("restore {i}: the held {held_key} {held_state}, file {held_file:?}"),
+                ));
+                break;
+            }
             let (state, body) = ch.settle(&key).await?;
             let (_, persist) = ch
-                .run(&format!("persist-{i}"), "cat persist", epoch)
+                .run(
+                    &format!("persist-{i}"),
+                    "cat persist /dev/shm/cube-check/mark",
+                    epoch,
+                )
                 .await?;
-            if state["state"] != "Succeeded" || body != b"ticked" || persist != format!("{token}\n")
+            if ticking["state"] != "Running"
+                || state["state"] != "Succeeded"
+                || body != b"ticked"
+                || persist != format!("{token}\n{token}\n")
             {
                 failed = Some((
                     3,
                     format!(
-                        "restore {i}: {key} {state} {:?}, persist {persist:?}",
+                        "restore {i}: {key} {} then {state} {:?}, persist and mark {persist:?}",
+                        ticking["state"],
                         String::from_utf8_lossy(&body)
                     ),
                 ));
@@ -1843,6 +2077,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
                 }
             ));
             restores.push(json!({
+                "prepareMs": prepare_ms, "heldNeverRan": true,
                 "saveMs": saved.as_millis(), "loadMs": loaded.as_millis(),
                 "contToHelloMs": hello_ms, "reset": was_reset, "lateHellos": late.ok(),
                 "memoryFileMiB": file.len() / (1 << 20),
@@ -1861,17 +2096,17 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             .unwrap_or_default();
         checks.ok(
             failed.as_ref().is_none_or(|(k, _)| *k != 1),
-            "restored into a new QEMU with the runner connected before cont, 3 times: hello (same boot, not ready, epoch kept) within 500 ms of cont, or within 2 s of the reset on channel 0; the runner sent nothing else before it",
+            "restored into a new QEMU with the runner connected before cont, 3 times: before each save snapshot_prepare is answered done and the status says not ready (prepared for a snapshot); after it hello (same boot, not ready, waiting for machine_setup, epoch kept) within 500 ms of cont, or within 2 s of the reset on channel 0; the runner sent nothing else before it",
             detail,
         )?;
         checks.ok(
             failed.as_ref().is_none_or(|(k, _)| *k != 2),
-            "after each restore guest operations are UNAVAILABLE/not_ready until machine_setup, and the status after its answer says ready",
+            "an operation sent after snapshot_prepare is held (no answer; the agent says so) and never runs (its key unknown after the restore, no file); after each restore guest operations are answered at once UNAVAILABLE/not_ready until machine_setup, and the status after its answer says ready",
             detail,
         )?;
         checks.ok(
             failed.is_none() && restores.len() == RESTORES,
-            "after each restore the command running at the save is found by its key and finishes; the disk is the one saved",
+            "after each restore the command running at the save is still running, is found by its key and finishes; the disk is the one saved and /dev/shm is kept (a restore is not a boot)",
             detail,
         )?;
 
@@ -2296,6 +2531,12 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
     )
     .await?;
 
+    checks.ok(
+        failed_save_error.is_none(),
+        "a save that fails (stop, a migrate QEMU cannot write, cont): the operation sent after snapshot_prepare is held, and snapshot_done lets it go on: it runs, and the status says ready again",
+        failed_save_error.as_deref().unwrap_or_default(),
+    )?;
+
     let results = json!({
         "qemu": {"path": lab.o.qemu, "version": version, "machine": machine_type, "accel": lab.o.accel, "smp": lab.o.smp, "memory": lab.o.memory},
         "arch": lab.o.arch,
@@ -2305,6 +2546,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         "checks": checks.0,
         "idle": idle,
         "restore": restore,
+        "snapshot": snapshot,
         "clock": clock,
         "template": template,
         "timings": timings,
