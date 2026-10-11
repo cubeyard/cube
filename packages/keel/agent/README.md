@@ -69,15 +69,31 @@ cube-init (PID 1)
   carry `memory.peak` and OOM kills. An agent that starts again adopts the
   operations whose cgroups still exist; a record without an end and without
   a cgroup (a boot) is `Interrupted`. Nothing is run twice.
-- `read`, `write`, `stat`, `services`, `portal` are answered `UNSUPPORTED`
-  and not advertised (K-5b, K-5c); `install` never exists for keel.
+- **Files** `read`, `write`, `stat` (`fs.read`, `fs.write`, `fs.stat`,
+  `fs.absolute`) with cube-guest's rules: a relative path is in the
+  workspace, an absolute one anywhere in the workload root but `/proc`,
+  `/sys` and `/dev`, never with `..`. Paths are resolved inside the
+  workload root (`openat2` with `RESOLVE_IN_ROOT`, `paths.rs`), so an
+  absolute link names the workload's file and the base root is out of
+  reach; what was resolved is opened with every link refused, so a link
+  swapped in after the check fails the operation. In the workspace the
+  agent writes as root and gives what it makes to `agent`; a path that
+  leads out of it (itself or through its links) is reached with the
+  `agent` account's permissions, on a thread of its own whose credentials
+  alone change. A write replaces the file atomically (temporary file,
+  fsync, rename), keeps its mode, checks `expectedSha`, and is journaled
+  under its key like a command (repeated key: the recorded result;
+  another request: `CONFLICT`; cut off before its result:
+  `COMPLETION_UNKNOWN`, never done again).
+- `services`, `portal` are answered `UNSUPPORTED` and not advertised
+  (K-5c); `install` never exists for keel.
   `snapshot_prepare` and `snapshot_done` are `UNIMPLEMENTED` (K-5f).
 
 ## Not yet (later K-5 rows)
 
 Generated files (`/etc/hosts`, `/etc/hostname`, sudoers, `/etc/cube/env`),
 the runner's CA in the bundle, the clock from PTP, hooks and `recover`
-output for `cube hooks` (K-5d); file operations (K-5b); services and the
+output for `cube hooks` (K-5d); services and the
 `cube` command (K-5c); templates (K-5e); `snapshot_prepare`/`snapshot_done`
 (K-5f). `ready` will
 include the generated files and
@@ -103,8 +119,11 @@ the CA once K-5d writes them.
   `cpr-reboot`, `-incoming defer`) with the runner connected before `cont`,
   each kept to the runner's connect rule, refused until `machine_setup`,
   ready from its `status`, and finding the command that ran at the save by
-  its key (`restore.restores`), and runs
-  the Workspace contract's exec part
+  its key (`restore.restores`), file operations over the channel (a write
+  kept across the boot and the restores; links that stay in the workload
+  root; `/proc`, `/sys`, `/dev` and `..` refused; `/etc` refused and
+  `/tmp`, `/home/agent` owned by `agent` out of the workspace), and runs
+  the Workspace contract (leases, files, commands)
   (`packages/server/test/keel-agent-contract-test.ts`) over the channel:
 
   ```sh

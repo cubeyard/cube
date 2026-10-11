@@ -1,15 +1,23 @@
 //! `OPERATIONS`: one guest request is one JSON header line and a raw body; the
 //! answer is one JSON header line and a raw body. Errors are answered as
 //! `{"error": {"code", "message"}}`, as cube-guest's `call` writes them.
-//! This agent takes `hello`, `exec`, `get` and `cancel` (masterplan K-5a);
-//! file operations, services and the portal come with K-5b and K-5c, and
-//! `install` never: keel's agent is replaced with a keel release.
+//! This agent takes `hello`, `exec`, `get` and `cancel` (masterplan K-5a)
+//! and `read`, `write` and `stat` (K-5b); services and the portal come with
+//! K-5c, and `install` never: keel's agent is replaced with a keel release.
 use serde_json::{Value, json};
 
 use crate::journal::{Answer, Fail, Journal, Limits, MAX_HEADER_BYTES, integer};
 
 /// What `hello` advertises: only what this agent implements.
-pub const CAPABILITIES: [&str; 3] = ["exec.start", "exec.cancel", "operation.get"];
+pub const CAPABILITIES: [&str; 7] = [
+    "exec.start",
+    "exec.cancel",
+    "operation.get",
+    "fs.read",
+    "fs.write",
+    "fs.stat",
+    "fs.absolute",
+];
 /// Every name cube-guest takes; the others are answered as unsupported.
 const KNOWN: [&str; 10] = [
     "hello", "exec", "get", "cancel", "read", "write", "stat", "services", "install", "portal",
@@ -49,7 +57,7 @@ pub fn call(
         if !KNOWN.contains(&op) {
             return Err(Fail::new("UNSUPPORTED", "unknown operation"));
         }
-        let (header, _body) = read_request(data)?;
+        let (header, body) = read_request(data)?;
         let journal =
             || journal.ok_or_else(|| Fail::new("UNAVAILABLE", "the machine is not ready"));
         match op {
@@ -57,6 +65,9 @@ pub fn call(
             "exec" => journal()?.exec(&header),
             "get" => journal()?.get(&header),
             "cancel" => journal()?.cancel(&header),
+            "read" => journal()?.read(&header),
+            "write" => journal()?.write(&header, body),
+            "stat" => journal()?.stat(&header),
             other => Err(Fail::new(
                 "UNSUPPORTED",
                 format!("{other} is not implemented by this cube-agent"),
@@ -127,6 +138,10 @@ mod tests {
         );
         assert_eq!(
             header(&call("read", b"{}\n", None, &hello))["error"]["code"],
+            "UNAVAILABLE"
+        );
+        assert_eq!(
+            header(&call("services", b"{}\n", None, &hello))["error"]["code"],
             "UNSUPPORTED"
         );
         assert_eq!(
