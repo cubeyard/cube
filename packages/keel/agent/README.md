@@ -17,10 +17,15 @@ cube-init (PID 1)
    │    ch>0   req guest{op,data} | machine_setup | snapshot_* → one ans
    ├─ machine_setup → /run/keel/{layers/N, rw, root, workload.mnt, setup.json}
    ├─ journal  /run/keel/rw/state/ops/<id>  (= /var/lib/cube/ops in the workload)
-   └─ supervisor thread (50 ms)
+   ├─ supervisor thread (50 ms)
+   ├─ services thread (200 ms)    /run/keel/rw/state/services/NAME.{json,log}
+   └─ cube socket                 /run/cube/agent.sock in the workload root
 /sys/fs/cgroup/cube-ops/<id>       one cgroup per operation
    └─ cube-agent wrap OPDIR         detached; reparented to cube-init
       └─ /bin/bash -c COMMAND       setns(workload.mnt), uid agent, cwd /workspace
+/sys/fs/cgroup/cube-services/NAME  one cgroup per service
+   └─ cube-agent service-run …      detached; copies the output to the log
+      └─ /bin/bash -c COMMAND       setns(workload.mnt), uid agent, PORT HOST CUBE_SERVICE
 ```
 
 ## What it does
@@ -85,25 +90,48 @@ cube-init (PID 1)
   under its key like a command (repeated key: the recorded result;
   another request: `CONFLICT`; cut off before its result:
   `COMPLETION_UNKNOWN`, never done again).
-- `services`, `portal` are answered `UNSUPPORTED` and not advertised
-  (K-5c); `install` never exists for keel.
+- **Services** (`services.list`, `portal.configure`): the workload's
+  `cube` command is this binary, bind-mounted read-only at
+  `/usr/local/bin/cube` (an empty file in `upper/` is its mount point).
+  It sends its arguments and directory to the agent over
+  `/run/cube/agent.sock` and prints what comes back; only the `agent`
+  account and root are served (`SO_PEERCRED`). `cube service start, open,
+  list, status, logs [-f], restart, stop` keep cube-guest's options,
+  texts and exit statuses and its registrations
+  (`/var/lib/cube/services/NAME.json`). A command service runs as `agent`
+  in the workload root in its own cgroup, with `PORT`, `HOST=0.0.0.0` and
+  `CUBE_SERVICE`; its main process is `cube-agent service-run`, which
+  copies the output into `NAME.log` (1 MiB, then one older `NAME.log.1`).
+  The agent starts it again 2 s after it fails, at most 5 starts in 60 s
+  (then `failed`), not after exit status 0 (systemd's `Restart=on-failure`,
+  `StartLimitBurst=5`), finds it again by its cgroup after an agent
+  restart, and starts every registered command again on a boot's first
+  `machine_setup`. `services` lists the registrations (with `probe`:
+  whether each listens) and `portal` keeps cubed's URL template or the
+  reason there is none (`/var/lib/cube/portal.json`). The address the
+  portal will reach is the machine's on its private link; until the
+  runner's network exists (B-4) that is 127.0.0.1, so "listens only on
+  127.0.0.1" is not caught yet. `cube hooks` comes with the hooks (K-5d).
+- `install` never exists for keel.
   `snapshot_prepare` and `snapshot_done` are `UNIMPLEMENTED` (K-5f).
 
 ## Not yet (later K-5 rows)
 
 Generated files (`/etc/hosts`, `/etc/hostname`, sudoers, `/etc/cube/env`),
 the runner's CA in the bundle, the clock from PTP, hooks and `recover`
-output for `cube hooks` (K-5d); services and the
-`cube` command (K-5c); templates (K-5e); `snapshot_prepare`/`snapshot_done`
+output for `cube hooks` (K-5d); templates (K-5e, which also leaves
+`/usr/local/bin/cube`'s mount point out of a template); `snapshot_prepare`/`snapshot_done`
 (K-5f). `ready` will
 include the generated files and
 the CA once K-5d writes them.
 
 ## Tests
 
-- `cargo test -p cube-agent`: unit tests, and `tests/journal.rs`, which runs
+- `cargo test -p cube-agent`: unit tests, `tests/journal.rs`, which runs
   the journal and the real wrapper on the host with process groups standing
-  in for cgroups (an ordinary user cannot create them). Offline.
+  in for cgroups (an ordinary user cannot create them), and
+  `tests/services.rs`, the same for services with the real `service-run`
+  wrapper and the `cube` socket. Offline.
 - `keel-agent-check` (`packages/keel/agent-check`): boots a disposable keel
   machine under QEMU (TCG, KVM or HVF), talks `DaemonFrame` to the agent,
   checks setup, readiness, the workload root, the journal, an agent restart

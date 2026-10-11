@@ -57,82 +57,10 @@ fn run(dir: &Path) -> io::Result<()> {
             launch["workspace"].as_str().unwrap_or("/workspace")
         ),
     };
-
-    // Everything the child needs, prepared before fork.
-    let namespace = match launch["namespace"].as_str() {
-        Some(path) => Some(fs::File::open(path)?),
-        None => None,
-    };
-    let account = launch["account"].as_object().map(|a| {
-        let ids = |value: &Value| value.as_u64().unwrap_or(65534) as u32;
-        let groups: Vec<libc::gid_t> = a
-            .get("groups")
-            .and_then(Value::as_array)
-            .map(|g| g.iter().map(ids).collect())
-            .unwrap_or_default();
-        (ids(&a["uid"]), ids(&a["gid"]), groups)
-    });
-    let env: Vec<CString> = launch["env"]
-        .as_object()
-        .map(|map| {
-            map.iter()
-                .map(|(k, v)| cstring(&format!("{k}={}", v.as_str().unwrap_or_default())))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut envp: Vec<*const libc::c_char> = env.iter().map(|c| c.as_ptr()).collect();
-    envp.push(std::ptr::null());
-    let bash = cstring("/bin/bash");
-    let argv_owned = [cstring("/bin/bash"), cstring("-c"), cstring(command)];
-    let mut argv: Vec<*const libc::c_char> = argv_owned.iter().map(|c| c.as_ptr()).collect();
-    argv.push(std::ptr::null());
-    let cwd_c = cstring(&cwd);
-    let null = fs::File::open("/dev/null")?;
-
-    let mut fds = [0; 2];
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let (reader, writer) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    let prepared = Prepared::new(&launch, cwd, command, &[])?;
+    let (reader, writer) = pipe()?;
     let mut output = fs::File::create(dir.join("output"))?;
-
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if pid == 0 {
-        unsafe {
-            libc::dup2(null.as_raw_fd(), 0);
-            libc::dup2(writer.as_raw_fd(), 1);
-            libc::dup2(writer.as_raw_fd(), 2);
-            let fail = |what: &str| -> ! {
-                let error = io::Error::last_os_error();
-                let message = format!("cube: cannot start the command: {what}: {error}\n");
-                libc::write(1, message.as_ptr().cast(), message.len());
-                libc::_exit(127);
-            };
-            if let Some(ns) = &namespace
-                && libc::setns(ns.as_raw_fd(), libc::CLONE_NEWNS) != 0
-            {
-                fail("entering the workload root");
-            }
-            if libc::chdir(cwd_c.as_ptr()) != 0 {
-                fail(&cwd);
-            }
-            if let Some((uid, gid, groups)) = &account
-                && (libc::setgroups(groups.len(), groups.as_ptr()) != 0
-                    || libc::setgid(*gid) != 0
-                    || libc::setuid(*uid) != 0)
-            {
-                fail("becoming agent");
-            }
-            libc::umask(0o022);
-            libc::execve(bash.as_ptr(), argv.as_ptr(), envp.as_ptr());
-            fail("/bin/bash");
-        }
-    }
-    drop(writer);
-    drop(namespace);
+    let pid = prepared.spawn(writer)?;
     let mut reader = fs::File::from(reader);
     let mut total = 0usize;
     let mut buffer = vec![0; 65536];
@@ -149,20 +77,151 @@ fn run(dir: &Path) -> io::Result<()> {
         }
         total += n;
     }
+    let status = wait(pid)?;
+    output.sync_all()?;
+    let (code, signal) = exit_json(status);
+    write_json(
+        &dir.join("wrapped.json"),
+        &json!({"exitCode": code, "signal": signal, "outputBytes": total}),
+    )
+}
+
+/// A pipe for a command's combined output (both ends close on exec).
+pub(crate) fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// Waits for `pid`; its wait status.
+pub(crate) fn wait(pid: libc::pid_t) -> io::Result<i32> {
     let mut status = 0;
     while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
         if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
             return Err(io::Error::last_os_error());
         }
     }
-    output.sync_all()?;
-    let (code, signal) = if libc::WIFEXITED(status) {
+    Ok(status)
+}
+
+/// `(exitCode, signal)` of a wait status, as `wrapped.json` says them.
+pub(crate) fn exit_json(status: i32) -> (Value, Value) {
+    if libc::WIFEXITED(status) {
         (json!(libc::WEXITSTATUS(status)), Value::Null)
     } else {
         (Value::Null, json!(libc::WTERMSIG(status)))
-    };
-    write_json(
-        &dir.join("wrapped.json"),
-        &json!({"exitCode": code, "signal": signal, "outputBytes": total}),
-    )
+    }
+}
+
+/// `/bin/bash -c COMMAND` as the workload's `agent` in the workload root,
+/// in `cwd` (a path in that root), with the launch's environment and
+/// `extra` on top: everything the child needs, prepared before the fork.
+pub(crate) struct Prepared {
+    namespace: Option<fs::File>,
+    account: Option<(u32, u32, Vec<libc::gid_t>)>,
+    _env: Vec<CString>,
+    envp: Vec<*const libc::c_char>,
+    _argv: [CString; 3],
+    argv: Vec<*const libc::c_char>,
+    bash: CString,
+    cwd: String,
+    cwd_c: CString,
+    null: fs::File,
+}
+
+impl Prepared {
+    pub(crate) fn new(
+        launch: &Value,
+        cwd: String,
+        command: &str,
+        extra: &[(String, String)],
+    ) -> io::Result<Self> {
+        let namespace = match launch["namespace"].as_str() {
+            Some(path) => Some(fs::File::open(path)?),
+            None => None,
+        };
+        let account = launch["account"].as_object().map(|a| {
+            let ids = |value: &Value| value.as_u64().unwrap_or(65534) as u32;
+            let groups: Vec<libc::gid_t> = a
+                .get("groups")
+                .and_then(Value::as_array)
+                .map(|g| g.iter().map(ids).collect())
+                .unwrap_or_default();
+            (ids(&a["uid"]), ids(&a["gid"]), groups)
+        });
+        let mut vars: std::collections::BTreeMap<String, String> = launch["env"]
+            .as_object()
+            .map(|map| {
+                map.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        vars.extend(extra.iter().cloned());
+        let env: Vec<CString> = vars
+            .iter()
+            .map(|(k, v)| cstring(&format!("{k}={v}")))
+            .collect();
+        let mut envp: Vec<*const libc::c_char> = env.iter().map(|c| c.as_ptr()).collect();
+        envp.push(std::ptr::null());
+        let argv_owned = [cstring("/bin/bash"), cstring("-c"), cstring(command)];
+        let mut argv: Vec<*const libc::c_char> = argv_owned.iter().map(|c| c.as_ptr()).collect();
+        argv.push(std::ptr::null());
+        Ok(Self {
+            namespace,
+            account,
+            _env: env,
+            envp,
+            _argv: argv_owned,
+            argv,
+            bash: cstring("/bin/bash"),
+            cwd_c: cstring(&cwd),
+            cwd,
+            null: fs::File::open("/dev/null")?,
+        })
+    }
+
+    /// Forks the command with stdin on /dev/null and stdout and stderr on
+    /// `output`; returns its pid. A child that cannot start says why on
+    /// `output` and exits 127.
+    pub(crate) fn spawn(self, output: OwnedFd) -> io::Result<libc::pid_t> {
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if pid == 0 {
+            unsafe {
+                libc::dup2(self.null.as_raw_fd(), 0);
+                libc::dup2(output.as_raw_fd(), 1);
+                libc::dup2(output.as_raw_fd(), 2);
+                let fail = |what: &str| -> ! {
+                    let error = io::Error::last_os_error();
+                    let message = format!("cube: cannot start the command: {what}: {error}\n");
+                    libc::write(1, message.as_ptr().cast(), message.len());
+                    libc::_exit(127);
+                };
+                if let Some(ns) = &self.namespace
+                    && libc::setns(ns.as_raw_fd(), libc::CLONE_NEWNS) != 0
+                {
+                    fail("entering the workload root");
+                }
+                if libc::chdir(self.cwd_c.as_ptr()) != 0 {
+                    fail(&self.cwd);
+                }
+                if let Some((uid, gid, groups)) = &self.account
+                    && (libc::setgroups(groups.len(), groups.as_ptr()) != 0
+                        || libc::setgid(*gid) != 0
+                        || libc::setuid(*uid) != 0)
+                {
+                    fail("becoming agent");
+                }
+                libc::umask(0o022);
+                libc::execve(self.bash.as_ptr(), self.argv.as_ptr(), self.envp.as_ptr());
+                fail("/bin/bash");
+            }
+        }
+        Ok(pid)
+    }
 }

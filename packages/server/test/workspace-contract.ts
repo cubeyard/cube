@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { workspaceRoute } from "../src/workspace-http.ts";
 import { settleOperation, WORKSPACE_CAPABILITIES, WorkspaceError, type Workspace, type WorkspaceLimits, type WorkspaceOwner } from "../src/workspace.ts";
+import type { GuestPortal, GuestService } from "../src/vm-workspace.ts";
 
 const code = (expected: string) => (error: unknown) => {
   assert.ok(error instanceof WorkspaceError, `expected WorkspaceError ${expected}, got ${String(error)}`);
@@ -178,6 +179,97 @@ async function execContract(workspace: Workspace, token: string, run: string, di
   const cancelled = await settleOperation(workspace, token, `${run}-cancel`, { intervalMs: 50 });
   assert.deepEqual(cancelled, { key: `${run}-cancel`, state: "failed", error: "CANCELLED", completionUnknown: false });
   await files.missing(`${dir}/not-cancelled`);
+}
+
+/** What cubed reads of a machine's services (VmWorkspace). */
+export interface ServiceGuest { services(probe?: boolean): Promise<GuestService[]>; configurePortal(portal: GuestPortal): Promise<void> }
+
+/** A web server in Perl (perl-base is in every Debian image): says where it
+ * listens and logs each request line. */
+const SERVICE_SCRIPT = `use IO::Socket::INET;
+$| = 1;
+$SIG{PIPE} = "IGNORE";
+my $s = IO::Socket::INET->new(LocalAddr => "$ENV{HOST}:$ENV{PORT}", Listen => 5, ReuseAddr => 1) or die "listen: $!\\n";
+print "listening on $ENV{PORT} as $ENV{CUBE_SERVICE}\\n";
+while (my $c = $s->accept) {
+  my $line = <$c>;
+  print "got $line" if defined $line;
+  while (my $h = <$c>) { last if $h =~ /^\\r?\\n$/ }
+  print $c "HTTP/1.0 200 OK\\r\\nContent-Type: text/plain\\r\\n\\r\\nhello from $ENV{CUBE_SERVICE}\\n";
+  close $c;
+}
+`;
+
+/** The service part: `cube service` as the agent runs it in the machine
+ * (start, logs, status, open, stop) and what cubed reads of it (`services`,
+ * `portal`). `cube` is how a command names the machine's cube command. */
+export async function workspaceServicesContract(name: string, workspace: Workspace, guest: ServiceGuest, owner: WorkspaceOwner,
+  options: { cube?: string } = {}): Promise<void> {
+  const cube = options.cube ?? "cube";
+  const run = `services-${randomUUID()}`;
+  const service = `c${run.slice(9, 17)}`;
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const template = "http://{name}-0123456789.100-64-0-1.sslip.io:7780/";
+  const token = (await workspace.lease({ owner })).token;
+  let step = 0;
+  const sh = async (command: string) => {
+    const key = `${run}-${step++}`;
+    await workspace.exec(token, key, { command, timeoutMs: 120000 });
+    const result = await settleOperation(workspace, token, key, { intervalMs: 100 });
+    assert.ok(result.state === "succeeded", `${command}: ${JSON.stringify(result)}`);
+    return { code: result.exitCode, output: Buffer.from(result.output).toString("utf8") };
+  };
+  const listed = async () => (await guest.services(true)).find(item => item.name === service);
+  try {
+    await workspace.writeFile(token, `${run}-script`, `${run}/server.pl`, Buffer.from(SERVICE_SCRIPT), { createParents: true });
+    await guest.configurePortal({ urlTemplate: template });
+    const url = template.replace("{name}", service);
+
+    const started = await sh(`${cube} service start ${service} --port ${port} --cwd ${run} --json -- perl server.pl`);
+    assert.equal(started.code, 0, started.output);
+    const view = JSON.parse(started.output.trim());
+    assert.equal(view.ok, true, started.output);
+    assert.equal(view.url, url);
+    assert.match(String(view.http), /^HTTP\/1\.0 200/);
+    assert.equal(view.kind, "command");
+    assert.deepEqual([view.name, view.port, view.command], [service, port, "perl server.pl"]);
+    const entry = await listed();
+    assert.ok(entry, `${name}: services lists ${service}`);
+    assert.deepEqual([entry.port, entry.kind, entry.state, entry.listening, entry.url], [port, "command", "active", true, url]);
+    const logs = await sh(`${cube} service logs ${service}`);
+    assert.equal(logs.code, 0, logs.output);
+    assert.ok(logs.output.includes(`listening on ${port} as ${service}`), logs.output);
+    assert.ok(logs.output.includes("got GET / HTTP/1.1"), logs.output);
+    const status = JSON.parse((await sh(`${cube} service status ${service} --json`)).output);
+    assert.deepEqual([status.state, status.listening], ["active", true]);
+    const taken = await sh(`${cube} service start other-${service} --port ${port} -- true`);
+    assert.equal(taken.code, 2);
+    assert.ok(taken.output.includes(`already service ${service}`), taken.output);
+
+    // A server cube service does not run: registered, not healthy, no logs here.
+    const opened = await sh(`${cube} service open x${service} --port ${port + 1} --wait 0 --json`);
+    assert.equal(opened.code, 1, opened.output);
+    assert.deepEqual([JSON.parse(opened.output).kind, JSON.parse(opened.output).ok], ["external", false]);
+    assert.equal((await guest.services()).find(item => item.name === `x${service}`)?.kind, "external");
+    assert.equal((await sh(`${cube} service logs x${service}`)).code, 2);
+    assert.equal((await sh(`${cube} service stop x${service}`)).output.trim(), `service x${service} stopped`);
+
+    // Without a portal, a service's URL says why.
+    await guest.configurePortal({ reason: "this cube installation has no portal" });
+    assert.equal((await listed())?.url, null);
+    assert.ok((await sh(`${cube} service status ${service}`)).output.includes("url: none (this cube installation has no portal)"));
+    await assert.rejects(guest.configurePortal({ urlTemplate: "http://evil/{name}" }), code("INVALID_REQUEST"));
+
+    const stopped = await sh(`${cube} service stop ${service}`);
+    assert.deepEqual([stopped.code, stopped.output.trim()], [0, `service ${service} stopped`]);
+    assert.equal(await listed(), undefined);
+    const closed = await sh(`for i in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/${port}) 2>/dev/null || { echo closed; exit 0; }; sleep 0.1; done; echo open`);
+    assert.equal(closed.output.trim(), "closed", "a stopped service no longer listens");
+    assert.equal((await sh(`${cube} service stop ${service}`)).output.trim(), `no service ${service}`);
+  } finally {
+    await workspace.release(token);
+  }
+  console.log(`ok: services contract (${name}): start, services, logs, status, a taken port, open, portal, stop`);
 }
 
 /** A bare HTTP server over the workspace routes, as cubed mounts them. */

@@ -2,7 +2,11 @@
 //! `cube-agent wrap OPDIR`    an operation's main process (the agent starts it)
 //! `cube-agent hold-ns ROOT`  holds the workload's mount namespace while the
 //!                            agent binds it (the agent starts it)
+//! `cube-agent service-run REGISTRY RUN NAME`
+//!                            a service's main process (the agent starts it)
 //! `cube-agent --version`
+//! `cube ARGS`                the workload's `cube` command (this binary,
+//!                            bind-mounted as /usr/local/bin/cube)
 #[cfg(not(target_os = "linux"))]
 fn main() -> std::process::ExitCode {
     eprintln!("cube-agent runs in a keel machine (Linux)");
@@ -13,11 +17,16 @@ fn main() -> std::process::ExitCode {
 use std::{path::Path, process::ExitCode};
 
 #[cfg(target_os = "linux")]
-use cube_agent::{agent::Agent, channel, setup, wrap};
+use cube_agent::{agent::Agent, channel, cli, services, setup, wrap};
 
 #[cfg(target_os = "linux")]
 fn main() -> ExitCode {
+    let invoked = std::env::args().next().unwrap_or_default();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if Path::new(&invoked).file_name().and_then(|n| n.to_str()) == Some("cube") {
+        let code = cli::client(args, Path::new(cli::SOCKET));
+        return ExitCode::from(code.clamp(0, 255) as u8);
+    }
     let code = match args
         .iter()
         .map(String::as_str)
@@ -27,12 +36,17 @@ fn main() -> ExitCode {
         [] => daemon(),
         ["wrap", dir] => wrap::main(Path::new(dir)),
         ["hold-ns", root] => setup::hold_namespace(root),
+        ["service-run", registry, run, name] => {
+            services::service_run(Path::new(registry), Path::new(run), name)
+        }
         ["--version"] => {
             println!("cube-agent {}", cube_agent::agent::VERSION);
             0
         }
         _ => {
-            eprintln!("usage: cube-agent | wrap OPDIR | hold-ns ROOT | --version");
+            eprintln!(
+                "usage: cube-agent | wrap OPDIR | hold-ns ROOT | service-run REGISTRY RUN NAME | --version"
+            );
             2
         }
     };

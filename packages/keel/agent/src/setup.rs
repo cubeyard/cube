@@ -556,8 +556,71 @@ fn assemble(layers: &[proto::Layer]) -> Result<bool, Refusal> {
         let dev = format!("{ROOT}/dev");
         ok(&dev, fs::create_dir_all(&dev))?;
         workload_dev(&dev)?;
+        if let Err(error) = bind_cli(Path::new(ROOT)) {
+            eprintln!("cube-agent: no cube command in the workload: {error}");
+        }
     }
     Ok(formatted)
+}
+
+/// Where the workload finds the `cube` command.
+pub const CLI: &str = "usr/local/bin/cube";
+
+/// The agent's own binary, read-only, as `/usr/local/bin/cube` in the
+/// workload root. The path is resolved inside the root and opened with no
+/// link on the way, so an image's link never puts the mount elsewhere; an
+/// empty file is made in `upper/` as the mount point (template publishing
+/// leaves it out, K-5e).
+pub fn bind_cli(root: &Path) -> io::Result<()> {
+    use crate::paths::{open_resolved, resolve_in_root};
+    let root_dir = fs::File::open(root)?;
+    let components = resolve_in_root(&root_dir, CLI)?;
+    for depth in 1..components.len() {
+        match open_resolved(
+            &root_dir,
+            &components[..depth],
+            libc::O_PATH | libc::O_DIRECTORY,
+            0,
+        ) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let parent = open_resolved(
+                    &root_dir,
+                    &components[..depth - 1],
+                    libc::O_PATH | libc::O_DIRECTORY,
+                    0,
+                )?;
+                let name = c(&components[depth - 1]);
+                if unsafe {
+                    libc::mkdirat(
+                        std::os::fd::AsRawFd::as_raw_fd(&parent),
+                        name.as_ptr(),
+                        0o755,
+                    )
+                } != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let target = open_resolved(
+        &root_dir,
+        &components,
+        libc::O_WRONLY | libc::O_CREAT,
+        0o755,
+    )?;
+    let at = format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&target));
+    let exe = std::env::current_exe()?;
+    mount(&exe.to_string_lossy(), &at, None, libc::MS_BIND, None)?;
+    mount(
+        "none",
+        &root.join(components.join("/")).to_string_lossy(),
+        None,
+        libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | libc::MS_NODEV | libc::MS_NOSUID,
+        None,
+    )
 }
 
 /// The workload's mount namespace: `cube-agent hold-ns` pivots into the

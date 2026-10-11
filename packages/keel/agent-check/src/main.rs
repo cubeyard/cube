@@ -333,6 +333,25 @@ async fn close(ch: Arc<Channel>) -> Result<()> {
 }
 
 const TIMEOUT: Duration = Duration::from_secs(120);
+/// A web server in Perl (perl-base is in every Debian image), as the
+/// contract's: says where it listens and logs each request line.
+const SERVICE_SCRIPT: &str = r#"use IO::Socket::INET;
+$| = 1;
+$SIG{PIPE} = "IGNORE";
+my $s = IO::Socket::INET->new(LocalAddr => "$ENV{HOST}:$ENV{PORT}", Listen => 5, ReuseAddr => 1) or die "listen: $!\n";
+print "listening on $ENV{PORT} as $ENV{CUBE_SERVICE}\n";
+while (my $c = $s->accept) {
+  my $line = <$c>;
+  print "got $line" if defined $line;
+  while (my $h = <$c>) { last if $h =~ /^\r?\n$/ }
+  print $c "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nhello from $ENV{CUBE_SERVICE}\n";
+  close $c;
+}
+"#;
+/// The pid of the `keep` service's server (empty when none runs).
+const SERVICE_PID: &str = "pgrep -u agent -f '^perl server.pl' | head -1";
+/// Waits (20 s) until the `keep` service listens.
+const WAIT_LISTENING: &str = "for i in $(seq 100); do cube service status keep --json 2>/dev/null | grep -q '\"listening\":true' && break; sleep 0.2; done";
 
 impl Channel {
     async fn open(path: &Path) -> Result<Arc<Self>> {
@@ -996,8 +1015,10 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
                     "fs.write",
                     "fs.stat",
                     "fs.absolute",
+                    "services.list",
+                    "portal.configure",
                 ],
-            "hello advertises only exec, cancel, get and the file operations",
+            "hello advertises exec, cancel, get, the file operations, services and the portal (no install)",
             format!("{:?}", hello.capabilities),
         )?;
         let limits = hello.limits.unwrap_or_default();
@@ -1126,6 +1147,8 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
     let first_ready_ms;
     let epoch: i64;
     let image_hello_ms;
+    // What the first boot saw of the `keep` service (checked after the second).
+    let (keep_started, keep_before, keep_after): (String, String, String);
     {
         let mut m = lab.start(&dir, &image_disk)?;
         let ch = Channel::open(&m.ctl).await?;
@@ -1271,7 +1294,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             serving.abort();
             checks.ok(
                 status.success(),
-                "the Workspace contract (leases, files, commands) passes over DaemonFrame",
+                "the Workspace contract (leases, files, commands, services) passes over DaemonFrame",
                 status,
             )?;
         }
@@ -1389,6 +1412,16 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             &memory["result"]["memory"],
         )?;
 
+        // K-5c: a service started with `cube` runs across the agent's restart.
+        ch.run(
+            "svc-script",
+            &format!("mkdir -p svc && cat > svc/server.pl <<'EOF'\n{SERVICE_SCRIPT}EOF\n"),
+            epoch,
+        )
+        .await?;
+        (_, keep_started) = ch.run("svc-keep", "cube service start keep --port 8101 --cwd svc --json -- perl server.pl; echo \"exit=$?\"", epoch).await?;
+        (_, keep_before) = ch.run("svc-keep-pid", SERVICE_PID, epoch).await?;
+
         // The agent dies under a running command; cube-init starts it again,
         // it finds the command by its cgroup and records it once.
         let _ = ch.guest("exec", json!({"id": "survivor", "epoch": epoch, "command": "sleep 4; echo survived >> survivor; printf done", "timeoutMs": 60000})).await?;
@@ -1403,6 +1436,13 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             "after the agent restart the same setup is done and the machine ready again",
             format!("{done:?}"),
         )?;
+        (_, keep_after) = ch
+            .run(
+                "svc-keep-after",
+                &format!("{SERVICE_PID}; cube service status keep --json"),
+                epoch,
+            )
+            .await?;
         let (state, body) = ch.settle("survivor").await?;
         let (_, survivor) = ch.run("survivor-check", "cat survivor", epoch).await?;
         checks.ok(
@@ -1505,6 +1545,9 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             "a result recorded before the boot is still there",
             &e1,
         )?;
+
+        // After the idle sample above: `cube` calls cost the agent CPU.
+        let (_, keep_boot) = ch.run("svc-boot", &format!("{WAIT_LISTENING}; {SERVICE_PID}; cube service status keep --json; cube service logs keep -n 50"), epoch).await?;
 
         // The runner closes its socket and connects again 2 s later.
         let (before, _) = ch.agent_cpu("cpu-connected", epoch).await?;
@@ -1879,6 +1922,121 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
                 && owners == "absent\nagent\nagent\nagent\nagent\n",
             "out of the workspace file operations have the agent account's permissions: /etc is refused (also through a workspace link) and nothing is written; what they make in /tmp and /home/agent is agent's",
             format!("{etc} | {etc_link} | {tmp} | {home} | {owners:?}"),
+        )?;
+
+        // Services (K-5c): `cube` in the workload, over the agent socket.
+        let (_, keep_restored) = ch
+            .run(
+                "svc-restored",
+                &format!("{SERVICE_PID}; cube service status keep --json"),
+                epoch,
+            )
+            .await?;
+        let (hello, _) = ch.guest("hello", json!({})).await?;
+        let (_, cli) = ch.run("svc-cli", "{ stat -c '%a %U' /usr/local/bin/cube; sha256sum < /usr/local/bin/cube | cut -c1-64; sudo -n touch /usr/local/bin/cube 2>&1 | grep -o 'Read-only file system'; sudo -n cube service list --json >/dev/null; echo root=$?; sudo -n -u nobody cube service list; echo nobody=$?; } 2>&1 | grep -v 'unable to resolve host'", epoch).await?;
+        let pid = |output: &str| output.lines().next().unwrap_or_default().trim().to_string();
+        let first_pid = pid(&keep_before);
+        let (_, environ) = ch.run("svc-environ", &format!("stat -c %U /proc/{p}; cat /proc/{p}/cgroup; sudo -n cat /proc/{p}/environ 2>/dev/null | tr '\\0' '\\n' | grep -E '^(PORT|HOST|CUBE_SERVICE)=' | sort", p = pid(&keep_restored)), epoch).await?;
+        let status_of = |output: &str| -> Value {
+            output
+                .lines()
+                .find(|line| line.starts_with('{'))
+                .and_then(|line| serde_json::from_str(line).ok())
+                .unwrap_or(Value::Null)
+        };
+        let started = status_of(&keep_started);
+        checks.ok(
+            cli.lines().collect::<Vec<_>>()
+                == [
+                    "755 root",
+                    hello["build"].as_str().unwrap_or("?"),
+                    "Read-only file system",
+                    "root=0",
+                    "cube: only the agent account and root may use cube service",
+                    "nobody=1",
+                ],
+            "cube in the workload is the agent's own binary, read-only; the agent account and root may use it, other accounts are refused",
+            &cli,
+        )?;
+        let after = status_of(&keep_after);
+        checks.ok(
+            started["ok"] == true
+                && keep_started.ends_with("exit=0\n")
+                && !first_pid.is_empty()
+                && pid(&keep_after) == first_pid
+                && after["state"] == "active"
+                && after["listening"] == true
+                && after["restarts"] == 0
+                && environ == "agent\n0::/cube-services/keep\nCUBE_SERVICE=keep\nHOST=0.0.0.0\nPORT=8101\n",
+            "a service started with cube runs as agent in its own cgroup with PORT, HOST and CUBE_SERVICE; it runs on across an agent restart (found again, not started twice) and cube answers again",
+            format!("{keep_started} | {keep_before} | {keep_after} | {environ:?}"),
+        )?;
+        let boot = status_of(&keep_boot);
+        let restored = status_of(&keep_restored);
+        checks.ok(
+            boot["state"] == "active"
+                && boot["listening"] == true
+                && boot["restarts"] == 0
+                && pid(&keep_boot) != first_pid
+                && keep_boot.matches("listening on 8101 as keep").count() == 2
+                && pid(&keep_restored) == pid(&keep_boot)
+                && restored["listening"] == true,
+            "a registered service starts again after the boot once machine_setup has assembled the root, and runs on across the restores; its log is kept across the boot",
+            format!("{keep_boot} | {keep_restored}"),
+        )?;
+        let (_, restarted) = ch.run("svc-kill", &format!("sudo -n kill -9 {p} 2>/dev/null; for i in $(seq 100); do sleep 0.2; s=$(cube service status keep --json); case $s in *'\"restarts\":1'*) case $s in *'\"listening\":true'*) break;; esac;; esac; done; {SERVICE_PID}; cube service status keep --json", p = pid(&keep_restored)), epoch).await?;
+        let (_, flaky) = ch.run("svc-flaky", "cube service start flaky --port 8102 --wait 2 -- 'echo flaky; exit 3'; echo exit=$?; for i in $(seq 150); do sleep 0.2; cube service status flaky --json | grep -q '\"state\":\"failed\"' && break; done; cube service status flaky --json", epoch).await?;
+        let (_, once) = ch.run("svc-once", "cube service start once --port 8103 --wait 5 -- 'echo once'; echo exit=$?; sleep 3; cube service status once --json", epoch).await?;
+        let killed = status_of(&restarted);
+        let flaky_status = status_of(flaky.lines().last().unwrap_or_default());
+        let once_status = status_of(once.lines().last().unwrap_or_default());
+        checks.ok(
+            killed["restarts"] == 1
+                && killed["listening"] == true
+                && !pid(&restarted).is_empty()
+                && pid(&restarted) != pid(&keep_restored)
+                && flaky.contains("service flaky is registered but not healthy")
+                && flaky.contains("exit=1")
+                && flaky_status["state"] == "failed"
+                && flaky_status["restarts"] == 4
+                && once.contains("the service stopped (dead)")
+                && once_status["state"] == "inactive"
+                && once_status["restarts"] == 0,
+            "a killed service is started again (1 restart, a new process); one that keeps failing stops after 5 starts in a minute (failed, 4 restarts); one that exits 0 is not restarted",
+            format!("{restarted} | {flaky} | {once}"),
+        )?;
+        let (portal, _) = ch
+            .guest(
+                "portal",
+                json!({"portal": {"urlTemplate": "http://{name}-0123456789.keel-check.example/"}}),
+            )
+            .await?;
+        let (listed, _) = ch.guest("services", json!({"probe": true})).await?;
+        let (_, stopped) = ch
+            .run(
+                "svc-stop",
+                "for s in keep flaky once; do cube service stop $s; done; cube service list",
+                epoch,
+            )
+            .await?;
+        let (empty, _) = ch.guest("services", json!({})).await?;
+        let keep = listed["services"]
+            .as_array()
+            .and_then(|all| all.iter().find(|s| s["name"] == "keep"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        checks.ok(
+            portal == json!({"urlTemplate": "http://{name}-0123456789.keel-check.example/"})
+                && keep["url"] == "http://keep-0123456789.keel-check.example/"
+                && keep["state"] == "active"
+                && keep["listening"] == true
+                && keep["command"] == "perl server.pl"
+                && keep["cwd"] == "/workspace/svc"
+                && listed["services"].as_array().map(Vec::len) == Some(3)
+                && stopped == "service keep stopped\nservice flaky stopped\nservice once stopped\nno services\n"
+                && empty == json!({"services": []}),
+            "the services and portal operations: the registered services with their state, whether they listen and their URL from the portal settings; cube service stop removes them",
+            format!("{portal} | {listed} | {stopped:?} | {empty}"),
         )?;
 
         timings

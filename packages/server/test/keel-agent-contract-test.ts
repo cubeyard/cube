@@ -1,4 +1,4 @@
-/** The Workspace contract (leases, files, commands) against keel's
+/** The Workspace contract (leases, files, commands, services) against keel's
  * cube-agent in a real keel machine, over protocol 4's DaemonFrame. keel-agent-check
  * (packages/keel/agent-check) boots the machine, applies its setup and runs
  * this file with CUBE_AGENT_BRIDGE: a Unix socket where each connection is
@@ -14,7 +14,7 @@ import path from "node:path";
 import { decodeGuestAnswer, encodeGuestRequest, GuestTransportError, type GuestAnswer, type GuestCallOptions, type GuestOp, type GuestTransport } from "../src/guest-ssh.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
-import { workspaceContract } from "./workspace-contract.ts";
+import { workspaceContract, workspaceServicesContract } from "./workspace-contract.ts";
 
 class BridgeGuestTransport implements GuestTransport {
   readonly socket: string;
@@ -50,6 +50,7 @@ const store = new LeaseStore(leases);
 try {
   const workspace = new VmWorkspace({ guest: new BridgeGuestTransport(socket), leases: store, owner: "pi", binding: `keel-agent-check:${process.pid}`, retryMs: 2000 });
   await workspaceContract("VmWorkspace -> DaemonFrame -> cube-agent", workspace, "pi");
+  await workspaceServicesContract("VmWorkspace -> DaemonFrame -> cube-agent", workspace, workspace, "pi");
 } finally {
   store.close();
   fs.rmSync(leases, { recursive: true, force: true });

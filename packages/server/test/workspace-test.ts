@@ -14,7 +14,7 @@ import { LeaseStore } from "../src/workspace-lease.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
 import type { GuestTransport } from "../src/guest-ssh.ts";
 import { LocalGuestTransport } from "./local-guest.ts";
-import { serveWorkspace, workspaceContract } from "./workspace-contract.ts";
+import { serveWorkspace, workspaceContract, workspaceServicesContract } from "./workspace-contract.ts";
 
 if (process.argv[2] === "hold") {
   // Child: hold a lease until killed.
@@ -35,6 +35,8 @@ if (process.argv[2] === "hold") {
   };
   try {
     await workspaceContract("VmWorkspace", open("direct").workspace, "pi");
+    const local = open("services");
+    await workspaceServicesContract("VmWorkspace", local.workspace, local.workspace, "pi", { cube: local.guest.cubeCommand() });
     const served = await serveWorkspace(open("http", "claude-code").workspace);
     try { await workspaceContract("HttpWorkspace -> routes -> VmWorkspace", new HttpWorkspace({ url: served.url }), "claude-code"); }
     finally { await served.close(); }
