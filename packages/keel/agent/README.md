@@ -79,7 +79,7 @@ Generated files (`/etc/hosts`, `/etc/hostname`, sudoers, `/etc/cube/env`),
 the runner's CA in the bundle, the clock from PTP, hooks and `recover`
 output for `cube hooks` (K-5d); file operations (K-5b); services and the
 `cube` command (K-5c); templates (K-5e); `snapshot_prepare`/`snapshot_done`
-and a driver check of the reset after a restore (K-5f). `ready` will
+(K-5f). `ready` will
 include the generated files and
 the CA once K-5d writes them.
 
@@ -96,7 +96,14 @@ the CA once K-5d writes them.
   channels, and the agent's CPU time from `/proc` while it waits), ten
   immediate reconnects, each recovered by the reset above when the plain
   `hello` does not come (`results.json` `idle.immediateReconnect` counts
-  both; the plain count is information only), and runs
+  both; the plain count is information only), a reset sent on purpose
+  right after a `hello` so that the next `hello` comes while
+  `machine_setup` waits (`restore.lateHello`), three restores into a new
+  QEMU (`stop`, `migrate` to `file:` with `mapped-ram` in mode
+  `cpr-reboot`, `-incoming defer`) with the runner connected before `cont`,
+  each kept to the runner's connect rule, refused until `machine_setup`,
+  ready from its `status`, and finding the command that ran at the save by
+  its key (`restore.restores`), and runs
   the Workspace contract's exec part
   (`packages/server/test/keel-agent-contract-test.ts`) over the channel:
 
@@ -111,6 +118,11 @@ the CA once K-5d writes them.
     --mkfs /usr/bin/mkfs.erofs --tar /var/tmp/kac/image-x86_64.tar --out /var/tmp/kac/x86_64-tcg \
     --arch x86_64 --accel tcg --contract "node packages/server/test/keel-agent-contract-test.ts"
   ```
+
+  `--control reconnect|late-hello|restore` (`--reset off` is `reconnect`)
+  leaves the reset out of one of those three places, a negative control
+  expected to fail at that place's check; a failed run writes no
+  `results.json`.
 
   `test-image.sh` needs Docker (and binfmt for the other architecture); it
   builds Debian trixie with sudo, git, gh and curl and passwordless sudo for
