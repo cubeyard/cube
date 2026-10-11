@@ -212,6 +212,10 @@ async fn handle(agent: &Arc<Agent>, request: proto::DaemonRequest) -> (AnswerKin
             Ok(()) => (AnswerKind::Done(proto::Empty {}), true),
             Err(error) => (AnswerKind::Error(error), true),
         },
+        Some(Op::TemplatePublish(_)) => match agent.template_publish().await {
+            Ok(()) => (AnswerKind::Done(proto::Empty {}), true),
+            Err(error) => (AnswerKind::Error(error), true),
+        },
         Some(Op::SnapshotPrepare(_) | Op::SnapshotDone(_)) => (
             AnswerKind::Error(refuse(
                 Code::Unimplemented,

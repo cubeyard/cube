@@ -100,4 +100,5 @@ jobs:
           sudo env "PATH=$PATH" "HOME=$HOME" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
             "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" CUBE_AGENT_ROOT_TESTS=1 \
             cargo test --locked --offline -p cube-agent --lib --target-dir target/as-root -- \
-            out_of_the_workspace_the_agent_account_acts hooks_are_read_as_the_caller
+            out_of_the_workspace_the_agent_account_acts hooks_are_read_as_the_caller \
+            whiteouts_and_opaque_directories_hide_lower_files

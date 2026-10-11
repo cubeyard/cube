@@ -182,6 +182,8 @@ pub struct Services {
     units: Mutex<BTreeMap<String, Unit>>,
     /// Where the portal reaches services; None: found from the machine's routes.
     host: Option<String>,
+    /// Template publishing took the machine: nothing is started any more.
+    halted: std::sync::atomic::AtomicBool,
 }
 
 impl Services {
@@ -202,6 +204,7 @@ impl Services {
             exe,
             units: Mutex::new(BTreeMap::new()),
             host,
+            halted: Default::default(),
         });
         if services.launch.lock().unwrap().is_some() {
             services.adopt();
@@ -305,6 +308,9 @@ impl Services {
     /// failed, started again after the delay unless it hit the limit.
     pub fn tick(&self) {
         let mut units = self.units.lock().unwrap();
+        if self.halted.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         let names: Vec<String> = units.keys().cloned().collect();
         for name in names {
             let unit = units.get_mut(&name).unwrap();
@@ -399,6 +405,12 @@ impl Services {
     /// `restart` do: the old process goes, the restart count and the limit
     /// start over.
     pub fn start(&self, name: &str) -> Result<(), Fail> {
+        if self.halted.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Fail::new(
+                "IO_ERROR",
+                "this machine is being published as a template",
+            ));
+        }
         if self.launch.lock().unwrap().is_none() {
             return Err(Fail::new("IO_ERROR", "the workload root is not assembled"));
         }
@@ -415,6 +427,18 @@ impl Services {
             ));
         }
         Ok(())
+    }
+
+    /// Template publishing: the supervisor starts nothing again and every
+    /// service's processes are killed (their registrations stay in state/,
+    /// which no template holds).
+    pub fn halt(&self) {
+        let mut units = self.units.lock().unwrap();
+        self.halted.store(true, std::sync::atomic::Ordering::SeqCst);
+        for name in units.keys().cloned().collect::<Vec<_>>() {
+            self.kill(&name);
+        }
+        units.clear();
     }
 
     /// Stops a service and forgets its process (not its registration).

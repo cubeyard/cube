@@ -19,6 +19,7 @@ pub mod ops;
 pub mod paths;
 pub mod services;
 pub mod setup;
+pub mod template;
 pub mod wrap;
 
 /// The PATH commands get, and where the workload's tools are looked for.

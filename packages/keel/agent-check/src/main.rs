@@ -6,16 +6,22 @@
 //! (packages/server/test/keel-agent-contract-test.ts) and runs it.
 //!
 //!   keel-agent-check --qemu PATH --qemu-img PATH --kernel PATH --base PATH \
-//!     --mkfs PATH --tar IMAGE.tar --out DIR [--arch x86_64|arm64] \
+//!     --mkfs PATH --fsck PATH --tar IMAGE.tar --out DIR [--arch x86_64|arm64] \
 //!     [--accel tcg|kvm|hvf] [--contract COMMAND] [--smp 2] [--memory 1024] \
-//!     [--control reconnect|late-hello|restore]
+//!     [--control reconnect|late-hello|restore|clock|seal]
 //!
 //! `--control` runs one negative control, expected to fail at its check:
 //! `reconnect` (also `--reset off`): the immediate reconnects wait for the
 //! plain `hello` only, without the reset on channel 0. `late-hello`: the
 //! forced late `hello` is not forced (no reset before the setup).
 //! `restore`: after each restore the runner waits for the plain `hello`
-//! only.
+//! only. `clock`: the machine has no virtio-rtc. `seal`: the build machine's
+//! setup leaves the runner's CA (DER) in a file, so publishing is refused.
+//!
+//! Last, a build machine with a template disk publishes its `upper/` as a
+//! template layer (`template_publish`); `fsck.erofs` (`--fsck`) checks and
+//! extracts it here, the driver looks for anything of cube's in it, and a
+//! new machine boots with it as its topmost layer.
 //!
 //! QEMU and every tool are given by path, never searched for. The driver is
 //! not a runner: no network, no secrets, one machine at a time. It writes
@@ -55,6 +61,7 @@ struct Options {
     kernel: PathBuf,
     base: PathBuf,
     mkfs: PathBuf,
+    fsck: PathBuf,
     tar: PathBuf,
     out: PathBuf,
     arch: String,
@@ -73,6 +80,7 @@ enum Control {
     LateHello,
     Restore,
     Clock,
+    Seal,
 }
 
 fn options() -> Result<Options> {
@@ -125,8 +133,9 @@ fn options() -> Result<Options> {
         ("on", Some("late-hello")) => Some(Control::LateHello),
         ("on", Some("restore")) => Some(Control::Restore),
         ("on", Some("clock")) => Some(Control::Clock),
+        ("on", Some("seal")) => Some(Control::Seal),
         _ => bail!(
-            "--control is reconnect, late-hello, restore or clock (and --reset off is reconnect)"
+            "--control is reconnect, late-hello, restore, clock or seal (and --reset off is reconnect)"
         ),
     };
     Ok(Options {
@@ -136,6 +145,7 @@ fn options() -> Result<Options> {
         kernel: path("kernel")?,
         base: path("base")?,
         mkfs: path("mkfs")?,
+        fsck: path("fsck")?,
         tar: path("tar")?,
         out: fs::canonicalize(&out)?,
         arch,
@@ -1144,8 +1154,8 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         let status = ch.info("status", TIMEOUT).await?;
         checks.ok(
             !status.ready
-                && status.reason == "the image lacks bash, sudo, flock, git, gh, curl, a CA bundle",
-            "an image without cube's tools is not ready, and status says what it lacks",
+                && status.reason == "the image lacks bash, sudo, flock, git, gh, curl, a CA bundle, a place for /etc/sudoers.d/cube",
+            "an image without cube's tools is not ready, and status says what it lacks (the tools, a CA bundle, a place for a file cube binds)",
             &status.reason,
         )?;
         let refused = ch
@@ -2269,6 +2279,16 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         quit(&mut m).await?;
     }
 
+    let template = template_checks(
+        &lab,
+        &mut checks,
+        &image,
+        &image_disk,
+        &image_layers,
+        documents,
+    )
+    .await?;
+
     let results = json!({
         "qemu": {"path": lab.o.qemu, "version": version, "machine": machine_type, "accel": lab.o.accel, "smp": lab.o.smp, "memory": lab.o.memory},
         "arch": lab.o.arch,
@@ -2279,6 +2299,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         "idle": idle,
         "restore": restore,
         "clock": clock,
+        "template": template,
         "timings": timings,
     });
     fs::write(
@@ -2296,6 +2317,361 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         serde_json::to_string(&timings)?
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------- templates
+
+/// The build machine's setup (as `agent`, in /workspace): work a template
+/// keeps (a file with its time, a deleted image file, a directory made
+/// again, a group) and what cube's scrub must take out (the runner's CA as
+/// update-ca-certificates spreads it and in a project's copy of the bundle,
+/// a shell history, hook logs, an ssh host key, a machine id).
+const BUILD_SETUP: &str = r#"set -e
+mkdir -p app && printf built > app/out.txt && touch -d @1700000000 app/out.txt
+test -f /etc/issue && sudo rm /etc/issue
+test -n "$(ls /etc/apt/apt.conf.d)" && sudo rm -rf /etc/apt/apt.conf.d && sudo mkdir /etc/apt/apt.conf.d
+echo mine | sudo tee /etc/apt/apt.conf.d/only >/dev/null
+sudo update-ca-certificates >/dev/null 2>&1
+test -L "/etc/ssl/certs/$(openssl x509 -hash -noout -in /usr/local/share/ca-certificates/cube-runner.crt 2>/dev/null || echo none).0" || ls /etc/ssl/certs | grep -q cube-runner
+sudo groupadd -g 1500 project
+cp "$SSL_CERT_FILE" app/bundle-copy.pem
+echo ls > ~/.bash_history
+mkdir -p ~/.cache/cube && echo 'token=cube_ph_github_keelcheck' > ~/.cache/cube/resume.log
+sudo mkdir -p /etc/ssh && echo key | sudo tee /etc/ssh/ssh_host_ed25519_key >/dev/null
+echo 0123456789abcdef | sudo tee /etc/machine-id >/dev/null
+mkdir -p svc
+echo setup-done
+"#;
+
+/// What must never be in a published template, below its root.
+const NEVER_IN_A_TEMPLATE: [&str; 11] = [
+    "etc/hosts",
+    "etc/hostname",
+    "etc/resolv.conf",
+    "etc/sudoers.d/cube",
+    "usr/local/bin/cube",
+    "etc/cube",
+    "var/lib/cube",
+    "home/agent/.bash_history",
+    "home/agent/.cache/cube",
+    "etc/ssh/ssh_host_ed25519_key",
+    "usr/local/share/ca-certificates/cube-runner.crt",
+];
+
+const MARKER: &str = "# cube: begin (keel writes this block on every machine_setup)";
+
+/// The DER of TEST_CA.
+fn test_ca_der() -> Vec<u8> {
+    use base64::Engine;
+    let body: String = TEST_CA
+        .lines()
+        .filter(|line| !line.starts_with("-----"))
+        .collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .expect("TEST_CA is PEM")
+}
+
+/// The EROFS superblock's image size on `disk`, or None.
+fn erofs_bytes(disk: &Path) -> Result<Option<u64>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(disk)?;
+    let mut sb = [0u8; 128];
+    file.seek(SeekFrom::Start(1024))?;
+    file.read_exact(&mut sb)?;
+    if sb[..4] != 0xE0F5E1E2u32.to_le_bytes() {
+        return Ok(None);
+    }
+    let blocks = u32::from_le_bytes(sb[36..40].try_into().unwrap());
+    Ok(Some(u64::from(blocks) << sb[12]))
+}
+
+/// Everything of cube's found in an extracted template at `root`: files
+/// that hold a marker line, the CA's DER or the start of its base64; files
+/// and links named for the runner's CA; the paths on NEVER_IN_A_TEMPLATE;
+/// `agent` lines in the account files; a machine id. Also how many files it
+/// read, so an empty extraction cannot pass.
+fn template_findings(root: &Path, der: &[u8]) -> Result<(Vec<String>, usize)> {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&der[..der.len().min(48)]);
+    let needles: [&[u8]; 3] = [MARKER.as_bytes(), der, b64.as_bytes()];
+    let mut found = vec![];
+    let mut read = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let (path, kind) = (entry.path(), entry.file_type()?);
+            let rel = path.strip_prefix(root)?.to_string_lossy().into_owned();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("cube-runner") {
+                found.push(format!("/{rel} is named for the runner's CA"));
+            }
+            if kind.is_symlink() {
+                if fs::read_link(&path)?
+                    .to_string_lossy()
+                    .contains("cube-runner")
+                {
+                    found.push(format!("/{rel} links to the runner's CA"));
+                }
+            } else if kind.is_dir() {
+                stack.push(path);
+            } else if kind.is_file() {
+                read += 1;
+                let data = fs::read(&path)?;
+                if needles
+                    .iter()
+                    .any(|n| data.windows(n.len()).any(|w| w == *n))
+                {
+                    found.push(format!("/{rel} holds cube's block or the runner's CA"));
+                }
+            }
+        }
+    }
+    for rel in NEVER_IN_A_TEMPLATE {
+        if fs::symlink_metadata(root.join(rel)).is_ok() {
+            found.push(format!("/{rel} is in the template"));
+        }
+    }
+    for rel in ["etc/passwd", "etc/group", "etc/shadow", "etc/gshadow"] {
+        if fs::read_to_string(root.join(rel))
+            .is_ok_and(|text| text.lines().any(|line| line.starts_with("agent:")))
+        {
+            found.push(format!("/{rel} has the agent account"));
+        }
+    }
+    if fs::metadata(root.join("etc/machine-id")).is_ok_and(|m| m.len() > 0) {
+        found.push("/etc/machine-id is not empty".into());
+    }
+    Ok((found, read))
+}
+
+/// The console's `cube-agent: template:` lines.
+fn template_lines(dir: &Path) -> Vec<String> {
+    (1..)
+        .map_while(|boot| fs::read_to_string(dir.join(format!("console-{boot}.log"))).ok())
+        .flat_map(|text| {
+            text.lines()
+                .filter_map(|line| line.split("cube-agent: template: ").nth(1))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// A build machine publishes its upper/ as a template layer; the layer is
+/// checked here and a new machine boots with it.
+async fn template_checks(
+    lab: &Lab,
+    checks: &mut Checks,
+    image: &(DiffId, PathBuf),
+    image_disk: &Path,
+    image_layers: &[proto::Layer],
+    documents: &[(&str, &[u8])],
+) -> Result<Value> {
+    let epoch = 7;
+    let dir = lab.new_disk("build")?;
+    let vdd = dir.join("template.raw");
+    let status = std::process::Command::new(&lab.o.qemu_img)
+        .args(["create", "-q", "-f", "raw"])
+        .arg(&vdd)
+        .arg("1G")
+        .status()?;
+    ensure!(status.success(), "qemu-img create");
+    let drive = format!("if=virtio,format=raw,file={}", vdd.display());
+    let mut m = lab.start_with(&dir, image_disk, &["-drive", &drive])?;
+    let ch = Channel::open(&m.ctl).await?;
+    ch.info("hello", TIMEOUT).await?;
+    let done = ch.request(setup(image_layers, documents)).await?;
+    let ready = ch.info("status", TIMEOUT).await?;
+    ensure!(
+        matches!(done, Answer::Done(_)) && ready.ready,
+        "the build machine's setup: {done:?} {ready:?}"
+    );
+    let mut script = BUILD_SETUP.to_string();
+    if lab.o.control == Some(Control::Seal) {
+        use base64::Engine;
+        let der = base64::engine::general_purpose::STANDARD.encode(test_ca_der());
+        script.push_str(&format!("echo {der} | base64 -d > app/runner.der\n"));
+    }
+    let (header, output) = ch.run("tpl-setup", &script, epoch).await?;
+    ensure!(
+        header["result"]["exitCode"] == 0 && output.contains("setup-done"),
+        "the build machine's setup: {header} {output}"
+    );
+    let (_, started) = ch
+        .run(
+            "tpl-svc",
+            &format!("cat > svc/server.pl <<'EOF'\n{SERVICE_SCRIPT}EOF\ncube service start web --port 8102 --cwd svc --json -- perl server.pl; echo \"exit=$?\""),
+            epoch,
+        )
+        .await?;
+    ensure!(
+        started.contains("exit=0"),
+        "a service on the build machine: {started}"
+    );
+
+    // A running command keeps the machine from being published.
+    let (running, _) = ch
+        .guest(
+            "exec",
+            json!({"id": "tpl-busy", "epoch": epoch, "command": "sleep 120", "timeoutMs": 600000}),
+        )
+        .await?;
+    let busy = ch.request(Op::TemplatePublish(proto::Empty {})).await?;
+    let _ = ch.info("status", TIMEOUT).await?;
+    ch.guest("cancel", json!({"id": "tpl-busy", "epoch": epoch}))
+        .await?;
+    let (cancelled, _) = ch.settle("tpl-busy").await?;
+    checks.ok(
+        running.get("error").is_none()
+            && refusal(&busy) == Some((proto::Code::FailedPrecondition as i32, "busy".into()))
+            && cancelled["state"] != "Running",
+        "template publishing is refused while a command runs (busy); the machine stays usable",
+        format!("{busy:?} {cancelled}"),
+    )?;
+
+    let t = Instant::now();
+    let published = ch
+        .request_on(
+            None,
+            Op::TemplatePublish(proto::Empty {}),
+            Duration::from_secs(600),
+        )
+        .await?;
+    let publish_ms = t.elapsed().as_millis();
+    let after = ch.info("status", TIMEOUT).await?;
+    let exec = ch
+        .guest_raw(
+            "exec",
+            format!(
+                "{}\n",
+                json!({"id": "tpl-after", "epoch": epoch, "command": "true"})
+            )
+            .into_bytes(),
+        )
+        .await?;
+    let again_setup = ch.request(setup(image_layers, documents)).await?;
+    let again = ch.request(Op::TemplatePublish(proto::Empty {})).await?;
+    let lines = template_lines(&dir);
+    log(&format!(
+        "template: {publish_ms} ms; {published:?}; {lines:?}"
+    ));
+    checks.ok(
+        matches!(published, Answer::Done(_))
+            && !after.ready
+            && after.reason.contains("published as a template")
+            && exec.as_ref().is_err_and(|e| e.reason == "not_ready")
+            && refusal(&again_setup) == Some((proto::Code::FailedPrecondition as i32, "published".into()))
+            && matches!(again, Answer::Done(_)),
+        "template_publish: done; then the machine is not ready (published), refuses commands and setups, and a repeated request is done again",
+        format!("{published:?} | {after:?} | {exec:?} | {again_setup:?} | {again:?}"),
+    )?;
+    quit(&mut m).await?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let lines = template_lines(&dir);
+
+    // The layer, as the runner will check it: an EROFS superblock and a size.
+    let bytes =
+        erofs_bytes(&vdd)?.ok_or_else(|| anyhow!("no EROFS superblock on the template disk"))?;
+    let layer = dir.join("template.erofs");
+    {
+        use std::io::Read;
+        let mut data = vec![];
+        fs::File::open(&vdd)?.take(bytes).read_to_end(&mut data)?;
+        fs::write(&layer, data)?;
+    }
+    let fsck = std::process::Command::new(&lab.o.fsck)
+        .arg(&layer)
+        .output()?;
+    let extracted = dir.join("template-extracted");
+    let _ = fs::remove_dir_all(&extracted);
+    let extract = std::process::Command::new(&lab.o.fsck)
+        .arg(format!("--extract={}", extracted.display()))
+        .arg("--no-preserve")
+        .arg(&layer)
+        .output()?;
+    ensure!(
+        fsck.status.success() && extract.status.success(),
+        "fsck.erofs: {} {}",
+        String::from_utf8_lossy(&fsck.stderr),
+        String::from_utf8_lossy(&extract.stderr)
+    );
+    let (found, files) = template_findings(&extracted, &test_ca_der())?;
+    checks.ok(
+        found.is_empty() && files > 0,
+        "the template layer (fsck.erofs clean) holds nothing of cube's: no marker block or runner CA in any file (DER or base64), no cube-runner.crt/.pem or link to it, no mount point, /etc/cube, /var/lib/cube, agent account line, hook log, shell history, ssh host key or machine id",
+        json!({"found": found, "files": files}),
+    )?;
+    let read = |rel: &str| fs::read_to_string(extracted.join(rel)).unwrap_or_default();
+    let mtime = fs::metadata(extracted.join("workspace/app/out.txt"))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    let whiteout = fs::symlink_metadata(extracted.join("etc/issue")).is_ok_and(|m| {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        m.file_type().is_char_device() && m.rdev() == 0
+    });
+    let copy = read("workspace/app/bundle-copy.pem");
+    checks.ok(
+        read("workspace/app/out.txt") == "built"
+            && mtime == Some(1700000000)
+            && whiteout
+            && read("etc/apt/apt.conf.d/only") == "mine\n"
+            && read("etc/group").contains("\nproject:x:1500:")
+            && copy.contains("BEGIN CERTIFICATE"),
+        "the setup's work is in the layer: a file with its time, a whiteout for a deleted image file, a directory made again, a new group, the project's copy of the bundle (without the runner's CA)",
+        json!({"mtime": mtime, "whiteout": whiteout, "copyCerts": copy.matches("BEGIN CERTIFICATE").count()}),
+    )?;
+
+    // A new machine with the template as its topmost layer.
+    let template_id: DiffId = format!("sha256:{}", sha256_file(&layer)?).parse()?;
+    let next_disk = lab.o.out.join("template-disk");
+    let mut layers = layer_disk(&next_disk, &[(template_id, layer.clone()), image.clone()])?;
+    layers[0].source = Some(proto::layer::Source::TemplateId(
+        template_id.hex()[..16].into(),
+    ));
+    let next = lab.new_disk("from-template")?;
+    let mut m = lab.start(&next, &next_disk)?;
+    let ch = Channel::open(&m.ctl).await?;
+    ch.info("hello", TIMEOUT).await?;
+    let done = ch.request(setup(&layers, documents)).await?;
+    let status = ch.info("status", TIMEOUT).await?;
+    let (_, seen) = ch
+        .run(
+            "tpl-next",
+            "stat -c '%U %Y' app/out.txt; cat app/out.txt; echo; test -e /etc/issue || echo no-issue; ls /etc/apt/apt.conf.d; grep -c '^agent:' /etc/passwd; getent group project; grep -c '^# cube: begin' \"$SSL_CERT_FILE\"; cube service list >/dev/null && echo cube-ok",
+            epoch,
+        )
+        .await?;
+    let refused = ch.request(Op::TemplatePublish(proto::Empty {})).await?;
+    let _ = ch.info("status", TIMEOUT).await;
+    checks.ok(
+        matches!(done, Answer::Done(_))
+            && status.ready
+            && seen
+                == "agent 1700000000\nbuilt\nno-issue\nonly\n1\nproject:x:1500:\n1\ncube-ok\n",
+        "a new machine with the template as its topmost layer is ready: the work is there (owner agent, its time), the deleted file stays deleted, the directory holds only what setup put there, one agent account, the machine's own CA block, the cube command",
+        &seen,
+    )?;
+    checks.ok(
+        refusal(&refused)
+            == Some((
+                proto::Code::FailedPrecondition as i32,
+                "no_template_disk".into(),
+            )),
+        "a machine without a template disk refuses template_publish (no_template_disk)",
+        format!("{refused:?}"),
+    )?;
+    quit(&mut m).await?;
+    Ok(json!({
+        "bytes": bytes,
+        "sha256": sha256_file(&layer)?,
+        "publishMs": publish_ms,
+        "files": files,
+        "agent": lines,
+    }))
 }
 
 #[cfg(test)]
@@ -2325,6 +2701,45 @@ mod tests {
     async fn read_any(stream: &mut UnixStream) -> proto::DaemonFrame {
         // The agent's own reader would refuse a req on channel 0; read the raw frame.
         cube_runner_protocol::read_frame(stream).await.unwrap()
+    }
+
+    #[test]
+    fn the_template_scan_finds_each_kind_of_leftover() {
+        use base64::Engine;
+        let dir = std::env::temp_dir().join(format!("kac-scan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let der = test_ca_der();
+        let put = |rel: &str, data: &[u8]| {
+            let path = dir.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, data).unwrap();
+        };
+        put("workspace/app/out.txt", b"built");
+        put("etc/passwd", b"root:x:0:0::/root:/bin/bash\n");
+        let (found, files) = template_findings(&dir, &der).unwrap();
+        assert_eq!((found.len(), files), (0, 2), "{found:?}");
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&der);
+        let cases: [(&str, Vec<u8>); 7] = [
+            ("etc/gitconfig", format!("{MARKER}\n").into_bytes()),
+            ("opt/x.der", der.clone()),
+            (
+                "opt/x.pem",
+                format!("-----BEGIN CERTIFICATE-----\n{}\n", &b64[..64]).into_bytes(),
+            ),
+            ("etc/ssl/certs/cube-runner.pem", b"x".to_vec()),
+            ("etc/hosts", vec![]),
+            ("etc/shadow", b"agent:!:1:0:99999:7:::\n".to_vec()),
+            ("etc/machine-id", b"0123\n".to_vec()),
+        ];
+        for (rel, data) in cases {
+            put(rel, &data);
+            let (found, _) = template_findings(&dir, &der).unwrap();
+            assert_eq!(found.len(), 1, "{rel}: {found:?}");
+            fs::remove_file(dir.join(rel)).unwrap();
+        }
+        std::os::unix::fs::symlink("cube-runner.pem", dir.join("etc/ssl/certs/abcd.0")).unwrap();
+        assert_eq!(template_findings(&dir, &der).unwrap().0.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

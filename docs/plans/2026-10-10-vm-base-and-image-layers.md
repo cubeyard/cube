@@ -303,12 +303,22 @@ on top.
 **Templates become a layer.** A build machine runs pre-setup and setup with an
 empty writable disk; `upper/` then holds what setup changed, already in
 overlay format, while cube's own state stayed in `state/` and tmpfs (see
-"Workload root"). To publish, the runner sends a template operation: the agent
-removes cube's lines from `/etc/passwd`, `/etc/group` and `/etc/shadow` and
-any other cube additions on a documented exclusion list, runs the seal's
-checks (today's `cube-guest seal`) on what is left, and writes the layer with
-the base's static `mkfs.erofs` from `upper/` onto a blank raw disk the runner
-attached to build machines (`vdd`). The runner checks the EROFS superblock and
+"Workload root"). To publish, the runner sends a template operation
+(`DaemonRequest.template_publish`): the agent kills the workload, detaches
+its root and removes what is cube's from `upper/`, the exclusion list:
+the `agent` account's lines in `/etc/passwd`, `/etc/group`, `/etc/shadow`
+and `/etc/gshadow` that the layers below lack; cube's marker blocks and
+every PEM certificate equal to a CA a setup brought, in any file (after a
+setup ran `update-ca-certificates` the bundle holds the runner's CA without
+markers); `cube-runner.crt`, `/etc/ssl/certs/cube-runner.pem` and every
+link to it; the mount points the agent made and the paths it binds in every
+machine; `/var/lib/cube`, `/etc/cube`, hook logs, shell histories, ssh host
+keys, the machine ids and the random seed. It then runs the seal's check on
+what is left (any file still holding a marker line or a runner CA, as DER
+or base64, or a Java keystore the build changed while a runner CA was
+installed, fails the publication) and writes the layer with the base's
+static `mkfs.erofs` from `upper/` onto a blank raw disk the runner attached
+to build machines (`vdd`). The machine is used up by it. The runner checks the EROFS superblock and
 size and moves the file under `templates/`. Building inside the guest works
 the same on a Mac, whose host cannot read the guest's ext4. Setup must still
 not write secrets into `upper/`.
@@ -672,7 +682,15 @@ includes them. `cube hooks` and `hello.hooks` report the hooks cubed runs as
 commands; the agent follows the host's PTP clock every 500 ms. The check
 adds the files, the CA across `update-ca-certificates`, git's helper, the
 hooks (cubed's resume script in the contract), a refused CA and realtime
-within 1 s after a pause.
+within 1 s after a pause. K-5e adds template publishing: the runner's
+`template_publish` on a build machine (one with vdd), refused while a
+command runs; the workload is killed and detached, `upper/` cleaned of the
+exclusion list below and checked, and written to vdd with the base's
+`mkfs.erofs`; the machine refuses everything afterwards. A target the image
+has no place for makes the machine not ready, and a file over 16 MiB is not
+rewritten. The check adds a build machine's setup, the published layer
+checked with `fsck.erofs` and searched for anything of cube's, and a new
+machine booted with it as its topmost layer.
 
 **6. cubed for keel machines.** Agent upgrades are keel releases (a cold boot
 on the new version), so `helper.install` and the helper-hash check in

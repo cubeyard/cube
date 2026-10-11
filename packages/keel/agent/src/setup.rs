@@ -41,7 +41,8 @@ pub const ROOT: &str = "/run/keel/root";
 pub const RW: &str = "/run/keel/rw";
 pub const STATE: &str = "/run/keel/rw/state";
 pub const NAMESPACE: &str = "/run/keel/workload.mnt";
-const SETUP: &str = "/run/keel/setup.json";
+pub const SETUP: &str = "/run/keel/setup.json";
+const UNBOUND: &str = "/run/keel/unbound.json";
 const LAYER_DISK: &str = "/dev/vdb";
 const RW_DISK: &str = "/dev/vdc";
 const MAX_LAYERS: u32 = 128;
@@ -563,23 +564,38 @@ fn assemble(layers: &[proto::Layer]) -> Result<bool, Refusal> {
         if let Err(error) = bind_cli(Path::new(ROOT)) {
             eprintln!("cube-agent: no cube command in the workload: {error}");
         }
-        crate::generated::bind_all(Path::new(ROOT))?;
+        let unbound = crate::generated::bind_all(Path::new(ROOT))?;
+        crate::files::write_json(Path::new(UNBOUND), &json!(unbound))
+            .map_err(|error| internal("setup", error.to_string()))?;
     }
     Ok(formatted)
+}
+
+/// What this boot's binds could not reach (kept in /run, so an agent that
+/// starts again still says it): each makes the machine not ready.
+fn unbound() -> Vec<String> {
+    crate::files::read_json(Path::new(UNBOUND))
+        .ok()
+        .flatten()
+        .and_then(|list| serde_json::from_value::<Vec<String>>(list).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| format!("a place for {path}"))
+        .collect()
 }
 
 /// Where the workload finds the `cube` command.
 pub const CLI: &str = "usr/local/bin/cube";
 
 /// The agent's own binary, read-only, as `/usr/local/bin/cube` in the
-/// workload root. The path is resolved inside the root and opened with no
-/// link on the way, so an image's link never puts the mount elsewhere; an
-/// empty file is made in `upper/` as the mount point (template publishing
-/// leaves it out, K-5e).
+/// workload root. The path is opened as named, with no link on the way
+/// (`ELOOP`: no `cube` command), so an image's link never moves the mount;
+/// what is missing is made in `upper/`, an empty file as the mount point,
+/// and listed for template publishing to leave out.
 pub fn bind_cli(root: &Path) -> io::Result<()> {
-    use crate::paths::{open_resolved, resolve_in_root};
+    use crate::{generated::record_mount_point, paths::open_resolved};
     let root_dir = fs::File::open(root)?;
-    let components = resolve_in_root(&root_dir, CLI)?;
+    let components: Vec<String> = CLI.split('/').map(str::to_string).collect();
     for depth in 1..components.len() {
         match open_resolved(
             &root_dir,
@@ -606,9 +622,14 @@ pub fn bind_cli(root: &Path) -> io::Result<()> {
                 {
                     return Err(io::Error::last_os_error());
                 }
+                record_mount_point(&components[..depth]);
             }
             Err(error) => return Err(error),
         }
+    }
+    match open_resolved(&root_dir, &components, libc::O_PATH, 0) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => record_mount_point(&components),
+        _ => {}
     }
     let target = open_resolved(
         &root_dir,
@@ -799,7 +820,10 @@ pub fn apply(setup: &proto::MachineSetup) -> Result<Applied, Refusal> {
             account: Some(account),
             env,
         },
-        missing: missing_tools(Path::new(ROOT)),
+        missing: missing_tools(Path::new(ROOT))
+            .into_iter()
+            .chain(unbound())
+            .collect(),
         formatted,
     })
 }
