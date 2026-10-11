@@ -487,11 +487,15 @@ impl Channel {
         }
     }
 
-    /// `snapshot_prepare`: its answer and the `status` after it.
-    async fn prepare(&self) -> Result<(Answer, proto::GuestInfo)> {
+    /// `snapshot_prepare`: its answer and, after `done`, the `status` that
+    /// follows it (an agent that refuses may send none).
+    async fn prepare(&self) -> Result<(Answer, Option<proto::GuestInfo>)> {
         self.drop_infos();
         let answer = self.request(Op::SnapshotPrepare(proto::Empty {})).await?;
-        let status = self.info("status", TIMEOUT).await?;
+        let status = match answer {
+            Answer::Done(_) => Some(self.info("status", TIMEOUT).await?),
+            _ => None,
+        };
         Ok((answer, status))
     }
 
@@ -1071,8 +1075,11 @@ async fn save_that_fails(ch: &Channel, m: &Machine, dir: &Path, epoch: i64) -> R
     )
 }
 
-fn prepared(answer: &Answer, status: &proto::GuestInfo) -> bool {
-    matches!(answer, Answer::Done(_)) && !status.ready && status.reason == "prepared for a snapshot"
+fn prepared(answer: &Answer, status: &Option<proto::GuestInfo>) -> bool {
+    matches!(answer, Answer::Done(_))
+        && status
+            .as_ref()
+            .is_some_and(|status| !status.ready && status.reason == "prepared for a snapshot")
 }
 
 fn setup(layers: &[proto::Layer], documents: &[(&str, &[u8])]) -> Op {
