@@ -380,9 +380,9 @@ fails in the machine, which has no credentials for it.
   and `cube-init` with base.erofs (`packages/keel/init`,
   `packages/keel/base`, `scripts/keel-boot-check.ts` on base-standin.erofs;
   accepted under KVM and HVF), and `cube-agent` (`packages/keel/agent`:
-  DaemonFrame, `machine_setup`, `OPERATIONS`' commands; checked by
-  `keel-agent-check` under TCG so far; files, services, generated files and
-  snapshots follow).
+  DaemonFrame, `machine_setup`, `OPERATIONS`' commands, files, services and
+  the `cube` command; checked by `keel-agent-check` under TCG so far;
+  generated files, hooks, templates and snapshots follow).
 - **The guest channel contract** (keel's work package 2, PR #144) is in
   `runner.proto`: `DaemonFrame` framing and channel rules, `machine_setup`,
   `snapshot_prepare`/`snapshot_done`, `GuestInfo.limits`/`epoch`, what

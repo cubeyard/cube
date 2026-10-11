@@ -14,7 +14,8 @@ guests) and macOS (HVF, arm64 guests) alike:
   the machine's read-only EROFS image layers and its writable disk with
   overlayfs, and runs commands and services, replacing SSH, cloud-init,
   systemd and the Python helper in the guest ([`agent/`](agent): channel,
-  `machine_setup` and commands so far; files, services and the rest follow);
+  `machine_setup`, commands, files, services and the `cube` command so
+  far; generated files, hooks, templates and snapshots follow);
 - **the layer format**: OCI images converted to EROFS and stacked as one
   disk, built on the runner by [`layers/`](layers) (`keel-layers`).
 
@@ -137,8 +138,10 @@ boot with no runner connected while it boots, a runner that disconnects and
 connects again (the agent must not spin meanwhile), immediate reconnects
 and a forced late `hello` recovered by the reset on channel 0, three
 restores with the runner connected before `cont`, file operations that
-stay in the workload root and act as `agent` out of the workspace, and the
-Workspace contract (leases, files, commands) over the channel. The command
+stay in the workload root and act as `agent` out of the workspace,
+services started with `cube` (across an agent restart, after a boot, killed,
+failing and done), and the Workspace contract (leases, files, commands,
+services) over the channel. The command
 is in [`agent/README.md`](agent/README.md).
 
 ## Layers

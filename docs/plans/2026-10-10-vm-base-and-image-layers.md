@@ -651,7 +651,13 @@ cube-guest's rules (relative is the workspace, absolute is anywhere in the
 workload root but `/proc`, `/sys` and `/dev`, never `..`), the `agent`
 account's permissions out of the workspace, writes journaled under their
 key; the check runs the whole Workspace contract (leases, files, commands)
-over the channel.
+over the channel. K-5c adds `services` and `portal` and the `cube` command:
+the agent's binary bind-mounted read-only at `/usr/local/bin/cube`, talking
+to the agent over `/run/cube/agent.sock` (the `agent` account and root
+only); services in a cgroup each, a 1 MiB log and one older, restarted on
+failure with systemd's limits, found again after an agent restart and
+started again after every boot's first `machine_setup`; the check runs the
+contract's service part and the restart, boot and failure cases.
 
 **6. cubed for keel machines.** Agent upgrades are keel releases (a cold boot
 on the new version), so `helper.install` and the helper-hash check in
