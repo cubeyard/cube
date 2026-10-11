@@ -11,7 +11,9 @@
 //! Any frame from the runner on channel 0 breaks the rules, so it is the
 //! runner's way out (runner.proto's header): with no `hello` 500 ms after a
 //! connect, it sends a `req` on channel 0, and the agent ends the stale
-//! connection and says `hello` about 100 ms later.
+//! connection and says `hello` about 100 ms later. Between
+//! `snapshot_prepare` and `snapshot_done` requests and the answers of reads
+//! are held (snapshot.rs); the end of the connection drops them.
 use std::{
     collections::HashSet,
     fs,
@@ -29,9 +31,13 @@ use cube_runner_protocol::{
     proto::{self, Code, daemon_answer::Result as AnswerKind, daemon_frame::T, daemon_request::Op},
     read_daemon_frame, refuse, write_frame,
 };
-use tokio::{io::BufReader, net::unix::pipe, sync::mpsc};
+use tokio::{
+    io::BufReader,
+    net::unix::pipe,
+    sync::{mpsc, watch},
+};
 
-use crate::agent::Agent;
+use crate::{agent::Agent, snapshot};
 
 /// The port's device: `/sys/class/virtio-ports/*/name` is `cube.0`.
 pub fn find_port() -> Option<PathBuf> {
@@ -140,6 +146,8 @@ async fn connection(agent: &Arc<Agent>, port: &fs::File) -> anyhow::Result<()> {
     let mut reader = BufReader::new(receiver);
     let mut used = HashSet::new();
     let aborted: Arc<Mutex<HashSet<u32>>> = Arc::default();
+    // True once this connection is over: what the gate holds for it is dropped.
+    let (end, ended) = watch::channel(false);
     let result = loop {
         let frame = match read_daemon_frame(&mut reader).await {
             Ok(frame) => frame,
@@ -158,24 +166,53 @@ async fn connection(agent: &Arc<Agent>, port: &fs::File) -> anyhow::Result<()> {
                         "channel {ch} was used before on this connection"
                     ));
                 }
-                let (agent, frames, aborted) =
-                    (Arc::clone(agent), frames.clone(), Arc::clone(&aborted));
+                let (agent, frames, aborted, mut ended) = (
+                    Arc::clone(agent),
+                    frames.clone(),
+                    Arc::clone(&aborted),
+                    ended.clone(),
+                );
                 tokio::spawn(async move {
-                    let (answer, follow) = handle(&agent, request).await;
-                    if aborted.lock().unwrap().remove(&ch) {
-                        return; // the runner stopped waiting; the work is done anyway
-                    }
-                    let _ = frames.send(proto::DaemonFrame {
-                        ch,
-                        t: Some(T::Ans(proto::DaemonAnswer {
-                            result: Some(answer),
-                        })),
-                    });
-                    if follow {
+                    let send = |answer, follow| {
+                        if aborted.lock().unwrap().remove(&ch) {
+                            return; // the runner stopped waiting; the work is done anyway
+                        }
                         let _ = frames.send(proto::DaemonFrame {
-                            ch: 0,
-                            t: Some(T::Status(agent.info())),
+                            ch,
+                            t: Some(T::Ans(proto::DaemonAnswer {
+                                result: Some(answer),
+                            })),
                         });
+                        if follow {
+                            let _ = frames.send(proto::DaemonFrame {
+                                ch: 0,
+                                t: Some(T::Status(agent.info())),
+                            });
+                        }
+                    };
+                    if matches!(
+                        request.op,
+                        Some(Op::SnapshotPrepare(_) | Op::SnapshotDone(_))
+                    ) {
+                        let (answer, follow) = handle(&agent, request).await;
+                        return send(answer, follow);
+                    }
+                    let writes = snapshot::writes(&request);
+                    let what = format!("channel {ch}");
+                    let Some(pass) = agent.gate().enter(writes, &what, &mut ended).await else {
+                        return;
+                    };
+                    let (answer, follow) = handle(&agent, request).await;
+                    if writes {
+                        // Answered before the pass goes, so before a prepare
+                        // that waited for it.
+                        send(answer, follow);
+                        drop(pass);
+                    } else {
+                        drop(pass);
+                        if agent.gate().answer(&what, &mut ended).await {
+                            send(answer, follow);
+                        }
                     }
                 });
             }
@@ -191,6 +228,9 @@ async fn connection(agent: &Arc<Agent>, port: &fs::File) -> anyhow::Result<()> {
             }
         }
     };
+    // The end first, so what the gate held is dropped, not let go.
+    let _ = end.send(true);
+    agent.disconnected();
     drop(frames);
     writer.abort();
     result
@@ -216,14 +256,14 @@ async fn handle(agent: &Arc<Agent>, request: proto::DaemonRequest) -> (AnswerKin
             Ok(()) => (AnswerKind::Done(proto::Empty {}), true),
             Err(error) => (AnswerKind::Error(error), true),
         },
-        Some(Op::SnapshotPrepare(_) | Op::SnapshotDone(_)) => (
-            AnswerKind::Error(refuse(
-                Code::Unimplemented,
-                "unimplemented",
-                "snapshots come with a later cube-agent (masterplan K-5f)",
-            )),
-            false,
-        ),
+        Some(Op::SnapshotPrepare(_)) => match agent.snapshot_prepare().await {
+            Ok(()) => (AnswerKind::Done(proto::Empty {}), true),
+            Err(error) => (AnswerKind::Error(error), true),
+        },
+        Some(Op::SnapshotDone(_)) => {
+            agent.snapshot_done();
+            (AnswerKind::Done(proto::Empty {}), true)
+        }
         None => (
             AnswerKind::Error(refuse(
                 Code::InvalidArgument,
@@ -299,6 +339,197 @@ mod tests {
                 .as_ref()
                 .is_err_and(|e| e.to_string().contains("channel above 0")),
             "{ended:?}"
+        );
+    }
+
+    fn runner_op(ch: u32, op: Op) -> proto::DaemonFrame {
+        proto::DaemonFrame {
+            ch,
+            t: Some(T::Req(proto::DaemonRequest { op: Some(op) })),
+        }
+    }
+
+    /// An agent whose prepare writes its kernel knobs into DIR (or fails
+    /// to, when DIR lacks them and `writable` is false).
+    fn agent_settling_in(dir: &std::path::Path, writable: bool) -> Arc<Agent> {
+        let knobs = if writable {
+            dir.to_path_buf()
+        } else {
+            dir.join("missing")
+        };
+        Agent::start_with(snapshot::Settle {
+            drop_caches: knobs.join("drop_caches"),
+            compact_memory: knobs.join("compact_memory"),
+        })
+    }
+
+    async fn frame(runner: &mut tokio::net::UnixStream) -> proto::DaemonFrame {
+        tokio::time::timeout(Duration::from_secs(5), read_daemon_frame(runner))
+            .await
+            .expect("a frame within 5 s")
+            .unwrap()
+    }
+
+    fn answer(frame: &proto::DaemonFrame) -> Option<(u32, &AnswerKind)> {
+        match &frame.t {
+            Some(T::Ans(proto::DaemonAnswer {
+                result: Some(result),
+            })) => Some((frame.ch, result)),
+            _ => None,
+        }
+    }
+
+    fn status(frame: &proto::DaemonFrame) -> Option<&proto::GuestInfo> {
+        match &frame.t {
+            Some(T::Status(info)) if frame.ch == 0 => Some(info),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_done_releases_what_the_prepare_held_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = agent_settling_in(dir.path(), true);
+        let (port, mut runner) = port();
+        tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move { connection(&agent, &port).await }
+        });
+        hello(&mut runner).await;
+        write_frame(
+            &mut runner,
+            &runner_op(1, Op::SnapshotPrepare(proto::Empty {})),
+        )
+        .await
+        .unwrap();
+        let done = frame(&mut runner).await;
+        assert!(
+            matches!(answer(&done), Some((1, AnswerKind::Done(_)))),
+            "{done:?}"
+        );
+        let prepared = frame(&mut runner).await;
+        let info = status(&prepared).expect("a status after the prepare");
+        assert!(
+            !info.ready && info.reason == "prepared for a snapshot",
+            "{info:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("drop_caches")).unwrap(),
+            "3"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("compact_memory")).unwrap(),
+            "1"
+        );
+        // Held: a guest operation, then the release on a later channel. The
+        // release's answer and status come first, then the held answer.
+        write_frame(&mut runner, &guest_hello(2)).await.unwrap();
+        write_frame(
+            &mut runner,
+            &runner_op(3, Op::SnapshotDone(proto::Empty {})),
+        )
+        .await
+        .unwrap();
+        let first = frame(&mut runner).await;
+        assert!(
+            matches!(answer(&first), Some((3, AnswerKind::Done(_)))),
+            "{first:?}"
+        );
+        let after = frame(&mut runner).await;
+        let info = status(&after).expect("a status after snapshot_done");
+        assert_eq!(info.reason, "waiting for machine_setup", "{info:?}");
+        let held = frame(&mut runner).await;
+        assert!(
+            matches!(answer(&held), Some((2, AnswerKind::Guest(_)))),
+            "{held:?}"
+        );
+        // Not prepared any more: the next operation is answered at once.
+        write_frame(&mut runner, &guest_hello(4)).await.unwrap();
+        let next = frame(&mut runner).await;
+        assert!(
+            matches!(answer(&next), Some((4, AnswerKind::Guest(_)))),
+            "{next:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_end_of_the_connection_ends_a_prepare_and_drops_what_it_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = agent_settling_in(dir.path(), true);
+        let (stale, mut runner) = port();
+        let served = tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move { connection(&agent, &stale).await }
+        });
+        hello(&mut runner).await;
+        write_frame(
+            &mut runner,
+            &runner_op(1, Op::SnapshotPrepare(proto::Empty {})),
+        )
+        .await
+        .unwrap();
+        frame(&mut runner).await;
+        frame(&mut runner).await;
+        write_frame(&mut runner, &guest_hello(2)).await.unwrap();
+        // A restored machine's stale connection: the runner's reset ends it.
+        write_frame(&mut runner, &guest_hello(0)).await.unwrap();
+        assert!(served.await.unwrap().is_err());
+        assert!(
+            !agent.gate().prepared(),
+            "the prepare ended with the connection"
+        );
+        // The next connection starts unprepared, and nothing held answers on it.
+        let (next, mut runner) = port();
+        tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move { connection(&agent, &next).await }
+        });
+        let fresh = frame(&mut runner).await;
+        let Some(T::Hello(info)) = &fresh.t else {
+            panic!("{fresh:?}")
+        };
+        assert_eq!(info.reason, "waiting for machine_setup");
+        write_frame(&mut runner, &guest_hello(2)).await.unwrap();
+        let next = frame(&mut runner).await;
+        assert!(
+            matches!(answer(&next), Some((2, AnswerKind::Guest(_)))),
+            "{next:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prepare_that_cannot_settle_the_machine_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = agent_settling_in(dir.path(), false);
+        let (port, mut runner) = port();
+        tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move { connection(&agent, &port).await }
+        });
+        hello(&mut runner).await;
+        write_frame(
+            &mut runner,
+            &runner_op(1, Op::SnapshotPrepare(proto::Empty {})),
+        )
+        .await
+        .unwrap();
+        let refused = frame(&mut runner).await;
+        let Some((1, AnswerKind::Error(error))) = answer(&refused) else {
+            panic!("{refused:?}")
+        };
+        assert_eq!(
+            (error.code, error.reason.as_str()),
+            (Code::Internal as i32, "snapshot_prepare"),
+            "{error:?}"
+        );
+        let info = frame(&mut runner).await;
+        assert_ne!(status(&info).unwrap().reason, "prepared for a snapshot");
+        assert!(!agent.gate().prepared());
+        write_frame(&mut runner, &guest_hello(2)).await.unwrap();
+        let next = frame(&mut runner).await;
+        assert!(
+            matches!(answer(&next), Some((2, AnswerKind::Guest(_)))),
+            "{next:?}"
         );
     }
 

@@ -2034,11 +2034,16 @@ export declare type DaemonRequest = Message<"cube.runner.v4.DaemonRequest"> & {
     case: "machineSetup";
   } | {
     /**
-     * Before a save: the agent finishes or parks its writes, syncs, drops
-     * the page cache and lets free page reporting return memory, then
-     * answers. It holds new operations until the connection closes (the
-     * machine was saved) or `snapshot_done` comes (the save failed, or the
-     * machine keeps running).
+     * Right before a save (`stop`): the agent waits for the requests that
+     * write to answer, syncs, drops the page cache and compacts memory, so
+     * free page reporting can return what it freed, then answers `done` and
+     * sends a `status` that is not ready ("prepared for a snapshot"). From
+     * then on it holds every new request and every answer still to come
+     * until `snapshot_done` (the save failed and the runner sent `cont`, or
+     * the machine keeps running: what was held goes on) or the end of the
+     * connection (the machine was saved: what was held is dropped, never
+     * run, and after the restore the runner asks again by key). A prepare
+     * that cannot settle the machine is refused and leaves it unprepared.
      *
      * @generated from field: cube.runner.v4.Empty snapshot_prepare = 3;
      */
@@ -2046,6 +2051,8 @@ export declare type DaemonRequest = Message<"cube.runner.v4.DaemonRequest"> & {
     case: "snapshotPrepare";
   } | {
     /**
+     * Ends a prepare; `done` also when nothing was prepared.
+     *
      * @generated from field: cube.runner.v4.Empty snapshot_done = 4;
      */
     value: Empty;
@@ -2116,9 +2123,9 @@ export declare type DaemonAnswer = Message<"cube.runner.v4.DaemonAnswer"> & {
     case: "guest";
   } | {
     /**
-     * The agent could not take the request (not ready, prepared for a
-     * snapshot, a setup it refuses). The runner answers a `guest` stream
-     * with it in `StreamAnswer`.
+     * The agent could not take the request (not ready, a setup it refuses,
+     * a snapshot prepare it could not complete). The runner answers a
+     * `guest` stream with it in `StreamAnswer`.
      *
      * @generated from field: cube.runner.v4.Error error = 2;
      */

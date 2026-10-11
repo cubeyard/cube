@@ -185,12 +185,36 @@ cube-init (PID 1)
   directories stay overlay's); the agent answers `done` and refuses every
   operation and setup until the machine powers off. A repeated request
   answers as the first; the outcome is kept in `/run/keel/published.json`.
+- **snapshot_prepare and snapshot_done** (`snapshot.rs`). Right before a
+  save the runner sends `snapshot_prepare`: the agent waits for the
+  requests that write (`exec`, `cancel`, `write`, `portal`,
+  `machine_setup`, `template_publish`) to answer, syncs, drops the page
+  cache and compacts memory, answers `done` and sends a `status` that is
+  not ready ("prepared for a snapshot"). From then on every request that
+  comes, and the answer of a read that was still running, is held (the
+  console says `holding channel N`) until `snapshot_done` (the save
+  failed and the runner sent `cont`, or the machine keeps running: what
+  was held goes on) or the end of the connection (the machine was saved:
+  what was held is dropped, never run). A restored machine's agent still
+  holds its old connection (see the reset above); the runner's reset ends
+  it, so the restore starts unprepared and not ready, `machine_setup`
+  makes it ready, and the runner asks again by key for what it sent. A
+  prepare that cannot write the kernel's knobs answers
+  `INTERNAL/snapshot_prepare` and leaves the machine unprepared; one let
+  go before the writes finished answers `ABORTED`. Commands and services
+  keep running: they are frozen with the machine and go on after the
+  restore, which is not a boot (`boot_id`, `/run` and `/dev/shm` are
+  kept, so services are not started again and cubed's resume script
+  answers "already"). The agent does not wait for free page reporting
+  (Linux reports free blocks about 2 s after they are freed); what the
+  balloon gives back is S-7b's to measure.
 - `install` never exists for keel.
-  `snapshot_prepare` and `snapshot_done` are `UNIMPLEMENTED` (K-5f).
 
-## Not yet (later K-5 rows)
+## Not yet
 
-`snapshot_prepare`/`snapshot_done` (K-5f).
+The runner's side of a suspend: `berth vm` sending `snapshot_prepare`
+before `stop` and `snapshot_done` after a failed save, the connect rule
+after `cont`, and the memory file's rules (B-2, S-7a).
 
 ## Tests
 
@@ -212,9 +236,12 @@ cube-init (PID 1)
   `machine_setup` waits (`restore.lateHello`), three restores into a new
   QEMU (`stop`, `migrate` to `file:` with `mapped-ram` in mode
   `cpr-reboot`, `-incoming defer`) with the runner connected before `cont`,
-  each kept to the runner's connect rule, refused until `machine_setup`,
-  ready from its `status`, and finding the command that ran at the save by
-  its key (`restore.restores`), file operations over the channel (a write
+  each after `snapshot_prepare` (answered `done`, the status not ready),
+  with an `exec` sent after the prepare and held (the agent's console
+  says so; no answer) that never runs, each kept to the runner's connect
+  rule, refused at once until `machine_setup`, ready from its `status`,
+  and finding the command that ran at the save still running and by its
+  key, with `/dev/shm` kept (`restore.restores`), file operations over the channel (a write
   kept across the boot and the restores; links that stay in the workload
   root; `/proc`, `/sys`, `/dev` and `..` refused; `/etc` refused and
   `/tmp`, `/home/agent` owned by `agent` out of the workspace), services,
@@ -266,9 +293,15 @@ cube-init (PID 1)
   agent refuses to publish (`seal_failed`); `--control redirect` points
   the published layer's redirects at names that do not exist (the
   superblock summed again, so the layer stays valid) before the new
-  machine boots, which is expected to fail at the last check (the moved
-  file cannot be read, the moved directory is empty). A failed run writes
-  no `results.json`.
+  machine boots, which is expected to fail at the template's last check,
+  80 (the moved file cannot be read, the moved directory is empty);
+  `--control prepare` leaves `snapshot_prepare` out before the saves, so
+  the `exec` sent then is not held and runs, which is expected to fail at
+  check 57. Check 81 comes last: a save that fails (`stop`, a `migrate`
+  QEMU cannot write, `cont`) after `snapshot_prepare`, an `exec` held
+  meanwhile, and `snapshot_done`, after which it runs (`results.json`
+  `snapshot.failedSave`). An agent without the snapshot operations fails
+  at check 56. A failed run writes no `results.json`.
 
   `test-image.sh` needs Docker (and binfmt for the other architecture); it
   builds Debian trixie with sudo, git, gh and curl and passwordless sudo for

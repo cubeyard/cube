@@ -23,6 +23,7 @@ use crate::{
     ops,
     services::{self, Services},
     setup,
+    snapshot::{Gate, Settle},
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -46,6 +47,9 @@ pub struct Agent {
     services_domain: Result<Arc<Cgroups>, String>,
     status: Mutex<Status>,
     setup: tokio::sync::Mutex<()>,
+    /// Holds requests while the machine is prepared for a snapshot.
+    gate: Gate,
+    settle: Settle,
     build: String,
     kernel: String,
     boot_id: String,
@@ -71,6 +75,11 @@ impl Agent {
     /// agent started again): running commands are supervised before the
     /// first answer.
     pub fn start() -> Arc<Self> {
+        Self::start_with(Settle::default())
+    }
+
+    /// `start`, with the kernel knobs a snapshot prepare writes.
+    pub fn start_with(settle: Settle) -> Arc<Self> {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/sbin/cube-agent"));
         let agent = Arc::new(Self {
             journal: Mutex::new(None),
@@ -88,6 +97,8 @@ impl Agent {
                 since: Timestamp::now(),
             }),
             setup: tokio::sync::Mutex::new(()),
+            gate: Gate::default(),
+            settle,
             build: crate::files::sha256_file(&exe).unwrap_or_default(),
             kernel: read_trimmed("/proc/sys/kernel/osrelease"),
             boot_id: read_trimmed("/proc/sys/kernel/random/boot_id"),
@@ -205,6 +216,18 @@ impl Agent {
         }
     }
 
+    /// The connection ended: a prepare ends with it, and what it held is
+    /// dropped (the gate's waiters see the end first).
+    pub fn disconnected(&self) {
+        if self.gate.release() {
+            eprintln!("cube-agent: snapshot: the connection ended while prepared");
+        }
+    }
+
+    pub fn gate(&self) -> &Gate {
+        &self.gate
+    }
+
     pub fn ready(&self) -> bool {
         self.status.lock().unwrap().ready
     }
@@ -239,9 +262,11 @@ impl Agent {
     pub fn info(&self) -> proto::GuestInfo {
         let hooks = self.hooks().into_iter().collect();
         let status = self.status.lock().unwrap();
+        let prepared = self.gate.prepared();
+        let ready = status.ready && !prepared;
         proto::GuestInfo {
             connected: true,
-            ready: status.ready,
+            ready,
             build: self.build.clone(),
             version: VERSION.into(),
             capabilities: ops::CAPABILITIES.iter().map(|c| c.to_string()).collect(),
@@ -262,8 +287,10 @@ impl Agent {
                 max_write_bytes: Limits::MAX_WRITE_BYTES,
             }),
             epoch: self.epoch(),
-            reason: if status.ready {
+            reason: if ready {
                 String::new()
+            } else if prepared {
+                "prepared for a snapshot".into()
             } else {
                 status.reason.clone()
             },
@@ -331,6 +358,46 @@ impl Agent {
         let record = crate::template::published().unwrap_or_default();
         self.set_status(false, published_reason(&record));
         result.map(|_| ())
+    }
+
+    /// `snapshot_prepare` (snapshot.rs): Ok means `done`, the machine
+    /// prepared. A machine that could not be settled is not left prepared.
+    pub async fn snapshot_prepare(self: &Arc<Self>) -> Result<(), proto::Error> {
+        let started = std::time::Instant::now();
+        self.gate.prepare().await?;
+        let settle = self.settle.clone();
+        let settled = tokio::task::spawn_blocking(move || settle.run())
+            .await
+            .unwrap_or_else(|error| Err(std::io::Error::other(error.to_string())));
+        if let Err(error) = settled {
+            self.gate.release();
+            eprintln!("cube-agent: snapshot: not prepared: {error}");
+            return Err(refuse(
+                Code::Internal,
+                "snapshot_prepare",
+                &format!("settling the machine failed, so it is not prepared: {error}"),
+            ));
+        }
+        if !self.gate.prepared() {
+            return Err(refuse(
+                Code::Aborted,
+                "snapshot_done",
+                "the machine was let go before it was prepared",
+            ));
+        }
+        eprintln!(
+            "cube-agent: snapshot: prepared in {} ms (synced, page cache dropped, memory compacted)",
+            started.elapsed().as_millis()
+        );
+        Ok(())
+    }
+
+    /// `snapshot_done`: what the prepare held goes on. Done also when the
+    /// machine was not prepared.
+    pub fn snapshot_done(&self) {
+        if self.gate.release() {
+            eprintln!("cube-agent: snapshot: snapshot_done; what was held goes on");
+        }
     }
 
     /// Applies a setup, one at a time; Ok means `done`.
