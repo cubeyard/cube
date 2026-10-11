@@ -136,8 +136,7 @@ async function leaseContract(workspace: Workspace, owner: WorkspaceOwner, run: s
 }
 
 /** How the exec part reads a workspace file's text and checks that a path
- * does not exist: with the file operations, or with commands where the
- * guest has none yet. `writeKey` is a key a file write used. */
+ * does not exist. `writeKey` is a key a file write used. */
 interface ContractFiles { read(path: string): Promise<string>; missing(path: string): Promise<void>; writeKey?: string }
 
 /** Commands: cwd, limits, a key that runs once, paged output, real cancellation. */
@@ -179,43 +178,6 @@ async function execContract(workspace: Workspace, token: string, run: string, di
   const cancelled = await settleOperation(workspace, token, `${run}-cancel`, { intervalMs: 50 });
   assert.deepEqual(cancelled, { key: `${run}-cancel`, state: "failed", error: "CANCELLED", completionUnknown: false });
   await files.missing(`${dir}/not-cancelled`);
-}
-
-/** The contract's lease and exec parts alone, for a guest that takes
- * commands but no file operations yet (keel's cube-agent before K-5b):
- * files are read and checked with commands. */
-export async function workspaceExecContract(name: string, workspace: Workspace, owner: WorkspaceOwner): Promise<void> {
-  const run = `contract-${randomUUID()}`;
-  const dir = run;
-  const capabilities = await workspace.capabilities();
-  for (const capability of ["exec.start", "exec.cancel", "operation.get"]) assert.ok(capabilities.includes(capability), `${name}: ${capability}`);
-  const limits = await checkLimits(name, workspace);
-  const token = await leaseContract(workspace, owner, run, dir);
-  let n = 0;
-  const command = async (line: string) => {
-    const key = `${run}-files-${n++}`;
-    await workspace.exec(token, key, { command: line, timeoutMs: 10000 });
-    const done = await settleOperation(workspace, token, key);
-    assert.ok(done.state === "succeeded", `${line}: ${JSON.stringify(done)}`);
-    return done;
-  };
-  try {
-    await command(`mkdir -p ${dir}`);
-    await execContract(workspace, token, run, dir, limits, {
-      read: async path => {
-        const done = await command(`cat ${path}`);
-        assert.ok(done.state === "succeeded" && done.exitCode === 0, path);
-        return Buffer.from(done.output).toString("utf8");
-      },
-      missing: async path => {
-        const done = await command(`test ! -e ${path}`);
-        assert.ok(done.state === "succeeded" && done.exitCode === 0, `${path} must not exist`);
-      },
-    });
-  } finally {
-    await workspace.release(token);
-  }
-  console.log(`ok: workspace contract, exec part (${name}): lease conflict and expiry, repeated key, paged output, cancel, limits`);
 }
 
 /** A bare HTTP server over the workspace routes, as cubed mounts them. */

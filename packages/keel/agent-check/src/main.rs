@@ -2,7 +2,7 @@
 //! (base.erofs with cube-init and cube-agent, an image's layer, a writable
 //! disk) under QEMU and talks to cube-agent over protocol 4's DaemonFrame on
 //! the host end of `cube.0`, as a VM runner will. Then it serves the guest
-//! operations on a Unix socket for the Workspace contract's exec part
+//! operations on a Unix socket for the Workspace contract
 //! (packages/server/test/keel-agent-contract-test.ts) and runs it.
 //!
 //!   keel-agent-check --qemu PATH --qemu-img PATH --kernel PATH --base PATH \
@@ -530,6 +530,26 @@ impl Channel {
         ))
     }
 
+    /// A file operation: header JSON line (with `length`) + body.
+    async fn file(&self, op: &str, mut header: Value, body: &[u8]) -> Result<(Value, Vec<u8>)> {
+        header["length"] = json!(body.len());
+        let bytes = self
+            .guest_raw(
+                op,
+                [format!("{header}\n").into_bytes(), body.to_vec()].concat(),
+            )
+            .await?
+            .map_err(|e| anyhow!("{op} refused: {e:?}"))?;
+        let end = bytes
+            .iter()
+            .position(|&b| b == b'\n')
+            .ok_or_else(|| anyhow!("{op}: no header line"))?;
+        Ok((
+            serde_json::from_slice(&bytes[..end])?,
+            bytes[end + 1..].to_vec(),
+        ))
+    }
+
     async fn settle(&self, id: &str) -> Result<(Value, Vec<u8>)> {
         let deadline = Instant::now() + TIMEOUT;
         loop {
@@ -967,8 +987,17 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             format!("{hello:?}"),
         )?;
         checks.ok(
-            hello.capabilities == ["exec.start", "exec.cancel", "operation.get"],
-            "hello advertises only exec, cancel and get",
+            hello.capabilities
+                == [
+                    "exec.start",
+                    "exec.cancel",
+                    "operation.get",
+                    "fs.read",
+                    "fs.write",
+                    "fs.stat",
+                    "fs.absolute",
+                ],
+            "hello advertises only exec, cancel, get and the file operations",
             format!("{:?}", hello.capabilities),
         )?;
         let limits = hello.limits.unwrap_or_default();
@@ -1227,7 +1256,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             &output,
         )?;
 
-        // The Workspace contract's exec part, over this channel. Its lease
+        // The Workspace contract (leases, files, commands), over this channel. Its lease
         // store is new, so its epochs start at 1: it runs before the epochs below.
         if let Some(command) = &lab.o.contract {
             let path = lab.sockets.join("bridge.sock");
@@ -1242,7 +1271,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             serving.abort();
             checks.ok(
                 status.success(),
-                "the Workspace contract's exec part passes over DaemonFrame",
+                "the Workspace contract (leases, files, commands) passes over DaemonFrame",
                 status,
             )?;
         }
@@ -1394,6 +1423,10 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         // A command still running when the machine powers off: interrupted after the boot.
         let _ = ch.guest("exec", json!({"id": "cut", "epoch": epoch, "command": "sleep 60; touch cut-ran", "timeoutMs": 120000})).await?;
         let (_, _) = ch.run("persist", &format!("echo {token} > persist; echo {token} | sudo -n tee /var/lib/cube/token >/dev/null; sync"), epoch).await?;
+        // A file written with the file operations, read again after the boot.
+        let (kept, _) = ch.file("write", json!({"id": "fw-kept", "epoch": epoch, "path": "files/kept.txt", "createParents": true}), token.as_bytes()).await?;
+        ensure!(kept.get("error").is_none(), "write files/kept.txt: {kept}");
+        ch.run("sync", "sync", epoch).await?;
         let _ = ch.guest("exec", json!({"id": "poweroff", "epoch": epoch, "command": "sudo -n kill -TERM 1", "timeoutMs": 60000})).await;
         let exited = tokio::time::timeout(Duration::from_secs(60), m.child.wait()).await;
         let console = fs::read_to_string(&m.console).unwrap_or_default();
@@ -1728,6 +1761,124 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             failed.is_none() && restores.len() == RESTORES,
             "after each restore the command running at the save is found by its key and finishes; the disk is the one saved",
             detail,
+        )?;
+
+        // File operations (K-5b) over the channel, as cube-guest's: they
+        // stay in the workload root, and out of the workspace they have the
+        // agent account's permissions.
+        let (hello, _) = ch.guest("hello", json!({})).await?;
+        let advertised = ["fs.read", "fs.write", "fs.stat", "fs.absolute"]
+            .iter()
+            .all(|c| {
+                hello["capabilities"]
+                    .as_array()
+                    .is_some_and(|a| a.contains(&json!(c)))
+            });
+        let (kept, kept_body) = ch.guest("read", json!({"path": "files/kept.txt"})).await?;
+        let (again, _) = ch.file("write", json!({"id": "fw-kept", "epoch": epoch, "path": "files/kept.txt", "createParents": true}), token.as_bytes()).await?;
+        let (new, _) = ch
+            .file(
+                "write",
+                json!({"id": "fw-new", "epoch": epoch, "path": "files/new.txt"}),
+                b"k5b\n",
+            )
+            .await?;
+        let (read, read_body) = ch
+            .guest("read", json!({"path": "/workspace/files/new.txt"}))
+            .await?;
+        let (stat, _) = ch.guest("stat", json!({"path": "files/new.txt"})).await?;
+        let (_, seen) = ch
+            .run(
+                "fw-seen",
+                "stat -c '%U %a' files/new.txt; cat files/new.txt",
+                epoch,
+            )
+            .await?;
+        let token_sha = hex(&Sha256::digest(token.as_bytes()));
+        checks.ok(
+            advertised
+                && kept_body == token.as_bytes()
+                && kept["sha256"] == token_sha.as_str()
+                && again == json!({"sha256": token_sha, "size": token.len()})
+                && new.get("error").is_none()
+                && read_body == b"k5b\n"
+                && read["sha256"] == new["sha256"]
+                && stat["kind"] == "file"
+                && stat["sha256"] == new["sha256"]
+                && seen == "agent 644\nk5b\n",
+            "file operations over DaemonFrame (fs.read, fs.write, fs.stat, fs.absolute advertised): a write before the power-off reads back after the boot and the restores and its key returns its result; a new write reads back, stats the same and belongs to agent",
+            format!("{hello} | {kept} | {again} | {new} | {read} | {stat} | {seen:?}"),
+        )?;
+
+        ch.run("fw-links", "ln -sfn /run/keel/setup.json files/base-link; ln -sfn / files/root-link; ln -sfn ../../../../../.. files/up-link; echo workload | sudo -n tee /etc/k5b-root >/dev/null", epoch).await?;
+        let code = |answer: &Value| answer["error"]["code"].as_str().unwrap_or("").to_string();
+        let (base_link, _) = ch.guest("read", json!({"path": "files/base-link"})).await?;
+        let (base_dir, _) = ch.guest("stat", json!({"path": "/run/keel"})).await?;
+        let (via_root, via_root_body) = ch
+            .guest("read", json!({"path": "files/root-link/etc/k5b-root"}))
+            .await?;
+        let (via_up, via_up_body) = ch
+            .guest("read", json!({"path": "files/up-link/etc/k5b-root"}))
+            .await?;
+        let mut pseudo = vec![];
+        for path in [
+            "/proc/1/environ",
+            "/sys/kernel/hostname",
+            "/dev/vda",
+            "files/root-link/proc/self/status",
+        ] {
+            pseudo.push(code(&ch.guest("read", json!({"path": path})).await?.0));
+        }
+        pseudo.push(code(
+            &ch.file(
+                "write",
+                json!({"id": "fw-dev", "epoch": epoch, "path": "/dev/null"}),
+                b"x",
+            )
+            .await?
+            .0,
+        ));
+        let (dotdot, _) = ch
+            .guest("read", json!({"path": "files/../../etc/k5b-root"}))
+            .await?;
+        checks.ok(
+            code(&base_link) == "NOT_FOUND"
+                && code(&base_dir) == "NOT_FOUND"
+                && via_root.get("error").is_none()
+                && via_root_body == b"workload\n"
+                && via_up.get("error").is_none()
+                && via_up_body == b"workload\n"
+                && pseudo.iter().all(|c| c == "INVALID_REQUEST")
+                && code(&dotdot) == "INVALID_REQUEST",
+            "file operations stay in the workload root: absolute and upward links name the workload's files, the base root (/run/keel) is out of reach, /proc /sys /dev and .. are refused",
+            format!("{base_link} | {base_dir} | {via_root} | {via_up} | {pseudo:?} | {dotdot}"),
+        )?;
+
+        let (etc, _) = ch
+            .file(
+                "write",
+                json!({"id": "fw-etc", "epoch": epoch, "path": "/etc/k5b-denied"}),
+                b"x",
+            )
+            .await?;
+        let (etc_link, _) = ch.file("write", json!({"id": "fw-etc-link", "epoch": epoch, "path": "files/root-link/etc/k5b-denied"}), b"x").await?;
+        let (tmp, _) = ch.file("write", json!({"id": "fw-tmp", "epoch": epoch, "path": "/tmp/k5b/x", "createParents": true}), b"x").await?;
+        let (home, _) = ch.file("write", json!({"id": "fw-home", "epoch": epoch, "path": "/home/agent/k5b/y", "createParents": true}), b"y").await?;
+        let (_, owners) = ch.run("fw-owners", "test ! -e /etc/k5b-denied && echo absent; stat -c %U /tmp/k5b /tmp/k5b/x /home/agent/k5b /home/agent/k5b/y", epoch).await?;
+        let denied = |answer: &Value| {
+            code(answer) == "IO_ERROR"
+                && answer["error"]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("permission denied"))
+        };
+        checks.ok(
+            denied(&etc)
+                && denied(&etc_link)
+                && tmp.get("error").is_none()
+                && home.get("error").is_none()
+                && owners == "absent\nagent\nagent\nagent\nagent\n",
+            "out of the workspace file operations have the agent account's permissions: /etc is refused (also through a workspace link) and nothing is written; what they make in /tmp and /home/agent is agent's",
+            format!("{etc} | {etc_link} | {tmp} | {home} | {owners:?}"),
         )?;
 
         timings
