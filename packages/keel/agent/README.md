@@ -227,10 +227,12 @@ cube-init (PID 1)
   `update-ca-certificates`, a copy of the bundle in the project, a history,
   hook logs, an ssh host key, a machine id, a running service), is refused
   while a command runs, publishes, and refuses everything afterwards; the
-  driver checks the layer with `fsck.erofs` (`--fsck`), extracts it and
-  finds nothing of cube's in it (no marker or runner CA in any file, as DER
-  or base64; no `cube-runner.*`; no mount point, account line, history,
-  hook log, host key or machine id) but the setup's work, and a new machine
+  driver checks the layer with `fsck.erofs` (`--fsck`), reads it in place
+  (no extraction, so no root or `mknod` on the host, macOS included) and
+  finds nothing of cube's in it (no marker or runner CA in any file or
+  xattr, as DER or base64; no `cube-runner.*`; no mount point, account
+  line, history, hook log, host key or machine id) but the setup's work
+  (with the 0/0 whiteout and the opaque directory), and a new machine
   boots with it as its topmost layer (`results.json` `template`). And it
   runs the Workspace contract (leases,
   files, commands, services, and cubed's resume script running the
