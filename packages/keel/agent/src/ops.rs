@@ -1,15 +1,18 @@
 //! `OPERATIONS`: one guest request is one JSON header line and a raw body; the
 //! answer is one JSON header line and a raw body. Errors are answered as
 //! `{"error": {"code", "message"}}`, as cube-guest's `call` writes them.
-//! This agent takes `hello`, `exec`, `get` and `cancel` (masterplan K-5a)
-//! and `read`, `write` and `stat` (K-5b); services and the portal come with
-//! K-5c, and `install` never: keel's agent is replaced with a keel release.
+//! This agent takes `hello`, `exec`, `get` and `cancel` (masterplan K-5a),
+//! `read`, `write` and `stat` (K-5b) and `services` and `portal` (K-5c);
+//! `install` never: keel's agent is replaced with a keel release.
 use serde_json::{Value, json};
 
-use crate::journal::{Answer, Fail, Journal, Limits, MAX_HEADER_BYTES, integer};
+use crate::{
+    journal::{Answer, Fail, Journal, Limits, MAX_HEADER_BYTES, integer},
+    services::Services,
+};
 
 /// What `hello` advertises: only what this agent implements.
-pub const CAPABILITIES: [&str; 7] = [
+pub const CAPABILITIES: [&str; 9] = [
     "exec.start",
     "exec.cancel",
     "operation.get",
@@ -17,6 +20,8 @@ pub const CAPABILITIES: [&str; 7] = [
     "fs.write",
     "fs.stat",
     "fs.absolute",
+    "services.list",
+    "portal.configure",
 ];
 /// Every name cube-guest takes; the others are answered as unsupported.
 const KNOWN: [&str; 10] = [
@@ -51,6 +56,7 @@ pub fn call(
     op: &str,
     data: &[u8],
     journal: Option<&Journal>,
+    services: Option<&Services>,
     hello: &dyn Fn() -> Value,
 ) -> Vec<u8> {
     let answer: Answer = (|| {
@@ -60,6 +66,8 @@ pub fn call(
         let (header, body) = read_request(data)?;
         let journal =
             || journal.ok_or_else(|| Fail::new("UNAVAILABLE", "the machine is not ready"));
+        let services =
+            || services.ok_or_else(|| Fail::new("UNAVAILABLE", "the machine is not ready"));
         match op {
             "hello" => Ok((hello(), vec![])),
             "exec" => journal()?.exec(&header),
@@ -68,6 +76,8 @@ pub fn call(
             "read" => journal()?.read(&header),
             "write" => journal()?.write(&header, body),
             "stat" => journal()?.stat(&header),
+            "services" => services()?.list(&header),
+            "portal" => services()?.portal(&header),
             other => Err(Fail::new(
                 "UNSUPPORTED",
                 format!("{other} is not implemented by this cube-agent"),
@@ -100,52 +110,56 @@ mod tests {
     fn requests_are_checked_as_cube_guest_checks_them() {
         let hello = || json!({"version": "x"});
         assert_eq!(
-            header(&call("hello", b"{}\n", None, &hello)),
+            header(&call("hello", b"{}\n", None, None, &hello)),
             json!({"version": "x"})
         );
         assert_eq!(
-            header(&call("shout", b"{}\n", None, &hello))["error"]["code"],
+            header(&call("shout", b"{}\n", None, None, &hello))["error"]["code"],
             "UNSUPPORTED"
         );
         assert_eq!(
-            header(&call("hello", b"{}", None, &hello))["error"]["message"],
+            header(&call("hello", b"{}", None, None, &hello))["error"]["message"],
             "request header must be one JSON line"
         );
         assert_eq!(
-            header(&call("hello", b"[]\n", None, &hello))["error"]["message"],
+            header(&call("hello", b"[]\n", None, None, &hello))["error"]["message"],
             "request header must be an object"
         );
         assert_eq!(
-            header(&call("hello", b"nope\n", None, &hello))["error"]["message"],
+            header(&call("hello", b"nope\n", None, None, &hello))["error"]["message"],
             "request header is not JSON"
         );
         assert_eq!(
-            header(&call("hello", b"{\"length\":4}\nab", None, &hello))["error"]["message"],
+            header(&call("hello", b"{\"length\":4}\nab", None, None, &hello))["error"]["message"],
             "request body is shorter than its length"
         );
         assert_eq!(
-            header(&call("hello", b"{\"length\":true}\n", None, &hello))["error"]["message"],
+            header(&call("hello", b"{\"length\":true}\n", None, None, &hello))["error"]["message"],
             "invalid body length"
         );
         let long = format!("{{\"x\":\"{}\"}}\n", "a".repeat(MAX_HEADER_BYTES));
         assert_eq!(
-            header(&call("hello", long.as_bytes(), None, &hello))["error"]["code"],
+            header(&call("hello", long.as_bytes(), None, None, &hello))["error"]["code"],
             "INVALID_REQUEST"
         );
         assert_eq!(
-            header(&call("exec", b"{}\n", None, &hello))["error"]["code"],
+            header(&call("exec", b"{}\n", None, None, &hello))["error"]["code"],
             "UNAVAILABLE"
         );
         assert_eq!(
-            header(&call("read", b"{}\n", None, &hello))["error"]["code"],
+            header(&call("read", b"{}\n", None, None, &hello))["error"]["code"],
             "UNAVAILABLE"
         );
         assert_eq!(
-            header(&call("services", b"{}\n", None, &hello))["error"]["code"],
-            "UNSUPPORTED"
+            header(&call("services", b"{}\n", None, None, &hello))["error"]["code"],
+            "UNAVAILABLE"
         );
         assert_eq!(
-            header(&call("install", b"{}\n", None, &hello))["error"]["code"],
+            header(&call("portal", b"{}\n", None, None, &hello))["error"]["code"],
+            "UNAVAILABLE"
+        );
+        assert_eq!(
+            header(&call("install", b"{}\n", None, None, &hello))["error"]["code"],
             "UNSUPPORTED"
         );
     }
