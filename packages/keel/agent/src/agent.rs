@@ -474,7 +474,7 @@ impl Agent {
     /// request answers as the first. Whatever the outcome, the machine
     /// refuses everything afterwards: the runner quits it.
     pub async fn shutdown(self: &Arc<Self>) -> Result<(), proto::Error> {
-        const WRITERS_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+        let writers_wait = self.teardown.writers_wait;
         let _one = self.setup.lock().await;
         let first = self.shut.lock().unwrap().clone();
         if let Some(outcome) = first {
@@ -484,13 +484,13 @@ impl Agent {
         }
         self.set_status(false, "shutting down");
         let outcome = async {
-            match tokio::time::timeout(WRITERS_WAIT, self.gate.prepare()).await {
+            match tokio::time::timeout(writers_wait, self.gate.prepare()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => return Err(error.message),
                 Err(_) => {
                     return Err(format!(
                         "requests that write did not answer within {} s",
-                        WRITERS_WAIT.as_secs()
+                        writers_wait.as_secs_f64()
                     ));
                 }
             }

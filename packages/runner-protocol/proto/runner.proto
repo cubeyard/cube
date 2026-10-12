@@ -45,11 +45,15 @@
 // that loads the memory file, and the runner connects to its port then;
 // reset and restore are the same mechanism. VMGENID has no part in it.
 // When the runner closes its end, the agent closes the port and opens it
-// again, which the runner sees in QMP (`query-chardev`: `frontend-open`).
-// Before a save the runner closes its end while the machine runs and waits
-// for that (bounded), then stops it and saves: the saved agent is waiting
-// for the host, so the runner's connect to the restored QEMU is an open it
-// sees. (A runner still connected at the save leaves a port that is already
+// again at once, which QMP reports as a `VSERPORT_CHANGE` timestamped after
+// the runner left (the event is rate-limited, so its timestamp, not its
+// state, is the answer). Before a save the runner closes its end while the
+// machine runs and waits for that (bounded), then stops it and saves: the
+// saved agent is waiting for the host, so the runner's connect to the
+// restored QEMU is an open it sees. The agent waits for the host on SIGIO
+// (the guest driver raises it for every message about the host's end),
+// never on a timer alone: a timer armed before a save can fire late after a
+// restore (under KVM, about 0.9 s for a young guest). (A runner still connected at the save leaves a port that is already
 // open in the restored machine, and a connect right after `cont` changes
 // nothing the guest sees; then only the reset helps.)
 // Sessions: every `hello` starts a session with a new `DaemonFrame.session`

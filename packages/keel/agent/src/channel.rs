@@ -34,6 +34,7 @@ use cube_runner_protocol::{
 use tokio::{
     io::BufReader,
     net::unix::pipe,
+    signal::unix::{Signal, SignalKind, signal},
     sync::{mpsc, watch},
 };
 
@@ -49,9 +50,32 @@ pub fn find_port() -> Option<PathBuf> {
     None
 }
 
-/// How often the agent looks for the runner while its end is closed: the
-/// port has no event for "connected again" (below).
+/// At most one connection per this long, whatever the port reports.
 const RECONNECT_POLL: Duration = Duration::from_millis(20);
+/// How often the agent looks for the runner while its end is closed, besides
+/// SIGIO (below): a backstop, never what a restore waits for.
+const HOST_POLL: Duration = Duration::from_millis(20);
+
+/// Asks the guest driver for SIGIO on this port (`O_ASYNC`, owner: this
+/// process). It sends one for every message from the host about its end
+/// (`VIRTIO_CONSOLE_PORT_OPEN`, connected or not) and for data, while the
+/// port is open. That is how the agent learns the runner connected without
+/// a timer: a timer armed before a save can fire late after a restore (on
+/// KVM, about 0.9 s for a young guest), an interrupt does not.
+fn signal_on_host_events(port: &fs::File) -> io::Result<()> {
+    let fd = port.as_raw_fd();
+    // SAFETY: fcntl on a descriptor this process owns.
+    unsafe {
+        if libc::fcntl(fd, libc::F_SETOWN, libc::getpid()) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_ASYNC) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
 
 /// Whether the runner's end of the port is connected. The guest driver sets
 /// POLLHUP while the host's end is closed, and POLLIN with it, because a
@@ -67,11 +91,12 @@ fn host_connected(port: &fs::File) -> bool {
     n >= 0 && poll.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) == 0
 }
 
-/// Waits until the runner's end is connected, looking every
-/// RECONNECT_POLL. Bytes a closed connection left unread are dropped on
-/// the way: they belong to channels the disconnect ended, and the next
-/// connection starts with `hello` (the runner speaks after it).
-async fn wait_for_host(port: &fs::File) {
+/// Waits until the runner's end is connected: woken by SIGIO (`events`,
+/// see signal_on_host_events), and every `poll` as a backstop. Bytes a
+/// closed connection left unread are dropped on the way: they belong to
+/// channels the disconnect ended, and the next connection starts with
+/// `hello` (the runner speaks after it).
+async fn wait_for_host(port: &fs::File, events: &mut Option<Signal>, poll: Duration) {
     let mut buffer = [0u8; 4096];
     let mut dropped = 0;
     while !host_connected(port) {
@@ -81,7 +106,15 @@ async fn wait_for_host(port: &fs::File) {
                 _ => break, // EOF (nothing left), or connected again (EAGAIN)
             }
         }
-        tokio::time::sleep(RECONNECT_POLL).await;
+        match events {
+            Some(events) => {
+                tokio::select! {
+                    _ = events.recv() => {}
+                    _ = tokio::time::sleep(poll) => {}
+                }
+            }
+            None => tokio::time::sleep(poll).await,
+        }
     }
     if dropped > 0 {
         eprintln!("cube-agent: dropped {dropped} bytes a closed connection left unread");
@@ -100,29 +133,47 @@ pub async fn serve(agent: Arc<Agent>) -> io::Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
+    // Registered once, before any port is open, so no SIGIO is lost.
+    let mut events = match signal(SignalKind::io()) {
+        Ok(events) => Some(events),
+        Err(error) => {
+            eprintln!("cube-agent: no SIGIO ({error}); waiting for the runner by polling only");
+            None
+        }
+    };
     loop {
         let port = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(&path)?;
-        wait_for_host(&port).await;
+        if let Err(error) = signal_on_host_events(&port) {
+            eprintln!(
+                "cube-agent: no SIGIO on cube.0 ({error}); waiting for the runner by polling only"
+            );
+        }
+        wait_for_host(&port, &mut events, HOST_POLL).await;
         let started = Instant::now();
         match connection(&agent, &port).await {
-            // The runner went away: close the port and open it again, so
-            // the runner sees (QMP VSERPORT_CHANGE) that this side knows. A
-            // machine saved after that waits for the host, and the runner's
-            // next connect is an open the agent sees, also after a restore.
-            // Never more than one connection per RECONNECT_POLL.
+            // The runner went away: close the port and open it again at
+            // once, so the runner sees (QMP VSERPORT_CHANGE, timestamped)
+            // that this side knows. No timer stands between that and the
+            // next hello: a machine saved now waits for the host on SIGIO,
+            // and the runner's connect after a restore wakes it. Never more
+            // than one connection per RECONNECT_POLL.
             Ok(()) => {
                 eprintln!("cube-agent: the runner closed its end of cube.0; closing the port");
-                tokio::time::sleep_until((started + RECONNECT_POLL).into()).await
+                drop(port);
+                tokio::time::sleep_until((started + RECONNECT_POLL).into()).await;
             }
-            // It broke the channel rules (or reset): the same.
-            Err(error) => eprintln!("cube-agent: ending the connection: {error}"),
+            // It broke the channel rules (or reset): the port is opened again
+            // after a pause.
+            Err(error) => {
+                eprintln!("cube-agent: ending the connection: {error}");
+                drop(port);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
-        drop(port);
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -666,6 +717,7 @@ mod tests {
             crate::shutdown::Teardown {
                 cgroups: vec![dir.join("ops")],
                 rw: dir.join("rw"),
+                writers_wait: Duration::from_millis(300),
                 term_wait: Duration::from_millis(50),
                 kill_wait: Duration::from_millis(50),
                 sync: || {},
@@ -769,6 +821,40 @@ mod tests {
         assert_eq!(reason(&exec), "shut_down");
         assert_eq!(reason(&setup), "shut_down");
         assert_eq!(reason(&again), "shutdown_failed", "the same outcome again");
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_waits_for_a_request_that_writes_and_fails_when_it_does_not_answer() {
+        // R13: a writer in flight when the shutdown comes. One that answers
+        // in time is waited for (done after it); one that does not makes the
+        // shutdown fail (never done), so the runner's stop is forced.
+        for (writer_ms, done) in [(100u64, true), (1000, false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let agent = agent_shutting_down_in(dir.path(), false);
+            let (_end, mut ended) = watch::channel(false);
+            let pass = agent
+                .gate()
+                .enter(true, "a write", &mut ended)
+                .await
+                .unwrap();
+            let shutting = tokio::spawn({
+                let agent = Arc::clone(&agent);
+                async move { agent.shutdown().await }
+            });
+            tokio::time::sleep(Duration::from_millis(writer_ms)).await;
+            drop(pass);
+            let outcome = tokio::time::timeout(Duration::from_secs(5), shutting)
+                .await
+                .unwrap()
+                .unwrap();
+            if done {
+                assert!(outcome.is_ok(), "{outcome:?}");
+            } else {
+                let error = outcome.unwrap_err();
+                assert_eq!(error.reason, "shutdown_failed");
+                assert!(error.message.contains("did not answer"), "{error:?}");
+            }
+        }
     }
 
     #[tokio::test]

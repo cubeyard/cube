@@ -12,6 +12,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How long the requests that write (journaled commands starting, file
+/// writes, a setup) have to answer before the teardown.
+pub const WRITERS_WAIT: Duration = Duration::from_secs(10);
 /// How long the workload has after SIGTERM.
 pub const TERM_WAIT: Duration = Duration::from_secs(10);
 /// How long SIGKILL may take to empty the cgroups.
@@ -24,6 +27,7 @@ pub struct Teardown {
     pub cgroups: Vec<PathBuf>,
     /// The writable disk's mount point.
     pub rw: PathBuf,
+    pub writers_wait: Duration,
     pub term_wait: Duration,
     pub kill_wait: Duration,
     pub sync: fn(),
@@ -37,6 +41,7 @@ impl Default for Teardown {
                 PathBuf::from("/sys/fs/cgroup/cube-services"),
             ],
             rw: PathBuf::from(crate::setup::RW),
+            writers_wait: WRITERS_WAIT,
             term_wait: TERM_WAIT,
             kill_wait: KILL_WAIT,
             // SAFETY: sync(2) has no preconditions.
@@ -195,6 +200,7 @@ mod tests {
         let teardown = Teardown {
             cgroups: vec![dir.path().join("ops")],
             rw: dir.path().join("rw"),
+            writers_wait: Duration::ZERO,
             term_wait: Duration::from_millis(50),
             kill_wait: Duration::from_millis(50),
             sync: || {},
@@ -215,6 +221,7 @@ mod tests {
         let teardown = Teardown {
             cgroups: vec![dir.path().join("services")],
             rw: dir.path().join("rw"),
+            writers_wait: Duration::ZERO,
             term_wait: Duration::from_millis(50),
             kill_wait: Duration::from_millis(50),
             sync: || {},
@@ -236,6 +243,7 @@ mod tests {
         let teardown = Teardown {
             cgroups: vec![],
             rw: dir.path().join("not-a-mount"),
+            writers_wait: Duration::ZERO,
             term_wait: Duration::ZERO,
             kill_wait: Duration::ZERO,
             sync: || {},

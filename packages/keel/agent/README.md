@@ -51,10 +51,15 @@ cube-init (PID 1)
 - **hello when the host opens the port.** The agent says `hello` when the
   runner's end connects: after a boot, an agent restart, the reset and a
   restore alike (runner.proto's header). When the runner closes its end
-  the agent closes the port and opens it again, so the runner sees it in
-  QMP (`query-chardev` `frontend-open`); a runner that saves a machine
-  closes its end first and waits for that, and the saved agent then waits
-  for the host, so the connect to the restored QEMU is an open it sees.
+  the agent closes the port and opens it again at once, which QMP reports
+  as a `VSERPORT_CHANGE` timestamped after the runner left; a runner that
+  saves a machine closes its end first and waits for that, and the saved
+  agent then waits for the host, so the connect to the restored QEMU is an
+  open it sees. It waits on SIGIO (`O_ASYNC` on the port: the guest driver
+  raises it for every message about the host's end), with a 20 ms look as
+  a backstop only: a timer armed before a save can fire late after a
+  restore (under KVM about 0.9 s for a young guest; K-4's host evidence),
+  an interrupt does not.
   VMGENID has no part in the handshake: on x86-64 QEMU's `vmgenid` device
   makes the kernel reseed its random generator on a restore (the kernel
   says so in its log, nothing else); arm64 QEMU has no such device. On both,
@@ -222,6 +227,8 @@ cube-init (PID 1)
   `INTERNAL/shutdown_failed`; a repeated request answers as the first.
   Afterwards it refuses every operation and setup (`shut_down`) and its
   status says so. It does not power the guest off: the runner quits QEMU.
+  The waits add up to 25 s (writers 10, SIGTERM 10, SIGKILL 5) plus the
+  sync, inside the runner's 30 s.
 - **snapshot_prepare and snapshot_done** (`snapshot.rs`). Right before a
   save the runner sends `snapshot_prepare`: the agent waits for the
   requests that write (`exec`, `cancel`, `write`, `portal`,
@@ -348,9 +355,10 @@ file's rules (S-7a). `berth vm` keeps the connect rule and sessions (B-2).
   Check 83 comes last (`--only snapshot` runs it alone, `--only rest`
   everything else, for a machine where the whole run is too long): one
   snapshot restored twice the supported way (the runner closes its end
-  while the machine runs, waits until `query-chardev` shows the agent closed
-  the port, then stops and saves; each restore is a new QEMU the runner
-  connects to after `cont`). Each restore must give a plain `hello` (no
+  while the machine runs, waits for a `VSERPORT_CHANGE` of the agent's port
+  timestamped after it left, then stops and saves; each restore is a new
+  QEMU the runner connects to after `cont`). A missing plain `hello` is a
+  failure; the check then says whether one came later, and when. Each restore must give a plain `hello` (no
   reset) within 500 ms of `cont`, a session neither the save nor the other
   restore had, the clock within 1 s after 3 s saved, random bytes the other
   restore did not read, and one kernel record of a VM generation change
