@@ -403,8 +403,15 @@ fn files(directory: &Path) -> Vec<String> {
     found
 }
 
+/// `dump.erofs` prints times in the local zone, so it runs in UTC whatever
+/// zone the tests run in (set on the subprocess, not on this process).
 fn dump(dump: &Path, image: &Path, arguments: &[&str]) -> String {
+    dump_in_zone(dump, image, arguments, "UTC")
+}
+
+fn dump_in_zone(dump: &Path, image: &Path, arguments: &[&str], zone: &str) -> String {
     let output = Command::new(dump)
+        .env("TZ", zone)
         .args(arguments)
         .arg(image)
         .output()
@@ -987,4 +994,24 @@ async fn a_cancelled_pull_stops_and_leaves_nothing() {
     assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
     assert!(!ran.exists());
     assert_eq!(files(directory.path()), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn layer_times_are_read_as_0_in_utc_in_any_local_zone() {
+    let (Some(mkfs), Some(dump_erofs)) = (tool("mkfs.erofs"), tool("dump.erofs")) else {
+        return;
+    };
+    let registry = FakeRegistry::start().await;
+    let (index, _) = image(&registry, &[base_layer()]);
+    let directory = tempfile::tempdir().unwrap();
+    let record = pull(&registry, directory.path(), &mkfs, &index)
+        .await
+        .unwrap();
+    let layer = directory.path().join(&record.layers[0].file);
+    // The same time 0 shown in a zone one hour east (POSIX TZ, no tzdata
+    // needed), as on a host in CET: the helper reads it in UTC anyway.
+    let east = dump_in_zone(&dump_erofs, &layer, &["--path=/etc/hello"], "CET-1");
+    assert!(east.contains("Timestamp: 1970-01-01 01:00:00"), "{east}");
+    let shown = dump(&dump_erofs, &layer, &["--path=/etc/hello"]);
+    assert!(shown.contains("Timestamp: 1970-01-01 00:00:00"), "{shown}");
 }
