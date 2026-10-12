@@ -324,11 +324,18 @@ try {
       note("Workspace contract (leases, files, commands, services, hooks) over RunnerGuestTransport: ok; hostname, placeholder and runner CA from machine_setup");
 
       // The agent starts again: a new session, the setup again, ready again.
-      const killed = await shell(workspace, "end-agent", "sudo pkill -x cube-agent; sleep 1").catch((error: unknown) => error);
+      // The main agent is the cube-agent in the root cgroup (its wrappers have
+      // cgroups of their own); /proc and bash's kill only: keel needs no procps.
+      const endAgent = "for p in /proc/[0-9]*; do [ \"$(cat $p/comm 2>/dev/null)\" = cube-agent ] && [ \"$(cat $p/cgroup 2>/dev/null)\" = 0::/ ] && sudo bash -c \"kill ${p#/proc/}\"; done; sleep 1";
+      const killed = await shell(workspace, "end-agent", endAgent).catch((error: unknown) => error);
       const renewed = await session.until(ref, machine => {
         const g = machine.status?.guest;
         return !!g && g.ready && SESSION.test(g.session) && g.session !== firstSession;
-      }, 60000);
+      }, 60000).catch(async (error: unknown) => {
+        const now = await session.machine({ case: "machineGet", value: { ref } });
+        const tail = fs.readFileSync(path.join(machineDir, "console.log"), "utf8").split("\n").slice(-15).join("\n");
+        throw new Error(`${String(error)}; the exec that should end the agent: ${JSON.stringify(killed)}; guest ${JSON.stringify(now.status?.guest, (_, v) => typeof v === "bigint" ? String(v) : v)}\nevents.log:\n${events(ref.id)}\nconsole:\n${tail}`);
+      });
       assert.equal(renewed.status?.bootId, firstBoot, "the same boot");
       note(`the agent started again: new session ${renewed.status!.guest!.session} after ${firstSession}, ready again (the exec that ended it: ${killed instanceof Error ? killed.message : "answered"})`);
       assert.match(events(ref.id), /the agent closed cube\.0; the session ended/);
