@@ -13,8 +13,11 @@ use std::{
 };
 
 /// How long the requests that write (journaled commands starting, file
-/// writes, a setup) have to answer before the teardown.
-pub const WRITERS_WAIT: Duration = Duration::from_secs(10);
+/// writes, a setup) have to answer before the teardown goes on anyway.
+/// The agent's waits add up to WRITERS_WAIT + TERM_WAIT + KILL_WAIT = 20 s,
+/// which leaves at least 10 s of the runner's 30 s for `sync` and the
+/// remount (berth's SHUTDOWN_WAIT).
+pub const WRITERS_WAIT: Duration = Duration::from_secs(5);
 /// How long the workload has after SIGTERM.
 pub const TERM_WAIT: Duration = Duration::from_secs(10);
 /// How long SIGKILL may take to empty the cgroups.

@@ -429,9 +429,6 @@ impl Services {
         Ok(())
     }
 
-    /// Template publishing: the supervisor starts nothing again and every
-    /// service's processes are killed (their registrations stay in state/,
-    /// which no template holds).
     /// No service starts again or anew from now on; running ones are left
     /// to the caller (the shutdown sends them SIGTERM first).
     pub fn hold(&self) {
@@ -439,6 +436,9 @@ impl Services {
         self.halted.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Template publishing: the supervisor starts nothing again and every
+    /// service's processes are killed (their registrations stay in state/,
+    /// which no template holds).
     pub fn halt(&self) {
         let mut units = self.units.lock().unwrap();
         self.halted.store(true, std::sync::atomic::Ordering::SeqCst);

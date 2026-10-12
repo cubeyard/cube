@@ -1054,9 +1054,10 @@ async fn same_snapshot(
     // and opens it again: a VSERPORT_CHANGE timestamped after the runner
     // left), then stops and saves. The saved
     // guest waits for the host, so the runner's connect after a restore is an
-    // open the guest sees. (Left connected, the restored port already says
-    // connected, and a connect right after cont can change nothing the guest
-    // sees: QEMU's post-load compares the states after the fact.)
+    // open the guest sees. (Left connected, the restored guest gets the
+    // host's close and open within moments of each other and may read
+    // after both, finding the host connected: no EOF, no hello; a race the
+    // agent usually loses.)
     let disconnect_first = lab.o.control != Some(Control::Snapshot);
     if disconnect_first {
         let mut qmp = Qmp::open(&m.qmp).await?;

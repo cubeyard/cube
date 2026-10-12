@@ -468,8 +468,8 @@ impl Agent {
 
     /// `shutdown` (shutdown.rs, runner.proto's `DaemonRequest.shutdown`):
     /// Ok means `done`, every write on the disk and the disk read-only. The
-    /// agent holds what comes from now on and waits (WRITERS_WAIT) for the
-    /// requests that write; services stop starting, command ends are no
+    /// agent holds what comes from now on and waits (at most WRITERS_WAIT,
+    /// then goes on) for the requests that write; services stop starting, command ends are no
     /// longer recorded, the workload gets SIGTERM, then SIGKILL. A repeated
     /// request answers as the first. Whatever the outcome, the machine
     /// refuses everything afterwards: the runner quits it.
@@ -484,15 +484,17 @@ impl Agent {
         }
         self.set_status(false, "shutting down");
         let outcome = async {
+            // New requests are held from here on (the gate is closed even
+            // when the wait ends first). A writer still busy afterwards is
+            // the workload's or ends with it; the read-only remount fails
+            // closed if a file is still open for writing.
             match tokio::time::timeout(writers_wait, self.gate.prepare()).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => return Err(error.message),
-                Err(_) => {
-                    return Err(format!(
-                        "requests that write did not answer within {} s",
-                        writers_wait.as_secs_f64()
-                    ));
-                }
+                Err(_) => eprintln!(
+                    "cube-agent: shutdown: requests that write did not answer within {} s; going on",
+                    writers_wait.as_secs_f64()
+                ),
             }
             if let Some(services) = self.services() {
                 services.hold();

@@ -824,11 +824,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_shutdown_waits_for_a_request_that_writes_and_fails_when_it_does_not_answer() {
+    async fn a_shutdown_waits_a_bounded_time_for_a_request_that_writes() {
         // R13: a writer in flight when the shutdown comes. One that answers
-        // in time is waited for (done after it); one that does not makes the
-        // shutdown fail (never done), so the runner's stop is forced.
-        for (writer_ms, done) in [(100u64, true), (1000, false)] {
+        // in time is waited for; one that does not is not waited for longer:
+        // the teardown goes on (and decides, through the remount, whether the
+        // disk is safe). Either way the answer comes after the wait, not
+        // before.
+        for (writer_ms, waited_ms) in [(100u64, 100u128), (1000, 300)] {
             let dir = tempfile::tempdir().unwrap();
             let agent = agent_shutting_down_in(dir.path(), false);
             let (_end, mut ended) = watch::channel(false);
@@ -837,6 +839,7 @@ mod tests {
                 .enter(true, "a write", &mut ended)
                 .await
                 .unwrap();
+            let started = std::time::Instant::now();
             let shutting = tokio::spawn({
                 let agent = Arc::clone(&agent);
                 async move { agent.shutdown().await }
@@ -847,13 +850,12 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            if done {
-                assert!(outcome.is_ok(), "{outcome:?}");
-            } else {
-                let error = outcome.unwrap_err();
-                assert_eq!(error.reason, "shutdown_failed");
-                assert!(error.message.contains("did not answer"), "{error:?}");
-            }
+            assert!(outcome.is_ok(), "{outcome:?}");
+            assert!(
+                started.elapsed().as_millis() >= waited_ms,
+                "waited {:?} for a writer of {writer_ms} ms",
+                started.elapsed()
+            );
         }
     }
 
