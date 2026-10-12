@@ -23,10 +23,13 @@ pub trait Service: Send + Sync + 'static {
     fn hello(&self, hello: &proto::Hello) -> Result<proto::HelloAnswer, proto::Error>;
     fn call(self: Arc<Self>, call: proto::Call) -> impl Future<Output = proto::CallResult> + Send;
     fn watch(self: Arc<Self>, send: &mut SendStream) -> impl Future<Output = Result<()>> + Send;
+    /// A guest operation's answer bytes; `send` is only watched (for cubed
+    /// stopping to read), the caller writes the answer.
     fn guest(
         self: Arc<Self>,
         header: proto::GuestHeader,
         recv: &mut RecvStream,
+        send: &mut SendStream,
     ) -> impl Future<Output = Result<Vec<u8>, proto::Error>> + Send;
     /// Called once when the runner starts serving.
     fn serving(self: &Arc<Self>) {}
@@ -110,7 +113,7 @@ async fn stream<S: Service>(
         },
         Some(open::Kind::Call(call)) => write_frame(send, &service.call(call).await).await?,
         Some(open::Kind::Watch(_)) => return service.watch(send).await,
-        Some(open::Kind::Guest(header)) => match service.guest(header, recv).await {
+        Some(open::Kind::Guest(header)) => match service.guest(header, recv, send).await {
             Ok(bytes) => {
                 write_frame(send, &answer(None)).await?;
                 send.write_all(&bytes).await?;

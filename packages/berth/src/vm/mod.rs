@@ -18,11 +18,21 @@
 //! machines interrupted. A machine is never started again by the runner on
 //! its own; cubed starts it.
 //!
-//! Not here yet: the guest channel (B-2: `status.guest`, `machine_setup`,
-//! guest streams), the network (B-4: no network device at all), image layers
-//! (B-7: the layer disk has no partitions), templates (B-8), diagnosis (B-9)
-//! and snapshots (S-7a). `stop` quits QEMU: a clean power-off through the
-//! agent comes with the channel.
+//! The guest channel (B-2, channel.rs): the runner connects to `ctl.sock`
+//! when QEMU runs, follows the agent's port over QMP (`qev.sock`), sends
+//! `machine_setup` after every `hello` (the image's layers, `Boot.documents`,
+//! the runner's CA from ca.rs, fresh entropy), keeps `status.guest` as the
+//! agent says it, and carries `guest` streams as `req`/`ans`. The image is
+//! the one `berth vm --image` names, pulled beforehand into the directory by
+//! `berth image pull`; a machine keeps the image it first started with.
+//!
+//! Not here yet: the network (B-4: no network device at all), image pulls
+//! by the runner itself and the cache limit (B-7), templates (B-8),
+//! diagnosis (B-9) and snapshots (S-7a). `stop` quits QEMU (a power cut for
+//! the guest, `e2fsck` on the next boot): keel's contract has no controlled
+//! power-off yet.
+mod ca;
+mod channel;
 mod qemu;
 mod record;
 
@@ -36,6 +46,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use cube_runner_protocol::proto::{daemon_answer::Result as AnswerKind, daemon_request::Op};
 use cube_runner_protocol::{
     MAX_FRAME_BYTES, PROTOCOL, Timestamp,
     proto::{self, Code, call::Verb, call_result, watch_event},
@@ -46,14 +57,15 @@ use tokio::sync::{broadcast, watch};
 
 pub use qemu::{Accel, Floor};
 use qemu::{Arch, Keel, Qmp};
-use record::{Boot, MachineRecord, Phase, Size};
+use record::{Boot, MachineImage, MachineRecord, Phase, Size};
 
 use crate::{
-    host::{getrandom, host_name, valid_id, valid_owner},
+    host::{getrandom, host_name, valid_id, valid_op, valid_owner},
+    image,
     serve::{self, Service, unimplemented},
 };
 
-const CAPABILITIES: [&str; 9] = [
+const CAPABILITIES: [&str; 10] = [
     "runner.get",
     "machine.create",
     "machine.start",
@@ -63,7 +75,17 @@ const CAPABILITIES: [&str; 9] = [
     "machine.get",
     "machine.list",
     "watch",
+    "guest",
 ];
+/// The `Boot.documents` names keel knows (runner.proto's `Boot`).
+const BOOT_DOCUMENTS: [&str; 4] = ["hostname", "env", "hooks/pre-setup", "hooks/pre-resume"];
+/// All of a machine's boot documents together, at most.
+const MAX_BOOT_BYTES: usize = 256 * 1024;
+/// A guest request, at most: in one `req` frame its bytes are base64, and
+/// the frame must stay within MAX_FRAME_BYTES.
+const MAX_GUEST_REQUEST: u64 = 704 * 1024;
+/// What the runner uses of the agent (`MachineSetup.capabilities`).
+const AGENT_CAPABILITIES: [&str; 3] = ["machine_setup", "session", "abort"];
 const DEFAULT_SIZE: Size = Size {
     vcpus: 2,
     memory_mib: 2048,
@@ -90,6 +112,29 @@ pub struct VmOptions {
     pub qemu_img: PathBuf,
     pub keel: PathBuf,
     pub accel: Accel,
+    /// The image every machine is built on, pulled into `directory` first.
+    pub image: image::Reference,
+}
+
+/// The runner's image, as `berth image pull` recorded it.
+struct Image {
+    reference: String,
+    record: image::ImageRecord,
+}
+
+impl Image {
+    fn machine_image(&self) -> MachineImage {
+        MachineImage {
+            reference: self.reference.clone(),
+            manifest: self.record.manifest.digest.clone(),
+            diff_ids: self
+                .record
+                .layers
+                .iter()
+                .map(|l| l.diff_id.clone())
+                .collect(),
+        }
+    }
 }
 
 /// A QEMU this runner started for a machine.
@@ -103,6 +148,11 @@ struct Entry {
     live: Option<Live>,
     version: i64,
     updated: Timestamp,
+    /// While QEMU runs: its channel, what the agent last said, and the boot
+    /// documents of the start (memory only; cubed sends them every start).
+    guest: Option<Arc<channel::Guest>>,
+    info: Option<proto::GuestInfo>,
+    documents: std::collections::HashMap<String, Vec<u8>>,
 }
 
 struct State {
@@ -117,6 +167,8 @@ pub struct VmRunner {
     arch: Arch,
     floor: Floor,
     keel: Keel,
+    ca: ca::RunnerCa,
+    image: Image,
     started_at: Timestamp,
     state: Mutex<State>,
     events: broadcast::Sender<proto::WatchEvent>,
@@ -202,6 +254,8 @@ impl VmRunner {
             options.directory.display()
         );
         let keel = Keel::open(&options.keel)?;
+        let ca = ca::RunnerCa::load_or_create(&control.join("ca"))?;
+        let image = load_image(&options.directory, &options.image)?;
         for dir in ["deleted", "trash"] {
             std::fs::create_dir_all(control.join(dir))?;
         }
@@ -250,6 +304,9 @@ impl VmRunner {
                     live: None,
                     version: 1,
                     updated: Timestamp::now(),
+                    guest: None,
+                    info: None,
+                    documents: Default::default(),
                 },
             );
         }
@@ -259,6 +316,8 @@ impl VmRunner {
             arch,
             floor,
             keel,
+            ca,
+            image,
             started_at: Timestamp::now(),
             state: Mutex::new(State {
                 version: 1,
@@ -299,6 +358,14 @@ impl VmRunner {
                 self.keel.kernel_sha256,
                 self.keel.base_sha256
             ),
+            format!(
+                "image: {} ({}, {} layers, manifest {})",
+                self.image.reference,
+                self.image.record.platform,
+                self.image.record.layers.len(),
+                self.image.record.manifest.digest
+            ),
+            format!("runner CA: certificate sha256 {}", self.ca.sha256),
             format!(
                 "machines: {} ({interrupted} interrupted; at most {} at once)",
                 state.machines.len(),
@@ -343,7 +410,7 @@ impl VmRunner {
                 max_disk_gib: MAX_DISK_GIB,
                 max_machines: self.options.max_machines,
                 max_frame_bytes: MAX_FRAME_BYTES as u32,
-                ..Default::default()
+                max_boot_bytes: MAX_BOOT_BYTES as u32,
             }),
             capacity: Some(proto::Capacity {
                 machines_active: active,
@@ -360,7 +427,7 @@ impl VmRunner {
             }),
             templates: vec![],
             labels: self.options.labels.clone(),
-            ca_pem: String::new(),
+            ca_pem: self.ca.pem.clone(),
             meta: Some(proto::Meta {
                 version: state.version,
                 updated: Some(Timestamp::now()),
@@ -369,7 +436,12 @@ impl VmRunner {
         }
     }
 
-    fn machine(record: &MachineRecord, version: i64, updated: Timestamp) -> proto::Machine {
+    fn machine(
+        record: &MachineRecord,
+        guest: Option<&proto::GuestInfo>,
+        version: i64,
+        updated: Timestamp,
+    ) -> proto::Machine {
         let boot = record.boot.as_ref().filter(|_| record.phase.live());
         let conditions = record
             .interrupted
@@ -403,7 +475,7 @@ impl VmRunner {
                 disk_bytes: 0,
                 error: record.error.clone(),
                 started_at: boot.map(|b| b.started_at),
-                guest: None,
+                guest: guest.filter(|_| record.phase.live()).cloned(),
             }),
             meta: Some(proto::Meta {
                 version,
@@ -415,8 +487,13 @@ impl VmRunner {
 
     fn current(&self, state: &State, id: &str) -> proto::Machine {
         match state.machines.get(id) {
-            Some(entry) => Self::machine(&entry.record, entry.version, entry.updated),
-            None => Self::machine(&state.deleted[id], state.version, Timestamp::now()),
+            Some(entry) => Self::machine(
+                &entry.record,
+                entry.info.as_ref(),
+                entry.version,
+                entry.updated,
+            ),
+            None => Self::machine(&state.deleted[id], None, state.version, Timestamp::now()),
         }
     }
 
@@ -430,9 +507,102 @@ impl VmRunner {
         let entry = state.machines.get_mut(id).unwrap();
         entry.version = version;
         entry.updated = Timestamp::now();
-        let machine = Self::machine(&entry.record, version, entry.updated);
+        let machine = Self::machine(&entry.record, entry.info.as_ref(), version, entry.updated);
         self.tell(watch_event::Type::Put, machine.clone(), state);
         Ok(machine)
+    }
+
+    /// What the agent of machine `id` said in boot `boot_id`, as
+    /// `status.guest`: a watch event, not a journal write.
+    fn publish_guest(&self, id: &str, boot_id: &str, info: proto::GuestInfo) {
+        let mut state = self.state.lock().unwrap();
+        let Some(entry) = state.machines.get_mut(id) else {
+            return;
+        };
+        let this_boot = entry.live.is_some()
+            && entry
+                .record
+                .boot
+                .as_ref()
+                .is_some_and(|b| b.boot_id == boot_id);
+        if !this_boot {
+            return;
+        }
+        entry.info = Some(info);
+        state.version += 1;
+        let version = state.version;
+        let entry = state.machines.get_mut(id).unwrap();
+        entry.version = version;
+        entry.updated = Timestamp::now();
+        let machine = Self::machine(&entry.record, entry.info.as_ref(), version, entry.updated);
+        self.tell(watch_event::Type::Put, machine, &state);
+    }
+
+    /// Machine `id`'s setup (runner.proto's `MachineSetup`): its image's
+    /// layers topmost first, its boot documents, the runner's CA, and 32
+    /// fresh random bytes.
+    fn setup(&self, id: &str) -> proto::MachineSetup {
+        let state = self.state.lock().unwrap();
+        let entry = state.machines.get(id);
+        let documents = entry
+            .map(|entry| entry.documents.clone().into_iter().collect())
+            .unwrap_or_default();
+        let layers = entry
+            .and_then(|entry| entry.record.image.as_ref())
+            .map(|image| {
+                image
+                    .diff_ids
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .map(|(i, diff_id)| proto::Layer {
+                        partition: i as u32 + 1,
+                        source: Some(proto::layer::Source::DiffId(diff_id.clone())),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut entropy = vec![0u8; 32];
+        getrandom(&mut entropy);
+        proto::MachineSetup {
+            r#ref: entry.map(|entry| proto::Ref {
+                owner: entry.record.owner.clone(),
+                id: entry.record.id.clone(),
+            }),
+            documents,
+            entropy,
+            layers,
+            image: Some(proto::ImageConfig {
+                digest: self.image.record.manifest.digest.clone(),
+                env: self.image.record.env.clone(),
+            }),
+            ca_pem: self.ca.pem.clone(),
+            runner_version: crate::SOFTWARE_VERSION.into(),
+            protocol: PROTOCOL,
+            capabilities: AGENT_CAPABILITIES.map(String::from).to_vec(),
+        }
+    }
+
+    /// Writes the runner's image onto machine `id`'s layer disk (QEMU does
+    /// not run) and returns what the record keeps of it.
+    fn write_layers(&self, id: &str) -> Result<MachineImage> {
+        let layers: Vec<keel_layers::disk::Layer> = self
+            .image
+            .record
+            .layers
+            .iter()
+            .map(|layer| keel_layers::disk::Layer {
+                path: self.options.directory.join(&layer.file),
+                name: layer
+                    .diff_id
+                    .trim_start_matches("sha256:")
+                    .chars()
+                    .take(29)
+                    .collect(),
+            })
+            .collect();
+        keel_layers::disk::write(&self.machine_dir(id), &layers)?;
+        Ok(self.image.machine_image())
     }
 
     fn tell(&self, r#type: watch_event::Type, machine: proto::Machine, state: &State) {
@@ -600,8 +770,7 @@ impl VmRunner {
                 .map_err(internal)?;
             std::fs::rename(&temporary, &disk).map_err(internal)?;
         }
-        // No image layers before masterplan B-7: a GPT without partitions.
-        keel_layers::disk::write(&dir, &[]).map_err(internal)?;
+        let image = self.write_layers(&reference.id).map_err(internal)?;
         let machine_type = self
             .floor
             .newest_machine_type()
@@ -620,8 +789,16 @@ impl VmRunner {
             interrupted: None,
             error: String::new(),
             boot: None,
+            image: Some(image),
         };
-        event(&dir, "created", &format!("machine type {machine_type}"));
+        event(
+            &dir,
+            "created",
+            &format!(
+                "machine type {machine_type}, image {}",
+                self.image.reference
+            ),
+        );
         let mut state = self.state.lock().unwrap();
         state.machines.insert(
             reference.id.clone(),
@@ -630,12 +807,16 @@ impl VmRunner {
                 live: None,
                 version: 0,
                 updated: Timestamp::now(),
+                guest: None,
+                info: None,
+                documents: Default::default(),
             },
         );
         self.commit(&mut state, &reference.id)
     }
 
     async fn start(self: &Arc<Self>, request: proto::MachineStart) -> Answer<proto::Machine> {
+        let documents = boot_documents(request.boot.as_ref())?;
         let (id, record) = {
             let mut state = self.state.lock().unwrap();
             let entry = Self::fenced(&mut state, request.r#ref.as_ref(), request.fence.as_ref())?;
@@ -671,12 +852,35 @@ impl VmRunner {
                     ),
                 ));
             }
+            // A machine keeps its image: its workload root is built on it.
+            let runner_image = self.image.machine_image();
+            match &entry.record.image {
+                Some(image) if image.manifest != runner_image.manifest => {
+                    return Err(refuse(
+                        Code::FailedPrecondition,
+                        "image_changed",
+                        &format!(
+                            "the machine is built on {} ({}); this runner serves {}",
+                            image.reference, image.manifest, runner_image.reference
+                        ),
+                    ));
+                }
+                Some(_) => {}
+                // Created before the runner had an image (B-1): its disk
+                // never had a workload root, so it takes the runner's.
+                None => {
+                    entry.record.image = Some(self.write_layers(&id).map_err(internal)?);
+                }
+            }
+            let entry = state.machines.get_mut(&id).unwrap();
+            entry.documents = documents;
             entry.record.phase = Phase::Starting;
             entry.record.error.clear();
             let record = entry.record.clone();
             self.commit(&mut state, &id)?;
             (id, record)
         };
+
         let dir = self.machine_dir(&id);
         match self.launch(&id, &dir, &record).await {
             Ok(()) => {
@@ -712,7 +916,7 @@ impl VmRunner {
 
     /// Spawns the machine's QEMU, records the boot, and waits until it runs.
     async fn launch(self: &Arc<Self>, id: &str, dir: &Path, record: &MachineRecord) -> Result<()> {
-        for name in [qemu::QMP_SOCKET, qemu::CHANNEL_SOCKET] {
+        for name in [qemu::QMP_SOCKET, qemu::EVENTS_SOCKET, qemu::CHANNEL_SOCKET] {
             let _ = std::fs::remove_file(dir.join(name));
         }
         let console = dir.join(qemu::CONSOLE);
@@ -782,6 +986,44 @@ impl VmRunner {
             "QEMU is {}, not running",
             status["status"]
         );
+        // The guest channel: the port's events first, so none is missed
+        // (the agent opens the port well after QEMU answers QMP).
+        let mut events = Qmp::open(&dir.join(qemu::EVENTS_SOCKET), BOOT_TIMEOUT).await?;
+        let (ports, port_events) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok(event) = events.event().await {
+                if event["event"] == "VSERPORT_CHANGE" && event["data"]["id"] == qemu::PORT_ID {
+                    let open = event["data"]["open"].as_bool().unwrap_or(false);
+                    if ports.send(open).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        let (guest, frames) = channel::Guest::new();
+        let exited = {
+            let mut state = self.state.lock().unwrap();
+            let entry = state.machines.get_mut(id).unwrap();
+            entry.guest = Some(Arc::clone(&guest));
+            entry.live.as_ref().map(|live| live.exited.clone())
+        };
+        if let Some(exited) = exited {
+            let host = Arc::new(MachineHost {
+                runner: Arc::clone(self),
+                id: id.to_owned(),
+                boot_id,
+                dir: dir.to_owned(),
+            });
+            tokio::spawn(channel::run(
+                guest,
+                frames,
+                dir.join(qemu::CHANNEL_SOCKET),
+                port_events,
+                host,
+                channel::TIMING,
+                exited,
+            ));
+        }
         Ok(())
     }
 
@@ -795,6 +1037,8 @@ impl VmRunner {
             return;
         }
         entry.live = None;
+        entry.guest = None;
+        entry.info = None;
         let status = status.unwrap_or_else(|error| error.to_string());
         let dir = self.machine_dir(id);
         if entry.record.phase != Phase::Stopping {
@@ -978,7 +1222,7 @@ impl VmRunner {
         }
         state.version += 1;
         state.deleted.insert(id.to_owned(), entry.record.clone());
-        let machine = Self::machine(&entry.record, state.version, Timestamp::now());
+        let machine = Self::machine(&entry.record, None, state.version, Timestamp::now());
         self.tell(watch_event::Type::Delete, machine.clone(), state);
         Ok(machine)
     }
@@ -1015,7 +1259,14 @@ impl VmRunner {
                     items: state
                         .machines
                         .values()
-                        .map(|entry| Self::machine(&entry.record, entry.version, entry.updated))
+                        .map(|entry| {
+                            Self::machine(
+                                &entry.record,
+                                entry.info.as_ref(),
+                                entry.version,
+                                entry.updated,
+                            )
+                        })
                         .collect(),
                     version: state.version,
                 }))
@@ -1109,6 +1360,97 @@ async fn quit_orphan(socket: &Path) -> bool {
     true
 }
 
+/// One boot of one machine, as its guest channel sees the runner.
+struct MachineHost {
+    runner: Arc<VmRunner>,
+    id: String,
+    boot_id: String,
+    dir: PathBuf,
+}
+
+impl channel::Host for MachineHost {
+    fn setup(&self) -> proto::MachineSetup {
+        self.runner.setup(&self.id)
+    }
+    fn publish(&self, info: proto::GuestInfo) {
+        self.runner.publish_guest(&self.id, &self.boot_id, info);
+    }
+    fn event(&self, what: &str, detail: &str) {
+        event(&self.dir, what, detail);
+    }
+}
+
+/// `MachineStart.boot`'s documents, checked: names keel knows, and at most
+/// MAX_BOOT_BYTES together. `Boot.mac` has no use before the network (B-4).
+fn boot_documents(
+    boot: Option<&proto::Boot>,
+) -> Answer<std::collections::HashMap<String, Vec<u8>>> {
+    let documents = boot.map(|boot| boot.documents.clone()).unwrap_or_default();
+    if let Some(name) = documents
+        .keys()
+        .find(|name| !BOOT_DOCUMENTS.contains(&name.as_str()))
+    {
+        return Err(refuse(
+            Code::InvalidArgument,
+            "unknown_document",
+            &format!(
+                "boot document {name:?}; keel knows {}",
+                BOOT_DOCUMENTS.join(", ")
+            ),
+        ));
+    }
+    let bytes: usize = documents.iter().map(|(k, v)| k.len() + v.len()).sum();
+    if bytes > MAX_BOOT_BYTES {
+        return Err(refuse(
+            Code::InvalidArgument,
+            "boot_size",
+            &format!("boot documents are at most {MAX_BOOT_BYTES} bytes together"),
+        ));
+    }
+    Ok(documents.into_iter().collect())
+}
+
+/// The image `reference` names, as `berth image pull` left it in
+/// `directory`: its record and every layer file, for this platform.
+fn load_image(directory: &Path, reference: &image::Reference) -> Result<Image> {
+    let store = image::Store::open(directory)?;
+    let path = store.record_path(&reference.digest);
+    let pull = format!(
+        "pull it first: berth image pull --dir {} --mkfs-erofs <mkfs.erofs> --image {reference}",
+        directory.display()
+    );
+    let text = std::fs::read(&path).with_context(|| {
+        format!(
+            "no record of {reference} in {}; {pull}",
+            directory.display()
+        )
+    })?;
+    let record: image::ImageRecord = serde_json::from_slice(&text)
+        .with_context(|| format!("{} is not an image record", path.display()))?;
+    let platform = image::Platform::native()?.to_string();
+    ensure!(
+        record.platform == platform && record.digest == reference.digest.to_string(),
+        "{} is for {} {}, not {platform} {}",
+        path.display(),
+        record.platform,
+        record.digest,
+        reference.digest
+    );
+    for layer in &record.layers {
+        let file = directory.join(&layer.file);
+        ensure!(
+            Path::new(&layer.file).is_relative() && !layer.file.contains("..") && file.is_file(),
+            "{reference}: layer {} is not in the cache ({}); {pull}",
+            layer.diff_id,
+            file.display()
+        );
+    }
+    Ok(Image {
+        reference: reference.to_string(),
+        record,
+    })
+}
+
 impl Service for VmRunner {
     const KIND: &'static str = "vm_runner";
 
@@ -1146,6 +1488,7 @@ impl Service for VmRunner {
             resources.extend(state.machines.values().map(|entry| {
                 watch_event::Resource::Machine(Self::machine(
                     &entry.record,
+                    entry.info.as_ref(),
                     entry.version,
                     entry.updated,
                 ))
@@ -1156,13 +1499,86 @@ impl Service for VmRunner {
     }
     async fn guest(
         self: Arc<Self>,
-        _header: proto::GuestHeader,
+        header: proto::GuestHeader,
         recv: &mut RecvStream,
+        send: &mut SendStream,
     ) -> Answer<Vec<u8>> {
-        // Read the request to its end (bounded), so the answer is what
-        // cubed sees rather than a stopped stream.
+        // The request first, to its end (bounded), so a refusal is what
+        // cubed reads rather than a stopped stream.
         use tokio::io::AsyncReadExt;
-        let _ = tokio::io::copy(&mut recv.take(8 << 20), &mut tokio::io::sink()).await;
-        Err(unimplemented::<Self>("guest channel yet (masterplan B-2)"))
+        let mut request = Vec::new();
+        recv.take(MAX_GUEST_REQUEST + 1)
+            .read_to_end(&mut request)
+            .await
+            .map_err(|error| refuse(Code::Unavailable, "stream", &error.to_string()))?;
+        if request.len() as u64 > MAX_GUEST_REQUEST {
+            return Err(refuse(
+                Code::InvalidArgument,
+                "size",
+                &format!("a guest request is at most {MAX_GUEST_REQUEST} bytes"),
+            ));
+        }
+        if !valid_op(&header.op) {
+            return Err(refuse(
+                Code::InvalidArgument,
+                "op",
+                "invalid guest operation name",
+            ));
+        }
+        let guest = {
+            let mut state = self.state.lock().unwrap();
+            let before = header
+                .r#ref
+                .as_ref()
+                .and_then(|r| state.machines.get(&r.id))
+                .map(|entry| entry.record.fence_epoch);
+            let entry = Self::fenced(&mut state, header.r#ref.as_ref(), header.fence.as_ref())?;
+            if before != Some(entry.record.fence_epoch) {
+                let id = entry.record.id.clone();
+                record::write_json(&self.machine_dir(&id).join(record::RECORD), &entry.record)
+                    .map_err(internal)?;
+            }
+            match (&entry.guest, entry.record.phase) {
+                (Some(guest), Phase::Running) => Arc::clone(guest),
+                _ => {
+                    return Err(refuse(
+                        Code::Unavailable,
+                        "not_running",
+                        &format!("the machine is {}", entry.record.phase.name()),
+                    ));
+                }
+            }
+        };
+        let (ch, answer) = guest.request(Op::Guest(proto::GuestRequest {
+            op: header.op.clone(),
+            data: request,
+        }))?;
+        let answer = tokio::select! {
+            answer = answer => answer,
+            // cubed stopped reading (its call was aborted or timed out):
+            // the agent lets the operation finish and drops its answer.
+            _ = send.stopped() => {
+                guest.abort(ch);
+                return Err(refuse(Code::Aborted, "stream", "cubed stopped waiting for the answer"));
+            }
+        };
+        match answer {
+            Ok(Ok(AnswerKind::Guest(bytes))) => Ok(bytes),
+            Ok(Ok(AnswerKind::Error(error))) => Err(error),
+            Ok(Ok(AnswerKind::Done(_))) => Err(refuse(
+                Code::Internal,
+                "agent",
+                "the agent answered a guest operation with done",
+            )),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(proto::Error {
+                completion_unknown: true,
+                ..refuse(
+                    Code::Unavailable,
+                    "guest_disconnected",
+                    "the machine stopped",
+                )
+            }),
+        }
     }
 }

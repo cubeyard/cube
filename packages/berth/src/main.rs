@@ -25,8 +25,9 @@ pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const RELAY_READY_TIMEOUT: Duration = Duration::from_secs(20);
 
 const USAGE: &str = "usage:
-  berth vm --dir <directory> --qemu <qemu-system binary> --qemu-img <qemu-img binary> --keel <directory with vmlinuz and base.erofs> [--accel kvm|hvf|tcg] [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay] [--listen <ip:port>] [--max-machines 8] [--labels k=v,...]
-      each machine is a keel guest under the QEMU given by path, which must meet keel's QEMU floor
+  berth vm --dir <directory> --qemu <qemu-system binary> --qemu-img <qemu-img binary> --keel <directory with vmlinuz and base.erofs> --image <registry/repository@sha256:digest> [--accel kvm|hvf|tcg] [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay] [--listen <ip:port>] [--max-machines 8] [--labels k=v,...]
+      each machine is a keel guest under the QEMU given by path, which must meet keel's QEMU floor,
+      built on the image, which `berth image pull` must have put into <directory> first
   berth host --dir <directory> [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay] [--listen <ip:port>] [--python python3] [--max-machines 8] [--labels k=v,...]
       UNSANDBOXED: each machine is a subdirectory of <directory>; commands run as you, with your logins
   berth image pull --dir <directory> --mkfs-erofs <mkfs.erofs binary> --image <registry/repository@sha256:digest>
@@ -391,6 +392,7 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
     let qemu_img = given_file(&mut options, "--qemu-img")?;
     let keel = PathBuf::from(take(&mut options, "--keel")?);
     ensure!(keel.is_absolute(), "--keel must be an absolute path");
+    let image = image::Reference::parse(&take(&mut options, "--image")?)?;
     let accel = match options.remove("--accel") {
         Some(accel) => vm::Accel::parse(&accel)?,
         None => vm::Accel::native(),
@@ -416,6 +418,7 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
             qemu_img,
             keel,
             accel,
+            image,
         },
         floor,
     )
