@@ -90,6 +90,13 @@ jobs:
               cargo build --locked --offline --release -p cube-agent --target "$target"
             file "target/$target/release/cube-agent" | tee /dev/stderr | grep -q 'statically linked\|static-pie linked'
           done
+      - name: Ubuntu's QEMU, below keel's floor, for berth vm to refuse
+        run: |
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-system-x86
+          qemu-system-x86_64 --version | head -1
+          if qemu-system-x86_64 --version | grep -q 'version 8\.2\.'; then
+            echo "CUBE_TEST_BERTH_OLD_QEMU=$(command -v qemu-system-x86_64)" >>"$GITHUB_ENV"
+          fi
       - name: real-QUIC Rust and in-process Node interoperability
         run: bash scripts/test-node-transport.sh
         env:

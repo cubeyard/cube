@@ -732,7 +732,12 @@ until they are re-enrolled), CI for keel, and updates to ARCHITECTURE.md,
 docs/platforms.md, docs/runner-operations.md and SECURITY.md (the channel is
 a new guest-to-host path the runner treats as hostile). Acceptance on hosts:
 `runner-host-test.ts`'s Workspace contract against a keel machine and
-`scripts/test-node-transport.sh`, on Linux/KVM and on a Mac.
+`scripts/test-node-transport.sh`, on Linux/KVM and on a Mac. Built so far
+(masterplan B-1): `berth vm` with QEMU, qemu-img and keel given by path, the
+floor checked on that QEMU, the machine type pinned per machine, the layer
+disk read-only (no image layers yet), the retained writable disk, a journal
+per machine and `Interrupted` after a runner stop or crash;
+`packages/server/test/runner-vm-test.ts` runs the session against it.
 
 **9. Suspend and resume.** Idle threads saved to a file and resumed, with the
 rules above, including the wake-or-fail decision for guest calls. Acceptance
