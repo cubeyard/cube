@@ -50,6 +50,10 @@ pub struct Agent {
     /// Holds requests while the machine is prepared for a snapshot.
     gate: Gate,
     settle: Settle,
+    /// What a shutdown does to the machine (tests give their own).
+    teardown: crate::shutdown::Teardown,
+    /// The shutdown's outcome once it ran: the machine refuses everything.
+    shut: Mutex<Option<Result<String, String>>>,
     build: String,
     kernel: String,
     boot_id: String,
@@ -131,6 +135,11 @@ impl Agent {
 
     /// `start`, with the kernel knobs a snapshot prepare writes.
     pub fn start_with(settle: Settle) -> Arc<Self> {
+        Self::start_with_teardown(settle, crate::shutdown::Teardown::default())
+    }
+
+    /// `start_with`, and what a shutdown does.
+    pub fn start_with_teardown(settle: Settle, teardown: crate::shutdown::Teardown) -> Arc<Self> {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/sbin/cube-agent"));
         let agent = Arc::new(Self {
             journal: Mutex::new(None),
@@ -150,6 +159,8 @@ impl Agent {
             setup: tokio::sync::Mutex::new(()),
             gate: Gate::default(),
             settle,
+            teardown,
+            shut: Mutex::new(None),
             build: crate::files::sha256_file(&exe).unwrap_or_default(),
             kernel: read_trimmed("/proc/sys/kernel/osrelease"),
             boot_id: read_trimmed("/proc/sys/kernel/random/boot_id"),
@@ -274,6 +285,10 @@ impl Agent {
         let count = self.sessions.fetch_add(1, Ordering::SeqCst);
         let session = session_id(host_ns, &self.boot_id, count);
         *self.session.lock().unwrap() = session.clone();
+        if let Some(reason) = self.shut_reason() {
+            self.set_status(false, reason);
+            return session;
+        }
         match crate::template::published() {
             Some(record) => self.set_status(false, published_reason(&record)),
             None => self.set_status(false, "waiting for machine_setup"),
@@ -327,8 +342,9 @@ impl Agent {
     pub fn info(&self) -> proto::GuestInfo {
         let hooks = self.hooks().into_iter().collect();
         let status = self.status.lock().unwrap();
-        let prepared = self.gate.prepared();
-        let ready = status.ready && !prepared;
+        let shut = self.shut.lock().unwrap().is_some();
+        let prepared = self.gate.prepared() && !shut;
+        let ready = status.ready && !prepared && !shut;
         proto::GuestInfo {
             connected: true,
             ready,
@@ -383,6 +399,11 @@ impl Agent {
                 "an operation name is lowercase ASCII letters",
             ));
         }
+        if let Some(reason) = self.shut_reason()
+            && op != "hello"
+        {
+            return AnswerKind::Error(refuse(Code::Unavailable, "shut_down", &reason));
+        }
         if op != "hello" && !self.ready() {
             let reason = self.status.lock().unwrap().reason.clone();
             return AnswerKind::Error(refuse(Code::Unavailable, "not_ready", &reason));
@@ -402,6 +423,9 @@ impl Agent {
     /// setup lock; Ok means `done`. A repeated request answers as the first.
     pub async fn template_publish(self: &Arc<Self>) -> Result<(), proto::Error> {
         let _one = self.setup.lock().await;
+        if let Some(reason) = self.shut_reason() {
+            return Err(refuse(Code::FailedPrecondition, "shut_down", &reason));
+        }
         if let Some(record) = crate::template::published() {
             return crate::template::outcome(&record);
         }
@@ -424,6 +448,73 @@ impl Agent {
         let record = crate::template::published().unwrap_or_default();
         self.set_status(false, published_reason(&record));
         result.map(|_| ())
+    }
+
+    /// Whether a shutdown ran (whatever its outcome).
+    pub fn is_shut(&self) -> bool {
+        self.shut.lock().unwrap().is_some()
+    }
+
+    fn shut_reason(&self) -> Option<String> {
+        self.shut
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|outcome| match outcome {
+                Ok(what) => format!("shut down: {what}"),
+                Err(why) => format!("shut down, but the teardown failed: {why}"),
+            })
+    }
+
+    /// `shutdown` (shutdown.rs, runner.proto's `DaemonRequest.shutdown`):
+    /// Ok means `done`, every write on the disk and the disk read-only. The
+    /// agent holds what comes from now on and waits (WRITERS_WAIT) for the
+    /// requests that write; services stop starting, command ends are no
+    /// longer recorded, the workload gets SIGTERM, then SIGKILL. A repeated
+    /// request answers as the first. Whatever the outcome, the machine
+    /// refuses everything afterwards: the runner quits it.
+    pub async fn shutdown(self: &Arc<Self>) -> Result<(), proto::Error> {
+        const WRITERS_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+        let _one = self.setup.lock().await;
+        let first = self.shut.lock().unwrap().clone();
+        if let Some(outcome) = first {
+            return outcome
+                .map(|_| ())
+                .map_err(|why| refuse(Code::Internal, "shutdown_failed", &why));
+        }
+        self.set_status(false, "shutting down");
+        let outcome = async {
+            match tokio::time::timeout(WRITERS_WAIT, self.gate.prepare()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(error.message),
+                Err(_) => {
+                    return Err(format!(
+                        "requests that write did not answer within {} s",
+                        WRITERS_WAIT.as_secs()
+                    ));
+                }
+            }
+            if let Some(services) = self.services() {
+                services.hold();
+            }
+            self.shutting_down();
+            let teardown = self.teardown.clone();
+            tokio::task::spawn_blocking(move || teardown.run())
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())
+        }
+        .await;
+        match &outcome {
+            Ok(what) => eprintln!("cube-agent: shutdown: {what}"),
+            Err(why) => eprintln!("cube-agent: shutdown failed: {why}"),
+        }
+        *self.shut.lock().unwrap() = Some(outcome.clone());
+        let reason = self.shut_reason().unwrap_or_default();
+        self.set_status(false, reason);
+        outcome
+            .map(|_| ())
+            .map_err(|why| refuse(Code::Internal, "shutdown_failed", &why))
     }
 
     /// `snapshot_prepare` (snapshot.rs): Ok means `done`, the machine
@@ -461,6 +552,9 @@ impl Agent {
     /// `snapshot_done`: what the prepare held goes on. Done also when the
     /// machine was not prepared.
     pub fn snapshot_done(&self) {
+        if self.shut.lock().unwrap().is_some() {
+            return; // what a shutdown holds is never let go
+        }
         if self.gate.release() {
             eprintln!("cube-agent: snapshot: snapshot_done; what was held goes on");
         }
@@ -472,6 +566,9 @@ impl Agent {
         request: proto::MachineSetup,
     ) -> Result<(), proto::Error> {
         let _one = self.setup.lock().await;
+        if let Some(reason) = self.shut_reason() {
+            return Err(refuse(Code::FailedPrecondition, "shut_down", &reason));
+        }
         if let Some(record) = crate::template::published() {
             return Err(refuse(
                 Code::FailedPrecondition,

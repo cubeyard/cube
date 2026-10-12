@@ -211,6 +211,17 @@ cube-init (PID 1)
   directories stay overlay's); the agent answers `done` and refuses every
   operation and setup until the machine powers off. A repeated request
   answers as the first; the outcome is kept in `/run/keel/published.json`.
+- **shutdown** (`shutdown.rs`, runner.proto's `DaemonRequest.shutdown`,
+  the runner's controlled stop). The agent holds what comes from now on and
+  waits (10 s) for the requests that write, stops starting services and
+  recording command ends (cut-off commands are interrupted after the next
+  boot), sends SIGTERM to every process in the operations' and services'
+  cgroups, SIGKILL to what is left after 10 s (and fails if they still do
+  not end), syncs and remounts the writable disk read-only, checked with
+  `statvfs`. It answers `done` only when all of that held, else
+  `INTERNAL/shutdown_failed`; a repeated request answers as the first.
+  Afterwards it refuses every operation and setup (`shut_down`) and its
+  status says so. It does not power the guest off: the runner quits QEMU.
 - **snapshot_prepare and snapshot_done** (`snapshot.rs`). Right before a
   save the runner sends `snapshot_prepare`: the agent waits for the
   requests that write (`exec`, `cancel`, `write`, `portal`,

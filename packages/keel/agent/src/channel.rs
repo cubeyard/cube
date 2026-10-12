@@ -222,10 +222,14 @@ async fn connection(agent: &Arc<Agent>, port: &fs::File) -> anyhow::Result<()> {
                             });
                         }
                     };
-                    if matches!(
-                        request.op,
-                        Some(Op::SnapshotPrepare(_) | Op::SnapshotDone(_))
-                    ) {
+                    // A shut machine refuses at once (the gate a shutdown
+                    // closed is never opened again).
+                    if agent.is_shut()
+                        || matches!(
+                            request.op,
+                            Some(Op::SnapshotPrepare(_) | Op::SnapshotDone(_) | Op::Shutdown(_))
+                        )
+                    {
                         let (answer, follow) = handle(&agent, request).await;
                         return send(answer, follow);
                     }
@@ -310,6 +314,10 @@ async fn handle(agent: &Arc<Agent>, request: proto::DaemonRequest) -> (AnswerKin
             agent.snapshot_done();
             (AnswerKind::Done(proto::Empty {}), true)
         }
+        Some(Op::Shutdown(_)) => match agent.shutdown().await {
+            Ok(()) => (AnswerKind::Done(proto::Empty {}), true),
+            Err(error) => (AnswerKind::Error(error), true),
+        },
         None => (
             AnswerKind::Error(refuse(
                 Code::InvalidArgument,
@@ -636,6 +644,131 @@ mod tests {
         assert_eq!(answered.session, s, "an answer carries its session");
         let more = tokio::time::timeout(Duration::from_millis(300), read_daemon_frame(&mut runner));
         assert!(more.await.is_err(), "nothing answers the dropped frames");
+    }
+
+    /// An agent whose shutdown acts on stand-in cgroups in `dir` (`populated`
+    /// says whether a workload outlives SIGKILL) and an unmounted disk.
+    fn agent_shutting_down_in(dir: &std::path::Path, populated: bool) -> Arc<Agent> {
+        let group = dir.join("ops").join("op-1");
+        fs::create_dir_all(&group).unwrap();
+        fs::write(
+            group.join("cgroup.events"),
+            if populated {
+                "populated 1\n"
+            } else {
+                "populated 0\n"
+            },
+        )
+        .unwrap();
+        fs::write(group.join("cgroup.procs"), "").unwrap();
+        Agent::start_with_teardown(
+            snapshot::Settle::default(),
+            crate::shutdown::Teardown {
+                cgroups: vec![dir.join("ops")],
+                rw: dir.join("rw"),
+                term_wait: Duration::from_millis(50),
+                kill_wait: Duration::from_millis(50),
+                sync: || {},
+            },
+        )
+    }
+
+    async fn shutdown_and_after(
+        agent: Arc<Agent>,
+    ) -> (
+        AnswerKind,
+        AnswerKind,
+        AnswerKind,
+        AnswerKind,
+        proto::GuestInfo,
+    ) {
+        let (port, mut runner) = port();
+        tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move { connection(&agent, &port).await }
+        });
+        let s = hello(&mut runner).await;
+        write_frame(
+            &mut runner,
+            &runner_op(1, Op::Shutdown(proto::Empty {}), &s),
+        )
+        .await
+        .unwrap();
+        let answered = frame(&mut runner).await;
+        let first = answer(&answered).unwrap().1.clone();
+        let info = status(&frame(&mut runner).await).unwrap().clone();
+        write_frame(
+            &mut runner,
+            &runner_op(
+                2,
+                Op::Guest(proto::GuestRequest {
+                    op: "exec".into(),
+                    data: b"{}\n".to_vec(),
+                }),
+                &s,
+            ),
+        )
+        .await
+        .unwrap();
+        let exec = answer(&frame(&mut runner).await).unwrap().1.clone();
+        write_frame(
+            &mut runner,
+            &runner_op(3, Op::MachineSetup(Default::default()), &s),
+        )
+        .await
+        .unwrap();
+        let setup = answer(&frame(&mut runner).await).unwrap().1.clone();
+        frame(&mut runner).await; // its status
+        write_frame(
+            &mut runner,
+            &runner_op(4, Op::Shutdown(proto::Empty {}), &s),
+        )
+        .await
+        .unwrap();
+        let again = answer(&frame(&mut runner).await).unwrap().1.clone();
+        (first, exec, setup, again, info)
+    }
+
+    fn reason(answer: &AnswerKind) -> &str {
+        match answer {
+            AnswerKind::Error(error) => &error.reason,
+            _ => "",
+        }
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_answers_done_once_the_teardown_held_and_the_machine_refuses_everything_after()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, exec, setup, again, info) =
+            shutdown_and_after(agent_shutting_down_in(dir.path(), false)).await;
+        assert!(matches!(first, AnswerKind::Done(_)), "{first:?}");
+        assert!(
+            !info.ready && info.reason.starts_with("shut down: "),
+            "{info:?}"
+        );
+        assert_eq!(reason(&exec), "shut_down", "{exec:?}");
+        assert_eq!(reason(&setup), "shut_down", "{setup:?}");
+        assert!(
+            matches!(again, AnswerKind::Done(_)),
+            "a repeated shutdown answers as the first: {again:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_whose_teardown_fails_answers_an_error_never_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let (first, exec, setup, again, info) =
+            shutdown_and_after(agent_shutting_down_in(dir.path(), true)).await;
+        let AnswerKind::Error(error) = &first else {
+            panic!("{first:?}")
+        };
+        assert_eq!(error.reason, "shutdown_failed");
+        assert!(error.message.contains("did not end"), "{error:?}");
+        assert!(info.reason.contains("teardown failed"), "{info:?}");
+        assert_eq!(reason(&exec), "shut_down");
+        assert_eq!(reason(&setup), "shut_down");
+        assert_eq!(reason(&again), "shutdown_failed", "the same outcome again");
     }
 
     #[tokio::test]

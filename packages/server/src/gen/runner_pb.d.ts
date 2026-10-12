@@ -2121,6 +2121,24 @@ export declare type DaemonRequest = Message<"cube.runner.v4.DaemonRequest"> & {
      */
     value: Empty;
     case: "templatePublish";
+  } | {
+    /**
+     * The runner's controlled stop (`machine_stop`): the agent holds new
+     * requests and waits for those that write, stops starting services and
+     * recording command ends (cut-off commands are interrupted after the next
+     * boot), sends SIGTERM to every workload process, SIGKILL to what is left
+     * after 10 s, syncs and unmounts the writable disk or remounts it
+     * read-only. It answers `done` only when that held: everything written
+     * is on the disk and the disk's teardown succeeded; else an error. It
+     * refuses everything afterwards; the guest does not power off. The
+     * runner then quits QEMU and records a controlled stop; without `done`
+     * within 30 s (no session, an error, no answer) it quits QEMU anyway and
+     * records a forced stop.
+     *
+     * @generated from field: cube.runner.v4.Empty shutdown = 6;
+     */
+    value: Empty;
+    case: "shutdown";
   } | { case: undefined; value?: undefined };
 };
 
