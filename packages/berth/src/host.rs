@@ -23,12 +23,12 @@ use tokio::{
 };
 
 use cube_runner_protocol::{
-    ALPN, MAX_FRAME_BYTES, PROTOCOL, Timestamp,
-    proto::{self, Code, call::Verb, call_result, machine_status::Phase, open, watch_event},
-    read_frame, refuse, write_frame,
+    MAX_FRAME_BYTES, PROTOCOL, Timestamp,
+    proto::{self, Code, call::Verb, call_result, machine_status::Phase, watch_event},
+    refuse,
 };
-use iroh::{Endpoint, EndpointId};
-use tokio::{task::JoinSet, time::timeout};
+
+use crate::serve::{self, Service, unimplemented};
 
 /// The guest helper this runner ships; written into a machine that has
 /// none. cubed replaces it with its own (`install`) when they differ.
@@ -88,13 +88,13 @@ pub struct HostRunner {
     events: broadcast::Sender<proto::WatchEvent>,
 }
 
-fn valid_owner(owner: &str) -> bool {
+pub(crate) fn valid_owner(owner: &str) -> bool {
     (1..=128).contains(&owner.len())
         && owner
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     id.len() == 16 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 fn valid_op(op: &str) -> bool {
@@ -508,15 +508,9 @@ impl HostRunner {
             .ok_or_else(|| refuse(Code::NotFound, "machine", "no such machine"))
     }
 
-    pub fn call(self: &Arc<Self>, call: proto::Call) -> proto::CallResult {
+    fn answer(self: &Arc<Self>, call: proto::Call) -> proto::CallResult {
         use call_result::Result as R;
-        let unimplemented = |what: &str| {
-            Err(refuse(
-                Code::Unimplemented,
-                "host_runner",
-                &format!("a host runner has no {what}"),
-            ))
-        };
+        let unimplemented = |what: &str| Err(unimplemented::<Self>(what));
         let result: std::result::Result<R, proto::Error> = match call.verb {
             Some(Verb::RunnerGet(_)) => Ok(R::Runner(self.runner(&self.state.lock().unwrap()))),
             Some(Verb::MachineCreate(request)) => self.create(request).map(R::Machine),
@@ -557,53 +551,9 @@ impl HostRunner {
         }
     }
 
-    /// Every resource as PUT after a RESET, then a BOOKMARK, then each change.
-    pub async fn watch(&self, send: &mut iroh::endpoint::SendStream) -> Result<()> {
-        let mut events = self.events.subscribe();
-        loop {
-            let snapshot = {
-                let state = self.state.lock().unwrap();
-                let mut events = vec![proto::WatchEvent {
-                    r#type: watch_event::Type::Reset as i32,
-                    version: state.version,
-                    resource: None,
-                }];
-                events.push(proto::WatchEvent {
-                    r#type: watch_event::Type::Put as i32,
-                    version: state.version,
-                    resource: Some(watch_event::Resource::Runner(self.runner(&state))),
-                });
-                for entry in state.machines.values() {
-                    events.push(proto::WatchEvent {
-                        r#type: watch_event::Type::Put as i32,
-                        version: state.version,
-                        resource: Some(watch_event::Resource::Machine(self.machine(entry))),
-                    });
-                }
-                events.push(proto::WatchEvent {
-                    r#type: watch_event::Type::Bookmark as i32,
-                    version: state.version,
-                    resource: None,
-                });
-                events
-            };
-            for event in &snapshot {
-                write_frame(send, event).await?;
-            }
-            loop {
-                match events.recv().await {
-                    Ok(event) => write_frame(send, &event).await?,
-                    // Too slow a reader: start over with the whole state.
-                    Err(broadcast::error::RecvError::Lagged(_)) => break,
-                    Err(broadcast::error::RecvError::Closed) => return Ok(()),
-                }
-            }
-        }
-    }
-
     /// One guest operation: checked, then run as a child that outlives the
     /// stream (a caller that goes away never kills a command it started).
-    pub async fn guest(
+    async fn run_guest(
         self: &Arc<Self>,
         header: proto::GuestHeader,
         recv: &mut iroh::endpoint::RecvStream,
@@ -761,7 +711,7 @@ impl HostRunner {
     }
 }
 
-fn host_name() -> String {
+pub(crate) fn host_name() -> String {
     let mut buffer = [0u8; 256];
     // SAFETY: gethostname writes at most `len` bytes into the buffer.
     let ok = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0;
@@ -772,7 +722,7 @@ fn host_name() -> String {
     String::from_utf8_lossy(&buffer[..end]).into_owned()
 }
 
-fn getrandom(bytes: &mut [u8]) {
+pub(crate) fn getrandom(bytes: &mut [u8]) {
     use std::io::Read;
     if std::fs::File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(bytes))
@@ -789,115 +739,37 @@ fn getrandom(bytes: &mut [u8]) {
     }
 }
 
-/// Answers the streams of one authenticated connection.
-pub async fn serve_connection(runner: Arc<HostRunner>, connection: iroh::endpoint::Connection) {
-    while let Ok((mut send, mut recv)) = connection.accept_bi().await {
-        let runner = runner.clone();
-        tokio::spawn(async move {
-            let _ = stream(&runner, &mut send, &mut recv).await;
-        });
-    }
-}
+impl Service for HostRunner {
+    const KIND: &'static str = "host_runner";
 
-async fn stream(
-    runner: &Arc<HostRunner>,
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-) -> Result<()> {
-    let answer = |error: Option<proto::Error>| proto::StreamAnswer { error };
-    let opened: proto::Open = match read_frame(recv).await {
-        Ok(opened) => opened,
-        Err(error) => {
-            write_frame(
-                send,
-                &answer(Some(refuse(
-                    Code::InvalidArgument,
-                    "open",
-                    &error.to_string(),
-                ))),
-            )
-            .await?;
-            send.finish()?;
-            return Ok(());
-        }
-    };
-    match opened.kind {
-        Some(open::Kind::Hello(hello)) => match runner.hello(&hello) {
-            Ok(hello) => write_frame(send, &hello).await?,
-            Err(error) => write_frame(send, &answer(Some(error))).await?,
-        },
-        Some(open::Kind::Call(call)) => write_frame(send, &runner.call(call)).await?,
-        Some(open::Kind::Watch(_)) => return runner.watch(send).await,
-        Some(open::Kind::Guest(header)) => match runner.guest(header, recv).await {
-            Ok(bytes) => {
-                write_frame(send, &answer(None)).await?;
-                send.write_all(&bytes).await?;
-            }
-            Err(error) => write_frame(send, &answer(Some(error))).await?,
-        },
-        Some(open::Kind::Dial(_)) => {
-            write_frame(
-                send,
-                &answer(Some(refuse(
-                    Code::Unimplemented,
-                    "host_runner",
-                    "a host runner has no dial",
-                ))),
-            )
-            .await?
-        }
-        None => {
-            write_frame(
-                send,
-                &answer(Some(refuse(
-                    Code::InvalidArgument,
-                    "open",
-                    "unknown stream",
-                ))),
-            )
-            .await?
-        }
+    fn hello(&self, hello: &proto::Hello) -> std::result::Result<proto::HelloAnswer, proto::Error> {
+        HostRunner::hello(self, hello)
     }
-    send.finish()?;
-    Ok(())
-}
-
-/// At most this many connections at once (cubed keeps one).
-const MAX_CONNECTIONS: usize = 16;
-/// A connection must finish its handshake within this.
-const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Accepts protocol-4 connections from `allowed` only; each stream is one
-/// call (see packages/runner-protocol/proto/runner.proto).
-pub async fn serve(
-    endpoint: &Endpoint,
-    allowed: EndpointId,
-    runner: Arc<HostRunner>,
-) -> Result<()> {
-    runner.probe_all();
-    let mut connections = JoinSet::new();
-    loop {
-        tokio::select! {
-            incoming = endpoint.accept() => {
-                let Some(incoming) = incoming else { break };
-                if connections.len() >= MAX_CONNECTIONS {
-                    incoming.refuse();
-                    continue;
-                }
-                let runner = runner.clone();
-                connections.spawn(async move {
-                    let Ok(Ok(connection)) = timeout(HANDSHAKE_TIMEOUT, incoming).await else { return };
-                    if connection.remote_id() != allowed || connection.alpn() != ALPN {
-                        connection.close(1u32.into(), b"UNAUTHORIZED");
-                        return;
-                    }
-                    serve_connection(runner, connection).await;
-                });
-            }
-            Some(_) = connections.join_next(), if !connections.is_empty() => {}
-        }
+    async fn call(self: Arc<Self>, call: proto::Call) -> proto::CallResult {
+        self.answer(call)
     }
-    connections.abort_all();
-    while connections.join_next().await.is_some() {}
-    Ok(())
+    async fn watch(self: Arc<Self>, send: &mut iroh::endpoint::SendStream) -> Result<()> {
+        serve::watch(send, &self.events, || {
+            let state = self.state.lock().unwrap();
+            let mut resources = vec![watch_event::Resource::Runner(self.runner(&state))];
+            resources.extend(
+                state
+                    .machines
+                    .values()
+                    .map(|entry| watch_event::Resource::Machine(self.machine(entry))),
+            );
+            (state.version, resources)
+        })
+        .await
+    }
+    async fn guest(
+        self: Arc<Self>,
+        header: proto::GuestHeader,
+        recv: &mut iroh::endpoint::RecvStream,
+    ) -> std::result::Result<Vec<u8>, proto::Error> {
+        self.run_guest(header, recv).await
+    }
+    fn serving(self: &Arc<Self>) {
+        self.probe_all();
+    }
 }

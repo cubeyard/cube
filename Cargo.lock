@@ -192,9 +192,11 @@ dependencies = [
  "anyhow",
  "cube-runner-protocol",
  "iroh",
+ "keel-layers",
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 

@@ -20,7 +20,8 @@ DEVELOPING.md before changing behavior.
 - `packages/runner-protocol`: runner protocol 4, `proto/runner.proto` (the
   one schema), its fixtures and the `cube-runner-protocol` crate (generated
   Rust types and stream framing). TypeScript types go to `packages/server/src/gen`.
-- `packages/berth`: `berth`, the protocol-4 runner. Today only `berth host`.
+- `packages/berth`: `berth`, the protocol-4 runner: `berth host` and the first
+  part of `berth vm` (keel machines under QEMU, masterplan B-1).
 - `packages/server/src/runner-select.ts`: the one place cubed picks protocol 3
   or 4 for a thread, by its runner's enrolled protocol.
 - `packages/gateway`: `cube-gateway`, supervised by cubed; each VM's only

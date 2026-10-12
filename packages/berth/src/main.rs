@@ -1,8 +1,11 @@
-//! berth: cube's runner on runner protocol 4 (`cubeyard/runner/4`). Today
-//! it has one mode, `berth host`, whose machines are directories on the host
-//! it runs on, unsandboxed, for developing and debugging runners. Key files
-//! hold secrets; stdout and stderr show only public identities and addresses.
+//! berth: cube's runner on runner protocol 4 (`cubeyard/runner/4`). Two
+//! modes: `berth vm`, whose machines are keel guests under QEMU, and `berth
+//! host`, whose machines are directories on the host it runs on, unsandboxed,
+//! for developing and debugging runners. Key files hold secrets; stdout and
+//! stderr show only public identities and addresses.
 mod host;
+mod serve;
+mod vm;
 
 use std::{
     collections::BTreeMap,
@@ -21,6 +24,8 @@ pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const RELAY_READY_TIMEOUT: Duration = Duration::from_secs(20);
 
 const USAGE: &str = "usage:
+  berth vm --dir <directory> --qemu <qemu-system binary> --qemu-img <qemu-img binary> --keel <directory with vmlinuz and base.erofs> [--accel kvm|hvf|tcg] [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay] [--listen <ip:port>] [--max-machines 8] [--labels k=v,...]
+      each machine is a keel guest under the QEMU given by path, which must meet keel's QEMU floor
   berth host --dir <directory> [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay] [--listen <ip:port>] [--python python3] [--max-machines 8] [--labels k=v,...]
       UNSANDBOXED: each machine is a subdirectory of <directory>; commands run as you, with your logins
   berth keygen --key <new-private-file>     a control key for cubed (prints its public key)
@@ -49,7 +54,8 @@ impl NetworkMode {
     }
 }
 
-/// `DIRECTORY/.berth/host.json`: written by the first `host` run.
+/// `DIRECTORY/.berth/host.json` or `vm.json`: written by the first run of
+/// the mode; a directory serves one mode only.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HostHome {
@@ -160,7 +166,17 @@ fn take(options: &mut BTreeMap<String, String>, key: &str) -> Result<String> {
         .with_context(|| format!("missing {key}\n{USAGE}"))
 }
 
-async fn host(mut options: BTreeMap<String, String>) -> Result<()> {
+/// A runner directory, locked, with its manifest and key: what both modes
+/// do before they serve.
+struct Prepared {
+    directory: PathBuf,
+    home: HostHome,
+    key: SecretKey,
+    max_machines: u32,
+    _lock: File,
+}
+
+fn prepare(options: &mut BTreeMap<String, String>, mode: &str) -> Result<Prepared> {
     use std::os::unix::{fs::DirBuilderExt, io::AsRawFd};
     let network = match options.remove("--network").as_deref() {
         None => None,
@@ -169,7 +185,7 @@ async fn host(mut options: BTreeMap<String, String>) -> Result<()> {
         Some("relay") => Some(NetworkMode::Relay),
         Some(_) => bail!("--network is loopback, direct or relay"),
     };
-    let directory = PathBuf::from(take(&mut options, "--dir")?);
+    let directory = PathBuf::from(take(options, "--dir")?);
     ensure!(directory.is_absolute(), "--dir must be an absolute path");
     fs::create_dir_all(&directory)?;
     let directory = fs::canonicalize(&directory)?;
@@ -181,22 +197,24 @@ async fn host(mut options: BTreeMap<String, String>) -> Result<()> {
     // SAFETY: flock on a descriptor this function owns.
     ensure!(
         unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
-        "another berth host runs in {}",
+        "another berth {mode} runs in {}",
         directory.display()
     );
-    let manifest = control.join("host.json");
+    let other = if mode == "host" { "vm" } else { "host" };
+    ensure!(
+        !control.join(format!("{other}.json")).exists(),
+        "{} is a berth {other} directory; a directory serves one mode only",
+        directory.display()
+    );
+    let manifest = control.join(format!("{mode}.json"));
     let allow = options.remove("--allow-peer");
     let node = options.remove("--node-id");
     let listen = options.remove("--listen");
     let labels = options.remove("--labels");
-    let python = options
-        .remove("--python")
-        .unwrap_or_else(|| "python3".into());
     let max_machines: u32 = options
         .remove("--max-machines")
         .map_or(Ok(8), |value| value.parse())
         .context("--max-machines must be a number")?;
-    ensure!(options.is_empty(), "unknown options\n{USAGE}");
     ensure!(
         (1..=64).contains(&max_machines),
         "--max-machines must be 1 through 64"
@@ -256,38 +274,25 @@ async fn host(mut options: BTreeMap<String, String>) -> Result<()> {
         file.sync_all()?;
         home
     };
-    let python_ok = std::process::Command::new(&python)
-        .args([
-            "-c",
-            "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)",
-        ])
-        .status()
-        .is_ok_and(|status| status.success());
-    ensure!(
-        python_ok,
-        "{python} (Python 3.8 or newer) is needed to run the guest helper; pass --python"
-    );
     let key = read_key(&control.join("runner.key"))?;
-    let allowed: EndpointId = home.allowed_peer.parse()?;
-    let listen = home
+    Ok(Prepared {
+        directory,
+        home,
+        key,
+        max_machines,
+        _lock: lock,
+    })
+}
+
+fn listen_address(home: &HostHome) -> Result<Option<SocketAddr>> {
+    Ok(home
         .listen
         .as_deref()
         .map(str::parse::<SocketAddr>)
-        .transpose()?;
-    let runner = host::HostRunner::open(host::HostOptions {
-        directory: directory.clone(),
-        node_id: home.node_id.clone(),
-        python,
-        network: home.network.name().into(),
-        max_machines,
-        labels: home.labels.clone(),
-    })?;
-    let endpoint = bind(key, home.network, listen).await?;
-    eprintln!(
-        "berth {SOFTWARE_VERSION} host (runner protocol {})",
-        cube_runner_protocol::PROTOCOL
-    );
-    eprintln!("{HOST_WARNING}");
+        .transpose()?)
+}
+
+fn print_endpoint(endpoint: &Endpoint, directory: &Path, home: &HostHome) {
     eprintln!("dir: {}", directory.display());
     eprintln!("node: {}", home.node_id);
     eprintln!("peer: {}", endpoint.id());
@@ -302,6 +307,47 @@ async fn host(mut options: BTreeMap<String, String>) -> Result<()> {
     if !addresses.is_empty() {
         eprintln!("listen: {addresses}");
     }
+}
+
+async fn host(mut options: BTreeMap<String, String>) -> Result<()> {
+    let python = options
+        .remove("--python")
+        .unwrap_or_else(|| "python3".into());
+    let Prepared {
+        directory,
+        home,
+        key,
+        max_machines,
+        _lock,
+    } = prepare(&mut options, "host")?;
+    ensure!(options.is_empty(), "unknown options\n{USAGE}");
+    let python_ok = std::process::Command::new(&python)
+        .args([
+            "-c",
+            "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)",
+        ])
+        .status()
+        .is_ok_and(|status| status.success());
+    ensure!(
+        python_ok,
+        "{python} (Python 3.8 or newer) is needed to run the guest helper; pass --python"
+    );
+    let allowed: EndpointId = home.allowed_peer.parse()?;
+    let runner = host::HostRunner::open(host::HostOptions {
+        directory: directory.clone(),
+        node_id: home.node_id.clone(),
+        python,
+        network: home.network.name().into(),
+        max_machines,
+        labels: home.labels.clone(),
+    })?;
+    let endpoint = bind(key, home.network, listen_address(&home)?).await?;
+    eprintln!(
+        "berth {SOFTWARE_VERSION} host (runner protocol {})",
+        cube_runner_protocol::PROTOCOL
+    );
+    eprintln!("{HOST_WARNING}");
+    print_endpoint(&endpoint, &directory, &home);
     eprintln!(
         "machines: {} (at most {max_machines} at once)",
         runner.machine_count()
@@ -311,13 +357,89 @@ async fn host(mut options: BTreeMap<String, String>) -> Result<()> {
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut terminate = signal(SignalKind::terminate())?;
     let result = tokio::select! {
-        result = host::serve(&endpoint, allowed, runner) => result,
+        result = serve::serve(&endpoint, allowed, runner) => result,
         _ = interrupt.recv() => Ok(()),
         _ = terminate.recv() => Ok(()),
     };
     endpoint.close().await;
     eprintln!("stopped");
-    drop(lock);
+    result
+}
+
+/// An absolute path to an existing file, given by the operator: berth never
+/// searches for QEMU or its tools (`PATH`, Homebrew, home directories).
+fn given_file(options: &mut BTreeMap<String, String>, key: &str) -> Result<PathBuf> {
+    let value = options.remove(key).with_context(|| {
+        format!(
+            "berth vm needs {key}: QEMU and its tools are given by path, never searched for\n{USAGE}"
+        )
+    })?;
+    let path = PathBuf::from(&value);
+    ensure!(
+        path.is_absolute(),
+        "{key} must be an absolute path, not {value}"
+    );
+    ensure!(path.is_file(), "{key} {value} is not a file");
+    Ok(path)
+}
+
+async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
+    let qemu = given_file(&mut options, "--qemu")?;
+    let qemu_img = given_file(&mut options, "--qemu-img")?;
+    let keel = PathBuf::from(take(&mut options, "--keel")?);
+    ensure!(keel.is_absolute(), "--keel must be an absolute path");
+    let accel = match options.remove("--accel") {
+        Some(accel) => vm::Accel::parse(&accel)?,
+        None => vm::Accel::native(),
+    };
+    let floor = vm::check_floor(&qemu, accel).await?;
+    let Prepared {
+        directory,
+        home,
+        key,
+        max_machines,
+        _lock,
+    } = prepare(&mut options, "vm")?;
+    ensure!(options.is_empty(), "unknown options\n{USAGE}");
+    let allowed: EndpointId = home.allowed_peer.parse()?;
+    let runner = vm::VmRunner::open(
+        vm::VmOptions {
+            directory: directory.clone(),
+            node_id: home.node_id.clone(),
+            network: home.network.name().into(),
+            max_machines,
+            labels: home.labels.clone(),
+            qemu,
+            qemu_img,
+            keel,
+            accel,
+        },
+        floor,
+    )
+    .await?;
+    let endpoint = bind(key, home.network, listen_address(&home)?).await?;
+    eprintln!(
+        "berth {SOFTWARE_VERSION} vm (runner protocol {})",
+        cube_runner_protocol::PROTOCOL
+    );
+    print_endpoint(&endpoint, &directory, &home);
+    for line in runner.describe() {
+        eprintln!("{line}");
+    }
+    eprintln!(
+        "waiting for cubed; Ctrl-C stops the runner and quits its machines' QEMUs (each is marked interrupted)"
+    );
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    let result = tokio::select! {
+        result = serve::serve(&endpoint, allowed, runner.clone()) => result,
+        _ = interrupt.recv() => Ok(()),
+        _ = terminate.recv() => Ok(()),
+    };
+    endpoint.close().await;
+    runner.shutdown().await;
+    eprintln!("stopped");
     result
 }
 
@@ -333,6 +455,7 @@ async fn main() -> Result<()> {
     }
     match command.as_str() {
         "host" => host(options).await,
+        "vm" => vm(options).await,
         "keygen" => {
             let path = PathBuf::from(take(&mut options, "--key")?);
             ensure!(options.is_empty(), "unknown options\n{USAGE}");

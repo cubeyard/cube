@@ -23,6 +23,7 @@ on:
       - packages/server/guest/**
       - packages/server/src/runner-*.ts
       - packages/server/test/runner-host-*.ts
+      - packages/server/test/runner-vm-test.ts
       - scripts/test-node-transport.sh
       - scripts/test-local-runner.ts
       - scripts/runner-production-test.ts

@@ -607,7 +607,16 @@ contract (leases, files, commands, services) over the channel. `base-standin.ero
 older line-protocol stand-in (`init/agent-standin.c`) in its place, for
 `scripts/keel-boot-check.ts` only (the root, a second boot, snapshots).
 
-Not built yet (later stages): protocol-4 VM runners (`berth vm`), the rest
+`berth vm --dir DIRECTORY` (masterplan row B-1) is the protocol-4 VM
+runner's first part: keel machines under the QEMU it is given by path
+(`--qemu`, `--qemu-img`, `--keel`), refused below keel's QEMU floor, with
+the machine type pinned per machine, a read-only layer disk, a retained
+writable disk, a per-machine journal (`machine.json`) and machines marked
+`Interrupted` when the runner stops or restarts; see packages/berth/README.md.
+cubed does not run threads on it yet.
+
+Not built yet (later stages): `berth vm`'s guest channel, network, image
+layers, templates and diagnosis, the rest
 of keel's `cube-agent` (generated files and the runner's
 CA, clock, hooks, templates, snapshots), the runner's network stack, the
 credential proxy and the `dial`, `credential` and `report` streams.
