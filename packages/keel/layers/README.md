@@ -24,6 +24,17 @@ registry blob (tar, tar+gzip, tar+zstd)
 - **Checked input.** The uncompressed tar's SHA-256 must equal the
   `diff_id`; otherwise, or if `mkfs.erofs` fails, nothing is published.
   gzip may have several members and zstd several frames (zstd:chunked).
+- **`mkfs.erofs` never runs unbounded.** erofs-utils 1.7.1 and 1.8.6 never
+  exit when a tar ends inside a file's data (`tarerofs_write_file_data`
+  loops on a read of 0 bytes; fixed in 1.9), and a layer can be made whose
+  `diff_id` matches such a tar. So mkfs.erofs sees the end of its input only
+  after the `diff_id` and the end-of-archive blocks are checked (otherwise
+  it is killed first); a write into it may block at most `TimeLimits.stall`,
+  and after its input it has `finish` plus `finish_per_gib` per GiB of tar.
+  Past either, or on `Mkfs::cancel_on`, it is killed and reaped and nothing
+  is published. On Linux it also dies with the thread that started it
+  (`PR_SET_PDEATHSIG`), so a killed runner leaves no mkfs.erofs behind.
+  `Mkfs::max_tar_bytes` bounds the uncompressed tar (a gzip bomb).
 - **`mkfs.erofs` by path.** The caller passes the program, as it passes
   QEMU's (A17 in the masterplan); nothing here searches `PATH`.
 - **No `ZERO` extents.** QEMU silently ignores `RW <n> ZERO` lines, which
@@ -35,8 +46,8 @@ registry blob (tar, tar+gzip, tar+zstd)
   limit; `get` and `publish` mark a layer used. The limit's place in
   `host.json` and when to call it are the runner's (B-7).
 - **Not here:** fetching (index, manifest per platform, anonymous tokens,
-  public images only: B-7), deduplicating concurrent conversions of one
-  layer, template layers (K-5e, B-8).
+  public images only: `berth image pull`, B-7), deduplicating concurrent
+  conversions of one layer, template layers (K-5e, B-8).
 
 ## `--tar=f` or `--tar=i` (U5)
 

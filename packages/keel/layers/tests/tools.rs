@@ -9,10 +9,11 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use keel_layers::DiffId;
 use keel_layers::cache::LayerCache;
-use keel_layers::convert::{self, Compression, Mkfs, TarMode};
+use keel_layers::convert::{self, Compression, Mkfs, TarMode, TimeLimits};
 use keel_layers::disk;
 use sha2::{Digest, Sha256};
 
@@ -346,6 +347,251 @@ fn a_layer_that_does_not_match_its_diff_id_is_not_cached() {
             .is_err()
     );
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn a_layer_larger_than_the_limit_is_refused_and_not_cached() {
+    let Some(mkfs) = tool("mkfs.erofs") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let cache = LayerCache::open(dir.path()).unwrap();
+    let layer = files_layer();
+    // A small gzip blob that is larger than the limit once decompressed.
+    let blob = gzip(&layer);
+    let limit = layer.len() as u64 - 1;
+    assert!((blob.len() as u64) < limit);
+    let error = cache
+        .get_or_convert(
+            &diff_id(&layer),
+            &Mkfs::new(&mkfs).max_tar_bytes(limit),
+            TarMode::Full,
+            Compression::Gzip,
+            || Ok(&blob[..]),
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains(&format!("larger than {limit} bytes")),
+        "{error:#}"
+    );
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    // At the limit it converts.
+    cache
+        .get_or_convert(
+            &diff_id(&layer),
+            &Mkfs::new(&mkfs).max_tar_bytes(limit + 1),
+            TarMode::Full,
+            Compression::Gzip,
+            || Ok(&blob[..]),
+        )
+        .unwrap();
+}
+
+/// The first entry's header and `kept` bytes of its 300 000 bytes of data:
+/// a tar cut inside a file.
+fn cut_layer(kept: usize) -> Vec<u8> {
+    let layer = files_layer();
+    // etc/, etc/hello (+ data block), usr/, then usr/noise's header.
+    let data = 512 * 5;
+    layer[..data + kept].to_vec()
+}
+
+const SHORT: TimeLimits = TimeLimits {
+    stall: Duration::from_secs(2),
+    finish: Duration::from_secs(3),
+    finish_per_gib: Duration::ZERO,
+};
+
+#[test]
+fn a_tar_cut_inside_a_file_is_refused_before_mkfs_sees_its_end() {
+    let Some(mkfs) = tool("mkfs.erofs") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let cache = LayerCache::open(dir.path()).unwrap();
+    // Its diff_id is its own: only the shape is wrong.
+    let layer = cut_layer(100_000);
+    let started = Instant::now();
+    let error = cache
+        .get_or_convert(
+            &diff_id(&layer),
+            &Mkfs::new(&mkfs),
+            TarMode::Full,
+            Compression::None,
+            || Ok(&layer[..]),
+        )
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("end-of-archive"), "{error:#}");
+    // Default limits are minutes; this did not wait for them.
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn a_tar_made_to_hang_mkfs_is_stopped_and_nothing_is_cached() {
+    let Some(mkfs) = tool("mkfs.erofs") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let cache = LayerCache::open(dir.path()).unwrap();
+    // Cut inside usr/noise at a block boundary and ended with two zero
+    // blocks: a well-formed end as far as the stream shows, and a diff_id
+    // that matches. erofs-utils 1.7.1 and 1.8.6 spin on it forever; 1.9
+    // fails. Either way the conversion fails in bounded time.
+    let mut layer = cut_layer(100_352);
+    layer.resize(layer.len() + 1024, 0);
+    let started = Instant::now();
+    let error = cache
+        .get_or_convert(
+            &diff_id(&layer),
+            &Mkfs::new(&mkfs).time_limits(SHORT),
+            TarMode::Full,
+            Compression::None,
+            || Ok(&layer[..]),
+        )
+        .unwrap_err();
+    eprintln!("{error:#}");
+    assert!(started.elapsed() < Duration::from_secs(15));
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+/// A `mkfs.erofs` stand-in running `script` (after `exec`, its pid is the
+/// stand-in's, written to `pid`).
+fn standin(dir: &Path, script: &str) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let program = dir.join("mkfs.erofs");
+    let pid = dir.join("pid");
+    fs::write(
+        &program,
+        format!("#!/bin/sh\necho $$ > '{}'\n{script}\n", pid.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    (program, pid)
+}
+
+/// Gone, not a zombie: `kill -0` succeeds on a zombie.
+fn reaped(pid: &Path) -> bool {
+    let pid = fs::read_to_string(pid).unwrap();
+    !Command::new("kill")
+        .args(["-0", pid.trim()])
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[test]
+fn a_mkfs_that_stops_reading_is_killed_and_reaped() {
+    let tools = tempfile::tempdir().unwrap();
+    let (mkfs, pid) = standin(tools.path(), "exec sleep 600");
+    let dir = tempfile::tempdir().unwrap();
+    let cache = LayerCache::open(dir.path().join("cache")).unwrap();
+    // More than a pipe holds, so the write blocks.
+    let layer = files_layer();
+    let started = Instant::now();
+    let error = cache
+        .get_or_convert(
+            &diff_id(&layer),
+            &Mkfs::new(&mkfs).time_limits(SHORT),
+            TarMode::Full,
+            Compression::None,
+            || Ok(&layer[..]),
+        )
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("read nothing"), "{error:#}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(reaped(&pid));
+    assert_eq!(fs::read_dir(cache.dir()).unwrap().count(), 0);
+}
+
+#[test]
+fn a_mkfs_that_never_ends_after_its_input_is_killed_and_reaped() {
+    let tools = tempfile::tempdir().unwrap();
+    let (mkfs, pid) = standin(tools.path(), "cat > /dev/null; exec sleep 600");
+    let dir = tempfile::tempdir().unwrap();
+    let cache = LayerCache::open(dir.path().join("cache")).unwrap();
+    let layer = files_layer();
+    let error = cache
+        .get_or_convert(
+            &diff_id(&layer),
+            &Mkfs::new(&mkfs).time_limits(SHORT),
+            TarMode::Full,
+            Compression::None,
+            || Ok(&layer[..]),
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("did not finish within 3 s"),
+        "{error:#}"
+    );
+    assert!(reaped(&pid));
+    assert_eq!(fs::read_dir(cache.dir()).unwrap().count(), 0);
+}
+
+#[test]
+fn a_cancelled_conversion_kills_and_reaps_mkfs() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let tools = tempfile::tempdir().unwrap();
+    let (mkfs, pid) = standin(tools.path(), "exec sleep 600");
+    let dir = tempfile::tempdir().unwrap();
+    let cache = LayerCache::open(dir.path().join("cache")).unwrap();
+    let layer = files_layer();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let setter = {
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            cancel.store(true, Ordering::SeqCst);
+        })
+    };
+    let started = Instant::now();
+    let error = cache
+        .get_or_convert(
+            &diff_id(&layer),
+            // Limits far away: only the cancel stops it.
+            &Mkfs::new(&mkfs).cancel_on(cancel),
+            TarMode::Full,
+            Compression::None,
+            || Ok(&layer[..]),
+        )
+        .unwrap_err();
+    setter.join().unwrap();
+    assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(reaped(&pid));
+    assert_eq!(fs::read_dir(cache.dir()).unwrap().count(), 0);
+}
+
+#[test]
+fn a_layer_that_does_not_match_never_reaches_the_end_of_mkfs_input() {
+    // The stand-in notes when its input ends, then exits as if it succeeded.
+    let tools = tempfile::tempdir().unwrap();
+    let saw_end = tools.path().join("saw-end");
+    let (mkfs, pid) = standin(
+        tools.path(),
+        &format!("cat > /dev/null; touch '{}'; exit 0", saw_end.display()),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let cache = LayerCache::open(dir.path().join("cache")).unwrap();
+    let layer = files_layer();
+    let wrong = diff_id(&whiteout_layer());
+    let error = cache
+        .get_or_convert(
+            &wrong,
+            &Mkfs::new(&mkfs),
+            TarMode::Full,
+            Compression::None,
+            || Ok(&layer[..]),
+        )
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("the image says"), "{error:#}");
+    assert!(reaped(&pid));
+    assert!(
+        !saw_end.exists(),
+        "mkfs.erofs saw the end of a tar that is not the layer"
+    );
+    assert_eq!(fs::read_dir(cache.dir()).unwrap().count(), 0);
 }
 
 #[test]
