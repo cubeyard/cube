@@ -71,7 +71,13 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       const model = task.model
         ? models.find(candidate => `${candidate.provider}/${candidate.id}` === task.model)
         : preferredModel(models);
-      if (!model) throw new Error(task.model ? `model ${task.model} unavailable` : "connect a model provider first");
+      // An id not in the catalog is named with the exact ids that are: no
+      // alias or fallback is guessed for it.
+      if (!model) {
+        if (!task.model) throw new Error("connect a model provider first");
+        const ids = models.map(candidate => `${candidate.provider}/${candidate.id}`);
+        throw new Error(`model ${task.model} unavailable; ${ids.length ? `selectable models: ${ids.join(", ")}` : "no model provider is connected"}`);
+      }
       const text = `${task.task}\n\n${THREAD_NOTE}`;
       let runnerId: string | undefined;
       if (task.runner) {
