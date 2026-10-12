@@ -26,9 +26,10 @@ node scripts/runner-production-test.ts
 # threads named to it.
 node packages/server/test/runner-host-test.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
 node packages/server/test/runner-host-cubed-test.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
-# `berth vm` (masterplan B-1): it refuses to start without QEMU by path and
-# refuses CUBE_TEST_BERTH_OLD_QEMU (below keel's floor); with
-# CUBE_TEST_BERTH_{QEMU,QEMU_IMG,KEEL} it runs keel machines (else skipped).
+# `berth vm` (masterplan B-1, B-2): it refuses to start without QEMU by path
+# and refuses CUBE_TEST_BERTH_OLD_QEMU (below keel's floor); with
+# CUBE_TEST_BERTH_{QEMU,QEMU_IMG,KEEL,IMAGE,MKFS} it pulls the image and runs
+# keel machines over the guest channel (else skipped).
 node packages/server/test/runner-vm-test.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
 # cubed's local runner setup with the real cube-runner and the fake QEMU.
 node scripts/test-local-runner.ts "${CARGO_TARGET_DIR:-target}/debug/cube-runner"

@@ -19,6 +19,7 @@ pub mod ops;
 pub mod paths;
 pub mod services;
 pub mod setup;
+pub mod shutdown;
 pub mod snapshot;
 pub mod template;
 pub mod wrap;

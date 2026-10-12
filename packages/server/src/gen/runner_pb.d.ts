@@ -39,17 +39,55 @@
 // snapshot) closes every channel. The agent sends `hello` again, the runner
 // sends `machine_setup` again, and operations that were running are found
 // by their keys, as `OPERATIONS` already requires.
-// The guest may miss a disconnect: a runner that connects again right after
-// it closed, or one that connected to a restored machine before `cont`,
-// gives it no event to read, and no `hello` comes. So after every connect
-// the runner waits for `hello` (500 ms is ample); without one it sends one
-// frame on channel 0 (a `req` with `guest.op = "hello"`). That breaks the
-// rules above, so the agent ends the connection, opens the port again and
-// sends `hello`; the runner waits for it again (2 s), and a second miss
-// means the machine is unhealthy. The runner never sends anything else
-// before a `hello`, and any `hello` on a socket it already had means every
-// channel closed: `machine_setup` again, and `ready` from the `status`
-// that follows its `ans`.
+// The agent says `hello` when the host opens the port: when the runner
+// connects to it, after a boot, after the agent starts again, after the
+// reset below, and after a restore. A restore is always a new QEMU process
+// that loads the memory file, and the runner connects to its port then;
+// reset and restore are the same mechanism. VMGENID has no part in it.
+// When the runner closes its end, the agent closes the port and opens it
+// again at once, which QMP reports as a `VSERPORT_CHANGE` timestamped after
+// the runner left (the event is rate-limited, so its timestamp, not its
+// state, is the answer). Before a save the runner closes its end while the
+// machine runs and waits for that (bounded), then stops it and saves: the
+// saved agent is waiting for the host, so the runner's connect to the
+// restored QEMU is an open it sees. The agent waits for the host on SIGIO
+// (the guest driver raises it for every message about the host's end),
+// never on a timer alone: a timer armed before a save can fire late after a
+// restore (under KVM, about 0.9 s for a young guest). (A runner still connected at the save leaves a port that is already
+// open in the restored machine, and a connect right after `cont` changes
+// nothing the guest sees; then only the reset helps.)
+// Sessions: every `hello` starts a session with a new `DaemonFrame.session`
+// (32 lowercase hex characters), and every frame the agent sends carries
+// its current session. The agent makes it from fresh random bytes and the
+// host's clock as the guest reads it then, so a machine restored twice from
+// one snapshot (its random state rolled back with its memory) still gets
+// two sessions. After a `hello` the runner puts the session on every frame
+// it sends; each side drops a frame of another session (a reply or request
+// that was on its way before the break), and the runner refuses a `hello`
+// whose session it has seen before on this machine. The agent sets the
+// guest's realtime clock from the host's (virtio-rtc's PTP clock) just
+// before each `hello`, and every 500 ms besides, so a restored machine has
+// the right time when it says `hello`. VMGENID (x86-64 only; QEMU has no
+// such device for arm64) makes the kernel reseed its random generator on a
+// restore; `machine_setup`'s entropy, with which the agent reseeds it at
+// once, does the same on both architectures.
+// The guest may miss a disconnect (see above), and then no `hello` comes.
+// So after every connect the runner waits for `hello` (500 ms is ample
+// once the agent has the port open); without one it sends one frame on
+// channel 0 (a `req` with `guest.op = "hello"`, no session). That breaks
+// the rules above, so the agent ends the connection, opens the port again
+// and sends `hello`; the runner waits for it again (2 s), and a second miss
+// means the machine is unhealthy. The runner learns whether the agent has
+// the port open from QMP: `VSERPORT_CHANGE` (at most one per second per
+// port, the newest state kept, so a close and an open can arrive as the
+// open alone) and `query-chardev`. While the port is closed (the machine
+// boots, or the agent starts again) the runner waits for it to open
+// (bounded by the boot) before it starts those 500 ms, and an event that
+// closes it ends the session at once. The event is never taken as a
+// `hello`. The runner never sends anything else before a `hello`, and any
+// `hello` on a socket it already had means every channel closed:
+// `machine_setup` again, and `ready` from the `status` that follows its
+// `ans`.
 //
 // The QEMU a VM runner needs (checked when it starts on the binary it is
 // given by path, never one it searches for; refused below it):
@@ -1031,6 +1069,14 @@ export declare type GuestInfo = Message<"cube.runner.v4.GuestInfo"> & {
    * @generated from field: string reason = 14;
    */
   reason: string;
+
+  /**
+   * keel: the guest channel's current session (`DaemonFrame.session`),
+   * new with every `hello`.
+   *
+   * @generated from field: string session = 15;
+   */
+  session: string;
 };
 
 /**
@@ -1999,6 +2045,14 @@ export declare type DaemonFrame = Message<"cube.runner.v4.DaemonFrame"> & {
     value: Empty;
     case: "abort";
   } | { case: undefined; value?: undefined };
+
+  /**
+   * The session the frame belongs to (see the header); empty only on the
+   * runner's reset on channel 0.
+   *
+   * @generated from field: string session = 7;
+   */
+  session: string;
 };
 
 /**
@@ -2071,6 +2125,24 @@ export declare type DaemonRequest = Message<"cube.runner.v4.DaemonRequest"> & {
      */
     value: Empty;
     case: "templatePublish";
+  } | {
+    /**
+     * The runner's controlled stop (`machine_stop`): the agent holds new
+     * requests and waits for those that write, stops starting services and
+     * recording command ends (cut-off commands are interrupted after the next
+     * boot), sends SIGTERM to every workload process, SIGKILL to what is left
+     * after 10 s, syncs and unmounts the writable disk or remounts it
+     * read-only. It answers `done` only when that held: everything written
+     * is on the disk and the disk's teardown succeeded; else an error. It
+     * refuses everything afterwards; the guest does not power off. The
+     * runner then quits QEMU and records a controlled stop; without `done`
+     * within 30 s (no session, an error, no answer) it quits QEMU anyway and
+     * records a forced stop.
+     *
+     * @generated from field: cube.runner.v4.Empty shutdown = 6;
+     */
+    value: Empty;
+    case: "shutdown";
   } | { case: undefined; value?: undefined };
 };
 

@@ -12,8 +12,10 @@ and `berth host`, unsandboxed, for developing runners.
 ## `berth vm`: keel machines under QEMU
 
 ```text
+berth image pull --dir /abs/dir --mkfs-erofs /abs/mkfs.erofs --image <registry/repository@sha256:…>
 berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img \
-  --keel /abs/keel/out/<arch> [--accel kvm|hvf|tcg] --allow-peer <control peer> --node-id node-<name> \
+  --keel /abs/keel/out/<arch> --image <registry/repository@sha256:…> [--accel kvm|hvf|tcg] \
+  --allow-peer <control peer> --node-id node-<name> \
   [--network loopback|direct|relay] [--listen ip:port] [--labels k=v,...] [--max-machines 8]
 ```
 
@@ -25,17 +27,31 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   `virtio-balloon-pci` with `free-page-reporting`, a versioned machine type,
   the `mapped-ram` capability, migration mode `cpr-reboot`, the migration
   commands, the accelerator); a QEMU below it is refused with what it
-  lacks (QEMU 8.2.2: `virtio-rtc-pci` and `mapped-ram`). `Platform.qemu_version`
-  is its version and path.
+  lacks (QEMU 8.2.2: `virtio-rtc-pci` and `mapped-ram`); on x86-64 it also
+  needs `vmgenid`, which every machine gets (`guid=auto`, so a restore
+  reseeds the guest's random generator). `Platform.qemu_version` is its
+  version and path.
+- `--image` names the one image every machine is built on, pinned by
+  digest; `berth image pull` must have put it into `--dir` first (berth vm
+  does not pull). A machine's layer disk holds its layers from creation on,
+  and the machine keeps that image: a runner started with another refuses to
+  start it (`FAILED_PRECONDITION image_changed`).
+- The runner's CA: `DIRECTORY/.berth/ca/` (0700) with `ca.key` (0600, never
+  logged or sent) and `ca.pem`, made on the first start and kept. Half a
+  pair, a key others can read, or a certificate that does not carry the key
+  is refused, never replaced. The certificate is `Runner.ca_pem` and goes to
+  every machine in `machine_setup`; nothing signs with the key until the
+  runner's network (B-4).
 - Each machine is `DIRECTORY/<16 hex>`: `machine.json` (its journal, written
   whole and renamed before an answer), `rw.qcow2` (vdc, the writable disk,
-  created once and never replaced), `layers.vmdk` (vdb, read-only; no image
-  layers yet), `ctl.sock` (`cube.0`), `qmp.sock`, `console.log`, `qemu.log`,
+  created once and never replaced), `layers.vmdk` (vdb, read-only, the
+  image's layers from the cache), `ctl.sock` (`cube.0`), `qmp.sock`, `qev.sock`
+  (QMP for the runner's event reader), `console.log`, `qemu.log`,
   `argv.json`, `events.log`. vda is the keel base, read-only. The newest
   versioned machine type is pinned when a machine is created; a QEMU
   without it does not start the machine (`FAILED_PRECONDITION machine_type`).
 - Verbs: `runner.get`, `machine.create` (`STOPPED`), `start` (QEMU runs it:
-  `RUNNING` with a new `boot_id`), `stop` (QMP `quit`), `delete` (stops it;
+  `RUNNING` with a new `boot_id`), `stop` (below), `delete` (stops it;
   `RETAINED` when asked to retain or when the runner interrupted it,
   otherwise the directory is deleted: `DELETED`), `discard` (a retained
   machine's directory is deleted), `get`, `list`, `watch`. Ids are never
@@ -46,14 +62,55 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   crash tells the QEMUs it finds over their QMP sockets to quit and marks
   their machines `Interrupted` (`runner_restarted`). It never starts a
   machine on its own; a successful start clears the condition.
-- Not yet: the guest channel (guest streams answer `UNIMPLEMENTED`,
-  `status.guest` is empty), a network device, image layers, templates,
-  diagnosis and snapshots (masterplan rows B-2, B-4, B-7, B-8, B-9, S-7a).
-  `stop` is QMP `quit`, not a clean power-off.
+- The guest channel (`src/vm/channel.rs`, runner.proto's header): when
+  QEMU runs, the runner connects to `ctl.sock` and reads QMP's
+  `VSERPORT_CHANGE` for the agent's port (QEMU sends at most one per second
+  per port and keeps the newest state, so the runner also asks
+  `query-chardev` when its event reader connects, and takes `hello`, never
+  the event, as the start of a session). Once the agent has the port open
+  (at most 120 s after a boot, 30 s after it closed it) it waits 500 ms for
+  `hello`, then sends the reset on channel 0 once and waits 2 s; a second
+  miss marks the machine unhealthy in `status.guest.reason`. A deadline for
+  the port that passes is not trusted: the reset goes anyway. Every `hello`
+  starts a session (`DaemonFrame.session`, new for this machine across its
+  QEMUs while the runner runs, else the
+  reset asks again); the runner ends the channels of the session before
+  (`UNAVAILABLE`, completion unknown), sends `machine_setup` (the image's
+  layers topmost first, `Boot.documents`, the CA, 32 fresh random bytes,
+  the image's `Env`) and puts what the agent says into `status.guest`
+  (a watch event). Frames of another session are dropped; a frame that
+  breaks the channel rules ends the socket and the runner connects again.
+- `guest` streams: fenced as on `berth host`, at most 704 KiB of request
+  (a `req` frame stays within 1 MiB), carried as one `req`/`ans` on a fresh
+  channel; the agent's refusals come back in `StreamAnswer` (`not_ready`
+  until its setup is applied). When cubed stops reading, the runner sends
+  `abort` (the operation finishes, its answer is dropped).
+- `MachineStart.boot`: only keel's documents (`hostname`, `env`,
+  `hooks/pre-setup`, `hooks/pre-resume`; others `INVALID_ARGUMENT
+  unknown_document`), at most 256 KiB together, kept in memory for the
+  boot's setups. `Boot.mac` and `MachineStart.policy` are not used before
+  the network (B-4).
+- Not yet: a network device, pulls by the runner and the cache limit,
+  templates, diagnosis and snapshots (masterplan rows B-4, B-7, B-8, B-9,
+  S-7a).
+- `stop`, `delete` and the runner's own shutdown stop a machine the same
+  way: the runner asks the agent to shut down (`DaemonRequest.shutdown`:
+  SIGTERM to the workload, SIGKILL to what is left after 10 s, sync, the
+  writable disk remounted read-only; done only when all of that held) and
+  waits at most 30 s for done in the session it asked in, then quits QEMU.
+  `machine.json`'s `stopped` and the `Stopped` condition say `controlled`
+  (status true: what the machine wrote is on its disk) or `forced` (no
+  session, an error or no answer: QEMU was quit as a power cut, `e2fsck` on
+  the next boot); a start clears it. The guest does not power off. cubed's
+  call timeout (15 s) is shorter than a forced stop can take (30 s and up to
+  20 s for QEMU to quit): cubed sees `completion_unknown` and asks again,
+  which waits for the first stop (a cubed change for C-1/C-2).
 
 Test: `packages/server/test/runner-vm-test.ts` (refusals always; keel
-machines with `CUBE_TEST_BERTH_QEMU`, `CUBE_TEST_BERTH_QEMU_IMG` and
-`CUBE_TEST_BERTH_KEEL`).
+machines with `CUBE_TEST_BERTH_QEMU`, `CUBE_TEST_BERTH_QEMU_IMG`,
+`CUBE_TEST_BERTH_KEEL`, `CUBE_TEST_BERTH_IMAGE` and `CUBE_TEST_BERTH_MKFS`;
+with an image that has keel's tools it runs the Workspace contract over
+cubed's `RunnerGuestTransport`).
 
 ## `berth image pull`: images into a vm directory's layer cache
 

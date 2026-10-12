@@ -97,7 +97,7 @@ pub(crate) fn valid_owner(owner: &str) -> bool {
 pub(crate) fn valid_id(id: &str) -> bool {
     id.len() == 16 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
-fn valid_op(op: &str) -> bool {
+pub(crate) fn valid_op(op: &str) -> bool {
     (1..=32).contains(&op.len()) && op.bytes().all(|b| b.is_ascii_lowercase())
 }
 
@@ -766,6 +766,7 @@ impl Service for HostRunner {
         self: Arc<Self>,
         header: proto::GuestHeader,
         recv: &mut iroh::endpoint::RecvStream,
+        _send: &mut iroh::endpoint::SendStream,
     ) -> std::result::Result<Vec<u8>, proto::Error> {
         self.run_guest(header, recv).await
     }

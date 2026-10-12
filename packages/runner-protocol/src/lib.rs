@@ -103,6 +103,12 @@ async fn read_payload(recv: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>> {
     Ok(payload)
 }
 
+/// Whether `text` has the form of a guest channel session
+/// (`DaemonFrame.session`): 32 lowercase hex characters.
+pub fn valid_session(text: &str) -> bool {
+    text.len() == 32 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// A guest's `hello` or `status` at most: the runner passes it on in a
 /// watch event.
 pub const MAX_GUEST_INFO_BYTES: usize = 64 * 1024;
@@ -183,6 +189,7 @@ mod tests {
                     data: b"{}\n".to_vec(),
                 })),
             })),
+            session: String::new(),
         };
         let mut bytes = Vec::new();
         write_frame(&mut bytes, &frame).await.unwrap();
@@ -294,12 +301,14 @@ mod tests {
                     data: data.clone(),
                 })),
             })),
+            session: "f".repeat(32),
         };
         let answer = proto::DaemonFrame {
             ch: u32::MAX,
             t: Some(T::Ans(proto::DaemonAnswer {
                 result: Some(Answer::Guest(data)),
             })),
+            session: "f".repeat(32),
         };
         for frame in [request, answer] {
             let mut bytes = Vec::new();

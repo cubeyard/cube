@@ -101,6 +101,40 @@ pub struct MachineRecord {
     /// Why the newest boot ended or failed; cleared by the next start.
     pub error: String,
     pub boot: Option<Boot>,
+    /// The image whose layers the machine's layer disk holds, fixed at its
+    /// first start under B-2: its workload root is built on them, so they
+    /// never change under it. Absent for a machine no image was given yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<MachineImage>,
+    /// How the newest boot ended when the runner stopped it: controlled (the
+    /// agent's shutdown answered done) or forced. Cleared by the next start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<Stopped>,
+}
+
+/// A stop the runner made (`machine_stop`, `delete`, its own shutdown).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Stopped {
+    /// `controlled`: the agent answered `shutdown` with done, so what the
+    /// machine wrote is on its disk and the disk is read-only or unmounted.
+    /// `forced`: QEMU was quit without that (no session, an error, no answer
+    /// within the wait); the disk is as a power cut leaves it.
+    pub kind: String,
+    pub message: String,
+    pub at: Timestamp,
+}
+
+/// The image of a machine (`berth image pull`'s record, in short).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MachineImage {
+    /// As given to `berth vm --image` (digest-pinned).
+    pub reference: String,
+    /// This platform's manifest digest (`ImageConfig.digest`).
+    pub manifest: String,
+    /// Bottom layer first; partition N on the layer disk is the Nth.
+    pub diff_ids: Vec<String>,
 }
 
 impl MachineRecord {
@@ -193,6 +227,8 @@ mod tests {
             interrupted: None,
             error: String::new(),
             boot: None,
+            image: None,
+            stopped: None,
         }
     }
 
@@ -255,6 +291,19 @@ mod tests {
         text["extra"] = true.into();
         std::fs::write(&path, text.to_string()).unwrap();
         assert!(read(&path).is_err());
+        // A B-1 record has no image; it reads as such, and one with an
+        // image keeps it.
+        text.as_object_mut().unwrap().remove("extra");
+        assert!(text.get("image").is_none(), "no image, no key: {text}");
+        std::fs::write(&path, text.to_string()).unwrap();
+        assert_eq!(read(&path).unwrap().image, None);
+        machine.image = Some(MachineImage {
+            reference: "ghcr.io/o/n@sha256:00".into(),
+            manifest: "sha256:11".into(),
+            diff_ids: vec!["sha256:22".into(), "sha256:33".into()],
+        });
+        write_json(&path, &machine).unwrap();
+        assert_eq!(read(&path).unwrap(), machine);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -178,6 +178,12 @@ pub fn evaluate(answers: &Answers, arch: Arch, accel: Accel) -> Floor {
     if !answers.cpr_reboot {
         missing.push("migrate mode cpr-reboot".into());
     }
+    // x86-64 guests reseed their random generator from QEMU's VM
+    // generation id when a snapshot is restored (keel's kernel has VMGENID;
+    // QEMU has no such device for arm64).
+    if arch == Arch::X86_64 && !types.iter().any(|t| t == "vmgenid") {
+        missing.push("vmgenid".into());
+    }
     let commands = names(&answers.commands, "name");
     for command in FLOOR_COMMANDS {
         if !commands.iter().any(|c| c == command) {
@@ -252,6 +258,19 @@ impl Qmp {
             .context("QMP did not answer")??;
         ensure!(read > 0, "QMP closed");
         Ok(serde_json::from_str(&line)?)
+    }
+
+    /// The next event, however long it takes (a connection kept for events).
+    pub async fn event(&mut self) -> Result<Value> {
+        loop {
+            let mut line = String::new();
+            let read = self.reader.read_line(&mut line).await?;
+            ensure!(read > 0, "QMP closed");
+            let message: Value = serde_json::from_str(&line)?;
+            if message.get("event").is_some() {
+                return Ok(message);
+            }
+        }
     }
 
     /// The command's `return`, or its `error` as an error.
@@ -352,7 +371,12 @@ pub struct Launch<'a> {
 }
 
 pub const QMP_SOCKET: &str = "qmp.sock";
+/// A second QMP monitor, for the runner's event reader alone (QMP serves
+/// one client per socket at a time).
+pub const EVENTS_SOCKET: &str = "qev.sock";
 pub const CHANNEL_SOCKET: &str = "ctl.sock";
+/// The `cube.0` port's device id, as QMP's VSERPORT_CHANGE names it.
+pub const PORT_ID: &str = "cube0";
 pub const CONSOLE: &str = "console.log";
 
 /// keel's QEMU arguments (docs/plans/2026-10-10-vm-base-and-image-layers.md,
@@ -411,7 +435,7 @@ pub fn argv(launch: &Launch) -> Vec<String> {
             path(CHANNEL_SOCKET)
         ),
         "-device".into(),
-        "virtserialport,chardev=ctl,name=cube.0".into(),
+        format!("virtserialport,chardev=ctl,name=cube.0,id={PORT_ID}"),
         "-device".into(),
         "virtio-rtc-pci".into(),
         "-device".into(),
@@ -420,7 +444,13 @@ pub fn argv(launch: &Launch) -> Vec<String> {
         format!("file:{}", path(CONSOLE)),
         "-qmp".into(),
         format!("unix:{},server=on,wait=off", path(QMP_SOCKET)),
+        "-qmp".into(),
+        format!("unix:{},server=on,wait=off", path(EVENTS_SOCKET)),
     ];
+    if launch.arch == Arch::X86_64 {
+        // A new generation id every time QEMU starts, so also in a restore.
+        args.extend(["-device".into(), "vmgenid,guid=auto".into()]);
+    }
     if cfg!(target_os = "linux") {
         args.extend(["-sandbox".into(), "on".into()]);
     }
@@ -519,6 +549,7 @@ mod tests {
                     "virtserialport",
                     "virtio-balloon-pci",
                     "virtio-blk-pci",
+                    "vmgenid",
                     "kvm-accel",
                     "tcg-accel",
                 ],
@@ -563,6 +594,7 @@ mod tests {
                     "virtio-serial-pci",
                     "virtserialport",
                     "virtio-balloon-pci",
+                    "vmgenid",
                     "kvm-accel",
                 ],
             ),
@@ -620,6 +652,7 @@ mod tests {
             [
                 "virtio-balloon-pci free-page-reporting",
                 "migrate mode cpr-reboot",
+                "vmgenid",
                 "QMP migrate-incoming",
                 "QMP migrate-set-capabilities",
                 "QMP migrate-set-parameters",
@@ -631,6 +664,11 @@ mod tests {
         // The same QEMU's virt-11.1 is the arm64 family.
         let arm = evaluate(&answers, Arch::Aarch64, Accel::Tcg);
         assert_eq!(arm.machine_types, ["virt-11.1"]);
+        assert!(
+            !arm.missing.iter().any(|m| m == "vmgenid"),
+            "arm64 has no vmgenid device: {:?}",
+            arm.missing
+        );
     }
 
     #[test]
@@ -662,7 +700,18 @@ mod tests {
                 "if=virtio,format=qcow2,discard=unmap,file=/r/0123456789abcdef/rw.qcow2",
             ]
         );
-        assert!(after("-device").contains(&"virtserialport,chardev=ctl,name=cube.0"));
+        assert!(after("-device").contains(&"virtserialport,chardev=ctl,name=cube.0,id=cube0"));
+        assert!(
+            after("-device").contains(&"vmgenid,guid=auto"),
+            "x86-64 restores reseed"
+        );
+        assert_eq!(
+            after("-qmp"),
+            [
+                "unix:/r/0123456789abcdef/qmp.sock,server=on,wait=off",
+                "unix:/r/0123456789abcdef/qev.sock,server=on,wait=off",
+            ]
+        );
         assert!(after("-device").contains(&"virtio-rtc-pci"));
         assert!(after("-device").contains(&"virtio-balloon-pci,free-page-reporting=on"));
         assert!(
