@@ -8,7 +8,8 @@
 //!   keel-agent-check --qemu PATH --qemu-img PATH --kernel PATH --base PATH \
 //!     --mkfs PATH --fsck PATH --tar IMAGE.tar --out DIR [--arch x86_64|arm64] \
 //!     [--accel tcg|kvm|hvf] [--contract COMMAND] [--smp 2] [--memory 1024] \
-//!     [--control reconnect|late-hello|restore|prepare|clock|seal|redirect]
+//!     [--vmgenid on|off] [--only snapshot|rest] \
+//!     [--control reconnect|late-hello|restore|prepare|clock|seal|redirect|snapshot]
 //!
 //! `--control` runs one negative control, expected to fail at its check:
 //! `reconnect` (also `--reset off`): the immediate reconnects wait for the
@@ -19,7 +20,13 @@
 //! sent then is not held. `clock`: the machine has no virtio-rtc. `seal`:
 //! the build machine's setup leaves the runner's CA (DER) in a file, so
 //! publishing is refused. `redirect`: the template's redirects point at
-//! nothing.
+//! nothing. `snapshot`: in the same-snapshot restores (check 83) the runner
+//! stays connected through the save, so the restored port already says
+//! connected and the guest may see no open when the runner connects again.
+//!
+//! `--vmgenid` (x86-64 only, default on, as `berth vm` runs machines): QEMU's
+//! `vmgenid` device, whose new GUID makes the guest kernel reseed its random
+//! generator after a restore. QEMU has no such device for arm64.
 //!
 //! Last, a build machine with a template disk publishes its `upper/` as a
 //! template layer (`template_publish`); `fsck.erofs` (`--fsck`) checks it,
@@ -76,6 +83,13 @@ struct Options {
     smp: String,
     memory: String,
     control: Option<Control>,
+    /// x86-64: QEMU's vmgenid device (as berth vm's machines have it).
+    vmgenid: bool,
+    /// `--only snapshot`: check 83 alone (a host retest of the restore flow).
+    only_snapshot: bool,
+    /// `--only rest`: every check but 83 (the two together are the whole
+    /// check, for a machine where one run takes too long).
+    skip_snapshot: bool,
 }
 
 /// A negative control: the one place the reset on channel 0 is left out,
@@ -91,6 +105,7 @@ enum Control {
     Seal,
     Redirect,
     Prepare,
+    Snapshot,
 }
 
 fn options() -> Result<Options> {
@@ -146,12 +161,27 @@ fn options() -> Result<Options> {
         ("on", Some("seal")) => Some(Control::Seal),
         ("on", Some("redirect")) => Some(Control::Redirect),
         ("on", Some("prepare")) => Some(Control::Prepare),
+        ("on", Some("snapshot")) => Some(Control::Snapshot),
         _ => bail!(
-            "--control is reconnect, late-hello, restore, prepare, clock, seal or redirect (and --reset off is reconnect)"
+            "--control is reconnect, late-hello, restore, prepare, clock, seal, redirect or snapshot (and --reset off is reconnect)"
         ),
+    };
+    let vmgenid = match values.get("vmgenid").map(String::as_str) {
+        None | Some("on") => arch == "x86_64",
+        Some("off") => false,
+        Some(other) => bail!("--vmgenid is on or off, not {other}"),
+    };
+    let (only_snapshot, skip_snapshot) = match values.get("only").map(String::as_str) {
+        None => (false, false),
+        Some("snapshot") => (true, false),
+        Some("rest") => (false, true),
+        Some(other) => bail!("--only is snapshot or rest, not {other}"),
     };
     Ok(Options {
         control,
+        vmgenid,
+        only_snapshot,
+        skip_snapshot,
         qemu: path("qemu")?,
         qemu_img: path("qemu-img")?,
         kernel: path("kernel")?,
@@ -266,6 +296,35 @@ impl Qmp {
                 bail!("{command}: {error}");
             }
             return Ok(answer["return"].clone());
+        }
+    }
+}
+
+impl Qmp {
+    /// Until the guest has closed cube.0 (QMP `query-chardev`: chardev `ctl`
+    /// no longer `frontend-open`): the agent saw the runner leave. It opens
+    /// the port again 100 ms later, so this asks every 5 ms. Not the
+    /// VSERPORT_CHANGE event: QEMU sends at most one per second per port
+    /// and keeps only the newest state, so a close followed by an open can
+    /// arrive as the open alone.
+    async fn port_closed(&mut self, within: Duration) -> Result<Duration> {
+        let started = Instant::now();
+        loop {
+            let chardevs = self.execute("query-chardev", Value::Null).await?;
+            let open = chardevs
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|c| c["label"] == "ctl")
+                .map(|c| c["frontend-open"] == true);
+            if open == Some(false) {
+                return Ok(started.elapsed());
+            }
+            ensure!(
+                started.elapsed() < within,
+                "the guest did not close cube.0 within {within:?} of the runner leaving"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 }
@@ -870,7 +929,7 @@ impl Lab {
             "-drive", &format!("if=virtio,format=qcow2,discard=unmap,file={}", dir.join("rw.qcow2").display()),
             "-device", "virtio-serial-pci",
             "-chardev", &format!("socket,id=ctl,path={},server=on,wait=off", self.sockets.join("ctl.sock").display()),
-            "-device", "virtserialport,chardev=ctl,name=cube.0",
+            "-device", "virtserialport,chardev=ctl,name=cube.0,id=cube0",
             "-device", "virtio-balloon-pci,free-page-reporting=on",
             "-serial", &format!("file:{}", dir.join(format!("console-{boot}.log")).display()),
             "-qmp", &format!("unix:{},server=on,wait=off", self.sockets.join("qmp.sock").display()),
@@ -880,6 +939,10 @@ impl Lab {
         .collect();
         if self.o.control != Some(Control::Clock) {
             args.extend(["-device".into(), "virtio-rtc-pci".into()]);
+        }
+        if self.o.vmgenid {
+            // A new generation id every time QEMU starts, so in a restore too.
+            args.extend(["-device".into(), "vmgenid,guid=auto".into()]);
         }
         if cfg!(target_os = "linux") {
             args.extend(["-sandbox".into(), "on".into()]);
@@ -961,6 +1024,135 @@ async fn save(machine: &mut Machine, memory: &Path) -> Result<Duration> {
     let _ = tokio::time::timeout(Duration::from_secs(30), machine.child.wait()).await;
     let _ = machine.child.kill().await;
     Ok(took)
+}
+
+/// Check 83: one snapshot restored twice. A machine on a fresh disk is set
+/// up, left by the runner (its end of cube.0 closed, which the agent
+/// acknowledges by closing and opening the port; query-chardev shows it),
+/// stopped and saved once
+/// (memory file and a copy of its writable disk); then, twice, the disk is
+/// put back, a new QEMU loads the memory and runs, and the runner connects
+/// (the supported flow: the guest sees the port open). Each `hello` must come without the reset, start a session
+/// neither the save nor the other restore had, and carry the host's time;
+/// after each setup the guest's random bytes must differ from the other's.
+async fn same_snapshot(
+    lab: &Lab,
+    layers: &Path,
+    image_layers: &[proto::Layer],
+    documents: &[(&str, &[u8])],
+) -> Result<Value> {
+    let dir = lab.new_disk("snapshot")?;
+    let mut m = lab.start(&dir, layers)?;
+    let ch = Channel::open(&m.ctl).await?;
+    ch.info("hello", TIMEOUT).await?;
+    ch.setup_after_hello(|| setup(image_layers, documents))
+        .await?;
+    let saved_session = ch.session.lock().unwrap().clone();
+    let memory = dir.join("memory");
+    // The supported flow: the runner closes its end of cube.0 while the
+    // machine runs and waits until the agent has seen it (it closes the port
+    // and opens it again; query-chardev shows the close), then stops and
+    // saves. The saved
+    // guest waits for the host, so the runner's connect after a restore is an
+    // open the guest sees. (Left connected, the restored port already says
+    // connected, and a connect right after cont can change nothing the guest
+    // sees: QEMU's post-load compares the states after the fact.)
+    let disconnect_first = lab.o.control != Some(Control::Snapshot);
+    if disconnect_first {
+        let mut qmp = Qmp::open(&m.qmp).await?;
+        close(ch).await?;
+        let acknowledged = qmp.port_closed(RESET_HELLO).await?;
+        drop(qmp); // one QMP client at a time: save opens its own
+        log(&format!(
+            "same snapshot: the agent closed cube.0 {} ms after the runner left",
+            acknowledged.as_millis()
+        ));
+        save(&mut m, &memory).await?;
+    } else {
+        save(&mut m, &memory).await?;
+        close(ch).await?;
+    }
+    fs::copy(dir.join("rw.qcow2"), dir.join("rw.saved.qcow2"))?;
+    let mut sessions = vec![saved_session.clone()];
+    let mut randoms: Vec<String> = vec![];
+    let mut each = vec![];
+    for i in 0..2 {
+        // Saved for a while: the guest's clock stands still meanwhile.
+        tokio::time::sleep(PAUSE).await;
+        fs::copy(dir.join("rw.saved.qcow2"), dir.join("rw.qcow2"))?;
+        let mut m = lab.start_with(&dir, layers, &["-S", "-incoming", "defer"])?;
+        let mut qmp = Qmp::open(&m.qmp).await?;
+        migration_mode(&mut qmp).await?;
+        qmp.execute(
+            "migrate-incoming",
+            json!({"uri": format!("file:{}", memory.display())}),
+        )
+        .await?;
+        await_migration(&mut qmp).await?;
+        qmp.execute("cont", Value::Null).await?;
+        let resumed = Instant::now();
+        drop(qmp); // one QMP client at a time: quit opens its own
+        let ch = Channel::open(&m.ctl).await?;
+        let hello = ch.info("hello", PLAIN_HELLO).await.with_context(|| {
+            format!("restore {i}: no plain hello within {PLAIN_HELLO:?} of cont (the guest saw no port open)")
+        })?;
+        let hello_ms = resumed.elapsed().as_millis();
+        let host_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let since = hello
+            .since
+            .map_or(0.0, |t| t.seconds as f64 + t.nanos as f64 / 1e9);
+        let offset = since - host_now;
+        ensure!(
+            cube_runner_protocol::valid_session(&hello.session)
+                && !sessions.contains(&hello.session),
+            "restore {i}: session {:?}, but this machine had {sessions:?}",
+            hello.session
+        );
+        ensure!(
+            offset.abs() <= CLOCK_TOLERANCE,
+            "restore {i}: hello's since is {offset:+.3} s from the host's time"
+        );
+        sessions.push(hello.session.clone());
+        ch.setup_after_hello(|| setup(image_layers, documents))
+            .await?;
+        let (_, random) = ch
+            .run(
+                &format!("random-{i}"),
+                "head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \\n'",
+                1,
+            )
+            .await?;
+        let (_, forks) = ch
+            .run(
+                &format!("forks-{i}"),
+                "sudo dmesg | grep -c 'virtual machine fork' || true",
+                1,
+            )
+            .await?;
+        let forks: u32 = forks.trim().parse().unwrap_or(0);
+        ensure!(
+            forks == u32::from(lab.o.vmgenid),
+            "restore {i}: {forks} kernel record(s) of a VM generation change, with vmgenid {}",
+            lab.o.vmgenid
+        );
+        ensure!(
+            random.len() == 32 && !randoms.contains(&random),
+            "restore {i}: random bytes {random:?} after {randoms:?}: the guest's random state is the save's"
+        );
+        randoms.push(random.clone());
+        log(&format!(
+            "same snapshot, restore {i}: plain hello {hello_ms} ms after cont, session {}, clock {offset:+.3} s, random {random}, vmgenid records {forks}",
+            hello.session
+        ));
+        each.push(json!({"contToHelloMs": hello_ms, "session": hello.session, "helloClockOffsetS": offset, "random": random, "vmgenidRecords": forks}));
+        close(ch).await?;
+        quit(&mut m).await?;
+    }
+    let _ = fs::remove_file(&memory);
+    Ok(json!({"savedSession": saved_session, "vmgenid": lab.o.vmgenid, "restores": each}))
 }
 
 async fn migration_mode(qmp: &mut Qmp) -> Result<()> {
@@ -1228,6 +1420,24 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         ("env", env),
         ("hooks/pre-resume", PRE_RESUME),
     ];
+    if lab.o.only_snapshot {
+        let same = same_snapshot(&lab, &image_disk, &image_layers, documents).await?;
+        fs::write(
+            lab.o.out.join("results.json"),
+            serde_json::to_string_pretty(&json!({
+                "qemu": {"path": lab.o.qemu, "version": version, "machine": machine_type, "accel": lab.o.accel, "vmgenid": lab.o.vmgenid},
+                "arch": lab.o.arch,
+                "kernel": {"path": lab.o.kernel, "sha256": sha256_file(&lab.o.kernel)?},
+                "base": {"path": lab.o.base, "sha256": sha256_file(&lab.o.base)?},
+                "sameSnapshot": same,
+            }))?,
+        )?;
+        println!(
+            "keel agent check: {} {}, QEMU {version} {machine_type}; check 83 (the same snapshot restored twice) passed",
+            lab.o.arch, lab.o.accel
+        );
+        return Ok(());
+    }
 
     // 1. The bare layer: hello, refusals before setup, an image that is not ready.
     {
@@ -2616,8 +2826,27 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         },
     )?;
 
+    let same = if lab.o.skip_snapshot {
+        Ok(json!("not run (--only rest)"))
+    } else {
+        same_snapshot(&lab, &image_disk, &image_layers, documents).await
+    };
+    let same_detail = match &same {
+        Ok(value) => value.to_string(),
+        Err(error) => format!("{error:#}"),
+    };
+    if !lab.o.skip_snapshot {
+        checks.ok(
+        same.is_ok(),
+        "one snapshot restored twice, each into a new QEMU, the runner having closed cube.0 before the save (the agent closed and opened its port; query-chardev shows the close) and connecting after cont (the supported flow): the guest sees the port open and says hello at once without the reset; each hello starts a session that is not the saved one nor the other restore's, though both start from the same memory; the clock is right at hello after 3 s saved; random bytes read after each setup differ (x86-64: the vmgenid reseed, one kernel record each; arm64: the setup's entropy and RNDRESEEDCRNG)",
+        same_detail,
+    )?;
+    }
+    let same = same.unwrap_or_default();
+
     let results = json!({
-        "qemu": {"path": lab.o.qemu, "version": version, "machine": machine_type, "accel": lab.o.accel, "smp": lab.o.smp, "memory": lab.o.memory},
+        "qemu": {"path": lab.o.qemu, "version": version, "machine": machine_type, "accel": lab.o.accel, "smp": lab.o.smp, "memory": lab.o.memory, "vmgenid": lab.o.vmgenid},
+        "sameSnapshot": same,
         "arch": lab.o.arch,
         "kernel": {"path": lab.o.kernel, "sha256": sha256_file(&lab.o.kernel)?},
         "base": {"path": lab.o.base, "sha256": sha256_file(&lab.o.base)?},
