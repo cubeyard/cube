@@ -26,6 +26,9 @@ DEVELOPING.md before changing behavior.
   or 4 for a thread, by its runner's enrolled protocol.
 - `packages/gateway`: `cube-gateway`, supervised by cubed; each VM's only
   network (LAN, HTTP/HTTPS egress, TLS interception, secret substitution).
+- `packages/netstack`: `cube-netstack`, the gateway's network stack without
+  policy or secrets (per-VM LAN, DNS, upstream address check, CA, the
+  guest-facing half of HTTP), taken out for `berth vm` (masterplan B-3).
 - `packages/git`: host-side repository capabilities; credentials stay here.
 - `packages/web`: Svelte 5/Vite UI, built to `packages/web/dist`.
 - `packages/keel`: keel, what runs inside a thread machine: the guest kernel

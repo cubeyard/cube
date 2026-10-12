@@ -16,6 +16,7 @@ on:
       - rust-toolchain.toml
       - packages/node-transport/**
       - packages/gateway/**
+      - packages/netstack/**
       - packages/runner-protocol/**
       - packages/berth/**
       - packages/keel/layers/**

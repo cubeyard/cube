@@ -24,7 +24,10 @@
   registrations).
 - **cube-gateway:** started and supervised by cubed; each VM's only network
   (DHCP, DNS, TCP termination, HTTP/HTTPS egress with TLS interception and a
-  per-request decision from cubed's egress policy, secret substitution).
+  per-request decision from cubed's egress policy, secret substitution). The
+  stack itself (LAN, DNS, address check, CA, the guest-facing half of HTTP) is
+  the library `cube-netstack` (`packages/netstack`); decisions, secrets and
+  the runner link stay in the gateway.
 - **OptChat:** the user's one endless chat (`optchat*.ts`). A second
   in-process pi-durable Harness on `CUBED_STATE/optchat/pi.sqlite`: its
   entries are the chat's log, a model-free conversation holds the summary tree,

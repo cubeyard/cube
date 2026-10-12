@@ -48,6 +48,11 @@ pub const GATEWAY_MAC: EthernetAddress = EthernetAddress([0x02, 0, 0, 0, 0, 0x01
 pub const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 1);
 pub const GUEST_IP: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 2);
 pub const EGRESS_PORTS: [u16; 2] = [80, 443];
+/// The MTU the guest is leased: the normal Ethernet MTU.
+pub const GUEST_MTU: u16 = 1500;
+/// Largest Ethernet frame the LAN takes or sends (MTU + 14-byte header; no
+/// VLAN tags).
+pub const MAX_FRAME: usize = GUEST_MTU as usize + 14;
 const CHUNK: usize = 16 * 1024;
 const CHANNEL_CHUNKS: usize = 16;
 const FRAME_QUEUE: usize = 4096;
@@ -93,6 +98,12 @@ pub struct FlowInfo {
 pub trait FlowHandler: Send + Sync + 'static {
     /// Called on the LAN task for each established guest flow; must not block.
     fn spawn(&self, info: FlowInfo, stream: FlowStream);
+}
+
+impl<T: FlowHandler + ?Sized> FlowHandler for Arc<T> {
+    fn spawn(&self, info: FlowInfo, stream: FlowStream) {
+        (**self).spawn(info, stream)
+    }
 }
 
 pub type ResolveFuture = Pin<Box<dyn Future<Output = dns::Answer> + Send>>;
@@ -322,7 +333,7 @@ impl Device for Frames {
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
         caps.medium = Medium::Ethernet;
-        caps.max_transmission_unit = cube_node_transport::l2::MAX_FRAME;
+        caps.max_transmission_unit = MAX_FRAME;
         caps
     }
 }
@@ -938,7 +949,7 @@ fn dhcp_reply(frame: &[u8], mac: EthernetAddress) -> Option<(Vec<u8>, bool)> {
         }
         _ => return None,
     };
-    let mtu = cube_node_transport::l2::GUEST_MTU.to_be_bytes();
+    let mtu = GUEST_MTU.to_be_bytes();
     let options = [DhcpOption {
         kind: 26,
         data: &mtu,

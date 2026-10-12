@@ -8,16 +8,19 @@
 //! placeholder secrets are substituted only where cubed says so. cubed reaches
 //! the guest's sshd, and its portal the guest's registered services, through
 //! the control socket's dial route.
-pub mod addr;
-pub mod ca;
+//!
+//! The per-VM LAN, DNS, address check, CA and the guest-facing half of HTTP
+//! are `cube-netstack`; decisions, secrets and the runner link are here.
 pub mod control;
 pub mod decide;
 pub mod dial;
-pub mod dns;
 pub mod http;
-pub mod lan;
 pub mod link;
 pub mod secrets;
+
+/// The network stack lives in `cube-netstack`; its modules keep their paths
+/// here so the gateway's code and tests read as before.
+pub use cube_netstack::{addr, ca, dns, lan};
 
 use anyhow::{Context, Result, bail, ensure};
 use cube_node_transport::NetworkMode;
@@ -146,4 +149,18 @@ pub fn load_or_create_key(path: &Path) -> Result<SecretKey> {
     let mut bytes = [0u8; 32];
     file.read_exact(&mut bytes)?;
     Ok(SecretKey::from_bytes(&bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use cube_node_transport::l2;
+
+    #[test]
+    fn the_lan_leases_the_mtu_the_frame_channel_carries() {
+        // The LAN (cube-netstack) and the runner's frame channel (p3) each
+        // have the constants; a guest leased a larger MTU than the channel
+        // carries would lose its frames.
+        assert_eq!(crate::lan::GUEST_MTU, l2::GUEST_MTU);
+        assert_eq!(crate::lan::MAX_FRAME, l2::MAX_FRAME);
+    }
 }
