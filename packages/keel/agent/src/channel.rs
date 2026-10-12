@@ -106,18 +106,20 @@ pub async fn serve(agent: Arc<Agent>) -> io::Result<()> {
             .write(true)
             .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(&path)?;
-        loop {
-            wait_for_host(&port).await;
-            let started = Instant::now();
-            match connection(&agent, &port).await {
-                // The runner went away; wait for the next. Never more than one
-                // connection per RECONNECT_POLL, whatever the port reports.
-                Ok(()) => tokio::time::sleep_until((started + RECONNECT_POLL).into()).await,
-                Err(error) => {
-                    eprintln!("cube-agent: ending the connection: {error}");
-                    break; // reopen the port
-                }
+        wait_for_host(&port).await;
+        let started = Instant::now();
+        match connection(&agent, &port).await {
+            // The runner went away: close the port and open it again, so
+            // the runner sees (QMP VSERPORT_CHANGE) that this side knows. A
+            // machine saved after that waits for the host, and the runner's
+            // next connect is an open the agent sees, also after a restore.
+            // Never more than one connection per RECONNECT_POLL.
+            Ok(()) => {
+                eprintln!("cube-agent: the runner closed its end of cube.0; closing the port");
+                tokio::time::sleep_until((started + RECONNECT_POLL).into()).await
             }
+            // It broke the channel rules (or reset): the same.
+            Err(error) => eprintln!("cube-agent: ending the connection: {error}"),
         }
         drop(port);
         tokio::time::sleep(Duration::from_millis(100)).await;

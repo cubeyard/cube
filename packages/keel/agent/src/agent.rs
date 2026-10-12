@@ -266,6 +266,11 @@ impl Agent {
     /// session.
     pub fn connected(&self) -> String {
         let host_ns = crate::clock::sync_now();
+        if host_ns.is_none() {
+            eprintln!(
+                "cube-agent: no host clock (PTP) for this session: it rests on random bytes alone, which a restore without VMGENID repeats"
+            );
+        }
         let count = self.sessions.fetch_add(1, Ordering::SeqCst);
         let session = session_id(host_ns, &self.boot_id, count);
         *self.session.lock().unwrap() = session.clone();

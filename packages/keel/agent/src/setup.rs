@@ -741,11 +741,23 @@ pub fn apply(setup: &proto::MachineSetup) -> Result<Applied, Refusal> {
     crate::generated::protect_links();
     // Mixed into the pool without crediting it: a restored machine must not
     // repeat another's random numbers.
-    fs::OpenOptions::new()
+    let random = fs::OpenOptions::new()
         .write(true)
         .open("/dev/urandom")
-        .and_then(|mut random| random.write_all(&setup.entropy))
+        .and_then(|mut random| random.write_all(&setup.entropy).map(|_| random))
         .map_err(|error| internal("entropy", error.to_string()))?;
+    // A write only mixes it into the input pool; the generator would use it
+    // at its next scheduled reseed (up to a minute later). arm64 has no
+    // VMGENID to reseed it after a restore, so reseed now. ENODATA: the
+    // generator is not ready yet, and its first seeding takes the pool.
+    const RNDRESEEDCRNG: libc::c_ulong = 0x5207; // _IO('R', 0x07)
+    // SAFETY: an ioctl without arguments on a descriptor this function owns.
+    if unsafe { libc::ioctl(std::os::fd::AsRawFd::as_raw_fd(&random), RNDRESEEDCRNG as _) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ENODATA) {
+            return Err(internal("entropy", format!("reseeding: {error}")));
+        }
+    }
 
     let formatted = if is_mounted(ROOT) {
         let assembled: Option<Value> = fs::read(SETUP)

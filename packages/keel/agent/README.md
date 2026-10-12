@@ -46,10 +46,22 @@ cube-init (PID 1)
   session is dropped unrun. The writer stops between frames when the
   connection ends (cut off only if the runner reads nothing for 2 s), so a
   `hello` never follows half a frame. A restored machine's memory, random
-  state included, is the save's (and arm64 has no VMGENID); the host's time
-  still makes its session new. The kernel's VMGENID driver reseeds the random
-  generator on x86-64 but tells user space nothing, so the agent learns of a
-  restore from the port (the runner's connect rule), not from VMGENID.
+  state included, is the save's; the host's time still makes its session
+  new.
+- **hello when the host opens the port.** The agent says `hello` when the
+  runner's end connects: after a boot, an agent restart, the reset and a
+  restore alike (runner.proto's header). When the runner closes its end
+  the agent closes the port and opens it again, so the runner sees it in
+  QMP (`query-chardev` `frontend-open`); a runner that saves a machine
+  closes its end first and waits for that, and the saved agent then waits
+  for the host, so the connect to the restored QEMU is an open it sees.
+  VMGENID has no part in the handshake: on x86-64 QEMU's `vmgenid` device
+  makes the kernel reseed its random generator on a restore (the kernel
+  says so in its log, nothing else); arm64 QEMU has no such device. On both,
+  `machine_setup`'s entropy is written to `/dev/urandom` and the generator
+  reseeded at once (`RNDRESEEDCRNG`), so a restored machine's random numbers
+  are its own after its setup. The clock is set from virtio-rtc's PTP clock
+  before each `hello` and every 500 ms, not from VMGENID.
 - **reset by the runner.** Any runner frame on channel 0 breaks the channel
   rules: the agent ends the connection, opens the port again and says
   `hello` about 100 ms later. A runner uses this when no `hello` comes
@@ -321,8 +333,20 @@ file's rules (S-7a). `berth vm` keeps the connect rule and sessions (B-2).
   `restore.restores.each[].session`, `helloClockOffsetS`). The agent's
   periodic sync (every 500 ms) also has the clock right by the time the
   reset's `hello` comes (about 600 ms after `cont`), so this check does not
-  single out the sync before `hello`: a build without it passes too. A
-  failed run writes no `results.json`.
+  single out the sync before `hello`: a build without it passes too.
+  Check 83 comes last (`--only snapshot` runs it alone, `--only rest`
+  everything else, for a machine where the whole run is too long): one
+  snapshot restored twice the supported way (the runner closes its end
+  while the machine runs, waits until `query-chardev` shows the agent closed
+  the port, then stops and saves; each restore is a new QEMU the runner
+  connects to after `cont`). Each restore must give a plain `hello` (no
+  reset) within 500 ms of `cont`, a session neither the save nor the other
+  restore had, the clock within 1 s after 3 s saved, random bytes the other
+  restore did not read, and one kernel record of a VM generation change
+  with `vmgenid` (x86-64, on by default, `--vmgenid off` leaves it out) or
+  none without (`results.json` `sameSnapshot`). `--control snapshot` keeps
+  the runner connected through the save, which is expected to fail there
+  (no plain `hello`). A failed run writes no `results.json`.
 
   `test-image.sh` needs Docker (and binfmt for the other architecture); it
   builds Debian trixie with sudo, git, gh and curl and passwordless sudo for
