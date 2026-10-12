@@ -51,7 +51,7 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   versioned machine type is pinned when a machine is created; a QEMU
   without it does not start the machine (`FAILED_PRECONDITION machine_type`).
 - Verbs: `runner.get`, `machine.create` (`STOPPED`), `start` (QEMU runs it:
-  `RUNNING` with a new `boot_id`), `stop` (QMP `quit`), `delete` (stops it;
+  `RUNNING` with a new `boot_id`), `stop` (below), `delete` (stops it;
   `RETAINED` when asked to retain or when the runner interrupted it,
   otherwise the directory is deleted: `DELETED`), `discard` (a retained
   machine's directory is deleted), `get`, `list`, `watch`. Ids are never
@@ -92,8 +92,19 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   the network (B-4).
 - Not yet: a network device, pulls by the runner and the cache limit,
   templates, diagnosis and snapshots (masterplan rows B-4, B-7, B-8, B-9,
-  S-7a). `stop` is QMP `quit`, a power cut for the guest (`e2fsck` on the
-  next boot): keel has no controlled power-off yet.
+  S-7a).
+- `stop`, `delete` and the runner's own shutdown stop a machine the same
+  way: the runner asks the agent to shut down (`DaemonRequest.shutdown`:
+  SIGTERM to the workload, SIGKILL to what is left after 10 s, sync, the
+  writable disk remounted read-only; done only when all of that held) and
+  waits at most 30 s for done in the session it asked in, then quits QEMU.
+  `machine.json`'s `stopped` and the `Stopped` condition say `controlled`
+  (status true: what the machine wrote is on its disk) or `forced` (no
+  session, an error or no answer: QEMU was quit as a power cut, `e2fsck` on
+  the next boot); a start clears it. The guest does not power off. cubed's
+  call timeout (15 s) is shorter than a forced stop can take (30 s and up to
+  20 s for QEMU to quit): cubed sees `completion_unknown` and asks again,
+  which waits for the first stop (a cubed change for C-1/C-2).
 
 Test: `packages/server/test/runner-vm-test.ts` (refusals always; keel
 machines with `CUBE_TEST_BERTH_QEMU`, `CUBE_TEST_BERTH_QEMU_IMG`,

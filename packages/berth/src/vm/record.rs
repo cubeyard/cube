@@ -106,6 +106,23 @@ pub struct MachineRecord {
     /// never change under it. Absent for a machine no image was given yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<MachineImage>,
+    /// How the newest boot ended when the runner stopped it: controlled (the
+    /// agent's shutdown answered done) or forced. Cleared by the next start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<Stopped>,
+}
+
+/// A stop the runner made (`machine_stop`, `delete`, its own shutdown).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Stopped {
+    /// `controlled`: the agent answered `shutdown` with done, so what the
+    /// machine wrote is on its disk and the disk is read-only or unmounted.
+    /// `forced`: QEMU was quit without that (no session, an error, no answer
+    /// within the wait); the disk is as a power cut leaves it.
+    pub kind: String,
+    pub message: String,
+    pub at: Timestamp,
 }
 
 /// The image of a machine (`berth image pull`'s record, in short).
@@ -211,6 +228,7 @@ mod tests {
             error: String::new(),
             boot: None,
             image: None,
+            stopped: None,
         }
     }
 

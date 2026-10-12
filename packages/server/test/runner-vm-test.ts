@@ -133,7 +133,7 @@ async function stop(child: ChildProcess, signal: NodeJS.Signals = "SIGINT"): Pro
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const record = (id: string) => JSON.parse(fs.readFileSync(path.join(directory, id, "machine.json"), "utf8")) as
   { machineType: string; phase: string; boot?: { pid: number; bootId: string; qemu: string }; interrupted?: { reason: string };
-    image?: { reference: string; manifest: string; diffIds: string[] } };
+    image?: { reference: string; manifest: string; diffIds: string[] }; stopped?: { kind: string; message: string } };
 const condition = (machine: Machine, type: string) => machine.status?.conditions.find(c => c.type === type);
 async function gone(pid: number): Promise<void> {
   for (let i = 0; i < 200 && alive(pid); i++) await new Promise(resolve => setTimeout(resolve, 50));
@@ -179,6 +179,14 @@ async function shell(workspace: Workspace, key: string, command: string): Promis
 const refusedBy = (code: string, reason: string) => (error: unknown) =>
   error instanceof GuestTransportError && error.cause instanceof RunnerError && error.cause.code === code && error.cause.reason === reason;
 const SESSION = /^[0-9a-f]{32}$/;
+const show = (value: unknown) => JSON.stringify(value, (_, x: unknown) => typeof x === "bigint" ? String(x) : x);
+/** A stop waits up to 30 s for the agent's shutdown, then QEMU may take 20 s. */
+const STOP_MS = 70000;
+async function stopVia(session: RunnerSession, ref: { owner: string; id: string }, epoch: number): Promise<Machine> {
+  const result = await session.call({ case: "machineStop", value: { ref, fence: { epoch: BigInt(epoch) } } }, STOP_MS);
+  assert.equal(result.case, "machine");
+  return result.value as Machine;
+}
 
 // The image, as the runner reads it: pulled into its directory first.
 const firstArgs = ["--allow-peer", control.peerId, "--node-id", node, "--listen", "127.0.0.1:0", "--labels", "site=test"];
@@ -339,6 +347,42 @@ try {
       assert.equal(renewed.status?.bootId, firstBoot, "the same boot");
       note(`the agent started again: new session ${renewed.status!.guest!.session} after ${firstSession}, ready again (the exec that ended it: ${killed instanceof Error ? killed.message : "answered"})`);
       assert.match(events(ref.id), /the agent closed cube\.0; the session ended/);
+
+      // A controlled stop (D1): written and not synced, then stopped at once;
+      // the agent's shutdown puts it on the disk before QEMU goes.
+      const token = randomBytes(8).toString("hex");
+      const wrote = await shell(workspace, "persist-write", `printf ${token} > persist.txt`);
+      assert.equal(wrote.exitCode, 0);
+      const controlled = await stopVia(session, ref, epoch);
+      assert.equal(controlled.status?.phase, MachineStatus_Phase.STOPPED);
+      assert.deepEqual([condition(controlled, "Stopped")?.reason, condition(controlled, "Stopped")?.status], ["controlled", true], show(controlled.status?.conditions));
+      assert.equal(record(ref.id).stopped?.kind, "controlled");
+      assert.match(events(ref.id), /stop: controlled: the agent shut down/);
+      await session.machine({ case: "machineStart", value: { ref, fence: { epoch: BigInt(epoch) }, boot: { documents, mac: "" } } });
+      await session.until(ref, machine => !!machine.status?.guest?.ready, 180000);
+      const kept = await shell(workspace, "persist-read", "cat persist.txt");
+      assert.equal(kept.output, token, "what was written before a controlled stop is on the disk after it");
+      note(`controlled stop: an unsynced write before it read back after the restart (${token}); Stopped/controlled journaled`);
+
+      // A forced stop: the guest cannot answer (QMP stop pauses it), so after
+      // 30 s QEMU is quit anyway and the stop is journaled as forced.
+      await qmp(ref.id, "stop");
+      const t1 = Date.now();
+      const forced = await stopVia(session, ref, epoch);
+      const waited = Date.now() - t1;
+      assert.equal(forced.status?.phase, MachineStatus_Phase.STOPPED);
+      assert.deepEqual([condition(forced, "Stopped")?.reason, condition(forced, "Stopped")?.status], ["forced", false]);
+      assert.match(condition(forced, "Stopped")!.message, /no answer to shutdown within 30 s/);
+      assert.ok(waited >= 30000 && waited < STOP_MS, `waited ${waited} ms`);
+      assert.match(events(ref.id), /stop: forced: no answer to shutdown within 30 s/);
+      // A restart after a forced stop: the machine boots, its disk is
+      // checked, and what the controlled stop kept is still there.
+      await session.machine({ case: "machineStart", value: { ref, fence: { epoch: BigInt(epoch) }, boot: { documents, mac: "" } } });
+      const back = await session.until(ref, machine => !!machine.status?.guest?.ready, 180000);
+      assert.equal(condition(back, "Stopped"), undefined, "a start clears the stop record");
+      const still = await shell(workspace, "persist-read-again", "cat persist.txt");
+      assert.equal(still.output, token);
+      note(`forced stop after ${waited} ms (guest paused: no answer to shutdown within 30 s), journaled forced; restarted ready with the data`);
     } finally {
       store.close();
       fs.rmSync(leases, { recursive: true, force: true });
@@ -359,12 +403,13 @@ try {
 
   // stop quits QEMU; the guest status goes; a start boots again on the same writable disk
   let pid = record(ref.id).boot!.pid;
-  const stopped = await session.machine({ case: "machineStop", value: { ref, fence: { epoch: BigInt(epoch) } } });
+  const stopped = await stopVia(session, ref, epoch);
   assert.equal(stopped.status?.phase, MachineStatus_Phase.STOPPED);
   assert.equal(stopped.status?.bootId, "");
   assert.equal(stopped.status?.guest, undefined, "no guest status without QEMU");
   await gone(pid);
   assert.equal(condition(stopped, "Interrupted"), undefined, "a stop cubed asked for is no interruption");
+  assert.equal(condition(stopped, "Stopped")?.reason, "controlled", show(stopped.status?.conditions));
   await assert.rejects(transport.call("hello", {}), refusedBy("UNAVAILABLE", "not_running"));
   const again = await session.machine({ case: "machineStart", value: { ref, fence: { epoch: BigInt(epoch) }, boot: { documents, mac: "" } } });
   assert.notEqual(again.status?.bootId, firstBoot);

@@ -28,9 +28,15 @@
 //!
 //! Not here yet: the network (B-4: no network device at all), image pulls
 //! by the runner itself and the cache limit (B-7), templates (B-8),
-//! diagnosis (B-9) and snapshots (S-7a). `stop` quits QEMU (a power cut for
-//! the guest, `e2fsck` on the next boot): keel's contract has no controlled
-//! power-off yet.
+//! diagnosis (B-9) and snapshots (S-7a).
+//!
+//! `stop` (also `delete` and the runner's own shutdown) asks the agent to
+//! shut down (`DaemonRequest.shutdown`: the workload gets SIGTERM, then
+//! SIGKILL after 10 s, the disk is synced and remounted read-only) and waits
+//! at most 30 s for done in the session it asked in; then QEMU is quit. The
+//! record says `controlled` (done came: what was written is on the disk) or
+//! `forced` (no session, an error, no answer: as a power cut, `e2fsck` on the
+//! next boot), shown as the `Stopped` condition until the next start.
 mod ca;
 mod channel;
 mod qemu;
@@ -57,7 +63,7 @@ use tokio::sync::{broadcast, watch};
 
 pub use qemu::{Accel, Floor};
 use qemu::{Arch, Keel, Qmp};
-use record::{Boot, MachineImage, MachineRecord, Phase, Size};
+use record::{Boot, MachineImage, MachineRecord, Phase, Size, Stopped};
 
 use crate::{
     host::{getrandom, host_name, valid_id, valid_op, valid_owner},
@@ -97,6 +103,9 @@ const MIN_MEMORY_MIB: u32 = 256;
 const MAX_DISK_GIB: u32 = 512;
 /// QEMU has this long to answer QMP after it starts.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the agent has to answer `shutdown` with done (a controlled
+/// stop); then QEMU is quit anyway (a forced stop).
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(30);
 /// After `quit`, QEMU has this long to exit before it is killed.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(20);
 /// A Unix socket path must fit `sun_path` (104 bytes on macOS).
@@ -447,7 +456,7 @@ impl VmRunner {
         updated: Timestamp,
     ) -> proto::Machine {
         let boot = record.boot.as_ref().filter(|_| record.phase.live());
-        let conditions = record
+        let mut conditions: Vec<proto::Condition> = record
             .interrupted
             .iter()
             .map(|interrupted| proto::Condition {
@@ -458,6 +467,15 @@ impl VmRunner {
                 since: Some(interrupted.since),
             })
             .collect();
+        // How the runner's newest stop went: status true only when it was
+        // controlled (reason `controlled` or `forced`).
+        conditions.extend(record.stopped.iter().map(|stopped| proto::Condition {
+            r#type: "Stopped".into(),
+            status: stopped.kind == "controlled",
+            reason: stopped.kind.clone(),
+            message: stopped.message.clone(),
+            since: Some(stopped.at),
+        }));
         proto::Machine {
             r#ref: Some(proto::Ref {
                 owner: record.owner.clone(),
@@ -794,6 +812,7 @@ impl VmRunner {
             error: String::new(),
             boot: None,
             image: Some(image),
+            stopped: None,
         };
         event(
             &dir,
@@ -894,6 +913,7 @@ impl VmRunner {
                 if entry.record.phase == Phase::Starting {
                     entry.record.phase = Phase::Running;
                     entry.record.interrupted = None;
+                    entry.record.stopped = None;
                     event(&dir, "running", "QEMU answers QMP and runs the guest");
                     return self.commit(&mut state, &id);
                 }
@@ -1137,6 +1157,53 @@ impl VmRunner {
         }
     }
 
+    /// Asks the machine's agent to shut down (runner.proto's
+    /// `DaemonRequest.shutdown`) and waits at most SHUTDOWN_WAIT for done in
+    /// the session it was sent in. Anything else is a forced stop.
+    async fn shut_down_guest(&self, id: &str) -> (bool, String) {
+        let guest = self
+            .state
+            .lock()
+            .unwrap()
+            .machines
+            .get(id)
+            .and_then(|entry| entry.guest.clone());
+        let Some(guest) = guest else {
+            return (false, "the machine had no guest channel".into());
+        };
+        let (_, answer) = match guest.request(Op::Shutdown(proto::Empty {})) {
+            Ok(sent) => sent,
+            Err(error) => return (false, format!("no shutdown was sent: {}", error.message)),
+        };
+        stop_outcome(tokio::time::timeout(SHUTDOWN_WAIT, answer).await.ok())
+    }
+
+    /// The machine's QEMU goes: a controlled stop when the agent shut down,
+    /// else forced. The machine is `Stopping` already; its record says how.
+    async fn stop_machine(&self, id: &str) {
+        let dir = self.machine_dir(id);
+        let (controlled, message) = self.shut_down_guest(id).await;
+        event(
+            &dir,
+            if controlled {
+                "stop: controlled"
+            } else {
+                "stop: forced"
+            },
+            &message,
+        );
+        self.quit(id).await;
+        let mut state = self.state.lock().unwrap();
+        if let Some(entry) = state.machines.get_mut(id) {
+            entry.record.stopped = Some(Stopped {
+                kind: if controlled { "controlled" } else { "forced" }.into(),
+                message,
+                at: Timestamp::now(),
+            });
+            let _ = self.commit(&mut state, id);
+        }
+    }
+
     async fn stop(self: &Arc<Self>, request: proto::MachineRef) -> Answer<proto::Machine> {
         let id = {
             let mut state = self.state.lock().unwrap();
@@ -1152,8 +1219,12 @@ impl VmRunner {
             self.commit(&mut state, &id)?;
             id
         };
-        event(&self.machine_dir(&id), "stop", "QEMU told to quit");
-        self.quit(&id).await;
+        event(
+            &self.machine_dir(&id),
+            "stop",
+            "the agent is asked to shut down",
+        );
+        self.stop_machine(&id).await;
         let state = self.state.lock().unwrap();
         Ok(self.current(&state, &id))
     }
@@ -1338,7 +1409,7 @@ impl VmRunner {
 
     /// The runner stops: every machine's QEMU is quit and the machine is
     /// marked interrupted (its disk is kept; cubed starts it again).
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(self: &Arc<Self>) {
         let _op = self.ops.lock().await;
         let live: Vec<String> = {
             let mut state = self.state.lock().unwrap();
@@ -1355,18 +1426,17 @@ impl VmRunner {
             }
             ids
         };
-        let mut asked = Vec::new();
-        for id in &live {
+        let mut stops = tokio::task::JoinSet::new();
+        for id in live {
             event(
-                &self.machine_dir(id),
+                &self.machine_dir(&id),
                 "runner stopping",
-                "QEMU told to quit",
+                "the agent is asked to shut down",
             );
-            asked.push(self.send_quit(id).await);
+            let runner = Arc::clone(self);
+            stops.spawn(async move { runner.stop_machine(&id).await });
         }
-        for (id, asked) in live.iter().zip(asked) {
-            self.await_exit(id, asked).await;
-        }
+        while stops.join_next().await.is_some() {}
     }
 }
 
@@ -1386,6 +1456,35 @@ async fn quit_orphan(socket: &Path) -> bool {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     true
+}
+
+/// Whether the agent's answer to `shutdown` makes a controlled stop (only
+/// done does), and what to record; None is no answer within the wait.
+fn stop_outcome(
+    answer: Option<std::result::Result<channel::Answer, tokio::sync::oneshot::error::RecvError>>,
+) -> (bool, String) {
+    match answer {
+        Some(Ok(Ok(AnswerKind::Done(_)))) => (
+            true,
+            "the agent shut down: its writes are on the disk and the disk is read-only".into(),
+        ),
+        Some(Ok(Ok(AnswerKind::Error(error)))) => (
+            false,
+            format!(
+                "the agent's shutdown failed: {} {}",
+                error.reason, error.message
+            ),
+        ),
+        Some(Ok(Ok(AnswerKind::Guest(_)))) => {
+            (false, "the agent answered shutdown with guest bytes".into())
+        }
+        Some(Ok(Err(error))) => (false, format!("no answer to shutdown: {}", error.message)),
+        Some(Err(_)) => (false, "no answer to shutdown: the channel ended".into()),
+        None => (
+            false,
+            format!("no answer to shutdown within {} s", SHUTDOWN_WAIT.as_secs()),
+        ),
+    }
 }
 
 /// One boot of one machine, as its guest channel sees the runner.
@@ -1611,5 +1710,42 @@ impl Service for VmRunner {
                 )
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    #[test]
+    fn only_done_is_a_controlled_stop() {
+        assert!(stop_outcome(Some(Ok(Ok(AnswerKind::Done(proto::Empty {}))))).0);
+        let failed = stop_outcome(Some(Ok(Ok(AnswerKind::Error(refuse(
+            Code::Internal,
+            "shutdown_failed",
+            "remounting /run/keel/rw read-only: Device or resource busy",
+        ))))));
+        assert!(
+            !failed.0 && failed.1.contains("shutdown_failed"),
+            "{failed:?}"
+        );
+        assert!(!stop_outcome(Some(Ok(Ok(AnswerKind::Guest(b"{}".to_vec()))))).0);
+        let ended = stop_outcome(Some(Ok(Err(refuse(
+            Code::Unavailable,
+            "guest_disconnected",
+            "the machine's agent started a new session",
+        )))));
+        assert!(!ended.0 && ended.1.contains("new session"), "{ended:?}");
+        let (sender, receiver) = tokio::sync::oneshot::channel::<channel::Answer>();
+        drop(sender);
+        let gone = stop_outcome(Some(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(receiver),
+        ));
+        assert!(!gone.0 && gone.1.contains("channel ended"), "{gone:?}");
+        let late = stop_outcome(None);
+        assert!(!late.0 && late.1.contains("within 30 s"), "{late:?}");
     }
 }
