@@ -353,7 +353,16 @@ try {
       const token = randomBytes(8).toString("hex");
       const wrote = await shell(workspace, "persist-write", `printf ${token} > persist.txt`);
       assert.equal(wrote.exitCode, 0);
+      // A workload that ignores SIGTERM runs meanwhile: the agent waits its
+      // 10 s, then SIGKILLs it, and the stop is still controlled, well
+      // within the runner's 30 s (R17).
+      const stubbornLease = await workspace.lease({ owner: "pi" });
+      await workspace.exec(stubbornLease.token, "stubborn", { command: "trap '' TERM; while :; do sleep 1; done", timeoutMs: 600000 });
+      await workspace.release(stubbornLease.token);
+      const t0Stop = Date.now();
       const controlled = await stopVia(session, ref, epoch);
+      const stopMs = Date.now() - t0Stop;
+      assert.ok(stopMs >= 10000 && stopMs < 30000, `a controlled stop with a workload that ignores SIGTERM took ${stopMs} ms`);
       assert.equal(controlled.status?.phase, MachineStatus_Phase.STOPPED);
       assert.deepEqual([condition(controlled, "Stopped")?.reason, condition(controlled, "Stopped")?.status], ["controlled", true], show(controlled.status?.conditions));
       assert.equal(record(ref.id).stopped?.kind, "controlled");
@@ -362,7 +371,7 @@ try {
       await session.until(ref, machine => !!machine.status?.guest?.ready, 180000);
       const kept = await shell(workspace, "persist-read", "cat persist.txt");
       assert.equal(kept.output, token, "what was written before a controlled stop is on the disk after it");
-      note(`controlled stop: an unsynced write before it read back after the restart (${token}); Stopped/controlled journaled`);
+      note(`controlled stop in ${stopMs} ms with a workload that ignores SIGTERM (killed after 10 s): an unsynced write before it read back after the restart (${token}); Stopped/controlled journaled`);
 
       // A forced stop: the guest cannot answer (QMP stop pauses it), so after
       // 30 s QEMU is quit anyway and the stop is journaled as forced.

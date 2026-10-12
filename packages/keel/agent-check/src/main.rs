@@ -301,30 +301,30 @@ impl Qmp {
 }
 
 impl Qmp {
-    /// Until the guest has closed cube.0 (QMP `query-chardev`: chardev `ctl`
-    /// no longer `frontend-open`): the agent saw the runner leave. It opens
-    /// the port again 100 ms later, so this asks every 5 ms. Not the
-    /// VSERPORT_CHANGE event: QEMU sends at most one per second per port
-    /// and keeps only the newest state, so a close followed by an open can
-    /// arrive as the open alone.
-    async fn port_closed(&mut self, within: Duration) -> Result<Duration> {
-        let started = Instant::now();
+    /// Until QEMU reports a change of cube.0's guest side (VSERPORT_CHANGE,
+    /// `cube0`) that happened after `since` (QMP's own timestamp, host
+    /// time): the agent saw the runner leave and closed and opened its port.
+    /// QEMU sends this event at most once a second per port and keeps only
+    /// the newest state, so its timestamp, not its `open`, says it is the
+    /// agent's answer and not an older change. Open this connection before
+    /// the runner leaves. Returns how long after `since` the change was.
+    async fn port_changed_after(&mut self, since: f64, within: Duration) -> Result<f64> {
+        let deadline = Instant::now() + within;
         loop {
-            let chardevs = self.execute("query-chardev", Value::Null).await?;
-            let open = chardevs
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|c| c["label"] == "ctl")
-                .map(|c| c["frontend-open"] == true);
-            if open == Some(false) {
-                return Ok(started.elapsed());
+            let left = deadline.saturating_duration_since(Instant::now());
+            let event = tokio::time::timeout(left, self.line())
+                .await
+                .map_err(|_| {
+                    anyhow!("no VSERPORT_CHANGE of cube0 after the runner left, within {within:?}")
+                })??;
+            if event["event"] != "VSERPORT_CHANGE" || event["data"]["id"] != "cube0" {
+                continue;
             }
-            ensure!(
-                started.elapsed() < within,
-                "the guest did not close cube.0 within {within:?} of the runner leaving"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            let at = event["timestamp"]["seconds"].as_f64().unwrap_or(0.0)
+                + event["timestamp"]["microseconds"].as_f64().unwrap_or(0.0) / 1e6;
+            if at > since {
+                return Ok(at - since);
+            }
         }
     }
 }
@@ -1028,8 +1028,8 @@ async fn save(machine: &mut Machine, memory: &Path) -> Result<Duration> {
 
 /// Check 83: one snapshot restored twice. A machine on a fresh disk is set
 /// up, left by the runner (its end of cube.0 closed, which the agent
-/// acknowledges by closing and opening the port; query-chardev shows it),
-/// stopped and saved once
+/// acknowledges by closing and opening the port: a VSERPORT_CHANGE
+/// timestamped after the runner left), stopped and saved once
 /// (memory file and a copy of its writable disk); then, twice, the disk is
 /// put back, a new QEMU loads the memory and runs, and the runner connects
 /// (the supported flow: the guest sees the port open). Each `hello` must come without the reset, start a session
@@ -1051,8 +1051,8 @@ async fn same_snapshot(
     let memory = dir.join("memory");
     // The supported flow: the runner closes its end of cube.0 while the
     // machine runs and waits until the agent has seen it (it closes the port
-    // and opens it again; query-chardev shows the close), then stops and
-    // saves. The saved
+    // and opens it again: a VSERPORT_CHANGE timestamped after the runner
+    // left), then stops and saves. The saved
     // guest waits for the host, so the runner's connect after a restore is an
     // open the guest sees. (Left connected, the restored port already says
     // connected, and a connect right after cont can change nothing the guest
@@ -1060,12 +1060,16 @@ async fn same_snapshot(
     let disconnect_first = lab.o.control != Some(Control::Snapshot);
     if disconnect_first {
         let mut qmp = Qmp::open(&m.qmp).await?;
+        let left = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
         close(ch).await?;
-        let acknowledged = qmp.port_closed(RESET_HELLO).await?;
+        let acknowledged = qmp.port_changed_after(left, RESET_HELLO).await?;
         drop(qmp); // one QMP client at a time: save opens its own
         log(&format!(
-            "same snapshot: the agent closed cube.0 {} ms after the runner left",
-            acknowledged.as_millis()
+            "same snapshot: the agent closed and opened cube.0 {:.0} ms after the runner left (VSERPORT_CHANGE)",
+            acknowledged * 1000.0
         ));
         save(&mut m, &memory).await?;
     } else {
@@ -1093,9 +1097,23 @@ async fn same_snapshot(
         let resumed = Instant::now();
         drop(qmp); // one QMP client at a time: quit opens its own
         let ch = Channel::open(&m.ctl).await?;
-        let hello = ch.info("hello", PLAIN_HELLO).await.with_context(|| {
-            format!("restore {i}: no plain hello within {PLAIN_HELLO:?} of cont (the guest saw no port open)")
-        })?;
+        let hello = match ch.info("hello", PLAIN_HELLO).await {
+            Ok(hello) => hello,
+            Err(error) => {
+                // Still a failure; say whether a hello came late, and when.
+                let late = ch.info("hello", Duration::from_secs(3)).await;
+                bail!(
+                    "restore {i}: no plain hello within {PLAIN_HELLO:?} of cont: {error}; {}",
+                    match late {
+                        Ok(_) => format!(
+                            "a hello came {} ms after cont",
+                            resumed.elapsed().as_millis()
+                        ),
+                        Err(_) => "none within 3.5 s either".into(),
+                    }
+                );
+            }
+        };
         let hello_ms = resumed.elapsed().as_millis();
         let host_now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2838,7 +2856,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
     if !lab.o.skip_snapshot {
         checks.ok(
         same.is_ok(),
-        "one snapshot restored twice, each into a new QEMU, the runner having closed cube.0 before the save (the agent closed and opened its port; query-chardev shows the close) and connecting after cont (the supported flow): the guest sees the port open and says hello at once without the reset; each hello starts a session that is not the saved one nor the other restore's, though both start from the same memory; the clock is right at hello after 3 s saved; random bytes read after each setup differ (x86-64: the vmgenid reseed, one kernel record each; arm64: the setup's entropy and RNDRESEEDCRNG)",
+        "one snapshot restored twice, each into a new QEMU, the runner having closed cube.0 before the save (the agent closed and opened its port: a VSERPORT_CHANGE after the runner left) and connecting after cont (the supported flow): the guest sees the port open and says hello at once without the reset; each hello starts a session that is not the saved one nor the other restore's, though both start from the same memory; the clock is right at hello after 3 s saved; random bytes read after each setup differ (x86-64: the vmgenid reseed, one kernel record each; arm64: the setup's entropy and RNDRESEEDCRNG)",
         same_detail,
     )?;
     }
