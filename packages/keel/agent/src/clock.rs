@@ -87,6 +87,30 @@ impl Source {
     }
 }
 
+/// Syncs realtime with the host's clock once, now, and returns the host's
+/// time it read (ns since the epoch); None without a PTP clock. Called
+/// before every `hello`, so a restored machine has the right time when it
+/// starts a session instead of within the next INTERVAL.
+pub fn sync_now() -> Option<i128> {
+    let source = find("/sys/class/ptp", "/dev")?;
+    match source.sync() {
+        Ok(offset) => {
+            if offset.abs() >= 1_000_000_000 {
+                eprintln!(
+                    "cube-agent: clock: stepped {:+.3} s to {} before hello",
+                    offset as f64 / 1e9,
+                    source.name
+                );
+            }
+            now(source.clock()).ok()
+        }
+        Err(error) => {
+            eprintln!("cube-agent: clock: {}: {error}", source.path);
+            None
+        }
+    }
+}
+
 /// Follows the host's clock for as long as the agent runs. Without a PTP
 /// clock it says so once and looks again now and then (nothing to follow).
 pub fn spawn() {

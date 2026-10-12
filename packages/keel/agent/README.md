@@ -36,6 +36,20 @@ cube-init (PID 1)
   `kernel`, `boot_id`, `hooks`: each hook's last outcome in this machine).
   Every new connection starts not ready ("waiting for
   machine_setup"); `status` follows each `machine_setup` answer.
+- **sessions.** Every connection is a session: before its `hello` the agent
+  sets realtime from the host's PTP clock once, then makes the session (16
+  bytes of sha256 over fresh random bytes, the host's time it just read, the
+  time since boot, the boot id and a counter, as 32 hex; `GuestInfo.session`).
+  Every frame it sends carries it (`DaemonFrame.session`), set by the
+  connection's writer, so an answer made for an older connection is never
+  sent on a newer one; a request or `abort` the runner sent for another
+  session is dropped unrun. The writer stops between frames when the
+  connection ends (cut off only if the runner reads nothing for 2 s), so a
+  `hello` never follows half a frame. A restored machine's memory, random
+  state included, is the save's (and arm64 has no VMGENID); the host's time
+  still makes its session new. The kernel's VMGENID driver reseeds the random
+  generator on x86-64 but tells user space nothing, so the agent learns of a
+  restore from the port (the runner's connect rule), not from VMGENID.
 - **reset by the runner.** Any runner frame on channel 0 breaks the channel
   rules: the agent ends the connection, opens the port again and says
   `hello` about 100 ms later. A runner uses this when no `hello` comes
@@ -213,8 +227,8 @@ cube-init (PID 1)
 ## Not yet
 
 The runner's side of a suspend: `berth vm` sending `snapshot_prepare`
-before `stop` and `snapshot_done` after a failed save, the connect rule
-after `cont`, and the memory file's rules (B-2, S-7a).
+before `stop` and `snapshot_done` after a failed save, and the memory
+file's rules (S-7a). `berth vm` keeps the connect rule and sessions (B-2).
 
 ## Tests
 
@@ -301,7 +315,14 @@ after `cont`, and the memory file's rules (B-2, S-7a).
   QEMU cannot write, `cont`) after `snapshot_prepare`, an `exec` held
   meanwhile, and `snapshot_done`, after which it runs (`results.json`
   `snapshot.failedSave`). An agent without the snapshot operations fails
-  at check 56. A failed run writes no `results.json`.
+  at check 56. Check 82 comes after it: each restore's `hello` starts
+  a session none of the machine's earlier ones had, and its `since` is
+  within 1 s of the host's time after 3 s saved (`results.json`
+  `restore.restores.each[].session`, `helloClockOffsetS`). The agent's
+  periodic sync (every 500 ms) also has the clock right by the time the
+  reset's `hello` comes (about 600 ms after `cont`), so this check does not
+  single out the sync before `hello`: a build without it passes too. A
+  failed run writes no `results.json`.
 
   `test-image.sh` needs Docker (and binfmt for the other architecture); it
   builds Debian trixie with sudo, git, gh and curl and passwordless sudo for

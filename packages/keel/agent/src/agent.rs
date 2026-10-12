@@ -53,6 +53,57 @@ pub struct Agent {
     build: String,
     kernel: String,
     boot_id: String,
+    /// The guest channel's current session (runner.proto's header).
+    session: Mutex<String>,
+    /// Sessions this agent process started, mixed into the next one.
+    sessions: std::sync::atomic::AtomicU64,
+}
+
+/// A new session: 16 bytes of sha256 over fresh random bytes, the host's
+/// time as the guest reads it now (the PTP clock, else realtime), the time
+/// since boot, the boot id and a counter. A restore rolls the random state
+/// back with memory (and arm64 has no VMGENID to reseed it); the host's time
+/// still differs between two restores of one snapshot.
+fn session_id(host_ns: Option<i128>, boot_id: &str, count: u64) -> String {
+    let mut random = [0u8; 32];
+    // SAFETY: getrandom into a buffer this function owns.
+    let filled = unsafe { libc::getrandom(random.as_mut_ptr().cast(), random.len(), 0) };
+    if filled != random.len() as isize {
+        eprintln!("cube-agent: getrandom gave {filled} bytes for a session");
+    }
+    let clock = |id| {
+        let mut t: libc::timespec = unsafe { std::mem::zeroed() };
+        // SAFETY: clock_gettime into a zeroed timespec owned here.
+        unsafe { libc::clock_gettime(id, &mut t) };
+        t.tv_sec as i128 * 1_000_000_000 + t.tv_nsec as i128
+    };
+    derive_session(
+        &random,
+        host_ns.unwrap_or_else(|| clock(libc::CLOCK_REALTIME)),
+        clock(libc::CLOCK_BOOTTIME),
+        boot_id,
+        count,
+    )
+}
+
+fn derive_session(
+    random: &[u8],
+    host_ns: i128,
+    boottime_ns: i128,
+    boot_id: &str,
+    count: u64,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(random);
+    hash.update(host_ns.to_le_bytes());
+    hash.update(boottime_ns.to_le_bytes());
+    hash.update(boot_id.as_bytes());
+    hash.update(count.to_le_bytes());
+    hash.finalize()[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// What a machine says once it was published (or failed to be).
@@ -102,6 +153,8 @@ impl Agent {
             build: crate::files::sha256_file(&exe).unwrap_or_default(),
             kernel: read_trimmed("/proc/sys/kernel/osrelease"),
             boot_id: read_trimmed("/proc/sys/kernel/random/boot_id"),
+            session: Mutex::new(String::new()),
+            sessions: std::sync::atomic::AtomicU64::new(0),
         });
         crate::clock::spawn();
         if let Some(record) = crate::template::published() {
@@ -208,12 +261,19 @@ impl Agent {
         status.since = Timestamp::now();
     }
 
-    /// A new connection: ready again only once its setup is applied.
-    pub fn connected(&self) {
+    /// A new connection: a new session, the clock synced with the host's
+    /// first, and ready again only once its setup is applied. Returns the
+    /// session.
+    pub fn connected(&self) -> String {
+        let host_ns = crate::clock::sync_now();
+        let count = self.sessions.fetch_add(1, Ordering::SeqCst);
+        let session = session_id(host_ns, &self.boot_id, count);
+        *self.session.lock().unwrap() = session.clone();
         match crate::template::published() {
             Some(record) => self.set_status(false, published_reason(&record)),
             None => self.set_status(false, "waiting for machine_setup"),
         }
+        session
     }
 
     /// The connection ended: a prepare ends with it, and what it held is
@@ -294,6 +354,7 @@ impl Agent {
             } else {
                 status.reason.clone()
             },
+            session: self.session.lock().unwrap().clone(),
             ..Default::default()
         }
     }
@@ -450,5 +511,25 @@ impl Agent {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    #[test]
+    fn sessions_differ_by_the_host_time_even_with_the_random_bytes_rolled_back() {
+        // Two restores of one snapshot: same random state, boot, counter and
+        // time since boot; only the host's time differs.
+        let random = [7u8; 32];
+        let a = super::derive_session(&random, 1_000, 5, "boot", 3);
+        let b = super::derive_session(&random, 2_000, 5, "boot", 3);
+        assert!(cube_runner_protocol::valid_session(&a), "{a}");
+        assert_ne!(a, b);
+        assert_eq!(a, super::derive_session(&random, 1_000, 5, "boot", 3));
+        // And fresh random bytes alone make two sessions differ.
+        assert_ne!(
+            super::session_id(Some(1), "boot", 0),
+            super::session_id(Some(1), "boot", 0)
+        );
     }
 }

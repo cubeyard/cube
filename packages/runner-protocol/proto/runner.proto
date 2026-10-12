@@ -39,17 +39,33 @@
 // snapshot) closes every channel. The agent sends `hello` again, the runner
 // sends `machine_setup` again, and operations that were running are found
 // by their keys, as `OPERATIONS` already requires.
+// Sessions: every `hello` starts a session with a new `DaemonFrame.session`
+// (32 lowercase hex characters), and every frame the agent sends carries
+// its current session. The agent makes it from fresh random bytes and the
+// host's clock as the guest reads it then, so a machine restored twice from
+// one snapshot (its random state rolled back with its memory) still gets
+// two sessions. After a `hello` the runner puts the session on every frame
+// it sends; each side drops a frame of another session (a reply or request
+// that was on its way before the break), and the runner refuses a `hello`
+// whose session it has seen before on this machine. The agent reads the
+// host's clock and sets the guest's realtime clock from it just before each
+// `hello`, so a restored machine has the right time when it says `hello`.
 // The guest may miss a disconnect: a runner that connects again right after
 // it closed, or one that connected to a restored machine before `cont`,
 // gives it no event to read, and no `hello` comes. So after every connect
-// the runner waits for `hello` (500 ms is ample); without one it sends one
-// frame on channel 0 (a `req` with `guest.op = "hello"`). That breaks the
-// rules above, so the agent ends the connection, opens the port again and
-// sends `hello`; the runner waits for it again (2 s), and a second miss
-// means the machine is unhealthy. The runner never sends anything else
-// before a `hello`, and any `hello` on a socket it already had means every
-// channel closed: `machine_setup` again, and `ready` from the `status`
-// that follows its `ans`.
+// the runner waits for `hello` (500 ms is ample once the agent has the port
+// open); without one it sends one frame on channel 0 (a `req` with
+// `guest.op = "hello"`, no session). That breaks the rules above, so the
+// agent ends the connection, opens the port again and sends `hello`; the
+// runner waits for it again (2 s), and a second miss means the machine is
+// unhealthy. The runner learns whether the agent has the port open from
+// QMP's `VSERPORT_CHANGE` event: while it is closed (the machine boots, or
+// the agent starts again) the runner waits for it to open (bounded by the
+// boot) before it starts those 500 ms, and an event that closes it ends the
+// session at once. The event is never taken as a `hello`. The runner never
+// sends anything else before a `hello`, and any `hello` on a socket it
+// already had means every channel closed: `machine_setup` again, and
+// `ready` from the `status` that follows its `ans`.
 //
 // The QEMU a VM runner needs (checked when it starts on the binary it is
 // given by path, never one it searches for; refused below it):
@@ -338,6 +354,9 @@ message GuestInfo {
   int64 epoch = 13;
   // When `ready` is false: why, for people.
   string reason = 14;
+  // keel: the guest channel's current session (`DaemonFrame.session`),
+  // new with every `hello`.
+  string session = 15;
 }
 
 // What one guest operation may carry; cubed's `WorkspaceLimits`.
@@ -559,6 +578,9 @@ message DaemonFrame {
     DaemonAnswer ans = 5;
     Empty abort = 6;
   }
+  // The session the frame belongs to (see the header); empty only on the
+  // runner's reset on channel 0.
+  string session = 7;
 }
 
 message DaemonRequest {

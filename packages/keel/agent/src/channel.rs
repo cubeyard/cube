@@ -130,24 +130,41 @@ async fn connection(agent: &Arc<Agent>, port: &fs::File) -> anyhow::Result<()> {
     let receiver = pipe::Receiver::from_owned_fd_unchecked(dup(port)?)?;
     let mut sender = pipe::Sender::from_owned_fd_unchecked(dup(port)?)?;
     let (frames, mut queue) = mpsc::unbounded_channel::<proto::DaemonFrame>();
-    let writer = tokio::spawn(async move {
-        while let Some(frame) = queue.recv().await {
-            if write_frame(&mut sender, &frame).await.is_err() {
-                break;
+    // True once this connection is over: what the gate holds for it is
+    // dropped, and the writer stops between two frames.
+    let (end, ended) = watch::channel(false);
+    let session = agent.connected();
+    let writer = tokio::spawn({
+        let (session, mut ended) = (session.clone(), ended.clone());
+        async move {
+            loop {
+                let mut frame = tokio::select! {
+                    biased;
+                    _ = ended.wait_for(|ended| *ended) => break,
+                    frame = queue.recv() => match frame {
+                        Some(frame) => frame,
+                        None => break,
+                    },
+                };
+                // Every frame is this connection's session's, whatever task
+                // made it: a frame made for an older one never gets here.
+                frame.session = session.clone();
+                if write_frame(&mut sender, &frame).await.is_err() {
+                    break;
+                }
             }
         }
     });
-    agent.connected();
     let _ = frames.send(proto::DaemonFrame {
         ch: 0,
         t: Some(T::Hello(agent.info())),
+        session: String::new(),
     });
 
     let mut reader = BufReader::new(receiver);
     let mut used = HashSet::new();
     let aborted: Arc<Mutex<HashSet<u32>>> = Arc::default();
-    // True once this connection is over: what the gate holds for it is dropped.
-    let (end, ended) = watch::channel(false);
+    let mut stale = 0u64;
     let result = loop {
         let frame = match read_daemon_frame(&mut reader).await {
             Ok(frame) => frame,
@@ -159,6 +176,17 @@ async fn connection(agent: &Arc<Agent>, port: &fs::File) -> anyhow::Result<()> {
             }
         };
         let ch = frame.ch;
+        if ch > 0 && frame.session != session {
+            // A request or abort the runner sent for another session (it had
+            // not read this connection's `hello` yet): never run, never
+            // answered; the runner asks again by key in this session.
+            stale += 1;
+            eprintln!(
+                "cube-agent: dropped a frame on channel {ch} for session {:?}, not {session}",
+                frame.session
+            );
+            continue;
+        }
         match frame.t {
             Some(T::Req(request)) => {
                 if !used.insert(ch) {
@@ -182,11 +210,13 @@ async fn connection(agent: &Arc<Agent>, port: &fs::File) -> anyhow::Result<()> {
                             t: Some(T::Ans(proto::DaemonAnswer {
                                 result: Some(answer),
                             })),
+                            session: String::new(),
                         });
                         if follow {
                             let _ = frames.send(proto::DaemonFrame {
                                 ch: 0,
                                 t: Some(T::Status(agent.info())),
+                                session: String::new(),
                             });
                         }
                     };
@@ -228,11 +258,25 @@ async fn connection(agent: &Arc<Agent>, port: &fs::File) -> anyhow::Result<()> {
             }
         }
     };
+    if stale > 0 {
+        eprintln!(
+            "cube-agent: session {session} ended; {stale} frame(s) of other sessions dropped"
+        );
+    }
     // The end first, so what the gate held is dropped, not let go.
     let _ = end.send(true);
     agent.disconnected();
     drop(frames);
-    writer.abort();
+    // The writer stops after the frame it is writing, so the next session's
+    // `hello` never follows half a frame. A runner that does not read at all
+    // leaves it blocked: then it is cut off.
+    let mut writer = writer;
+    if tokio::time::timeout(Duration::from_secs(2), &mut writer)
+        .await
+        .is_err()
+    {
+        writer.abort();
+    }
     result
 }
 
@@ -295,7 +339,7 @@ mod tests {
         )
     }
 
-    fn guest_hello(ch: u32) -> proto::DaemonFrame {
+    fn guest_hello(ch: u32, session: &str) -> proto::DaemonFrame {
         proto::DaemonFrame {
             ch,
             t: Some(T::Req(proto::DaemonRequest {
@@ -304,15 +348,22 @@ mod tests {
                     data: Vec::new(),
                 })),
             })),
+            session: session.into(),
         }
     }
 
-    async fn hello(runner: &mut tokio::net::UnixStream) {
+    /// The `hello` that starts a connection; its session.
+    async fn hello(runner: &mut tokio::net::UnixStream) -> String {
         let frame = read_daemon_frame(runner).await.unwrap();
+        let Some(T::Hello(info)) = &frame.t else {
+            panic!("{frame:?}")
+        };
         assert!(
-            frame.ch == 0 && matches!(frame.t, Some(T::Hello(_))),
+            frame.ch == 0 && cube_runner_protocol::valid_session(&frame.session),
             "{frame:?}"
         );
+        assert_eq!(info.session, frame.session, "hello says its own session");
+        frame.session
     }
 
     #[tokio::test]
@@ -323,16 +374,16 @@ mod tests {
             let agent = Arc::clone(&agent);
             async move { connection(&agent, &port).await }
         });
-        hello(&mut runner).await;
+        let s = hello(&mut runner).await;
         // The connection works: an operation on channel 1 is answered.
-        write_frame(&mut runner, &guest_hello(1)).await.unwrap();
+        write_frame(&mut runner, &guest_hello(1, &s)).await.unwrap();
         let answer = read_daemon_frame(&mut runner).await.unwrap();
         assert!(
             answer.ch == 1 && matches!(answer.t, Some(T::Ans(_))),
             "{answer:?}"
         );
-        // The runner's way out of a stale connection.
-        write_frame(&mut runner, &guest_hello(0)).await.unwrap();
+        // The runner's way out of a stale connection (no session yet).
+        write_frame(&mut runner, &guest_hello(0, "")).await.unwrap();
         let ended = served.await.unwrap();
         assert!(
             ended
@@ -342,10 +393,11 @@ mod tests {
         );
     }
 
-    fn runner_op(ch: u32, op: Op) -> proto::DaemonFrame {
+    fn runner_op(ch: u32, op: Op, session: &str) -> proto::DaemonFrame {
         proto::DaemonFrame {
             ch,
             t: Some(T::Req(proto::DaemonRequest { op: Some(op) })),
+            session: session.into(),
         }
     }
 
@@ -406,10 +458,10 @@ mod tests {
             let agent = Arc::clone(&agent);
             async move { connection(&agent, &port).await }
         });
-        hello(&mut runner).await;
+        let s = hello(&mut runner).await;
         write_frame(
             &mut runner,
-            &runner_op(1, Op::SnapshotPrepare(proto::Empty {})),
+            &runner_op(1, Op::SnapshotPrepare(proto::Empty {}), &s),
         )
         .await
         .unwrap();
@@ -435,10 +487,10 @@ mod tests {
         );
         // Held: a guest operation, then the release on a later channel. The
         // release's answer and status come first, then the held answer.
-        write_frame(&mut runner, &guest_hello(2)).await.unwrap();
+        write_frame(&mut runner, &guest_hello(2, &s)).await.unwrap();
         write_frame(
             &mut runner,
-            &runner_op(3, Op::SnapshotDone(proto::Empty {})),
+            &runner_op(3, Op::SnapshotDone(proto::Empty {}), &s),
         )
         .await
         .unwrap();
@@ -456,7 +508,7 @@ mod tests {
             "{held:?}"
         );
         // Not prepared any more: the next operation is answered at once.
-        write_frame(&mut runner, &guest_hello(4)).await.unwrap();
+        write_frame(&mut runner, &guest_hello(4, &s)).await.unwrap();
         let next = frame(&mut runner).await;
         assert!(
             matches!(answer(&next), Some((4, AnswerKind::Guest(_)))),
@@ -473,19 +525,19 @@ mod tests {
             let agent = Arc::clone(&agent);
             async move { connection(&agent, &stale).await }
         });
-        hello(&mut runner).await;
+        let s = hello(&mut runner).await;
         write_frame(
             &mut runner,
-            &runner_op(1, Op::SnapshotPrepare(proto::Empty {})),
+            &runner_op(1, Op::SnapshotPrepare(proto::Empty {}), &s),
         )
         .await
         .unwrap();
         frame(&mut runner).await;
         frame(&mut runner).await;
         assert_eq!(synced(&syncs), 1);
-        write_frame(&mut runner, &guest_hello(2)).await.unwrap();
+        write_frame(&mut runner, &guest_hello(2, &s)).await.unwrap();
         // A restored machine's stale connection: the runner's reset ends it.
-        write_frame(&mut runner, &guest_hello(0)).await.unwrap();
+        write_frame(&mut runner, &guest_hello(0, "")).await.unwrap();
         assert!(served.await.unwrap().is_err());
         assert!(
             !agent.gate().prepared(),
@@ -502,12 +554,23 @@ mod tests {
             panic!("{fresh:?}")
         };
         assert_eq!(info.reason, "waiting for machine_setup");
-        write_frame(&mut runner, &guest_hello(2)).await.unwrap();
+        assert!(
+            cube_runner_protocol::valid_session(&fresh.session) && fresh.session != s,
+            "a new connection is a new session: {} after {s}",
+            fresh.session
+        );
+        // A request made for the old session is dropped, never answered.
+        write_frame(&mut runner, &guest_hello(2, &s)).await.unwrap();
+        // The same request in this session is answered, in this session.
+        write_frame(&mut runner, &guest_hello(3, &fresh.session))
+            .await
+            .unwrap();
         let next = frame(&mut runner).await;
         assert!(
-            matches!(answer(&next), Some((2, AnswerKind::Guest(_)))),
-            "{next:?}"
+            matches!(answer(&next), Some((3, AnswerKind::Guest(_)))),
+            "only the current session's request is answered: {next:?}"
         );
+        assert_eq!(next.session, fresh.session);
     }
 
     #[tokio::test]
@@ -519,10 +582,10 @@ mod tests {
             let agent = Arc::clone(&agent);
             async move { connection(&agent, &port).await }
         });
-        hello(&mut runner).await;
+        let s = hello(&mut runner).await;
         write_frame(
             &mut runner,
-            &runner_op(1, Op::SnapshotPrepare(proto::Empty {})),
+            &runner_op(1, Op::SnapshotPrepare(proto::Empty {}), &s),
         )
         .await
         .unwrap();
@@ -539,12 +602,38 @@ mod tests {
         let info = frame(&mut runner).await;
         assert_ne!(status(&info).unwrap().reason, "prepared for a snapshot");
         assert!(!agent.gate().prepared());
-        write_frame(&mut runner, &guest_hello(2)).await.unwrap();
+        write_frame(&mut runner, &guest_hello(2, &s)).await.unwrap();
         let next = frame(&mut runner).await;
         assert!(
             matches!(answer(&next), Some((2, AnswerKind::Guest(_)))),
             "{next:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn frames_without_this_session_are_dropped_and_answers_carry_it() {
+        let agent = Agent::start();
+        let (port, mut runner) = port();
+        tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move { connection(&agent, &port).await }
+        });
+        let s = hello(&mut runner).await;
+        for other in ["", "0123456789abcdef0123456789abcdef"] {
+            write_frame(&mut runner, &guest_hello(1, other))
+                .await
+                .unwrap();
+        }
+        // Dropped frames do not use their channel: 1 still works.
+        write_frame(&mut runner, &guest_hello(1, &s)).await.unwrap();
+        let answered = frame(&mut runner).await;
+        assert!(
+            matches!(answer(&answered), Some((1, AnswerKind::Guest(_)))),
+            "{answered:?}"
+        );
+        assert_eq!(answered.session, s, "an answer carries its session");
+        let more = tokio::time::timeout(Duration::from_millis(300), read_daemon_frame(&mut runner));
+        assert!(more.await.is_err(), "nothing answers the dropped frames");
     }
 
     #[tokio::test]

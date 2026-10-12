@@ -343,6 +343,11 @@ struct Channel {
     /// What the driver sent before that `hello`: the runner's rule allows
     /// only the reset on channel 0.
     early: Mutex<Vec<String>>,
+    /// The session of the newest `hello` (runner.proto's header): put on
+    /// every frame sent on a channel above 0.
+    session: Arc<Mutex<String>>,
+    /// Frames the agent sent with another session than its newest `hello`'s.
+    foreign: Arc<AtomicU32>,
 }
 
 impl Drop for Channel {
@@ -409,6 +414,9 @@ impl Channel {
         let waiting = Arc::clone(&pending);
         let helloed = Arc::new(AtomicBool::new(false));
         let seen = Arc::clone(&helloed);
+        let session = Arc::new(Mutex::new(String::new()));
+        let foreign = Arc::new(AtomicU32::new(0));
+        let (current, others) = (Arc::clone(&session), Arc::clone(&foreign));
         let reader = tokio::spawn(async move {
             let mut reader = BufReader::new(read);
             loop {
@@ -422,6 +430,16 @@ impl Channel {
                         break;
                     }
                 };
+                if let Some(T::Hello(_)) = &frame.t {
+                    *current.lock().unwrap() = frame.session.clone();
+                } else if frame.session != *current.lock().unwrap() {
+                    others.fetch_add(1, Ordering::SeqCst);
+                    log(&format!(
+                        "channel: a frame of session {:?} dropped",
+                        frame.session
+                    ));
+                    continue;
+                }
                 match frame.t {
                     Some(T::Hello(info)) => {
                         seen.store(true, Ordering::SeqCst);
@@ -447,6 +465,8 @@ impl Channel {
             reader,
             helloed,
             early: Mutex::default(),
+            session,
+            foreign,
         }))
     }
 
@@ -471,7 +491,11 @@ impl Channel {
         if !self.helloed.load(Ordering::SeqCst) {
             self.early.lock().unwrap().push(describe(frame));
         }
-        write_frame(&mut *self.writer.lock().await, frame).await
+        let mut frame = frame.clone();
+        if frame.ch > 0 {
+            frame.session = self.session.lock().unwrap().clone();
+        }
+        write_frame(&mut *self.writer.lock().await, &frame).await
     }
 
     /// Drops the `hello`s and `status`es queued so far, so the next `status`
@@ -519,6 +543,7 @@ impl Channel {
         self.send(&proto::DaemonFrame {
             ch,
             t: Some(T::Req(proto::DaemonRequest { op: Some(op) })),
+            session: String::new(), // send() puts the current session on it
         })
         .await?;
         Ok((ch, receiver))
@@ -703,6 +728,7 @@ impl Channel {
 
 fn reset_frame() -> proto::DaemonFrame {
     proto::DaemonFrame {
+        session: String::new(),
         ch: 0,
         t: Some(T::Req(proto::DaemonRequest {
             op: Some(Op::Guest(proto::GuestRequest {
@@ -1563,6 +1589,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         ch.send(&proto::DaemonFrame {
             ch: ch_abort,
             t: Some(T::Abort(proto::Empty {})),
+            session: String::new(),
         })
         .await?;
         let dropped = waiting.await?;
@@ -1705,6 +1732,7 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
     let mut restore = json!({});
     let mut snapshot = json!({});
     let failed_save_error: Option<String>;
+    let restored_sessions: Result<usize, String>;
     let clock;
     {
         let m = lab.start(&dir, &image_disk)?;
@@ -1924,6 +1952,10 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         let prepare = lab.o.control != Some(Control::Prepare);
         let (mut ch, mut m) = (ch, m);
         let mut restores: Vec<Value> = vec![];
+        // Every session this machine's agent started so far; a restore's
+        // must be new although its memory (and random state) is the save's.
+        let mut sessions = vec![ch.session.lock().unwrap().clone()];
+        let mut session_failure: Option<String> = None;
         // (which check, why); the loop stops at the first failure.
         let mut failed: Option<(u8, String)> = None;
         for i in 0..RESTORES {
@@ -1963,6 +1995,10 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             let memory = dir.join("memory");
             let saved = save(&mut m, &memory).await?;
             close(ch).await?;
+            // Saved for a while: the guest's clock stands still meanwhile, so
+            // its realtime is behind by more than CLOCK_TOLERANCE until the
+            // agent syncs it with the host's.
+            tokio::time::sleep(PAUSE).await;
             let file = fs::metadata(&memory)?;
             m = lab.start_with(&dir, &image_disk, &["-S", "-incoming", "defer"])?;
             // Connected before migrate-incoming and cont.
@@ -1981,6 +2017,10 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
             let resumed = Instant::now();
             let got = ch.hello_or_reset(reset).await;
             let hello_ms = resumed.elapsed().as_millis();
+            let host_at_hello = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
             let early = ch.sent_before_hello();
             fs::remove_file(&memory)?;
             let (hello, was_reset) = match got {
@@ -2010,6 +2050,24 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
                 ));
                 break;
             }
+            // A new session, never one of this machine's before, and the
+            // clock synced before the hello: `since` is the agent's realtime
+            // when the session started.
+            let since = hello
+                .since
+                .map_or(0.0, |t| t.seconds as f64 + t.nanos as f64 / 1e9);
+            let clock_offset = since - host_at_hello;
+            if !cube_runner_protocol::valid_session(&hello.session)
+                || sessions.contains(&hello.session)
+                || clock_offset.abs() > CLOCK_TOLERANCE
+            {
+                // Checked last (check 82), so the numbers before stay.
+                session_failure.get_or_insert(format!(
+                    "restore {i}: session {:?} after {sessions:?}; hello's since is {clock_offset:+.3} s from the host's time",
+                    hello.session
+                ));
+            }
+            sessions.push(hello.session.clone());
             // Answered at once, not held: the prepare ended with the old connection.
             let refused = ch
                 .request_on(
@@ -2087,10 +2145,16 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
                 "prepareMs": prepare_ms, "heldNeverRan": true,
                 "saveMs": saved.as_millis(), "loadMs": loaded.as_millis(),
                 "contToHelloMs": hello_ms, "reset": was_reset, "lateHellos": late.ok(),
+                "session": hello.session, "helloClockOffsetS": clock_offset,
+                "foreignFrames": ch.foreign.load(Ordering::SeqCst),
                 "memoryFileMiB": file.len() / (1 << 20),
                 "memoryOnDiskMiB": std::os::unix::fs::MetadataExt::blocks(&file) / 2048,
             }));
         }
+        restored_sessions = match session_failure {
+            Some(why) => Err(why),
+            None => Ok(sessions.len() - 1),
+        };
         let resets = restores.iter().filter(|r| r["reset"] == true).count();
         log(&format!(
             "restores: {} of {RESTORES}, {resets} needed the reset on channel 0",
@@ -2542,6 +2606,14 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         failed_save_error.is_none(),
         "a save that fails (stop, a migrate QEMU cannot write, cont): the operation sent after snapshot_prepare is held, and snapshot_done lets it go on: it runs, and the status says ready again",
         failed_save_error.as_deref().unwrap_or_default(),
+    )?;
+    checks.ok(
+        restored_sessions == Ok(RESTORES),
+        "each restore's hello starts a new session (32 hex, none of this machine's earlier ones, though memory and random state are the save's), and its since (the agent's realtime when the session started) is within 1 s of the host's time after 3 s saved: the clock is synced before the hello",
+        match &restored_sessions {
+            Ok(n) => format!("{n} new sessions"),
+            Err(why) => why.clone(),
+        },
     )?;
 
     let results = json!({
@@ -3155,9 +3227,16 @@ mod tests {
     }
 
     async fn say(stream: &mut UnixStream, ch: u32, t: T) {
-        write_frame(stream, &proto::DaemonFrame { ch, t: Some(t) })
-            .await
-            .unwrap();
+        write_frame(
+            stream,
+            &proto::DaemonFrame {
+                ch,
+                t: Some(t),
+                session: String::new(),
+            },
+        )
+        .await
+        .unwrap();
     }
 
     async fn read_any(stream: &mut UnixStream) -> proto::DaemonFrame {
