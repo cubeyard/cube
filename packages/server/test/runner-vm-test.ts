@@ -15,7 +15,9 @@
  * build's out/<arch>, with vmlinuz and base.erofs) and an accelerator
  * (CUBE_TEST_BERTH_ACCEL, default kvm on Linux and hvf on macOS); without
  * them that part is skipped with a notice, and CUBE_TEST_BERTH_VM=required
- * turns the skip into a failure. Mocks are not runner acceptance. */
+ * turns the skip into a failure. It works in /tmp/cvm-* unless
+ * CUBE_TEST_BERTH_TMP names another (short) directory. Mocks are not runner
+ * acceptance. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import net from "node:net";
@@ -30,7 +32,8 @@ import { GuestTransportError } from "../src/guest-ssh.ts";
 const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
 assert.ok(fs.existsSync(binary), `${binary}: build berth first (cargo build -p berth)`);
 // Short: a machine's sockets must fit sun_path (104 bytes on macOS).
-const root = fs.realpathSync(fs.mkdtempSync("/tmp/cvm-"));
+// CUBE_TEST_BERTH_TMP puts it elsewhere (a host runner's thread directory).
+const root = fs.realpathSync(fs.mkdtempSync(path.join(process.env.CUBE_TEST_BERTH_TMP ?? "/tmp", "cvm-")));
 const directory = path.join(root, "m");
 const controlKey = path.join(root, "control.key");
 const control = JSON.parse(execFileSync(binary, ["keygen", "--key", controlKey], { encoding: "utf8" })) as { peerId: string };
