@@ -821,6 +821,10 @@ const IDLE_SHARE: f64 = 0.25;
 /// How long a runner waits for the plain `hello` after a connect: the
 /// agent looks for the runner every 20 ms.
 const PLAIN_HELLO: Duration = Duration::from_millis(500);
+/// How long after `cont` the clock thread has synced at least once: every
+/// 500 ms, and a sleep armed before the save can end about 1 s late under
+/// KVM. A step it adds after the hello's (R18) is on the console by then.
+const CLOCK_SETTLED: Duration = Duration::from_secs(2);
 /// How long it waits for `hello` after the reset on channel 0: the agent
 /// opens the port again after 100 ms, then looks every 20 ms.
 const RESET_HELLO: Duration = Duration::from_secs(2);
@@ -1162,11 +1166,31 @@ async fn same_snapshot(
             "restore {i}: random bytes {random:?} after {randoms:?}: the guest's random state is the save's"
         );
         randoms.push(random.clone());
+        // The restore's step is made once: by the sync before hello or by
+        // the clock thread, not by both (each logs a step of 1 s or more),
+        // and realtime is still the host's once the thread has synced.
+        tokio::time::sleep_until((resumed + CLOCK_SETTLED).into()).await;
+        let settled = ch.clock_offset(&format!("date-{i}"), 1).await?;
+        let steps = count_in(&m.console, "cube-agent: clock: stepped");
+        ensure!(
+            steps <= 1,
+            "restore {i}: the restore's clock step was made {steps} times:\n{}",
+            fs::read_to_string(&m.console)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains("cube-agent: clock:"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        ensure!(
+            settled.abs() <= CLOCK_TOLERANCE,
+            "restore {i}: realtime is {settled:+.3} s from the host's time {CLOCK_SETTLED:?} after cont"
+        );
         log(&format!(
-            "same snapshot, restore {i}: plain hello {hello_ms} ms after cont, session {}, clock {offset:+.3} s, random {random}, vmgenid records {forks}",
+            "same snapshot, restore {i}: plain hello {hello_ms} ms after cont, session {}, clock {offset:+.3} s, random {random}, vmgenid records {forks}; clock steps {steps}, clock {settled:+.3} s at {CLOCK_SETTLED:?}",
             hello.session
         ));
-        each.push(json!({"contToHelloMs": hello_ms, "session": hello.session, "helloClockOffsetS": offset, "random": random, "vmgenidRecords": forks}));
+        each.push(json!({"contToHelloMs": hello_ms, "session": hello.session, "helloClockOffsetS": offset, "random": random, "vmgenidRecords": forks, "clockSteps": steps, "settledClockOffsetS": settled}));
         close(ch).await?;
         quit(&mut m).await?;
     }

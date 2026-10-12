@@ -188,7 +188,9 @@ cube-init (PID 1)
   apart, so realtime is right again within that interval after a pause or a
   restore. Without a PTP clock it says so on the console. That sync and the
   one before each `hello` hold one lock from their first read to the step,
-  so a restore's step is never added twice.
+  and step to the host's reading plus the monotonic time since it, so a
+  restore's step is never added twice; the console line says the step
+  made.
 - **recover before answering**: an agent that starts with the root
   assembled recovers its journal before it serves the channel, and every
   setup recovers it before `ready`.
@@ -363,9 +365,11 @@ file's rules (S-7a). `berth vm` keeps the connect rule and sessions (B-2).
   QEMU the runner connects to after `cont`). A missing plain `hello` is a
   failure; the check then says whether one came later, and when. Each restore must give a plain `hello` (no
   reset) within 500 ms of `cont`, a session neither the save nor the other
-  restore had, the clock within 1 s after 3 s saved, random bytes the other
-  restore did not read, and one kernel record of a VM generation change
-  with `vmgenid` (x86-64, on by default, `--vmgenid off` leaves it out) or
+  restore had, the clock within 1 s after 3 s saved at `hello` and again
+  2 s after `cont` (once the clock thread has synced), one clock step on
+  the restore's console, not one by each of the two syncs (R18's double
+  step), random bytes the other restore did not read, and one kernel
+  record of a VM generation change with `vmgenid` (x86-64, on by default, `--vmgenid off` leaves it out) or
   none without (`results.json` `sameSnapshot`). `--control snapshot` keeps
   the runner connected through the save, which is expected to fail there
   (no plain `hello`). A failed run writes no `results.json`.
