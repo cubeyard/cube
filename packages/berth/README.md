@@ -55,6 +55,42 @@ Test: `packages/server/test/runner-vm-test.ts` (refusals always; keel
 machines with `CUBE_TEST_BERTH_QEMU`, `CUBE_TEST_BERTH_QEMU_IMG` and
 `CUBE_TEST_BERTH_KEEL`).
 
+## `berth image pull`: images into a vm directory's layer cache
+
+```text
+berth image pull --dir /abs/dir --mkfs-erofs /abs/mkfs.erofs \
+  --image ghcr.io/<owner>/<name>[:tag]@sha256:<digest>
+```
+
+The first part of masterplan row B-7; machines do not use the layers yet
+(B-7 wires them into `machine_start`, B-2 brings `machine_setup`).
+
+- **Pinned, public, this platform.** The image is named with its registry
+  and a digest (a tag is only a label); `linux/amd64` or `linux/arm64`, the
+  runner's own. An index must have exactly one entry for it (attestations
+  and other platforms are skipped; `amd64` variants such as `v3` are not
+  taken); the manifest's configuration must say the same platform. Public
+  registries only (U4): an anonymous bearer token when asked, nothing
+  stored. HTTPS only, also across redirects; the token is not sent to the
+  CDN a blob redirects to.
+- **Checked before used.** Index and manifest bytes must hash to their
+  digests (at most 4 MiB); the configuration and each layer blob must match
+  their descriptor's size and digest, written to `images/.tmp-*` first.
+  Conversion reads a blob only after that, and keel-layers publishes the
+  layer only if the tar matches the `diff_id` and ends properly (at most 32
+  GiB per tar). Foreign layers (`urls`) and unknown media types are refused.
+- **Cached once.** `layers/1/sha256:<diff_id>.erofs` (the `1` is the layer
+  format, masterplan H2); a layer already there is not fetched again.
+  `images/sha256:<digest>.json` records what was resolved: the platform's
+  manifest, configuration and `Env`, each layer's blob, `diff_id`, cached
+  file and sizes, and the `mkfs.erofs` path and version.
+- **Never half-done.** A pull holds the directory's lock (never beside a
+  running `berth vm` or another pull) and removes what a crashed pull left.
+  A failed pull keeps the layers it finished, each complete. SIGINT or
+  SIGTERM stops it, kills and reaps mkfs.erofs and removes temporary files.
+- Not yet: eviction under a limit in `host.json` (U6; `LayerCache::evict`
+  exists) and checking free space before a conversion.
+
 ## `berth host`: unsandboxed, for developing runners
 
 `berth host --dir DIRECTORY` runs in the foreground on a Mac or Linux host.

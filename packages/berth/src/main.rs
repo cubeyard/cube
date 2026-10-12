@@ -4,6 +4,7 @@
 //! for developing and debugging runners. Key files hold secrets; stdout and
 //! stderr show only public identities and addresses.
 mod host;
+mod image;
 mod serve;
 mod vm;
 
@@ -28,6 +29,8 @@ const USAGE: &str = "usage:
       each machine is a keel guest under the QEMU given by path, which must meet keel's QEMU floor
   berth host --dir <directory> [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay] [--listen <ip:port>] [--python python3] [--max-machines 8] [--labels k=v,...]
       UNSANDBOXED: each machine is a subdirectory of <directory>; commands run as you, with your logins
+  berth image pull --dir <directory> --mkfs-erofs <mkfs.erofs binary> --image <registry/repository@sha256:digest>
+      fetches a public image for this runner's platform, checks every blob, converts its layers into <directory>'s layer cache
   berth keygen --key <new-private-file>     a control key for cubed (prints its public key)
   berth version";
 
@@ -443,10 +446,80 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
     result
 }
 
+/// `berth image pull`: under the runner directory's lock, so never while
+/// `berth vm` or another pull uses the directory.
+async fn image_pull(mut options: BTreeMap<String, String>) -> Result<()> {
+    use std::os::unix::{fs::DirBuilderExt, io::AsRawFd};
+    let mkfs = given_file(&mut options, "--mkfs-erofs")?;
+    let reference = image::Reference::parse(&take(&mut options, "--image")?)?;
+    let directory = PathBuf::from(take(&mut options, "--dir")?);
+    ensure!(options.is_empty(), "unknown options\n{USAGE}");
+    ensure!(directory.is_absolute(), "--dir must be an absolute path");
+    fs::create_dir_all(&directory)?;
+    let directory = fs::canonicalize(&directory)?;
+    let control = directory.join(".berth");
+    if !control.exists() {
+        fs::DirBuilder::new().mode(0o700).create(&control)?;
+    }
+    ensure!(
+        !control.join("host.json").exists(),
+        "{} is a berth host directory; images are for berth vm",
+        directory.display()
+    );
+    let lock = File::create(control.join("lock"))?;
+    // SAFETY: flock on a descriptor this function owns.
+    ensure!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
+        "berth runs in {}; pull while it is stopped",
+        directory.display()
+    );
+    struct Stderr;
+    impl image::Progress for Stderr {
+        fn line(&self, text: &str) {
+            eprintln!("{text}");
+        }
+    }
+    let store = image::Store::open(&directory)?;
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pull = image::Pull {
+        store: &store,
+        mkfs: &mkfs,
+        platform: image::Platform::native()?,
+        progress: &Stderr,
+        cancel: cancel.clone(),
+    };
+    let pull = pull.run(&reference);
+    tokio::pin!(pull);
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    // A signal stops the pull, and the pull is awaited until mkfs.erofs is
+    // reaped and its temporary files are gone.
+    let record = tokio::select! {
+        record = &mut pull => record,
+        _ = interrupt.recv() => {
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            eprintln!("stopping");
+            pull.await
+        }
+        _ = terminate.recv() => {
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            pull.await
+        }
+    }?;
+    eprintln!("record: {}", store.record_path(&reference.digest).display());
+    println!("{}", serde_json::to_string_pretty(&record)?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let command = args.next().context(USAGE)?;
+    let mut command = args.next().context(USAGE)?;
+    if command == "image" {
+        command.push(' ');
+        command.push_str(&args.next().context(USAGE)?);
+    }
     let mut options = BTreeMap::new();
     while let Some(key) = args.next() {
         ensure!(key.starts_with("--"), "{USAGE}");
@@ -456,6 +529,7 @@ async fn main() -> Result<()> {
     match command.as_str() {
         "host" => host(options).await,
         "vm" => vm(options).await,
+        "image pull" => image_pull(options).await,
         "keygen" => {
             let path = PathBuf::from(take(&mut options, "--key")?);
             ensure!(options.is_empty(), "unknown options\n{USAGE}");
