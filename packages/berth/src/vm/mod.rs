@@ -153,6 +153,9 @@ struct Entry {
     guest: Option<Arc<channel::Guest>>,
     info: Option<proto::GuestInfo>,
     documents: std::collections::HashMap<String, Vec<u8>>,
+    /// The sessions this machine's agent used in earlier QEMUs (boots and,
+    /// with S-7a, restores), for as long as the runner runs.
+    sessions: std::collections::HashSet<String>,
 }
 
 struct State {
@@ -307,6 +310,7 @@ impl VmRunner {
                     guest: None,
                     info: None,
                     documents: Default::default(),
+                    sessions: Default::default(),
                 },
             );
         }
@@ -810,6 +814,7 @@ impl VmRunner {
                 guest: None,
                 info: None,
                 documents: Default::default(),
+                sessions: Default::default(),
             },
         );
         self.commit(&mut state, &reference.id)
@@ -990,6 +995,19 @@ impl VmRunner {
         // (the agent opens the port well after QEMU answers QMP).
         let mut events = Qmp::open(&dir.join(qemu::EVENTS_SOCKET), BOOT_TIMEOUT).await?;
         let (ports, port_events) = tokio::sync::mpsc::unbounded_channel();
+        // R3: the agent may have opened the port before this monitor was
+        // connected; QMP's chardev state says so (`frontend-open`).
+        if let Ok(chardevs) = events
+            .execute("query-chardev", serde_json::Value::Null)
+            .await
+            && chardevs
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|c| c["label"] == "ctl" && c["frontend-open"] == true)
+        {
+            let _ = ports.send(true); // an event during the query was skipped; this state is after it
+        }
         tokio::spawn(async move {
             while let Ok(event) = events.event().await {
                 if event["event"] == "VSERPORT_CHANGE" && event["data"]["id"] == qemu::PORT_ID {
@@ -1000,7 +1018,15 @@ impl VmRunner {
                 }
             }
         });
-        let (guest, frames) = channel::Guest::new();
+        let seen = self
+            .state
+            .lock()
+            .unwrap()
+            .machines
+            .get(id)
+            .map(|entry| entry.sessions.clone())
+            .unwrap_or_default();
+        let (guest, frames) = channel::Guest::with_seen(seen);
         let exited = {
             let mut state = self.state.lock().unwrap();
             let entry = state.machines.get_mut(id).unwrap();
@@ -1037,7 +1063,9 @@ impl VmRunner {
             return;
         }
         entry.live = None;
-        entry.guest = None;
+        if let Some(guest) = entry.guest.take() {
+            entry.sessions.extend(guest.seen());
+        }
         entry.info = None;
         let status = status.unwrap_or_else(|error| error.to_string());
         let dir = self.machine_dir(id);
@@ -1557,7 +1585,10 @@ impl Service for VmRunner {
             answer = answer => answer,
             // cubed stopped reading (its call was aborted or timed out):
             // the agent lets the operation finish and drops its answer.
-            _ = send.stopped() => {
+            stopped = send.stopped() => {
+                if let Some(r) = header.r#ref.as_ref() {
+                    event(&self.machine_dir(&r.id), "stream", &format!("channel {ch}: cubed stopped reading ({stopped:?})"));
+                }
                 guest.abort(ch);
                 return Err(refuse(Code::Aborted, "stream", "cubed stopped waiting for the answer"));
             }

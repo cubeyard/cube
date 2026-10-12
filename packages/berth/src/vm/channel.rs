@@ -107,19 +107,29 @@ fn ended(message: &str) -> proto::Error {
 }
 
 impl Guest {
-    /// The channel and its outgoing queue, which [`run`] takes.
-    pub fn new() -> (Arc<Self>, mpsc::UnboundedReceiver<proto::DaemonFrame>) {
+    /// A channel and its outgoing queue, which [`run`] takes, for a machine
+    /// whose agent used `seen` before (in an earlier QEMU of the same
+    /// machine: a boot or a restore).
+    pub fn with_seen(
+        seen: HashSet<String>,
+    ) -> (Arc<Self>, mpsc::UnboundedReceiver<proto::DaemonFrame>) {
         let (queue, frames) = mpsc::unbounded_channel();
         (
             Arc::new(Self {
                 inner: Mutex::new(Inner {
                     next: 1,
+                    seen,
                     ..Default::default()
                 }),
                 queue,
             }),
             frames,
         )
+    }
+
+    /// Every session this machine's agent has used under this runner.
+    pub fn seen(&self) -> HashSet<String> {
+        self.inner.lock().unwrap().seen.clone()
     }
 
     /// The current session, if the agent said `hello`.
@@ -356,10 +366,11 @@ pub async fn run(
                     // Only the current session's frames go out; one made for
                     // an older session is dropped (its channel was answered).
                     let current = guest.inner.lock().unwrap().session.clone();
-                    if wait == Wait::Live
-                        && current.as_deref() == Some(frame.session.as_str())
-                        && write_frame(&mut write, &frame).await.is_err()
-                    {
+                    let live = wait == Wait::Live && current.as_deref() == Some(frame.session.as_str());
+                    if live && matches!(frame.t, Some(T::Abort(_))) {
+                        host.event("abort", &format!("channel {}: cubed stopped waiting", frame.ch));
+                    }
+                    if live && write_frame(&mut write, &frame).await.is_err() {
                         break None;
                     }
                 }

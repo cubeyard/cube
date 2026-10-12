@@ -64,12 +64,16 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   machine on its own; a successful start clears the condition.
 - The guest channel (`src/vm/channel.rs`, runner.proto's header): when
   QEMU runs, the runner connects to `ctl.sock` and reads QMP's
-  `VSERPORT_CHANGE` for the agent's port. Once the agent has the port open
+  `VSERPORT_CHANGE` for the agent's port (QEMU sends at most one per second
+  per port and keeps the newest state, so the runner also asks
+  `query-chardev` when its event reader connects, and takes `hello`, never
+  the event, as the start of a session). Once the agent has the port open
   (at most 120 s after a boot, 30 s after it closed it) it waits 500 ms for
   `hello`, then sends the reset on channel 0 once and waits 2 s; a second
   miss marks the machine unhealthy in `status.guest.reason`. A deadline for
   the port that passes is not trusted: the reset goes anyway. Every `hello`
-  starts a session (`DaemonFrame.session`, new for this machine, else the
+  starts a session (`DaemonFrame.session`, new for this machine across its
+  QEMUs while the runner runs, else the
   reset asks again); the runner ends the channels of the session before
   (`UNAVAILABLE`, completion unknown), sends `machine_setup` (the image's
   layers topmost first, `Boot.documents`, the CA, 32 fresh random bytes,

@@ -62,11 +62,16 @@ struct Lab {
 }
 
 fn lab() -> Lab {
+    lab_with(HashSet::new())
+}
+
+/// A lab whose machine's agent used `seen` in earlier QEMUs.
+fn lab_with(seen: HashSet<String>) -> Lab {
     let dir = tempfile::tempdir().unwrap();
     let ctl = dir.path().join("ctl.sock");
     let listener = UnixListener::bind(&ctl).unwrap();
     let (ports, port_events) = mpsc::unbounded_channel();
-    let (guest, frames) = Guest::new();
+    let (guest, frames) = Guest::with_seen(seen);
     let host = Arc::new(Recorder::default());
     let (exit, exited) = watch::channel(false);
     let task = tokio::spawn(run(
@@ -414,4 +419,20 @@ async fn a_frame_that_breaks_the_rules_ends_the_socket_and_the_runner_connects_a
     // The port is open: the plain hello's deadline applies at once.
     again.hello(S2).await;
     again.setup(S2).await;
+}
+
+#[tokio::test]
+async fn a_session_from_an_earlier_qemu_of_the_machine_is_refused() {
+    // A restore is a new QEMU and a new channel; the runner still knows
+    // what the machine's agent used before (the save's session).
+    let lab = lab_with(HashSet::from([S1.to_string()]));
+    let mut agent = Agent::accept(&lab.listener).await;
+    lab.ports.send(true).unwrap();
+    agent.hello(S1).await;
+    let reset = agent.next(Duration::from_secs(2)).await.unwrap();
+    assert!(is_reset(&reset), "{reset:?}");
+    assert!(lab.host.saw("which it used before"));
+    agent.hello(S2).await;
+    agent.setup(S2).await;
+    assert!(lab.guest.seen().contains(S1) && lab.guest.seen().contains(S2));
 }
