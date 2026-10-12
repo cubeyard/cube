@@ -191,12 +191,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cube-runner-protocol",
+ "flate2",
  "iroh",
  "keel-layers",
  "libc",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
 ]
 
@@ -1728,6 +1732,7 @@ dependencies = [
  "anyhow",
  "crc32fast",
  "flate2",
+ "libc",
  "sha2",
  "tempfile",
  "zstd",
