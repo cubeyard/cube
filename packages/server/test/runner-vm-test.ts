@@ -83,7 +83,8 @@ if (missing.length) {
 
 async function start(args: string[]): Promise<{ child: ChildProcess; peer: string; address: string; banner: string }> {
   const child = spawn(binary, ["vm", "--dir", directory, "--qemu", qemu, "--qemu-img", qemuImg, "--keel", keel, "--accel", accel, ...args],
-    { stdio: ["ignore", "ignore", "pipe"] });
+    // Its own process group, as in a terminal: a Ctrl-C reaches the whole group.
+    { stdio: ["ignore", "ignore", "pipe"], detached: true });
   let banner = "";
   child.stderr!.setEncoding("utf8");
   await new Promise<void>((resolve, reject) => {
@@ -93,10 +94,13 @@ async function start(args: string[]): Promise<{ child: ChildProcess; peer: strin
   const field = (name: string) => banner.match(new RegExp(`^${name}: (.+)$`, "m"))?.[1]?.trim() ?? "";
   return { child, peer: field("peer"), address: field("listen").split(", ")[0]!, banner };
 }
+/** SIGINT goes to the runner's process group, as a terminal's Ctrl-C does. */
 async function stop(child: ChildProcess, signal: NodeJS.Signals = "SIGINT"): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  child.kill(signal);
-  await once(child, "exit");
+  const exited = once(child, "exit");
+  if (signal === "SIGINT") process.kill(-child.pid!, signal);
+  else child.kill(signal);
+  await exited;
 }
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const record = (id: string) => JSON.parse(fs.readFileSync(path.join(directory, id, "machine.json"), "utf8")) as
@@ -251,11 +255,14 @@ try {
   assert.equal(fs.statSync(path.join(machineDir, "rw.qcow2")).ino, disk.ino, "the writable disk is kept");
   note(`stopped (QEMU ${pid} gone) and started again: boot ${again.status?.bootId}`);
 
-  // the runner stops: its machines' QEMUs quit, the machines are interrupted
+  // Ctrl-C: the runner quits its machines' QEMUs (they are in process groups
+  // of their own, so the signal does not end them first) and marks them interrupted
   pid = record(ref.id).boot!.pid;
   await stop(runner.child, "SIGINT");
   await gone(pid);
   assert.equal(record(ref.id).interrupted?.reason, "runner_stopped");
+  assert.doesNotMatch(fs.readFileSync(path.join(machineDir, "qemu.log"), "utf8"), /terminating on signal/,
+    "the runner told QEMU to quit; the Ctrl-C did not reach it");
   runner = await start(["--listen", "127.0.0.1:0"]);
   assert.match(runner.banner, /^machines: 1 \(1 interrupted; /m);
   writeConfig(runner.address, runner.peer);
@@ -264,7 +271,7 @@ try {
   assert.equal(after.status?.phase, MachineStatus_Phase.STOPPED);
   assert.equal(condition(after, "Interrupted")?.reason, "runner_stopped");
   assert.equal(after.fenceEpoch, BigInt(epoch), "the fence survives a restart");
-  note(`runner stopped (SIGINT): QEMU ${pid} quit, machine ${MachineStatus_Phase[after.status!.phase]}, Interrupted/${condition(after, "Interrupted")?.reason}`);
+  note(`runner stopped (SIGINT to its process group): QEMU ${pid} quit, machine ${MachineStatus_Phase[after.status!.phase]}, Interrupted/${condition(after, "Interrupted")?.reason}`);
 
   // the runner crashes: its QEMU runs on; the next runner quits it and interrupts the machine
   const resumed = await session.machine({ case: "machineStart", value: { ref, fence: { epoch: BigInt(epoch) } } });
