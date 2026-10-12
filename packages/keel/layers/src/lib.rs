@@ -13,7 +13,7 @@
 //!               (+ zero padding) + tail (backup GPT), all FLAT extents
 //! ```
 //!
-//! Fetching images (index, manifest, anonymous tokens) and deciding when the
+//! Fetching images (`berth image pull`) and deciding when the
 //! cache is evicted belong to the runner (`berth vm`); this crate only does
 //! the work it is told to do.
 

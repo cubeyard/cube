@@ -21,8 +21,11 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
@@ -71,12 +74,79 @@ pub enum TarMode {
 #[derive(Clone, Debug)]
 pub struct Mkfs {
     program: PathBuf,
+    max_tar_bytes: u64,
+    time_limits: TimeLimits,
+    cancel: Option<Arc<AtomicBool>>,
+}
+
+/// How long `mkfs.erofs` may take before it is killed. erofs-utils 1.7.1 and
+/// 1.8.6 never exit when a tar ends inside a file's data
+/// (`tarerofs_write_file_data` loops on a read of 0 bytes; fixed in 1.9), and
+/// a layer can be made so its `diff_id` matches such a tar, so a conversion
+/// must not wait for mkfs.erofs without a bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimeLimits {
+    /// One write of the tar into mkfs.erofs may block this long.
+    pub stall: Duration,
+    /// After the tar is written: this long, plus `finish_per_gib` for each
+    /// GiB of tar (mkfs.erofs compresses most of the image then).
+    pub finish: Duration,
+    pub finish_per_gib: Duration,
+}
+
+impl Default for TimeLimits {
+    /// Far above what conversion takes (U5: 6.7 s for a 638 MiB tar on two
+    /// vCPUs); a bound on a stuck process, not a measure of a slow one.
+    fn default() -> Self {
+        Self {
+            stall: Duration::from_secs(300),
+            finish: Duration::from_secs(120),
+            finish_per_gib: Duration::from_secs(240),
+        }
+    }
+}
+
+impl TimeLimits {
+    fn finish_for(&self, tar_bytes: u64) -> Duration {
+        self.finish
+            + self
+                .finish_per_gib
+                .mul_f64(tar_bytes as f64 / (1u64 << 30) as f64)
+    }
 }
 
 impl Mkfs {
     pub fn new(program: impl Into<PathBuf>) -> Self {
         Self {
             program: program.into(),
+            max_tar_bytes: u64::MAX,
+            time_limits: TimeLimits::default(),
+            cancel: None,
+        }
+    }
+
+    /// A conversion stops, killing mkfs.erofs, once `cancel` is set.
+    pub fn cancel_on(self, cancel: Arc<AtomicBool>) -> Self {
+        Self {
+            cancel: Some(cancel),
+            ..self
+        }
+    }
+
+    pub fn time_limits(self, time_limits: TimeLimits) -> Self {
+        Self {
+            time_limits,
+            ..self
+        }
+    }
+
+    /// Refuses a layer whose uncompressed tar is larger than `bytes`, so a
+    /// small blob that decompresses to far more (a gzip bomb) cannot fill
+    /// the runner's disk. Unlimited unless set.
+    pub fn max_tar_bytes(self, bytes: u64) -> Self {
+        Self {
+            max_tar_bytes: bytes,
+            ..self
         }
     }
 
@@ -143,63 +213,114 @@ fn convert_inner(
         TarMode::Full => None,
         TarMode::Index => Some(BufWriter::new(create_new(&sidecar(out))?)),
     };
-    let mut child = Command::new(mkfs.program())
+    let mut command = Command::new(mkfs.program());
+    command
         .args(Mkfs::arguments(mode, diff_id))
         .arg(out)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // If the runner dies without killing it, mkfs.erofs would read the end
+    // of a cut tar (the case above). Linux kills it with its parent thread,
+    // which is this one, waiting for it until it is reaped.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: prctl is async-signal-safe.
+        command.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command
         .spawn()
         .with_context(|| format!("start {}", mkfs.program().display()))?;
     let output = Output::collect(&mut child);
     let mut stdin = child.stdin.take();
+    let child = Watched::new(child, mkfs.time_limits.stall, mkfs.cancel.clone());
 
-    let mut tar = compression.reader(blob)?;
-    let mut hasher = Sha256::new();
-    let mut tar_bytes = 0u64;
-    let mut buffer = vec![0u8; 1 << 20];
-    let read_result: Result<()> = (|| {
+    let result = (|| {
+        let mut tar = compression.reader(blob)?;
+        let mut hasher = Sha256::new();
+        let mut tar_bytes = 0u64;
+        let mut tail = Vec::with_capacity(2 * END_OF_ARCHIVE);
+        let mut buffer = vec![0u8; 1 << 20];
         loop {
             let n = match tar.read(&mut buffer) {
-                Ok(0) => return Ok(()),
+                Ok(0) => break,
                 Ok(n) => n,
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e).context("read the layer"),
             };
+            if child.cancelled() {
+                bail!("cancelled");
+            }
             let chunk = &buffer[..n];
             hasher.update(chunk);
             tar_bytes += n as u64;
+            if tar_bytes > mkfs.max_tar_bytes {
+                bail!(
+                    "the layer's tar is larger than {} bytes, the limit",
+                    mkfs.max_tar_bytes
+                );
+            }
+            tail.extend_from_slice(&chunk[chunk.len().saturating_sub(END_OF_ARCHIVE)..]);
+            tail.drain(..tail.len().saturating_sub(END_OF_ARCHIVE));
             if let Some(copy) = tar_copy.as_mut() {
                 copy.write_all(chunk).context("keep the tar")?;
             }
             if let Some(pipe) = stdin.as_mut() {
                 // mkfs.erofs may stop reading at the end-of-archive blocks;
                 // the rest of the stream still counts for the digest.
-                if let Err(e) = pipe.write_all(chunk) {
-                    if e.kind() != ErrorKind::BrokenPipe {
+                if let Err(e) = child.write(pipe, chunk) {
+                    if e.kind() != ErrorKind::BrokenPipe || child.stalled() || child.cancelled() {
                         return Err(e).context("write to mkfs.erofs");
                     }
                     stdin = None;
                 }
             }
         }
+        // Checked before mkfs.erofs sees the end of its input, so it never
+        // sees the end of a tar that is not the layer's.
+        let digest: [u8; 32] = hasher.finalize().into();
+        if &digest != diff_id.as_bytes() {
+            bail!(
+                "layer digest is {} but the image says {diff_id}",
+                DiffId::from_bytes(digest)
+            );
+        }
+        // mkfs.erofs needs them too; a tar cut short fails here at once.
+        if !tar_bytes.is_multiple_of(512)
+            || tail.len() < END_OF_ARCHIVE
+            || tail.iter().any(|&b| b != 0)
+        {
+            bail!("the layer's tar does not end with the end-of-archive blocks");
+        }
+        Ok(tar_bytes)
     })();
-    drop(stdin);
-    let status = child.wait().context("wait for mkfs.erofs")?;
+    let outcome = match result {
+        Ok(tar_bytes) => {
+            drop(stdin);
+            child
+                .wait_for(mkfs.time_limits.finish_for(tar_bytes))
+                .map(|status| (status, tar_bytes))
+        }
+        Err(e) => {
+            // Killed before its input ends, so it never reads a cut tar.
+            child.kill();
+            drop(stdin);
+            Err(e)
+        }
+    };
     let log = output.finish();
-    read_result?;
+    let (status, tar_bytes) = outcome?;
     if !status.success() {
         bail!(
             "{} failed ({status}): {}",
             mkfs.program().display(),
             log.trim()
-        );
-    }
-    let digest: [u8; 32] = hasher.finalize().into();
-    if &digest != diff_id.as_bytes() {
-        bail!(
-            "layer digest is {} but the image says {diff_id}",
-            DiffId::from_bytes(digest)
         );
     }
 
@@ -224,6 +345,148 @@ fn convert_inner(
         tar_bytes,
         image_bytes,
     })
+}
+
+/// Two zero blocks end a tar.
+const END_OF_ARCHIVE: usize = 1024;
+
+/// The running mkfs.erofs: killed when one write into it blocks longer than
+/// the stall limit (by a watchdog thread) or when it does not exit in time
+/// after its input ended, and always reaped.
+struct Watched {
+    child: Arc<Mutex<Child>>,
+    /// When the write in progress started.
+    writing: Arc<Mutex<Option<Instant>>>,
+    stalled: Arc<AtomicBool>,
+    cancel: Option<Arc<AtomicBool>>,
+    done: Option<mpsc::Sender<()>>,
+    watchdog: Option<JoinHandle<()>>,
+    stall: Duration,
+}
+
+impl Watched {
+    fn new(child: Child, stall: Duration, cancel: Option<Arc<AtomicBool>>) -> Self {
+        let child = Arc::new(Mutex::new(child));
+        let writing = Arc::new(Mutex::new(None::<Instant>));
+        let stalled = Arc::new(AtomicBool::new(false));
+        let (done, finished) = mpsc::channel::<()>();
+        let watchdog = {
+            let (child, writing, stalled) = (child.clone(), writing.clone(), stalled.clone());
+            let cancel = cancel.clone();
+            thread::spawn(move || {
+                while let Err(mpsc::RecvTimeoutError::Timeout) =
+                    finished.recv_timeout(Duration::from_millis(50))
+                {
+                    if cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst)) {
+                        let _ = child.lock().unwrap().kill();
+                        return;
+                    }
+                    let since = *writing.lock().unwrap();
+                    if since.is_some_and(|since| since.elapsed() > stall) {
+                        stalled.store(true, Ordering::SeqCst);
+                        let _ = child.lock().unwrap().kill();
+                        return;
+                    }
+                }
+            })
+        };
+        Self {
+            child,
+            writing,
+            stalled,
+            cancel,
+            done: Some(done),
+            watchdog: Some(watchdog),
+            stall,
+        }
+    }
+
+    fn write(&self, pipe: &mut impl Write, chunk: &[u8]) -> io::Result<()> {
+        *self.writing.lock().unwrap() = Some(Instant::now());
+        let result = pipe.write_all(chunk);
+        *self.writing.lock().unwrap() = None;
+        if self.cancelled() {
+            return Err(io::Error::new(ErrorKind::Interrupted, "cancelled"));
+        }
+        if self.stalled() {
+            return Err(io::Error::new(
+                ErrorKind::TimedOut,
+                format!(
+                    "mkfs.erofs read nothing for {} s and was killed",
+                    self.stall.as_secs_f64()
+                ),
+            ));
+        }
+        result
+    }
+
+    fn stalled(&self) -> bool {
+        self.stalled.load(Ordering::SeqCst)
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|c| c.load(Ordering::SeqCst))
+    }
+
+    fn stop_watchdog(&mut self) {
+        drop(self.done.take());
+        if let Some(watchdog) = self.watchdog.take() {
+            let _ = watchdog.join();
+        }
+    }
+
+    fn kill(mut self) {
+        self.stop_watchdog();
+        let mut child = self.child.lock().unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Waits up to `limit` for mkfs.erofs to exit; kills and reaps it after.
+    fn wait_for(mut self, limit: Duration) -> Result<ExitStatus> {
+        self.stop_watchdog();
+        let deadline = Instant::now() + limit;
+        let mut child = self.child.lock().unwrap();
+        loop {
+            if let Some(status) = child.try_wait().context("wait for mkfs.erofs")? {
+                return Ok(status);
+            }
+            if self
+                .cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::SeqCst))
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("cancelled");
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!(
+                    "mkfs.erofs did not finish within {} s after its input ended and was killed \
+                     (erofs-utils before 1.9 never ends on a tar cut inside a file)",
+                    limit.as_secs_f64()
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for Watched {
+    /// A panic on the way still reaps mkfs.erofs.
+    fn drop(&mut self) {
+        self.stop_watchdog();
+        if let Ok(mut child) = self.child.lock()
+            && let Ok(None) = child.try_wait()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 /// A version 4 UUID from the first 16 bytes of the `diff_id`.

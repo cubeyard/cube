@@ -11,6 +11,7 @@ description = "keel's image layers on the runner: OCI layer tar to EROFS, the la
 anyhow = "1"
 crc32fast = "1"
 flate2 = "1"
+libc = "0.2"
 sha2 = "0.11"
 zstd = { version = "0.13", default-features = false }
 
