@@ -186,7 +186,9 @@ cube-init (PID 1)
   with the host's PTP clock ("Virtio PTP", else "KVM virtual PTP", picked
   by `/sys/class/ptp/*/clock_name`) and steps it when they are 20 ms or more
   apart, so realtime is right again within that interval after a pause or a
-  restore. Without a PTP clock it says so on the console.
+  restore. Without a PTP clock it says so on the console. That sync and the
+  one before each `hello` hold one lock from their first read to the step,
+  so a restore's step is never added twice.
 - **recover before answering**: an agent that starts with the root
   assembled recovers its journal before it serves the channel, and every
   setup recovers it before `ready`.
