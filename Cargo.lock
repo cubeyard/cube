@@ -499,8 +499,8 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "cube-gateway",
+ "cube-netstack",
  "cube-runner",
- "heapless",
  "http",
  "http-body-util",
  "hyper",
@@ -512,6 +512,26 @@ dependencies = [
  "rustls-native-certs",
  "serde",
  "serde_json",
+ "smoltcp",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
+name = "cube-netstack"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "heapless",
+ "http",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "rcgen",
+ "rustls",
+ "rustls-native-certs",
  "sha2",
  "smoltcp",
  "tempfile",

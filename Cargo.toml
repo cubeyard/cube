@@ -1,5 +1,5 @@
 [workspace]
-members = ["packages/node-transport", "packages/gateway", "packages/runner-protocol", "packages/berth", "packages/keel/layers", "packages/keel/agent", "packages/keel/agent-check"]
+members = ["packages/node-transport", "packages/gateway", "packages/netstack", "packages/runner-protocol", "packages/berth", "packages/keel/layers", "packages/keel/agent", "packages/keel/agent-check"]
 resolver = "3"
 
 [workspace.package]

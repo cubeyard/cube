@@ -4,202 +4,37 @@
 //! flow is closed). Each request is parsed by hyper, checked (`Host` must
 //! match SNI, no CONNECT or Upgrade), decided by cubed, given its secrets and
 //! sent to the SNI/Host name's public address. Bodies stream unmodified.
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result};
 use bytes::Bytes;
-use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri, header};
+use http::{HeaderValue, Method, Request, Response, StatusCode, Uri, header};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::{body::Incoming, client::conn::http1::SendRequest, service::service_fn};
 use hyper_util::rt::{TokioIo, TokioTimer};
-use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
-use std::{
-    collections::HashMap,
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
+use rustls::pki_types::ServerName;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    net::TcpStream,
     sync::Mutex,
 };
-use tokio_rustls::{LazyConfigAcceptor, TlsConnector};
 
 use crate::{
-    addr,
-    ca::{self, Ca},
+    ca::Ca,
     decide::{DecideClient, DecideRequest, Decision},
-    dns,
-    lan::{FlowHandler, FlowInfo, FlowStream, ResolveFuture, Resolver},
+    lan::{FlowHandler, FlowInfo, FlowStream},
     secrets,
 };
+#[cfg(feature = "test-hooks")]
+pub use cube_netstack::http::TEST_HOST_ADDRESS;
+use cube_netstack::http::{
+    HANDSHAKE_TIMEOUT, Scheme, accept_tls, authority, client, strip_hop_by_hop,
+};
+pub use cube_netstack::http::{HostResolver, MAX_HEAD, Upstream, UpstreamError};
 
-pub const MAX_HEAD: usize = 64 * 1024;
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const HEADER_TIMEOUT: Duration = Duration::from_secs(60);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DENIED_HEADER: &str = "x-cube-denied";
 pub const ERROR_HEADER: &str = "x-cube-error";
-/// What the guest's DNS gets for a test-hooks host: any address works,
-/// because the upstream comes from SNI/Host, never from the dialled IP.
-#[cfg(feature = "test-hooks")]
-pub const TEST_HOST_ADDRESS: std::net::Ipv4Addr = std::net::Ipv4Addr::new(203, 0, 113, 1);
 
 type Body = BoxBody<Bytes, hyper::Error>;
-
-/// How the gateway reaches upstream hosts.
-pub struct Upstream {
-    tls: Arc<ClientConfig>,
-    #[cfg(feature = "test-hooks")]
-    overrides: HashMap<String, SocketAddr>,
-}
-
-#[derive(Debug)]
-pub enum UpstreamError {
-    NotPublic,
-    Failed(anyhow::Error),
-}
-
-impl Upstream {
-    /// Upstream TLS verifies against the system roots.
-    pub fn system() -> Result<Self> {
-        let mut roots = RootCertStore::empty();
-        let native = rustls_native_certs::load_native_certs();
-        for cert in native.certs {
-            let _ = roots.add(cert);
-        }
-        if roots.is_empty() {
-            bail!("no system root certificates found");
-        }
-        Self::with_roots(roots)
-    }
-
-    pub fn with_roots(roots: RootCertStore) -> Result<Self> {
-        let mut tls = ClientConfig::builder_with_provider(ca::provider())
-            .with_safe_default_protocol_versions()?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        tls.alpn_protocols = vec![b"http/1.1".to_vec()];
-        Ok(Self {
-            tls: Arc::new(tls),
-            #[cfg(feature = "test-hooks")]
-            overrides: HashMap::new(),
-        })
-    }
-
-    /// Test hooks: `host` is reached at `address` regardless of the public
-    /// address check, and `roots` are trusted in addition.
-    #[cfg(feature = "test-hooks")]
-    pub fn with_test_hooks(
-        roots: RootCertStore,
-        overrides: HashMap<String, SocketAddr>,
-    ) -> Result<Self> {
-        let mut upstream = Self::with_roots(roots)?;
-        upstream.overrides = overrides;
-        Ok(upstream)
-    }
-
-    #[cfg(feature = "test-hooks")]
-    fn test_override(&self, host: &str) -> Option<SocketAddr> {
-        self.overrides.get(host).copied()
-    }
-    #[cfg(not(feature = "test-hooks"))]
-    fn test_override(&self, _: &str) -> Option<SocketAddr> {
-        None
-    }
-
-    /// Resolves `host` and connects to it. Every resolved address must be
-    /// public unicast, otherwise nothing is dialled.
-    pub async fn connect(&self, host: &str, port: u16) -> Result<TcpStream, UpstreamError> {
-        let addresses: Vec<SocketAddr> = match self.test_override(host) {
-            Some(address) => vec![address],
-            None => {
-                let resolved: Vec<SocketAddr> =
-                    tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, port)))
-                        .await
-                        .map_err(|_| UpstreamError::Failed(anyhow!("resolving {host} timed out")))?
-                        .map_err(|e| UpstreamError::Failed(anyhow!("resolve {host}: {e}")))?
-                        .collect();
-                if resolved.is_empty() {
-                    return Err(UpstreamError::Failed(anyhow!("{host} has no address")));
-                }
-                // Read per connection: the host's addresses can change, and
-                // failing to read them refuses rather than guesses.
-                let local = addr::local_addresses()
-                    .map_err(|e| UpstreamError::Failed(anyhow!("reading local addresses: {e}")))?;
-                if resolved.iter().any(|a| !addr::is_upstream(a.ip(), &local)) {
-                    return Err(UpstreamError::NotPublic);
-                }
-                resolved
-            }
-        };
-        let mut last = anyhow!("no address");
-        for address in addresses {
-            match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(address)).await {
-                Ok(Ok(stream)) => {
-                    let _ = stream.set_nodelay(true);
-                    return Ok(stream);
-                }
-                Ok(Err(e)) => last = anyhow!("connect {address}: {e}"),
-                Err(_) => last = anyhow!("connect {address}: timed out"),
-            }
-        }
-        Err(UpstreamError::Failed(last))
-    }
-
-    fn connector(&self) -> TlsConnector {
-        TlsConnector::from(self.tls.clone())
-    }
-}
-
-/// The guest's DNS: public A records from the host resolver.
-pub struct HostResolver {
-    upstream: Arc<Upstream>,
-}
-
-impl HostResolver {
-    pub fn new(upstream: Arc<Upstream>) -> Self {
-        Self { upstream }
-    }
-}
-
-impl Resolver for HostResolver {
-    fn resolve(&self, name: String) -> ResolveFuture {
-        #[cfg(feature = "test-hooks")]
-        if self.upstream.test_override(&name).is_some() {
-            return Box::pin(async { dns::Answer::A(vec![TEST_HOST_ADDRESS]) });
-        }
-        let _ = &self.upstream;
-        Box::pin(async move {
-            match tokio::net::lookup_host((name.as_str(), 0)).await {
-                Ok(addresses) => {
-                    // Private and host-local addresses are never useful to
-                    // the guest (the gateway refuses them) and would leak the
-                    // host's network.
-                    let local = addr::local_addresses().unwrap_or_default();
-                    let v4: Vec<_> = addresses
-                        .filter_map(|a| match a.ip() {
-                            IpAddr::V4(v4) if addr::is_upstream(a.ip(), &local) => Some(v4),
-                            _ => None,
-                        })
-                        .collect();
-                    if v4.is_empty() {
-                        dns::Answer::Empty
-                    } else {
-                        dns::Answer::A(v4)
-                    }
-                }
-                Err(e) => {
-                    let text = e.to_string();
-                    if text.contains("not known") || text.contains("No address") {
-                        dns::Answer::NxDomain
-                    } else {
-                        dns::Answer::ServFail
-                    }
-                }
-            }
-        })
-    }
-}
 
 /// Shared by every VM.
 pub struct Egress {
@@ -209,6 +44,7 @@ pub struct Egress {
 }
 
 /// Flow handler of one VM's LAN.
+#[derive(Clone)]
 pub struct VmEgress {
     egress: Arc<Egress>,
     vm_id: String,
@@ -239,24 +75,16 @@ impl VmEgress {
     /// Terminates TLS with a leaf for the ClientHello's SNI. Without SNI
     /// there is nothing to name the upstream by, so the flow is closed.
     async fn serve_tls(self: Arc<Self>, stream: FlowStream) -> Result<()> {
-        let acceptor = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream);
-        let start = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor).await??;
-        let Some(name) = start
-            .client_hello()
-            .server_name()
-            .map(str::to_ascii_lowercase)
-        else {
+        let Some((name, tls)) = accept_tls(&self.egress.ca, stream).await? else {
             return Ok(());
         };
-        let config = self.egress.ca.server_config(&name)?;
-        let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, start.into_stream(config)).await??;
         self.connection(Scheme::Https(name)).serve(tls).await
     }
 }
 
-impl FlowHandler for Arc<VmEgress> {
+impl FlowHandler for VmEgress {
     fn spawn(&self, info: FlowInfo, stream: FlowStream) {
-        let this = self.clone();
+        let this = Arc::new(self.clone());
         tokio::spawn(async move {
             // Guest-side failures (bad TLS, resets, timeouts) are routine and
             // only end this flow.
@@ -267,13 +95,6 @@ impl FlowHandler for Arc<VmEgress> {
             };
         });
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Scheme {
-    Http,
-    /// The SNI name.
-    Https(String),
 }
 
 struct Connection {
@@ -313,7 +134,7 @@ impl Connection {
         if request.headers().contains_key(header::UPGRADE) {
             return denied(StatusCode::FORBIDDEN, "protocol upgrades are not supported");
         }
-        let (host, port) = match self.authority(&request) {
+        let (host, port) = match authority(&self.scheme, &request) {
             Ok(target) => target,
             Err((status, reason)) => return denied(status, reason),
         };
@@ -377,61 +198,6 @@ impl Connection {
         Response::from_parts(parts, body.boxed())
     }
 
-    /// The request's host and port. For HTTPS the host must equal the SNI
-    /// name (else 421); the port must be the one the guest dialled.
-    fn authority(
-        &self,
-        request: &Request<Incoming>,
-    ) -> Result<(String, u16), (StatusCode, &'static str)> {
-        // RFC 9112 section 3.2: more than one Host is a 400. Otherwise a
-        // second Host could route a substituted secret past the SNI check.
-        if request.headers().get_all(header::HOST).iter().count() > 1 {
-            return Err((StatusCode::BAD_REQUEST, "more than one Host header"));
-        }
-        let from_header = request
-            .headers()
-            .get(header::HOST)
-            .map(|h| {
-                h.to_str()
-                    .map_err(|_| (StatusCode::BAD_REQUEST, "invalid Host header"))
-            })
-            .transpose()?;
-        let from_uri = request.uri().authority().map(|a| a.as_str());
-        let raw = match (from_uri, from_header) {
-            (Some(u), Some(h)) if !u.eq_ignore_ascii_case(h) => {
-                return Err((StatusCode::BAD_REQUEST, "request target and Host differ"));
-            }
-            (Some(a), _) | (None, Some(a)) => a,
-            (None, None) => return Err((StatusCode::BAD_REQUEST, "missing Host header")),
-        };
-        let authority: http::uri::Authority = raw
-            .parse()
-            .map_err(|_| (StatusCode::BAD_REQUEST, "invalid Host header"))?;
-        if raw.contains('@') {
-            return Err((StatusCode::BAD_REQUEST, "invalid Host header"));
-        }
-        let host = authority.host().trim_end_matches('.').to_ascii_lowercase();
-        let default_port = match self.scheme {
-            Scheme::Https(_) => 443,
-            Scheme::Http => 80,
-        };
-        let port = authority.port_u16().unwrap_or(default_port);
-        if host.is_empty() || host.starts_with('[') {
-            return Err((StatusCode::BAD_REQUEST, "unsupported Host"));
-        }
-        match &self.scheme {
-            Scheme::Https(sni) if *sni != host || port != 443 => Err((
-                StatusCode::MISDIRECTED_REQUEST,
-                "Host does not match the TLS server name",
-            )),
-            Scheme::Http if port != 80 => Err((
-                StatusCode::MISDIRECTED_REQUEST,
-                "Host port does not match the connection",
-            )),
-            _ => Ok((host, port)),
-        }
-    }
-
     async fn sender(&self, host: &str, port: u16) -> Result<SendRequest<Incoming>, UpstreamError> {
         let key = format!("{host}:{port}");
         if let Some((existing, mut sender)) = self.upstream.lock().await.take()
@@ -460,46 +226,6 @@ impl Connection {
         };
         handshake.await.map_err(UpstreamError::Failed)
     }
-}
-
-async fn client<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
-    io: S,
-) -> Result<SendRequest<Incoming>> {
-    let (sender, connection) = hyper::client::conn::http1::Builder::new()
-        .handshake(TokioIo::new(io))
-        .await?;
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-    Ok(sender)
-}
-
-fn strip_hop_by_hop(headers: &mut HeaderMap) {
-    let listed: Vec<String> = headers
-        .get_all(header::CONNECTION)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .map(|t| t.trim().to_ascii_lowercase())
-        .filter(|t| !t.is_empty())
-        .collect();
-    for name in listed {
-        if let Ok(name) = header::HeaderName::from_bytes(name.as_bytes()) {
-            headers.remove(name);
-        }
-    }
-    for name in [
-        header::CONNECTION,
-        header::TE,
-        header::TRAILER,
-        header::TRANSFER_ENCODING,
-        header::UPGRADE,
-        header::PROXY_AUTHENTICATE,
-    ] {
-        headers.remove(name);
-    }
-    headers.remove("keep-alive");
-    headers.remove("proxy-connection");
 }
 
 fn header_text(reason: &str) -> HeaderValue {

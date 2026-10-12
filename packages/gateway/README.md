@@ -5,6 +5,10 @@ The central network for runner VMs. cubed starts and supervises it
 [the VM runner plan](../../docs/plans/2026-10-04-vm-runner.md)).
 A guest's only network is raw Ethernet frames carried over Iroh from its
 runner; the gateway gives each VM a small LAN and is its only way out.
+The LAN, DNS, address check, CA and the guest-facing half of HTTP are
+[`cube-netstack`](../netstack) (re-exported here as `lan`, `dns`, `addr`,
+`ca`); the decision call, secrets, the runner link and the control socket are
+the gateway's own.
 
 ```
 guest eth0 ─ QEMU -netdev dgram ─ runner pump ─ Iroh cube/l2/1 datagrams ─ cube-gateway
@@ -71,8 +75,9 @@ it through a self dev-dependency.
 
 `cargo test -p cube-gateway` runs offline:
 
-- unit tests: address classification, DNS, placeholders, decision parsing,
-  CA files and leaf chains;
+- unit tests: placeholders, decision parsing, and that the LAN's MTU is the
+  frame channel's (address classification, DNS, CA files and leaf chains,
+  Host checks and hop-by-hop headers are `cargo test -p cube-netstack`);
 - `tests/lan.rs`: a smoltcp test guest on an in-memory frame pipe: DHCP lease
   and MTU, DNS, HTTPS through an allow decision with Bearer and Basic
   substitution, deny/timeout/malformed decisions, RST for other ports, Host ≠

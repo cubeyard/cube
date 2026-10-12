@@ -61,7 +61,7 @@ const macos = Object.values(platforms.jobs).find((job) => job.name === "node-tra
 assert.equal(macos?.["runs-on"], "macos-latest");
 assert.deepEqual(platforms.on.push.branches, ["main"]);
 assert.ok("workflow_dispatch" in platforms.on);
-for (const own of [".github/workflows/platforms.yml", ".github/actions/**", "Cargo.lock", "packages/node-transport/**", "packages/gateway/**", "scripts/homebrew/**"]) {
+for (const own of [".github/workflows/platforms.yml", ".github/actions/**", "Cargo.lock", "packages/node-transport/**", "packages/gateway/**", "packages/netstack/**", "scripts/homebrew/**"]) {
   assert.ok(platforms.on.pull_request.paths.includes(own), `platforms.yml runs on pull requests that touch ${own}`);
 }
 
