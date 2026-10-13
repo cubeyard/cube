@@ -621,11 +621,19 @@ pair to one cube-netstack LAN per QEMU process in the runner, the same fixed
 address for every machine, HTTP and HTTPS out under the egress policy cubed
 sends with `machine_start`, HTTPS intercepted with the runner's CA, a lease
 that keeps ordinary egress going for a while after cubed's connection is
-gone, and refusals reported on the runner-opened `report` stream. cubed
-does not run threads on it yet and does not read reports yet.
+gone, and refusals reported on the runner-opened `report` stream. A
+request a credential rule matches goes over a runner-opened `credential`
+stream (row B-5): cubed's RunnerSession checks that the runner owns the
+machine at the thread's current epoch and carries the HTTP/1.1 exchange
+unread to cube-gateway's credential proxy (`--credential`, the same
+process), which substitutes the token, as for p3, and turns it back into
+the placeholder in the answer; the token never reaches cubed's Node
+process, the runner or the guest. cubed does not run threads on `berth vm`
+yet (it logs the reports and carries credentials for runners that open
+the streams).
 
 Not built yet (later stages): `berth vm`'s templates and diagnosis, the
-credential proxy and the `dial` and `credential` streams, snapshots.
+`dial` stream, snapshots.
 
 ## Machine templates and hooks
 

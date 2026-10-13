@@ -48,10 +48,39 @@ What it does per VM:
   (`Upgrade: cube-tcp`), which the `dial` subcommand wraps for OpenSSH's
   `ProxyCommand`. Only port 22 can be dialled.
 
+## Credential proxy (runner protocol 4)
+
+With `--credential SOCK` the same process also serves the credential proxy
+for `berth vm` runners (masterplan B-5; `src/credential.rs`). A runner sends
+each guest request a credential rule matches over a `credential` stream to
+cubed, which checks the machine and fence, connects to `SOCK` (0600, in
+cubed's 0700 run directory; only cubed connects, as the same user), writes
+the stream's `CredentialHeader` (u32 length, at most 64 KiB, then proto3
+JSON) and then carries bytes unread. Per connection the gateway serves one
+HTTP/1.1 request through the same handler as above, as HTTPS for the
+header's server name (`sni` = `host`, port 443, and the request's `Host`
+must match), with these differences:
+
+- every placeholder must be of the header's credential (else 403);
+- `Accept-Encoding: identity` is sent upstream, and an answer with any
+  other `Content-Encoding` is refused (502);
+- B6: each value the gateway substituted (the token, and each `Basic`
+  credential it re-encoded) is turned back into the guest's own (its
+  placeholder, its encoding) in every answer header and in the body as it
+  streams (`src/reverse.rs`: it holds back at most the longest value less
+  one byte, so a value split across chunks is found; `Content-Length` is
+  dropped when the length may change, except where there is no body).
+  A value upstream encodes another way (base64 of the token alone, URL
+  encoding) is not found;
+- no keep-alive: one request per connection. A redirect is passed on
+  (rewritten as above), never followed, and no credential is added to it.
+
+The LAN mode and its tests are unchanged.
+
 ## CLI
 
 ```
-cube-gateway serve --state DIR --control SOCK --decide SOCK --network loopback|direct|relay [--listen ADDR]
+cube-gateway serve --state DIR --control SOCK --decide SOCK --network loopback|direct|relay [--listen ADDR] [--credential SOCK]
 cube-gateway dial --control SOCK --vm ID --port 22
 cube-gateway --version
 ```
@@ -87,7 +116,15 @@ it through a self dev-dependency.
 - `tests/link.rs`: the whole gateway over Iroh loopback with a fake runner
   that authorizes the frame hello: attach, lease, `dial` over the control
   socket, wrong token refused, token rotation replacing the connection,
-  attach validation, a second gateway refused on a live socket.
+  attach validation, a second gateway refused on a live socket;
+- `tests/credential.rs`: the credential proxy over its socket with a local
+  TLS upstream: the token upstream and only the placeholder back (Bearer;
+  Basic as the guest encoded it; split across chunks at every position),
+  identity forced and encoded answers refused, redirects passed on and not
+  followed, other credentials' placeholders, a `Host` other than the server
+  name and cubed's denial refused, `Content-Length` kept without a
+  substitution and for HEAD, 8 MiB up and 16 MiB down, one request per
+  connection, a bad or oversized header closing the connection unanswered.
 
 ## Manual run with a real guest
 
