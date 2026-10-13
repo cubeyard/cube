@@ -464,6 +464,21 @@ struct StreamUpstream {
 }
 
 impl StreamUpstream {
+    /// When the runner closed the upstream, waiting a little: the guest may
+    /// see its side end before this fake reads the EOF.
+    async fn closed_within(&self, wait: Duration) -> Option<std::time::Instant> {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            if let Some(at) = *self.closed.lock().unwrap() {
+                return Some(at);
+            }
+            if std::time::Instant::now() > deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     async fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1129,9 +1144,8 @@ async fn at_the_end_of_the_lease_a_download_stops_upstream_and_drains_to_the_gue
     .expect("the download ended");
     let closed = env
         .stream
-        .closed
-        .lock()
-        .unwrap()
+        .closed_within(Duration::from_secs(3))
+        .await
         .expect("the upstream was closed");
     let after = closed.duration_since(lost);
     assert!(
@@ -1300,9 +1314,8 @@ async fn a_surviving_connection_recovers_and_is_stopped_again_at_the_next_expiry
     assert!(drained.is_ok(), "the download ended");
     let closed = env
         .stream
-        .closed
-        .lock()
-        .unwrap()
+        .closed_within(Duration::from_secs(3))
+        .await
         .expect("the upstream was closed again");
     let after = closed.duration_since(lost);
     assert!(
