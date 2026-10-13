@@ -1,0 +1,13 @@
+diff --git a/packages/server/test/runner-vm-test.ts b/packages/server/test/runner-vm-test.ts
+index 90b8ef34..d33a0170 100644
+--- a/packages/server/test/runner-vm-test.ts
++++ b/packages/server/test/runner-vm-test.ts
+@@ -828,6 +828,8 @@ try {
+         // full (leak-scan.ts; grep differs between hosts). The machine runs, so
+         // its QMP, event and channel sockets are there: listed, never read;
+         // anything else that is not a regular file fails the scan.
++        fs.writeFileSync(path.join(directory, ref.id, "unreadable.log"), "control g\n");
++        fs.chmodSync(path.join(directory, ref.id, "unreadable.log"), 0);
+         const hostScan = scanForSecret([directory, path.join(root, "gateway")], ghToken);
+         assert.deepEqual(hostScan.matches, [], "the token is in the runner's directory or the gateway's state");
+         assert.ok(hostScan.files > 0 && hostScan.skipped.every(s => s.kind === "socket"), `not scanned: ${show(hostScan.skipped)}`);

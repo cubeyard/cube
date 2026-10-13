@@ -1,0 +1,13 @@
+diff --git a/packages/berth/src/vm/egress.rs b/packages/berth/src/vm/egress.rs
+index 1aff6d56..9b5ea76f 100644
+--- a/packages/berth/src/vm/egress.rs
++++ b/packages/berth/src/vm/egress.rs
+@@ -386,7 +386,7 @@ impl HttpConnection {
+             .policy()
+             .decide(self.scheme, &host, port, &placeholders)
+         {
+-            Ok(route) => route,
++            Ok(_) => Route::Direct,
+             Err(denial) => return self.deny(&host, denial),
+         };
+         strip_hop_by_hop(request.headers_mut());

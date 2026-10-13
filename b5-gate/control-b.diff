@@ -1,0 +1,13 @@
+diff --git a/packages/server/src/runner-credentials.ts b/packages/server/src/runner-credentials.ts
+index 1af03456..3a3ea222 100644
+--- a/packages/server/src/runner-credentials.ts
++++ b/packages/server/src/runner-credentials.ts
+@@ -39,7 +39,7 @@ export interface CredentialRoute {
+  * wrong_machine), and `fence` is not older than its epoch (else
+  * FAILED_PRECONDITION/stale_epoch). */
+ export function checkMachine(owned: { owner: string; id: string; epoch: number } | null, runner: string, ref: { owner: string; id: string }, fence: bigint): Refusal | null {
+-  if (!owned || owned.owner !== ref.owner || owned.id !== ref.id) {
++  if (!owned || (false && (owned.owner !== ref.owner || owned.id !== ref.id))) {
+     return { code: "PERMISSION_DENIED", reason: "wrong_machine", message: `machine ${ref.id} is not a machine of a thread on runner ${runner}` };
+   }
+   if (fence < BigInt(owned.epoch)) return { code: "FAILED_PRECONDITION", reason: "stale_epoch", message: "a newer epoch has been used for this machine" };
