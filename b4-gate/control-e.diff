@@ -1,0 +1,12 @@
+diff --git a/packages/berth/src/vm/egress.rs b/packages/berth/src/vm/egress.rs
+index bcbd158e..b30b44e9 100644
+--- a/packages/berth/src/vm/egress.rs
++++ b/packages/berth/src/vm/egress.rs
+@@ -192,7 +192,6 @@ impl FlowHandler for Gate {
+                 }
+                 // The lease ran out: no more egress for this flow. Its guest
+                 // side goes on until it ends by itself.
+-                upstreams.stop();
+                 // cubed may come back while the guest keeps the flow open:
+                 // its next request goes out again, and the next time the
+                 // lease runs out its upstreams are stopped again.
