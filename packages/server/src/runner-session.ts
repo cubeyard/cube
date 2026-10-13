@@ -4,12 +4,14 @@
  * keeps one `watch` stream open (the runner and its machines, as the runner
  * reports them: cubed never polls a guest's hello for readiness), answers
  * `call`s and opens a `guest` stream per guest operation
- * (`RunnerGuestTransport`). It also takes the streams the runner opens on
+ * (`RunnerGuestTransport`) and a `dial` stream per connection to a port of
+ * a machine (the portal's, masterplan B-6). It also takes the streams the runner opens on
  * the connection: `credential` (runner-credentials.ts) and `report`, whose
  * refusals it logs; it never answers a report. */
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { Duplex } from "node:stream";
 import { create, fromJsonString, toJsonString, type DescMessage, type MessageInitShape, type MessageShape } from "@bufbuild/protobuf";
 import { Endpoint, EndpointAddr, EndpointId, SecretKey, type BiStream, type Connection } from "@number0/iroh/index.js";
 import { CallResultSchema, CallSchema, Code, EgressReportSchema, HelloAnswerSchema, OpenSchema, StreamAnswerSchema, WatchEvent_Type, WatchEventSchema,
@@ -26,6 +28,8 @@ const MAX_GUEST_ANSWER = 4 * 1024 * 1024;
 const CONNECT_TIMEOUT_MS = 15000;
 const CALL_TIMEOUT_MS = 15000;
 const GUEST_TIMEOUT_MS = 60000;
+/** Bytes per read from a dial stream (the binding copies each into an array). */
+const DIAL_READ_BYTES = 256 * 1024;
 const PEER = /^[0-9a-f]{64}$/;
 const NODE_ID = /^node-[a-zA-Z0-9-]{1,123}$/;
 
@@ -390,6 +394,29 @@ export class RunnerSession {
     } finally { options.signal?.removeEventListener("abort", onAbort); }
   }
 
+  /** A TCP connection to `port` of machine `ref` at fence `epoch`: a `dial`
+   * stream, then, after the runner's `StreamAnswer`, its bytes. A refusal
+   * throws `RunnerError`. The runner allows ports 1024 to 65535 of a running
+   * machine and gives the guest 10 s to answer. */
+  async dial(ref: MachineRef, epoch: number, port: number): Promise<Duplex> {
+    const connection = await this.connect();
+    let stream: BiStream | undefined;
+    const work = (async () => {
+      stream = await connection.openBi();
+      await stream.send.writeAll(frame(OpenSchema, { kind: { case: "dial", value: { ref: { owner: ref.owner, id: ref.id }, fence: { epoch: BigInt(epoch) }, port } } }));
+      const refused = refusal(await readFrame(stream));
+      if (refused) { await stream.send.finish().catch(() => {}); throw refused; }
+      return dialStream(stream);
+    })();
+    try { return await within(CALL_TIMEOUT_MS, work, () => unavailable(`runner ${this.nodeId} did not answer a dial to port ${port}`)); }
+    catch (error) {
+      work.then(socket => socket.destroy(), () => {});
+      if (!(error instanceof RunnerError)) void stream?.send.reset(0n).catch(() => {});
+      if (error instanceof RunnerError) throw error;
+      throw unavailable(`runner ${this.nodeId}: dial failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     const connection = await this.connection?.catch(() => null);
@@ -399,6 +426,42 @@ export class RunnerSession {
     this.endpoint = null;
     this.notify();
   }
+}
+
+/** A dial stream's bytes as a Duplex. Each direction ends on its own:
+ * `end()` finishes the stream (the runner passes the FIN to the guest) and
+ * the guest's FIN ends reading. `destroy()` acts as a socket's close: the
+ * write under way still goes, then FIN, and reading stops (STOP_SENDING,
+ * so the runner drops the guest's connection if the guest goes on
+ * sending); `destroy(error)` resets the stream. A lost connection is an
+ * error, never an end. */
+function dialStream(stream: BiStream): Duplex {
+  let reading = false;
+  let written: Promise<unknown> = Promise.resolve();
+  return new Duplex({
+    allowHalfOpen: true,
+    read() {
+      if (reading) return;
+      reading = true;
+      stream.recv.read(DIAL_READ_BYTES).then(chunk => {
+        reading = false;
+        this.push(chunk.length ? Buffer.from(chunk) : null);
+      }, error => this.destroy(error instanceof Error ? error : new Error(String(error))));
+    },
+    write(chunk: Buffer, _encoding, callback) {
+      written = stream.send.writeAll(Array.from(chunk));
+      written.then(() => callback(), callback);
+    },
+    final(callback) { stream.send.finish().then(() => callback(), callback); },
+    destroy(error, callback) {
+      if (!this.writableFinished) {
+        if (error) void stream.send.reset(0n).catch(() => {});
+        else void written.then(() => stream.send.finish()).catch(() => {});
+      }
+      if (!this.readableEnded) void stream.recv.stop(0n).catch(() => {});
+      callback(error);
+    },
+  });
 }
 
 /** `GuestTransport` over a runner's `guest` stream: the same request and

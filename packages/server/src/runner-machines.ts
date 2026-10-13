@@ -7,6 +7,7 @@
  * A thread is on such a runner only because it was started there by name:
  * it never moves, and while the runner is down it waits (RunnerWait). */
 import path from "node:path";
+import type { Duplex } from "node:stream";
 import { MachineStatus_Phase, Runner_Kind, type Machine } from "./gen/runner_pb.js";
 import type { GuestTransport } from "./guest-ssh.ts";
 import { createLogger, type Logger } from "./log.ts";
@@ -144,6 +145,15 @@ export class RunnerMachines implements ThreadMachines {
   }
 
   running(thread: Thread): boolean { return this.boots.has(thread.id); }
+
+  /** The portal's connection to `port` of the thread's machine, at its
+   * current epoch (as its guest calls), only while this process has it
+   * running. The runner refuses ports below 1024 and a machine it does not
+   * run; `berth host` has no dial (masterplan B-9). */
+  async dial(thread: Thread, port: number): Promise<Duplex> {
+    if (!this.running(thread)) throw new Error("the thread's machine is not running");
+    return this.session(thread).dial(this.ref(thread), Math.max(1, currentMachineEpoch(this.directory(thread))), port);
+  }
 
   /** What cubed knows of the machine: its events and the runner's last report. */
   async diagnose(thread: Thread): Promise<MachineEvidence> {

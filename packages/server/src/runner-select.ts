@@ -3,7 +3,7 @@
  * ThreadVms over SSH and cube-gateway) or protocol 4 (`cubeyard/runner/4`,
  * RunnerMachines over one RunnerSession; today `berth host` only).
  * Threads on a protocol-3 runner stay on protocol 3. */
-import type net from "node:net";
+import type { Duplex } from "node:stream";
 import { Runner_Kind, Runner_Lifecycle } from "./gen/runner_pb.js";
 import type { GuestTransport } from "./guest-ssh.ts";
 import { runnerClient, type TrustedRunnerHealth } from "./iroh-node.ts";
@@ -58,7 +58,7 @@ export class ProtocolMachines implements ThreadMachines {
   release(thread: Thread, retain: boolean): Promise<{ retained: boolean }> { return this.pick(thread).release(thread, retain); }
   discard(thread: Thread): Promise<void> { return this.pick(thread).discard(thread); }
   running(thread: Thread): boolean { return this.pick(thread).running?.(thread) ?? false; }
-  dial(thread: Thread, port: number): Promise<net.Socket> {
+  dial(thread: Thread, port: number): Promise<Duplex> {
     const machines = this.pick(thread);
     if (!machines.dial) return Promise.reject(new Error("this thread's runner has no portal (dial)"));
     return machines.dial(thread, port);

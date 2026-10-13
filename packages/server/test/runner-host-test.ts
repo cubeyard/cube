@@ -130,6 +130,8 @@ try {
   for (const verb of unsupported) {
     await assert.rejects(session.call(verb), (error: unknown) => error instanceof RunnerError && error.code === "UNIMPLEMENTED", verb.case);
   }
+  await assert.rejects(session.dial(ref, epoch, 8080), (error: unknown) =>
+    error instanceof RunnerError && error.code === "UNIMPLEMENTED" && error.reason === "host_runner", "a host runner has no dial (B-9)");
   assert.equal(Code.UNIMPLEMENTED, 8);
 
   // a runner restart is a new boot; the machine is still there
