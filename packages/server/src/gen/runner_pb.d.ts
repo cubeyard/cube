@@ -95,8 +95,9 @@
 // `virtio-balloon-pci` with `free-page-reporting`, versioned machine types,
 // `-kernel` boot on arm64 and x86-64, `migrate` to `file:` with the
 // `mapped-ram` capability in migration mode `cpr-reboot` (QEMU's vmdk
-// driver blocks mode `normal`, and the layer disk is a VMDK descriptor).
-// One set of QEMU arguments on Linux and macOS.
+// driver blocks mode `normal`, and the layer disk is a VMDK descriptor),
+// `-netdev dgram` (on a socket pair the runner keeps the other end of) and
+// `virtio-net-pci`. One set of QEMU arguments on Linux and macOS.
 //
 // This file is the only schema. Rust types are generated at build time
 // (packages/runner-protocol/build.rs); TypeScript types are generated into
@@ -300,6 +301,15 @@ export declare type Open = Message<"cube.runner.v4.Open"> & {
      */
     value: DialHeader;
     case: "dial";
+  } | {
+    /**
+     * Runner -> cubed: at most one per connection, opened at the first
+     * report; `EgressReport` frames until FIN. cubed never answers.
+     *
+     * @generated from field: cube.runner.v4.ReportHeader report = 6;
+     */
+    value: ReportHeader;
+    case: "report";
   } | { case: undefined; value?: undefined };
 };
 
@@ -850,7 +860,10 @@ export declare const SizeSchema: GenMessage<Size>;
  * The agent refuses a setup with a name it does not know. Everything else
  * the seed carries today is keel's own (the agent account, sudoers, git's
  * credential helper) or the runner's (its CA, `MachineSetup.ca_pem`), and
- * the image brings its packages. `berth host` ignores `Boot`.
+ * the image brings its packages. `berth host` ignores `Boot`, and a keel
+ * machine ignores `mac`: every keel machine has the same fixed address and
+ * MAC on its own link to the runner, set by the runner, so nothing in the
+ * guest's network names the machine.
  *
  * @generated from message cube.runner.v4.Boot
  */
@@ -1144,6 +1157,24 @@ export declare type GuestLimits = Message<"cube.runner.v4.GuestLimits"> & {
 export declare const GuestLimitsSchema: GenMessage<GuestLimits>;
 
 /**
+ * Sent with every machine_start and kept for that QEMU process; a new
+ * machine_start replaces it. Absent: no egress (as DENY with no rules).
+ * Host patterns: a lowercase name without a trailing dot, "*.suffix", or "*".
+ * Order: deny_hosts, then the first rule whose hosts and ports match, then
+ * default. Rule.ports: empty means the kind's port (http 80, https 443);
+ * any port but 80 or 443 is INVALID_ARGUMENT. Https.credential goes through
+ * the credential stream; until a runner has it, such a request is denied
+ * (credential_unavailable). Decide is UNIMPLEMENTED (egress_decide).
+ * CONNECT and Upgrade are always denied; a request carrying a cube_ph_
+ * placeholder is denied unless a credential rule for its host matches.
+ * lease: how long ordinary egress goes on after the runner loses its
+ * connection to cubed (B5: 15 min); absent or 0 stops it at once. When it
+ * runs out, new flows and requests are denied (lease_expired) and the
+ * upstream connections of open flows closed; an open flow's guest side is
+ * not reset: what was already on its way to the guest drains and TCP ends
+ * it. The next connection from cubed ends the grace. Credential requests
+ * need cubed and stop at once.
+ *
  * @generated from message cube.runner.v4.EgressPolicy
  */
 export declare type EgressPolicy = Message<"cube.runner.v4.EgressPolicy"> & {
@@ -1967,6 +1998,11 @@ export declare type ReportHeader = Message<"cube.runner.v4.ReportHeader"> & {
 export declare const ReportHeaderSchema: GenMessage<ReportHeader>;
 
 /**
+ * A refused egress attempt, for diagnosis. reason: lease_expired | policy |
+ * deny_host | connect | upgrade | placeholder | credential_unavailable |
+ * address | sni_mismatch | resolve_failed. dropped_before: how many reports
+ * the runner dropped (its queue full) just before this one.
+ *
  * @generated from message cube.runner.v4.EgressReport
  */
 export declare type EgressReport = Message<"cube.runner.v4.EgressReport"> & {

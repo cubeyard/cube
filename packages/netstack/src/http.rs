@@ -14,6 +14,7 @@ use rustls::{ClientConfig, RootCertStore};
 #[cfg(feature = "test-hooks")]
 use std::collections::HashMap;
 use std::{
+    collections::HashSet,
     net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Duration,
@@ -103,6 +104,17 @@ impl Upstream {
     /// Resolves `host` and connects to it. Every resolved address must be
     /// public unicast, otherwise nothing is dialled.
     pub async fn connect(&self, host: &str, port: u16) -> Result<TcpStream, UpstreamError> {
+        self.connect_avoiding(host, port, &HashSet::new()).await
+    }
+
+    /// [`Self::connect`], with `avoid` refused as this host's own addresses
+    /// are (berth: the addresses it reaches cubed at).
+    pub async fn connect_avoiding(
+        &self,
+        host: &str,
+        port: u16,
+        avoid: &HashSet<IpAddr>,
+    ) -> Result<TcpStream, UpstreamError> {
         let addresses: Vec<SocketAddr> = match self.test_override(host) {
             Some(address) => vec![address],
             None => {
@@ -117,8 +129,9 @@ impl Upstream {
                 }
                 // Read per connection: the host's addresses can change, and
                 // failing to read them refuses rather than guesses.
-                let local = addr::local_addresses()
+                let mut local = addr::local_addresses()
                     .map_err(|e| UpstreamError::Failed(anyhow!("reading local addresses: {e}")))?;
+                local.extend(avoid.iter().copied());
                 if resolved.iter().any(|a| !addr::is_upstream(a.ip(), &local)) {
                     return Err(UpstreamError::NotPublic);
                 }

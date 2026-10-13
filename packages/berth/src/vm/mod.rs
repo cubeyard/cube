@@ -7,6 +7,7 @@
 //! rw.qcow2       the writable disk (vdc), created once, never replaced
 //! layers.vmdk    the layer disk (vdb, read-only) with layers.head/.tail
 //! ctl.sock       cube.0, the guest channel (spoken from masterplan B-2 on)
+//! (no socket)    virtio-net: QEMU inherits one end of a socket pair (B-4)
 //! qmp.sock       QMP; console.log, qemu.log, argv.json, events.log
 //! ```
 //!
@@ -26,9 +27,16 @@
 //! the one `berth vm --image` names, pulled beforehand into the directory by
 //! `berth image pull`; a machine keeps the image it first started with.
 //!
-//! Not here yet: the network (B-4: no network device at all), image pulls
-//! by the runner itself and the cache limit (B-7), templates (B-8),
-//! diagnosis (B-9) and snapshots (S-7a).
+//! The network (B-4, egress.rs): every QEMU process gets a socket pair for
+//! `-netdev dgram` and its own cube-netstack LAN in the runner, with the
+//! fixed guest address on the kernel command line; egress follows the
+//! policy of the newest `machine_start` (policy.rs), goes on for its lease
+//! after cubed's connection is gone (presence.rs), and refusals are
+//! reported to cubed (report.rs). HTTPS is intercepted with the runner's CA.
+//!
+//! Not here yet: credentials (B-5), `dial` (B-6), image pulls by the runner
+//! itself and the cache limit (B-7), templates (B-8), diagnosis (B-9) and
+//! snapshots (S-7a).
 //!
 //! `stop` (also `delete` and the runner's own shutdown) asks the agent to
 //! shut down (`DaemonRequest.shutdown`: the workload gets SIGTERM, then
@@ -39,8 +47,12 @@
 //! next boot), shown as the `Stopped` condition until the next start.
 mod ca;
 mod channel;
+mod egress;
+mod policy;
+mod presence;
 mod qemu;
 mod record;
+mod report;
 
 use std::{
     collections::BTreeMap,
@@ -165,6 +177,10 @@ struct Entry {
     /// The sessions this machine's agent used in earlier QEMUs (boots and,
     /// with S-7a, restores), for as long as the runner runs.
     sessions: std::collections::HashSet<String>,
+    /// The egress policy of the newest start (memory only, as documents).
+    policy: Option<policy::Policy>,
+    /// While QEMU runs: its LAN and egress gate.
+    net: Option<egress::Net>,
 }
 
 struct State {
@@ -180,6 +196,7 @@ pub struct VmRunner {
     floor: Floor,
     keel: Keel,
     ca: ca::RunnerCa,
+    egress: Arc<egress::Egress>,
     image: Image,
     started_at: Timestamp,
     state: Mutex<State>,
@@ -320,16 +337,28 @@ impl VmRunner {
                     info: None,
                     documents: Default::default(),
                     sessions: Default::default(),
+                    policy: None,
+                    net: None,
                 },
             );
         }
         let (events, _) = broadcast::channel(256);
+        let egress = Arc::new(egress::Egress {
+            ca: ca.signer.clone(),
+            upstream: Arc::new(
+                cube_netstack::http::Upstream::system()
+                    .context("the runner's egress verifies upstreams against the system roots")?,
+            ),
+            presence: presence::Presence::new(),
+            reports: report::Reports::new(),
+        });
         Ok(Arc::new(Self {
             options,
             arch,
             floor,
             keel,
             ca,
+            egress,
             image,
             started_at: Timestamp::now(),
             state: Mutex::new(State {
@@ -379,6 +408,12 @@ impl VmRunner {
                 self.image.record.manifest.digest
             ),
             format!("runner CA: certificate sha256 {}", self.ca.sha256),
+            format!(
+                "network: each machine {}/{} on its own link to the runner at {} (DNS, HTTP and HTTPS out by its policy; HTTPS intercepted with the runner CA)",
+                egress::KEEL.guest,
+                egress::KEEL.prefix,
+                egress::KEEL.gateway
+            ),
             format!(
                 "machines: {} ({interrupted} interrupted; at most {} at once)",
                 state.machines.len(),
@@ -436,6 +471,8 @@ impl VmRunner {
             lifecycle: proto::runner::Lifecycle::Ready as i32,
             network: Some(proto::Network {
                 mode: self.options.network.clone(),
+                // The runner lets guest traffic out itself (B-4).
+                egress: true,
                 ..Default::default()
             }),
             templates: vec![],
@@ -834,6 +871,8 @@ impl VmRunner {
                 info: None,
                 documents: Default::default(),
                 sessions: Default::default(),
+                policy: None,
+                net: None,
             },
         );
         self.commit(&mut state, &reference.id)
@@ -841,6 +880,7 @@ impl VmRunner {
 
     async fn start(self: &Arc<Self>, request: proto::MachineStart) -> Answer<proto::Machine> {
         let documents = boot_documents(request.boot.as_ref())?;
+        let policy = policy::Policy::from_proto(request.policy.as_ref())?;
         let (id, record) = {
             let mut state = self.state.lock().unwrap();
             let entry = Self::fenced(&mut state, request.r#ref.as_ref(), request.fence.as_ref())?;
@@ -854,6 +894,11 @@ impl VmRunner {
                     ));
                 }
                 Phase::Running | Phase::Starting => {
+                    // A new start replaces the policy of the running QEMU.
+                    if let Some(net) = &entry.net {
+                        net.gate.replace(policy.clone());
+                    }
+                    entry.policy = Some(policy);
                     let record = entry.record.clone();
                     record::write_json(&self.machine_dir(&id).join(record::RECORD), &record)
                         .map_err(internal)?;
@@ -898,6 +943,7 @@ impl VmRunner {
             }
             let entry = state.machines.get_mut(&id).unwrap();
             entry.documents = documents;
+            entry.policy = Some(policy);
             entry.record.phase = Phase::Starting;
             entry.record.error.clear();
             let record = entry.record.clone();
@@ -968,7 +1014,25 @@ impl VmRunner {
             .open(dir.join("qemu.log"))?;
         let boot_id = random_hex();
         writeln!(log, "--- boot {boot_id}: {}", self.qemu_version())?;
-        let mut child = tokio::process::Command::new(&self.options.qemu)
+        // The network of this QEMU process: a new socket pair and LAN.
+        let gate = {
+            let state = self.state.lock().unwrap();
+            let entry = &state.machines[id];
+            egress::Gate::new(
+                Arc::clone(&self.egress),
+                proto::Ref {
+                    owner: entry.record.owner.clone(),
+                    id: entry.record.id.clone(),
+                },
+                entry
+                    .policy
+                    .clone()
+                    .unwrap_or_else(policy::Policy::deny_all),
+            )
+        };
+        let (net, theirs) = egress::Net::open(gate, id)?;
+        let mut command = tokio::process::Command::new(&self.options.qemu);
+        command
             .args(&args)
             .current_dir(dir)
             .stdin(Stdio::null())
@@ -976,15 +1040,24 @@ impl VmRunner {
             .stderr(log)
             // Its own process group: a terminal's Ctrl-C reaches the runner,
             // which quits its machines itself.
-            .process_group(0)
-            .spawn()
-            .with_context(|| format!("start {}", self.options.qemu.display()))?;
+            .process_group(0);
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&theirs);
+        // SAFETY: `inherit` makes only async-signal-safe calls.
+        unsafe {
+            command.pre_exec(move || egress::inherit(fd));
+        }
+        let spawned = command.spawn();
+        // QEMU holds its own copy now (or failed to start).
+        drop(theirs);
+        let mut child =
+            spawned.with_context(|| format!("start {}", self.options.qemu.display()))?;
         let pid = child.id().context("QEMU exited at once")?;
         let (exited_tx, exited) = watch::channel(false);
         {
             let mut state = self.state.lock().unwrap();
             let entry = state.machines.get_mut(id).unwrap();
             entry.live = Some(Live { pid, exited });
+            entry.net = Some(net);
             entry.record.boot = Some(Boot {
                 boot_id: boot_id.clone(),
                 started_at: Timestamp::now(),
@@ -1083,6 +1156,8 @@ impl VmRunner {
             return;
         }
         entry.live = None;
+        // The LAN goes with its QEMU: every flow is reset.
+        entry.net = None;
         if let Some(guest) = entry.guest.take() {
             entry.sessions.extend(guest.seen());
         }
@@ -1508,7 +1583,8 @@ impl channel::Host for MachineHost {
 }
 
 /// `MachineStart.boot`'s documents, checked: names keel knows, and at most
-/// MAX_BOOT_BYTES together. `Boot.mac` has no use before the network (B-4).
+/// MAX_BOOT_BYTES together. `Boot.mac` is ignored: every keel machine has
+/// the same fixed MAC and address on its own link (egress.rs).
 fn boot_documents(
     boot: Option<&proto::Boot>,
 ) -> Answer<std::collections::HashMap<String, Vec<u8>>> {
@@ -1580,6 +1656,24 @@ fn load_image(directory: &Path, reference: &image::Reference) -> Result<Image> {
 
 impl Service for VmRunner {
     const KIND: &'static str = "vm_runner";
+
+    /// cubed is here while the connection lives (the egress lease), and
+    /// the connection carries the refusal reports.
+    fn attach(self: &Arc<Self>, connection: &iroh::endpoint::Connection) -> Box<dyn Send> {
+        struct Attached {
+            _present: presence::Attached,
+            writer: tokio::task::JoinHandle<()>,
+        }
+        impl Drop for Attached {
+            fn drop(&mut self) {
+                self.writer.abort();
+            }
+        }
+        Box::new(Attached {
+            _present: self.egress.presence.attach(Some(connection.clone())),
+            writer: tokio::spawn(Arc::clone(&self.egress.reports).run(connection.clone())),
+        })
+    }
 
     fn hello(&self, hello: &proto::Hello) -> Answer<proto::HelloAnswer> {
         if hello.protocol != PROTOCOL {

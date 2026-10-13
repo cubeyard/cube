@@ -22,11 +22,12 @@ use tokio::{
 };
 
 /// What the floor needs of `qom-list-types`.
-pub const FLOOR_DEVICES: [&str; 4] = [
+pub const FLOOR_DEVICES: [&str; 5] = [
     "virtio-rtc-pci",
     "virtio-serial-pci",
     "virtserialport",
     "virtio-balloon-pci",
+    "virtio-net-pci",
 ];
 /// What the floor needs of `query-commands`.
 pub const FLOOR_COMMANDS: [&str; 6] = [
@@ -119,6 +120,28 @@ pub struct Answers {
     pub cpr_reboot: bool,
     pub commands: Value,
     pub machines: Value,
+    /// `query-qmp-schema`: the network backends QEMU was built with.
+    pub schema: Value,
+}
+
+/// Whether the QMP schema has the `dgram` network backend (an enum with
+/// both `dgram` and `socket` among its values: `NetClientDriver`).
+fn has_netdev_dgram(schema: &Value) -> bool {
+    schema.as_array().into_iter().flatten().any(|entry| {
+        entry["meta-type"] == "enum"
+            && ["dgram", "socket"].iter().all(|wanted| {
+                entry["members"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|m| m["name"] == *wanted)
+                    || entry["values"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|v| v == *wanted)
+            })
+    })
 }
 
 /// A QEMU binary measured against keel's floor.
@@ -177,6 +200,9 @@ pub fn evaluate(answers: &Answers, arch: Arch, accel: Accel) -> Floor {
     }
     if !answers.cpr_reboot {
         missing.push("migrate mode cpr-reboot".into());
+    }
+    if !has_netdev_dgram(&answers.schema) {
+        missing.push("netdev dgram".into());
     }
     // x86-64 guests reseed their random generator from QEMU's VM
     // generation id when a snapshot is restored (keel's kernel has VMGENID;
@@ -348,6 +374,7 @@ pub async fn probe(qemu: &Path, socket: &Path) -> Result<Answers> {
             cpr_reboot,
             commands: qmp.execute("query-commands", Value::Null).await?,
             machines: qmp.execute("query-machines", Value::Null).await?,
+            schema: qmp.execute("query-qmp-schema", Value::Null).await?,
         })
     }
     .await;
@@ -382,7 +409,9 @@ pub const CONSOLE: &str = "console.log";
 /// keel's QEMU arguments (docs/plans/2026-10-10-vm-base-and-image-layers.md,
 /// "Target layout"): vda the base read-only, vdb the layer disk read-only
 /// (its layer files are read-only cache files, keel-layers' H4), vdc the
-/// machine's writable disk, `cube.0` on `ctl.sock`. No network device yet.
+/// machine's writable disk, `cube.0` on `ctl.sock`, and virtio-net on the
+/// socket pair QEMU inherits on `egress::NET_FD` (masterplan B-4), with the
+/// guest's fixed address on the kernel command line.
 pub fn argv(launch: &Launch) -> Vec<String> {
     let dir = launch.dir;
     let path = |name: &str| dir.join(name).display().to_string();
@@ -409,8 +438,9 @@ pub fn argv(launch: &Launch) -> Vec<String> {
         launch.kernel.display().to_string(),
         "-append".into(),
         format!(
-            "console={} root=/dev/vda ro rootfstype=erofs init=/sbin/cube-init quiet panic=-1",
-            launch.arch.console()
+            "console={} root=/dev/vda ro rootfstype=erofs init=/sbin/cube-init quiet panic=-1 {}",
+            launch.arch.console(),
+            super::egress::kernel_ip()
         ),
         "-drive".into(),
         format!(
@@ -440,6 +470,17 @@ pub fn argv(launch: &Launch) -> Vec<String> {
         "virtio-rtc-pci".into(),
         "-device".into(),
         "virtio-balloon-pci,free-page-reporting=on".into(),
+        "-netdev".into(),
+        format!(
+            "dgram,id=n0,local.type=fd,local.str={}",
+            super::egress::NET_FD
+        ),
+        // No option ROM: keel boots by -kernel, and the default is x86 iPXE.
+        "-device".into(),
+        format!(
+            "virtio-net-pci,netdev=n0,mac={},romfile=",
+            super::egress::GUEST_MAC
+        ),
         "-serial".into(),
         format!("file:{}", path(CONSOLE)),
         "-qmp".into(),
@@ -549,6 +590,7 @@ mod tests {
                     "virtserialport",
                     "virtio-balloon-pci",
                     "virtio-blk-pci",
+                    "virtio-net-pci",
                     "vmgenid",
                     "kvm-accel",
                     "tcg-accel",
@@ -580,6 +622,12 @@ mod tests {
                     "none",
                 ],
             ),
+            schema: json!([
+                {"name": "NetClientDriver", "meta-type": "enum",
+                 "members": [{"name": "none"}, {"name": "user"}, {"name": "socket"}, {"name": "stream"}, {"name": "dgram"}],
+                 "values": ["none", "user", "socket", "stream", "dgram"]},
+                {"name": "QapiErrorClass", "meta-type": "enum", "values": ["GenericError"]},
+            ]),
         }
     }
 
@@ -594,6 +642,7 @@ mod tests {
                     "virtio-serial-pci",
                     "virtserialport",
                     "virtio-balloon-pci",
+                    "virtio-net-pci",
                     "vmgenid",
                     "kvm-accel",
                 ],
@@ -633,6 +682,8 @@ mod tests {
         let answers = Answers {
             balloon_properties: list("name", &["deflate-on-oom"]),
             cpr_reboot: false,
+            // QEMU before 7.2: socket, but no dgram.
+            schema: json!([{"meta-type": "enum", "values": ["none", "user", "socket"]}]),
             commands: list("name", &["migrate", "query-status"]),
             machines: list("name", &["q35", "pc-i440fx-11.1", "virt-11.1"]),
             types: list(
@@ -650,8 +701,10 @@ mod tests {
         assert_eq!(
             evaluate(&answers, Arch::X86_64, Accel::Kvm).missing,
             [
+                "virtio-net-pci",
                 "virtio-balloon-pci free-page-reporting",
                 "migrate mode cpr-reboot",
+                "netdev dgram",
                 "vmgenid",
                 "QMP migrate-incoming",
                 "QMP migrate-set-capabilities",
@@ -718,9 +771,22 @@ mod tests {
             after("-append")[0]
                 .contains("console=ttyS0 root=/dev/vda ro rootfstype=erofs init=/sbin/cube-init")
         );
+        // B-4: the socket pair on fd 3, the fixed MAC, no option ROM, no
+        // user-mode network; the fixed address on the kernel command line.
+        assert_eq!(after("-netdev"), ["dgram,id=n0,local.type=fd,local.str=3"]);
         assert!(
-            args.iter().all(|arg| !arg.starts_with("-netdev")),
-            "no network until B-4"
+            after("-device").contains(&"virtio-net-pci,netdev=n0,mac=02:00:00:00:00:02,romfile=")
+        );
+        assert!(
+            after("-append")[0]
+                .ends_with(" ip=192.168.127.2::192.168.127.1:255.255.255.0::eth0:off"),
+            "{}",
+            after("-append")[0]
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.contains("user,") || a.contains("hostfwd"))
         );
         assert_eq!(
             args.contains(&"-sandbox".to_string()),

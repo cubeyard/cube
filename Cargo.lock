@@ -190,20 +190,30 @@ name = "berth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "cube-netstack",
  "cube-runner-protocol",
  "flate2",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "iroh",
  "keel-layers",
  "libc",
+ "pbjson-types",
  "rcgen",
  "reqwest",
  "rustls",
  "serde",
  "serde_json",
  "sha2",
+ "smoltcp",
  "tempfile",
  "time",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -523,6 +533,7 @@ name = "cube-netstack"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bytes",
  "heapless",
  "http",

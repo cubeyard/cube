@@ -616,13 +616,16 @@ runner's first part: keel machines under the QEMU it is given by path
 the machine type pinned per machine, a read-only layer disk, a retained
 writable disk, a per-machine journal (`machine.json`) and machines marked
 `Interrupted` when the runner stops or restarts; see packages/berth/README.md.
-cubed does not run threads on it yet.
+Its machines have a network of their own (row B-4): virtio-net on a socket
+pair to one cube-netstack LAN per QEMU process in the runner, the same fixed
+address for every machine, HTTP and HTTPS out under the egress policy cubed
+sends with `machine_start`, HTTPS intercepted with the runner's CA, a lease
+that keeps ordinary egress going for a while after cubed's connection is
+gone, and refusals reported on the runner-opened `report` stream. cubed
+does not run threads on it yet and does not read reports yet.
 
-Not built yet (later stages): `berth vm`'s guest channel, network, image
-layers, templates and diagnosis, the rest
-of keel's `cube-agent` (generated files and the runner's
-CA, clock, hooks, templates, snapshots), the runner's network stack, the
-credential proxy and the `dial`, `credential` and `report` streams.
+Not built yet (later stages): `berth vm`'s templates and diagnosis, the
+credential proxy and the `dial` and `credential` streams, snapshots.
 
 ## Machine templates and hooks
 

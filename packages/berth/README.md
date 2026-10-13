@@ -24,9 +24,10 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   directories. Before it touches `--dir` it starts the QEMU with `-machine
   none` and reads keel's QEMU floor over QMP (runner.proto's header:
   `virtio-rtc-pci`, `virtio-serial-pci` and `virtserialport`,
-  `virtio-balloon-pci` with `free-page-reporting`, a versioned machine type,
-  the `mapped-ram` capability, migration mode `cpr-reboot`, the migration
-  commands, the accelerator); a QEMU below it is refused with what it
+  `virtio-balloon-pci` with `free-page-reporting`, `virtio-net-pci`, the
+  `dgram` network backend, a versioned machine type, the `mapped-ram`
+  capability, migration mode `cpr-reboot`, the migration commands, the
+  accelerator); a QEMU below it is refused with what it
   lacks (QEMU 8.2.2: `virtio-rtc-pci` and `mapped-ram`); on x86-64 it also
   needs `vmgenid`, which every machine gets (`guid=auto`, so a restore
   reseeds the guest's random generator). `Platform.qemu_version` is its
@@ -40,8 +41,10 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   logged or sent) and `ca.pem`, made on the first start and kept. Half a
   pair, a key others can read, or a certificate that does not carry the key
   is refused, never replaced. The certificate is `Runner.ca_pem` and goes to
-  every machine in `machine_setup`; nothing signs with the key until the
-  runner's network (B-4).
+  every machine in `machine_setup`; the key signs the leaves of the
+  runner's HTTPS interception (below), whose issuer is read from this
+  certificate (cube-netstack's `Ca::from_loaded`; a leaf is checked to
+  verify against it before the runner serves).
 - Each machine is `DIRECTORY/<16 hex>`: `machine.json` (its journal, written
   whole and renamed before an answer), `rw.qcow2` (vdc, the writable disk,
   created once and never replaced), `layers.vmdk` (vdb, read-only, the
@@ -88,11 +91,47 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
 - `MachineStart.boot`: only keel's documents (`hostname`, `env`,
   `hooks/pre-setup`, `hooks/pre-resume`; others `INVALID_ARGUMENT
   unknown_document`), at most 256 KiB together, kept in memory for the
-  boot's setups. `Boot.mac` and `MachineStart.policy` are not used before
-  the network (B-4).
-- Not yet: a network device, pulls by the runner and the cache limit,
-  templates, diagnosis and snapshots (masterplan rows B-4, B-7, B-8, B-9,
-  S-7a).
+  boot's setups. `Boot.mac` is ignored (below).
+- The network (masterplan B-4, `src/vm/egress.rs`): every machine has one
+  virtio-net device (`-netdev dgram` on a socket pair; QEMU inherits its
+  end on fd 3, no socket path, no root) and the same fixed link: the guest
+  `192.168.127.2/24` with MAC `02:00:00:00:00:02`, set by the kernel's
+  `ip=` on the command line (no DHCP; IPv4 only), the runner at `.1` as
+  gateway and resolver. Each QEMU process gets its own cube-netstack LAN in
+  the runner: DNS A records (AAAA empty), TCP to ports 80 and 443 only
+  (other TCP is reset, other UDP dropped), and HTTP on 80 and HTTPS on 443
+  intercepted with the runner's CA (the leaf for the ClientHello's SNI; no
+  SNI: closed). A new start or a restore is a new LAN; the old flows reset.
+- Egress follows `MachineStart.policy` (`src/vm/policy.rs`; the rules are
+  in runner.proto's comment on `EgressPolicy`): a policy berth cannot carry
+  out is refused at the start (`INVALID_ARGUMENT egress_policy`; Decide
+  rules `UNIMPLEMENTED egress_decide`), a start of a running machine
+  replaces its policy, and no policy means no egress. Per request:
+  CONNECT and Upgrade refused, `Host` must equal the SNI name, then
+  `deny_hosts`, the first matching rule (a credential rule is refused with
+  `credential_unavailable` until B-5), the default, a `cube_ph_`
+  placeholder anywhere it is not a credential rule's, and the address
+  check: only public unicast, none of this host's own addresses and none
+  of the addresses Iroh's direct paths reach cubed at (remembered for the
+  runner's life; over a relay-only connection only `deny_hosts` keeps a
+  guest from cubed's hosts). Upstream TLS verifies against the system
+  roots. A refusal is a 403 with `x-cube-denied`.
+- The lease (`src/vm/presence.rs`): while cubed has a connection to the
+  runner, egress follows the policy; when the last one goes, it goes on
+  for the policy's `lease` (cubed sends 15 min; absent or 0: it stops at
+  once), then new flows and requests are refused, the upstream connections
+  of open flows closed and DNS answers SERVFAIL, until cubed connects
+  again. An open flow's guest side is not reset or cut: what was already on
+  its way to the guest drains, and the connection ends as TCP ends it.
+- Reports (`src/vm/report.rs`): every refusal is queued (256 per runner;
+  more are dropped and counted in the next report's `dropped_before`) and
+  written to cubed on one `report` stream per connection that the runner
+  opens (`Open.report`), never from the flow; a write that does not finish
+  in 5 s ends that stream and the rest waits for the next connection.
+  (cubed does not read the stream yet; that is the C phase.)
+- Not yet: credentials (B-5), `dial` (B-6), pulls by the runner and the
+  cache limit, templates, diagnosis and snapshots (masterplan rows B-7,
+  B-8, B-9, S-7a).
 - `stop`, `delete` and the runner's own shutdown stop a machine the same
   way: the runner asks the agent to shut down (`DaemonRequest.shutdown`:
   SIGTERM to the workload, SIGKILL to what is left after 10 s, sync, the

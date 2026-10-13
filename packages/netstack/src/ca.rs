@@ -4,6 +4,11 @@
 //! and never rotated by the gateway. The CA's subject is derived from its key,
 //! so loading needs no X.509 parser: the issuer is rebuilt from the key and
 //! the loaded certificate is checked to carry that key.
+//!
+//! A CA someone else keeps (berth's runner CA, loaded by berth under its own
+//! rules) comes in through [`Ca::from_loaded`] (feature `loaded-ca`): the
+//! leaves' issuer is read from that certificate, never rebuilt from this
+//! module's own parameters, and a leaf is checked to chain to it first.
 use anyhow::{Context, Result, bail, ensure};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
@@ -126,17 +131,68 @@ impl Ca {
                 .any(|w| w == key.public_key_raw()),
             "ca.pem does not belong to ca.key"
         );
-        let sha256 = hex(&Sha256::digest(&ca_der));
+        Self::assemble(Issuer::new(ca_params(&key), key), ca_der, pem)
+    }
+
+    fn assemble(
+        issuer: Issuer<'static, KeyPair>,
+        ca_der: CertificateDer<'static>,
+        pem: String,
+    ) -> Result<Self> {
         Ok(Self {
-            issuer: Issuer::new(ca_params(&key), key),
+            sha256: hex(&Sha256::digest(&ca_der)),
+            issuer,
             ca_der,
             pem,
-            sha256,
             leaf_key: KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?,
             serial: AtomicU64::new(0),
             cache: Mutex::new(HashMap::new()),
             provider: provider(),
         })
+    }
+
+    /// A CA its owner has loaded and checked already: its key (PKCS#8 PEM)
+    /// and its certificate (PEM). The leaves' issuer name, key identifier
+    /// and key usages are the certificate's, whatever parameters made it;
+    /// a CA whose leaves would not verify against the certificate (a key
+    /// that is not the certificate's, a name that does not match) is
+    /// refused here rather than in the guest's TLS.
+    #[cfg(feature = "loaded-ca")]
+    pub fn from_loaded(key_pem: &str, cert_pem: &str) -> Result<Self> {
+        let key = KeyPair::from_pem(key_pem).context("read the CA key")?;
+        ensure!(
+            key.algorithm() == &PKCS_ECDSA_P256_SHA256,
+            "the CA key must be a P-256 key"
+        );
+        let ca_der = CertificateDer::from_pem_slice(cert_pem.as_bytes())
+            .context("read the CA certificate")?;
+        let issuer = Issuer::from_ca_cert_der(&ca_der, key).context("parse the CA certificate")?;
+        let ca = Self::assemble(issuer, ca_der, cert_pem.to_string())?;
+        ca.check_chain()
+            .context("a leaf does not verify against the CA certificate")?;
+        Ok(ca)
+    }
+
+    /// Mints a leaf and verifies it against the CA certificate alone.
+    pub fn check_chain(&self) -> Result<()> {
+        use rustls::{
+            RootCertStore,
+            client::{WebPkiServerVerifier, danger::ServerCertVerifier},
+            pki_types::{ServerName, UnixTime},
+        };
+        const NAME: &str = "chain-check.cube.invalid";
+        let mut roots = RootCertStore::empty();
+        roots.add(self.ca_der.clone())?;
+        WebPkiServerVerifier::builder_with_provider(Arc::new(roots), self.provider.clone())
+            .build()?
+            .verify_server_cert(
+                &self.leaf(NAME)?,
+                &[],
+                &ServerName::try_from(NAME)?,
+                &[],
+                UnixTime::now(),
+            )?;
+        Ok(())
     }
 
     pub fn pem(&self) -> &str {
