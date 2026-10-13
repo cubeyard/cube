@@ -1,0 +1,52 @@
+diff --git a/scripts/test-vm-e2e.ts b/scripts/test-vm-e2e.ts
+index c092831c..0dc728cd 100644
+--- a/scripts/test-vm-e2e.ts
++++ b/scripts/test-vm-e2e.ts
+@@ -410,6 +410,47 @@ try {
+   assert.equal((await api(`/api/runners/${runnerStatus.id}/check`, "POST", {})).runner.health.retainedVms, 1);
+   log("7: the operator discarded one retained disk on the runner");
+ 
++  // 7c. Control (#168): a project with a repository, checked out in a real
++  // guest. The host has no route to the fake GitHub, so cubed's mirror is
++  // seeded from it (as for the skills); the guest fetches through the gateway.
++  const repoUrl = "https://github.com/cube-e2e/repo.git";
++  git(work, "clone", "-q", "--mirror", github.repository, new GitService(path.join(work, "state", "repositories")).mirrorPathFor(repoUrl));
++  const repoProject = (await api("/api/projects", "POST", { name: "e2e-repo", repositories: [{ url: repoUrl, base: "main" }] })).project;
++  assert.equal(repoProject.status, "ready", JSON.stringify(repoProject));
++  const pin = repoProject.repositories[0].baseOid as string;
++  assert.equal(pin, git(github.repository, "rev-parse", "main"));
++  const commitAs = "git -c user.name=e2e -c user.email=e2e@example.invalid -c commit.gpgsign=false commit -q";
++  const dirsBefore = vmDirs().length;
++  const retainedBefore = (await api(`/api/runners/${runnerStatus.id}/check`, "POST", {})).runner.health.retainedVms as number;
++  const repoThread = async (requestId: string) => {
++    const id = (await api("/api/threads", "POST", { projectId: repoProject.id, requestId, text: "hello", model })).id as string;
++    vmIds.push((await ready(id)).vm!.vmId);
++    assert.equal((await settled(id, "cube:initial")).status.state, "completed");
++    assert.equal(await bash(id, "pwd; git rev-parse HEAD; git remote get-url origin; git status --porcelain | wc -l"), `/workspace\n${pin}\n${repoUrl}\n0`, "the pinned checkout");
++    return id;
++  };
++  // Committed and pushed: archive deletes the disk.
++  const pushedThread = await repoThread("repo-pushed");
++  const pushedHead = await bash(pushedThread, `set -e; git checkout -q -b pr168-pushed; echo pushed > pushed.txt; git add pushed.txt; ${commitAs} -m pushed; git push -q origin pr168-pushed; git rev-parse HEAD`);
++  assert.notEqual(pushedHead, pin);
++  assert.equal(git(github.repository, "rev-parse", "refs/heads/pr168-pushed"), pushedHead, "the push reached the fake GitHub");
++  assert.equal(vmDirs().length, dirsBefore + 1);
++  const pushedArchive = await api(`/api/threads/${pushedThread}`, "DELETE");
++  assert.deepEqual(pushedArchive, { ok: true, retained: false, reason: "clean: the agent's work is committed and pushed" });
++  assert.equal(vmDirs().length, dirsBefore, "the pushed thread's disk is deleted");
++  log(`7c: CONTROL repository project, pinned ${pin.slice(0, 12)}: the agent committed and pushed pr168-pushed (${pushedHead.slice(0, 12)}); archive: retained=${pushedArchive.retained} (${pushedArchive.reason}); disk deleted`);
++  // Committed, not pushed: archive keeps the disk, with the reason.
++  const unpushedThread = await repoThread("repo-unpushed");
++  const unpushedHead = (await bash(unpushedThread, `set -e; git checkout -q -b pr168-unpushed; echo local > local.txt; git add local.txt; ${commitAs} -m local; git status --porcelain | wc -l; git rev-parse HEAD`)).split("\n");
++  assert.equal(unpushedHead[0], "0", "the tree is clean; only the commit is unpushed");
++  assert.equal(spawnSync("git", ["-C", github.repository, "rev-parse", "--verify", "-q", "refs/heads/pr168-unpushed"]).status, 1, "nothing was pushed");
++  const unpushedArchive = await api(`/api/threads/${unpushedThread}`, "DELETE");
++  assert.equal(unpushedArchive.retained, true, JSON.stringify(unpushedArchive));
++  assert.match(unpushedArchive.reason, /has commits that are not pushed/);
++  assert.equal(vmDirs().length, dirsBefore + 1, "the unpushed thread's disk is kept");
++  assert.equal((await api(`/api/runners/${runnerStatus.id}/check`, "POST", {})).runner.health.retainedVms, retainedBefore + 1);
++  log(`7c: CONTROL the agent committed ${unpushedHead[1]!.slice(0, 12)} on pr168-unpushed without pushing; archive: retained=${unpushedArchive.retained} (${unpushedArchive.reason}); disk kept; runner retains ${retainedBefore + 1}`);
++
+   // 8. Stop everything this run started.
+   await kill(cubed.child, "SIGTERM");
+   await until("the gateway to exit with cubed", 30, () => gatewayPids().length === 0);

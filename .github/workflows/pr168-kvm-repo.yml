@@ -1,0 +1,63 @@
+# Throwaway: #168's real-repository archive control at its exact head, on a
+# GitHub-hosted runner with KVM (the review's named gap). Not for merge.
+name: pr168-kvm-repo
+on:
+  push:
+    branches: [acceptance/pr168-kvm-repo]
+permissions:
+  contents: read
+env:
+  HEAD_SHA: 1fd0833623ea3dc540ba3a9fcc1b5eb7de21763b
+jobs:
+  kvm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.HEAD_SHA }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: acceptance
+      - name: exact head and control patches
+        run: |
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA" && git log -1 --format='%H %s'
+          git -C acceptance log -1 --format='acceptance %H %s'
+          sha256sum acceptance/.github/acceptance/*.patch
+      - uses: ./.github/actions/node-deps
+      - uses: ./.github/actions/rust-deps
+      - name: QEMU, ssh, qemu-img; KVM for the runner account
+        run: |
+          sudo apt-get update -qq
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils openssh-client
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          qemu-system-x86_64 --version | head -1
+          uname -a
+      - name: Debian 13 genericcloud amd64, checked against Debian's SHA512SUMS
+        run: |
+          set -euo pipefail
+          base=https://cloud.debian.org/images/cloud/trixie/latest
+          curl -fsSL -o "$RUNNER_TEMP/debian-13-genericcloud-amd64.qcow2" "$base/debian-13-genericcloud-amd64.qcow2"
+          curl -fsSL -o "$RUNNER_TEMP/SHA512SUMS" "$base/SHA512SUMS"
+          (cd "$RUNNER_TEMP" && grep ' debian-13-genericcloud-amd64.qcow2$' SHA512SUMS | sha512sum -c -)
+          echo "CUBE_TEST_VM_IMAGE=$RUNNER_TEMP/debian-13-genericcloud-amd64.qcow2" >>"$GITHUB_ENV"
+      - name: cube-runner and cube-gateway at the exact head
+        run: cargo build --locked --offline -p cube-runner -p cube-gateway -j 2
+      - name: control - real repository, push then archive deletes; commit without push then archive retains
+        run: |
+          set -o pipefail
+          git apply --check acceptance/.github/acceptance/pr168-control-repo.patch
+          git apply acceptance/.github/acceptance/pr168-control-repo.patch
+          git diff --stat
+          sha256sum scripts/test-vm-e2e.ts
+          node scripts/test-vm-e2e.ts target/debug/cube-runner "$CUBE_TEST_VM_IMAGE" 2>&1 | tee "$RUNNER_TEMP/pr168-control-repo.log"
+          git checkout -- scripts/test-vm-e2e.ts
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA" && test -z "$(git status --porcelain --untracked-files=no)"
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr168-control-repo-log
+          path: ${{ runner.temp }}/pr168-control-repo.log
