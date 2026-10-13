@@ -1187,3 +1187,31 @@ async fn a_lease_of_zero_stops_egress_when_cubed_goes_and_a_new_policy_applies()
         ["lease_expired", "policy"]
     );
 }
+
+#[tokio::test]
+async fn no_upstream_opens_once_the_flow_stopped_its_upstreams() {
+    let upstreams = Upstreams::default();
+    let (open, _peer) = tokio::io::duplex(1024);
+    let sender = upstreams
+        .client(open)
+        .await
+        .expect("before the lease ran out");
+    upstreams.stop();
+    assert!(
+        sender.is_closed()
+            || tokio::time::timeout(Duration::from_secs(2), async {
+                let mut sender = sender;
+                while sender.ready().await.is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_ok(),
+        "stop closes the open upstream"
+    );
+    let (late, _peer) = tokio::io::duplex(1024);
+    let Err(error) = upstreams.client(late).await else {
+        panic!("an upstream opened after stop");
+    };
+    assert!(error.to_string().contains("lease expired"), "{error}");
+}

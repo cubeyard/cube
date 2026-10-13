@@ -12,7 +12,8 @@
  * CA, private, metadata, the host's own and cubed's addresses refused,
  * CONNECT, Upgrade and other ports refused, deny_hosts, DENY, credential
  * rules and placeholders, a policy replaced by a new start, the lease
- * (3 s here) running out with an open flow closed and cubed's return, and
+ * (3 s here) running out (new flows and requests refused, a download's
+ * upstream closed, an open connection left to drain) and cubed's return, and
  * the runner's report stream read as cubed would read it, with
  * `dropped_before` after its queue overflowed.
  *
@@ -530,16 +531,20 @@ try {
       assert.ok(got.every(r => r.ref?.id === ref.id && r.ref?.owner === ref.owner && r.droppedBefore === 0n));
       note(`V5 6: ${got.length} reports on the runner's report stream, reasons and hosts as refused`);
 
-      // 5. the lease: 3 s after cubed's last connection goes, new flows are
-      // refused and open ones closed; the next connection ends the grace.
-      // The guest runs on its own meanwhile: probes every 250 ms, a flow held
-      // open from the start, and (once the lease is over) 300 connections,
+      // 5. the lease: 3 s after cubed's last connection goes, new flows and
+      // requests are refused and upstreams closed; an open connection is the
+      // guest's to end (drained, never reset); the next connection ends the
+      // grace. The guest runs on its own meanwhile: probes every 250 ms, a
+      // connection held open from the start that asks once the lease is over,
+      // a download under way, and (once the lease is over) 300 connections,
       // more refusals than the runner's queue of 256 holds.
       await startWith(policyA);
       const leaseHolder = await egressWorkspace.lease({ owner: "pi" });
       const script = [
-        "rm -f /tmp/lease.log /tmp/held.log",
-        "( exec 3<>/dev/tcp/203.0.113.1/80; cat <&3 >/dev/null; date +%s%3N > /tmp/held.log ) &",
+        "rm -f /tmp/lease.log /tmp/held.log /tmp/dl.log",
+        "( exec 3<>/dev/tcp/203.0.113.1/80; sleep 7.5; printf 'GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n' >&3; " +
+          "timeout 10 cat <&3 | tr -d '\\r' | grep -iE '^HTTP/|^x-cube-denied:' | tr '\\n' '|' > /tmp/held.log ) &",
+        "( curl -s -o /dev/null --limit-rate 200k -m 60 -w '%{http_code}|%{size_download}|%{exitcode}|%{errormsg}\\n' 'https://speed.cloudflare.com/__down?bytes=25000000' > /tmp/dl.log; date +%s%3N >> /tmp/dl.log ) &",
         "( sleep 7; for i in $(seq 1 300); do (exec 3<>/dev/tcp/203.0.113.1/80) 2>/dev/null; done; date +%s%3N > /tmp/flood.log ) &",
         "for i in $(seq 1 64); do echo \"$(date +%s%3N) $(curl -s -o /dev/null -m 1 -w '%{http_code}' http://example.com/)\" >> /tmp/lease.log; sleep 0.25; done",
         "wait",
@@ -561,9 +566,10 @@ try {
       const settled = await settleOperation(backWorkspace, backLease.token, "v5-lease");
       await backWorkspace.release(backLease.token);
       assert.equal(settled.state, "succeeded", JSON.stringify(settled));
-      const log = (await shell(backWorkspace, "v5-lease-log", "cat /tmp/lease.log; echo held $(cat /tmp/held.log); echo flood $(cat /tmp/flood.log)")).output.trim().split("\n");
+      const log = (await shell(backWorkspace, "v5-lease-log", "cat /tmp/lease.log; echo \"held $(cat /tmp/held.log)\"; echo \"dl $(cat /tmp/dl.log | tr '\\n' '|')\"; echo flood $(cat /tmp/flood.log)")).output.trim().split("\n");
       const flood = Number(log.pop()!.split(" ")[1]);
-      const held = Number(log.pop()!.split(" ")[1]);
+      const [dlStatus, dlBytes, dlExit, dlError, dlEnd] = log.pop()!.slice(3).split("|");
+      const held = log.pop()!.slice(5);
       const probes = log.map(line => line.split(" ")).map(([at, status]) => ({ at: Number(at), status }));
       const leaseMs = 3000;
       const within = probes.filter(p => p.at < lost + leaseMs - 500);
@@ -572,13 +578,24 @@ try {
       assert.ok(within.length >= 4 && within.every(p => p.status === "200"), `within the lease: ${show(within)}`);
       assert.ok(expired.length >= 4 && expired.every(p => p.status !== "200"), `after it: ${show(expired)}`);
       assert.ok(again.length >= 2 && again.every(p => p.status === "200"), `after cubed came returned: ${show(again)}`);
-      assert.ok(held - lost >= leaseMs - 300 && held - lost < leaseMs + 2000, `the held flow closed ${held - lost} ms after cubed went (lease ${leaseMs} ms)`);
+      // The held connection was not closed: asked after the lease, it answers that.
+      assert.match(held, /^HTTP\/1\.1 403[^|]*\|x-cube-denied: egress lease expired/i, `the held connection: ${held}`);
+      // The download's upstream closed when the lease ran out: the guest got
+      // what the runner had buffered for it (it reads at 200 KB/s, so that
+      // drains for a while), then EOF; never a reset, never the full 25 MB
+      // (nor curl's own 60 s limit). At most 200 KB/s until the lease ended
+      // plus the runner's buffers for one flow (a few MiB).
+      const dlAt = Number(dlEnd) - lost;
+      const cap = (leaseMs + 4000) / 1000 * 200 * 1024 + 4 * 1024 * 1024;
+      assert.ok(dlStatus === "200" && Number(dlBytes) > 0 && Number(dlBytes) < cap && !["0", "28"].includes(dlExit ?? "") && dlAt < 50000,
+        `the download: ${dlStatus}, ${dlBytes} bytes (at most ${Math.round(cap)}), exit ${dlExit} "${dlError}", ended ${dlAt} ms after cubed went`);
+      assert.doesNotMatch(dlError ?? "", /reset/i, "never a reset");
       assert.ok(flood > lost + leaseMs && flood < returned, `the 300 connections ran while the lease was over (${flood - lost} ms after cubed went, returned at ${returned - lost})`);
-      note(`V5 5: lease 3 s: ${within.length} probes 200 within it, ${expired.length} refused after it, ${again.length} 200 after cubed came back; the held flow closed ${held - lost} ms after cubed went`);
+      note(`V5 5: lease 3 s: ${within.length} probes 200 within it, ${expired.length} refused after it, ${again.length} 200 after cubed came back; the held connection answered "${held.split("|")[0]}" after the lease (not closed); a download ended ${dlAt} ms after cubed went, after draining (${dlBytes} bytes, curl exit ${dlExit}: ${dlError})`);
 
       // 6b. what was refused while cubed was gone, then the count of what the full queue dropped
       const queued = await reader.take(256, 30000);
-      assert.ok(queued.every(r => r.reason === "lease_expired" && /^203\.0\.113\.1:80$|^[0-9.]+:(80|443)$/.test(r.host)), show(queued.slice(0, 3)));
+      assert.ok(queued.every(r => r.reason === "lease_expired" && /^[0-9.]+:(80|443)$|^example\.com$/.test(r.host)), show(queued.slice(0, 3)));
       const afterFlood = await shell(backWorkspace, "v5-after-flood", "curl -s -o /dev/null -m 20 -D - https://example.net/ | tr -d '\\r' | sed -n 's/^x-cube-denied: //Ip'; true");
       assert.equal(afterFlood.output.trim(), "host is denied by the egress policy");
       const [next] = await reader.take(1, 20000);
