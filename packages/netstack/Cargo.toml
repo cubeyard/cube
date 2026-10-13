@@ -13,9 +13,14 @@ name = "cube_netstack"
 # Lets `Upstream` map hosts to local fake upstreams without the public
 # address check, for tests. Never enabled in release builds.
 test-hooks = []
+# `Ca::from_loaded`: a CA kept and loaded by its owner (berth), whose issuer
+# is read from its certificate (rcgen's X.509 parser). The gateway does not
+# need it.
+loaded-ca = ["rcgen/x509-parser"]
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 bytes = "1"
 http = "1"
 hyper = { version = "1", features = ["client", "http1"] }

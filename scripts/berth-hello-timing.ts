@@ -1,0 +1,73 @@
+/** Hello time of a keel machine under `berth vm`: from `machine_start` to
+ * the agent's `hello` (a new session in `status.guest`), over N stops and
+ * starts of one machine. Masterplan B-4 asks for it with and without the
+ * network: run it with this head's berth (virtio-net, `ip=` on the kernel
+ * command line) and with the berth of the base commit (no network device);
+ * the script itself does not depend on either.
+ *
+ *   node scripts/berth-hello-timing.ts <berth> [runs=10]
+ *
+ * Needs CUBE_TEST_BERTH_{QEMU,QEMU_IMG,KEEL,IMAGE} and
+ * CUBE_TEST_BERTH_PULLED (a berth directory the image was pulled into, as
+ * runner-vm-test.ts takes it), CUBE_TEST_BERTH_ACCEL (kvm or hvf) and
+ * optionally CUBE_TEST_BERTH_TMP. Prints one JSON line. Loopback only; the
+ * machine and its directory are removed at the end. */
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { randomBytes } from "node:crypto";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
+import { RunnerSession, loadSessionConfig } from "../packages/server/src/runner-session.ts";
+
+const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
+const runs = Number(process.argv[3] ?? 10);
+const env = process.env;
+const [qemu, qemuImg, keel, image, pulled] = ["QEMU", "QEMU_IMG", "KEEL", "IMAGE", "PULLED"].map(k => env[`CUBE_TEST_BERTH_${k}`] ?? "");
+assert.ok(qemu && qemuImg && keel && image && pulled, "CUBE_TEST_BERTH_{QEMU,QEMU_IMG,KEEL,IMAGE,PULLED} are needed");
+const accel = env.CUBE_TEST_BERTH_ACCEL ?? (process.platform === "darwin" ? "hvf" : "kvm");
+const root = fs.realpathSync(fs.mkdtempSync(path.join(env.CUBE_TEST_BERTH_TMP ?? "/tmp", "cht-")));
+const directory = path.join(root, "m");
+const controlKey = path.join(root, "control.key");
+const control = JSON.parse(execFileSync(binary, ["keygen", "--key", controlKey], { encoding: "utf8" })) as { peerId: string };
+for (const part of ["images", "layers"]) fs.cpSync(path.join(pulled, part), path.join(directory, part), { recursive: true });
+
+let child: ChildProcess | undefined;
+let session: RunnerSession | undefined;
+try {
+  child = spawn(binary, ["vm", "--dir", directory, "--qemu", qemu, "--qemu-img", qemuImg, "--keel", keel, "--accel", accel, "--image", image,
+    "--allow-peer", control.peerId, "--node-id", "node-hello-timing", "--listen", "127.0.0.1:0"], { stdio: ["ignore", "ignore", "pipe"], detached: true });
+  let banner = "";
+  child.stderr!.setEncoding("utf8");
+  await new Promise<void>((resolve, reject) => {
+    child!.stderr!.on("data", chunk => { banner += chunk; if (banner.includes("waiting for cubed")) resolve(); });
+    child!.once("exit", code => reject(new Error(`berth vm exited (${code}): ${banner}`)));
+  });
+  const field = (name: string) => banner.match(new RegExp(`^${name}: (.+)$`, "m"))?.[1]?.trim() ?? "";
+  const configPath = path.join(root, "runner.json");
+  fs.writeFileSync(configPath, JSON.stringify({ version: 2, protocol: 4, binding: { nodeId: "node-hello-timing", threadId: "t", environmentId: 1 },
+    controlKey, serverPeer: field("peer"), network: "loopback", address: field("listen").split(", ")[0] }), { mode: 0o600 });
+  session = new RunnerSession(loadSessionConfig(configPath).config);
+  const ref = { owner: "timing", id: randomBytes(8).toString("hex") };
+  const fence = { epoch: 1n };
+  await session.machine({ case: "machineCreate", value: { ref, fence, spec: { source: { case: "base", value: true }, size: { vcpus: 2, memoryMib: 1024, diskGib: 4 } } } });
+  const samples: number[] = [];
+  let previous = "";
+  for (let i = 0; i < runs; i++) {
+    const t0 = performance.now();
+    await session.machine({ case: "machineStart", value: { ref, fence } });
+    const up = await session.until(ref, m => !!m.status?.guest?.session && m.status.guest.session !== previous, 180000);
+    samples.push(Math.round(performance.now() - t0));
+    previous = up.status!.guest!.session;
+    await session.call({ case: "machineStop", value: { ref, fence } }, 70000);
+  }
+  const sorted = [...samples].sort((a, b) => a - b);
+  const at = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(q * (sorted.length - 1) + 0.5))]!;
+  const network = fs.readFileSync(path.join(directory, ref.id, "argv.json"), "utf8").includes("virtio-net-pci");
+  console.log(JSON.stringify({ berth: binary, accel, network, runs, ms: samples, median: at(0.5), p25: at(0.25), p75: at(0.75), min: sorted[0], max: sorted.at(-1) }));
+} finally {
+  await session?.close();
+  if (child && child.exitCode === null) { const exited = once(child, "exit"); process.kill(-child.pid!, "SIGINT"); await exited; }
+  try { execFileSync("pkill", ["-KILL", "-f", directory], { stdio: "ignore" }); } catch { /* none left */ }
+  fs.rmSync(root, { recursive: true, force: true });
+}

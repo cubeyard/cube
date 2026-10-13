@@ -39,7 +39,9 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { MachineStatus_Phase, Runner_Kind, type Machine } from "../src/gen/runner_pb.js";
+import { fromJsonString } from "@bufbuild/protobuf";
+import { Endpoint, EndpointAddr, EndpointId, SecretKey } from "@number0/iroh/index.js";
+import { EgressPolicy_Default, EgressReportSchema, MachineStatus_Phase, OpenSchema, Runner_Kind, type EgressReport, type Machine } from "../src/gen/runner_pb.js";
 import { RunnerError, RunnerSession, loadSessionConfig } from "../src/runner-session.ts";
 import { GuestTransportError } from "../src/guest-ssh.ts";
 import { resumeWorkspace } from "../src/vm.ts";
@@ -188,6 +190,50 @@ async function stopVia(session: RunnerSession, ref: { owner: string; id: string 
   return result.value as Machine;
 }
 
+/** cubed's end of the runner's report stream (masterplan B-4), as the test
+ * plays it: its own connection with the control key; the runner opens one
+ * stream on it with `Open.report` and writes `EgressReport` frames. */
+async function reportReader(address: string, peer: string) {
+  const builder = Endpoint.builder();
+  builder.applyMinimal();
+  const bytes = fs.readFileSync(controlKey);
+  builder.secretKey(SecretKey.fromBytes(Array.from(bytes)).toBytes());
+  builder.alpns([]);
+  builder.bindAddr("127.0.0.1:0");
+  const endpoint = await builder.bind();
+  const connection = await endpoint.connect(new EndpointAddr(EndpointId.fromBytes(Array.from(Buffer.from(peer, "hex"))), null, [address]),
+    Array.from(Buffer.from("cubeyard/runner/4")));
+  const received: EgressReport[] = [];
+  let wake = () => {};
+  let ended = false;
+  void (async () => {
+    try {
+      const stream = await connection.acceptBi();
+      const frame = async () => {
+        const length = Buffer.from(await stream.recv.readExact(4)).readUInt32BE();
+        return Buffer.from(await stream.recv.readExact(length)).toString("utf8");
+      };
+      const opened = fromJsonString(OpenSchema, await frame());
+      assert.equal(opened.kind.case, "report", "the runner's stream is a report stream");
+      for (;;) { received.push(fromJsonString(EgressReportSchema, await frame())); wake(); }
+    } catch { ended = true; wake(); }
+  })();
+  return {
+    /** The next `n` reports, in order. */
+    async take(n: number, ms: number): Promise<EgressReport[]> {
+      const deadline = Date.now() + ms;
+      while (received.length < n) {
+        if (ended) throw new Error(`the report stream ended after ${received.length} of ${n}`);
+        if (Date.now() > deadline) throw new Error(`${received.length} of ${n} reports in ${ms} ms: ${show(received)}`);
+        await new Promise<void>(resolve => { wake = resolve; setTimeout(resolve, 200); });
+      }
+      return received.splice(0, n);
+    },
+    discard() { received.splice(0); },
+    async close() { connection.close(0n, []); await endpoint.close(); },
+  };
+}
+
 // The image, as the runner reads it: pulled into its directory first.
 const firstArgs = ["--allow-peer", control.peerId, "--node-id", node, "--listen", "127.0.0.1:0", "--labels", "site=test"];
 assert.match(refused(vmArgs(firstArgs).slice(1)), /pull it first: berth image pull/);
@@ -305,7 +351,7 @@ try {
   note(`started: boot ${firstBoot}; agent hello, session ${firstSession}, setup done ${Date.now() - t0} ms after the start; ready=${guest.ready}${guest.ready ? "" : ` ("${guest.reason}")`}`);
 
   // A guest stream: hello is answered by the agent itself (also when not ready)
-  const transport = session.guest(ref, () => epoch);
+  let transport = session.guest(ref, () => epoch);
   const agentHello = await transport.call("hello", {});
   assert.equal(agentHello.header.bootId, guest.bootId, "the guest stream reaches this machine's agent");
   assert.equal(agentHello.header.ready, guest.ready);
@@ -392,6 +438,141 @@ try {
       const still = await shell(workspace, "persist-read-again", "cat persist.txt");
       assert.equal(still.output, token);
       note(`forced stop after ${waited} ms (guest paused: no answer to shutdown within 30 s), journaled forced; restarted ready with the data`);
+
+      // ------------------------------------------------ V5 (masterplan B-4)
+      // The runner's own egress: the test plays cubed, reading the runner's
+      // report stream on a connection of its own, opened before any other
+      // (the runner writes reports on one connection at a time).
+      for (const s of sessions.splice(0)) await s.close();
+      let reader = await reportReader(runner.address, runner.peer);
+      session = open();
+      assert.equal((await session.hello()).runner?.network?.egress, true, "Runner.network.egress");
+      const open443 = { case: "https" as const, value: {} };
+      const policyA = {
+        default: EgressPolicy_Default.ALLOW_PUBLIC_HTTP, denyHosts: ["example.net"],
+        rules: [{ hosts: ["api.github.com"], ports: [], kind: { case: "https" as const, value: { credential: { name: "github" } } } }],
+        lease: { seconds: 3n, nanos: 0 },
+      };
+      const startWith = async (policy: object) =>
+        await session.machine({ case: "machineStart", value: { ref, fence: { epoch: BigInt(epoch) }, boot: { documents, mac: "" }, policy: policy as never } });
+      // The machine runs: a new start replaces its policy.
+      assert.equal((await startWith(policyA)).status?.phase, MachineStatus_Phase.RUNNING);
+      const egressWorkspace = new VmWorkspace({ guest: session.guest(ref, () => epoch), leases: store, owner: "pi", binding: `runner-vm-test-egress:${process.pid}`, retryMs: 2000 });
+      const run = async (key: string, command: string) => (await shell(egressWorkspace, key, command)).output.trim();
+      const code = (key: string, args: string) => run(key, `curl -s -o /dev/null -m 20 -w '%{http_code}' ${args}; true`);
+      const deniedBy = (key: string, args: string) => run(key, `curl -s -o /dev/null -m 20 -D - ${args} | tr -d '\\r' | sed -n 's/^x-cube-denied: //Ip'; true`);
+      // The guest dials any address; the runner names the upstream by Host or SNI.
+      const via = "--connect-to ::203.0.113.1:";
+
+      // 1. public HTTPS through the interception, trusted through the runner's CA
+      assert.equal(await code("v5-https", "https://example.com/"), "200");
+      assert.equal(await code("v5-http", "http://example.com/"), "200");
+      const issuer = await run("v5-issuer", "curl -sv -o /dev/null https://example.com/ 2>&1 | sed -n 's/^\\* *issuer: //p'");
+      assert.match(issuer, /cube runner CA [0-9a-f]{12}/, `the leaf is the runner CA's: ${issuer}`);
+      const git = await run("v5-git", "git ls-remote https://github.com/git/git HEAD >/dev/null 2>&1; echo $?");
+      assert.equal(git, "0", "git trusts the runner CA");
+      const nodeFetch = await run("v5-node", "command -v node >/dev/null && node -e \"fetch('https://example.com/').then(r => console.log(r.status), e => console.log('error', e.cause?.code ?? e.message))\" || echo absent");
+      assert.ok(nodeFetch === "200" || nodeFetch === "absent", `node: ${nodeFetch}`);
+      note(`V5 1: https://example.com 200 and http:// 200 through the runner; issuer "${issuer}"; git ls-remote ok; node: ${nodeFetch}`);
+
+      // 2. private, link-local/metadata, the runner host's own and cubed's addresses
+      const own = Object.values(os.networkInterfaces()).flat().filter(a => a && a.family === "IPv4").map(a => a!.address);
+      const cubedAddress = "127.0.0.1"; // cubed reaches the runner over loopback here
+      const forbidden = [...new Set(["10.1.2.3", "192.168.1.1", "169.254.169.254", "192.168.127.1", cubedAddress, ...own])];
+      for (const [i, host] of forbidden.entries()) {
+        assert.equal(await deniedBy(`v5-addr-${i}`, `${via} http://${host}/`), "upstream address is not public", host);
+      }
+      note(`V5 2: refused as not public: ${forbidden.join(", ")}`);
+
+      // 3. CONNECT and Upgrade refused; other ports reset at once
+      const connect = await run("v5-connect", "exec 3<>/dev/tcp/203.0.113.1/80; printf 'CONNECT example.com:443 HTTP/1.1\\r\\nHost: example.com:443\\r\\n\\r\\n' >&3; head -n1 <&3 | tr -d '\\r'");
+      assert.match(connect, /^HTTP\/1\.1 403/, connect);
+      assert.equal(await deniedBy("v5-upgrade", "-H 'Connection: Upgrade' -H 'Upgrade: websocket' https://example.com/"), "protocol upgrades are not supported");
+      for (const port of [22, 8080]) {
+        const reset = await run(`v5-port-${port}`, `s=$(date +%s%N); (exec 3<>/dev/tcp/203.0.113.1/${port}) 2>&1; echo "rc=$? ms=$(( ($(date +%s%N) - s) / 1000000 ))"`);
+        assert.match(reset, /Connection refused[\s\S]*rc=1 ms=\d+$/, reset);
+        assert.ok(Number(reset.match(/ms=(\d+)/)![1]) < 2000, reset);
+      }
+      note("V5 3: CONNECT 403, Upgrade 403, ports 22 and 8080 reset at once");
+
+      // 4. deny_hosts, a credential rule (B-5 not yet), a placeholder elsewhere, DENY by default
+      assert.equal(await deniedBy("v5-deny-host", "https://example.net/"), "host is denied by the egress policy");
+      assert.equal(await deniedBy("v5-credential", "-H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/"), "credentials are not available on this runner yet");
+      assert.equal(await deniedBy("v5-placeholder", "-H \"Authorization: Bearer $GH_TOKEN\" https://example.com/"), "a secret placeholder is only sent where a credential rule allows it");
+      await startWith({ default: EgressPolicy_Default.DENY, denyHosts: [], rules: [{ hosts: ["example.com"], ports: [443], kind: open443 }], lease: { seconds: 3n, nanos: 0 } });
+      assert.equal(await code("v5-deny-allowed", "https://example.com/"), "200");
+      assert.equal(await deniedBy("v5-deny-other", "https://example.org/"), "host is not allowed by the egress policy");
+      assert.equal(await deniedBy("v5-deny-http", "http://example.com/"), "host is not allowed by the egress policy");
+      note("V5 4: deny_hosts, credential_unavailable, placeholder and DENY by default refused; a new start replaced the policy of the running machine");
+
+      // 6. the reports so far, as cubed reads them
+      const expected: Array<[string, string]> = [
+        ...forbidden.map(h => [h, "address"] as [string, string]),
+        ["example.com:443", "connect"], ["example.com", "upgrade"], ["example.net", "deny_host"],
+        ["api.github.com", "credential_unavailable"], ["example.com", "placeholder"], ["example.org", "policy"], ["example.com", "policy"],
+      ];
+      const got = await reader.take(expected.length, 20000);
+      assert.deepEqual(got.map(r => [r.host, r.reason]), expected, show(got));
+      assert.ok(got.every(r => r.ref?.id === ref.id && r.ref?.owner === ref.owner && r.droppedBefore === 0n));
+      note(`V5 6: ${got.length} reports on the runner's report stream, reasons and hosts as refused`);
+
+      // 5. the lease: 3 s after cubed's last connection goes, new flows are
+      // refused and open ones closed; the next connection ends the grace.
+      // The guest runs on its own meanwhile: probes every 250 ms, a flow held
+      // open from the start, and (once the lease is over) 300 connections,
+      // more refusals than the runner's queue of 256 holds.
+      await startWith(policyA);
+      const leaseHolder = await egressWorkspace.lease({ owner: "pi" });
+      const script = [
+        "rm -f /tmp/lease.log /tmp/held.log",
+        "( exec 3<>/dev/tcp/203.0.113.1/80; cat <&3 >/dev/null; date +%s%3N > /tmp/held.log ) &",
+        "( sleep 7; for i in $(seq 1 300); do (exec 3<>/dev/tcp/203.0.113.1/80) 2>/dev/null; done; date +%s%3N > /tmp/flood.log ) &",
+        "for i in $(seq 1 64); do echo \"$(date +%s%3N) $(curl -s -o /dev/null -m 1 -w '%{http_code}' http://example.com/)\" >> /tmp/lease.log; sleep 0.25; done",
+        "wait",
+      ].join("\n");
+      await egressWorkspace.exec(leaseHolder.token, "v5-lease", { command: script, timeoutMs: 120000 });
+      await egressWorkspace.release(leaseHolder.token);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      // cubed goes: every connection from it closes.
+      await reader.close();
+      for (const s of sessions.splice(0)) await s.close();
+      const lost = Date.now();
+      await new Promise(resolve => setTimeout(resolve, 9000));
+      reader = await reportReader(runner.address, runner.peer);
+      session = open();
+      const returned = Date.now();
+      await session.hello();
+      const backWorkspace = new VmWorkspace({ guest: session.guest(ref, () => epoch), leases: store, owner: "pi", binding: `runner-vm-test-egress-2:${process.pid}`, retryMs: 2000 });
+      const backLease = await backWorkspace.lease({ owner: "pi" });
+      const settled = await settleOperation(backWorkspace, backLease.token, "v5-lease");
+      await backWorkspace.release(backLease.token);
+      assert.equal(settled.state, "succeeded", JSON.stringify(settled));
+      const log = (await shell(backWorkspace, "v5-lease-log", "cat /tmp/lease.log; echo held $(cat /tmp/held.log); echo flood $(cat /tmp/flood.log)")).output.trim().split("\n");
+      const flood = Number(log.pop()!.split(" ")[1]);
+      const held = Number(log.pop()!.split(" ")[1]);
+      const probes = log.map(line => line.split(" ")).map(([at, status]) => ({ at: Number(at), status }));
+      const leaseMs = 3000;
+      const within = probes.filter(p => p.at < lost + leaseMs - 500);
+      const expired = probes.filter(p => p.at > lost + leaseMs + 1500 && p.at < returned - 500);
+      const again = probes.filter(p => p.at > returned + 2500);
+      assert.ok(within.length >= 4 && within.every(p => p.status === "200"), `within the lease: ${show(within)}`);
+      assert.ok(expired.length >= 4 && expired.every(p => p.status !== "200"), `after it: ${show(expired)}`);
+      assert.ok(again.length >= 2 && again.every(p => p.status === "200"), `after cubed came returned: ${show(again)}`);
+      assert.ok(held - lost >= leaseMs - 300 && held - lost < leaseMs + 2000, `the held flow closed ${held - lost} ms after cubed went (lease ${leaseMs} ms)`);
+      assert.ok(flood > lost + leaseMs && flood < returned, `the 300 connections ran while the lease was over (${flood - lost} ms after cubed went, returned at ${returned - lost})`);
+      note(`V5 5: lease 3 s: ${within.length} probes 200 within it, ${expired.length} refused after it, ${again.length} 200 after cubed came returned; the held flow closed ${held - lost} ms after cubed went`);
+
+      // 6b. what was refused while cubed was gone, then the count of what the full queue dropped
+      const queued = await reader.take(256, 30000);
+      assert.ok(queued.every(r => r.reason === "lease_expired" && /^203\.0\.113\.1:80$|^[0-9.]+:(80|443)$/.test(r.host)), show(queued.slice(0, 3)));
+      assert.equal(await deniedBy("v5-after-flood", "https://example.net/"), "host is denied by the egress policy");
+      const [next] = await reader.take(1, 20000);
+      assert.equal(next!.reason, "deny_host");
+      assert.ok(next!.droppedBefore > 0n, `dropped_before ${next!.droppedBefore}`);
+      note(`V5 6b: 256 lease_expired reports kept while cubed was gone; the next report says dropped_before=${next!.droppedBefore}`);
+      reader.discard();
+      await reader.close();
+      transport = session.guest(ref, () => epoch);
     } finally {
       store.close();
       fs.rmSync(leases, { recursive: true, force: true });

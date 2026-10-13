@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! .berth/ca/       0700, the runner's account
-//!   ca.key         0600, PKCS#8 PEM (P-256): never logged, never sent
+//!   ca.key         0600, PKCS#8 PEM (P-256): never logged, never sent; signs
+//!                  the leaves of intercepted HTTPS (egress.rs)
 //!   ca.pem         0644, the certificate: Runner.ca_pem and MachineSetup.ca_pem
 //! ```
 //!
@@ -13,9 +14,14 @@
 //! another account owns, a key that is not P-256, or a certificate that does
 //! not carry the key is refused, and the runner does not start: it never
 //! replaces a CA it cannot read on its own. Remove both files to have a new
-//! one made (machines get the new certificate with their next setup). Only
-//! the certificate is used until the runner's egress (masterplan B-4) signs
-//! with the key; nothing intercepts traffic yet.
+//! one made (machines get the new certificate with their next setup).
+//!
+//! This file is the only loader. The runner's egress (masterplan B-4) gets
+//! the loaded key and certificate as cube-netstack's `Ca::from_loaded`,
+//! which reads the leaves' issuer from this certificate (`cube runner CA`),
+//! never from netstack's own parameters (`cube installation CA`, the
+//! gateway's), and checks that a leaf verifies against it before the runner
+//! serves.
 use std::{
     fs,
     io::Write,
@@ -29,6 +35,7 @@ use rcgen::{
     PKCS_ECDSA_P256_SHA256,
 };
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 const YEARS: i64 = 10;
 
@@ -37,6 +44,8 @@ pub struct RunnerCa {
     pub pem: String,
     /// sha256 of the certificate's DER, for people (`describe`).
     pub sha256: String,
+    /// Mints the leaves of intercepted HTTPS with the CA's key.
+    pub signer: Arc<cube_netstack::ca::Ca>,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -118,7 +127,8 @@ impl RunnerCa {
             "{} must be a file of the runner account's, closed to group and others (0600)",
             key_path.display()
         );
-        let key = KeyPair::from_pem(&fs::read_to_string(&key_path)?)
+        let key_pem = fs::read_to_string(&key_path)?;
+        let key = KeyPair::from_pem(&key_pem)
             .with_context(|| format!("{} is not a PEM key", key_path.display()))?;
         ensure!(
             key.algorithm() == &PKCS_ECDSA_P256_SHA256,
@@ -135,9 +145,12 @@ impl RunnerCa {
             pem_path.display(),
             key_path.display()
         );
+        let signer = cube_netstack::ca::Ca::from_loaded(&key_pem, &pem)
+            .with_context(|| format!("{} cannot sign for the runner's egress", dir.display()))?;
         Ok(Self {
             sha256: hex(&Sha256::digest(&der)),
             pem,
+            signer: Arc::new(signer),
         })
     }
 }
@@ -169,6 +182,62 @@ mod tests {
             (again.pem, again.sha256),
             (first.pem, first.sha256),
             "kept, not made again"
+        );
+    }
+
+    #[test]
+    fn leaves_chain_to_the_runner_ca_by_its_own_name() {
+        use rustls::{
+            RootCertStore,
+            client::{WebPkiServerVerifier, danger::ServerCertVerifier},
+            pki_types::{CertificateDer, ServerName, UnixTime},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca");
+        let runner = RunnerCa::load_or_create(&ca).unwrap();
+        let leaf = runner.signer.leaf("example.com").unwrap();
+        // The leaf names the runner CA as its issuer, byte for byte as the
+        // certificate names itself.
+        let cn = |der: &[u8], marker: &[u8]| der.windows(marker.len()).any(|w| w == marker);
+        assert!(cn(&leaf, b"cube runner CA "), "issuer is the runner CA");
+        assert!(!cn(&leaf, b"cube installation CA"));
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(CertificateDer::from_pem_slice(runner.pem.as_bytes()).unwrap())
+            .unwrap();
+        let verifier = WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            cube_netstack::ca::provider(),
+        )
+        .build()
+        .unwrap();
+        verifier
+            .verify_server_cert(
+                &leaf,
+                &[],
+                &ServerName::try_from("example.com").unwrap(),
+                &[],
+                UnixTime::now(),
+            )
+            .expect("a guest that trusts ca.pem trusts the leaf");
+        // The mismatch B-4 had to avoid: netstack's own loader rebuilds the
+        // issuer from its parameters ("cube installation CA ..."), and its
+        // leaves do not verify against the runner's certificate.
+        let wrong = cube_netstack::ca::Ca::load_or_create(&ca).unwrap();
+        assert!(
+            wrong.check_chain().is_err(),
+            "leaves named by netstack's own parameters must not verify"
+        );
+        assert!(
+            verifier
+                .verify_server_cert(
+                    &wrong.leaf("example.com").unwrap(),
+                    &[],
+                    &ServerName::try_from("example.com").unwrap(),
+                    &[],
+                    UnixTime::now(),
+                )
+                .is_err()
         );
     }
 

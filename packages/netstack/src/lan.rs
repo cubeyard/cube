@@ -1,7 +1,10 @@
-//! One virtual LAN per VM: 10.77.0.0/24, the gateway at .1, the guest at .2.
+//! One virtual LAN per VM: by default ([`Addressing::P3`]) 10.77.0.0/24, the
+//! gateway at .1, the guest at .2; another [`Addressing`] names other
+//! addresses and can leave DHCP out (a guest with a fixed address).
 //!
 //! smoltcp terminates the guest's TCP. DHCP is answered by hand (fixed lease,
-//! MTU 1500, router and resolver .1), DNS by [`crate::dns`]. A guest SYN to
+//! MTU 1500, router and resolver .1) when the addressing has it, DNS by
+//! [`crate::dns`]. A guest SYN to
 //! port 80 or 443 on any address gets a listening socket; every other TCP
 //! segment gets smoltcp's RST, other UDP is dropped and there is no IPv6.
 //! Established flows are handed to a [`FlowHandler`] as a [`FlowStream`].
@@ -47,6 +50,37 @@ use crate::dns;
 pub const GATEWAY_MAC: EthernetAddress = EthernetAddress([0x02, 0, 0, 0, 0, 0x01]);
 pub const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 1);
 pub const GUEST_IP: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 2);
+/// The LAN's two addresses, and whether it answers DHCP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Addressing {
+    /// The LAN's own address: router, resolver, source of dials.
+    pub gateway: Ipv4Addr,
+    /// The one guest address (leased by DHCP, or fixed in the guest).
+    pub guest: Ipv4Addr,
+    pub prefix: u8,
+    /// Without DHCP, DHCP requests are dropped: the guest has its address
+    /// from elsewhere (keel: the kernel command line).
+    pub dhcp: bool,
+}
+
+impl Addressing {
+    /// cube-gateway's LAN for protocol-3 runners.
+    pub const P3: Self = Self {
+        gateway: GATEWAY_IP,
+        guest: GUEST_IP,
+        prefix: 24,
+        dhcp: true,
+    };
+
+    fn netmask(&self) -> Ipv4Addr {
+        Ipv4Addr::from(
+            u32::MAX
+                .checked_shl(32 - u32::from(self.prefix))
+                .unwrap_or(0),
+        )
+    }
+}
+
 pub const EGRESS_PORTS: [u16; 2] = [80, 443];
 /// The MTU the guest is leased: the normal Ethernet MTU.
 pub const GUEST_MTU: u16 = 1500;
@@ -165,8 +199,19 @@ impl FrameInput {
 }
 
 impl Lan {
+    /// A LAN with [`Addressing::P3`].
     pub fn spawn(
         config: LanConfig,
+        sink: Box<dyn FrameSink>,
+        handler: Arc<dyn FlowHandler>,
+        resolver: Arc<dyn Resolver>,
+    ) -> Self {
+        Self::spawn_addressed(config, Addressing::P3, sink, handler, resolver)
+    }
+
+    pub fn spawn_addressed(
+        config: LanConfig,
+        addressing: Addressing,
         sink: Box<dyn FrameSink>,
         handler: Arc<dyn FlowHandler>,
         resolver: Arc<dyn Resolver>,
@@ -177,6 +222,7 @@ impl Lan {
         let task = tokio::spawn(
             Stack::new(
                 config,
+                addressing,
                 sink,
                 handler,
                 resolver,
@@ -201,7 +247,7 @@ impl Lan {
         Dialer(self.commands.clone())
     }
 
-    /// Opens a TCP connection from 10.77.0.1 to the guest on `port`.
+    /// Opens a TCP connection from the LAN's address to the guest on `port`.
     pub async fn dial(&self, port: u16) -> Result<FlowStream> {
         self.dialer().dial(port).await
     }
@@ -367,6 +413,7 @@ struct Flow {
 
 struct Stack {
     config: LanConfig,
+    addressing: Addressing,
     sink: Box<dyn FrameSink>,
     handler: Arc<dyn FlowHandler>,
     resolver: Arc<dyn Resolver>,
@@ -387,6 +434,7 @@ struct Stack {
 impl Stack {
     fn new(
         config: LanConfig,
+        addressing: Addressing,
         sink: Box<dyn FrameSink>,
         handler: Arc<dyn FlowHandler>,
         resolver: Arc<dyn Resolver>,
@@ -400,11 +448,13 @@ impl Stack {
         let mut iface =
             Interface::new(Config::new(GATEWAY_MAC.into()), &mut dev, NetInstant::now());
         iface.update_ip_addrs(|a| {
-            let _ = a.push(IpCidr::new(GATEWAY_IP.into(), 24));
+            let _ = a.push(IpCidr::new(addressing.gateway.into(), addressing.prefix));
         });
         // AnyIP plus a default route through our own address: the gateway
         // terminates TCP for every destination the guest dials.
-        let _ = iface.routes_mut().add_default_ipv4_route(GATEWAY_IP);
+        let _ = iface
+            .routes_mut()
+            .add_default_ipv4_route(addressing.gateway);
         iface.set_any_ip(true);
         let mut sockets = SocketSet::new(vec![]);
         let dns = {
@@ -412,7 +462,7 @@ impl Stack {
                 || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 32], vec![0; 32 * 1024]);
             let mut s = udp::Socket::new(meta(), meta());
             s.bind(IpListenEndpoint {
-                addr: Some(GATEWAY_IP.into()),
+                addr: Some(addressing.gateway.into()),
                 port: 53,
             })
             .expect("bind dns");
@@ -420,6 +470,7 @@ impl Stack {
         };
         Self {
             config,
+            addressing,
             sink,
             handler,
             resolver,
@@ -491,11 +542,13 @@ impl Stack {
         if eth.src_addr() != self.config.mac {
             return;
         }
-        if let Some(reply) = dhcp_reply(&frame, self.config.mac) {
+        if let Some(reply) = dhcp_reply(&frame, self.config.mac, &self.addressing) {
             if reply.1 {
                 self.stats.leased.store(true, Relaxed);
             }
-            self.dev.tx.push_back(reply.0);
+            if !reply.0.is_empty() {
+                self.dev.tx.push_back(reply.0);
+            }
             return;
         }
         if let Some((src, dst)) = tcp_syn(&frame)
@@ -587,9 +640,9 @@ impl Stack {
                     return;
                 };
                 let mut s = self.tcp_socket();
-                let remote = IpEndpoint::new(GUEST_IP.into(), port);
+                let remote = IpEndpoint::new(self.addressing.guest.into(), port);
                 let local = IpListenEndpoint {
-                    addr: Some(GATEWAY_IP.into()),
+                    addr: Some(self.addressing.gateway.into()),
                     port: local,
                 };
                 if let Err(e) = s.connect(self.iface.context(), remote, local) {
@@ -913,8 +966,13 @@ fn tcp_syn(frame: &[u8]) -> Option<(IpEndpoint, IpEndpoint)> {
 
 /// Answers DISCOVER/REQUEST from the guest's MAC with the fixed lease, the
 /// gateway as router and resolver, and MTU 1500. Returns the frame and
-/// whether it is an ACK.
-fn dhcp_reply(frame: &[u8], mac: EthernetAddress) -> Option<(Vec<u8>, bool)> {
+/// whether it is an ACK. Without DHCP the request is taken and dropped
+/// (an empty frame, which is not sent).
+fn dhcp_reply(
+    frame: &[u8],
+    mac: EthernetAddress,
+    addressing: &Addressing,
+) -> Option<(Vec<u8>, bool)> {
     let eth = EthernetFrame::new_checked(frame).ok()?;
     if eth.ethertype() != EthernetProtocol::Ipv4 {
         return None;
@@ -927,6 +985,10 @@ fn dhcp_reply(frame: &[u8], mac: EthernetAddress) -> Option<(Vec<u8>, bool)> {
     if udp.dst_port() != 67 {
         return None;
     }
+    if !addressing.dhcp {
+        return Some((vec![], false));
+    }
+    let (gateway, guest) = (addressing.gateway, addressing.guest);
     let dhcp = DhcpPacket::new_checked(udp.payload()).ok()?;
     let request = DhcpRepr::parse(&dhcp).ok()?;
     if request.client_hardware_address != mac {
@@ -937,10 +999,10 @@ fn dhcp_reply(frame: &[u8], mac: EthernetAddress) -> Option<(Vec<u8>, bool)> {
         DhcpMessageType::Request => {
             if request
                 .requested_ip
-                .is_some_and(|requested| requested != GUEST_IP)
+                .is_some_and(|requested| requested != guest)
                 || request
                     .server_identifier
-                    .is_some_and(|server| server != GATEWAY_IP)
+                    .is_some_and(|server| server != gateway)
             {
                 DhcpMessageType::Nak
             } else {
@@ -961,24 +1023,20 @@ fn dhcp_reply(frame: &[u8], mac: EthernetAddress) -> Option<(Vec<u8>, bool)> {
         secs: 0,
         client_hardware_address: request.client_hardware_address,
         client_ip: Ipv4Address::UNSPECIFIED,
-        your_ip: if nak {
-            Ipv4Address::UNSPECIFIED
-        } else {
-            GUEST_IP
-        },
-        server_ip: GATEWAY_IP,
-        router: (!nak).then_some(GATEWAY_IP),
-        subnet_mask: (!nak).then_some(Ipv4Address::new(255, 255, 255, 0)),
+        your_ip: if nak { Ipv4Address::UNSPECIFIED } else { guest },
+        server_ip: gateway,
+        router: (!nak).then_some(gateway),
+        subnet_mask: (!nak).then_some(addressing.netmask()),
         relay_agent_ip: Ipv4Address::UNSPECIFIED,
         broadcast: false,
         requested_ip: None,
         client_identifier: None,
-        server_identifier: Some(GATEWAY_IP),
+        server_identifier: Some(gateway),
         parameter_request_list: None,
         dns_servers: if nak {
             None
         } else {
-            Some(heapless::Vec::from_slice(&[GATEWAY_IP]).ok()?)
+            Some(heapless::Vec::from_slice(&[gateway]).ok()?)
         },
         max_size: None,
         lease_duration: (!nak).then_some(86400),
@@ -992,7 +1050,7 @@ fn dhcp_reply(frame: &[u8], mac: EthernetAddress) -> Option<(Vec<u8>, bool)> {
         dst_port: 68,
     };
     let ip_repr = Ipv4Repr {
-        src_addr: GATEWAY_IP,
+        src_addr: gateway,
         dst_addr: Ipv4Address::BROADCAST,
         next_header: IpProtocol::Udp,
         payload_len: udp_repr.header_len() + dhcp_len,
@@ -1012,7 +1070,7 @@ fn dhcp_reply(frame: &[u8], mac: EthernetAddress) -> Option<(Vec<u8>, bool)> {
     let mut datagram = UdpPacket::new_unchecked(packet.payload_mut());
     udp_repr.emit(
         &mut datagram,
-        &GATEWAY_IP.into(),
+        &gateway.into(),
         &Ipv4Address::BROADCAST.into(),
         dhcp_len,
         |buf| {

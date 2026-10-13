@@ -33,6 +33,12 @@ pub trait Service: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Vec<u8>, proto::Error>> + Send;
     /// Called once when the runner starts serving.
     fn serving(self: &Arc<Self>) {}
+    /// Called for each authenticated connection from cubed; what it returns
+    /// is dropped when the connection ends (`berth vm`: cubed's presence
+    /// for the egress lease, and the report stream).
+    fn attach(self: &Arc<Self>, _connection: &Connection) -> Box<dyn Send> {
+        Box::new(())
+    }
 }
 
 /// Every resource as PUT after a RESET, then a BOOKMARK, then each change;
@@ -67,6 +73,7 @@ pub async fn watch(
 
 /// Answers the streams of one authenticated connection.
 async fn serve_connection(service: Arc<impl Service>, connection: Connection) {
+    let _attached = service.attach(&connection);
     while let Ok((mut send, mut recv)) = connection.accept_bi().await {
         let service = service.clone();
         tokio::spawn(async move {
@@ -122,6 +129,18 @@ async fn stream<S: Service>(
         },
         Some(open::Kind::Dial(_)) => {
             write_frame(send, &answer(Some(unimplemented::<S>("dial")))).await?
+        }
+        // Runner -> cubed only.
+        Some(open::Kind::Report(_)) => {
+            write_frame(
+                send,
+                &answer(Some(refuse(
+                    Code::InvalidArgument,
+                    "open",
+                    "a report stream is opened by the runner",
+                ))),
+            )
+            .await?
         }
         None => {
             write_frame(
