@@ -160,6 +160,20 @@ impl Drop for Attached {
     }
 }
 
+/// Resolves once ordinary egress under the lease `lease()` may run again:
+/// cubed is back (or the lease, read again at every change, covers the time
+/// it has been gone). A runner that drops its presence never resolves it.
+pub async fn lease_restored(mut cubed: watch::Receiver<Cubed>, lease: impl Fn() -> Duration) {
+    loop {
+        if !cubed.borrow_and_update().expired(lease()) {
+            return;
+        }
+        if cubed.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
 /// Resolves once ordinary egress under the lease `lease()` (read again at
 /// every change) has run out: cubed gone for that long. A runner that
 /// drops its presence counts as gone.

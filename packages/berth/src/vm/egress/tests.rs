@@ -1067,6 +1067,16 @@ async fn egress_goes_on_for_the_lease_then_stops_new_flows_and_requests() {
 
     // cubed is back: the grace is over, egress again.
     let _back = env.presence.attach(None);
+    // The connection that outlived the grace works again (it was refused,
+    // not poisoned): its next request goes out.
+    assert_eq!(
+        kept.send_request(get("github.test", "/4", &[]))
+            .await
+            .expect("the surviving connection still answers")
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(env.tls.hits.load(Ordering::SeqCst), 3);
     let tcp = env.guest.connect(ANY, 80, 40063).await.unwrap();
     assert_eq!(
         request(tcp, get("plain.test", "/", &[])).await.0,
@@ -1189,11 +1199,11 @@ async fn a_lease_of_zero_stops_egress_when_cubed_goes_and_a_new_policy_applies()
 }
 
 #[tokio::test]
-async fn no_upstream_opens_once_the_flow_stopped_its_upstreams() {
+async fn no_upstream_opens_while_the_lease_is_over_and_one_opens_again_after() {
     let upstreams = Upstreams::default();
     let (open, _peer) = tokio::io::duplex(1024);
     let sender = upstreams
-        .client(open)
+        .client(open, || false)
         .await
         .expect("before the lease ran out");
     upstreams.stop();
@@ -1210,8 +1220,95 @@ async fn no_upstream_opens_once_the_flow_stopped_its_upstreams() {
         "stop closes the open upstream"
     );
     let (late, _peer) = tokio::io::duplex(1024);
-    let Err(error) = upstreams.client(late).await else {
-        panic!("an upstream opened after stop");
+    let Err(error) = upstreams.client(late, || true).await else {
+        panic!("an upstream opened while the lease is over");
     };
     assert!(error.to_string().contains("lease expired"), "{error}");
+    // cubed is back: the flow's next request may open an upstream again.
+    let (again, _peer) = tokio::io::duplex(1024);
+    upstreams
+        .client(again, || false)
+        .await
+        .expect("an upstream once the lease covers the flow again");
+}
+
+/// One guest connection over two losses of cubed: refused after the first
+/// lease, served again once cubed is back, and a download it starts then is
+/// stopped upstream when the lease runs out again (the flow re-arms).
+#[tokio::test]
+async fn a_surviving_connection_recovers_and_is_stopped_again_at_the_next_expiry() {
+    let lease = Duration::from_millis(1000);
+    let env = Env::new(open_policy(lease)).await;
+    let cubed = env.presence.attach(None);
+    let tcp = env.guest.connect(ANY, 80, 40090).await.unwrap();
+    let (mut conn, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
+        .await
+        .unwrap();
+    let ended = tokio::spawn(connection);
+    let status = |r: Response<Incoming>| r.status();
+    assert_eq!(
+        status(
+            conn.send_request(get("plain.test", "/1", &[]))
+                .await
+                .unwrap()
+        ),
+        StatusCode::OK
+    );
+    drop(cubed);
+    tokio::time::sleep(lease + Duration::from_millis(300)).await;
+    let refused = conn
+        .send_request(get("plain.test", "/2", &[]))
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            refused.status(),
+            refused.headers()[DENIED_HEADER].to_str().unwrap()
+        ),
+        (StatusCode::FORBIDDEN, Denial::LeaseExpired.message())
+    );
+    // cubed is back: the same connection is served again, at once.
+    let cubed = env.presence.attach(None);
+    assert_eq!(
+        status(
+            conn.send_request(get("plain.test", "/3", &[]))
+                .await
+                .unwrap()
+        ),
+        StatusCode::OK,
+        "a request on the surviving connection after cubed came back"
+    );
+    assert_eq!(env.plain.hits.load(Ordering::SeqCst), 2);
+    // A download on it, then cubed goes again: its upstream is stopped.
+    let download = conn
+        .send_request(get("stream.test", "/big", &[]))
+        .await
+        .unwrap();
+    assert_eq!(download.status(), StatusCode::OK);
+    let mut body = download.into_body();
+    let mut received = 0;
+    while received < 4096 {
+        let frame = body.frame().await.unwrap().unwrap();
+        received += frame.data_ref().map_or(0, |d| d.len());
+    }
+    drop(cubed);
+    let lost = std::time::Instant::now();
+    let drained = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(Ok(_)) = body.frame().await {}
+    })
+    .await;
+    assert!(drained.is_ok(), "the download ended");
+    let closed = env
+        .stream
+        .closed
+        .lock()
+        .unwrap()
+        .expect("the upstream was closed again");
+    let after = closed.duration_since(lost);
+    assert!(
+        after >= lease && after < lease + Duration::from_millis(1500),
+        "upstream closed {after:?} after cubed went the second time (lease {lease:?})"
+    );
+    drop(conn);
+    let _ = ended.await;
 }

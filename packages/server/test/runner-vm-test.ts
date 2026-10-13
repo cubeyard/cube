@@ -534,17 +534,19 @@ try {
       // 5. the lease: 3 s after cubed's last connection goes, new flows and
       // requests are refused and upstreams closed; an open connection is the
       // guest's to end (drained, never reset); the next connection ends the
-      // grace. The guest runs on its own meanwhile: probes every 250 ms, a
-      // connection held open from the start that asks once the lease is over,
-      // a download under way, and (once the lease is over) 300 connections,
-      // more refusals than the runner's queue of 256 holds.
+      // grace. The guest runs on its own meanwhile: probes every 250 ms, one
+      // keep-alive connection that asks before the loss, once the lease is
+      // over and again after cubed is back (curl spaces them 7.5 s apart and
+      // reuses the connection), a download under way (a pinned tag tarball
+      // from GitHub, which the gate reaches anyway), and (once the lease is
+      // over) 300 connections, more refusals than the runner's queue of 256
+      // holds.
       await startWith(policyA);
       const leaseHolder = await egressWorkspace.lease({ owner: "pi" });
       const script = [
         "rm -f /tmp/lease.log /tmp/held.log /tmp/dl.log",
-        "( exec 3<>/dev/tcp/203.0.113.1/80; sleep 7.5; printf 'GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n' >&3; " +
-          "timeout 10 cat <&3 | tr -d '\\r' | grep -iE '^HTTP/|^x-cube-denied:' | tr '\\n' '|' > /tmp/held.log ) &",
-        "( curl -s -o /dev/null --limit-rate 200k -m 60 -w '%{http_code}|%{size_download}|%{exitcode}|%{errormsg}\\n' 'https://speed.cloudflare.com/__down?bytes=25000000' > /tmp/dl.log; date +%s%3N >> /tmp/dl.log ) &",
+        "( curl -s -o /dev/null -o /dev/null -o /dev/null --rate 8/m -w '%{http_code} %{num_connects}\\n' 'http://example.com/?before' 'http://example.com/?expired' 'http://example.com/?back' | tr '\\n' '|' > /tmp/held.log ) &",
+        "( curl -s -o /dev/null --limit-rate 200k -m 60 -w '%{http_code}|%{size_download}|%{exitcode}|%{errormsg}\\n' 'https://codeload.github.com/git/git/tar.gz/refs/tags/v2.47.0' > /tmp/dl.log; date +%s%3N >> /tmp/dl.log ) &",
         "( sleep 7; for i in $(seq 1 300); do (exec 3<>/dev/tcp/203.0.113.1/80) 2>/dev/null; done; date +%s%3N > /tmp/flood.log ) &",
         "for i in $(seq 1 64); do echo \"$(date +%s%3N) $(curl -s -o /dev/null -m 1 -w '%{http_code}' http://example.com/)\" >> /tmp/lease.log; sleep 0.25; done",
         "wait",
@@ -577,21 +579,26 @@ try {
       const again = probes.filter(p => p.at > returned + 2500);
       assert.ok(within.length >= 4 && within.every(p => p.status === "200"), `within the lease: ${show(within)}`);
       assert.ok(expired.length >= 4 && expired.every(p => p.status !== "200"), `after it: ${show(expired)}`);
-      assert.ok(again.length >= 2 && again.every(p => p.status === "200"), `after cubed came returned: ${show(again)}`);
-      // The held connection was not closed: asked after the lease, it answers that.
-      assert.match(held, /^HTTP\/1\.1 403[^|]*\|x-cube-denied: egress lease expired/i, `the held connection: ${held}`);
+      assert.ok(again.length >= 2 && again.every(p => p.status === "200"), `after cubed came back: ${show(again)}`);
+      // One connection through the loss (curl reuses it: one connect): 200
+      // while cubed is here, 403 once the lease is over (not closed), and 200
+      // again once cubed is back (not poisoned by the stop).
+      assert.equal(held, "200 1|403 0|200 0|", `the held connection's three requests (status, connects): ${held}`);
       // The download's upstream closed when the lease ran out: the guest got
       // what the runner had buffered for it (it reads at 200 KB/s, so that
-      // drains for a while), then EOF; never a reset, never the full 25 MB
+      // drains for a while), then EOF; never a reset, never the full 11.4 MB
       // (nor curl's own 60 s limit). At most 200 KB/s until the lease ended
-      // plus the runner's buffers for one flow (a few MiB).
+      // plus what was in flight: the runner's buffers for one flow and the
+      // guest's own receive window (8 MiB together is generous; the whole
+      // tarball is 11.4 MB, and a download that was not stopped also ends
+      // with exit 0 or 28, which this refuses).
       const dlAt = Number(dlEnd) - lost;
-      const cap = (leaseMs + 4000) / 1000 * 200 * 1024 + 4 * 1024 * 1024;
+      const cap = (leaseMs + 4000) / 1000 * 200 * 1024 + 8 * 1024 * 1024;
       assert.ok(dlStatus === "200" && Number(dlBytes) > 0 && Number(dlBytes) < cap && !["0", "28"].includes(dlExit ?? "") && dlAt < 50000,
         `the download: ${dlStatus}, ${dlBytes} bytes (at most ${Math.round(cap)}), exit ${dlExit} "${dlError}", ended ${dlAt} ms after cubed went`);
       assert.doesNotMatch(dlError ?? "", /reset/i, "never a reset");
       assert.ok(flood > lost + leaseMs && flood < returned, `the 300 connections ran while the lease was over (${flood - lost} ms after cubed went, returned at ${returned - lost})`);
-      note(`V5 5: lease 3 s: ${within.length} probes 200 within it, ${expired.length} refused after it, ${again.length} 200 after cubed came back; the held connection answered "${held.split("|")[0]}" after the lease (not closed); a download ended ${dlAt} ms after cubed went, after draining (${dlBytes} bytes, curl exit ${dlExit}: ${dlError})`);
+      note(`V5 5: lease 3 s: ${within.length} probes 200 within it, ${expired.length} refused after it, ${again.length} 200 after cubed came back; one connection answered ${held.split("|").slice(0, 3).map(r => r.split(" ")[0]).join(", ")} before, during and after the loss (reused); a download ended ${dlAt} ms after cubed went, after draining (${dlBytes} bytes, curl exit ${dlExit}: ${dlError})`);
 
       // 6b. what was refused while cubed was gone, then the count of what the full queue dropped
       const queued = await reader.take(256, 30000);

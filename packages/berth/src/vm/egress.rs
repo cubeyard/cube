@@ -23,6 +23,8 @@
 //! more egress. The guest's side of an open flow is left alone: what is
 //! already on its way to the guest drains, and the connection then ends as
 //! TCP ends it (the runner neither resets it nor discards its buffers).
+//! Once cubed is back, an open flow's next request goes out again, and the
+//! next time the lease runs out its upstreams are stopped again.
 use std::{
     os::fd::{AsRawFd, OwnedFd, RawFd},
     sync::{Arc, Mutex},
@@ -60,7 +62,7 @@ use tokio::{
 
 use super::{
     policy::{Denial, Policy, Scheme},
-    presence::{Presence, lease_runs_out},
+    presence::{Presence, lease_restored, lease_runs_out},
     report::Reports,
 };
 
@@ -183,14 +185,22 @@ impl FlowHandler for Gate {
             // and only end this flow.
             let serve = this.serve(info, stream, upstreams.clone());
             tokio::pin!(serve);
-            tokio::select! {
-                _ = &mut serve => return,
-                _ = lease_runs_out(cubed, move || gate.lease()) => {}
+            loop {
+                tokio::select! {
+                    _ = &mut serve => return,
+                    _ = lease_runs_out(cubed.clone(), || gate.lease()) => {}
+                }
+                // The lease ran out: no more egress for this flow. Its guest
+                // side goes on until it ends by itself.
+                upstreams.stop();
+                // cubed may come back while the guest keeps the flow open:
+                // its next request goes out again, and the next time the
+                // lease runs out its upstreams are stopped again.
+                tokio::select! {
+                    _ = &mut serve => return,
+                    _ = lease_restored(cubed.clone(), || gate.lease()) => {}
+                }
             }
-            // The lease ran out: no more egress for this flow. Its guest
-            // side goes on until it ends by itself.
-            upstreams.stop();
-            let _ = serve.await;
         });
     }
 }
@@ -221,24 +231,26 @@ impl Resolver for GateResolver {
 }
 
 /// The upstream connections of one guest flow, closed when the lease runs
-/// out; none opens after that.
+/// out. None opens while the lease is over: `client` reads the lease under
+/// the same lock `stop` closes them under, and `stop` runs only once the
+/// lease is over, so a connection either is closed by it or is refused.
+/// Once cubed is back, the flow's next request opens one again.
 #[derive(Default)]
-struct Upstreams(Mutex<(bool, Vec<tokio::task::AbortHandle>)>);
+struct Upstreams(Mutex<Vec<tokio::task::AbortHandle>>);
 
 impl Upstreams {
     fn stop(&self) {
-        let mut state = self.0.lock().unwrap();
-        state.0 = true;
-        for task in state.1.drain(..) {
+        for task in self.0.lock().unwrap().drain(..) {
             task.abort();
         }
     }
 
     /// An HTTP/1.1 client connection over `io`, driven on its own task that
-    /// [`Self::stop`] ends.
+    /// [`Self::stop`] ends; refused while `lease_expired()` says so.
     async fn client<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         &self,
         io: S,
+        lease_expired: impl Fn() -> bool,
     ) -> Result<SendRequest<Incoming>> {
         let (sender, connection) = hyper::client::conn::http1::Builder::new()
             .handshake(TokioIo::new(io))
@@ -246,13 +258,13 @@ impl Upstreams {
         let task = tokio::spawn(async move {
             let _ = connection.await;
         });
-        let mut state = self.0.lock().unwrap();
-        if state.0 {
+        let mut tasks = self.0.lock().unwrap();
+        if lease_expired() {
             task.abort();
             anyhow::bail!("egress lease expired");
         }
-        state.1.retain(|t| !t.is_finished());
-        state.1.push(task.abort_handle());
+        tasks.retain(|t| !t.is_finished());
+        tasks.push(task.abort_handle());
         Ok(sender)
     }
 }
@@ -406,9 +418,15 @@ impl HttpConnection {
                     .await
                     .context("upstream TLS timed out")?
                     .context("upstream TLS")?;
-                    self.upstreams.client(tls).await
+                    self.upstreams
+                        .client(tls, || self.gate.lease_expired())
+                        .await
                 }
-                Scheme::Http => self.upstreams.client(stream).await,
+                Scheme::Http => {
+                    self.upstreams
+                        .client(stream, || self.gate.lease_expired())
+                        .await
+                }
             }
         };
         handshake.await.map_err(UpstreamError::Failed)
