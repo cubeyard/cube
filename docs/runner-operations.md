@@ -402,8 +402,9 @@ gone.
 ## Retained VMs
 
 Releasing a VM deletes its directory only when cubed found the thread clean
-(`retain: false`: the agent never ran a command or wrote a file there, and
-the guest's release check is clean) and the VM was never interrupted. Any
+(`retain: false`: the guest's release check found nothing uncommitted or
+unpushed) and the VM was never interrupted, which includes a guest that did
+not power off within the stop grace (cubed then records the disk as retained). Any
 other thread (`retain: true`), an interrupted VM and a failed transition keep the disk as
 evidence (`retained` / `failed`); they no longer hold the VM slot.
 `retainedBytes` shows their size. Inspect a retained disk offline, for

@@ -202,7 +202,8 @@ try {
   assert.notEqual(secondTemplate, firstTemplate);
   assert.equal(await bash(c, "cat /var/tmp/v2"), "v2");
   assert.deepEqual(templateDirs(), [firstTemplate, secondTemplate].sort(), "the old template stays while b's disk depends on it");
-  assert.equal((await api(`/api/threads/${b}`, "DELETE")).retained, true, "b's agent ran commands: its disk is retained");
+  await bash(b, "touch /workspace/kept");
+  assert.equal((await api(`/api/threads/${b}`, "DELETE")).retained, true, "b left a file in its workspace: its disk is retained");
   assert.deepEqual(templateDirs(), [firstTemplate, secondTemplate].sort(), "a retained disk keeps its template");
   await api(`/api/threads/${b}/discard`, "POST", {});
   assert.deepEqual(templateDirs(), [secondTemplate], "deleted with the last disk that depended on it");

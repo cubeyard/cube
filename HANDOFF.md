@@ -41,8 +41,12 @@ in `docs/plans/` hold the reasoning and the detailed evidence.
   OptChat reads and saves a project's hooks (`project_hooks`,
   `project_hooks_write`) and threads read theirs with `cube hooks`
   (read only): docs/project-hooks.md.
-- **Archive keeps the disk** of any thread whose agent ran a command or wrote
-  a file. The operator deletes retained disks from the project page
+- **Archive keeps the disk** only when the release check finds work that
+  would be lost (uncommitted changes, commits not pushed, files outside a
+  checkout in an empty project), the machine could not be checked, or the
+  runner kept it anyway (a machine that did not stop in time or failed);
+  ordinary agent work that is committed and pushed is deleted with the
+  disk. The operator deletes retained disks from the project page
   ("retained machines") or with `POST /api/threads/<id>/discard`
   (`vm.discard`, cube-runner 0.5.0+).
 

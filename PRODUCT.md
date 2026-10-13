@@ -36,8 +36,11 @@ its own virtual machine there, with `/workspace` pinned to the commits its
 repositories' branches have when it starts; an idle archived thread returns
 that lease. The thread supports streaming chat, model choice, bounded shell tools, stop, rename and archive.
 Provider and GitHub credentials remain on the host: the machine sees only a
-placeholder, and `gh` and `git push` work through the gateway. A machine the
-agent touched is retained at archive.
+placeholder, and `gh` and `git push` work through the gateway. Archive
+deletes the machine's disk unless it holds work that would be lost
+(uncommitted changes, commits not pushed, files outside a checkout in an
+empty project) or could not be checked; then the disk is retained, with the
+reason. The chat, its usage and what was pushed stay either way.
 
 OptChat and threads can write work artifacts: documents with revisions the
 user reads, comments on (comments reach the author as a message, never

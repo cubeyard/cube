@@ -1336,26 +1336,37 @@ function hookSummary(hooks: Record<string, HookOutcome>): string {
   return Object.entries(hooks).map(([name, hook]) => `${name} ${hook.status}${hook.exitCode !== undefined ? ` (exit ${hook.exitCode})` : ""}`).join(", ");
 }
 
-/** The release check: clean means every checkout is at its pinned commit
- * with no changes, branches, stashes or commits of its own, an empty project
- * left /workspace empty, and no other command runs. Prints `clean` or
- * `dirty: <reason>`. */
+/** The release check: clean means nothing in the workspace is lost with the
+ * disk. Every checkout has no uncommitted changes (ignored files aside) and
+ * no stashes, and every commit it has (branches, tags, HEAD, and the reflog:
+ * a commit left behind by a checkout is still work) is the pinned one's
+ * history or was on a remote: pushed, fetched or once at a remote-tracking
+ * ref. Its own branches and a HEAD away from the pin are fine. An empty
+ * project's /workspace holds only such checkouts. No other command runs.
+ * Prints `clean` or `dirty: <reason>`. */
 export function releaseCheckScript(allocation: WorkspaceAllocation): string {
   const items = checkouts(allocation);
   const lines = [
     "set -u",
     "dirty() { echo \"dirty: $*\"; exit 0; }",
+    // What a remote has or had: the remote-tracking refs' reflogs (a branch force-pushed since).
+    "published() {",
+    "  [ -z \"$2\" ] || echo \"^$2\"",
+    "  git -C \"$1\" for-each-ref --format='%(refname)' refs/remotes | while read -r ref; do git -C \"$1\" reflog show --format='^%H' \"$ref\" -- 2>/dev/null; done",
+    "}",
     "check() {",
     "  dir=$1 oid=$2",
     "  [ -e \"$dir/.git\" ] || dirty \"$dir is not a checkout\"",
-    "  [ \"$(git -C \"$dir\" rev-parse HEAD 2>/dev/null)\" = \"$oid\" ] || dirty \"$dir is not at its pinned commit\"",
-    "  [ -z \"$(git -C \"$dir\" status --porcelain 2>&1)\" ] || dirty \"$dir has changes\"",
-    "  [ -z \"$(git -C \"$dir\" for-each-ref refs/heads refs/tags --format=x 2>&1)\" ] || dirty \"$dir has branches or tags of its own\"",
+    "  [ -z \"$(git -C \"$dir\" status --porcelain 2>&1)\" ] || dirty \"$dir has uncommitted changes\"",
     "  [ -z \"$(git -C \"$dir\" stash list 2>&1)\" ] || dirty \"$dir has stashes\"",
-    "  [ -z \"$(git -C \"$dir\" rev-list --all --reflog --not --remotes \"$oid\" 2>&1)\" ] || dirty \"$dir has commits of its own\"",
+    "  [ -z \"$(published \"$dir\" \"$oid\" | git -C \"$dir\" rev-list --all --reflog --not --remotes --not --stdin 2>&1)\" ] || dirty \"$dir has commits that are not pushed\"",
     "}",
     ...(items.length ? items.map(item => `check ${quote(item.dir)} ${quote(item.oid)}`)
-      : ["[ -z \"$(ls -A . 2>&1)\" ] || dirty \"the workspace is not empty\""]),
+      : ["for entry in .[!.]* ..?* *; do",
+        "  [ -e \"$entry\" ] || [ -L \"$entry\" ] || continue",
+        "  [ -e \"$entry/.git\" ] || dirty \"the workspace is not empty: $entry is not a checkout\"",
+        "  check \"$entry\" ''",
+        "done"]),
     "if command -v systemctl >/dev/null 2>&1; then",
     "  running=$(systemctl list-units --plain --no-legend --state=active,activating,deactivating 'cube-op-*' 2>/dev/null | wc -l)",
     "  [ \"$running\" -le 1 ] || dirty \"another command is still running\"",
@@ -1479,9 +1490,8 @@ export async function refreshGuest(workspace: VmWorkspace, owner: WorkspaceOwner
   return outcome;
 }
 
-/** What the machine reports about its work at archive. The guest is
- * agent-controlled: `clean` alone never decides deletion (see
- * Conversations.archive), any other answer keeps the disk. */
+/** What the machine reports about its work at archive: `clean` releases the
+ * disk, any other answer keeps it (see Conversations.archive). */
 export async function releaseCheck(workspace: VmWorkspace, owner: WorkspaceOwner, allocation: WorkspaceAllocation): Promise<{ clean: boolean; reason: string }> {
   const state = await own(workspace, owner, epoch => `cube:release-check:${epoch}`, releaseCheckScript(allocation), 120000);
   if (state.state !== "succeeded" || state.exitCode !== 0) return { clean: false, reason: `the release check did not finish (${state.state})` };

@@ -174,11 +174,10 @@ Useful reads: `/api/threads` (with each machine's startup steps), `/api/projects
 full transcript on every connection. `/api/threads` reports a thread `starting`
 while its machine boots. Stop uses `POST /api/threads/<id>/stop`; DELETE archives
 an idle thread, releases runner capacity and answers `{retained, reason}`: a
-machine is deleted only when the agent never ran a command or wrote a file in
-it (cubed's own record) and its release check reports clean; one with agent
-commands, changes, commits of its own or an unknown state is retained on the
-runner. The guest is agent-controlled, so its own report never alone deletes a
-disk.
+machine is deleted when its release check reports clean (nothing uncommitted,
+every commit pushed; agent work that is committed and pushed is fine); one
+with uncommitted changes, unpushed commits, files outside a checkout in an
+empty project or an unknown state is retained on the runner with the reason.
 
 `/api/threads/<id>/workspace` exposes the thread's `Workspace` (capabilities,
 limits, lease, exec, operations, file and stat; see
