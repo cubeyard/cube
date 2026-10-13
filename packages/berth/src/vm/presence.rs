@@ -1,8 +1,8 @@
 //! Whether cubed is connected to the runner, and since when it is not
 //! (masterplan B5, B-4 decision 2): ordinary egress goes on for a machine's
 //! `policy.lease` after the last connection from cubed is gone, then new
-//! flows are refused and open ones closed; the next connection ends the
-//! grace. The clock is the runner's own, started when the connection falls;
+//! flows and requests are refused and open flows' upstreams closed (their
+//! guest side drains; egress.rs); the next connection ends the grace. The clock is the runner's own, started when the connection falls;
 //! cubed renews nothing. Before cubed's first connection the runner counts
 //! as left alone since it started (it has no running machine then).
 //!

@@ -119,8 +119,10 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
 - The lease (`src/vm/presence.rs`): while cubed has a connection to the
   runner, egress follows the policy; when the last one goes, it goes on
   for the policy's `lease` (cubed sends 15 min; absent or 0: it stops at
-  once), then new flows are refused, open ones closed and DNS answers
-  SERVFAIL, until cubed connects again.
+  once), then new flows and requests are refused, the upstream connections
+  of open flows closed and DNS answers SERVFAIL, until cubed connects
+  again. An open flow's guest side is not reset or cut: what was already on
+  its way to the guest drains, and the connection ends as TCP ends it.
 - Reports (`src/vm/report.rs`): every refusal is queued (256 per runner;
   more are dropped and counted in the next report's `dropped_before`) and
   written to cubed on one `report` stream per connection that the runner

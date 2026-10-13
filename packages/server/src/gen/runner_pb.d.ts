@@ -1169,9 +1169,11 @@ export declare const GuestLimitsSchema: GenMessage<GuestLimits>;
  * placeholder is denied unless a credential rule for its host matches.
  * lease: how long ordinary egress goes on after the runner loses its
  * connection to cubed (B5: 15 min); absent or 0 stops it at once. When it
- * runs out, new flows are denied (lease_expired) and open ones closed; the
- * next connection from cubed ends the grace. Credential requests need
- * cubed and stop at once.
+ * runs out, new flows and requests are denied (lease_expired) and the
+ * upstream connections of open flows closed; an open flow's guest side is
+ * not reset: what was already on its way to the guest drains and TCP ends
+ * it. The next connection from cubed ends the grace. Credential requests
+ * need cubed and stop at once.
  *
  * @generated from message cube.runner.v4.EgressPolicy
  */
