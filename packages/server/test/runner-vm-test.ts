@@ -507,8 +507,11 @@ try {
 
       // 4. deny_hosts, a credential rule (B-5 not yet), a placeholder elsewhere, DENY by default
       assert.equal(await deniedBy("v5-deny-host", "https://example.net/"), "host is denied by the egress policy");
-      assert.equal(await deniedBy("v5-credential", "-H \"Authorization: Bearer $GH_TOKEN\" https://api.github.com/"), "credentials are not available on this runner yet");
-      assert.equal(await deniedBy("v5-placeholder", "-H \"Authorization: Bearer $GH_TOKEN\" https://example.com/"), "a secret placeholder is only sent where a credential rule allows it");
+      // A placeholder of the real form (the boot document's GH_TOKEN above is
+      // shorter, so it is no placeholder and would go out as any header).
+      const placeholder = "cube_ph_github_AbCdEfGhIjKlMnOpQrStUv";
+      assert.equal(await deniedBy("v5-credential", `-H "Authorization: Bearer ${placeholder}" https://api.github.com/`), "credentials are not available on this runner yet");
+      assert.equal(await deniedBy("v5-placeholder", `-H "Authorization: Bearer ${placeholder}" https://example.com/`), "a secret placeholder is only sent where a credential rule allows it");
       await startWith({ default: EgressPolicy_Default.DENY, denyHosts: [], rules: [{ hosts: ["example.com"], ports: [443], kind: open443 }], lease: { seconds: 3n, nanos: 0 } });
       assert.equal(await code("v5-deny-allowed", "https://example.com/"), "200");
       assert.equal(await deniedBy("v5-deny-other", "https://example.org/"), "host is not allowed by the egress policy");
@@ -553,7 +556,7 @@ try {
       session = open();
       const returned = Date.now();
       await session.hello();
-      const backWorkspace = new VmWorkspace({ guest: session.guest(ref, () => epoch), leases: store, owner: "pi", binding: `runner-vm-test-egress-2:${process.pid}`, retryMs: 2000 });
+      const backWorkspace = new VmWorkspace({ guest: session.guest(ref, () => epoch), leases: store, owner: "pi", binding: `runner-vm-test-egress:${process.pid}`, retryMs: 2000 });
       const backLease = await backWorkspace.lease({ owner: "pi" });
       const settled = await settleOperation(backWorkspace, backLease.token, "v5-lease");
       await backWorkspace.release(backLease.token);
@@ -571,12 +574,13 @@ try {
       assert.ok(again.length >= 2 && again.every(p => p.status === "200"), `after cubed came returned: ${show(again)}`);
       assert.ok(held - lost >= leaseMs - 300 && held - lost < leaseMs + 2000, `the held flow closed ${held - lost} ms after cubed went (lease ${leaseMs} ms)`);
       assert.ok(flood > lost + leaseMs && flood < returned, `the 300 connections ran while the lease was over (${flood - lost} ms after cubed went, returned at ${returned - lost})`);
-      note(`V5 5: lease 3 s: ${within.length} probes 200 within it, ${expired.length} refused after it, ${again.length} 200 after cubed came returned; the held flow closed ${held - lost} ms after cubed went`);
+      note(`V5 5: lease 3 s: ${within.length} probes 200 within it, ${expired.length} refused after it, ${again.length} 200 after cubed came back; the held flow closed ${held - lost} ms after cubed went`);
 
       // 6b. what was refused while cubed was gone, then the count of what the full queue dropped
       const queued = await reader.take(256, 30000);
       assert.ok(queued.every(r => r.reason === "lease_expired" && /^203\.0\.113\.1:80$|^[0-9.]+:(80|443)$/.test(r.host)), show(queued.slice(0, 3)));
-      assert.equal(await deniedBy("v5-after-flood", "https://example.net/"), "host is denied by the egress policy");
+      const afterFlood = await shell(backWorkspace, "v5-after-flood", "curl -s -o /dev/null -m 20 -D - https://example.net/ | tr -d '\\r' | sed -n 's/^x-cube-denied: //Ip'; true");
+      assert.equal(afterFlood.output.trim(), "host is denied by the egress policy");
       const [next] = await reader.take(1, 20000);
       assert.equal(next!.reason, "deny_host");
       assert.ok(next!.droppedBefore > 0n, `dropped_before ${next!.droppedBefore}`);
