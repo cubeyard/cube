@@ -24,7 +24,13 @@
  * Content-Length and chunked, split across chunks), an encoded answer
  * refused, redirects, a placeholder refused at the wrong host, the fence,
  * cubed going during a download, and a scan for the token in the guest, the
- * runner's directory (leak-scan.ts) and every log.
+ * runner's directory (leak-scan.ts) and every log. Then (B-6, V9) the
+ * portal over `dial` streams: cubed's real Portal -> RunnerSession.dial ->
+ * berth vm -> the machine's LAN -> dial-app.pl started with `cube service`
+ * in the guest (portal-dial.ts): HTTP, 1 MiB each way, a WebSocket, FIN
+ * from each side; ports 80 (with a listener) and 22 refused, an old fence
+ * refused, an open connection ended when cubed goes and when the machine
+ * stops, and a stopped machine refused.
  *
  *   node packages/server/test/runner-vm-test.ts target/debug/berth
  *
@@ -72,6 +78,7 @@ import { VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
 import { settleOperation, type Workspace } from "../src/workspace.ts";
 import { workspaceContract, workspaceServicesContract } from "./workspace-contract.ts";
+import { DIAL_APP, dialPortal, portalContract, Raw, request, type DialPortal } from "./portal-dial.ts";
 
 const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
 const repo = path.resolve(import.meta.dirname, "../../..");
@@ -205,6 +212,7 @@ async function shell(workspace: Workspace, key: string, command: string, timeout
 const refusedBy = (code: string, reason: string) => (error: unknown) =>
   error instanceof GuestTransportError && error.cause instanceof RunnerError && error.cause.code === code && error.cause.reason === reason;
 const SESSION = /^[0-9a-f]{32}$/;
+const dialRefused = (code: string, reason: string) => (error: unknown) => error instanceof RunnerError && error.code === code && error.reason === reason;
 const show = (value: unknown) => JSON.stringify(value, (_, x: unknown) => typeof x === "bigint" ? String(x) : x);
 /** A stop waits up to 30 s for the agent's shutdown, then QEMU may take 20 s. */
 const STOP_MS = 70000;
@@ -282,6 +290,8 @@ const documents = {
 // The refused start bound the directory to this control peer and node already.
 let runner = await start(["--listen", "127.0.0.1:0"]);
 const sessions: RunnerSession[] = [];
+/** V9's portal and the app's port, kept until the machine stops. */
+let v9: { target: DialPortal; port: number } | undefined;
 try {
   assert.match(runner.banner, /^qemu: \d+\.\d+\.\d+ .+ \(meets keel's floor; new machines get (pc-q35|virt)-\d+\.\d+\)$/m);
   assert.match(runner.banner, /^image: .+ \(linux\/(amd64|arm64), \d+ layers, manifest sha256:[0-9a-f]{64}\)$/m);
@@ -309,7 +319,8 @@ try {
   assert.equal(hello.runner?.platform?.qemuVersion.split(" ")[1], qemu, "Platform.qemu_version is version and path (A17)");
   assert.match(hello.runner?.platform?.baseImageSha256 ?? "", /^[0-9a-f]{64}$/);
   assert.deepEqual(hello.runner?.labels, { site: "test" });
-  assert.ok(hello.capabilities.includes("machine.discard") && hello.capabilities.includes("watch") && hello.capabilities.includes("guest"));
+  assert.ok(hello.capabilities.includes("machine.discard") && hello.capabilities.includes("watch") && hello.capabilities.includes("guest")
+    && hello.capabilities.includes("dial"));
   assert.equal(hello.runner?.caPem, caPem, "Runner.ca_pem is the runner's CA certificate");
   assert.doesNotMatch(hello.runner?.caPem ?? "", /PRIVATE KEY/);
 
@@ -840,6 +851,62 @@ try {
         await decider.close();
         github.close();
       }
+
+      // ------------------------------------------------ V9 (masterplan B-6)
+      // The portal over the runner's `dial` streams: cubed's real Portal ->
+      // RunnerSession.dial at the machine's epoch (as RunnerMachines.dial)
+      // -> berth vm -> the machine's LAN -> dial-app.pl, which the agent
+      // starts with `cube service` (portal-dial.ts; offline in
+      // runner-dial-test.ts against a fake runner).
+      for (const s of sessions.splice(0)) await s.close();
+      session = open();
+      const b6 = new VmWorkspace({ guest: session.guest(ref, () => epoch), leases: store, owner: "pi", binding: `runner-vm-test-b6:${process.pid}`, retryMs: 2000 });
+      const sh9 = async (key: string, command: string, timeoutMs = 60000) => {
+        const done = await shell(b6, `${key}-${randomBytes(3).toString("hex")}`, command, timeoutMs);
+        assert.equal(done.exitCode, 0, `${key}: ${done.output}`);
+        return done.output.trim();
+      };
+      assert.equal(await sh9("v9-perl", "perl -MDigest::SHA -MMIME::Base64 -e 'print qq(ok\\n)'"), "ok", "dial-app.pl needs perl with Digest::SHA and MIME::Base64");
+      const appPort = 20000 + Math.floor(Math.random() * 20000);
+      const appLease = await b6.lease({ owner: "pi" });
+      try { await b6.writeFile(appLease.token, `v9-app-${process.pid}`, "v9/dial-app.pl", fs.readFileSync(DIAL_APP), { createParents: true }); }
+      finally { await b6.release(appLease.token); }
+      const started = JSON.parse(await sh9("v9-start", `mkdir -p /tmp/v9-state && cube service start dialapp --port ${appPort} --cwd v9 --env CUBE_APP_STATE=/tmp/v9-state --json -- perl dial-app.pl`, 120000)) as { ok: boolean };
+      assert.equal(started.ok, true, show(started));
+      v9 = { target: await dialPortal({ session: () => session, guest: () => session.guest(ref, () => epoch), ref, epoch: () => epoch, directory: path.join(root, "portal") }), port: appPort };
+      const readState = async (name: string) => (await sh9("v9-state", `cat /tmp/v9-state/${name} 2>/dev/null; true`)) || null;
+      for (const line of await portalContract(v9.target, "dialapp", readState)) note(`V9: ${line}`);
+
+      // Refused by the runner whatever listens there: dial-app.pl as root on
+      // port 80 (it answers inside the guest), nothing on 22 (keel has no sshd).
+      const low = await b6.lease({ owner: "pi" });
+      const lowKey = `v9-low-${process.pid}`;
+      await b6.exec(low.token, lowKey, { command: "cd v9 && exec sudo env HOST=0.0.0.0 PORT=80 CUBE_SERVICE=low CUBE_APP_STATE=/tmp/v9-state perl dial-app.pl", timeoutMs: 600000 });
+      try {
+        assert.equal(await sh9("v9-80-inside", "for i in $(seq 100); do curl -s -m 2 http://127.0.0.1:80/ && break; sleep 0.2; done"), "dial-app: hello from low");
+        for (const port of [80, 22, 1023]) await assert.rejects(session.dial(ref, epoch, port), dialRefused("PERMISSION_DENIED", "port"), `port ${port}`);
+        await assert.rejects(session.dial(ref, epoch, 1999), dialRefused("UNAVAILABLE", "dial_failed"), "nothing listens on 1999");
+      } finally {
+        await b6.cancel(low.token, lowKey).catch(() => {});
+        await b6.release(low.token).catch(() => {});
+      }
+      // An old fence is refused; the machine's own goes through.
+      await assert.rejects(session.dial(ref, epoch - 1, appPort), dialRefused("FAILED_PRECONDITION", "stale_epoch"));
+      (await session.dial(ref, epoch, appPort)).destroy();
+      note("V9: refused: port 80 with a listener (it answers inside the guest), 22 and 1023 (PERMISSION_DENIED/port), the fence before the machine's (stale_epoch); nothing on 1999: UNAVAILABLE/dial_failed");
+
+      // cubed goes: an open connection through the portal ends; a new session dials again.
+      const open9 = await Raw.open(v9.target.port, `GET /fin-client HTTP/1.1\r\nHost: ${v9.target.host("dialapp")}\r\nConnection: Upgrade\r\nUpgrade: cube-test\r\n\r\n`);
+      assert.match(await open9.head(), /^HTTP\/1\.1 101 /);
+      const went = Date.now();
+      await session.close();
+      await open9.until("the portal's connection ends when cubed's session closes", r => r.ended, 15000);
+      const endedMs = Date.now() - went;
+      open9.socket.destroy();
+      session = open();
+      const again9 = await request(v9.target.port, v9.target.host("dialapp"), "GET", "/");
+      assert.equal(again9.status, 200, again9.body.toString());
+      note(`V9: cubed's connection closed: an open portal connection ended after ${endedMs} ms; a new session dials again (200)`);
       transport = session.guest(ref, () => epoch);
     } finally {
       store.close();
@@ -861,6 +928,9 @@ try {
 
   // stop quits QEMU; the guest status goes; a start boots again on the same writable disk
   let pid = record(ref.id).boot!.pid;
+  // V9: a connection through the portal while the machine stops.
+  const heldOverStop = v9 ? await Raw.open(v9.target.port, `GET /fin-client HTTP/1.1\r\nHost: ${v9.target.host("dialapp")}\r\nConnection: Upgrade\r\nUpgrade: cube-test\r\n\r\n`) : null;
+  if (heldOverStop) assert.match(await heldOverStop.head(), /^HTTP\/1\.1 101 /);
   const stopped = await stopVia(session, ref, epoch);
   assert.equal(stopped.status?.phase, MachineStatus_Phase.STOPPED);
   assert.equal(stopped.status?.bootId, "");
@@ -869,6 +939,14 @@ try {
   assert.equal(condition(stopped, "Interrupted"), undefined, "a stop cubed asked for is no interruption");
   assert.equal(condition(stopped, "Stopped")?.reason, "controlled", show(stopped.status?.conditions));
   await assert.rejects(transport.call("hello", {}), refusedBy("UNAVAILABLE", "not_running"));
+  if (v9 && heldOverStop) {
+    await heldOverStop.until("the portal's connection ends when the machine stops", r => r.ended || r.closed, 15000);
+    heldOverStop.socket.destroy();
+    await assert.rejects(session.dial(ref, epoch, v9.port), dialRefused("UNAVAILABLE", "not_running"));
+    await v9.target.portal.close();
+    v9 = undefined;
+    note("V9: the machine stopped: an open portal connection ended, and a dial to the stopped machine is refused (UNAVAILABLE/not_running)");
+  }
   const again = await session.machine({ case: "machineStart", value: { ref, fence: { epoch: BigInt(epoch) }, boot: { documents, mac: "" } } });
   assert.notEqual(again.status?.bootId, firstBoot);
   assert.equal(fs.statSync(path.join(machineDir, "rw.qcow2")).ino, disk.ino, "the writable disk is kept");
@@ -965,8 +1043,9 @@ try {
   const list = await session.call({ case: "machineList", value: {} });
   assert.ok(list.case === "machines" && list.value.items.length === 0);
   note("a second machine deleted without retain: QEMU quit, directory gone");
-  console.log(`ok: berth vm over protocol 4 (${accel}): floor, image, CA, hello, create, start, guest channel (session, setup, ${guest.ready ? "ready, Workspace contract, agent restart, network V5, credentials V6-V8" : "not ready: image lacks tools"}), guest streams, fencing, UNIMPLEMENTED, stop, restart and crash interrupt, pinned machine type and image, retained disk, discard, delete`);
+  console.log(`ok: berth vm over protocol 4 (${accel}): floor, image, CA, hello, create, start, guest channel (session, setup, ${guest.ready ? "ready, Workspace contract, agent restart, network V5, credentials V6-V8, portal V9" : "not ready: image lacks tools"}), guest streams, fencing, UNIMPLEMENTED, stop, restart and crash interrupt, pinned machine type and image, retained disk, discard, delete`);
 } finally {
+  await v9?.target.portal.close();
   await Promise.allSettled(sessions.map(session => session.close()));
   await stop(runner.child);
   // Any QEMU this test's machines left.
