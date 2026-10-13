@@ -7,6 +7,14 @@
  * and the guest channel (B-2): `status.guest` from the agent's `hello` and
  * `status` with a session, `machine_setup` with the image's layers and the
  * boot documents, and `guest` streams carried as `req`/`ans`. Loopback only.
+ * With an image that is ready (curl, git), also the machine's network
+ * (B-4, V5): HTTPS through the runner's interception trusted through its
+ * CA, private, metadata, the host's own and cubed's addresses refused,
+ * CONNECT, Upgrade and other ports refused, deny_hosts, DENY, credential
+ * rules and placeholders, a policy replaced by a new start, the lease
+ * (3 s here) running out with an open flow closed and cubed's return, and
+ * the runner's report stream read as cubed would read it, with
+ * `dropped_before` after its queue overflowed.
  *
  *   node packages/server/test/runner-vm-test.ts target/debug/berth
  *
@@ -455,12 +463,14 @@ try {
       };
       const startWith = async (policy: object) =>
         await session.machine({ case: "machineStart", value: { ref, fence: { epoch: BigInt(epoch) }, boot: { documents, mac: "" }, policy: policy as never } });
-      // The machine runs: a new start replaces its policy.
-      assert.equal((await startWith(policyA)).status?.phase, MachineStatus_Phase.RUNNING);
       const egressWorkspace = new VmWorkspace({ guest: session.guest(ref, () => epoch), leases: store, owner: "pi", binding: `runner-vm-test-egress:${process.pid}`, retryMs: 2000 });
       const run = async (key: string, command: string) => (await shell(egressWorkspace, key, command)).output.trim();
       const code = (key: string, args: string) => run(key, `curl -s -o /dev/null -m 20 -w '%{http_code}' ${args}; true`);
       const deniedBy = (key: string, args: string) => run(key, `curl -s -o /dev/null -m 20 -D - ${args} | tr -d '\\r' | sed -n 's/^x-cube-denied: //Ip'; true`);
+      // Started without a policy: no egress (as DENY with no rules), over TLS the guest trusts.
+      assert.equal(await deniedBy("v5-none", "https://example.com/"), "host is not allowed by the egress policy");
+      // The machine runs: a new start replaces its policy.
+      assert.equal((await startWith(policyA)).status?.phase, MachineStatus_Phase.RUNNING);
       // The guest dials any address; the runner names the upstream by Host or SNI.
       const via = "--connect-to ::203.0.113.1:";
 
@@ -507,6 +517,7 @@ try {
 
       // 6. the reports so far, as cubed reads them
       const expected: Array<[string, string]> = [
+        ["example.com", "policy"],
         ...forbidden.map(h => [h, "address"] as [string, string]),
         ["example.com:443", "connect"], ["example.com", "upgrade"], ["example.net", "deny_host"],
         ["api.github.com", "credential_unavailable"], ["example.com", "placeholder"], ["example.org", "policy"], ["example.com", "policy"],
@@ -697,7 +708,7 @@ try {
   const list = await session.call({ case: "machineList", value: {} });
   assert.ok(list.case === "machines" && list.value.items.length === 0);
   note("a second machine deleted without retain: QEMU quit, directory gone");
-  console.log(`ok: berth vm over protocol 4 (${accel}): floor, image, CA, hello, create, start, guest channel (session, setup, ${guest.ready ? "ready, Workspace contract, agent restart" : "not ready: image lacks tools"}), guest streams, fencing, UNIMPLEMENTED, stop, restart and crash interrupt, pinned machine type and image, retained disk, discard, delete`);
+  console.log(`ok: berth vm over protocol 4 (${accel}): floor, image, CA, hello, create, start, guest channel (session, setup, ${guest.ready ? "ready, Workspace contract, agent restart, network V5" : "not ready: image lacks tools"}), guest streams, fencing, UNIMPLEMENTED, stop, restart and crash interrupt, pinned machine type and image, retained disk, discard, delete`);
 } finally {
   await Promise.allSettled(sessions.map(session => session.close()));
   await stop(runner.child);
