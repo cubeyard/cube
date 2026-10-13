@@ -1,0 +1,27 @@
+diff --git a/scripts/test-vm-e2e.ts b/scripts/test-vm-e2e.ts
+index c092831c..59d97d4a 100644
+--- a/scripts/test-vm-e2e.ts
++++ b/scripts/test-vm-e2e.ts
+@@ -394,16 +394,20 @@ try {
+   const clean = (await api("/api/threads", "POST", { projectId: project.id, requestId: "clean", text: "hello", model })).id as string;
+   vmIds.push((await ready(clean)).vm!.vmId);
+   await until("the clean thread's first answer", 120, async () => (await history(clean)).status?.state === "completed");
++  // Control (#168): one harmless agent command; the disk is still deleted.
++  const cleanRun = `e2e-${++requests}`;
++  await api(`/api/threads/${clean}/prompt`, "POST", { text: tool("bash", { command: "true" }), requestId: cleanRun });
++  assert.equal((await settled(clean, cleanRun, 120)).status.state, "completed");
+   const vmDirs = () => fs.readdirSync(path.join(work, "runner-state", "vms")).filter(name => fs.existsSync(path.join(work, "runner-state", "vms", name, "disk.qcow2")));
+   assert.equal(vmDirs().length, 3);
+   const cleanArchive = await api(`/api/threads/${clean}`, "DELETE");
+-  assert.deepEqual(cleanArchive, { ok: true, retained: false, reason: "clean" });
++  assert.deepEqual(cleanArchive, { ok: true, retained: false, reason: "clean: the agent's work is committed and pushed" });
+   assert.equal(vmDirs().length, 2, "the clean machine's disk is deleted; the two changed ones are retained");
+   const [runnerStatus] = (await api("/api/runners")).runners;
+   const checkedRunner = (await api(`/api/runners/${runnerStatus.id}/check`, "POST", {})).runner;
+   assert.equal(checkedRunner.health.retainedVms, 2);
+   assert.equal(checkedRunner.health.activeVms, 0);
+-  log("7: a clean archive deleted the disk; two retained disks reported by the runner");
++  log(`7: CONTROL a thread whose agent ran a command archived clean (${cleanArchive.reason}); its disk deleted; two retained disks reported by the runner`);
+   // The operator discards a retained disk.
+   await api(`/api/threads/${pi}/discard`, "POST", {});
+   assert.equal(vmDirs().length, 1, "the discarded disk is gone");
