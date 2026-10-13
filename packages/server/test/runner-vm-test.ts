@@ -24,7 +24,7 @@
  * Content-Length and chunked, split across chunks), an encoded answer
  * refused, redirects, a placeholder refused at the wrong host, the fence,
  * cubed going during a download, and a scan for the token in the guest, the
- * runner's directory and every log.
+ * runner's directory (leak-scan.ts) and every log.
  *
  *   node packages/server/test/runner-vm-test.ts target/debug/berth
  *
@@ -65,6 +65,7 @@ import { EgressPolicy, newPlaceholder, serveEgress } from "../src/egress-policy.
 import { GatewaySupervisor } from "../src/gateway.ts";
 import { checkMachine, type CredentialRoute } from "../src/runner-credentials.ts";
 import { fakeGithub, git as gitAt } from "../../../scripts/fake-github.ts";
+import { scanForSecret } from "./leak-scan.ts";
 import { GuestTransportError } from "../src/guest-ssh.ts";
 import { resumeWorkspace } from "../src/vm.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
@@ -823,11 +824,17 @@ try {
         const guestScan = await sh("v6-scan", `sudo bash -c 'a=${tokenHead}; b=${tokenTail}; grep -rlsF --exclude-dir=proc --exclude-dir=sys --exclude-dir=dev -e "$a$b" / | head -5; `
           + `for f in /proc/[0-9]*/environ; do grep -lsF -e "$a$b" "$f"; done | head -5'; echo scan-done`, 900000);
         assert.equal(guestScan, "scan-done", `the token is in the guest: ${guestScan}`);
-        const hostScan = spawnSync("grep", ["-rlsF", "-e", ghToken, directory, path.join(root, "gateway")], { encoding: "utf8" });
-        assert.equal(hostScan.status, 1, `the token is in the runner's directory or the gateway's state: ${hostScan.stdout}`);
+        // Every regular file of berth's --dir and the gateway's state, read in
+        // full (leak-scan.ts; grep differs between hosts). The machine runs, so
+        // its QMP, event and channel sockets are there: listed, never read;
+        // anything else that is not a regular file fails the scan.
+        const hostScan = scanForSecret([directory, path.join(root, "gateway")], ghToken);
+        assert.deepEqual(hostScan.matches, [], "the token is in the runner's directory or the gateway's state");
+        assert.ok(hostScan.files > 0 && hostScan.skipped.every(s => s.kind === "socket"), `not scanned: ${show(hostScan.skipped)}`);
+        assert.ok(hostScan.skipped.some(s => s.path.endsWith("qmp.sock")), `the running machine's sockets: ${show(hostScan.skipped)}`);
         assert.ok(!runner.banner.includes(ghToken) && !logged.some(line => line.includes(ghToken)), "the token is in berth's stderr or a log");
         assert.ok(logged.some(line => line.startsWith("gateway ")), "the gateway's log was captured");
-        note(`V6 leak scan: the token is in no guest file or process environment, not in berth's --dir (${fs.readdirSync(directory).length} entries, rw.qcow2 included), its stderr, the gateway's state or the ${logged.length} log lines of cubed's side`);
+        note(`V6 leak scan: the token is in no guest file or process environment, not in berth's --dir or the gateway's state (${hostScan.files} files, ${hostScan.bytes} bytes read, rw.qcow2 included; ${hostScan.skipped.length} sockets not read), its stderr, the gateway's state or the ${logged.length} log lines of cubed's side`);
       } finally {
         await gateway.stop();
         await decider.close();
