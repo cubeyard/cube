@@ -1,0 +1,26 @@
+diff --git a/packages/gateway/src/http.rs b/packages/gateway/src/http.rs
+index ce965496..ed643dd6 100644
+--- a/packages/gateway/src/http.rs
++++ b/packages/gateway/src/http.rs
+@@ -185,11 +185,6 @@ impl Connection {
+                     &format!("only {name} placeholders go through this credential"),
+                 );
+             }
+-            // B6 reads every answer, so it must not be encoded.
+-            request.headers_mut().insert(
+-                header::ACCEPT_ENCODING,
+-                HeaderValue::from_static("identity"),
+-            );
+         }
+         let decision = self
+             .egress
+@@ -261,9 +256,6 @@ impl Connection {
+         if self.credential.is_none() {
+             return Response::from_parts(parts, body.boxed());
+         }
+-        if encoded(&parts.headers) {
+-            return failed("the credential proxy refuses an encoded answer");
+-        }
+         if pairs.rewrite_headers(&mut parts.headers).is_err() {
+             return failed("the answer's headers cannot carry the placeholder");
+         }

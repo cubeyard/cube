@@ -1,0 +1,13 @@
+diff --git a/packages/gateway/src/http.rs b/packages/gateway/src/http.rs
+index ce965496..06492f60 100644
+--- a/packages/gateway/src/http.rs
++++ b/packages/gateway/src/http.rs
+@@ -223,7 +223,7 @@ impl Connection {
+         };
+         // B6: exactly what was substituted, to turn back in the answer.
+         let mut pairs = Pairs::default();
+-        if self.credential.is_some() {
++        if false && self.credential.is_some() {
+             for (placeholder, value) in &substitute {
+                 pairs.add(value.as_bytes(), placeholder.as_bytes());
+             }
