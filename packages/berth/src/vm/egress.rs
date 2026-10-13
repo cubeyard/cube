@@ -571,7 +571,7 @@ fn failed(reason: &str) -> Response<Body> {
 /// A machine's network while its QEMU runs. Dropping it stops the LAN
 /// (every flow reset) and the frame pump.
 pub struct Net {
-    _lan: Lan,
+    lan: Lan,
     pub gate: Arc<Gate>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -594,6 +594,11 @@ impl FrameSink for ToQemu {
 }
 
 impl Net {
+    /// TCP into the guest from the LAN's address (cubed's `dial` streams).
+    pub fn dialer(&self) -> cube_netstack::lan::Dialer {
+        self.lan.dialer()
+    }
+
     /// The socket pair and the LAN for one QEMU process. Returns QEMU's end
     /// (close-on-exec; the spawn puts it on [`NET_FD`]).
     pub fn open(gate: Arc<Gate>, vm_id: &str) -> Result<(Self, OwnedFd)> {
@@ -635,7 +640,7 @@ impl Net {
         });
         Ok((
             Self {
-                _lan: lan,
+                lan,
                 gate,
                 tasks: vec![reader, writer],
             },

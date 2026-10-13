@@ -5,6 +5,7 @@
 use std::{future::Future, sync::Arc};
 
 use anyhow::Result;
+use cube_netstack::lan::FlowStream;
 use cube_runner_protocol::{
     ALPN,
     proto::{self, Code, open, watch_event},
@@ -31,6 +32,17 @@ pub trait Service: Send + Sync + 'static {
         recv: &mut RecvStream,
         send: &mut SendStream,
     ) -> impl Future<Output = Result<Vec<u8>, proto::Error>> + Send;
+    /// A TCP connection into the machine for a `dial` stream, or why not.
+    /// A mode without one answers UNIMPLEMENTED (`berth host`: masterplan B-9).
+    fn dial(
+        self: Arc<Self>,
+        _header: proto::DialHeader,
+    ) -> impl Future<Output = Result<FlowStream, proto::Error>> + Send
+    where
+        Self: Sized,
+    {
+        async { Err(unimplemented::<Self>("dial")) }
+    }
     /// Called once when the runner starts serving.
     fn serving(self: &Arc<Self>) {}
     /// Called for each authenticated connection from cubed; what it returns
@@ -127,8 +139,8 @@ async fn stream<S: Service>(
             }
             Err(error) => write_frame(send, &answer(Some(error))).await?,
         },
-        Some(open::Kind::Dial(_)) => {
-            write_frame(send, &answer(Some(unimplemented::<S>("dial")))).await?
+        Some(open::Kind::Dial(header)) => {
+            return dial(service.dial(header).await, recv, send).await;
         }
         // Runner -> cubed only.
         Some(open::Kind::Report(_) | open::Kind::Credential(_)) => {
@@ -155,6 +167,34 @@ async fn stream<S: Service>(
         }
     }
     send.finish()?;
+    Ok(())
+}
+
+/// Answers a `dial` stream: `StreamAnswer`, then (when it has no error) the
+/// connection's bytes both ways, each direction ending on its own: cubed's
+/// FIN shuts the flow's writing side (FIN to the guest), the guest's FIN
+/// finishes the stream. When either side fails, the stream is reset and the
+/// flow dropped (the LAN ends it as it ends any flow).
+pub async fn dial(
+    dialed: Result<FlowStream, proto::Error>,
+    recv: &mut RecvStream,
+    send: &mut SendStream,
+) -> Result<()> {
+    let mut flow = match dialed {
+        Ok(flow) => flow,
+        Err(error) => {
+            write_frame(send, &proto::StreamAnswer { error: Some(error) }).await?;
+            send.finish()?;
+            return Ok(());
+        }
+    };
+    write_frame(send, &proto::StreamAnswer { error: None }).await?;
+    let mut quic = tokio::io::join(&mut *recv, &mut *send);
+    if let Err(error) = tokio::io::copy_bidirectional(&mut quic, &mut flow).await {
+        let _ = send.reset(0u32.into());
+        let _ = recv.stop(0u32.into());
+        return Err(error.into());
+    }
     Ok(())
 }
 

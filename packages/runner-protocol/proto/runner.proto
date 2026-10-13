@@ -590,6 +590,15 @@ message GuestHeader {
   string op = 3;
 }
 
+// The first frame of a `dial` stream (cubed's portal, masterplan B-6): a
+// TCP connection from the runner to `port` of a running machine, fenced
+// as `guest` is. A VM runner refuses ports below 1024
+// (PERMISSION_DENIED/port; 22 too), a machine it does not run
+// (UNAVAILABLE/not_running), and a port where the guest does not answer
+// within 10 s (UNAVAILABLE/dial_failed). Each direction of the bytes that
+// follow `StreamAnswer` ends on its own (FIN to FIN); a reset or a lost
+// connection drops the guest's connection. It needs cubed's connection and
+// nothing else: the egress lease does not apply.
 message DialHeader {
   Ref ref = 1;
   Fence fence = 2;

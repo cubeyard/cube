@@ -141,9 +141,17 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   and a `credential_unavailable` report. An answer under way when cubed
   goes ends as an upstream failure does: what the runner has drains to the
   guest, then its connection ends.
-- Not yet: `dial` (B-6), pulls by the runner and the
-  cache limit, templates, diagnosis and snapshots (masterplan rows B-7,
-  B-8, B-9, S-7a).
+- Dial (masterplan B-6, `src/serve.rs`, `src/vm/mod.rs`): cubed's portal
+  opens a `dial` stream (`Open.dial`: the machine's `ref`, fence and a
+  port); the runner checks the port (1024 to 65535 only, so not 22: keel
+  runs no sshd), the fence as for `guest`, and that the machine runs, then
+  connects from the LAN's address to the guest's port (10 s, the LAN's
+  own limit), answers `StreamAnswer` and carries the bytes both ways, each
+  direction ending on its own (FIN to FIN). A reset or a lost connection
+  from cubed drops the guest's connection. It needs cubed's connection and
+  nothing else: the egress lease does not apply.
+- Not yet: pulls by the runner and the cache limit, templates, diagnosis
+  and snapshots (masterplan rows B-7, B-8, B-9, S-7a).
 - `stop`, `delete` and the runner's own shutdown stop a machine the same
   way: the runner asks the agent to shut down (`DaemonRequest.shutdown`:
   SIGTERM to the workload, SIGKILL to what is left after 10 s, sync, the
