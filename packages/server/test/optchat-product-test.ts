@@ -166,10 +166,10 @@ try {
   // OptChat's archive is the UI's: the agent closes, the machine is
   // released, its slot is free again; history still reads the thread.
   const before = app.registry.runnerSlots().free;
-  assert.deepEqual(await adapter.archive!(thread.id), { already: false, disk: `machine disk retained (${app.registry.getThread(thread.id)!.vm!.retainReason})`, free: `${before + 1} of ${app.registry.runnerSlots().total}` });
+  assert.deepEqual(await adapter.archive!(thread.id), { already: false, disk: "machine disk deleted", free: `${before + 1} of ${app.registry.runnerSlots().total}` });
   assert.equal(app.registry.getThread(thread.id)!.archived, true);
   assert.equal(app.conversations.agentOpen(thread.id), false);
-  // Archiving again changes nothing: not the slots, not the retained disk.
+  // Archiving again changes nothing: not the slots, not the disk's record.
   const vm = app.registry.getThread(thread.id)!.vm;
   assert.equal((await adapter.archive!(thread.id))?.already, true);
   assert.equal(app.registry.runnerSlots().free, before + 1, "a repeated archive frees no second slot");
@@ -178,9 +178,9 @@ try {
   assert.equal(await adapter.archive!("no-such-thread"), null);
   const archived = (await adapter.history(thread.id))!;
   assert.deepEqual([archived.archived, archived.machine, archived.agentOpen], [true, null, false]);
-  assert.ok(archived.facts.some(fact => fact.startsWith("machine disk retained")), archived.facts.join("; "));
+  assert.ok(archived.facts.includes("machine disk deleted"), archived.facts.join("; "));
   assert.deepEqual(archived.transcript?.events, open.transcript?.events, "an archived thread keeps its history");
-  assert.match(formatHistory(thread.id, archived, "delivered"), /\ncubed: archived; machine disk retained [^\n]*; agent pi not open in cubed; workspace writer: none\nrun: completed/);
+  assert.match(formatHistory(thread.id, archived, "delivered"), /\ncubed: archived; machine disk deleted; agent pi not open in cubed; workspace writer: none\nrun: completed/);
   const quiet = app.registry.createThread(project.project.id, "quiet", { provider: faux.getModel().provider, id: faux.getModel().id }, "never opened");
   const none = (await adapter.history(quiet.id))!;
   assert.deepEqual([none.machine, none.transcript, none.unreadable], ["not started", null, null], "no agent, no history");

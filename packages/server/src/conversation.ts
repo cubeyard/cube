@@ -26,6 +26,8 @@ const context = BACKGROUND_CONTEXT;
 const log = createLogger("threads");
 /** The registry's first message is submitted once under this request id. */
 const INITIAL_REQUEST = "cube:initial";
+/** Why a disk the release check let go is kept all the same. */
+const RUNNER_KEPT = "the release check was clean, but the runner kept the disk (a machine that did not stop in time or failed, or a host runner's directory)";
 /** Archive refused: the thread's agent is running. Nothing is interrupted. */
 export class ThreadWorking extends Error {
   /** `waiting`: no turn runs, but the agent's background agents do. */
@@ -534,10 +536,13 @@ export class Conversations {
   async stream(id: string, response: ServerResponse, query: WindowQuery = null): Promise<void> {
     await serveThreadEvents(await this.events(id), response, query);
   }
-  /** Closes the agent and releases the machine. Its disk is deleted only
-   * when cubed's own records show the agent never ran a command or wrote a
-   * file in it and the machine's release check also reports clean; the
-   * guest is agent-controlled, so its report alone never deletes a disk.
+  /** Closes the agent and releases the machine. Its disk is deleted when the
+   * machine's release check reports clean: nothing uncommitted and every
+   * commit pushed (see `releaseCheckScript`); the chat, its usage and what
+   * was pushed stay. Any other answer, or none, keeps the disk with the
+   * reason. The guest is agent-controlled, but an agent that would lie to it
+   * can as well delete its own work: the check guards against losing work,
+   * not against the agent.
    * A thread whose run goes on is refused (ThreadWorking), never stopped. A
    * thread an earlier archive already archived is left as it is (`already`). */
   async archive(id: string): Promise<{ retained: boolean; reason: string; already?: true }> {
@@ -585,7 +590,7 @@ export class Conversations {
         const workspace = this.openWorkspace(id);
         try { decision = await releaseCheck(workspace, threadAgent(thread), thread.allocation); }
         catch (error) { decision = { clean: false, reason: `the thread machine could not be checked: ${error instanceof Error ? error.message : String(error)}` }; }
-        if (decision.clean && workspace.agentChanged()) decision = { clean: false, reason: "the agent ran commands or wrote files in the machine" };
+        if (decision.clean && workspace.agentChanged()) decision = { clean: true, reason: "clean: the agent's work is committed and pushed" };
       }
       this.closeWorkspace(id);
       this.resumed.delete(id);
@@ -593,7 +598,7 @@ export class Conversations {
       else if (thread.vm) this.registry.updateThreadVm(id, { retain: !decision.clean, retainReason: decision.reason });
       this.registry.beginRelease(id);
       const released = await this.release(id);
-      return { retained: released.retained, reason: decision.reason };
+      return { retained: released.retained, reason: released.retained && decision.clean ? RUNNER_KEPT : decision.reason };
     });
   }
   /** Deletes an archived thread's retained machine disk: the operator
@@ -620,6 +625,9 @@ export class Conversations {
       if (!thread) throw new Error("thread not found");
       // A release a crash interrupted keeps the evidence unless the check was clean.
       const released = await this.machines.release(thread, thread.vm?.retain ?? true);
+      // The runner keeps a disk cubed let go when the machine did not stop
+      // in time (or failed): recorded, so it is listed and can be discarded.
+      if (released.retained && thread.vm && !thread.vm.retain) this.registry.updateThreadVm(id, { retain: true, retainReason: RUNNER_KEPT });
       this.registry.finishRelease(id);
       this.failures.delete(id);
       this.waits.delete(id);

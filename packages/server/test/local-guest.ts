@@ -93,9 +93,12 @@ export class LocalMachines implements ThreadMachines {
     this.rebooted.add(thread.id);
   }
   readonly discarded = new Set<string>();
+  /** Threads whose machine does not stop in time: the runner keeps the disk. */
+  readonly stuck = new Set<string>();
   async release(thread: Thread, retain: boolean): Promise<{ retained: boolean }> {
     this.guest(thread).stop();
     this.released.set(thread.id, retain);
+    if (this.stuck.has(thread.id)) return { retained: true };
     if (!retain) fs.rmSync(path.join(this.root, thread.id), { recursive: true, force: true });
     return { retained: retain };
   }

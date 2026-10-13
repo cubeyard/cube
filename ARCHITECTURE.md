@@ -459,14 +459,20 @@ checkouts with an ordinary workspace command under `cube:provision:<n>`:
 through the gateway, verifying the pinned commit and checking it out detached;
 an empty project gets an empty `/workspace`. A failed try is never rerun under
 its key, and a force-pushed branch that no longer holds the pinned commit fails
-closed. Archive runs the release check (every checkout at its pinned commit, no
-changes, branches, stashes or commits of its own, no other command running).
-The guest is agent-controlled, so its answer alone never deletes a disk:
-`VmWorkspace` records in the thread's lease store that the agent ran a command
-or wrote a file before sending it (cubed's own provisioning and checks do not
-count). A machine is released and its disk deleted only when that record is
-empty and the check is clean; anything else, an unreachable machine, a failed
-one or an interrupted one is retained on the runner. While an archive runs,
+closed. Archive runs the release check: no uncommitted changes (ignored files
+aside) or stashes in any checkout, every commit (branches, tags, HEAD and the
+reflog) in the pinned history or once on a remote (its remote-tracking refs and
+their reflogs, so a force-pushed branch counts), an empty project's
+`/workspace` holding only such checkouts, and no other command running. Its
+own branches and a HEAD away from the pin are fine. A clean check releases the
+machine and deletes its disk; anything else, an unreachable machine, a failed
+one or an interrupted one is retained on the runner with the reason. The guest
+is agent-controlled, but an agent that would fake the check could as well
+delete its own work: the check guards against losing work, not against the
+agent. `VmWorkspace` still records that the agent ran a command or wrote a file
+(the clean reason says so). A runner that keeps a disk cubed let go (a guest
+that did not power off within the stop grace is marked interrupted) answers
+retained, and cubed records it so it is listed and can be discarded. While an archive runs,
 activation and the recovery loop do not reopen the thread.
 
 On a cubed restart machines keep running; activation starts each again (which

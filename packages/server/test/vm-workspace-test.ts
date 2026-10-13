@@ -1,7 +1,8 @@
 /** A thread's machine through cubed's real API, on local guests (the real
  * guest helper under temporary roots): background activation, provisioning
- * of the pinned checkouts once, the release check at archive (a clean
- * machine is deleted, anything else retained with its reason), a failed
+ * of the pinned checkouts once, the release check at archive (a machine
+ * with nothing uncommitted or unpushed is deleted, anything else retained
+ * with its reason), a failed
  * provisioning shown on the thread and retried under a new key. Real VMs run
  * in scripts/test-vm-e2e.ts. */
 import assert from "node:assert/strict";
@@ -89,21 +90,33 @@ try {
   assert.equal(machines.released.get(clean), false);
   assert.equal(app.registry.getThread(clean)?.archived, true);
 
-  // The guest is agent-controlled: a machine reporting clean is still kept
-  // when cubed's records show the agent ran a command in it.
-  faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command: "true" })], { stopReason: "toolUse" }),
+  // Ordinary agent work does not keep the disk: a branch of its own,
+  // committed, pushed, amended and force-pushed, HEAD away from the pin.
+  const commit = "git -c user.name=agent -c user.email=agent@example.invalid -c commit.gpgsign=false commit -q";
+  faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command: `git checkout -q -b feature && echo work > work.txt && git add work.txt && ${commit} -m work && git push -q origin feature && ${commit} --amend -m again && git push -q -f origin feature` })], { stopReason: "toolUse" }),
     ...Array.from({ length: 20 }, () => fauxAssistantMessage("ready"))]);
   const ran = await create(project.id, "ran");
   await thread(ran, row => row.state === "ready");
   await idle(ran);
+  assert.equal(git(primary, "rev-parse", "feature"), git(machines.guests.get(ran)!.workspace, "rev-parse", "HEAD"), "the agent pushed its work");
   const ranArchive = await (await fetch(`${base}/api/threads/${ran}`, { method: "DELETE" })).json();
-  assert.deepEqual(ranArchive, { ok: true, retained: true, reason: "the agent ran commands or wrote files in the machine" });
-  assert.equal(machines.released.get(ran), true);
+  assert.deepEqual(ranArchive, { ok: true, retained: false, reason: "clean: the agent's work is committed and pushed" });
+  assert.equal(machines.released.get(ran), false);
+
+  // A disk the runner keeps all the same (its machine did not stop in time)
+  // is recorded, so it is listed and the operator can discard it.
+  const stuck = await create(project.id, "stuck");
+  await thread(stuck, row => row.state === "ready");
+  await idle(stuck);
+  machines.stuck.add(stuck);
+  const stuckArchive = await (await fetch(`${base}/api/threads/${stuck}`, { method: "DELETE" })).json();
+  assert.deepEqual(stuckArchive, { ok: true, retained: true, reason: "the release check was clean, but the runner kept the disk (a machine that did not stop in time or failed, or a host runner's directory)" });
+  assert.equal(app.registry.getThread(stuck)!.vm!.retain, true);
   // The operator discards the retained disk; only archived threads, once.
-  assert.equal((await post(`/api/threads/${ran}/discard`, {})).status, 200);
-  assert.ok(machines.discarded.has(ran));
-  assert.equal(app.registry.getThread(ran)!.vm!.discarded, true);
-  assert.equal((await post(`/api/threads/${ran}/discard`, {})).status, 200, "repeatable");
+  assert.equal((await post(`/api/threads/${stuck}/discard`, {})).status, 200);
+  assert.ok(machines.discarded.has(stuck));
+  assert.equal(app.registry.getThread(stuck)!.vm!.discarded, true);
+  assert.equal((await post(`/api/threads/${stuck}/discard`, {})).status, 200, "repeatable");
 
   // While an archive runs, nothing reopens the thread's agent or workspace.
   const raced = await create(project.id, "raced");
@@ -132,11 +145,12 @@ try {
   fs.writeFileSync(path.join(machines.guests.get(dirty)!.workspace, "notes.txt"), "work in progress\n");
   const kept = await (await fetch(`${base}/api/threads/${dirty}`, { method: "DELETE" })).json();
   assert.equal(kept.retained, true);
-  assert.match(kept.reason, /has changes/);
+  assert.match(kept.reason, /has uncommitted changes/);
   assert.equal(app.registry.getThread(dirty)?.vm?.retain, true);
-  assert.match(app.registry.getThread(dirty)?.vm?.retainReason ?? "", /has changes/);
+  assert.match(app.registry.getThread(dirty)?.vm?.retainReason ?? "", /has uncommitted changes/);
 
-  // A commit of its own is retained even when the tree is clean again.
+  // A commit not pushed is retained even when the tree is clean again: on a
+  // branch, or left behind by a checkout (only the reflog has it).
   const committed = await create(project.id, "committed");
   await thread(committed, row => row.state === "ready");
   await idle(committed);
@@ -146,15 +160,29 @@ try {
   git(committedWorkspace, "-c", "advice.detachedHead=false", "checkout", "-q", project.repositories[0].baseOid);
   const own = await (await fetch(`${base}/api/threads/${committed}`, { method: "DELETE" })).json();
   assert.equal(own.retained, true);
-  assert.match(own.reason, /commits of its own/);
+  assert.match(own.reason, /has commits that are not pushed/);
+  const branched = await create(project.id, "branched");
+  await thread(branched, row => row.state === "ready");
+  await idle(branched);
+  const branchedWorkspace = machines.guests.get(branched)!.workspace;
+  git(branchedWorkspace, "checkout", "-q", "-b", "local");
+  fs.writeFileSync(path.join(branchedWorkspace, "README.md"), "changed\n");
+  git(branchedWorkspace, "commit", "-qam", "own");
+  assert.match((await (await fetch(`${base}/api/threads/${branched}`, { method: "DELETE" })).json()).reason, /\. has commits that are not pushed/);
 
-  // An empty project gets an empty workspace; anything left in it is retained.
+  // An empty project gets an empty workspace; anything left in it but a
+  // checkout with nothing unpushed is retained.
   const blank = await create(empty.id, "blank");
   await thread(blank, row => row.state === "ready");
   assert.deepEqual(fs.readdirSync(machines.guests.get(blank)!.workspace), []);
   await idle(blank);
   fs.writeFileSync(path.join(machines.guests.get(blank)!.workspace, "scratch"), "x");
-  assert.match((await (await fetch(`${base}/api/threads/${blank}`, { method: "DELETE" })).json()).reason, /not empty/);
+  assert.match((await (await fetch(`${base}/api/threads/${blank}`, { method: "DELETE" })).json()).reason, /the workspace is not empty: scratch is not a checkout/);
+  const cloned = await create(empty.id, "cloned");
+  await thread(cloned, row => row.state === "ready");
+  await idle(cloned);
+  git(machines.guests.get(cloned)!.workspace, "clone", "-q", primary, "primary");
+  assert.equal((await (await fetch(`${base}/api/threads/${cloned}`, { method: "DELETE" })).json()).retained, false);
 
   // A pinned commit that vanished: provisioning fails visibly and is retried
   // under a new key; nothing falls back to another commit.
@@ -213,8 +241,8 @@ try {
   // The scripts quote what they are given.
   assert.match(provisionScript({ projectId: "p", projectRevision: 1, repositories: [{ url: "https://example.com/a'b.git", base: "main", baseOid: "a".repeat(40), checkoutName: "workspace" }] }),
     /checkout '\.' 'https:\/\/example\.com\/a'\\''b\.git' 'refs\/heads\/main'/);
-  assert.match(releaseCheckScript({ projectId: "p", projectRevision: 1, repositories: [] }), /the workspace is not empty/);
-  console.log("ok: thread machines: background activation, pinned checkouts provisioned once, release check (clean deleted; agent commands, changes, own commits, leftovers and failures retained with reasons), no reopening while archiving, failed provisioning retried under a new key, no agent on a machine that is not ready");
+  assert.match(releaseCheckScript({ projectId: "p", projectRevision: 1, repositories: [] }), /check "\$entry" ''/);
+  console.log("ok: thread machines: background activation, pinned checkouts provisioned once, release check (clean and pushed work deleted; changes, unpushed commits, leftovers, failures and disks the runner kept retained with reasons), no reopening while archiving, failed provisioning retried under a new key, no agent on a machine that is not ready");
 } finally {
   await app.close();
   await machines.close();

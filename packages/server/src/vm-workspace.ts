@@ -103,7 +103,7 @@ export class VmWorkspace implements Workspace {
   async limits(): Promise<WorkspaceLimits> { return { ...(await this.describe()).limits }; }
 
   /** The agent's commands; each one marks the workspace as changed by the
-   * agent, which keeps its disk at archive (see `agentChanged`). */
+   * agent (see `agentChanged`). */
   async exec(token: string, key: string, spec: WorkspaceExecSpec): Promise<WorkspaceOperation> {
     return this.start(token, key, spec, true);
   }
@@ -113,8 +113,7 @@ export class VmWorkspace implements Workspace {
     return this.start(token, key, spec, false);
   }
   /** Whether the agent ever ran a command or wrote a file here, from cubed's
-   * own records. The guest is agent-controlled (root via sudo), so its own
-   * report can keep a disk but never alone justify deleting one. */
+   * own records (the archive's reason says so; the release check decides). */
   agentChanged(): boolean { return this.leases.agentChanged(); }
   private async start(token: string, key: string, spec: WorkspaceExecSpec, agent: boolean): Promise<WorkspaceOperation> {
     const { epoch } = this.leases.verify(token);
