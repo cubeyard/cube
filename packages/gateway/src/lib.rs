@@ -9,13 +9,20 @@
 //! the guest's sshd, and its portal the guest's registered services, through
 //! the control socket's dial route.
 //!
+//! With `--credential SOCK` the same process is also the credential proxy of
+//! runner protocol 4 (credential.rs): cubed carries a `berth vm` runner's
+//! `credential` streams to that socket, and the token is substituted here,
+//! as for p3, and turned back into the placeholder in the answer (B6).
+//!
 //! The per-VM LAN, DNS, address check, CA and the guest-facing half of HTTP
 //! are `cube-netstack`; decisions, secrets and the runner link are here.
 pub mod control;
+pub mod credential;
 pub mod decide;
 pub mod dial;
 pub mod http;
 pub mod link;
+pub mod reverse;
 pub mod secrets;
 
 /// The network stack lives in `cube-netstack`; its modules keep their paths
@@ -56,16 +63,30 @@ pub struct Running {
     pub ready: serde_json::Value,
     pub control: PathBuf,
     pub task: JoinHandle<Result<()>>,
+    /// The credential proxy's socket and task, when it serves one.
+    pub credential: Option<(PathBuf, JoinHandle<Result<()>>)>,
 }
 
 impl Running {
     pub fn stop(self) {
         self.task.abort();
         let _ = fs::remove_file(&self.control);
+        if let Some((path, task)) = self.credential {
+            task.abort();
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
 pub async fn start(options: ServeOptions) -> Result<Running> {
+    start_with_credential(options, None).await
+}
+
+/// [`start`], and the credential proxy on `credential` when given.
+pub async fn start_with_credential(
+    options: ServeOptions,
+    credential: Option<PathBuf>,
+) -> Result<Running> {
     fs::create_dir_all(&options.state)
         .with_context(|| format!("create {}", options.state.display()))?;
     fs::set_permissions(&options.state, fs::Permissions::from_mode(0o700))?;
@@ -84,10 +105,18 @@ pub async fn start(options: ServeOptions) -> Result<Running> {
     let gateway = Arc::new(control::Gateway::new(
         endpoint.clone(),
         options.network,
-        egress,
+        egress.clone(),
         Arc::new(http::HostResolver::new(upstream)),
         options.limits,
     ));
+    let credential = match credential {
+        Some(path) => {
+            let listener = bind_control(&path).await?;
+            let task = tokio::spawn(credential::serve(listener, egress.clone()));
+            Some((path, task))
+        }
+        None => None,
+    };
     let listener = bind_control(&options.control).await?;
     let task = tokio::spawn(control::serve(listener, gateway.clone()));
     let ready = serde_json::json!({
@@ -101,11 +130,13 @@ pub async fn start(options: ServeOptions) -> Result<Running> {
         ready,
         control: options.control,
         task,
+        credential,
     })
 }
 
-/// Binds the control socket (0600). A stale socket from a previous gateway
-/// is replaced; a socket another gateway still serves is not.
+/// Binds the control (or credential) socket (0600). A stale socket from a
+/// previous gateway is replaced; a socket another gateway still serves is
+/// not.
 async fn bind_control(path: &Path) -> Result<UnixListener> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         ensure!(

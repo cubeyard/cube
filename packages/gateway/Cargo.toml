@@ -24,6 +24,7 @@ base64 = "0.22"
 bytes = "1"
 cube-netstack = { path = "../netstack" }
 cube-runner = { path = "../node-transport" }
+cube-runner-protocol = { path = "../runner-protocol" }
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "server", "http1"] }

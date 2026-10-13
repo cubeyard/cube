@@ -30,11 +30,24 @@ fn replace(s: &[u8], map: &HashMap<String, String>) -> Vec<u8> {
     out
 }
 
+/// The secret name of a placeholder (`github` of `cube_ph_github_…`).
+pub fn placeholder_name(placeholder: &str) -> Option<&str> {
+    is_placeholder(placeholder)
+        .then(|| placeholder["cube_ph_".len()..].split('_').next())
+        .flatten()
+}
+
 /// Replaces the placeholders named in `map` (and only those). Values that
-/// would make an invalid header are refused, never sent partially.
-pub fn substitute_headers(headers: &mut HeaderMap, map: &HashMap<String, String>) -> Result<()> {
+/// would make an invalid header are refused, never sent partially. Returns
+/// each `Basic` credential it re-encoded as (the new encoding, the guest's),
+/// for B6 (reverse.rs).
+pub fn substitute_headers(
+    headers: &mut HeaderMap,
+    map: &HashMap<String, String>,
+) -> Result<Vec<(String, String)>> {
+    let mut basic = vec![];
     if map.is_empty() {
-        return Ok(());
+        return Ok(basic);
     }
     for (key, value) in map {
         if !is_placeholder(key) {
@@ -50,7 +63,11 @@ pub fn substitute_headers(headers: &mut HeaderMap, map: &HashMap<String, String>
             if new == decoded {
                 None
             } else {
-                Some(format!("Basic {}", STANDARD.encode(new)).into_bytes())
+                let encoded = STANDARD.encode(new);
+                let guest =
+                    String::from_utf8_lossy(value.as_bytes()[6..].trim_ascii()).into_owned();
+                basic.push((encoded.clone(), guest));
+                Some(format!("Basic {encoded}").into_bytes())
             }
         } else {
             let new = replace(value.as_bytes(), map);
@@ -62,7 +79,7 @@ pub fn substitute_headers(headers: &mut HeaderMap, map: &HashMap<String, String>
             *value = new;
         }
     }
-    Ok(())
+    Ok(basic)
 }
 
 #[cfg(test)]
@@ -87,6 +104,9 @@ mod tests {
         assert!(find(b"cube_ph_GitHub_AbCdEfGhIjKlMnOpQrStUv").is_empty());
         assert!(find(b"cube_ph__AbCdEfGhIjKlMnOpQrStUv").is_empty());
         assert!(!is_placeholder(&format!("{GH} ")));
+        assert_eq!(placeholder_name(GH), Some("github"));
+        assert_eq!(placeholder_name(OTHER), Some("npm"));
+        assert_eq!(placeholder_name("cube_ph_github_short"), None);
     }
 
     fn headers(pairs: &[(&'static str, String)]) -> HeaderMap {
@@ -117,11 +137,10 @@ mod tests {
         let mut h = headers(&[("authorization", format!("basic {encoded}"))]);
         assert_eq!(scan_headers(&h), vec![GH]);
         let map = HashMap::from([(GH.to_string(), "ghp_real".to_string())]);
-        substitute_headers(&mut h, &map).unwrap();
-        assert_eq!(
-            h["authorization"],
-            format!("Basic {}", STANDARD.encode("x-access-token:ghp_real"))
-        );
+        let basic = substitute_headers(&mut h, &map).unwrap();
+        let real = STANDARD.encode("x-access-token:ghp_real");
+        assert_eq!(h["authorization"], format!("Basic {real}"));
+        assert_eq!(basic, vec![(real, encoded.clone())], "for B6");
         // Not returned: left untouched, byte for byte.
         let mut h = headers(&[("authorization", format!("basic {encoded}"))]);
         substitute_headers(
