@@ -451,7 +451,56 @@ struct Env {
     runner_ca: RunnerCa,
     tls: FakeUpstream,
     plain: FakeUpstream,
+    stream: StreamUpstream,
     _net: Net,
+}
+
+/// Answers any request with an endless body, 1 KiB every 20 ms, and notes
+/// when the runner closes the upstream connection.
+struct StreamUpstream {
+    address: SocketAddr,
+    written: Arc<AtomicUsize>,
+    closed: Arc<Mutex<Option<std::time::Instant>>>,
+}
+
+impl StreamUpstream {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let written = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(Mutex::new(None));
+        let (count, mark) = (written.clone(), closed.clone());
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (count, mark) = (count.clone(), mark.clone());
+                tokio::spawn(async move {
+                    let (mut read, mut write) = stream.into_split();
+                    let mut head = vec![0u8; 4096];
+                    let _ = read.read(&mut head).await;
+                    let _ = write
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 1000000000\r\n\r\n")
+                        .await;
+                    let writer = tokio::spawn(async move {
+                        let chunk = [b'x'; 1024];
+                        while write.write_all(&chunk).await.is_ok() {
+                            count.fetch_add(chunk.len(), Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                    });
+                    // The runner closing its end reads as EOF here.
+                    let mut rest = [0u8; 64];
+                    while matches!(read.read(&mut rest).await, Ok(n) if n > 0) {}
+                    *mark.lock().unwrap() = Some(std::time::Instant::now());
+                    writer.abort();
+                });
+            }
+        });
+        Self {
+            address,
+            written,
+            closed,
+        }
+    }
 }
 
 fn reference() -> proto::Ref {
@@ -498,6 +547,7 @@ impl Env {
         let upstream_ca = UpstreamCa::new();
         let tls = FakeUpstream::tls(&upstream_ca, &["github.test", "api.github.test"]).await;
         let plain = FakeUpstream::plain().await;
+        let stream = StreamUpstream::start().await;
         let mut roots = RootCertStore::empty();
         roots.add(upstream_ca.der.clone()).unwrap();
         let upstream = Arc::new(
@@ -507,6 +557,7 @@ impl Env {
                     ("github.test".to_string(), tls.address),
                     ("api.github.test".to_string(), tls.address),
                     ("plain.test".to_string(), plain.address),
+                    ("stream.test".to_string(), stream.address),
                 ]),
             )
             .unwrap(),
@@ -539,6 +590,7 @@ impl Env {
             runner_ca,
             tls,
             plain,
+            stream,
             _net: net,
         }
     }
@@ -946,7 +998,7 @@ async fn private_own_and_cubed_addresses_are_refused_even_when_allowed() {
 }
 
 #[tokio::test]
-async fn egress_goes_on_for_the_lease_then_stops_and_closes_open_flows() {
+async fn egress_goes_on_for_the_lease_then_stops_new_flows_and_requests() {
     let lease = Duration::from_millis(1500);
     let env = Env::new(open_policy(lease)).await;
     let cubed = env.presence.attach(None);
@@ -981,13 +1033,23 @@ async fn egress_goes_on_for_the_lease_then_stops_and_closes_open_flows() {
     );
     assert!(lost.elapsed() < lease, "checked within the lease");
 
-    // The lease runs out: the open flow is closed, new ones refused.
-    tokio::time::timeout(Duration::from_secs(5), kept_ended)
+    // The lease runs out: the open connection is the guest's to end (the
+    // runner does not close or reset it), but it carries no more egress.
+    tokio::time::sleep(lease.saturating_sub(lost.elapsed()) + Duration::from_millis(300)).await;
+    let refused = kept
+        .send_request(get("github.test", "/3", &[]))
         .await
-        .expect("the open flow was closed when the lease ran out")
-        .unwrap()
-        .ok();
-    assert!(lost.elapsed() >= lease);
+        .expect("the open connection still answers");
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        refused.headers()[DENIED_HEADER],
+        Denial::LeaseExpired.message()
+    );
+    assert!(
+        !kept_ended.is_finished(),
+        "the runner left the connection open"
+    );
+    assert_eq!(env.tls.hits.load(Ordering::SeqCst), 2, "/3 never went out");
     let mut tcp = env.guest.connect(ANY, 80, 40062).await.unwrap();
     let _ = tcp
         .write_all(b"GET / HTTP/1.1\r\nhost: plain.test\r\n\r\n")
@@ -1021,6 +1083,68 @@ async fn egress_goes_on_for_the_lease_then_stops_and_closes_open_flows() {
     assert!(
         reasons.iter().all(|(_, r)| r == "lease_expired"),
         "{reasons:?}"
+    );
+}
+
+/// A download under way when the lease runs out: the runner closes its
+/// upstream (no more egress) and leaves the guest's side to end as TCP
+/// does: what reached the guest's stream is read, then EOF, never a reset.
+#[tokio::test]
+async fn at_the_end_of_the_lease_a_download_stops_upstream_and_drains_to_the_guest() {
+    let lease = Duration::from_millis(1000);
+    let env = Env::new(open_policy(lease)).await;
+    let cubed = env.presence.attach(None);
+    let mut tcp = env.guest.connect(ANY, 80, 40080).await.unwrap();
+    tcp.write_all(b"GET /big HTTP/1.1\r\nhost: stream.test\r\n\r\n")
+        .await
+        .unwrap();
+    let mut first = [0u8; 4096];
+    let n = tcp.read(&mut first).await.unwrap();
+    assert!(String::from_utf8_lossy(&first[..n]).starts_with("HTTP/1.1 200"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(cubed);
+    let lost = std::time::Instant::now();
+    let mut received = n;
+    let mut buffer = vec![0u8; 65536];
+    let end = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match tcp.read(&mut buffer).await {
+                Ok(0) => return Ok(()),
+                Ok(k) => received += k,
+                Err(e) => return Err(e),
+            }
+        }
+    })
+    .await
+    .expect("the download ended");
+    let closed = env
+        .stream
+        .closed
+        .lock()
+        .unwrap()
+        .expect("the upstream was closed");
+    let after = closed.duration_since(lost);
+    assert!(
+        after >= lease && after < lease + Duration::from_millis(1500),
+        "upstream closed {after:?} after cubed went (lease {lease:?})"
+    );
+    assert!(
+        end.is_ok(),
+        "the guest's connection ended by FIN, not a reset: {end:?}"
+    );
+    let written = env.stream.written.load(Ordering::SeqCst);
+    assert!(
+        received > 8 * 1024,
+        "the guest got the download until then: {received} bytes"
+    );
+    assert!(
+        received <= written + 1024,
+        "nothing beyond what the upstream sent: {received} of {written}"
+    );
+    let reasons = env.reasons();
+    assert!(
+        reasons.is_empty(),
+        "closing an upstream is no refusal: {reasons:?}"
     );
 }
 

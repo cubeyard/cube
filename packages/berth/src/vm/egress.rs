@@ -17,6 +17,12 @@
 //! (or the flow closed when no HTTP is spoken yet) and a report to cubed.
 //! The LAN lives as long as the QEMU process: a new start or a restore gets
 //! a new socket pair and LAN, and every flow of the old one is reset.
+//!
+//! When the lease runs out (presence.rs), new flows and new requests are
+//! refused and every upstream connection of an open flow is closed: no
+//! more egress. The guest's side of an open flow is left alone: what is
+//! already on its way to the guest drains, and the connection then ends as
+//! TCP ends it (the runner neither resets it nor discards its buffers).
 use std::{
     os::fd::{AsRawFd, OwnedFd, RawFd},
     sync::{Arc, Mutex},
@@ -30,7 +36,7 @@ use cube_netstack::{
     dns,
     http::{
         HANDSHAKE_TIMEOUT, HostResolver, MAX_HEAD, Scheme as Authority, Upstream, UpstreamError,
-        accept_tls, authority, client, strip_hop_by_hop,
+        accept_tls, authority, strip_hop_by_hop,
     },
     lan::{
         Addressing, FlowHandler, FlowInfo, FlowStream, FrameSink, Lan, LanConfig, LanLimits,
@@ -132,18 +138,23 @@ impl Gate {
             .push(&self.reference, host, denial.reason());
     }
 
-    async fn serve(self: Arc<Self>, info: FlowInfo, stream: FlowStream) -> Result<()> {
+    async fn serve(
+        self: Arc<Self>,
+        info: FlowInfo,
+        stream: FlowStream,
+        upstreams: Arc<Upstreams>,
+    ) -> Result<()> {
         match info.destination.port() {
             443 => {
                 let Some((name, tls)) = accept_tls(&self.egress.ca, stream).await? else {
                     return Ok(());
                 };
-                HttpConnection::new(self, Scheme::Https, Some(name))
+                HttpConnection::new(self, Scheme::Https, Some(name), upstreams)
                     .serve(tls)
                     .await
             }
             80 => {
-                HttpConnection::new(self, Scheme::Http, None)
+                HttpConnection::new(self, Scheme::Http, None, upstreams)
                     .serve(stream)
                     .await
             }
@@ -167,13 +178,19 @@ impl FlowHandler for Gate {
         let cubed = this.egress.presence.subscribe();
         tokio::spawn(async move {
             let gate = this.clone();
+            let upstreams = Arc::new(Upstreams::default());
+            // Guest-side failures (bad TLS, resets, timeouts) are routine
+            // and only end this flow.
+            let serve = this.serve(info, stream, upstreams.clone());
+            tokio::pin!(serve);
             tokio::select! {
-                // Guest-side failures (bad TLS, resets, timeouts) are
-                // routine and only end this flow.
-                _ = this.serve(info, stream) => {}
-                // The lease ran out: the flow and its upstream go.
+                _ = &mut serve => return,
                 _ = lease_runs_out(cubed, move || gate.lease()) => {}
             }
+            // The lease ran out: no more egress for this flow. Its guest
+            // side goes on until it ends by itself.
+            upstreams.stop();
+            let _ = serve.await;
         });
     }
 }
@@ -203,8 +220,46 @@ impl Resolver for GateResolver {
     }
 }
 
+/// The upstream connections of one guest flow, closed when the lease runs
+/// out; none opens after that.
+#[derive(Default)]
+struct Upstreams(Mutex<(bool, Vec<tokio::task::AbortHandle>)>);
+
+impl Upstreams {
+    fn stop(&self) {
+        let mut state = self.0.lock().unwrap();
+        state.0 = true;
+        for task in state.1.drain(..) {
+            task.abort();
+        }
+    }
+
+    /// An HTTP/1.1 client connection over `io`, driven on its own task that
+    /// [`Self::stop`] ends.
+    async fn client<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+        &self,
+        io: S,
+    ) -> Result<SendRequest<Incoming>> {
+        let (sender, connection) = hyper::client::conn::http1::Builder::new()
+            .handshake(TokioIo::new(io))
+            .await?;
+        let task = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let mut state = self.0.lock().unwrap();
+        if state.0 {
+            task.abort();
+            anyhow::bail!("egress lease expired");
+        }
+        state.1.retain(|t| !t.is_finished());
+        state.1.push(task.abort_handle());
+        Ok(sender)
+    }
+}
+
 struct HttpConnection {
     gate: Arc<Gate>,
+    upstreams: Arc<Upstreams>,
     scheme: Scheme,
     sni: Option<String>,
     /// One upstream connection per guest connection, reused while alive.
@@ -212,9 +267,15 @@ struct HttpConnection {
 }
 
 impl HttpConnection {
-    fn new(gate: Arc<Gate>, scheme: Scheme, sni: Option<String>) -> Arc<Self> {
+    fn new(
+        gate: Arc<Gate>,
+        scheme: Scheme,
+        sni: Option<String>,
+        upstreams: Arc<Upstreams>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             gate,
+            upstreams,
             scheme,
             sni,
             upstream: tokio::sync::Mutex::new(None),
@@ -345,9 +406,9 @@ impl HttpConnection {
                     .await
                     .context("upstream TLS timed out")?
                     .context("upstream TLS")?;
-                    client(tls).await
+                    self.upstreams.client(tls).await
                 }
-                Scheme::Http => client(stream).await,
+                Scheme::Http => self.upstreams.client(stream).await,
             }
         };
         handshake.await.map_err(UpstreamError::Failed)
