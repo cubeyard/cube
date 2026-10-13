@@ -15,7 +15,16 @@
  * (3 s here) running out (new flows and requests refused, a download's
  * upstream closed, an open connection left to drain) and cubed's return, and
  * the runner's report stream read as cubed would read it, with
- * `dropped_before` after its queue overflowed.
+ * `dropped_before` after its queue overflowed. Then (B-5, V6-V8) the
+ * credential stream through the real chain: the guest -> berth vm -> cubed's
+ * RunnerSession -> cube-gateway's credential proxy (built with test-hooks;
+ * CUBE_TEST_BERTH_GATEWAY names another build) -> test-vm-e2e's fake GitHub
+ * (fake-github.ts): `gh api user`, `git push` (and a timed 100 MiB push),
+ * the token echoed back only as the guest's placeholder (Bearer and Basic,
+ * Content-Length and chunked, split across chunks), an encoded answer
+ * refused, redirects, a placeholder refused at the wrong host, the fence,
+ * cubed going during a download, and a scan for the token in the guest, the
+ * runner's directory and every log.
  *
  *   node packages/server/test/runner-vm-test.ts target/debug/berth
  *
@@ -52,6 +61,10 @@ import { fromJsonString } from "@bufbuild/protobuf";
 import { Endpoint, EndpointAddr, EndpointId, SecretKey } from "@number0/iroh/index.js";
 import { EgressPolicy_Default, EgressReportSchema, MachineStatus_Phase, OpenSchema, Runner_Kind, type EgressReport, type Machine } from "../src/gen/runner_pb.js";
 import { RunnerError, RunnerSession, loadSessionConfig } from "../src/runner-session.ts";
+import { EgressPolicy, newPlaceholder, serveEgress } from "../src/egress-policy.ts";
+import { GatewaySupervisor } from "../src/gateway.ts";
+import type { CredentialRoute } from "../src/runner-credentials.ts";
+import { fakeGithub, git as gitAt } from "../../../scripts/fake-github.ts";
 import { GuestTransportError } from "../src/guest-ssh.ts";
 import { resumeWorkspace } from "../src/vm.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
@@ -60,6 +73,7 @@ import { settleOperation, type Workspace } from "../src/workspace.ts";
 import { workspaceContract, workspaceServicesContract } from "./workspace-contract.ts";
 
 const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
+const repo = path.resolve(import.meta.dirname, "../../..");
 assert.ok(fs.existsSync(binary), `${binary}: build berth first (cargo build -p berth)`);
 // Short: a machine's sockets must fit sun_path (104 bytes on macOS).
 // CUBE_TEST_BERTH_TMP puts it elsewhere (a host runner's thread directory).
@@ -177,10 +191,10 @@ async function qmp(id: string, command: string): Promise<unknown> {
 }
 
 /** A command under its own lease, to its end: exit code and output. */
-async function shell(workspace: Workspace, key: string, command: string): Promise<{ exitCode: number | null; output: string }> {
+async function shell(workspace: Workspace, key: string, command: string, timeoutMs = 30000): Promise<{ exitCode: number | null; output: string }> {
   const lease = await workspace.lease({ owner: "pi" });
   try {
-    await workspace.exec(lease.token, key, { command, timeoutMs: 30000 });
+    await workspace.exec(lease.token, key, { command, timeoutMs });
     const done = await settleOperation(workspace, lease.token, key);
     assert.equal(done.state, "succeeded", JSON.stringify(done));
     return { exitCode: done.state === "succeeded" ? done.exitCode : null, output: done.state === "succeeded" ? Buffer.from(done.output).toString("utf8") : "" };
@@ -256,9 +270,11 @@ if (pulled) {
   note(`pulled ${image}: ${pull.stderr.trim().split("\n").filter(line => /layer|index/.test(line)).join(" | ")}`);
 }
 
+// The machine's GitHub placeholder (B-5's V6-V8 use it as the guest's GH_TOKEN).
+const PH = newPlaceholder("github");
 const documents = {
   hostname: Buffer.from("cube-vm-test\n"),
-  env: Buffer.from("GH_TOKEN=cube_ph_github_vmtest\n"),
+  env: Buffer.from(`GH_TOKEN=${PH}\n`),
   "hooks/pre-resume": Buffer.from("#!/bin/bash\necho \"pre-resume as $(id -un) in $(pwd) token=$GH_TOKEN\"\n"),
 };
 
@@ -383,7 +399,7 @@ try {
       assert.equal(resumed.hooks["pre-resume"]?.status, "ok", JSON.stringify(resumed));
       const facts = await shell(workspace, "facts", "hostname; echo \"$GH_TOKEN\"; grep -c 'cube: begin' /etc/ssl/certs/ca-certificates.crt || true");
       assert.equal(facts.exitCode, 0, JSON.stringify(facts));
-      assert.match(facts.output, /^cube-vm-test\ncube_ph_github_vmtest\n1\n/, "the boot documents and the runner's CA reached the machine");
+      assert.match(facts.output, new RegExp(`^cube-vm-test\n${PH}\n1\n`), "the boot documents and the runner's CA reached the machine");
       note("Workspace contract (leases, files, commands, services, hooks) over RunnerGuestTransport: ok; hostname, placeholder and runner CA from machine_setup");
 
       // The agent starts again: a new session, the setup again, ready again.
@@ -511,13 +527,15 @@ try {
       // A placeholder of the real form (the boot document's GH_TOKEN above is
       // shorter, so it is no placeholder and would go out as any header).
       const placeholder = "cube_ph_github_AbCdEfGhIjKlMnOpQrStUv";
-      assert.equal(await deniedBy("v5-credential", `-H "Authorization: Bearer ${placeholder}" https://api.github.com/`), "credentials are not available on this runner yet");
+      // A credential rule's request goes to cubed (B-5); this session has no credential proxy.
+      const unavailable = await run("v5-credential", `curl -s -o /dev/null -m 20 -D - -H "Authorization: Bearer ${placeholder}" https://api.github.com/ | tr -d '\\r' | sed -n 's/^HTTP\\/1.1 //p;s/^x-cube-error: //Ip'; true`);
+      assert.equal(unavailable, "503 Service Unavailable\ncubed refused the credential request: this cubed carries no credential requests");
       assert.equal(await deniedBy("v5-placeholder", `-H "Authorization: Bearer ${placeholder}" https://example.com/`), "a secret placeholder is only sent where a credential rule allows it");
       await startWith({ default: EgressPolicy_Default.DENY, denyHosts: [], rules: [{ hosts: ["example.com"], ports: [443], kind: open443 }], lease: { seconds: 3n, nanos: 0 } });
       assert.equal(await code("v5-deny-allowed", "https://example.com/"), "200");
       assert.equal(await deniedBy("v5-deny-other", "https://example.org/"), "host is not allowed by the egress policy");
       assert.equal(await deniedBy("v5-deny-http", "http://example.com/"), "host is not allowed by the egress policy");
-      note("V5 4: deny_hosts, credential_unavailable, placeholder and DENY by default refused; a new start replaced the policy of the running machine");
+      note("V5 4: deny_hosts, credential_unavailable (cubed without a credential proxy: 503), placeholder and DENY by default refused; a new start replaced the policy of the running machine");
 
       // 6. the reports so far, as cubed reads them
       const expected: Array<[string, string]> = [
@@ -611,6 +629,201 @@ try {
       note(`V5 6b: 256 lease_expired reports kept while cubed was gone; the next report says dropped_before=${next!.droppedBefore}`);
       reader.discard();
       await reader.close();
+
+      // ------------------------------------------------ V6–V8 (masterplan B-5)
+      // A credential through the real chain: the guest -> berth vm -> a
+      // `credential` stream on cubed's connection -> cubed's RunnerSession ->
+      // cube-gateway's credential proxy (a test-hooks build: github.com and
+      // api.github.com reach test-vm-e2e's fake GitHub, fake-github.ts) and
+      // back. The token is only in the gateway and the fake; the guest holds
+      // the placeholder PH (its GH_TOKEN). The test plays the rest of cubed:
+      // its egress policy on egress.sock, the gateway's supervisor, and the
+      // registry's check (this thread's machine at its current epoch).
+      const ghToken = `ghs_b5${randomBytes(12).toString("hex")}`;
+      const [tokenHead, tokenTail] = [ghToken.slice(0, 10), ghToken.slice(10)];
+      const gatewayBin = env.CUBE_TEST_BERTH_GATEWAY || (() => {
+        execFileSync("cargo", ["build", "--locked", "--offline", "-p", "cube-gateway", "--features", "test-hooks"],
+          { cwd: repo, env: { ...process.env, CARGO_TARGET_DIR: path.join(repo, "target/test-hooks") }, stdio: "ignore" });
+        return path.join(repo, "target/test-hooks/debug/cube-gateway");
+      })();
+      const logged: string[] = [];
+      const capture = (scope: string) => {
+        const line = (level: string) => (message: string, fields?: object) => logged.push(`${scope} ${level} ${message} ${show(fields ?? {})}`);
+        const logger = { debug: line("debug"), info: line("info"), warn: line("warn"), error: line("error"), child: () => logger };
+        return logger as never;
+      };
+      const run5 = path.join(root, "run");
+      fs.mkdirSync(run5, { mode: 0o700 });
+      const github = await fakeGithub({ dir: path.join(root, "github"), token: ghToken });
+      const credentialSocket = path.join(run5, "credential.sock");
+      const egress5 = new EgressPolicy({ vms: { vm: vmId => vmId === ref.id ? { threadId: ref.owner, placeholders: { github: PH } } : null },
+        secrets: [{ name: "github", hosts: ["github.com", "api.github.com"], value: async () => ghToken }], log: capture("egress") });
+      const decider = await serveEgress(path.join(run5, "egress.sock"), egress5);
+      const gateway = new GatewaySupervisor({ state: path.join(root, "gateway"), control: path.join(run5, "gateway.sock"), decide: path.join(run5, "egress.sock"),
+        credential: credentialSocket, network: "loopback", binary: gatewayBin, log: capture("gateway"),
+        extraArgs: ["--test-upstream", `github.com=127.0.0.1:${github.port}`, "--test-upstream", `api.github.com=127.0.0.1:${github.port}`, "--test-upstream-ca", github.ca] });
+      gateway.start();
+      try {
+        await gateway.ready();
+        assert.equal(fs.statSync(credentialSocket).mode & 0o777, 0o600, "the credential socket is the user's alone");
+        assert.equal(fs.statSync(run5).mode & 0o777, 0o700);
+        let cubedEpoch = epoch;
+        const route: CredentialRoute = {
+          refuse: (_runner, machine, fence) => machine.owner !== ref.owner || machine.id !== ref.id
+            ? { code: "PERMISSION_DENIED", reason: "wrong_machine", message: `machine ${machine.id} is not this thread's` }
+            : fence < BigInt(cubedEpoch) ? { code: "FAILED_PRECONDITION", reason: "stale_epoch", message: "a newer epoch has been used for this machine" } : null,
+          socket: () => gateway.running ? credentialSocket : null,
+        };
+        const credentialSession = () => {
+          const opened = new RunnerSession(loadSessionConfig(configPath).config, { credentials: route, log: capture("session") });
+          sessions.push(opened);
+          return opened;
+        };
+        for (const s of sessions.splice(0)) await s.close();
+        session = credentialSession();
+        // cubed's own policy for the thread: one credential rule on exactly the secret's hosts.
+        const policy5 = egress5.policyFor({ vm: { placeholders: { github: PH } } });
+        assert.equal((await startWith(policy5)).status?.phase, MachineStatus_Phase.RUNNING);
+        const b5 = new VmWorkspace({ guest: session.guest(ref, () => epoch), leases: store, owner: "pi", binding: `runner-vm-test-b5:${process.pid}`, retryMs: 2000 });
+        const sh = async (key: string, command: string, timeoutMs = 30000) => {
+          const done = await shell(b5, key, command, timeoutMs);
+          assert.equal(done.exitCode, 0, `${key}: ${done.output}`);
+          return done.output.trim();
+        };
+
+        // V6: gh and git push with the host's token; the guest never has it.
+        assert.equal(await sh("v6-gh", "gh api user --jq .login"), "cube-e2e");
+        const pushed = await sh("v6-push", "set -e; rm -rf /tmp/r; git clone -q https://github.com/cube-e2e/repo.git /tmp/r; cd /tmp/r; echo b5 > b5.txt; git add b5.txt; "
+          + "git -c user.name=b5 -c user.email=b5@example.invalid commit -qm b5; git push -q origin HEAD:main; git rev-parse HEAD", 120000);
+        assert.equal(gitAt(github.repository, "rev-parse", "main"), pushed, "the push reached the fake GitHub");
+        assert.ok(github.seen.some(s => s.method === "POST" && s.path.endsWith("/git-receive-pack") && s.auth === "token"), show(github.seen));
+        // 100 MiB of random data: a measurement of the chain (Node carries every byte in cubed).
+        const big = (await sh("v6-push-100m", "set -e; cd /tmp/r; head -c 104857600 /dev/urandom > big.bin; git add big.bin; "
+          + "git -c user.name=b5 -c user.email=b5@example.invalid commit -qm big; s=$(date +%s%3N); git push -q origin HEAD:main; e=$(date +%s%3N); "
+          + "echo \"$((e - s)) $(git rev-parse HEAD)\"", 900000)).split("\n").at(-1)!.split(" ");
+        assert.equal(gitAt(github.repository, "rev-parse", "main"), big[1], "the 100 MiB push reached the fake GitHub");
+        const pushMs = Number(big[0]);
+        note(`V6: gh api user and git push through the credential stream; 100 MiB push in ${pushMs} ms (${(100 / (pushMs / 1000)).toFixed(1)} MiB/s); machine_diagnose stays UNIMPLEMENTED (B-9)`);
+
+        // V7: what the gateway substituted comes back as the guest's own value.
+        const curlEcho = async (key: string, args: string) => {
+          const all = await sh(key, `curl -s -o /tmp/b7 -D /tmp/h7 -w '%{http_code} %{exitcode}' ${args}; echo; tr -d '\\r' < /tmp/h7 | grep -i '^x-echo-auth:\\|^x-cube-\\|^content-length:\\|^transfer-encoding:'; echo ---; cat /tmp/b7`);
+          const marker = all.indexOf("\n---");
+          return { status: all.slice(0, all.indexOf("\n")), headers: all.slice(all.indexOf("\n") + 1, marker), body: all.slice(marker + 4).replace(/^\n/, ""), all };
+        };
+        const bearer = `Bearer ${PH}`;
+        const basic = `Basic ${Buffer.from(`x-access-token:${PH}`).toString("base64")}`;
+        const checks: string[] = [];
+        const echoed = await curlEcho("v7-bearer", `--compressed -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/cube-test/echo`);
+        assert.equal(echoed.status, "200 0", echoed.all);
+        assert.match(echoed.headers, new RegExp(`^x-echo-auth: ${bearer}$`, "mi"), echoed.all);
+        assert.equal(echoed.body, `auth=[${bearer}]`);
+        checks.push("Bearer in header and Content-Length body");
+        const basicEcho = await curlEcho("v7-basic", `-u "x-access-token:$GH_TOKEN" https://github.com/cube-test/echo`);
+        assert.equal(basicEcho.body, `auth=[${basic}]`, basicEcho.all);
+        assert.match(basicEcho.headers, new RegExp(`^x-echo-auth: ${basic.replace(/[+/]/g, c => `\\${c}`)}$`, "mi"));
+        checks.push("the whole Basic value in header and body");
+        const bearerAt = [0, 7, 8, 12, 7 + Math.floor(ghToken.length / 2), 7 + ghToken.length - 1, 7 + ghToken.length];
+        for (const at of bearerAt) {
+          const split = await curlEcho(`v7-split-${at}`, `-H "Authorization: Bearer $GH_TOKEN" 'https://api.github.com/cube-test/split?at=${at}'`);
+          assert.equal(split.status, "200 0", split.all);
+          assert.equal(split.body, `auth=[${bearer}]`, `split at ${at}: ${split.all}`);
+        }
+        const basicAt = [6, 10, 30, 6 + Math.floor((basic.length - 6) / 2)];
+        for (const at of basicAt) {
+          const split = await curlEcho(`v7-split-basic-${at}`, `-u "x-access-token:$GH_TOKEN" 'https://github.com/cube-test/split?at=${at}'`);
+          assert.equal(split.body, `auth=[${basic}]`, `basic split at ${at}: ${split.all}`);
+        }
+        checks.push(`chunked, the value split across two chunks at ${bearerAt.length + basicAt.length} places`);
+        const encoded = await curlEcho("v7-gzip", `--compressed -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/cube-test/gzip`);
+        assert.equal(encoded.status, "502 0", encoded.all);
+        assert.match(encoded.headers, /^x-cube-error: the credential proxy refuses an encoded answer$/mi);
+        checks.push("an encoded answer 502");
+        const v7 = github.seen.filter(s => s.path.startsWith("/cube-test/"));
+        assert.ok(v7.length >= 3 + bearerAt.length + basicAt.length && v7.every(s => s.auth === "token" && s.acceptEncoding === "identity"), show(v7));
+        assert.ok(![echoed, basicEcho, encoded].some(r => r.all.includes(ghToken)));
+        note(`V7: the guest saw only its placeholder: ${checks.join("; ")}; the fake got the token with Accept-Encoding: identity each time (${v7.length} requests)`);
+
+        // V8: redirects are the guest's; a placeholder never leaves for the wrong host.
+        const seenBefore = github.seen.length;
+        const followed = await sh("v8-follow", `curl -s -L -o /dev/null -w '%{http_code} %{num_redirects} %{url_effective}' -H "Authorization: Bearer $GH_TOKEN" 'https://api.github.com/cube-test/redirect?to=https://example.com/'`);
+        assert.equal(followed, "200 1 https://example.com/", "curl drops Authorization at another host; ordinary egress from the runner");
+        assert.equal(github.seen.length, seenBefore + 1, "the gateway did not follow the redirect");
+        const trusted = await sh("v8-trusted", `curl -s -L --location-trusted -o /dev/null -D - -H "Authorization: Bearer $GH_TOKEN" 'https://api.github.com/cube-test/redirect?to=https://example.com/' | tr -d '\\r' | sed -n 's/^x-cube-denied: //Ip'`);
+        assert.equal(trusted, "a secret placeholder is only sent where a credential rule allows it", "berth refuses the placeholder at example.com");
+        await startWith({ ...policy5, rules: [{ ...policy5.rules![0]!, hosts: ["github.com", "api.github.com", "uploads.github.com"] }] });
+        const widened = await sh("v8-not-the-secrets", `curl -s -o /dev/null -D - -H "Authorization: Bearer $GH_TOKEN" https://uploads.github.com/x | tr -d '\\r' | sed -n 's/^x-cube-denied: //Ip'`);
+        assert.equal(widened, "the github secret is not allowed for uploads.github.com", "cubed's decide refuses a host outside the secret's");
+        await startWith(policy5);
+        note("V8: a redirect is passed to the guest and never followed; without the placeholder it went out from the runner, with it berth refused it (placeholder), and a host in the rule but not the secret's was refused by decide");
+
+        // The fence: cubed's epoch newer than the runner's is refused, until a fenced start raises it.
+        cubedEpoch = epoch + 1;
+        const stale = await sh("fence-stale", `curl -s -o /dev/null -D - -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user | tr -d '\\r' | sed -n 's/^HTTP\\/1.1 //p;s/^x-cube-error: //Ip'`);
+        assert.equal(stale, "503 Service Unavailable\ncubed refused the credential request: a newer epoch has been used for this machine", stale);
+        epoch += 1;
+        await startWith(policy5);
+        assert.equal(await sh("fence-raised", "gh api user --jq .login"), "cube-e2e");
+        note("fence: a credential stream below cubed's epoch refused (503, stale_epoch); a fenced start raised the runner's and it went through");
+
+        // cubed goes during a download from the credential host: the guest
+        // gets what the runner had, then EOF (never a reset); a new credential
+        // request is refused at once while ordinary egress goes on (lease 15 min),
+        // and the refusal is reported on the next connection.
+        const holder = await b5.lease({ owner: "pi" });
+        const script = [
+          "rm -f /tmp/dl5.log /tmp/after5.log",
+          `( curl -s -o /dev/null --limit-rate 200k -m 120 -w '%{http_code}|%{size_download}|%{exitcode}|%{errormsg}\\n' -H "Authorization: Bearer $GH_TOKEN" 'https://github.com/cube-test/large?mib=100' > /tmp/dl5.log; date +%s%3N >> /tmp/dl5.log ) &`,
+          "sleep 8",
+          `echo "$(date +%s%3N) $(curl -s -o /dev/null -D - -m 20 -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user | tr -d '\\r' | sed -n 's/^HTTP\\/1.1 \\([0-9]*\\).*/\\1/p;s/^x-cube-error: //Ip' | tr '\\n' '|')" > /tmp/after5.log`,
+          `echo "public $(curl -s -o /dev/null -m 20 -w '%{http_code}' http://example.com/)" >> /tmp/after5.log`,
+          "wait",
+        ].join("\n");
+        await b5.exec(holder.token, "b5-disconnect", { command: script, timeoutMs: 180000 });
+        await b5.release(holder.token);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        for (const s of sessions.splice(0)) await s.close();
+        const lost = Date.now();
+        await new Promise(resolve => setTimeout(resolve, 12000));
+        session = credentialSession();
+        await session.hello();
+        const back = new VmWorkspace({ guest: session.guest(ref, () => epoch), leases: store, owner: "pi", binding: `runner-vm-test-b5:${process.pid}`, retryMs: 2000 });
+        const backLease = await back.lease({ owner: "pi" });
+        const ended = await settleOperation(back, backLease.token, "b5-disconnect");
+        await back.release(backLease.token);
+        assert.equal(ended.state, "succeeded", JSON.stringify(ended));
+        const [dl, after] = [(await shell(back, "b5-dl", "cat /tmp/dl5.log | tr '\\n' '|'")).output.trim(), (await shell(back, "b5-after", "cat /tmp/after5.log")).output.trim()];
+        const [dlStatus, dlBytes, dlExit, dlError, dlEnd] = dl.split("|");
+        assert.ok(dlStatus === "200" && Number(dlBytes) > 0 && Number(dlBytes) < 100 * 1024 * 1024 && !["0", "28"].includes(dlExit ?? "") && Number(dlEnd) - lost < 60000,
+          `the download: ${dl} (ended ${Number(dlEnd) - lost} ms after cubed went)`);
+        assert.doesNotMatch(dlError ?? "", /reset/i, "never a reset");
+        const [refusedLine = "", publicLine] = after.split("\n");
+        const refused5 = /^(\d+) (\d+)\|(.*)\|$/.exec(refusedLine);
+        assert.ok(refused5, after);
+        const [, refusedAt, refusedStatus, refusedReason] = refused5;
+        assert.equal(refusedStatus, "503", after);
+        assert.equal(refusedReason, "credentials need cubed, which the runner cannot reach", after);
+        assert.ok(Number(refusedAt) > lost && Number(refusedAt) < lost + 12000, `refused while cubed was gone: ${after}`);
+        assert.equal(publicLine, "public 200", "ordinary egress goes on within the lease");
+        for (let i = 0; i < 100 && !logged.some(line => /session info egress refused .*"reason":"credential_unavailable"/.test(line)); i++) await new Promise(resolve => setTimeout(resolve, 200));
+        assert.ok(logged.some(line => /session info egress refused .*"host":"api\.github\.com".*"reason":"credential_unavailable"/.test(line)), logged.filter(l => l.includes("egress refused")).join("\n"));
+        note(`disconnect: a download from the credential host ended ${Number(dlEnd) - lost} ms after cubed went (${dlBytes} bytes, curl exit ${dlExit}: ${dlError}); a credential request meanwhile 503 credential_unavailable, ordinary egress 200; the report reached cubed's next connection`);
+
+        // The token: nowhere in the guest, the runner's directory (state,
+        // journal, logs, rw.qcow2), its stderr, the gateway's state or any log.
+        const guestScan = await sh("v6-scan", `sudo bash -c 'a=${tokenHead}; b=${tokenTail}; grep -rlsF --exclude-dir=proc --exclude-dir=sys --exclude-dir=dev -e "$a$b" / | head -5; `
+          + `for f in /proc/[0-9]*/environ; do grep -lsF -e "$a$b" "$f"; done | head -5'; echo scan-done`, 900000);
+        assert.equal(guestScan, "scan-done", `the token is in the guest: ${guestScan}`);
+        const hostScan = spawnSync("grep", ["-rlsF", "-e", ghToken, directory, path.join(root, "gateway")], { encoding: "utf8" });
+        assert.equal(hostScan.status, 1, `the token is in the runner's directory or the gateway's state: ${hostScan.stdout}`);
+        assert.ok(!runner.banner.includes(ghToken) && !logged.some(line => line.includes(ghToken)), "the token is in berth's stderr or a log");
+        assert.ok(logged.some(line => line.startsWith("gateway ")), "the gateway's log was captured");
+        note(`V6 leak scan: the token is in no guest file or process environment, not in berth's --dir (${fs.readdirSync(directory).length} entries, rw.qcow2 included), its stderr, the gateway's state or the ${logged.length} log lines of cubed's side`);
+      } finally {
+        await gateway.stop();
+        await decider.close();
+        github.close();
+      }
       transport = session.guest(ref, () => epoch);
     } finally {
       store.close();
