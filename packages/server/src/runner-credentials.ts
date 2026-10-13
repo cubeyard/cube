@@ -33,21 +33,31 @@ export interface CredentialRoute {
   socket(): string | null;
 }
 
+/** The machine a runner may carry credential requests for, as cubed knows
+ * it (`epoch`: the thread's newest machine epoch), or null for none. The
+ * checks, in order: it is that machine (else PERMISSION_DENIED/
+ * wrong_machine), and `fence` is not older than its epoch (else
+ * FAILED_PRECONDITION/stale_epoch). */
+export function checkMachine(owned: { owner: string; id: string; epoch: number } | null, runner: string, ref: { owner: string; id: string }, fence: bigint): Refusal | null {
+  if (!owned || owned.owner !== ref.owner || owned.id !== ref.id) {
+    return { code: "PERMISSION_DENIED", reason: "wrong_machine", message: `machine ${ref.id} is not a machine of a thread on runner ${runner}` };
+  }
+  if (fence < BigInt(owned.epoch)) return { code: "FAILED_PRECONDITION", reason: "stale_epoch", message: "a newer epoch has been used for this machine" };
+  return null;
+}
+
 /** cubed's own route: the thread `ref.owner` exists, is not archived, has
- * machine `ref.id` and is placed on this runner's admission, and `epoch` is
- * not older than the thread's newest machine epoch. */
+ * machine `ref.id` and is placed on this runner's admission; its epoch is
+ * the newest `nextMachineEpoch` gave out. */
 export function registryCredentialRoute(options: { registry: Registry; threads: string; socket: () => string | null }): CredentialRoute {
   return {
     refuse(runner, ref, epoch) {
-      const wrong = { code: "PERMISSION_DENIED", reason: "wrong_machine", message: `machine ${ref.id} is not a machine of a thread on runner ${runner.nodeId}` } as const;
       const thread = options.registry.getThread(ref.owner);
-      if (!thread || thread.archived || thread.vm?.vmId !== ref.id) return wrong;
-      const admission = options.registry.runner(thread.id);
-      if (!admission || !runner.admission || admission.configPath !== runner.admission.configPath || admission.configHash !== runner.admission.configHash) return wrong;
-      if (epoch < BigInt(currentMachineEpoch(path.join(options.threads, thread.id, "vm")))) {
-        return { code: "FAILED_PRECONDITION", reason: "stale_epoch", message: "a newer epoch has been used for this machine" };
-      }
-      return null;
+      const admission = thread ? options.registry.runner(thread.id) : null;
+      const placed = !!thread && !thread.archived && !!thread.vm && !!admission && !!runner.admission
+        && admission.configPath === runner.admission.configPath && admission.configHash === runner.admission.configHash;
+      const owned = placed ? { owner: thread.id, id: thread.vm!.vmId, epoch: currentMachineEpoch(path.join(options.threads, thread.id, "vm")) } : null;
+      return checkMachine(owned, runner.nodeId, ref, epoch);
     },
     socket: options.socket,
   };

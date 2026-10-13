@@ -63,7 +63,7 @@ import { EgressPolicy_Default, EgressReportSchema, MachineStatus_Phase, OpenSche
 import { RunnerError, RunnerSession, loadSessionConfig } from "../src/runner-session.ts";
 import { EgressPolicy, newPlaceholder, serveEgress } from "../src/egress-policy.ts";
 import { GatewaySupervisor } from "../src/gateway.ts";
-import type { CredentialRoute } from "../src/runner-credentials.ts";
+import { checkMachine, type CredentialRoute } from "../src/runner-credentials.ts";
 import { fakeGithub, git as gitAt } from "../../../scripts/fake-github.ts";
 import { GuestTransportError } from "../src/guest-ssh.ts";
 import { resumeWorkspace } from "../src/vm.ts";
@@ -668,10 +668,10 @@ try {
         assert.equal(fs.statSync(credentialSocket).mode & 0o777, 0o600, "the credential socket is the user's alone");
         assert.equal(fs.statSync(run5).mode & 0o777, 0o700);
         let cubedEpoch = epoch;
+        let cubedMachine = ref.id;
         const route: CredentialRoute = {
-          refuse: (_runner, machine, fence) => machine.owner !== ref.owner || machine.id !== ref.id
-            ? { code: "PERMISSION_DENIED", reason: "wrong_machine", message: `machine ${machine.id} is not this thread's` }
-            : fence < BigInt(cubedEpoch) ? { code: "FAILED_PRECONDITION", reason: "stale_epoch", message: "a newer epoch has been used for this machine" } : null,
+          // cubed's own check (registryCredentialRoute's), on what the test's "registry" holds.
+          refuse: (runner, machine, fence) => checkMachine({ owner: ref.owner, id: cubedMachine, epoch: cubedEpoch }, runner.nodeId, machine, fence),
           socket: () => gateway.running ? credentialSocket : null,
         };
         const credentialSession = () => {
@@ -684,7 +684,7 @@ try {
         // cubed's own policy for the thread: one credential rule on exactly the secret's hosts.
         const policy5 = egress5.policyFor({ vm: { placeholders: { github: PH } } });
         assert.equal((await startWith(policy5)).status?.phase, MachineStatus_Phase.RUNNING);
-        const b5 = new VmWorkspace({ guest: session.guest(ref, () => epoch), leases: store, owner: "pi", binding: `runner-vm-test-b5:${process.pid}`, retryMs: 2000 });
+        let b5 = new VmWorkspace({ guest: session.guest(ref, () => epoch), leases: store, owner: "pi", binding: `runner-vm-test-b5:${process.pid}`, retryMs: 2000 });
         const sh = async (key: string, command: string, timeoutMs = 30000) => {
           const done = await shell(b5, key, command, timeoutMs);
           assert.equal(done.exitCode, 0, `${key}: ${done.output}`);
@@ -757,14 +757,22 @@ try {
         await startWith(policy5);
         note("V8: a redirect is passed to the guest and never followed; without the placeholder it went out from the runner, with it berth refused it (placeholder), and a host in the rule but not the secret's was refused by decide");
 
+        // Ownership: a machine cubed no longer has for the thread (released,
+        // archived, another machine) is refused before the proxy.
+        const asked = (key: string) => sh(key, `curl -s -o /dev/null -D - -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user | tr -d '\\r' | sed -n 's/^HTTP\\/1.1 //p;s/^x-cube-error: //Ip'`);
+        const proxiedBefore = github.seen.length;
+        cubedMachine = "f".repeat(16);
+        assert.equal(await asked("owner-other"), `503 Service Unavailable\ncubed refused the credential request: machine ${ref.id} is not a machine of a thread on runner ${node}`);
+        cubedMachine = ref.id;
         // The fence: cubed's epoch newer than the runner's is refused, until a fenced start raises it.
         cubedEpoch = epoch + 1;
-        const stale = await sh("fence-stale", `curl -s -o /dev/null -D - -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/user | tr -d '\\r' | sed -n 's/^HTTP\\/1.1 //p;s/^x-cube-error: //Ip'`);
+        const stale = await asked("fence-stale");
         assert.equal(stale, "503 Service Unavailable\ncubed refused the credential request: a newer epoch has been used for this machine", stale);
         epoch += 1;
         await startWith(policy5);
+        assert.equal(github.seen.length, proxiedBefore, "nothing refused reached GitHub");
         assert.equal(await sh("fence-raised", "gh api user --jq .login"), "cube-e2e");
-        note("fence: a credential stream below cubed's epoch refused (503, stale_epoch); a fenced start raised the runner's and it went through");
+        note("ownership and fence: a machine cubed does not have for the thread refused (503, wrong_machine); a credential stream below cubed's epoch refused (503, stale_epoch); a fenced start raised the runner's and it went through");
 
         // cubed goes during a download from the credential host: the guest
         // gets what the runner had, then EOF (never a reset); a new credential
@@ -788,6 +796,7 @@ try {
         session = credentialSession();
         await session.hello();
         const back = new VmWorkspace({ guest: session.guest(ref, () => epoch), leases: store, owner: "pi", binding: `runner-vm-test-b5:${process.pid}`, retryMs: 2000 });
+        b5 = back;
         const backLease = await back.lease({ owner: "pi" });
         const ended = await settleOperation(back, backLease.token, "b5-disconnect");
         await back.release(backLease.token);
@@ -949,7 +958,7 @@ try {
   const list = await session.call({ case: "machineList", value: {} });
   assert.ok(list.case === "machines" && list.value.items.length === 0);
   note("a second machine deleted without retain: QEMU quit, directory gone");
-  console.log(`ok: berth vm over protocol 4 (${accel}): floor, image, CA, hello, create, start, guest channel (session, setup, ${guest.ready ? "ready, Workspace contract, agent restart, network V5" : "not ready: image lacks tools"}), guest streams, fencing, UNIMPLEMENTED, stop, restart and crash interrupt, pinned machine type and image, retained disk, discard, delete`);
+  console.log(`ok: berth vm over protocol 4 (${accel}): floor, image, CA, hello, create, start, guest channel (session, setup, ${guest.ready ? "ready, Workspace contract, agent restart, network V5, credentials V6-V8" : "not ready: image lacks tools"}), guest streams, fencing, UNIMPLEMENTED, stop, restart and crash interrupt, pinned machine type and image, retained disk, discard, delete`);
 } finally {
   await Promise.allSettled(sessions.map(session => session.close()));
   await stop(runner.child);
