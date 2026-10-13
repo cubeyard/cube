@@ -3,7 +3,9 @@
  * is scanned without reading them and without failing; the secret is found
  * in a nested file, at every offset across a chunk boundary and at the end
  * of a file; an unreadable file or directory fails the scan. The macOS gate
- * of #167 failed because BSD grep exits 2 on such a socket. */
+ * of #167 failed because BSD grep exits 2 on such a socket; a grep -r
+ * over this directory also hung macOS CI (on the FIFO, it seems), so no
+ * grep runs here. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import net from "node:net";
@@ -25,7 +27,6 @@ try {
   const outside = path.join(root, "outside.txt");
   fs.writeFileSync(outside, `the secret ${secret} outside the roots\n`);
   fs.symlinkSync(outside, path.join(machine, "link"));
-  const grep = spawnSync("grep", ["-rlsF", "-e", secret, path.join(root, "m")], { encoding: "utf8" });
 
   // Absent: no match; the socket, FIFO and symlink are listed, not read (a FIFO read would block).
   const clean = scanForSecret([path.join(root, "m")], secret);
@@ -63,7 +64,7 @@ try {
     fs.chmodSync(path.join(machine, "deep"), 0o700);
   }
   assert.throws(() => scanForSecret([path.join(root, "missing")], secret), /ENOENT/, "a missing root is an error");
-  console.log(`ok: leak scan: socket, FIFO and symlink listed and not read (this host's grep -rlsF on the same directory: status ${grep.status}), the secret found nested, across chunk boundaries and in 3 MiB, unreadable entries fail`);
+  console.log(`ok: leak scan: socket, FIFO and symlink listed and not read, the secret found nested, across chunk boundaries and in 3 MiB, unreadable entries fail`);
 } finally {
   server.close();
   fs.chmodSync(root, 0o700);
