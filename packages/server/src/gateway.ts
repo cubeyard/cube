@@ -134,6 +134,9 @@ export interface GatewaySupervisorOptions {
   control: string;
   /** cubed's egress decision socket the gateway calls. */
   decide: string;
+  /** The credential proxy's socket the gateway serves for protocol-4
+   * runners' `credential` streams (runner-credentials.ts); none: no proxy. */
+  credential?: string;
   network: RunnerNetwork;
   /** null: no gateway on this host. Default: locateGateway(). */
   binary?: string | null;
@@ -236,7 +239,7 @@ export class GatewaySupervisor {
     const binary = this.binary!;
     fs.mkdirSync(this.options.state, { recursive: true, mode: 0o700 });
     const args = ["serve", "--state", this.options.state, "--control", this.options.control, "--decide", this.options.decide,
-      "--network", this.network, ...(this.options.extraArgs ?? [])];
+      "--network", this.network, ...(this.options.credential ? ["--credential", this.options.credential] : []), ...(this.options.extraArgs ?? [])];
     const child = spawn(binary, args, { stdio: ["pipe", "pipe", "pipe"],
       env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? "/", ...this.options.env } });
     this.child = child;

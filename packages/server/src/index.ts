@@ -17,6 +17,8 @@ import { EgressPolicy, githubSecret, serveEgress, type SecretSource } from "./eg
 import { GatewaySupervisor, locateGateway, widestNetwork } from "./gateway.ts";
 import { errorText, machineFor, ThreadVms, vmSizes, type ThreadMachines } from "./vm.ts";
 import { RunnerMachines } from "./runner-machines.ts";
+import { registryCredentialRoute } from "./runner-credentials.ts";
+import { routeCredentials } from "./runner-session.ts";
 import { ProtocolMachines, runnerHealth as protocolRunnerHealth } from "./runner-select.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
@@ -248,10 +250,14 @@ export async function createCubed(options: {
   const threadsDirectory = path.join(options.state, "threads");
   let machines = typeof options.machines === "function" ? options.machines(registry, threadsDirectory) : options.machines;
   if (!machines) {
+    const credential = path.join(run, "credential.sock");
     gateway = new GatewaySupervisor({ state: path.join(options.state, "gateway"), control: path.join(run, "gateway.sock"),
-      decide: path.join(run, "egress.sock"), network: gatewayNetwork(registry), extraArgs: gatewayTestArgs(process.env),
+      decide: path.join(run, "egress.sock"), credential, network: gatewayNetwork(registry), extraArgs: gatewayTestArgs(process.env),
       ...(options.gateway === undefined ? {} : { binary: options.gateway }) });
     gateway.start();
+    // Protocol-4 runners' credential streams go to the gateway's proxy.
+    const supervised = gateway;
+    routeCredentials(registryCredentialRoute({ registry, threads: threadsDirectory, socket: () => supervised.running ? credential : null }));
     // Each thread on its runner's protocol (runner-select.ts).
     machines = new ProtocolMachines({ registry, p3: new ThreadVms({ registry, threads: threadsDirectory, run, gateway }),
       p4: new RunnerMachines({ registry, threads: threadsDirectory }) });
@@ -907,6 +913,7 @@ export async function createCubed(options: {
       artifactService.close();
       await (await optchat?.catch(() => null))?.chat.close();
       await conversations.close();
+      routeCredentials(null);
       await gateway?.stop();
       await egress.close();
       workspaceServer.closeAllConnections();

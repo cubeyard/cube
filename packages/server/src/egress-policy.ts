@@ -13,6 +13,8 @@
 import fs from "node:fs";
 import http from "node:http";
 import { randomInt } from "node:crypto";
+import type { MessageInitShape } from "@bufbuild/protobuf";
+import { EgressPolicy_Default, type EgressPolicySchema } from "./gen/runner_pb.js";
 import { createLogger, type Logger } from "./log.ts";
 
 export interface EgressRequest {
@@ -57,6 +59,25 @@ export class EgressPolicy {
     this.vms = options.vms;
     this.secrets = new Map(options.secrets.map(source => [source.name, source]));
     this.log = options.log ?? createLogger("egress");
+  }
+
+  /** A protocol-4 VM runner's policy for a thread's machine (runner.proto
+   * `EgressPolicy`, sent with `machine_start`; masterplan B-5): public HTTP
+   * and HTTPS out from the runner, both explicit (D2), the 15-minute lease
+   * (B5), and per secret the thread holds a placeholder of, one https rule
+   * on exactly the secret's hosts through the credential stream. So the
+   * runner's rule and `decide` agree on where a secret may go. Sending it
+   * belongs to the C phase (RunnerMachines does not start VM runners yet). */
+  policyFor(thread: { vm?: { placeholders: Record<string, string> } }): MessageInitShape<typeof EgressPolicySchema> {
+    const held = thread.vm?.placeholders ?? {};
+    return {
+      default: EgressPolicy_Default.ALLOW_PUBLIC_HTTP,
+      denyHosts: [],
+      rules: [...this.secrets.values()].filter(source => held[source.name]).map(source => ({
+        hosts: [...source.hosts], ports: [], kind: { case: "https" as const, value: { credential: { name: source.name } } },
+      })),
+      lease: { seconds: 15n * 60n, nanos: 0 },
+    };
   }
 
   async decide(request: EgressRequest): Promise<EgressDecision> {
