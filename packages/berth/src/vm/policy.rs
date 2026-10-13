@@ -6,10 +6,11 @@
 //! ```text
 //! deny_hosts                         -> deny_host
 //! first rule whose hosts and ports match
-//!   Http, Https without credential   -> allow
-//!   Https with a credential          -> credential_unavailable (B-5)
+//!   Http, Https without credential   -> allow (out from the runner)
+//!   Https with a credential          -> the credential stream to cubed
+//!                                       (B-5; placeholders go along)
 //! no rule: ALLOW_PUBLIC_HTTP         -> allow;  DENY -> policy
-//! allowed, but a cube_ph_ placeholder in a header -> placeholder
+//! allowed out, but a cube_ph_ placeholder in a header -> placeholder
 //! ```
 //!
 //! CONNECT, Upgrade and the `Host` checks come before (egress.rs); the
@@ -81,6 +82,16 @@ impl Pattern {
                 .is_some_and(|head| head.len() > 1 && head.ends_with('.')),
         }
     }
+}
+
+/// Where an allowed request goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// Out from the runner, without any placeholder.
+    Direct,
+    /// To cubed's credential proxy over a `credential` stream, as the
+    /// credential of this name.
+    Credential(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,7 +179,7 @@ impl Denial {
             Self::Placeholder => {
                 "a secret placeholder is only sent where a credential rule allows it"
             }
-            Self::CredentialUnavailable => "credentials are not available on this runner yet",
+            Self::CredentialUnavailable => "credentials need cubed, which the runner cannot reach",
             Self::Address => "upstream address is not public",
             Self::SniMismatch => "Host does not match the TLS server name",
             Self::ResolveFailed => "upstream host did not resolve",
@@ -270,15 +281,17 @@ impl Policy {
         host: &str,
         port: u16,
         placeholders: &[String],
-    ) -> Result<(), Denial> {
+    ) -> Result<Route, Denial> {
         if self.deny_hosts.iter().any(|p| p.matches(host)) {
             return Err(Denial::DenyHost);
         }
         match self.rules.iter().find(|r| r.matches(scheme, host, port)) {
+            // cubed's proxy checks the placeholders (their credential and
+            // thread) and decides; the runner never sees the token.
             Some(Rule {
-                kind: Kind::Credential(_),
+                kind: Kind::Credential(name),
                 ..
-            }) => return Err(Denial::CredentialUnavailable),
+            }) => return Ok(Route::Credential(name.clone())),
             Some(_) => {}
             None if self.allow_public => {}
             None => return Err(Denial::Policy),
@@ -287,7 +300,7 @@ impl Policy {
         if !placeholders.is_empty() {
             return Err(Denial::Placeholder);
         }
-        Ok(())
+        Ok(Route::Direct)
     }
 }
 
@@ -352,31 +365,27 @@ mod tests {
             )
         };
         use Scheme::*;
-        assert_eq!(d(Https, "example.com", 443, &[]), Ok(()));
-        assert_eq!(d(Http, "example.com", 80, &[]), Ok(()));
+        let direct = Ok(Route::Direct);
+        let github = Ok(Route::Credential("github".into()));
+        assert_eq!(d(Https, "example.com", 443, &[]), direct);
+        assert_eq!(d(Http, "example.com", 80, &[]), direct);
         assert_eq!(d(Https, "a.evil.example", 443, &[]), Err(Denial::DenyHost));
         assert_eq!(
             d(Https, "evil.example", 443, &[]),
-            Ok(()),
+            direct,
             "*.x is below x only"
         );
         assert_eq!(d(Https, "blocked.example", 443, &[]), Err(Denial::DenyHost));
-        assert_eq!(
-            d(Https, "api.github.com", 443, &[GH]),
-            Err(Denial::CredentialUnavailable)
-        );
-        assert_eq!(
-            d(Https, "github.com", 443, &[]),
-            Err(Denial::CredentialUnavailable)
-        );
+        assert_eq!(d(Https, "api.github.com", 443, &[GH]), github);
+        assert_eq!(d(Https, "github.com", 443, &[]), github);
         // Plain HTTP to github.com matches no rule (the rule is https).
-        assert_eq!(d(Http, "github.com", 80, &[]), Ok(()));
+        assert_eq!(d(Http, "github.com", 80, &[]), direct);
         assert_eq!(d(Http, "github.com", 80, &[GH]), Err(Denial::Placeholder));
         assert_eq!(
             d(Https, "example.com", 443, &[GH]),
             Err(Denial::Placeholder)
         );
-        assert_eq!(d(Http, "plain.example", 80, &[]), Ok(()));
+        assert_eq!(d(Http, "plain.example", 80, &[]), direct);
 
         let deny = Policy::from_proto(Some(&policy(
             egress_policy::Default::Deny,
@@ -384,7 +393,10 @@ mod tests {
             vec![rule(&["*"], &[443], https())],
         )))
         .unwrap();
-        assert_eq!(deny.decide(Https, "any.example", 443, &[]), Ok(()));
+        assert_eq!(
+            deny.decide(Https, "any.example", 443, &[]),
+            Ok(Route::Direct)
+        );
         assert_eq!(
             deny.decide(Http, "any.example", 80, &[]),
             Err(Denial::Policy)

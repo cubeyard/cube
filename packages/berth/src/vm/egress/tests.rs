@@ -585,7 +585,7 @@ impl Env {
             presence: presence.clone(),
             reports: reports.clone(),
         });
-        let gate = Gate::new(egress, reference(), policy);
+        let gate = Gate::new(egress, reference(), policy, Arc::new(|| 42));
         let (net, qemu_end) = Net::open(gate.clone(), "0123456789abcdef").unwrap();
         // QEMU's end is close-on-exec until the spawn puts it on NET_FD.
         // SAFETY: fcntl on a descriptor this test owns.
@@ -873,7 +873,7 @@ async fn the_policy_refuses_and_every_refusal_is_reported() {
         request(tls, get("other.test", "/", &[])).await.0,
         StatusCode::FORBIDDEN
     );
-    // a credential rule: not on this runner yet (B-5)
+    // a credential rule: to cubed, which is not connected here (B-5)
     let tls = env.tls("a.cred.test", 40023).await.unwrap();
     let (status, headers, _) = request(
         tls,
@@ -885,10 +885,10 @@ async fn the_policy_refuses_and_every_refusal_is_reported() {
     )
     .await;
     assert_eq!(
-        (status, denied(&headers)),
+        (status, headers[ERROR_HEADER].to_str().unwrap()),
         (
-            StatusCode::FORBIDDEN,
-            Denial::CredentialUnavailable.message().into()
+            StatusCode::SERVICE_UNAVAILABLE,
+            Denial::CredentialUnavailable.message()
         )
     );
     // a placeholder where no credential rule applies (plain HTTP, also in Basic)
@@ -1325,3 +1325,5 @@ async fn a_surviving_connection_recovers_and_is_stopped_again_at_the_next_expiry
     drop(conn);
     let _ = ended.await;
 }
+
+mod credential;

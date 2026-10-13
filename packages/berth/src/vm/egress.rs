@@ -25,6 +25,15 @@
 //! TCP ends it (the runner neither resets it nor discards its buffers).
 //! Once cubed is back, an open flow's next request goes out again, and the
 //! next time the lease runs out its upstreams are stopped again.
+//!
+//! A request a credential rule matches (B-5) never goes out from here: it
+//! goes, placeholder and all, over a `credential` stream on cubed's newest
+//! connection to cubed's proxy, which holds the token (runner.proto's
+//! `CredentialHeader`). Without a connection, or when cubed refuses, it is
+//! a 503 with `x-cube-error` and a `credential_unavailable` report, at
+//! once (the lease does not apply). An answer under way when cubed goes
+//! ends as an upstream failure does: what the runner already has drains to
+//! the guest, then its connection ends.
 use std::{
     os::fd::{AsRawFd, OwnedFd, RawFd},
     sync::{Arc, Mutex},
@@ -46,7 +55,10 @@ use cube_netstack::{
     },
     placeholder,
 };
-use cube_runner_protocol::proto;
+use cube_runner_protocol::{
+    proto::{self, open},
+    read_frame, write_frame,
+};
 use http::{HeaderValue, Method, Request, Response, StatusCode, Uri, header};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::{body::Incoming, client::conn::http1::SendRequest, service::service_fn};
@@ -61,7 +73,7 @@ use tokio::{
 };
 
 use super::{
-    policy::{Denial, Policy, Scheme},
+    policy::{Denial, Policy, Route, Scheme},
     presence::{Presence, lease_restored, lease_runs_out},
     report::Reports,
 };
@@ -85,6 +97,8 @@ pub fn kernel_ip() -> String {
 }
 
 const HEADER_TIMEOUT: Duration = Duration::from_secs(60);
+/// A credential stream must be open and answered by cubed within this.
+const CREDENTIAL_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DENIED_HEADER: &str = "x-cube-denied";
 pub const ERROR_HEADER: &str = "x-cube-error";
 /// Frames queued for QEMU before more are dropped (the guest retransmits).
@@ -100,6 +114,9 @@ pub struct Egress {
     pub reports: Arc<Reports>,
 }
 
+/// The machine's fence epoch as the runner last recorded it.
+pub type FenceEpoch = Arc<dyn Fn() -> i64 + Send + Sync>;
+
 /// One machine's egress: its policy (replaced by each `machine_start`) and
 /// the flow handler of its LAN.
 pub struct Gate {
@@ -107,14 +124,21 @@ pub struct Gate {
     reference: proto::Ref,
     /// Shared with the copies flows hold, so a new policy reaches them.
     policy: Arc<Mutex<Arc<Policy>>>,
+    fence: FenceEpoch,
 }
 
 impl Gate {
-    pub fn new(egress: Arc<Egress>, reference: proto::Ref, policy: Policy) -> Arc<Self> {
+    pub fn new(
+        egress: Arc<Egress>,
+        reference: proto::Ref,
+        policy: Policy,
+        fence: FenceEpoch,
+    ) -> Arc<Self> {
         Arc::new(Self {
             egress,
             reference,
             policy: Arc::new(Mutex::new(Arc::new(policy))),
+            fence,
         })
     }
 
@@ -171,6 +195,7 @@ impl FlowHandler for Gate {
             egress: self.egress.clone(),
             reference: self.reference.clone(),
             policy: self.policy.clone(),
+            fence: self.fence.clone(),
         });
         if this.lease_expired() {
             // Before TLS: the dialled address is all there is to name.
@@ -356,13 +381,14 @@ impl HttpConnection {
             }
         };
         let placeholders = placeholder::scan_headers(request.headers());
-        if let Err(denial) = self
+        let route = match self
             .gate
             .policy()
             .decide(self.scheme, &host, port, &placeholders)
         {
-            return self.deny(&host, denial);
-        }
+            Ok(route) => route,
+            Err(denial) => return self.deny(&host, denial),
+        };
         strip_hop_by_hop(request.headers_mut());
         request.headers_mut().remove(header::PROXY_AUTHORIZATION);
         let path = request
@@ -374,6 +400,9 @@ impl HttpConnection {
             Ok(uri) => uri,
             Err(_) => return denied(StatusCode::BAD_REQUEST, "invalid request target"),
         };
+        if let Route::Credential(name) = route {
+            return self.credential(request, &host, port, name).await;
+        }
         let mut sender = match self.sender(&host, port).await {
             Ok(sender) => sender,
             Err(UpstreamError::NotPublic) => return self.deny(&host, Denial::Address),
@@ -393,6 +422,79 @@ impl HttpConnection {
         let (mut parts, body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
         Response::from_parts(parts, body.boxed())
+    }
+
+    /// A request a credential rule matched, over a `credential` stream to
+    /// cubed's proxy (one request per stream; the guest's request as hyper
+    /// writes it, the placeholder untouched).
+    async fn credential(
+        &self,
+        request: Request<Incoming>,
+        host: &str,
+        port: u16,
+        credential: String,
+    ) -> Response<Body> {
+        let unavailable = |message: &str| {
+            self.gate.report(host, Denial::CredentialUnavailable);
+            plain(StatusCode::SERVICE_UNAVAILABLE, ERROR_HEADER, message)
+        };
+        // Credential requests need cubed: no grace, no waiting for it.
+        let Some(connection) = self.gate.egress.presence.connection() else {
+            return unavailable(Denial::CredentialUnavailable.message());
+        };
+        let header = proto::CredentialHeader {
+            r#ref: Some(self.gate.reference.clone()),
+            credential,
+            sni: host.to_owned(),
+            host: host.to_owned(),
+            port: port.into(),
+            fence: Some(proto::Fence {
+                epoch: (self.gate.fence)(),
+            }),
+        };
+        let opened = tokio::time::timeout(CREDENTIAL_OPEN_TIMEOUT, async {
+            let (mut send, mut recv) = connection.open_bi().await?;
+            write_frame(
+                &mut send,
+                &proto::Open {
+                    kind: Some(open::Kind::Credential(header)),
+                },
+            )
+            .await?;
+            let answer: proto::StreamAnswer = read_frame(&mut recv).await?;
+            anyhow::Ok((send, recv, answer))
+        })
+        .await;
+        let (send, recv) = match opened {
+            Ok(Ok((send, recv, proto::StreamAnswer { error: None }))) => (send, recv),
+            Ok(Ok((_, _, proto::StreamAnswer { error: Some(error) }))) => {
+                return unavailable(&format!(
+                    "cubed refused the credential request: {}",
+                    error.message
+                ));
+            }
+            Ok(Err(error)) => {
+                return unavailable(&format!("the credential stream failed: {error:#}"));
+            }
+            Err(_) => return unavailable("cubed did not take the credential request in time"),
+        };
+        let exchange = async {
+            let (mut sender, connection) = hyper::client::conn::http1::Builder::new()
+                .handshake(TokioIo::new(tokio::io::join(recv, send)))
+                .await?;
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            sender.send_request(request).await
+        };
+        match exchange.await {
+            Ok(response) => {
+                let (mut parts, body) = response.into_parts();
+                strip_hop_by_hop(&mut parts.headers);
+                Response::from_parts(parts, body.boxed())
+            }
+            Err(error) => failed(&format!("the credential request failed: {error}")),
+        }
     }
 
     async fn sender(&self, host: &str, port: u16) -> Result<SendRequest<Incoming>, UpstreamError> {
