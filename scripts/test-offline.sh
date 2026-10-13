@@ -26,6 +26,8 @@ OFFLINE_TESTS=(
   packages/server/test/workspace-test.ts
   packages/server/test/vm-seed-test.ts
   packages/server/test/egress-policy-test.ts
+  packages/server/test/runner-credentials-test.ts
+  packages/server/test/leak-scan-test.ts
   packages/server/test/gateway-test.ts
   packages/server/test/vm-workspace-test.ts
   packages/server/test/lifecycle-test.ts

@@ -511,6 +511,7 @@ dependencies = [
  "cube-gateway",
  "cube-netstack",
  "cube-runner",
+ "cube-runner-protocol",
  "http",
  "http-body-util",
  "hyper",

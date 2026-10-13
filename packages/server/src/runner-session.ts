@@ -4,14 +4,18 @@
  * keeps one `watch` stream open (the runner and its machines, as the runner
  * reports them: cubed never polls a guest's hello for readiness), answers
  * `call`s and opens a `guest` stream per guest operation
- * (`RunnerGuestTransport`). */
+ * (`RunnerGuestTransport`). It also takes the streams the runner opens on
+ * the connection: `credential` (runner-credentials.ts) and `report`, whose
+ * refusals it logs; it never answers a report. */
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { create, fromJsonString, toJsonString, type DescMessage, type MessageInitShape, type MessageShape } from "@bufbuild/protobuf";
 import { Endpoint, EndpointAddr, EndpointId, SecretKey, type BiStream, type Connection } from "@number0/iroh/index.js";
-import { CallResultSchema, CallSchema, Code, HelloAnswerSchema, OpenSchema, StreamAnswerSchema, WatchEvent_Type, WatchEventSchema,
+import { CallResultSchema, CallSchema, Code, EgressReportSchema, HelloAnswerSchema, OpenSchema, StreamAnswerSchema, WatchEvent_Type, WatchEventSchema,
   type CallResult, type HelloAnswer, type Machine, type Runner } from "./gen/runner_pb.js";
+import { carryCredential, MAX_CREDENTIAL_HEADER, type CredentialRoute } from "./runner-credentials.ts";
+import { createLogger, type Logger } from "./log.ts";
 import { decodeGuestAnswer, encodeGuestRequest, GuestTransportError, type GuestAnswer, type GuestCallOptions, type GuestOp,
   type GuestTransport } from "./guest-ssh.ts";
 
@@ -116,6 +120,20 @@ function within<T>(ms: number, work: Promise<T>, onTimeout: () => Error): Promis
 export interface MachineRef { owner: string; id: string }
 export function machineKey(ref: MachineRef): string { return `${ref.owner}/${ref.id}`; }
 
+/** The route of runners' credential streams for sessions not given one
+ * (cubed's own, set at its start); none: every such stream is refused. */
+let defaultCredentials: CredentialRoute | null = null;
+export function routeCredentials(route: CredentialRoute | null): void { defaultCredentials = route; }
+
+export interface SessionOptions {
+  cubedVersion?: string;
+  /** Where this session's runner's credential streams go (default: `routeCredentials`). */
+  credentials?: CredentialRoute;
+  /** The registry's identity of the runner (`runnerSession` sets it). */
+  admission?: { configPath: string; configHash: string };
+  log?: Logger;
+}
+
 export class RunnerSession {
   readonly nodeId: string;
   readonly config: SessionConfig;
@@ -130,11 +148,15 @@ export class RunnerSession {
   private closed = false;
   private readonly waiters = new Set<() => void>();
   private readonly cubedVersion: string;
+  private readonly options: SessionOptions;
+  private readonly log: Logger;
 
-  constructor(config: SessionConfig, options: { cubedVersion?: string } = {}) {
+  constructor(config: SessionConfig, options: SessionOptions = {}) {
     this.config = config;
     this.nodeId = config.binding.nodeId;
     this.cubedVersion = options.cubedVersion ?? "";
+    this.options = options;
+    this.log = options.log ?? createLogger("runner-session");
   }
 
   /** The connection, after a hello on it; a new one when the last closed. */
@@ -146,6 +168,7 @@ export class RunnerSession {
     attempt.then(connection => {
       void connection.closed().catch(() => "").then(() => { if (this.connection === attempt) this.connection = null; });
       this.watch(attempt);
+      this.accept(connection);
     }, () => { if (this.connection === attempt) this.connection = null; });
     return attempt;
   }
@@ -287,6 +310,48 @@ export class RunnerSession {
     })();
   }
 
+  /** The streams the runner opens on `connection`, until it ends. */
+  private accept(connection: Connection): void {
+    void (async () => {
+      for (;;) {
+        let stream: BiStream;
+        try { stream = await connection.acceptBi(); } catch { return; }
+        void this.runnerStream(stream).catch(error => this.log.warn("runner stream failed", { runner: this.nodeId, error }));
+      }
+    })();
+  }
+
+  private async runnerStream(stream: BiStream): Promise<void> {
+    const text = await readFrame(stream);
+    const opened = parse(OpenSchema, text);
+    const kind = opened.kind;
+    if (kind.case === "report") {
+      // Refusals for diagnosis (C phase); read so they do not pile up.
+      for (;;) {
+        let report;
+        try { report = parse(EgressReportSchema, await readFrame(stream)); } catch { return; }
+        this.log.info("egress refused", { runner: this.nodeId, thread: report.ref?.owner, vm: report.ref?.id, host: report.host,
+          reason: report.reason, droppedBefore: report.droppedBefore ? Number(report.droppedBefore) : undefined });
+      }
+    }
+    if (kind.case === "credential") {
+      if (Buffer.byteLength(text) > MAX_CREDENTIAL_HEADER) {
+        await stream.send.writeAll(frame(StreamAnswerSchema, { error: { code: Code.INVALID_ARGUMENT, reason: "size", message: "a credential header is at most 64 KiB" } }));
+        await stream.send.finish();
+        return;
+      }
+      const header = kind.value;
+      const carried = await carryCredential(stream, header, this.options.credentials ?? defaultCredentials,
+        { nodeId: this.nodeId, admission: this.options.admission ?? null });
+      const fields = { runner: this.nodeId, thread: header.ref?.owner, vm: header.ref?.id, host: header.host, credential: header.credential };
+      if (carried.refused) this.log.info("credential request refused", { ...fields, reason: carried.refused.reason, message: carried.refused.message });
+      else this.log.debug("credential request carried", { ...fields, up: carried.up, down: carried.down, error: carried.error ?? undefined });
+      return;
+    }
+    await stream.send.writeAll(frame(StreamAnswerSchema, { error: { code: Code.INVALID_ARGUMENT, reason: "open", message: `a runner does not open ${kind.case ?? "unknown"} streams` } }));
+    await stream.send.finish();
+  }
+
   /** The guest helper of machine `ref`, fenced by `fence()` at each call. */
   guest(ref: MachineRef, fence: () => number): RunnerGuestTransport {
     return new RunnerGuestTransport(this, ref, fence);
@@ -364,7 +429,7 @@ export function runnerSession(admission: { configPath: string; configHash: strin
   if (!session) {
     const { config, hash } = loadSessionConfig(admission.configPath);
     if (hash !== admission.configHash) throw new RunnerError("FAILED_PRECONDITION", "config_changed", `${admission.configPath} changed since the runner was enrolled`);
-    session = new RunnerSession(config, options);
+    session = new RunnerSession(config, { ...options, admission: { configPath: admission.configPath, configHash: admission.configHash } });
     sessions.set(key, session);
   }
   return session;

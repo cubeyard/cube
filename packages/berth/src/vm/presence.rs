@@ -129,6 +129,19 @@ impl Presence {
         self.seen.lock().unwrap().iter().copied().collect()
     }
 
+    /// The newest live connection from cubed, for the streams the runner
+    /// opens (`credential`); None while cubed is not connected.
+    pub fn connection(&self) -> Option<Connection> {
+        self.live
+            .lock()
+            .unwrap()
+            .values()
+            .rev()
+            .flatten()
+            .find(|connection| connection.close_reason().is_none())
+            .cloned()
+    }
+
     /// Adds an address as if a path to cubed had it (tests).
     #[cfg(test)]
     pub fn note_address(&self, ip: IpAddr) {

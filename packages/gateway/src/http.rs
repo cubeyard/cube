@@ -4,9 +4,16 @@
 //! flow is closed). Each request is parsed by hyper, checked (`Host` must
 //! match SNI, no CONNECT or Upgrade), decided by cubed, given its secrets and
 //! sent to the SNI/Host name's public address. Bodies stream unmodified.
+//!
+//! The same handler serves the credential proxy (credential.rs): one request
+//! per connection from cubed, a runner's `credential` stream, as HTTPS for
+//! the stream's server name. There every placeholder must be of the
+//! stream's credential, the request asks for `Accept-Encoding: identity`,
+//! an encoded answer is refused (502), and what the gateway substituted is
+//! turned back into the guest's placeholder in the answer (B6, reverse.rs).
 use anyhow::{Context as _, Result};
 use bytes::Bytes;
-use http::{HeaderValue, Method, Request, Response, StatusCode, Uri, header};
+use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri, header};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::{body::Incoming, client::conn::http1::SendRequest, service::service_fn};
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -21,6 +28,7 @@ use crate::{
     ca::Ca,
     decide::{DecideClient, DecideRequest, Decision},
     lan::{FlowHandler, FlowInfo, FlowStream},
+    reverse::{Pairs, Reversed},
     secrets,
 };
 #[cfg(feature = "test-hooks")]
@@ -68,6 +76,7 @@ impl VmEgress {
             vm_id: self.vm_id.clone(),
             thread_id: self.thread_id.clone(),
             scheme,
+            credential: None,
             upstream: Mutex::new(None),
         })
     }
@@ -97,11 +106,35 @@ impl FlowHandler for VmEgress {
     }
 }
 
+/// One request of a runner's `credential` stream, as HTTPS for `sni`: the
+/// credential proxy's connection (credential.rs).
+pub async fn serve_credential<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    egress: Arc<Egress>,
+    vm_id: String,
+    thread_id: String,
+    sni: String,
+    credential: String,
+    io: S,
+) -> Result<()> {
+    Arc::new(Connection {
+        egress,
+        vm_id,
+        thread_id,
+        scheme: Scheme::Https(sni),
+        credential: Some(credential),
+        upstream: Mutex::new(None),
+    })
+    .serve(io)
+    .await
+}
+
 struct Connection {
     egress: Arc<Egress>,
     vm_id: String,
     thread_id: String,
     scheme: Scheme,
+    /// Credential mode: the stream's credential name.
+    credential: Option<String>,
     /// One upstream connection per guest connection, reused while alive.
     upstream: Mutex<Option<(String, SendRequest<Incoming>)>>,
 }
@@ -113,6 +146,8 @@ impl Connection {
     ) -> Result<()> {
         let this = self.clone();
         hyper::server::conn::http1::Builder::new()
+            // A credential stream carries one request.
+            .keep_alive(self.credential.is_none())
             .max_buf_size(MAX_HEAD)
             .timer(TokioTimer::new())
             .header_read_timeout(HEADER_TIMEOUT)
@@ -140,6 +175,22 @@ impl Connection {
         };
         let https = matches!(self.scheme, Scheme::Https(_));
         let placeholders = secrets::scan_headers(request.headers());
+        if let Some(name) = &self.credential {
+            if placeholders
+                .iter()
+                .any(|p| secrets::placeholder_name(p) != Some(name.as_str()))
+            {
+                return denied(
+                    StatusCode::FORBIDDEN,
+                    &format!("only {name} placeholders go through this credential"),
+                );
+            }
+            // B6 reads every answer, so it must not be encoded.
+            request.headers_mut().insert(
+                header::ACCEPT_ENCODING,
+                HeaderValue::from_static("identity"),
+            );
+        }
         let decision = self
             .egress
             .decide
@@ -166,10 +217,22 @@ impl Connection {
         if !substitute.is_empty() && !https {
             return denied(StatusCode::FORBIDDEN, "secrets are only sent over https");
         }
-        if secrets::substitute_headers(request.headers_mut(), &substitute).is_err() {
-            return denied(StatusCode::FORBIDDEN, "invalid secret substitution");
+        let basic = match secrets::substitute_headers(request.headers_mut(), &substitute) {
+            Ok(basic) => basic,
+            Err(_) => return denied(StatusCode::FORBIDDEN, "invalid secret substitution"),
+        };
+        // B6: exactly what was substituted, to turn back in the answer.
+        let mut pairs = Pairs::default();
+        if self.credential.is_some() {
+            for (placeholder, value) in &substitute {
+                pairs.add(value.as_bytes(), placeholder.as_bytes());
+            }
+            for (upstream, guest) in basic {
+                pairs.add(upstream, guest);
+            }
         }
         drop(substitute);
+        let head = request.method() == Method::HEAD;
         strip_hop_by_hop(request.headers_mut());
         request.headers_mut().remove(header::PROXY_AUTHORIZATION);
         let path = request
@@ -195,7 +258,27 @@ impl Connection {
         *self.upstream.lock().await = Some((format!("{host}:{port}"), sender));
         let (mut parts, body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
-        Response::from_parts(parts, body.boxed())
+        if self.credential.is_none() {
+            return Response::from_parts(parts, body.boxed());
+        }
+        if encoded(&parts.headers) {
+            return failed("the credential proxy refuses an encoded answer");
+        }
+        if pairs.rewrite_headers(&mut parts.headers).is_err() {
+            return failed("the answer's headers cannot carry the placeholder");
+        }
+        if pairs.is_empty() {
+            return Response::from_parts(parts, body.boxed());
+        }
+        let bodiless = head
+            || parts.status.is_informational()
+            || parts.status == StatusCode::NO_CONTENT
+            || parts.status == StatusCode::NOT_MODIFIED;
+        if !bodiless && pairs.changes_length() {
+            // The length may change: hyper sends the rewritten body chunked.
+            parts.headers.remove(header::CONTENT_LENGTH);
+        }
+        Response::from_parts(parts, Reversed::new(body, pairs).boxed())
     }
 
     async fn sender(&self, host: &str, port: u16) -> Result<SendRequest<Incoming>, UpstreamError> {
@@ -226,6 +309,16 @@ impl Connection {
         };
         handshake.await.map_err(UpstreamError::Failed)
     }
+}
+
+/// A `Content-Encoding` other than `identity`.
+fn encoded(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::CONTENT_ENCODING)
+        .iter()
+        .flat_map(|v| v.as_bytes().split(|b| *b == b','))
+        .map(|token| token.trim_ascii())
+        .any(|token| !token.is_empty() && !token.eq_ignore_ascii_case(b"identity"))
 }
 
 fn header_text(reason: &str) -> HeaderValue {

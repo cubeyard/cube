@@ -6,7 +6,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const USAGE: &str = "usage:
-  cube-gateway serve --state DIR --control SOCK --decide SOCK --network loopback|direct|relay [--listen ADDR]
+  cube-gateway serve --state DIR --control SOCK --decide SOCK --network loopback|direct|relay [--listen ADDR] [--credential SOCK]
   cube-gateway dial --control SOCK --vm ID --port 22
   cube-gateway --version";
 
@@ -105,18 +105,22 @@ async fn serve(mut options: Options) -> Result<()> {
     let state = PathBuf::from(options.take("state")?);
     let control = PathBuf::from(options.take("control")?);
     let decide = PathBuf::from(options.take("decide")?);
+    let credential = options.values.remove("credential").map(PathBuf::from);
     let upstream = upstream(&mut options)?;
     options.done()?;
-    let running = cube_gateway::start(ServeOptions {
-        state,
-        control,
-        decide,
-        network,
-        listen,
-        upstream,
-        decide_timeout: DECIDE_TIMEOUT,
-        limits: LanLimits::default(),
-    })
+    let running = cube_gateway::start_with_credential(
+        ServeOptions {
+            state,
+            control,
+            decide,
+            network,
+            listen,
+            upstream,
+            decide_timeout: DECIDE_TIMEOUT,
+            limits: LanLimits::default(),
+        },
+        credential,
+    )
     .await?;
     let mut stdout = tokio::io::stdout();
     stdout

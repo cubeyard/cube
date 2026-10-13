@@ -17,9 +17,9 @@ import { type ChildProcess, execFileSync, fork, spawn, spawnSync } from "node:ch
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
-import https from "node:https";
 import path from "node:path";
 import readline from "node:readline";
+import { fakeGithub, git } from "./fake-github.ts";
 
 const [runnerBin, image] = process.argv.slice(2).map(p => path.resolve(p));
 if (!runnerBin || !image) throw new Error("usage: test-vm-e2e.ts <cube-runner> <image.qcow2>");
@@ -32,7 +32,6 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const children = new Set<ChildProcess>();
 const fakeToken = `ghs_e2e${randomBytes(12).toString("hex")}`;
 const [tokenHead, tokenTail] = [fakeToken.slice(0, 10), fakeToken.slice(10)];
-const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=Cube E2E", "-c", "user.email=e2e@example.invalid", "-c", "commit.gpgsign=false", "-C", cwd, ...args], { encoding: "utf8" }).trim();
 const production = () => { try { return execFileSync("systemctl", ["--user", "is-active", "cubed.service"], { encoding: "utf8" }).trim(); } catch (error) { return String((error as { stdout?: string }).stdout ?? "unknown").trim(); } };
 const productionBefore = production();
 const vmIds: string[] = [];
@@ -45,86 +44,6 @@ async function until<T>(what: string, seconds: number, probe: () => Promise<T | 
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
     await sleep(500);
   }
-}
-
-// --- a local GitHub: api.github.com/user and smart HTTP for one repository
-function fakeGithub(): Promise<{ port: number; ca: string; repository: string; skills: { url: string; commit: string; path: string; bare: string }; close(): void; requests: string[] }> {
-  const dir = path.join(work, "github");
-  fs.mkdirSync(path.join(dir, "cube-e2e"), { recursive: true });
-  const openssl = (...args: string[]) => execFileSync("openssl", args, { cwd: dir, stdio: "ignore" });
-  openssl("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=cube e2e test ca");
-  fs.writeFileSync(path.join(dir, "san.ext"), "subjectAltName=DNS:github.com,DNS:api.github.com\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n");
-  openssl("req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "leaf.key", "-out", "leaf.csr", "-subj", "/CN=github.com");
-  openssl("x509", "-req", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", "leaf.pem", "-days", "2", "-extfile", "san.ext");
-  const seedTree = path.join(dir, "seed");
-  fs.mkdirSync(seedTree);
-  git(seedTree, "init", "-q", "--initial-branch=main");
-  fs.writeFileSync(path.join(seedTree, "README.md"), "e2e\n");
-  git(seedTree, "add", "README.md");
-  git(seedTree, "commit", "-qm", "base");
-  const repository = path.join(dir, "cube-e2e", "repo.git");
-  git(dir, "clone", "-q", "--bare", seedTree, repository);
-  // Skills the thread installs: one links the other by ../<name>/SKILL.md.
-  const skillsTree = path.join(dir, "skills-seed");
-  for (const [name, body] of [["target", "the linked skill\n"], ["linking", "see [target](../target/SKILL.md)\n"]]) {
-    fs.mkdirSync(path.join(skillsTree, "skills", name), { recursive: true });
-    fs.writeFileSync(path.join(skillsTree, "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: e2e ${name}\n---\n${body}`);
-  }
-  git(skillsTree, "init", "-q", "--initial-branch=main");
-  git(skillsTree, "add", "-A");
-  git(skillsTree, "commit", "-qm", "skills");
-  const skillsBare = path.join(dir, "cube-e2e", "skills.git");
-  git(dir, "clone", "-q", "--bare", skillsTree, skillsBare);
-  const skills = { url: "https://github.com/cube-e2e/skills.git", commit: git(skillsTree, "rev-parse", "HEAD").trim(), path: "skills", bare: skillsBare };
-  const requests: string[] = [];
-  const server = https.createServer({ key: fs.readFileSync(path.join(dir, "leaf.key")), cert: fs.readFileSync(path.join(dir, "leaf.pem")) }, (request, response) => {
-    const chunks: Buffer[] = [];
-    request.on("data", (chunk: Buffer) => chunks.push(chunk));
-    request.on("end", () => {
-      const auth = request.headers.authorization ?? "";
-      const host = request.headers.host?.split(":")[0];
-      requests.push(`${request.method} ${host}${request.url} auth=${auth ? auth.split(" ")[0] : "none"}`);
-      if (host === "api.github.com") {
-        const token = /^(?:token|Bearer) (.+)$/.exec(auth)?.[1];
-        if (token !== fakeToken) { response.writeHead(401, { "content-type": "application/json" }); response.end('{"message":"Bad credentials"}'); return; }
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ login: "cube-e2e", id: 1 }));
-        return;
-      }
-      const basic = /^Basic (.+)$/.exec(auth)?.[1];
-      if (!basic || Buffer.from(basic, "base64").toString() !== `x-access-token:${fakeToken}`) {
-        response.writeHead(401, { "www-authenticate": 'Basic realm="GitHub"' });
-        response.end();
-        return;
-      }
-      const url = new URL(request.url!, "https://github.com");
-      const backend = spawn("git", ["http-backend"], { env: { PATH: process.env.PATH, GIT_PROJECT_ROOT: dir, GIT_HTTP_EXPORT_ALL: "1",
-        REMOTE_USER: "x-access-token", REQUEST_METHOD: request.method, PATH_INFO: url.pathname, QUERY_STRING: url.search.slice(1),
-        CONTENT_TYPE: request.headers["content-type"] ?? "", CONTENT_LENGTH: String(Buffer.concat(chunks).length),
-        HTTP_CONTENT_ENCODING: request.headers["content-encoding"] ?? "", GIT_PROTOCOL: String(request.headers["git-protocol"] ?? "") } });
-      const out: Buffer[] = [];
-      backend.stdout.on("data", (chunk: Buffer) => out.push(chunk));
-      backend.stdin.end(Buffer.concat(chunks));
-      backend.on("close", () => {
-        const all = Buffer.concat(out);
-        const split = all.indexOf("\r\n\r\n");
-        const head = all.subarray(0, split).toString().split("\r\n");
-        const headers: Record<string, string> = {};
-        let status = 200;
-        for (const line of head) {
-          const [name, ...rest] = line.split(":");
-          if (name.toLowerCase() === "status") status = Number(rest.join(":").trim().split(" ")[0]);
-          else headers[name] = rest.join(":").trim();
-        }
-        response.writeHead(status, headers);
-        response.end(all.subarray(split + 4));
-      });
-    });
-  });
-  return new Promise(resolve => server.listen(0, "127.0.0.1", () => {
-    const port = (server.address() as { port: number }).port;
-    resolve({ port, ca: path.join(dir, "ca.pem"), repository, skills, requests, close: () => server.close() });
-  }));
 }
 
 // --- processes
@@ -210,7 +129,7 @@ try {
   execFileSync("cargo", ["build", "--locked", "--offline", "-p", "cube-gateway", "--features", "test-hooks", "-j", "4"],
     { cwd: repo, env: { ...process.env, CARGO_TARGET_DIR: path.join(repo, "target/test-hooks") }, stdio: "ignore" });
   const gatewayBin = path.join(repo, "target/test-hooks/debug/cube-gateway");
-  github = await fakeGithub();
+  github = await fakeGithub({ dir: path.join(work, "github"), token: fakeToken });
   log(`fake GitHub on 127.0.0.1:${github.port}`);
 
   const peerOf = (file: string) => JSON.parse(execFileSync(runnerBin, ["keygen", "--key", file], { encoding: "utf8" })).peerId as string;

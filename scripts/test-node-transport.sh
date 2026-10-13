@@ -26,6 +26,9 @@ node scripts/runner-production-test.ts
 # threads named to it.
 node packages/server/test/runner-host-test.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
 node packages/server/test/runner-host-cubed-test.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
+# runner-vm-test's host-side token scan, without grep (macOS's BSD grep
+# exits 2 on a machine's sockets): here so the macOS job runs it too.
+node packages/server/test/leak-scan-test.ts
 # `berth vm` (masterplan B-1, B-2): it refuses to start without QEMU by path
 # and refuses CUBE_TEST_BERTH_OLD_QEMU (below keel's floor); with
 # CUBE_TEST_BERTH_{QEMU,QEMU_IMG,KEEL,IMAGE,MKFS} it pulls the image and runs

@@ -11,6 +11,9 @@
 //           answer: one `StreamAnswer` frame, then (when it has no error)
 //           the operation's answer bytes as the helper wrote them, then FIN.
 //   dial    one `StreamAnswer` frame, then raw TCP both ways.
+//   credential (runner -> cubed) one `StreamAnswer` frame, then (when it
+//           has no error) one HTTP/1.1 request and its answer as raw bytes
+//           both ways, then FIN; see `CredentialHeader`.
 // A runner never interprets the guest bytes (`OPERATIONS` in cube-guest).
 //
 // The guest channel (`berth vm` <-> keel's cube-agent): one virtio-serial
@@ -310,6 +313,17 @@ export declare type Open = Message<"cube.runner.v4.Open"> & {
      */
     value: ReportHeader;
     case: "report";
+  } | {
+    /**
+     * Runner -> cubed: one per guest request that a credential rule
+     * matched. cubed answers one StreamAnswer frame; without an error, one
+     * HTTP/1.1 request and its answer follow as raw bytes, then FIN. The
+     * header routes and authorizes; the request itself is the bytes.
+     *
+     * @generated from field: cube.runner.v4.CredentialHeader credential = 7;
+     */
+    value: CredentialHeader;
+    case: "credential";
   } | { case: undefined; value?: undefined };
 };
 
@@ -320,8 +334,9 @@ export declare type Open = Message<"cube.runner.v4.Open"> & {
 export declare const OpenSchema: GenMessage<Open>;
 
 /**
- * The answer frame of a `guest` or `dial` stream; no error means the bytes
- * that follow are the machine's.
+ * The answer frame of a `guest`, `dial` or `credential` stream; no error
+ * means the bytes that follow are the machine's (for `credential`: the
+ * HTTP/1.1 exchange with cubed's credential proxy).
  *
  * @generated from message cube.runner.v4.StreamAnswer
  */
@@ -1163,8 +1178,8 @@ export declare const GuestLimitsSchema: GenMessage<GuestLimits>;
  * Order: deny_hosts, then the first rule whose hosts and ports match, then
  * default. Rule.ports: empty means the kind's port (http 80, https 443);
  * any port but 80 or 443 is INVALID_ARGUMENT. Https.credential goes through
- * the credential stream; until a runner has it, such a request is denied
- * (credential_unavailable). Decide is UNIMPLEMENTED (egress_decide).
+ * the credential stream (`CredentialHeader`). Decide is UNIMPLEMENTED
+ * (egress_decide).
  * CONNECT and Upgrade are always denied; a request carrying a cube_ph_
  * placeholder is denied unless a credential rule for its host matches.
  * lease: how long ordinary egress goes on after the runner loses its
@@ -1914,6 +1929,25 @@ export declare type DialHeader = Message<"cube.runner.v4.DialHeader"> & {
 export declare const DialHeaderSchema: GenMessage<DialHeader>;
 
 /**
+ * The first frame of a `credential` stream (B-5). The runner opens one per
+ * guest request to a host and port a credential rule matched, on its
+ * connection from cubed, and never without one: with no connection it
+ * refuses the request at once (503, credential_unavailable); the egress
+ * lease does not apply. cubed checks, before anything reaches its proxy,
+ * that `ref` is a machine of a thread placed on this runner (else
+ * PERMISSION_DENIED/wrong_machine) and that `fence` is not older than the
+ * thread's newest epoch (else FAILED_PRECONDITION/stale_epoch); then it
+ * answers `StreamAnswer` and passes the bytes on unread. The request is
+ * the guest's, placeholder and all: the token exists only in cubed's
+ * proxy, which needs Host = `sni` = `host`, port 443, every placeholder to
+ * be of `credential` and belong to the thread, and cubed's decision. The
+ * proxy follows no redirect and adds no credential of its own; it asks for
+ * `Accept-Encoding: identity`, refuses an encoded answer (502), and turns
+ * what it substituted back into the guest's placeholder in the answer's
+ * headers and body. No limit on body size or total time; the answer ends
+ * when the stream does (cubed gone: what the runner already has goes to
+ * the guest, then the guest's connection ends as on an upstream failure).
+ *
  * @generated from message cube.runner.v4.CredentialHeader
  */
 export declare type CredentialHeader = Message<"cube.runner.v4.CredentialHeader"> & {
@@ -1923,19 +1957,18 @@ export declare type CredentialHeader = Message<"cube.runner.v4.CredentialHeader"
   ref?: Ref | undefined;
 
   /**
+   * The rule's `EgressPolicy.Credential.name`.
+   *
    * @generated from field: string credential = 2;
    */
   credential: string;
 
   /**
+   * The guest's TLS server name, and the request's host and port.
+   *
    * @generated from field: string sni = 3;
    */
   sni: string;
-
-  /**
-   * @generated from field: string method = 4;
-   */
-  method: string;
 
   /**
    * @generated from field: string host = 5;
@@ -1948,14 +1981,11 @@ export declare type CredentialHeader = Message<"cube.runner.v4.CredentialHeader"
   port: number;
 
   /**
-   * @generated from field: string path = 7;
+   * The machine's fence epoch as the runner last recorded it.
+   *
+   * @generated from field: cube.runner.v4.Fence fence = 9;
    */
-  path: string;
-
-  /**
-   * @generated from field: repeated cube.runner.v4.Header headers = 8;
-   */
-  headers: Header[];
+  fence?: Fence | undefined;
 };
 
 /**

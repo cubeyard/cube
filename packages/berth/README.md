@@ -108,9 +108,9 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   rules `UNIMPLEMENTED egress_decide`), a start of a running machine
   replaces its policy, and no policy means no egress. Per request:
   CONNECT and Upgrade refused, `Host` must equal the SNI name, then
-  `deny_hosts`, the first matching rule (a credential rule is refused with
-  `credential_unavailable` until B-5), the default, a `cube_ph_`
-  placeholder anywhere it is not a credential rule's, and the address
+  `deny_hosts`, the first matching rule (a credential rule's request goes
+  to cubed, below), the default, a `cube_ph_` placeholder anywhere it is
+  not a credential rule's, and the address
   check: only public unicast, none of this host's own addresses and none
   of the addresses Iroh's direct paths reach cubed at (remembered for the
   runner's life; over a relay-only connection only `deny_hosts` keeps a
@@ -128,8 +128,20 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   written to cubed on one `report` stream per connection that the runner
   opens (`Open.report`), never from the flow; a write that does not finish
   in 5 s ends that stream and the rest waits for the next connection.
-  (cubed does not read the stream yet; that is the C phase.)
-- Not yet: credentials (B-5), `dial` (B-6), pulls by the runner and the
+  (cubed reads and logs them; using them is the C phase.)
+- Credentials (masterplan B-5, `src/vm/egress.rs`): a request a credential
+  rule matches never goes out from the runner. It goes, placeholder and
+  all, over a `credential` stream (`Open.credential`, with the machine's
+  `ref` and fence) on cubed's newest connection, as one HTTP/1.1 exchange
+  after cubed's `StreamAnswer`; cubed checks the machine and fence and
+  carries it to cube-gateway's credential proxy, which holds the token and
+  turns it back into the placeholder in the answer. Without a connection
+  from cubed (the lease does not apply), when cubed refuses, or when the
+  stream is not open and answered within 10 s: 503 with `x-cube-error`
+  and a `credential_unavailable` report. An answer under way when cubed
+  goes ends as an upstream failure does: what the runner has drains to the
+  guest, then its connection ends.
+- Not yet: `dial` (B-6), pulls by the runner and the
   cache limit, templates, diagnosis and snapshots (masterplan rows B-7,
   B-8, B-9, S-7a).
 - `stop`, `delete` and the runner's own shutdown stop a machine the same

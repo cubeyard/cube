@@ -131,13 +131,13 @@ async fn stream<S: Service>(
             write_frame(send, &answer(Some(unimplemented::<S>("dial")))).await?
         }
         // Runner -> cubed only.
-        Some(open::Kind::Report(_)) => {
+        Some(open::Kind::Report(_) | open::Kind::Credential(_)) => {
             write_frame(
                 send,
                 &answer(Some(refuse(
                     Code::InvalidArgument,
                     "open",
-                    "a report stream is opened by the runner",
+                    "report and credential streams are opened by the runner",
                 ))),
             )
             .await?

@@ -1018,6 +1018,9 @@ impl VmRunner {
         let gate = {
             let state = self.state.lock().unwrap();
             let entry = &state.machines[id];
+            // Credential streams carry the epoch the runner holds now.
+            let runner = Arc::downgrade(self);
+            let machine = id.to_owned();
             egress::Gate::new(
                 Arc::clone(&self.egress),
                 proto::Ref {
@@ -1028,6 +1031,17 @@ impl VmRunner {
                     .policy
                     .clone()
                     .unwrap_or_else(policy::Policy::deny_all),
+                Arc::new(move || {
+                    runner.upgrade().map_or(0, |runner| {
+                        runner
+                            .state
+                            .lock()
+                            .unwrap()
+                            .machines
+                            .get(&machine)
+                            .map_or(0, |entry| entry.record.fence_epoch)
+                    })
+                }),
             )
         };
         let (net, theirs) = egress::Net::open(gate, id)?;

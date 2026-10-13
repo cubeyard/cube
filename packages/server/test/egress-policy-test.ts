@@ -5,6 +5,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { EgressPolicy, githubSecret, newPlaceholder, serveEgress, type EgressRequest } from "../src/egress-policy.ts";
+import { EgressPolicy_Default } from "../src/gen/runner_pb.js";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-egress-"));
 const lines: string[] = [];
@@ -56,6 +57,14 @@ try {
   const offline = new EgressPolicy({ vms: { vm: () => ({ threadId: "t1", placeholders: { github: mine } }) },
     secrets: [githubSecret(async () => null, { env: {} })], log });
   assert.deepEqual(await offline.decide(ask({ placeholders: [mine] })), { allow: true });
+  // A VM runner's policy for a thread (B-5): public egress, the 15-minute
+  // lease, and a credential rule on exactly the secret's hosts.
+  assert.deepEqual(policy.policyFor({ vm: { placeholders: { github: mine } } }), {
+    default: EgressPolicy_Default.ALLOW_PUBLIC_HTTP, denyHosts: [], lease: { seconds: 900n, nanos: 0 },
+    rules: [{ hosts: ["github.com", "api.github.com"], ports: [], kind: { case: "https", value: { credential: { name: "github" } } } }],
+  });
+  assert.deepEqual(policy.policyFor({ vm: { placeholders: {} } }).rules, [], "no placeholder, no credential rule");
+  assert.deepEqual(policy.policyFor({}).rules, []);
   // cubed's configuration may name the token instead of gh.
   assert.equal(await githubSecret(async () => "from-gh", { env: { CUBED_GITHUB_TOKEN: "from-config" } }).value(), "from-config");
 
