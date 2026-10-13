@@ -1,0 +1,12 @@
+diff --git a/packages/berth/src/vm/egress.rs b/packages/berth/src/vm/egress.rs
+index bc044dc5..1199ea86 100644
+--- a/packages/berth/src/vm/egress.rs
++++ b/packages/berth/src/vm/egress.rs
+@@ -189,7 +189,6 @@ impl FlowHandler for Gate {
+             }
+             // The lease ran out: no more egress for this flow. Its guest
+             // side goes on until it ends by itself.
+-            upstreams.stop();
+             let _ = serve.await;
+         });
+     }

@@ -1,0 +1,21 @@
+diff --git a/packages/berth/src/vm/egress.rs b/packages/berth/src/vm/egress.rs
+index bc044dc5..806ed97c 100644
+--- a/packages/berth/src/vm/egress.rs
++++ b/packages/berth/src/vm/egress.rs
+@@ -129,7 +129,7 @@ impl Gate {
+     }
+ 
+     fn lease_expired(&self) -> bool {
+-        self.egress.presence.now().expired(self.lease())
++        false && self.egress.presence.now().expired(self.lease())
+     }
+ 
+     fn report(&self, host: &str, denial: Denial) {
+@@ -189,7 +189,6 @@ impl FlowHandler for Gate {
+             }
+             // The lease ran out: no more egress for this flow. Its guest
+             // side goes on until it ends by itself.
+-            upstreams.stop();
+             let _ = serve.await;
+         });
+     }

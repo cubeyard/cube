@@ -1,0 +1,13 @@
+diff --git a/packages/netstack/src/http.rs b/packages/netstack/src/http.rs
+index e2a1d709..4c5d17b9 100644
+--- a/packages/netstack/src/http.rs
++++ b/packages/netstack/src/http.rs
+@@ -132,7 +132,7 @@ impl Upstream {
+                 let mut local = addr::local_addresses()
+                     .map_err(|e| UpstreamError::Failed(anyhow!("reading local addresses: {e}")))?;
+                 local.extend(avoid.iter().copied());
+-                if resolved.iter().any(|a| !addr::is_upstream(a.ip(), &local)) {
++                if false && resolved.iter().any(|a| !addr::is_upstream(a.ip(), &local)) {
+                     return Err(UpstreamError::NotPublic);
+                 }
+                 resolved
