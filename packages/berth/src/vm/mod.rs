@@ -24,8 +24,15 @@
 //! `machine_setup` after every `hello` (the image's layers, `Boot.documents`,
 //! the runner's CA from ca.rs, fresh entropy), keeps `status.guest` as the
 //! agent says it, and carries `guest` streams as `req`/`ans`. The image is
-//! the one `berth vm --image` names, pulled beforehand into the directory by
-//! `berth image pull`; a machine keeps the image it first started with.
+//! the one `berth vm --image` names, which berth pulls into the directory
+//! before it listens if any of it is missing (B-7, image.rs); a machine
+//! keeps the image it first started with.
+//!
+//! The layer cache (B-7, masterplan U6): least recently used layers go
+//! first once the cache is over `--layer-cache-gib`, but never a layer of
+//! the runner's image or of a machine that is not deleted, retained ones
+//! too (their layer disks name the cache's files). It is trimmed when the
+//! runner starts and when a machine is deleted or discarded.
 //!
 //! The network (B-4, egress.rs): every QEMU process gets a socket pair for
 //! `-netdev dgram` and its own cube-netstack LAN in the runner, with the
@@ -39,9 +46,7 @@
 //! both ways on the stream (serve.rs). It needs cubed's connection, which
 //! carries it, and nothing else: the egress lease does not apply.
 //!
-//! Not here yet: image pulls by the runner
-//! itself and the cache limit (B-7), templates (B-8), diagnosis (B-9) and
-//! snapshots (S-7a).
+//! Not here yet: templates (B-8), diagnosis (B-9) and snapshots (S-7a).
 //!
 //! `stop` (also `delete` and the runner's own shutdown) asks the agent to
 //! shut down (`DaemonRequest.shutdown`: the workload gets SIGTERM, then
@@ -60,7 +65,7 @@ mod record;
 mod report;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     io::Write as _,
     path::{Path, PathBuf},
     process::Stdio,
@@ -141,6 +146,11 @@ pub struct VmOptions {
     pub accel: Accel,
     /// The image every machine is built on, pulled into `directory` first.
     pub image: image::Reference,
+    /// Given by path, as QEMU; and what it says it is.
+    pub mkfs: PathBuf,
+    pub mkfs_version: String,
+    /// The layer cache's limit (`--layer-cache-gib`).
+    pub layer_cache_bytes: u64,
 }
 
 /// The runner's image, as `berth image pull` recorded it.
@@ -204,6 +214,7 @@ pub struct VmRunner {
     ca: ca::RunnerCa,
     egress: Arc<egress::Egress>,
     image: Image,
+    cache: keel_layers::cache::LayerCache,
     started_at: Timestamp,
     state: Mutex<State>,
     events: broadcast::Sender<proto::WatchEvent>,
@@ -291,6 +302,7 @@ impl VmRunner {
         let keel = Keel::open(&options.keel)?;
         let ca = ca::RunnerCa::load_or_create(&control.join("ca"))?;
         let image = load_image(&options.directory, &options.image)?;
+        let cache = keel_layers::cache::LayerCache::open(image::layer_dir(&options.directory))?;
         for dir in ["deleted", "trash"] {
             std::fs::create_dir_all(control.join(dir))?;
         }
@@ -358,7 +370,7 @@ impl VmRunner {
             presence: presence::Presence::new(),
             reports: report::Reports::new(),
         });
-        Ok(Arc::new(Self {
+        let runner = Arc::new(Self {
             options,
             arch,
             floor,
@@ -366,6 +378,7 @@ impl VmRunner {
             ca,
             egress,
             image,
+            cache,
             started_at: Timestamp::now(),
             state: Mutex::new(State {
                 version: 1,
@@ -374,7 +387,38 @@ impl VmRunner {
             }),
             events,
             ops: tokio::sync::Mutex::new(()),
-        }))
+        });
+        runner.evict(&runner.state.lock().unwrap());
+        Ok(runner)
+    }
+
+    /// Trims the layer cache to its limit (masterplan B-7 D2). Nothing is
+    /// removed when a machine's layers cannot be read.
+    fn evict(&self, state: &State) {
+        let limit = self.options.layer_cache_bytes;
+        match trim_cache(&self.cache, limit, &self.image.record, state) {
+            Ok((eviction, _))
+                if eviction.removed.is_empty() && eviction.remaining_bytes <= limit => {}
+            Ok((eviction, in_use)) => {
+                for diff_id in &eviction.removed {
+                    eprintln!(
+                        "layer cache: removed {diff_id} (least recently used, no machine uses it)"
+                    );
+                }
+                eprintln!(
+                    "layer cache: {} bytes left of a {limit}-byte limit{}",
+                    eviction.remaining_bytes,
+                    if eviction.remaining_bytes > limit {
+                        format!(
+                            "; the {in_use} layers the runner's image and its machines use are kept beyond it"
+                        )
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+            Err(error) => eprintln!("layer cache: nothing removed: {error:#}"),
+        }
     }
 
     fn qemu_version(&self) -> String {
@@ -383,6 +427,7 @@ impl VmRunner {
 
     /// What the runner says when it starts.
     pub fn describe(&self) -> Vec<String> {
+        let cached = self.cache.entries().unwrap_or_default();
         let state = self.state.lock().unwrap();
         let interrupted = state
             .machines
@@ -412,6 +457,15 @@ impl VmRunner {
                 self.image.record.platform,
                 self.image.record.layers.len(),
                 self.image.record.manifest.digest
+            ),
+            format!(
+                "layer cache: {} ({} bytes in {} layers; limit {} GiB besides the layers machines use), mkfs.erofs {} ({})",
+                self.cache.dir().display(),
+                cached.iter().map(|entry| entry.bytes).sum::<u64>(),
+                cached.len(),
+                self.options.layer_cache_bytes >> 30,
+                self.options.mkfs.display(),
+                self.options.mkfs_version
             ),
             format!("runner CA: certificate sha256 {}", self.ca.sha256),
             format!(
@@ -1457,6 +1511,7 @@ impl VmRunner {
         state.deleted.insert(id.to_owned(), entry.record.clone());
         let machine = Self::machine(&entry.record, None, state.version, Timestamp::now());
         self.tell(watch_event::Type::Delete, machine.clone(), state);
+        self.evict(state);
         Ok(machine)
     }
 
@@ -1574,6 +1629,41 @@ impl VmRunner {
     }
 }
 
+/// The layers the cache must keep: the runner's image's and those of every
+/// machine that is not deleted, retained ones too.
+fn layers_in_use(
+    image: &image::ImageRecord,
+    state: &State,
+) -> Result<HashSet<keel_layers::DiffId>> {
+    let machines = state
+        .machines
+        .values()
+        .filter_map(|entry| entry.record.image.as_ref())
+        .flat_map(|image| image.diff_ids.iter());
+    let runner = image.layers.iter().map(|layer| &layer.diff_id);
+    runner
+        .chain(machines)
+        .map(|diff_id| {
+            diff_id
+                .parse()
+                .with_context(|| format!("a machine's layer {diff_id:?}"))
+        })
+        .collect()
+}
+
+/// Removes least recently used layers no one keeps until the cache holds at
+/// most `limit` bytes; also returns how many layers are kept. Removes
+/// nothing when a layer in use cannot be read.
+fn trim_cache(
+    cache: &keel_layers::cache::LayerCache,
+    limit: u64,
+    image: &image::ImageRecord,
+    state: &State,
+) -> Result<(keel_layers::cache::Eviction, usize)> {
+    let in_use = layers_in_use(image, state)?;
+    Ok((cache.evict(limit, &in_use)?, in_use.len()))
+}
+
 /// A QEMU a previous runner left: told to quit over its QMP socket. The
 /// runner never signals a process it did not start. True if one answered.
 async fn quit_orphan(socket: &Path) -> bool {
@@ -1672,15 +1762,12 @@ fn boot_documents(
     Ok(documents.into_iter().collect())
 }
 
-/// The image `reference` names, as `berth image pull` left it in
+/// The image `reference` names, as the pull at start left it in
 /// `directory`: its record and every layer file, for this platform.
 fn load_image(directory: &Path, reference: &image::Reference) -> Result<Image> {
     let store = image::Store::open(directory)?;
     let path = store.record_path(&reference.digest);
-    let pull = format!(
-        "pull it first: berth image pull --dir {} --mkfs-erofs <mkfs.erofs> --image {reference}",
-        directory.display()
-    );
+    let pull = "berth vm pulls it when it starts";
     let text = std::fs::read(&path).with_context(|| {
         format!(
             "no record of {reference} in {}; {pull}",
@@ -2068,5 +2155,196 @@ mod dial_tests {
                 refused.message
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use keel_layers::{DiffId, cache::LayerCache};
+    use std::{fs::File, time::SystemTime};
+
+    fn id(n: u8) -> DiffId {
+        DiffId::from_bytes([n; 32])
+    }
+
+    /// A 100-byte layer last used `age_seconds` ago.
+    fn put(cache: &LayerCache, n: u8, age_seconds: u64) {
+        let path = cache
+            .publish(&id(n), |out| Ok(std::fs::write(out, [n; 100])?))
+            .unwrap();
+        File::open(path)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(age_seconds))
+            .unwrap();
+    }
+
+    fn left(cache: &LayerCache) -> Vec<DiffId> {
+        let mut left: Vec<DiffId> = cache
+            .entries()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.diff_id)
+            .collect();
+        left.sort();
+        left
+    }
+
+    fn runner_image(layers: &[u8]) -> image::ImageRecord {
+        let descriptor = image::Descriptor {
+            media_type: "m".into(),
+            digest: "sha256:00".into(),
+            size: 1,
+        };
+        image::ImageRecord {
+            version: 1,
+            reference: "registry.test/o/n@sha256:00".into(),
+            registry: "registry.test".into(),
+            repository: "o/n".into(),
+            digest: "sha256:00".into(),
+            platform: "linux/amd64".into(),
+            manifest: descriptor.clone(),
+            config: descriptor.clone(),
+            env: Vec::new(),
+            layers: layers
+                .iter()
+                .map(|n| image::LayerRecord {
+                    diff_id: id(*n).to_string(),
+                    blob: descriptor.clone(),
+                    file: format!("layers/1/{}.erofs", id(*n)),
+                    erofs_bytes: 100,
+                    tar_bytes: None,
+                })
+                .collect(),
+            layer_format: 1,
+            mkfs: "/m".into(),
+            mkfs_version: "mkfs.erofs 1".into(),
+            resolved_at: 0,
+        }
+    }
+
+    fn machine(n: u8, phase: Phase, diff_ids: Option<Vec<String>>) -> MachineRecord {
+        MachineRecord {
+            version: 1,
+            owner: "thread-1".into(),
+            id: format!("{n:016x}"),
+            fence_epoch: 1,
+            phase,
+            size: DEFAULT_SIZE,
+            machine_type: "pc-q35-11.1".into(),
+            created_with: "11.1.2 /q".into(),
+            created_at: Timestamp::now(),
+            interrupted: None,
+            error: String::new(),
+            boot: None,
+            image: diff_ids.map(|diff_ids| MachineImage {
+                reference: "registry.test/o/old@sha256:11".into(),
+                manifest: "sha256:11".into(),
+                diff_ids,
+            }),
+            stopped: None,
+        }
+    }
+
+    fn state(machines: Vec<MachineRecord>, deleted: Vec<MachineRecord>) -> State {
+        State {
+            version: 1,
+            machines: machines
+                .into_iter()
+                .map(|record| {
+                    let entry = Entry {
+                        record,
+                        live: None,
+                        version: 1,
+                        updated: Timestamp::now(),
+                        guest: None,
+                        info: None,
+                        documents: Default::default(),
+                        sessions: Default::default(),
+                        policy: None,
+                        net: None,
+                    };
+                    (entry.record.id.clone(), entry)
+                })
+                .collect(),
+            deleted: deleted.into_iter().map(|r| (r.id.clone(), r)).collect(),
+        }
+    }
+
+    fn ids(ns: &[u8]) -> Vec<String> {
+        ns.iter().map(|n| id(*n).to_string()).collect()
+    }
+
+    #[test]
+    fn the_cache_keeps_the_runners_image_and_every_machine_not_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LayerCache::open(dir.path()).unwrap();
+        // The oldest layers are the ones in use, so LRU alone would take them.
+        for (n, age) in [(1, 900), (2, 800), (3, 700), (4, 600), (5, 500), (6, 400)] {
+            put(&cache, n, age);
+        }
+        let state = state(
+            vec![
+                machine(1, Phase::Stopped, Some(ids(&[2]))),
+                // Deleted with retain: its disk is kept, so are its layers.
+                machine(2, Phase::Retained, Some(ids(&[3, 4]))),
+                // A B-1 machine without an image keeps nothing of its own.
+                machine(3, Phase::Stopped, None),
+            ],
+            vec![machine(4, Phase::Deleted, Some(ids(&[5])))],
+        );
+        let (eviction, kept) = trim_cache(&cache, 0, &runner_image(&[1]), &state).unwrap();
+        assert_eq!(eviction.removed, vec![id(5), id(6)]);
+        assert_eq!(
+            eviction.remaining_bytes, 400,
+            "in use beyond a 0-byte limit"
+        );
+        assert_eq!(kept, 4);
+        assert_eq!(left(&cache), vec![id(1), id(2), id(3), id(4)]);
+    }
+
+    #[test]
+    fn unused_layers_go_least_recently_used_first_and_a_retained_machines_once_it_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LayerCache::open(dir.path()).unwrap();
+        put(&cache, 1, 100); // the runner's image
+        put(&cache, 2, 400); // the retained machine's, oldest
+        put(&cache, 3, 300);
+        put(&cache, 4, 200);
+        let image = runner_image(&[1]);
+        let retained = machine(2, Phase::Retained, Some(ids(&[2])));
+        let mut kept = state(vec![retained.clone()], Vec::new());
+        // Under the limit: nothing goes.
+        let (eviction, _) = trim_cache(&cache, 400, &image, &kept).unwrap();
+        assert!(eviction.removed.is_empty());
+        // Over it: the oldest layer no one uses (3), not the older retained one.
+        let (eviction, _) = trim_cache(&cache, 300, &image, &kept).unwrap();
+        assert_eq!(eviction.removed, vec![id(3)]);
+        assert_eq!(left(&cache), vec![id(1), id(2), id(4)]);
+        // Over again, with the machine still retained: only 4 can go.
+        let (eviction, _) = trim_cache(&cache, 100, &image, &kept).unwrap();
+        assert_eq!(eviction.removed, vec![id(4)]);
+        assert_eq!(left(&cache), vec![id(1), id(2)]);
+        // Discarded: its layer goes; the runner's stays.
+        kept.machines.clear();
+        kept.deleted.insert(retained.id.clone(), retained);
+        let (eviction, _) = trim_cache(&cache, 100, &image, &kept).unwrap();
+        assert_eq!(eviction.removed, vec![id(2)]);
+        assert_eq!(left(&cache), vec![id(1)]);
+    }
+
+    #[test]
+    fn nothing_is_removed_when_a_machines_layers_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = LayerCache::open(dir.path()).unwrap();
+        put(&cache, 1, 200);
+        put(&cache, 2, 100);
+        let unreadable = state(
+            vec![machine(1, Phase::Retained, Some(vec!["sha256:zz".into()]))],
+            Vec::new(),
+        );
+        let error = trim_cache(&cache, 0, &runner_image(&[]), &unreadable).unwrap_err();
+        assert!(format!("{error:#}").contains("sha256:zz"), "{error:#}");
+        assert_eq!(left(&cache), vec![id(1), id(2)]);
     }
 }

@@ -2,7 +2,7 @@
 
 keel's image layers on the runner side, work package 3 of
 [the keel plan](../../../docs/plans/2026-10-10-vm-base-and-image-layers.md).
-A library; no runner calls it yet (`berth vm` will, from B-7 on).
+A library; `berth vm` and `berth image pull` call it.
 
 ```text
 registry blob (tar, tar+gzip, tar+zstd)
@@ -26,7 +26,7 @@ registry blob (tar, tar+gzip, tar+zstd)
   gzip may have several members and zstd several frames (zstd:chunked).
 - **`mkfs.erofs` never runs unbounded.** erofs-utils 1.7.1 and 1.8.6 never
   exit when a tar ends inside a file's data (`tarerofs_write_file_data`
-  loops on a read of 0 bytes; fixed in 1.9), and a layer can be made whose
+  loops on a read of 0 bytes; fixed in 1.9.1), and a layer can be made whose
   `diff_id` matches such a tar. So mkfs.erofs sees the end of its input only
   after the `diff_id` and the end-of-archive blocks are checked (otherwise
   it is killed first); a write into it may block at most `TimeLimits.stall`,
@@ -34,6 +34,11 @@ registry blob (tar, tar+gzip, tar+zstd)
   Past either, or on `Mkfs::cancel_on`, it is killed and reaped and nothing
   is published. On Linux it also dies with the thread that started it
   (`PR_SET_PDEATHSIG`), so a killed runner leaves no mkfs.erofs behind.
+  macOS has no equivalent: there a SIGKILLed runner leaves mkfs.erofs
+  running until it reads the end of its input (its pipe closes with the
+  runner) and exits, or, on erofs-utils before 1.9.1 with a tar cut inside
+  a file, until it is killed by hand. What it writes is a `.tmp-*` file,
+  never a published layer, and the runner's next start removes it.
   `Mkfs::max_tar_bytes` bounds the uncompressed tar (a gzip bomb).
 - **`mkfs.erofs` by path.** The caller passes the program, as it passes
   QEMU's (A17 in the masterplan); nothing here searches `PATH`.
@@ -43,10 +48,10 @@ registry blob (tar, tar+gzip, tar+zstd)
   `FLAT`.
 - **Eviction (U6).** `LayerCache::evict(limit, in_use)` removes the least
   recently used layers no machine references until the cache fits the
-  limit; `get` and `publish` mark a layer used. The limit's place in
-  `host.json` and when to call it are the runner's (B-7).
+  limit; `get` and `publish` mark a layer used. `berth vm` keeps the limit
+  in `.berth/vm.json` and calls it (B-7).
 - **Not here:** fetching (index, manifest per platform, anonymous tokens,
-  public images only: `berth image pull`, B-7), deduplicating concurrent
+  public images only: berth's `image.rs`), deduplicating concurrent
   conversions of one layer, template layers (K-5e, B-8).
 
 ## `--tar=f` or `--tar=i` (U5)
