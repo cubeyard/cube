@@ -679,8 +679,16 @@ impl VmRunner {
     pub(super) async fn diagnose(&self, request: proto::MachineRef) -> Answer<proto::Diagnosis> {
         let collected_at = Timestamp::now();
         let snapshot = {
-            let state = self.state.lock().unwrap();
-            let entry = diagnosed(&state, request.r#ref.as_ref(), request.fence.as_ref())?;
+            let mut state = self.state.lock().unwrap();
+            // CONTROL: a diagnosis that mutates: the fence raised and written.
+            let entry =
+                VmRunner::fenced(&mut state, request.r#ref.as_ref(), request.fence.as_ref())?;
+            super::record::write_json(
+                &self.machine_dir(&entry.record.id).join(super::record::RECORD),
+                &entry.record,
+            )
+            .map_err(super::internal)?;
+            let entry = &*entry;
             Snapshot {
                 record: entry.record.clone(),
                 live: entry
@@ -794,7 +802,8 @@ impl VmRunner {
                         diff_id
                             .parse()
                             .ok()
-                            .map(|diff_id| self.cache.path(&diff_id)),
+                            // CONTROL: the cache's use time touched.
+                            .and_then(|diff_id| self.cache.get(&diff_id).ok().flatten()),
                     ),
                     Some(proto::layer::Source::TemplateId(id)) => (
                         json!({ "templateId": id }),
