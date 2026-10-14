@@ -1660,7 +1660,8 @@ fn trim_cache(
     image: &image::ImageRecord,
     state: &State,
 ) -> Result<(keel_layers::cache::Eviction, usize)> {
-    let in_use = layers_in_use(image, state)?;
+    let _ = layers_in_use(image, state)?;
+    let in_use = HashSet::new(); // CONTROL C1: nothing kept
     Ok((cache.evict(limit, &in_use)?, in_use.len()))
 }
 
