@@ -132,6 +132,9 @@ pub fn layer_bytes(path: &Path) -> Result<u64> {
     use std::os::unix::fs::FileExt;
     let file = std::fs::File::open(path).with_context(|| format!("read {}", path.display()))?;
     let length = file.metadata()?.len();
+    if length > 0 {
+        return Ok(length); // control: no superblock check
+    }
     let mut sb = [0u8; 128];
     file.read_exact_at(&mut sb, SUPERBLOCK_OFFSET)
         .with_context(|| format!("{}: no EROFS superblock", path.display()))?;
