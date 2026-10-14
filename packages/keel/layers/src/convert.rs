@@ -81,7 +81,7 @@ pub struct Mkfs {
 
 /// How long `mkfs.erofs` may take before it is killed. erofs-utils 1.7.1 and
 /// 1.8.6 never exit when a tar ends inside a file's data
-/// (`tarerofs_write_file_data` loops on a read of 0 bytes; fixed in 1.9), and
+/// (`tarerofs_write_file_data` loops on a read of 0 bytes; fixed in 1.9.1), and
 /// a layer can be made so its `diff_id` matches such a tar, so a conversion
 /// must not wait for mkfs.erofs without a bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -467,7 +467,7 @@ impl Watched {
                 let _ = child.wait();
                 bail!(
                     "mkfs.erofs did not finish within {} s after its input ended and was killed \
-                     (erofs-utils before 1.9 never ends on a tar cut inside a file)",
+                     (erofs-utils before 1.9.1 never ends on a tar cut inside a file)",
                     limit.as_secs_f64()
                 );
             }

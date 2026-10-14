@@ -12,10 +12,9 @@ and `berth host`, unsandboxed, for developing runners.
 ## `berth vm`: keel machines under QEMU
 
 ```text
-berth image pull --dir /abs/dir --mkfs-erofs /abs/mkfs.erofs --image <registry/repository@sha256:…>
 berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img \
-  --keel /abs/keel/out/<arch> --image <registry/repository@sha256:…> [--accel kvm|hvf|tcg] \
-  --allow-peer <control peer> --node-id node-<name> \
+  --keel /abs/keel/out/<arch> --mkfs-erofs /abs/mkfs.erofs --image <registry/repository@sha256:…> \
+  [--layer-cache-gib 16] [--accel kvm|hvf|tcg] --allow-peer <control peer> --node-id node-<name> \
   [--network loopback|direct|relay] [--listen ip:port] [--labels k=v,...] [--max-machines 8]
 ```
 
@@ -33,10 +32,25 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   reseeds the guest's random generator). `Platform.qemu_version` is its
   version and path.
 - `--image` names the one image every machine is built on, pinned by
-  digest; `berth image pull` must have put it into `--dir` first (berth vm
-  does not pull). A machine's layer disk holds its layers from creation on,
-  and the machine keeps that image: a runner started with another refuses to
-  start it (`FAILED_PRECONDITION image_changed`).
+  digest. berth pulls it when it starts (masterplan B-7), under the
+  directory's lock and **before it listens**, unless its record and every
+  layer file are in `--dir` already; then nothing goes over the network. A
+  layer file that is gone is fetched again. Until the image is there cubed
+  finds no runner, and its threads wait as for one that is down. The pull is
+  `berth image pull`'s (below), with mkfs.erofs (by path, any version) given
+  60 s + 60 s per GiB of tar after its input instead of 120 s + 240 s;
+  SIGINT or SIGTERM stops it as they stop that. A machine's layer disk holds
+  its layers from creation on, and the machine keeps that image: a runner
+  started with another refuses to start it (`FAILED_PRECONDITION
+  image_changed`).
+- The layer cache (`layers/1/`) is trimmed to `--layer-cache-gib` (16 by
+  default; the first run, and any run that gives the flag, writes it to
+  `.berth/vm.json`), least recently used first, when berth starts and when a
+  machine is deleted or discarded. It never removes a layer of the runner's
+  image or of a machine that is not deleted, retained ones too: their layer
+  disks name the cache's files. Those are kept even beyond the limit (`0`
+  keeps only them), and nothing is removed while a machine's layers cannot
+  be read. Each removal is a line on stderr.
 - The runner's CA: `DIRECTORY/.berth/ca/` (0700) with `ca.key` (0600, never
   logged or sent) and `ca.pem`, made on the first start and kept. Half a
   pair, a key others can read, or a certificate that does not carry the key
@@ -165,11 +179,14 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   20 s for QEMU to quit): cubed sees `completion_unknown` and asks again,
   which waits for the first stop (a cubed change for C-1/C-2).
 
-Test: `packages/server/test/runner-vm-test.ts` (refusals always; keel
+Tests: `packages/server/test/runner-vm-test.ts` (refusals always; keel
 machines with `CUBE_TEST_BERTH_QEMU`, `CUBE_TEST_BERTH_QEMU_IMG`,
 `CUBE_TEST_BERTH_KEEL`, `CUBE_TEST_BERTH_IMAGE` and `CUBE_TEST_BERTH_MKFS`;
 with an image that has keel's tools it runs the Workspace contract over
-cubed's `RunnerGuestTransport`).
+cubed's `RunnerGuestTransport`) and `runner-image-test.ts` (the same
+variables and `CUBE_TEST_BERTH_IMAGE_B`: the pull before listening, a warm
+start, a lost layer, SIGINT and SIGKILL during a conversion, and the cache
+limit with a retained machine; for host gates, not in CI).
 
 ## `berth image pull`: images into a vm directory's layer cache
 
@@ -178,8 +195,9 @@ berth image pull --dir /abs/dir --mkfs-erofs /abs/mkfs.erofs \
   --image ghcr.io/<owner>/<name>[:tag]@sha256:<digest>
 ```
 
-The first part of masterplan row B-7; machines do not use the layers yet
-(B-7 wires them into `machine_start`, B-2 brings `machine_setup`).
+What `berth vm` does itself when it starts (above), by hand: always a
+full resolve, with keel-layers' longer mkfs.erofs limits, while berth is
+stopped.
 
 - **Pinned, public, this platform.** The image is named with its registry
   and a digest (a tag is only a label); `linux/amd64` or `linux/arm64`, the
@@ -200,12 +218,18 @@ The first part of masterplan row B-7; machines do not use the layers yet
   `images/sha256:<digest>.json` records what was resolved: the platform's
   manifest, configuration and `Env`, each layer's blob, `diff_id`, cached
   file and sizes, and the `mkfs.erofs` path and version.
+- **Room first.** Before each blob the images directory and the cache must
+  each have 3 × the blob's size + 2 GiB free (`statvfs`; `statfs` on
+  macOS); otherwise the pull stops with both numbers, before the blob is
+  fetched.
 - **Never half-done.** A pull holds the directory's lock (never beside a
   running `berth vm` or another pull) and removes what a crashed pull left.
   A failed pull keeps the layers it finished, each complete. SIGINT or
-  SIGTERM stops it, kills and reaps mkfs.erofs and removes temporary files.
-- Not yet: eviction under a limit in `host.json` (U6; `LayerCache::evict`
-  exists) and checking free space before a conversion.
+  SIGTERM stops it, also while it waits on the registry (a document has 120
+  s in all), kills and reaps mkfs.erofs and removes temporary files. On
+  Linux mkfs.erofs also dies with a SIGKILLed berth (`PR_SET_PDEATHSIG`);
+  macOS has no such thing, and there it runs on until its input, which ends
+  with berth, is read (keel-layers' README).
 
 ## `berth host`: unsandboxed, for developing runners
 

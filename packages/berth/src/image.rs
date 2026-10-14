@@ -1,9 +1,9 @@
-//! Image fetching for `berth vm`, the first part of masterplan row B-7:
-//! a public OCI image, pinned by digest, resolved for this runner's platform,
-//! every blob checked against its digest and size before it is used, and
-//! each layer converted once into keel-layers' cache. `berth image pull`
-//! runs it on a runner directory; machines do not use it yet (B-7 wires it
-//! into `machine_start`, B-2 brings the guest channel).
+//! Image fetching for `berth vm` (masterplan row B-7): a public OCI image,
+//! pinned by digest, resolved for this runner's platform, every blob checked
+//! against its digest and size before it is used, and each layer converted
+//! once into keel-layers' cache. `berth vm` pulls its `--image` this way
+//! when it starts, before it listens, unless the record and every layer file
+//! are there ([`Store::cached`]); `berth image pull` does the same by hand.
 //!
 //! ```text
 //! DIRECTORY/layers/1/sha256:<diff_id>.erofs   keel_layers::cache, layer format 1
@@ -22,6 +22,9 @@
 //! matched the `diff_id` and `mkfs.erofs` succeeded; the record is written
 //! last, by rename. A pull that fails leaves the layers it finished (each
 //! complete and verified), so the next pull starts where it stopped.
+//!
+//! Before each blob the disk must have 3 × the blob's size + 2 GiB free
+//! (masterplan B-7 D2); otherwise the pull stops and publishes nothing more.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -38,7 +41,7 @@ use anyhow::{Context, Result, bail, ensure};
 use keel_layers::{
     DiffId,
     cache::LayerCache,
-    convert::{self, Compression, Mkfs, TarMode},
+    convert::{self, Compression, Mkfs, TarMode, TimeLimits},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -61,6 +64,27 @@ const MAX_TOKEN_BYTES: u64 = 64 << 10;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Between two reads of one response, not for the whole of it.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// A whole document, configuration or token answer (at most 4 MiB), so a
+/// registry that sends a byte now and then cannot hold a pull forever.
+const DOCUMENT_DEADLINE: Duration = Duration::from_secs(120);
+/// How often a wait on the network looks at the cancel flag.
+const CANCEL_POLL: Duration = Duration::from_millis(50);
+/// Free space before a blob: `FREE_FACTOR` × its size + `FREE_RESERVE`
+/// (masterplan B-7 D2): the blob, the layer it becomes, and room left for
+/// the machines' disks.
+const FREE_FACTOR: u64 = 3;
+const FREE_RESERVE: u64 = 2 << 30;
+
+/// mkfs.erofs's time for a pull `berth vm` starts itself (masterplan B-7
+/// D3): 60 s + 60 s per GiB of tar after its input ends, instead of
+/// keel-layers' 120 s + 240 s for one run by hand. Any erofs-utils is
+/// accepted; this bounds what a crafted layer can cost on one before 1.9.1.
+/// A write into mkfs.erofs may still block 300 s, as by hand.
+pub const RUNNER_TIME_LIMITS: TimeLimits = TimeLimits {
+    stall: Duration::from_secs(300),
+    finish: Duration::from_secs(60),
+    finish_per_gib: Duration::from_secs(60),
+};
 
 const INDEX_TYPES: [&str; 2] = [
     "application/vnd.oci.image.index.v1+json",
@@ -368,6 +392,105 @@ impl Store {
     pub fn record_path(&self, digest: &Digest) -> PathBuf {
         self.images().join(format!("{digest}.json"))
     }
+
+    /// The image's record if it and every layer file it names are here for
+    /// `platform` (each layer is marked used); otherwise why not, and the
+    /// image is pulled again. A layer the cache lost is fetched again by the
+    /// pull, which looks each one up (#162's F7).
+    pub fn cached(
+        &self,
+        reference: &Reference,
+        platform: Platform,
+    ) -> Result<std::result::Result<ImageRecord, String>> {
+        let path = self.record_path(&reference.digest);
+        let text = match fs::read(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Err(format!("no record of {reference}")));
+            }
+            Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+        };
+        let record: ImageRecord = match serde_json::from_slice(&text) {
+            Ok(record) => record,
+            Err(e) => {
+                return Ok(Err(format!(
+                    "{} is not an image record: {e}",
+                    path.display()
+                )));
+            }
+        };
+        if record.platform != platform.to_string()
+            || record.digest != reference.digest.to_string()
+            || record.layer_format != LAYER_FORMAT
+        {
+            return Ok(Err(format!(
+                "{} is for {} {} in layer format {}",
+                path.display(),
+                record.platform,
+                record.digest,
+                record.layer_format
+            )));
+        }
+        for layer in &record.layers {
+            let Ok(diff_id) = layer.diff_id.parse::<DiffId>() else {
+                return Ok(Err(format!(
+                    "{}: diff_id {:?}",
+                    path.display(),
+                    layer.diff_id
+                )));
+            };
+            if self.directory.join(&layer.file) != self.cache.path(&diff_id) {
+                return Ok(Err(format!(
+                    "{}: layer {diff_id} is named as {:?}, not in the cache",
+                    path.display(),
+                    layer.file
+                )));
+            }
+            if self.cache.get(&diff_id)?.is_none() {
+                return Ok(Err(format!(
+                    "layer {diff_id} of {reference} is not in the cache"
+                )));
+            }
+        }
+        Ok(Ok(record))
+    }
+}
+
+/// Bytes an unprivileged process may still write on the file system that
+/// holds `path`.
+pub fn free_bytes(path: &Path) -> std::io::Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    // statfs, not statvfs, on macOS: Darwin's statvfs has 32-bit block
+    // counts, which a large disk overflows.
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: plain data, filled in by statfs.
+        let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: a NUL-terminated path and a struct of the right type.
+        if unsafe { libc::statfs(name.as_ptr(), &mut stat) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(stat.f_bavail.saturating_mul(u64::from(stat.f_bsize)))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // SAFETY: plain data, filled in by statvfs.
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: a NUL-terminated path and a struct of the right type.
+        if unsafe { libc::statvfs(name.as_ptr(), &mut stat) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        #[allow(clippy::unnecessary_cast)]
+        Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+    }
+}
+
+/// What a blob of `blob_bytes` needs free before it is fetched.
+pub fn free_needed(blob_bytes: u64) -> u64 {
+    blob_bytes
+        .saturating_mul(FREE_FACTOR)
+        .saturating_add(FREE_RESERVE)
 }
 
 pub fn layer_dir(directory: &Path) -> PathBuf {
@@ -447,7 +570,9 @@ impl Registry {
             if let Some(token) = &self.token {
                 request = request.bearer_auth(token);
             }
-            let response = request.send().await.with_context(|| format!("GET {url}"))?;
+            let response = unless_cancelled(&self.cancel, request.send())
+                .await?
+                .with_context(|| format!("GET {url}"))?;
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 ensure!(
                     attempt == 0,
@@ -489,11 +614,8 @@ impl Registry {
         if let Some(service) = challenge_field(challenge, "service") {
             token_url.query_pairs_mut().append_pair("service", service);
         }
-        let response = self
-            .client
-            .get(token_url)
-            .send()
-            .await
+        let response = unless_cancelled(&self.cancel, self.client.get(token_url).send())
+            .await?
             .with_context(|| format!("anonymous token from {realm}"))?;
         ensure!(
             response.status().is_success(),
@@ -505,7 +627,14 @@ impl Registry {
             token: Option<String>,
             access_token: Option<String>,
         }
-        let body = read_bounded(response, MAX_TOKEN_BYTES, "the token answer").await?;
+        let body = read_bounded(
+            response,
+            MAX_TOKEN_BYTES,
+            "the token answer",
+            &self.cancel,
+            DOCUMENT_DEADLINE,
+        )
+        .await?;
         let answer: Answer =
             serde_json::from_slice(&body).context("the token answer is not JSON")?;
         answer
@@ -529,7 +658,14 @@ impl Registry {
             .unwrap_or_default()
             .trim()
             .to_owned();
-        let body = read_bounded(response, MAX_DOCUMENT_BYTES, &digest.to_string()).await?;
+        let body = read_bounded(
+            response,
+            MAX_DOCUMENT_BYTES,
+            &digest.to_string(),
+            &self.cancel,
+            DOCUMENT_DEADLINE,
+        )
+        .await?;
         check_digest(&body, digest)?;
         Ok((body, content_type))
     }
@@ -543,7 +679,14 @@ impl Registry {
             descriptor.size
         );
         let response = self.get(&format!("blobs/{digest}"), &[]).await?;
-        let body = read_bounded(response, descriptor.size, &digest.to_string()).await?;
+        let body = read_bounded(
+            response,
+            descriptor.size,
+            &digest.to_string(),
+            &self.cancel,
+            DOCUMENT_DEADLINE,
+        )
+        .await?;
         ensure!(
             body.len() as u64 == descriptor.size,
             "{digest}: {} bytes, the descriptor says {}",
@@ -573,12 +716,10 @@ impl Registry {
             .with_context(|| format!("create {}", path.display()))?;
         let mut hasher = Sha256::new();
         let mut received = 0u64;
-        while let Some(chunk) = response
-            .chunk()
-            .await
+        while let Some(chunk) = unless_cancelled(&self.cancel, response.chunk())
+            .await?
             .with_context(|| format!("read {digest}"))?
         {
-            ensure!(!self.cancel.load(Ordering::SeqCst), "cancelled");
             received += chunk.len() as u64;
             ensure!(
                 received <= descriptor.size,
@@ -604,23 +745,58 @@ impl Registry {
     }
 }
 
-async fn read_bounded(mut response: reqwest::Response, max: u64, what: &str) -> Result<Vec<u8>> {
+/// `future`'s output, unless `cancel` is set first: a pull stuck on the
+/// network stops within [`CANCEL_POLL`] of a signal, not after a read
+/// timeout (#162's F2).
+async fn unless_cancelled<T>(
+    cancel: &AtomicBool,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T> {
+    tokio::pin!(future);
+    loop {
+        ensure!(!cancel.load(Ordering::SeqCst), "cancelled");
+        tokio::select! {
+            output = &mut future => return Ok(output),
+            () = tokio::time::sleep(CANCEL_POLL) => {}
+        }
+    }
+}
+
+/// A small body whole: at most `max` bytes, within `deadline`, and stopped
+/// by `cancel` (#162's F2).
+async fn read_bounded(
+    mut response: reqwest::Response,
+    max: u64,
+    what: &str,
+    cancel: &AtomicBool,
+    deadline: Duration,
+) -> Result<Vec<u8>> {
     if let Some(length) = response.content_length() {
         ensure!(length <= max, "{what}: {length} bytes, more than {max}");
     }
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .with_context(|| format!("read {what}"))?
-    {
-        ensure!(
-            body.len() as u64 + chunk.len() as u64 <= max,
-            "{what}: more than {max} bytes"
-        );
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
+    let read = async {
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .with_context(|| format!("read {what}"))?
+        {
+            ensure!(
+                body.len() as u64 + chunk.len() as u64 <= max,
+                "{what}: more than {max} bytes"
+            );
+            body.extend_from_slice(&chunk);
+        }
+        anyhow::Ok(body)
+    };
+    unless_cancelled(cancel, tokio::time::timeout(deadline, read))
+        .await?
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "{what}: not all of it arrived within {} s",
+                deadline.as_secs_f64()
+            )
+        })?
 }
 
 fn check_digest(body: &[u8], digest: &Digest) -> Result<()> {
@@ -651,17 +827,73 @@ pub struct Pull<'a> {
     pub mkfs: &'a Path,
     pub platform: Platform,
     pub progress: &'a dyn Progress,
-    /// Once set, the pull stops at the next read of a blob or the next
-    /// write into mkfs.erofs, which it kills and reaps; it fails "cancelled".
+    /// Once set, the pull stops within [`CANCEL_POLL`] while it waits on the
+    /// network, or at the next write into mkfs.erofs, which it kills and
+    /// reaps; it fails "cancelled".
     pub cancel: Arc<AtomicBool>,
+    /// mkfs.erofs's: keel-layers' default by hand, [`RUNNER_TIME_LIMITS`]
+    /// for `berth vm`.
+    pub time_limits: TimeLimits,
+    /// [`free_bytes`]; tests give another.
+    pub free_space: &'a dyn Fn(&Path) -> std::io::Result<u64>,
 }
 
-impl Pull<'_> {
+impl<'a> Pull<'a> {
+    pub fn new(
+        store: &'a Store,
+        mkfs: &'a Path,
+        platform: Platform,
+        progress: &'a dyn Progress,
+        cancel: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            store,
+            mkfs,
+            platform,
+            progress,
+            cancel,
+            time_limits: TimeLimits::default(),
+            free_space: &free_bytes,
+        }
+    }
+
     /// Resolves, fetches, verifies and converts the image; writes and
     /// returns its record.
     pub async fn run(&self, reference: &Reference) -> Result<ImageRecord> {
         let base = format!("https://{}", reference.api_host());
         self.run_at(reference, client(true)?, base).await
+    }
+
+    /// What `berth vm` does before it listens (masterplan B-7 D1): nothing
+    /// more, and nothing on the network, when the record and every layer
+    /// file are here; otherwise a pull, which fetches only what is missing.
+    pub async fn ensure(&self, reference: &Reference) -> Result<ImageRecord> {
+        let base = format!("https://{}", reference.api_host());
+        self.ensure_at(reference, client(true)?, base).await
+    }
+
+    async fn ensure_at(
+        &self,
+        reference: &Reference,
+        client: reqwest::Client,
+        base: String,
+    ) -> Result<ImageRecord> {
+        match self.store.cached(reference, self.platform)? {
+            Ok(record) => {
+                self.progress.line(&format!(
+                    "image: {reference} is in {}",
+                    self.store.directory.display()
+                ));
+                Ok(record)
+            }
+            Err(missing) => {
+                self.progress.line(&format!(
+                    "image: {missing}; pulling {reference} with {}",
+                    self.mkfs.display()
+                ));
+                self.run_at(reference, client, base).await
+            }
+        }
     }
 
     async fn run_at(
@@ -771,6 +1003,7 @@ impl Pull<'_> {
 
         let mkfs = Mkfs::new(self.mkfs)
             .max_tar_bytes(MAX_TAR_BYTES)
+            .time_limits(self.time_limits)
             .cancel_on(self.cancel.clone());
         let mut records = Vec::new();
         for (index, (layer, diff_id)) in layers.into_iter().zip(config.rootfs.diff_ids).enumerate()
@@ -891,6 +1124,7 @@ impl Pull<'_> {
             &blob.digest["sha256:".len()..],
             std::process::id()
         ));
+        self.check_free_space(blob, index)?;
         let started = Instant::now();
         let fetched = registry.blob_to_file(blob, &temporary).await;
         let result = match fetched {
@@ -931,6 +1165,28 @@ impl Pull<'_> {
         };
         let _ = fs::remove_file(&temporary);
         result.with_context(|| format!("layer {} ({})", index + 1, blob.digest))
+    }
+}
+
+impl Pull<'_> {
+    /// Refuses a blob the disk has no room for: the images directory (where
+    /// the blob goes) and the cache (where its layer goes) must each have
+    /// [`free_needed`] free.
+    fn check_free_space(&self, blob: &Descriptor, index: usize) -> Result<()> {
+        let needed = free_needed(blob.size);
+        for directory in [self.store.images(), self.store.cache.dir().to_owned()] {
+            let free = (self.free_space)(&directory)
+                .with_context(|| format!("free space in {}", directory.display()))?;
+            ensure!(
+                free >= needed,
+                "layer {} ({}, {} bytes): {} has {free} bytes free, and a blob needs 3 × its size + 2 GiB = {needed}; free space there and start again",
+                index + 1,
+                blob.digest,
+                blob.size,
+                directory.display()
+            );
+        }
+        Ok(())
     }
 }
 

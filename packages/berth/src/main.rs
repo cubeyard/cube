@@ -23,15 +23,21 @@ use serde::{Deserialize, Serialize};
 
 pub const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const RELAY_READY_TIMEOUT: Duration = Duration::from_secs(20);
+/// The layer cache's limit unless `--layer-cache-gib` says (masterplan B-7
+/// D2); layers machines use are kept beyond it.
+const DEFAULT_LAYER_CACHE_GIB: u64 = 16;
+const MAX_LAYER_CACHE_GIB: u64 = 1 << 20;
 
 const USAGE: &str = "usage:
-  berth vm --dir <directory> --qemu <qemu-system binary> --qemu-img <qemu-img binary> --keel <directory with vmlinuz and base.erofs> --image <registry/repository@sha256:digest> [--accel kvm|hvf|tcg] [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay] [--listen <ip:port>] [--max-machines 8] [--labels k=v,...]
+  berth vm --dir <directory> --qemu <qemu-system binary> --qemu-img <qemu-img binary> --keel <directory with vmlinuz and base.erofs> --mkfs-erofs <mkfs.erofs binary> --image <registry/repository@sha256:digest> [--layer-cache-gib 16] [--accel kvm|hvf|tcg] [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay] [--listen <ip:port>] [--max-machines 8] [--labels k=v,...]
       each machine is a keel guest under the QEMU given by path, which must meet keel's QEMU floor,
-      built on the image, which `berth image pull` must have put into <directory> first
+      built on the image, which berth pulls into <directory> before it listens if any of it is missing;
+      the layer cache keeps at most --layer-cache-gib (kept in .berth/vm.json) besides the layers machines use
   berth host --dir <directory> [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay] [--listen <ip:port>] [--python python3] [--max-machines 8] [--labels k=v,...]
       UNSANDBOXED: each machine is a subdirectory of <directory>; commands run as you, with your logins
   berth image pull --dir <directory> --mkfs-erofs <mkfs.erofs binary> --image <registry/repository@sha256:digest>
       fetches a public image for this runner's platform, checks every blob, converts its layers into <directory>'s layer cache
+      (berth vm does this itself; by hand only while berth is stopped)
   berth keygen --key <new-private-file>     a control key for cubed (prints its public key)
   berth version";
 
@@ -69,6 +75,10 @@ struct HostHome {
     network: NetworkMode,
     listen: Option<String>,
     labels: BTreeMap<String, String>,
+    /// `berth vm` only: the layer cache's limit, set with
+    /// `--layer-cache-gib`; absent means DEFAULT_LAYER_CACHE_GIB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    layer_cache_gib: Option<u64>,
 }
 
 fn read_key(path: &Path) -> Result<SecretKey> {
@@ -164,6 +174,22 @@ async fn bind(
         .await?)
 }
 
+/// Writes the runner's manifest whole: under a temporary name, synced,
+/// renamed, and the directory synced.
+fn write_home(path: &Path, home: &HostHome) -> Result<()> {
+    let temporary = path.with_extension("json.tmp");
+    let _ = fs::remove_file(&temporary);
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    file.write_all(serde_json::to_string_pretty(home)?.as_bytes())?;
+    file.sync_all()?;
+    fs::rename(&temporary, path)?;
+    File::open(path.parent().context("manifest path")?)?.sync_all()?;
+    Ok(())
+}
+
 fn take(options: &mut BTreeMap<String, String>, key: &str) -> Result<String> {
     options
         .remove(key)
@@ -204,6 +230,29 @@ fn prepare(options: &mut BTreeMap<String, String>, mode: &str) -> Result<Prepare
         "another berth {mode} runs in {}",
         directory.display()
     );
+    let (home, key, max_machines) = load_home(&directory, &control, mode, network, options)?;
+    Ok(Prepared {
+        directory,
+        home,
+        key,
+        max_machines,
+        _lock: lock,
+    })
+}
+
+/// The part of `prepare` under the lock: checks the mode, reads the manifest
+/// (or makes it and the key on the first run) and the key. Apart from
+/// `prepare` only for tests, which must not take, drop and take the lock
+/// again in one process: a child that another thread has forked but not
+/// yet exec'd holds a copy of the lock's descriptor, and with it the flock,
+/// so a dropped lock can still look held for that moment.
+fn load_home(
+    directory: &Path,
+    control: &Path,
+    mode: &str,
+    network: Option<NetworkMode>,
+    options: &mut BTreeMap<String, String>,
+) -> Result<(HostHome, SecretKey, u32)> {
     let other = if mode == "host" { "vm" } else { "host" };
     ensure!(
         !control.join(format!("{other}.json")).exists(),
@@ -223,6 +272,23 @@ fn prepare(options: &mut BTreeMap<String, String>, mode: &str) -> Result<Prepare
         (1..=64).contains(&max_machines),
         "--max-machines must be 1 through 64"
     );
+    let layer_cache_gib = match mode {
+        "vm" => options
+            .remove("--layer-cache-gib")
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|gib| *gib <= MAX_LAYER_CACHE_GIB)
+                    .with_context(|| {
+                        format!(
+                            "--layer-cache-gib is a number of GiB, 0 through {MAX_LAYER_CACHE_GIB}"
+                        )
+                    })
+            })
+            .transpose()?,
+        _ => None,
+    };
     let home = if manifest.exists() {
         let home: HostHome = serde_json::from_slice(&fs::read(&manifest)?)?;
         ensure!(
@@ -239,10 +305,24 @@ fn prepare(options: &mut BTreeMap<String, String>, mode: &str) -> Result<Prepare
             "{} already names this runner's control peer, node id and labels; a runner is never rebound",
             manifest.display()
         );
-        HostHome {
+        let home = HostHome {
             network: network.unwrap_or(home.network),
             listen: listen.or(home.listen),
             ..home
+        };
+        // The cache limit is the one setting a later start may change, and
+        // it stays changed.
+        match layer_cache_gib {
+            Some(gib) if home.layer_cache_gib != Some(gib) => {
+                let mut stored: HostHome = serde_json::from_slice(&fs::read(&manifest)?)?;
+                stored.layer_cache_gib = Some(gib);
+                write_home(&manifest, &stored)?;
+                HostHome {
+                    layer_cache_gib: Some(gib),
+                    ..home
+                }
+            }
+            _ => home,
         }
     } else {
         let allowed_peer = allow
@@ -268,6 +348,10 @@ fn prepare(options: &mut BTreeMap<String, String>, mode: &str) -> Result<Prepare
             network: network.unwrap_or_default(),
             listen,
             labels: parsed,
+            layer_cache_gib: match mode {
+                "vm" => Some(layer_cache_gib.unwrap_or(DEFAULT_LAYER_CACHE_GIB)),
+                _ => None,
+            },
         };
         keygen(&control.join("runner.key"))?;
         let mut file = OpenOptions::new()
@@ -279,13 +363,7 @@ fn prepare(options: &mut BTreeMap<String, String>, mode: &str) -> Result<Prepare
         home
     };
     let key = read_key(&control.join("runner.key"))?;
-    Ok(Prepared {
-        directory,
-        home,
-        key,
-        max_machines,
-        _lock: lock,
-    })
+    Ok((home, key, max_machines))
 }
 
 fn listen_address(home: &HostHome) -> Result<Option<SocketAddr>> {
@@ -387,9 +465,84 @@ fn given_file(options: &mut BTreeMap<String, String>, key: &str) -> Result<PathB
     Ok(path)
 }
 
+struct Stderr;
+impl image::Progress for Stderr {
+    fn line(&self, text: &str) {
+        eprintln!("{text}");
+    }
+}
+
+/// SIGINT and SIGTERM, taken once for the whole run: once tokio has a
+/// handler, a signal no one waits for is kept for the next wait rather
+/// than ending the process.
+struct Stops {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+impl Stops {
+    fn new() -> Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt())?,
+            terminate: signal(SignalKind::terminate())?,
+        })
+    }
+
+    /// Whether it was SIGINT.
+    async fn next(&mut self) -> bool {
+        tokio::select! {
+            _ = self.interrupt.recv() => true,
+            _ = self.terminate.recv() => false,
+        }
+    }
+}
+
+/// Pulls `reference` into `store` until it is done or SIGINT or SIGTERM
+/// stops it: then the pull is awaited until mkfs.erofs is reaped and its
+/// temporary files are gone, and it fails "cancelled".
+async fn pull_until_signal(
+    store: &image::Store,
+    mkfs: &Path,
+    reference: &image::Reference,
+    time_limits: keel_layers::convert::TimeLimits,
+    only_what_is_missing: bool,
+    stops: &mut Stops,
+) -> Result<image::ImageRecord> {
+    use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut pull = image::Pull::new(
+        store,
+        mkfs,
+        image::Platform::native()?,
+        &Stderr,
+        cancel.clone(),
+    );
+    pull.time_limits = time_limits;
+    let pull = async {
+        if only_what_is_missing {
+            pull.ensure(reference).await
+        } else {
+            pull.run(reference).await
+        }
+    };
+    tokio::pin!(pull);
+    tokio::select! {
+        record = &mut pull => record,
+        interrupt = stops.next() => {
+            cancel.store(true, Ordering::SeqCst);
+            if interrupt {
+                eprintln!("stopping");
+            }
+            pull.await
+        }
+    }
+}
+
 async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
     let qemu = given_file(&mut options, "--qemu")?;
     let qemu_img = given_file(&mut options, "--qemu-img")?;
+    let mkfs = given_file(&mut options, "--mkfs-erofs")?;
     let keel = PathBuf::from(take(&mut options, "--keel")?);
     ensure!(keel.is_absolute(), "--keel must be an absolute path");
     let image = image::Reference::parse(&take(&mut options, "--image")?)?;
@@ -407,6 +560,21 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
     } = prepare(&mut options, "vm")?;
     ensure!(options.is_empty(), "unknown options\n{USAGE}");
     let allowed: EndpointId = home.allowed_peer.parse()?;
+    let mkfs_version = image::mkfs_version(&mkfs)?;
+    let mut stops = Stops::new()?;
+    // The image before the endpoint (masterplan B-7 D1): until it is here,
+    // cubed finds no runner, and its threads wait as for one that is down.
+    let store = image::Store::open(&directory)?;
+    pull_until_signal(
+        &store,
+        &mkfs,
+        &image,
+        image::RUNNER_TIME_LIMITS,
+        true,
+        &mut stops,
+    )
+    .await?;
+    drop(store);
     let runner = vm::VmRunner::open(
         vm::VmOptions {
             directory: directory.clone(),
@@ -419,6 +587,12 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
             keel,
             accel,
             image,
+            mkfs,
+            mkfs_version,
+            layer_cache_bytes: home
+                .layer_cache_gib
+                .unwrap_or(DEFAULT_LAYER_CACHE_GIB)
+                .saturating_mul(1 << 30),
         },
         floor,
     )
@@ -435,13 +609,9 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
     eprintln!(
         "waiting for cubed; Ctrl-C stops the runner and quits its machines' QEMUs (each is marked interrupted)"
     );
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
     let result = tokio::select! {
         result = serve::serve(&endpoint, allowed, runner.clone()) => result,
-        _ = interrupt.recv() => Ok(()),
-        _ = terminate.recv() => Ok(()),
+        _ = stops.next() => Ok(()),
     };
     endpoint.close().await;
     runner.shutdown().await;
@@ -476,40 +646,16 @@ async fn image_pull(mut options: BTreeMap<String, String>) -> Result<()> {
         "berth runs in {}; pull while it is stopped",
         directory.display()
     );
-    struct Stderr;
-    impl image::Progress for Stderr {
-        fn line(&self, text: &str) {
-            eprintln!("{text}");
-        }
-    }
     let store = image::Store::open(&directory)?;
-    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let pull = image::Pull {
-        store: &store,
-        mkfs: &mkfs,
-        platform: image::Platform::native()?,
-        progress: &Stderr,
-        cancel: cancel.clone(),
-    };
-    let pull = pull.run(&reference);
-    tokio::pin!(pull);
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
-    // A signal stops the pull, and the pull is awaited until mkfs.erofs is
-    // reaped and its temporary files are gone.
-    let record = tokio::select! {
-        record = &mut pull => record,
-        _ = interrupt.recv() => {
-            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-            eprintln!("stopping");
-            pull.await
-        }
-        _ = terminate.recv() => {
-            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-            pull.await
-        }
-    }?;
+    let record = pull_until_signal(
+        &store,
+        &mkfs,
+        &reference,
+        keel_layers::convert::TimeLimits::default(),
+        false,
+        &mut Stops::new()?,
+    )
+    .await?;
     eprintln!("record: {}", store.record_path(&reference.digest).display());
     println!("{}", serde_json::to_string_pretty(&record)?);
     Ok(())
@@ -555,5 +701,144 @@ async fn main() -> Result<()> {
             Ok(())
         }
         _ => bail!("{USAGE}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::io::AsRawFd;
+
+    fn options(directory: &Path, extra: &[(&str, &str)]) -> BTreeMap<String, String> {
+        let mut options = BTreeMap::from([("--dir".to_owned(), directory.display().to_string())]);
+        for (key, value) in extra {
+            options.insert((*key).to_owned(), (*value).to_owned());
+        }
+        options
+    }
+
+    fn stored(directory: &Path, mode: &str) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(directory.join(format!(".berth/{mode}.json"))).unwrap())
+            .unwrap()
+    }
+
+    /// A later start of the runner in `prepared`'s directory, under the lock
+    /// `prepared` still holds (the lock is never dropped and taken again in
+    /// this process; see `load_home`).
+    fn later(
+        prepared: &Prepared,
+        network: Option<NetworkMode>,
+        extra: &[(&str, &str)],
+    ) -> Result<HostHome> {
+        let mut options: BTreeMap<String, String> = extra
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        let (home, _, _) = load_home(
+            &prepared.directory,
+            &prepared.directory.join(".berth"),
+            "vm",
+            network,
+            &mut options,
+        )?;
+        assert!(options.is_empty(), "{options:?}");
+        Ok(home)
+    }
+
+    #[test]
+    fn the_runner_lock_refuses_a_second_runner_and_is_closed_on_exec() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = SecretKey::generate().public().to_string();
+        let first = [("--allow-peer", peer.as_str()), ("--node-id", "node-test")];
+        let prepared = prepare(&mut options(directory.path(), &first), "vm").unwrap();
+        // A second berth (or a pull) is refused while the first runs.
+        let error = prepare(&mut options(directory.path(), &[]), "vm")
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().contains("another berth vm runs"),
+            "{error}"
+        );
+        // The programs the runner starts (QEMU, mkfs.erofs) never keep it:
+        // the descriptor closes when they exec.
+        // SAFETY: F_GETFD on a descriptor `prepared` owns.
+        let flags = unsafe { libc::fcntl(prepared._lock.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0, "{flags}");
+    }
+
+    #[test]
+    fn the_layer_cache_limit_is_16_gib_kept_in_vm_json_and_changed_by_the_flag() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = SecretKey::generate().public().to_string();
+        let first = [("--allow-peer", peer.as_str()), ("--node-id", "node-test")];
+        let prepared = prepare(&mut options(directory.path(), &first), "vm").unwrap();
+        assert_eq!(prepared.home.layer_cache_gib, Some(DEFAULT_LAYER_CACHE_GIB));
+        assert_eq!(stored(directory.path(), "vm")["layerCacheGib"], 16);
+
+        // A later start with the flag (and a network override) keeps the
+        // limit, and only the limit.
+        let home = later(
+            &prepared,
+            Some(NetworkMode::Direct),
+            &[("--layer-cache-gib", "4")],
+        )
+        .unwrap();
+        assert_eq!(home.layer_cache_gib, Some(4));
+        assert_eq!(home.network, NetworkMode::Direct);
+        let manifest = stored(directory.path(), "vm");
+        assert_eq!(manifest["layerCacheGib"], 4);
+        assert_eq!(manifest["network"], "loopback", "an override is not kept");
+        assert_eq!(manifest["allowedPeer"], peer.as_str());
+        assert!(!directory.path().join(".berth/vm.json.tmp").exists());
+
+        // Without the flag, the stored limit stays.
+        assert_eq!(
+            later(&prepared, None, &[]).unwrap().layer_cache_gib,
+            Some(4)
+        );
+        // 0 keeps only the layers in use.
+        let zero = later(&prepared, None, &[("--layer-cache-gib", "0")]).unwrap();
+        assert_eq!(zero.layer_cache_gib, Some(0));
+        for bad in ["-1", "16GiB", "1048577"] {
+            let error = later(&prepared, None, &[("--layer-cache-gib", bad)])
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("--layer-cache-gib"), "{error}");
+        }
+        assert_eq!(stored(directory.path(), "vm")["layerCacheGib"], 0);
+    }
+
+    #[test]
+    fn a_vm_json_from_before_b7_reads_as_16_gib_and_a_host_has_no_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = SecretKey::generate().public().to_string();
+        let first = [("--allow-peer", peer.as_str()), ("--node-id", "node-test")];
+        let prepared = prepare(&mut options(directory.path(), &first), "vm").unwrap();
+        let path = directory.path().join(".berth/vm.json");
+        let mut manifest = stored(directory.path(), "vm");
+        manifest.as_object_mut().unwrap().remove("layerCacheGib");
+        fs::write(&path, manifest.to_string()).unwrap();
+        let home = later(&prepared, None, &[]).unwrap();
+        assert_eq!(home.layer_cache_gib, None, "the default, 16 GiB");
+        assert!(
+            stored(directory.path(), "vm")
+                .get("layerCacheGib")
+                .is_none()
+        );
+
+        let host = tempfile::tempdir().unwrap();
+        let mut flagged = options(
+            host.path(),
+            &[
+                ("--allow-peer", peer.as_str()),
+                ("--node-id", "node-test"),
+                ("--layer-cache-gib", "4"),
+            ],
+        );
+        let prepared = prepare(&mut flagged, "host").unwrap();
+        assert_eq!(prepared.home.layer_cache_gib, None);
+        assert!(stored(host.path(), "host").get("layerCacheGib").is_none());
+        // Left for host() to refuse as an unknown option.
+        assert!(flagged.contains_key("--layer-cache-gib"));
     }
 }

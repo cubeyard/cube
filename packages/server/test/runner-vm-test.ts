@@ -40,13 +40,14 @@
  * CUBE_TEST_BERTH_QEMU and CUBE_TEST_BERTH_QEMU_IMG (absolute paths to a
  * QEMU that meets the floor and its qemu-img), CUBE_TEST_BERTH_KEEL (a keel
  * build's out/<arch>, with vmlinuz and base.erofs), CUBE_TEST_BERTH_IMAGE (a
- * public image pinned by digest, which the test pulls with `berth image
- * pull`) and CUBE_TEST_BERTH_MKFS (an absolute mkfs.erofs), and an
- * accelerator (CUBE_TEST_BERTH_ACCEL, default kvm on Linux and hvf on
- * macOS); without them that part is skipped with a notice, and
- * CUBE_TEST_BERTH_VM=required turns the skip into a failure.
- * CUBE_TEST_BERTH_PULLED names a berth directory the image was pulled into
- * before: its images/ and layers/ are copied instead of pulling again.
+ * public image pinned by digest, which berth vm pulls itself before it
+ * listens, masterplan B-7) and CUBE_TEST_BERTH_MKFS (an absolute
+ * mkfs.erofs, which berth vm requires), and an accelerator
+ * (CUBE_TEST_BERTH_ACCEL, default kvm on Linux and hvf on macOS); without
+ * them that part is skipped with a notice, and CUBE_TEST_BERTH_VM=required
+ * turns the skip into a failure. CUBE_TEST_BERTH_PULLED names a berth
+ * directory the image was pulled into before: its images/ and layers/ are
+ * copied, and the runner's start finds the image there and fetches nothing.
  *
  * keel says `ready` only for an image with bash, sudo, flock, git, gh, curl
  * and a CA bundle. With such an image the test runs the whole Workspace
@@ -106,12 +107,15 @@ const missingKeel = path.join(root, "no-keel");
 assert.match(refused(["--dir", directory, "--qemu-img", "/x", "--keel", missingKeel]), /needs --qemu: QEMU and its tools are given by path, never searched for/);
 assert.match(refused(["--dir", directory, "--qemu", "qemu-system-x86_64", "--qemu-img", "/x", "--keel", missingKeel]), /--qemu must be an absolute path/);
 assert.match(refused(["--dir", directory, "--qemu", path.join(root, "nothing"), "--qemu-img", "/x", "--keel", missingKeel]), /is not a file/);
+// mkfs.erofs by path too (B-7: the runner pulls its image itself).
+assert.match(refused(["--dir", directory, "--qemu", process.execPath, "--qemu-img", process.execPath, "--keel", missingKeel]), /needs --mkfs-erofs: QEMU and its tools are given by path/);
+assert.match(refused(["--dir", directory, "--qemu", process.execPath, "--qemu-img", process.execPath, "--mkfs-erofs", "mkfs.erofs", "--keel", missingKeel]), /--mkfs-erofs must be an absolute path/);
 assert.ok(!fs.existsSync(directory), "a refused start writes nothing");
-note("refused: no --qemu, a relative --qemu, a missing --qemu");
+note("refused: no --qemu, a relative --qemu, a missing --qemu, no --mkfs-erofs, a relative --mkfs-erofs");
 if (env.CUBE_TEST_BERTH_OLD_QEMU) {
   const old = env.CUBE_TEST_BERTH_OLD_QEMU;
   // The floor is read before anything else is used, so any file stands for qemu-img.
-  const said = refused(["--dir", directory, "--qemu", old, "--qemu-img", process.execPath, "--keel", missingKeel,
+  const said = refused(["--dir", directory, "--qemu", old, "--qemu-img", process.execPath, "--mkfs-erofs", process.execPath, "--keel", missingKeel,
     "--image", `ghcr.io/x/y@sha256:${"0".repeat(64)}`, "--allow-peer", control.peerId, "--node-id", node, "--accel", "tcg"]);
   assert.match(said, /is below keel's QEMU floor; missing: .*virtio-rtc-pci/, said);
   assert.ok(!fs.existsSync(directory), "a QEMU below the floor is refused before the runner writes anything");
@@ -130,7 +134,7 @@ const missing = [
   ...(path.isAbsolute(qemuImg) && fs.existsSync(qemuImg) ? [] : ["CUBE_TEST_BERTH_QEMU_IMG=<absolute qemu-img path>"]),
   ...(fs.existsSync(path.join(keel, "vmlinuz")) && fs.existsSync(path.join(keel, "base.erofs")) ? [] : ["CUBE_TEST_BERTH_KEEL=<keel out/<arch> with vmlinuz and base.erofs>"]),
   ...(/@sha256:[0-9a-f]{64}$/.test(image) ? [] : ["CUBE_TEST_BERTH_IMAGE=<registry/repository@sha256:digest>"]),
-  ...(pulled || (path.isAbsolute(mkfs) && fs.existsSync(mkfs)) ? [] : ["CUBE_TEST_BERTH_MKFS=<absolute mkfs.erofs path> (or CUBE_TEST_BERTH_PULLED)"]),
+  ...(path.isAbsolute(mkfs) && fs.existsSync(mkfs) ? [] : ["CUBE_TEST_BERTH_MKFS=<absolute mkfs.erofs path>"]),
 ];
 if (missing.length) {
   console.error(`\nSKIP: berth vm with keel machines did NOT run; missing:\n${missing.map(m => `  - ${m}`).join("\n")}`);
@@ -141,7 +145,7 @@ if (missing.length) {
 
 // ---------------------------------------------------------------- the runner
 
-const vmArgs = (extra: string[] = []) => ["vm", "--dir", directory, "--qemu", qemu, "--qemu-img", qemuImg, "--keel", keel, "--accel", accel, "--image", image, ...extra];
+const vmArgs = (extra: string[] = []) => ["vm", "--dir", directory, "--qemu", qemu, "--qemu-img", qemuImg, "--keel", keel, "--mkfs-erofs", mkfs, "--accel", accel, "--image", image, ...extra];
 async function start(args: string[]): Promise<{ child: ChildProcess; peer: string; address: string; banner: string }> {
   const child = spawn(binary, vmArgs(args),
     // Its own process group, as in a terminal: a Ctrl-C reaches the whole group.
@@ -266,17 +270,12 @@ async function reportReader(address: string, peer: string) {
   };
 }
 
-// The image, as the runner reads it: pulled into its directory first.
+// The image: berth vm pulls it itself before it listens (B-7), unless it is
+// in the directory already.
 const firstArgs = ["--allow-peer", control.peerId, "--node-id", node, "--listen", "127.0.0.1:0", "--labels", "site=test"];
-assert.match(refused(vmArgs(firstArgs).slice(1)), /pull it first: berth image pull/);
-note("refused: an image not pulled into the runner's directory");
 if (pulled) {
   for (const part of ["images", "layers"]) fs.cpSync(path.join(pulled, part), path.join(directory, part), { recursive: true });
   note(`image copied from ${pulled}`);
-} else {
-  const pull = spawnSync(binary, ["image", "pull", "--dir", directory, "--mkfs-erofs", mkfs, "--image", image], { encoding: "utf8", timeout: 900000 });
-  assert.equal(pull.status, 0, `berth image pull: ${pull.stderr}`);
-  note(`pulled ${image}: ${pull.stderr.trim().split("\n").filter(line => /layer|index/.test(line)).join(" | ")}`);
 }
 
 // The machine's GitHub placeholder (B-5's V6-V8 use it as the guest's GH_TOKEN).
@@ -287,8 +286,18 @@ const documents = {
   "hooks/pre-resume": Buffer.from("#!/bin/bash\necho \"pre-resume as $(id -un) in $(pwd) token=$GH_TOKEN\"\n"),
 };
 
-// The refused start bound the directory to this control peer and node already.
-let runner = await start(["--listen", "127.0.0.1:0"]);
+// The first start binds the directory to this control peer and node.
+let runner = await start(firstArgs);
+{
+  const lines = runner.banner.split("\n");
+  const pulledAt = lines.findIndex(line => /^image: .*; pulling /.test(line));
+  const cachedAt = lines.findIndex(line => /^image: .+ is in /.test(line));
+  const listenAt = lines.findIndex(line => /^listen: /.test(line));
+  assert.ok(pulled ? cachedAt >= 0 && pulledAt < 0 : pulledAt >= 0, runner.banner);
+  assert.ok(listenAt > Math.max(pulledAt, cachedAt), `the endpoint listens only after the image is here: ${runner.banner}`);
+  note(pulled ? "the image was in the directory: nothing fetched before listening"
+    : `pulled before listening: ${lines.filter(line => /^layer \d+ |: index, /.test(line)).join(" | ")}`);
+}
 const sessions: RunnerSession[] = [];
 /** V9's portal and the app's port, kept until the machine stops. */
 let v9: { target: DialPortal; port: number } | undefined;
@@ -960,6 +969,8 @@ try {
     "the runner told QEMU to quit; the Ctrl-C did not reach it");
   runner = await start(["--listen", "127.0.0.1:0"]);
   assert.match(runner.banner, /^machines: 1 \(1 interrupted; /m);
+  assert.match(runner.banner, /^image: .+ is in /m, "a restart finds the image in the directory");
+  assert.doesNotMatch(runner.banner, /^layer \d+ .*: fetched /m, "and fetches nothing");
   writeConfig(runner.address, runner.peer);
   session = open();
   assert.equal((await session.hello()).runner?.caPem, caPem, "the runner's CA is kept across restarts");

@@ -10,7 +10,9 @@
  * Needs CUBE_TEST_BERTH_{QEMU,QEMU_IMG,KEEL,IMAGE} and
  * CUBE_TEST_BERTH_PULLED (a berth directory the image was pulled into, as
  * runner-vm-test.ts takes it), CUBE_TEST_BERTH_ACCEL (kvm or hvf) and
- * optionally CUBE_TEST_BERTH_TMP. Prints one JSON line. Loopback only; the
+ * optionally CUBE_TEST_BERTH_TMP; CUBE_TEST_BERTH_MKFS for a berth from B-7
+ * on, which requires --mkfs-erofs (it finds the image there and pulls
+ * nothing). Prints one JSON line. Loopback only; the
  * machine and its directory are removed at the end. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -35,7 +37,8 @@ for (const part of ["images", "layers"]) fs.cpSync(path.join(pulled, part), path
 let child: ChildProcess | undefined;
 let session: RunnerSession | undefined;
 try {
-  child = spawn(binary, ["vm", "--dir", directory, "--qemu", qemu, "--qemu-img", qemuImg, "--keel", keel, "--accel", accel, "--image", image,
+  const mkfs = env.CUBE_TEST_BERTH_MKFS ? ["--mkfs-erofs", env.CUBE_TEST_BERTH_MKFS] : [];
+  child = spawn(binary, ["vm", "--dir", directory, "--qemu", qemu, "--qemu-img", qemuImg, "--keel", keel, ...mkfs, "--accel", accel, "--image", image,
     "--allow-peer", control.peerId, "--node-id", "node-hello-timing", "--listen", "127.0.0.1:0"], { stdio: ["ignore", "ignore", "pipe"], detached: true });
   let banner = "";
   child.stderr!.setEncoding("utf8");

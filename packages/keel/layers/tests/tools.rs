@@ -436,8 +436,8 @@ fn a_tar_made_to_hang_mkfs_is_stopped_and_nothing_is_cached() {
     let cache = LayerCache::open(dir.path()).unwrap();
     // Cut inside usr/noise at a block boundary and ended with two zero
     // blocks: a well-formed end as far as the stream shows, and a diff_id
-    // that matches. erofs-utils 1.7.1 and 1.8.6 spin on it forever; 1.9
-    // fails. Either way the conversion fails in bounded time.
+    // that matches. erofs-utils 1.7.1 through 1.9.0 spin on it forever;
+    // 1.9.1 fails. Either way the conversion fails in bounded time.
     let mut layer = cut_layer(100_352);
     layer.resize(layer.len() + 1024, 0);
     let started = Instant::now();
