@@ -1,0 +1,13 @@
+diff --git a/packages/keel/agent/src/channel.rs b/packages/keel/agent/src/channel.rs
+index 3fa028df..65055be7 100644
+--- a/packages/keel/agent/src/channel.rs
++++ b/packages/keel/agent/src/channel.rs
+@@ -213,7 +213,7 @@ pub async fn serve(agent: Arc<Agent>) -> io::Result<()> {
+ /// One connection: Ok when the runner's end closed, Err when it broke the
+ /// channel rules.
+ async fn connection(agent: &Arc<Agent>, port: &fs::File) -> anyhow::Result<()> {
+-    let receiver = PortReader::new(dup(port)?)?;
++    let receiver = pipe::Receiver::from_owned_fd_unchecked(dup(port)?)?;
+     let mut sender = pipe::Sender::from_owned_fd_unchecked(dup(port)?)?;
+     let (frames, mut queue) = mpsc::unbounded_channel::<proto::DaemonFrame>();
+     // True once this connection is over: what the gate holds for it is

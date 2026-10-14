@@ -1,0 +1,13 @@
+diff --git a/packages/berth/src/vm/mod.rs b/packages/berth/src/vm/mod.rs
+index 642d7f93..e041c02d 100644
+--- a/packages/berth/src/vm/mod.rs
++++ b/packages/berth/src/vm/mod.rs
+@@ -1882,7 +1882,7 @@ async fn dial_into(
+ /// gateway not 22, which was for its SSH; keel runs no sshd.
+ fn dial_port(port: u32) -> Answer<u16> {
+     match u16::try_from(port) {
+-        Ok(port) if port >= 1024 => Ok(port),
++        Ok(port) => Ok(port),
+         _ => Err(refuse(
+             Code::PermissionDenied,
+             "port",

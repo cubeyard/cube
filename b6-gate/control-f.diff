@@ -1,0 +1,14 @@
+diff --git a/packages/server/test/portal-dial.ts b/packages/server/test/portal-dial.ts
+index 7b7092a0..6f7c667c 100644
+--- a/packages/server/test/portal-dial.ts
++++ b/packages/server/test/portal-dial.ts
+@@ -53,7 +53,8 @@ export async function withListener(workspace: Workspace, key: string, command: {
+   try {
+     await workspace.exec(lease.token, key, { command: command.listener, timeoutMs: 600000 });
+     try {
+-      await workspace.exec(lease.token, `${key}-probe`, { command: command.probe, timeoutMs: 60000 });
++      // CONTROL f: the probe on a second lease, as V9 did at b5e67965.
++      await workspace.exec((await workspace.lease({ owner: "pi" })).token, `${key}-probe`, { command: command.probe, timeoutMs: 60000 });
+       const probed = await settleOperation(workspace, lease.token, `${key}-probe`);
+       assert.ok(probed.state === "succeeded" && probed.exitCode === 0, `${key}: the probe: ${JSON.stringify(probed)}`);
+       assert.equal(Buffer.from(probed.output).toString("utf8").trim(), command.expect, `${key}: the listener answers inside the machine`);
