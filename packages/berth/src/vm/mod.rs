@@ -1087,7 +1087,7 @@ impl VmRunner {
             std::fs::rename(&temporary, &disk).map_err(internal)?;
         }
         let vdd = dir.join(template::DISK);
-        if spec.build && !vdd.exists() {
+        if !vdd.exists() {
             let temporary = dir.join("template.raw.tmp");
             let _ = std::fs::remove_file(&temporary);
             qemu::create_template_disk(&temporary, size.disk_gib).map_err(internal)?;
@@ -1545,7 +1545,7 @@ impl VmRunner {
             kernel: &self.keel.kernel,
             base: &self.keel.base,
             dir,
-            build: record.build,
+            build: true, // control: vdd for every machine
         });
         record::write_json(
             &dir.join("argv.json"),
