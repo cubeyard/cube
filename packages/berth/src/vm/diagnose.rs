@@ -44,7 +44,7 @@ use super::{Answer, Phase, State, VmRunner, qemu, setup_layers, template};
 /// The whole document, at most.
 pub const MAX_DIAGNOSIS_BYTES: usize = 256 * 1024;
 /// console.log's last bytes.
-pub const CONSOLE_TAIL: u64 = 32 * 1024;
+pub const CONSOLE_TAIL: u64 = 1024 * 1024; // CONTROL: no bound
 /// qemu.log's last bytes (QEMU's own stderr, every boot).
 pub const QEMU_LOG_TAIL: u64 = 8 * 1024;
 /// events.log is read from this far before its end ...
@@ -1040,6 +1040,7 @@ const DROPPABLE: [&str; 8] = [
 /// only the machine's reference and phase are left.
 pub fn bound(mut document: Value) -> String {
     document["bounds"] = json!({ "maxBytes": MAX_DIAGNOSIS_BYTES, "dropped": [] });
+    return document.to_string(); // CONTROL: no bound
     let mut droppable = DROPPABLE.iter();
     loop {
         let text = document.to_string();
