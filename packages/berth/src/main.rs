@@ -789,3 +789,68 @@ mod tests {
         assert!(flagged.contains_key("--layer-cache-gib"));
     }
 }
+
+#[cfg(test)]
+mod lock_probe {
+    use super::*;
+    use std::os::unix::{io::AsRawFd, process::CommandExt};
+
+    fn try_lock(path: &Path) -> bool {
+        let file = File::create(path).unwrap();
+        // SAFETY: flock on a descriptor this function owns.
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+    }
+
+    /// A thread spawns a child that waits 1 s between fork and exec.
+    fn spawner() -> std::thread::JoinHandle<()> {
+        let spawner = std::thread::spawn(|| {
+            let mut command = std::process::Command::new("/bin/true");
+            // SAFETY: only nanosleep in the child.
+            unsafe {
+                command.pre_exec(|| {
+                    std::thread::sleep(Duration::from_secs(1));
+                    Ok(())
+                });
+            }
+            command.status().unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(200)); // the child is in pre_exec now
+        spawner
+    }
+
+    #[test]
+    fn probe_a_child_between_fork_and_exec_keeps_a_dropped_flock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lock");
+        let lock = File::create(&path).unwrap();
+        assert!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0);
+        let spawner = spawner();
+        drop(lock);
+        let during = try_lock(&path);
+        spawner.join().unwrap();
+        let after = try_lock(&path);
+        eprintln!("PROBE raw flock: free during the child's fork->exec window: {during}; free after its exec: {after}");
+        assert!(!during && after);
+    }
+
+    #[test]
+    fn probe_prepare_drop_prepare_fails_while_a_thread_spawns() {
+        let dir = tempfile::tempdir().unwrap();
+        let peer = SecretKey::generate().public().to_string();
+        let mut options = BTreeMap::from([
+            ("--dir".to_owned(), dir.path().display().to_string()),
+            ("--allow-peer".to_owned(), peer),
+            ("--node-id".to_owned(), "node-test".to_owned()),
+        ]);
+        let prepared = prepare(&mut options, "vm").unwrap();
+        let spawner = spawner();
+        drop(prepared);
+        let again = BTreeMap::from([("--dir".to_owned(), dir.path().display().to_string())]);
+        let during = prepare(&mut again.clone(), "vm").err().map(|e| e.to_string());
+        spawner.join().unwrap();
+        let after = prepare(&mut again.clone(), "vm").err().map(|e| e.to_string());
+        eprintln!("PROBE prepare after drop: during the window: {during:?}; after the exec: {after:?}");
+        assert!(during.unwrap().starts_with("another berth vm runs in"));
+        assert!(after.is_none());
+    }
+}
