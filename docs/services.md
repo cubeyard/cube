@@ -99,6 +99,11 @@ browser ──HTTP──▶ cubed portal (CUBED_PORTAL_LISTEN:CUBED_PORTAL_PORT)
                  Iroh frame channel → runner → guest 10.77.0.2:PORT
 ```
 
+On a protocol-4 runner (`berth vm`) the gateway is not in the path: the
+portal opens a `dial` stream on cubed's connection to the runner, which
+connects to the guest from the machine's own LAN and allows only ports
+1024-65535 (see packages/berth/README.md).
+
 Each service has its own origin:
 
 ```
@@ -170,7 +175,8 @@ keeps the Host header.
   machine running and the thread is not archived or archiving. The portal
   never starts or resumes a machine: a sleeping thread answers 503.
 - Only the registered port, through the gateway's dial route, which itself
-  allows only port 22 and 1024-65535. The request never names a target.
+  allows only port 22 and 1024-65535 (a protocol-4 runner's `dial`:
+  1024-65535). The request never names a target.
 - Hop-by-hop headers and any `Forwarded`/`X-Forwarded-*` the browser sent
   are dropped; the portal sets `X-Forwarded-For/Host/Proto`. Cookies a
   service sets lose their `Domain` attribute, so they stay with that one

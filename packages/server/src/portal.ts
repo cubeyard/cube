@@ -9,7 +9,8 @@
  * nothing of cube's, sets no cookie of its own and answers only Host values
  * of exactly that form. A request goes
  * browser → portal → the gateway's dial route → the runner's frame channel →
- * the guest's registered port; nothing else is reachable through it: the
+ * the guest's registered port (protocol 4: the runner's `dial` stream, into
+ * the machine's LAN in the runner); nothing else is reachable through it: the
  * service and its port come from the guest's own registrations, never from
  * the request, and only while cubed has the thread's machine running (the
  * portal never starts one). The thread label is an HMAC of the thread id
@@ -238,7 +239,7 @@ export class Portal {
     };
   }
 
-  private async connect(thread: Thread, service: GuestService): Promise<net.Socket> {
+  private async connect(thread: Thread, service: GuestService): Promise<Duplex> {
     try { return await this.options.machines.dial!(thread, service.port); }
     catch (error) {
       // The registration may be stale (stopped, replaced): ask again next time.

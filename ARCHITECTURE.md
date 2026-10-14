@@ -636,10 +636,15 @@ process), which substitutes the token, as for p3, and turns it back into
 the placeholder in the answer; the token never reaches cubed's Node
 process, the runner or the guest. cubed does not run threads on `berth vm`
 yet (it logs the reports and carries credentials for runners that open
-the streams).
+the streams). The portal reaches a machine on a protocol-4 runner over a
+`dial` stream (row B-6): `RunnerMachines.dial` opens it with the machine's
+ref and epoch, `berth vm` refuses ports below 1024 (22 too), an older
+fence and a machine it does not run, connects from the machine's LAN and
+carries the bytes both ways, each direction ending on its own. `berth
+host` answers it UNIMPLEMENTED (row B-9).
 
-Not built yet (later stages): `berth vm`'s templates and diagnosis, the
-`dial` stream, snapshots.
+Not built yet (later stages): `berth vm`'s templates and diagnosis,
+snapshots.
 
 ## Machine templates and hooks
 

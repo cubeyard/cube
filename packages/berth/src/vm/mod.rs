@@ -34,7 +34,12 @@
 //! after cubed's connection is gone (presence.rs), and refusals are
 //! reported to cubed (report.rs). HTTPS is intercepted with the runner's CA.
 //!
-//! Not here yet: credentials (B-5), `dial` (B-6), image pulls by the runner
+//! `dial` (B-6): a TCP connection from the LAN's address to a port of a
+//! running machine, 1024 to 65535 only, fenced as `guest` is; its bytes go
+//! both ways on the stream (serve.rs). It needs cubed's connection, which
+//! carries it, and nothing else: the egress lease does not apply.
+//!
+//! Not here yet: image pulls by the runner
 //! itself and the cache limit (B-7), templates (B-8), diagnosis (B-9) and
 //! snapshots (S-7a).
 //!
@@ -83,7 +88,7 @@ use crate::{
     serve::{self, Service, unimplemented},
 };
 
-const CAPABILITIES: [&str; 10] = [
+const CAPABILITIES: [&str; 11] = [
     "runner.get",
     "machine.create",
     "machine.start",
@@ -94,6 +99,7 @@ const CAPABILITIES: [&str; 10] = [
     "machine.list",
     "watch",
     "guest",
+    "dial",
 ];
 /// The `Boot.documents` names keel knows (runner.proto's `Boot`).
 const BOOT_DOCUMENTS: [&str; 4] = ["hostname", "env", "hooks/pre-setup", "hooks/pre-resume"];
@@ -721,6 +727,45 @@ impl VmRunner {
         }
         entry.record.fence_epoch = epoch;
         Ok(entry)
+    }
+
+    /// The epoch of the machine `reference` names, as it is now.
+    fn epoch(state: &State, reference: Option<&proto::Ref>) -> Option<i64> {
+        reference
+            .and_then(|r| state.machines.get(&r.id))
+            .map(|entry| entry.record.fence_epoch)
+    }
+
+    /// After a `guest` or `dial` stream was fenced: an epoch it raised is
+    /// written down at once, as a mutation's is.
+    fn write_raised(
+        &self,
+        state: &State,
+        reference: Option<&proto::Ref>,
+        before: Option<i64>,
+    ) -> Answer<()> {
+        let Some(entry) = reference.and_then(|r| state.machines.get(&r.id)) else {
+            return Ok(());
+        };
+        if before != Some(entry.record.fence_epoch) {
+            record::write_json(
+                &self.machine_dir(&entry.record.id).join(record::RECORD),
+                &entry.record,
+            )
+            .map_err(internal)?;
+        }
+        Ok(())
+    }
+
+    /// What a `dial` stream reaches: its port (1024 to 65535), the machine
+    /// fenced as for `guest` (raising its epoch), and its LAN while it runs.
+    fn dial_target(
+        state: &mut State,
+        header: &proto::DialHeader,
+    ) -> Answer<(u16, cube_netstack::lan::Dialer)> {
+        let port = dial_port(header.port)?;
+        let entry = Self::fenced(state, header.r#ref.as_ref(), header.fence.as_ref())?;
+        Ok((port, running_dialer(entry)?))
     }
 
     fn size(requested: Option<&proto::Size>) -> Answer<Size> {
@@ -1762,27 +1807,14 @@ impl Service for VmRunner {
         }
         let guest = {
             let mut state = self.state.lock().unwrap();
-            let before = header
-                .r#ref
-                .as_ref()
-                .and_then(|r| state.machines.get(&r.id))
-                .map(|entry| entry.record.fence_epoch);
-            let entry = Self::fenced(&mut state, header.r#ref.as_ref(), header.fence.as_ref())?;
-            if before != Some(entry.record.fence_epoch) {
-                let id = entry.record.id.clone();
-                record::write_json(&self.machine_dir(&id).join(record::RECORD), &entry.record)
-                    .map_err(internal)?;
-            }
-            match (&entry.guest, entry.record.phase) {
-                (Some(guest), Phase::Running) => Arc::clone(guest),
-                _ => {
-                    return Err(refuse(
-                        Code::Unavailable,
-                        "not_running",
-                        &format!("the machine is {}", entry.record.phase.name()),
-                    ));
-                }
-            }
+            let before = Self::epoch(&state, header.r#ref.as_ref());
+            let fenced = Self::fenced(&mut state, header.r#ref.as_ref(), header.fence.as_ref())
+                .map(|entry| match (&entry.guest, entry.record.phase) {
+                    (Some(guest), Phase::Running) => Ok(Arc::clone(guest)),
+                    _ => Err(not_running(entry)),
+                });
+            self.write_raised(&state, header.r#ref.as_ref(), before)?;
+            fenced??
         };
         let (ch, answer) = guest.request(Op::Guest(proto::GuestRequest {
             op: header.op.clone(),
@@ -1818,6 +1850,60 @@ impl Service for VmRunner {
                 )
             }),
         }
+    }
+    async fn dial(
+        self: Arc<Self>,
+        header: proto::DialHeader,
+    ) -> Answer<cube_netstack::lan::FlowStream> {
+        let (port, dialer) = {
+            let mut state = self.state.lock().unwrap();
+            let before = Self::epoch(&state, header.r#ref.as_ref());
+            let target = Self::dial_target(&mut state, &header);
+            self.write_raised(&state, header.r#ref.as_ref(), before)?;
+            target?
+        };
+        dial_into(dialer, port).await
+    }
+}
+
+/// TCP to `port` of the machine whose LAN `dialer` is. The LAN gives up
+/// after its own 10 s (`LanLimits::dial`), as p3's gateway does.
+async fn dial_into(
+    dialer: cube_netstack::lan::Dialer,
+    port: u16,
+) -> Answer<cube_netstack::lan::FlowStream> {
+    dialer
+        .dial(port)
+        .await
+        .map_err(|error| refuse(Code::Unavailable, "dial_failed", &format!("{error:#}")))
+}
+
+/// The ports cubed may dial in a machine (V9): 1024 to 65535. Unlike p3's
+/// gateway not 22, which was for its SSH; keel runs no sshd.
+fn dial_port(port: u32) -> Answer<u16> {
+    match u16::try_from(port) {
+        Ok(port) if port >= 1024 => Ok(port),
+        _ => Err(refuse(
+            Code::PermissionDenied,
+            "port",
+            &format!("dialling port {port} is not allowed; only 1024 to 65535"),
+        )),
+    }
+}
+
+fn not_running(entry: &Entry) -> proto::Error {
+    refuse(
+        Code::Unavailable,
+        "not_running",
+        &format!("the machine is {}", entry.record.phase.name()),
+    )
+}
+
+/// The LAN of a running machine, to dial into it.
+fn running_dialer(entry: &Entry) -> Answer<cube_netstack::lan::Dialer> {
+    match (&entry.net, entry.record.phase) {
+        (Some(net), Phase::Running) => Ok(net.dialer()),
+        _ => Err(not_running(entry)),
     }
 }
 
@@ -1855,5 +1941,132 @@ mod stop_tests {
         assert!(!gone.0 && gone.1.contains("channel ended"), "{gone:?}");
         let late = stop_outcome(None);
         assert!(!late.0 && late.1.contains("within 30 s"), "{late:?}");
+    }
+}
+
+#[cfg(test)]
+mod dial_tests {
+    use super::*;
+
+    fn one_machine(phase: Phase) -> State {
+        let record = MachineRecord {
+            version: 1,
+            owner: "thread-1".into(),
+            id: "0123456789abcdef".into(),
+            fence_epoch: 7,
+            phase,
+            size: DEFAULT_SIZE,
+            machine_type: "pc-q35-11.1".into(),
+            created_with: "11.1.2 /q".into(),
+            created_at: Timestamp {
+                seconds: 1,
+                nanos: 0,
+            },
+            interrupted: None,
+            error: String::new(),
+            boot: None,
+            image: None,
+            stopped: None,
+        };
+        let entry = Entry {
+            record,
+            live: None,
+            version: 1,
+            updated: Timestamp {
+                seconds: 1,
+                nanos: 0,
+            },
+            guest: None,
+            info: None,
+            documents: Default::default(),
+            sessions: Default::default(),
+            policy: None,
+            net: None,
+        };
+        State {
+            version: 1,
+            machines: BTreeMap::from([("0123456789abcdef".to_string(), entry)]),
+            deleted: BTreeMap::new(),
+        }
+    }
+
+    fn reference(owner: &str) -> proto::Ref {
+        proto::Ref {
+            owner: owner.into(),
+            id: "0123456789abcdef".into(),
+        }
+    }
+
+    fn reason(error: proto::Error) -> (Code, String) {
+        (Code::try_from(error.code).unwrap(), error.reason)
+    }
+
+    #[test]
+    fn only_ports_1024_to_65535_are_dialled() {
+        for port in [1024, 3000, 8080, 65535] {
+            assert_eq!(dial_port(port).unwrap(), port as u16);
+        }
+        // 22 too: p3's gateway let cubed reach sshd there; keel has none.
+        for port in [0, 22, 80, 443, 1023, 65536, u32::MAX] {
+            let refused = reason(dial_port(port).unwrap_err());
+            assert_eq!(refused, (Code::PermissionDenied, "port".into()), "{port}");
+        }
+    }
+
+    fn header(owner: &str, epoch: i64, port: u32) -> proto::DialHeader {
+        proto::DialHeader {
+            r#ref: Some(reference(owner)),
+            fence: Some(proto::Fence { epoch }),
+            port,
+        }
+    }
+
+    #[test]
+    fn a_dial_is_fenced_owned_and_needs_a_running_machine() {
+        let refused = |state: &mut State, header: proto::DialHeader| {
+            reason(VmRunner::dial_target(state, &header).err().unwrap())
+        };
+        let mut state = one_machine(Phase::Running);
+        assert_eq!(
+            refused(&mut state, header("thread-1", 6, 8080)),
+            (Code::FailedPrecondition, "stale_epoch".into())
+        );
+        // The port first: a refused port leaves the epoch as it was.
+        assert_eq!(
+            refused(&mut state, header("thread-1", 9, 80)),
+            (Code::PermissionDenied, "port".into())
+        );
+        assert_eq!(state.machines["0123456789abcdef"].record.fence_epoch, 7);
+        assert_eq!(
+            refused(&mut state, header("thread-2", 7, 8080)),
+            (Code::NotFound, "machine".into())
+        );
+        // Running, but its network is gone (as while QEMU is being quit);
+        // the newer epoch is taken as guest takes it.
+        assert_eq!(
+            refused(&mut state, header("thread-1", 8, 8080)),
+            (Code::Unavailable, "not_running".into())
+        );
+        assert_eq!(state.machines["0123456789abcdef"].record.fence_epoch, 8);
+        for phase in [
+            Phase::Stopped,
+            Phase::Starting,
+            Phase::Stopping,
+            Phase::Retained,
+        ] {
+            let mut state = one_machine(phase);
+            let refused = VmRunner::dial_target(&mut state, &header("thread-1", 7, 8080))
+                .err()
+                .unwrap();
+            assert_eq!(
+                reason(refused.clone()),
+                (Code::Unavailable, "not_running".into())
+            );
+            assert!(
+                refused.message.contains(phase.name()),
+                "{}",
+                refused.message
+            );
+        }
     }
 }

@@ -11,6 +11,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import type net from "node:net";
+import type { Duplex } from "node:stream";
 import path from "node:path";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
@@ -55,8 +56,9 @@ export interface ThreadMachines {
    * never starts one (the portal must not wake a machine). */
   running?(thread: Thread): boolean;
   /** A TCP connection to a port of the thread's running machine, for the
-   * portal (the gateway allows 22 and 1024-65535). */
-  dial?(thread: Thread, port: number): Promise<net.Socket>;
+   * portal (p3's gateway allows 22 and 1024-65535, a protocol-4 runner
+   * 1024-65535). */
+  dial?(thread: Thread, port: number): Promise<Duplex>;
   /** Read-only evidence about the thread's machine (vm-diagnostics.ts);
    * never starts, stops or attaches it. */
   diagnose?(thread: Thread): Promise<MachineEvidence>;

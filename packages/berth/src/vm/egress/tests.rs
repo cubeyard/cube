@@ -1327,3 +1327,4 @@ async fn a_surviving_connection_recovers_and_is_stopped_again_at_the_next_expiry
 }
 
 mod credential;
+mod dial;
