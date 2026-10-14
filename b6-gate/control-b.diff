@@ -1,0 +1,18 @@
+diff --git a/packages/berth/src/vm/mod.rs b/packages/berth/src/vm/mod.rs
+index 642d7f93..2a38b7f1 100644
+--- a/packages/berth/src/vm/mod.rs
++++ b/packages/berth/src/vm/mod.rs
+@@ -764,7 +764,12 @@ impl VmRunner {
+         header: &proto::DialHeader,
+     ) -> Answer<(u16, cube_netstack::lan::Dialer)> {
+         let port = dial_port(header.port)?;
+-        let entry = Self::fenced(state, header.r#ref.as_ref(), header.fence.as_ref())?;
++        let reference = header.r#ref.as_ref().ok_or_else(|| refuse(Code::InvalidArgument, "ref", "a machine reference is required"))?;
++        let entry = state
++            .machines
++            .get_mut(&reference.id)
++            .filter(|entry| entry.record.owner == reference.owner)
++            .ok_or_else(|| refuse(Code::NotFound, "machine", "no such machine"))?;
+         Ok((port, running_dialer(entry)?))
+     }
+ 
