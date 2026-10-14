@@ -180,6 +180,30 @@ try {
   closing.destroy();
   await dials.at(-1)!.done;
   assert.deepEqual([dials.at(-1)!.fin, dials.at(-1)!.reset], [true, false], "destroy() finishes the stream after what was written");
+  // F-B6-1: destroy() after the app half-closed, with small writes queued
+  // behind one whose writeAll is still pending (the binding cannot resolve
+  // it before this synchronous code ends): every accepted write reaches the
+  // app, in order, before the FIN.
+  const tail = await session.dial(MACHINE, 7, appPort);
+  const tailId = randomBytes(6).toString("hex");
+  const head: Buffer[] = [];
+  tail.on("data", (chunk: Buffer) => head.push(chunk));
+  const appFin = once(tail, "end");
+  tail.write(`GET /fin-guest?${tailId} HTTP/1.1\r\nhost: x\r\nconnection: Upgrade\r\nupgrade: cube-test\r\n\r\n`);
+  await appFin;
+  assert.match(Buffer.concat(head).toString(), /^HTTP\/1\.1 101 [^]*\r\n\r\nguest-first\n$/, "the app closed its side first");
+  const parts = ["first;", "second;", "third;", "fourth."].map(text => Buffer.from(text));
+  for (const part of parts) assert.equal(tail.write(part), true, "small writes are accepted (below the high-water mark)");
+  assert.ok(tail.writableLength > parts[0]!.length, "writes are queued behind the pending one");
+  tail.destroy();
+  await dials.at(-1)!.done;
+  assert.deepEqual([dials.at(-1)!.fin, dials.at(-1)!.reset], [true, false], "destroy() after the app's FIN ends with FIN");
+  const tailFile = path.join(state, `fin-${tailId}`);
+  for (let i = 0; i < 100 && !fs.existsSync(tailFile); i++) await delay(50);
+  const sent = Buffer.concat(parts);
+  assert.equal(fs.readFileSync(tailFile, "utf8").trim(), `${sent.length} ${sha256(sent)}`, "every queued write, in order, before the FIN");
+  console.log(`ok: destroy() after the app's FIN: ${parts.length} queued writes (${sent.length} bytes) reached the app in order, then FIN`);
+
   // destroy(error) resets it.
   const aborted = await session.dial(MACHINE, 7, appPort);
   aborted.write("GET / HTTP/1.1\r\n");

@@ -430,38 +430,52 @@ export class RunnerSession {
 
 /** A dial stream's bytes as a Duplex. Each direction ends on its own:
  * `end()` finishes the stream (the runner passes the FIN to the guest) and
- * the guest's FIN ends reading. `destroy()` acts as a socket's close: the
- * write under way still goes, then FIN, and reading stops (STOP_SENDING,
- * so the runner drops the guest's connection if the guest goes on
- * sending); `destroy(error)` resets the stream. A lost connection is an
- * error, never an end. */
-function dialStream(stream: BiStream): Duplex {
-  let reading = false;
-  let written: Promise<unknown> = Promise.resolve();
-  return new Duplex({
-    allowHalfOpen: true,
-    read() {
-      if (reading) return;
-      reading = true;
-      stream.recv.read(DIAL_READ_BYTES).then(chunk => {
-        reading = false;
-        this.push(chunk.length ? Buffer.from(chunk) : null);
-      }, error => this.destroy(error instanceof Error ? error : new Error(String(error))));
-    },
-    write(chunk: Buffer, _encoding, callback) {
-      written = stream.send.writeAll(Array.from(chunk));
-      written.then(() => callback(), callback);
-    },
-    final(callback) { stream.send.finish().then(() => callback(), callback); },
-    destroy(error, callback) {
-      if (!this.writableFinished) {
-        if (error) void stream.send.reset(0n).catch(() => {});
-        else void written.then(() => stream.send.finish()).catch(() => {});
-      }
-      if (!this.readableEnded) void stream.recv.stop(0n).catch(() => {});
-      callback(error);
-    },
-  });
+ * the guest's FIN ends reading. `destroy()` without an error acts as
+ * net.Socket's `destroySoon()`, a socket's close: reading stops
+ * (STOP_SENDING, so the runner drops the guest's connection if the guest
+ * goes on sending), and an open writable side first ends, so every write
+ * it accepted goes, in order, then FIN. `destroy(error)` resets the
+ * stream. A lost connection is an error, never an end. */
+function dialStream(stream: BiStream): Duplex { return new DialStream(stream); }
+
+class DialStream extends Duplex {
+  private readonly stream: BiStream;
+  private reading = false;
+  private closing = false;
+  constructor(stream: BiStream) {
+    super({ allowHalfOpen: true });
+    this.stream = stream;
+  }
+  override _read(): void {
+    if (this.reading) return;
+    this.reading = true;
+    this.stream.recv.read(DIAL_READ_BYTES).then(chunk => {
+      this.reading = false;
+      this.push(chunk.length ? Buffer.from(chunk) : null);
+    }, error => this.destroy(error instanceof Error ? error : new Error(String(error))));
+  }
+  override _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    this.stream.send.writeAll(Array.from(chunk)).then(() => callback(), callback);
+  }
+  override _final(callback: (error?: Error | null) => void): void {
+    this.stream.send.finish().then(() => callback(), callback);
+  }
+  override destroy(error?: Error): this {
+    if (error || this.destroyed || this.writableFinished) return super.destroy(error);
+    if (!this.readableEnded) void this.stream.recv.stop(0n).catch(() => {});
+    if (!this.closing) {
+      this.closing = true;
+      // A write that fails destroys with its error (a reset) instead.
+      this.once("finish", () => super.destroy());
+      if (!this.writableEnded) this.end();
+    }
+    return this;
+  }
+  override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    if (!this.writableFinished) void this.stream.send.reset(0n).catch(() => {});
+    if (!this.readableEnded) void this.stream.recv.stop(0n).catch(() => {});
+    callback(error);
+  }
 }
 
 /** `GuestTransport` over a runner's `guest` stream: the same request and
