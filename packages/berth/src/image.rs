@@ -1124,7 +1124,7 @@ impl<'a> Pull<'a> {
             &blob.digest["sha256:".len()..],
             std::process::id()
         ));
-        self.check_free_space(blob, index)?;
+        let _ = (blob, index); // CONTROL C3: no space check
         let started = Instant::now();
         let fetched = registry.blob_to_file(blob, &temporary).await;
         let result = match fetched {
