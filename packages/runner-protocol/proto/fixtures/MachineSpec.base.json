@@ -10,5 +10,6 @@
       "documents-key": "ZG9jdW1lbnRzLTE="
     },
     "mac": "mac-2"
-  }
+  },
+  "build": true
 }

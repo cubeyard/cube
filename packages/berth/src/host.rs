@@ -253,6 +253,7 @@ impl HostRunner {
                 source: Some(proto::machine_spec::Source::Base(true)),
                 size: None,
                 boot: None,
+                build: false,
             }),
             status: Some(proto::MachineStatus {
                 phase: if entry.file.retained {

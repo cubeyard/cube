@@ -593,6 +593,7 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
                 .layer_cache_gib
                 .unwrap_or(DEFAULT_LAYER_CACHE_GIB)
                 .saturating_mul(1 << 30),
+            free_space: image::free_bytes,
         },
         floor,
     )
