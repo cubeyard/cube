@@ -23,7 +23,11 @@ import type { Thread } from "../src/registry.ts";
 import { RunnerMachines } from "../src/runner-machines.ts";
 import { RunnerError, RunnerSession, type SessionConfig } from "../src/runner-session.ts";
 import { nextMachineEpoch } from "../src/vm.ts";
-import { DIAL_APP, dialPortal, portalContract, Raw, request, sha256 } from "./portal-dial.ts";
+import { DIAL_APP, dialPortal, portalContract, Raw, request, sha256, withListener } from "./portal-dial.ts";
+import { LocalGuestTransport } from "./local-guest.ts";
+import { VmWorkspace } from "../src/vm-workspace.ts";
+import { LeaseStore } from "../src/workspace-lease.ts";
+import { WorkspaceError } from "../src/workspace.ts";
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cube-dial-")));
 
@@ -232,6 +236,43 @@ try {
   assert.equal(dials.length, before + 1);
   assert.equal(dials.at(-1)!.epoch, BigInt(epochs.at(-1)!), "RunnerMachines dials at the machine's current epoch");
   console.log("ok: RunnerMachines.dial refuses a machine it does not run and dials at the machine's current epoch");
+
+  // V9's listener step (withListener) over a real VmWorkspace and LeaseStore
+  // on the local guest: the listener and its probe share one writable
+  // lease, the single owner still refuses a second one meanwhile, and the
+  // lease is free and the listener gone afterwards.
+  {
+    const guest = new LocalGuestTransport(path.join(root, "listener", "guest"));
+    const leases = new LeaseStore(path.join(root, "listener", "thread"));
+    const workspace = new VmWorkspace({ guest, leases, owner: "pi", binding: "runner-dial-listener", retryMs: 5000 });
+    const probe = net.createServer().listen(0, "127.0.0.1");
+    await once(probe, "listening");
+    const lowPort = (probe.address() as net.AddressInfo).port;
+    await new Promise(resolve => probe.close(resolve));
+    let during = false;
+    try {
+      await withListener(workspace, "listener", {
+        listener: `exec env HOST=127.0.0.1 PORT=${lowPort} CUBE_SERVICE=low CUBE_APP_STATE=${state} perl ${DIAL_APP}`,
+        probe: `for i in $(seq 100); do curl -s -m 2 http://127.0.0.1:${lowPort}/ && break; sleep 0.2; done`,
+        expect: "dial-app: hello from low",
+      }, async () => {
+        during = true;
+        await assert.rejects(workspace.lease({ owner: "pi" }), (error: unknown) => error instanceof WorkspaceError && error.code === "LEASE_HELD",
+          "one writable owner: a second lease is refused while the listener's is held");
+        assert.equal((await request(lowPort, "x", "GET", "/")).body.toString(), "dial-app: hello from low\n");
+      });
+      assert.ok(during);
+      const after = await workspace.lease({ owner: "pi" });
+      await workspace.release(after.token);
+      let refused = false;
+      for (let i = 0; i < 100 && !refused; i++) {
+        refused = await new Promise<boolean>(resolve => net.connect(lowPort, "127.0.0.1").once("connect", function (this: net.Socket) { this.destroy(); resolve(false); }).once("error", () => resolve(true)));
+        if (!refused) await delay(50);
+      }
+      assert.ok(refused, "the listener was cancelled");
+    } finally { guest.stop(); leases.close(); }
+    console.log("ok: withListener: listener and probe on one lease, a second lease refused meanwhile, the lease free and the listener gone after");
+  }
 
   // The real Portal over it.
   const services = { call: async () => ({ header: { services: [{ name: "dialapp", port: appPort, kind: "command" }] }, body: Buffer.alloc(0) }), close: async () => {} };

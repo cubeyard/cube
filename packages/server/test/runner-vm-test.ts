@@ -78,7 +78,7 @@ import { VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
 import { settleOperation, type Workspace } from "../src/workspace.ts";
 import { workspaceContract, workspaceServicesContract } from "./workspace-contract.ts";
-import { DIAL_APP, dialPortal, portalContract, Raw, request, type DialPortal } from "./portal-dial.ts";
+import { DIAL_APP, dialPortal, portalContract, Raw, request, withListener, type DialPortal } from "./portal-dial.ts";
 
 const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
 const repo = path.resolve(import.meta.dirname, "../../..");
@@ -879,17 +879,14 @@ try {
 
       // Refused by the runner whatever listens there: dial-app.pl as root on
       // port 80 (it answers inside the guest), nothing on 22 (keel has no sshd).
-      const low = await b6.lease({ owner: "pi" });
-      const lowKey = `v9-low-${process.pid}`;
-      await b6.exec(low.token, lowKey, { command: "cd v9 && exec sudo env HOST=0.0.0.0 PORT=80 CUBE_SERVICE=low CUBE_APP_STATE=/tmp/v9-state perl dial-app.pl", timeoutMs: 600000 });
-      try {
-        assert.equal(await sh9("v9-80-inside", "for i in $(seq 100); do curl -s -m 2 http://127.0.0.1:80/ && break; sleep 0.2; done"), "dial-app: hello from low");
+      await withListener(b6, `v9-low-${process.pid}`, {
+        listener: "cd v9 && exec sudo env HOST=0.0.0.0 PORT=80 CUBE_SERVICE=low CUBE_APP_STATE=/tmp/v9-state perl dial-app.pl",
+        probe: "for i in $(seq 100); do curl -s -m 2 http://127.0.0.1:80/ && break; sleep 0.2; done",
+        expect: "dial-app: hello from low",
+      }, async () => {
         for (const port of [80, 22, 1023]) await assert.rejects(session.dial(ref, epoch, port), dialRefused("PERMISSION_DENIED", "port"), `port ${port}`);
         await assert.rejects(session.dial(ref, epoch, 1999), dialRefused("UNAVAILABLE", "dial_failed"), "nothing listens on 1999");
-      } finally {
-        await b6.cancel(low.token, lowKey).catch(() => {});
-        await b6.release(low.token).catch(() => {});
-      }
+      });
       // An old fence is refused; the machine's own goes through.
       await assert.rejects(session.dial(ref, epoch - 1, appPort), dialRefused("FAILED_PRECONDITION", "stale_epoch"));
       (await session.dial(ref, epoch, appPort)).destroy();

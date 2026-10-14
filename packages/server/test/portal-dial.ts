@@ -14,6 +14,7 @@ import type { GuestTransport } from "../src/guest-ssh.ts";
 import { Portal, portalSettings } from "../src/portal.ts";
 import type { Thread } from "../src/registry.ts";
 import type { MachineRef, RunnerSession } from "../src/runner-session.ts";
+import { settleOperation, type Workspace } from "../src/workspace.ts";
 
 export const DIAL_APP = path.join(import.meta.dirname, "dial-app.pl");
 export const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
@@ -40,6 +41,25 @@ export async function dialPortal(options: { session: () => RunnerSession; guest:
   await portal.listen();
   assert.equal(portal.state, "listening");
   return { portal, port, running, host: service => `${service}-${portal.label(thread.id)}.localhost:${port}` };
+}
+
+/** Runs `listener` (a command that keeps running) in the machine, waits
+ * until `probe` prints `expect`, runs `during`, then cancels the listener.
+ * All under ONE writable lease: a workspace has one writable owner, so the
+ * probe runs on the listener's lease, never on a second one. */
+export async function withListener(workspace: Workspace, key: string, command: { listener: string; probe: string; expect: string },
+  during: () => Promise<void>): Promise<void> {
+  const lease = await workspace.lease({ owner: "pi" });
+  try {
+    await workspace.exec(lease.token, key, { command: command.listener, timeoutMs: 600000 });
+    try {
+      await workspace.exec(lease.token, `${key}-probe`, { command: command.probe, timeoutMs: 60000 });
+      const probed = await settleOperation(workspace, lease.token, `${key}-probe`);
+      assert.ok(probed.state === "succeeded" && probed.exitCode === 0, `${key}: the probe: ${JSON.stringify(probed)}`);
+      assert.equal(Buffer.from(probed.output).toString("utf8").trim(), command.expect, `${key}: the listener answers inside the machine`);
+      await during();
+    } finally { await workspace.cancel(lease.token, key).catch(() => {}); }
+  } finally { await workspace.release(lease.token).catch(() => {}); }
 }
 
 /** One HTTP request to the portal with an exact Host. */
