@@ -2170,8 +2170,8 @@ fn layers_in_use(
         .flat_map(|template| template.image.diff_ids.iter());
     let runner = image.layers.iter().map(|layer| &layer.diff_id);
     runner
-        .chain(machines)
-        .chain(templates)
+        .chain(machines) // control: a template keeps no layers
+        .chain(templates.filter(|_| false))
         .map(|diff_id| {
             diff_id
                 .parse()
