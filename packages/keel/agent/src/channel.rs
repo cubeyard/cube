@@ -23,7 +23,9 @@ use std::{
         unix::fs::OpenOptionsExt,
     },
     path::PathBuf,
+    pin::Pin,
     sync::{Arc, Mutex},
+    task::{Context, Poll, ready},
     time::{Duration, Instant},
 };
 
@@ -32,7 +34,7 @@ use cube_runner_protocol::{
     read_daemon_frame, refuse, write_frame,
 };
 use tokio::{
-    io::BufReader,
+    io::{AsyncRead, BufReader, Interest, ReadBuf, unix::AsyncFd},
     net::unix::pipe,
     signal::unix::{Signal, SignalKind, signal},
     sync::{mpsc, watch},
@@ -125,6 +127,37 @@ fn dup(port: &fs::File) -> io::Result<OwnedFd> {
     port.try_clone().map(OwnedFd::from)
 }
 
+/// The port's reading side. Not tokio's `pipe::Receiver`: on epoll it takes
+/// a read shorter than its buffer as "drained" and waits for the next
+/// edge, but a virtio port's read returns one of the guest's buffers (a
+/// page) at a time, so the rest of a frame the host sent in more than one
+/// buffer (any frame over 4 KiB) would wait until the host sent something
+/// else. This waits for readiness only after a read says WouldBlock.
+struct PortReader(AsyncFd<fs::File>);
+
+impl PortReader {
+    fn new(fd: OwnedFd) -> io::Result<Self> {
+        AsyncFd::with_interest(fs::File::from(fd), Interest::READABLE).map(Self)
+    }
+}
+
+impl AsyncRead for PortReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        loop {
+            let mut guard = ready!(self.0.poll_read_ready(cx))?;
+            let unfilled = buf.initialize_unfilled();
+            if let Ok(read) = guard.try_io(|port| port.get_ref().read(unfilled)) {
+                buf.advance(read?);
+                return Poll::Ready(Ok(()));
+            }
+        }
+    }
+}
+
 /// Serves the port until the agent is told to stop.
 pub async fn serve(agent: Arc<Agent>) -> io::Result<()> {
     let path = loop {
@@ -180,7 +213,7 @@ pub async fn serve(agent: Arc<Agent>) -> io::Result<()> {
 /// One connection: Ok when the runner's end closed, Err when it broke the
 /// channel rules.
 async fn connection(agent: &Arc<Agent>, port: &fs::File) -> anyhow::Result<()> {
-    let receiver = pipe::Receiver::from_owned_fd_unchecked(dup(port)?)?;
+    let receiver = PortReader::new(dup(port)?)?;
     let mut sender = pipe::Sender::from_owned_fd_unchecked(dup(port)?)?;
     let (frames, mut queue) = mpsc::unbounded_channel::<proto::DaemonFrame>();
     // True once this connection is over: what the gate holds for it is
@@ -382,7 +415,7 @@ async fn handle(agent: &Arc<Agent>, request: proto::DaemonRequest) -> (AnswerKin
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::net::UnixStream;
+    use std::os::{fd::FromRawFd, unix::net::UnixStream};
 
     use tokio::io::AsyncWriteExt;
 
@@ -452,6 +485,104 @@ mod tests {
                 .is_err_and(|e| e.to_string().contains("channel above 0")),
             "{ended:?}"
         );
+    }
+
+    /// A port that, as a virtio port does, answers each read with at most
+    /// one of the buffers the host's bytes came in: one end of a
+    /// SOCK_SEQPACKET pair (one packet per read) as the agent's port, the
+    /// other as the runner's (blocking, read whole packets at a time).
+    fn packet_port() -> (fs::File, std::os::unix::net::UnixStream) {
+        let mut fds = [0; 2];
+        // SAFETY: socketpair fills both descriptors, which are then owned.
+        let made = unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+                0,
+                fds.as_mut_ptr(),
+            )
+        };
+        assert_eq!(made, 0, "{}", io::Error::last_os_error());
+        // SAFETY: fresh descriptors from socketpair, each owned once.
+        let (agent, runner) = unsafe {
+            (
+                UnixStream::from_raw_fd(fds[0]),
+                UnixStream::from_raw_fd(fds[1]),
+            )
+        };
+        agent.set_nonblocking(true).unwrap();
+        runner
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        (fs::File::from(OwnedFd::from(agent)), runner)
+    }
+
+    /// The next frame from packets on the runner's end (blocking).
+    fn packet_frame(runner: &mut UnixStream, pending: &mut Vec<u8>) -> proto::DaemonFrame {
+        loop {
+            if pending.len() >= 4 {
+                let length = u32::from_be_bytes(pending[..4].try_into().unwrap()) as usize;
+                if pending.len() >= 4 + length {
+                    let frame = serde_json::from_slice(&pending[4..4 + length]).unwrap();
+                    pending.drain(..4 + length);
+                    return frame;
+                }
+            }
+            let mut packet = vec![0u8; 1 << 20];
+            let n = runner
+                .read(&mut packet)
+                .expect("a packet from the agent within 10 s");
+            assert!(n > 0, "the agent closed its end");
+            pending.extend_from_slice(&packet[..n]);
+        }
+    }
+
+    /// The B-6 gate's stall: a request over 4 KiB reaches the guest in two
+    /// of the port's buffers, both there before the agent reads. The first
+    /// read gets only the first buffer; the agent must read the second
+    /// without waiting for more from the host.
+    #[tokio::test]
+    async fn a_frame_in_two_port_buffers_is_read_without_more_from_the_host() {
+        use std::io::Write;
+        let agent = Agent::start();
+        let (port, runner) = packet_port();
+        let served = tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move { connection(&agent, &port).await }
+        });
+        let read = |mut runner: UnixStream, mut pending: Vec<u8>| {
+            tokio::task::spawn_blocking(move || {
+                let frame = packet_frame(&mut runner, &mut pending);
+                (runner, pending, frame)
+            })
+        };
+        let (mut runner, pending, hello) = read(runner, Vec::new()).await.unwrap();
+        let session = hello.session.clone();
+        assert!(matches!(hello.t, Some(T::Hello(_))), "{hello:?}");
+        let mut request = guest_hello(1, &session);
+        if let Some(T::Req(proto::DaemonRequest {
+            op: Some(Op::Guest(guest)),
+        })) = &mut request.t
+        {
+            guest.data = b"{}\n"
+                .iter()
+                .copied()
+                .chain(std::iter::repeat_n(b'x', 4486))
+                .collect();
+        }
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &request).await.unwrap();
+        assert!(bytes.len() > 4096 + 1024, "{} bytes", bytes.len());
+        // Both buffers before the agent's next read: no await in between.
+        runner.write_all(&bytes[..4096]).unwrap();
+        runner.write_all(&bytes[4096..]).unwrap();
+        let (runner, _, answer) = read(runner, pending).await.unwrap();
+        assert!(
+            answer.ch == 1 && matches!(answer.t, Some(T::Ans(_))),
+            "{answer:?}"
+        );
+        drop(runner);
+        let _ = served.await;
     }
 
     fn runner_op(ch: u32, op: Op, session: &str) -> proto::DaemonFrame {
