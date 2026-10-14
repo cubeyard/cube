@@ -230,6 +230,29 @@ fn prepare(options: &mut BTreeMap<String, String>, mode: &str) -> Result<Prepare
         "another berth {mode} runs in {}",
         directory.display()
     );
+    let (home, key, max_machines) = load_home(&directory, &control, mode, network, options)?;
+    Ok(Prepared {
+        directory,
+        home,
+        key,
+        max_machines,
+        _lock: lock,
+    })
+}
+
+/// The part of `prepare` under the lock: checks the mode, reads the manifest
+/// (or makes it and the key on the first run) and the key. Apart from
+/// `prepare` only for tests, which must not take, drop and take the lock
+/// again in one process: a child that another thread has forked but not
+/// yet exec'd holds a copy of the lock's descriptor, and with it the flock,
+/// so a dropped lock can still look held for that moment.
+fn load_home(
+    directory: &Path,
+    control: &Path,
+    mode: &str,
+    network: Option<NetworkMode>,
+    options: &mut BTreeMap<String, String>,
+) -> Result<(HostHome, SecretKey, u32)> {
     let other = if mode == "host" { "vm" } else { "host" };
     ensure!(
         !control.join(format!("{other}.json")).exists(),
@@ -340,13 +363,7 @@ fn prepare(options: &mut BTreeMap<String, String>, mode: &str) -> Result<Prepare
         home
     };
     let key = read_key(&control.join("runner.key"))?;
-    Ok(Prepared {
-        directory,
-        home,
-        key,
-        max_machines,
-        _lock: lock,
-    })
+    Ok((home, key, max_machines))
 }
 
 fn listen_address(home: &HostHome) -> Result<Option<SocketAddr>> {
@@ -690,6 +707,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::io::AsRawFd;
 
     fn options(directory: &Path, extra: &[(&str, &str)]) -> BTreeMap<String, String> {
         let mut options = BTreeMap::from([("--dir".to_owned(), directory.display().to_string())]);
@@ -704,6 +722,50 @@ mod tests {
             .unwrap()
     }
 
+    /// A later start of the runner in `prepared`'s directory, under the lock
+    /// `prepared` still holds (the lock is never dropped and taken again in
+    /// this process; see `load_home`).
+    fn later(
+        prepared: &Prepared,
+        network: Option<NetworkMode>,
+        extra: &[(&str, &str)],
+    ) -> Result<HostHome> {
+        let mut options: BTreeMap<String, String> = extra
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        let (home, _, _) = load_home(
+            &prepared.directory,
+            &prepared.directory.join(".berth"),
+            "vm",
+            network,
+            &mut options,
+        )?;
+        assert!(options.is_empty(), "{options:?}");
+        Ok(home)
+    }
+
+    #[test]
+    fn the_runner_lock_refuses_a_second_runner_and_is_closed_on_exec() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = SecretKey::generate().public().to_string();
+        let first = [("--allow-peer", peer.as_str()), ("--node-id", "node-test")];
+        let prepared = prepare(&mut options(directory.path(), &first), "vm").unwrap();
+        // A second berth (or a pull) is refused while the first runs.
+        let error = prepare(&mut options(directory.path(), &[]), "vm")
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().contains("another berth vm runs"),
+            "{error}"
+        );
+        // The programs the runner starts (QEMU, mkfs.erofs) never keep it:
+        // the descriptor closes when they exec.
+        // SAFETY: F_GETFD on a descriptor `prepared` owns.
+        let flags = unsafe { libc::fcntl(prepared._lock.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0, "{flags}");
+    }
+
     #[test]
     fn the_layer_cache_limit_is_16_gib_kept_in_vm_json_and_changed_by_the_flag() {
         let directory = tempfile::tempdir().unwrap();
@@ -712,48 +774,35 @@ mod tests {
         let prepared = prepare(&mut options(directory.path(), &first), "vm").unwrap();
         assert_eq!(prepared.home.layer_cache_gib, Some(DEFAULT_LAYER_CACHE_GIB));
         assert_eq!(stored(directory.path(), "vm")["layerCacheGib"], 16);
-        // The runner's lock: a second berth (or a pull) is refused meanwhile.
-        let error = prepare(&mut options(directory.path(), &[]), "vm")
-            .err()
-            .unwrap();
-        assert!(
-            error.to_string().contains("another berth vm runs"),
-            "{error}"
-        );
-        drop(prepared);
 
-        let mut changed = options(
-            directory.path(),
-            &[("--layer-cache-gib", "4"), ("--network", "loopback")],
-        );
-        let prepared = prepare(&mut changed, "vm").unwrap();
-        assert!(changed.is_empty());
-        assert_eq!(prepared.home.layer_cache_gib, Some(4));
-        let manifest = stored(directory.path(), "vm");
-        assert_eq!(manifest["layerCacheGib"], 4);
-        assert_eq!(manifest["allowedPeer"], peer.as_str());
-        assert!(!directory.path().join(".berth/vm.json.tmp").exists());
-        drop(prepared);
-
-        // Without the flag, the stored limit stays.
-        let prepared = prepare(&mut options(directory.path(), &[]), "vm").unwrap();
-        assert_eq!(prepared.home.layer_cache_gib, Some(4));
-        drop(prepared);
-        // 0 keeps only the layers in use.
-        let prepared = prepare(
-            &mut options(directory.path(), &[("--layer-cache-gib", "0")]),
-            "vm",
+        // A later start with the flag (and a network override) keeps the
+        // limit, and only the limit.
+        let home = later(
+            &prepared,
+            Some(NetworkMode::Direct),
+            &[("--layer-cache-gib", "4")],
         )
         .unwrap();
-        assert_eq!(prepared.home.layer_cache_gib, Some(0));
-        drop(prepared);
+        assert_eq!(home.layer_cache_gib, Some(4));
+        assert_eq!(home.network, NetworkMode::Direct);
+        let manifest = stored(directory.path(), "vm");
+        assert_eq!(manifest["layerCacheGib"], 4);
+        assert_eq!(manifest["network"], "loopback", "an override is not kept");
+        assert_eq!(manifest["allowedPeer"], peer.as_str());
+        assert!(!directory.path().join(".berth/vm.json.tmp").exists());
+
+        // Without the flag, the stored limit stays.
+        assert_eq!(
+            later(&prepared, None, &[]).unwrap().layer_cache_gib,
+            Some(4)
+        );
+        // 0 keeps only the layers in use.
+        let zero = later(&prepared, None, &[("--layer-cache-gib", "0")]).unwrap();
+        assert_eq!(zero.layer_cache_gib, Some(0));
         for bad in ["-1", "16GiB", "1048577"] {
-            let error = prepare(
-                &mut options(directory.path(), &[("--layer-cache-gib", bad)]),
-                "vm",
-            )
-            .err()
-            .unwrap();
+            let error = later(&prepared, None, &[("--layer-cache-gib", bad)])
+                .err()
+                .unwrap();
             assert!(error.to_string().contains("--layer-cache-gib"), "{error}");
         }
         assert_eq!(stored(directory.path(), "vm")["layerCacheGib"], 0);
@@ -764,14 +813,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let peer = SecretKey::generate().public().to_string();
         let first = [("--allow-peer", peer.as_str()), ("--node-id", "node-test")];
-        drop(prepare(&mut options(directory.path(), &first), "vm").unwrap());
+        let prepared = prepare(&mut options(directory.path(), &first), "vm").unwrap();
         let path = directory.path().join(".berth/vm.json");
         let mut manifest = stored(directory.path(), "vm");
         manifest.as_object_mut().unwrap().remove("layerCacheGib");
         fs::write(&path, manifest.to_string()).unwrap();
-        let prepared = prepare(&mut options(directory.path(), &[]), "vm").unwrap();
-        assert_eq!(prepared.home.layer_cache_gib, None, "the default, 16 GiB");
-        drop(prepared);
+        let home = later(&prepared, None, &[]).unwrap();
+        assert_eq!(home.layer_cache_gib, None, "the default, 16 GiB");
+        assert!(
+            stored(directory.path(), "vm")
+                .get("layerCacheGib")
+                .is_none()
+        );
 
         let host = tempfile::tempdir().unwrap();
         let mut flagged = options(
