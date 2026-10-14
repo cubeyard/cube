@@ -536,6 +536,20 @@ try {
       assert.match(facts.output, new RegExp(`^cube-vm-test\n${PH}\n1\n`), "the boot documents and the runner's CA reached the machine");
       note("Workspace contract (leases, files, commands, services, hooks) over RunnerGuestTransport: ok; hostname, placeholder and runner CA from machine_setup");
 
+      // B-9: what the guest writes to its console reaches the diagnosis
+      // redacted and bounded: 300 kB of filler, then its placeholder, a
+      // token-like value, a password and a key block.
+      const fakeToken = `ghp_${"b9".repeat(12)}`;
+      const plant = `{ head -c 300000 /dev/zero | tr '\\0' x; printf '\\nb9-plant %s %s password=hunter2b9\\n' '${PH}' '${fakeToken}'; `
+        + "printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\\nb3BlbnNzaC1rZXktdjEAAAABbm9uZQ\\n-----END OPENSSH PRIVATE KEY-----\\nb9-end\\n'; } > /dev/console";
+      await shell(workspace, "b9-plant", `echo ${Buffer.from(plant).toString("base64")} | base64 -d | sudo sh`, 120000);
+      const planted = (await diagnose(session, ref, epoch)).doc;
+      const consoleText: string = planted.console.text;
+      assert.ok(planted.console.omittedBytes > 300000 - 32 * 1024 && consoleText.length <= 4 * 32 * 1024 + 64, `the console's tail is bounded: ${planted.console.bytes} bytes, ${planted.console.omittedBytes} left out, ${consoleText.length} shown`);
+      assert.match(consoleText, /b9-plant cube_ph_github_\[redacted\] ghp_\[redacted\] password=\[redacted\]\n\[redacted private key\]\nb9-end\n/, "the planted secrets are redacted");
+      for (const secret of [PH, fakeToken, "hunter2b9", "b3BlbnNzaC1rZXktdjE"]) assert.ok(!consoleText.includes(secret), `${secret} in the diagnosis`);
+      note(`B-9 console: ${planted.console.bytes} bytes, ${planted.console.omittedBytes} left out; placeholder, token, password and key block redacted`);
+
       // The agent starts again: a new session, the setup again, ready again.
       // The main agent is the cube-agent in the root cgroup (its wrappers have
       // cgroups of their own); /proc and bash's kill only: keel needs no procps.

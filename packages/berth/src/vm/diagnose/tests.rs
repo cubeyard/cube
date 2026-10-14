@@ -1050,3 +1050,28 @@ async fn a_machine_with_large_logs_stays_within_the_bound() {
     );
     assert_eq!(document["egress"]["refusals"]["total"], 100);
 }
+
+/// What runner-vm-test.ts has the guest write to its console (B-9), as
+/// the serial console stores it (`\r\n`): its expected text here.
+#[test]
+fn the_native_gates_planted_console_is_redacted_as_it_expects() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("console.log");
+    let fake = format!("ghp_{}", "b9".repeat(12));
+    let mut planted = vec![b'x'; 300_000];
+    planted.extend(
+        format!(
+            "\r\nb9-plant {PH} {fake} password=hunter2b9\r\n-----BEGIN OPENSSH PRIVATE KEY-----\r\nb3BlbnNzaC1rZXktdjEAAAABbm9uZQ\r\n-----END OPENSSH PRIVATE KEY-----\r\nb9-end\r\n"
+        )
+        .bytes(),
+    );
+    std::fs::write(&log, &planted).unwrap();
+    let tail = log_tail(&log, CONSOLE_TAIL);
+    let text = tail["text"].as_str().unwrap();
+    assert!(
+        text.ends_with("\nb9-plant cube_ph_github_[redacted] ghp_[redacted] password=[redacted]\n[redacted private key]\nb9-end\n"),
+        "{}",
+        &text[text.len() - 200..]
+    );
+    assert_eq!(tail["omittedBytes"], planted.len() as u64 - CONSOLE_TAIL);
+}
