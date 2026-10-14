@@ -736,3 +736,49 @@ fn only_the_agents_done_goes_on_to_keep_the_disk() {
             .completion_unknown
     );
 }
+
+#[tokio::test]
+async fn the_runners_shutdown_does_not_wait_for_a_publication() {
+    let lab = Lab::new();
+    let image = pull(lab.path(), 1, &[1]);
+    let runner = lab.runner(image, 16 << 30, plenty).await;
+    create(&runner, BUILD, base(), true).await.unwrap();
+    // The build machine runs, and its agent never answers.
+    let (guest, mut frames) = channel::Guest::connected("s1");
+    {
+        let mut state = runner.state.lock().unwrap();
+        let entry = state.machines.get_mut(BUILD).unwrap();
+        entry.record.phase = Phase::Running;
+        entry.guest = Some(guest);
+    }
+    let publishing = {
+        let runner = Arc::clone(&runner);
+        tokio::spawn(async move {
+            let _op = runner.ops.lock().await;
+            runner
+                .publish(proto::TemplatePublish {
+                    from: Some(reference(BUILD)),
+                    fence: fence(1),
+                    key: "key-1".into(),
+                    meta: String::new(),
+                })
+                .await
+        })
+    };
+    let sent = frames.recv().await.unwrap();
+    assert!(matches!(
+        sent.t,
+        Some(proto::daemon_frame::T::Req(proto::DaemonRequest {
+            op: Some(Op::TemplatePublish(_))
+        }))
+    ));
+    tokio::time::timeout(Duration::from_secs(10), runner.shutdown())
+        .await
+        .expect("the shutdown waits for no publication");
+    let stopped = publishing.await.unwrap().unwrap_err();
+    assert!(
+        stopped.completion_unknown && stopped.reason == "runner_stopping",
+        "{stopped:?}"
+    );
+    assert!(runner.list_templates().items.is_empty());
+}

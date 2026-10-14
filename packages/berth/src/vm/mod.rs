@@ -243,8 +243,12 @@ pub struct VmRunner {
     started_at: Timestamp,
     state: Mutex<State>,
     events: broadcast::Sender<proto::WatchEvent>,
-    /// One mutation at a time (create, start, stop, delete, discard).
+    /// One mutation at a time (create, start, stop, delete, discard,
+    /// template publish and delete).
     ops: tokio::sync::Mutex<()>,
+    /// The runner stops: a publication stops waiting for the agent, so the
+    /// shutdown does not wait for it behind `ops`.
+    stopping: watch::Sender<bool>,
 }
 
 type Answer<T> = std::result::Result<T, proto::Error>;
@@ -441,6 +445,7 @@ impl VmRunner {
             }),
             events,
             ops: tokio::sync::Mutex::new(()),
+            stopping: watch::channel(false).0,
         });
         {
             let mut state = runner.state.lock().unwrap();
@@ -1228,15 +1233,25 @@ impl VmRunner {
             "the agent is asked to publish its layer",
         );
         let (_, answer) = guest.request(Op::TemplatePublish(proto::Empty {}))?;
-        publish_outcome(tokio::time::timeout(PUBLISH_WAIT, answer).await.ok()).inspect_err(
-            |error| {
-                event(
-                    &dir,
-                    "template_publish not done",
-                    &format!("{} {}", error.reason, error.message),
-                )
-            },
-        )?;
+        let mut stopping = self.stopping.subscribe();
+        let answer = tokio::select! {
+            answer = tokio::time::timeout(PUBLISH_WAIT, answer) => answer.ok(),
+            // The runner stops; it stops the machine as it stops every one.
+            _ = stopping.wait_for(|stopping| *stopping) => {
+                event(&dir, "template_publish not done", "the runner stops");
+                return Err(proto::Error {
+                    completion_unknown: true,
+                    ..refuse(Code::Unavailable, "runner_stopping", "the runner stops")
+                });
+            }
+        };
+        publish_outcome(answer).inspect_err(|error| {
+            event(
+                &dir,
+                "template_publish not done",
+                &format!("{} {}", error.reason, error.message),
+            )
+        })?;
         // The layer is on vdd; the machine is used up (its agent refuses
         // everything now), so its QEMU is quit without a shutdown.
         {
@@ -2036,6 +2051,7 @@ impl VmRunner {
     /// The runner stops: every machine's QEMU is quit and the machine is
     /// marked interrupted (its disk is kept; cubed starts it again).
     pub async fn shutdown(self: &Arc<Self>) {
+        self.stopping.send_replace(true);
         let _op = self.ops.lock().await;
         let live: Vec<String> = {
             let mut state = self.state.lock().unwrap();

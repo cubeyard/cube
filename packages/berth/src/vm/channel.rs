@@ -132,6 +132,14 @@ impl Guest {
         self.inner.lock().unwrap().seen.clone()
     }
 
+    /// A channel whose agent said `hello` in `session` (tests).
+    #[cfg(test)]
+    pub fn connected(session: &str) -> (Arc<Self>, mpsc::UnboundedReceiver<proto::DaemonFrame>) {
+        let (guest, frames) = Self::with_seen(HashSet::new());
+        guest.inner.lock().unwrap().session = Some(session.into());
+        (guest, frames)
+    }
+
     /// The current session, if the agent said `hello`.
     #[cfg(test)]
     pub fn session(&self) -> Option<String> {
