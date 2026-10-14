@@ -446,7 +446,7 @@ impl Store {
                     layer.file
                 )));
             }
-            if self.cache.get(&diff_id)?.is_none() {
+            if false && self.cache.get(&diff_id)?.is_none() { // CONTROL C2
                 return Ok(Err(format!(
                     "layer {diff_id} of {reference} is not in the cache"
                 )));
