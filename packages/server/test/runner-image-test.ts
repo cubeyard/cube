@@ -282,8 +282,8 @@ try {
     const there = fs.mkdtempSync(path.join(small, "cim-small-"));
     try {
       const run = spawnSync(binary, ["vm", "--dir", there, "--qemu", qemu!, "--qemu-img", qemuImg!, "--keel", keel!, "--mkfs-erofs", mkfs!,
-        "--accel", "tcg", "--image", imageB!, "--allow-peer", control.peerId, "--node-id", node], { encoding: "utf8", timeout: 300000 });
-      assert.notEqual(run.status, 0, run.stderr);
+        "--accel", "tcg", "--image", imageB!, "--allow-peer", control.peerId, "--node-id", node], { encoding: "utf8", timeout: 120000, killSignal: "SIGKILL" });
+      assert.ok(run.status !== null && run.status !== 0, `not refused within 120 s: ${run.stderr}`);
       const said = run.stderr.match(/has (\d+) bytes free, and a blob needs 3 × its size \+ 2 GiB = (\d+)/);
       assert.ok(said, `not refused for space (is ${small} small enough?): ${run.stderr}`);
       assert.ok(Number(said[1]) < Number(said[2]));
