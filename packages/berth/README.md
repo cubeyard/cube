@@ -224,7 +224,9 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   made safe for a terminal, and keys, tokens, `password=`-style values and
   `cube_ph_` placeholders are redacted (node-transport's cleaning, copied);
   when the document would be larger than 256 KiB, the console goes first,
-  then the events, and `bounds.dropped` says what went.
+  then the events, and `bounds.dropped` says what went. A thread's
+  commands run in a root whose `/dev` has no console, so the console's
+  tail is the kernel's, `cube-init`'s and `cube-agent`'s output.
 - Iroh's path (masterplan U15 (a)): the diagnosis lists each connection
   from cubed with its open paths (`direct` with the address, or `relay`
   with its URL), the one in use and each path's RTT (QUIC's estimate);

@@ -41,7 +41,10 @@
  * fsck.erofs to check the layer with. And (B-9) `machine_diagnose`: one
  * bounded, redacted JSON document about a running, a paused and a stopped
  * machine (QEMU's path, version and argv as the process has them,
- * `query-status`, the console's and events' tails, the agent's GuestInfo,
+ * `query-status`, the tails of the serial console (the kernel's, cube-init's
+ * and the agent's output; a thread's commands have no console device, so
+ * the test makes a /dev/console node in the workload's /dev for its plant)
+ * and of the events, the agent's GuestInfo,
  * egress, and Iroh's path in use to cubed with its RTT, also as
  * `Network.rtt_to_cubed` in hello), fenced, changing nothing, with neither
  * the token nor a placeholder in it.
@@ -510,6 +513,9 @@ try {
       (error: unknown) => error instanceof RunnerError && error.code === "NOT_FOUND");
     assert.equal((await diagnose(session, ref, epoch + 1000)).doc.machine.fenceEpoch, epoch, "a newer fence is not taken");
     assert.equal(record(ref.id).fenceEpoch, epoch);
+    const logged = { ...doc, qemu: { ...doc.qemu, log: { ...doc.qemu.log, text: `<${doc.qemu.log.text?.length} characters>` } },
+      console: { ...doc.console, text: `<${doc.console.text.length} characters>` }, events: { ...doc.events, lines: `<${doc.events.lines.length} lines>` } };
+    note(`B-9 document: ${JSON.stringify(logged)}`);
     note(`B-9 running: diagnosis ${Buffer.byteLength(JSON.stringify(doc))} bytes; QEMU ${doc.qemu.version} ${doc.qemu.path} pid ${doc.qemu.pid}, argv as the system has it; query-status ${doc.qmp.status.status} in ${doc.qmp.ms} ms; console ${doc.console.bytes} bytes; ${doc.events.lines.length} events; path in use ${used.map((p: any) => `${p.kind} ${p.address} ${p.rttMs.toFixed(3)} ms`).join(", ")}; rtt_to_cubed in hello ${helloRtt.seconds}s ${helloRtt.nanos}ns`);
   }
   // Templates answer (B-8): none yet; an ordinary machine never publishes.
@@ -536,19 +542,26 @@ try {
       assert.match(facts.output, new RegExp(`^cube-vm-test\n${PH}\n1\n`), "the boot documents and the runner's CA reached the machine");
       note("Workspace contract (leases, files, commands, services, hooks) over RunnerGuestTransport: ok; hostname, placeholder and runner CA from machine_setup");
 
-      // B-9: what the guest writes to its console reaches the diagnosis
+      // B-9: what reaches the machine's serial console reaches the diagnosis
       // redacted and bounded: 300 kB of filler, then its placeholder, a
-      // token-like value, a password and a key block.
+      // token-like value, a password and a key block. A thread's commands
+      // run in a root whose /dev has no console, so the plant makes the
+      // kernel console's node (5,1) there first, for this machine only.
       const fakeToken = `ghp_${"b9".repeat(12)}`;
-      const plant = `{ head -c 300000 /dev/zero | tr '\\0' x; printf '\\nb9-plant %s %s password=hunter2b9\\n' '${PH}' '${fakeToken}'; `
-        + "printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\\nb3BlbnNzaC1rZXktdjEAAAABbm9uZQ\\n-----END OPENSSH PRIVATE KEY-----\\nb9-end\\n'; } > /dev/console";
-      await shell(workspace, "b9-plant", `echo ${Buffer.from(plant).toString("base64")} | base64 -d | sudo sh`, 120000);
+      const plant = "test -c /dev/console || mknod -m 0600 /dev/console c 5 1\n"
+        + `{ head -c 300000 /dev/zero | tr '\\0' x; printf '\\nb9-plant %s %s password=hunter2b9\\n' '${PH}' '${fakeToken}'; `
+        + "printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\\nb3BlbnNzaC1rZXktdjEAAAABbm9uZQ\\n-----END OPENSSH PRIVATE KEY-----\\nb9-end\\n'; } > /dev/console\n"
+        + "ls -l /dev/console\ncat /proc/consoles\n";
+      const plantStart = Date.now();
+      const plantRun = await shell(workspace, "b9-plant", `echo ${Buffer.from(plant).toString("base64")} | base64 -d | sudo sh -e`, 120000);
+      const plantMs = Date.now() - plantStart;
+      assert.equal(plantRun.exitCode, 0, `the plant: ${plantRun.output}`);
       const planted = (await diagnose(session, ref, epoch)).doc;
       const consoleText: string = planted.console.text;
       assert.ok(planted.console.omittedBytes > 300000 - 32 * 1024 && consoleText.length <= 4 * 32 * 1024 + 64, `the console's tail is bounded: ${planted.console.bytes} bytes, ${planted.console.omittedBytes} left out, ${consoleText.length} shown`);
       assert.match(consoleText, /b9-plant cube_ph_github_\[redacted\] ghp_\[redacted\] password=\[redacted\]\n\[redacted private key\]\nb9-end\n/, "the planted secrets are redacted");
       for (const secret of [PH, fakeToken, "hunter2b9", "b3BlbnNzaC1rZXktdjE"]) assert.ok(!consoleText.includes(secret), `${secret} in the diagnosis`);
-      note(`B-9 console: ${planted.console.bytes} bytes, ${planted.console.omittedBytes} left out; placeholder, token, password and key block redacted`);
+      note(`B-9 console: ${planted.console.bytes} bytes, ${planted.console.omittedBytes} left out; placeholder, token, password and key block redacted; plant ${plantMs} ms: ${plantRun.output.trim().split("\n").join("; ")}`);
 
       // The agent starts again: a new session, the setup again, ready again.
       // The main agent is the cube-agent in the root cgroup (its wrappers have
