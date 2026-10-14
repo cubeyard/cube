@@ -12,6 +12,13 @@
 //! a guest cannot reach cubed through the runner also after it left. Over a
 //! relay-only connection the runner sees only the relay, so this is a
 //! second layer behind `deny_hosts` and cubed being private.
+//!
+//! The path in use (masterplan U15 (a), B-9): which paths each connection
+//! from cubed has now (direct or relay, the address, the one Iroh sends
+//! on) and their RTT, for a machine's diagnosis, and the RTT of the newest
+//! connection's path in use as `Network.rtt_to_cubed` in hello and watch.
+//! The configured `--network` mode says what the runner allows, not which
+//! path is used.
 use std::{
     collections::{BTreeMap, HashSet},
     net::IpAddr,
@@ -142,10 +149,98 @@ impl Presence {
             .cloned()
     }
 
+    /// What Iroh says now of every live connection from cubed, newest
+    /// first (masterplan U15 (a)): each open path, direct (an IP address) or
+    /// relay (its URL), whether it is the one in use, and its RTT. Read
+    /// only; at most [`MAX_PATHS`] paths per connection.
+    pub fn paths(&self) -> Vec<ConnectionPaths> {
+        let live: Vec<Connection> = self
+            .live
+            .lock()
+            .unwrap()
+            .values()
+            .rev()
+            .flatten()
+            .cloned()
+            .collect();
+        live.iter()
+            .map(|connection| {
+                let list = connection.paths();
+                ConnectionPaths {
+                    closed: connection.close_reason().is_some(),
+                    open: list.len(),
+                    paths: list
+                        .iter()
+                        .take(MAX_PATHS)
+                        .map(|path| path_facts(&path))
+                        .collect(),
+                }
+            })
+            .collect()
+    }
+
+    /// The RTT of the path in use of the newest live connection from cubed
+    /// (`Network.rtt_to_cubed`); None while cubed is not connected or no
+    /// path is in use.
+    pub fn rtt(&self) -> Option<Duration> {
+        let connection = self.connection()?;
+        let paths = connection.paths();
+        paths
+            .iter()
+            .find(|path| path.is_selected())
+            .map(|path| path.rtt())
+    }
+
     /// Adds an address as if a path to cubed had it (tests).
     #[cfg(test)]
     pub fn note_address(&self, ip: IpAddr) {
         self.seen.lock().unwrap().push(ip);
+    }
+}
+
+/// Paths shown per connection, at most.
+pub const MAX_PATHS: usize = 8;
+
+/// One path of a connection from cubed, as Iroh has it now.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PathFacts {
+    /// `direct` (an IP path), `relay` or `custom`.
+    pub kind: &'static str,
+    /// The remote address: `ip:port`, or the relay's URL.
+    pub address: String,
+    /// The path Iroh sends on now.
+    pub selected: bool,
+    /// QUIC's smoothed RTT estimate for the path (its initial guess until
+    /// the path carried acknowledged packets).
+    pub rtt: Duration,
+    pub sent_datagrams: u64,
+    pub received_datagrams: u64,
+}
+
+/// One live connection from cubed: its open paths now.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConnectionPaths {
+    /// Closed, but not yet let go by the runner.
+    pub closed: bool,
+    /// How many paths are open (more than [`MAX_PATHS`] are not shown).
+    pub open: usize,
+    pub paths: Vec<PathFacts>,
+}
+
+fn path_facts(path: &iroh::endpoint::Path<'_>) -> PathFacts {
+    let (kind, address) = match path.remote_addr() {
+        TransportAddr::Ip(address) => ("direct", address.to_string()),
+        TransportAddr::Relay(url) => ("relay", url.to_string()),
+        other => ("custom", format!("{other:?}")),
+    };
+    let stats = path.stats();
+    PathFacts {
+        kind,
+        address,
+        selected: path.is_selected(),
+        rtt: stats.rtt,
+        sent_datagrams: stats.udp_tx.datagrams,
+        received_datagrams: stats.udp_rx.datagrams,
     }
 }
 
@@ -257,6 +352,62 @@ mod tests {
             .expect("the lease ran out")
             .unwrap();
         assert!(presence.now().expired(lease));
+    }
+
+    /// A loopback connection as `berth vm` serves it: its one direct path,
+    /// in use, with an RTT, and that RTT as `rtt_to_cubed`; nothing once
+    /// cubed is gone.
+    #[tokio::test]
+    async fn the_path_in_use_and_its_rtt_are_read_from_iroh() {
+        use crate::{NetworkMode, bind};
+        use cube_runner_protocol::ALPN;
+        let runner = bind(iroh::SecretKey::generate(), NetworkMode::Loopback, None)
+            .await
+            .unwrap();
+        let cubed = bind(iroh::SecretKey::generate(), NetworkMode::Loopback, None)
+            .await
+            .unwrap();
+        let presence = Presence::new();
+        assert!(presence.paths().is_empty());
+        assert_eq!(presence.rtt(), None, "no cubed, no RTT");
+        let accepting = {
+            let runner = runner.clone();
+            tokio::spawn(async move { runner.accept().await.unwrap().await.unwrap() })
+        };
+        let to_runner = cubed.connect(runner.addr(), ALPN).await.unwrap();
+        let connection = accepting.await.unwrap();
+        let attached = presence.attach(Some(connection.clone()));
+        // One round trip so the path has an RTT sample of its own.
+        let (mut send, _recv) = to_runner.open_bi().await.unwrap();
+        send.write_all(b"x").await.unwrap();
+        let (_, mut recv) = connection.accept_bi().await.unwrap();
+        let mut byte = [0u8; 1];
+        recv.read_exact(&mut byte).await.unwrap();
+        let connections = presence.paths();
+        assert_eq!(connections.len(), 1, "{connections:?}");
+        let selected: Vec<&PathFacts> = connections[0]
+            .paths
+            .iter()
+            .filter(|path| path.selected)
+            .collect();
+        assert_eq!(selected.len(), 1, "{connections:?}");
+        assert_eq!(selected[0].kind, "direct");
+        assert!(
+            selected[0].address.starts_with("127.0.0.1:"),
+            "{}",
+            selected[0].address
+        );
+        assert!(selected[0].received_datagrams > 0);
+        let rtt = presence.rtt().expect("an RTT while cubed is connected");
+        assert!(
+            rtt > Duration::ZERO && rtt < Duration::from_secs(5),
+            "{rtt:?}"
+        );
+        assert!(!connections[0].closed);
+        drop(attached);
+        assert!(presence.paths().is_empty());
+        assert_eq!(presence.rtt(), None);
+        to_runner.close(0u32.into(), b"bye");
     }
 
     #[tokio::test(start_paused = true)]

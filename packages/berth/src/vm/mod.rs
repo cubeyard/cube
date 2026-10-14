@@ -55,7 +55,15 @@
 //! layers of their image in the cache, and go only by `template_delete`,
 //! once no machine is made from them.
 //!
-//! Not here yet: diagnosis (B-9) and snapshots (S-7a).
+//! Diagnosis (B-9, diagnose.rs): `machine_diagnose` answers one bounded,
+//! redacted JSON document of read-only evidence about a machine (its
+//! record, QEMU's path, version and argv, `query-status`, the tails of its
+//! console and events, what its agent said, its egress, the runner, and
+//! Iroh's paths to cubed with their RTT). It takes no mutation's lock and
+//! changes nothing. The RTT of the path in use is `Network.rtt_to_cubed`
+//! in hello and watch (masterplan U15 (a)).
+//!
+//! Not here yet: snapshots (S-7a).
 //!
 //! `stop` (also `delete` and the runner's own shutdown) asks the agent to
 //! shut down (`DaemonRequest.shutdown`: the workload gets SIGTERM, then
@@ -66,6 +74,7 @@
 //! next boot), shown as the `Stopped` condition until the next start.
 mod ca;
 mod channel;
+mod diagnose;
 mod egress;
 mod policy;
 mod presence;
@@ -102,10 +111,10 @@ use record::{Boot, MachineImage, MachineRecord, Phase, Size, Stopped};
 use crate::{
     host::{getrandom, host_name, valid_id, valid_op, valid_owner},
     image,
-    serve::{self, Service, unimplemented},
+    serve::{self, Service},
 };
 
-const CAPABILITIES: [&str; 14] = [
+const CAPABILITIES: [&str; 15] = [
     "runner.get",
     "machine.create",
     "machine.start",
@@ -114,6 +123,7 @@ const CAPABILITIES: [&str; 14] = [
     "machine.discard",
     "machine.get",
     "machine.list",
+    "machine.diagnose",
     "watch",
     "guest",
     "dial",
@@ -255,6 +265,14 @@ type Answer<T> = std::result::Result<T, proto::Error>;
 
 fn internal(error: impl std::fmt::Display) -> proto::Error {
     refuse(Code::Internal, "io", &error.to_string())
+}
+
+/// A `google.protobuf.Duration`.
+fn duration(duration: Duration) -> pbjson_types::Duration {
+    pbjson_types::Duration {
+        seconds: duration.as_secs() as i64,
+        nanos: duration.subsec_nanos() as i32,
+    }
 }
 
 fn random_hex() -> String {
@@ -612,9 +630,12 @@ impl VmRunner {
             lifecycle: proto::runner::Lifecycle::Ready as i32,
             network: Some(proto::Network {
                 mode: self.options.network.clone(),
+                // The path in use to cubed now (U15 (a)); unset while cubed
+                // is not connected. Sent with every runner event, never on
+                // its own.
+                rtt_to_cubed: self.egress.presence.rtt().map(duration),
                 // The runner lets guest traffic out itself (B-4).
                 egress: true,
-                ..Default::default()
             }),
             templates: state
                 .templates
@@ -1953,6 +1974,7 @@ impl VmRunner {
         }
         state.version += 1;
         state.deleted.insert(id.to_owned(), entry.record.clone());
+        self.egress.reports.forget(id);
         let machine = Self::machine(&entry.record, None, state.version, Timestamp::now());
         self.tell(watch_event::Type::Delete, machine.clone(), state);
         // Its template may have lost its last user.
@@ -2025,9 +2047,9 @@ impl VmRunner {
                 let _op = self.ops.lock().await;
                 self.discard(request).await.map(R::Machine)
             }
-            Some(Verb::MachineDiagnose(_)) => {
-                Err(unimplemented::<Self>("diagnosis yet (masterplan B-9)"))
-            }
+            // Read only: no `ops` lock, so it neither waits for a mutation
+            // nor holds one up (diagnose.rs).
+            Some(Verb::MachineDiagnose(request)) => self.diagnose(request).await.map(R::Diagnosis),
             Some(Verb::TemplatePublish(request)) => {
                 let _op = self.ops.lock().await;
                 self.publish(request).await.map(R::Template)
