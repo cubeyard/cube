@@ -30,7 +30,15 @@
  * in the guest (portal-dial.ts): HTTP, 1 MiB each way, a WebSocket, FIN
  * from each side; ports 80 (with a listener) and 22 refused, an old fence
  * refused, an open connection ended when cubed goes and when the machine
- * stops, and a stopped machine refused.
+ * stops, and a stopped machine refused. Then (B-8, V10) templates as layers:
+ * a build machine's blank, sparse vdd, `template_publish` (READY, the layer
+ * cut to size and read-only, the build machine deleted, asked again the
+ * same), a machine from the template with the build's files but none of the
+ * runner's CA or cube's blocks from the build, a write kept over a stop, the
+ * template across a restart, refused on another image
+ * (CUBE_TEST_BERTH_IMAGE_B, template_image_changed), and template_delete
+ * (REMOVING, gone with its last machine). CUBE_TEST_BERTH_FSCK names an
+ * fsck.erofs to check the layer with.
  *
  *   node packages/server/test/runner-vm-test.ts target/debug/berth
  *
@@ -61,12 +69,12 @@ import fs from "node:fs";
 import os from "node:os";
 import net from "node:net";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { fromJsonString } from "@bufbuild/protobuf";
 import { Endpoint, EndpointAddr, EndpointId, SecretKey } from "@number0/iroh/index.js";
-import { EgressPolicy_Default, EgressReportSchema, MachineStatus_Phase, OpenSchema, Runner_Kind, type EgressReport, type Machine } from "../src/gen/runner_pb.js";
+import { EgressPolicy_Default, EgressReportSchema, MachineStatus_Phase, OpenSchema, Runner_Kind, Template_State, type EgressReport, type Machine, type Template } from "../src/gen/runner_pb.js";
 import { RunnerError, RunnerSession, loadSessionConfig } from "../src/runner-session.ts";
 import { EgressPolicy, newPlaceholder, serveEgress } from "../src/egress-policy.ts";
 import { GatewaySupervisor } from "../src/gateway.ts";
@@ -145,9 +153,9 @@ if (missing.length) {
 
 // ---------------------------------------------------------------- the runner
 
-const vmArgs = (extra: string[] = []) => ["vm", "--dir", directory, "--qemu", qemu, "--qemu-img", qemuImg, "--keel", keel, "--mkfs-erofs", mkfs, "--accel", accel, "--image", image, ...extra];
-async function start(args: string[]): Promise<{ child: ChildProcess; peer: string; address: string; banner: string }> {
-  const child = spawn(binary, vmArgs(args),
+const vmArgs = (extra: string[] = [], served = image) => ["vm", "--dir", directory, "--qemu", qemu, "--qemu-img", qemuImg, "--keel", keel, "--mkfs-erofs", mkfs, "--accel", accel, "--image", served, ...extra];
+async function start(args: string[], served = image): Promise<{ child: ChildProcess; peer: string; address: string; banner: string }> {
+  const child = spawn(binary, vmArgs(args, served),
     // Its own process group, as in a terminal: a Ctrl-C reaches the whole group.
     { stdio: ["ignore", "ignore", "pipe"], detached: true });
   let banner = "";
@@ -329,7 +337,8 @@ try {
   assert.match(hello.runner?.platform?.baseImageSha256 ?? "", /^[0-9a-f]{64}$/);
   assert.deepEqual(hello.runner?.labels, { site: "test" });
   assert.ok(hello.capabilities.includes("machine.discard") && hello.capabilities.includes("watch") && hello.capabilities.includes("guest")
-    && hello.capabilities.includes("dial"));
+    && hello.capabilities.includes("dial") && ["template.publish", "template.list", "template.delete"].every(c => hello.capabilities.includes(c)));
+  assert.deepEqual(hello.runner?.templates, []);
   assert.equal(hello.runner?.caPem, caPem, "Runner.ca_pem is the runner's CA certificate");
   assert.doesNotMatch(hello.runner?.caPem ?? "", /PRIVATE KEY/);
 
@@ -403,10 +412,18 @@ try {
   assert.equal(agentHello.header.ready, guest.ready);
   await assert.rejects(session.guest(ref, () => epoch - 1).call("hello", {}), refusedBy("FAILED_PRECONDITION", "stale_epoch"));
   await assert.rejects(session.guest(ref, () => epoch).call("Bad" as never, {}), refusedBy("INVALID_ARGUMENT", "op"));
-  const unsupported: Array<Parameters<RunnerSession["call"]>[0]> = [{ case: "templateList", value: {} }, { case: "machineDiagnose", value: { ref } }];
+  const unsupported: Array<Parameters<RunnerSession["call"]>[0]> = [{ case: "machineDiagnose", value: { ref } }];
   for (const verb of unsupported) {
     await assert.rejects(session.call(verb), (error: unknown) => error instanceof RunnerError && error.code === "UNIMPLEMENTED" && error.reason === "vm_runner", verb.case);
   }
+  // Templates answer (B-8): none yet; an ordinary machine never publishes.
+  const noTemplates = await session.call({ case: "templateList", value: {} });
+  assert.ok(noTemplates.case === "templates" && noTemplates.value.items.length === 0, show(noTemplates));
+  await assert.rejects(session.call({ case: "templatePublish", value: { from: ref, fence: { epoch: BigInt(epoch) }, key: "k", meta: "" } }),
+    (error: unknown) => error instanceof RunnerError && error.code === "FAILED_PRECONDITION" && error.reason === "not_build");
+  await assert.rejects(session.call({ case: "machineCreate", value: { ref: { owner: "thread-1", id: randomBytes(8).toString("hex") }, fence: { epoch: BigInt(epoch) },
+    spec: { source: { case: "templateId", value: "0000000000000000" } } } }),
+  (error: unknown) => error instanceof RunnerError && error.code === "NOT_FOUND" && error.reason === "template");
 
   if (guest.ready) {
     // The Workspace contract over cubed's own RunnerGuestTransport (B-2's done criterion).
@@ -953,6 +970,163 @@ try {
     v9 = undefined;
     note("V9: the machine stopped: an open portal connection ended, and a dial to the stopped machine is refused (UNAVAILABLE/not_running)");
   }
+
+  // ------------------------------------------------ V10 (masterplan B-8)
+  // Templates as layers: a build machine (MachineSpec.build) gets a blank
+  // template disk (vdd), its agent publishes its upper/ there, berth keeps it
+  // as templates/<id>.erofs and deletes the build machine; a machine made
+  // from it sees the build's files without the runner's CA or cube's
+  // blocks, keeps what it writes, and the template survives a restart, is
+  // refused on another image (template_image_changed) and goes with its
+  // last machine after template_delete. The first machine is stopped here.
+  if (guest.ready) {
+    const leases10 = fs.mkdtempSync(path.join(os.tmpdir(), "runner-vm-b8-"));
+    const store10 = new LeaseStore(leases10);
+    try {
+      const fence10 = { epoch: BigInt(epoch) };
+      const workspace10 = (machine: { owner: string; id: string }) => new VmWorkspace({ guest: session.guest(machine, () => epoch), leases: store10, owner: "pi",
+        binding: `runner-vm-test-b8-${machine.id}:${process.pid}`, retryMs: 2000 });
+      const sh10 = async (workspace: Workspace, key: string, command: string, timeoutMs = 60000) => {
+        const done = await shell(workspace, `${key}-${randomBytes(3).toString("hex")}`, command, timeoutMs);
+        assert.equal(done.exitCode, 0, `${key}: ${done.output}`);
+        return done.output;
+      };
+      // The runner CA's first base64 line: what any PEM copy of it holds.
+      const caLine = caPem.split("\n")[1]!;
+      assert.match(caLine, /^[A-Za-z0-9+/]{64}$/);
+      // An ordinary machine has no template disk and never had one.
+      assert.ok(!fs.existsSync(path.join(machineDir, "template.raw")));
+      assert.ok(!(JSON.parse(fs.readFileSync(path.join(machineDir, "argv.json"), "utf8")) as { args: string[] }).args.some(a => a.includes("template.raw")));
+
+      // A build machine: its template disk is vdd, blank, sparse, writable.
+      const buildRef = { owner: "thread-1", id: randomBytes(8).toString("hex") };
+      const built = await session.machine({ case: "machineCreate", value: { ref: buildRef, fence: fence10,
+        spec: { source: { case: "base", value: true }, size: { vcpus: 2, memoryMib: 1024, diskGib: 2 }, build: true } } });
+      assert.equal(built.spec?.build, true);
+      const vdd = fs.statSync(path.join(directory, buildRef.id, "template.raw"));
+      assert.ok(vdd.size === 2 * 2 ** 30 && vdd.blocks * 512 < 2 ** 20, `a sparse 2 GiB vdd: ${vdd.size} bytes, ${vdd.blocks} blocks`);
+      await session.machine({ case: "machineStart", value: { ref: buildRef, fence: fence10, boot: { documents, mac: "" } } });
+      const buildBlocks = await qmp(buildRef.id, "query-block") as Array<{ inserted?: { ro: boolean; file: string } }>;
+      const buildRo = Object.fromEntries(buildBlocks.filter(b => b.inserted).map(b => [path.basename(b.inserted!.file), b.inserted!.ro]));
+      assert.deepEqual(buildRo, { "base.erofs": true, "layers.vmdk": true, "rw.qcow2": false, "template.raw": false }, "vdd is the build machine's writable template disk");
+      await session.until(buildRef, machine => !!machine.status?.guest?.ready, 180000);
+      const builder = workspace10(buildRef);
+      const marker = randomBytes(8).toString("hex");
+      const setupOut = await sh10(builder, "v10-setup", `set -e; mkdir -p app; printf ${marker} > app/built.txt; cp /etc/ssl/certs/ca-certificates.crt app/bundle-copy.pem
+grep -c 'cube: begin' app/bundle-copy.pem; grep -cF '${caLine}' app/bundle-copy.pem
+sudo mkdir -p /opt/v10; echo setup-done | sudo tee /opt/v10/setup.txt >/dev/null`, 120000);
+      assert.equal(setupOut, "1\n1\n", "before the publication the build machine has the runner's CA and cube's block, in a copy too");
+
+      // template_publish: the agent cleans and writes the layer, berth keeps it.
+      const ask = { from: buildRef, fence: fence10, key: "v10-key", meta: "{\"setup\":\"v10\"}" };
+      const t10 = Date.now();
+      const published = await session.call({ case: "templatePublish", value: ask }, 600000);
+      const publishMs = Date.now() - t10;
+      assert.equal(published.case, "template");
+      const template = published.value as Template;
+      assert.deepEqual([template.id, template.state, template.key, template.meta, template.diskGib, template.users],
+        [buildRef.id, Template_State.READY, "v10-key", "{\"setup\":\"v10\"}", 2, 0], show(template));
+      const layer = path.join(directory, "templates", `${buildRef.id}.erofs`);
+      const layerStat = fs.statSync(layer);
+      assert.equal(BigInt(layerStat.size), template.bytes, "the layer file is cut to the superblock's size");
+      assert.equal(layerStat.mode & 0o777, 0o444);
+      const layerSha = createHash("sha256").update(fs.readFileSync(layer)).digest("hex");
+      assert.ok(!fs.existsSync(path.join(directory, buildRef.id)), "the build machine's directory is gone");
+      assert.equal((await session.machine({ case: "machineGet", value: { ref: buildRef } })).status?.phase, MachineStatus_Phase.DELETED);
+      const again10 = await session.call({ case: "templatePublish", value: ask }, 60000);
+      assert.equal(show(again10.value), show(template), "a publication asked again gets the same template");
+      await assert.rejects(session.call({ case: "templatePublish", value: { ...ask, key: "other" } }), (error: unknown) => error instanceof RunnerError && error.code === "ALREADY_EXISTS");
+      const listed = await session.call({ case: "templateList", value: {} });
+      assert.ok(listed.case === "templates" && listed.value.items.length === 1 && listed.value.items[0]!.state === Template_State.READY, show(listed));
+      const summaryDeadline = Date.now() + 10000;
+      while (!(await session.hello()).runner?.templates.some(t => t.id === buildRef.id && t.state === Template_State.READY)) {
+        assert.ok(Date.now() < summaryDeadline, "the runner's templates (watch) name the new template");
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+      if (env.CUBE_TEST_BERTH_FSCK) {
+        execFileSync(env.CUBE_TEST_BERTH_FSCK, [layer], { stdio: "pipe" });
+        note(`V10: fsck.erofs (${env.CUBE_TEST_BERTH_FSCK}) passed on the template layer`);
+      }
+      note(`V10: build machine ${buildRef.id} (vdd 2 GiB sparse, writable) published in ${publishMs} ms: template READY, ${template.bytes} bytes, 0444, sha256 ${layerSha}; the build machine DELETED; asked again: the same template; another key: ALREADY_EXISTS; in template_list and the runner's templates`);
+
+      // A machine made from it: the build's files, nothing of cube's from the build.
+      const userRef = { owner: "thread-1", id: randomBytes(8).toString("hex") };
+      const made = await session.machine({ case: "machineCreate", value: { ref: userRef, fence: fence10,
+        spec: { source: { case: "templateId", value: buildRef.id }, size: { vcpus: 2, memoryMib: 1024, diskGib: 4 } } } });
+      assert.deepEqual([made.spec?.source.case, made.spec?.source.value, made.spec?.build], ["templateId", buildRef.id, false]);
+      assert.ok(!fs.existsSync(path.join(directory, userRef.id, "template.raw")), "a machine from a template is no build machine");
+      const userExtents = fs.readFileSync(path.join(directory, userRef.id, "layers.vmdk"), "utf8").split("\n").filter(line => /\.erofs"/.test(line));
+      assert.equal(userExtents.length, machineImage.diffIds.length + 1);
+      assert.ok(userExtents.at(-1)!.includes(layer), "the template is the topmost partition, read where it is");
+      await session.machine({ case: "machineStart", value: { ref: userRef, fence: fence10, boot: { documents, mac: "" } } });
+      await session.until(userRef, machine => !!machine.status?.guest?.ready, 180000);
+      const user = workspace10(userRef);
+      const seen10 = await sh10(user, "v10-seen", `cat app/built.txt; echo; cat /opt/v10/setup.txt
+grep -c 'cube: begin' app/bundle-copy.pem || true; grep -cF '${caLine}' app/bundle-copy.pem || true
+grep -c 'cube: begin' /etc/ssl/certs/ca-certificates.crt; grep -cF '${caLine}' /etc/ssl/certs/ca-certificates.crt; grep -c '^agent:' /etc/passwd`);
+      assert.equal(seen10, `${marker}\nsetup-done\n0\n0\n1\n1\n1\n`,
+        "the build's files are there; its copy of the bundle lost the runner's CA and cube's block; the machine has its own CA block once and one agent account");
+      const token10 = randomBytes(8).toString("hex");
+      await sh10(user, "v10-write", `printf ${token10} > app/after.txt`);
+      const stopped10 = await stopVia(session, userRef, epoch);
+      assert.equal(condition(stopped10, "Stopped")?.reason, "controlled");
+      await session.machine({ case: "machineStart", value: { ref: userRef, fence: fence10, boot: { documents, mac: "" } } });
+      await session.until(userRef, machine => !!machine.status?.guest?.ready, 180000);
+      assert.equal(await sh10(user, "v10-read", "cat app/after.txt; echo; cat app/built.txt"), `${token10}\n${marker}`);
+      assert.equal(createHash("sha256").update(fs.readFileSync(layer)).digest("hex"), layerSha, "the template's layer never changes");
+      await stopVia(session, userRef, epoch);
+      note(`V10: machine ${userRef.id} from the template: the build's files there (${marker}, /opt/v10), its bundle copy without the runner CA or a marker line, one CA block and one agent account of its own; a write kept over a controlled stop; the layer's sha256 unchanged`);
+
+      // A restart keeps the template; another image refuses it (B-8 D3).
+      await stop(runner.child);
+      runner = await start(["--listen", "127.0.0.1:0"]);
+      assert.match(runner.banner, /^templates: 1 in /m);
+      writeConfig(runner.address, runner.peer);
+      session = open();
+      assert.ok((await session.hello()).runner?.templates.some(t => t.id === buildRef.id && t.state === Template_State.READY), "a template survives the runner's restart");
+      const usersAfter = await session.call({ case: "templateList", value: {} });
+      assert.ok(usersAfter.case === "templates" && usersAfter.value.items[0]!.users === 1, show(usersAfter));
+      const imageB = env.CUBE_TEST_BERTH_IMAGE_B ?? "";
+      if (/@sha256:[0-9a-f]{64}$/.test(imageB) && imageB !== image) {
+        await stop(runner.child);
+        runner = await start(["--listen", "127.0.0.1:0"], imageB);
+        writeConfig(runner.address, runner.peer);
+        session = open();
+        const otherRef = { owner: "thread-1", id: randomBytes(8).toString("hex") };
+        await assert.rejects(session.call({ case: "machineCreate", value: { ref: otherRef, fence: fence10, spec: { source: { case: "templateId", value: buildRef.id } } } }),
+          (error: unknown) => error instanceof RunnerError && error.code === "FAILED_PRECONDITION" && error.reason === "template_image_changed");
+        const kept10 = await session.call({ case: "templateList", value: {} });
+        assert.ok(kept10.case === "templates" && kept10.value.items.length === 1, "the template stays until it is deleted");
+        assert.ok(fs.existsSync(layer));
+        await stop(runner.child);
+        runner = await start(["--listen", "127.0.0.1:0"]);
+        writeConfig(runner.address, runner.peer);
+        session = open();
+        note(`V10: the template survived a restart (users 1); with --image ${imageB} a machine from it was refused (FAILED_PRECONDITION/template_image_changed) and the template stayed`);
+      } else {
+        note("V10: template_image_changed NOT checked here: CUBE_TEST_BERTH_IMAGE_B (another image pinned by digest) is unset");
+      }
+
+      // template_delete: removing while a machine is made from it, gone with the last.
+      const removing = await session.call({ case: "templateDelete", value: { id: buildRef.id } });
+      assert.ok(removing.case === "template" && removing.value.state === Template_State.REMOVING && removing.value.users === 1, show(removing));
+      assert.ok(fs.existsSync(layer), "a machine is still made from it");
+      await assert.rejects(session.call({ case: "machineCreate", value: { ref: { owner: "thread-1", id: randomBytes(8).toString("hex") }, fence: fence10,
+        spec: { source: { case: "templateId", value: buildRef.id } } } }),
+      (error: unknown) => error instanceof RunnerError && error.code === "FAILED_PRECONDITION" && error.reason === "template_removing");
+      const removed = await session.machine({ case: "machineDelete", value: { ref: userRef, fence: fence10, retain: false } });
+      assert.equal(removed.status?.phase, MachineStatus_Phase.DELETED);
+      assert.ok(!fs.existsSync(layer), "the template went with its last machine");
+      assert.deepEqual(fs.readdirSync(path.join(directory, "templates")), []);
+      const none = await session.call({ case: "templateList", value: {} });
+      assert.ok(none.case === "templates" && none.value.items.length === 0);
+      await assert.rejects(session.call({ case: "templateDelete", value: { id: buildRef.id } }), (error: unknown) => error instanceof RunnerError && error.code === "NOT_FOUND");
+      note("V10: template_delete: REMOVING with 1 user (a new machine from it refused: template_removing), gone (file and record) once that machine was deleted; again: NOT_FOUND");
+    } finally {
+      store10.close();
+      fs.rmSync(leases10, { recursive: true, force: true });
+    }
+  }
   const again = await session.machine({ case: "machineStart", value: { ref, fence: { epoch: BigInt(epoch) }, boot: { documents, mac: "" } } });
   assert.notEqual(again.status?.bootId, firstBoot);
   assert.equal(fs.statSync(path.join(machineDir, "rw.qcow2")).ino, disk.ino, "the writable disk is kept");
@@ -1051,7 +1225,7 @@ try {
   const list = await session.call({ case: "machineList", value: {} });
   assert.ok(list.case === "machines" && list.value.items.length === 0);
   note("a second machine deleted without retain: QEMU quit, directory gone");
-  console.log(`ok: berth vm over protocol 4 (${accel}): floor, image, CA, hello, create, start, guest channel (session, setup, ${guest.ready ? "ready, Workspace contract, agent restart, network V5, credentials V6-V8, portal V9" : "not ready: image lacks tools"}), guest streams, fencing, UNIMPLEMENTED, stop, restart and crash interrupt, pinned machine type and image, retained disk, discard, delete`);
+  console.log(`ok: berth vm over protocol 4 (${accel}): floor, image, CA, hello, create, start, guest channel (session, setup, ${guest.ready ? "ready, Workspace contract, agent restart, network V5, credentials V6-V8, portal V9, templates V10" : "not ready: image lacks tools"}), guest streams, fencing, UNIMPLEMENTED, stop, restart and crash interrupt, pinned machine type and image, retained disk, discard, delete`);
 } finally {
   await v9?.target.portal.close();
   await Promise.allSettled(sessions.map(session => session.close()));

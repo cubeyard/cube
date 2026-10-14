@@ -641,10 +641,18 @@ the streams). The portal reaches a machine on a protocol-4 runner over a
 ref and epoch, `berth vm` refuses ports below 1024 (22 too), an older
 fence and a machine it does not run, connects from the machine's LAN and
 carries the bytes both ways, each direction ending on its own. `berth
-host` answers it UNIMPLEMENTED (row B-9).
+host` answers it UNIMPLEMENTED (row B-9). Templates are layers on `berth
+vm` (row B-8): only a build machine (`MachineSpec.build`) has a template
+disk, vdd; `template_publish` has its agent clean its `upper/` of cube's
+things and write it there as one EROFS layer, which the runner checks and
+keeps as `templates/<id>.erofs` (read-only, outside the layer cache's
+limit, removed only by `template_delete` once no machine uses it) while
+the build machine is deleted. A machine made from a template gets it above
+the image's layers, and only on the image it was built on
+(`template_image_changed`). cubed builds no templates over protocol 4 yet
+(C phase).
 
-Not built yet (later stages): `berth vm`'s templates and diagnosis,
-snapshots.
+Not built yet (later stages): `berth vm`'s diagnosis, snapshots.
 
 ## Machine templates and hooks
 
