@@ -545,6 +545,8 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
     let allowed: EndpointId = home.allowed_peer.parse()?;
     let mkfs_version = image::mkfs_version(&mkfs)?;
     let mut stops = Stops::new()?;
+    let endpoint = bind(key, home.network, listen_address(&home)?).await?;
+    eprintln!("listen: (CONTROL C6: bound before the pull)");
     // The image before the endpoint (masterplan B-7 D1): until it is here,
     // cubed finds no runner, and its threads wait as for one that is down.
     let store = image::Store::open(&directory)?;
@@ -580,7 +582,6 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
         floor,
     )
     .await?;
-    let endpoint = bind(key, home.network, listen_address(&home)?).await?;
     eprintln!(
         "berth {SOFTWARE_VERSION} vm (runner protocol {})",
         cube_runner_protocol::PROTOCOL
