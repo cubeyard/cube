@@ -1003,7 +1003,7 @@ impl<'a> Pull<'a> {
 
         let mkfs = Mkfs::new(self.mkfs)
             .max_tar_bytes(MAX_TAR_BYTES)
-            .time_limits(self.time_limits)
+            // CONTROL C4: keel-layers' default limits
             .cancel_on(self.cancel.clone());
         let mut records = Vec::new();
         for (index, (layer, diff_id)) in layers.into_iter().zip(config.rootfs.diff_ids).enumerate()
