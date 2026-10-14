@@ -136,6 +136,9 @@ const keel = env.CUBE_TEST_BERTH_KEEL ?? "";
 const image = env.CUBE_TEST_BERTH_IMAGE ?? "";
 const mkfs = env.CUBE_TEST_BERTH_MKFS ?? "";
 const pulled = env.CUBE_TEST_BERTH_PULLED ?? "";
+// Another image pinned by digest, for V10's template_image_changed and cache steps.
+const imageB = env.CUBE_TEST_BERTH_IMAGE_B ?? "";
+const otherImage = /@sha256:[0-9a-f]{64}$/.test(imageB) && imageB !== env.CUBE_TEST_BERTH_IMAGE;
 const accel = env.CUBE_TEST_BERTH_ACCEL ?? (process.platform === "darwin" ? "hvf" : "kvm");
 const missing = [
   ...(path.isAbsolute(qemu) && fs.existsSync(qemu) ? [] : ["CUBE_TEST_BERTH_QEMU=<absolute qemu-system path meeting keel's floor>"]),
@@ -185,6 +188,14 @@ async function gone(pid: number): Promise<void> {
   assert.ok(!alive(pid), `QEMU ${pid} still runs`);
 }
 const events = (id: string) => fs.readFileSync(path.join(directory, id, "events.log"), "utf8");
+/** The size an EROFS image's superblock says it has (its blocks << blkszbits). */
+function erofsBytes(file: string): bigint {
+  const superblock = Buffer.alloc(128);
+  const fd = fs.openSync(file, "r");
+  try { fs.readSync(fd, superblock, 0, 128, 1024); } finally { fs.closeSync(fd); }
+  assert.equal(superblock.readUInt32LE(0), 0xe0f5e1e2, `${file}: no EROFS superblock`);
+  return BigInt(superblock.readUInt32LE(36)) << BigInt(superblock[12]!);
+}
 
 /** One QMP command on the machine's socket (berth holds no connection between verbs). */
 async function qmp(id: string, command: string): Promise<unknown> {
@@ -1029,6 +1040,8 @@ sudo mkdir -p /opt/v10; echo setup-done | sudo tee /opt/v10/setup.txt >/dev/null
       const layer = path.join(directory, "templates", `${buildRef.id}.erofs`);
       const layerStat = fs.statSync(layer);
       assert.equal(BigInt(layerStat.size), template.bytes, "the layer file is cut to the superblock's size");
+      assert.equal(erofsBytes(layer), template.bytes, "the size is the EROFS superblock's");
+      assert.ok(template.bytes < 2n * 2n ** 30n, "the layer, not the whole template disk");
       assert.equal(layerStat.mode & 0o777, 0o444);
       const layerSha = createHash("sha256").update(fs.readFileSync(layer)).digest("hex");
       assert.ok(!fs.existsSync(path.join(directory, buildRef.id)), "the build machine's directory is gone");
@@ -1086,8 +1099,7 @@ grep -c 'cube: begin' /etc/ssl/certs/ca-certificates.crt; grep -cF '${caLine}' /
       assert.ok((await session.hello()).runner?.templates.some(t => t.id === buildRef.id && t.state === Template_State.READY), "a template survives the runner's restart");
       const usersAfter = await session.call({ case: "templateList", value: {} });
       assert.ok(usersAfter.case === "templates" && usersAfter.value.items[0]!.users === 1, show(usersAfter));
-      const imageB = env.CUBE_TEST_BERTH_IMAGE_B ?? "";
-      if (/@sha256:[0-9a-f]{64}$/.test(imageB) && imageB !== image) {
+      if (otherImage) {
         await stop(runner.child);
         runner = await start(["--listen", "127.0.0.1:0"], imageB);
         writeConfig(runner.address, runner.peer);
@@ -1225,6 +1237,36 @@ grep -c 'cube: begin' /etc/ssl/certs/ca-certificates.crt; grep -cF '${caLine}' /
   const list = await session.call({ case: "machineList", value: {} });
   assert.ok(list.case === "machines" && list.value.items.length === 0);
   note("a second machine deleted without retain: QEMU quit, directory gone");
+
+  // V10, the cache (B-8 D2): with no machine left, a template keeps the
+  // layers of its image beyond a 0 GiB limit on another image, until it goes.
+  if (guest.ready && otherImage) {
+    const lruRef = { owner: "thread-1", id: randomBytes(8).toString("hex") };
+    const lruFence = { epoch: 1n };
+    await session.machine({ case: "machineCreate", value: { ref: lruRef, fence: lruFence, spec: { size: { vcpus: 2, memoryMib: 1024, diskGib: 2 }, build: true } } });
+    await session.machine({ case: "machineStart", value: { ref: lruRef, fence: lruFence, boot: { documents, mac: "" } } });
+    await session.until(lruRef, machine => !!machine.status?.guest?.ready, 180000);
+    const lru = await session.call({ case: "templatePublish", value: { from: lruRef, fence: lruFence, key: "v10-lru", meta: "" } }, 600000);
+    assert.ok(lru.case === "template" && lru.value.state === Template_State.READY, show(lru));
+    await stop(runner.child);
+    runner = await start(["--listen", "127.0.0.1:0", "--layer-cache-gib", "0"], imageB);
+    writeConfig(runner.address, runner.peer);
+    session = open();
+    const digestB = imageB.split("@")[1]!;
+    const layersB = (JSON.parse(fs.readFileSync(path.join(directory, "images", `${digestB}.json`), "utf8")) as { layers: Array<{ diffId: string }> }).layers.map(l => l.diffId);
+    const onlyA = machineImage.diffIds.filter(d => !layersB.includes(d));
+    const cached = (d: string) => fs.existsSync(path.join(directory, "layers", "1", `${d}.erofs`));
+    assert.ok(onlyA.length > 0, "CUBE_TEST_BERTH_IMAGE_B shares every layer with CUBE_TEST_BERTH_IMAGE");
+    assert.ok(onlyA.every(cached), `the template's image keeps its ${onlyA.length} layers beyond a 0 GiB limit`);
+    const gone = await session.call({ case: "templateDelete", value: { id: lruRef.id } });
+    assert.ok(gone.case === "template" && gone.value.users === 0, show(gone));
+    assert.ok(onlyA.every(d => !cached(d)), "with the template gone, its image's layers are trimmed");
+    assert.ok(layersB.every(cached), "the runner's image keeps its layers");
+    assert.ok(!fs.existsSync(path.join(directory, "templates", `${lruRef.id}.erofs`)));
+    note(`V10 cache: on ${imageB} with --layer-cache-gib 0 and no machine left, template ${lruRef.id} kept its image's ${onlyA.length} other layers; template_delete removed it and the cache trimmed them`);
+  } else if (guest.ready) {
+    note("V10 cache: NOT checked natively: CUBE_TEST_BERTH_IMAGE_B (another image pinned by digest) is unset");
+  }
   console.log(`ok: berth vm over protocol 4 (${accel}): floor, image, CA, hello, create, start, guest channel (session, setup, ${guest.ready ? "ready, Workspace contract, agent restart, network V5, credentials V6-V8, portal V9, templates V10" : "not ready: image lacks tools"}), guest streams, fencing, UNIMPLEMENTED, stop, restart and crash interrupt, pinned machine type and image, retained disk, discard, delete`);
 } finally {
   await v9?.target.portal.close();
