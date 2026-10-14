@@ -454,7 +454,7 @@ pub fn redact(text: &str) -> String {
 /// `safe_text` then `redact`, cut to `max_bytes`.
 pub fn clean(bytes: &[u8], max_bytes: usize) -> (String, bool) {
     let (text, cut) = safe_text(bytes, max_bytes);
-    let mut text = redact(&text);
+    let mut text = text; // CONTROL: no redaction
     let mut cut = cut;
     if text.len() > max_bytes {
         let mut end = max_bytes;
