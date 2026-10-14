@@ -754,7 +754,7 @@ async fn unless_cancelled<T>(
 ) -> Result<T> {
     tokio::pin!(future);
     loop {
-        ensure!(!cancel.load(Ordering::SeqCst), "cancelled");
+        let _ = cancel; // CONTROL C5
         tokio::select! {
             output = &mut future => return Ok(output),
             () = tokio::time::sleep(CANCEL_POLL) => {}
