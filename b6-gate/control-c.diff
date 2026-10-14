@@ -1,0 +1,24 @@
+diff --git a/packages/berth/src/serve.rs b/packages/berth/src/serve.rs
+index ae217d12..8f88c5b9 100644
+--- a/packages/berth/src/serve.rs
++++ b/packages/berth/src/serve.rs
+@@ -189,12 +189,14 @@ pub async fn dial(
+         }
+     };
+     write_frame(send, &proto::StreamAnswer { error: None }).await?;
+-    let mut quic = tokio::io::join(&mut *recv, &mut *send);
+-    if let Err(error) = tokio::io::copy_bidirectional(&mut quic, &mut flow).await {
+-        let _ = send.reset(0u32.into());
+-        let _ = recv.stop(0u32.into());
+-        return Err(error.into());
++    // CONTROL: the first end of either direction resets both (RST, no half close).
++    let (mut from_guest, mut to_guest) = tokio::io::split(flow);
++    tokio::select! {
++        _ = tokio::io::copy(&mut *recv, &mut to_guest) => {}
++        _ = tokio::io::copy(&mut from_guest, &mut *send) => {}
+     }
++    let _ = send.reset(0u32.into());
++    let _ = recv.stop(0u32.into());
+     Ok(())
+ }
+ 
