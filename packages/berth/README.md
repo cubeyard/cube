@@ -170,8 +170,8 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   `MachineSpec.build` (from the base only; with a template
   `INVALID_ARGUMENT build`) is a build machine, and only it gets a template
   disk, vdd: `template.raw`, raw, blank and sparse, `size.disk_gib` large,
-  made only if the directory's file system has B-7's room for a blob of
-  that size (3 × it + 2 GiB; else `RESOURCE_EXHAUSTED disk_space`). Other
+  made only if the directory's file system has the disk's size + 2 GiB
+  free (a 32 GiB disk: 34 GiB; else `RESOURCE_EXHAUSTED disk_space`). Other
   machines have no vdd, and their agent refuses to publish.
   `template_publish {from, fence, key, meta}` (`key` 1 to 128 printable
   ASCII characters and `meta` at most 4 KiB, both cubed's and opaque) needs

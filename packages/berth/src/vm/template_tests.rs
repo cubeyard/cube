@@ -16,14 +16,14 @@ fn plenty(_: &Path) -> std::io::Result<u64> {
     Ok(u64::MAX)
 }
 
-/// 5 GiB free: B-7's rule for a 1 GiB disk needs 3 + 2.
-fn five_gib(_: &Path) -> std::io::Result<u64> {
-    Ok(5 << 30)
+/// 3 GiB free: a 1 GiB template disk needs 1 + 2 (B-8 C2).
+fn three_gib(_: &Path) -> std::io::Result<u64> {
+    Ok(3 << 30)
 }
 
-/// 4 GiB free: not enough for a 1 GiB template disk.
-fn four_gib(_: &Path) -> std::io::Result<u64> {
-    Ok(4 << 30)
+/// A byte short of that.
+fn short_of_three_gib(_: &Path) -> std::io::Result<u64> {
+    Ok((3 << 30) - 1)
 }
 
 fn diff_id(n: u8) -> DiffId {
@@ -254,14 +254,18 @@ async fn only_a_build_machine_gets_a_template_disk() {
 async fn a_build_machine_is_made_from_the_base_and_needs_room_for_its_disk() {
     let lab = Lab::new();
     let image = pull(lab.path(), 1, &[1]);
-    let runner = lab.runner(image.clone(), 16 << 30, four_gib).await;
+    let runner = lab
+        .runner(image.clone(), 16 << 30, short_of_three_gib)
+        .await;
     let refused = create(&runner, BUILD, base(), true).await.unwrap_err();
     assert_eq!(
         reason(refused.clone()),
         (Code::ResourceExhausted, "disk_space".into())
     );
     assert!(
-        refused.message.contains("3 × its size + 2 GiB"),
+        refused
+            .message
+            .contains("its size + 2 GiB = 3221225472 bytes"),
         "{}",
         refused.message
     );
@@ -270,14 +274,26 @@ async fn a_build_machine_is_made_from_the_base_and_needs_room_for_its_disk() {
     // An ordinary machine has no template disk, so no such check.
     create(&runner, USER, base(), false).await.unwrap();
     drop(runner);
-    let runner = lab.runner(image, 16 << 30, five_gib).await;
+    let runner = lab.runner(image, 16 << 30, three_gib).await;
     create(&runner, BUILD, base(), true).await.unwrap();
     // Not from a template (no templates on templates).
     let refused = create(&runner, "00000000000000d1", from(BUILD), true)
         .await
         .unwrap_err();
     assert_eq!(reason(refused), (Code::InvalidArgument, "build".into()));
-    assert!(build_room(5 << 30, 1).is_ok() && build_room((5 << 30) - 1, 1).is_err());
+    assert!(build_room(3 << 30, 1).is_ok() && build_room((3 << 30) - 1, 1).is_err());
+    // 1 × the disk + 2 GiB, not B-7's 3 × + 2: a 32 GiB disk needs 34 GiB.
+    assert!(build_room(34 << 30, 32).is_ok());
+    let short = build_room((34 << 30) - 1, 32).unwrap_err();
+    assert_eq!(
+        reason(short.clone()),
+        (Code::ResourceExhausted, "disk_space".into())
+    );
+    assert!(
+        short.message.contains(&format!("= {} bytes", 34u64 << 30)),
+        "{}",
+        short.message
+    );
 }
 
 #[tokio::test]

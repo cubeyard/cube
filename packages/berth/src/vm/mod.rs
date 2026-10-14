@@ -1062,8 +1062,8 @@ impl VmRunner {
             }
         };
         if spec.build {
-            // B-8 D2: B-7's rule before the template disk is made, as the
-            // agent may fill it.
+            // B-8 D2 and C2: room for the template disk before it is
+            // made, as the agent may fill it.
             let free = (self.options.free_space)(&self.options.directory).map_err(internal)?;
             build_room(free, size.disk_gib)?;
         }
@@ -2082,17 +2082,22 @@ impl VmRunner {
     }
 }
 
-/// B-7 D2's rule before a build machine's template disk is made (B-8 D2):
-/// as much free as before a blob of the disk's size (3 × it + 2 GiB), since
-/// the agent may fill it; the templates already kept are on the same disk.
+/// Free space a build machine's template disk needs besides its size (B-8
+/// C2, approved: 1 × the disk + 2 GiB).
+const BUILD_RESERVE: u64 = 2 << 30;
+
+/// The room check before a build machine's template disk is made (B-8 D2,
+/// C2): the disk's size + 2 GiB, since the agent may fill it and the
+/// template is that same file, renamed, not a copy; the templates already
+/// kept are on the same disk.
 fn build_room(free: u64, disk_gib: u32) -> Answer<()> {
-    let needed = image::free_needed(u64::from(disk_gib) << 30);
+    let needed = (u64::from(disk_gib) << 30).saturating_add(BUILD_RESERVE);
     if free < needed {
         return Err(refuse(
             Code::ResourceExhausted,
             "disk_space",
             &format!(
-                "a build machine's {disk_gib} GiB template disk needs 3 × its size + 2 GiB = {needed} bytes free; the runner's directory has {free}"
+                "a build machine's {disk_gib} GiB template disk needs its size + 2 GiB = {needed} bytes free; the runner's directory has {free}"
             ),
         ));
     }
