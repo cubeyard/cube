@@ -395,6 +395,8 @@ pub struct Launch<'a> {
     /// The machine's directory: layers.vmdk, rw.qcow2, the sockets and the
     /// console.
     pub dir: &'a Path,
+    /// A build machine (masterplan B-8 D1): its template disk is vdd.
+    pub build: bool,
 }
 
 pub const QMP_SOCKET: &str = "qmp.sock";
@@ -411,7 +413,9 @@ pub const CONSOLE: &str = "console.log";
 /// (its layer files are read-only cache files, keel-layers' H4), vdc the
 /// machine's writable disk, `cube.0` on `ctl.sock`, and virtio-net on the
 /// socket pair QEMU inherits on `egress::NET_FD` (masterplan B-4), with the
-/// guest's fixed address on the kernel command line.
+/// guest's fixed address on the kernel command line. A build machine has a
+/// fourth disk, vdd, its template disk (raw, writable; B-8), and no other
+/// machine has one.
 pub fn argv(launch: &Launch) -> Vec<String> {
     let dir = launch.dir;
     let path = |name: &str| dir.join(name).display().to_string();
@@ -457,6 +461,14 @@ pub fn argv(launch: &Launch) -> Vec<String> {
             "if=virtio,format=qcow2,discard=unmap,file={}",
             path(RW_DISK)
         ),
+    ];
+    if launch.build {
+        args.extend([
+            "-drive".into(),
+            format!("if=virtio,format=raw,file={}", path(super::template::DISK)),
+        ]);
+    }
+    args.extend::<Vec<String>>(vec![
         "-device".into(),
         "virtio-serial-pci".into(),
         "-chardev".into(),
@@ -487,7 +499,7 @@ pub fn argv(launch: &Launch) -> Vec<String> {
         format!("unix:{},server=on,wait=off", path(QMP_SOCKET)),
         "-qmp".into(),
         format!("unix:{},server=on,wait=off", path(EVENTS_SOCKET)),
-    ];
+    ]);
     if launch.arch == Arch::X86_64 {
         // A new generation id every time QEMU starts, so also in a restore.
         args.extend(["-device".into(), "vmgenid,guid=auto".into()]);
@@ -548,6 +560,19 @@ pub fn sha256_file(path: &Path) -> Result<String> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect())
+}
+
+/// A build machine's template disk: a blank raw file of `gib` GiB, sparse,
+/// so it takes room only as the agent writes the layer.
+pub fn create_template_disk(file: &Path, gib: u32) -> Result<()> {
+    let disk = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(file)
+        .with_context(|| format!("create {}", file.display()))?;
+    disk.set_len(u64::from(gib) << 30)?;
+    disk.sync_all()?;
+    Ok(())
 }
 
 /// `qemu-img create -f qcow2 FILE SIZEG`, with the binary given by path.
@@ -736,6 +761,7 @@ mod tests {
             kernel: Path::new("/k/vmlinuz"),
             base: Path::new("/k/base.erofs"),
             dir,
+            build: false,
         });
         let after = |flag: &str| -> Vec<&str> {
             args.windows(2)
@@ -792,5 +818,47 @@ mod tests {
             args.contains(&"-sandbox".to_string()),
             cfg!(target_os = "linux")
         );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.contains(super::super::template::DISK)),
+            "an ordinary machine has no template disk"
+        );
+    }
+
+    #[test]
+    fn only_a_build_machine_has_a_template_disk_and_it_is_vdd() {
+        let dir = Path::new("/r/0123456789abcdef");
+        let launch = |build| Launch {
+            arch: Arch::Aarch64,
+            accel: Accel::Hvf,
+            machine_type: "virt-11.1",
+            vcpus: 2,
+            memory_mib: 1024,
+            kernel: Path::new("/k/vmlinuz"),
+            base: Path::new("/k/base.erofs"),
+            dir,
+            build,
+        };
+        let drives = |args: Vec<String>| -> Vec<String> {
+            args.windows(2)
+                .filter(|pair| pair[0] == "-drive")
+                .map(|pair| pair[1].clone())
+                .collect()
+        };
+        let ordinary = argv(&launch(false));
+        let build = argv(&launch(true));
+        assert_eq!(drives(ordinary.clone()).len(), 3);
+        // The fourth virtio disk (vdd), raw and writable, after vda-vdc.
+        let mut expected = drives(ordinary.clone());
+        expected.push("if=virtio,format=raw,file=/r/0123456789abcdef/template.raw".into());
+        assert_eq!(drives(build.clone()), expected);
+        // Nothing else differs.
+        let without: Vec<String> = build
+            .iter()
+            .filter(|a| !a.contains("template.raw"))
+            .cloned()
+            .collect();
+        assert_eq!(without.len(), ordinary.len() + 1, "one -drive more");
     }
 }

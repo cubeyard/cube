@@ -827,6 +827,19 @@ export declare type MachineSpec = Message<"cube.runner.v4.MachineSpec"> & {
    * @generated from field: cube.runner.v4.Boot boot = 4;
    */
   boot?: Boot | undefined;
+
+  /**
+   * VM runners: a build machine, the only kind that can become a template
+   * (`template_publish`). It is made from the base (`source = base`; with a
+   * template: INVALID_ARGUMENT/build) and gets a template disk (vdd), blank,
+   * `size.disk_gib` large, that its agent writes the template layer to.
+   * Absent or false: an ordinary machine, which has no vdd and whose agent
+   * refuses to publish (FAILED_PRECONDITION/no_template_disk). A runner that
+   * predates the field sees an ordinary machine.
+   *
+   * @generated from field: bool build = 5;
+   */
+  build: boolean;
 };
 
 /**

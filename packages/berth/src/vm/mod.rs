@@ -46,7 +46,16 @@
 //! both ways on the stream (serve.rs). It needs cubed's connection, which
 //! carries it, and nothing else: the egress lease does not apply.
 //!
-//! Not here yet: templates (B-8), diagnosis (B-9) and snapshots (S-7a).
+//! Templates (B-8, template.rs): a build machine (`MachineSpec.build`) has
+//! a blank template disk, vdd; `template_publish` has its agent write its
+//! `upper/` there as one EROFS layer, checks the superblock, keeps the disk
+//! as `templates/<id>.erofs` and deletes the build machine. A machine made
+//! from a template gets it above the image's layers, and only on the image
+//! it was built on. Templates are outside the layer cache's limit, keep the
+//! layers of their image in the cache, and go only by `template_delete`,
+//! once no machine is made from them.
+//!
+//! Not here yet: diagnosis (B-9) and snapshots (S-7a).
 //!
 //! `stop` (also `delete` and the runner's own shutdown) asks the agent to
 //! shut down (`DaemonRequest.shutdown`: the workload gets SIGTERM, then
@@ -63,6 +72,9 @@ mod presence;
 mod qemu;
 mod record;
 mod report;
+mod template;
+#[cfg(test)]
+mod template_tests;
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -93,7 +105,7 @@ use crate::{
     serve::{self, Service, unimplemented},
 };
 
-const CAPABILITIES: [&str; 11] = [
+const CAPABILITIES: [&str; 14] = [
     "runner.get",
     "machine.create",
     "machine.start",
@@ -105,6 +117,9 @@ const CAPABILITIES: [&str; 11] = [
     "watch",
     "guest",
     "dial",
+    "template.publish",
+    "template.list",
+    "template.delete",
 ];
 /// The `Boot.documents` names keel knows (runner.proto's `Boot`).
 const BOOT_DOCUMENTS: [&str; 4] = ["hostname", "env", "hooks/pre-setup", "hooks/pre-resume"];
@@ -131,6 +146,10 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(20);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(30);
 /// After `quit`, QEMU has this long to exit before it is killed.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the agent has to publish (clean, check and write the layer with
+/// mkfs.erofs) before the call says `completion_unknown`; asked again, it
+/// answers as the first time.
+const PUBLISH_WAIT: Duration = Duration::from_secs(600);
 /// A Unix socket path must fit `sun_path` (104 bytes on macOS).
 const MAX_SOCKET_PATH: usize = 100;
 
@@ -151,6 +170,9 @@ pub struct VmOptions {
     pub mkfs_version: String,
     /// The layer cache's limit (`--layer-cache-gib`).
     pub layer_cache_bytes: u64,
+    /// Free bytes on the file system of a path ([`image::free_bytes`]; tests
+    /// give another).
+    pub free_space: fn(&Path) -> std::io::Result<u64>,
 }
 
 /// The runner's image, as `berth image pull` recorded it.
@@ -204,6 +226,9 @@ struct State {
     machines: BTreeMap<String, Entry>,
     /// Deleted machines: their ids are never reused.
     deleted: BTreeMap<String, MachineRecord>,
+    /// Templates by id (a build machine's id); `publishing` ones only for
+    /// as long as a publication runs.
+    templates: BTreeMap<String, template::TemplateRecord>,
 }
 
 pub struct VmRunner {
@@ -218,8 +243,12 @@ pub struct VmRunner {
     started_at: Timestamp,
     state: Mutex<State>,
     events: broadcast::Sender<proto::WatchEvent>,
-    /// One mutation at a time (create, start, stop, delete, discard).
+    /// One mutation at a time (create, start, stop, delete, discard,
+    /// template publish and delete).
     ops: tokio::sync::Mutex<()>,
+    /// The runner stops: a publication stops waiting for the agent, so the
+    /// shutdown does not wait for it behind `ops`.
+    stopping: watch::Sender<bool>,
 }
 
 type Answer<T> = std::result::Result<T, proto::Error>;
@@ -317,6 +346,34 @@ impl VmRunner {
                 deleted.insert(record.id.clone(), record);
             }
         }
+        // Templates: a publication a crash cut short is finished or
+        // forgotten (template.rs).
+        let mut templates = template::load(&options.directory)?;
+        for record in templates.values_mut() {
+            if record.state == template::State::Publishing {
+                let finished = template::recover(&options.directory, record)?;
+                eprintln!(
+                    "template {}: a publication the runner did not finish was {}",
+                    record.id,
+                    if finished {
+                        "finished (its layer was in place)"
+                    } else {
+                        "forgotten (its build machine keeps its disk)"
+                    }
+                );
+            }
+        }
+        templates.retain(|_, record| record.state != template::State::Publishing);
+        for record in templates.values() {
+            let layer = template::layer(&options.directory, &record.id);
+            if !layer.is_file() {
+                eprintln!(
+                    "template {}: its layer {} is missing; a machine made from it does not start",
+                    record.id,
+                    layer.display()
+                );
+            }
+        }
         let mut machines = BTreeMap::new();
         for entry in std::fs::read_dir(&options.directory)? {
             let dir = entry?.path();
@@ -384,11 +441,29 @@ impl VmRunner {
                 version: 1,
                 machines,
                 deleted,
+                templates,
             }),
             events,
             ops: tokio::sync::Mutex::new(()),
+            stopping: watch::channel(false).0,
         });
-        runner.evict(&runner.state.lock().unwrap());
+        {
+            let mut state = runner.state.lock().unwrap();
+            // A crash after the publication, before its build machine went.
+            let published: Vec<String> = state
+                .templates
+                .keys()
+                .filter(|id| state.machines.contains_key(*id))
+                .cloned()
+                .collect();
+            for id in published {
+                runner.remove(&mut state, &id).map_err(|e| {
+                    anyhow::anyhow!("template {id}: its build machine: {}", e.message)
+                })?;
+            }
+            runner.collect_templates(&mut state);
+            runner.evict(&state);
+        }
         Ok(runner)
     }
 
@@ -479,6 +554,12 @@ impl VmRunner {
                 state.machines.len(),
                 self.options.max_machines
             ),
+            format!(
+                "templates: {} in {} ({} bytes; outside the layer cache's limit, removed only by template_delete)",
+                state.templates.len(),
+                template::dir(&self.options.directory).display(),
+                state.templates.values().map(|t| t.bytes).sum::<u64>()
+            ),
         ]
     }
 
@@ -535,7 +616,19 @@ impl VmRunner {
                 egress: true,
                 ..Default::default()
             }),
-            templates: vec![],
+            templates: state
+                .templates
+                .values()
+                .filter_map(|record| {
+                    let template = template_proto(record, state)?;
+                    Some(proto::TemplateSummary {
+                        id: template.id,
+                        key: template.key,
+                        state: template.state,
+                        created_at: template.created_at,
+                    })
+                })
+                .collect(),
             labels: self.options.labels.clone(),
             ca_pem: self.ca.pem.clone(),
             meta: Some(proto::Meta {
@@ -579,13 +672,17 @@ impl VmRunner {
                 id: record.id.clone(),
             }),
             spec: Some(proto::MachineSpec {
-                source: Some(proto::machine_spec::Source::Base(true)),
+                source: Some(match &record.template {
+                    Some(id) => proto::machine_spec::Source::TemplateId(id.clone()),
+                    None => proto::machine_spec::Source::Base(true),
+                }),
                 size: Some(proto::Size {
                     vcpus: record.size.vcpus,
                     memory_mib: record.size.memory_mib,
                     disk_gib: record.size.disk_gib,
                 }),
                 boot: None,
+                build: record.build,
             }),
             status: Some(proto::MachineStatus {
                 phase: record.phase.proto() as i32,
@@ -657,9 +754,9 @@ impl VmRunner {
         self.tell(watch_event::Type::Put, machine, &state);
     }
 
-    /// Machine `id`'s setup (runner.proto's `MachineSetup`): its image's
-    /// layers topmost first, its boot documents, the runner's CA, and 32
-    /// fresh random bytes.
+    /// Machine `id`'s setup (runner.proto's `MachineSetup`): its template
+    /// and its image's layers topmost first, its boot documents, the
+    /// runner's CA, and 32 fresh random bytes.
     fn setup(&self, id: &str) -> proto::MachineSetup {
         let state = self.state.lock().unwrap();
         let entry = state.machines.get(id);
@@ -667,19 +764,8 @@ impl VmRunner {
             .map(|entry| entry.documents.clone().into_iter().collect())
             .unwrap_or_default();
         let layers = entry
-            .and_then(|entry| entry.record.image.as_ref())
-            .map(|image| {
-                image
-                    .diff_ids
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .map(|(i, diff_id)| proto::Layer {
-                        partition: i as u32 + 1,
-                        source: Some(proto::layer::Source::DiffId(diff_id.clone())),
-                    })
-                    .collect()
-            })
+            .and_then(|entry| Some((entry.record.image.as_ref()?, &entry.record.template)))
+            .map(|(image, template)| setup_layers(image, template.as_deref()))
             .unwrap_or_default();
         let mut entropy = vec![0u8; 32];
         getrandom(&mut entropy);
@@ -702,10 +788,15 @@ impl VmRunner {
         }
     }
 
-    /// Writes the runner's image onto machine `id`'s layer disk (QEMU does
-    /// not run) and returns what the record keeps of it.
-    fn write_layers(&self, id: &str) -> Result<MachineImage> {
-        let layers: Vec<keel_layers::disk::Layer> = self
+    /// Writes the runner's image, and above it `template`'s layer, onto
+    /// machine `id`'s layer disk (QEMU does not run) and returns what the
+    /// record keeps of the image.
+    fn write_layers(
+        &self,
+        id: &str,
+        template: Option<&template::TemplateRecord>,
+    ) -> Result<MachineImage> {
+        let mut layers: Vec<keel_layers::disk::Layer> = self
             .image
             .record
             .layers
@@ -720,8 +811,57 @@ impl VmRunner {
                     .collect(),
             })
             .collect();
+        if let Some(template) = template {
+            // The topmost partition, as `setup_layers` names it.
+            layers.push(keel_layers::disk::Layer {
+                path: template::layer(&self.options.directory, &template.id),
+                name: format!("template-{}", template.id),
+            });
+        }
         keel_layers::disk::write(&self.machine_dir(id), &layers)?;
         Ok(self.image.machine_image())
+    }
+
+    /// Tells every watch about a template (and the runner, whose summaries
+    /// changed).
+    fn tell_template(&self, r#type: watch_event::Type, template: proto::Template, state: &State) {
+        let _ = self.events.send(proto::WatchEvent {
+            r#type: r#type as i32,
+            version: state.version,
+            resource: Some(watch_event::Resource::Template(template)),
+        });
+        let _ = self.events.send(proto::WatchEvent {
+            r#type: watch_event::Type::Put as i32,
+            version: state.version,
+            resource: Some(watch_event::Resource::Runner(self.runner(state))),
+        });
+    }
+
+    /// Deletes every removing template no machine is made from any more
+    /// (p3's `gc_templates`). One that cannot be deleted is tried again the
+    /// next time.
+    fn collect_templates(&self, state: &mut State) {
+        let gone: Vec<String> = state
+            .templates
+            .values()
+            .filter(|t| t.state == template::State::Removing && users(state, &t.id) == 0)
+            .map(|t| t.id.clone())
+            .collect();
+        for id in gone {
+            if let Err(error) = template::remove(&self.options.directory, &id) {
+                eprintln!("template {id}: not removed yet: {error:#}");
+                continue;
+            }
+            let record = state.templates.remove(&id).unwrap();
+            eprintln!(
+                "template {id}: removed ({} bytes; deleted, and no machine is made from it)",
+                record.bytes
+            );
+            state.version += 1;
+            if let Some(gone) = template_proto(&record, state) {
+                self.tell_template(watch_event::Type::Delete, gone, state);
+            }
+        }
     }
 
     fn tell(&self, r#type: watch_event::Type, machine: proto::Machine, state: &State) {
@@ -862,11 +1002,19 @@ impl VmRunner {
             ));
         }
         let spec = request.spec.clone().unwrap_or_default();
-        if let Some(proto::machine_spec::Source::TemplateId(_)) = spec.source {
-            return Err(unimplemented::<Self>("templates yet (masterplan B-8)"));
+        let from = match &spec.source {
+            Some(proto::machine_spec::Source::TemplateId(id)) => Some(id.clone()),
+            _ => None,
+        };
+        if spec.build && from.is_some() {
+            return Err(refuse(
+                Code::InvalidArgument,
+                "build",
+                "a build machine is made from the base (source = base), not from a template",
+            ));
         }
         let size = Self::size(spec.size.as_ref())?;
-        {
+        let template = {
             let mut state = self.state.lock().unwrap();
             let taken = state
                 .deleted
@@ -908,6 +1056,16 @@ impl VmRunner {
                     "the runner hosts as many machines as it may",
                 ));
             }
+            match &from {
+                Some(id) => Some(self.usable_template(&state, id)?),
+                None => None,
+            }
+        };
+        if spec.build {
+            // B-8 D2 and C2: room for the template disk before it is
+            // made, as the agent may fill it.
+            let free = (self.options.free_space)(&self.options.directory).map_err(internal)?;
+            build_room(free, size.disk_gib)?;
         }
         let epoch = request.fence.as_ref().map_or(0, |fence| fence.epoch);
         if epoch < 1 {
@@ -928,7 +1086,16 @@ impl VmRunner {
                 .map_err(internal)?;
             std::fs::rename(&temporary, &disk).map_err(internal)?;
         }
-        let image = self.write_layers(&reference.id).map_err(internal)?;
+        let vdd = dir.join(template::DISK);
+        if spec.build && !vdd.exists() {
+            let temporary = dir.join("template.raw.tmp");
+            let _ = std::fs::remove_file(&temporary);
+            qemu::create_template_disk(&temporary, size.disk_gib).map_err(internal)?;
+            std::fs::rename(&temporary, &vdd).map_err(internal)?;
+        }
+        let image = self
+            .write_layers(&reference.id, template.as_ref())
+            .map_err(internal)?;
         let machine_type = self
             .floor
             .newest_machine_type()
@@ -949,13 +1116,23 @@ impl VmRunner {
             boot: None,
             image: Some(image),
             stopped: None,
+            build: spec.build,
+            template: from,
         };
         event(
             &dir,
             "created",
             &format!(
-                "machine type {machine_type}, image {}",
-                self.image.reference
+                "machine type {machine_type}, image {}{}",
+                self.image.reference,
+                match (&record.template, record.build) {
+                    (Some(id), _) => format!(", from template {id}"),
+                    (None, true) => format!(
+                        ", a build machine with a {} GiB template disk",
+                        size.disk_gib
+                    ),
+                    (None, false) => String::new(),
+                }
             ),
         );
         let mut state = self.state.lock().unwrap();
@@ -975,6 +1152,272 @@ impl VmRunner {
             },
         );
         self.commit(&mut state, &reference.id)
+    }
+
+    /// Template `id` for a new machine: ready, and on this runner's image
+    /// (B-8 D3: a template is an upper layer over those layers only).
+    fn usable_template(&self, state: &State, id: &str) -> Answer<template::TemplateRecord> {
+        let record = state
+            .templates
+            .get(id)
+            .filter(|t| t.state != template::State::Publishing)
+            .ok_or_else(|| {
+                refuse(
+                    Code::NotFound,
+                    "template",
+                    "no such template on this runner",
+                )
+            })?;
+        if record.state == template::State::Removing {
+            return Err(refuse(
+                Code::FailedPrecondition,
+                "template_removing",
+                "the template is deleted; it goes when the last machine made from it does",
+            ));
+        }
+        let runner = &self.image.record.manifest.digest;
+        if &record.image.manifest != runner {
+            return Err(refuse(
+                Code::FailedPrecondition,
+                "template_image_changed",
+                &format!(
+                    "the template was built on {} ({}); this runner serves {} ({runner})",
+                    record.image.reference, record.image.manifest, self.image.reference
+                ),
+            ));
+        }
+        Ok(record.clone())
+    }
+
+    /// `template_publish` (masterplan B-8): the build machine's agent writes
+    /// its layer to vdd (runner.proto's `DaemonRequest.template_publish`);
+    /// then its QEMU is quit, the disk checked and kept as the template, and
+    /// the build machine deleted. Asked again, the same template.
+    async fn publish(self: &Arc<Self>, request: proto::TemplatePublish) -> Answer<proto::Template> {
+        if !template::valid_key(&request.key) {
+            return Err(refuse(
+                Code::InvalidArgument,
+                "key",
+                &format!(
+                    "a template key is 1 to {} printable ASCII characters",
+                    template::MAX_KEY_BYTES
+                ),
+            ));
+        }
+        if !template::valid_meta(&request.meta) {
+            return Err(refuse(
+                Code::InvalidArgument,
+                "meta",
+                &format!(
+                    "template meta is at most {} bytes",
+                    template::MAX_META_BYTES
+                ),
+            ));
+        }
+        if let Some(published) = self.published(&request)? {
+            return Ok(published);
+        }
+        let guest = {
+            let mut state = self.state.lock().unwrap();
+            let before = Self::epoch(&state, request.from.as_ref());
+            let fenced = Self::fenced(&mut state, request.from.as_ref(), request.fence.as_ref())
+                .and_then(|entry| publishing_guest(entry));
+            self.write_raised(&state, request.from.as_ref(), before)?;
+            fenced?
+        };
+        let id = request.from.clone().unwrap_or_default().id;
+        let dir = self.machine_dir(&id);
+        event(
+            &dir,
+            "template_publish",
+            "the agent is asked to publish its layer",
+        );
+        let (_, answer) = guest.request(Op::TemplatePublish(proto::Empty {}))?;
+        let mut stopping = self.stopping.subscribe();
+        let answer = tokio::select! {
+            answer = tokio::time::timeout(PUBLISH_WAIT, answer) => answer.ok(),
+            // The runner stops; it stops the machine as it stops every one.
+            _ = stopping.wait_for(|stopping| *stopping) => {
+                event(&dir, "template_publish not done", "the runner stops");
+                return Err(proto::Error {
+                    completion_unknown: true,
+                    ..refuse(Code::Unavailable, "runner_stopping", "the runner stops")
+                });
+            }
+        };
+        publish_outcome(answer).inspect_err(|error| {
+            event(
+                &dir,
+                "template_publish not done",
+                &format!("{} {}", error.reason, error.message),
+            )
+        })?;
+        // The layer is on vdd; the machine is used up (its agent refuses
+        // everything now), so its QEMU is quit without a shutdown.
+        {
+            let mut state = self.state.lock().unwrap();
+            if let Some(entry) = state.machines.get_mut(&id) {
+                entry.record.phase = Phase::Stopping;
+                self.commit(&mut state, &id)?;
+            }
+        }
+        event(
+            &dir,
+            "published",
+            "the agent wrote its layer to vdd; QEMU is quit",
+        );
+        self.quit(&id).await;
+        let mut state = self.state.lock().unwrap();
+        self.keep_template(&mut state, &id, &request.key, &request.meta)
+    }
+
+    /// A publication that came again: the template it made (fenced against
+    /// the build machine's epoch then; another key or meta is refused).
+    fn published(&self, request: &proto::TemplatePublish) -> Answer<Option<proto::Template>> {
+        let state = self.state.lock().unwrap();
+        let Some(record) = request.from.as_ref().and_then(|from| {
+            state
+                .templates
+                .get(&from.id)
+                .filter(|t| t.owner == from.owner && t.state != template::State::Publishing)
+        }) else {
+            return Ok(None);
+        };
+        if request.fence.as_ref().map_or(0, |fence| fence.epoch) < record.fence_epoch {
+            return Err(refuse(
+                Code::FailedPrecondition,
+                "stale_epoch",
+                "a newer epoch has been used for this machine",
+            ));
+        }
+        if record.key != request.key || record.meta != request.meta {
+            return Err(refuse(
+                Code::AlreadyExists,
+                "template",
+                "the machine was published as a template with another key or meta",
+            ));
+        }
+        Ok(template_proto(record, &state))
+    }
+
+    /// After the agent published and QEMU is gone: the template disk's
+    /// superblock is checked, the disk becomes template `id` (template.rs:
+    /// `publishing`, moved, cut to size, read-only, `ready`), and the build
+    /// machine is deleted.
+    fn keep_template(
+        &self,
+        state: &mut State,
+        id: &str,
+        key: &str,
+        meta: &str,
+    ) -> Answer<proto::Template> {
+        let entry = state
+            .machines
+            .get(id)
+            .ok_or_else(|| refuse(Code::NotFound, "machine", "no such machine"))?;
+        let dir = self.machine_dir(id);
+        let disk = dir.join(template::DISK);
+        let bytes = template::layer_bytes(&disk).map_err(|error| {
+            event(&dir, "template refused", &format!("{error:#}"));
+            refuse(
+                Code::FailedPrecondition,
+                "template_disk",
+                &format!("the template disk does not hold a layer: {error:#}"),
+            )
+        })?;
+        let image = entry
+            .record
+            .image
+            .clone()
+            .ok_or_else(|| internal("the build machine has no image"))?;
+        let boot = entry.record.boot.as_ref();
+        let mut record = template::TemplateRecord {
+            version: 1,
+            id: id.to_owned(),
+            owner: entry.record.owner.clone(),
+            key: key.to_owned(),
+            meta: meta.to_owned(),
+            state: template::State::Publishing,
+            disk_gib: entry.record.size.disk_gib,
+            bytes,
+            sha256: String::new(),
+            image,
+            kernel_sha256: boot.map_or_else(
+                || self.keel.kernel_sha256.clone(),
+                |b| b.kernel_sha256.clone(),
+            ),
+            base_sha256: boot
+                .map_or_else(|| self.keel.base_sha256.clone(), |b| b.base_sha256.clone()),
+            fence_epoch: entry.record.fence_epoch,
+            created_at: Timestamp::now(),
+        };
+        template::adopt(&self.options.directory, &record, &disk).map_err(internal)?;
+        // A failure from here on is finished or forgotten when the runner
+        // starts again (template::recover).
+        template::finish(&self.options.directory, &mut record).map_err(internal)?;
+        event(
+            &dir,
+            "template",
+            &format!(
+                "published as template {id}: {bytes} bytes, sha256 {}",
+                record.sha256
+            ),
+        );
+        eprintln!(
+            "template {id}: published ({bytes} bytes, sha256 {}, image {})",
+            record.sha256, record.image.reference
+        );
+        state.templates.insert(id.to_owned(), record.clone());
+        state.version += 1;
+        let published = template_proto(&record, state).unwrap();
+        self.tell_template(watch_event::Type::Put, published, state);
+        // The build machine is used up, as p3 releases its build VM.
+        self.remove(state, id)?;
+        Ok(template_proto(&record, state).unwrap())
+    }
+
+    /// `template_delete`: no new machine is made from it (`removing`), and
+    /// it goes once no machine that is not deleted is made from it. Gone:
+    /// NOT_FOUND.
+    fn delete_template(&self, request: proto::TemplateRef) -> Answer<proto::Template> {
+        let mut state = self.state.lock().unwrap();
+        let Some(record) = state
+            .templates
+            .get_mut(&request.id)
+            .filter(|t| t.state != template::State::Publishing)
+        else {
+            return Err(refuse(
+                Code::NotFound,
+                "template",
+                "no such template on this runner",
+            ));
+        };
+        if record.state == template::State::Ready {
+            record.state = template::State::Removing;
+            if let Err(error) = template::write(&self.options.directory, record) {
+                record.state = template::State::Ready;
+                return Err(internal(error));
+            }
+            state.version += 1;
+            let removing = template_proto(&state.templates[&request.id], &state).unwrap();
+            self.tell_template(watch_event::Type::Put, removing, &state);
+        }
+        let answer = template_proto(&state.templates[&request.id], &state).unwrap();
+        self.collect_templates(&mut state);
+        // Its image's layers may be free for the cache to trim now.
+        self.evict(&state);
+        Ok(answer)
+    }
+
+    fn list_templates(&self) -> proto::Templates {
+        let state = self.state.lock().unwrap();
+        proto::Templates {
+            items: state
+                .templates
+                .values()
+                .filter_map(|record| template_proto(record, &state))
+                .collect(),
+        }
     }
 
     async fn start(self: &Arc<Self>, request: proto::MachineStart) -> Answer<proto::Machine> {
@@ -1037,7 +1480,7 @@ impl VmRunner {
                 // Created before the runner had an image (B-1): its disk
                 // never had a workload root, so it takes the runner's.
                 None => {
-                    entry.record.image = Some(self.write_layers(&id).map_err(internal)?);
+                    entry.record.image = Some(self.write_layers(&id, None).map_err(internal)?);
                 }
             }
             let entry = state.machines.get_mut(&id).unwrap();
@@ -1102,6 +1545,7 @@ impl VmRunner {
             kernel: &self.keel.kernel,
             base: &self.keel.base,
             dir,
+            build: record.build,
         });
         record::write_json(
             &dir.join("argv.json"),
@@ -1511,6 +1955,8 @@ impl VmRunner {
         state.deleted.insert(id.to_owned(), entry.record.clone());
         let machine = Self::machine(&entry.record, None, state.version, Timestamp::now());
         self.tell(watch_event::Type::Delete, machine.clone(), state);
+        // Its template may have lost its last user.
+        self.collect_templates(state);
         self.evict(state);
         Ok(machine)
     }
@@ -1582,8 +2028,14 @@ impl VmRunner {
             Some(Verb::MachineDiagnose(_)) => {
                 Err(unimplemented::<Self>("diagnosis yet (masterplan B-9)"))
             }
-            Some(Verb::TemplatePublish(_) | Verb::TemplateList(_) | Verb::TemplateDelete(_)) => {
-                Err(unimplemented::<Self>("templates yet (masterplan B-8)"))
+            Some(Verb::TemplatePublish(request)) => {
+                let _op = self.ops.lock().await;
+                self.publish(request).await.map(R::Template)
+            }
+            Some(Verb::TemplateList(_)) => Ok(R::Templates(self.list_templates())),
+            Some(Verb::TemplateDelete(request)) => {
+                let _op = self.ops.lock().await;
+                self.delete_template(request).map(R::Template)
             }
             None => Err(refuse(
                 Code::InvalidArgument,
@@ -1599,6 +2051,7 @@ impl VmRunner {
     /// The runner stops: every machine's QEMU is quit and the machine is
     /// marked interrupted (its disk is kept; cubed starts it again).
     pub async fn shutdown(self: &Arc<Self>) {
+        self.stopping.send_replace(true);
         let _op = self.ops.lock().await;
         let live: Vec<String> = {
             let mut state = self.state.lock().unwrap();
@@ -1629,8 +2082,84 @@ impl VmRunner {
     }
 }
 
-/// The layers the cache must keep: the runner's image's and those of every
-/// machine that is not deleted, retained ones too.
+/// Free space a build machine's template disk needs besides its size (B-8
+/// C2, approved: 1 × the disk + 2 GiB).
+const BUILD_RESERVE: u64 = 2 << 30;
+
+/// The room check before a build machine's template disk is made (B-8 D2,
+/// C2): the disk's size + 2 GiB, since the agent may fill it and the
+/// template is that same file, renamed, not a copy; the templates already
+/// kept are on the same disk.
+fn build_room(free: u64, disk_gib: u32) -> Answer<()> {
+    let needed = (u64::from(disk_gib) << 30).saturating_add(BUILD_RESERVE);
+    if free < needed {
+        return Err(refuse(
+            Code::ResourceExhausted,
+            "disk_space",
+            &format!(
+                "a build machine's {disk_gib} GiB template disk needs its size + 2 GiB = {needed} bytes free; the runner's directory has {free}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// `MachineSetup.layers` of a machine on `image` (partition N the Nth
+/// layer, bottom first), made from `template` (the partition above them):
+/// topmost first.
+fn setup_layers(image: &MachineImage, template: Option<&str>) -> Vec<proto::Layer> {
+    let template = template.map(|id| proto::Layer {
+        partition: image.diff_ids.len() as u32 + 1,
+        source: Some(proto::layer::Source::TemplateId(id.to_owned())),
+    });
+    template
+        .into_iter()
+        .chain(
+            image
+                .diff_ids
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(i, diff_id)| proto::Layer {
+                    partition: i as u32 + 1,
+                    source: Some(proto::layer::Source::DiffId(diff_id.clone())),
+                }),
+        )
+        .collect()
+}
+
+/// How many machines that are not deleted (retained ones too) are made
+/// from template `id`.
+fn users(state: &State, id: &str) -> u32 {
+    state
+        .machines
+        .values()
+        .filter(|entry| entry.record.template.as_deref() == Some(id))
+        .count() as u32
+}
+
+/// A template as cubed sees it; None while it is being published.
+fn template_proto(record: &template::TemplateRecord, state: &State) -> Option<proto::Template> {
+    let phase = match record.state {
+        template::State::Publishing => return None,
+        template::State::Ready => proto::template::State::Ready,
+        template::State::Removing => proto::template::State::Removing,
+    };
+    Some(proto::Template {
+        id: record.id.clone(),
+        key: record.key.clone(),
+        meta: record.meta.clone(),
+        state: phase as i32,
+        disk_gib: record.disk_gib,
+        bytes: record.bytes,
+        users: users(state, &record.id),
+        created_at: Some(record.created_at),
+    })
+}
+
+/// The layers the cache must keep: the runner's image's, those of every
+/// machine that is not deleted, retained ones too, and those of the image
+/// every template lies on (B-8 D2: a template keeps them while it exists).
 fn layers_in_use(
     image: &image::ImageRecord,
     state: &State,
@@ -1640,9 +2169,14 @@ fn layers_in_use(
         .values()
         .filter_map(|entry| entry.record.image.as_ref())
         .flat_map(|image| image.diff_ids.iter());
+    let templates = state
+        .templates
+        .values()
+        .flat_map(|template| template.image.diff_ids.iter());
     let runner = image.layers.iter().map(|layer| &layer.diff_id);
     runner
         .chain(machines)
+        .chain(templates)
         .map(|diff_id| {
             diff_id
                 .parse()
@@ -1708,6 +2242,55 @@ fn stop_outcome(
             false,
             format!("no answer to shutdown within {} s", SHUTDOWN_WAIT.as_secs()),
         ),
+    }
+}
+
+/// The channel of a machine that may publish now: a build machine (B-8
+/// D1) that runs.
+fn publishing_guest(entry: &Entry) -> Answer<Arc<channel::Guest>> {
+    if !entry.record.build {
+        return Err(refuse(
+            Code::FailedPrecondition,
+            "not_build",
+            "only a build machine (MachineSpec.build) publishes a template",
+        ));
+    }
+    match (&entry.guest, entry.record.phase) {
+        (Some(guest), Phase::Running) => Ok(Arc::clone(guest)),
+        _ => Err(not_running(entry)),
+    }
+}
+
+/// The agent's answer to `template_publish`: only done goes on to keep the
+/// disk. Its refusal (busy, not ready, a seal that failed) is cubed's
+/// answer, the machine as it was; no answer is `completion_unknown`.
+fn publish_outcome(
+    answer: Option<std::result::Result<channel::Answer, tokio::sync::oneshot::error::RecvError>>,
+) -> Answer<()> {
+    let unknown = |reason: &str, message: &str| proto::Error {
+        completion_unknown: true,
+        ..refuse(Code::Unavailable, reason, message)
+    };
+    match answer {
+        Some(Ok(Ok(AnswerKind::Done(_)))) => Ok(()),
+        Some(Ok(Ok(AnswerKind::Error(error)))) => Err(error),
+        Some(Ok(Ok(AnswerKind::Guest(_)))) => Err(refuse(
+            Code::Internal,
+            "agent",
+            "the agent answered template_publish with guest bytes",
+        )),
+        Some(Ok(Err(error))) => Err(unknown(&error.reason, &error.message)),
+        Some(Err(_)) => Err(unknown(
+            "guest_disconnected",
+            "the machine's channel ended during the publication",
+        )),
+        None => Err(unknown(
+            "publish_timeout",
+            &format!(
+                "the agent did not publish within {} s; ask again",
+                PUBLISH_WAIT.as_secs()
+            ),
+        )),
     }
 }
 
@@ -1860,6 +2443,13 @@ impl Service for VmRunner {
                     entry.updated,
                 ))
             }));
+            resources.extend(
+                state
+                    .templates
+                    .values()
+                    .filter_map(|record| template_proto(record, &state))
+                    .map(watch_event::Resource::Template),
+            );
             (state.version, resources)
         })
         .await
@@ -2054,6 +2644,8 @@ mod dial_tests {
             boot: None,
             image: None,
             stopped: None,
+            build: false,
+            template: None,
         };
         let entry = Entry {
             record,
@@ -2074,6 +2666,7 @@ mod dial_tests {
             version: 1,
             machines: BTreeMap::from([("0123456789abcdef".to_string(), entry)]),
             deleted: BTreeMap::new(),
+            templates: BTreeMap::new(),
         }
     }
 
@@ -2243,6 +2836,8 @@ mod cache_tests {
                 diff_ids,
             }),
             stopped: None,
+            build: false,
+            template: None,
         }
     }
 
@@ -2268,6 +2863,7 @@ mod cache_tests {
                 })
                 .collect(),
             deleted: deleted.into_iter().map(|r| (r.id.clone(), r)).collect(),
+            templates: BTreeMap::new(),
         }
     }
 

@@ -110,6 +110,16 @@ pub struct MachineRecord {
     /// agent's shutdown answered done) or forced. Cleared by the next start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped: Option<Stopped>,
+    /// A build machine (`MachineSpec.build`, masterplan B-8 D1): it has the
+    /// template disk, vdd (`template.raw`), and may publish. Fixed at
+    /// creation; absent in a record from before B-8, which is not one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub build: bool,
+    /// The template the machine is made from (`MachineSpec.template_id`):
+    /// its layer disk holds the template above the image's layers. Fixed at
+    /// creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
 }
 
 /// A stop the runner made (`machine_stop`, `delete`, its own shutdown).
@@ -229,6 +239,8 @@ mod tests {
             boot: None,
             image: None,
             stopped: None,
+            build: false,
+            template: None,
         }
     }
 
@@ -305,5 +317,30 @@ mod tests {
         write_json(&path, &machine).unwrap();
         assert_eq!(read(&path).unwrap(), machine);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_record_from_before_templates_is_an_ordinary_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(RECORD);
+        let ordinary = record(Phase::Stopped);
+        write_json(&path, &ordinary).unwrap();
+        let text: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        // An ordinary machine writes neither key, so a B-7 runner reads it.
+        assert!(
+            text.get("build").is_none() && text.get("template").is_none(),
+            "{text}"
+        );
+        let read_back = read(&path).unwrap();
+        assert!(!read_back.build && read_back.template.is_none());
+        let mut build = record(Phase::Stopped);
+        build.build = true;
+        write_json(&path, &build).unwrap();
+        assert_eq!(read(&path).unwrap(), build);
+        let mut from_template = record(Phase::Stopped);
+        from_template.template = Some("fedcba9876543210".into());
+        write_json(&path, &from_template).unwrap();
+        assert_eq!(read(&path).unwrap(), from_template);
     }
 }

@@ -46,11 +46,11 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
 - The layer cache (`layers/1/`) is trimmed to `--layer-cache-gib` (16 by
   default; the first run, and any run that gives the flag, writes it to
   `.berth/vm.json`), least recently used first, when berth starts and when a
-  machine is deleted or discarded. It never removes a layer of the runner's
-  image or of a machine that is not deleted, retained ones too: their layer
-  disks name the cache's files. Those are kept even beyond the limit (`0`
-  keeps only them), and nothing is removed while a machine's layers cannot
-  be read. Each removal is a line on stderr.
+  machine or template is deleted or discarded. It never removes a layer of
+  the runner's image, of a machine that is not deleted, retained ones too
+  (their layer disks name the cache's files), or of a template's image.
+  Those are kept even beyond the limit (`0` keeps only them), and nothing
+  is removed while a machine's layers cannot be read. Each removal is a line on stderr.
 - The runner's CA: `DIRECTORY/.berth/ca/` (0700) with `ca.key` (0600, never
   logged or sent) and `ca.pem`, made on the first start and kept. Half a
   pair, a key others can read, or a certificate that does not carry the key
@@ -64,15 +64,17 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   created once and never replaced), `layers.vmdk` (vdb, read-only, the
   image's layers from the cache), `ctl.sock` (`cube.0`), `qmp.sock`, `qev.sock`
   (QMP for the runner's event reader), `console.log`, `qemu.log`,
-  `argv.json`, `events.log`. vda is the keel base, read-only. The newest
+  `argv.json`, `events.log`, and on a build machine only `template.raw`
+  (vdd, below). vda is the keel base, read-only. The newest
   versioned machine type is pinned when a machine is created; a QEMU
   without it does not start the machine (`FAILED_PRECONDITION machine_type`).
 - Verbs: `runner.get`, `machine.create` (`STOPPED`), `start` (QEMU runs it:
   `RUNNING` with a new `boot_id`), `stop` (below), `delete` (stops it;
   `RETAINED` when asked to retain or when the runner interrupted it,
   otherwise the directory is deleted: `DELETED`), `discard` (a retained
-  machine's directory is deleted), `get`, `list`, `watch`. Ids are never
-  reused. Mutations are fenced as on `berth host`.
+  machine's directory is deleted), `get`, `list`, `watch`, and the
+  templates' `template.publish`, `template.list`, `template.delete` (below).
+  Ids are never reused. Mutations are fenced as on `berth host`.
 - Each QEMU runs in a process group of its own. When the runner stops
   (Ctrl-C, SIGTERM) it quits its machines' QEMUs and marks them with the
   `Interrupted` condition (`runner_stopped`); a runner that starts after a
@@ -164,8 +166,47 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   direction ending on its own (FIN to FIN). A reset or a lost connection
   from cubed drops the guest's connection. It needs cubed's connection and
   nothing else: the egress lease does not apply.
-- Not yet: pulls by the runner and the cache limit, templates, diagnosis
-  and snapshots (masterplan rows B-7, B-8, B-9, S-7a).
+- Templates (masterplan B-8, `src/vm/template.rs`): a machine created with
+  `MachineSpec.build` (from the base only; with a template
+  `INVALID_ARGUMENT build`) is a build machine, and only it gets a template
+  disk, vdd: `template.raw`, raw, blank and sparse, `size.disk_gib` large,
+  made only if the directory's file system has the disk's size + 2 GiB
+  free (a 32 GiB disk: 34 GiB; else `RESOURCE_EXHAUSTED disk_space`). Other
+  machines have no vdd, and their agent refuses to publish.
+  `template_publish {from, fence, key, meta}` (`key` 1 to 128 printable
+  ASCII characters and `meta` at most 4 KiB, both cubed's and opaque) needs
+  a running build machine (`FAILED_PRECONDITION not_build`, `UNAVAILABLE
+  not_running`): the agent cleans its `upper/` of cube's things (the
+  runner's CA in any form, marker blocks, mount points, the agent account,
+  identity; keel's `template.rs`), checks it and writes it to vdd as one
+  EROFS layer (its refusal, such as `busy` or `seal_failed`, is the
+  answer, and the machine stays as it was). Then QEMU is quit, vdd's EROFS
+  superblock checked (magic, block size, size within the disk; else
+  `FAILED_PRECONDITION template_disk`, the machine kept), and the disk
+  becomes `DIRECTORY/templates/<id>.erofs` (the build machine's id): its
+  record written as `publishing`, the disk renamed, cut to the layer's
+  size, made read-only (0444) and hashed, the record `ready`. The build
+  machine is deleted, as p3 releases its build VM. Asked again with the
+  same key and meta, the same template (another: `ALREADY_EXISTS
+  template`). The agent has 10 min (`completion_unknown` after); the call
+  holds the runner's one-mutation-at-a-time lock meanwhile, so another
+  mutation waits, but the runner's own stop does not. A runner that starts
+  finishes a publication whose disk was moved and forgets one whose disk
+  was not.
+- A machine created with `source = template_id` gets the template as the
+  topmost partition of its layer disk, above the image's layers, and in
+  `MachineSetup.layers` (`Layer.template_id`). The template must be ready
+  (`NOT_FOUND template`; deleted: `FAILED_PRECONDITION template_removing`)
+  and built on the runner's image: on another `--image` it is refused
+  (`FAILED_PRECONDITION template_image_changed`, masterplan B-8 D3) and
+  stays until it is deleted. `template_delete` makes it `REMOVING`; it goes
+  (file and record) once no machine that is not deleted, retained ones
+  too, is made from it (p3's rule; gone: `NOT_FOUND`). `template_list` and
+  `Runner.templates` (hello and watch) list ready and removing ones, with
+  `users` and `bytes`. Templates are not the layer cache's (B-8 D2): never
+  trimmed and not in its limit, though on the same disk; while one exists,
+  the layers of its image stay in the cache.
+- Not yet: diagnosis and snapshots (masterplan rows B-9, S-7a).
 - `stop`, `delete` and the runner's own shutdown stop a machine the same
   way: the runner asks the agent to shut down (`DaemonRequest.shutdown`:
   SIGTERM to the workload, SIGKILL to what is left after 10 s, sync, the
@@ -186,7 +227,10 @@ with an image that has keel's tools it runs the Workspace contract over
 cubed's `RunnerGuestTransport`) and `runner-image-test.ts` (the same
 variables and `CUBE_TEST_BERTH_IMAGE_B`: the pull before listening, a warm
 start, a lost layer, SIGINT and SIGKILL during a conversion, and the cache
-limit with a retained machine; for host gates, not in CI).
+limit with a retained machine; for host gates, not in CI). With a ready
+image `runner-vm-test.ts` also runs templates (V10; `CUBE_TEST_BERTH_IMAGE_B`
+for `template_image_changed`, `CUBE_TEST_BERTH_FSCK` for fsck.erofs on the
+layer).
 
 ## `berth image pull`: images into a vm directory's layer cache
 
