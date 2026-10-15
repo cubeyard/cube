@@ -39,6 +39,8 @@ builder.applyMinimal();
 builder.secretKey(SecretKey.generate().toBytes());
 builder.alpns([ALPN]);
 builder.bindAddr("127.0.0.1:0");
+// The IPv6 default is the wildcard [::]:0 (the host's every address); both families explicit, as runner-session.ts binds.
+builder.bindAddr("[::1]:0");
 const runnerEndpoint = await builder.bind();
 const address = runnerEndpoint.boundSockets().find(a => a.startsWith("127.0.0.1:"))!;
 const controlKey = path.join(root, "control.key");
