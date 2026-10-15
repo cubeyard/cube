@@ -12,6 +12,7 @@ import type {
   Project,
   ProjectInput,
   RunnerStatus,
+  RunnersObservation,
   SettingsView,
   SkillSource,
   SkillsConfig,
@@ -159,6 +160,9 @@ export const deleteProject = (id: string) =>
 
 export const fetchRunners = () =>
   request<{ runners: RunnerStatus[] }>("/api/runners").then((r) => r.runners);
+
+/** What cubed knows of each runner and the capacity by protocol (runner-observe.ts). */
+export const fetchObservedRunners = () => request<RunnersObservation>("/api/runners/observed");
 
 export const checkRunner = (id: string) =>
   request<{ runner: RunnerStatus }>(`/api/runners/${encodeURIComponent(id)}/check`, "POST").then((r) => r.runner);

@@ -1373,6 +1373,10 @@ select.compose-input {
 .runner-evidence strong { color: var(--ink-2); }
 .runner-evidence .error, .runner-blocked { color: var(--bad); }
 .runner-controls { display: flex; gap: 0.35rem; }
+.runner-identity small.runner-protocol { color: var(--ink-2); }
+.runner-capacity { display: flex; flex-direction: column; gap: 0.1rem; color: var(--ink-2); font: 11px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+.runner-capacity p { margin: 0; }
+.runner-capacity .capacity-note { color: var(--ink-3); }
 .runner-blocked { grid-column: 2 / -1; margin: 0; font-size: 11px; }
 .runner-retire { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; padding: 0.8rem; background: var(--s2); border: 1px solid var(--bad-line); border-radius: var(--r-key); }
 .runner-retire p { grid-column: 1 / -1; margin: 0; color: var(--ink-2); font-size: 12px; overflow-wrap: anywhere; }

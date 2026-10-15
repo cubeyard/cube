@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { checkRunner, discardThreadMachine, errorText, fetchRunners, fetchThreads, retireRunner } from "../lib/api.ts";
+  import { checkRunner, discardThreadMachine, errorText, fetchObservedRunners, fetchRunners, fetchThreads, retireRunner } from "../lib/api.ts";
   import { relTime } from "../lib/time.ts";
-  import type { RunnerStatus, ThreadSummary } from "../lib/types.ts";
+  import type { CapacityGroup, RunnersObservation, RunnerStatus, ThreadSummary } from "../lib/types.ts";
   import Icon from "./Icon.svelte";
 
   let { onChanged = () => {} }: { onChanged?: () => void } = $props();
   let runners = $state<RunnerStatus[]>([]);
+  let observed = $state<RunnersObservation | null>(null);
   let loaded = $state(false);
   let error = $state<string | null>(null);
   let checking = $state<string[]>([]);
@@ -39,9 +40,13 @@
     }
   }
 
+  async function observe(): Promise<void> {
+    observed = await fetchObservedRunners();
+  }
+
   async function load(): Promise<void> {
     try {
-      [runners] = await Promise.all([fetchRunners(), loadRetained()]);
+      [runners] = await Promise.all([fetchRunners(), loadRetained(), observe()]);
       error = null;
     } catch (cause) {
       error = errorText(cause);
@@ -55,6 +60,7 @@
     checking = [...checking, runner.id];
     try {
       replace(await checkRunner(runner.id));
+      await observe();
       error = null;
     } catch (cause) {
       error = errorText(cause);
@@ -101,6 +107,20 @@
     : runner.contactStatus === "retired" ? "retired bindings are never scheduled"
     : "not checked since this registry learned runner observations";
 
+  const observation = (runner: RunnerStatus) => observed?.runners.find((item) => item.id === runner.id);
+  /** The runner's protocol, and whether it takes any thread or only those started on it by name. */
+  const protocolLabel = (runner: RunnerStatus) => {
+    const item = observation(runner);
+    return !item ? null : item.protocol === 3 ? "p3" : item.kind === "host" ? "p4 host · unsandboxed, by name only" : "p4 vm · by name only";
+  };
+  const nodeOf = (id: string) => observed?.runners.find((item) => item.id === id)?.nodeId ?? id;
+  const slotsCopy = (group: CapacityGroup) => `${group.free} free of ${group.slots} ${group.slots === 1 ? "slot" : "slots"}`;
+  /** Runners whose numbers are their last report's, or not from a report at all. */
+  const notCurrent = (...groups: CapacityGroup[]) => [
+    ...groups.flatMap((group) => group.stale.map((id) => `${nodeOf(id)} (stale report)`)),
+    ...groups.flatMap((group) => group.unreported.map((id) => `${nodeOf(id)} (never reported)`)),
+  ];
+
   onMount(async () => {
     await load();
     await checkAll();
@@ -110,13 +130,26 @@
 <section class="runner-panel" aria-labelledby="runner-heading">
   <div class="board-head">
     <div>
-      <h2 id="runner-heading">global runner pool</h2>
+      <h2 id="runner-heading">runners</h2>
       <p>reachable is the latest authenticated check; stale means continuously unreachable for 7 days</p>
     </div>
     <button class="key" onclick={checkAll} disabled={!loaded || checking.length > 0 || !runners.some((runner) => !runner.retiredAt)}>
       <Icon name="refresh" size={13} />{checking.length ? "checking…" : "check runners"}
     </button>
   </div>
+
+  {#if observed && runners.length}
+    {@const { p3, p4 } = observed.capacity}
+    {@const late = notCurrent(p3, p4.vm, p4.host)}
+    <div class="runner-capacity" aria-label="capacity">
+      <p class="capacity-p3">p3 pool · {slotsCopy(p3)} on {p3.runners} {p3.runners === 1 ? "runner" : "runners"} · open p3 threads: {p3.openThreads}</p>
+      <p class="capacity-p4">p4 by name · {p4.vm.runners || p4.host.runners
+        ? [p4.vm.runners ? `vm ${slotsCopy(p4.vm)}` : "", p4.host.runners ? `host ${slotsCopy(p4.host)}` : ""].filter(Boolean).join(" · ")
+        : "no runners"}</p>
+      {#if late.length}<p class="capacity-late">not current: {late.join(", ")}</p>{/if}
+      <p class="capacity-note">p3 takes any new thread; p4 only threads started on it by name. a slot is an open thread in cube, not a machine on the runner.</p>
+    </div>
+  {/if}
 
   {#if error}<div class="banner" role="alert"><span class="banner-text">{error}</span></div>{/if}
   {#if !loaded}
@@ -131,6 +164,7 @@
             <span class="lamp {lampClass(runner)}" aria-hidden="true"></span>
             <span>
               <strong>{runner.nodeId}</strong>
+              {#if protocolLabel(runner)}<small class="runner-protocol">{protocolLabel(runner)}</small>{/if}
               <small>environment {runner.environmentId} · {runner.allocationState} · {runner.activeThreads
                 ? `${runner.activeThreads} of ${runner.maxActiveVms} thread machines in use`
                 : `unallocated · ${runner.maxActiveVms} thread ${runner.maxActiveVms === 1 ? "machine" : "machines"}`}</small>

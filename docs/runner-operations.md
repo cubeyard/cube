@@ -274,6 +274,17 @@ The background probe (`node.status` every minute) keeps them current, and
   advertised bound (`totalSource: reported`), or 1 when it never advertised one
   (`assumed`). `free` is 0 while the runner is retiring.
 - `unknown`: what this runner's data does not say, for example a stale report.
+- `protocol`: 3 (`cube-runner`) or 4 (`berth`), as enrolled; with `kind` and
+  `byName`, whether the runner takes any thread or only those started on it by
+  name (every protocol-4 runner until R-3).
+
+Beside the runners, `capacity` sums the slots of the runners that take
+threads, by protocol: `p3` (the pool, with `openThreads`, every open thread on
+a protocol-3 runner) and `p4.vm` and `p4.host`. Each group lists in `stale`
+the runners counted with their last, stale report, and in `unreported` those
+that never answered, whose bound is from enrollment or assumed. A slot is an
+open thread in cubed, not a machine the runner hosts (`report.activeVms`). The
+project page shows these per runner and above the runner list.
 
 The version shown is the one the runner itself reported. Nothing is inferred
 from a published release: a runner with an active VM postpones its update. A
