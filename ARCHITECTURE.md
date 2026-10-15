@@ -634,9 +634,16 @@ machine at the thread's current epoch and carries the HTTP/1.1 exchange
 unread to cube-gateway's credential proxy (`--credential`, the same
 process), which substitutes the token, as for p3, and turns it back into
 the placeholder in the answer; the token never reaches cubed's Node
-process, the runner or the guest. cubed does not run threads on `berth vm`
-yet (it logs the reports and carries credentials for runners that open
-the streams). The portal reaches a machine on a protocol-4 runner over a
+process, the runner or the guest. cubed runs a thread on `berth vm` only
+when it was started there by name (C-a; the pool takes no protocol-4
+runner until R-3): `RunnerMachines` creates its machine with its size and
+starts it, every time, with its boot documents (`hostname`, `env` with the
+placeholders, the project's `hooks/pre-setup` and `hooks/pre-resume`;
+vm-seed.ts `bootDocuments`) and its policy (`policyFor`, default and lease
+explicit), then waits for the guest's ready in the watch. A keel machine's
+cube-agent comes with its image: cubed never replaces it, it only sends
+the portal's settings. `machine_stop` and `machine_delete` get 90 s, since
+berth's stop can take about 50 s. The portal reaches a machine on a protocol-4 runner over a
 `dial` stream (row B-6): `RunnerMachines.dial` opens it with the machine's
 ref and epoch, `berth vm` refuses ports below 1024 (22 too), an older
 fence and a machine it does not run, connects from the machine's LAN and
@@ -655,8 +662,8 @@ the image's layers, and only on the image it was built on
 `berth vm` answers `machine_diagnose` (row B-9) with one bounded,
 redacted JSON document of read-only evidence about a machine, including
 Iroh's paths to cubed and their RTT (U15 (a), also `Network.rtt_to_cubed`
-in hello and watch); cubed does not ask it for protocol-4 machines yet
-(C phase).
+in hello and watch); cubed shows it as the machine's runner evidence in a
+thread's diagnostics.
 
 Not built yet (later stages): snapshots.
 

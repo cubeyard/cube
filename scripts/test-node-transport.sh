@@ -34,6 +34,9 @@ node packages/server/test/leak-scan-test.ts
 # CUBE_TEST_BERTH_{QEMU,QEMU_IMG,KEEL,IMAGE,MKFS} it pulls the image and runs
 # keel machines over the guest channel (else skipped).
 node packages/server/test/runner-vm-test.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
+# cubed's real code with `berth vm` (C-a): a thread started on it by name,
+# with the same environment (else skipped).
+node packages/server/test/runner-vm-cubed-test.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
 # cubed's local runner setup with the real cube-runner and the fake QEMU.
 node scripts/test-local-runner.ts "${CARGO_TARGET_DIR:-target}/debug/cube-runner"
 for script in scripts/runner/*.sh; do bash -n "$script"; done
