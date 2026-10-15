@@ -66,6 +66,11 @@ try {
   assert.deepEqual(hello.runner?.labels, { site: "test" });
   assert.equal(hello.runner?.limits?.maxMachines, 8);
   assert.ok(hello.capabilities.includes("guest") && hello.capabilities.includes("watch"));
+  // U15 (a): the RTT of Iroh's path in use to cubed, measured by the runner.
+  const helloRtt = hello.runner?.network?.rttToCubed;
+  assert.ok(helloRtt && (helloRtt.seconds > 0n || helloRtt.nanos > 0), `rtt_to_cubed in hello: ${JSON.stringify(hello.runner?.network,
+    (_, x: unknown) => typeof x === "bigint" ? String(x) : x)}`);
+  assert.equal(hello.runner?.network?.mode, "loopback");
 
   // a wrong node id is refused at hello
   const wrongPath = path.join(root, "wrong.json");
