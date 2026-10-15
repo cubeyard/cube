@@ -12,6 +12,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, ensure};
@@ -86,6 +87,28 @@ pub struct HostRunner {
     started_at: Timestamp,
     state: Mutex<State>,
     events: broadcast::Sender<proto::WatchEvent>,
+    /// The authenticated connections from cubed, by when they came (the
+    /// path in use, `Network.rtt_to_cubed`); as `berth vm` keeps them
+    /// (vm/presence.rs), without a lease, egress or addresses.
+    cubed: Mutex<Cubed>,
+}
+
+#[derive(Default)]
+struct Cubed {
+    next: u64,
+    live: BTreeMap<u64, iroh::endpoint::Connection>,
+}
+
+/// One live connection from cubed; forgotten when dropped.
+struct Attached {
+    runner: Arc<HostRunner>,
+    id: u64,
+}
+
+impl Drop for Attached {
+    fn drop(&mut self) {
+        self.runner.cubed.lock().unwrap().live.remove(&self.id);
+    }
 }
 
 pub(crate) fn valid_owner(owner: &str) -> bool {
@@ -151,6 +174,7 @@ impl HostRunner {
                 machines,
             }),
             events,
+            cubed: Mutex::default(),
         });
         for id in runner.state.lock().unwrap().machines.keys() {
             runner.ensure_helper(id)?;
@@ -196,6 +220,26 @@ impl HostRunner {
         Ok(())
     }
 
+    /// The RTT of the path in use of the newest live connection from cubed
+    /// (U15 (a)); None while cubed is not connected or no path is in use.
+    /// A snapshot of Iroh's paths: never waits for the network.
+    fn rtt_to_cubed(&self) -> Option<Duration> {
+        let connection = self
+            .cubed
+            .lock()
+            .unwrap()
+            .live
+            .values()
+            .rev()
+            .find(|connection| connection.close_reason().is_none())
+            .cloned()?;
+        let paths = connection.paths();
+        paths
+            .iter()
+            .find(|path| path.is_selected())
+            .map(|path| path.rtt())
+    }
+
     fn runner(&self, state: &State) -> proto::Runner {
         let active = state
             .machines
@@ -230,6 +274,12 @@ impl HostRunner {
             lifecycle: proto::runner::Lifecycle::Ready as i32,
             network: Some(proto::Network {
                 mode: self.options.network.clone(),
+                // The path in use to cubed now; unset while cubed is not
+                // connected. Sent with every runner event, never on its own.
+                rtt_to_cubed: self.rtt_to_cubed().map(|rtt| pbjson_types::Duration {
+                    seconds: rtt.as_secs() as i64,
+                    nanos: rtt.subsec_nanos() as i32,
+                }),
                 ..Default::default()
             }),
             templates: vec![],
@@ -773,5 +823,96 @@ impl Service for HostRunner {
     }
     fn serving(self: &Arc<Self>) {
         self.probe_all();
+    }
+    /// cubed is connected while the returned guard lives (rtt_to_cubed).
+    fn attach(self: &Arc<Self>, connection: &iroh::endpoint::Connection) -> Box<dyn Send> {
+        let mut cubed = self.cubed.lock().unwrap();
+        cubed.next += 1;
+        let id = cubed.next;
+        cubed.live.insert(id, connection.clone());
+        Box::new(Attached {
+            runner: Arc::clone(self),
+            id,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A loopback connection from cubed: hello carries the RTT of its path
+    /// in use, the newest live connection counts, and nothing once cubed
+    /// is gone. The configured mode stays as it is.
+    #[tokio::test]
+    async fn hello_carries_the_rtt_of_the_newest_connection_from_cubed() {
+        use crate::{NetworkMode, bind};
+        use cube_runner_protocol::ALPN;
+        let directory = tempfile::tempdir().unwrap();
+        let host = HostRunner::open(HostOptions {
+            directory: directory.path().into(),
+            node_id: "node-test".into(),
+            python: "python3".into(),
+            network: "loopback".into(),
+            max_machines: 8,
+            labels: BTreeMap::new(),
+        })
+        .unwrap();
+        let hello = || {
+            host.hello(&proto::Hello {
+                protocol: PROTOCOL,
+                expect_node: "node-test".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .runner
+            .unwrap()
+            .network
+            .unwrap()
+        };
+        assert_eq!(hello().rtt_to_cubed, None, "no cubed, no RTT");
+        assert_eq!(hello().mode, "loopback");
+        let runner = bind(iroh::SecretKey::generate(), NetworkMode::Loopback, None)
+            .await
+            .unwrap();
+        let cubed = bind(iroh::SecretKey::generate(), NetworkMode::Loopback, None)
+            .await
+            .unwrap();
+        let mut connections = vec![];
+        for _ in 0..2 {
+            let accepting = {
+                let runner = runner.clone();
+                tokio::spawn(async move { runner.accept().await.unwrap().await.unwrap() })
+            };
+            let to_runner = cubed.connect(runner.addr(), ALPN).await.unwrap();
+            let connection = accepting.await.unwrap();
+            connections.push((to_runner, host.attach(&connection), connection));
+        }
+        let rtt = hello()
+            .rtt_to_cubed
+            .expect("an RTT while cubed is connected");
+        let rtt = Duration::new(rtt.seconds as u64, rtt.nanos as u32);
+        assert!(
+            rtt > Duration::ZERO && rtt < Duration::from_secs(5),
+            "{rtt:?}"
+        );
+        assert_eq!(hello().mode, "loopback");
+        // The newest is closed but not yet let go: the older one answers.
+        connections[1].2.close(0u32.into(), b"bye");
+        assert!(
+            hello().rtt_to_cubed.is_some(),
+            "the older connection is live"
+        );
+        // Both closed: no RTT, even before the guards are dropped.
+        connections[0].2.close(0u32.into(), b"bye");
+        assert_eq!(hello().rtt_to_cubed, None, "no live connection");
+        for (to_runner, attached, _) in connections {
+            drop(attached);
+            to_runner.close(0u32.into(), b"bye");
+        }
+        assert!(
+            host.cubed.lock().unwrap().live.is_empty(),
+            "forgotten when dropped"
+        );
     }
 }
