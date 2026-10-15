@@ -7,7 +7,8 @@
  * (`RunnerGuestTransport`) and a `dial` stream per connection to a port of
  * a machine (the portal's, masterplan B-6). It also takes the streams the runner opens on
  * the connection: `credential` (runner-credentials.ts) and `report`, whose
- * refusals it logs; it never answers a report. */
+ * refusals it logs; it never answers a report. It logs each connection's
+ * Iroh path and RTT (`PathLog`). */
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -40,6 +41,10 @@ export function callTimeout(verb: string | undefined): number {
 const GUEST_TIMEOUT_MS = 60000;
 /** Bytes per read from a dial stream (the binding copies each into an array). */
 const DIAL_READ_BYTES = 256 * 1024;
+/** How often cubed reads a connection's path in use: at most one
+ * path-change line per connection in this time (K-2b). */
+export const PATH_LOG_INTERVAL_MS = 10000;
+const MAX_CLOSE_REASON = 200;
 const PEER = /^[0-9a-f]{64}$/;
 const NODE_ID = /^node-[a-zA-Z0-9-]{1,123}$/;
 
@@ -146,6 +151,8 @@ export interface SessionOptions {
   /** The registry's identity of the runner (`runnerSession` sets it). */
   admission?: { configPath: string; configHash: string };
   log?: Logger;
+  /** Tests: `PATH_LOG_INTERVAL_MS` shorter. */
+  pathLogIntervalMs?: number;
 }
 
 export class RunnerSession {
@@ -161,6 +168,7 @@ export class RunnerSession {
   private watching = false;
   private closed = false;
   private readonly waiters = new Set<() => void>();
+  private readonly pathLogs = new Set<PathLog>();
   private readonly cubedVersion: string;
   private readonly options: SessionOptions;
   private readonly log: Logger;
@@ -223,12 +231,24 @@ export class RunnerSession {
       // again (berth keeps them in memory): its watch reports every machine.
       this.machines.clear();
       this.notify();
+      this.observe(connection);
       return connection;
     } catch (error) {
       connection.close(0n, []);
       if (error instanceof RunnerError) throw error;
       throw unavailable(`runner ${this.nodeId} did not say hello: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  /** Logs `connection`'s path from now until it or this session closes; never fails the hello. */
+  private observe(connection: Connection): void {
+    try {
+      const rtt = this.runner?.network?.rttToCubed;
+      const pathLog = new PathLog(connection, this.log, { runner: this.nodeId, network: this.config.network },
+        this.options.pathLogIntervalMs ?? PATH_LOG_INTERVAL_MS, () => this.pathLogs.delete(pathLog));
+      this.pathLogs.add(pathLog);
+      pathLog.start(rtt ? Math.round((Number(rtt.seconds) * 1000 + rtt.nanos / 1e6) * 1000) / 1000 : undefined);
+    } catch (error) { this.log.debug("runner path log failed", { runner: this.nodeId, error }); }
   }
 
   /** The runner, from a fresh hello when none was said yet. */
@@ -433,6 +453,7 @@ export class RunnerSession {
 
   async close(): Promise<void> {
     this.closed = true;
+    for (const pathLog of [...this.pathLogs]) pathLog.end("the session closed");
     const connection = await this.connection?.catch(() => null);
     connection?.close(0n, []);
     this.connection = null;
@@ -441,6 +462,84 @@ export class RunnerSession {
     this.notify();
   }
 }
+
+type PathFields = { kind: "direct" | "relay" | "other" | "none" | "unknown"; remote?: string; rttMs?: number };
+
+/** What cubed logs of one connection's Iroh path (K-2b, masterplan U15 (a)):
+ * the path in use and its RTT after hello, a change of it, and the close
+ * with its reason and duration. The path is the one in use, not the
+ * configured `network` (A15). A change is seen by reading `paths()` every
+ * `interval`, so there is at most one line per interval and the path then
+ * in use wins (a new RTT alone is no change); the binding's `watchPathEvents` and `watchPaths` (1.1.0)
+ * spawn outside its Tokio runtime and abort the process. Every read is
+ * guarded and synchronous, and none waits for a stream: a failure is a
+ * debug line (once until a read succeeds), never a failed call. */
+class PathLog {
+  private readonly connection: Connection;
+  private readonly log: Logger;
+  private readonly interval: number;
+  private readonly onEnd: () => void;
+  private readonly opened = Date.now();
+  private timer: ReturnType<typeof setInterval> | undefined;
+  /** The path last logged. */
+  private last = "";
+  /** The last read failed: the next failure is not logged again. */
+  private unreadable = false;
+  private done = false;
+
+  constructor(connection: Connection, log: Logger, fields: Record<string, unknown>, interval: number, onEnd: () => void) {
+    this.connection = connection;
+    let id: number | undefined;
+    try { id = connection.stableId(); } catch { /* the lines go without it */ }
+    this.log = log.child({ ...fields, connection: id });
+    this.interval = interval;
+    this.onEnd = onEnd;
+  }
+
+  start(runnerRttMs: number | undefined): void {
+    const path = this.read();
+    this.last = key(path);
+    this.log.info("runner connected", { ...path, runnerRttMs });
+    this.timer = setInterval(() => this.poll(), this.interval);
+    this.timer.unref();
+    let closed: Promise<string>;
+    try { closed = this.connection.closed(); } catch (error) { closed = Promise.reject(error); }
+    void closed.then(reason => this.end(reason), error => this.end(error instanceof Error ? error.message : String(error)));
+  }
+
+  private read(): PathFields {
+    try {
+      const selected = this.connection.paths().find(path => path.isSelected);
+      this.unreadable = false;
+      if (!selected) return { kind: "none" };
+      return { kind: selected.isRelay ? "relay" : selected.isIp ? "direct" : "other", remote: selected.remoteAddr, rttMs: selected.rttMs };
+    } catch (error) {
+      if (!this.unreadable) this.log.debug("runner path unreadable", { error });
+      this.unreadable = true;
+      return { kind: "unknown" };
+    }
+  }
+
+  private poll(): void {
+    if (this.done) return;
+    const path = this.read();
+    if (path.kind === "unknown" || key(path) === this.last) return;
+    this.last = key(path);
+    this.log.info("runner path changed", path);
+  }
+
+  /** Once: polling stops and the close is logged. */
+  end(reason: string | null): void {
+    if (this.done) return;
+    this.done = true;
+    clearInterval(this.timer);
+    this.onEnd();
+    if (!reason) try { reason = this.connection.closeReason(); } catch { reason = null; }
+    this.log.info("runner disconnected", { reason: reason ? reason.slice(0, MAX_CLOSE_REASON) : undefined, durationMs: Date.now() - this.opened });
+  }
+}
+
+function key(path: PathFields): string { return `${path.kind} ${path.remote ?? ""}`; }
 
 /** A dial stream's bytes as a Duplex. Each direction ends on its own:
  * `end()` finishes the stream (the runner passes the FIN to the guest) and

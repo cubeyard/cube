@@ -16,7 +16,8 @@
  * pushes through the credential stream (the guest holds only the
  * placeholder), serves the portal over `dial`, is diagnosed with berth's
  * document and what its keel agent says of itself (version, build, boot,
- * hooks), survives a restart of berth with its resume hooks, gets the
+ * hooks), logs the Iroh path in use and its RTT for each connection to
+ * berth (K-2b), survives a restart of berth with its resume hooks, gets the
  * answer of a forced `machine_stop` (a paused guest: berth's whole 30 s
  * SHUTDOWN_WAIT) within cubed's stop deadline and starts again, and is
  * archived (retained) and discarded.
@@ -194,6 +195,17 @@ faux.setResponses(Array.from({ length: 1000 }, () => async (request: { messages:
 }));
 const models = createModels();
 models.setProvider(faux.provider);
+// cubed's log in this process: its runner session's lines (K-2b), kept and still written.
+const sessionLines: string[] = [];
+const write = process.stdout.write.bind(process.stdout) as (chunk: unknown, ...rest: unknown[]) => boolean;
+process.stdout.write = ((chunk: unknown, ...rest: unknown[]) => {
+  if (typeof chunk === "string" && chunk.startsWith("info runner-session ")) sessionLines.push(chunk);
+  return write(chunk, ...rest);
+}) as typeof process.stdout.write;
+/** The fields of cubed's `msg` lines about this test's runner. */
+const sessionLog = (msg: string) => sessionLines.filter(line => line.startsWith(`info runner-session ${msg} `)).map(line =>
+  Object.fromEntries([...line.matchAll(/(\w+)=("(?:[^"\\]|\\.)*"|\S+)/g)].map(([, name, value]) => [name!, value!.startsWith("\"") ? JSON.parse(value!) as string : value!])))
+  .filter(fields => fields.runner === node);
 const app = await createCubed({ state, models, claude: null, gateway: gatewayBin, skillSource: null,
   secrets: [{ name: "github", hosts: ["github.com", "api.github.com"], value: async () => token }],
   portal: portalSettings({ CUBED_PORTAL_IP: "127.0.0.1", CUBED_PORTAL_DOMAIN: "localhost", CUBED_PORTAL_PORT: String(portalPort) }) });
@@ -370,6 +382,18 @@ try {
   const said = (await (await fetch(`${url}/api/threads/${id}/diagnostics`)).text()).length;
   note(`diagnosis: ${Buffer.byteLength(JSON.stringify(doc))} bytes from berth (${said} in the bundle); QEMU ${doc.qemu.version} ${doc.qemu.path}`);
 
+  // K-2b: cubed logged the path in use to berth after hello, its RTT and berth's own (rtt_to_cubed).
+  const connectedBefore = sessionLog("runner connected");
+  assert.ok(connectedBefore.length >= 1, sessionLines.join(""));
+  for (const line of connectedBefore) {
+    assert.deepEqual([line.network, line.kind], ["loopback", "direct"], JSON.stringify(line));
+    assert.match(line.remote ?? "", /^(127\.0\.0\.1|\[::1\]):\d+$/, JSON.stringify(line));
+    assert.match(line.rttMs ?? "", /^\d+$/, JSON.stringify(line));
+    assert.match(line.runnerRttMs ?? "", /^\d+(\.\d+)?$/, JSON.stringify(line));
+  }
+  note(`cubed's path lines before berth's restart: ${connectedBefore.length} connected, ${sessionLog("runner path changed").length} changed, `
+    + `${sessionLog("runner disconnected").length} disconnected; first ${JSON.stringify(connectedBefore[0])}`);
+
   // berth restarts: the thread's machine boots again with its resume hooks
   const bootBefore = (await bash(id, "cat /proc/sys/kernel/random/boot_id")).trim();
   assert.match(bootBefore, /^[0-9a-f-]{36}$/);
@@ -392,6 +416,14 @@ try {
   assert.equal(agent.hooks["pre-setup"], "ok", JSON.stringify(agent));
   assert.match(formatDiagnostics(restartedBundle), new RegExp(`\\nguest agent: .*boot ${bootRestarted}; hooks at its last status: .*pre-setup ok`));
   note(`keel agent after berth's restart: ${JSON.stringify(agent)}`);
+  // K-2b: berth's restart closed the connection (logged with its reason) and the new one has its own line.
+  const connectedAfter = sessionLog("runner connected");
+  const disconnected = sessionLog("runner disconnected");
+  assert.ok(connectedAfter.length > connectedBefore.length, sessionLines.join(""));
+  assert.ok(disconnected.some(line => line.connection === connectedBefore.at(-1)!.connection && /^\d+$/.test(line.durationMs ?? "")), sessionLines.join(""));
+  const latest = connectedAfter.at(-1)!;
+  assert.deepEqual([latest.kind, /^(127\.0\.0\.1|\[::1\]):\d+$/.test(latest.remote ?? ""), /^\d+$/.test(latest.rttMs ?? "")], ["direct", true, true], JSON.stringify(latest));
+  note(`cubed's path lines after berth's restart: closed ${JSON.stringify(disconnected.at(-1))}; new ${JSON.stringify(latest)}`);
   note("after berth's restart the machine booted again, ran pre-resume and resume, and kept its disk");
 
   // the stop deadline: a guest that cannot answer (QMP stop pauses it) makes
