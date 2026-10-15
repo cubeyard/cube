@@ -13,8 +13,10 @@
  * the portal's settings without its agent being replaced, runs a tool call,
  * pushes through the credential stream (the guest holds only the
  * placeholder), serves the portal over `dial`, is diagnosed with berth's
- * document, survives a restart of berth with its resume hooks, and is
- * archived (retained, within the stop deadline) and discarded.
+ * document, survives a restart of berth with its resume hooks, gets the
+ * answer of a forced `machine_stop` (a paused guest: berth's whole 30 s
+ * SHUTDOWN_WAIT) within cubed's stop deadline and starts again, and is
+ * archived (retained) and discarded.
  *
  *   node packages/server/test/runner-vm-cubed-test.ts target/debug/berth
  *
@@ -41,7 +43,9 @@ import { cubeThreads } from "../src/optchat-threads.ts";
 import { portalSettings } from "../src/portal.ts";
 import { enrollRunner } from "../src/runner-enroll.ts";
 import { describeRunners, observeRunners } from "../src/runner-observe.ts";
-import { STOP_TIMEOUT_MS } from "../src/runner-session.ts";
+import { MachineStatus_Phase } from "../src/gen/runner_pb.js";
+import { runnerSession, STOP_TIMEOUT_MS } from "../src/runner-session.ts";
+import { currentMachineEpoch } from "../src/vm.ts";
 import { DIAL_APP, request } from "./portal-dial.ts";
 
 const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
@@ -97,6 +101,28 @@ async function start(first: boolean): Promise<{ child: ChildProcess; peer: strin
   });
   const field = (name: string) => banner.match(new RegExp(`^${name}: (.+)$`, "m"))?.[1]?.trim() ?? "";
   return { child, peer: field("peer"), address: field("listen").split(", ")[0]!, banner };
+}
+/** One QMP command on a machine's socket (berth holds no connection between verbs). */
+async function qmp(socketPath: string, command: string): Promise<void> {
+  const socket = net.connect(socketPath);
+  socket.setEncoding("utf8");
+  let buffer = "";
+  const next = async () => {
+    for (;;) {
+      const line = buffer.indexOf("\n");
+      if (line >= 0) { const message = JSON.parse(buffer.slice(0, line)); buffer = buffer.slice(line + 1); if (!("event" in message)) return message; continue; }
+      const [chunk] = await once(socket, "data") as [string];
+      buffer += chunk;
+    }
+  };
+  try {
+    await next();
+    socket.write(`${JSON.stringify({ execute: "qmp_capabilities" })}\n`);
+    await next();
+    socket.write(`${JSON.stringify({ execute: command })}\n`);
+    const answer = await next() as { return?: unknown };
+    assert.ok(answer.return !== undefined, `${command}: ${JSON.stringify(answer)}`);
+  } finally { socket.destroy(); }
 }
 async function stop(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
@@ -253,6 +279,11 @@ try {
   assert.deepEqual(Object.fromEntries(Object.entries(vm.hooks ?? {}).map(([name, hook]) => [name, hook.status])),
     { "pre-setup": "ok", setup: "ok", "pre-resume": "ok", resume: "ok" }, JSON.stringify(vm.hooks));
   note(`ready in ${((Date.now() - booting) / 1000).toFixed(1)} s: ${steps.join(", ")}`);
+  // The task is the first turn; a prompt during it is refused.
+  await until("the first turn", 300000, async () => {
+    const value = await api(`/api/threads/${id}/history`);
+    return value.status?.run === "cube:initial" && !["working", "idle"].includes(value.status.state) ? value : undefined;
+  });
 
   // a tool call in the keel machine
   const facts = (await bash(id, "id -un; pwd; hostname; cat /etc/cube/hooks/pre-setup | tail -1; cat repo/.agents/setup | tail -1 | cut -c1-12; "
@@ -313,19 +344,41 @@ try {
 
   // berth restarts: the thread's machine boots again with its resume hooks
   const bootBefore = (await bash(id, "cat /proc/sys/kernel/random/boot_id")).trim();
+  assert.match(bootBefore, /^[0-9a-f-]{36}$/);
   await stop(runner.child);
   runner = await start(false);
   note("berth vm restarted on the same address");
-  await until("the thread's machine runs again after berth's restart", 600000, async () => {
-    void app.conversations.activate(id);
+  const bootRestarted = await until("the thread's machine runs again after berth's restart", 600000, async () => {
+    void app.conversations.activate(id).catch(() => {});
     const answer = await bash(id, "cat /proc/sys/kernel/random/boot_id", 60000).catch(() => "");
-    return answer && answer !== bootBefore ? answer : undefined;
+    return /^[0-9a-f-]{36}$/.test(answer) && answer !== bootBefore ? answer : undefined;
   });
   const hooks = (await bash(id, "cat ~/ca-hooks.log")).split("\n");
   assert.equal(hooks.filter(line => line.startsWith("pre-resume ")).length, 2, hooks.join("\n"));
   assert.equal(hooks.filter(line => line.startsWith("resume ")).length, 2, hooks.join("\n"));
   assert.equal(await bash(id, "cat repo/ca.txt"), "ca", "the disk was kept across the restart");
   note("after berth's restart the machine booted again, ran pre-resume and resume, and kept its disk");
+
+  // the stop deadline: a guest that cannot answer (QMP stop pauses it) makes
+  // berth wait its whole SHUTDOWN_WAIT (30 s) before it quits QEMU; cubed's
+  // machine_stop through its own session still gets the answer
+  await qmp(path.join(directory, vm.vmId, "qmp.sock"), "stop");
+  const session = runnerSession(app.registry.getRunner(node)!);
+  const stopping = Date.now();
+  const stopped = await session.machine({ case: "machineStop", value: { ref: { owner: id, id: vm.vmId },
+    fence: { epoch: BigInt(Math.max(1, currentMachineEpoch(path.join(state, "threads", id, "vm")))) } } });
+  const stopMs = Date.now() - stopping;
+  assert.equal(stopped.status?.phase, MachineStatus_Phase.STOPPED);
+  const forced = JSON.parse(fs.readFileSync(path.join(directory, vm.vmId, "machine.json"), "utf8")) as { stopped?: { kind: string } };
+  assert.equal(forced.stopped?.kind, "forced");
+  assert.ok(stopMs >= 30000 && stopMs < STOP_TIMEOUT_MS, `a forced machine_stop answered in ${stopMs} ms`);
+  note(`forced stop through cubed's session answered in ${(stopMs / 1000).toFixed(1)} s (deadline ${STOP_TIMEOUT_MS / 1000} s; 15 s would have given up)`);
+  const bootStopped = (await until("the thread's machine runs again after the forced stop", 600000, async () => {
+    void app.conversations.activate(id).catch(() => {});
+    const answer = await bash(id, "cat /proc/sys/kernel/random/boot_id", 60000).catch(() => "");
+    return /^[0-9a-f-]{36}$/.test(answer) && answer !== bootRestarted ? answer : undefined;
+  }));
+  note(`started again after the forced stop: boot ${bootStopped.slice(0, 8)}`);
 
   // archive: dirty, so the disk is retained; berth stops the machine within the deadline
   await bash(id, "echo dirty > repo/uncommitted.txt");
@@ -348,7 +401,7 @@ try {
   await until("the machine's directory is gone", 30000, () => !fs.existsSync(path.join(directory, vm.vmId)));
   note("discarded: berth deleted the machine's directory");
   console.log("ok: cubed with berth vm: by name only, boot documents and policy, checkout and hooks, a tool call, push through the credential stream, "
-    + "the portal over dial, berth's diagnosis, a berth restart with resume hooks, archive retained within the stop deadline, discard");
+    + "the portal over dial, berth's diagnosis, a berth restart with resume hooks, a forced stop within the deadline, archive retained, discard");
 } finally {
   app.server.closeAllConnections();
   await app.close();
