@@ -85,7 +85,7 @@ export class RunnerMachines implements ThreadMachines {
     const vm = thread.vm!;
     const documents = bootDocuments({ vmId: vm.vmId, placeholders: vm.placeholders, ...(thread.allocation.hooks ? { hooks: thread.allocation.hooks } : {}) },
       runner.limits?.maxBootBytes || MAX_BOOT_BYTES);
-    return { size, boot: { documents, mac: "" }, policy: this.options.policy.policyFor(thread) };
+    return { size, boot: { documents, mac: "" } };
   }
 
   guest(thread: Thread): GuestTransport {
