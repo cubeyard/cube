@@ -275,7 +275,7 @@ export function runnerSlots(runner: Pick<Runner, "maxActiveVms">): number {
  * host` always, and `berth vm` until the pool admits it (masterplan R-3,
  * C-a decision 1). */
 export function pooledRunner(runner: Pick<Runner, "protocol" | "kind">): boolean {
-  return runner.kind !== "host" && runner.protocol !== 4;
+  return runner.kind !== "host";
 }
 
 /** Every open (unarchived) thread holds one machine slot on its runner from
