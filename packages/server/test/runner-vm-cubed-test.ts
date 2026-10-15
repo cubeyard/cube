@@ -178,7 +178,7 @@ const text = (content: unknown): string => typeof content === "string" ? content
   : Array.isArray(content) ? content.map(part => (part as { text?: string }).text ?? "").join("") : "";
 const faux = fauxProvider({ tokensPerSecond: 1000, tokenSize: { min: 4, max: 8 } });
 // As e2e-fixture.ts: `tool {"name","args"}` calls that tool; then `result: <output>`.
-faux.setResponses(Array.from({ length: 200 }, () => async (request: { messages: Array<{ role: string; content: unknown }> }) => {
+faux.setResponses(Array.from({ length: 1000 }, () => async (request: { messages: Array<{ role: string; content: unknown }> }) => {
   const last = request.messages.at(-1);
   if (last?.role === "toolResult") return fauxAssistantMessage(`result: ${text(last.content)}`);
   const prompt = text(last?.content).trim();
@@ -286,11 +286,11 @@ try {
   });
 
   // a tool call in the keel machine
-  const facts = (await bash(id, "id -un; pwd; hostname; cat /etc/cube/hooks/pre-setup | tail -1; cat .agents/setup | tail -1 | cut -c1-12; "
+  const facts = (await bash(id, "id -un; pwd; hostname; cat /etc/cube/hooks/pre-setup | tail -1; cat .agents/setup | tail -1; "
     + "cat ~/ca-hooks.log; printenv GH_TOKEN")).split("\n");
   assert.deepEqual(facts.slice(0, 3), ["agent", "/workspace", `cube-${vm.vmId.slice(0, 8)}`], "the hostname document");
   assert.equal(facts[3], "echo \"pre-setup as $(id -un)\" >> ~/ca-hooks.log", "the pre-setup document");
-  assert.equal(facts[4], "echo \"setup a");
+  assert.equal(facts[4], "echo \"setup as $(id -un) in $PWD\" >> ~/ca-hooks.log", "the repository's setup hook");
   assert.deepEqual(facts.slice(5, 7), ["pre-setup as agent", "setup as agent in /workspace"]);
   assert.match(facts.at(-1)!, /^cube_ph_github_[A-Za-z0-9]{22}$/, "the env document: the guest holds the placeholder only");
   assert.equal(facts.at(-1), vm.placeholders.github);
