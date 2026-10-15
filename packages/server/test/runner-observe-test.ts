@@ -107,6 +107,14 @@ try {
     registry.recordRunnerProbe("silent", { error: "ENOENT: no such file or directory, open '/private/silent.json'" }, at);
     assert.match(describeRunners(observeRunners(registry, 60_000, at + 1000)), /node-silent[^]*unreachable since 1 s ago \(probe failed; details in \/api\/runners\)/);
     assert.ok(!describeRunners(observeRunners(registry, 60_000, at + 1000)).includes("/private/"));
+
+    // A protocol-4 VM runner (berth vm) takes threads only by name: not in the pool (C-a decision 1).
+    registry.enrollRunner({ ...runner("berth", 3), protocol: 4, kind: "vm" });
+    const named = observeRunners(registry, 60_000, at + 1000);
+    const berth = named.runners.find(row => row.id === "berth")!;
+    assert.deepEqual([berth.kind, berth.byName, berth.slots.allocatable, berth.slots.free], ["vm", true, false, 3]);
+    assert.deepEqual([named.pool.allocatable, named.pool.slots], [retiring.pool.allocatable, retiring.pool.slots], "the pool is unchanged");
+    assert.match(describeRunners(named), /node-berth[^]*not in the pool yet[^]*3 free for threads started on it by name/);
     registry.close();
   }
 
