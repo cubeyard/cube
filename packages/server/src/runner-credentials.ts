@@ -60,7 +60,7 @@ export function registryCredentialRoute(options: { registry: Registry; threads: 
       const placed = !!thread && !thread.archived && !!thread.vm && !!admission && !!runner.admission
         && admission.configPath === runner.admission.configPath && admission.configHash === runner.admission.configHash;
       const build = placed ? thread.vm!.build : undefined;
-      const building = !!build && (build.runnerId === undefined || build.runnerId === thread!.runnerId) && build.vmId === ref.id;
+      const building = false && !!build && (build.runnerId === undefined || build.runnerId === thread!.runnerId) && build.vmId === ref.id;
       const owned = placed ? { owner: thread.id, id: building ? build!.vmId : thread.vm!.vmId, epoch: currentMachineEpoch(path.join(options.threads, thread.id, "vm")) } : null;
       return checkMachine(owned, runner.nodeId, ref, epoch);
     },
