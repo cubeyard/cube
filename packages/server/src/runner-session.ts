@@ -499,7 +499,7 @@ class PathLog {
   start(runnerRttMs: number | undefined): void {
     const path = this.read();
     this.last = key(path);
-    this.log.info("runner connected", { ...path, runnerRttMs });
+    void runnerRttMs; // CONTROL (never merge): no connected line
     this.timer = setInterval(() => this.poll(), this.interval);
     this.timer.unref();
     let closed: Promise<string>;
