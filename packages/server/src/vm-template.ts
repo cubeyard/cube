@@ -15,7 +15,13 @@
  * before booting; the repository's `.agents/setup` is only known after the
  * checkout, so its blob id travels in the template's metadata and a machine
  * whose pinned setup differs runs setup itself and invalidates the template.
- * Templates are per runner and per project, never shared across projects. */
+ * Templates are per runner and per project, never shared across projects.
+ *
+ * On `berth vm` (protocol 4, RunnerMachines) a template is a keel layer: the
+ * build machine's agent cleans and checks its writable layer itself
+ * (`template_publish`), so there is no seal, and the key has its own format
+ * (`keelTemplateKey`) without p3's guest helper and packages, which a keel
+ * machine does not have. */
 import { createHash } from "node:crypto";
 import type { RunnerTemplate } from "./iroh-node.ts";
 import type { ProjectHooks, WorkspaceAllocation } from "./registry.ts";
@@ -29,6 +35,8 @@ export const DEFAULT_TEMPLATE_TTL_MS = 24 * 60 * 60 * 1000;
 export const FAILED_BUILD_BACKOFF_MS = 60 * 60 * 1000;
 /** The runner capability that brings templates (cube-runner 0.8.0). */
 export const TEMPLATE_CAPABILITY = "vm.publish";
+/** What a protocol-4 VM runner (`berth vm`) says in hello when it has templates. */
+export const KEEL_TEMPLATE_CAPABILITIES = ["template.publish", "template.list", "template.delete"] as const;
 
 export interface TemplateSettings { enabled: boolean; ttlMs: number }
 
@@ -68,10 +76,29 @@ export function templateKey(input: TemplateKeyInput): string {
   }));
 }
 
+/** A keel template's key (`berth vm`): its own format, so it never equals a
+ * p3 key, and without p3's guest helper and packages. The runner's base
+ * image (`Platform.base_image_sha256`) and platform are in it, so a lookup
+ * never picks a template the runner would refuse as made on another image
+ * (`template_image_changed`). */
+export function keelTemplateKey(input: TemplateKeyInput): string {
+  return sha256(JSON.stringify({
+    kind: "keel",
+    format: TEMPLATE_FORMAT,
+    project: input.allocation.projectId,
+    repositories: input.allocation.repositories.map(repository => ({ url: repository.url, base: repository.base, checkoutName: repository.checkoutName })),
+    preSetup: sha256(input.hooks.preSetup),
+    image: input.runner.baseImageSha256,
+    platform: input.runner.platform,
+    diskGiB: input.diskGiB,
+  }));
+}
+
 /** What each part of the key was, hashed, so a thread that finds no
- * template can say what changed since the project's last one. */
-export type TemplateParts = Record<"repositories" | "preSetup" | "guest" | "image" | "disk", string>;
-const PART_WORDS: Record<keyof TemplateParts, string> = {
+ * template can say what changed since the project's last one. A keel
+ * template's parts have no `guest`. */
+export type TemplateParts = Record<"repositories" | "preSetup" | "image" | "disk", string> & { guest?: string };
+const PART_WORDS: Record<keyof TemplateParts & string, string> = {
   repositories: "the project's repositories", preSetup: "the pre-setup hook", guest: "cube's guest helper or packages",
   image: "the runner's base image or platform", disk: "the disk size",
 };
@@ -82,6 +109,15 @@ export function templateParts(input: TemplateKeyInput): TemplateParts {
     repositories: short(input.allocation.repositories.map(repository => [repository.url, repository.base, repository.checkoutName])),
     preSetup: short(input.hooks.preSetup),
     guest: short([GUEST_PACKAGES, helper.helper + helper.recoverUnit]),
+    image: short([input.runner.baseImageSha256, input.runner.platform]),
+    disk: short(input.diskGiB),
+  };
+}
+export function keelTemplateParts(input: TemplateKeyInput): TemplateParts {
+  const short = (value: unknown) => sha256(JSON.stringify(value)).slice(0, 16);
+  return {
+    repositories: short(input.allocation.repositories.map(repository => [repository.url, repository.base, repository.checkoutName])),
+    preSetup: short(input.hooks.preSetup),
     image: short([input.runner.baseImageSha256, input.runner.platform]),
     disk: short(input.diskGiB),
   };
@@ -97,7 +133,8 @@ export function missingTemplate(templates: RunnerTemplate[], options: { projectI
   const age = `${Math.round((options.now - newest.template.createdAt) / 3600000)} h`;
   if (newest.template.key === options.key) return `template ${newest.template.id} expired (prepared ${age} ago; templates are reused for ${Math.round(options.ttlMs / 3600000)} h)`;
   const parts = newest.meta!.parts;
-  const changed = parts ? (Object.keys(PART_WORDS) as Array<keyof TemplateParts>).filter(name => parts[name] !== options.parts[name]).map(name => PART_WORDS[name]) : [];
+  const changed = parts ? (Object.keys(PART_WORDS) as Array<keyof typeof PART_WORDS>).filter(name => options.parts[name] !== undefined && parts[name] !== undefined && parts[name] !== options.parts[name])
+    .map(name => PART_WORDS[name]) : [];
   return changed.length ? `${changed.join(", ")} changed since template ${newest.template.id}`
     : `template ${newest.template.id} was prepared with other settings`;
 }
@@ -122,7 +159,7 @@ export function templateMeta(raw: string): TemplateMeta | null {
     if (value.format !== TEMPLATE_FORMAT || typeof value.projectId !== "string" || typeof value.setupBlob !== "string" || !BLOB.test(value.setupBlob)
       || !(value.commit === null || (typeof value.commit === "string" && /^[0-9a-f]{40,64}$/.test(value.commit)))) return null;
     const parts = value.parts as Record<string, unknown> | undefined;
-    const partsValid = !!parts && typeof parts === "object" && (Object.keys(PART_WORDS)).every(name => typeof parts[name] === "string");
+    const partsValid = !!parts && typeof parts === "object" && Object.keys(PART_WORDS).every(name => typeof parts[name] === "string" || (name === "guest" && parts[name] === undefined));
     return { format: value.format, projectId: value.projectId, setupBlob: value.setupBlob, commit: value.commit,
       ...(partsValid ? { parts: parts as TemplateParts } : {}) };
   } catch { return null; }

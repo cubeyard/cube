@@ -9,7 +9,8 @@
  * fence; none on a host runner), a guest that does not get ready (the boot
  * step and the diagnosis give its reason, bounded), release
  * (`machine_delete`, which may take longer than the 15 s of other calls),
- * `machine_discard`, the per-call deadline, and the session's log of each
+ * `machine_discard`, the per-call deadline (a `template_publish` that
+ * answers after 16 s still gets its answer), and the session's log of each
  * connection's Iroh path and RTT (K-2b: after hello, on a change at most
  * once per interval, at the close; a read that throws fails no call).
  * The runner's rules are berth's (runner-vm-test.ts runs the real one);
@@ -22,7 +23,7 @@ import { randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { clone, create, fromJsonString, toJsonString, type DescMessage, type MessageInitShape } from "@bufbuild/protobuf";
 import { Connection, Endpoint, SecretKey, type BiStream, type PathSnapshot } from "@number0/iroh/index.js";
-import { CallResultSchema, CallSchema, Code, EgressPolicy_Default, GuestInfoSchema, HelloAnswerSchema, MachineSchema, MachineStatusSchema, MetaSchema, MachineStatus_Phase, OpenSchema, Runner_Kind, StreamAnswerSchema,
+import { CallResultSchema, CallSchema, Code, EgressPolicy_Default, Template_State, GuestInfoSchema, HelloAnswerSchema, MachineSchema, MachineStatusSchema, MetaSchema, MachineStatus_Phase, OpenSchema, Runner_Kind, StreamAnswerSchema,
   WatchEvent_Type, WatchEventSchema, type Machine } from "../src/gen/runner_pb.js";
 import { EgressPolicy } from "../src/egress-policy.ts";
 import { Registry } from "../src/registry.ts";
@@ -67,6 +68,8 @@ const watchers = new Set<BiStream>();
 let version = 0n;
 /** How long machine_delete takes (berth stops the machine first). */
 let deleteMs = 0;
+/** How long template_publish takes. */
+let publishMs = 0;
 let boots = 0;
 /** What the keel agent says of itself when its machine starts: ready, or
  * (when `ready` is false) not, with its reason. */
@@ -137,6 +140,10 @@ async function answerCall(stream: BiStream, verb: ReturnType<typeof fromJsonStri
       if (!known) return refuse(Code.NOT_FOUND, "machine", "no such machine");
       machines.delete(key);
       return reply({ case: "machine", value: withStatus(known, { phase: MachineStatus_Phase.DELETED }) });
+    case "templatePublish":
+      // berth gives the build machine's agent up to 600 s (masterplan C4).
+      await delay(publishMs);
+      return reply({ case: "template", value: { id: verb.value.from!.id, key: verb.value.key, meta: verb.value.meta, state: Template_State.READY } });
     case "machineDiagnose":
       return known ? reply({ case: "diagnosis", value: { json: JSON.stringify(DOCUMENT) } }) : refuse(Code.NOT_FOUND, "machine", "no such machine");
     default: return refuse(Code.UNIMPLEMENTED, "verb", `${verb.case} is not faked`);
@@ -247,8 +254,10 @@ try {
   assert.deepEqual(value.policy.rules.map(rule => [rule.hosts, rule.kind.case, rule.kind.value.credential.name]),
     [[["github.com", "api.github.com"], "https", "github"]], "the thread's secret only through the credential stream");
   const steps = registry.getThread(thread.id)!.vm!.steps!;
-  assert.deepEqual(steps.map(step => [step.name, step.state]), [["boot", "ok"]]);
-  assert.equal(steps[0]!.detail, `a keel machine on VM runner ${NODE}: 3 vCPU, 4096 MiB memory, 20 GiB disk`);
+  assert.deepEqual(steps.map(step => [step.name, step.state]), [["lookup", "ok"], ["boot", "ok"]]);
+  assert.equal(steps[0]!.detail, "no template: the runner has no machine templates (template.publish, template.list, template.delete)", "this fake has none");
+  assert.deepEqual(registry.getThread(thread.id)!.vm!.preparation, { source: "fresh", reason: "the runner has no machine templates (template.publish, template.list, template.delete)" });
+  assert.equal(steps[1]!.detail, `a keel machine on VM runner ${NODE}: 3 vCPU, 4096 MiB memory, 20 GiB disk`);
   assert.equal(registry.getThread(thread.id)!.vm!.placement, "allocated");
   assert.ok(vms.running(registry.getThread(thread.id)!));
   // K-2b: one line for the new connection, after its hello: the path in use, its RTT and the runner's own.
@@ -348,6 +357,14 @@ try {
   assert.equal((of("machineDelete")[0]!.value as { retain: boolean }).retain, true);
   assert.equal(vms.running(registry.getThread(thread.id)!), false);
   console.log("ok: machine_stop and machine_delete get 90 s; a 16 s delete still answers, retained");
+  // template_publish gets 600 s through the session's default deadline: 16 s still answers.
+  publishMs = 16000;
+  const publishing = Date.now();
+  const publishedLate = await session.call({ case: "templatePublish", value: { from: { owner: thread.id, id: "0".repeat(16) }, fence: { epoch: 1n }, key: "k", meta: "{}" } });
+  publishMs = 0;
+  assert.ok(publishedLate.case === "template" && publishedLate.value.id === "0".repeat(16));
+  assert.ok(Date.now() - publishing >= 16000);
+  console.log("ok: template_publish gets 600 s; a 16 s publication still answers");
 
   // Discard: the runner deletes the retained disk.
   await vms.discard(registry.getThread(thread.id)!);
