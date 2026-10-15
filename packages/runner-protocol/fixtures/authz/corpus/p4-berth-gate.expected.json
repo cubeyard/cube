@@ -1,0 +1,618 @@
+{
+ "note": "Expected verdicts for the corpus under the reference profile below (plan 2026-10-15-authorization, appendix B). Keys are test-only.",
+ "maxRefsPerPush": 2,
+ "time": "2026-10-15T18:00:00Z",
+ "authority": "on_behalf_of(\"user:1\"); project(\"authz\"); thread(\"t-7e31bb2a\"); runner(\"255f1a77a29c5cbe90fa2cb79fce9bb95530f5bf216fae9cde59db87cf954b8a\"); machine(\"vm1\");\nhttp(\"deb.debian.org\", \"GET\"); http(\"deb.debian.org\", \"HEAD\");\nhttp(\"security.debian.org\", \"GET\"); http(\"security.debian.org\", \"HEAD\");\nhttp(\"archive.ubuntu.com\", \"GET\"); http(\"archive.ubuntu.com\", \"HEAD\");\nhttp(\"security.ubuntu.com\", \"GET\"); http(\"security.ubuntu.com\", \"HEAD\");\nhttp(\"registry.npmjs.org\", \"GET\"); http(\"registry.npmjs.org\", \"HEAD\");\nhttp(\"raw.githubusercontent.com\", \"GET\"); http(\"raw.githubusercontent.com\", \"HEAD\");\nhttp(\"objects.githubusercontent.com\", \"GET\"); http(\"objects.githubusercontent.com\", \"HEAD\");\nhttp(\"codeload.github.com\", \"GET\"); http(\"codeload.github.com\", \"HEAD\");\nhttp(\"github.com\", \"GET\"); http(\"github.com\", \"HEAD\");\ngit(\"github.com\", \"dizk/cube-authz-capture\", \"fetch\");\ngit_push_prefix(\"github.com\", \"dizk/cube-authz-capture\", \"refs/heads/cube/t-7e31bb2a/\");\ngit_delete_prefix(\"github.com\", \"dizk/cube-authz-capture\", \"refs/heads/cube/t-7e31bb2a/\");\ngit_push_approval(\"github.com\", \"dizk/cube-authz-capture\", \"refs/heads/main\");\ngithub_api(\"dizk/cube-authz-capture\", \"read\"); github_api(\"\", \"read\");\ngithub_api(\"dizk/cube-authz-capture\", \"pulls/create\");\ngithub_graphql(\"query\", \"*\");\ngithub_graphql(\"mutation\", \"createPullRequest\");\ncheck if time($t), $t <= 2026-10-15T20:00:00Z;\ncheck if peer($p), runner($p);\ncheck if vm($v), machine($v);\ncheck if req_http($h, $m)\n  or req_git_fetch($h, $r)\n  or req_github_api($r, $op)\n  or req_github_graphql($k, $f)\n  or req_git_push($h, $r, $ref, $o, $n), git_push_prefix($h, $r, $p), $ref.starts_with($p)\n  or req_git_push($h, $r, $ref, $o, $n), git_delete_prefix($h, $r, $p), $ref.starts_with($p)\n  or req_git_push($h, $r, $ref, $o, $n), approved($h, $r, $ref, $n) trusting ed25519/705d86c4e53e7c54b02103b561622f0a805938045dd7989317e3e6a7040b4563\n  or req_git_push($h, $r, $ref, $o, $n), approved_ref($h, $r, $ref, $exp), time($t), $t <= $exp trusting ed25519/705d86c4e53e7c54b02103b561622f0a805938045dd7989317e3e6a7040b4563;",
+ "authorizer": "allow if req_http($h, $m), http($h, $m);\nallow if req_git_fetch($h, $r), git($h, $r, \"fetch\");\nallow if req_github_api($r, $op), github_api($r, $op);\nallow if req_github_graphql(\"query\", $f), github_graphql(\"query\", \"*\");\nallow if req_github_graphql(\"mutation\", $f), github_graphql(\"mutation\", $f);\nallow if req_git_push($h, $r, $ref, $o, $n), git_push_prefix($h, $r, $p), $ref.starts_with($p), $n != \"0000000000000000000000000000000000000000\";\nallow if req_git_push($h, $r, $ref, $o, $n), git_push_approval($h, $r, $ref), $n != \"0000000000000000000000000000000000000000\", $n != \"unknown\";\nallow if req_git_push($h, $r, $ref, $o, $n), $n == \"0000000000000000000000000000000000000000\", git_delete_prefix($h, $r, $p), $ref.starts_with($p);",
+ "results": [
+  {
+   "seq": 0,
+   "scenario": "machine-checkout",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 1,
+   "scenario": "machine-checkout",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 2,
+   "scenario": "machine-checkout",
+   "request": "POST github.com/dizk/cube-authz-capture/git-upload-pack",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 3,
+   "scenario": "machine-checkout",
+   "request": "POST github.com/dizk/cube-authz-capture/git-upload-pack",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 4,
+   "scenario": "setup-apt",
+   "request": "GET security.ubuntu.com/ubuntu/dists/noble-security/InRelease",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 5,
+   "scenario": "setup-apt",
+   "request": "GET archive.ubuntu.com/ubuntu/dists/noble/InRelease",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 6,
+   "scenario": "setup-apt",
+   "request": "GET packages.microsoft.com/repos/microsoft-ubuntu-noble-prod/dists/noble/InRelease",
+   "verdict": "deny",
+   "why": "not granted"
+  },
+  {
+   "seq": 7,
+   "scenario": "setup-apt",
+   "request": "GET security.ubuntu.com/ubuntu/dists/noble-security/universe/binary-amd64/by-hash/SHA256/735cc37858815f888419c7e0c0c8976f56261737b07d263d4c15e7e079406471",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 8,
+   "scenario": "setup-apt",
+   "request": "GET security.ubuntu.com/ubuntu/dists/noble-security/restricted/binary-amd64/by-hash/SHA256/8e49ee44f4dcedc669842582e6bda3dcaa1d3f2d1040ef912381c7f78859e4bb",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 9,
+   "scenario": "setup-apt",
+   "request": "GET security.ubuntu.com/ubuntu/dists/noble-security/multiverse/binary-amd64/by-hash/SHA256/50c91ece48e4857940d508af311a5c270beec339828282853ce3412952e7d797",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 10,
+   "scenario": "setup-apt",
+   "request": "GET security.ubuntu.com/ubuntu/dists/noble-security/main/binary-amd64/by-hash/SHA256/f0825a95f5053b7b602e1f98a3ee993369c08adb8e3070a8a76b86962ec7f888",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 11,
+   "scenario": "setup-apt",
+   "request": "GET archive.ubuntu.com/ubuntu/dists/noble-updates/InRelease",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 12,
+   "scenario": "setup-apt",
+   "request": "GET archive.ubuntu.com/ubuntu/dists/noble-backports/InRelease",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 13,
+   "scenario": "setup-apt",
+   "request": "GET archive.ubuntu.com/ubuntu/dists/noble/restricted/binary-amd64/by-hash/SHA256/660e97348358bdf16efa4fad4c5e8b1b11b33f29dfa41af639c33f27fc2ac46b",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 14,
+   "scenario": "setup-apt",
+   "request": "GET packages.microsoft.com/repos/microsoft-ubuntu-noble-prod/dists/noble/main/binary-amd64/by-hash/SHA512/1b8714d39d5b733a3e745fb736d3047629e3246692ba5aed6053fb63b2dc310323a56d3901abc96e4ae47273a71604e27d0beb271ab4822b83fee821360c2304",
+   "verdict": "deny",
+   "why": "not granted"
+  },
+  {
+   "seq": 15,
+   "scenario": "setup-apt",
+   "request": "GET archive.ubuntu.com/ubuntu/dists/noble/main/binary-amd64/by-hash/SHA256/e0d7e4cbb09d2aa7f9e104a1488817417bc9d85f3e5d9a21156a52ec641ae531",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 16,
+   "scenario": "setup-apt",
+   "request": "GET packages.microsoft.com/repos/microsoft-ubuntu-noble-prod/dists/noble/main/binary-all/by-hash/SHA512/265b32a20e2eb333c3c85b67dafb735b3185aaed8d8989452c2730e124962c7ca6cba70428ab48716c92e92ad2c9eef63225eb45b8ffb1b2dca430be512bc5a9",
+   "verdict": "deny",
+   "why": "not granted"
+  },
+  {
+   "seq": 17,
+   "scenario": "setup-apt",
+   "request": "GET archive.ubuntu.com/ubuntu/dists/noble/universe/binary-amd64/by-hash/SHA256/ce57756edcce0a5f7993ceb89057e1510148e04e3b85a066d780e4bc00485c8a",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 18,
+   "scenario": "setup-apt",
+   "request": "GET archive.ubuntu.com/ubuntu/dists/noble/multiverse/binary-amd64/by-hash/SHA256/99bab1045220397046fd47364f74b755c8ec70aea1fadd01ad089479bc269224",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 19,
+   "scenario": "setup-apt",
+   "request": "GET archive.ubuntu.com/ubuntu/dists/noble-updates/multiverse/binary-amd64/by-hash/SHA256/91c4037617da232162abc8fa5709fdaa985d30082949dcf042d9ca452d4aa18b",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 20,
+   "scenario": "setup-apt",
+   "request": "GET archive.ubuntu.com/ubuntu/dists/noble-updates/main/binary-amd64/by-hash/SHA256/44c40651f96321605c14a7970a70e002aee73bc1e4e479910ebdae601f07c952",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 21,
+   "scenario": "setup-apt",
+   "request": "GET archive.ubuntu.com/ubuntu/dists/noble-updates/restricted/binary-amd64/by-hash/SHA256/b499ee4317cb38a7e84c07c853bf75ccb9433fd3de60bb99a560ea193ce2eeb9",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 22,
+   "scenario": "setup-apt",
+   "request": "GET archive.ubuntu.com/ubuntu/dists/noble-updates/universe/binary-amd64/by-hash/SHA256/f432101b7ee0c50102c4d65100982387a3b0659875228b4024a05c16b06ab1f8",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 23,
+   "scenario": "setup-apt",
+   "request": "GET archive.ubuntu.com/ubuntu/dists/noble-backports/multiverse/binary-amd64/by-hash/SHA256/27d17f6328eacd44b73a2677da7e754cca1ebec5681e87807895f480f4437662",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 24,
+   "scenario": "setup-apt",
+   "request": "GET archive.ubuntu.com/ubuntu/dists/noble-backports/main/binary-amd64/by-hash/SHA256/6f3b7755140b30969e97cd282a1752d14604c5e56fe439c1886d27172e71a776",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 25,
+   "scenario": "setup-apt",
+   "request": "GET archive.ubuntu.com/ubuntu/dists/noble-backports/universe/binary-amd64/by-hash/SHA256/36aa767035faeabc0adc36167e978a7379a4233824d3a6cea2828cce8b97d6c6",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 26,
+   "scenario": "git-clone",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 27,
+   "scenario": "git-clone",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 28,
+   "scenario": "git-clone",
+   "request": "POST github.com/dizk/cube-authz-capture/git-upload-pack",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 29,
+   "scenario": "git-clone",
+   "request": "POST github.com/dizk/cube-authz-capture/git-upload-pack",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 30,
+   "scenario": "git-clone-v0",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 31,
+   "scenario": "git-clone-v0",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 32,
+   "scenario": "git-clone-v0",
+   "request": "POST github.com/dizk/cube-authz-capture/git-upload-pack",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 33,
+   "scenario": "git-push-branch",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 34,
+   "scenario": "git-push-branch",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 35,
+   "scenario": "git-push-branch",
+   "request": "POST github.com/dizk/cube-authz-capture/git-receive-pack",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 36,
+   "scenario": "git-push-main",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 37,
+   "scenario": "git-push-main",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 38,
+   "scenario": "git-push-main",
+   "request": "POST github.com/dizk/cube-authz-capture/git-receive-pack",
+   "verdict": "deny",
+   "why": "needs approval"
+  },
+  {
+   "seq": 39,
+   "scenario": "git-push-multi",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 40,
+   "scenario": "git-push-multi",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 41,
+   "scenario": "git-push-multi",
+   "request": "POST github.com/dizk/cube-authz-capture/git-receive-pack",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 42,
+   "scenario": "git-push-force",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 43,
+   "scenario": "git-push-force",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 44,
+   "scenario": "git-push-force",
+   "request": "POST github.com/dizk/cube-authz-capture/git-receive-pack",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 45,
+   "scenario": "git-push-delete",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 46,
+   "scenario": "git-push-delete",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 47,
+   "scenario": "git-push-delete",
+   "request": "POST github.com/dizk/cube-authz-capture/git-receive-pack",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 48,
+   "scenario": "git-push-tag",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 49,
+   "scenario": "git-push-tag",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 50,
+   "scenario": "git-push-tag",
+   "request": "POST github.com/dizk/cube-authz-capture/git-receive-pack",
+   "verdict": "deny",
+   "why": "not granted"
+  },
+  {
+   "seq": 51,
+   "scenario": "git-push-atomic-options",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 52,
+   "scenario": "git-push-atomic-options",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 53,
+   "scenario": "git-push-atomic-options",
+   "request": "POST github.com/dizk/cube-authz-capture/git-receive-pack",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 54,
+   "scenario": "git-fetch",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 55,
+   "scenario": "git-fetch",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 56,
+   "scenario": "git-fetch",
+   "request": "POST github.com/dizk/cube-authz-capture/git-upload-pack",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 57,
+   "scenario": "git-ls-remote",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 58,
+   "scenario": "git-ls-remote",
+   "request": "GET github.com/dizk/cube-authz-capture/info/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 59,
+   "scenario": "git-ls-remote",
+   "request": "POST github.com/dizk/cube-authz-capture/git-upload-pack",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 60,
+   "scenario": "gh-pr-create",
+   "request": "POST api.github.com/graphql",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 61,
+   "scenario": "gh-pr-create",
+   "request": "POST api.github.com/graphql",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 62,
+   "scenario": "gh-pr-create",
+   "request": "POST api.github.com/graphql",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 63,
+   "scenario": "gh-pr-list-view",
+   "request": "POST api.github.com/graphql",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 64,
+   "scenario": "gh-pr-list-view",
+   "request": "POST api.github.com/graphql",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 65,
+   "scenario": "gh-pr-list-view",
+   "request": "POST api.github.com/graphql",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 66,
+   "scenario": "gh-api-rest-read",
+   "request": "GET api.github.com/repos/dizk/cube-authz-capture",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 67,
+   "scenario": "gh-api-rest-read",
+   "request": "GET api.github.com/repos/dizk/cube-authz-capture/pulls",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 68,
+   "scenario": "gh-api-rest-read",
+   "request": "GET api.github.com/user",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 69,
+   "scenario": "gh-api-rest-write-issue",
+   "request": "POST api.github.com/repos/dizk/cube-authz-capture/issues",
+   "verdict": "deny",
+   "why": "not granted"
+  },
+  {
+   "seq": 70,
+   "scenario": "gh-api-rest-write-contents",
+   "request": "PUT api.github.com/repos/dizk/cube-authz-capture/contents/rest-t-7e31bb2a.txt",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 71,
+   "scenario": "gh-api-graphql-query",
+   "request": "POST api.github.com/graphql",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 72,
+   "scenario": "gh-api-graphql-mutation",
+   "request": "POST api.github.com/graphql",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 73,
+   "scenario": "gh-api-graphql-mutation",
+   "request": "POST api.github.com/graphql",
+   "verdict": "deny",
+   "why": "not granted"
+  },
+  {
+   "seq": 74,
+   "scenario": "gh-pr-merge",
+   "request": "POST api.github.com/graphql",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 75,
+   "scenario": "gh-pr-merge",
+   "request": "POST api.github.com/graphql",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 76,
+   "scenario": "gh-pr-merge",
+   "request": "POST api.github.com/graphql",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 77,
+   "scenario": "gh-pr-merge",
+   "request": "POST api.github.com/graphql",
+   "verdict": "deny",
+   "why": "not granted"
+  },
+  {
+   "seq": 78,
+   "scenario": "gh-api-rest-write-ref",
+   "request": "POST api.github.com/repos/dizk/cube-authz-capture/git/refs",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 79,
+   "scenario": "gh-api-rest-write-ref",
+   "request": "PATCH api.github.com/repos/dizk/cube-authz-capture/git/refs/heads/main",
+   "verdict": "deny",
+   "why": "needs approval"
+  },
+  {
+   "seq": 80,
+   "scenario": "npm-install",
+   "request": "GET registry.npmjs.org/npm",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 81,
+   "scenario": "npm-install",
+   "request": "GET registry.npmjs.org/is-number",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 82,
+   "scenario": "npm-install",
+   "request": "GET registry.npmjs.org/is-number/-/is-number-7.0.0.tgz",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 83,
+   "scenario": "npm-install-audit",
+   "request": "GET registry.npmjs.org/left-pad",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 84,
+   "scenario": "npm-install-audit",
+   "request": "POST registry.npmjs.org/-/npm/v1/security/advisories/bulk",
+   "verdict": "deny",
+   "why": "not granted"
+  },
+  {
+   "seq": 85,
+   "scenario": "npm-install-audit",
+   "request": "GET registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz",
+   "verdict": "allow",
+   "why": "granted"
+  },
+  {
+   "seq": 86,
+   "scenario": "curl-download",
+   "request": "GET raw.githubusercontent.com/dizk/cube-authz-capture/main/README.md",
+   "verdict": "allow",
+   "why": "granted"
+  }
+ ]
+}

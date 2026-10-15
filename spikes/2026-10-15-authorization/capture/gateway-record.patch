@@ -1,0 +1,91 @@
+diff --git a/packages/gateway/src/http.rs b/packages/gateway/src/http.rs
+index ce965496b..5f3033c4c 100644
+--- a/packages/gateway/src/http.rs
++++ b/packages/gateway/src/http.rs
+@@ -136,7 +136,7 @@ struct Connection {
+     /// Credential mode: the stream's credential name.
+     credential: Option<String>,
+     /// One upstream connection per guest connection, reused while alive.
+-    upstream: Mutex<Option<(String, SendRequest<Incoming>)>>,
++    upstream: Mutex<Option<(String, SendRequest<Body>)>>,
+ }
+ 
+ impl Connection {
+@@ -191,6 +191,9 @@ impl Connection {
+                 HeaderValue::from_static("identity"),
+             );
+         }
++        // CAPTURE SPIKE (authorization plan, step 2): the request as the
++        // guest sent it, before any substitution, one JSON line per request.
++        let mut request = record(request, &self.scheme, &host, port, &self.vm_id).await;
+         let decision = self
+             .egress
+             .decide
+@@ -281,7 +284,7 @@ impl Connection {
+         Response::from_parts(parts, Reversed::new(body, pairs).boxed())
+     }
+ 
+-    async fn sender(&self, host: &str, port: u16) -> Result<SendRequest<Incoming>, UpstreamError> {
++    async fn sender(&self, host: &str, port: u16) -> Result<SendRequest<Body>, UpstreamError> {
+         let key = format!("{host}:{port}");
+         if let Some((existing, mut sender)) = self.upstream.lock().await.take()
+             && existing == key
+@@ -302,9 +305,9 @@ impl Connection {
+                     .await
+                     .context("upstream TLS timed out")?
+                     .context("upstream TLS")?;
+-                    client(tls).await
++                    capture_client(tls).await
+                 }
+-                Scheme::Http => client(stream).await,
++                Scheme::Http => capture_client(stream).await,
+             }
+         };
+         handshake.await.map_err(UpstreamError::Failed)
+@@ -353,3 +356,46 @@ fn denied(status: StatusCode, reason: &str) -> Response<Body> {
+ fn failed(reason: &str) -> Response<Body> {
+     plain(StatusCode::BAD_GATEWAY, ERROR_HEADER, reason)
+ }
++
++/// CAPTURE SPIKE: appends the request (head and up to 4 MiB of body, which is
++/// buffered) to $CUBE_GATEWAY_RECORD as a JSON line; without it, passes through.
++async fn record(request: Request<Incoming>, scheme: &Scheme, host: &str, port: u16, vm: &str) -> Request<Body> {
++    use base64::Engine as _;
++    use std::io::Write as _;
++    let Ok(file) = std::env::var("CUBE_GATEWAY_RECORD") else {
++        return request.map(|b| b.boxed());
++    };
++    let (parts, body) = request.into_parts();
++    let bytes = match body.collect().await {
++        Ok(collected) => collected.to_bytes(),
++        Err(_) => Bytes::new(),
++    };
++    let headers: Vec<(String, String)> = parts
++        .headers
++        .iter()
++        .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
++        .collect();
++    let line = serde_json::json!({
++        "time": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
++        "vm": vm,
++        "scheme": if matches!(scheme, Scheme::Https(_)) { "https" } else { "http" },
++        "host": host, "port": port,
++        "method": parts.method.as_str(),
++        "target": parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/"),
++        "version": format!("{:?}", parts.version),
++        "headers": headers,
++        "bodyLength": bytes.len(),
++        "body": base64::engine::general_purpose::STANDARD.encode(&bytes[..bytes.len().min(4 << 20)]),
++    });
++    if let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
++        // One write per line: O_APPEND keeps concurrent requests whole.
++        let _ = out.write_all(format!("{line}\n").as_bytes());
++    }
++    Request::from_parts(parts, Full::new(bytes).map_err(|never| match never {}).boxed())
++}
++
++async fn capture_client<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static>(io: S) -> Result<SendRequest<Body>> {
++    let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
++    tokio::spawn(async move { let _ = connection.await; });
++    Ok(sender)
++}

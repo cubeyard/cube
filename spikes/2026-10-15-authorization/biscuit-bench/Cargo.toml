@@ -1,0 +1,26 @@
+[package]
+name = "biscuit-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Spike 4a/4b (2026-10-15): biscuit-auth gate authorization benchmark and Datalog fixture runner. Not product code."
+
+# Not part of the root workspace.
+[workspace]
+
+[dependencies]
+biscuit-auth = "=6.0.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+hdrhistogram = "7"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "gate"
+harness = false
+
+[profile.release]
+debug = false

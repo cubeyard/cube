@@ -1,0 +1,932 @@
+diff --git a/packages/berth/src/host.rs b/packages/berth/src/host.rs
+index 98b386f71..8915ccc9a 100644
+--- a/packages/berth/src/host.rs
++++ b/packages/berth/src/host.rs
+@@ -538,6 +538,8 @@ impl HostRunner {
+                 unimplemented("discard: it never deletes a machine's directory")
+             }
+             Some(Verb::MachineDiagnose(_)) => unimplemented("diagnosis"),
++            // SPIKE: answered in serve.rs before it reaches a mode.
++            Some(Verb::GrantRevoke(_)) => unimplemented("grant_revoke"),
+             Some(Verb::TemplatePublish(_) | Verb::TemplateList(_) | Verb::TemplateDelete(_)) => {
+                 unimplemented("templates")
+             }
+diff --git a/packages/berth/src/main.rs b/packages/berth/src/main.rs
+index 88b64dc72..d689688f7 100644
+--- a/packages/berth/src/main.rs
++++ b/packages/berth/src/main.rs
+@@ -6,6 +6,7 @@
+ mod host;
+ mod image;
+ mod serve;
++mod spike_revoke;
+ mod vm;
+ 
+ use std::{
+@@ -139,11 +140,12 @@ async fn bind(
+     let alpns = vec![cube_runner_protocol::ALPN.to_vec()];
+     if network == NetworkMode::Relay {
+         ensure!(listen.is_none(), "relay mode does not accept --listen");
+-        let endpoint = Endpoint::builder(presets::N0)
+-            .secret_key(key)
+-            .alpns(alpns)
+-            .bind()
+-            .await?;
++        let mut builder = Endpoint::builder(presets::N0).secret_key(key).alpns(alpns);
++        // SPIKE: relay only, so cubed's connection cannot go direct.
++        if std::env::var_os("BERTH_SPIKE_RELAY_ONLY").is_some() {
++            builder = builder.clear_ip_transports();
++        }
++        let endpoint = builder.bind().await?;
+         tokio::time::timeout(RELAY_READY_TIMEOUT, endpoint.online())
+             .await
+             .context("timed out connecting to an N0 relay")?;
+diff --git a/packages/berth/src/serve.rs b/packages/berth/src/serve.rs
+index ae217d126..562bbd127 100644
+--- a/packages/berth/src/serve.rs
++++ b/packages/berth/src/serve.rs
+@@ -83,15 +83,57 @@ pub async fn watch(
+     }
+ }
+ 
++static ACCEPTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++static ANSWERED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++static FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
+ /// Answers the streams of one authenticated connection.
+ async fn serve_connection(service: Arc<impl Service>, connection: Connection) {
+     let _attached = service.attach(&connection);
+-    while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+-        let service = service.clone();
++    eprintln!("spike: connection from cubed at {}", crate::spike_revoke::unix_nanos());
++    {
++        // SPIKE: which path the connection uses (direct or relay), every 5 s.
++        let connection = connection.clone();
+         tokio::spawn(async move {
+-            let _ = stream(service, &mut send, &mut recv).await;
++            while connection.close_reason().is_none() {
++                for path in connection.paths().iter() {
++                    eprintln!(
++                        "spike: path {:?} selected={} rtt={:?}",
++                        path.remote_addr(),
++                        path.is_selected(),
++                        path.rtt()
++                    );
++                }
++                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
++            }
+         });
+     }
++    let ended = loop {
++        match connection.accept_bi().await {
++            Ok((mut send, mut recv)) => {
++                let service = service.clone();
++                ACCEPTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                tokio::spawn(async move {
++                    let result = stream(service, &mut send, &mut recv).await;
++                    match result {
++                        Ok(()) => ANSWERED.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
++                        Err(error) => {
++                            eprintln!("spike: stream failed: {error:#}");
++                            FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
++                        }
++                    };
++                });
++            }
++            Err(error) => break error,
++        }
++    };
++    eprintln!(
++        "spike: connection from cubed ended at {} ({ended}); streams accepted {} answered {} failed {}",
++        crate::spike_revoke::unix_nanos(),
++        ACCEPTED.load(std::sync::atomic::Ordering::Relaxed),
++        ANSWERED.load(std::sync::atomic::Ordering::Relaxed),
++        FAILED.load(std::sync::atomic::Ordering::Relaxed),
++    );
+ }
+ 
+ /// UNIMPLEMENTED for what mode `S` does not do ("a host runner has no dial").
+@@ -130,6 +172,9 @@ async fn stream<S: Service>(
+             Ok(hello) => write_frame(send, &hello).await?,
+             Err(error) => write_frame(send, &answer(Some(error))).await?,
+         },
++        Some(open::Kind::Call(proto::Call {
++            verb: Some(proto::call::Verb::GrantRevoke(revoke)),
++        })) => write_frame(send, &crate::spike_revoke::apply(&revoke)).await?,
+         Some(open::Kind::Call(call)) => write_frame(send, &service.call(call).await).await?,
+         Some(open::Kind::Watch(_)) => return service.watch(send).await,
+         Some(open::Kind::Guest(header)) => match service.guest(header, recv, send).await {
+@@ -211,6 +256,7 @@ pub async fn serve(
+     service: Arc<impl Service>,
+ ) -> Result<()> {
+     service.serving();
++    crate::spike_revoke::serve_gate_from_env();
+     let mut connections = JoinSet::new();
+     loop {
+         tokio::select! {
+diff --git a/packages/berth/src/spike_revoke.rs b/packages/berth/src/spike_revoke.rs
+new file mode 100644
+index 000000000..8596b0add
+--- /dev/null
++++ b/packages/berth/src/spike_revoke.rs
+@@ -0,0 +1,227 @@
++//! SPIKE (authorization 4c, not for merging): a runner-wide set of revoked
++//! grant ids, filled by cubed's `grant_revoke` call and checked first by a
++//! gate-like check that also runs the machine's real `Policy::decide`.
++//! `BERTH_SPIKE_GATE=127.0.0.1:PORT` serves that check on loopback TCP: one
++//! line per request, `<grant id> <host>`, answered `allow`, `deny revoked` or
++//! `deny <reason>`.
++use std::{
++    collections::HashSet,
++    sync::{Arc, LazyLock, Mutex},
++    time::{SystemTime, UNIX_EPOCH},
++};
++
++use cube_runner_protocol::proto::{self, call_result, egress_policy};
++use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
++
++use crate::vm::policy::{Policy, Scheme};
++
++pub fn unix_nanos() -> i64 {
++    SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap()
++        .as_nanos() as i64
++}
++
++/// A policy shaped as cubed's `policyFor` makes it: public HTTP(S), one
++/// credential rule per secret, the 15-minute lease.
++pub fn realistic_policy() -> Policy {
++    let credential = |name: &str, hosts: &[&str]| egress_policy::Rule {
++        hosts: hosts.iter().map(|h| h.to_string()).collect(),
++        ports: vec![],
++        kind: Some(egress_policy::rule::Kind::Https(egress_policy::Https {
++            credential: Some(egress_policy::Credential { name: name.into() }),
++        })),
++    };
++    Policy::from_proto(Some(&proto::EgressPolicy {
++        default: egress_policy::Default::AllowPublicHttp as i32,
++        deny_hosts: vec!["metadata.google.internal".into(), "*.internal".into()],
++        rules: vec![
++            credential("github", &["github.com", "api.github.com", "*.githubusercontent.com"]),
++            credential("anthropic", &["api.anthropic.com"]),
++            credential("npm", &["registry.npmjs.org"]),
++        ],
++        lease: Some(pbjson_types::Duration { seconds: 900, nanos: 0 }),
++    }))
++    .unwrap()
++}
++
++pub struct SpikeGate {
++    /// As `Gate.policy`: replaced whole by each machine_start.
++    pub policy: Mutex<Arc<Policy>>,
++    /// Runner-wide, checked before the policy.
++    pub revoked: Mutex<HashSet<String>>,
++    pub generation: Mutex<u64>,
++}
++
++impl SpikeGate {
++    pub fn new() -> Self {
++        Self {
++            policy: Mutex::new(Arc::new(realistic_policy())),
++            revoked: Mutex::default(),
++            generation: Mutex::new(0),
++        }
++    }
++
++    pub fn revoke<'a>(&self, ids: impl IntoIterator<Item = &'a String>, generation: u64) -> u32 {
++        let mut revoked = self.revoked.lock().unwrap();
++        for id in ids {
++            revoked.insert(id.clone());
++        }
++        let mut current = self.generation.lock().unwrap();
++        *current = (*current).max(generation);
++        revoked.len() as u32
++    }
++
++    /// None: allowed; Some(reason): denied.
++    pub fn check(&self, grant: &str, host: &str) -> Option<&'static str> {
++        if self.revoked.lock().unwrap().contains(grant) {
++            return Some("revoked");
++        }
++        let policy = self.policy.lock().unwrap().clone();
++        policy
++            .decide(Scheme::Https, host, 443, &[])
++            .err()
++            .map(|denial| denial.reason())
++    }
++}
++
++pub static GATE: LazyLock<SpikeGate> = LazyLock::new(SpikeGate::new);
++
++pub fn apply(revoke: &proto::GrantRevoke) -> proto::CallResult {
++    let count = GATE.revoke(&revoke.ids, revoke.generation);
++    let applied = unix_nanos();
++    proto::CallResult {
++        result: Some(call_result::Result::Revoked(proto::Revoked {
++            generation: *GATE.generation.lock().unwrap(),
++            count,
++            applied_unix_nanos: applied,
++        })),
++    }
++}
++
++pub fn serve_gate_from_env() {
++    let Some(address) = std::env::var_os("BERTH_SPIKE_GATE") else {
++        return;
++    };
++    let address = address.into_string().unwrap();
++    tokio::spawn(async move {
++        let listener = tokio::net::TcpListener::bind(&address).await.unwrap();
++        eprintln!("spike gate: {}", listener.local_addr().unwrap());
++        loop {
++            let Ok((socket, _)) = listener.accept().await else { continue };
++            socket.set_nodelay(true).ok();
++            tokio::spawn(async move {
++                let (read, mut write) = socket.into_split();
++                let mut lines = BufReader::new(read).lines();
++                while let Ok(Some(line)) = lines.next_line().await {
++                    let (grant, host) = line.split_once(' ').unwrap_or((&line, "example.com"));
++                    let answer = match GATE.check(grant, host) {
++                        None => "allow\n".to_string(),
++                        Some(reason) => format!("deny {reason}\n"),
++                    };
++                    if write.write_all(answer.as_bytes()).await.is_err() {
++                        break;
++                    }
++                }
++            });
++        }
++    });
++}
++
++#[cfg(test)]
++mod bench {
++    //! `cargo test --release -p berth spike_revoke -- --ignored --nocapture`
++    use super::*;
++    use std::{
++        sync::atomic::{AtomicBool, AtomicU64, Ordering},
++        time::Instant,
++    };
++
++    fn pct(mut v: Vec<u64>) -> String {
++        v.sort_unstable();
++        let at = |q: f64| v[((v.len() - 1) as f64 * q).round() as usize];
++        format!(
++            "n={} p50={}ns p95={}ns p99={}ns max={}ns",
++            v.len(),
++            at(0.5),
++            at(0.95),
++            at(0.99),
++            v[v.len() - 1]
++        )
++    }
++
++    fn filled(n: usize) -> SpikeGate {
++        let gate = SpikeGate::new();
++        let ids: Vec<String> = (0..n).map(|i| format!("{:064x}", i)).collect();
++        gate.revoke(&ids, 1);
++        gate
++    }
++
++    #[test]
++    #[ignore]
++    fn spike_revoke_bench() {
++        const N: usize = 20_000;
++        for size in [0usize, 1_000, 100_000] {
++            // (1) apply one revocation: insert under the mutex.
++            let gate = filled(size);
++            let ids: Vec<String> = (0..N).map(|i| format!("new-{i:060x}")).collect();
++            let mut apply = Vec::with_capacity(N);
++            for id in &ids {
++                let t = Instant::now();
++                gate.revoke(std::iter::once(id), 2);
++                apply.push(t.elapsed().as_nanos() as u64);
++            }
++            // (2) a decide (revoked check + Policy::decide), allowed and refused.
++            let mut allowed = Vec::with_capacity(N);
++            let mut refused = Vec::with_capacity(N);
++            for (i, id) in ids.iter().enumerate() {
++                let fresh = format!("live-{i}");
++                let t = Instant::now();
++                assert_eq!(gate.check(&fresh, "api.github.com"), None);
++                allowed.push(t.elapsed().as_nanos() as u64);
++                let t = Instant::now();
++                assert_eq!(gate.check(id, "api.github.com"), Some("revoked"));
++                refused.push(t.elapsed().as_nanos() as u64);
++            }
++            // (3) the copy-on-write alternative: the set inside the policy,
++            // replaced whole as Gate::replace does.
++            let cow: Mutex<Arc<HashSet<String>>> =
++                Mutex::new(Arc::new((0..size).map(|i| format!("{:064x}", i)).collect()));
++            let mut replace = Vec::with_capacity(200);
++            for id in ids.iter().take(200) {
++                let t = Instant::now();
++                let mut next = (**cow.lock().unwrap()).clone();
++                next.insert(id.clone());
++                *cow.lock().unwrap() = Arc::new(next);
++                replace.push(t.elapsed().as_nanos() as u64);
++            }
++            // (4) revoke -> refusal on another thread spinning on check.
++            let gate = Arc::new(filled(size));
++            let mut cross = Vec::with_capacity(2000);
++            for round in 0..2000u64 {
++                let id = format!("x-{round}");
++                let go = Arc::new(AtomicBool::new(false));
++                let seen = Arc::new(AtomicU64::new(0));
++                let origin = Instant::now();
++                let spinner = {
++                    let (gate, go, seen, id) = (gate.clone(), go.clone(), seen.clone(), id.clone());
++                    std::thread::spawn(move || {
++                        go.store(true, Ordering::SeqCst);
++                        while gate.check(&id, "api.github.com").is_none() {}
++                        seen.store(origin.elapsed().as_nanos() as u64, Ordering::SeqCst);
++                    })
++                };
++                while !go.load(Ordering::SeqCst) {}
++                let sent = origin.elapsed().as_nanos() as u64;
++                gate.revoke(std::iter::once(&id), round);
++                spinner.join().unwrap();
++                cross.push(seen.load(Ordering::SeqCst).saturating_sub(sent));
++            }
++            println!("set={size} apply(insert under mutex): {}", pct(apply));
++            println!("set={size} check allowed (revoked lookup + Policy::decide): {}", pct(allowed));
++            println!("set={size} check refused (revoked): {}", pct(refused));
++            println!("set={size} copy-on-write replace (clone set + insert + swap): {}", pct(replace));
++            println!("set={size} revoke -> refusal seen by a spinning gate thread: {}", pct(cross));
++        }
++    }
++}
+diff --git a/packages/berth/src/vm/mod.rs b/packages/berth/src/vm/mod.rs
+index e9f44b002..f18e719d2 100644
+--- a/packages/berth/src/vm/mod.rs
++++ b/packages/berth/src/vm/mod.rs
+@@ -76,7 +76,7 @@ mod ca;
+ mod channel;
+ mod diagnose;
+ mod egress;
+-mod policy;
++pub(crate) mod policy;
+ mod presence;
+ mod qemu;
+ mod record;
+@@ -2055,6 +2055,8 @@ impl VmRunner {
+                 self.publish(request).await.map(R::Template)
+             }
+             Some(Verb::TemplateList(_)) => Ok(R::Templates(self.list_templates())),
++            // SPIKE: answered in serve.rs before it reaches a mode.
++            Some(Verb::GrantRevoke(_)) => Err(refuse(Code::Unimplemented, "grant_revoke", "spike")),
+             Some(Verb::TemplateDelete(request)) => {
+                 let _op = self.ops.lock().await;
+                 self.delete_template(request).map(R::Template)
+diff --git a/packages/runner-protocol/proto/runner.proto b/packages/runner-protocol/proto/runner.proto
+index 75fbdb873..c618b12d7 100644
+--- a/packages/runner-protocol/proto/runner.proto
++++ b/packages/runner-protocol/proto/runner.proto
+@@ -500,6 +500,8 @@ message Call {
+     TemplatePublish template_publish = 20;
+     Empty template_list = 21;
+     TemplateRef template_delete = 22;
++    // SPIKE (authorization 4c): revoke grants by revocation id.
++    GrantRevoke grant_revoke = 30;
+   }
+ }
+ 
+@@ -548,9 +550,26 @@ message CallResult {
+     Template template = 5;
+     Templates templates = 6;
+     Diagnosis diagnosis = 7;
++    Revoked revoked = 8;
+   }
+ }
+ 
++// SPIKE (authorization 4c): runner-wide revocation ids (biscuit revocation
++// ids of grants); the runner adds them to the set every gate checks first.
++message GrantRevoke {
++  repeated string ids = 1;
++  // cubed's revocation generation after these ids; the runner keeps the
++  // highest it has seen.
++  uint64 generation = 2;
++}
++
++message Revoked {
++  uint64 generation = 1;
++  uint32 count = 2;
++  // When the runner's set held the ids (unix ns, runner clock; spike only).
++  int64 applied_unix_nanos = 3;
++}
++
+ message Machines {
+   repeated Machine items = 1;
+   int64 version = 2;
+diff --git a/packages/server/src/gen/runner_pb.d.ts b/packages/server/src/gen/runner_pb.d.ts
+index 76c784f19..b7c79f4e6 100644
+--- a/packages/server/src/gen/runner_pb.d.ts
++++ b/packages/server/src/gen/runner_pb.d.ts
+@@ -1513,6 +1513,14 @@ export declare type Call = Message<"cube.runner.v4.Call"> & {
+      */
+     value: TemplateRef;
+     case: "templateDelete";
++  } | {
++    /**
++     * SPIKE (authorization 4c): revoke grants by revocation id.
++     *
++     * @generated from field: cube.runner.v4.GrantRevoke grant_revoke = 30;
++     */
++    value: GrantRevoke;
++    case: "grantRevoke";
+   } | { case: undefined; value?: undefined };
+ };
+ 
+@@ -1727,6 +1735,12 @@ export declare type CallResult = Message<"cube.runner.v4.CallResult"> & {
+      */
+     value: Diagnosis;
+     case: "diagnosis";
++  } | {
++    /**
++     * @generated from field: cube.runner.v4.Revoked revoked = 8;
++     */
++    value: Revoked;
++    case: "revoked";
+   } | { case: undefined; value?: undefined };
+ };
+ 
+@@ -1736,6 +1750,61 @@ export declare type CallResult = Message<"cube.runner.v4.CallResult"> & {
+  */
+ export declare const CallResultSchema: GenMessage<CallResult>;
+ 
++/**
++ * SPIKE (authorization 4c): runner-wide revocation ids (biscuit revocation
++ * ids of grants); the runner adds them to the set every gate checks first.
++ *
++ * @generated from message cube.runner.v4.GrantRevoke
++ */
++export declare type GrantRevoke = Message<"cube.runner.v4.GrantRevoke"> & {
++  /**
++   * @generated from field: repeated string ids = 1;
++   */
++  ids: string[];
++
++  /**
++   * cubed's revocation generation after these ids; the runner keeps the
++   * highest it has seen.
++   *
++   * @generated from field: uint64 generation = 2;
++   */
++  generation: bigint;
++};
++
++/**
++ * Describes the message cube.runner.v4.GrantRevoke.
++ * Use `create(GrantRevokeSchema)` to create a new message.
++ */
++export declare const GrantRevokeSchema: GenMessage<GrantRevoke>;
++
++/**
++ * @generated from message cube.runner.v4.Revoked
++ */
++export declare type Revoked = Message<"cube.runner.v4.Revoked"> & {
++  /**
++   * @generated from field: uint64 generation = 1;
++   */
++  generation: bigint;
++
++  /**
++   * @generated from field: uint32 count = 2;
++   */
++  count: number;
++
++  /**
++   * When the runner's set held the ids (unix ns, runner clock; spike only).
++   *
++   * @generated from field: int64 applied_unix_nanos = 3;
++   */
++  appliedUnixNanos: bigint;
++};
++
++/**
++ * Describes the message cube.runner.v4.Revoked.
++ * Use `create(RevokedSchema)` to create a new message.
++ */
++export declare const RevokedSchema: GenMessage<Revoked>;
++
+ /**
+  * @generated from message cube.runner.v4.Machines
+  */
+diff --git a/packages/server/src/gen/runner_pb.js b/packages/server/src/gen/runner_pb.js
+index 1af7ebb75..e34ead88d 100644
+--- a/packages/server/src/gen/runner_pb.js
++++ b/packages/server/src/gen/runner_pb.js
+@@ -118,7 +118,7 @@ import { file_google_protobuf_duration, file_google_protobuf_timestamp } from "@
+  * Describes the file runner.proto.
+  */
+ export const file_runner = /*@__PURE__*/
+-  fileDesc("CgxydW5uZXIucHJvdG8SDmN1YmUucnVubmVyLnY0IiAKA1JlZhINCgVvd25lchgBIAEoCRIKCgJpZBgCIAEoCSIWCgVGZW5jZRINCgVlcG9jaBgBIAEoAyJECgRNZXRhEg8KB3ZlcnNpb24YASABKAMSKwoHdXBkYXRlZBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAidQoJQ29uZGl0aW9uEgwKBHR5cGUYASABKAkSDgoGc3RhdHVzGAIgASgIEg4KBnJlYXNvbhgDIAEoCRIPCgdtZXNzYWdlGAQgASgJEikKBXNpbmNlGAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJoCgVFcnJvchIiCgRjb2RlGAEgASgOMhQuY3ViZS5ydW5uZXIudjQuQ29kZRIOCgZyZWFzb24YAiABKAkSDwoHbWVzc2FnZRgDIAEoCRIaChJjb21wbGV0aW9uX3Vua25vd24YBCABKAgiBwoFRW1wdHkizQIKBE9wZW4SJgoFaGVsbG8YASABKAsyFS5jdWJlLnJ1bm5lci52NC5IZWxsb0gAEiQKBGNhbGwYAiABKAsyFC5jdWJlLnJ1bm5lci52NC5DYWxsSAASLQoFd2F0Y2gYAyABKAsyHC5jdWJlLnJ1bm5lci52NC5XYXRjaFJlcXVlc3RIABIsCgVndWVzdBgEIAEoCzIbLmN1YmUucnVubmVyLnY0Lkd1ZXN0SGVhZGVySAASKgoEZGlhbBgFIAEoCzIaLmN1YmUucnVubmVyLnY0LkRpYWxIZWFkZXJIABIuCgZyZXBvcnQYBiABKAsyHC5jdWJlLnJ1bm5lci52NC5SZXBvcnRIZWFkZXJIABI2CgpjcmVkZW50aWFsGAcgASgLMiAuY3ViZS5ydW5uZXIudjQuQ3JlZGVudGlhbEhlYWRlckgAQgYKBGtpbmQiNAoMU3RyZWFtQW5zd2VyEiQKBWVycm9yGAEgASgLMhUuY3ViZS5ydW5uZXIudjQuRXJyb3IiRQoFSGVsbG8SEAoIcHJvdG9jb2wYASABKA0SEwoLZXhwZWN0X25vZGUYAiABKAkSFQoNY3ViZWRfdmVyc2lvbhgDIAEoCSJdCgtIZWxsb0Fuc3dlchIQCghwcm90b2NvbBgBIAEoDRIUCgxjYXBhYmlsaXRpZXMYAiADKAkSJgoGcnVubmVyGAMgASgLMhYuY3ViZS5ydW5uZXIudjQuUnVubmVyIs0FCgZSdW5uZXISDwoHbm9kZV9pZBgBIAEoCRIYChBzb2Z0d2FyZV92ZXJzaW9uGAIgASgJEikKBGtpbmQYAyABKA4yGy5jdWJlLnJ1bm5lci52NC5SdW5uZXIuS2luZBIqCghwbGF0Zm9ybRgEIAEoCzIYLmN1YmUucnVubmVyLnY0LlBsYXRmb3JtEiYKBmxpbWl0cxgFIAEoCzIWLmN1YmUucnVubmVyLnY0LkxpbWl0cxIqCghjYXBhY2l0eRgGIAEoCzIYLmN1YmUucnVubmVyLnY0LkNhcGFjaXR5EjMKCWxpZmVjeWNsZRgHIAEoDjIgLmN1YmUucnVubmVyLnY0LlJ1bm5lci5MaWZlY3ljbGUSKAoHbmV0d29yaxgIIAEoCzIXLmN1YmUucnVubmVyLnY0Lk5ldHdvcmsSMgoJdGVtcGxhdGVzGAkgAygLMh8uY3ViZS5ydW5uZXIudjQuVGVtcGxhdGVTdW1tYXJ5EjIKBmxhYmVscxgKIAMoCzIiLmN1YmUucnVubmVyLnY0LlJ1bm5lci5MYWJlbHNFbnRyeRIOCgZjYV9wZW0YCyABKAkSIgoEbWV0YRgMIAEoCzIULmN1YmUucnVubmVyLnY0Lk1ldGESLgoKc3RhcnRlZF9hdBgNIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAaLQoLTGFiZWxzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASIuCgRLaW5kEhQKEEtJTkRfVU5TUEVDSUZJRUQQABIGCgJWTRABEggKBEhPU1QQAiJjCglMaWZlY3ljbGUSGQoVTElGRUNZQ0xFX1VOU1BFQ0lGSUVEEAASCQoFUkVBRFkQARIMCghEUkFJTklORxACEgsKB0ZBVUxURUQQAxIVChFSRUNPVkVSWV9SRVFVSVJFRBAEIpYBCghQbGF0Zm9ybRIKCgJvcxgBIAEoCRIMCgRhcmNoGAIgASgJEhMKC2FjY2VsZXJhdG9yGAMgASgJEhQKDHFlbXVfdmVyc2lvbhgEIAEoCRIZChFiYXNlX2ltYWdlX3NoYTI1NhgFIAEoCRIXCg9iYXNlX2ltYWdlX25hbWUYBiABKAkSEQoJaG9zdF9uYW1lGAcgASgJIpABCgZMaW1pdHMSEQoJbWF4X3ZjcHVzGAEgASgNEhYKDm1heF9tZW1vcnlfbWliGAIgASgNEhQKDG1heF9kaXNrX2dpYhgDIAEoDRIUCgxtYXhfbWFjaGluZXMYBCABKA0SFgoObWF4X2Jvb3RfYnl0ZXMYBSABKA0SFwoPbWF4X2ZyYW1lX2J5dGVzGAYgASgNItwBCghDYXBhY2l0eRIXCg9tYWNoaW5lc19hY3RpdmUYASABKA0SGAoQbWFjaGluZXNfcnVubmluZxgCIAEoDRISCgpzbG90c19mcmVlGAMgASgNEhEKCWhvc3RfY3B1cxgEIAEoDRIXCg9ob3N0X21lbW9yeV9taWIYBSABKAQSHAoUaG9zdF9tZW1vcnlfZnJlZV9taWIYBiABKAQSFQoNZGlza19mcmVlX2dpYhgHIAEoBBIQCghyZXRhaW5lZBgIIAEoDRIWCg5yZXRhaW5lZF9ieXRlcxgJIAEoBCJYCgdOZXR3b3JrEgwKBG1vZGUYASABKAkSLwoMcnR0X3RvX2N1YmVkGAIgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEg4KBmVncmVzcxgDIAEoCCKJAQoPVGVtcGxhdGVTdW1tYXJ5EgoKAmlkGAEgASgJEgsKA2tleRgCIAEoCRItCgVzdGF0ZRgDIAEoDjIeLmN1YmUucnVubmVyLnY0LlRlbXBsYXRlLlN0YXRlEi4KCmNyZWF0ZWRfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIr4BCgdNYWNoaW5lEiAKA3JlZhgBIAEoCzITLmN1YmUucnVubmVyLnY0LlJlZhIpCgRzcGVjGAIgASgLMhsuY3ViZS5ydW5uZXIudjQuTWFjaGluZVNwZWMSLQoGc3RhdHVzGAMgASgLMh0uY3ViZS5ydW5uZXIudjQuTWFjaGluZVN0YXR1cxIiCgRtZXRhGAQgASgLMhQuY3ViZS5ydW5uZXIudjQuTWV0YRITCgtmZW5jZV9lcG9jaBgFIAEoAyKVAQoLTWFjaGluZVNwZWMSDgoEYmFzZRgBIAEoCEgAEhUKC3RlbXBsYXRlX2lkGAIgASgJSAASIgoEc2l6ZRgDIAEoCzIULmN1YmUucnVubmVyLnY0LlNpemUSIgoEYm9vdBgEIAEoCzIULmN1YmUucnVubmVyLnY0LkJvb3QSDQoFYnVpbGQYBSABKAhCCAoGc291cmNlIjsKBFNpemUSDQoFdmNwdXMYASABKA0SEgoKbWVtb3J5X21pYhgCIAEoDRIQCghkaXNrX2dpYhgDIAEoDSJ9CgRCb290EjYKCWRvY3VtZW50cxgBIAMoCzIjLmN1YmUucnVubmVyLnY0LkJvb3QuRG9jdW1lbnRzRW50cnkSCwoDbWFjGAIgASgJGjAKDkRvY3VtZW50c0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoDDoCOAEikgMKDU1hY2hpbmVTdGF0dXMSMgoFcGhhc2UYASABKA4yIy5jdWJlLnJ1bm5lci52NC5NYWNoaW5lU3RhdHVzLlBoYXNlEi0KCmNvbmRpdGlvbnMYAiADKAsyGS5jdWJlLnJ1bm5lci52NC5Db25kaXRpb24SDwoHYm9vdF9pZBgDIAEoCRISCgpkaXNrX2J5dGVzGAQgASgEEg0KBWVycm9yGAUgASgJEi4KCnN0YXJ0ZWRfYXQYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEigKBWd1ZXN0GAcgASgLMhkuY3ViZS5ydW5uZXIudjQuR3Vlc3RJbmZvIokBCgVQaGFzZRIVChFQSEFTRV9VTlNQRUNJRklFRBAAEgwKCENSRUFUSU5HEAESCwoHU1RPUFBFRBACEgwKCFNUQVJUSU5HEAMSCwoHUlVOTklORxAEEgwKCFNUT1BQSU5HEAUSDAoIUkVUQUlORUQQBhILCgdERUxFVEVEEAcSCgoGRkFJTEVEEAhKBAgUEB4ikgMKCUd1ZXN0SW5mbxIRCgljb25uZWN0ZWQYASABKAgSDQoFcmVhZHkYAiABKAgSDQoFYnVpbGQYAyABKAkSDwoHdmVyc2lvbhgEIAEoCRIUCgxjYXBhYmlsaXRpZXMYBSADKAkSCgoCb3MYBiABKAkSDgoGa2VybmVsGAcgASgJEg8KB2Jvb3RfaWQYCCABKAkSMwoFaG9va3MYCSADKAsyJC5jdWJlLnJ1bm5lci52NC5HdWVzdEluZm8uSG9va3NFbnRyeRIVCg10ZW1wbGF0ZV9zZWFsGAogASgJEikKBXNpbmNlGAsgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIrCgZsaW1pdHMYDCABKAsyGy5jdWJlLnJ1bm5lci52NC5HdWVzdExpbWl0cxINCgVlcG9jaBgNIAEoAxIOCgZyZWFzb24YDiABKAkSDwoHc2Vzc2lvbhgPIAEoCRosCgpIb29rc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEi+AEKC0d1ZXN0TGltaXRzEhcKD21heF9mcmFtZV9ieXRlcxgBIAEoDRIaChJyZXF1ZXN0X3RpbWVvdXRfbXMYAiABKA0SGQoRbWF4X2NvbW1hbmRfYnl0ZXMYAyABKA0SFgoObWF4X3BhdGhfYnl0ZXMYBCABKA0SGwoTbWF4X2V4ZWNfdGltZW91dF9tcxgFIAEoDRIYChBtYXhfb3V0cHV0X2J5dGVzGAYgASgNEhkKEW91dHB1dF9wYWdlX2J5dGVzGAcgASgNEhYKDm1heF9yZWFkX2J5dGVzGAggASgNEhcKD21heF93cml0ZV9ieXRlcxgJIAEoDSK8BAoMRWdyZXNzUG9saWN5EjUKB2RlZmF1bHQYASABKA4yJC5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kuRGVmYXVsdBISCgpkZW55X2hvc3RzGAIgAygJEjAKBXJ1bGVzGAMgAygLMiEuY3ViZS5ydW5uZXIudjQuRWdyZXNzUG9saWN5LlJ1bGUSKAoFbGVhc2UYBCABKAsyGS5nb29nbGUucHJvdG9idWYuRHVyYXRpb24aywEKBFJ1bGUSDQoFaG9zdHMYASADKAkSDQoFcG9ydHMYAiADKA0SMwoFaHR0cHMYAyABKAsyIi5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kuSHR0cHNIABIxCgRodHRwGAQgASgLMiEuY3ViZS5ydW5uZXIudjQuRWdyZXNzUG9saWN5Lkh0dHBIABI1CgZkZWNpZGUYBSABKAsyIy5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kuRGVjaWRlSABCBgoEa2luZBpECgVIdHRwcxI7CgpjcmVkZW50aWFsGAEgASgLMicuY3ViZS5ydW5uZXIudjQuRWdyZXNzUG9saWN5LkNyZWRlbnRpYWwaBgoESHR0cBoICgZEZWNpZGUaGgoKQ3JlZGVudGlhbBIMCgRuYW1lGAEgASgJIkMKB0RlZmF1bHQSFwoTREVGQVVMVF9VTlNQRUNJRklFRBAAEggKBERFTlkQARIVChFBTExPV19QVUJMSUNfSFRUUBACIvkBCghUZW1wbGF0ZRIKCgJpZBgBIAEoCRILCgNrZXkYAiABKAkSDAoEbWV0YRgDIAEoCRItCgVzdGF0ZRgEIAEoDjIeLmN1YmUucnVubmVyLnY0LlRlbXBsYXRlLlN0YXRlEhAKCGRpc2tfZ2liGAUgASgNEg0KBWJ5dGVzGAYgASgEEg0KBXVzZXJzGAcgASgNEi4KCmNyZWF0ZWRfYXQYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIjcKBVN0YXRlEhUKEVNUQVRFX1VOU1BFQ0lGSUVEEAASCQoFUkVBRFkQARIMCghSRU1PVklORxACIo4FCgRDYWxsEisKCnJ1bm5lcl9nZXQYASABKAsyFS5jdWJlLnJ1bm5lci52NC5FbXB0eUgAEjcKDm1hY2hpbmVfY3JlYXRlGAogASgLMh0uY3ViZS5ydW5uZXIudjQuTWFjaGluZUNyZWF0ZUgAEjUKDW1hY2hpbmVfc3RhcnQYCyABKAsyHC5jdWJlLnJ1bm5lci52NC5NYWNoaW5lU3RhcnRIABIyCgxtYWNoaW5lX3N0b3AYDCABKAsyGi5jdWJlLnJ1bm5lci52NC5NYWNoaW5lUmVmSAASNwoObWFjaGluZV9kZWxldGUYDSABKAsyHS5jdWJlLnJ1bm5lci52NC5NYWNoaW5lRGVsZXRlSAASNQoPbWFjaGluZV9kaXNjYXJkGA4gASgLMhouY3ViZS5ydW5uZXIudjQuTWFjaGluZVJlZkgAEjEKC21hY2hpbmVfZ2V0GA8gASgLMhouY3ViZS5ydW5uZXIudjQuTWFjaGluZVJlZkgAEi0KDG1hY2hpbmVfbGlzdBgQIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SAASNgoQbWFjaGluZV9kaWFnbm9zZRgRIAEoCzIaLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVSZWZIABI7ChB0ZW1wbGF0ZV9wdWJsaXNoGBQgASgLMh8uY3ViZS5ydW5uZXIudjQuVGVtcGxhdGVQdWJsaXNoSAASLgoNdGVtcGxhdGVfbGlzdBgVIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SAASNgoPdGVtcGxhdGVfZGVsZXRlGBYgASgLMhsuY3ViZS5ydW5uZXIudjQuVGVtcGxhdGVSZWZIAEIGCgR2ZXJiIlQKCk1hY2hpbmVSZWYSIAoDcmVmGAEgASgLMhMuY3ViZS5ydW5uZXIudjQuUmVmEiQKBWZlbmNlGAIgASgLMhUuY3ViZS5ydW5uZXIudjQuRmVuY2UiggEKDU1hY2hpbmVDcmVhdGUSIAoDcmVmGAEgASgLMhMuY3ViZS5ydW5uZXIudjQuUmVmEiQKBWZlbmNlGAIgASgLMhUuY3ViZS5ydW5uZXIudjQuRmVuY2USKQoEc3BlYxgDIAEoCzIbLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVTcGVjIswBCgxNYWNoaW5lU3RhcnQSIAoDcmVmGAEgASgLMhMuY3ViZS5ydW5uZXIudjQuUmVmEiQKBWZlbmNlGAIgASgLMhUuY3ViZS5ydW5uZXIudjQuRmVuY2USIgoEc2l6ZRgDIAEoCzIULmN1YmUucnVubmVyLnY0LlNpemUSIgoEYm9vdBgEIAEoCzIULmN1YmUucnVubmVyLnY0LkJvb3QSLAoGcG9saWN5GAUgASgLMhwuY3ViZS5ydW5uZXIudjQuRWdyZXNzUG9saWN5ImcKDU1hY2hpbmVEZWxldGUSIAoDcmVmGAEgASgLMhMuY3ViZS5ydW5uZXIudjQuUmVmEiQKBWZlbmNlGAIgASgLMhUuY3ViZS5ydW5uZXIudjQuRmVuY2USDgoGcmV0YWluGAMgASgIInUKD1RlbXBsYXRlUHVibGlzaBIhCgRmcm9tGAEgASgLMhMuY3ViZS5ydW5uZXIudjQuUmVmEiQKBWZlbmNlGAIgASgLMhUuY3ViZS5ydW5uZXIudjQuRmVuY2USCwoDa2V5GAMgASgJEgwKBG1ldGEYBCABKAkiGQoLVGVtcGxhdGVSZWYSCgoCaWQYASABKAki0AIKCkNhbGxSZXN1bHQSJgoFZXJyb3IYASABKAsyFS5jdWJlLnJ1bm5lci52NC5FcnJvckgAEigKBnJ1bm5lchgCIAEoCzIWLmN1YmUucnVubmVyLnY0LlJ1bm5lckgAEioKB21hY2hpbmUYAyABKAsyFy5jdWJlLnJ1bm5lci52NC5NYWNoaW5lSAASLAoIbWFjaGluZXMYBCABKAsyGC5jdWJlLnJ1bm5lci52NC5NYWNoaW5lc0gAEiwKCHRlbXBsYXRlGAUgASgLMhguY3ViZS5ydW5uZXIudjQuVGVtcGxhdGVIABIuCgl0ZW1wbGF0ZXMYBiABKAsyGS5jdWJlLnJ1bm5lci52NC5UZW1wbGF0ZXNIABIuCglkaWFnbm9zaXMYByABKAsyGS5jdWJlLnJ1bm5lci52NC5EaWFnbm9zaXNIAEIICgZyZXN1bHQiQwoITWFjaGluZXMSJgoFaXRlbXMYASADKAsyFy5jdWJlLnJ1bm5lci52NC5NYWNoaW5lEg8KB3ZlcnNpb24YAiABKAMiNAoJVGVtcGxhdGVzEicKBWl0ZW1zGAEgAygLMhguY3ViZS5ydW5uZXIudjQuVGVtcGxhdGUiGQoJRGlhZ25vc2lzEgwKBGpzb24YASABKAkiJQoMV2F0Y2hSZXF1ZXN0EhUKDXNpbmNlX3ZlcnNpb24YASABKAMiqAIKCldhdGNoRXZlbnQSLQoEdHlwZRgBIAEoDjIfLmN1YmUucnVubmVyLnY0LldhdGNoRXZlbnQuVHlwZRIPCgd2ZXJzaW9uGAIgASgDEioKB21hY2hpbmUYAyABKAsyFy5jdWJlLnJ1bm5lci52NC5NYWNoaW5lSAASLAoIdGVtcGxhdGUYBCABKAsyGC5jdWJlLnJ1bm5lci52NC5UZW1wbGF0ZUgAEigKBnJ1bm5lchgFIAEoCzIWLmN1YmUucnVubmVyLnY0LlJ1bm5lckgAIkoKBFR5cGUSFAoQVFlQRV9VTlNQRUNJRklFRBAAEgcKA1BVVBABEgoKBkRFTEVURRACEgwKCEJPT0tNQVJLEAMSCQoFUkVTRVQQBEIKCghyZXNvdXJjZSJhCgtHdWVzdEhlYWRlchIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZRIKCgJvcBgDIAEoCSJiCgpEaWFsSGVhZGVyEiAKA3JlZhgBIAEoCzITLmN1YmUucnVubmVyLnY0LlJlZhIkCgVmZW5jZRgCIAEoCzIVLmN1YmUucnVubmVyLnY0LkZlbmNlEgwKBHBvcnQYAyABKA0iqQEKEENyZWRlbnRpYWxIZWFkZXISIAoDcmVmGAEgASgLMhMuY3ViZS5ydW5uZXIudjQuUmVmEhIKCmNyZWRlbnRpYWwYAiABKAkSCwoDc25pGAMgASgJEgwKBGhvc3QYBSABKAkSDAoEcG9ydBgGIAEoDRIkCgVmZW5jZRgJIAEoCzIVLmN1YmUucnVubmVyLnY0LkZlbmNlSgQIBBAFSgQIBxAISgQICBAJIiUKBkhlYWRlchIMCgRuYW1lGAEgASgJEg0KBXZhbHVlGAIgASgMIg4KDFJlcG9ydEhlYWRlciKOAQoMRWdyZXNzUmVwb3J0EiAKA3JlZhgBIAEoCzITLmN1YmUucnVubmVyLnY0LlJlZhIMCgRob3N0GAIgASgJEg4KBnJlYXNvbhgDIAEoCRIWCg5kcm9wcGVkX2JlZm9yZRgEIAEoBBImCgJhdBgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAiiwIKC0RhZW1vbkZyYW1lEgoKAmNoGAEgASgNEioKBWhlbGxvGAIgASgLMhkuY3ViZS5ydW5uZXIudjQuR3Vlc3RJbmZvSAASKwoGc3RhdHVzGAMgASgLMhkuY3ViZS5ydW5uZXIudjQuR3Vlc3RJbmZvSAASLAoDcmVxGAQgASgLMh0uY3ViZS5ydW5uZXIudjQuRGFlbW9uUmVxdWVzdEgAEisKA2FucxgFIAEoCzIcLmN1YmUucnVubmVyLnY0LkRhZW1vbkFuc3dlckgAEiYKBWFib3J0GAYgASgLMhUuY3ViZS5ydW5uZXIudjQuRW1wdHlIABIPCgdzZXNzaW9uGAcgASgJQgMKAXQivAIKDURhZW1vblJlcXVlc3QSLQoFZ3Vlc3QYASABKAsyHC5jdWJlLnJ1bm5lci52NC5HdWVzdFJlcXVlc3RIABI1Cg1tYWNoaW5lX3NldHVwGAIgASgLMhwuY3ViZS5ydW5uZXIudjQuTWFjaGluZVNldHVwSAASMQoQc25hcHNob3RfcHJlcGFyZRgDIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SAASLgoNc25hcHNob3RfZG9uZRgEIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SAASMQoQdGVtcGxhdGVfcHVibGlzaBgFIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SAASKQoIc2h1dGRvd24YBiABKAsyFS5jdWJlLnJ1bm5lci52NC5FbXB0eUgAQgQKAm9wIigKDEd1ZXN0UmVxdWVzdBIKCgJvcBgBIAEoCRIMCgRkYXRhGAIgASgMIngKDERhZW1vbkFuc3dlchIPCgVndWVzdBgBIAEoDEgAEiYKBWVycm9yGAIgASgLMhUuY3ViZS5ydW5uZXIudjQuRXJyb3JIABIlCgRkb25lGAMgASgLMhUuY3ViZS5ydW5uZXIudjQuRW1wdHlIAEIICgZyZXN1bHQi1gIKDE1hY2hpbmVTZXR1cBIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSPgoJZG9jdW1lbnRzGAIgAygLMisuY3ViZS5ydW5uZXIudjQuTWFjaGluZVNldHVwLkRvY3VtZW50c0VudHJ5Eg8KB2VudHJvcHkYAyABKAwSJQoGbGF5ZXJzGAQgAygLMhUuY3ViZS5ydW5uZXIudjQuTGF5ZXISKgoFaW1hZ2UYBSABKAsyGy5jdWJlLnJ1bm5lci52NC5JbWFnZUNvbmZpZxIOCgZjYV9wZW0YBiABKAkSFgoOcnVubmVyX3ZlcnNpb24YByABKAkSEAoIcHJvdG9jb2wYCCABKA0SFAoMY2FwYWJpbGl0aWVzGAkgAygJGjAKDkRvY3VtZW50c0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoDDoCOAEiTgoFTGF5ZXISEQoJcGFydGl0aW9uGAEgASgNEhEKB2RpZmZfaWQYAiABKAlIABIVCgt0ZW1wbGF0ZV9pZBgDIAEoCUgAQggKBnNvdXJjZSIqCgtJbWFnZUNvbmZpZxIOCgZkaWdlc3QYASABKAkSCwoDZW52GAIgAygJKtwBCgRDb2RlEhQKEENPREVfVU5TUEVDSUZJRUQQABINCglOT1RfRk9VTkQQARISCg5BTFJFQURZX0VYSVNUUxACEhcKE0ZBSUxFRF9QUkVDT05ESVRJT04QAxIWChJSRVNPVVJDRV9FWEhBVVNURUQQBBIPCgtVTkFWQUlMQUJMRRAFEhUKEVBFUk1JU1NJT05fREVOSUVEEAYSFAoQSU5WQUxJRF9BUkdVTUVOVBAHEhEKDVVOSU1QTEVNRU5URUQQCBIMCghJTlRFUk5BTBAJEgsKB0FCT1JURUQQCmIGcHJvdG8z", [file_google_protobuf_duration, file_google_protobuf_timestamp]);
++  fileDesc("CgxydW5uZXIucHJvdG8SDmN1YmUucnVubmVyLnY0IiAKA1JlZhINCgVvd25lchgBIAEoCRIKCgJpZBgCIAEoCSIWCgVGZW5jZRINCgVlcG9jaBgBIAEoAyJECgRNZXRhEg8KB3ZlcnNpb24YASABKAMSKwoHdXBkYXRlZBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAidQoJQ29uZGl0aW9uEgwKBHR5cGUYASABKAkSDgoGc3RhdHVzGAIgASgIEg4KBnJlYXNvbhgDIAEoCRIPCgdtZXNzYWdlGAQgASgJEikKBXNpbmNlGAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJoCgVFcnJvchIiCgRjb2RlGAEgASgOMhQuY3ViZS5ydW5uZXIudjQuQ29kZRIOCgZyZWFzb24YAiABKAkSDwoHbWVzc2FnZRgDIAEoCRIaChJjb21wbGV0aW9uX3Vua25vd24YBCABKAgiBwoFRW1wdHkizQIKBE9wZW4SJgoFaGVsbG8YASABKAsyFS5jdWJlLnJ1bm5lci52NC5IZWxsb0gAEiQKBGNhbGwYAiABKAsyFC5jdWJlLnJ1bm5lci52NC5DYWxsSAASLQoFd2F0Y2gYAyABKAsyHC5jdWJlLnJ1bm5lci52NC5XYXRjaFJlcXVlc3RIABIsCgVndWVzdBgEIAEoCzIbLmN1YmUucnVubmVyLnY0Lkd1ZXN0SGVhZGVySAASKgoEZGlhbBgFIAEoCzIaLmN1YmUucnVubmVyLnY0LkRpYWxIZWFkZXJIABIuCgZyZXBvcnQYBiABKAsyHC5jdWJlLnJ1bm5lci52NC5SZXBvcnRIZWFkZXJIABI2CgpjcmVkZW50aWFsGAcgASgLMiAuY3ViZS5ydW5uZXIudjQuQ3JlZGVudGlhbEhlYWRlckgAQgYKBGtpbmQiNAoMU3RyZWFtQW5zd2VyEiQKBWVycm9yGAEgASgLMhUuY3ViZS5ydW5uZXIudjQuRXJyb3IiRQoFSGVsbG8SEAoIcHJvdG9jb2wYASABKA0SEwoLZXhwZWN0X25vZGUYAiABKAkSFQoNY3ViZWRfdmVyc2lvbhgDIAEoCSJdCgtIZWxsb0Fuc3dlchIQCghwcm90b2NvbBgBIAEoDRIUCgxjYXBhYmlsaXRpZXMYAiADKAkSJgoGcnVubmVyGAMgASgLMhYuY3ViZS5ydW5uZXIudjQuUnVubmVyIs0FCgZSdW5uZXISDwoHbm9kZV9pZBgBIAEoCRIYChBzb2Z0d2FyZV92ZXJzaW9uGAIgASgJEikKBGtpbmQYAyABKA4yGy5jdWJlLnJ1bm5lci52NC5SdW5uZXIuS2luZBIqCghwbGF0Zm9ybRgEIAEoCzIYLmN1YmUucnVubmVyLnY0LlBsYXRmb3JtEiYKBmxpbWl0cxgFIAEoCzIWLmN1YmUucnVubmVyLnY0LkxpbWl0cxIqCghjYXBhY2l0eRgGIAEoCzIYLmN1YmUucnVubmVyLnY0LkNhcGFjaXR5EjMKCWxpZmVjeWNsZRgHIAEoDjIgLmN1YmUucnVubmVyLnY0LlJ1bm5lci5MaWZlY3ljbGUSKAoHbmV0d29yaxgIIAEoCzIXLmN1YmUucnVubmVyLnY0Lk5ldHdvcmsSMgoJdGVtcGxhdGVzGAkgAygLMh8uY3ViZS5ydW5uZXIudjQuVGVtcGxhdGVTdW1tYXJ5EjIKBmxhYmVscxgKIAMoCzIiLmN1YmUucnVubmVyLnY0LlJ1bm5lci5MYWJlbHNFbnRyeRIOCgZjYV9wZW0YCyABKAkSIgoEbWV0YRgMIAEoCzIULmN1YmUucnVubmVyLnY0Lk1ldGESLgoKc3RhcnRlZF9hdBgNIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAaLQoLTGFiZWxzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASIuCgRLaW5kEhQKEEtJTkRfVU5TUEVDSUZJRUQQABIGCgJWTRABEggKBEhPU1QQAiJjCglMaWZlY3ljbGUSGQoVTElGRUNZQ0xFX1VOU1BFQ0lGSUVEEAASCQoFUkVBRFkQARIMCghEUkFJTklORxACEgsKB0ZBVUxURUQQAxIVChFSRUNPVkVSWV9SRVFVSVJFRBAEIpYBCghQbGF0Zm9ybRIKCgJvcxgBIAEoCRIMCgRhcmNoGAIgASgJEhMKC2FjY2VsZXJhdG9yGAMgASgJEhQKDHFlbXVfdmVyc2lvbhgEIAEoCRIZChFiYXNlX2ltYWdlX3NoYTI1NhgFIAEoCRIXCg9iYXNlX2ltYWdlX25hbWUYBiABKAkSEQoJaG9zdF9uYW1lGAcgASgJIpABCgZMaW1pdHMSEQoJbWF4X3ZjcHVzGAEgASgNEhYKDm1heF9tZW1vcnlfbWliGAIgASgNEhQKDG1heF9kaXNrX2dpYhgDIAEoDRIUCgxtYXhfbWFjaGluZXMYBCABKA0SFgoObWF4X2Jvb3RfYnl0ZXMYBSABKA0SFwoPbWF4X2ZyYW1lX2J5dGVzGAYgASgNItwBCghDYXBhY2l0eRIXCg9tYWNoaW5lc19hY3RpdmUYASABKA0SGAoQbWFjaGluZXNfcnVubmluZxgCIAEoDRISCgpzbG90c19mcmVlGAMgASgNEhEKCWhvc3RfY3B1cxgEIAEoDRIXCg9ob3N0X21lbW9yeV9taWIYBSABKAQSHAoUaG9zdF9tZW1vcnlfZnJlZV9taWIYBiABKAQSFQoNZGlza19mcmVlX2dpYhgHIAEoBBIQCghyZXRhaW5lZBgIIAEoDRIWCg5yZXRhaW5lZF9ieXRlcxgJIAEoBCJYCgdOZXR3b3JrEgwKBG1vZGUYASABKAkSLwoMcnR0X3RvX2N1YmVkGAIgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEg4KBmVncmVzcxgDIAEoCCKJAQoPVGVtcGxhdGVTdW1tYXJ5EgoKAmlkGAEgASgJEgsKA2tleRgCIAEoCRItCgVzdGF0ZRgDIAEoDjIeLmN1YmUucnVubmVyLnY0LlRlbXBsYXRlLlN0YXRlEi4KCmNyZWF0ZWRfYXQYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIr4BCgdNYWNoaW5lEiAKA3JlZhgBIAEoCzITLmN1YmUucnVubmVyLnY0LlJlZhIpCgRzcGVjGAIgASgLMhsuY3ViZS5ydW5uZXIudjQuTWFjaGluZVNwZWMSLQoGc3RhdHVzGAMgASgLMh0uY3ViZS5ydW5uZXIudjQuTWFjaGluZVN0YXR1cxIiCgRtZXRhGAQgASgLMhQuY3ViZS5ydW5uZXIudjQuTWV0YRITCgtmZW5jZV9lcG9jaBgFIAEoAyKVAQoLTWFjaGluZVNwZWMSDgoEYmFzZRgBIAEoCEgAEhUKC3RlbXBsYXRlX2lkGAIgASgJSAASIgoEc2l6ZRgDIAEoCzIULmN1YmUucnVubmVyLnY0LlNpemUSIgoEYm9vdBgEIAEoCzIULmN1YmUucnVubmVyLnY0LkJvb3QSDQoFYnVpbGQYBSABKAhCCAoGc291cmNlIjsKBFNpemUSDQoFdmNwdXMYASABKA0SEgoKbWVtb3J5X21pYhgCIAEoDRIQCghkaXNrX2dpYhgDIAEoDSJ9CgRCb290EjYKCWRvY3VtZW50cxgBIAMoCzIjLmN1YmUucnVubmVyLnY0LkJvb3QuRG9jdW1lbnRzRW50cnkSCwoDbWFjGAIgASgJGjAKDkRvY3VtZW50c0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoDDoCOAEikgMKDU1hY2hpbmVTdGF0dXMSMgoFcGhhc2UYASABKA4yIy5jdWJlLnJ1bm5lci52NC5NYWNoaW5lU3RhdHVzLlBoYXNlEi0KCmNvbmRpdGlvbnMYAiADKAsyGS5jdWJlLnJ1bm5lci52NC5Db25kaXRpb24SDwoHYm9vdF9pZBgDIAEoCRISCgpkaXNrX2J5dGVzGAQgASgEEg0KBWVycm9yGAUgASgJEi4KCnN0YXJ0ZWRfYXQYBiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEigKBWd1ZXN0GAcgASgLMhkuY3ViZS5ydW5uZXIudjQuR3Vlc3RJbmZvIokBCgVQaGFzZRIVChFQSEFTRV9VTlNQRUNJRklFRBAAEgwKCENSRUFUSU5HEAESCwoHU1RPUFBFRBACEgwKCFNUQVJUSU5HEAMSCwoHUlVOTklORxAEEgwKCFNUT1BQSU5HEAUSDAoIUkVUQUlORUQQBhILCgdERUxFVEVEEAcSCgoGRkFJTEVEEAhKBAgUEB4ikgMKCUd1ZXN0SW5mbxIRCgljb25uZWN0ZWQYASABKAgSDQoFcmVhZHkYAiABKAgSDQoFYnVpbGQYAyABKAkSDwoHdmVyc2lvbhgEIAEoCRIUCgxjYXBhYmlsaXRpZXMYBSADKAkSCgoCb3MYBiABKAkSDgoGa2VybmVsGAcgASgJEg8KB2Jvb3RfaWQYCCABKAkSMwoFaG9va3MYCSADKAsyJC5jdWJlLnJ1bm5lci52NC5HdWVzdEluZm8uSG9va3NFbnRyeRIVCg10ZW1wbGF0ZV9zZWFsGAogASgJEikKBXNpbmNlGAsgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIrCgZsaW1pdHMYDCABKAsyGy5jdWJlLnJ1bm5lci52NC5HdWVzdExpbWl0cxINCgVlcG9jaBgNIAEoAxIOCgZyZWFzb24YDiABKAkSDwoHc2Vzc2lvbhgPIAEoCRosCgpIb29rc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEi+AEKC0d1ZXN0TGltaXRzEhcKD21heF9mcmFtZV9ieXRlcxgBIAEoDRIaChJyZXF1ZXN0X3RpbWVvdXRfbXMYAiABKA0SGQoRbWF4X2NvbW1hbmRfYnl0ZXMYAyABKA0SFgoObWF4X3BhdGhfYnl0ZXMYBCABKA0SGwoTbWF4X2V4ZWNfdGltZW91dF9tcxgFIAEoDRIYChBtYXhfb3V0cHV0X2J5dGVzGAYgASgNEhkKEW91dHB1dF9wYWdlX2J5dGVzGAcgASgNEhYKDm1heF9yZWFkX2J5dGVzGAggASgNEhcKD21heF93cml0ZV9ieXRlcxgJIAEoDSK8BAoMRWdyZXNzUG9saWN5EjUKB2RlZmF1bHQYASABKA4yJC5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kuRGVmYXVsdBISCgpkZW55X2hvc3RzGAIgAygJEjAKBXJ1bGVzGAMgAygLMiEuY3ViZS5ydW5uZXIudjQuRWdyZXNzUG9saWN5LlJ1bGUSKAoFbGVhc2UYBCABKAsyGS5nb29nbGUucHJvdG9idWYuRHVyYXRpb24aywEKBFJ1bGUSDQoFaG9zdHMYASADKAkSDQoFcG9ydHMYAiADKA0SMwoFaHR0cHMYAyABKAsyIi5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kuSHR0cHNIABIxCgRodHRwGAQgASgLMiEuY3ViZS5ydW5uZXIudjQuRWdyZXNzUG9saWN5Lkh0dHBIABI1CgZkZWNpZGUYBSABKAsyIy5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kuRGVjaWRlSABCBgoEa2luZBpECgVIdHRwcxI7CgpjcmVkZW50aWFsGAEgASgLMicuY3ViZS5ydW5uZXIudjQuRWdyZXNzUG9saWN5LkNyZWRlbnRpYWwaBgoESHR0cBoICgZEZWNpZGUaGgoKQ3JlZGVudGlhbBIMCgRuYW1lGAEgASgJIkMKB0RlZmF1bHQSFwoTREVGQVVMVF9VTlNQRUNJRklFRBAAEggKBERFTlkQARIVChFBTExPV19QVUJMSUNfSFRUUBACIvkBCghUZW1wbGF0ZRIKCgJpZBgBIAEoCRILCgNrZXkYAiABKAkSDAoEbWV0YRgDIAEoCRItCgVzdGF0ZRgEIAEoDjIeLmN1YmUucnVubmVyLnY0LlRlbXBsYXRlLlN0YXRlEhAKCGRpc2tfZ2liGAUgASgNEg0KBWJ5dGVzGAYgASgEEg0KBXVzZXJzGAcgASgNEi4KCmNyZWF0ZWRfYXQYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIjcKBVN0YXRlEhUKEVNUQVRFX1VOU1BFQ0lGSUVEEAASCQoFUkVBRFkQARIMCghSRU1PVklORxACIsMFCgRDYWxsEisKCnJ1bm5lcl9nZXQYASABKAsyFS5jdWJlLnJ1bm5lci52NC5FbXB0eUgAEjcKDm1hY2hpbmVfY3JlYXRlGAogASgLMh0uY3ViZS5ydW5uZXIudjQuTWFjaGluZUNyZWF0ZUgAEjUKDW1hY2hpbmVfc3RhcnQYCyABKAsyHC5jdWJlLnJ1bm5lci52NC5NYWNoaW5lU3RhcnRIABIyCgxtYWNoaW5lX3N0b3AYDCABKAsyGi5jdWJlLnJ1bm5lci52NC5NYWNoaW5lUmVmSAASNwoObWFjaGluZV9kZWxldGUYDSABKAsyHS5jdWJlLnJ1bm5lci52NC5NYWNoaW5lRGVsZXRlSAASNQoPbWFjaGluZV9kaXNjYXJkGA4gASgLMhouY3ViZS5ydW5uZXIudjQuTWFjaGluZVJlZkgAEjEKC21hY2hpbmVfZ2V0GA8gASgLMhouY3ViZS5ydW5uZXIudjQuTWFjaGluZVJlZkgAEi0KDG1hY2hpbmVfbGlzdBgQIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SAASNgoQbWFjaGluZV9kaWFnbm9zZRgRIAEoCzIaLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVSZWZIABI7ChB0ZW1wbGF0ZV9wdWJsaXNoGBQgASgLMh8uY3ViZS5ydW5uZXIudjQuVGVtcGxhdGVQdWJsaXNoSAASLgoNdGVtcGxhdGVfbGlzdBgVIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SAASNgoPdGVtcGxhdGVfZGVsZXRlGBYgASgLMhsuY3ViZS5ydW5uZXIudjQuVGVtcGxhdGVSZWZIABIzCgxncmFudF9yZXZva2UYHiABKAsyGy5jdWJlLnJ1bm5lci52NC5HcmFudFJldm9rZUgAQgYKBHZlcmIiVAoKTWFjaGluZVJlZhIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZSKCAQoNTWFjaGluZUNyZWF0ZRIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZRIpCgRzcGVjGAMgASgLMhsuY3ViZS5ydW5uZXIudjQuTWFjaGluZVNwZWMizAEKDE1hY2hpbmVTdGFydBIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZRIiCgRzaXplGAMgASgLMhQuY3ViZS5ydW5uZXIudjQuU2l6ZRIiCgRib290GAQgASgLMhQuY3ViZS5ydW5uZXIudjQuQm9vdBIsCgZwb2xpY3kYBSABKAsyHC5jdWJlLnJ1bm5lci52NC5FZ3Jlc3NQb2xpY3kiZwoNTWFjaGluZURlbGV0ZRIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZRIOCgZyZXRhaW4YAyABKAgidQoPVGVtcGxhdGVQdWJsaXNoEiEKBGZyb20YASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZRILCgNrZXkYAyABKAkSDAoEbWV0YRgEIAEoCSIZCgtUZW1wbGF0ZVJlZhIKCgJpZBgBIAEoCSL8AgoKQ2FsbFJlc3VsdBImCgVlcnJvchgBIAEoCzIVLmN1YmUucnVubmVyLnY0LkVycm9ySAASKAoGcnVubmVyGAIgASgLMhYuY3ViZS5ydW5uZXIudjQuUnVubmVySAASKgoHbWFjaGluZRgDIAEoCzIXLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVIABIsCghtYWNoaW5lcxgEIAEoCzIYLmN1YmUucnVubmVyLnY0Lk1hY2hpbmVzSAASLAoIdGVtcGxhdGUYBSABKAsyGC5jdWJlLnJ1bm5lci52NC5UZW1wbGF0ZUgAEi4KCXRlbXBsYXRlcxgGIAEoCzIZLmN1YmUucnVubmVyLnY0LlRlbXBsYXRlc0gAEi4KCWRpYWdub3NpcxgHIAEoCzIZLmN1YmUucnVubmVyLnY0LkRpYWdub3Npc0gAEioKB3Jldm9rZWQYCCABKAsyFy5jdWJlLnJ1bm5lci52NC5SZXZva2VkSABCCAoGcmVzdWx0Ii4KC0dyYW50UmV2b2tlEgsKA2lkcxgBIAMoCRISCgpnZW5lcmF0aW9uGAIgASgEIkgKB1Jldm9rZWQSEgoKZ2VuZXJhdGlvbhgBIAEoBBINCgVjb3VudBgCIAEoDRIaChJhcHBsaWVkX3VuaXhfbmFub3MYAyABKAMiQwoITWFjaGluZXMSJgoFaXRlbXMYASADKAsyFy5jdWJlLnJ1bm5lci52NC5NYWNoaW5lEg8KB3ZlcnNpb24YAiABKAMiNAoJVGVtcGxhdGVzEicKBWl0ZW1zGAEgAygLMhguY3ViZS5ydW5uZXIudjQuVGVtcGxhdGUiGQoJRGlhZ25vc2lzEgwKBGpzb24YASABKAkiJQoMV2F0Y2hSZXF1ZXN0EhUKDXNpbmNlX3ZlcnNpb24YASABKAMiqAIKCldhdGNoRXZlbnQSLQoEdHlwZRgBIAEoDjIfLmN1YmUucnVubmVyLnY0LldhdGNoRXZlbnQuVHlwZRIPCgd2ZXJzaW9uGAIgASgDEioKB21hY2hpbmUYAyABKAsyFy5jdWJlLnJ1bm5lci52NC5NYWNoaW5lSAASLAoIdGVtcGxhdGUYBCABKAsyGC5jdWJlLnJ1bm5lci52NC5UZW1wbGF0ZUgAEigKBnJ1bm5lchgFIAEoCzIWLmN1YmUucnVubmVyLnY0LlJ1bm5lckgAIkoKBFR5cGUSFAoQVFlQRV9VTlNQRUNJRklFRBAAEgcKA1BVVBABEgoKBkRFTEVURRACEgwKCEJPT0tNQVJLEAMSCQoFUkVTRVQQBEIKCghyZXNvdXJjZSJhCgtHdWVzdEhlYWRlchIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSJAoFZmVuY2UYAiABKAsyFS5jdWJlLnJ1bm5lci52NC5GZW5jZRIKCgJvcBgDIAEoCSJiCgpEaWFsSGVhZGVyEiAKA3JlZhgBIAEoCzITLmN1YmUucnVubmVyLnY0LlJlZhIkCgVmZW5jZRgCIAEoCzIVLmN1YmUucnVubmVyLnY0LkZlbmNlEgwKBHBvcnQYAyABKA0iqQEKEENyZWRlbnRpYWxIZWFkZXISIAoDcmVmGAEgASgLMhMuY3ViZS5ydW5uZXIudjQuUmVmEhIKCmNyZWRlbnRpYWwYAiABKAkSCwoDc25pGAMgASgJEgwKBGhvc3QYBSABKAkSDAoEcG9ydBgGIAEoDRIkCgVmZW5jZRgJIAEoCzIVLmN1YmUucnVubmVyLnY0LkZlbmNlSgQIBBAFSgQIBxAISgQICBAJIiUKBkhlYWRlchIMCgRuYW1lGAEgASgJEg0KBXZhbHVlGAIgASgMIg4KDFJlcG9ydEhlYWRlciKOAQoMRWdyZXNzUmVwb3J0EiAKA3JlZhgBIAEoCzITLmN1YmUucnVubmVyLnY0LlJlZhIMCgRob3N0GAIgASgJEg4KBnJlYXNvbhgDIAEoCRIWCg5kcm9wcGVkX2JlZm9yZRgEIAEoBBImCgJhdBgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAiiwIKC0RhZW1vbkZyYW1lEgoKAmNoGAEgASgNEioKBWhlbGxvGAIgASgLMhkuY3ViZS5ydW5uZXIudjQuR3Vlc3RJbmZvSAASKwoGc3RhdHVzGAMgASgLMhkuY3ViZS5ydW5uZXIudjQuR3Vlc3RJbmZvSAASLAoDcmVxGAQgASgLMh0uY3ViZS5ydW5uZXIudjQuRGFlbW9uUmVxdWVzdEgAEisKA2FucxgFIAEoCzIcLmN1YmUucnVubmVyLnY0LkRhZW1vbkFuc3dlckgAEiYKBWFib3J0GAYgASgLMhUuY3ViZS5ydW5uZXIudjQuRW1wdHlIABIPCgdzZXNzaW9uGAcgASgJQgMKAXQivAIKDURhZW1vblJlcXVlc3QSLQoFZ3Vlc3QYASABKAsyHC5jdWJlLnJ1bm5lci52NC5HdWVzdFJlcXVlc3RIABI1Cg1tYWNoaW5lX3NldHVwGAIgASgLMhwuY3ViZS5ydW5uZXIudjQuTWFjaGluZVNldHVwSAASMQoQc25hcHNob3RfcHJlcGFyZRgDIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SAASLgoNc25hcHNob3RfZG9uZRgEIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SAASMQoQdGVtcGxhdGVfcHVibGlzaBgFIAEoCzIVLmN1YmUucnVubmVyLnY0LkVtcHR5SAASKQoIc2h1dGRvd24YBiABKAsyFS5jdWJlLnJ1bm5lci52NC5FbXB0eUgAQgQKAm9wIigKDEd1ZXN0UmVxdWVzdBIKCgJvcBgBIAEoCRIMCgRkYXRhGAIgASgMIngKDERhZW1vbkFuc3dlchIPCgVndWVzdBgBIAEoDEgAEiYKBWVycm9yGAIgASgLMhUuY3ViZS5ydW5uZXIudjQuRXJyb3JIABIlCgRkb25lGAMgASgLMhUuY3ViZS5ydW5uZXIudjQuRW1wdHlIAEIICgZyZXN1bHQi1gIKDE1hY2hpbmVTZXR1cBIgCgNyZWYYASABKAsyEy5jdWJlLnJ1bm5lci52NC5SZWYSPgoJZG9jdW1lbnRzGAIgAygLMisuY3ViZS5ydW5uZXIudjQuTWFjaGluZVNldHVwLkRvY3VtZW50c0VudHJ5Eg8KB2VudHJvcHkYAyABKAwSJQoGbGF5ZXJzGAQgAygLMhUuY3ViZS5ydW5uZXIudjQuTGF5ZXISKgoFaW1hZ2UYBSABKAsyGy5jdWJlLnJ1bm5lci52NC5JbWFnZUNvbmZpZxIOCgZjYV9wZW0YBiABKAkSFgoOcnVubmVyX3ZlcnNpb24YByABKAkSEAoIcHJvdG9jb2wYCCABKA0SFAoMY2FwYWJpbGl0aWVzGAkgAygJGjAKDkRvY3VtZW50c0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoDDoCOAEiTgoFTGF5ZXISEQoJcGFydGl0aW9uGAEgASgNEhEKB2RpZmZfaWQYAiABKAlIABIVCgt0ZW1wbGF0ZV9pZBgDIAEoCUgAQggKBnNvdXJjZSIqCgtJbWFnZUNvbmZpZxIOCgZkaWdlc3QYASABKAkSCwoDZW52GAIgAygJKtwBCgRDb2RlEhQKEENPREVfVU5TUEVDSUZJRUQQABINCglOT1RfRk9VTkQQARISCg5BTFJFQURZX0VYSVNUUxACEhcKE0ZBSUxFRF9QUkVDT05ESVRJT04QAxIWChJSRVNPVVJDRV9FWEhBVVNURUQQBBIPCgtVTkFWQUlMQUJMRRAFEhUKEVBFUk1JU1NJT05fREVOSUVEEAYSFAoQSU5WQUxJRF9BUkdVTUVOVBAHEhEKDVVOSU1QTEVNRU5URUQQCBIMCghJTlRFUk5BTBAJEgsKB0FCT1JURUQQCmIGcHJvdG8z", [file_google_protobuf_duration, file_google_protobuf_timestamp]);
+ 
+ /**
+  * Describes the message cube.runner.v4.Ref.
+@@ -446,46 +446,60 @@ export const TemplateRefSchema = /*@__PURE__*/
+ export const CallResultSchema = /*@__PURE__*/
+   messageDesc(file_runner, 32);
+ 
++/**
++ * Describes the message cube.runner.v4.GrantRevoke.
++ * Use `create(GrantRevokeSchema)` to create a new message.
++ */
++export const GrantRevokeSchema = /*@__PURE__*/
++  messageDesc(file_runner, 33);
++
++/**
++ * Describes the message cube.runner.v4.Revoked.
++ * Use `create(RevokedSchema)` to create a new message.
++ */
++export const RevokedSchema = /*@__PURE__*/
++  messageDesc(file_runner, 34);
++
+ /**
+  * Describes the message cube.runner.v4.Machines.
+  * Use `create(MachinesSchema)` to create a new message.
+  */
+ export const MachinesSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 33);
++  messageDesc(file_runner, 35);
+ 
+ /**
+  * Describes the message cube.runner.v4.Templates.
+  * Use `create(TemplatesSchema)` to create a new message.
+  */
+ export const TemplatesSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 34);
++  messageDesc(file_runner, 36);
+ 
+ /**
+  * Describes the message cube.runner.v4.Diagnosis.
+  * Use `create(DiagnosisSchema)` to create a new message.
+  */
+ export const DiagnosisSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 35);
++  messageDesc(file_runner, 37);
+ 
+ /**
+  * Describes the message cube.runner.v4.WatchRequest.
+  * Use `create(WatchRequestSchema)` to create a new message.
+  */
+ export const WatchRequestSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 36);
++  messageDesc(file_runner, 38);
+ 
+ /**
+  * Describes the message cube.runner.v4.WatchEvent.
+  * Use `create(WatchEventSchema)` to create a new message.
+  */
+ export const WatchEventSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 37);
++  messageDesc(file_runner, 39);
+ 
+ /**
+  * Describes the enum cube.runner.v4.WatchEvent.Type.
+  */
+ export const WatchEvent_TypeSchema = /*@__PURE__*/
+-  enumDesc(file_runner, 37, 0);
++  enumDesc(file_runner, 39, 0);
+ 
+ /**
+  * @generated from enum cube.runner.v4.WatchEvent.Type
+@@ -498,91 +512,91 @@ export const WatchEvent_Type = /*@__PURE__*/
+  * Use `create(GuestHeaderSchema)` to create a new message.
+  */
+ export const GuestHeaderSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 38);
++  messageDesc(file_runner, 40);
+ 
+ /**
+  * Describes the message cube.runner.v4.DialHeader.
+  * Use `create(DialHeaderSchema)` to create a new message.
+  */
+ export const DialHeaderSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 39);
++  messageDesc(file_runner, 41);
+ 
+ /**
+  * Describes the message cube.runner.v4.CredentialHeader.
+  * Use `create(CredentialHeaderSchema)` to create a new message.
+  */
+ export const CredentialHeaderSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 40);
++  messageDesc(file_runner, 42);
+ 
+ /**
+  * Describes the message cube.runner.v4.Header.
+  * Use `create(HeaderSchema)` to create a new message.
+  */
+ export const HeaderSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 41);
++  messageDesc(file_runner, 43);
+ 
+ /**
+  * Describes the message cube.runner.v4.ReportHeader.
+  * Use `create(ReportHeaderSchema)` to create a new message.
+  */
+ export const ReportHeaderSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 42);
++  messageDesc(file_runner, 44);
+ 
+ /**
+  * Describes the message cube.runner.v4.EgressReport.
+  * Use `create(EgressReportSchema)` to create a new message.
+  */
+ export const EgressReportSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 43);
++  messageDesc(file_runner, 45);
+ 
+ /**
+  * Describes the message cube.runner.v4.DaemonFrame.
+  * Use `create(DaemonFrameSchema)` to create a new message.
+  */
+ export const DaemonFrameSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 44);
++  messageDesc(file_runner, 46);
+ 
+ /**
+  * Describes the message cube.runner.v4.DaemonRequest.
+  * Use `create(DaemonRequestSchema)` to create a new message.
+  */
+ export const DaemonRequestSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 45);
++  messageDesc(file_runner, 47);
+ 
+ /**
+  * Describes the message cube.runner.v4.GuestRequest.
+  * Use `create(GuestRequestSchema)` to create a new message.
+  */
+ export const GuestRequestSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 46);
++  messageDesc(file_runner, 48);
+ 
+ /**
+  * Describes the message cube.runner.v4.DaemonAnswer.
+  * Use `create(DaemonAnswerSchema)` to create a new message.
+  */
+ export const DaemonAnswerSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 47);
++  messageDesc(file_runner, 49);
+ 
+ /**
+  * Describes the message cube.runner.v4.MachineSetup.
+  * Use `create(MachineSetupSchema)` to create a new message.
+  */
+ export const MachineSetupSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 48);
++  messageDesc(file_runner, 50);
+ 
+ /**
+  * Describes the message cube.runner.v4.Layer.
+  * Use `create(LayerSchema)` to create a new message.
+  */
+ export const LayerSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 49);
++  messageDesc(file_runner, 51);
+ 
+ /**
+  * Describes the message cube.runner.v4.ImageConfig.
+  * Use `create(ImageConfigSchema)` to create a new message.
+  */
+ export const ImageConfigSchema = /*@__PURE__*/
+-  messageDesc(file_runner, 50);
++  messageDesc(file_runner, 52);
+ 
+ /**
+  * Describes the enum cube.runner.v4.Code.
+diff --git a/packages/server/src/runner-session.ts b/packages/server/src/runner-session.ts
+index 26e7ba13e..a61a19e40 100644
+--- a/packages/server/src/runner-session.ts
++++ b/packages/server/src/runner-session.ts
+@@ -241,15 +241,22 @@ export class RunnerSession {
+   async call(verb: NonNullable<MessageInitShape<typeof CallSchema>["verb"]>, timeoutMs = callTimeout(verb.case)): Promise<Exclude<CallResult["result"], { case: "error" } | { case: undefined }>> {
+     const connection = await this.connect();
+     let sent = false;
++    let phase = "open"; // SPIKE: where a call that does not answer waits
+     const work = (async () => {
+       const stream = await connection.openBi();
+-      sent = true;
++      sent = true; phase = "write";
+       await stream.send.writeAll(frame(OpenSchema, { kind: { case: "call", value: create(CallSchema, { verb }) } }));
++      phase = "finish";
+       await stream.send.finish();
+-      return parse(CallResultSchema, await readFrame(stream));
++      phase = "read";
++      const text = await readFrame(stream);
++      // SPIKE: read the runner's FIN, so the stream ends now and not when GC
++      // frees its handle.
++      if (process.env.SPIKE_READ_FIN) await stream.recv.readToEnd(16);
++      return parse(CallResultSchema, text);
+     })();
+     let answer: CallResult;
+-    try { answer = await within(timeoutMs, work, () => unavailable(`runner ${this.nodeId} did not answer ${verb.case}`, true)); }
++    try { answer = await within(timeoutMs, work, () => unavailable(`runner ${this.nodeId} did not answer ${verb.case} (waiting in ${phase})`, true)); }
+     catch (error) {
+       if (error instanceof RunnerError) throw error;
+       throw unavailable(`runner ${this.nodeId}: ${verb.case} failed: ${error instanceof Error ? error.message : String(error)}`, sent);
+diff --git a/scripts/spike-revoke-disconnect.ts b/scripts/spike-revoke-disconnect.ts
+new file mode 100644
+index 000000000..5948c77bc
+--- /dev/null
++++ b/scripts/spike-revoke-disconnect.ts
+@@ -0,0 +1,54 @@
++/** SPIKE (authorization 4c): when does berth learn that cubed is gone?
++ * A child process (cubed's RunnerSession) connects and revokes once, then
++ * either closes the session or is SIGKILLed; the parent reads berth's
++ * "connection ended" line (unix ns) and prints the delay.
++ *   node scripts/spike-revoke-disconnect.ts <berth> <loopback|relay> <close|kill> <dir> */
++import fs from "node:fs";
++import path from "node:path";
++import { execFileSync, spawn } from "node:child_process";
++import { once } from "node:events";
++import { RunnerSession, loadSessionConfig } from "../packages/server/src/runner-session.ts";
++
++const [binaryArg, mode, how, dirArg] = process.argv.slice(2);
++if (how === "child") {
++  const session = new RunnerSession(loadSessionConfig(dirArg!).config);
++  await session.hello();
++  await session.call({ case: "grantRevoke", value: { ids: ["rid-before-disconnect"], generation: 1n } });
++  process.stdout.write("ready\n");
++  process.stdin.on("data", async () => { await session.close(); process.stdout.write(`closed ${Date.now()}\n`); process.exit(0); });
++} else {
++  const binary = path.resolve(binaryArg!);
++  const root = path.resolve(dirArg!);
++  fs.rmSync(root, { recursive: true, force: true });
++  fs.mkdirSync(root, { recursive: true });
++  const controlKey = path.join(root, "control.key");
++  const control = JSON.parse(execFileSync(binary, ["keygen", "--key", controlKey], { encoding: "utf8" })) as { peerId: string };
++  const net = mode === "relay" ? ["--network", "relay"] : ["--listen", "127.0.0.1:0"];
++  const berth = spawn(binary, ["host", "--dir", path.join(root, "host"), "--allow-peer", control.peerId, "--node-id", "node-spike-c", ...net],
++    { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, BERTH_SPIKE_GATE: "127.0.0.1:0" } });
++  let banner = "";
++  berth.stderr!.setEncoding("utf8");
++  berth.stderr!.on("data", chunk => { banner += chunk; });
++  const until = async (re: RegExp, ms: number) => {
++    const deadline = Date.now() + ms;
++    while (!re.test(banner)) { if (Date.now() > deadline) throw new Error(`timeout waiting for ${re}`); await new Promise(r => setTimeout(r, 5)); }
++    return banner.match(re)!;
++  };
++  await until(/^spike gate: .+\n/m, 30000);
++  const field = (name: string) => banner.match(new RegExp(`^${name}: (.+)$`, "m"))?.[1]?.trim() ?? "";
++  const configPath = path.join(root, "runner.json");
++  fs.writeFileSync(configPath, JSON.stringify({ version: 2, protocol: 4, binding: { nodeId: "node-spike-c", threadId: "t", environmentId: 1 },
++    controlKey, serverPeer: field("peer"), network: mode, ...(mode === "loopback" ? { address: field("listen").split(", ")[0] } : {}) }), { mode: 0o600 });
++  const child = spawn(process.execPath, [import.meta.filename, "", mode!, "child", configPath], { stdio: ["pipe", "pipe", "inherit"] });
++  let out = "";
++  child.stdout!.setEncoding("utf8");
++  child.stdout!.on("data", c => { out += c; });
++  while (!out.includes("ready")) await new Promise(r => setTimeout(r, 5));
++  await new Promise(r => setTimeout(r, 2000));
++  const at = BigInt(Date.now()) * 1_000_000n;
++  if (how === "kill") child.kill("SIGKILL"); else child.stdin!.write("close\n");
++  const ended = await until(/connection from cubed ended at (\d+) \(([^)]*)\)/, 120000);
++  console.log(JSON.stringify({ mode, how, detectMs: Number(BigInt(ended[1]!) - at) / 1e6, reason: ended[2] }));
++  berth.kill("SIGINT");
++  await once(berth, "exit");
++}
+diff --git a/scripts/spike-revoke-timing.ts b/scripts/spike-revoke-timing.ts
+new file mode 100644
+index 000000000..ada3d991e
+--- /dev/null
++++ b/scripts/spike-revoke-timing.ts
+@@ -0,0 +1,136 @@
++/** SPIKE (authorization 4c): how fast a revocation from cubed reaches a
++ * protocol-4 runner's gate. A real `berth host` (spike build: grant_revoke
++ * and a loopback gate check, BERTH_SPIKE_GATE) and cubed's RunnerSession
++ * over real Iroh.
++ *
++ *   node scripts/spike-revoke-timing.ts <berth> <loopback|relay> <dir> [n=1000]
++ *
++ * Prints one JSON line: runner_get and grant_revoke round trips, the
++ * one-way time to the runner's set (send -> applied, same host clock), and
++ * send -> the first refusal a prober in a worker thread sees at the gate. */
++import assert from "node:assert/strict";
++import fs from "node:fs";
++import net from "node:net";
++import path from "node:path";
++import { execFileSync, spawn, type ChildProcess } from "node:child_process";
++import { once } from "node:events";
++import { Worker } from "node:worker_threads";
++import { RunnerSession, loadSessionConfig } from "../packages/server/src/runner-session.ts";
++
++const binary = path.resolve(process.argv[2]!);
++const mode = process.argv[3] as "loopback" | "relay";
++const root = path.resolve(process.argv[4]!);
++const n = Number(process.argv[5] ?? 1000);
++assert.ok(mode === "loopback" || mode === "relay");
++fs.rmSync(root, { recursive: true, force: true });
++fs.mkdirSync(root, { recursive: true });
++const now = () => performance.timeOrigin + performance.now(); // ms, wall clock, us precision
++const controlKey = path.join(root, "control.key");
++const control = JSON.parse(execFileSync(binary, ["keygen", "--key", controlKey], { encoding: "utf8" })) as { peerId: string };
++
++const net_ = mode === "relay" ? ["--network", "relay"] : ["--listen", "127.0.0.1:0"];
++const child: ChildProcess = spawn(binary, ["host", "--dir", path.join(root, "host"), "--allow-peer", control.peerId, "--node-id", "node-spike-c", ...net_],
++  { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, BERTH_SPIKE_GATE: "127.0.0.1:0" } });
++let banner = "";
++const log = fs.createWriteStream(path.join(root, "berth.log"));
++child.stderr!.setEncoding("utf8");
++child.stderr!.on("data", chunk => { banner += chunk; log.write(chunk); });
++await new Promise<void>((resolve, reject) => {
++  const check = () => { if (/^spike gate: .+\n/m.test(banner)) resolve(); };
++  child.stderr!.on("data", check);
++  child.once("exit", code => reject(new Error(`berth exited (${code}): ${banner}`)));
++});
++const field = (name: string) => banner.match(new RegExp(`^${name}: (.+)$`, "m"))?.[1]?.trim() ?? "";
++const gate = field("spike gate");
++const configPath = path.join(root, "runner.json");
++fs.writeFileSync(configPath, JSON.stringify({ version: 2, protocol: 4, binding: { nodeId: "node-spike-c", threadId: "t", environmentId: 1 },
++  controlKey, serverPeer: field("peer"), network: mode, ...(mode === "loopback" ? { address: field("listen").split(", ")[0] } : {}) }), { mode: 0o600 });
++const session = new RunnerSession(loadSessionConfig(configPath).config);
++
++function stats(values: number[]) {
++  const v = [...values].sort((a, b) => a - b);
++  const at = (q: number) => +v[Math.min(v.length - 1, Math.round(q * (v.length - 1)))]!.toFixed(3);
++  return { n: v.length, p50: at(0.5), p95: at(0.95), p99: at(0.99), max: +v.at(-1)!.toFixed(3), min: +v[0]!.toFixed(3) };
++}
++
++// The prober: its own event loop, one TCP connection to the gate, checking
++// the current round's grant id until it is refused.
++const shared = new SharedArrayBuffer(64);
++const round = new Int32Array(shared, 0, 4); // [round, allowsSeenThisRound, deniedRound, stop]
++const times = new Float64Array(shared, 16, 4); // [deniedAt]
++const worker = new Worker(`
++  const { workerData } = require("node:worker_threads");
++  const net = require("node:net");
++  const round = new Int32Array(workerData.shared, 0, 4);
++  const times = new Float64Array(workerData.shared, 16, 4);
++  const now = () => performance.timeOrigin + performance.now();
++  const [host, port] = workerData.gate.split(":");
++  const socket = net.connect({ host, port: Number(port), noDelay: true });
++  let buffer = "";
++  let asked = -1;
++  const ask = () => {
++    if (Atomics.load(round, 3)) { socket.end(); return; }
++    asked = Atomics.load(round, 0);
++    socket.write("rid-" + asked + " api.github.com\\n");
++  };
++  socket.on("connect", ask);
++  socket.on("data", chunk => {
++    buffer += chunk;
++    let i;
++    while ((i = buffer.indexOf("\\n")) >= 0) {
++      const line = buffer.slice(0, i); buffer = buffer.slice(i + 1);
++      if (line === "deny revoked" && Atomics.load(round, 2) !== asked) { times[0] = now(); Atomics.store(round, 2, asked); }
++      else if (line === "allow" && asked === Atomics.load(round, 0)) Atomics.add(round, 1, 1);
++      ask();
++    }
++  });
++`, { eval: true, workerData: { shared, gate } });
++
++try {
++  const started = now();
++  await session.hello();
++  const warm = mode === "relay" ? 20 : 100;
++  // (a) a cheap existing call: runner_get, then machine_list
++  const rtt = async (verb: Parameters<RunnerSession["call"]>[0], count: number) => {
++    const samples: number[] = [];
++    for (let i = 0; i < warm + count; i++) {
++      const t0 = now();
++      if (process.env.SPIKE_GC && i % 50 === 0) (globalThis as { gc?: () => void }).gc?.();
++      try { await session.call(verb); }
++      catch (error) { throw new Error(`${verb.case} #${i} after ${(now() - started).toFixed(0)} ms: ${String(error)}`); }
++      if (i >= warm) samples.push(now() - t0);
++    }
++    return samples;
++  };
++  const runnerGet = await rtt({ case: "runnerGet", value: {} }, n);
++  const machineList = await rtt({ case: "machineList", value: {} }, n);
++  // (a') + (c): grant_revoke, with the prober at the gate
++  const revokeRtt: number[] = [], oneWay: number[] = [], toRefusal: number[] = [];
++  let delivered = 0;
++  for (let i = 1; i <= warm + n; i++) {
++    Atomics.store(round, 1, 0);
++    Atomics.store(round, 0, i);
++    // the prober has seen this round's grant allowed at least once
++    while (Atomics.load(round, 1) < 1) await new Promise(resolve => setImmediate(resolve));
++    const t0 = now();
++    const answer = await session.call({ case: "grantRevoke", value: { ids: [`rid-${i}`], generation: BigInt(i) } });
++    const t1 = now();
++    assert.equal(answer.case, "revoked");
++    while (Atomics.load(round, 2) !== i) await new Promise(resolve => setImmediate(resolve));
++    if (i <= warm) continue;
++    if (answer.case === "revoked" && answer.value.generation === BigInt(i)) delivered++;
++    revokeRtt.push(t1 - t0);
++    oneWay.push(Number(answer.case === "revoked" ? answer.value.appliedUnixNanos : 0n) / 1e6 - t0);
++    toRefusal.push(times[0]! - t0);
++  }
++  Atomics.store(round, 3, 1);
++  const paths = [...banner.matchAll(/^spike: path (.+)$/gm)].map(m => m[1]).slice(-4);
++  console.log(JSON.stringify({ mode, n, delivered, unit: "ms",
++    runnerGetRtt: stats(runnerGet), machineListRtt: stats(machineList), grantRevokeRtt: stats(revokeRtt),
++    sendToApplied: stats(oneWay), sendToRefusal: stats(toRefusal), paths }));
++} finally {
++  await worker.terminate();
++  await session.close();
++  if (child.exitCode === null) { const exited = once(child, "exit"); child.kill("SIGINT"); await exited; }
++  log.end();
++}

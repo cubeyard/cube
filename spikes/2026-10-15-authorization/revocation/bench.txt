@@ -1,0 +1,23 @@
+    Finished `release` profile [optimized] target(s) in 1m 09s
+     Running unittests src/main.rs (/tmp/authz/target-c/release/deps/berth-ed4a8c7b79f6cbf3)
+
+running 1 test
+set=0 apply(insert under mutex): n=20000 p50=168ns p95=374ns p99=7205ns max=2136518ns
+set=0 check allowed (revoked lookup + Policy::decide): n=20000 p50=156ns p95=245ns p99=317ns max=251623ns
+set=0 check refused (revoked): n=20000 p50=186ns p95=414ns p99=592ns max=95144ns
+set=0 copy-on-write replace (clone set + insert + swap): n=200 p50=10214ns p95=18953ns p99=30535ns max=42152ns
+set=0 revoke -> refusal seen by a spinning gate thread: n=2000 p50=964ns p95=3373ns p99=25079ns max=3149235ns
+set=1000 apply(insert under mutex): n=20000 p50=176ns p95=341ns p99=563ns max=1896576ns
+set=1000 check allowed (revoked lookup + Policy::decide): n=20000 p50=159ns p95=249ns p99=324ns max=39143ns
+set=1000 check refused (revoked): n=20000 p50=183ns p95=395ns p99=589ns max=157548ns
+set=1000 copy-on-write replace (clone set + insert + swap): n=200 p50=95788ns p95=130682ns p99=187439ns max=461571ns
+set=1000 revoke -> refusal seen by a spinning gate thread: n=2000 p50=846ns p95=1501ns p99=2607ns max=663133ns
+set=100000 apply(insert under mutex): n=20000 p50=170ns p95=412ns p99=622ns max=18283095ns
+set=100000 check allowed (revoked lookup + Policy::decide): n=20000 p50=172ns p95=311ns p99=503ns max=18985ns
+set=100000 check refused (revoked): n=20000 p50=202ns p95=448ns p99=615ns max=11778ns
+set=100000 copy-on-write replace (clone set + insert + swap): n=200 p50=7503700ns p95=10062928ns p99=11053197ns max=36394067ns
+set=100000 revoke -> refusal seen by a spinning gate thread: n=2000 p50=996ns p95=1442ns p99=1812ns max=79706ns
+test spike_revoke::bench::spike_revoke_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 118 filtered out; finished in 2.89s
+

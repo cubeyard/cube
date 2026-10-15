@@ -1,0 +1,28 @@
+{
+  "name": "approval-outside-profile-ref-denied",
+  "description": "valid approval for refs/heads/prod, which the profile neither grants nor gates",
+  "test_only_keys": {
+    "_note": "TEST ONLY. sha256('cube-authz-TEST-ONLY:<label>'). Never use outside these fixtures.",
+    "root_private": "5ed761bfda702286488a3e55ea26e9844c53c877b0b131832a977d770d73ccdc",
+    "root_key_id": 1,
+    "approval_private": "9faf1d752ee88ed4649e5c5c17ea2e3ef3bf854f7b4980d4a4ebaee992516cb6",
+    "other_private": "6a23ea1e25b2390fc6887fd885749a2190c0cf85a6b1b9961d08ddc2273f7e96"
+  },
+  "token": {
+    "signed_by": "root",
+    "authority": "on_behalf_of(\"user:test\");\nproject(\"cube\");\nthread(\"t1\");\nrunner(\"255f1a77a29c5cbe90fa2cb79fce9bb95530f5bf216fae9cde59db87cf954b8a\");\nmachine(\"vm1\");\nhttp(\"registry.npmjs.org\", \"GET\");\nhttp(\"github.com\", \"GET\");\nhttp(\"codeload.github.com\", \"GET\");\nhttp(\"objects.githubusercontent.com\", \"GET\");\nhttp(\"crates.io\", \"GET\");\nhttp(\"static.crates.io\", \"GET\");\nhttp(\"index.crates.io\", \"GET\");\nhttp(\"pypi.org\", \"GET\");\nhttp(\"files.pythonhosted.org\", \"GET\");\nhttp(\"deb.debian.org\", \"GET\");\nhttp(\"security.debian.org\", \"GET\");\nhttp(\"proxy.golang.org\", \"GET\");\nhttp(\"sum.golang.org\", \"GET\");\nhttp(\"dl-cdn.alpinelinux.org\", \"GET\");\nhttp(\"nodejs.org\", \"GET\");\nhttp(\"registry.yarnpkg.com\", \"GET\");\nhttp(\"api.github.com\", \"GET\");\ngit(\"github.com\", \"cubeyard/cube\", \"fetch\");\ngit(\"github.com\", \"cubeyard/keel\", \"fetch\");\ngit_push_prefix(\"github.com\", \"cubeyard/cube\", \"refs/heads/cube/t1/\");\ngit_push_approval(\"github.com\", \"cubeyard/cube\", \"refs/heads/main\");\ngithub_api(\"cubeyard/cube\", \"pulls.create\");\ngithub_api(\"cubeyard/cube\", \"pulls.get\");\ngithub_api(\"cubeyard/cube\", \"issues.comment\");\ncheck if time($t), $t <= 2026-10-15T20:00:00Z;\ncheck if peer($p), runner($p);\ncheck if vm($v), machine($v);\ncheck if req_http($h, $m)\n  or req_git_fetch($h, $r)\n  or req_github_api($r, $op)\n  or req_git_push($h, $r, $ref, $o, $n), git_push_prefix($h, $r, $p), $ref.starts_with($p)\n  or req_git_push($h, $r, $ref, $o, $n), git_delete_prefix($h, $r, $p), $ref.starts_with($p)\n  or req_git_push($h, $r, $ref, $o, $n), approved($h, $r, $ref, $n) trusting ed25519/705d86c4e53e7c54b02103b561622f0a805938045dd7989317e3e6a7040b4563\n  or req_git_push($h, $r, $ref, $o, $n), approved_ref($h, $r, $ref, $exp), time($t), $t <= $exp trusting ed25519/705d86c4e53e7c54b02103b561622f0a805938045dd7989317e3e6a7040b4563;",
+    "blocks": [
+      {
+        "type": "third_party",
+        "signer": "approval",
+        "code": "approved(\"github.com\", \"cubeyard/cube\", \"refs/heads/prod\", \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\");"
+      }
+    ]
+  },
+  "authorizer": "allow if req_http($h, $m), http($h, $m);\nallow if req_git_fetch($h, $r), git($h, $r, \"fetch\");\nallow if req_github_api($r, $op), github_api($r, $op);\nallow if req_git_push($h, $r, $ref, $o, $n), git_push_prefix($h, $r, $p), $ref.starts_with($p), $n != \"0000000000000000000000000000000000000000\";\nallow if req_git_push($h, $r, $ref, $o, $n), git_push_approval($h, $r, $ref), $n != \"0000000000000000000000000000000000000000\";\nallow if req_git_push($h, $r, $ref, $o, $n), $n == \"0000000000000000000000000000000000000000\", git_delete_prefix($h, $r, $p), $ref.starts_with($p);",
+  "revoked_blocks": [],
+  "actions": [
+    "peer(\"255f1a77a29c5cbe90fa2cb79fce9bb95530f5bf216fae9cde59db87cf954b8a\");\nvm(\"vm1\");\ntime(2026-10-15T18:00:00Z);\nreq_git_push(\"github.com\", \"cubeyard/cube\", \"refs/heads/prod\", \"1111111111111111111111111111111111111111\", \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\");"
+  ],
+  "expect": "deny"
+}

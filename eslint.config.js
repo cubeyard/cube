@@ -18,6 +18,8 @@ export default defineConfig([
     "packages/claude-mod/.claude-plugin/types/",
     // Generated from packages/node-transport/proto/runner.proto (pnpm proto:check).
     "packages/server/src/gen/",
+    // Throwaway measurement code behind docs/plans; not product code.
+    "spikes/",
   ]),
   js.configs.recommended,
   tseslint.configs.recommended,

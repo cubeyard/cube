@@ -1,0 +1,4 @@
+{"mode":"loopback","how":"close","detectMs":4.241273,"reason":"closed by peer: 0"}
+{"mode":"loopback","how":"kill","detectMs":33023.76291,"reason":"timed out"}
+{"mode":"relay","how":"close","detectMs":29.864967,"reason":"closed by peer: 0"}
+{"mode":"relay","how":"kill","detectMs":33098.798394,"reason":"timed out"}

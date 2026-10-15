@@ -1,0 +1,8 @@
+dbg-fail-11.out: RangeError [ERR_SOCKET_BAD_PORT]: Port should be >= 0 and < 65536. Received type number (NaN).
+dbg-fail-19.out: RangeError [ERR_SOCKET_BAD_PORT]: Port should be >= 0 and < 65536. Received type number (NaN).
+dbg-fail-7.out: Error: machineList #215 after 16618 ms: RunnerError: UNAVAILABLE: runner node-spike-c did not answer machineList
+dbg2-fail-3.out: Error: machineList #1060 after 17073 ms: RunnerError: UNAVAILABLE: runner node-spike-c did not answer machineList
+dbg3-fail-3.out: Error: runnerGet #1785 after 16591 ms: RunnerError: UNAVAILABLE: runner node-spike-c did not answer runnerGet (waiting in open)
+dbg3-fail-6.out: Error: runnerGet #217 after 15463 ms: RunnerError: UNAVAILABLE: runner node-spike-c did not answer runnerGet (waiting in open)
+loopback-5.out: RunnerError: UNAVAILABLE: runner node-spike-c did not answer runnerGet
+readfin-run (SPIKE_READ_FIN=1, not saved): Error: machineList #1526 after 18213 ms: RunnerError: UNAVAILABLE: runner node-spike-c did not answer machineList (waiting in open)

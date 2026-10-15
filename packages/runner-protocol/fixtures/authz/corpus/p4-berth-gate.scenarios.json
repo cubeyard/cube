@@ -1,0 +1,207 @@
+{
+ "placeholder": "cube_ph_github_0000000000000000000000",
+ "id": "t-7e31bb2a",
+ "repository": "dizk/cube-authz-capture",
+ "scenarios": [
+  {
+   "name": "whoami",
+   "command": "id; printenv GH_TOKEN | cut -c1-15; git remote -v; git config --show-origin --get-regexp credential || true",
+   "from": 0,
+   "to": 527,
+   "ok": true,
+   "output": "uid=1001(agent) gid=1002(agent) groups=1002(agent)\ncube_ph_github_\norigin\thttps://github.com/dizk/cube-authz-capture (fetch)\norigin\thttps://github.com/dizk/cube-authz-capture (push)\nfile:/etc/gitconfig\tcredential.https://github.com.helper \nfile:/etc/gitconfig\tcredential.https://github.com.helper !f() { test \"$1\" = get || exit 0; echo username=x-access-token; echo \"password=$GH_TOKEN\"; }; f\n\n[exit=0; exited]"
+  },
+  {
+   "name": "setup-apt",
+   "command": "sudo DEBIAN_FRONTEND=noninteractive apt-get update -q >/dev/null; gh --version | head -1; git --version; npm --version",
+   "from": 527,
+   "to": 4594,
+   "ok": true,
+   "output": "gh version 2.102.0 (2026-09-30)\ngit version 2.56.0\n11.19.0\n\n[exit=0; exited]"
+  },
+  {
+   "name": "git-clone",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; cd ~; rm -rf repo; git clone https://github.com/dizk/cube-authz-capture repo",
+   "from": 4594,
+   "to": 6403,
+   "ok": true,
+   "output": "Cloning into 'repo'...\n\n[exit=0; exited]"
+  },
+  {
+   "name": "git-clone-v0",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; cd ~; rm -rf repo-v0; git -c protocol.version=0 clone https://github.com/dizk/cube-authz-capture repo-v0",
+   "from": 6403,
+   "to": 8004,
+   "ok": true,
+   "output": "Cloning into 'repo-v0'...\n\n[exit=0; exited]"
+  },
+  {
+   "name": "git-push-branch",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; cd ~/repo; echo one-t-7e31bb2a > a.txt; git add a.txt; git commit -qm one; git push origin HEAD:refs/heads/cube/t-7e31bb2a/work",
+   "from": 8004,
+   "to": 10311,
+   "ok": true,
+   "output": "remote: \nremote: Create a pull request for 'cube/t-7e31bb2a/work' on GitHub by visiting:        \nremote:      https://github.com/dizk/cube-authz-capture/pull/new/cube/t-7e31bb2a/work        \nremote: \nTo https://github.com/dizk/cube-authz-capture\n * [new branch]      HEAD -> cube/t-7e31bb2a/work\n\n[exit=0; exited]"
+  },
+  {
+   "name": "git-push-main",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; cd ~/repo; echo two-t-7e31bb2a > b.txt; git add b.txt; git commit -qm two; git push origin HEAD:main || (git pull -q --rebase origin main && git push origin HEAD:main)",
+   "from": 10311,
+   "to": 12355,
+   "ok": true,
+   "output": "To https://github.com/dizk/cube-authz-capture\n   8e42bc2..a0f8d1f  HEAD -> main\n\n[exit=0; exited]"
+  },
+  {
+   "name": "git-push-multi",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; cd ~/repo; git push origin HEAD:refs/heads/cube/t-7e31bb2a/a HEAD:refs/heads/cube/t-7e31bb2a/b",
+   "from": 12355,
+   "to": 14411,
+   "ok": true,
+   "output": "To https://github.com/dizk/cube-authz-capture\n * [new branch]      HEAD -> cube/t-7e31bb2a/a\n * [new branch]      HEAD -> cube/t-7e31bb2a/b\n\n[exit=0; exited]"
+  },
+  {
+   "name": "git-push-force",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; cd ~/repo; git commit -q --amend -m two-amended; git push -f origin HEAD:refs/heads/cube/t-7e31bb2a/work",
+   "from": 14411,
+   "to": 16454,
+   "ok": true,
+   "output": "To https://github.com/dizk/cube-authz-capture\n   950a1e4..e4a10ba  HEAD -> cube/t-7e31bb2a/work\n\n[exit=0; exited]"
+  },
+  {
+   "name": "git-push-delete",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; cd ~/repo; git push origin :refs/heads/cube/t-7e31bb2a/b",
+   "from": 16454,
+   "to": 18255,
+   "ok": true,
+   "output": "To https://github.com/dizk/cube-authz-capture\n - [deleted]         cube/t-7e31bb2a/b\n\n[exit=0; exited]"
+  },
+  {
+   "name": "git-push-tag",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; cd ~/repo; git tag capture-t-7e31bb2a; git push origin capture-t-7e31bb2a",
+   "from": 18255,
+   "to": 20323,
+   "ok": true,
+   "output": "To https://github.com/dizk/cube-authz-capture\n * [new tag]         capture-t-7e31bb2a -> capture-t-7e31bb2a\n\n[exit=0; exited]"
+  },
+  {
+   "name": "git-push-atomic-options",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; cd ~/repo; echo three-t-7e31bb2a > c.txt; git add c.txt; git commit -qm three; git push --atomic -o ci.skip origin HEAD:refs/heads/cube/t-7e31bb2a/work HEAD:refs/heads/cube/t-7e31bb2a/c",
+   "from": 20323,
+   "to": 22366,
+   "ok": true,
+   "output": "To https://github.com/dizk/cube-authz-capture\n   e4a10ba..07f0227  HEAD -> cube/t-7e31bb2a/work\n * [new branch]      HEAD -> cube/t-7e31bb2a/c\n\n[exit=0; exited]"
+  },
+  {
+   "name": "git-fetch",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; cd ~/repo; git fetch origin",
+   "from": 22366,
+   "to": 23648,
+   "ok": true,
+   "output": "\n[exit=0; exited]"
+  },
+  {
+   "name": "git-ls-remote",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; git ls-remote https://github.com/dizk/cube-authz-capture",
+   "from": 23648,
+   "to": 25440,
+   "ok": true,
+   "output": "-7e31bb2a/a\n07f02270c32099c261710ccf3aa0fe864bea225e\trefs/heads/cube/t-7e31bb2a/c\n07f02270c32099c261710ccf3aa0fe864bea225e\trefs/heads/cube/t-7e31bb2a/work\n7de97b06cb4f94c2ff94cff5b4a927f72231e58e\trefs/heads/cube/t-capture-267eee/a\n2b2ce66d0f849ff5b89f5491cf907e8328d5c347\trefs/heads/cube/t-capture-267eee/c\n2b2ce66d0f849ff5b89f5491cf907e8328d5c347\trefs/heads/cube/t-capture-267eee/rest\n2b2ce66d0f849ff5b89f5491cf907e8328d5c347\trefs/heads/cube/t-capture-267eee/work\n0af9b20d67ad5c4f0e183ba6255da422f08d103a\trefs/heads/cube/t-capture-52d303/a\nd2b17fdafb9b80ba266c1f5c830c13b70af6f2bc\trefs/heads/cube/t-capture-52d303/rest\nd2b17fdafb9b80ba266c1f5c830c13b70af6f2bc\trefs/heads/cube/t-capture-52d303/work\n9cfa0129bb78501e6e937e68187f8f7e5b9e38f1\trefs/heads/cube/t-capture-94ee3a/a\n8e42bc23aa27d63796dc18926b20556a0ad071fe\trefs/heads/cube/t-capture-94ee3a/c\n8e42bc23aa27d63796dc18926b20556a0ad071fe\trefs/heads/cube/t-capture-94ee3a/rest\n8e42bc23aa27d63796dc18926b20556a0ad071fe\trefs/heads/cube/t-capture-94ee3a/work\n0ed77f43f41122bb2b8981477b7347e588947584\trefs/heads/cube/t-capture-c37162/a\n8aee93ecbf12a27b7cf79d587e718838730c0704\trefs/heads/cube/t-capture-c37162/c\n8aee93ecbf12a27b7cf79d587e718838730c0704\trefs/heads/cube/t-capture-c37162/rest\n8aee93ecbf12a27b7cf79d587e718838730c0704\trefs/heads/cube/t-capture-c37162/work\na0f8d1f479a51aa8fa79c5aaeeac44de416d6ae9\trefs/heads/main\n8aee93ecbf12a27b7cf79d587e718838730c0704\trefs/pull/1/head\n8e42bc23aa27d63796dc18926b20556a0ad071fe\trefs/pull/10/head\nd2b17fdafb9b80ba266c1f5c830c13b70af6f2bc\trefs/pull/4/head\n2b2ce66d0f849ff5b89f5491cf907e8328d5c347\trefs/pull/7/head\ne4a10ba4f29f9b5749459ad57ea76c81906904df\trefs/tags/capture-t-7e31bb2a\n2c188ae3725f83022aa1a44280cde10e2e0a0093\trefs/tags/capture-t-capture-267eee\nd2b17fdafb9b80ba266c1f5c830c13b70af6f2bc\trefs/tags/capture-t-capture-52d303\n592457c016da1248ddc07a0914a2516633569dec\trefs/tags/capture-t-capture-94ee3a\n5bc37c2ee2e516e853ed3ecc66be48dd3a64a653\trefs/tags/capture-t-capture-c37162\n\n[exit=0; exited]"
+  },
+  {
+   "name": "gh-pr-create",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; cd ~/repo; gh pr create --repo dizk/cube-authz-capture --head cube/t-7e31bb2a/work --base main --title \"capture t-7e31bb2a\" --body \"disposable capture\"",
+   "from": 25440,
+   "to": 29253,
+   "ok": true,
+   "output": "https://github.com/dizk/cube-authz-capture/pull/13\n\n[exit=0; exited]"
+  },
+  {
+   "name": "gh-pr-list-view",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; gh pr list --repo dizk/cube-authz-capture; gh pr view --repo dizk/cube-authz-capture cube/t-7e31bb2a/work || true",
+   "from": 29253,
+   "to": 31571,
+   "ok": true,
+   "output": "13\tcapture t-7e31bb2a\tcube/t-7e31bb2a/work\tOPEN\t2026-10-15T17:52:56Z\ntitle:\tcapture t-7e31bb2a\nstate:\tOPEN\nauthor:\tdizk (Didrik)\nlabels:\t\nassignees:\t\nreviewers:\t\nprojects:\t\nmilestone:\t\nnumber:\t13\nurl:\thttps://github.com/dizk/cube-authz-capture/pull/13\nadditions:\t2\ndeletions:\t2\nauto-merge:\tdisabled\n--\ndisposable capture\n\n[exit=0; exited]"
+  },
+  {
+   "name": "gh-api-rest-read",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; gh api repos/dizk/cube-authz-capture >/dev/null; gh api repos/dizk/cube-authz-capture/pulls >/dev/null; gh api user >/dev/null",
+   "from": 31572,
+   "to": 33634,
+   "ok": true,
+   "output": "\n[exit=0; exited]"
+  },
+  {
+   "name": "gh-api-rest-write-issue",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; gh api -X POST repos/dizk/cube-authz-capture/issues -f title=\"capture t-7e31bb2a\" -f body=disposable >/dev/null",
+   "from": 33634,
+   "to": 34675,
+   "ok": true,
+   "output": "\n[exit=0; exited]"
+  },
+  {
+   "name": "gh-api-rest-write-contents",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; gh api -X PUT repos/dizk/cube-authz-capture/contents/rest-t-7e31bb2a.txt -f message=\"contents api\" -f content=$(printf hi | base64) -f branch=cube/t-7e31bb2a/a >/dev/null",
+   "from": 34675,
+   "to": 36212,
+   "ok": true,
+   "output": "\n[exit=0; exited]"
+  },
+  {
+   "name": "gh-api-graphql-query",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; gh api graphql -f query='query { viewer { login } }' >/dev/null",
+   "from": 36212,
+   "to": 37247,
+   "ok": true,
+   "output": "\n[exit=0; exited]"
+  },
+  {
+   "name": "gh-api-graphql-mutation",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; rid=$(gh api graphql -f query='query($o:String!,$n:String!){repository(owner:$o,name:$n){id}}' -f o=dizk -f n=cube-authz-capture -q .data.repository.id); gh api graphql -f query='mutation($r:ID!){createIssue(input:{repositoryId:$r,title:\"graphql capture\"}){issue{number}}}' -f r=$rid >/dev/null",
+   "from": 37247,
+   "to": 39546,
+   "ok": true,
+   "output": "\n[exit=0; exited]"
+  },
+  {
+   "name": "gh-pr-merge",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; gh pr merge --repo dizk/cube-authz-capture cube/t-7e31bb2a/work --merge",
+   "from": 39546,
+   "to": 44623,
+   "ok": true,
+   "output": "\n[exit=0; exited]"
+  },
+  {
+   "name": "gh-api-rest-write-ref",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; sha=$(cd ~/repo && git rev-parse HEAD); gh api -X POST repos/dizk/cube-authz-capture/git/refs -f ref=refs/heads/cube/t-7e31bb2a/rest -f sha=$sha >/dev/null; gh api -X PATCH repos/dizk/cube-authz-capture/git/refs/heads/main -f sha=$sha -F force=true >/dev/null || true",
+   "from": 44623,
+   "to": 46915,
+   "ok": true,
+   "output": "\n[exit=0; exited]"
+  },
+  {
+   "name": "npm-install",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; mkdir -p ~/npmtest && cd ~/npmtest && npm init -y >/dev/null && npm install --no-audit --no-fund is-number@7.0.0",
+   "from": 46915,
+   "to": 48209,
+   "ok": true,
+   "output": "\nadded 1 package in 320ms\n\n[exit=0; exited]"
+  },
+  {
+   "name": "npm-install-audit",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; cd ~/npmtest && npm install --no-fund left-pad@1.3.0",
+   "from": 48209,
+   "to": 49239,
+   "ok": true,
+   "output": "npm warn deprecated left-pad@1.3.0: use String.prototype.padStart()\n\nadded 1 package, and audited 3 packages in 491ms\n\nfound 0 vulnerabilities\n\n[exit=0; exited]"
+  },
+  {
+   "name": "curl-download",
+   "command": "export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1; git config --global user.name capture; git config --global user.email capture@cube.invalid; curl -fsS -o /dev/null https://raw.githubusercontent.com/dizk/cube-authz-capture/main/README.md -H \"Authorization: token $GH_TOKEN\" || true",
+   "from": 49239,
+   "to": 50018,
+   "ok": true,
+   "output": "curl: (22) The requested URL returned error: 403\n\n[exit=0; exited]"
+  }
+ ]
+}

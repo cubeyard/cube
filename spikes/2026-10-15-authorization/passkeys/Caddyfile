@@ -1,0 +1,51 @@
+# Loopback-only TLS proxies for spike 4d. Certs from certs.sh in /tmp/authz/pk.
+# User "spike", password "spike-pass".
+{
+	admin off
+	auto_https off
+}
+
+# 5a: authenticated proxy, RP verifies against the configured origin.
+https://cube.example.test:18456 {
+	bind 127.0.0.1
+	tls /tmp/authz/pk/chain.crt /tmp/authz/pk/leaf.key
+	basic_auth {
+		spike $2a$14$X3UpNXdCzqCjoAzGWooe4OFXFT5s3IZmMvxWdod5wN4Mdn0jwO94m
+	}
+	reverse_proxy 127.0.0.1:18457
+}
+
+# 5b: same, RP derives the expected origin from what it sees (naive).
+https://cube.example.test:18459 {
+	bind 127.0.0.1
+	tls /tmp/authz/pk/chain.crt /tmp/authz/pk/leaf.key
+	basic_auth {
+		spike $2a$14$X3UpNXdCzqCjoAzGWooe4OFXFT5s3IZmMvxWdod5wN4Mdn0jwO94m
+	}
+	reverse_proxy 127.0.0.1:18458
+}
+
+# 5c: same, RP misconfigured with RP ID = its own loopback name.
+https://cube.example.test:18464 {
+	bind 127.0.0.1
+	tls /tmp/authz/pk/chain.crt /tmp/authz/pk/leaf.key
+	basic_auth {
+		spike $2a$14$X3UpNXdCzqCjoAzGWooe4OFXFT5s3IZmMvxWdod5wN4Mdn0jwO94m
+	}
+	reverse_proxy 127.0.0.1:18465
+}
+
+# 5d: path-prefixed proxy, https://example.test:18460/cube/
+https://example.test:18460 {
+	bind 127.0.0.1
+	tls /tmp/authz/pk/chain.crt /tmp/authz/pk/leaf.key
+	basic_auth {
+		spike $2a$14$X3UpNXdCzqCjoAzGWooe4OFXFT5s3IZmMvxWdod5wN4Mdn0jwO94m
+	}
+	handle_path /cube/* {
+		reverse_proxy 127.0.0.1:18461
+	}
+	handle {
+		respond "not cube" 404
+	}
+}
