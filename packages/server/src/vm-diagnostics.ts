@@ -224,8 +224,14 @@ export interface MachineEvidence {
   events: ReturnType<MachineEvents["read"]>;
   runner: Evidence<{ method: "vm.diagnose" | "vm.inspect" | "machine_diagnose"; ms: number; diagnosis?: Record<string, unknown>; vm?: unknown; consoleTail?: string | null; note?: string }>;
   gateway: Evidence<{ attached: boolean; link?: string; leased?: boolean; guestIp?: string | null; flows?: number; rxBytes?: number; txBytes?: number; lastError?: string | null }>;
-  guest: Evidence<{ ready: boolean; ms: number; error: string | null }>;
+  guest: Evidence<{ ready: boolean; ms: number; error: string | null; agent?: GuestAgent }>;
 }
+
+/** A keel agent as it last described itself in a protocol-4 runner's watch
+ * (runner.proto `GuestInfo`): `build` is its sha256, `hooks` each keel
+ * hook's last outcome in that machine (ok, failed:N, skipped, notrun,
+ * absent) as of its last status. */
+export interface GuestAgent { version: string; build: string; kernel: string; bootId: string; hooks: Record<string, string> }
 
 export interface DiagnosticsSources {
   registry: Registry;
@@ -313,6 +319,12 @@ export function formatDiagnostics(bundle: Record<string, unknown>, maxChars = 12
     lines.push(`cubed: start in progress ${String(cubed.startInProgress)}, attached ${String(cubed.attached)}, last guest probe ${JSON.stringify(cubed.lastGuestProbe)}`);
     lines.push(`gateway: ${gateway.status === "observed" ? `attached ${String(gateway.attached)}, link ${String(gateway.link)}, guest ip ${String(gateway.guestIp)}, rx ${String(gateway.rxBytes)} B, tx ${String(gateway.txBytes)} B${gateway.lastError ? `, last error ${String(gateway.lastError)}` : ""}` : `${String(gateway.status)}: ${String(gateway.reason)}`}`);
     lines.push(`guest hello: ${guest.status === "observed" ? `${guest.ready ? "ready" : "not ready"} in ${String(guest.ms)} ms${guest.error ? `: ${String(guest.error)}` : ""}` : `${String(guest.status)}: ${String(guest.reason)}`}`);
+    const agent = guest.agent as GuestAgent | undefined;
+    if (agent) {
+      const hooks = Object.entries(agent.hooks ?? {}).map(([name, outcome]) => `${name} ${outcome}`).join(", ");
+      lines.push(`guest agent: ${agent.version || "?"}, build ${agent.build ? agent.build.slice(0, 12) : "?"}, kernel ${agent.kernel || "?"}, `
+        + `boot ${agent.bootId || "?"}; hooks at its last status: ${hooks || "none yet"}`);
+    }
     if (runner.status !== "observed") lines.push(`runner evidence: ${String(runner.status)}: ${String(runner.reason)}`);
     else if (runner.method === "machine_diagnose") {
       // berth vm's document (protocol 4, masterplan B-9).
