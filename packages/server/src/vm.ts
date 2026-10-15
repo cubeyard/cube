@@ -1467,7 +1467,7 @@ export async function refreshGuest(workspace: VmWorkspace, owner: WorkspaceOwner
   const shipped = shippedHelper();
   const description = await workspace.describe();
   let outcome: "current" | "installed" | "bootstrapped" = "current";
-  if (!keelGuest(description) && description.build !== shipped.sha256) {
+  if (description.build !== shipped.sha256) {
     if (description.capabilities.includes("helper.install")) {
       await workspace.installHelper(shipped.source);
       outcome = "installed";
