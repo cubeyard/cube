@@ -262,6 +262,9 @@ try {
   note("a thread without a runner name was refused: the pool is empty, berth vm is not in it");
 
   // spawn naming berth vm: boot, boot documents, policy, checkout and hooks
+  // a deployment's gateway is up before any thread starts; the credential route refuses, not waits, while it starts (F-Ca-2)
+  assert.ok(app.gateway, "cubed started its gateway");
+  await app.gateway.ready();
   const booting = Date.now();
   const spawned = await threads.spawn({ project: "ca", task: "say hi", runner: node }, "req-vm");
   const id = spawned.id;
