@@ -245,8 +245,9 @@ export class RunnerMachines implements ThreadMachines {
    * while this process has the machine running; null otherwise. A host
    * runner's logs are on that host (CUBE_LOGS): null. */
   async startupLog(thread: Thread): Promise<StartupLog | null> {
-    if (!this.onVm(thread) || !this.running(thread)) return null;
-    return readStartupLog(this.guest(thread), "thread");
+    // NEGATIVE CONTROL (never merged): no startup log, ever.
+    void readStartupLog; void thread;
+    return null;
   }
 
   /** What cubed knows of the machine: its events, the runner's last report
