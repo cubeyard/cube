@@ -663,7 +663,13 @@ the image's layers, and only on the image it was built on
 redacted JSON document of read-only evidence about a machine, including
 Iroh's paths to cubed and their RTT (U15 (a), also `Network.rtt_to_cubed`
 in hello and watch); cubed shows it as the machine's runner evidence in a
-thread's diagnostics.
+thread's diagnostics. Beside it cubed shows what the keel agent last said
+of itself in the watch (`GuestInfo`, row C-2): why it is not ready (also
+in the `boot` step when it never got ready), its version, build, kernel,
+boot id and hooks' outcomes as of its last status (keel sends one after
+each `machine_setup`). A thread's startup log on `berth vm` is read like
+protocol 3's, with keel's `read` of `~/.cache/cube` at the current epoch;
+`berth host` keeps its hooks' logs on that host and shows none.
 
 Not built yet (later stages): snapshots.
 

@@ -9,11 +9,14 @@
  * boots with its boot documents and policy, checks out a repository through
  * the credential stream from test-vm-e2e's fake GitHub (fake-github.ts; the
  * host side resolves it from a local mirror through GIT_CONFIG_GLOBAL), runs
- * the project's pre-setup hook and the repository's `.agents/setup`, gets
+ * the project's pre-setup hook (a slow one, whose log the thread's startup
+ * log shows while it runs: keel's read, C-2b) and the repository's
+ * `.agents/setup`, gets
  * the portal's settings without its agent being replaced, runs a tool call,
  * pushes through the credential stream (the guest holds only the
  * placeholder), serves the portal over `dial`, is diagnosed with berth's
- * document, survives a restart of berth with its resume hooks, gets the
+ * document and what its keel agent says of itself (version, build, boot,
+ * hooks), survives a restart of berth with its resume hooks, gets the
  * answer of a forced `machine_stop` (a paused guest: berth's whole 30 s
  * SHUTDOWN_WAIT) within cubed's stop deadline and starts again, and is
  * archived (retained) and discarded.
@@ -46,6 +49,7 @@ import { describeRunners, observeRunners } from "../src/runner-observe.ts";
 import { MachineStatus_Phase } from "../src/gen/runner_pb.js";
 import { runnerSession, STOP_TIMEOUT_MS } from "../src/runner-session.ts";
 import { currentMachineEpoch } from "../src/vm.ts";
+import { formatDiagnostics } from "../src/vm-diagnostics.ts";
 import { DIAL_APP, request } from "./portal-dial.ts";
 
 const binary = path.resolve(process.argv[2] ?? "target/debug/berth");
@@ -241,8 +245,10 @@ try {
   note("enrolled in this test's cubed only; not in the pool");
 
   await api("/api/onboarding", "POST", {});
+  const MARKER = `c2b-pre-setup-${randomBytes(4).toString("hex")}`;
   const project = (await api("/api/projects", "POST", { name: "ca", repositories: [{ url: upstream, base: "main" }],
-    hooks: { preSetup: "echo \"pre-setup as $(id -un)\" >> ~/ca-hooks.log", preResume: "echo \"pre-resume $(cat /proc/sys/kernel/random/boot_id)\" >> ~/ca-hooks.log" } })).project as { id: string };
+    // Slow, with a marker in its log (C-2b); the last line is what the tool call reads back.
+    hooks: { preSetup: `echo ${MARKER}; sleep 8\necho "pre-setup as $(id -un)" >> ~/ca-hooks.log`, preResume: "echo \"pre-resume $(cat /proc/sys/kernel/random/boot_id)\" >> ~/ca-hooks.log" } })).project as { id: string };
   const ready = await until("the project is ready", 60000, async () => {
     const row = (await api("/api/projects")).projects.find((p: { id: string }) => p.id === project.id) as { status: string; error: string | null };
     return row.status !== "checking" ? row : undefined;
@@ -270,11 +276,22 @@ try {
   const id = spawned.id;
   const thread = app.registry.getThread(id)!;
   assert.deepEqual([thread.runnerId, thread.pinned], [node, true]);
-  await until("the thread's machine is ready", 900000, () => {
+  // While pre-setup runs, the thread's startup log is its log, read in the keel machine.
+  let live = null as { hook: string | null; text: string } | null;
+  const reads: string[] = [];
+  await until("the thread's machine is ready", 900000, async () => {
     const current = app.registry.getThread(id)!;
     if (current.workspaceState === "failed") throw new Error(`the machine failed: ${current.workspaceError}`);
+    if (!live) {
+      const { log } = await api(`/api/threads/${id}/startup-log`) as { log: { hook: string | null; text: string; error?: string } | null };
+      const seen = log === null ? "null" : log.error ? `error ${log.error}` : `hook ${log.hook}`;
+      if (reads.at(-1) !== seen) reads.push(seen);
+      if (log?.hook === "pre-setup" && log.text.includes(MARKER)) live = log;
+    }
     return current.workspaceState === "available";
   });
+  assert.ok(live, `the startup log showed pre-setup and its marker while it ran; it said: ${reads.join(" -> ")}`);
+  note(`startup log while pre-setup ran: hook ${live!.hook}, ${JSON.stringify(live!.text.trim())} (reads: ${reads.join(" -> ")})`);
   const vm = app.registry.getThread(id)!.vm!;
   const steps = vm.steps!.map(step => `${step.name}:${step.state}`);
   assert.ok(steps.includes("boot:ok") && steps.includes("prepare:ok") && steps.includes("resume:ok"), steps.join(", "));
@@ -328,7 +345,7 @@ try {
   note(`portal: ${host} reached dial-app.pl in the machine over berth's dial`);
 
   // the diagnosis: berth's bounded, redacted document as cubed's machine evidence
-  const diagnostics = (await api(`/api/threads/${id}/diagnostics`)).diagnostics as { machine: { runner: Record<string, any>; gateway: { status: string } } };
+  const diagnostics = (await api(`/api/threads/${id}/diagnostics`)).diagnostics as { machine: { runner: Record<string, any>; gateway: { status: string }; guest: Record<string, any> } };
   const evidence = diagnostics.machine.runner;
   assert.equal(evidence.status, "observed", JSON.stringify(evidence));
   assert.equal(evidence.method, "machine_diagnose");
@@ -342,6 +359,14 @@ try {
   assert.ok(Buffer.byteLength(whole) < 600 * 1024, `${Buffer.byteLength(whole)} bytes`);
   assert.ok(!whole.includes(token), "no token in the diagnosis");
   assert.ok(!whole.includes(vm.placeholders.github!), "no placeholder in the diagnosis");
+  // keel's own word on itself, from berth's watch (C-2b).
+  const guest = diagnostics.machine.guest;
+  assert.deepEqual([guest.status, guest.ready, guest.error], ["observed", true, null], JSON.stringify(guest));
+  assert.match(guest.agent.version, /^\d+\.\d+\.\d+/, JSON.stringify(guest.agent));
+  assert.match(guest.agent.build, /^[0-9a-f]{64}$/);
+  assert.match(guest.agent.bootId, /^[0-9a-f-]{36}$/);
+  assert.ok(guest.agent.kernel.length > 0);
+  note(`keel agent (first boot): ${JSON.stringify(guest.agent)}`);
   const said = (await (await fetch(`${url}/api/threads/${id}/diagnostics`)).text()).length;
   note(`diagnosis: ${Buffer.byteLength(JSON.stringify(doc))} bytes from berth (${said} in the bundle); QEMU ${doc.qemu.version} ${doc.qemu.path}`);
 
@@ -360,6 +385,13 @@ try {
   assert.equal(hooks.filter(line => line.startsWith("pre-resume ")).length, 2, hooks.join("\n"));
   assert.equal(hooks.filter(line => line.startsWith("resume ")).length, 2, hooks.join("\n"));
   assert.equal(await bash(id, "cat ca.txt"), "ca", "the disk was kept across the restart");
+  // The agent's status after this boot's machine_setup: this boot, and pre-setup's outcome from the preparation.
+  const restartedBundle = (await api(`/api/threads/${id}/diagnostics`)).diagnostics as Record<string, any>;
+  const agent = restartedBundle.machine.guest.agent;
+  assert.equal(agent.bootId, bootRestarted, JSON.stringify(agent));
+  assert.equal(agent.hooks["pre-setup"], "ok", JSON.stringify(agent));
+  assert.match(formatDiagnostics(restartedBundle), new RegExp(`\\nguest agent: .*boot ${bootRestarted}; hooks at its last status: .*pre-setup ok`));
+  note(`keel agent after berth's restart: ${JSON.stringify(agent)}`);
   note("after berth's restart the machine booted again, ran pre-resume and resume, and kept its disk");
 
   // the stop deadline: a guest that cannot answer (QMP stop pauses it) makes

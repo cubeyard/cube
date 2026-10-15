@@ -288,6 +288,13 @@ try {
       /qemu log: absent/, /guest hello: not ready in \d+ ms: ssh could not reach the guest/, /gateway: attached true, link up, guest ip null/]) {
       assert.match(text, fact);
     }
+    assert.doesNotMatch(text, /guest agent:/, "protocol 3's guest hello has no keel agent line");
+    // A keel agent (protocol 4, C-2b): one line, its secrets cleaned with the bundle.
+    const keel = structuredClone(bundle) as { machine: { guest: Record<string, unknown> } };
+    keel.machine.guest.agent = { version: "0.1.0", build: "cd".repeat(32), kernel: "6.18.0", bootId: "boot-1", hooks: { "pre-setup": "ok", setup: "absent" } };
+    assert.match(formatDiagnostics(keel), /\nguest agent: 0\.1\.0, build cdcdcdcdcdcd, kernel 6\.18\.0, boot boot-1; hooks at its last status: pre-setup ok, setup absent\n/);
+    keel.machine.guest.agent = { version: "", build: "", kernel: "", bootId: "", hooks: {} };
+    assert.match(formatDiagnostics(keel), /\nguest agent: \?, build \?, kernel \?, boot \?; hooks at its last status: none yet\n/);
     const odd = structuredClone(bundle) as { machine: { runner: { diagnosis: { events: { entries: Array<{ at: number }> } } } } };
     odd.machine.runner.diagnosis.events.entries[0]!.at = Number.MAX_VALUE; // too large for a Date, as a u64 from the runner can be
     assert.match(formatDiagnostics(odd), /1.7976931348623157e\+308 qemu started/, "a time no Date holds is shown, not thrown");
