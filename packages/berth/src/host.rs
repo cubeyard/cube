@@ -276,10 +276,11 @@ impl HostRunner {
                 mode: self.options.network.clone(),
                 // The path in use to cubed now; unset while cubed is not
                 // connected. Sent with every runner event, never on its own.
-                rtt_to_cubed: self.rtt_to_cubed().map(|rtt| pbjson_types::Duration {
-                    seconds: rtt.as_secs() as i64,
-                    nanos: rtt.subsec_nanos() as i32,
-                }),
+                // NEGATIVE CONTROL (never merged): the field is not filled.
+                rtt_to_cubed: {
+                    let _ = self.rtt_to_cubed();
+                    None
+                },
                 ..Default::default()
             }),
             templates: vec![],
