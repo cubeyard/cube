@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
 import { newPlaceholder } from "../src/egress-policy.ts";
-import { GUEST_CLI_PATH, GUEST_CLI_SHIM, GUEST_HELPER_PATH, GUEST_PACKAGES, MAX_SEED_BYTES, guestHelper, vmMac, vmSeed } from "../src/vm-seed.ts";
+import { bootDocuments, GUEST_CLI_PATH, GUEST_CLI_SHIM, GUEST_HELPER_PATH, GUEST_PACKAGES, MAX_BOOT_BYTES, MAX_SEED_BYTES, guestHelper, vmMac, vmSeed } from "../src/vm-seed.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-seed-"));
 try {
@@ -86,3 +86,34 @@ try {
 const helperPackages = /self\.packages = (\[[^\]]*\])/.exec(guestHelper().helper)?.[1];
 assert.deepEqual(JSON.parse(helperPackages!.replaceAll("'", "\"")), GUEST_PACKAGES);
 console.log("ok: guest helper retries the seed's packages");
+
+// Protocol 4: a keel machine's boot documents (C-4), with berth's names and bound.
+{
+  const vmId = "0123456789abcdef";
+  const github = newPlaceholder("github");
+  const other = newPlaceholder("npm");
+  const hooks = { preSetup: "echo pre-setup\n", preResume: "#!/bin/sh\necho pre-resume" };
+  const documents = bootDocuments({ vmId, placeholders: { github, npm: other }, hooks });
+  const text = (name: string) => Buffer.from(documents[name]!).toString("utf8");
+  assert.deepEqual(Object.keys(documents).sort(), ["env", "hooks/pre-resume", "hooks/pre-setup", "hostname"]);
+  assert.equal(text("hostname"), "cube-01234567\n", "the seed's host name");
+  assert.equal(text("env"), `GH_TOKEN=${github}\nCUBE_SECRET_NPM=${other}\n`, "only the placeholders: keel adds the CA and git lines");
+  assert.equal(text("hooks/pre-setup"), "#!/bin/bash\necho pre-setup\n", "a hook as the seed writes it");
+  assert.equal(text("hooks/pre-resume"), "#!/bin/sh\necho pre-resume\n");
+  assert.deepEqual(Object.keys(bootDocuments({ vmId, placeholders: {}, hooks: { preSetup: " \n", preResume: "" } })).sort(), ["env", "hostname"], "a blank hook is no document");
+  assert.equal(Buffer.from(bootDocuments({ vmId, placeholders: {} }).env!).byteLength, 0);
+  // berth vm's and keel's names and berth's bound, from their sources.
+  const berth = fs.readFileSync(path.resolve(import.meta.dirname, "../../berth/src/vm/mod.rs"), "utf8");
+  const keel = fs.readFileSync(path.resolve(import.meta.dirname, "../../keel/agent/src/setup.rs"), "utf8");
+  const names = (source: string, constant: string) => JSON.parse(new RegExp(`const ${constant}: \\[&str; \\d+\\] = (\\[[^\\]]*\\]);`).exec(source)![1]!) as string[];
+  assert.deepEqual(names(berth, "BOOT_DOCUMENTS").sort(), Object.keys(documents).sort());
+  assert.deepEqual(names(keel, "DOCUMENTS").sort(), Object.keys(documents).sort());
+  assert.equal(MAX_BOOT_BYTES, Number(/const MAX_BOOT_BYTES: usize = (\d+) \* 1024;/.exec(berth)![1]) * 1024);
+  // Within the runner's bound, or refused before anything is sent.
+  const big = { preSetup: "x".repeat(MAX_BOOT_BYTES), preResume: "" };
+  assert.throws(() => bootDocuments({ vmId, placeholders: {}, hooks: big }), /the boot documents are \d+ bytes; the runner accepts at most 262144/);
+  assert.throws(() => bootDocuments({ vmId, placeholders: {}, hooks }, 64), /at most 64/);
+  assert.throws(() => bootDocuments({ vmId: "nope", placeholders: {} }), /invalid vm id/);
+  assert.throws(() => bootDocuments({ vmId, placeholders: { github: "ghp_the-real-host-token-never-in-a-boot" } }), /invalid placeholder/);
+  console.log("ok: boot documents: host name, placeholders as env lines, hooks as scripts; berth's and keel's names, berth's bound");
+}
