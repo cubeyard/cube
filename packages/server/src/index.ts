@@ -260,7 +260,7 @@ export async function createCubed(options: {
     routeCredentials(registryCredentialRoute({ registry, threads: threadsDirectory, socket: () => supervised.running ? credential : null }));
     // Each thread on its runner's protocol (runner-select.ts).
     machines = new ProtocolMachines({ registry, p3: new ThreadVms({ registry, threads: threadsDirectory, run, gateway }),
-      p4: new RunnerMachines({ registry, threads: threadsDirectory }) });
+      p4: new RunnerMachines({ registry, threads: threadsDirectory, policy }) });
   }
   let portal: Portal | null = null;
   let artifacts: Artifacts | null = null;

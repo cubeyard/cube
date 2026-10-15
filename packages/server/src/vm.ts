@@ -23,7 +23,7 @@ import { createLogger, type Logger } from "./log.ts";
 import { NO_HOOKS, STEP_LOG_BYTES, placement, threadAgent, type CommandMemory, type HookOutcome, type Registry, type StartupStep, type Thread,
   type WorkspaceAllocation } from "./registry.ts";
 import { newPlaceholder, type EgressVms } from "./egress-policy.ts";
-import { guestDescription, VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
+import { guestDescription, keelGuest, VmWorkspace, type GuestPortal } from "./vm-workspace.ts";
 import { GUEST_HELPER_PATH, shippedHelper, vmMac, vmSeed } from "./vm-seed.ts";
 import { clean, MachineEvents, type Evidence, type MachineEvidence } from "./vm-diagnostics.ts";
 import { FAILED_BUILD_BACKOFF_MS, TEMPLATE_CAPABILITY, TEMPLATE_FORMAT, missingTemplate, obsoleteTemplates, pickTemplate, templateKey, templateParts,
@@ -1459,13 +1459,15 @@ export function helperBootstrapScripts(source: Buffer): string[] {
 /** Brings the machine's guest helper, and with it the agent's `cube`
  * command, to the one this cubed ships, then tells it the portal's settings.
  * A fresh machine has it from its seed already; a machine made before this
- * cubed (a cubed update, a reused disk) gets it here. Runs with the
- * workspace lease free (before the agent opens). */
+ * cubed (a cubed update, a reused disk) gets it here. A keel machine's
+ * cube-agent comes with its image and is never replaced: it only gets the
+ * portal's settings. Runs with the workspace lease free (before the agent
+ * opens). */
 export async function refreshGuest(workspace: VmWorkspace, owner: WorkspaceOwner, portal: GuestPortal): Promise<"current" | "installed" | "bootstrapped"> {
   const shipped = shippedHelper();
   const description = await workspace.describe();
   let outcome: "current" | "installed" | "bootstrapped" = "current";
-  if (description.build !== shipped.sha256) {
+  if (!keelGuest(description) && description.build !== shipped.sha256) {
     if (description.capabilities.includes("helper.install")) {
       await workspace.installHelper(shipped.source);
       outcome = "installed";

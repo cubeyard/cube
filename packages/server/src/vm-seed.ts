@@ -73,6 +73,15 @@ export function hookFileContent(script: string): string {
   return content.endsWith("\n") ? content : `${content}\n`;
 }
 
+/** The placeholders as `NAME=value` lines: `GH_TOKEN` for GitHub,
+ * `CUBE_SECRET_<NAME>` for the others. */
+function placeholderLines(placeholders: Record<string, string>): string[] {
+  return Object.entries(placeholders).map(([name, value]) => {
+    if (!/^cube_ph_[a-z0-9]+_[A-Za-z0-9]{22}$/.test(value)) throw new Error(`invalid placeholder for ${name}`);
+    return name === "github" ? `GH_TOKEN=${value}` : `CUBE_SECRET_${name.toUpperCase()}=${value}`;
+  });
+}
+
 function hookFiles(hooks: ProjectHooks | undefined): Array<Record<string, unknown>> {
   return (["preSetup", "preResume"] as const).flatMap(name => {
     const script = hooks?.[name] ?? "";
@@ -91,10 +100,7 @@ export function vmSeed(input: SeedInput): VmSeed {
   const hostPublic = input.hostKey.publicKey.trim();
   if (!/^ssh-ed25519 [A-Za-z0-9+/=]+(?: \S+)?$/.test(hostPublic)) throw new Error("host key must be ssh-ed25519");
   const env = [
-    ...Object.entries(input.placeholders).map(([name, value]) => {
-      if (!/^cube_ph_[a-z0-9]+_[A-Za-z0-9]{22}$/.test(value)) throw new Error(`invalid placeholder for ${name}`);
-      return name === "github" ? `GH_TOKEN=${value}` : `CUBE_SECRET_${name.toUpperCase()}=${value}`;
-    }),
+    ...placeholderLines(input.placeholders),
     `NODE_EXTRA_CA_CERTS=${CA_BUNDLE}`, `REQUESTS_CA_BUNDLE=${CA_BUNDLE}`, `SSL_CERT_FILE=${CA_BUNDLE}`, `CURL_CA_BUNDLE=${CA_BUNDLE}`,
     "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1",
   ].join("\n");
@@ -155,4 +161,31 @@ export function vmSeed(input: SeedInput): VmSeed {
   const size = Buffer.byteLength(seed.metaData) + Buffer.byteLength(seed.userData) + Buffer.byteLength(seed.networkConfig);
   if (size > MAX_SEED_BYTES) throw new Error(`the vm seed is ${size} bytes; the runner accepts at most ${MAX_SEED_BYTES}`);
   return seed;
+}
+
+/** What `berth vm` accepts of all boot documents together (its
+ * MAX_BOOT_BYTES; the runner's hello says `limits.max_boot_bytes`). */
+export const MAX_BOOT_BYTES = 256 * 1024;
+
+/** A keel machine's boot documents (runner.proto `Boot.documents`, sent
+ * with every `machine_start` to a protocol-4 VM runner): its host name, the
+ * placeholders as `env` lines (keel adds the CA variables and the rest of
+ * cube's fixed lines itself, and its own git credential helper reads
+ * `GH_TOKEN`), and the project's external hooks as executable scripts
+ * (keel writes them to /etc/cube/hooks, as the seed does). Like the seed it
+ * holds no real secret and no address. */
+export function bootDocuments(input: { vmId: string; placeholders: Record<string, string>; hooks?: ProjectHooks },
+  maxBytes = MAX_BOOT_BYTES): Record<string, Uint8Array> {
+  if (!/^[0-9a-f]{16}$/.test(input.vmId)) throw new Error("invalid vm id");
+  const documents: Record<string, Uint8Array> = {
+    hostname: Buffer.from(`cube-${input.vmId.slice(0, 8)}\n`),
+    env: Buffer.from(placeholderLines(input.placeholders).map(line => `${line}\n`).join("")),
+  };
+  for (const name of ["preSetup", "preResume"] as const) {
+    const script = input.hooks?.[name] ?? "";
+    if (script.trim()) documents[name === "preSetup" ? "hooks/pre-setup" : "hooks/pre-resume"] = Buffer.from(hookFileContent(script));
+  }
+  const size = Object.values(documents).reduce((sum, document) => sum + document.byteLength, 0);
+  if (size > maxBytes) throw new Error(`the boot documents are ${size} bytes; the runner accepts at most ${maxBytes}`);
+  return documents;
 }

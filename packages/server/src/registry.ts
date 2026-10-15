@@ -106,7 +106,8 @@ export interface Runner extends NodeBinding {
   /** The runner protocol it was enrolled with; absent: 3 (VM runners). */
   protocol?: 4;
   /** `host`: `berth host`, machines are directories on that host and
-   * nothing is sandboxed. Only a thread started on it by name runs there. */
+   * nothing is sandboxed. Only a thread started on it by name runs on a
+   * protocol-4 runner of either kind (pooledRunner). */
   kind?: "vm" | "host";
 }
 export interface WorkspaceRepository {
@@ -269,6 +270,14 @@ export function runnerSlots(runner: Pick<Runner, "maxActiveVms">): number {
   return Number.isSafeInteger(runner.maxActiveVms) && runner.maxActiveVms! >= 1 ? runner.maxActiveVms! : 1;
 }
 
+/** Whether a thread started without naming a runner may get this one.
+ * Protocol-4 runners take only threads started on them by name: `berth
+ * host` always, and `berth vm` until the pool admits it (masterplan R-3,
+ * C-a decision 1). */
+export function pooledRunner(runner: Pick<Runner, "protocol" | "kind">): boolean {
+  return runner.kind !== "host" && runner.protocol !== 4;
+}
+
 /** Every open (unarchived) thread holds one machine slot on its runner from
  * creation until its release finishes, whatever its workspace state: a failed
  * or releasing machine may still exist on the runner. */
@@ -404,8 +413,8 @@ export class Registry {
         FROM thread WHERE ${OPEN_THREAD} GROUP BY runner_id) t ON t.runner_id=r.id
       WHERE o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired' ORDER BY r.rowid`).all() as Array<Record<string, unknown>>;
     return rows.map(row => ({ row, runner: JSON.parse(String(row.data)) as Runner }))
-      // A host runner takes only the threads started on it by name.
-      .filter(({ runner }) => runner.kind !== "host").map(({ row, runner }) => {
+      // A protocol-4 runner takes only the threads started on it by name.
+      .filter(({ runner }) => pooledRunner(runner)).map(({ row, runner }) => {
         const { fitness } = runnerFitness(observation(row), now);
         return { id: String(row.id), runner, slots: runnerSlots(runner), active: Number(row.active), failed: Number(row.failed), fitness };
       }).sort((a, b) => FITNESS_ORDER[a.fitness] - FITNESS_ORDER[b.fitness] || Number(a.failed > 0) - Number(b.failed > 0)

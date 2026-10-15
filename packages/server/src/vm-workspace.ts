@@ -61,6 +61,14 @@ export function guestServices(header: Record<string, unknown>): GuestService[] {
   });
 }
 
+/** keel's cube-agent: it configures the portal but has no `helper.install`.
+ * Its program is the machine's image's, not a file cubed ships. Every
+ * cube-guest.py that has `portal.configure` also has `helper.install`
+ * (both came with `cube service`), so the capabilities tell them apart. */
+export function keelGuest(description: Pick<GuestDescription, "capabilities">): boolean {
+  return description.capabilities.includes("portal.configure") && !description.capabilities.includes("helper.install");
+}
+
 /** The helper's hello, validated. */
 export function guestDescription(header: Record<string, unknown>): GuestDescription {
   const limits = header.limits as Record<string, unknown> | undefined;

@@ -222,7 +222,7 @@ export interface MachineEvidence {
   /** This cubed's live view: a start under way, the machine attached. */
   cubed: { startInProgress: boolean; attached: boolean; lastGuestProbe: { at: number; ready: boolean; error: string | null } | null };
   events: ReturnType<MachineEvents["read"]>;
-  runner: Evidence<{ method: "vm.diagnose" | "vm.inspect"; ms: number; diagnosis?: Record<string, unknown>; vm?: unknown; consoleTail?: string | null; note?: string }>;
+  runner: Evidence<{ method: "vm.diagnose" | "vm.inspect" | "machine_diagnose"; ms: number; diagnosis?: Record<string, unknown>; vm?: unknown; consoleTail?: string | null; note?: string }>;
   gateway: Evidence<{ attached: boolean; link?: string; leased?: boolean; guestIp?: string | null; flows?: number; rxBytes?: number; txBytes?: number; lastError?: string | null }>;
   guest: Evidence<{ ready: boolean; ms: number; error: string | null }>;
 }
@@ -314,7 +314,20 @@ export function formatDiagnostics(bundle: Record<string, unknown>, maxChars = 12
     lines.push(`gateway: ${gateway.status === "observed" ? `attached ${String(gateway.attached)}, link ${String(gateway.link)}, guest ip ${String(gateway.guestIp)}, rx ${String(gateway.rxBytes)} B, tx ${String(gateway.txBytes)} B${gateway.lastError ? `, last error ${String(gateway.lastError)}` : ""}` : `${String(gateway.status)}: ${String(gateway.reason)}`}`);
     lines.push(`guest hello: ${guest.status === "observed" ? `${guest.ready ? "ready" : "not ready"} in ${String(guest.ms)} ms${guest.error ? `: ${String(guest.error)}` : ""}` : `${String(guest.status)}: ${String(guest.reason)}`}`);
     if (runner.status !== "observed") lines.push(`runner evidence: ${String(runner.status)}: ${String(runner.reason)}`);
-    else if (runner.method === "vm.inspect") {
+    else if (runner.method === "machine_diagnose") {
+      // berth vm's document (protocol 4, masterplan B-9).
+      const d = runner.diagnosis as Record<string, unknown>;
+      lines.push(`machine (berth vm): ${JSON.stringify(d.machine)}`, `qemu: ${JSON.stringify({ ...get(d, "qemu") as object, log: undefined })}`,
+        `qmp: ${JSON.stringify(d.qmp)}`, `guest: ${JSON.stringify(d.guest)}`, `egress: ${JSON.stringify(d.egress)}`, `iroh: ${JSON.stringify(d.iroh)}`);
+      const events = get(d, "events", "lines") as string[] | undefined;
+      lines.push(events ? "runner events:" : "runner events: none recorded", ...(events ?? []).slice(-25).map(line => `  ${line}`));
+      for (const name of ["qemu log", "console"]) {
+        const log = (name === "console" ? get(d, "console") : get(d, "qemu", "log")) as Record<string, unknown> | undefined;
+        if (!log?.present) { lines.push(`${name}: absent`); continue; }
+        lines.push(`${name}: ${String(log.bytes)} bytes${log.complete ? "" : `, ${String(log.omittedBytes)} bytes omitted`}; its last lines:`,
+          ...lastLines(String(log.text), name === "console" ? 40 : 10));
+      }
+    } else if (runner.method === "vm.inspect") {
       lines.push(`runner evidence (vm.inspect only): ${String(runner.note)}`, `record: ${JSON.stringify(runner.vm)}`);
       if (typeof runner.consoleTail === "string") lines.push("console tail:", ...lastLines(runner.consoleTail, 40));
     } else {

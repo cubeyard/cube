@@ -4,7 +4,7 @@
  * what neither says is listed as unknown, never guessed. Nothing here
  * contacts a runner: the background probe keeps the reports current. */
 import type { TrustedRunnerHealth } from "./iroh-node.ts";
-import type { Registry, RunnerContactStatus } from "./registry.ts";
+import { pooledRunner, type Registry, type RunnerContactStatus } from "./registry.ts";
 
 /** A report older than this many probe intervals is stale even if the latest
  * probe has not failed yet (cubed was down, or the probe loop is stuck). */
@@ -42,6 +42,9 @@ export interface RunnerObservation {
   /** `host`: berth host (protocol 4), unsandboxed; it takes only the
    * threads started on it by name and is never part of the pool. */
   kind: "vm" | "host";
+  /** It takes only the threads started on it by name (every protocol-4
+   * runner, pooledRunner): never part of the pool. */
+  byName: boolean;
   contact: { status: RunnerContactStatus; lastAttemptAt: number | null; lastContactAt: number | null; unreachableSince: number | null; error: string | null };
   /** The last report the runner sent; null if it never answered. */
   report: RunnerReport | null;
@@ -97,16 +100,17 @@ export function observeRunners(registry: Registry, probeIntervalMs: number, now 
     } else unknown.push("everything the runner reports (version, platform, lifecycle, machines): it has not answered a probe");
     const retirement = status.retiredAt ? "retired" : status.allocationState === "retiring" ? "retiring" : "none";
     const kind = runner?.kind === "host" ? "host" : "vm";
+    const byName = runner ? !pooledRunner(runner) : false;
     // The pool: what a thread started without naming a runner may get.
-    const allocatable = retirement === "none" && kind === "vm";
+    const allocatable = retirement === "none" && kind === "vm" && !byName;
     const total = status.maxActiveVms;
     return {
-      id: status.id, nodeId: status.nodeId, enrolledAt: status.enrolledAt, kind,
+      id: status.id, nodeId: status.nodeId, enrolledAt: status.enrolledAt, kind, byName,
       contact: { status: status.contactStatus, lastAttemptAt: status.lastAttemptAt, lastContactAt: status.lastContactAt,
         unreachableSince: status.unreachableSince, error: status.error },
       report,
       slots: { total, totalSource: runner?.maxActiveVms === undefined ? "assumed" : "reported", reserved: status.activeThreads,
-        free: allocatable || (kind === "host" && retirement === "none") ? Math.max(0, total - status.activeThreads) : 0, allocatable },
+        free: allocatable || (byName && retirement === "none") ? Math.max(0, total - status.activeThreads) : 0, allocatable },
       retirement, unknown,
     };
   });
@@ -142,6 +146,9 @@ export function describeRunners(view: RunnersObservation): string {
       lines.push("  HOST runner (berth host, protocol 4): UNSANDBOXED, commands run as the user who started it on that host, with "
         + "that user's files and gh/git logins; only for developing cube runners. It takes only threads started on it by name "
         + "(spawn with runner), never others; while it is down, its threads wait.");
+    } else if (runner.byName) {
+      lines.push("  protocol-4 VM runner (berth vm): not in the pool yet; it takes only threads started on it by name "
+        + "(spawn with runner), never others; while it is down, its threads wait.");
     }
     const contactText = contact.status === "reachable" ? "reachable"
       : contact.status === "unknown" ? "not probed yet"
@@ -156,7 +163,7 @@ export function describeRunners(view: RunnersObservation): string {
       if (report.vmLimits) lines.push(`  largest machine: ${report.vmLimits.maxVcpus} vCPUs, ${report.vmLimits.maxMemoryMiB} MiB, ${report.vmLimits.maxDiskGiB} GiB disk`);
     }
     lines.push(`  cubed's slots: ${slots.reserved} reserved by open threads of ${slots.total}${slots.totalSource === "assumed" ? " (assumed: the runner never advertised a bound)" : ""}, `
-      + `${slots.allocatable ? `${slots.free} free` : runner.kind === "host" && runner.retirement === "none" ? `${slots.free} free for threads started on it by name` : "not taking threads"}`);
+      + `${slots.allocatable ? `${slots.free} free` : runner.byName && runner.retirement === "none" ? `${slots.free} free for threads started on it by name` : "not taking threads"}`);
     for (const item of runner.unknown) lines.push(`  unknown: ${item}`);
   }
   lines.push(`pool: ${view.pool.free} of ${view.pool.slots} slots free across ${view.pool.allocatable} runners taking threads`);

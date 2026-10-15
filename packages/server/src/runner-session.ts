@@ -27,6 +27,16 @@ const MAX_FRAME = 1024 * 1024;
 const MAX_GUEST_ANSWER = 4 * 1024 * 1024;
 const CONNECT_TIMEOUT_MS = 15000;
 const CALL_TIMEOUT_MS = 15000;
+/** `machine_stop` and `machine_delete` (which stops first): berth vm gives
+ * the agent 30 s to shut down (SHUTDOWN_WAIT), then QEMU 20 s to quit
+ * (QUIT_TIMEOUT) before it kills it, and a delete then removes the
+ * directory; about 50 s at worst before the answer. 45 s covered only the
+ * common path (masterplan R14). */
+export const STOP_TIMEOUT_MS = 90000;
+/** A call's deadline: the stopping verbs wait for the runner's whole stop. */
+export function callTimeout(verb: string | undefined): number {
+  return verb === "machineStop" || verb === "machineDelete" ? STOP_TIMEOUT_MS : CALL_TIMEOUT_MS;
+}
 const GUEST_TIMEOUT_MS = 60000;
 /** Bytes per read from a dial stream (the binding copies each into an array). */
 const DIAL_READ_BYTES = 256 * 1024;
@@ -209,6 +219,9 @@ export class RunnerSession {
       }
       this.runner = hello.runner;
       this.capabilities = [...hello.capabilities];
+      // A new connection, perhaps to a restarted runner whose versions began
+      // again (berth keeps them in memory): its watch reports every machine.
+      this.machines.clear();
       this.notify();
       return connection;
     } catch (error) {
@@ -225,7 +238,7 @@ export class RunnerSession {
   }
 
   /** One verb; a refusal throws `RunnerError`. */
-  async call(verb: NonNullable<MessageInitShape<typeof CallSchema>["verb"]>, timeoutMs = CALL_TIMEOUT_MS): Promise<Exclude<CallResult["result"], { case: "error" } | { case: undefined }>> {
+  async call(verb: NonNullable<MessageInitShape<typeof CallSchema>["verb"]>, timeoutMs = callTimeout(verb.case)): Promise<Exclude<CallResult["result"], { case: "error" } | { case: undefined }>> {
     const connection = await this.connect();
     let sent = false;
     const work = (async () => {
@@ -303,7 +316,8 @@ export class RunnerSession {
         await stream.send.finish();
         for (;;) {
           const event = parse(WatchEventSchema, await readFrame(stream));
-          if (event.type === WatchEvent_Type.RESET) continue;
+          // Every machine follows as PUT: the view starts again.
+          if (event.type === WatchEvent_Type.RESET) { this.machines.clear(); continue; }
           if (event.resource.case === "machine") {
             if (event.type === WatchEvent_Type.DELETE && event.resource.value.ref) this.machines.delete(machineKey(event.resource.value.ref));
             else this.remember(event.resource.value);
