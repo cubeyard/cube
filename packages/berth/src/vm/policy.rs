@@ -302,6 +302,57 @@ impl Policy {
         }
         Ok(Route::Direct)
     }
+
+    /// The policy as a diagnosis shows it (masterplan B-9): its default,
+    /// lease, denied hosts and rules, at most [`SUMMARY_ITEMS`] of each list
+    /// with how many there are. A credential rule names its credential,
+    /// never a value: the runner has none.
+    pub fn summary(&self) -> serde_json::Value {
+        let patterns = |list: &[Pattern]| -> serde_json::Value {
+            serde_json::json!({
+                "count": list.len(),
+                "shown": list.iter().take(SUMMARY_ITEMS).map(Pattern::text).collect::<Vec<_>>(),
+            })
+        };
+        let rules: Vec<serde_json::Value> = self
+            .rules
+            .iter()
+            .take(SUMMARY_ITEMS)
+            .map(|rule| {
+                let (kind, credential) = match &rule.kind {
+                    Kind::Http => ("http", None),
+                    Kind::Https => ("https", None),
+                    Kind::Credential(name) => ("https", Some(name.as_str())),
+                };
+                serde_json::json!({
+                    "kind": kind,
+                    "credential": credential,
+                    "hosts": patterns(&rule.hosts),
+                    "ports": rule.ports,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "default": if self.allow_public { "allow_public_http" } else { "deny" },
+            "leaseSeconds": self.lease.as_secs_f64(),
+            "denyHosts": patterns(&self.deny_hosts),
+            "rules": { "count": self.rules.len(), "shown": rules },
+        })
+    }
+}
+
+/// At most this many of a policy's rules, denied hosts and hosts per rule
+/// in its [`Policy::summary`].
+pub const SUMMARY_ITEMS: usize = 32;
+
+impl Pattern {
+    fn text(&self) -> String {
+        match self {
+            Self::Any => "*".into(),
+            Self::Below(name) => format!("*.{name}"),
+            Self::Exact(name) => name.clone(),
+        }
+    }
 }
 
 #[cfg(test)]

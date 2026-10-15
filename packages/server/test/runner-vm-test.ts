@@ -1,6 +1,6 @@
 /** Runner protocol 4 against the real `berth vm` (masterplan B-1 and B-2):
  * the session part of runner-host-test.ts (hello, a wrong node, create,
- * watch, fencing, UNIMPLEMENTED, a runner restart, delete) with keel machines
+ * watch, fencing, a runner restart, delete) with keel machines
  * under QEMU, plus what only a VM runner has: keel's QEMU floor, a pinned
  * machine type, a read-only layer disk built from a pulled image, a retained
  * writable disk, machines a runner restart interrupts, the runner's own CA,
@@ -38,7 +38,16 @@
  * template across a restart, refused on another image
  * (CUBE_TEST_BERTH_IMAGE_B, template_image_changed), and template_delete
  * (REMOVING, gone with its last machine). CUBE_TEST_BERTH_FSCK names an
- * fsck.erofs to check the layer with.
+ * fsck.erofs to check the layer with. And (B-9) `machine_diagnose`: one
+ * bounded, redacted JSON document about a running, a paused and a stopped
+ * machine (QEMU's path, version and argv as the process has them,
+ * `query-status`, the tails of the serial console (the kernel's, cube-init's
+ * and the agent's output; a thread's commands have no console device, so
+ * the test makes a /dev/console node in the workload's /dev for its plant)
+ * and of the events, the agent's GuestInfo,
+ * egress, and Iroh's path in use to cubed with its RTT, also as
+ * `Network.rtt_to_cubed` in hello), fenced, changing nothing, with neither
+ * the token nor a placeholder in it.
  *
  *   node packages/server/test/runner-vm-test.ts target/debug/berth
  *
@@ -180,7 +189,7 @@ async function stop(child: ChildProcess, signal: NodeJS.Signals = "SIGINT"): Pro
 }
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const record = (id: string) => JSON.parse(fs.readFileSync(path.join(directory, id, "machine.json"), "utf8")) as
-  { machineType: string; phase: string; boot?: { pid: number; bootId: string; qemu: string }; interrupted?: { reason: string };
+  { machineType: string; phase: string; fenceEpoch: number; boot?: { pid: number; bootId: string; qemu: string }; interrupted?: { reason: string };
     image?: { reference: string; manifest: string; diffIds: string[] }; stopped?: { kind: string; message: string } };
 const condition = (machine: Machine, type: string) => machine.status?.conditions.find(c => c.type === type);
 async function gone(pid: number): Promise<void> {
@@ -243,6 +252,37 @@ async function stopVia(session: RunnerSession, ref: { owner: string; id: string 
   const result = await session.call({ case: "machineStop", value: { ref, fence: { epoch: BigInt(epoch) } } }, STOP_MS);
   assert.equal(result.case, "machine");
   return result.value as Machine;
+}
+
+/** machine_diagnose (masterplan B-9): the runner's read-only, bounded and
+ * redacted evidence about a machine. Asking changes nothing: the record,
+ * the recorded argv and the layer disk's descriptor keep their bytes, the
+ * fence its epoch, and the layer cache its use times. */
+const MAX_DIAGNOSIS_BYTES = 256 * 1024;
+function unchanged(id: string): string {
+  const dir = path.join(directory, id);
+  const files = ["machine.json", "argv.json", "layers.vmdk"].map(name => fs.existsSync(path.join(dir, name)) ? createHash("sha256").update(fs.readFileSync(path.join(dir, name))).digest("hex") : "-");
+  const layers = fs.readdirSync(path.join(directory, "layers"), { recursive: true, withFileTypes: true }).filter(e => e.isFile())
+    .map(e => `${e.name} ${fs.statSync(path.join(e.parentPath, e.name)).mtimeMs}`).sort();
+  return JSON.stringify({ files, layers });
+}
+async function diagnose(session: RunnerSession, ref: { owner: string; id: string }, epoch: number): Promise<{ text: string; doc: any }> {
+  const before = unchanged(ref.id);
+  const result = await session.call({ case: "machineDiagnose", value: { ref, fence: { epoch: BigInt(epoch) } } });
+  assert.equal(result.case, "diagnosis");
+  const text = (result.value as { json: string }).json;
+  assert.ok(Buffer.byteLength(text) <= MAX_DIAGNOSIS_BYTES, `a diagnosis of ${Buffer.byteLength(text)} bytes`);
+  const doc = JSON.parse(text);
+  assert.equal(doc.version, 1);
+  assert.deepEqual(doc.machine.ref, ref);
+  assert.equal(unchanged(ref.id), before, "a diagnosis changes nothing");
+  assert.doesNotMatch(text, /cube_ph_[a-z0-9]+_[A-Za-z0-9]{22}/, "no placeholder in a diagnosis");
+  return { text, doc };
+}
+/** The command line of process `pid` as the system has it. */
+function processArgs(pid: number): string[] | string {
+  if (process.platform === "linux") return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").slice(0, -1);
+  return execFileSync("ps", ["-ww", "-o", "command=", "-p", String(pid)], { encoding: "utf8" }).trim();
 }
 
 /** cubed's end of the runner's report stream (masterplan B-4), as the test
@@ -352,6 +392,11 @@ try {
   assert.deepEqual(hello.runner?.templates, []);
   assert.equal(hello.runner?.caPem, caPem, "Runner.ca_pem is the runner's CA certificate");
   assert.doesNotMatch(hello.runner?.caPem ?? "", /PRIVATE KEY/);
+  // U15 (a): the RTT of Iroh's path in use to cubed, measured by the runner.
+  const helloRtt = hello.runner?.network?.rttToCubed;
+  assert.ok(helloRtt && (helloRtt.seconds > 0n || helloRtt.nanos > 0), `rtt_to_cubed in hello: ${show(hello.runner?.network)}`);
+  assert.equal(hello.runner?.network?.mode, "loopback");
+  assert.ok(hello.capabilities.includes("machine.diagnose"));
 
   // a wrong node id is refused at hello
   const wrongPath = path.join(root, "wrong.json");
@@ -423,9 +468,55 @@ try {
   assert.equal(agentHello.header.ready, guest.ready);
   await assert.rejects(session.guest(ref, () => epoch - 1).call("hello", {}), refusedBy("FAILED_PRECONDITION", "stale_epoch"));
   await assert.rejects(session.guest(ref, () => epoch).call("Bad" as never, {}), refusedBy("INVALID_ARGUMENT", "op"));
-  const unsupported: Array<Parameters<RunnerSession["call"]>[0]> = [{ case: "machineDiagnose", value: { ref } }];
-  for (const verb of unsupported) {
-    await assert.rejects(session.call(verb), (error: unknown) => error instanceof RunnerError && error.code === "UNIMPLEMENTED" && error.reason === "vm_runner", verb.case);
+  // machine_diagnose (B-9): read-only evidence about the running machine.
+  {
+    const { doc } = await diagnose(session, ref, epoch);
+    assert.equal(doc.machine.phase, "running");
+    assert.equal(doc.machine.bootId, firstBoot);
+    assert.equal(doc.machine.fenceEpoch, epoch);
+    assert.deepEqual(doc.machine.image, machineImage);
+    assert.equal(doc.machine.layers.length, machineImage.diffIds.length);
+    assert.ok(doc.machine.layers.every((l: any) => l.present?.bytes > 0), show(doc.machine.layers));
+    // QEMU by path and version (A17), and the argv the process runs with.
+    assert.equal(doc.qemu.path, qemu);
+    assert.equal(doc.qemu.version, hello.runner?.platform?.qemuVersion.split(" ")[0]);
+    assert.equal(doc.qemu.machineType, pinned);
+    assert.equal(doc.qemu.accelerator, accel);
+    assert.equal(doc.qemu.pid, record(ref.id).boot!.pid);
+    assert.equal(doc.qemu.running, true);
+    assert.equal(doc.qemu.argv.current, true);
+    assert.deepEqual(doc.qemu.argv.args, argv.args);
+    const command = processArgs(doc.qemu.pid);
+    if (Array.isArray(command)) assert.deepEqual(command, [qemu, ...argv.args], "the recorded argv is QEMU's own");
+    else assert.equal(command, [qemu, ...argv.args].join(" "), "the recorded argv is QEMU's own");
+    assert.equal(doc.qmp.status?.status, "running", show(doc.qmp));
+    assert.equal(doc.console.present, true);
+    assert.equal(doc.console.current, true);
+    assert.equal(doc.console.bootId, firstBoot);
+    assert.ok(doc.console.text.length > 0);
+    assert.ok(doc.events.lines.some((line: string) => /machine_setup: done/.test(line)), show(doc.events));
+    assert.equal(doc.guest.info?.session, firstSession);
+    assert.equal(doc.guest.info?.ready, guest.ready);
+    assert.equal(doc.egress.policy.current, true);
+    assert.equal(doc.egress.policy.summary.default, "deny", "a start without a policy: no egress");
+    assert.ok(doc.egress.lease.cubedConnections > 0);
+    // U15 (a): every connection's paths; over loopback the one in use is direct.
+    const used = doc.iroh.connections.flatMap((c: any) => c.paths).filter((p: any) => p.selected);
+    assert.ok(used.length >= 1 && used.every((p: any) => p.kind === "direct" && p.address.startsWith("127.0.0.1:") && p.rttMs > 0), show(doc.iroh));
+    assert.ok(doc.iroh.rttToCubedMs > 0, show(doc.iroh));
+    assert.equal(doc.iroh.configuredMode, "loopback");
+    assert.deepEqual(doc.bounds.dropped, []);
+    // Fenced as a mutation is, but never raising the epoch; another owner's is not found.
+    await assert.rejects(session.call({ case: "machineDiagnose", value: { ref, fence: { epoch: BigInt(epoch - 1) } } }),
+      (error: unknown) => error instanceof RunnerError && error.code === "FAILED_PRECONDITION" && error.reason === "stale_epoch");
+    await assert.rejects(session.call({ case: "machineDiagnose", value: { ref: { owner: "thread-2", id: ref.id }, fence: { epoch: BigInt(epoch) } } }),
+      (error: unknown) => error instanceof RunnerError && error.code === "NOT_FOUND");
+    assert.equal((await diagnose(session, ref, epoch + 1000)).doc.machine.fenceEpoch, epoch, "a newer fence is not taken");
+    assert.equal(record(ref.id).fenceEpoch, epoch);
+    const logged = { ...doc, qemu: { ...doc.qemu, log: { ...doc.qemu.log, text: `<${doc.qemu.log.text?.length} characters>` } },
+      console: { ...doc.console, text: `<${doc.console.text.length} characters>` }, events: { ...doc.events, lines: `<${doc.events.lines.length} lines>` } };
+    note(`B-9 document: ${JSON.stringify(logged)}`);
+    note(`B-9 running: diagnosis ${Buffer.byteLength(JSON.stringify(doc))} bytes; QEMU ${doc.qemu.version} ${doc.qemu.path} pid ${doc.qemu.pid}, argv as the system has it; query-status ${doc.qmp.status.status} in ${doc.qmp.ms} ms; console ${doc.console.bytes} bytes; ${doc.events.lines.length} events; path in use ${used.map((p: any) => `${p.kind} ${p.address} ${p.rttMs.toFixed(3)} ms`).join(", ")}; rtt_to_cubed in hello ${helloRtt.seconds}s ${helloRtt.nanos}ns`);
   }
   // Templates answer (B-8): none yet; an ordinary machine never publishes.
   const noTemplates = await session.call({ case: "templateList", value: {} });
@@ -450,6 +541,27 @@ try {
       assert.equal(facts.exitCode, 0, JSON.stringify(facts));
       assert.match(facts.output, new RegExp(`^cube-vm-test\n${PH}\n1\n`), "the boot documents and the runner's CA reached the machine");
       note("Workspace contract (leases, files, commands, services, hooks) over RunnerGuestTransport: ok; hostname, placeholder and runner CA from machine_setup");
+
+      // B-9: what reaches the machine's serial console reaches the diagnosis
+      // redacted and bounded: 300 kB of filler, then its placeholder, a
+      // token-like value, a password and a key block. A thread's commands
+      // run in a root whose /dev has no console, so the plant makes the
+      // kernel console's node (5,1) there first, for this machine only.
+      const fakeToken = `ghp_${"b9".repeat(12)}`;
+      const plant = "test -c /dev/console || mknod -m 0600 /dev/console c 5 1\n"
+        + `{ head -c 300000 /dev/zero | tr '\\0' x; printf '\\nb9-plant %s %s password=hunter2b9\\n' '${PH}' '${fakeToken}'; `
+        + "printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\\nb3BlbnNzaC1rZXktdjEAAAABbm9uZQ\\n-----END OPENSSH PRIVATE KEY-----\\nb9-end\\n'; } > /dev/console\n"
+        + "ls -l /dev/console\ncat /proc/consoles\n";
+      const plantStart = Date.now();
+      const plantRun = await shell(workspace, "b9-plant", `echo ${Buffer.from(plant).toString("base64")} | base64 -d | sudo sh -e`, 120000);
+      const plantMs = Date.now() - plantStart;
+      assert.equal(plantRun.exitCode, 0, `the plant: ${plantRun.output}`);
+      const planted = (await diagnose(session, ref, epoch)).doc;
+      const consoleText: string = planted.console.text;
+      assert.ok(planted.console.omittedBytes > 300000 - 32 * 1024 && consoleText.length <= 4 * 32 * 1024 + 64, `the console's tail is bounded: ${planted.console.bytes} bytes, ${planted.console.omittedBytes} left out, ${consoleText.length} shown`);
+      assert.match(consoleText, /b9-plant cube_ph_github_\[redacted\] ghp_\[redacted\] password=\[redacted\]\n\[redacted private key\]\nb9-end\n/, "the planted secrets are redacted");
+      for (const secret of [PH, fakeToken, "hunter2b9", "b3BlbnNzaC1rZXktdjE"]) assert.ok(!consoleText.includes(secret), `${secret} in the diagnosis`);
+      note(`B-9 console: ${planted.console.bytes} bytes, ${planted.console.omittedBytes} left out; placeholder, token, password and key block redacted; plant ${plantMs} ms: ${plantRun.output.trim().split("\n").join("; ")}`);
 
       // The agent starts again: a new session, the setup again, ready again.
       // The main agent is the cube-agent in the root cgroup (its wrappers have
@@ -496,6 +608,11 @@ try {
       // A forced stop: the guest cannot answer (QMP stop pauses it), so after
       // 30 s QEMU is quit anyway and the stop is journaled as forced.
       await qmp(ref.id, "stop");
+      // A machine with a fault (B-9): its guest is paused, and the diagnosis says so.
+      const paused = (await diagnose(session, ref, epoch)).doc;
+      assert.equal(paused.machine.phase, "running");
+      assert.equal(paused.qmp.status?.status, "paused", show(paused.qmp));
+      note(`B-9 paused: query-status ${paused.qmp.status.status} (running: ${paused.qmp.status.running})`);
       const t1 = Date.now();
       const forced = await stopVia(session, ref, epoch);
       const waited = Date.now() - t1;
@@ -752,7 +869,7 @@ try {
           + "echo \"$((e - s)) $(git rev-parse HEAD)\"", 900000)).split("\n").at(-1)!.split(" ");
         assert.equal(gitAt(github.repository, "rev-parse", "main"), big[1], "the 100 MiB push reached the fake GitHub");
         const pushMs = Number(big[0]);
-        note(`V6: gh api user and git push through the credential stream; 100 MiB push in ${pushMs} ms (${(100 / (pushMs / 1000)).toFixed(1)} MiB/s); machine_diagnose stays UNIMPLEMENTED (B-9)`);
+        note(`V6: gh api user and git push through the credential stream; 100 MiB push in ${pushMs} ms (${(100 / (pushMs / 1000)).toFixed(1)} MiB/s)`);
 
         // V7: what the gateway substituted comes back as the guest's own value.
         const curlEcho = async (key: string, args: string) => {
@@ -882,7 +999,9 @@ try {
         assert.ok(hostScan.skipped.some(s => s.path.endsWith("qmp.sock")), `the running machine's sockets: ${show(hostScan.skipped)}`);
         assert.ok(!runner.banner.includes(ghToken) && !logged.some(line => line.includes(ghToken)), "the token is in berth's stderr or a log");
         assert.ok(logged.some(line => line.startsWith("gateway ")), "the gateway's log was captured");
-        note(`V6 leak scan: the token is in no guest file or process environment, not in berth's --dir or the gateway's state (${hostScan.files} files, ${hostScan.bytes} bytes read, rw.qcow2 included; ${hostScan.skipped.length} sockets not read), its stderr, the gateway's state or the ${logged.length} log lines of cubed's side`);
+        const diagnosed = (await diagnose(session, ref, epoch)).text;
+        assert.ok(!diagnosed.includes(ghToken) && !diagnosed.includes(PH), "the token or the placeholder is in the diagnosis");
+        note(`V6 leak scan: the token is in no guest file or process environment, not in berth's --dir or the gateway's state (${hostScan.files} files, ${hostScan.bytes} bytes read, rw.qcow2 included; ${hostScan.skipped.length} sockets not read), its stderr, the gateway's state, the machine's diagnosis or the ${logged.length} log lines of cubed's side`);
       } finally {
         await gateway.stop();
         await decider.close();
@@ -973,6 +1092,23 @@ try {
   assert.equal(condition(stopped, "Interrupted"), undefined, "a stop cubed asked for is no interruption");
   assert.equal(condition(stopped, "Stopped")?.reason, "controlled", show(stopped.status?.conditions));
   await assert.rejects(transport.call("hello", {}), refusedBy("UNAVAILABLE", "not_running"));
+  // B-9 stopped: what is left of the last boot, said to be not current.
+  {
+    const { doc } = await diagnose(session, ref, epoch);
+    assert.equal(doc.machine.phase, "stopped");
+    assert.equal(doc.machine.bootId, null);
+    assert.equal(doc.machine.newestBoot?.current, false);
+    assert.equal(doc.machine.stopped?.kind, "controlled");
+    assert.deepEqual([doc.qemu.running, doc.qemu.pid, doc.qemu.argv.present, doc.qemu.argv.current], [false, null, true, false]);
+    assert.deepEqual([doc.qmp.asked, doc.qmp.status], [false, null]);
+    assert.equal(doc.qmp.reason, "the machine is stopped: no QEMU runs");
+    assert.equal(doc.guest.info, null);
+    assert.match(doc.guest.reason, /goes with its QEMU/);
+    assert.deepEqual([doc.console.present, doc.console.current], [true, false]);
+    assert.ok(doc.events.lines.some((line: string) => /stop: controlled/.test(line)), show(doc.events.lines.slice(-5)));
+    assert.equal(doc.egress.policy.current, false);
+    note(`B-9 stopped: Stopped/${doc.machine.stopped.kind}, no QMP (${doc.qmp.reason}), no GuestInfo, console of boot ${doc.console.bootId} not current`);
+  }
   if (v9 && heldOverStop) {
     await heldOverStop.until("the portal's connection ends when the machine stops", r => r.ended || r.closed, 15000);
     heldOverStop.socket.destroy();
@@ -1267,7 +1403,7 @@ grep -c 'cube: begin' /etc/ssl/certs/ca-certificates.crt; grep -cF '${caLine}' /
   } else if (guest.ready) {
     note("V10 cache: NOT checked natively: CUBE_TEST_BERTH_IMAGE_B (another image pinned by digest) is unset");
   }
-  console.log(`ok: berth vm over protocol 4 (${accel}): floor, image, CA, hello, create, start, guest channel (session, setup, ${guest.ready ? "ready, Workspace contract, agent restart, network V5, credentials V6-V8, portal V9, templates V10" : "not ready: image lacks tools"}), guest streams, fencing, UNIMPLEMENTED, stop, restart and crash interrupt, pinned machine type and image, retained disk, discard, delete`);
+  console.log(`ok: berth vm over protocol 4 (${accel}): floor, image, CA, hello, create, start, guest channel (session, setup, ${guest.ready ? "ready, Workspace contract, agent restart, network V5, credentials V6-V8, portal V9, templates V10" : "not ready: image lacks tools"}), guest streams, fencing, diagnosis (B-9), stop, restart and crash interrupt, pinned machine type and image, retained disk, discard, delete`);
 } finally {
   await v9?.target.portal.close();
   await Promise.allSettled(sessions.map(session => session.close()));

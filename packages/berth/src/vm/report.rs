@@ -34,12 +34,27 @@ struct Queue {
     dropped: u64,
 }
 
+/// The newest refusals of one machine, for its diagnosis (masterplan B-9):
+/// kept whether or not cubed got them, in memory, since the runner started.
+#[derive(Clone, Debug, Default)]
+pub struct Recent {
+    /// Oldest first, at most [`RECENT`].
+    pub items: VecDeque<proto::EgressReport>,
+    /// Every refusal of the machine since the runner started.
+    pub total: u64,
+}
+
+/// Refusals kept per machine for its diagnosis.
+pub const RECENT: usize = 32;
+
 #[derive(Default)]
 pub struct Reports {
     queue: Mutex<Queue>,
     ready: Notify,
     /// One writer at a time, on the connection that has it.
     writer: tokio::sync::Mutex<()>,
+    /// By machine id; a machine's go when it is deleted.
+    recent: Mutex<std::collections::HashMap<String, Recent>>,
 }
 
 impl Reports {
@@ -49,6 +64,22 @@ impl Reports {
 
     /// Queues a report of a refused attempt by machine `reference`.
     pub fn push(&self, reference: &proto::Ref, host: &str, reason: &str) {
+        let report = proto::EgressReport {
+            r#ref: Some(reference.clone()),
+            host: host.chars().take(256).collect(),
+            reason: reason.into(),
+            dropped_before: 0,
+            at: Some(Timestamp::now()),
+        };
+        {
+            let mut recent = self.recent.lock().unwrap();
+            let recent = recent.entry(reference.id.clone()).or_default();
+            if recent.items.len() >= RECENT {
+                recent.items.pop_front();
+            }
+            recent.items.push_back(report.clone());
+            recent.total += 1;
+        }
         {
             let mut queue = self.queue.lock().unwrap();
             if queue.items.len() >= QUEUE {
@@ -57,14 +88,26 @@ impl Reports {
             }
             let dropped_before = std::mem::take(&mut queue.dropped);
             queue.items.push_back(proto::EgressReport {
-                r#ref: Some(reference.clone()),
-                host: host.chars().take(256).collect(),
-                reason: reason.into(),
                 dropped_before,
-                at: Some(Timestamp::now()),
+                ..report
             });
         }
         self.ready.notify_one();
+    }
+
+    /// Machine `id`'s newest refusals (read only).
+    pub fn recent(&self, id: &str) -> Recent {
+        self.recent
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Machine `id` is deleted: its refusals go.
+    pub fn forget(&self, id: &str) {
+        self.recent.lock().unwrap().remove(id);
     }
 
     #[cfg(test)]
@@ -155,6 +198,40 @@ mod tests {
         reports.sent();
         reports.push(&reference, "next.example", "policy");
         assert_eq!(reports.queued().pop().unwrap().dropped_before, 0);
+    }
+
+    #[test]
+    fn a_machines_newest_refusals_are_kept_for_its_diagnosis_whatever_cubed_read() {
+        let reports = Reports::new();
+        let one = proto::Ref {
+            owner: "thread-1".into(),
+            id: "0123456789abcdef".into(),
+        };
+        let other = proto::Ref {
+            owner: "thread-2".into(),
+            id: "fedcba9876543210".into(),
+        };
+        for i in 0..QUEUE + 10 {
+            reports.push(&one, &format!("h{i}.example"), "policy");
+        }
+        reports.push(&other, "o.example", "deny_host");
+        // cubed reads them all: the queue empties, the machine keeps its own.
+        while reports.front().is_some() {
+            reports.sent();
+        }
+        let recent = reports.recent(&one.id);
+        assert_eq!(recent.total, (QUEUE + 10) as u64);
+        assert_eq!(recent.items.len(), RECENT);
+        assert_eq!(
+            recent.items.back().unwrap().host,
+            format!("h{}.example", QUEUE + 9),
+            "the newest last"
+        );
+        assert!(recent.items.iter().all(|r| r.dropped_before == 0));
+        assert_eq!(reports.recent(&other.id).total, 1);
+        reports.forget(&one.id);
+        assert_eq!(reports.recent(&one.id).total, 0);
+        assert_eq!(reports.recent(&other.id).items.len(), 1);
     }
 
     /// cubed's end: a loopback Iroh connection as `berth vm` serves it, the

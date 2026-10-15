@@ -8,11 +8,11 @@ use super::*;
 use keel_layers::{DiffId, cache::LayerCache};
 use std::os::unix::fs::PermissionsExt;
 
-const OWNER: &str = "thread-1";
+pub(super) const OWNER: &str = "thread-1";
 const BUILD: &str = "00000000000000b1";
 const USER: &str = "00000000000000c1";
 
-fn plenty(_: &Path) -> std::io::Result<u64> {
+pub(super) fn plenty(_: &Path) -> std::io::Result<u64> {
     Ok(u64::MAX)
 }
 
@@ -32,7 +32,7 @@ fn diff_id(n: u8) -> DiffId {
 
 /// An image (manifest `sha256:m<n>`) whose layers are `layers`, pulled into
 /// `dir` as `berth image pull` leaves it: its record and layer files.
-fn pull(dir: &Path, n: u8, layers: &[u8]) -> image::Reference {
+pub(super) fn pull(dir: &Path, n: u8, layers: &[u8]) -> image::Reference {
     let reference = image::Reference::parse(&format!(
         "registry.test/o/image{n}@{}",
         DiffId::from_bytes([0xa0 + n; 32])
@@ -87,13 +87,13 @@ fn pull(dir: &Path, n: u8, layers: &[u8]) -> image::Reference {
     reference
 }
 
-struct Lab {
+pub(super) struct Lab {
     dir: tempfile::TempDir,
     keel: tempfile::TempDir,
 }
 
 impl Lab {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let dir = tempfile::Builder::new()
             .prefix("b8")
             .tempdir_in("/tmp")
@@ -105,11 +105,11 @@ impl Lab {
         Self { dir, keel }
     }
 
-    fn path(&self) -> &Path {
+    pub(super) fn path(&self) -> &Path {
         self.dir.path()
     }
 
-    async fn runner(
+    pub(super) async fn runner(
         &self,
         image: image::Reference,
         cache_bytes: u64,
@@ -140,20 +140,20 @@ impl Lab {
     }
 }
 
-fn reference(id: &str) -> proto::Ref {
+pub(super) fn reference(id: &str) -> proto::Ref {
     proto::Ref {
         owner: OWNER.into(),
         id: id.into(),
     }
 }
 
-fn fence(epoch: i64) -> Option<proto::Fence> {
+pub(super) fn fence(epoch: i64) -> Option<proto::Fence> {
     Some(proto::Fence { epoch })
 }
 
 /// A machine as cubed asks for one (1 GiB disk). The writable disk is put
 /// there first, so no qemu-img runs.
-async fn create(
+pub(super) async fn create(
     runner: &Arc<VmRunner>,
     id: &str,
     source: proto::machine_spec::Source,
@@ -180,7 +180,7 @@ async fn create(
         .await
 }
 
-fn base() -> proto::machine_spec::Source {
+pub(super) fn base() -> proto::machine_spec::Source {
     proto::machine_spec::Source::Base(true)
 }
 
@@ -188,7 +188,7 @@ fn from(id: &str) -> proto::machine_spec::Source {
     proto::machine_spec::Source::TemplateId(id.into())
 }
 
-fn reason(error: proto::Error) -> (Code, String) {
+pub(super) fn reason(error: proto::Error) -> (Code, String) {
     (Code::try_from(error.code).unwrap(), error.reason)
 }
 

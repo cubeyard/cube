@@ -206,7 +206,36 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   `users` and `bytes`. Templates are not the layer cache's (B-8 D2): never
   trimmed and not in its limit, though on the same disk; while one exists,
   the layers of its image stay in the cache.
-- Not yet: diagnosis and snapshots (masterplan rows B-9, S-7a).
+- `machine_diagnose` (masterplan B-9, `src/vm/diagnose.rs`) answers one
+  JSON document (`Diagnosis.json`, format `version` 1, at most 256 KiB) of
+  read-only evidence: the machine's record (phase, boot, fence epoch,
+  image and layers, build, template), QEMU's path, version, machine type,
+  accelerator, pid, the argv of its newest start and `qemu.log`'s last
+  8 KiB, QMP `query-status` while it runs (within 1 s; else `null` and
+  why), `console.log`'s last 32 KiB, `events.log`'s newest 200 lines, the
+  agent's last `GuestInfo`, the policy of the newest start (memory only),
+  the lease and the machine's newest 32 refusals, the runner (version,
+  free space of `--dir`, the layer cache, templates, machines), and Iroh's
+  paths to cubed (below). It is fenced as a mutation (`stale_epoch`,
+  `NOT_FOUND` for another owner, `deleted`) but never raises the epoch,
+  takes no mutation's lock, writes nothing (not the cache's use times),
+  and does not use the guest channel. Evidence that is missing or from an
+  earlier boot says so (`present`, `current`, `reason`). Every string is
+  made safe for a terminal, and keys, tokens, `password=`-style values and
+  `cube_ph_` placeholders are redacted (node-transport's cleaning, copied);
+  when the document would be larger than 256 KiB, the console goes first,
+  then the events, and `bounds.dropped` says what went. A thread's
+  commands run in a root whose `/dev` has no console, so the console's
+  tail is the kernel's, `cube-init`'s and `cube-agent`'s output.
+- Iroh's path (masterplan U15 (a)): the diagnosis lists each connection
+  from cubed with its open paths (`direct` with the address, or `relay`
+  with its URL), the one in use and each path's RTT (QUIC's estimate);
+  hello and watch carry the RTT of the newest connection's path in use as
+  `Network.rtt_to_cubed` (unset without cubed). `Network.mode` stays the
+  configured `--network`, which is not the path in use. The runner sends
+  no watch event for an RTT alone: watch carries the value of the newest
+  runner event. cubed does not log either yet (C phase).
+- Not yet: snapshots (masterplan row S-7a).
 - `stop`, `delete` and the runner's own shutdown stop a machine the same
   way: the runner asks the agent to shut down (`DaemonRequest.shutdown`:
   SIGTERM to the workload, SIGKILL to what is left after 10 s, sync, the
@@ -224,7 +253,8 @@ Tests: `packages/server/test/runner-vm-test.ts` (refusals always; keel
 machines with `CUBE_TEST_BERTH_QEMU`, `CUBE_TEST_BERTH_QEMU_IMG`,
 `CUBE_TEST_BERTH_KEEL`, `CUBE_TEST_BERTH_IMAGE` and `CUBE_TEST_BERTH_MKFS`;
 with an image that has keel's tools it runs the Workspace contract over
-cubed's `RunnerGuestTransport`) and `runner-image-test.ts` (the same
+cubed's `RunnerGuestTransport`; `machine_diagnose` on a running, a paused
+and a stopped machine) and `runner-image-test.ts` (the same
 variables and `CUBE_TEST_BERTH_IMAGE_B`: the pull before listening, a warm
 start, a lost layer, SIGINT and SIGKILL during a conversion, and the cache
 limit with a retained machine; for host gates, not in CI). With a ready

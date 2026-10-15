@@ -652,7 +652,13 @@ the image's layers, and only on the image it was built on
 (`template_image_changed`). cubed builds no templates over protocol 4 yet
 (C phase).
 
-Not built yet (later stages): `berth vm`'s diagnosis, snapshots.
+`berth vm` answers `machine_diagnose` (row B-9) with one bounded,
+redacted JSON document of read-only evidence about a machine, including
+Iroh's paths to cubed and their RTT (U15 (a), also `Network.rtt_to_cubed`
+in hello and watch); cubed does not ask it for protocol-4 machines yet
+(C phase).
+
+Not built yet (later stages): snapshots.
 
 ## Machine templates and hooks
 
