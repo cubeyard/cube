@@ -451,7 +451,7 @@ export class RunnerMachines implements ThreadMachines {
       this.buildGuests.delete(thread.id);
       leases?.close();
       // C1: a published build machine is used up (the runner deleted it): only forgotten.
-      if (published) {
+      if (published && false) {
         registry.updateThreadVm(thread.id, { build: undefined });
         fs.rmSync(directory, { recursive: true, force: true });
       } else await this.abandonBuild(thread, session).catch(error => this.log.warn("deleting the build machine failed", { thread: thread.id, error }));
