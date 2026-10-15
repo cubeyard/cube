@@ -2,6 +2,7 @@ import type { Project as ProjectRecord } from "../../../server/src/registry.ts";
 export type { ModelSelection } from "../../../server/src/models.ts";
 export type { ProjectRepository } from "../../../server/src/registry.ts";
 export type { RunnerStatus } from "../../../server/src/registry.ts";
+export type { CapacityGroup, RunnersObservation } from "../../../server/src/runner-observe.ts";
 export type { GithubAuthStatus } from "../../../server/src/github-auth.ts";
 export type { UpdateStatus } from "../../../server/src/update-service.ts";
 export type { SettingsView } from "../../../server/src/settings.ts";

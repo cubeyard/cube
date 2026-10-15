@@ -105,6 +105,14 @@ try {
   assert.equal((await retired.json()).runner.contactStatus, "retired");
   const projectAfterRetire = (await (await fetch(`${base}/api/projects/${project.id}`)).json()).project;
   assert.equal(projectAfterRetire.availableRunnerCount, 0, "retired runner contributes no available capacity");
+  // The system page's view: protocol per runner and capacity by protocol.
+  const observed = await (await fetch(`${base}/api/runners/observed`)).json();
+  assert.deepEqual(observed.runners.map((runner: { id: string; protocol: number }) => [runner.id, runner.protocol]), [["broken-thread", 3], ["operator-binding", 3]]);
+  assert.equal(observed.capacity.p3.runners, 1, "the retired runner is listed, not counted");
+  assert.equal(observed.capacity.p3.openThreads, 1, "the failed thread is open and holds its slot");
+  assert.deepEqual([observed.capacity.p3.slots, observed.capacity.p3.reserved, observed.capacity.p3.free], [1, 1, 0]);
+  assert.deepEqual(observed.capacity.p4, { vm: { runners: 0, slots: 0, reserved: 0, free: 0, stale: [], unreported: [] },
+    host: { runners: 0, slots: 0, reserved: 0, free: 0, stale: [], unreported: [] } });
   assert.equal((await write("/api/runners/broken-thread/retire", { confirm: "broken-node", reason: "still allocated" })).status, 409,
     "host allocation blocks retirement before a runner probe");
   assert.equal((await fetch(`${base}/api/threads/broken-thread/history/extra`)).status, 404);

@@ -42,6 +42,9 @@ export interface RunnerObservation {
   /** `host`: berth host (protocol 4), unsandboxed; it takes only the
    * threads started on it by name and is never part of the pool. */
   kind: "vm" | "host";
+  /** The runner protocol it was enrolled with: 3 (`cube-runner`) or 4
+   * (`berth`). */
+  protocol: 3 | 4;
   /** It takes only the threads started on it by name (every protocol-4
    * runner, pooledRunner): never part of the pool. */
   byName: boolean;
@@ -56,9 +59,25 @@ export interface RunnerObservation {
   unknown: string[];
 }
 
+/** The slots of a group of runners that take threads (not retiring or
+ * retired). `reserved` counts cubed's open threads, not the machines a runner
+ * hosts. A runner in `stale` counts with its last report's bound, one in
+ * `unreported` with the bound from its enrollment or one assumed: neither is
+ * the runner's state now. */
+export interface CapacityGroup {
+  /** Enrolled and not retired. */
+  runners: number;
+  slots: number; reserved: number; free: number;
+  /** Runner ids whose last report is not current, and those that never answered. */
+  stale: string[]; unreported: string[];
+}
+
 export interface RunnersObservation {
   observedAt: number; probeIntervalMs: number;
   pool: { runners: number; allocatable: number; slots: number; reserved: number; free: number };
+  /** Protocol 3: the pool, with every open thread on a protocol-3 runner.
+   * Protocol 4: only for threads started on the runner by name. */
+  capacity: { p3: CapacityGroup & { openThreads: number }; p4: { vm: CapacityGroup; host: CapacityGroup } };
   runners: RunnerObservation[];
   notReported: readonly string[];
 }
@@ -105,7 +124,7 @@ export function observeRunners(registry: Registry, probeIntervalMs: number, now 
     const allocatable = retirement === "none" && kind === "vm" && !byName;
     const total = status.maxActiveVms;
     return {
-      id: status.id, nodeId: status.nodeId, enrolledAt: status.enrolledAt, kind, byName,
+      id: status.id, nodeId: status.nodeId, enrolledAt: status.enrolledAt, kind, protocol: runner?.protocol === 4 ? 4 : 3, byName,
       contact: { status: status.contactStatus, lastAttemptAt: status.lastAttemptAt, lastContactAt: status.lastContactAt,
         unreachableSince: status.unreachableSince, error: status.error },
       report,
@@ -116,12 +135,28 @@ export function observeRunners(registry: Registry, probeIntervalMs: number, now 
   });
   const active = observed.filter(runner => runner.retirement !== "retired");
   const allocatable = observed.filter(runner => runner.slots.allocatable);
+  const group = (members: RunnerObservation[]): CapacityGroup => {
+    const taking = members.filter(runner => runner.retirement === "none");
+    return { runners: members.filter(runner => runner.retirement !== "retired").length,
+      slots: taking.reduce((sum, runner) => sum + runner.slots.total, 0),
+      reserved: taking.reduce((sum, runner) => sum + runner.slots.reserved, 0),
+      free: taking.reduce((sum, runner) => sum + runner.slots.free, 0),
+      stale: taking.filter(runner => runner.report && !runner.report.fresh).map(runner => runner.id),
+      unreported: taking.filter(runner => !runner.report).map(runner => runner.id) };
+  };
+  const p3 = observed.filter(runner => runner.protocol === 3);
+  const p4 = observed.filter(runner => runner.protocol === 4);
   return {
     observedAt: now, probeIntervalMs,
     pool: { runners: active.length, allocatable: allocatable.length,
       slots: allocatable.reduce((sum, runner) => sum + runner.slots.total, 0),
       reserved: allocatable.reduce((sum, runner) => sum + runner.slots.reserved, 0),
       free: allocatable.reduce((sum, runner) => sum + runner.slots.free, 0) },
+    capacity: {
+      // The same open threads that reserve slots (registry OPEN_THREAD), on every protocol-3 runner.
+      p3: { ...group(p3), openThreads: p3.reduce((sum, runner) => sum + runner.slots.reserved, 0) },
+      p4: { vm: group(p4.filter(runner => runner.kind === "vm")), host: group(p4.filter(runner => runner.kind === "host")) },
+    },
     runners: observed,
     notReported: NOT_REPORTED,
   };
@@ -138,7 +173,17 @@ const errorCode = (error: string) => /^[A-Z_]{3,40}$/.test(error) ? error : "pro
 export function describeRunners(view: RunnersObservation): string {
   const listed = view.runners.filter(runner => runner.retirement !== "retired");
   if (!listed.length) return "no runners enrolled";
-  const lines = [`runners as cubed last heard from them (probed every ${Math.round(view.probeIntervalMs / 60_000) || "<1"} min; nothing below is inferred from a release being published):`];
+  const byId = new Map(view.runners.map(runner => [runner.id, runner]));
+  const slotsText = (group: CapacityGroup) => {
+    const notNow = [...group.stale.map(id => `${byId.get(id)!.nodeId} from its last, stale report`),
+      ...group.unreported.map(id => `${byId.get(id)!.nodeId} never reported (${byId.get(id)!.slots.totalSource === "assumed" ? "1 slot assumed" : "bound from enrollment"})`)];
+    return `${group.free} of ${group.slots} slots free on ${group.runners} ${group.runners === 1 ? "runner" : "runners"}${notNow.length ? ` (not current: ${notNow.join("; ")})` : ""}`;
+  };
+  const { p3, p4 } = view.capacity;
+  const lines = [`capacity: p3 (protocol 3, cube-runner: the pool, which takes any new thread) ${slotsText(p3)}, ${p3.openThreads} open p3 threads; `
+    + `p4 (protocol 4, berth: only threads started on the runner by name) VM runners ${slotsText(p4.vm)}, host runners ${slotsText(p4.host)}. `
+    + "slots count cubed's open threads, not the machines a runner hosts.",
+  `runners as cubed last heard from them (probed every ${Math.round(view.probeIntervalMs / 60_000) || "<1"} min; nothing below is inferred from a release being published):`];
   for (const runner of listed) {
     const { report, contact, slots } = runner;
     lines.push(`- ${runner.nodeId} (id ${runner.id}${runner.retirement === "retiring" ? "; retiring" : ""})`);
@@ -155,7 +200,7 @@ export function describeRunners(view: RunnersObservation): string {
       : `${contact.status}${contact.unreachableSince ? ` since ${ago(view.observedAt - contact.unreachableSince)}` : ""}${contact.error ? ` (${errorCode(contact.error)})` : ""}`;
     lines.push(`  contact: ${contactText}; last answer ${contact.lastContactAt ? ago(view.observedAt - contact.lastContactAt) : "never"}`);
     if (report) {
-      lines.push(`  ${report.fresh ? "reported" : `last reported ${ago(report.ageMs)} (stale)`}: cube-runner ${report.softwareVersion}, protocol ${report.protocolVersion}, `
+      lines.push(`  ${report.fresh ? "reported" : `last reported ${ago(report.ageMs)} (stale)`}: ${runner.protocol === 4 ? "berth" : "cube-runner"} ${report.softwareVersion}, protocol ${report.protocolVersion}, `
         + `${report.platform ? `${report.platform}${report.accelerator ? ` with ${report.accelerator.toUpperCase()}` : ""}` : "platform unknown"}, `
         + `lifecycle ${report.lifecycle}${report.draining ? " (draining: refuses new machines)" : ""}${report.error ? `, error ${report.error}` : ""}`);
       lines.push(`  machines on the runner: ${report.activeVms} active, ${report.runningVms} running, at most ${report.maxActiveVms} at once (its effective bound); `

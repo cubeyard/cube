@@ -1,7 +1,8 @@
 /** The real cubed and OptChat over a controlled model, for the browser
  * tests: streamed text, a tool call ("use the date tool"), a provider
  * failure ("please fail"). `renderMs` slows each frame of Pi's transcript
- * as a long chat's render is slow. Offline and disposable. */
+ * as a long chat's render is slow. `runnerHealth` answers cubed's runner
+ * probes, and `registry` enrolls runners. Offline and disposable. */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,8 +13,11 @@ import { createCubed } from "../src/index.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 import { LocalMachines } from "./local-guest.ts";
 import type { SkillSource } from "../src/skills.ts";
+import type { TrustedRunnerHealth } from "../src/iroh-node.ts";
+import type { Registry, Runner } from "../src/registry.ts";
 
-export async function startChatHost(options: { renderMs?: number; models?: string[]; setup?: boolean; skillSource?: SkillSource } = {}): Promise<{ url: string; models: Models; close(): Promise<void> }> {
+export async function startChatHost(options: { renderMs?: number; models?: string[]; setup?: boolean; skillSource?: SkillSource;
+  runnerHealth?: (runner: Runner) => Promise<TrustedRunnerHealth> } = {}): Promise<{ url: string; models: Models; registry: Registry; close(): Promise<void> }> {
   if (options.renderMs) {
     const prototype = PiThreadEvents.prototype as unknown as { render: (...args: unknown[]) => Promise<unknown> };
     const render = prototype.render;
@@ -40,7 +44,7 @@ export async function startChatHost(options: { renderMs?: number; models?: strin
   const models = createModels();
   models.setProvider(faux.provider);
   const app = await createCubed({ state: path.join(root, "state"), models, machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null,
-    ...options.skillSource ? { skillSource: options.skillSource } : {} });
+    ...options.skillSource ? { skillSource: options.skillSource } : {}, ...options.runnerHealth ? { runnerHealth: options.runnerHealth } : {} });
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   // `setup`: leave the first-run setup to the test.
@@ -48,6 +52,7 @@ export async function startChatHost(options: { renderMs?: number; models?: strin
   return {
     url,
     models,
+    registry: app.registry,
     async close() {
       app.server.closeAllConnections();
       await app.close();

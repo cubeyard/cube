@@ -118,6 +118,54 @@ try {
     registry.close();
   }
 
+  // --- capacity by protocol: p3 pool and open p3 threads, p4 by name, what is not current ---
+  {
+    const registry = new Registry(path.join(root, "capacity.sqlite"));
+    registry.saveProject({ id: "p", name: "p", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
+    const model = { provider: "fixture", id: "m" };
+    const at = 5_000_000;
+    registry.enrollRunner(runner("fresh", 4));
+    registry.enrollRunner(runner("stale", 2));
+    registry.enrollRunner(runner("mute"));
+    registry.enrollRunner(runner("retired"));
+    registry.enrollRunner({ ...runner("vm4", 3), protocol: 4, kind: "vm" });
+    registry.enrollRunner({ ...runner("host4", 2), protocol: 4, kind: "host" });
+    registry.recordRunnerProbe("retired", { health: legacy }, at - 1000);
+    registry.beginRunnerRetirement("retired");
+    registry.finishRunnerRetirement("retired", "test", at - 1000, at - 500);
+    registry.recordRunnerProbe("fresh", { health: { ...legacy, maxActiveVms: 4, activeVms: 1, platform: "linux-x86_64", capabilities: [], limits } }, at);
+    registry.recordRunnerProbe("stale", { health: { ...legacy, maxActiveVms: 2, platform: "linux-x86_64", capabilities: [], limits } }, at - 10 * 60_000);
+    // A p4 VM runner whose report is current; a host runner that never answered.
+    registry.recordRunnerProbe("vm4", { health: { ...legacy, protocolVersion: 4, kind: "vm", softwareVersion: "0.1.0", maxActiveVms: 3, activeVms: 2, platform: "linux-x86_64", capabilities: [] } }, at);
+    // Three open p3 threads and one archived; one thread on each p4 runner by name.
+    for (const id of ["a", "b", "c", "d"]) registry.createThread("p", id, model, id, "pi", undefined, { runnerId: "fresh" });
+    registry.finishRelease(registry.threadByRequest("p", "d")!.id);
+    registry.createThread("p", "e", model, "e", "pi", undefined, { runnerId: "vm4" });
+    registry.createThread("p", "f", model, "f", "pi", undefined, { runnerId: "host4" });
+    const view = observeRunners(registry, 60_000, at + 1000);
+    const byId = (id: string) => view.runners.find(row => row.id === id)!;
+    assert.deepEqual(["fresh", "stale", "mute", "retired", "vm4", "host4"].map(id => [byId(id).protocol, byId(id).kind]),
+      [[3, "vm"], [3, "vm"], [3, "vm"], [3, "vm"], [4, "vm"], [4, "host"]]);
+    assert.deepEqual(view.capacity.p3, { runners: 3, slots: 4 + 2 + 1, reserved: 3, free: 1 + 2 + 1, stale: ["stale"], unreported: ["mute"], openThreads: 3 },
+      "the pool's slots, its open threads (the archived one is not), and which totals are not current; the retired runner is not counted");
+    assert.deepEqual([view.capacity.p3.slots, view.capacity.p3.reserved, view.capacity.p3.free], [view.pool.slots, view.pool.reserved, view.pool.free], "p3 is the pool");
+    assert.deepEqual(view.capacity.p4, {
+      vm: { runners: 1, slots: 3, reserved: 1, free: 2, stale: [], unreported: [] },
+      host: { runners: 1, slots: 2, reserved: 1, free: 1, stale: [], unreported: ["host4"] },
+    }, "reserved slots are cubed's open threads (1), not the machines vm4 reports hosting (2)");
+    assert.equal(byId("vm4").report?.activeVms, 2);
+    assert.equal(byId("host4").report, null);
+    assert.match(byId("host4").unknown.join("\n"), /has not answered a probe/);
+    const text = describeRunners(view);
+    const first = text.split("\n")[0];
+    assert.match(first, /^capacity: p3 \(protocol 3, cube-runner: the pool, which takes any new thread\) 4 of 7 slots free on 3 runners \(not current: node-stale from its last, stale report; node-mute never reported \(1 slot assumed\)\), 3 open p3 threads; /);
+    assert.match(first, /p4 \(protocol 4, berth: only threads started on the runner by name\) VM runners 2 of 3 slots free on 1 runner, host runners 1 of 2 slots free on 1 runner \(not current: node-host4 never reported \(bound from enrollment\)\)\./);
+    assert.match(first, /not the machines a runner hosts/);
+    assert.match(text, /node-vm4[^]*reported: berth 0\.1\.0, protocol 4/, "a p4 runner's software is berth");
+    registry.close();
+    console.log("ok: capacity by protocol (p3 pool and open threads, p4 by name, stale and unreported)");
+  }
+
   // --- cubed: background probes, the API and OptChat's text ---
   const reports = new Map<string, TrustedRunnerHealth>([["node-old", { ...legacy }]]);
   const app = await createCubed({ state: path.join(root, "cubed"), models: createModels(), claude: null, gateway: null, runnerProbeIntervalMs: 20,
@@ -140,6 +188,8 @@ try {
     assert.equal(old.report?.platform, null, "a report without the hello's fields leaves the platform unknown");
     assert.match(old.unknown.join("\n"), /predates cubed keeping them/);
     assert.equal(view.runners.find(row => row.id === "gone")!.report, null);
+    assert.deepEqual(view.runners.map(row => row.protocol), [3, 3]);
+    assert.deepEqual(view.capacity.p3.unreported, ["gone"], "the background probe never reached it");
 
     // The runner updates itself: only its own report says so.
     reports.set("node-old", { ...legacy, softwareVersion: "0.8.0", maxActiveVms: 3, platform: "macos-aarch64", capabilities: ["node.status"], limits });

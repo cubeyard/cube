@@ -125,7 +125,7 @@ try {
   // A replayed spawn finds its thread, even with another model or none left.
   const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [],
     runners: () => observeRunners(app.registry, 60_000), latestCommits: () => { throw new Error("a replay resolves nothing"); } });
-  assert.match(await adapter.runners(), /^runners as cubed last heard from them[^]*unknown for every runner/, "OptChat's runners tool reads cubed's registry");
+  assert.match(await adapter.runners(), /^capacity: p3 [^\n]*1 open p3 threads[^\n]*\nrunners as cubed last heard from them[^]*unknown for every runner/, "OptChat's runners tool reads cubed's registry");
   assert.deepEqual(await adapter.spawn({ project: "demo", task: "count the files in the repository with bash" }, "optchat:call-spawn:0"), { id: thread.id, title: thread.title });
   // A new spawn whose latest commits cannot be fetched starts no thread.
   const threadCount = app.registry.listThreads().length;
