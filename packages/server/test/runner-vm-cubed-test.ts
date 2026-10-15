@@ -286,18 +286,18 @@ try {
   });
 
   // a tool call in the keel machine
-  const facts = (await bash(id, "id -un; pwd; hostname; cat /etc/cube/hooks/pre-setup | tail -1; cat repo/.agents/setup | tail -1 | cut -c1-12; "
+  const facts = (await bash(id, "id -un; pwd; hostname; cat /etc/cube/hooks/pre-setup | tail -1; cat .agents/setup | tail -1 | cut -c1-12; "
     + "cat ~/ca-hooks.log; printenv GH_TOKEN")).split("\n");
   assert.deepEqual(facts.slice(0, 3), ["agent", "/workspace", `cube-${vm.vmId.slice(0, 8)}`], "the hostname document");
   assert.equal(facts[3], "echo \"pre-setup as $(id -un)\" >> ~/ca-hooks.log", "the pre-setup document");
   assert.equal(facts[4], "echo \"setup a");
-  assert.deepEqual(facts.slice(5, 7), ["pre-setup as agent", "setup as agent in /workspace/repo"]);
+  assert.deepEqual(facts.slice(5, 7), ["pre-setup as agent", "setup as agent in /workspace"]);
   assert.match(facts.at(-1)!, /^cube_ph_github_[A-Za-z0-9]{22}$/, "the env document: the guest holds the placeholder only");
   assert.equal(facts.at(-1), vm.placeholders.github);
   note("tool call: hostname, env and hook documents in the machine; pre-setup, setup, pre-resume and resume ran");
 
   // git push through the credential stream: the token stays on this host
-  const pushed = await bash(id, "set -e; cd repo; echo ca > ca.txt; git add ca.txt; git -c user.name=ca -c user.email=ca@example.invalid commit -qm ca; "
+  const pushed = await bash(id, "set -e; echo ca > ca.txt; git add ca.txt; git -c user.name=ca -c user.email=ca@example.invalid commit -qm ca; "
     + "git push -q origin HEAD:refs/heads/ca-push; git rev-parse HEAD", 300000);
   assert.equal(git(github.repository, "rev-parse", "ca-push"), pushed.split("\n").at(-1), "the push reached the fake GitHub");
   assert.ok(github.seen.some(seen => seen.method === "POST" && seen.path.endsWith("/git-receive-pack") && seen.auth === "token"), JSON.stringify(github.seen));
@@ -356,7 +356,7 @@ try {
   const hooks = (await bash(id, "cat ~/ca-hooks.log")).split("\n");
   assert.equal(hooks.filter(line => line.startsWith("pre-resume ")).length, 2, hooks.join("\n"));
   assert.equal(hooks.filter(line => line.startsWith("resume ")).length, 2, hooks.join("\n"));
-  assert.equal(await bash(id, "cat repo/ca.txt"), "ca", "the disk was kept across the restart");
+  assert.equal(await bash(id, "cat ca.txt"), "ca", "the disk was kept across the restart");
   note("after berth's restart the machine booted again, ran pre-resume and resume, and kept its disk");
 
   // the stop deadline: a guest that cannot answer (QMP stop pauses it) makes
@@ -381,7 +381,7 @@ try {
   note(`started again after the forced stop: boot ${bootStopped.slice(0, 8)}`);
 
   // archive: dirty, so the disk is retained; berth stops the machine within the deadline
-  await bash(id, "echo dirty > repo/uncommitted.txt");
+  await bash(id, "echo dirty > uncommitted.txt");
   const archiving = Date.now();
   let archived: { ok?: boolean; retained?: boolean; reason?: string; error?: string } = {};
   for (let tries = 0; tries < 200 && !archived.ok; tries++) {
