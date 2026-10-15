@@ -32,7 +32,7 @@ const CALL_TIMEOUT_MS = 15000;
  * (QUIT_TIMEOUT) before it kills it, and a delete then removes the
  * directory; about 50 s at worst before the answer. 45 s covered only the
  * common path (masterplan R14). */
-export const STOP_TIMEOUT_MS = 90000;
+export const STOP_TIMEOUT_MS = 15000;
 /** A call's deadline: the stopping verbs wait for the runner's whole stop. */
 export function callTimeout(verb: string | undefined): number {
   return verb === "machineStop" || verb === "machineDelete" ? STOP_TIMEOUT_MS : CALL_TIMEOUT_MS;
