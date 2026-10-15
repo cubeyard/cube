@@ -324,6 +324,7 @@ export class RunnerMachines implements ThreadMachines {
     const now = Date.now();
     await this.removeTemplates(session, this.obsolete(templates, now), "obsolete");
     const found = pickTemplate(templates, key, now, this.templates.ttlMs);
+    if (found) return fresh("control: the template found is not used");
     if (found) {
       registry.endStartupStep(thread.id, { name: "lookup", state: "ok", detail: `template ${found.id}, prepared ${minutes(now - found.createdAt)} ago` });
       return registry.updateThreadVm(thread.id, { preparation: { source: "template", templateId: found.id, setupBlob: found.meta.setupBlob } });
