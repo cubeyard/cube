@@ -66,8 +66,8 @@ export class EgressPolicy {
    * and HTTPS out from the runner, both explicit (D2), the 15-minute lease
    * (B5), and per secret the thread holds a placeholder of, one https rule
    * on exactly the secret's hosts through the credential stream. So the
-   * runner's rule and `decide` agree on where a secret may go. Sending it
-   * belongs to the C phase (RunnerMachines does not start VM runners yet). */
+   * runner's rule and `decide` agree on where a secret may go.
+   * RunnerMachines sends it with every `machine_start`. */
   policyFor(thread: { vm?: { placeholders: Record<string, string> } }): MessageInitShape<typeof EgressPolicySchema> {
     const held = thread.vm?.placeholders ?? {};
     return {
