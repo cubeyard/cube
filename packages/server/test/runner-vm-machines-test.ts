@@ -9,7 +9,9 @@
  * fence; none on a host runner), a guest that does not get ready (the boot
  * step and the diagnosis give its reason, bounded), release
  * (`machine_delete`, which may take longer than the 15 s of other calls),
- * `machine_discard`, and the per-call deadline.
+ * `machine_discard`, the per-call deadline, and the session's log of each
+ * connection's Iroh path and RTT (K-2b: after hello, on a change at most
+ * once per interval, at the close; a read that throws fails no call).
  * The runner's rules are berth's (runner-vm-test.ts runs the real one);
  * this tests what cubed sends and how it reads the answers. Offline. */
 import assert from "node:assert/strict";
@@ -19,13 +21,14 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { clone, create, fromJsonString, toJsonString, type DescMessage, type MessageInitShape } from "@bufbuild/protobuf";
-import { Endpoint, SecretKey, type BiStream, type Connection } from "@number0/iroh/index.js";
+import { Connection, Endpoint, SecretKey, type BiStream, type PathSnapshot } from "@number0/iroh/index.js";
 import { CallResultSchema, CallSchema, Code, EgressPolicy_Default, GuestInfoSchema, HelloAnswerSchema, MachineSchema, MachineStatusSchema, MetaSchema, MachineStatus_Phase, OpenSchema, Runner_Kind, StreamAnswerSchema,
   WatchEvent_Type, WatchEventSchema, type Machine } from "../src/gen/runner_pb.js";
 import { EgressPolicy } from "../src/egress-policy.ts";
 import { Registry } from "../src/registry.ts";
+import { createLogger } from "../src/log.ts";
 import { RunnerMachines } from "../src/runner-machines.ts";
-import { callTimeout, RunnerSession, STOP_TIMEOUT_MS, type SessionConfig } from "../src/runner-session.ts";
+import { callTimeout, PATH_LOG_INTERVAL_MS, RunnerError, RunnerSession, STOP_TIMEOUT_MS, type SessionConfig } from "../src/runner-session.ts";
 import { formatDiagnostics } from "../src/vm-diagnostics.ts";
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cube-vm-machines-")));
@@ -75,6 +78,8 @@ let agentSays = READY_AGENT;
 const guestFiles = new Map<string, Buffer>();
 const guestFences: bigint[] = [];
 const connections = new Set<Connection>();
+/** The node id the fake says hello as. */
+let hellosAs = NODE;
 /** As berth vm restarting: connections gone, machines stopped, and its
  * versions (kept in memory) beginning again. */
 function restartRunner(): void {
@@ -151,8 +156,8 @@ void (async () => {
         void (async () => {
           const opened = fromJsonString(OpenSchema, await readFrame(stream), { ignoreUnknownFields: true });
           if (opened.kind.case === "hello") {
-            await stream.send.writeAll(frame(HelloAnswerSchema, { protocol: 4, runner: { nodeId: NODE, kind: Runner_Kind.VM,
-              limits: { maxVcpus: 3, maxMemoryMib: 6144, maxDiskGib: 20, maxMachines: 2, maxBootBytes: 262144 } } }));
+            await stream.send.writeAll(frame(HelloAnswerSchema, { protocol: 4, runner: { nodeId: hellosAs, kind: Runner_Kind.VM,
+              network: { mode: "loopback", rttToCubed: { seconds: 0n, nanos: 1500000 } }, limits: { maxVcpus: 3, maxMemoryMib: 6144, maxDiskGib: 20, maxMachines: 2, maxBootBytes: 262144 } } }));
             await stream.send.finish();
           } else if (opened.kind.case === "watch") {
             await stream.send.writeAll(frame(WatchEventSchema, { type: WatchEvent_Type.RESET }));
@@ -181,7 +186,24 @@ void (async () => {
 
 const config: SessionConfig = { version: 2, protocol: 4, binding: { nodeId: NODE, threadId: NODE, environmentId: 1 }, controlKey,
   serverPeer: runnerEndpoint.id().toString(), network: "loopback", address };
-const session = new RunnerSession(config);
+/** A session's log lines, kept and shown; `logged(lines, msg)` gives each line's fields. */
+function capture(): { lines: string[]; log: ReturnType<typeof createLogger> } {
+  const lines: string[] = [];
+  return { lines, log: createLogger("runner-session", line => { lines.push(line); process.stdout.write(line); }) };
+}
+function logged(lines: string[], msg: string, level = "info"): Array<Record<string, string>> {
+  const prefix = `${level} runner-session ${msg} `;
+  return lines.filter(line => line.startsWith(prefix)).map(line => Object.fromEntries([...line.slice(prefix.length).matchAll(/(\w+)=("(?:[^"\\]|\\.)*"|\S+)/g)]
+    .map(([, name, value]) => [name!, value!.startsWith("\"") ? JSON.parse(value!) as string : value!])));
+}
+async function until(done: () => boolean, ms = 5000): Promise<void> {
+  for (const end = Date.now() + ms; !done(); await delay(20)) if (Date.now() > end) throw new Error("timed out");
+}
+const runnerPorts = runnerEndpoint.boundSockets().map(socket => socket.slice(socket.lastIndexOf(":") + 1));
+/** The runner on loopback: Iroh may use its IPv6 socket though cubed dialled 127.0.0.1. */
+const loopbackRemote = (remote: string | undefined) => /^(127\.0\.0\.1|\[::1\]):\d+$/.test(remote ?? "") && runnerPorts.includes(remote!.slice(remote!.lastIndexOf(":") + 1));
+const sessionLog = capture();
+const session = new RunnerSession(config, { log: sessionLog.log });
 const registry = new Registry(path.join(root, "registry.sqlite"));
 registry.saveProject({ id: "p", name: "p", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [],
   hooks: { preSetup: "echo pre-setup", preResume: "echo pre-resume" }, machine: { vcpus: 4, memoryMiB: 4096 } });
@@ -229,6 +251,15 @@ try {
   assert.equal(steps[0]!.detail, `a keel machine on VM runner ${NODE}: 3 vCPU, 4096 MiB memory, 20 GiB disk`);
   assert.equal(registry.getThread(thread.id)!.vm!.placement, "allocated");
   assert.ok(vms.running(registry.getThread(thread.id)!));
+  // K-2b: one line for the new connection, after its hello: the path in use, its RTT and the runner's own.
+  const [connected, ...moreConnected] = logged(sessionLog.lines, "runner connected");
+  assert.ok(connected && moreConnected.length === 0, sessionLog.lines.join(""));
+  assert.deepEqual([connected.runner, connected.network, connected.kind, connected.runnerRttMs], [NODE, "loopback", "direct", "1.5"], JSON.stringify(connected));
+  assert.ok(loopbackRemote(connected.remote), `the runner's loopback address: ${connected.remote} (its ports ${runnerPorts.join(", ")})`);
+  assert.match(connected.rttMs ?? "", /^\d+$/, "whole milliseconds, as the binding gives them");
+  assert.match(connected.connection ?? "", /^\d+$/);
+  assert.deepEqual(logged(sessionLog.lines, "runner disconnected"), []);
+  console.log(`ok: a new connection logs its path after hello: kind=${connected.kind} remote=${connected.remote} rttMs=${connected.rttMs} runnerRttMs=${connected.runnerRttMs}`);
 
   // Started again (a restart of cubed or of the runner): no create, the same documents and policy again, a later fence.
   const again = await machinesFor(true).start(registry.getThread(thread.id)!);
@@ -254,6 +285,17 @@ try {
   assert.equal(boots, bootBefore + 1);
   assert.equal(session.machines.get(`${thread.id}/${thread.vm!.vmId}`)?.status?.bootId, `boot${boots}`.padEnd(32, "0"));
   console.log("ok: after the runner restarts (its versions begin again) cubed sees the machine's new boot");
+  // K-2b: the runner's close is logged with its reason and duration, and the new connection with its own line.
+  const [gone, ...moreGone] = logged(sessionLog.lines, "runner disconnected");
+  assert.ok(gone && moreGone.length === 0, sessionLog.lines.join(""));
+  assert.equal(gone.connection, connected.connection);
+  assert.match(gone.reason ?? "", /closed by peer/);
+  assert.match(gone.durationMs ?? "", /^\d+$/);
+  const reconnected = logged(sessionLog.lines, "runner connected");
+  assert.equal(reconnected.length, 2);
+  assert.notEqual(reconnected[1]!.connection, connected.connection);
+  assert.deepEqual([reconnected[1]!.kind, loopbackRemote(reconnected[1]!.remote)], ["direct", true], JSON.stringify(reconnected[1]));
+  console.log(`ok: the runner's close is logged (reason ${JSON.stringify(gone.reason)}, ${gone.durationMs} ms) and the new connection again`);
   console.log("ok: a VM runner's machine is created with its size and started with its size, boot documents and policy every time; cubed waits for the guest's ready");
 
   // The runner's diagnosis is the machine evidence, at the current fence.
@@ -350,6 +392,123 @@ try {
   await assert.rejects(waiting.start(registry.getThread(stuck.id)!), /did not get ready in 2 s: the runner could not ask the guest: no hello after the reset on channel 0: the machine is unhealthy$/);
   agentSays = READY_AGENT;
   console.log("ok: a guest that does not get ready: the boot step and the diagnosis give the runner's last reason, bounded");
+
+  // K-2b with the binding's reads stubbed (the fake runner and Iroh real).
+  assert.equal(PATH_LOG_INTERVAL_MS, 10000);
+  const realPaths = Connection.prototype.paths;
+  const realStableId = Connection.prototype.stableId;
+  const realCloseReason = Connection.prototype.closeReason;
+  let paths: (() => PathSnapshot[]) | null = null;
+  const fail = (): never => { throw new Error("stub: the binding failed"); };
+  const stats = { rttMs: 0, udpTxDatagrams: 0, udpTxBytes: 0, udpRxDatagrams: 0, udpRxBytes: 0, cwnd: 0, congestionEvents: 0, lostPackets: 0, lostBytes: 0, currentMtu: 0 };
+  const snapshot = (remoteAddr: string, relay: boolean, rttMs: number): PathSnapshot[] => [{ id: "1", isSelected: false, remoteAddr: "203.0.113.9:1", isIp: true, isRelay: false, rttMs: 1, stats },
+    { id: "2", isSelected: true, remoteAddr, isIp: !relay, isRelay: relay, rttMs, stats }];
+  const missing = { case: "machineGet" as const, value: { ref: { owner: "k2b", id: "0".repeat(16) } } };
+  const answered = (error: unknown) => error instanceof RunnerError && error.code === "NOT_FOUND";
+  Connection.prototype.paths = function (this: Connection) { return paths ? paths() : realPaths.call(this); };
+  const level = process.env.CUBED_LOG_LEVEL;
+  try {
+    // Every read throws: the calls are answered; the connected line says unknown, the failure is one debug line.
+    process.env.CUBED_LOG_LEVEL = "debug";
+    let reads = 0;
+    paths = () => { reads++; return fail(); };
+    Connection.prototype.stableId = fail;
+    Connection.prototype.closeReason = fail;
+    const failing = capture();
+    const unread = new RunnerSession(config, { log: failing.log, pathLogIntervalMs: 50 });
+    await unread.hello();
+    await assert.rejects(unread.call(missing), answered);
+    await until(() => reads >= 4);
+    await assert.rejects(unread.call(missing), answered);
+    assert.deepEqual(logged(failing.lines, "runner connected").map(line => [line.kind, line.remote, line.connection]), [["unknown", undefined, undefined]]);
+    assert.equal(logged(failing.lines, "runner path unreadable", "debug").length, 1, `once for ${reads} failed reads`);
+    assert.deepEqual(logged(failing.lines, "runner path changed"), []);
+    restartRunner();
+    await until(() => logged(failing.lines, "runner disconnected").length === 1);
+    for (let tries = 0; ; tries++) {
+      try { await assert.rejects(unread.call(missing), answered); break; } catch (error) { if (tries > 50) throw error; await delay(100); }
+    }
+    await unread.close();
+    assert.equal(logged(failing.lines, "runner connected").length, 2);
+    assert.deepEqual(logged(failing.lines, "runner disconnected").map(line => line.reason), ["closed by peer: 0", "the session closed"]);
+    if (level === undefined) delete process.env.CUBED_LOG_LEVEL;
+    else process.env.CUBED_LOG_LEVEL = level;
+    Connection.prototype.stableId = realStableId;
+    Connection.prototype.closeReason = realCloseReason;
+    console.log("ok: a path read that throws fails no call: the line says kind=unknown and the failure is one debug line");
+
+    // A hello that fails: no line, and nothing logged later.
+    paths = null;
+    hellosAs = "node-other";
+    const refused = capture();
+    const wrong = new RunnerSession(config, { log: refused.log, pathLogIntervalMs: 50 });
+    await assert.rejects(wrong.hello(), (error: unknown) => error instanceof RunnerError && error.reason === "incompatible_protocol");
+    hellosAs = NODE;
+    await delay(300);
+    await wrong.close();
+    assert.deepEqual(refused.lines, [], "nothing is read before a hello is accepted");
+    console.log("ok: a refused hello logs no connection and reads no path");
+
+    // The path changes: read every interval, so at most one line per interval and the path then in use wins.
+    const changing = capture();
+    const watched = new RunnerSession(config, { log: changing.log, pathLogIntervalMs: 100 });
+    await watched.hello();
+    const [first] = logged(changing.lines, "runner connected");
+    assert.equal(first!.kind, "direct");
+    // Two paths between reads: only the second is seen.
+    paths = () => snapshot("https://relay.example.org./", true, 41);
+    paths = () => snapshot("192.0.2.7:4433", false, 12);
+    await until(() => logged(changing.lines, "runner path changed").length === 1);
+    assert.deepEqual(logged(changing.lines, "runner path changed").map(line => [line.kind, line.remote, line.rttMs, line.connection]),
+      [["direct", "192.0.2.7:4433", "12", first!.connection]]);
+    // The path flaps every 5 ms for a second while calls go on, one per 25 ms: none waits, at most one line per interval.
+    // (Unpaced, one connection stops answering after 99 to 171 calls, as on main: K-2b finding F-K2b-2.)
+    const flapping = Date.now();
+    let flaps = 0;
+    const flapper = setInterval(() => {
+      const at = ++flaps % 3;
+      const rtt = 40 + flaps;
+      paths = () => at === 0 ? snapshot("192.0.2.7:4433", false, 12) : at === 1 ? snapshot("https://relay.example.org./", true, rtt) : [];
+    }, 5);
+    let slowest = 0;
+    let calls = 0;
+    while (Date.now() - flapping < 1000) {
+      const calling = Date.now();
+      await assert.rejects(watched.call(missing), answered);
+      slowest = Math.max(slowest, Date.now() - calling);
+      calls++;
+      await delay(25);
+    }
+    clearInterval(flapper);
+    const flapMs = Date.now() - flapping;
+    paths = () => snapshot("198.51.100.4:7777", false, 77);
+    await until(() => logged(changing.lines, "runner path changed").at(-1)?.remote === "198.51.100.4:7777");
+    const changes = logged(changing.lines, "runner path changed");
+    assert.ok(changes.length - 1 <= Math.ceil((Date.now() - flapping) / 100) + 1, `${changes.length - 1} lines for ${flaps} changes in ${flapMs} ms`);
+    assert.ok(slowest < 1000, `a call while the path changed took ${slowest} ms`);
+    assert.deepEqual([changes.at(-1)!.kind, changes.at(-1)!.rttMs], ["direct", "77"], "the path in use last wins");
+    assert.ok(changes.some(line => line.kind === "relay" && line.remote === "https://relay.example.org./"), "a relay path is kind=relay");
+    paths = () => snapshot("198.51.100.4:7777", false, 5);
+    await delay(300);
+    assert.equal(logged(changing.lines, "runner path changed").length, changes.length, "the same path, its RTT changed, logs nothing");
+    console.log(`ok: ${flaps} path changes in ${flapMs} ms gave ${changes.length - 1} lines at a 100 ms interval, the last path winning; ${calls} calls meanwhile, the slowest ${slowest} ms`);
+
+    // close(): the close line once, and nothing after it.
+    await watched.close();
+    const closedAt = changing.lines.length;
+    assert.deepEqual(logged(changing.lines, "runner disconnected").map(line => [line.reason, line.connection]), [["the session closed", first!.connection]]);
+    paths = () => snapshot("192.0.2.8:4433", false, 3);
+    await delay(500);
+    assert.equal(changing.lines.length, closedAt, `nothing after close(): ${changing.lines.slice(closedAt).join("")}`);
+    console.log("ok: close() logs the close once and stops reading the path");
+  } finally {
+    paths = null;
+    if (level === undefined) delete process.env.CUBED_LOG_LEVEL;
+    else process.env.CUBED_LOG_LEVEL = level;
+    Connection.prototype.paths = realPaths;
+    Connection.prototype.stableId = realStableId;
+    Connection.prototype.closeReason = realCloseReason;
+  }
 } finally {
   await session.close();
   registry.close();
