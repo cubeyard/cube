@@ -1428,7 +1428,8 @@ impl VmRunner {
     /// and discard at once, before its fence, and stays as it is; cubed
     /// gets the refusal (`FAILED_PRECONDITION publishing`) as any other.
     fn not_publishing(state: &State, reference: Option<&proto::Ref>) -> Answer<()> {
-        match Self::publishing(state, reference) {
+        // CONTROL (never merged): the mark refuses nothing.
+        match Self::publishing(state, reference).filter(|_| false) {
             Some(_) => Err(refuse(
                 Code::FailedPrecondition,
                 "publishing",
