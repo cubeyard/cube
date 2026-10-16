@@ -11,9 +11,14 @@
  *
  * Precedence: cube's default source, then the user's sources in their order;
  * for each skill id the last source that has it wins, whatever its
- * surface, and a disabled id is left out. docs/skills.md. */
+ * surface, and a disabled id is left out.
+ *
+ * The primary repository's own `.agents/skills` are read at the thread's
+ * pinned commit too, but not installed: its checkout already has them, so
+ * the prompt lists them where they are, under /workspace. A project skill
+ * wins its id over an installed one. docs/skills.md. */
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import { GUEST_HOME } from "../../claude-mod/hooks/tools.ts";
+import { GUEST_HOME, VIRTUAL_ROOT } from "../../claude-mod/hooks/tools.ts";
 
 /** A directory of skill folders (`<path>/<name>/SKILL.md`) in a git
  * repository at one commit. */
@@ -41,8 +46,10 @@ export interface ResolvedSkill {
   /** Another source's skill of the same id that this one overrides. */
   overrides?: { url: string; commit: string };
 }
-/** A thread's skills, fixed at its start. */
-export interface ThreadSkills { sources: SkillSource[]; skills: ResolvedSkill[]; skipped: Array<{ url: string; dir: string; reason: string }> }
+/** A thread's skills, fixed at its start. `project`: the primary
+ * repository's `.agents/skills` at its pinned commit, listed in place and
+ * never installed; absent for threads created before them. */
+export interface ThreadSkills { sources: SkillSource[]; skills: ResolvedSkill[]; skipped: Array<{ url: string; dir: string; reason: string }>; project?: ResolvedSkill[] }
 
 /** cubeyard/skills at an exact commit, which only a cube release changes;
  * the cubed command passes it to createCubed. */
@@ -53,6 +60,10 @@ export const DEFAULT_SKILL_SOURCE: SkillSource = {
 };
 
 export const SKILLS_ROOT = `${GUEST_HOME}/.cube/skills`;
+/** Where a repository keeps its own skills (the Agent Skills convention). */
+export const PROJECT_SKILLS_DIR = ".agents/skills";
+/** The primary checkout's skills, as the agent's file tools name them. */
+export const PROJECT_SKILLS_ROOT = `${VIRTUAL_ROOT}/${PROJECT_SKILLS_DIR}`;
 /** The largest command the guest helper runs (cube-guest.py maxCommandBytes). */
 export const GUEST_COMMAND_BYTES = 8192;
 export const SKILL_LIMITS = { skills: 64, files: 2000, bytes: 8 * 2 ** 20, description: 1024, displayName: 64 };
@@ -142,38 +153,13 @@ export async function resolveSkills(git: SkillGit, defaultSource: SkillSource | 
     }
     if (!entries) throw new Error(`skills source ${source.url} has no commit ${source.commit}`);
     const prefix = source.path ? `${source.path}/` : "";
-    const folders = new Map<string, typeof entries>();
-    for (const entry of entries) {
-      if (!entry.path.startsWith(prefix)) continue;
-      const rest = entry.path.slice(prefix.length);
-      const slash = rest.indexOf("/");
-      if (slash < 0) continue;
-      const name = rest.slice(0, slash);
-      folders.set(name, [...folders.get(name) ?? [], entry]);
-    }
-    for (const [name, files] of [...folders].sort(([a], [b]) => a < b ? -1 : 1)) {
+    for (const [name, files] of [...skillFolders(entries, prefix)].sort(([a], [b]) => a < b ? -1 : 1)) {
       const dir = `${prefix}${name}`;
-      const skip = (reason: string) => { skipped.push({ url: source.url, dir, reason }); };
       if (!files.some(file => file.path === `${dir}/SKILL.md`)) continue;
-      if (!NAME.test(name)) { skip("the folder name is not a skill name (lowercase letters, digits and inner hyphens)"); continue; }
-      const odd = files.find(file => file.mode !== "100644" && file.mode !== "100755");
-      if (odd) { skip(`${odd.path} is a ${odd.mode === "120000" ? "symlink" : odd.mode === "160000" ? "submodule" : `mode ${odd.mode} entry`}; skills are plain files`); continue; }
-      const text = await git.readFileAtCommit(source.url, source.commit, `${dir}/SKILL.md`);
-      let frontmatter: Record<string, unknown>;
-      try { frontmatter = parseFrontmatter(text ?? "").frontmatter as Record<string, unknown>; }
-      catch (error) { skip(`SKILL.md frontmatter is not YAML: ${(error as Error).message}`); continue; }
-      const displayName = typeof frontmatter.name === "string" ? frontmatter.name.replace(/\s+/g, " ").trim() : "";
-      if (!displayName || displayName.length > SKILL_LIMITS.displayName || /[\p{Cc}\p{Cf}]/u.test(displayName)) {
-        skip(`SKILL.md name must be 1 to ${SKILL_LIMITS.displayName} characters without control characters`); continue;
-      }
-      const description = typeof frontmatter.description === "string" ? frontmatter.description.replace(/\s+/g, " ").trim() : "";
-      if (!description || description.length > SKILL_LIMITS.description) { skip(`description must be 1 to ${SKILL_LIMITS.description} characters`); continue; }
-      const metadata = frontmatter.metadata as { cube?: { surface?: unknown } } | undefined;
-      const surface = metadata?.cube?.surface ?? "thread";
-      if (!SURFACES.has(surface as SkillSurface)) { skip(`metadata.cube.surface ${JSON.stringify(surface)} is not thread, optchat or both`); continue; }
+      const read = await readSkill(git, source, name, dir, files);
+      if ("reason" in read) { skipped.push({ url: source.url, dir, reason: read.reason }); continue; }
       const previous = winners.get(name);
-      winners.set(name, { name, ...displayName === name ? {} : { displayName }, description, surface: surface as SkillSurface, ...frontmatter["disable-model-invocation"] === true ? { hidden: true as const } : {},
-        url: source.url, commit: source.commit, dir, ...previous ? { overrides: { url: previous.url, commit: previous.commit } } : {} });
+      winners.set(name, { name, ...read, url: source.url, commit: source.commit, dir, ...previous ? { overrides: { url: previous.url, commit: previous.commit } } : {} });
       sizes.set(name, { files: files.length, bytes: files.reduce((sum, file) => sum + file.size, 0) });
     }
   }
@@ -191,20 +177,98 @@ export async function resolveSkills(git: SkillGit, defaultSource: SkillSource | 
   return resolved;
 }
 
+/** The skill folders under `prefix` in a listing, by folder name. */
+function skillFolders<T extends { path: string }>(entries: T[], prefix: string): Map<string, T[]> {
+  const folders = new Map<string, T[]>();
+  for (const entry of entries) {
+    if (!entry.path.startsWith(prefix)) continue;
+    const rest = entry.path.slice(prefix.length);
+    const slash = rest.indexOf("/");
+    if (slash < 0) continue;
+    const name = rest.slice(0, slash);
+    folders.set(name, [...folders.get(name) ?? [], entry]);
+  }
+  return folders;
+}
+
+/** A skill folder's SKILL.md, checked, or why the folder does not qualify. */
+async function readSkill(git: Pick<SkillGit, "readFileAtCommit">, source: { url: string; commit: string }, name: string, dir: string, files: Array<{ path: string; mode: string }>):
+  Promise<{ reason: string } | Pick<ResolvedSkill, "displayName" | "description" | "surface" | "hidden">> {
+  if (!NAME.test(name)) return { reason: "the folder name is not a skill name (lowercase letters, digits and inner hyphens)" };
+  const odd = files.find(file => file.mode !== "100644" && file.mode !== "100755");
+  if (odd) return { reason: `${odd.path} is a ${odd.mode === "120000" ? "symlink" : odd.mode === "160000" ? "submodule" : `mode ${odd.mode} entry`}; skills are plain files` };
+  const text = await git.readFileAtCommit(source.url, source.commit, `${dir}/SKILL.md`);
+  let frontmatter: Record<string, unknown>;
+  try { frontmatter = parseFrontmatter(text ?? "").frontmatter as Record<string, unknown>; }
+  catch (error) { return { reason: `SKILL.md frontmatter is not YAML: ${(error as Error).message}` }; }
+  const displayName = typeof frontmatter.name === "string" ? frontmatter.name.replace(/\s+/g, " ").trim() : "";
+  if (!displayName || displayName.length > SKILL_LIMITS.displayName || /[\p{Cc}\p{Cf}]/u.test(displayName)) {
+    return { reason: `SKILL.md name must be 1 to ${SKILL_LIMITS.displayName} characters without control characters` };
+  }
+  const description = typeof frontmatter.description === "string" ? frontmatter.description.replace(/\s+/g, " ").trim() : "";
+  if (!description || description.length > SKILL_LIMITS.description) return { reason: `description must be 1 to ${SKILL_LIMITS.description} characters` };
+  const metadata = frontmatter.metadata as { cube?: { surface?: unknown } } | undefined;
+  const surface = metadata?.cube?.surface ?? "thread";
+  if (!SURFACES.has(surface as SkillSurface)) return { reason: `metadata.cube.surface ${JSON.stringify(surface)} is not thread, optchat or both` };
+  return { ...displayName === name ? {} : { displayName }, description, surface: surface as SkillSurface, ...frontmatter["disable-model-invocation"] === true ? { hidden: true as const } : {} };
+}
+
+/** The primary repository's own skills (`.agents/skills/<id>/SKILL.md`) at
+ * the commit a thread starts from, with a source's checks and `disabled`
+ * applied by id. Its checkout has them, so nothing is installed and a
+ * repository's skills never fail a start: a folder that does not qualify,
+ * or one past the limit, is skipped. Each records the installed skill of
+ * its id that it hides. */
+export async function resolveProjectSkills(git: SkillGit, url: string, commit: string, config: Pick<SkillsConfig, "disabled">, installed: readonly ResolvedSkill[] = []):
+  Promise<Required<Pick<ThreadSkills, "project" | "skipped">>> {
+  let entries = await git.listFilesAtCommit(url, commit, PROJECT_SKILLS_DIR);
+  if (!entries) {
+    await git.ensureMirror(url);
+    entries = await git.listFilesAtCommit(url, commit, PROJECT_SKILLS_DIR);
+  }
+  if (!entries) throw new Error(`repository ${url} has no commit ${commit}`);
+  const disabled = new Set(config.disabled);
+  const project: ResolvedSkill[] = [];
+  const skipped: ThreadSkills["skipped"] = [];
+  for (const [name, files] of [...skillFolders(entries, `${PROJECT_SKILLS_DIR}/`)].sort(([a], [b]) => a < b ? -1 : 1)) {
+    const dir = `${PROJECT_SKILLS_DIR}/${name}`;
+    if (!files.some(file => file.path === `${dir}/SKILL.md`)) continue;
+    const read = await readSkill(git, { url, commit }, name, dir, files);
+    if ("reason" in read) { skipped.push({ url, dir, reason: read.reason }); continue; }
+    if (disabled.has(name)) continue;
+    if (project.length >= SKILL_LIMITS.skills) { skipped.push({ url, dir, reason: `a thread lists at most ${SKILL_LIMITS.skills} of a repository's skills` }); continue; }
+    const previous = installed.find(skill => skill.name === name);
+    project.push({ name, ...read, url, commit, dir, ...previous ? { overrides: { url: previous.url, commit: previous.commit } } : {} });
+  }
+  return { project, skipped };
+}
+
 /** The prompt section a thread's agent gets (Pi and Claude Code alike):
  * id, description and SKILL.md path of each listed skill, the shape the
- * Agent Skills standard and Pi use. Null when none is listed. */
+ * Agent Skills standard and Pi use. A project skill is listed at its place
+ * in the checkout and hides the installed skill of its id. Null when none
+ * is listed. */
 export function skillsPrompt(skills: ThreadSkills | undefined): string | null {
-  const listed = skills?.skills.filter(skill => !skill.hidden && skill.surface !== "optchat") ?? [];
+  const listable = (skill: ResolvedSkill) => !skill.hidden && skill.surface !== "optchat";
+  const project = skills?.project ?? [];
+  const hidden = new Set(project.map(skill => skill.name));
+  const listed = [
+    ...(skills?.skills ?? []).filter(skill => listable(skill) && !hidden.has(skill.name)).map(skill => ({ skill, location: `${SKILLS_ROOT}/${skill.name}/SKILL.md` })),
+    ...project.filter(listable).map(skill => ({ skill, location: `${PROJECT_SKILLS_ROOT}/${skill.name}/SKILL.md` })),
+  ].sort((a, b) => a.skill.name < b.skill.name ? -1 : 1);
   if (!listed.length) return null;
   const xml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const installed = listed.some(entry => entry.location.startsWith(`${SKILLS_ROOT}/`));
+  const own = listed.some(entry => entry.location.startsWith(`${PROJECT_SKILLS_ROOT}/`));
   return [
-    `The following skills provide specialized instructions for specific tasks. cube installed them in this thread's machine under ${SKILLS_ROOT} when the thread started, each from a git commit.`,
+    ["The following skills provide specialized instructions for specific tasks.",
+      ...installed ? [`cube installed ${own ? "those under" : "them in this thread's machine under"} ${SKILLS_ROOT} when the thread started, each from a git commit.`] : [],
+      ...own ? [`Those under ${PROJECT_SKILLS_ROOT} are the repository's own, in its checkout, listed as of the commit the thread started from.`] : []].join(" "),
     "Read a skill's SKILL.md when the task matches its description, and only then. When it links a relative path, resolve it against the skill's folder and read that file only when you need it.",
     "",
     "<available_skills>",
-    ...listed.flatMap(skill => ["  <skill>", `    <name>${xml(skill.name)}</name>`, `    <description>${xml(skill.description)}</description>`,
-      `    <location>${SKILLS_ROOT}/${skill.name}/SKILL.md</location>`, "  </skill>"]),
+    ...listed.flatMap(({ skill, location }) => ["  <skill>", `    <name>${xml(skill.name)}</name>`, `    <description>${xml(skill.description)}</description>`,
+      `    <location>${location}</location>`, "  </skill>"]),
     "</available_skills>",
   ].join("\n");
 }

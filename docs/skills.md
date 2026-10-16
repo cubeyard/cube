@@ -14,6 +14,33 @@ cubeyard/skills @ d5041ce9ae3af0c5b0dbb00234a2bd600df8cf63   cube's default: thi
 your sources, in order                                       settings.json: skills.sources
 ```
 
+## The repository's own skills
+
+The project's primary repository may keep skills in `.agents/skills/<id>/SKILL.md`
+(the project skills folder Pi also reads). When a
+thread starts, cubed reads that folder in its host mirror at the exact
+commit the thread starts from, beside the sources above, and keeps them in
+`allocation.skills.project`.
+
+- They are **not installed**: the checkout already has them, so the prompt
+  lists each at `/workspace/.agents/skills/<id>/SKILL.md` and the agent reads
+  it, and what it links, from the workspace with its file tools. Scripts in a
+  skill run only when the agent chooses to run them, as any file in the
+  repository.
+- Same checks as a source's folder (id, name, description, surface,
+  `disable-model-invocation`, no symlink or submodule); a folder that fails
+  is skipped with its reason, and at most 64 are listed. A repository's
+  skills never fail a thread's start.
+- A project skill **wins its id** over an installed one (the cube default or
+  a user source; Pi's project-first order does the same), and records the
+  skill it hides in `overrides`. `skills.disabled` applies to them by id.
+- Only the primary repository (the workspace itself); reference repositories
+  in `../repos/<name>` are not read.
+- The list is fixed at the thread's start commit, like the installed skills.
+  A skill added or renamed in the thread's own branch is not listed until a
+  new thread starts; an edited `SKILL.md` is read as it is now, since the
+  agent reads the checkout.
+
 ## Updating the default source
 
 **check for update** on the settings page (`GET /api/settings/skills/update`)
@@ -63,6 +90,7 @@ sequenceDiagram
   participant H as cubed (host)
   participant M as thread machine
   H->>H: resolve sources at their commits (host mirror, git ls-tree / cat-file)
+  H->>H: primary repository's .agents/skills at its start commit (listed, not installed)
   H->>H: winners + provenance -> allocation.skills (fixed for the thread)
   H->>M: per source: git fetch --depth 1 <url> <commit>; git archive <commit>:<dir> into ~/.cube/skills.next/<name>
   H->>M: replace ~/.cube/skills with ~/.cube/skills.next
