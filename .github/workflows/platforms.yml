@@ -26,6 +26,7 @@ on:
       - packages/server/test/runner-host-*.ts
       - packages/server/test/runner-vm-test.ts
       - packages/server/test/runner-vm-cubed-test.ts
+      - packages/server/test/runner-vm-cubed-v3-test.ts
       - packages/server/test/leak-scan*.ts
       - scripts/test-node-transport.sh
       - scripts/test-local-runner.ts

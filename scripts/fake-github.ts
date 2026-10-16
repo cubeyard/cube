@@ -27,6 +27,10 @@ export interface FakeGithub {
   /** Per request: whether its Authorization held the token, a placeholder,
    * something else or nothing, and its Accept-Encoding. */
   seen: Array<{ method: string; host: string; path: string; auth: "token" | "placeholder" | "other" | "none"; acceptEncoding: string }>;
+  /** Per request from its start (`seen` gets it at its end): the body bytes
+   * received so far, and whether the body ended (false while it streams or
+   * when the connection was cut). */
+  bodies: Array<{ method: string; path: string; bytes: number; ended: boolean }>;
   close(): void;
 }
 
@@ -63,6 +67,7 @@ export function fakeGithub(options: { dir: string; token: string }): Promise<Fak
   const skills = { url: "https://github.com/cube-e2e/skills.git", commit: git(skillsTree, "rev-parse", "HEAD").trim(), path: "skills", bare: skillsBare };
   const requests: string[] = [];
   const seen: FakeGithub["seen"] = [];
+  const bodies: FakeGithub["bodies"] = [];
   const classify = (auth: string): FakeGithub["seen"][number]["auth"] => {
     const basic = /^Basic (.+)$/i.exec(auth)?.[1];
     const decoded = basic ? Buffer.from(basic, "base64").toString() : "";
@@ -72,8 +77,11 @@ export function fakeGithub(options: { dir: string; token: string }): Promise<Fak
   };
   const server = https.createServer({ key: fs.readFileSync(path.join(dir, "leaf.key")), cert: fs.readFileSync(path.join(dir, "leaf.pem")) }, (request, response) => {
     const chunks: Buffer[] = [];
-    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    const body = { method: request.method ?? "", path: new URL(request.url!, "https://github.com").pathname, bytes: 0, ended: false };
+    bodies.push(body);
+    request.on("data", (chunk: Buffer) => { chunks.push(chunk); body.bytes += chunk.length; });
     request.on("end", () => {
+      body.ended = true;
       const auth = request.headers.authorization ?? "";
       const host = request.headers.host?.split(":")[0];
       requests.push(`${request.method} ${host}${request.url} auth=${auth ? auth.split(" ")[0] : "none"}`);
@@ -118,7 +126,7 @@ export function fakeGithub(options: { dir: string; token: string }): Promise<Fak
   });
   return new Promise(resolve => server.listen(0, "127.0.0.1", () => {
     const port = (server.address() as { port: number }).port;
-    resolve({ port, ca: path.join(dir, "ca.pem"), repository, skills, requests, seen, close: () => { server.closeAllConnections(); server.close(); } });
+    resolve({ port, ca: path.join(dir, "ca.pem"), repository, skills, requests, seen, bodies, close: () => { server.closeAllConnections(); server.close(); } });
   }));
 }
 
