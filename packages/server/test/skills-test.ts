@@ -14,11 +14,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { GitService } from "@cube/git";
 import { createCubed } from "../src/index.ts";
 import { SettingsStore } from "../src/settings.ts";
-import { defaultSource, GUEST_COMMAND_BYTES, parseSkillsConfig, resolveSkills, skillInstallScripts, skillsPrompt, type SkillSource } from "../src/skills.ts";
+import { defaultSource, GUEST_COMMAND_BYTES, parseSkillsConfig, resolveProjectSkills, resolveSkills, skillInstallScripts, skillsPrompt, type SkillSource } from "../src/skills.ts";
 import { LocalMachines } from "./local-guest.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-skills-"));
@@ -198,6 +198,55 @@ try {
   assert.equal(skillsPrompt({ sources: [defaults], skills: resolved.skills.filter(entry => entry.surface === "optchat"), skipped: [] }), null);
   console.log("ok: the prompt lists thread skills by name and description only");
 
+  // 3b. The primary repository's own .agents/skills at a commit: the same
+  //     checks, disabled ids left out, listed in place under /workspace,
+  //     hiding the installed skill of the same id, never installed; a
+  //     repository without them lists none and a bad folder never throws.
+  const own = repository("own", {
+    "README.md": "a project\n",
+    ".agents/setup": "#!/bin/sh\necho setup\n",
+    ".agents/skills/repo-skill/SKILL.md": skill("repo-skill", "This repository's <own> way.", "", "# repo-skill body\n"),
+    ".agents/skills/repo-skill/scripts/run": "#!/bin/sh\necho ran\n",
+    ".agents/skills/prove-it-works/SKILL.md": skill("prove-it-works", "The repository's way to check work."),
+    ".agents/skills/repo-manual/SKILL.md": skill("repo-manual", "Only by name.", "disable-model-invocation: true\n"),
+    ".agents/skills/repo-optchat/SKILL.md": skill("repo-optchat", "For OptChat.", "metadata:\n  cube:\n    surface: optchat\n"),
+    ".agents/skills/repo-off/SKILL.md": skill("repo-off", "Disabled by id."),
+    ".agents/skills/Bad/SKILL.md": skill("Bad", "Upper case."),
+    ".agents/skills/broken/SKILL.md": "---\nname: [unclosed\n---\n",
+    ".agents/skills/notes/README.md": "no SKILL.md\n",
+    ".agents/skills/linked/notes.md": "beside a symlinked SKILL.md\n",
+    "skills/elsewhere/SKILL.md": skill("elsewhere", "Not under .agents/skills."),
+  }, [".agents/setup", ".agents/skills/repo-skill/scripts/run"], { ".agents/skills/linked/SKILL.md": "../repo-skill/SKILL.md" });
+  const ownSkills = await resolveProjectSkills(hostGit, own.url, own.commit, { disabled: ["repo-off"] }, resolved.skills);
+  assert.deepEqual(ownSkills.project.map(({ name, description, surface, hidden, dir, commit, overrides }) => ({ name, description, surface, hidden, dir, commit, overrides })), [
+    { name: "prove-it-works", description: "The repository's way to check work.", surface: "thread", hidden: undefined, dir: ".agents/skills/prove-it-works", commit: own.commit,
+      overrides: { url: mine.url, commit: mine.commit } },
+    { name: "repo-manual", description: "Only by name.", surface: "thread", hidden: true, dir: ".agents/skills/repo-manual", commit: own.commit, overrides: undefined },
+    { name: "repo-optchat", description: "For OptChat.", surface: "optchat", hidden: undefined, dir: ".agents/skills/repo-optchat", commit: own.commit, overrides: undefined },
+    { name: "repo-skill", description: "This repository's <own> way.", surface: "thread", hidden: undefined, dir: ".agents/skills/repo-skill", commit: own.commit, overrides: undefined },
+  ]);
+  assert.deepEqual(ownSkills.skipped.map(entry => entry.dir), [".agents/skills/Bad", ".agents/skills/broken", ".agents/skills/linked"]);
+  assert.match(ownSkills.skipped[1]!.reason, /frontmatter is not YAML/);
+  assert.match(ownSkills.skipped[2]!.reason, /symlink/);
+  assert.deepEqual(await resolveProjectSkills(hostGit, defaults.url, defaults.commit, { disabled: [] }), { project: [], skipped: [] }, "no .agents/skills, none");
+  await assert.rejects(resolveProjectSkills(hostGit, own.url, "f".repeat(40), { disabled: [] }), /has no commit/);
+  const withOwn = { ...resolved, project: ownSkills.project };
+  const ownPrompt = skillsPrompt(withOwn)!;
+  assert.deepEqual([...ownPrompt.matchAll(/<location>(.*)<\/location>/g)].map(match => match[1]), [
+    "/home/agent/.cube/skills/opening-a-pull-request/SKILL.md",
+    "/workspace/.agents/skills/prove-it-works/SKILL.md",
+    "/workspace/.agents/skills/repo-skill/SKILL.md",
+  ], "sorted by id; the project's prove-it-works hides the installed one; hidden and optchat-only ones are not listed");
+  assert.match(ownPrompt, /This repository's &lt;own&gt; way\./);
+  assert.match(ownPrompt, /cube installed those under \/home\/agent\/\.cube\/skills .* Those under \/workspace\/\.agents\/skills are the repository's own/);
+  assert.doesNotMatch(ownPrompt, /repo-skill body/, "bodies are read on demand");
+  const onlyOwn = skillsPrompt({ sources: [], skills: [], skipped: [], project: ownSkills.project })!;
+  assert.doesNotMatch(onlyOwn, /cube installed/);
+  assert.match(onlyOwn, /^The following skills provide specialized instructions for specific tasks\. Those under \/workspace\/\.agents\/skills are the repository's own/);
+  assert.equal(skillsPrompt({ sources: [], skills: [], skipped: [], project: [] }), null);
+  assert.deepEqual(skillInstallScripts(withOwn), skillInstallScripts(resolved), "project skills are not installed");
+  console.log("ok: the repository's .agents/skills are checked, listed in place under /workspace, win their id and are never installed");
+
   // 4. The install commands, run by bash: every winner in its own folder,
   //    a link to ../prove-it-works reaching the override, modes kept, no
   //    symlink, and a reinstall replacing the previous set.
@@ -229,7 +278,12 @@ try {
   //    first model request lists the skills.
   const requests: string[] = [];
   const faux = fauxProvider({ tokensPerSecond: 100_000 });
-  faux.setResponses(Array.from({ length: 5 }, () => (request: unknown) => { requests.push(JSON.stringify(request)); return fauxAssistantMessage("done"); }));
+  // The first turn reads the project skill at the location its prompt lists.
+  faux.setResponses(Array.from({ length: 5 }, (_, index) => (request: unknown) => {
+    requests.push(JSON.stringify(request));
+    return index === 0 ? fauxAssistantMessage([fauxToolCall("read", { path: "/workspace/.agents/skills/repo-skill/SKILL.md" }, { id: "call-skill" })], { stopReason: "toolUse" })
+      : fauxAssistantMessage("done");
+  }));
   const models = createModels();
   models.setProvider(faux.provider);
   const machines = new LocalMachines(path.join(root, "machines"));
@@ -263,8 +317,11 @@ try {
     fs.mkdirSync(upstream);
     git(upstream, "init", "-q", "--initial-branch=main");
     fs.writeFileSync(path.join(upstream, "README"), "project\n");
-    git(upstream, "add", "README");
+    fs.mkdirSync(path.join(upstream, ".agents/skills/repo-skill"), { recursive: true });
+    fs.writeFileSync(path.join(upstream, ".agents/skills/repo-skill/SKILL.md"), skill("repo-skill", "This repository's own way.", "", "# repo-skill body\n"));
+    git(upstream, "add", "-A");
     git(upstream, "commit", "-qm", "project");
+    const projectCommit = git(upstream, "rev-parse", "HEAD");
     const project = (await call("/api/projects", "POST", { name: "skills", repositories: [{ url: upstream }] })).body.project as { id: string };
     const model = { provider: faux.getModel().provider, id: faux.getModel().id };
     const started = await call("/api/threads", "POST", { projectId: project.id, requestId: "one", text: "hello", model });
@@ -280,8 +337,16 @@ try {
       ["briefing-a-thread/SKILL.md", "opening-a-pull-request/SKILL.md", "prove-it-works/SKILL.md"]);
     assert.match(requests[0]!, /<name>opening-a-pull-request<\/name>/);
     assert.match(requests[0]!, /<name>prove-it-works<\/name>/);
-    assert.doesNotMatch(requests[0]!, /briefing-a-thread|manual-only|Verify first/);
-    console.log("ok: a Pi thread's allocation pins its skills, its machine has them and its prompt lists the thread skills");
+    assert.doesNotMatch(requests[0]!, /briefing-a-thread|manual-only|Verify first|repo-skill body/);
+    assert.deepEqual(allocation.skills!.project!.map(entry => [entry.name, entry.commit, entry.dir]), [["repo-skill", projectCommit, ".agents/skills/repo-skill"]]);
+    assert.match(requests[0]!, /<name>repo-skill<\/name>/);
+    assert.match(requests[0]!, /<location>\/workspace\/\.agents\/skills\/repo-skill\/SKILL\.md<\/location>/);
+    assert.ok(!fs.existsSync(path.join(machines.root, id, "home", ".cube", "skills", "repo-skill")), "a project skill is not installed");
+    for (const deadline = Date.now() + 30_000; requests.length < 2; await delay(25)) {
+      assert.ok(Date.now() < deadline, `the thread's second request is sent: ${app.conversations.error(id)}`);
+    }
+    assert.match(requests[1]!, /# repo-skill body/, "the agent's read tool returns the project skill from the checkout");
+    console.log("ok: a Pi thread's allocation pins its skills, its machine has them, its prompt lists the thread and repository skills and it reads one in place");
 
     // 6. A source the host still has but the machine cannot fetch fails the
     //    preparation visibly, and cube tries again.

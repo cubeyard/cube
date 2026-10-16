@@ -25,7 +25,7 @@ import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { SettingsStore, type SettingsView } from "./settings.ts";
-import { checkDefaultUpdate, DEFAULT_SKILL_SOURCE, defaultSource, parseSkillsConfig, resolveSkills, type SkillSource } from "./skills.ts";
+import { checkDefaultUpdate, DEFAULT_SKILL_SOURCE, defaultSource, parseSkillsConfig, resolveProjectSkills, resolveSkills, type SkillSource } from "./skills.ts";
 import { UpdateService } from "./update-service.ts";
 import { versionInfo } from "./version.ts";
 import { OptChat, OptChatEvents } from "./optchat.ts";
@@ -462,7 +462,14 @@ export async function createCubed(options: {
       }
     }));
     const saved = settings.get().skills;
-    const skills = await resolveSkills(git, defaultSource(options.skillSource ?? null, saved), saved).catch(error => {
+    const skills = await (async () => {
+      const installed = await resolveSkills(git, defaultSource(options.skillSource ?? null, saved), saved);
+      // The primary checkout's own .agents/skills, at the commit it starts from.
+      const primary = repositories[0];
+      if (!primary) return installed;
+      const own = await resolveProjectSkills(git, primary.url, primary.baseOid, saved, installed.skills);
+      return { ...installed, skipped: [...installed.skipped, ...own.skipped], project: own.project };
+    })().catch(error => {
       throw Object.assign(new Error(`resolving the skills failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
     });
     return { projectRevision: project.revision, repositories, skills };
