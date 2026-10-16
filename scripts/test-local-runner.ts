@@ -1,7 +1,8 @@
 /** `cubed runners init-local` with the real cube-runner: keygen, init with
  * the fake QEMU (no accelerator needed), the config cubed reads, and the
- * attempt to start the runner for enrollment. With a usable /dev/kvm the
- * runner starts and the enrollment is recorded; otherwise the command must
+ * attempt to start the runner for enrollment. With an accelerator the runner
+ * accepts (KVM on Linux: a usable /dev/kvm; HVF on macOS: kern.hv_support 1)
+ * it starts and the enrollment is recorded; without one the command must
  * leave the setup in place and say what to run once the runner is up. The
  * fake-runner orchestration is in packages/server/test/runner-enroll-test.ts.
  * node scripts/test-local-runner.ts target/debug/cube-runner */
@@ -35,7 +36,20 @@ try {
   fs.writeFileSync(image, header);
   const home = path.join(root, "cube");
   const state = path.join(root, "state");
-  const kvm = (() => { try { fs.accessSync("/dev/kvm", fs.constants.R_OK | fs.constants.W_OK); return process.platform === "linux"; } catch { return false; } })();
+  // An accelerator the runner accepts, by its own check
+  // (packages/node-transport/src/vm.rs, check_accelerator), with the
+  // platform it reports and the name in the ok line.
+  const accelerator = (() => {
+    if (process.platform === "linux") {
+      try { fs.accessSync("/dev/kvm", fs.constants.R_OK | fs.constants.W_OK); } catch { return undefined; }
+      return { platform: "linux-x86_64", name: "KVM" };
+    }
+    if (process.platform === "darwin") {
+      const hv = spawnSync("sysctl", ["-n", "kern.hv_support"], { encoding: "utf8" });
+      return hv.stdout?.trim() === "1" ? { platform: "macos-aarch64", name: "HVF" } : undefined;
+    }
+    return undefined;
+  })();
   const result = spawnSync(process.execPath, [path.join(repo, "packages/server/src/index.ts"), "runners", "init-local", "--state", state,
     "--image", image, "--home", home, "--listen", "127.0.0.1:47811", "--node-id", "node-local-test", "--qemu", path.join(bin, "qemu-system-fake"),
     "--firmware", path.join(bin, "firmware.fd"), "--max-vcpus", "2", "--max-memory-mib", "4096"],
@@ -58,12 +72,12 @@ try {
   assert.match(result.stdout, /image:\s+sha256 [0-9a-f]{64}/);
   const registry = new Registry(path.join(state, "registry.sqlite"));
   try {
-    if (kvm) {
+    if (accelerator) {
       assert.equal(result.status, 0, output);
-      assert.match(result.stdout, /enrolled in .*: cube-runner \d+\.\d+\.\d+, linux-x86_64, up to \d+ thread machine/);
+      assert.match(result.stdout, new RegExp(`enrolled in .*: cube-runner \\d+\\.\\d+\\.\\d+, ${accelerator.platform}, up to \\d+ thread machine`));
       assert.equal(registry.listRunners().length, 1);
       assert.equal(registry.listRunners()[0].nodeId, "node-local-test");
-      console.log("ok: init-local with the real cube-runner (KVM): initialized, started, enrolled, stopped");
+      console.log(`ok: init-local with the real cube-runner (${accelerator.name}): initialized, started, enrolled, stopped`);
     } else {
       assert.equal(result.status, 1, output);
       assert.match(result.stderr, /set up but not enrolled: the runner exited \(1\): .*(kvm|Hypervisor)/i);
