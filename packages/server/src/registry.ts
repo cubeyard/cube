@@ -277,7 +277,7 @@ export function runnerSlots(runner: Pick<Runner, "maxActiveVms">): number {
  * started on them by name (the user's decision of 2026-10-16: p3 only by
  * explicit choice). */
 export function pooledRunner(runner: Pick<Runner, "protocol" | "kind">): boolean {
-  return runner.protocol === 4 && runner.kind !== "host";
+  return runner.protocol === 4 && runner.kind !== "host" && runner.protocol !== 4;
 }
 
 /** Every open (unarchived) thread holds one machine slot on its runner from
