@@ -140,9 +140,11 @@ try {
   const create = (name: string) => call("/api/threads", "POST", { projectId: project.id, requestId: name, text: "hello", model, runner: "node-conc" });
   const [a, b] = (await Promise.all([create("a"), create("b")])).map(response => { assert.equal(response.status, 200, JSON.stringify(response.json)); return response.json.id as string; });
   const refused = await create("c");
-  assert.ok(refused.status >= 400 && /no free thread machine/.test(refused.json.error), JSON.stringify(refused.json));
+  // The named runner's own bound refuses the third thread (namedRunner), not the pool's.
+  assert.ok(refused.status >= 400 && /^runner node-conc has no free thread machine \(2 of 2 in use\)/.test(refused.json.error), JSON.stringify(refused.json));
   const projects = (await api("/api/projects")).projects;
-  assert.deepEqual(projects[0].runnerCapacity.slots, { free: 0, total: 2 });
+  // C-1: the pool is the berth vm runners; a protocol-3 runner adds nothing to it, full or idle. Its own slots: /api/runners.
+  assert.deepEqual([projects[0].runnerCapacity.slots, (await api("/api/runners")).runners[0].activeThreads, (await api("/api/runners")).runners[0].maxActiveVms], [{ free: 0, total: 0 }, 2, 2]);
   const booting = Date.now();
   await Promise.all([ready(a), ready(b)]);
   const both = await runnerStatus();
@@ -170,7 +172,7 @@ try {
   await api(`/api/threads/${b}`, "DELETE");
   await api(`/api/threads/${c.json.id}`, "DELETE");
   const idle = await runnerStatus();
-  assert.deepEqual([idle.health.activeVms, idle.activeThreads, (await api("/api/projects")).projects[0].runnerCapacity.slots], [0, 0, { free: 2, total: 2 }]);
+  assert.deepEqual([idle.health.activeVms, idle.activeThreads, idle.maxActiveVms, (await api("/api/projects")).projects[0].runnerCapacity.slots], [0, 0, 2, { free: 0, total: 0 }]);
   log(`4: archive freed a slot for a third thread; all slots returned (runner retains ${idle.health.retainedVms} disks)`);
 
   // 5. Stop everything this run started.
