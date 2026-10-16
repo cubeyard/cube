@@ -69,9 +69,13 @@ Node ≥26, pnpm pinned in package.json, Rust pinned in rust-toolchain.toml.
 `bash scripts/setup-dev.sh` bootstraps a Linux development account. Run
 `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm build`. New offline Node tests
 belong in `scripts/test-offline.sh`. Runner, gateway and VM changes also need
+`scripts/test-node-transport.sh`'s real-VM runs: on Linux with KVM
 `CUBE_TEST_VM_IMAGE=<debian-13-genericcloud.qcow2> CUBE_TEST_VM=required bash
-scripts/test-node-transport.sh` on Linux with KVM; mocks are not runner
-acceptance.
+scripts/test-node-transport.sh` for protocol 3, and for `berth vm` also
+`CUBE_TEST_BERTH_VM=required` with the `CUBE_TEST_BERTH_*` paths
+(DEVELOPING.md); on macOS with HVF the `berth vm` part only, without
+`CUBE_TEST_VM=required` (protocol 3 is skipped there by design). Mocks are not
+runner acceptance.
 keel kernel changes need `packages/keel/kernel/build.sh` for both
 architectures and a boot under KVM and HVF.
 Inspect rendered UI at desktop/phone sizes for appearance changes; behavior
