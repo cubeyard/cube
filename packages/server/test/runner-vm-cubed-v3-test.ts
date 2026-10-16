@@ -14,10 +14,11 @@
  *       cubed on the same state and port reattaches to the same guest
  *       operation (the machine is not rebooted), the command ran once and
  *       its result came back by the key;
- *   (b) the supervised cube-gateway SIGKILLed mid-push of a 200 MiB blob
- *       through berth's credential stream: either the push happened once or
- *       it was refused by the credential route and the ref did not move,
- *       never two; the gateway is restarted and a fresh push succeeds;
+ *   (b) the supervised cube-gateway SIGKILLed while a 200 MiB push streams
+ *       through berth's credential stream (once the fake GitHub has 8 MiB of
+ *       the pack's body): either the push happened once or it was refused or
+ *       cut and the ref did not move, never two; the gateway is restarted
+ *       and a fresh push succeeds;
  *   (c) the command ends the guest's own cube-agent: the agent comes back
  *       (a new session, the same boot), adopts the running command, which
  *       ran once, and its result came back by the key.
@@ -290,20 +291,31 @@ try {
   const [baseB, commitB] = prepared.split("\n").slice(-2) as [string, string];
   assert.equal(git(github.repository, "rev-parse", "v3-push"), baseB, `the branch starts at ${baseB} (main was ${before})`);
   const receivesBefore = github.seen.filter(seen => seen.path.endsWith("/git-receive-pack")).length;
-  await api(`/api/threads/${id}/prompt`, "POST", { text: tool(marked("b", "git push origin HEAD:refs/heads/v3-push > v3-b.push 2>&1; rc=$?",
+  const bodiesBefore = github.bodies.length;
+  // Compression off: random bytes do not shrink, and the pack is streamed at once instead of after a long preparation.
+  await api(`/api/threads/${id}/prompt`, "POST", { text: tool(marked("b", "git -c pack.compression=0 -c core.compression=0 push origin HEAD:refs/heads/v3-push > v3-b.push 2>&1; rc=$?",
     "[ $rc = 0 ] && echo once >> effect-b; cat v3-b.push; echo \"push-rc $rc\""), 600000), requestId: "v3-proxy" });
   await toolCallSeen(id, "v3-b.log");
-  await delay(2000);
+  // The kill's marker is the fake GitHub's: the pack's receive-pack POST with >= 8 MiB of its body received (git's small probe POST stays below).
+  const UPLOAD_MARK = 8 * 1024 * 1024;
+  const uploadDeadline = now() + 300000;
+  let upload: (typeof github.bodies)[number] | undefined;
+  while (!(upload = github.bodies.slice(bodiesBefore).find(body => body.method === "POST" && body.path.endsWith("/git-receive-pack") && body.bytes >= UPLOAD_MARK))) {
+    if (now() > uploadDeadline) throw new Error(`timed out: the receive-pack POST reaching ${UPLOAD_MARK} bytes; bodies ${JSON.stringify(github.bodies.slice(bodiesBefore))}`);
+    await delay(20);
+  }
   const proxies = gatewayPids();
   assert.equal(proxies.length, 1, `one supervised gateway: ${proxies.join(", ")}`);
   const tKillB = now();
   process.kill(Number(proxies[0]), "SIGKILL");
+  const [bytesAtKill, endedAtKill] = [upload.bytes, upload.ended];
+  assert.ok(!endedAtKill, `scenario (b): the upload was over before the kill (${bytesAtKill} bytes, ended): not in flight`);
   const newProxy = await until("a new gateway pid and /api/health gateway ready", 60000, async () => {
     const pids = gatewayPids();
     return pids.length === 1 && pids[0] !== proxies[0] && (await api("/api/health")).gateway === "ready" ? pids[0] : undefined;
   });
   const tBackB = now();
-  note(`(b) gateway ${proxies[0]} SIGKILLed mid-push; gateway ${newProxy} ready`);
+  note(`(b) gateway ${proxies[0]} SIGKILLed with the pack's POST at ${bytesAtKill} bytes; gateway ${newProxy} ready`);
   const settledB = await settled(id, "v3-proxy", 900000);
   const pushRc = Number(lastText(settledB).match(/push-rc (\d+)/)?.[1] ?? NaN);
   const pushedOnce = pushRc === 0;
@@ -311,17 +323,21 @@ try {
   const remote = git(github.repository, "rev-parse", "v3-push");
   const seenFromGuest = (await bash(id, "git ls-remote origin refs/heads/v3-push | cut -f1")).split("\n").at(-1);
   const receives = github.seen.filter(seen => seen.path.endsWith("/git-receive-pack")).length - receivesBefore;
+  const posts = github.bodies.slice(bodiesBefore).filter(body => body.path.endsWith("/git-receive-pack")).map(body => `${body.method} ${body.bytes} B${body.ended ? "" : " (cut)"}`);
   if (pushedOnce) {
     assert.equal(remote, commitB, "scenario (b): the push reached the fake GitHub");
     assert.equal(git(github.repository, "rev-parse", "v3-push^"), baseB, "scenario (b): the ref advanced by exactly one commit");
     assert.equal(seenFromGuest, commitB, "scenario (b): the guest's ls-remote shows the pushed commit");
   } else {
-    assert.match(b.answer, /credential_proxy|the credential proxy is not running|does not answer/, `scenario (b): the push failed (rc ${pushRc}) without the credential refusal: ${JSON.stringify(b.answer)}`);
-    assert.equal(remote, baseB, "scenario (b): a refused push left the ref where it was");
+    // The credential route's refusal, or what a transfer cut under git looks like.
+    assert.match(b.answer, /credential_proxy|the credential proxy is not running|does not answer|RPC failed|unexpected disconnect|curl 5[256]|the remote end hung up|transfer closed/,
+      `scenario (b): the push failed (rc ${pushRc}) without the credential refusal or a cut transfer: ${JSON.stringify(b.answer)}`);
+    assert.equal(remote, baseB, "scenario (b): a refused or cut push left the ref where it was");
     assert.equal(seenFromGuest, baseB, "scenario (b): the guest's ls-remote shows the ref unmoved");
   }
-  note(`(b) start ${b.start} < kill ${tKillB} < done ${b.done} (back ${tBackB}); outcome: ${pushedOnce ? `pushed once (${baseB.slice(0, 8)} -> ${commitB.slice(0, 8)})` : `refused (rc ${pushRc}), ref unmoved at ${baseB.slice(0, 8)}`}; `
-    + `${receives} receive-pack request(s) at the fake; push output: ${JSON.stringify(b.answer)}`);
+  note(`(b) start ${b.start} < kill ${tKillB} (the pack's POST at ${bytesAtKill} bytes, in flight) < done ${b.done} (back ${tBackB}); `
+    + `outcome: ${pushedOnce ? `pushed once (${baseB.slice(0, 8)} -> ${commitB.slice(0, 8)})` : `failed (rc ${pushRc}), ref unmoved at ${baseB.slice(0, 8)}`}; `
+    + `receive-pack POSTs at the fake: ${posts.join(", ")} (${receives} ended); push output: ${JSON.stringify(b.answer)}`);
   const fresh = await bash(id, "set -e; head -c 1048576 /dev/urandom > v3-b2.bin; git add v3-b2.bin; git -c user.name=v3 -c user.email=v3@example.invalid commit -qm v3-b2; "
     + "git push -q origin HEAD:refs/heads/v3-push-2; git rev-parse HEAD", 300000);
   assert.equal(git(github.repository, "rev-parse", "v3-push-2"), fresh.split("\n").at(-1), "scenario (b): a fresh push after the restart");
