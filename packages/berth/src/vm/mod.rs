@@ -266,7 +266,9 @@ impl Mark {
 
 impl Drop for Mark {
     fn drop(&mut self) {
+        // CONTROL (never merged): the mark is never cleared.
         if let Ok(mut state) = self.runner.state.lock()
+            && false
             && let Some(entry) = state.machines.get_mut(&self.id)
             && entry
                 .publishing
