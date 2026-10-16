@@ -26,13 +26,22 @@ const project = (id: string): Project => ({ id, name: id, status: "ready", error
 const model = { provider: "fixture", id: "selected" };
 const runner = (id: string, maxActiveVms?: number) => ({ nodeId: `node-${id}`, environmentId: 1, threadId: id,
   configPath: `/private/${id}.json`, configHash: id, ...(maxActiveVms ? { maxActiveVms } : {}) });
+/** A berth vm: the pool is the berth vm runners (pooledRunner). */
+const pooled = (id: string, maxActiveVms?: number) => ({ ...runner(id, maxActiveVms), protocol: 4 as const, kind: "vm" as const });
 const archive = (registry: Registry, id: string) => { registry.beginRelease(id); registry.finishRelease(id); };
+/** A thread the pool placed on a protocol-3 runner before protocol 3
+ * needed a runner's name: unpinned. */
+const legacy = (registry: Registry, thread: Thread): Thread => {
+  const { pinned: _, ...unpinned } = thread;
+  registry.saveThread(unpinned);
+  return unpinned;
+};
 
 try {
   // --- registry ---
   const registry = new Registry(path.join(root, "registry.sqlite"));
   registry.saveProject(project("p"));
-  registry.enrollRunner(runner("wide", 2));
+  registry.enrollRunner(pooled("wide", 2));
   const status = () => registry.runnerStatuses().find(row => row.id === "wide")!;
   const slots = () => { const { free, total } = registry.runnerSlots(); return { free, total }; };
   assert.deepEqual(slots(), { free: 2, total: 2 });
@@ -60,7 +69,7 @@ try {
   assert.equal(c.runnerId, "wide");
 
   // Spread: a second runner takes the next thread; one with a failed machine comes last.
-  registry.enrollRunner(runner("other", 2));
+  registry.enrollRunner(pooled("other", 2));
   const d = registry.createThread("p", "d", model, "d");
   assert.equal(d.runnerId, "other", "the least loaded runner is chosen");
   archive(registry, a.id); archive(registry, c.id);
@@ -78,7 +87,7 @@ try {
 
   // A runner without an advertised bound (before 0.7.0) hosts one machine, as always.
   registry.saveProject(project("q"));
-  registry.enrollRunner(runner("single"));
+  registry.enrollRunner(pooled("single"));
   // Both answered ready lately; "other" holds a failed machine, so it comes last.
   registry.recordRunnerProbe("single", { health });
   const only = registry.createThread("q", "only", model, "only");
@@ -92,7 +101,7 @@ try {
   const raceFile = path.join(root, "race.sqlite");
   const race = new Registry(raceFile);
   for (const id of ["r1", "r2", "r3"]) race.saveProject(project(id));
-  race.enrollRunner(runner("raced", 2));
+  race.enrollRunner(pooled("raced", 2));
   race.close();
   const source = `
     const { parentPort, workerData } = require("node:worker_threads");
@@ -123,15 +132,15 @@ try {
   assert.equal(raced.listThreads().length, 2);
   raced.close();
 
-  // --- a full runner: an unbound thread moves to a runner with room ---
+  // --- a full protocol-3 runner: an unbound legacy thread moves to a protocol-3 runner with room ---
   {
     const file = path.join(root, "relocate.sqlite");
     const moving = new Registry(file);
     moving.saveProject(project("m"));
     moving.enrollRunner(runner("full", 2));
     moving.enrollRunner(runner("roomy", 1));
-    const first = moving.createThread("m", "first", model, "first");
-    assert.equal(first.runnerId, "full", "enrollment order breaks the tie");
+    const first = legacy(moving, moving.createThread("m", "first", model, "first", "pi", undefined, { runnerId: "full" }));
+    assert.equal(first.runnerId, "full");
     const calls: string[] = [];
     const vmRecord = (ref: { threadId: string; vmId: string }, state: string) => ({ vmId: ref.vmId, threadId: ref.threadId, state, interrupted: false, diskBytes: 0 });
     const fake = (name: string) => ({
@@ -159,7 +168,7 @@ try {
     assert.deepEqual(moving.runnerStatuses().map(row => [row.id, row.activeThreads]), [["full", 0], ["roomy", 1]]);
 
     // An opened workspace (its lease store) keys operations by the runner: it stays.
-    const third = moving.createThread("m", "third", model, "third");
+    const third = legacy(moving, moving.createThread("m", "third", model, "third", "pi", undefined, { runnerId: "full" }));
     assert.equal(third.runnerId, "full");
     fs.mkdirSync(path.join(root, "relocate-threads", third.id), { recursive: true });
     fs.writeFileSync(path.join(root, "relocate-threads", third.id, "lease.sqlite"), "");
@@ -169,7 +178,7 @@ try {
     assert.equal(moving.getThread(third.id)!.runnerId, "full");
 
     // Bound to its runner (the agent's storage exists): it stays and says why.
-    const second = moving.createThread("m", "second", model, "second");
+    const second = legacy(moving, moving.createThread("m", "second", model, "second", "pi", undefined, { runnerId: "full" }));
     assert.equal(second.runnerId, "full");
     fs.mkdirSync(path.join(root, "relocate-threads", second.id), { recursive: true });
     fs.writeFileSync(path.join(root, "relocate-threads", second.id, "pi.sqlite"), "");
@@ -203,7 +212,7 @@ try {
   }
   const machines = new FlakyMachines(path.join(root, "machines"));
   const app = await createCubed({ state: path.join(root, "state"), models, machines, claude: null, gateway: null });
-  app.registry.enrollRunner(runner("shared", 2));
+  app.registry.enrollRunner(pooled("shared", 2));
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
   const address = app.server.address();
   assert(address && typeof address === "object");

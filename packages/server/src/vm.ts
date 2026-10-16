@@ -340,7 +340,8 @@ export class ThreadVms implements ThreadMachines, EgressVms {
           const why = unusableReason(error);
           const moved = this.options.registry.relocateThread(thread.id, tried);
           if (!moved) {
-            const text = `${this.nodeId(thread.runnerId)} ${why}, and no other runner with a free thread machine is ready`;
+            const text = `${this.nodeId(thread.runnerId)} ${why}${thread.pinned ? "; this thread was started on it by name and stays there"
+              : ", and no other runner with a free thread machine is ready"}`;
             if (error instanceof RunnerUnusable && !error.transient) throw new Error(`runner ${text}`, { cause: error });
             throw new RunnerWait(`waiting for a runner: ${text}; cube tries again`, { cause: error });
           }

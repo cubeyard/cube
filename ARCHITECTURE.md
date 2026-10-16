@@ -634,9 +634,17 @@ machine at the thread's current epoch and carries the HTTP/1.1 exchange
 unread to cube-gateway's credential proxy (`--credential`, the same
 process), which substitutes the token, as for p3, and turns it back into
 the placeholder in the answer; the token never reaches cubed's Node
-process, the runner or the guest. cubed runs a thread on `berth vm` only
-when it was started there by name (C-a; the pool takes no protocol-4
-runner until R-3): `RunnerMachines` creates its machine with its size and
+process, the runner or the guest. The pool is the `berth vm` runners
+(registry.ts `pooledRunner`; the user's decision of 2026-10-16): a thread
+that names no runner goes to one of them, by fitness, a failed machine
+last, then load, and is refused when none has a free slot, never placed on
+a protocol-3 or host runner; while its `berth vm` is down it waits there.
+A protocol-3 runner takes a thread only by name (OptChat `spawn` with
+`runner`, or `runner` in `POST /api/threads`), pinned. A thread never
+moves between protocols: `relocateThread` moves only an unpinned thread on
+a protocol-3 runner (one placed before this rule), and only to another
+protocol-3 runner. On it,
+`RunnerMachines` creates the thread's machine with its size and
 starts it, every time, with its boot documents (`hostname`, `env` with the
 placeholders, the project's `hooks/pre-setup` and `hooks/pre-resume`;
 vm-seed.ts `bootDocuments`) and its policy (`policyFor`, default and lease

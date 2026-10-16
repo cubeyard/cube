@@ -199,8 +199,8 @@ try {
   class TestVms extends ThreadVms { override guest(_thread: Thread) { return guest as never; } }
   const vms = new TestVms({ registry, threads: path.join(root, "threads"), run: path.join(root, "run"), gateway: gateway as unknown as GatewaySupervisor,
     templates: { enabled: false, ttlMs: 3600000 }, runnerClient: () => client as unknown as IrohRunnerClient, diagnoseTimeoutMs: 300, log: silent as never });
-  const created = registry.createThread("p", "r1", { provider: "faux", id: "faux" }, "hello");
-  const other = registry.createThread("p", "r2", { provider: "faux", id: "faux" }, "other");
+  const created = registry.createThread("p", "r1", { provider: "faux", id: "faux" }, "hello", "pi", undefined, { runnerId: "mac" });
+  const other = registry.createThread("p", "r2", { provider: "faux", id: "faux" }, "other", "pi", undefined, { runnerId: "mac" });
   const allocated = (thread: Thread) => registry.markPlacement(thread.id, thread.runnerId, ["provisional"], "allocated");
   {
     const thread = registry.getThread(created.id)!;

@@ -65,7 +65,7 @@ async function idle(id: string) {
 try {
   for (let index = 0; index < 5; index++) {
     app.registry.enrollRunner({ nodeId: `node-${index}`, threadId: `runner-${index}`, environmentId: index + 1,
-      configPath: `/private/runner-${index}.json`, configHash: `hash-${index}` });
+      configPath: `/private/runner-${index}.json`, configHash: `hash-${index}`, protocol: 4, kind: "vm" });
   }
   const project = (await (await post("/api/projects", { name: "pinned", repositories: [{ url: primary, base: "develop" }, { url: reference, checkoutName: "lib" }] })).json()).project;
   assert.equal(project.status, "ready", JSON.stringify(project));

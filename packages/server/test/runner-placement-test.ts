@@ -121,13 +121,16 @@ const gateway = { binary: "/bin/false", unavailable: null, control: "/nonexisten
   ensureNetwork: async () => {}, ready: async () => ({ client: { detach: async () => {} }, hello: { peer: "0".repeat(64), caPem: "" } }) };
 
 /** A registry, runners and ThreadVms over them. */
-function world(name: string, runners: Array<{ name: string; max: number }>) {
+/** Runners with fakes. `berthVm`: the runners are enrolled as berth vms,
+ * the pool, for placement by the registry alone (no ThreadVms). */
+function world(name: string, runners: Array<{ name: string; max: number }>, berthVm = false) {
   const file = path.join(root, `${name}.sqlite`);
   const registry = new Registry(file);
   registry.saveProject({ id: "p", name: "p", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
   const fakes = new Map<string, FakeRunner>();
   const enroll = (spec: { name: string; max: number }) => {
-    registry.enrollRunner({ nodeId: `node-${spec.name}`, threadId: spec.name, environmentId: fakes.size + 1, configPath: `/private/${spec.name}.json`, configHash: spec.name, maxActiveVms: spec.max });
+    registry.enrollRunner({ nodeId: `node-${spec.name}`, threadId: spec.name, environmentId: fakes.size + 1, configPath: `/private/${spec.name}.json`, configHash: spec.name, maxActiveVms: spec.max,
+      ...(berthVm ? { protocol: 4 as const, kind: "vm" as const } : {}) });
     fakes.set(spec.name, new FakeRunner(spec.name, spec.max));
   };
   runners.forEach(enroll);
@@ -135,7 +138,16 @@ function world(name: string, runners: Array<{ name: string; max: number }>) {
     gateway: gateway as unknown as GatewaySupervisor, sizes: { vcpus: 1, memoryMiB: 1024, diskGiB: 8 }, templates: { enabled: templates, ttlMs: 3600000 },
     runnerClient: admission => fakes.get(admission.configHash)!.client() as unknown as IrohRunnerClient, log: silent });
   let requests = 0;
-  const create = () => registry.createThread("p", `r${++requests}`, model, "hello");
+  /** A thread that names no runner: on berth vms the pool places it; on
+   * protocol-3 runners it is a legacy thread, one the pool placed on
+   * `runner` (the first enrolled unless named) before protocol 3 needed a
+   * runner's name: unpinned, so it may still move to another protocol-3 runner. */
+  const create = (runner?: string) => {
+    if (berthVm) return registry.createThread("p", `r${++requests}`, model, "hello");
+    const { pinned: _, ...legacy } = registry.createThread("p", `r${++requests}`, model, "hello", "pi", undefined, { runnerId: runner ?? [...fakes.keys()][0]! });
+    registry.saveThread(legacy);
+    return legacy as Thread;
+  };
   const get = (id: string) => registry.getThread(id)!;
   /** Each machine exists on at most one runner and runs only there; cubed's
    * slots are exactly its open threads. */
@@ -173,7 +185,7 @@ try {
     assert.equal(draining.fitness, "down");
 
     // An empty runner never heard from does not beat a busier one that answered ready.
-    const w = world("choose", [{ name: "mac", max: 4 }, { name: "linux", max: 4 }]);
+    const w = world("choose", [{ name: "mac", max: 4 }, { name: "linux", max: 4 }], true);
     w.registry.recordRunnerProbe("linux", { health: ready(4) });
     const busy = w.create();
     assert.equal(busy.runnerId, "linux");
@@ -192,7 +204,7 @@ try {
   {
     const w = world("unreachable", [{ name: "mac", max: 2 }, { name: "linux", max: 2 }]);
     const thread = w.create();
-    assert.equal(thread.runnerId, "mac", "neither was asked yet: enrollment order");
+    assert.equal(thread.runnerId, "mac");
     w.fakes.get("mac")!.down = true;
     const vms = w.vms();
     await assert.rejects(vms.start(thread), /fixture stops here/);
@@ -206,7 +218,7 @@ try {
     w.invariants();
 
     // The next thread does not ask the failed runner again before its retry is due.
-    const next = w.create();
+    const next = w.create("linux");
     assert.equal(next.runnerId, "linux");
     w.fakes.get("mac")!.calls.length = 0;
     w.fakes.get("linux")!.calls.length = 0;
@@ -244,7 +256,7 @@ try {
 
     w.fakes.get("b")!.lifecycle = "faulted";
     w.registry.recordRunnerProbe("b", { health: ready(2) }, Date.now() - RUNNER_FRESH_MS - 1000);
-    const second = w.create();
+    const second = w.create("b");
     assert.equal(second.runnerId, "b");
     await assert.rejects(vms.start(second), (error: Error) => error instanceof RunnerWait
       && /waiting for a runner: node-b is faulted, and no other runner with a free thread machine is ready/.test(error.message));
@@ -520,39 +532,72 @@ try {
     console.log("ok: a started (or allocated) thread whose runner is lost waits for it and never moves");
   }
 
-  // --- a protocol-4 VM runner (berth vm) is not in the pool (C-a decision 1, until R-3) ---
+  // --- the pool is the berth vm runners; p3 only by name (the user's decision of 2026-10-16); never between protocols ---
   {
-    const w = world("berth-vm", []);
-    // Enrolled first, empty, ready and wide: it would win every pool choice.
-    w.registry.enrollRunner({ nodeId: "node-berth", threadId: "berth", environmentId: 9, configPath: "/private/berth.json", configHash: "berth",
-      maxActiveVms: 8, protocol: 4, kind: "vm" });
-    w.registry.recordRunnerProbe("berth", { health: { ...ready(8), protocolVersion: 4, kind: "vm" } });
-    w.enroll({ name: "a", max: 2 });
-    assert.deepEqual(w.registry.runnerSlots(), { free: 2, total: 2, runners: 1 }, "the berth vm adds nothing to the pool");
-    assert.deepEqual(w.registry.availableRunners().map(runner => runner.threadId), ["a"]);
-    const thread = w.create();
-    assert.equal(thread.runnerId, "a", "a thread that names no runner never lands on a berth vm");
-    // Its runner is down before anything was sent: the only other runner with
-    // a free slot is the berth vm, so the thread waits instead of moving there.
+    const w = world("berth-vm", [{ name: "a", max: 1 }]);
+    const berthVm = (id: string, max: number, environmentId: number) => {
+      w.registry.enrollRunner({ nodeId: `node-${id}`, threadId: id, environmentId, configPath: `/private/${id}.json`, configHash: id,
+        maxActiveVms: max, protocol: 4, kind: "vm" });
+      w.registry.recordRunnerProbe(id, { health: { ...ready(max), protocolVersion: 4, kind: "vm" } });
+    };
+    const unnamed = (request: string) => w.registry.createThread("p", request, model, "x");
+    w.registry.recordRunnerProbe("a", { health: ready(1) });
+    // No berth vm enrolled: a thread that names no runner is refused, though a ready p3 runner has a free slot.
+    assert.deepEqual(w.registry.runnerSlots(), { free: 0, total: 0, runners: 0 }, "a protocol-3 runner adds nothing to the pool");
+    assert.throws(() => unnamed("no-berth"), /no berth vm runner in the global runner pool: start the thread on a runner by name/);
+    assert.equal(w.registry.listThreads().length, 0);
+    // A legacy thread: placed on p3 by the pool before protocol 3 needed a name.
+    const p3 = w.create();
+    assert.deepEqual([p3.runnerId, p3.pinned], ["a", undefined]);
+    berthVm("berth", 2, 9);
+    assert.deepEqual(w.registry.runnerSlots(), { free: 2, total: 2, runners: 1 }, "the berth vm is the pool");
+    assert.deepEqual(w.registry.availableRunners().map(runner => runner.threadId), ["berth"]);
+    const pooled = unnamed("pooled");
+    assert.deepEqual([pooled.runnerId, pooled.pinned, placement(pooled)], ["berth", undefined, "provisional"]);
+    // The p3 thread's runner is down before anything was sent: the berth vm
+    // has a free slot, but a p3 thread only moves to another p3 runner, so it waits.
     w.fakes.get("a")!.down = true;
     const vms = w.vms();
-    await assert.rejects(vms.start(thread), (error: Error) => error instanceof RunnerWait);
-    assert.equal(w.get(thread.id).runnerId, "a");
-    assert.equal(placement(w.get(thread.id)), "provisional");
-    assert.equal(w.registry.relocateThread(thread.id), null, "relocateThread never chooses a berth vm");
-    // Only by name.
+    await assert.rejects(vms.start(p3), (error: Error) => error instanceof RunnerWait && /no other runner with a free thread machine is ready/.test(error.message));
+    assert.equal(w.get(p3.id).runnerId, "a");
+    assert.equal(placement(w.get(p3.id)), "provisional");
+    assert.equal(w.registry.relocateThread(p3.id), null, "relocateThread never gives a p3 thread a berth vm");
+    // Started on the berth vm by name: pinned. Then the pool is full: neither
+    // a free host runner nor a ready protocol-3 runner with free slots takes the thread.
     const named = w.registry.createThread("p", "named", model, "x", "pi", undefined, { runnerId: "berth" });
-    assert.equal(named.runnerId, "berth");
-    assert.equal(named.pinned, true);
-    // A pool runner recovers: the waiting thread starts there, and a new one goes there too.
-    w.fakes.get("a")!.down = false;
-    w.registry.recordRunnerProbe("a", { health: ready(2) });
-    await assert.rejects(vms.start(w.get(thread.id)), /fixture stops here/);
-    assert.equal(w.create().runnerId, "a");
-    assert.throws(() => w.create(), /no free thread machine in the global runner pool/, "a full pool is full even beside a free berth vm");
+    assert.deepEqual([named.runnerId, named.pinned], ["berth", true]);
+    w.registry.enrollRunner({ nodeId: "node-host", threadId: "host", environmentId: 10, configPath: "/private/host.json", configHash: "host",
+      maxActiveVms: 4, protocol: 4, kind: "host" });
+    w.enroll({ name: "b", max: 3 });
+    w.registry.recordRunnerProbe("b", { health: ready(3) });
+    assert.throws(() => unnamed("full"), /no free thread machine in the global runner pool \(its berth vm runners\)/, "a full pool never falls back to p3 or a host runner");
+    // A protocol-3 runner by name: pinned there.
+    const onB = w.registry.createThread("p", "on-b", model, "x", "pi", undefined, { runnerId: w.registry.namedRunnerId("node-b") });
+    assert.deepEqual([onB.runnerId, onB.pinned], ["b", true]);
+    // The berth vm is down with a free slot: the thread is placed there and
+    // waits for it (runner-machines.ts), not on the ready p3 runner.
+    w.registry.beginRelease(named.id);
+    w.registry.finishRelease(named.id);
+    w.registry.recordRunnerProbe("berth", { error: "NODE_UNAVAILABLE" });
+    assert.equal(w.registry.runnerFitness("berth")!.fitness, "down");
+    const waiting = unnamed("down");
+    assert.deepEqual([waiting.runnerId, waiting.pinned], ["berth", undefined], "an unavailable berth vm never falls back to p3");
+    // Another berth vm, ready with a free slot: the thread on the berth vm never
+    // moves; the legacy p3 thread may move to a p3 runner with room.
+    berthVm("berth2", 2, 11);
+    assert.equal(w.registry.relocateThread(pooled.id), null, "a thread on a berth vm never moves, to p3 or to another berth vm");
+    assert.equal(w.get(pooled.id).runnerId, "berth");
+    assert.equal(w.registry.relocateThread(p3.id), "b", "a legacy p3 thread moves only to another p3 runner");
+    assert.equal(w.registry.relocateThread(onB.id), null, "a p3 thread started by name never moves");
+    // Its runner down: it waits there and says why.
+    w.fakes.get("b")!.down = true;
+    await assert.rejects(vms.start(onB), (error: Error) => error instanceof RunnerWait
+      && /^waiting for a runner: node-b does not answer; this thread was started on it by name and stays there; cube tries again$/.test(error.message));
+    assert.equal(w.get(onB.id).runnerId, "b");
+    w.invariants();
     await vms.close();
     w.registry.close();
-    console.log("ok: a protocol-4 VM runner is not in the pool: no thread lands or moves there unless started on it by name");
+    console.log("ok: the pool is the berth vm runners: no p3 or host fallback when there is none, when it is full or down; p3 by name, pinned; never between protocols");
   }
 
   // --- every runner down, then one recovers ---
@@ -599,7 +644,7 @@ try {
     try {
       app.registry.enrollRunner({ nodeId: "node-a", threadId: "a", environmentId: 1, configPath: "/private/a.json", configHash: "a" });
       app.registry.saveProject({ id: "p", name: "p", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
-      const thread = app.registry.createThread("p", "view", { provider: faux.getModel().provider, id: faux.getModel().id }, "hello");
+      const thread = app.registry.createThread("p", "view", { provider: faux.getModel().provider, id: faux.getModel().id }, "hello", "pi", undefined, { runnerId: "a" });
       await app.conversations.activate(thread.id);
       assert.equal(app.conversations.error(thread.id), null, "a wait is not a failure");
       assert.match(app.conversations.waiting(thread.id)!, /node-a does not answer/);

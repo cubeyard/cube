@@ -35,7 +35,7 @@ export async function startStartupHost() {
   models.setProvider(faux.provider);
   const machines = new LocalMachines(path.join(root, "machines"));
   const app = await createCubed({ state: path.join(root, "state"), models, machines, claude: null, gateway: null });
-  app.registry.enrollRunner({ nodeId: "node-browser", environmentId: 1, threadId: "runner-browser", configPath: "/private/browser.json", configHash: "browser", maxActiveVms: 2 });
+  app.registry.enrollRunner({ nodeId: "node-browser", environmentId: 1, threadId: "runner-browser", configPath: "/private/browser.json", configHash: "browser", maxActiveVms: 2, protocol: 4, kind: "vm" });
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   await fetch(`${url}/api/onboarding`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });

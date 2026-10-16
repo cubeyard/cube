@@ -63,12 +63,22 @@ try {
   assert.equal((await write("/api/threads", input)).status, 409);
   app.registry.enrollRunner({ nodeId: "broken-node", threadId: "broken-thread", environmentId: 1,
     configPath: path.join(state, "absent.json"), configHash: "missing" });
-  const accepted = await write("/api/threads", input);
+  // A protocol-3 runner takes a thread only by name (the user's decision of 2026-10-16).
+  const unnamed = await write("/api/threads", input);
+  assert.equal(unnamed.status, 409);
+  assert.match((await unnamed.json()).error, /no berth vm runner in the global runner pool: start the thread on a runner by name/);
+  const unknown = await write("/api/threads", { ...input, runner: "node-nobody" });
+  assert.equal(unknown.status, 409);
+  assert.match((await unknown.json()).error, /no runner node-nobody/);
+  assert.equal(app.registry.listThreads().length, 0, "a refused start leaves no thread");
+  const named = { ...input, runner: "broken-node" };
+  const accepted = await write("/api/threads", named);
   assert.equal(accepted.status, 200, "activation failure must not lose accepted allocation");
   const acceptedBody = await accepted.json();
   assert.equal(typeof acceptedBody.id, "string");
   assert.notEqual(acceptedBody.id, "broken-thread");
-  assert.deepEqual(await (await write("/api/threads", input)).json(), acceptedBody);
+  assert.deepEqual(await (await write("/api/threads", named)).json(), acceptedBody);
+  assert.deepEqual([app.registry.getThread(acceptedBody.id)!.runnerId, app.registry.getThread(acceptedBody.id)!.pinned], ["broken-thread", true]);
   // The machine starts in the background; the thread reports starting, then the failure.
   const settledThreads = async () => {
     for (let attempt = 0; ; attempt++) {
@@ -125,7 +135,7 @@ try {
   const { createHash } = await import("node:crypto");
   app.registry.enrollRunner({ nodeId: "node-valid", threadId: "valid-binding", environmentId: 3, configPath: validConfig,
     configHash: createHash("sha256").update(fs.readFileSync(validConfig)).digest("hex") });
-  const gatewayless = await (await write("/api/threads", { ...input, requestId: "no-gateway" })).json();
+  const gatewayless = await (await write("/api/threads", { ...input, requestId: "no-gateway", runner: "valid-binding" })).json();
   const failed = (await settledThreads()).find((thread: { id: string }) => thread.id === gatewayless.id);
   assert.equal(failed.state, "error");
   assert.match(failed.error, /gateway unavailable: cube-gateway was not found/);

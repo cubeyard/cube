@@ -4,8 +4,9 @@ This is the operations boundary for Cube **runners**. A runner hosts one QEMU
 virtual machine per active thread. It runs no command of its own for a thread:
 the agent's tools run inside the thread's VM, reached over SSH through
 `cube-gateway` next to cubed. One installation has one immutable
-installation/environment binding, speaks runner protocol 3, belongs to the
-global Cube pool, hosts a bounded number of active VMs at once (see
+installation/environment binding, speaks runner protocol 3, takes only the
+threads started on it by name (the global pool is the `berth vm` runners;
+the user's decision of 2026-10-16), hosts a bounded number of active VMs at once (see
 [thread machines per runner](#thread-machines-per-runner)), and uses Iroh's
 public N0 discovery/relay transport.
 
@@ -226,7 +227,11 @@ no fresh answer from for its status. If the runner does not answer, is
 draining, faulted or waiting for recovery, or refuses the machine (a lowered
 bound, the disk floor, a VM cubed does not know), a thread whose agent and
 workspace have not opened yet moves to another runner with a free slot and
-starts there, without showing the first runner's error. Once an allocation may
+starts there, without showing the first runner's error. Only an unpinned
+thread on a protocol-3 runner moves (one the pool placed there before
+protocol 3 needed a runner's name), and only to another protocol-3 runner; a
+thread started on a runner by name and a thread on a `berth vm` stay there
+and wait. Once an allocation may
 have reached a runner (its answer lost, cubed restarted), the thread stays
 with that runner until it answers: the machine it made is used, never a second
 one elsewhere. A thread whose machine was allocated never moves. With no
@@ -275,12 +280,12 @@ The background probe (`node.status` every minute) keeps them current, and
   (`assumed`). `free` is 0 while the runner is retiring.
 - `unknown`: what this runner's data does not say, for example a stale report.
 - `protocol`: 3 (`cube-runner`) or 4 (`berth`), as enrolled; with `kind` and
-  `byName`, whether the runner takes any thread or only those started on it by
-  name (every protocol-4 runner until R-3).
+  `byName`, whether the runner is in the pool (a `berth vm`) or takes only
+  threads started on it by name (a protocol-3 runner and `berth host`).
 
 Beside the runners, `capacity` sums the slots of the runners that take
-threads, by protocol: `p3` (the pool, with `openThreads`, every open thread on
-a protocol-3 runner) and `p4.vm` and `p4.host`. Each group lists in `stale`
+threads, by protocol: `p3` (with `openThreads`, every open thread on a
+protocol-3 runner), `p4.vm` (the pool) and `p4.host`. Each group lists in `stale`
 the runners counted with their last, stale report, and in `unreported` those
 that never answered, whose bound is from enrollment or assumed. A slot is an
 open thread in cubed, not a machine the runner hosts (`report.activeVms`). The

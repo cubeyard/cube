@@ -108,10 +108,10 @@
     : "not checked since this registry learned runner observations";
 
   const observation = (runner: RunnerStatus) => observed?.runners.find((item) => item.id === runner.id);
-  /** The runner's protocol, and whether it takes any thread or only those started on it by name. */
+  /** The runner's protocol, and whether it is in the pool or takes only threads started on it by name. */
   const protocolLabel = (runner: RunnerStatus) => {
     const item = observation(runner);
-    return !item ? null : item.protocol === 3 ? "p3" : item.kind === "host" ? "p4 host · unsandboxed, by name only" : "p4 vm · by name only";
+    return !item ? null : item.protocol === 3 ? "p3 · by name only" : item.kind === "host" ? "p4 host · unsandboxed, by name only" : "p4 vm · pool";
   };
   const nodeOf = (id: string) => observed?.runners.find((item) => item.id === id)?.nodeId ?? id;
   const slotsCopy = (group: CapacityGroup) => `${group.free} free of ${group.slots} ${group.slots === 1 ? "slot" : "slots"}`;
@@ -142,12 +142,12 @@
     {@const { p3, p4 } = observed.capacity}
     {@const late = notCurrent(p3, p4.vm, p4.host)}
     <div class="runner-capacity" aria-label="capacity">
-      <p class="capacity-p3">p3 pool · {slotsCopy(p3)} on {p3.runners} {p3.runners === 1 ? "runner" : "runners"} · open p3 threads: {p3.openThreads}</p>
-      <p class="capacity-p4">p4 by name · {p4.vm.runners || p4.host.runners
-        ? [p4.vm.runners ? `vm ${slotsCopy(p4.vm)}` : "", p4.host.runners ? `host ${slotsCopy(p4.host)}` : ""].filter(Boolean).join(" · ")
+      <p class="capacity-p3">p3 by name · {slotsCopy(p3)} on {p3.runners} {p3.runners === 1 ? "runner" : "runners"} · open p3 threads: {p3.openThreads}</p>
+      <p class="capacity-p4">p4 · {p4.vm.runners || p4.host.runners
+        ? [p4.vm.runners ? `vm pool ${slotsCopy(p4.vm)}` : "", p4.host.runners ? `host by name ${slotsCopy(p4.host)}` : ""].filter(Boolean).join(" · ")
         : "no runners"}</p>
       {#if late.length}<p class="capacity-late">not current: {late.join(", ")}</p>{/if}
-      <p class="capacity-note">p3 takes any new thread; p4 only threads started on it by name. a slot is an open thread in cube, not a machine on the runner.</p>
+      <p class="capacity-note">a new thread goes to the pool, the p4 vm runners; p3 and p4 host runners take only threads started on them by name. a slot is an open thread in cube, not a machine on the runner.</p>
     </div>
   {/if}
 

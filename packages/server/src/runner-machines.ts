@@ -8,8 +8,10 @@
  * guest's hello for it), and on `berth vm` what the keel agent last said
  * of itself (`GuestInfo`): why it is not ready, its build and its hooks.
  *
- * A thread is on such a runner only because it was started there by name:
- * it never moves, and while the runner is down it waits (RunnerWait).
+ * A thread is on `berth host` only because it was started there by name,
+ * and on `berth vm` by name or from the pool (registry.ts pooledRunner).
+ * Either way it never moves, and while the runner is down it waits
+ * (RunnerWait).
  *
  * On `berth vm` a new machine starts from its project's template on that
  * runner when there is one (vm-template.ts), as on protocol 3: the newest
@@ -205,8 +207,9 @@ export class RunnerMachines implements ThreadMachines {
   private waitFor(thread: Thread, error: unknown): unknown {
     if (!(error instanceof RunnerError && error.code === "UNAVAILABLE")) return error;
     const node = this.options.registry.getRunner(thread.runnerId)?.nodeId ?? thread.runnerId;
-    return new RunnerWait(`waiting for runner ${node}: it does not answer; this thread was started on it by name and stays there `
-      + (this.onVm(thread) ? "" : "(a host runner runs only while someone runs berth host)"), { cause: error });
+    return new RunnerWait(`waiting for runner ${node}: it does not answer; this thread was `
+      + `${thread.pinned ? "started on it by name" : "placed on it"} and stays there`
+      + (this.onVm(thread) ? "" : " (a host runner runs only while someone runs berth host)"), { cause: error });
   }
 
   private async boot(thread: Thread, options: StartOptions): Promise<MachineStart> {

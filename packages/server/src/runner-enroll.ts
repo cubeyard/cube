@@ -25,8 +25,8 @@ export interface Enrollment {
   next: string;
 }
 
-/** Admits the runner a version-2 config describes to the installation's
- * global pool, after an authenticated protocol-3 hello (a protocol-2 runner
+/** Admits the runner a version-2 config describes to the installation (it
+ * takes only threads started on it by name, pooledRunner), after an authenticated protocol-3 hello (a protocol-2 runner
  * is refused) and a status exchange. Each runner needs its own control key:
  * two endpoints publishing one Iroh identity break each other's calls. */
 export async function enrollRunner(options: { state: string; configPath: string }): Promise<Enrollment> {
@@ -44,7 +44,7 @@ export async function enrollRunner(options: { state: string; configPath: string 
     registry.enrollRunner({ ...client.binding, configPath, configHash: client.configHash, maxActiveVms: health.maxActiveVms });
     return { ...client.binding, profile: "vm-runner", admitted: true, softwareVersion: described.softwareVersion,
       platform: described.platform, baseImageSha256: described.baseImageSha256, maxActiveVms: health.maxActiveVms,
-      next: "restart cubed if this runner's network mode is wider than the others; start a thread in any ready project" };
+      next: `restart cubed if this runner's network mode is wider than the others; start a thread on it by name: ask OptChat to start one on runner ${client.binding.nodeId} (a protocol-3 runner is not in the pool)` };
   } finally { registry.close(); }
 }
 
@@ -60,8 +60,9 @@ function sharedControlKey(registry: Registry, configPath: string, nodeId: string
 }
 
 /** A protocol-4 runner (`"protocol": 4` in its config; `berth host` or
- * `berth vm`): admitted after an authenticated hello. It never joins
- * the default pool (pooledRunner): only threads started on it by name run there. */
+ * `berth vm`): admitted after an authenticated hello. A `berth vm` joins
+ * the pool; only threads started on a `berth host` by name run there
+ * (pooledRunner). */
 async function enrollProtocol4(state: string, configPath: string): Promise<Enrollment> {
   const { config, hash } = loadSessionConfig(configPath);
   const registry = new Registry(path.join(state, "registry.sqlite"));
@@ -76,7 +77,7 @@ async function enrollProtocol4(state: string, configPath: string): Promise<Enrol
       platform: [runner.platform?.os, runner.platform?.arch].filter(Boolean).join("/"), baseImageSha256: runner.platform?.baseImageSha256 ?? "",
       maxActiveVms,
       next: host ? `start a thread on it by name: ask OptChat to start one on runner ${config.binding.nodeId} (it runs unsandboxed on that host)`
-        : `start a thread on it by name: ask OptChat to start one on runner ${config.binding.nodeId} (a protocol-4 VM runner is not in the pool yet)` };
+        : `start a thread in any ready project (the pool places it on a berth vm), or ask OptChat to start one on runner ${config.binding.nodeId} by name` };
   } finally {
     await session.close();
     registry.close();

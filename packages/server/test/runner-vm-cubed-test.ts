@@ -3,9 +3,9 @@
  * cube-gateway built with test-hooks, the real ProtocolMachines and
  * RunnerMachines with its egress policy) and a keel machine under QEMU.
  *
- * berth vm is enrolled in this test's cubed only, and takes threads only by
- * name (C-a decision 1): a thread started without a runner is refused (the
- * pool is empty), and OptChat's spawn naming it starts one there. The first
+ * berth vm is enrolled in this test's cubed only, where it is the whole
+ * pool: OptChat's spawn naming it starts a thread there, pinned, and a
+ * spawn that names no runner is placed there too, unpinned. The first
  * thread of the project builds its template first (C-5): a build machine
  * of cubed's own (its own id and placeholder, no agent) boots from the
  * base, checks out a repository through the credential stream from
@@ -15,7 +15,7 @@
  * keel's read, C-2b) and the repository's `.agents/setup`, and is published
  * by keel and berth; the thread's own machine then starts from that
  * template with its boot documents and policy, and skips setup. A second
- * thread of the project starts from the template too, and a third, pinned
+ * thread of the project, from the pool, starts from the template too, and a third, pinned
  * to a commit whose `.agents/setup` changed, runs setup itself and removes
  * the template. The first thread gets
  * the portal's settings without its agent being replaced, runs a tool call,
@@ -257,16 +257,16 @@ async function bash(id: string, command: string, ms = 300000): Promise<string> {
 }
 
 try {
-  // enrollment: berth vm by its hello, outside the pool
+  // enrollment: berth vm by its hello, in the pool
   const enrolled = await enrollRunner({ state, configPath });
   assert.equal(enrolled.profile, "vm-runner");
-  assert.match(enrolled.next, /by name/);
+  assert.match(enrolled.next, /the pool places it on a berth vm/);
   const admitted = app.registry.getRunner(node)!;
   assert.deepEqual([admitted.protocol, admitted.kind], [4, "vm"]);
   const overview = describeRunners(observeRunners(app.registry, 60_000));
-  assert.match(overview, /protocol-4 VM runner \(berth vm\): not in the pool yet/);
-  assert.match(overview, /pool: 0 of 0 slots free across 0 runners/, "berth vm is not in the pool");
-  note("enrolled in this test's cubed only; not in the pool");
+  assert.match(overview, /protocol-4 VM runner \(berth vm\): in the pool/);
+  assert.match(overview, new RegExp(`pool: ${enrolled.maxActiveVms} of ${enrolled.maxActiveVms} slots free across 1 runners`), "berth vm is the pool");
+  note(`enrolled in this test's cubed only; the pool is this berth vm (${enrolled.maxActiveVms} slots)`);
 
   await api("/api/onboarding", "POST", {});
   const MARKER = `c2b-pre-setup-${randomBytes(4).toString("hex")}`;
@@ -285,11 +285,6 @@ try {
       const current = app.registry.getProject(project.id)!;
       return { projectRevision: current.revision, repositories: current.repositories.map(r => ({ url: r.url, base: r.resolvedBase!, baseOid: r.baseOid! })) };
     } });
-
-  // a thread that names no runner never lands on berth vm
-  await assert.rejects(threads.spawn({ project: "ca", task: "pool" }, "req-pool"), /no free thread machine in the global runner pool/);
-  assert.equal(app.registry.listThreads().length, 0);
-  note("a thread without a runner name was refused: the pool is empty, berth vm is not in it");
 
   // spawn naming berth vm: the template build, then boot, boot documents, policy, checkout and hooks
   // a deployment's gateway is up before any thread starts; the credential route refuses, not waits, while it starts (F-Ca-2)
@@ -446,7 +441,9 @@ try {
   };
   const hookStatus = (threadId: string) => Object.fromEntries(Object.entries(app.registry.getThread(threadId)!.vm!.hooks ?? {}).map(([name, hook]) => [name, hook.status]));
   const secondBooting = Date.now();
-  const second = (await threads.spawn({ project: "ca", task: "from the template", runner: node }, "req-vm-2")).id;
+  // No runner named: the pool places it on the berth vm, unpinned.
+  const second = (await threads.spawn({ project: "ca", task: "from the template" }, "req-vm-2")).id;
+  assert.deepEqual([app.registry.getThread(second)!.runnerId, app.registry.getThread(second)!.pinned], [node, undefined], "a thread that names no runner is placed on berth vm");
   await waitReady(second, "the second thread's machine is ready");
   const vm2 = app.registry.getThread(second)!.vm!;
   const steps2 = vm2.steps!.map(step => `${step.name}:${step.state}`);
@@ -462,7 +459,7 @@ try {
   assert.equal(hooks2.filter(line => line.startsWith("resume ")).length, 1, "its own resume");
   const secondMs = Date.now() - secondBooting;
   await archive(second);
-  note(`second thread: from template ${templateId}, setup skipped, ready and archived in ${(secondMs / 1000).toFixed(1)} s: ${steps2.join(", ")}`);
+  note(`second thread, from the pool: from template ${templateId}, setup skipped, ready and archived in ${(secondMs / 1000).toFixed(1)} s: ${steps2.join(", ")}`);
 
   // C-5: a changed .agents/setup: the third thread runs setup itself and the template is removed.
   fs.writeFileSync(path.join(seed, ".agents", "setup"), "#!/bin/bash\necho \"setup v2 as $(id -un)\" >> ~/ca-hooks.log\n", { mode: 0o755 });
@@ -558,7 +555,7 @@ try {
   assert.equal(app.registry.getThread(id)!.vm!.discarded, true);
   await until("the machine's directory is gone", 30000, () => !fs.existsSync(path.join(directory, vm.vmId)));
   note("discarded: berth deleted the machine's directory");
-  console.log("ok: cubed with berth vm: by name only, a template built in the first thread's slot and used by the next, invalidated by a changed setup, "
+  console.log("ok: cubed with berth vm: by name and from the pool, a template built in the first thread's slot and used by the next, invalidated by a changed setup, "
     + "boot documents and policy, checkout and hooks, a tool call, push through the credential stream, "
     + "the portal over dial, berth's diagnosis, a berth restart with resume hooks, a forced stop within the deadline, archive retained, discard");
 } finally {

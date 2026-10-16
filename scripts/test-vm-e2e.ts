@@ -163,7 +163,7 @@ try {
   const model = { provider: cubed.provider, id: cubed.model };
 
   // 1. A Pi thread: write, read, edit, bash and codemode in the guest.
-  const pi = (await api("/api/threads", "POST", { projectId: project.id, requestId: "pi", text: "hello", model })).id as string;
+  const pi = (await api("/api/threads", "POST", { projectId: project.id, requestId: "pi", text: "hello", model, runner: "node-e2e" })).id as string;
   const booted = Date.now();
   const piRow = await ready(pi);
   vmIds.push(piRow.vm!.vmId);
@@ -283,7 +283,7 @@ try {
 
   // 6. A Claude Code thread through the mod: Bash/Read/Write/Edit in the guest; stop cancels.
   const claude = (await api("/api/threads", "POST", { projectId: project.id, requestId: "claude",
-    text: "write c.txt hello\nread c.txt\nedit c.txt hello bye\nrun cat c.txt; id -un; pwd; ls ~/.cube/skills | tr '\\n' ' '", model: { provider: "claude-code", id: "sonnet" } })).id as string;
+    text: "write c.txt hello\nread c.txt\nedit c.txt hello bye\nrun cat c.txt; id -un; pwd; ls ~/.cube/skills | tr '\\n' ' '", model: { provider: "claude-code", id: "sonnet" }, runner: "node-e2e" })).id as string;
   vmIds.push((await ready(claude)).vm!.vmId);
   const claudeFirst = await until("claude's first turn", 300, async () => {
     const value = await history(claude); return ["completed", "failed", "stopped"].includes(value.status?.state) ? value : undefined;
@@ -310,7 +310,7 @@ try {
   assert.equal(claudeArchive.retained, true);
 
   // 7b. Archive clean: the disk is deleted.
-  const clean = (await api("/api/threads", "POST", { projectId: project.id, requestId: "clean", text: "hello", model })).id as string;
+  const clean = (await api("/api/threads", "POST", { projectId: project.id, requestId: "clean", text: "hello", model, runner: "node-e2e" })).id as string;
   vmIds.push((await ready(clean)).vm!.vmId);
   await until("the clean thread's first answer", 120, async () => (await history(clean)).status?.state === "completed");
   const vmDirs = () => fs.readdirSync(path.join(work, "runner-state", "vms")).filter(name => fs.existsSync(path.join(work, "runner-state", "vms", name, "disk.qcow2")));

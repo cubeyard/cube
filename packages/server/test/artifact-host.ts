@@ -92,7 +92,7 @@ export async function startArtifactHost(options: { web: string }) {
   models.setProvider(faux.provider);
   const app = await createCubed({ state: path.join(root, "state"), models, machines: new LocalMachines(path.join(root, "machines")), claude: null, gateway: null,
     githubPulls: github, artifactRetryMs: 200, web: options.web });
-  for (const n of [1, 2]) app.registry.enrollRunner({ nodeId: `node-${n}`, environmentId: 1, threadId: `runner-${n}`, configPath: `/private/${n}.json`, configHash: `h${n}` });
+  for (const n of [1, 2]) app.registry.enrollRunner({ nodeId: `node-${n}`, environmentId: 1, threadId: `runner-${n}`, configPath: `/private/${n}.json`, configHash: `h${n}`, protocol: 4, kind: "vm" });
   app.registry.saveProject({ id: "gh", name: "cube", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1,
     repositories: [{ id: "r", projectId: "gh", position: 0, url: "https://github.com/cubeyard/demo", base: "main", checkoutName: "workspace", status: "ready", error: null, resolvedBase: "main", baseOid: SHA, checkedAt: 1 }] });
   await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));

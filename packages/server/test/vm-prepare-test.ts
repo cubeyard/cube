@@ -72,14 +72,16 @@ try {
   const threadVms = vms();
   let requests = 0;
   const start = async (machinesOf = threadVms): Promise<Thread> => {
-    const thread = registry.createThread("p1", `t${++requests}`, model, "hello");
+    // On the first protocol-3 runner with room (protocol 3 only by name).
+    const runnerId = registry.runnerStatuses().find(status => status.activeThreads < status.maxActiveVms)!.id;
+    const thread = registry.createThread("p1", `t${++requests}`, model, "hello", "pi", undefined, { runnerId });
     await assert.rejects(machinesOf.start(thread), /fixture stops here/);
     return registry.getThread(thread.id)!;
   };
   const meta = (projectId: string) => JSON.stringify({ format: TEMPLATE_FORMAT, projectId, setupBlob: "none", commit: null });
   const template = (id: string, key: string, createdAt = Date.now(), projectId = "p1"): RunnerTemplate =>
     ({ id, key, meta: meta(projectId), state: "ready", diskGiB: 8, bytes: 1, createdAt, users: 0 });
-  const sample = registry.createThread("p1", "sample", model, "sample");
+  const sample = registry.createThread("p1", "sample", model, "sample", "pi", undefined, { runnerId: "r1" });
   const key = templateKey({ allocation: sample.allocation, hooks: sample.allocation.hooks!, runner: { baseImageSha256: IMAGE, platform: "linux-x86_64" }, diskGiB: 8 });
   registry.finishRelease(sample.id);
 
@@ -95,7 +97,7 @@ try {
   calls.length = 0;
   let fail!: (error: Error) => void;
   buildAllocate = () => new Promise((_resolve, reject) => { fail = reject; });
-  const first = registry.createThread("p1", "first", model, "hello");
+  const first = registry.createThread("p1", "first", model, "hello", "pi", undefined, { runnerId: "r1" });
   const building = assert.rejects(threadVms.start(first), /fixture stops here/);
   while (!calls.includes("r1:build-allocate")) await new Promise(resolve => setTimeout(resolve, 5));
   assert.ok(registry.getThread(first.id)!.vm!.build, "the build machine is recorded on its thread");
@@ -135,7 +137,7 @@ try {
     status: "ready" as const, error: null, resolvedBase: "refs/heads/main", baseOid: oid, checkedAt: 1 });
   registry.saveProject({ ...project("p2"), repositories: [repository("a".repeat(40))] });
   const inProject = async (name: string) => {
-    const thread = registry.createThread("p2", name, model, "hello");
+    const thread = registry.createThread("p2", name, model, "hello", "pi", undefined, { runnerId: "r1" });
     await assert.rejects(threadVms.start(thread), /fixture stops here/);
     registry.finishRelease(thread.id);
     return registry.getThread(thread.id)!;
@@ -151,7 +153,7 @@ try {
   console.log("ok: a new commit is not held back by the failed build of an older one");
 
   // Why there is no template: an expired one, or what changed since the project's last one.
-  const keyed = registry.createThread("p1", "keyed", model, "hello");
+  const keyed = registry.createThread("p1", "keyed", model, "hello", "pi", undefined, { runnerId: "r1" });
   const parts = templateParts({ allocation: keyed.allocation, hooks: keyed.allocation.hooks!, runner: { baseImageSha256: IMAGE, platform: "linux-x86_64" }, diskGiB: 8 });
   const withParts = (id: string, key: string, createdAt: number, changed: Partial<typeof parts> = {}): RunnerTemplate => ({ ...template(id, key, createdAt),
     meta: JSON.stringify({ format: TEMPLATE_FORMAT, projectId: "p1", setupBlob: "none", commit: null, parts: { ...parts, ...changed } }) });
@@ -175,7 +177,7 @@ try {
   console.log("ok: a template that vanished before allocation falls back to the base image");
 
   // A build machine a crash left behind is deleted first, on its own runner.
-  const left = registry.createThread("p1", "left", model, "hello");
+  const left = registry.createThread("p1", "left", model, "hello", "pi", undefined, { runnerId: "r1" });
   enroll("r2", 2);
   registry.updateThreadVm(left.id, { build: { vmId: "b000000000000001", placeholders: {}, key, runnerId: "r2" } });
   machines.set("r2:b000000000000001", "stopped");
@@ -190,7 +192,7 @@ try {
   // was left running interrupted, Conversations.activate) deletes the build
   // machine and uses the template; nothing stays running.
   templates = [template("a000000000000005", key)];
-  const crashed = registry.createThread("p1", "crashed", model, "hello");
+  const crashed = registry.createThread("p1", "crashed", model, "hello", "pi", undefined, { runnerId: "r1" });
   for (const name of ["lookup", "build-boot"] as const) {
     registry.beginStartupStep(crashed.id, { name });
     registry.endStartupStep(crashed.id, { name, state: "ok" });

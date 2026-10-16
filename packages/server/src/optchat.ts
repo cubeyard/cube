@@ -1136,7 +1136,8 @@ export class OptChat {
         task: Type.String({ description: "The whole task, self-contained" }),
         model: Type.Optional(Type.String({ description: "provider/model; default: the host's preferred model" })),
         runner: Type.Optional(Type.String({ description: "A runner's node id (see runners), only when the user asks for that runner. "
-          + "The thread starts there and never moves; it waits while that runner is down. A HOST runner is unsandboxed and takes only threads named to it." })),
+          + "The thread starts there and never moves; it waits while that runner is down. A HOST runner is unsandboxed and takes only threads named to it; "
+          + "so does a protocol-3 runner (cube-runner). Absent: the pool places it on a berth vm, and refuses it when none has a free slot." })),
       }), { minItems: 1 }) }),
       // A request id per call and task: a rerun finds the same threads.
       replay: "safe",
