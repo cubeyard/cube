@@ -441,7 +441,6 @@ impl Watched {
         self.stop_watchdog();
         let mut child = self.child.lock().unwrap();
         let _ = child.kill();
-        let _ = child.wait();
     }
 
     /// Waits up to `limit` for mkfs.erofs to exit; kills and reaps it after.
@@ -459,12 +458,10 @@ impl Watched {
                 .is_some_and(|c| c.load(Ordering::SeqCst))
             {
                 let _ = child.kill();
-                let _ = child.wait();
                 bail!("cancelled");
             }
             if Instant::now() >= deadline {
                 let _ = child.kill();
-                let _ = child.wait();
                 bail!(
                     "mkfs.erofs did not finish within {} s after its input ended and was killed \
                      (erofs-utils before 1.9.1 never ends on a tar cut inside a file)",
@@ -480,12 +477,6 @@ impl Drop for Watched {
     /// A panic on the way still reaps mkfs.erofs.
     fn drop(&mut self) {
         self.stop_watchdog();
-        if let Ok(mut child) = self.child.lock()
-            && let Ok(None) = child.try_wait()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
     }
 }
 
