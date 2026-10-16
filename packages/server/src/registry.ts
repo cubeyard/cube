@@ -274,7 +274,7 @@ export function runnerSlots(runner: Pick<Runner, "maxActiveVms">): number {
  * every VM runner, protocol 3 (`cube-runner`) or 4 (`berth vm`). A host
  * runner (`berth host`) takes only threads started on it by name. */
 export function pooledRunner(runner: Pick<Runner, "protocol" | "kind">): boolean {
-  return runner.kind !== "host";
+  return runner.kind !== "host" && runner.protocol !== 4;
 }
 
 /** Every open (unarchived) thread holds one machine slot on its runner from
