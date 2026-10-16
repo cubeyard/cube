@@ -207,7 +207,7 @@ async function readBack(id: string, n: string): Promise<Readback> {
   return { starts: stamps("start"), dones: stamps("done"), kills: stamps("kill"), effects: effect.split("\n").filter(line => line === "once").length, raw };
 }
 /** The common assertions of a scenario: settled completed by the same key with its marker, ran once, the kill inside the command. */
-async function verify(id: string, n: string, run: string, tKill: number, tBack: number, options: { effects?: number; doneAfterBack?: boolean; killInside?: boolean } = {}) {
+async function verify(id: string, n: string, run: string, kill: number | ((back: Readback) => number), tBack: number, options: { effects?: number; doneAfterBack?: boolean; killInside?: boolean } = {}) {
   const value = await settled(id, run, 300000);
   assertKnown(`scenario (${n})`, value);
   assert.equal(value.status!.state, "completed", `scenario (${n}): the run ${run} settled ${JSON.stringify(value.status)}; last text ${JSON.stringify(lastText(value))}`);
@@ -215,6 +215,8 @@ async function verify(id: string, n: string, run: string, tKill: number, tBack: 
   assert.ok(answer.startsWith("result: ") && answer.includes(`finished-${n}`) && answer.includes("[exit=0; exited]"),
     `scenario (${n}): the result by the key: ${JSON.stringify(answer)}`);
   const back = await readBack(id, n);
+  const tKill = typeof kill === "number" ? kill : kill(back);
+  assert.ok(Number.isFinite(tKill), `scenario (${n}): the kill's time: ${JSON.stringify(back.raw)}`);
   assert.equal(back.starts.length, 1, `scenario (${n}): the command started once: ${JSON.stringify(back.raw)}`);
   assert.equal(back.dones.length, 1, `scenario (${n}): the command finished once: ${JSON.stringify(back.raw)}`);
   assert.equal(back.effects, options.effects ?? 1, `scenario (${n}): exactly ${options.effects ?? 1} effect line(s): ${JSON.stringify(back.raw)}`);
@@ -223,7 +225,7 @@ async function verify(id: string, n: string, run: string, tKill: number, tBack: 
   assert.ok(options.killInside ? start <= tKill : start < tKill, `scenario (${n}): kill before the command started (start ${start}, kill ${tKill}): V3 not exercised`);
   assert.ok(done > tKill, `scenario (${n}): the command was over before the kill (done ${done}, kill ${tKill}): V3 not exercised`);
   if (options.doneAfterBack ?? true) assert.ok(done > tBack, `scenario (${n}): the command was over before the replacement was back (done ${done}, back ${tBack})`);
-  return { value, back, start, done, answer };
+  return { value, back, start, done, answer, tKill };
 }
 type Diagnostics = { machine: { runner: { status: string; diagnosis?: { guest?: { info?: { session?: string; ready?: boolean; bootId?: string } | null } } }; guest: { status: string; agent?: { bootId: string } } } };
 const diagnose = async (id: string) => (await api(`/api/threads/${id}/diagnostics`)).diagnostics as Diagnostics;
@@ -239,8 +241,9 @@ let failed = true;
 try {
   // enrollment: berth vm into this test's state before cubed starts; it is the pool
   fs.mkdirSync(state, { mode: 0o700 });
+  // Its answer is the JSON line; the runner session logs its own lines beside it.
   const enrolled = JSON.parse(execFileSync(process.execPath, [path.join(repo, "scripts/enroll-runner.ts"), "--state", state, "--config", configPath, "--trusted-runner"],
-    { encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: gitconfig } })) as { profile: string; admitted: boolean; maxActiveVms: number };
+    { encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: gitconfig } }).split("\n").findLast(line => line.startsWith("{")) ?? "null") as { profile: string; admitted: boolean; maxActiveVms: number };
   assert.deepEqual([enrolled.profile, enrolled.admitted], ["vm-runner", true], JSON.stringify(enrolled));
   cubed = await startCubed();
   note(`berth vm enrolled before cubed started (${enrolled.maxActiveVms} slots); cubed ${cubed.url} (pid ${cubed.child.pid})`);
@@ -336,11 +339,9 @@ try {
   });
   const tBackC = now();
   assert.equal(renewed.bootId, guestC.bootId, `scenario (c): the machine was rebooted (boot ${guestC.bootId} -> ${renewed.bootId}), not the agent restarted`);
-  const settledC = await settled(id, "v3-agent", 300000);
-  assertKnown("scenario (c)", settledC);
-  const tKillC = (await readBack(id, "c")).kills[0] ?? NaN;
-  assert.ok(Number.isFinite(tKillC), "scenario (c): the command logged its kill");
-  const c = await verify(id, "c", "v3-agent", tKillC, tBackC, { killInside: true });
+  // tKill is the command's own `kill` line, read back with its other lines.
+  const c = await verify(id, "c", "v3-agent", back => back.kills.length === 1 ? back.kills[0]! : NaN, tBackC, { killInside: true });
+  const tKillC = c.tKill;
   assert.ok(tKillC < tBackC, `scenario (c): the agent came back (${tBackC}) after the kill (${tKillC})`);
   note(`(c) start ${c.start} <= kill ${tKillC} < back ${tBackC} < done ${c.done}; agent session ${guestC.session} -> ${renewed.session}, boot ${renewed.bootId} kept; `
     + `adopted, not restarted (one start line); completed by the key: ${JSON.stringify(c.answer)}`);
