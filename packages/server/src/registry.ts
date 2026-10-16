@@ -459,7 +459,7 @@ export class Registry {
       // runner with protocol 3.
       const load = this.getRunner(thread.runnerId)?.protocol === 4 ? undefined
         : this.runnerLoads(now).find(candidate => candidate.id !== thread.runnerId && !exclude.has(candidate.id)
-          && candidate.runner.protocol !== 4 && candidate.fitness !== "down" && candidate.active < candidate.slots);
+          && candidate.fitness !== "down" && candidate.active < candidate.slots);
       if (!load) { this.db.exec("COMMIT"); return null; }
       const moved: Thread = { ...thread, runnerId: load.id, ...(thread.vm ? { vm: { ...thread.vm, placement: "provisional" } } : {}) };
       this.db.prepare("UPDATE thread SET runner_id=?,data=? WHERE id=?").run(load.id, JSON.stringify(moved), threadId);
