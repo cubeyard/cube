@@ -441,7 +441,6 @@ impl Watched {
         self.stop_watchdog();
         let mut child = self.child.lock().unwrap();
         let _ = child.kill();
-        let _ = child.wait();
     }
 
     /// Waits up to `limit` for mkfs.erofs to exit; kills and reaps it after.
@@ -459,7 +458,6 @@ impl Watched {
                 .is_some_and(|c| c.load(Ordering::SeqCst))
             {
                 let _ = child.kill();
-                let _ = child.wait();
                 bail!("cancelled");
             }
             if Instant::now() >= deadline {
