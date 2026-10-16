@@ -1,7 +1,7 @@
 /** In-process Pi execution on pi-durable. The host owns activation and the
  * thread's workspace lease; Pi owns every conversation entry, task checkpoint
  * and document. There is no second workflow journal. */
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -17,6 +17,8 @@ import { createPiReadTool } from "./pi-read.ts";
 import { createCodemodeTool, type CodemodeLimits, type NestedTool } from "./codemode.ts";
 import { settleOperation, WorkspaceError, type Workspace } from "./workspace.ts";
 import { expandHome, WORKSPACE_ROOT, WorkspaceEnv, workspacePath } from "./workspace-env.ts";
+
+const KEY_NONCE = randomBytes(4).toString("hex");
 
 const context = BACKGROUND_CONTEXT;
 const BASH_OUTPUT_BYTES = 50 * 1024;
@@ -126,7 +128,8 @@ export async function openAgent(options: {
     // its task's; a codemode call's nested calls extend the codemode task's
     // key with their sequence number.
     let instance = "";
-    const taskKey = (api: ToolExecutionApi) => `pi:${instance}:${api.taskId}`;
+    // CONTROL (A-1b v3-control-unstable-key, never merged): a per-process nonce makes the key differ across a restart.
+    const taskKey = (api: ToolExecutionApi) => `pi:${instance}:${api.taskId}:${KEY_NONCE}`;
     const fileTool = (tool: ToolRegistration, mutates: boolean): NestedTool => ({
       registration: tool, mutates,
       run: (args, api, callContext, key) => tool.execute(args, {
