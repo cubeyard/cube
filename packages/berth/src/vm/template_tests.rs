@@ -9,8 +9,8 @@ use keel_layers::{DiffId, cache::LayerCache};
 use std::os::unix::fs::PermissionsExt;
 
 pub(super) const OWNER: &str = "thread-1";
-const BUILD: &str = "00000000000000b1";
-const USER: &str = "00000000000000c1";
+pub(super) const BUILD: &str = "00000000000000b1";
+pub(super) const USER: &str = "00000000000000c1";
 
 pub(super) fn plenty(_: &Path) -> std::io::Result<u64> {
     Ok(u64::MAX)
@@ -194,7 +194,7 @@ pub(super) fn reason(error: proto::Error) -> (Code, String) {
 
 /// What the agent's `template_publish` leaves on vdd: an EROFS image of
 /// `blocks` 4 KiB blocks at the start of the (sparse) disk.
-fn write_layer(runner: &VmRunner, id: &str, blocks: u32) {
+pub(super) fn write_layer(runner: &VmRunner, id: &str, blocks: u32) {
     use std::os::unix::fs::FileExt;
     let mut first = vec![0u8; 4096];
     first[1024..1028].copy_from_slice(&0xE0F5_E1E2u32.to_le_bytes());
@@ -751,50 +751,4 @@ fn only_the_agents_done_goes_on_to_keep_the_disk() {
             .unwrap_err()
             .completion_unknown
     );
-}
-
-#[tokio::test]
-async fn the_runners_shutdown_does_not_wait_for_a_publication() {
-    let lab = Lab::new();
-    let image = pull(lab.path(), 1, &[1]);
-    let runner = lab.runner(image, 16 << 30, plenty).await;
-    create(&runner, BUILD, base(), true).await.unwrap();
-    // The build machine runs, and its agent never answers.
-    let (guest, mut frames) = channel::Guest::connected("s1");
-    {
-        let mut state = runner.state.lock().unwrap();
-        let entry = state.machines.get_mut(BUILD).unwrap();
-        entry.record.phase = Phase::Running;
-        entry.guest = Some(guest);
-    }
-    let publishing = {
-        let runner = Arc::clone(&runner);
-        tokio::spawn(async move {
-            let _op = runner.ops.lock().await;
-            runner
-                .publish(proto::TemplatePublish {
-                    from: Some(reference(BUILD)),
-                    fence: fence(1),
-                    key: "key-1".into(),
-                    meta: String::new(),
-                })
-                .await
-        })
-    };
-    let sent = frames.recv().await.unwrap();
-    assert!(matches!(
-        sent.t,
-        Some(proto::daemon_frame::T::Req(proto::DaemonRequest {
-            op: Some(Op::TemplatePublish(_))
-        }))
-    ));
-    tokio::time::timeout(Duration::from_secs(10), runner.shutdown())
-        .await
-        .expect("the shutdown waits for no publication");
-    let stopped = publishing.await.unwrap().unwrap_err();
-    assert!(
-        stopped.completion_unknown && stopped.reason == "runner_stopping",
-        "{stopped:?}"
-    );
-    assert!(runner.list_templates().items.is_empty());
 }
