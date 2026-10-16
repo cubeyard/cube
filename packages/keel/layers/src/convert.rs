@@ -377,10 +377,6 @@ impl Watched {
                 while let Err(mpsc::RecvTimeoutError::Timeout) =
                     finished.recv_timeout(Duration::from_millis(50))
                 {
-                    if cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst)) {
-                        let _ = child.lock().unwrap().kill();
-                        return;
-                    }
                     let since = *writing.lock().unwrap();
                     if since.is_some_and(|since| since.elapsed() > stall) {
                         stalled.store(true, Ordering::SeqCst);
