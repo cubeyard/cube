@@ -472,7 +472,12 @@ fn standin(dir: &Path, script: &str) -> (PathBuf, PathBuf) {
 
 /// Gone, not a zombie: `kill -0` succeeds on a zombie.
 fn reaped(pid: &Path) -> bool {
-    let pid = fs::read_to_string(pid).unwrap();
+    let pid = fs::read_to_string(pid).unwrap_or_else(|e| {
+        panic!(
+            "the stand-in never wrote its pid to {} ({e}), so its reaping cannot be checked",
+            pid.display()
+        )
+    });
     !Command::new("kill")
         .args(["-0", pid.trim()])
         .status()
@@ -528,37 +533,75 @@ fn a_mkfs_that_never_ends_after_its_input_is_killed_and_reaped() {
     assert_eq!(fs::read_dir(cache.dir()).unwrap().count(), 0);
 }
 
+/// Far from the 5 s the cancel must meet, near enough that a product
+/// ignoring the cancel fails that bound in 30 s.
+const FAR: TimeLimits = TimeLimits {
+    stall: Duration::from_secs(30),
+    finish: Duration::from_secs(30),
+    finish_per_gib: Duration::ZERO,
+};
+
 #[test]
 fn a_cancelled_conversion_kills_and_reaps_mkfs() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     let tools = tempfile::tempdir().unwrap();
-    let (mkfs, pid) = standin(tools.path(), "exec sleep 600");
+    // Reads one byte of the product's first write, notes it, then reads
+    // nothing: the layer is one chunk larger than a pipe holds, so from the
+    // note on the product is inside that write and only a kill ends it.
+    let writing = tools.path().join("writing");
+    let (mkfs, pid) = standin(
+        tools.path(),
+        &format!(
+            "dd bs=1 count=1 >/dev/null 2>&1\n: > '{}'\nexec sleep 600",
+            writing.display()
+        ),
+    );
     let dir = tempfile::tempdir().unwrap();
     let cache = LayerCache::open(dir.path().join("cache")).unwrap();
     let layer = files_layer();
     let cancel = Arc::new(AtomicBool::new(false));
+    // Cancels once the product is writing, or after 5 s without it, so the
+    // conversion always ends. Returns when it cancelled and whether the
+    // product was writing.
     let setter = {
         let cancel = cancel.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(500));
+            let waiting = Instant::now();
+            let started = loop {
+                if writing.exists() {
+                    break true;
+                }
+                if waiting.elapsed() >= Duration::from_secs(5) {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
             cancel.store(true, Ordering::SeqCst);
+            (Instant::now(), started)
         })
     };
-    let started = Instant::now();
     let error = cache
         .get_or_convert(
             &diff_id(&layer),
-            // Limits far away: only the cancel stops it.
-            &Mkfs::new(&mkfs).cancel_on(cancel),
+            &Mkfs::new(&mkfs).time_limits(FAR).cancel_on(cancel),
             TarMode::Full,
             Compression::None,
             || Ok(&layer[..]),
         )
         .unwrap_err();
-    setter.join().unwrap();
-    assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
-    assert!(started.elapsed() < Duration::from_secs(10));
+    let ended = Instant::now();
+    let (cancelled_at, started) = setter.join().unwrap();
+    assert!(started, "the stand-in did not start writing within 5 s");
+    assert!(
+        format!("{error:#}").contains("write to mkfs.erofs: cancelled"),
+        "{error:#}"
+    );
+    let after_cancel = ended.saturating_duration_since(cancelled_at);
+    assert!(
+        after_cancel <= Duration::from_secs(5),
+        "the conversion ended {after_cancel:?} after the cancel"
+    );
     assert!(reaped(&pid));
     assert_eq!(fs::read_dir(cache.dir()).unwrap().count(), 0);
 }
