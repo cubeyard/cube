@@ -267,11 +267,9 @@ export class GatewaySupervisor {
       const stableMs = this.options.backoff?.stableMs ?? 60000;
       if (this.readyAt && Date.now() - this.readyAt >= stableMs) this.delayMs = this.options.backoff?.minMs ?? 1000;
       this.readyAt = 0;
-      this.log.warn("exited; restarting", { code, signal, inMs: this.delayMs });
-      clearTimeout(this.timer);
-      this.timer = setTimeout(() => { this.timer = undefined; if (!this.stopping) this.spawn(); }, this.delayMs);
-      this.timer.unref();
-      this.delayMs = Math.min(this.delayMs * 2, this.options.backoff?.maxMs ?? 30000);
+      // CONTROL (A-1b v3-control-no-gateway-restart, never merged): no restart after an exit.
+      this.log.warn("exited; not restarting (control)", { code, signal });
+      return;
     });
   }
 
