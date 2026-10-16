@@ -470,7 +470,7 @@ export class Registry {
       // Never between protocols: the caller (vm.ts) boots it on the new
       // runner with protocol 3.
       const load = this.getRunner(thread.runnerId)?.protocol === 4 ? undefined
-        : this.runnerLoads(now, runner => runner.protocol !== 4 && runner.kind !== "host").find(candidate => candidate.id !== thread.runnerId && !exclude.has(candidate.id)
+        : this.runnerLoads(now, runner => runner.kind !== "host").find(candidate => candidate.id !== thread.runnerId && !exclude.has(candidate.id)
           && candidate.fitness !== "down" && candidate.active < candidate.slots);
       if (!load) { this.db.exec("COMMIT"); return null; }
       const moved: Thread = { ...thread, runnerId: load.id, ...(thread.vm ? { vm: { ...thread.vm, placement: "provisional" } } : {}) };
