@@ -472,7 +472,12 @@ fn standin(dir: &Path, script: &str) -> (PathBuf, PathBuf) {
 
 /// Gone, not a zombie: `kill -0` succeeds on a zombie.
 fn reaped(pid: &Path) -> bool {
-    let pid = fs::read_to_string(pid).unwrap();
+    let pid = fs::read_to_string(pid).unwrap_or_else(|e| {
+        panic!(
+            "the stand-in never wrote its pid to {} ({e}), so its reaping cannot be checked",
+            pid.display()
+        )
+    });
     !Command::new("kill")
         .args(["-0", pid.trim()])
         .status()
@@ -538,14 +543,26 @@ fn a_cancelled_conversion_kills_and_reaps_mkfs() {
     let cache = LayerCache::open(dir.path().join("cache")).unwrap();
     let layer = files_layer();
     let cancel = Arc::new(AtomicBool::new(false));
+    // Cancels once the stand-in has written its pid, or after 5 s without
+    // it, so the conversion always ends. Returns when it cancelled and
+    // whether the stand-in had started.
     let setter = {
-        let cancel = cancel.clone();
+        let (cancel, pid) = (cancel.clone(), pid.clone());
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(500));
+            let waiting = Instant::now();
+            let started = loop {
+                if fs::read_to_string(&pid).is_ok_and(|p| !p.trim().is_empty()) {
+                    break true;
+                }
+                if waiting.elapsed() >= Duration::from_secs(5) {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
             cancel.store(true, Ordering::SeqCst);
+            (Instant::now(), started)
         })
     };
-    let started = Instant::now();
     let error = cache
         .get_or_convert(
             &diff_id(&layer),
@@ -556,9 +573,15 @@ fn a_cancelled_conversion_kills_and_reaps_mkfs() {
             || Ok(&layer[..]),
         )
         .unwrap_err();
-    setter.join().unwrap();
+    let ended = Instant::now();
+    let (cancelled_at, started) = setter.join().unwrap();
+    assert!(started, "the stand-in did not start within 5 s");
     assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
-    assert!(started.elapsed() < Duration::from_secs(10));
+    let after_cancel = ended.saturating_duration_since(cancelled_at);
+    assert!(
+        after_cancel <= Duration::from_secs(5),
+        "the conversion ended {after_cancel:?} after the cancel"
+    );
     assert!(reaped(&pid));
     assert_eq!(fs::read_dir(cache.dir()).unwrap().count(), 0);
 }
