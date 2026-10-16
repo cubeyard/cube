@@ -478,12 +478,6 @@ impl Drop for Watched {
     /// A panic on the way still reaps mkfs.erofs.
     fn drop(&mut self) {
         self.stop_watchdog();
-        if let Ok(mut child) = self.child.lock()
-            && let Ok(None) = child.try_wait()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
     }
 }
 
