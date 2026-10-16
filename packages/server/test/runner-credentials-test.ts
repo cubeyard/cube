@@ -59,8 +59,29 @@ assert.equal(reason(route.refuse({ nodeId: "node-r2", admission: { configPath: r
   "PERMISSION_DENIED/wrong_machine", "a runner that is not the thread's");
 assert.equal(reason(route.refuse({ ...runner1, admission: { ...runner1.admission, configHash: "changed" } }, ref, BigInt(epoch))), "PERMISSION_DENIED/wrong_machine");
 assert.equal(reason(route.refuse({ ...runner1, admission: null }, ref, BigInt(epoch))), "PERMISSION_DENIED/wrong_machine");
+// The thread's unfinished template build machine (C-5): its machine too, on its runner at its current epoch; nothing else.
+const buildId = "b".repeat(16);
+const buildRef = { owner: mine.id, id: buildId };
+assert.equal(reason(route.refuse(runner1, buildRef, BigInt(epoch))), "PERMISSION_DENIED/wrong_machine", "no build machine yet");
+registry.updateThreadVm(mine.id, { build: { vmId: buildId, placeholders: { github: "cube_ph_github_AbCdEfGhIjKlMnOpQrStUv" }, key: "k", runnerId: "node-r1" } });
+assert.equal(route.refuse(runner1, buildRef, BigInt(epoch)), null, "the build machine at the thread's runner and current epoch");
+assert.equal(route.refuse(runner1, ref, BigInt(epoch)), null, "the thread's own machine still");
+assert.equal(reason(route.refuse(runner1, buildRef, BigInt(epoch) - 1n)), "FAILED_PRECONDITION/stale_epoch");
+assert.equal(reason(route.refuse(runner1, { owner: mine.id, id: "c".repeat(16) }, BigInt(epoch))), "PERMISSION_DENIED/wrong_machine", "another id");
+assert.equal(reason(route.refuse(runner1, { owner: other.id, id: buildId }, BigInt(epoch))), "PERMISSION_DENIED/wrong_machine", "the id under another thread");
+assert.equal(reason(route.refuse({ nodeId: "node-r2", admission: { configPath: r2.configPath, configHash: r2.configHash } }, buildRef, BigInt(epoch))),
+  "PERMISSION_DENIED/wrong_machine", "another runner");
+registry.updateThreadVm(mine.id, { build: { vmId: buildId, placeholders: {}, key: "k", runnerId: "node-r2" } });
+assert.equal(reason(route.refuse(runner1, buildRef, BigInt(epoch))), "PERMISSION_DENIED/wrong_machine", "a build machine made on another runner");
+registry.updateThreadVm(mine.id, { build: { vmId: buildId, placeholders: {}, key: "k", runnerId: "node-r1" } });
+assert.equal(route.refuse(runner1, buildRef, BigInt(epoch)), null);
+// Published or deleted: forgotten, and refused.
+registry.updateThreadVm(mine.id, { build: undefined });
+assert.equal(reason(route.refuse(runner1, buildRef, BigInt(epoch))), "PERMISSION_DENIED/wrong_machine", "after the publication");
+registry.updateThreadVm(gone.id, { build: { vmId: buildId, placeholders: {}, key: "k", runnerId: "node-r1" } });
+assert.equal(reason(route.refuse(runner1, { owner: gone.id, id: buildId }, BigInt(epoch))), "PERMISSION_DENIED/wrong_machine", "an archived thread's build machine");
 registry.close();
-console.log("ok: route: owner, machine id, archive, runner admission and epoch checked");
+console.log("ok: route: owner, machine id, archive, runner admission and epoch checked; the unfinished build machine allowed only as the thread's, and refused once forgotten");
 
 // ---------------------------------------------------------------- the fake proxy
 

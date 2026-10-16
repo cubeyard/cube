@@ -34,8 +34,14 @@ const CALL_TIMEOUT_MS = 15000;
  * directory; about 50 s at worst before the answer. 45 s covered only the
  * common path (masterplan R14). */
 export const STOP_TIMEOUT_MS = 90000;
-/** A call's deadline: the stopping verbs wait for the runner's whole stop. */
+/** `template_publish`: berth vm gives the build machine's agent up to 600 s
+ * to clean its writable layer and write it as EROFS, and holds its global
+ * lock meanwhile (masterplan C4, R14b). */
+export const PUBLISH_TIMEOUT_MS = 600000;
+/** A call's deadline: the stopping verbs wait for the runner's whole stop,
+ * a publication for the agent's. */
 export function callTimeout(verb: string | undefined): number {
+  if (verb === "templatePublish") return PUBLISH_TIMEOUT_MS;
   return verb === "machineStop" || verb === "machineDelete" ? STOP_TIMEOUT_MS : CALL_TIMEOUT_MS;
 }
 const GUEST_TIMEOUT_MS = 60000;

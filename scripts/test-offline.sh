@@ -29,6 +29,7 @@ OFFLINE_TESTS=(
   packages/server/test/runner-credentials-test.ts
   packages/server/test/runner-dial-test.ts
   packages/server/test/runner-vm-machines-test.ts
+  packages/server/test/runner-vm-templates-test.ts
   packages/server/test/leak-scan-test.ts
   packages/server/test/gateway-test.ts
   packages/server/test/vm-workspace-test.ts

@@ -9,19 +9,41 @@
  * of itself (`GuestInfo`): why it is not ready, its build and its hooks.
  *
  * A thread is on such a runner only because it was started there by name:
- * it never moves, and while the runner is down it waits (RunnerWait). */
+ * it never moves, and while the runner is down it waits (RunnerWait).
+ *
+ * On `berth vm` a new machine starts from its project's template on that
+ * runner when there is one (vm-template.ts), as on protocol 3: the newest
+ * fresh one for its key, or one built now in the thread's slot before its
+ * own machine exists, or the base. The build machine is cubed's own: its
+ * own id and placeholders (`vm.build`), made from the base with a template
+ * disk (`MachineSpec.build`); only cubed's checkout, pre-setup and
+ * `.agents/setup` run in it, never an agent; then `template_publish`, where
+ * keel cleans and checks its writable layer itself (there is no seal) and
+ * berth keeps the layer as the template and deletes the build machine (so
+ * cubed only forgets it). A build that fails before that is deleted and the
+ * thread starts from the base, with the reason. `berth host` has no templates. */
+import { randomBytes } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import type { Duplex } from "node:stream";
 import type { MessageInitShape } from "@bufbuild/protobuf";
-import { MachineStatus_Phase, Runner_Kind, type EgressPolicySchema, type GuestInfo, type Machine, type Runner, type SizeSchema } from "./gen/runner_pb.js";
+import { MachineStatus_Phase, Runner_Kind, Template_State, type EgressPolicySchema, type GuestInfo, type Machine, type Runner, type SizeSchema,
+  type Template } from "./gen/runner_pb.js";
 import type { GuestTransport } from "./guest-ssh.ts";
+import type { RunnerTemplate } from "./iroh-node.ts";
 import { createLogger, type Logger } from "./log.ts";
-import { placement, type Registry, type Thread } from "./registry.ts";
+import { newPlaceholder } from "./egress-policy.ts";
+import { NO_HOOKS, placement, threadAgent, type HookOutcome, type Registry, type StartupStep, type Thread } from "./registry.ts";
 import { machineKey, RunnerError, runnerSession, type MachineRef, type RunnerSession } from "./runner-session.ts";
-import { currentMachineEpoch, nextMachineEpoch, readStartupLog, RunnerWait, vmSizes, type MachineStart, type StartOptions, type StartupLog, type ThreadMachines,
-  type VmSizes } from "./vm.ts";
+import { currentMachineEpoch, gib, nextMachineEpoch, preparationOutcome, preparationScript, readStartupLog, RunnerWait, StepFailure, stepLog, vmSizes,
+  type MachineStart, type StartOptions, type StartupLog, type ThreadMachines, type VmSizes } from "./vm.ts";
 import { MachineEvents, safeText, type GuestAgent, type MachineEvidence } from "./vm-diagnostics.ts";
 import { bootDocuments, MAX_BOOT_BYTES } from "./vm-seed.ts";
+import { FAILED_BUILD_BACKOFF_MS, KEEL_TEMPLATE_CAPABILITIES, TEMPLATE_FORMAT, keelTemplateKey, keelTemplateParts, missingTemplate, obsoleteTemplates, pickTemplate,
+  templateMeta, templateSettings, type TemplateMeta, type TemplateParts, type TemplateSettings } from "./vm-template.ts";
+import { VmWorkspace } from "./vm-workspace.ts";
+import { LeaseStore } from "./workspace-lease.ts";
+import { settleOperation, type WorkspaceOwner } from "./workspace.ts";
 
 /** How long a machine's guest has to report ready in the runner's watch. */
 const READY_TIMEOUT_MS = 2 * 60 * 1000;
@@ -31,6 +53,46 @@ const MAX_DIAGNOSIS_BYTES = 256 * 1024;
 const MAX_REASON = 512;
 /** keel's hooks (hooks.rs `HOOKS`), the only names a guest's outcomes are shown for. */
 const HOOK_NAMES = ["pre-setup", "setup", "pre-resume", "resume"];
+/** How long cubed's preparation command in a build machine may run (as p3's). */
+const BUILD_PREPARE_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** A runner's template as vm-template.ts reads it. */
+function listedTemplate(template: Template): RunnerTemplate {
+  const created = template.createdAt;
+  return { id: template.id, key: template.key, meta: template.meta,
+    state: template.state === Template_State.READY ? "ready" : template.state === Template_State.REMOVING ? "removing" : "publishing",
+    diskGiB: template.diskGib, bytes: Number(template.bytes), createdAt: created ? Number(created.seconds) * 1000 + Math.floor(created.nanos / 1e6) : 0,
+    users: template.users };
+}
+
+/** Why the runner would not make a machine from the template, as the
+ * thread's reason to start from the base; null for any other refusal. */
+function templateRefused(error: unknown, id: string): string | null {
+  if (!(error instanceof RunnerError)) return null;
+  if (error.code === "NOT_FOUND") return `template ${id} was removed before the machine was created`;
+  if (error.code === "FAILED_PRECONDITION" && error.reason === "template_removing") return `template ${id} was being removed when the machine was created`;
+  if (error.code === "FAILED_PRECONDITION" && error.reason === "template_image_changed") return `the runner's image changed since template ${id} was prepared`;
+  return null;
+}
+
+/** Runs one of cubed's own commands in a build machine under a fresh lease
+ * and a fixed key (as vm.ts `own`); reattaches to it when the key already ran. */
+async function own(workspace: VmWorkspace, owner: WorkspaceOwner, key: string, command: string, timeoutMs: number) {
+  const lease = await workspace.lease({ owner });
+  try {
+    await workspace.execOwn(lease.token, key, { command, timeoutMs });
+    return await settleOperation(workspace, lease.token, key);
+  } finally { await workspace.release(lease.token).catch(() => {}); }
+}
+
+function minutes(ms: number): string {
+  const whole = Math.round(ms / 60000);
+  return whole < 1 ? "under a minute" : `${whole} min`;
+}
+function hookSummary(hooks: Record<string, HookOutcome>): string {
+  return Object.entries(hooks).map(([name, hook]) => `${name} ${hook.status}${hook.exitCode !== undefined ? ` (exit ${hook.exitCode})` : ""}`).join(", ");
+}
+const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 /** Why the guest is not ready, as the runner last reported it; null when it is. */
 function notReady(guest: GuestInfo | undefined): string | null {
@@ -63,6 +125,8 @@ export interface RunnerMachinesOptions {
   sizes?: VmSizes;
   /** Tests: how long a guest has to report ready (default READY_TIMEOUT_MS). */
   readyTimeoutMs?: number;
+  /** Machine templates on VM runners (default: from CUBED_TEMPLATES and CUBED_TEMPLATE_TTL_HOURS). */
+  templates?: TemplateSettings;
 }
 
 export class RunnerMachines implements ThreadMachines {
@@ -72,11 +136,19 @@ export class RunnerMachines implements ThreadMachines {
   /** The runner boot each thread's machine was last started in. */
   private readonly boots = new Map<string, string>();
   private readonly starting = new Map<string, Promise<MachineStart>>();
+  private readonly templates: TemplateSettings;
+  /** Template builds under way, by runner and key: one at a time. */
+  private readonly builds = new Map<string, Promise<unknown>>();
+  /** When a build of a runner, key, machine size and commit last failed, and why. */
+  private readonly failedBuilds = new Map<string, { at: number; error: string }>();
+  /** The guest of each thread's build machine while cubed prepares it. */
+  private readonly buildGuests = new Map<string, GuestTransport>();
 
   constructor(options: RunnerMachinesOptions) {
     this.options = options;
     this.log = options.log ?? createLogger("runner-machines");
     this.events = new MachineEvents(options.threads);
+    this.templates = options.templates ?? templateSettings();
   }
 
   private session(thread: Thread): RunnerSession {
@@ -89,6 +161,8 @@ export class RunnerMachines implements ThreadMachines {
     return { owner: thread.id, id: thread.vm.vmId };
   }
   private directory(thread: Thread): string { return path.join(this.options.threads, thread.id, "vm"); }
+  /** The build machine's lease store (its epoch is the thread's). */
+  private buildDirectory(thread: Thread): string { return path.join(this.options.threads, thread.id, "build"); }
   private fence(thread: Thread) { return { epoch: BigInt(nextMachineEpoch(this.directory(thread))) }; }
   /** The thread's runner as enrolled is `berth vm` (its hello said VM). */
   private onVm(thread: Thread): boolean { return this.options.registry.getRunner(thread.runnerId)?.kind === "vm"; }
@@ -153,27 +227,24 @@ export class RunnerMachines implements ThreadMachines {
       catch (error) {
         if (!(error instanceof RunnerError && error.code === "NOT_FOUND")) throw error;
         options.onBoot?.();
+        // What the disk is made from (a template, built now if there is
+        // none), decided before the thread's machine exists.
+        if (vm) thread = await this.prepare(thread, session, runner, size!);
         this.options.registry.beginStartupStep(thread.id, { name: "boot", detail: vm
           ? `a keel machine on VM runner ${node}: ${size!.vcpus} vCPU, ${size!.memoryMib} MiB memory, ${size!.diskGib} GiB disk`
           : `a directory on host runner ${node}, unsandboxed` });
         this.options.registry.markPlacement(thread.id, thread.runnerId, ["provisional"], "requested");
         created = true;
-        machine = await this.step(thread, () => session.machine({ case: "machineCreate",
-          value: { ref, fence: this.fence(thread), spec: { source: { case: "base", value: true }, ...(size ? { size } : {}) } } }));
-        this.events.record(thread.id, "created", `machine ${ref.id} on ${what} ${node}`);
+        machine = await this.step(thread, () => this.create(thread, session, ref, size));
+        const preparation = this.options.registry.getThread(thread.id)?.vm?.preparation;
+        this.events.record(thread.id, "created", `machine ${ref.id} on ${what} ${node}`
+          + (preparation ? `, ${preparation.source}${preparation.templateId ? ` template ${preparation.templateId}` : ""}${preparation.reason ? ` (${preparation.reason})` : ""}` : ""));
       }
       this.options.registry.markPlacement(thread.id, thread.runnerId, ["provisional", "requested"], "allocated");
       if (machine.status?.phase === MachineStatus_Phase.RETAINED) throw new Error(`the thread's machine on ${node} was released; its ${vm ? "disk" : "directory"} is kept there`);
       const startAndWait = async () => {
         await session.machine({ case: "machineStart", value: { ref, fence: this.fence(thread), ...start } });
-        const timeout = this.options.readyTimeoutMs ?? READY_TIMEOUT_MS;
-        try { return await session.until(ref, current => current.status?.guest?.ready === true, timeout); }
-        catch (error) {
-          if (error instanceof RunnerError) throw error;
-          // The runner's last word on the guest says why it did not get ready.
-          const why = notReady(session.machines.get(machineKey(ref))?.status?.guest);
-          throw new Error(`runner ${node}: the guest of machine ${ref.id} did not get ready in ${Math.round(timeout / 1000)} s: ${why ?? "it is ready now"}`, { cause: error });
-        }
+        return this.ready(session, ref);
       };
       const ready = created ? await this.step(thread, startAndWait) : await startAndWait();
       if (created) this.options.registry.endStartupStep(thread.id, { name: "boot", state: "ok" });
@@ -187,6 +258,258 @@ export class RunnerMachines implements ThreadMachines {
       this.events.record(thread.id, failure instanceof RunnerWait ? "waiting for a runner" : "start failed", failure);
       throw failure;
     }
+  }
+
+  /** Waits until the runner's watch reports the guest of `ref` ready. */
+  private async ready(session: RunnerSession, ref: MachineRef): Promise<Machine> {
+    const timeout = this.options.readyTimeoutMs ?? READY_TIMEOUT_MS;
+    try { return await session.until(ref, current => current.status?.guest?.ready === true, timeout); }
+    catch (error) {
+      if (error instanceof RunnerError) throw error;
+      // The runner's last word on the guest says why it did not get ready.
+      const why = notReady(session.machines.get(machineKey(ref))?.status?.guest);
+      throw new Error(`runner ${session.nodeId}: the guest of machine ${ref.id} did not get ready in ${Math.round(timeout / 1000)} s: ${why ?? "it is ready now"}`, { cause: error });
+    }
+  }
+
+  /** Creates the thread's machine as its preparation says. A template the
+   * runner no longer has, is removing, or made on another image (B-8 D3)
+   * makes it start from the base, with that reason (as vm.ts `allocate`). */
+  private async create(thread: Thread, session: RunnerSession, ref: MachineRef, size: MessageInitShape<typeof SizeSchema> | undefined): Promise<Machine> {
+    const send = (templateId?: string) => session.machine({ case: "machineCreate", value: { ref, fence: this.fence(thread),
+      spec: { source: templateId ? { case: "templateId", value: templateId } : { case: "base", value: true }, ...(size ? { size } : {}) } } });
+    const preparation = this.options.registry.getThread(thread.id)?.vm?.preparation;
+    if (preparation?.source !== "template" || !preparation.templateId) return send();
+    try { return await send(preparation.templateId); }
+    catch (error) {
+      const reason = templateRefused(error, preparation.templateId);
+      if (!reason) throw error;
+      this.log.warn("template refused; starting fresh", { thread: thread.id, template: preparation.templateId, error });
+      this.options.registry.updateThreadVm(thread.id, { preparation: { source: "fresh", reason } });
+      return send();
+    }
+  }
+
+  /** Decides what a new machine's disk on a VM runner is made from and
+   * records it on the thread (`vm.preparation`), as vm.ts `prepare` does
+   * for protocol 3: the newest fresh template of the project on this
+   * runner for its key, or one built now, or the base. Returns the
+   * updated thread. */
+  private async prepare(thread: Thread, session: RunnerSession, runner: Runner, size: MessageInitShape<typeof SizeSchema>): Promise<Thread> {
+    const { registry } = this.options;
+    registry.beginStartupStep(thread.id, { name: "lookup" });
+    const fresh = (reason: string) => {
+      registry.endStartupStep(thread.id, { name: "lookup", state: "ok", detail: `no template: ${reason}` });
+      return registry.updateThreadVm(thread.id, { preparation: { source: "fresh", reason } });
+    };
+    // A build machine an earlier start left (a crash, a cubed restart): cubed's own, deleted first.
+    try { await this.abandonBuild(thread, session); }
+    catch (error) {
+      registry.endStartupStep(thread.id, { name: "lookup", state: "failed", detail: `an earlier template build machine is not deleted yet: ${message(error)}` });
+      throw error;
+    }
+    if (!this.templates.enabled) return fresh("templates are off (CUBED_TEMPLATES=off)");
+    if (!KEEL_TEMPLATE_CAPABILITIES.every(capability => session.capabilities.includes(capability))) {
+      return fresh(`the runner has no machine templates (${KEEL_TEMPLATE_CAPABILITIES.join(", ")})`);
+    }
+    const keyInput = { allocation: thread.allocation, hooks: thread.allocation.hooks ?? NO_HOOKS, diskGiB: size.diskGib ?? 0,
+      runner: { baseImageSha256: runner.platform?.baseImageSha256 ?? "", platform: [runner.platform?.os, runner.platform?.arch].filter(Boolean).join("-") } };
+    const key = keelTemplateKey(keyInput);
+    let templates: RunnerTemplate[];
+    try { templates = await this.listTemplates(session); }
+    catch (error) {
+      this.log.warn("listing templates failed", { thread: thread.id, error });
+      return fresh("the runner's templates could not be listed");
+    }
+    const now = Date.now();
+    await this.removeTemplates(session, this.obsolete(templates, now), "obsolete");
+    const found = pickTemplate(templates, key, now, this.templates.ttlMs);
+    if (found) {
+      registry.endStartupStep(thread.id, { name: "lookup", state: "ok", detail: `template ${found.id}, prepared ${minutes(now - found.createdAt)} ago` });
+      return registry.updateThreadVm(thread.id, { preparation: { source: "template", templateId: found.id, setupBlob: found.meta.setupBlob } });
+    }
+    const parts = keelTemplateParts(keyInput);
+    const missing = missingTemplate(templates, { projectId: thread.allocation.projectId, key, parts, now, ttlMs: this.templates.ttlMs });
+    const flight = `${thread.runnerId}:${key}`;
+    // One build per runner and key: a thread that comes meanwhile starts fresh.
+    if (this.builds.has(flight)) return fresh(`${missing}; another thread is preparing the project's template now`);
+    // As p3: a failed build is not tried again for an hour with the same
+    // key, machine size and commit.
+    const attempt = `${flight}:${size.vcpus}:${size.memoryMib}:${thread.allocation.repositories[0]?.baseOid ?? ""}`;
+    const failed = this.failedBuilds.get(attempt);
+    if (failed !== undefined && now - failed.at < FAILED_BUILD_BACKOFF_MS) {
+      return fresh(`${missing}; the last build of one failed ${minutes(now - failed.at)} ago (${failed.error}); `
+        + `cube tries again in ${minutes(failed.at + FAILED_BUILD_BACKOFF_MS - now)}, or at once with a new commit or another machine size`);
+    }
+    registry.endStartupStep(thread.id, { name: "lookup", state: "ok", detail: `${missing}: building one` });
+    const building = this.build(thread, session, runner, size, key, parts);
+    this.builds.set(flight, building);
+    try {
+      const template = await building;
+      this.failedBuilds.delete(attempt);
+      return registry.updateThreadVm(thread.id, { preparation: { source: "template", templateId: template.id, setupBlob: template.meta.setupBlob } });
+    } catch (error) {
+      // The runner does not answer: the thread waits for it (it never moves).
+      if (error instanceof RunnerError && error.code === "UNAVAILABLE") throw error;
+      const text = message(error);
+      // No room (B-8 C2, or no free machine): the thread cannot move, so it
+      // starts fresh; as on p3 a refusal is no failed build and sets no backoff.
+      if (!(error instanceof RunnerError && error.code === "RESOURCE_EXHAUSTED")) this.failedBuilds.set(attempt, { at: Date.now(), error: text });
+      this.log.warn("template build failed; starting fresh", { thread: thread.id, runner: session.nodeId, error: text });
+      return registry.updateThreadVm(thread.id, { preparation: { source: "fresh", reason: `the template build failed: ${text}` } });
+    } finally { this.builds.delete(flight); }
+  }
+
+  /** Builds a template for `key` in the thread's slot, before the thread's
+   * own machine exists: a build machine with its own id and placeholders
+   * (`vm.build`) is made from the base with a template disk and started
+   * with its own boot documents and policy; cubed's own commands check out
+   * the pinned commits and run pre-setup and `.agents/setup` in it; then
+   * `template_publish` (600 s; asked once more if the answer is lost, as it
+   * is idempotent). A published build machine is used up (C1: berth
+   * deleted it) and only forgotten. Anything short of that publishes
+   * nothing and the build machine is deleted. */
+  private async build(thread: Thread, session: RunnerSession, runner: Runner, size: MessageInitShape<typeof SizeSchema>, key: string,
+    parts: TemplateParts): Promise<{ id: string; meta: TemplateMeta }> {
+    const { registry } = this.options;
+    if (!this.options.policy) throw new Error("this cubed has no egress policy for protocol-4 VM runners");
+    const started = Date.now();
+    const build = { vmId: randomBytes(8).toString("hex"), placeholders: { github: newPlaceholder("github") }, key, runnerId: thread.runnerId };
+    registry.updateThreadVm(thread.id, { build });
+    const ref: MachineRef = { owner: thread.id, id: build.vmId };
+    const directory = this.buildDirectory(thread);
+    fs.rmSync(directory, { recursive: true, force: true });
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    let leases: LeaseStore | undefined;
+    let published = false;
+    // The step under way, marked failed if the build stops there.
+    let step: StartupStep["name"] = "build-boot";
+    registry.beginStartupStep(thread.id, { name: step, detail: `${size.vcpus} vCPU, ${size.memoryMib} MiB memory, ${size.diskGib} GiB disk, from the base image` });
+    try {
+      await session.machine({ case: "machineCreate", value: { ref, fence: this.fence(thread), spec: { source: { case: "base", value: true }, size, build: true } } });
+      this.events.record(thread.id, "build machine created", `machine ${ref.id} on VM runner ${session.nodeId}`);
+      const documents = bootDocuments({ vmId: build.vmId, placeholders: build.placeholders, ...(thread.allocation.hooks ? { hooks: thread.allocation.hooks } : {}) },
+        runner.limits?.maxBootBytes || MAX_BOOT_BYTES);
+      await session.machine({ case: "machineStart", value: { ref, fence: this.fence(thread), size, boot: { documents, mac: "" },
+        policy: this.options.policy.policyFor({ ...thread, vm: { ...thread.vm!, placeholders: build.placeholders } }) } });
+      await this.ready(session, ref);
+      registry.endStartupStep(thread.id, { name: step, state: "ok" });
+
+      // cubed's own commands: the build machine never has an agent.
+      step = "build-prepare";
+      registry.beginStartupStep(thread.id, { name: step, detail: "checkout, pre-setup and .agents/setup in the build machine" });
+      const guest = session.guest(ref, () => Math.max(1, currentMachineEpoch(this.directory(thread))));
+      this.buildGuests.set(thread.id, guest);
+      leases = new LeaseStore(path.join(directory, "lease"));
+      const owner = threadAgent(thread);
+      const workspace = new VmWorkspace({ guest, leases, owner, binding: JSON.stringify({ build: build.vmId, thread: thread.id }) });
+      const prepared = await own(workspace, owner, "cube:build:prepare", preparationScript(thread.allocation, { kind: "fresh" }), BUILD_PREPARE_TIMEOUT_MS);
+      const outcome = preparationOutcome(prepared);
+      if (outcome.error) {
+        // A hook that was killed printed nothing more: its log is still in the machine.
+        const log = outcome.log ?? (outcome.running ? await readStartupLog(guest, "build").then(read => read.text ? stepLog(read.text) : undefined, () => undefined) : undefined);
+        throw new StepFailure(outcome.error, outcome.memory, log);
+      }
+      const failedHook = Object.entries(outcome.hooks).find(([, hook]) => hook.status === "failed");
+      if (failedHook) throw new StepFailure(`${failedHook[0]} failed (exit ${failedHook[1].exitCode}) in the build machine`, outcome.memory, outcome.log);
+      this.buildGuests.delete(thread.id);
+      registry.endStartupStep(thread.id, { name: step, state: "ok", detail: hookSummary(outcome.hooks), ...(outcome.memory ? { memory: outcome.memory } : {}) });
+
+      // No seal: keel's template_publish cleans and checks the layer itself.
+      step = "build-publish";
+      registry.beginStartupStep(thread.id, { name: step, detail: "keel cleans the build machine's layer and writes it as the template" });
+      const meta: TemplateMeta = { format: TEMPLATE_FORMAT, projectId: thread.allocation.projectId, setupBlob: outcome.setupBlob ?? "none",
+        commit: thread.allocation.repositories[0]?.baseOid ?? null, parts };
+      const ask = { case: "templatePublish" as const, value: { from: ref, fence: this.fence(thread), key, meta: JSON.stringify(meta) } };
+      const publish = async () => {
+        const result = await session.call(ask);
+        if (result.case !== "template") throw new Error(`runner ${session.nodeId} answered ${result.case} to template_publish`);
+        return result.value;
+      };
+      let template: Template;
+      try { template = await publish(); }
+      catch (error) {
+        // The answer was lost: publishing is idempotent, so the same call goes once more.
+        if (!(error instanceof RunnerError && error.code === "UNAVAILABLE")) throw error;
+        this.log.warn("template_publish unanswered; asking again", { thread: thread.id, vm: build.vmId, error });
+        template = await publish();
+      }
+      published = true;
+      registry.endStartupStep(thread.id, { name: step, state: "ok", detail: `template ${template.id}, ${gib(Number(template.bytes))}` });
+      this.log.info("template published", { thread: thread.id, runner: session.nodeId, template: template.id, bytes: Number(template.bytes), ms: Date.now() - started });
+      this.events.record(thread.id, "template published", `template ${template.id}; the runner deleted the build machine`);
+      // The project's older templates on this runner are superseded.
+      try {
+        await this.removeTemplates(session, this.obsolete(await this.listTemplates(session), Date.now(), { projectId: meta.projectId, keep: template.id }), "superseded");
+      } catch (error) { this.log.warn("removing superseded templates failed", { runner: session.nodeId, error }); }
+      return { id: template.id, meta };
+    } catch (error) {
+      if (!published) registry.endStartupStep(thread.id, { name: step, state: "failed", detail: `${message(error)}; no template was published`,
+        ...(error instanceof StepFailure && error.memory ? { memory: error.memory } : {}), ...(error instanceof StepFailure && error.log ? { log: error.log } : {}) });
+      throw error;
+    } finally {
+      this.buildGuests.delete(thread.id);
+      leases?.close();
+      // C1: a published build machine is used up (the runner deleted it): only forgotten.
+      if (published) {
+        registry.updateThreadVm(thread.id, { build: undefined });
+        fs.rmSync(directory, { recursive: true, force: true });
+      } else await this.abandonBuild(thread, session).catch(error => this.log.warn("deleting the build machine failed", { thread: thread.id, error }));
+    }
+  }
+
+  /** Deletes the thread's build machine that did not publish (a failure, or
+   * one an earlier cubed left); it held only cubed's own work. Gone already
+   * (`NOT_FOUND`) is the same. */
+  private async abandonBuild(thread: Thread, session: RunnerSession): Promise<void> {
+    const build = this.options.registry.getThread(thread.id)?.vm?.build;
+    if (!build) return;
+    this.buildGuests.delete(thread.id);
+    const ref: MachineRef = { owner: thread.id, id: build.vmId };
+    try {
+      const machine = await session.machine({ case: "machineDelete", value: { ref, fence: this.fence(thread), retain: false } });
+      if (machine.status?.phase === MachineStatus_Phase.RETAINED) await session.machine({ case: "machineDiscard", value: { ref, fence: this.fence(thread) } });
+    } catch (error) {
+      if (!(error instanceof RunnerError && error.code === "NOT_FOUND")) throw error;
+    }
+    this.options.registry.updateThreadVm(thread.id, { build: undefined });
+    fs.rmSync(this.buildDirectory(thread), { recursive: true, force: true });
+    this.log.info("build machine deleted", { thread: thread.id, vm: build.vmId });
+    this.events.record(thread.id, "build machine deleted", `machine ${build.vmId}`);
+  }
+
+  private async listTemplates(session: RunnerSession): Promise<RunnerTemplate[]> {
+    const result = await session.call({ case: "templateList", value: {} });
+    if (result.case !== "templates") throw new Error(`runner ${session.nodeId} answered ${result.case} to template_list`);
+    return result.value.items.map(listedTemplate);
+  }
+
+  /** C7: `template_delete` has no owner or fence, so cubed deletes only
+   * templates whose metadata it reads as its own (`templateMeta`), by the
+   * obsolete rule (expired, of a project that is gone, or superseded by
+   * `keep`); a template it cannot read is never touched. */
+  private obsolete(templates: RunnerTemplate[], now: number, superseded?: { projectId: string; keep: string }): string[] {
+    return obsoleteTemplates(templates.filter(template => templateMeta(template.meta) !== null), { now, ttlMs: this.templates.ttlMs,
+      projectExists: id => this.options.registry.getProject(id) !== null, ...(superseded ?? {}) });
+  }
+
+  private async removeTemplates(session: RunnerSession, ids: string[], reason: string): Promise<void> {
+    for (const id of ids) {
+      try {
+        const removed = await session.call({ case: "templateDelete", value: { id } });
+        this.log.info("template removed", { runner: session.nodeId, template: id, reason, inUse: removed.case === "template" ? removed.value.users : undefined });
+      } catch (error) {
+        if (error instanceof RunnerError && error.code === "NOT_FOUND") continue;
+        this.log.warn("removing a template failed", { runner: session.nodeId, template: id, error });
+      }
+    }
+  }
+
+  /** Stops new machines from using a template (its setup changed): on a VM
+   * runner, `template_delete`; the runner removes it once no machine uses it. */
+  async invalidateTemplate(thread: Thread, templateId: string): Promise<void> {
+    if (!this.onVm(thread)) return;
+    await this.removeTemplates(this.session(thread), [templateId], "its setup changed");
   }
 
   /** Ends the thread's `boot` step as failed when `work` fails. */
@@ -203,6 +526,8 @@ export class RunnerMachines implements ThreadMachines {
    * keeps its disk only when asked to (or after an interruption). */
   async release(thread: Thread, retain: boolean): Promise<{ retained: boolean }> {
     this.boots.delete(thread.id);
+    // A build machine that outlived its start (cubed's own) goes first.
+    if (this.onVm(thread)) await this.abandonBuild(thread, this.session(thread));
     if (placement(this.options.registry.getThread(thread.id) ?? thread) === "provisional") return { retained: false };
     try {
       const machine = await this.session(thread).machine({ case: "machineDelete", value: { ref: this.ref(thread), fence: this.fence(thread), retain } });
@@ -245,7 +570,11 @@ export class RunnerMachines implements ThreadMachines {
    * while this process has the machine running; null otherwise. A host
    * runner's logs are on that host (CUBE_LOGS): null. */
   async startupLog(thread: Thread): Promise<StartupLog | null> {
-    if (!this.onVm(thread) || !this.running(thread)) return null;
+    if (!this.onVm(thread)) return null;
+    // While cubed prepares a template, the hook runs in the build machine.
+    const build = this.buildGuests.get(thread.id);
+    if (build) return readStartupLog(build, "build");
+    if (!this.running(thread)) return null;
     return readStartupLog(this.guest(thread), "thread");
   }
 

@@ -656,8 +656,23 @@ keeps as `templates/<id>.erofs` (read-only, outside the layer cache's
 limit, removed only by `template_delete` once no machine uses it) while
 the build machine is deleted. A machine made from a template gets it above
 the image's layers, and only on the image it was built on
-(`template_image_changed`). cubed builds no templates over protocol 4 yet
-(C phase).
+(`template_image_changed`). cubed uses them (RunnerMachines, row C-5) as
+it uses p3's, below, when the hello names all three template
+capabilities; `berth host` gets none. The differences: the key is its own
+format (`keelTemplateKey`: no guest helper or packages; the runner's
+`Platform.base_image_sha256` and platform are in it), the build machine is
+created with `build: true` and started with its own boot documents and
+policy, there is no seal and so no `build-seal` step (keel's
+`template_publish` cleans and checks the layer; cubed waits up to 600 s
+and asks the same call once more if the answer is lost), a published build
+machine is deleted by berth and only forgotten by cubed (B-8 C1), and cubed
+deletes only templates whose metadata it reads as its own (C7:
+`template_delete` has no owner or fence). The credential route accepts the
+thread's unfinished build machine on the thread's runner at the thread's
+current epoch, as the egress policy does (`machineFor`). While a template
+is published berth holds its global lock for up to 600 s, so other calls
+on that runner can time out after 15 s (C4, follow-up R14b; `berth vm`
+takes named threads only).
 
 `berth vm` answers `machine_diagnose` (row B-9) with one bounded,
 redacted JSON document of read-only evidence about a machine, including
@@ -774,8 +789,8 @@ template found, or why none, and whether a build starts), `build-boot`,
 try, `attempt` = the `cube:provision:<n>` key) and `resume`, each with its
 state (`running`, `ok`, `failed`, `interrupted` when cubed began it again),
 times, a detail, the command's memory and, for a failed hook, the end of its
-log (4 KiB, escaped and redacted). ThreadVms writes the lookup, build and
-boot steps; Conversations the preparation and resume. Each activation
+log (4 KiB, escaped and redacted). ThreadVms (and RunnerMachines on `berth
+vm`, without `build-seal`) writes the lookup, build and boot steps; Conversations the preparation and resume. Each activation
 first marks every step still running as interrupted (one thread has one
 activation at a time, so such a step is one an earlier activation or a
 stopped cubed never ended); a preparation try marked so that ended in the

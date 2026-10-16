@@ -5,13 +5,19 @@
  *
  * berth vm is enrolled in this test's cubed only, and takes threads only by
  * name (C-a decision 1): a thread started without a runner is refused (the
- * pool is empty), and OptChat's spawn naming it starts one there. The thread
- * boots with its boot documents and policy, checks out a repository through
- * the credential stream from test-vm-e2e's fake GitHub (fake-github.ts; the
- * host side resolves it from a local mirror through GIT_CONFIG_GLOBAL), runs
- * the project's pre-setup hook (a slow one, whose log the thread's startup
- * log shows while it runs: keel's read, C-2b) and the repository's
- * `.agents/setup`, gets
+ * pool is empty), and OptChat's spawn naming it starts one there. The first
+ * thread of the project builds its template first (C-5): a build machine
+ * of cubed's own (its own id and placeholder, no agent) boots from the
+ * base, checks out a repository through the credential stream from
+ * test-vm-e2e's fake GitHub (fake-github.ts; the host side resolves it from
+ * a local mirror through GIT_CONFIG_GLOBAL), runs the project's pre-setup
+ * hook (a slow one, whose log the thread's startup log shows while it runs:
+ * keel's read, C-2b) and the repository's `.agents/setup`, and is published
+ * by keel and berth; the thread's own machine then starts from that
+ * template with its boot documents and policy, and skips setup. A second
+ * thread of the project starts from the template too, and a third, pinned
+ * to a commit whose `.agents/setup` changed, runs setup itself and removes
+ * the template. The first thread gets
  * the portal's settings without its agent being replaced, runs a tool call,
  * pushes through the credential stream (the guest holds only the
  * placeholder), serves the portal over `dial`, is diagnosed with berth's
@@ -47,7 +53,7 @@ import { cubeThreads } from "../src/optchat-threads.ts";
 import { portalSettings } from "../src/portal.ts";
 import { enrollRunner } from "../src/runner-enroll.ts";
 import { describeRunners, observeRunners } from "../src/runner-observe.ts";
-import { MachineStatus_Phase } from "../src/gen/runner_pb.js";
+import { MachineStatus_Phase, Template_State } from "../src/gen/runner_pb.js";
 import { runnerSession, STOP_TIMEOUT_MS } from "../src/runner-session.ts";
 import { currentMachineEpoch } from "../src/vm.ts";
 import { formatDiagnostics } from "../src/vm-diagnostics.ts";
@@ -217,6 +223,12 @@ const api = async (route: string, method = "GET", body?: unknown) => {
   if (response.status >= 400) throw new Error(`${method} ${route}: ${response.status} ${answer}`);
   return answer ? JSON.parse(answer) : undefined;
 };
+/** `expected` appear in `actual` in this order (other entries may come between). */
+function assertInOrder(actual: string[], expected: string[]): void {
+  let at = 0;
+  for (const item of actual) if (item === expected[at]) at++;
+  assert.equal(at, expected.length, `expected ${expected.join(", ")} in order; got ${actual.join(", ")}`);
+}
 async function until<T>(what: string, ms: number, probe: () => Promise<T | undefined | false> | T | undefined | false): Promise<T> {
   const deadline = Date.now() + ms;
   for (;;) {
@@ -279,23 +291,24 @@ try {
   assert.equal(app.registry.listThreads().length, 0);
   note("a thread without a runner name was refused: the pool is empty, berth vm is not in it");
 
-  // spawn naming berth vm: boot, boot documents, policy, checkout and hooks
+  // spawn naming berth vm: the template build, then boot, boot documents, policy, checkout and hooks
   // a deployment's gateway is up before any thread starts; the credential route refuses, not waits, while it starts (F-Ca-2)
   assert.ok(app.gateway, "cubed started its gateway");
   await app.gateway.ready();
+  const seenBefore = github.seen.length;
   const booting = Date.now();
   const spawned = await threads.spawn({ project: "ca", task: "say hi", runner: node }, "req-vm");
   const id = spawned.id;
   const thread = app.registry.getThread(id)!;
   assert.deepEqual([thread.runnerId, thread.pinned], [node, true]);
   // While pre-setup runs, the thread's startup log is its log, read in the keel machine.
-  let live = null as { hook: string | null; text: string } | null;
+  let live = null as { machine: string; hook: string | null; text: string } | null;
   const reads: string[] = [];
   await until("the thread's machine is ready", 900000, async () => {
     const current = app.registry.getThread(id)!;
     if (current.workspaceState === "failed") throw new Error(`the machine failed: ${current.workspaceError}`);
     if (!live) {
-      const { log } = await api(`/api/threads/${id}/startup-log`) as { log: { hook: string | null; text: string; error?: string } | null };
+      const { log } = await api(`/api/threads/${id}/startup-log`) as { log: { machine: string; hook: string | null; text: string; error?: string } | null };
       const seen = log === null ? "null" : log.error ? `error ${log.error}` : `hook ${log.hook}`;
       if (reads.at(-1) !== seen) reads.push(seen);
       if (log?.hook === "pre-setup" && log.text.includes(MARKER)) live = log;
@@ -303,14 +316,31 @@ try {
     return current.workspaceState === "available";
   });
   assert.ok(live, `the startup log showed pre-setup and its marker while it ran; it said: ${reads.join(" -> ")}`);
-  note(`startup log while pre-setup ran: hook ${live!.hook}, ${JSON.stringify(live!.text.trim())} (reads: ${reads.join(" -> ")})`);
+  assert.equal(live!.machine, "build", "pre-setup ran in the template's build machine");
+  note(`startup log while pre-setup ran: ${live!.machine} machine, hook ${live!.hook}, ${JSON.stringify(live!.text.trim())} (reads: ${reads.join(" -> ")})`);
   const vm = app.registry.getThread(id)!.vm!;
   const steps = vm.steps!.map(step => `${step.name}:${step.state}`);
-  assert.ok(steps.includes("boot:ok") && steps.includes("prepare:ok") && steps.includes("resume:ok"), steps.join(", "));
+  assertInOrder(steps, ["lookup:ok", "build-boot:ok", "build-prepare:ok", "build-publish:ok", "boot:ok", "prepare:ok", "resume:ok"]);
+  assert.ok(!steps.some(step => step.startsWith("build-seal")), "no seal on keel: template_publish cleans the layer itself");
+  assert.equal(vm.steps!.find(step => step.name === "lookup")!.detail, "the project has no template on this runner yet: building one");
+  assert.equal(vm.steps!.find(step => step.name === "build-prepare")!.detail, "pre-setup ok, setup ok", "pre-setup and setup ran in the build machine");
   assert.match(vm.steps!.find(step => step.name === "boot")!.detail ?? "", new RegExp(`^a keel machine on VM runner ${node}: 2 vCPU, 2048 MiB memory, 16 GiB disk$`));
+  // The template: the build machine's id; berth deleted the build machine (C1), cubed forgot it.
+  const templateId = vm.preparation?.templateId ?? "";
+  assert.deepEqual([vm.preparation?.source, /^[0-9a-f]{16}$/.test(templateId), templateId !== vm.vmId, vm.build], ["template", true, true, undefined], JSON.stringify(vm.preparation));
+  assert.ok(fs.existsSync(path.join(directory, "templates", `${templateId}.erofs`)), "berth keeps the layer");
+  assert.ok(!fs.existsSync(path.join(directory, templateId)), "the build machine is gone");
+  const publishedTemplates = await runnerSession(app.registry.getRunner(node)!).call({ case: "templateList", value: {} });
+  assert.ok(publishedTemplates.case === "templates" && publishedTemplates.value.items.length === 1 && publishedTemplates.value.items[0]!.id === templateId, "one template");
+  assert.equal(JSON.parse(publishedTemplates.value.items[0]!.meta).projectId, project.id);
+  // The build machine checked out through berth's credential stream (the fake GitHub wants the token), and so did the thread's machine.
+  const fetches = github.seen.slice(seenBefore).filter(seen => seen.method === "POST" && seen.path.endsWith("/git-upload-pack"));
+  assert.ok(fetches.length >= 2 && fetches.every(seen => seen.auth === "token"), JSON.stringify(github.seen.slice(seenBefore)));
+  // From the template, setup is not run again in the thread's machine.
   assert.deepEqual(Object.fromEntries(Object.entries(vm.hooks ?? {}).map(([name, hook]) => [name, hook.status])),
-    { "pre-setup": "ok", setup: "ok", "pre-resume": "ok", resume: "ok" }, JSON.stringify(vm.hooks));
-  note(`ready in ${((Date.now() - booting) / 1000).toFixed(1)} s: ${steps.join(", ")}`);
+    { "pre-setup": "skipped", setup: "skipped", "pre-resume": "ok", resume: "ok" }, JSON.stringify(vm.hooks));
+  note(`template ${templateId} built in the thread's slot (${vm.steps!.filter(step => step.name.startsWith("build-")).map(step => `${step.name} ${((step.endedAt! - step.startedAt) / 1000).toFixed(1)} s`).join(", ")}); `
+    + `ready in ${((Date.now() - booting) / 1000).toFixed(1)} s: ${steps.join(", ")}`);
   // The task is the first turn; a prompt during it is refused.
   await until("the first turn", 300000, async () => {
     const value = await api(`/api/threads/${id}/history`);
@@ -323,6 +353,7 @@ try {
   assert.deepEqual(facts.slice(0, 3), ["agent", "/workspace", `cube-${vm.vmId.slice(0, 8)}`], "the hostname document");
   assert.equal(facts[3], "echo \"pre-setup as $(id -un)\" >> ~/ca-hooks.log", "the pre-setup document");
   assert.equal(facts[4], "echo \"setup as $(id -un) in $PWD\" >> ~/ca-hooks.log", "the repository's setup hook");
+  // Written in the build machine, and in the template since.
   assert.deepEqual(facts.slice(5, 7), ["pre-setup as agent", "setup as agent in /workspace"]);
   assert.match(facts.at(-1)!, /^cube_ph_github_[A-Za-z0-9]{22}$/, "the env document: the guest holds the placeholder only");
   assert.equal(facts.at(-1), vm.placeholders.github);
@@ -394,6 +425,66 @@ try {
   note(`cubed's path lines before berth's restart: ${connectedBefore.length} connected, ${sessionLog("runner path changed").length} changed, `
     + `${sessionLog("runner disconnected").length} disconnected; first ${JSON.stringify(connectedBefore[0])}`);
 
+  // C-5: a second thread of the project starts from the template; setup does not run again.
+  const waitReady = (threadId: string, what: string) => until(what, 900000, () => {
+    const current = app.registry.getThread(threadId)!;
+    if (current.workspaceState === "failed") throw new Error(`${what}: the machine failed: ${current.workspaceError}`);
+    return current.workspaceState === "available";
+  });
+  const firstTurn = (threadId: string) => until("the first turn", 300000, async () => {
+    const value = await api(`/api/threads/${threadId}/history`);
+    return value.status?.run === "cube:initial" && !["working", "idle"].includes(value.status.state) ? value : undefined;
+  });
+  const archive = async (threadId: string) => {
+    let answer: { ok?: boolean; retained?: boolean; reason?: string } = {};
+    for (let tries = 0; tries < 200 && !answer.ok; tries++) {
+      answer = await (await fetch(`${url}/api/threads/${threadId}`, { method: "DELETE" })).json() as typeof answer;
+      if (!answer.ok) await delay(500);
+    }
+    assert.ok(answer.ok, JSON.stringify(answer));
+    return answer;
+  };
+  const hookStatus = (threadId: string) => Object.fromEntries(Object.entries(app.registry.getThread(threadId)!.vm!.hooks ?? {}).map(([name, hook]) => [name, hook.status]));
+  const secondBooting = Date.now();
+  const second = (await threads.spawn({ project: "ca", task: "from the template", runner: node }, "req-vm-2")).id;
+  await waitReady(second, "the second thread's machine is ready");
+  const vm2 = app.registry.getThread(second)!.vm!;
+  const steps2 = vm2.steps!.map(step => `${step.name}:${step.state}`);
+  assert.ok(!steps2.some(step => step.startsWith("build-")), `nothing built for the second thread: ${steps2.join(", ")}`);
+  assertInOrder(steps2, ["lookup:ok", "boot:ok", "prepare:ok", "resume:ok"]);
+  assert.match(vm2.steps!.find(step => step.name === "lookup")!.detail ?? "", new RegExp(`^template ${templateId}, prepared `));
+  assert.deepEqual(vm2.preparation, { source: "template", templateId, setupBlob: vm.preparation!.setupBlob });
+  assert.deepEqual(hookStatus(second), { "pre-setup": "skipped", setup: "skipped", "pre-resume": "ok", resume: "ok" });
+  await firstTurn(second);
+  const hooks2 = (await bash(second, "cat ~/ca-hooks.log")).split("\n");
+  assert.equal(hooks2.filter(line => line === "setup as agent in /workspace").length, 1, `setup ran once, in the build machine: ${hooks2.join(" | ")}`);
+  assert.equal(hooks2.filter(line => line === "pre-setup as agent").length, 1, hooks2.join(" | "));
+  assert.equal(hooks2.filter(line => line.startsWith("resume ")).length, 1, "its own resume");
+  const secondMs = Date.now() - secondBooting;
+  await archive(second);
+  note(`second thread: from template ${templateId}, setup skipped, ready and archived in ${(secondMs / 1000).toFixed(1)} s: ${steps2.join(", ")}`);
+
+  // C-5: a changed .agents/setup: the third thread runs setup itself and the template is removed.
+  fs.writeFileSync(path.join(seed, ".agents", "setup"), "#!/bin/bash\necho \"setup v2 as $(id -un)\" >> ~/ca-hooks.log\n", { mode: 0o755 });
+  git(seed, "commit", "-qam", "setup v2");
+  git(seed, "push", "-q", "origin", "HEAD:main");
+  const v2 = git(seed, "rev-parse", "HEAD");
+  await api(`/api/projects/${project.id}/check`, "POST", {});
+  await until("the project sees the new commit", 60000, () => app.registry.getProject(project.id)!.repositories[0]!.baseOid === v2);
+  const third = (await threads.spawn({ project: "ca", task: "a new setup", runner: node }, "req-vm-3")).id;
+  await waitReady(third, "the third thread's machine is ready");
+  const vm3 = app.registry.getThread(third)!.vm!;
+  assert.deepEqual([vm3.preparation?.source, vm3.preparation?.templateId], ["template", templateId], "the key has no commit: the template is found");
+  assert.deepEqual(hookStatus(third), { "pre-setup": "ok", setup: "ok", "pre-resume": "ok", resume: "ok" }, "its setup differs: pre-setup and setup ran here");
+  await firstTurn(third);
+  assert.ok((await bash(third, "cat ~/ca-hooks.log")).split("\n").includes("setup v2 as agent"));
+  const afterInvalidation = await runnerSession(app.registry.getRunner(node)!).call({ case: "templateList", value: {} });
+  assert.ok(afterInvalidation.case === "templates");
+  const stale = afterInvalidation.value.items.find(item => item.id === templateId);
+  assert.ok(!stale || stale.state === Template_State.REMOVING, `the template is removed: ${JSON.stringify(afterInvalidation.value.items.map(item => [item.id, item.state, item.users]))}`);
+  await archive(third);
+  note(`third thread at ${v2.slice(0, 8)} (a new .agents/setup): pre-setup and setup ran in its machine; template ${templateId} ${stale ? `removing (users ${stale.users})` : "gone"}`);
+
   // berth restarts: the thread's machine boots again with its resume hooks
   const bootBefore = (await bash(id, "cat /proc/sys/kernel/random/boot_id")).trim();
   assert.match(bootBefore, /^[0-9a-f-]{36}$/);
@@ -413,8 +504,8 @@ try {
   const restartedBundle = (await api(`/api/threads/${id}/diagnostics`)).diagnostics as Record<string, any>;
   const agent = restartedBundle.machine.guest.agent;
   assert.equal(agent.bootId, bootRestarted, JSON.stringify(agent));
-  assert.equal(agent.hooks["pre-setup"], "ok", JSON.stringify(agent));
-  assert.match(formatDiagnostics(restartedBundle), new RegExp(`\\nguest agent: .*boot ${bootRestarted}; hooks at its last status: .*pre-setup ok`));
+  assert.equal(agent.hooks["pre-setup"], "skipped", JSON.stringify(agent));
+  assert.match(formatDiagnostics(restartedBundle), new RegExp(`\\nguest agent: .*boot ${bootRestarted}; hooks at its last status: .*pre-setup skipped`));
   note(`keel agent after berth's restart: ${JSON.stringify(agent)}`);
   // K-2b: berth's restart closed the connection (logged with its reason) and the new one has its own line.
   const connectedAfter = sessionLog("runner connected");
@@ -467,7 +558,8 @@ try {
   assert.equal(app.registry.getThread(id)!.vm!.discarded, true);
   await until("the machine's directory is gone", 30000, () => !fs.existsSync(path.join(directory, vm.vmId)));
   note("discarded: berth deleted the machine's directory");
-  console.log("ok: cubed with berth vm: by name only, boot documents and policy, checkout and hooks, a tool call, push through the credential stream, "
+  console.log("ok: cubed with berth vm: by name only, a template built in the first thread's slot and used by the next, invalidated by a changed setup, "
+    + "boot documents and policy, checkout and hooks, a tool call, push through the credential stream, "
     + "the portal over dial, berth's diagnosis, a berth restart with resume hooks, a forced stop within the deadline, archive retained, discard");
 } finally {
   app.server.closeAllConnections();

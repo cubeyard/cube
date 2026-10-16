@@ -48,7 +48,10 @@ export function checkMachine(owned: { owner: string; id: string; epoch: number }
 
 /** cubed's own route: the thread `ref.owner` exists, is not archived, has
  * machine `ref.id` and is placed on this runner's admission; its epoch is
- * the newest `nextMachineEpoch` gave out. */
+ * the newest `nextMachineEpoch` gave out. The thread's unfinished template
+ * build machine (`vm.build`, made on the thread's runner) is its machine
+ * too, at the same epoch, as for the egress policy (vm.ts `machineFor`);
+ * once published or deleted it is forgotten, and refused. */
 export function registryCredentialRoute(options: { registry: Registry; threads: string; socket: () => string | null }): CredentialRoute {
   return {
     refuse(runner, ref, epoch) {
@@ -56,7 +59,9 @@ export function registryCredentialRoute(options: { registry: Registry; threads: 
       const admission = thread ? options.registry.runner(thread.id) : null;
       const placed = !!thread && !thread.archived && !!thread.vm && !!admission && !!runner.admission
         && admission.configPath === runner.admission.configPath && admission.configHash === runner.admission.configHash;
-      const owned = placed ? { owner: thread.id, id: thread.vm!.vmId, epoch: currentMachineEpoch(path.join(options.threads, thread.id, "vm")) } : null;
+      const build = placed ? thread.vm!.build : undefined;
+      const building = !!build && (build.runnerId === undefined || build.runnerId === thread!.runnerId) && build.vmId === ref.id;
+      const owned = placed ? { owner: thread.id, id: building ? build!.vmId : thread.vm!.vmId, epoch: currentMachineEpoch(path.join(options.threads, thread.id, "vm")) } : null;
       return checkMachine(owned, runner.nodeId, ref, epoch);
     },
     socket: options.socket,
