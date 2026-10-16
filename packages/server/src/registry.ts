@@ -791,8 +791,10 @@ export class Registry {
       // Counting open threads and inserting this one in one IMMEDIATE
       // transaction is the slot reservation: no two creations, in this or
       // another process, can take a runner's last slot.
-      const load = options.runnerId !== undefined ? this.namedRunner(options.runnerId)
+      let load = options.runnerId !== undefined ? this.namedRunner(options.runnerId)
         : this.runnerLoads().find(candidate => candidate.active < candidate.slots);
+      const fallback = load ?? this.runnerLoads(Date.now(), runner => runner.protocol !== 4 && runner.kind !== "host").find(candidate => candidate.active < candidate.slots);
+      if (fallback) load = fallback;
       if (!load) throw new Error(this.runnerLoads().length
         ? "no free thread machine in the global runner pool (its berth vm runners) — archive an idle thread, enroll another berth vm, raise a runner's limit, or start the thread on a runner by name"
         : "no berth vm runner in the global runner pool: start the thread on a runner by name (a protocol-3 runner takes threads only by name), or enroll a berth vm");
