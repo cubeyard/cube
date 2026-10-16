@@ -60,8 +60,9 @@ function sharedControlKey(registry: Registry, configPath: string, nodeId: string
 }
 
 /** A protocol-4 runner (`"protocol": 4` in its config; `berth host` or
- * `berth vm`): admitted after an authenticated hello. It never joins
- * the default pool (pooledRunner): only threads started on it by name run there. */
+ * `berth vm`): admitted after an authenticated hello. A `berth vm` joins
+ * the pool; only threads started on a `berth host` by name run there
+ * (pooledRunner). */
 async function enrollProtocol4(state: string, configPath: string): Promise<Enrollment> {
   const { config, hash } = loadSessionConfig(configPath);
   const registry = new Registry(path.join(state, "registry.sqlite"));
@@ -76,7 +77,7 @@ async function enrollProtocol4(state: string, configPath: string): Promise<Enrol
       platform: [runner.platform?.os, runner.platform?.arch].filter(Boolean).join("/"), baseImageSha256: runner.platform?.baseImageSha256 ?? "",
       maxActiveVms,
       next: host ? `start a thread on it by name: ask OptChat to start one on runner ${config.binding.nodeId} (it runs unsandboxed on that host)`
-        : `start a thread on it by name: ask OptChat to start one on runner ${config.binding.nodeId} (a protocol-4 VM runner is not in the pool yet)` };
+        : `start a thread in any ready project (the pool may place it on this runner), or ask OptChat to start one on runner ${config.binding.nodeId} by name` };
   } finally {
     await session.close();
     registry.close();

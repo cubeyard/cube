@@ -108,17 +108,23 @@ try {
     assert.match(describeRunners(observeRunners(registry, 60_000, at + 1000)), /node-silent[^]*unreachable since 1 s ago \(probe failed; details in \/api\/runners\)/);
     assert.ok(!describeRunners(observeRunners(registry, 60_000, at + 1000)).includes("/private/"));
 
-    // A protocol-4 VM runner (berth vm) takes threads only by name: not in the pool (C-a decision 1).
+    // A protocol-4 VM runner (berth vm) is in the pool; a host runner is not.
     registry.enrollRunner({ ...runner("berth", 3), protocol: 4, kind: "vm" });
-    const named = observeRunners(registry, 60_000, at + 1000);
-    const berth = named.runners.find(row => row.id === "berth")!;
-    assert.deepEqual([berth.kind, berth.byName, berth.slots.allocatable, berth.slots.free], ["vm", true, false, 3]);
-    assert.deepEqual([named.pool.allocatable, named.pool.slots], [retiring.pool.allocatable, retiring.pool.slots], "the pool is unchanged");
-    assert.match(describeRunners(named), /node-berth[^]*not in the pool yet[^]*3 free for threads started on it by name/);
+    registry.enrollRunner({ ...runner("bhost", 2), protocol: 4, kind: "host" });
+    const pooled = observeRunners(registry, 60_000, at + 1000);
+    const berth = pooled.runners.find(row => row.id === "berth")!;
+    const bhost = pooled.runners.find(row => row.id === "bhost")!;
+    assert.deepEqual([berth.kind, berth.byName, berth.slots.allocatable, berth.slots.free], ["vm", false, true, 3]);
+    assert.deepEqual([bhost.kind, bhost.byName, bhost.slots.allocatable, bhost.slots.free], ["host", true, false, 2]);
+    assert.deepEqual([pooled.pool.allocatable, pooled.pool.slots], [retiring.pool.allocatable + 1, retiring.pool.slots + 3], "the berth vm joins the pool, the host runner does not");
+    const pooledText = describeRunners(pooled);
+    assert.match(pooledText, /node-berth[^]*protocol-4 VM runner \(berth vm\): in the pool;[^]*cubed's slots: 0 reserved by open threads of 3, 3 free\n/);
+    assert.match(pooledText, /node-bhost[^]*HOST runner[^]*2 free for threads started on it by name/);
+    assert.ok(!/not in the pool yet/.test(pooledText));
     registry.close();
   }
 
-  // --- capacity by protocol: p3 pool and open p3 threads, p4 by name, what is not current ---
+  // --- capacity by protocol: p3 and open p3 threads, p4 vm in the pool, p4 host by name, what is not current ---
   {
     const registry = new Registry(path.join(root, "capacity.sqlite"));
     registry.saveProject({ id: "p", name: "p", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
@@ -148,7 +154,9 @@ try {
       [[3, "vm"], [3, "vm"], [3, "vm"], [3, "vm"], [4, "vm"], [4, "host"]]);
     assert.deepEqual(view.capacity.p3, { runners: 3, slots: 4 + 2 + 1, reserved: 3, free: 1 + 2 + 1, stale: ["stale"], unreported: ["mute"], openThreads: 3 },
       "the pool's slots, its open threads (the archived one is not), and which totals are not current; the retired runner is not counted");
-    assert.deepEqual([view.capacity.p3.slots, view.capacity.p3.reserved, view.capacity.p3.free], [view.pool.slots, view.pool.reserved, view.pool.free], "p3 is the pool");
+    const { vm: vmGroup } = view.capacity.p4;
+    assert.deepEqual([view.capacity.p3.slots + vmGroup.slots, view.capacity.p3.reserved + vmGroup.reserved, view.capacity.p3.free + vmGroup.free],
+      [view.pool.slots, view.pool.reserved, view.pool.free], "the pool is p3 and the p4 VM runners, not the host runner");
     assert.deepEqual(view.capacity.p4, {
       vm: { runners: 1, slots: 3, reserved: 1, free: 2, stale: [], unreported: [] },
       host: { runners: 1, slots: 2, reserved: 1, free: 1, stale: [], unreported: ["host4"] },
@@ -158,12 +166,12 @@ try {
     assert.match(byId("host4").unknown.join("\n"), /has not answered a probe/);
     const text = describeRunners(view);
     const first = text.split("\n")[0];
-    assert.match(first, /^capacity: p3 \(protocol 3, cube-runner: the pool, which takes any new thread\) 4 of 7 slots free on 3 runners \(not current: node-stale from its last, stale report; node-mute never reported \(1 slot assumed\)\), 3 open p3 threads; /);
-    assert.match(first, /p4 \(protocol 4, berth: only threads started on the runner by name\) VM runners 2 of 3 slots free on 1 runner, host runners 1 of 2 slots free on 1 runner \(not current: node-host4 never reported \(bound from enrollment\)\)\./);
+    assert.match(first, /^capacity: p3 \(protocol 3, cube-runner, in the pool\) 4 of 7 slots free on 3 runners \(not current: node-stale from its last, stale report; node-mute never reported \(1 slot assumed\)\), 3 open p3 threads; /);
+    assert.match(first, /p4 \(protocol 4, berth\) VM runners \(in the pool\) 2 of 3 slots free on 1 runner, host runners \(only threads started on the runner by name\) 1 of 2 slots free on 1 runner \(not current: node-host4 never reported \(bound from enrollment\)\)\./);
     assert.match(first, /not the machines a runner hosts/);
     assert.match(text, /node-vm4[^]*reported: berth 0\.1\.0, protocol 4/, "a p4 runner's software is berth");
     registry.close();
-    console.log("ok: capacity by protocol (p3 pool and open threads, p4 by name, stale and unreported)");
+    console.log("ok: capacity by protocol (p3 and open threads, p4 vm in the pool, p4 host by name, stale and unreported)");
   }
 
   // --- cubed: background probes, the API and OptChat's text ---

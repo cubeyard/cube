@@ -106,8 +106,8 @@ export interface Runner extends NodeBinding {
   /** The runner protocol it was enrolled with; absent: 3 (VM runners). */
   protocol?: 4;
   /** `host`: `berth host`, machines are directories on that host and
-   * nothing is sandboxed. Only a thread started on it by name runs on a
-   * protocol-4 runner of either kind (pooledRunner). */
+   * nothing is sandboxed. Only a thread started on it by name runs there;
+   * a `berth vm` is in the pool (pooledRunner). */
   kind?: "vm" | "host";
 }
 export interface WorkspaceRepository {
@@ -270,12 +270,11 @@ export function runnerSlots(runner: Pick<Runner, "maxActiveVms">): number {
   return Number.isSafeInteger(runner.maxActiveVms) && runner.maxActiveVms! >= 1 ? runner.maxActiveVms! : 1;
 }
 
-/** Whether a thread started without naming a runner may get this one.
- * Protocol-4 runners take only threads started on them by name: `berth
- * host` always, and `berth vm` until the pool admits it (masterplan R-3,
- * C-a decision 1). */
+/** Whether a thread started without naming a runner may get this one:
+ * every VM runner, protocol 3 (`cube-runner`) or 4 (`berth vm`). A host
+ * runner (`berth host`) takes only threads started on it by name. */
 export function pooledRunner(runner: Pick<Runner, "protocol" | "kind">): boolean {
-  return runner.kind !== "host" && runner.protocol !== 4;
+  return runner.kind !== "host";
 }
 
 /** Every open (unarchived) thread holds one machine slot on its runner from
@@ -413,7 +412,7 @@ export class Registry {
         FROM thread WHERE ${OPEN_THREAD} GROUP BY runner_id) t ON t.runner_id=r.id
       WHERE o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired' ORDER BY r.rowid`).all() as Array<Record<string, unknown>>;
     return rows.map(row => ({ row, runner: JSON.parse(String(row.data)) as Runner }))
-      // A protocol-4 runner takes only the threads started on it by name.
+      // A host runner takes only the threads started on it by name.
       .filter(({ runner }) => pooledRunner(runner)).map(({ row, runner }) => {
         const { fitness } = runnerFitness(observation(row), now);
         return { id: String(row.id), runner, slots: runnerSlots(runner), active: Number(row.active), failed: Number(row.failed), fitness };
@@ -440,9 +439,11 @@ export class Registry {
       retired: row.retired_at != null };
   }
   /** Moves an open thread whose machine was never allocated to another
-   * runner with a free slot that is not down and not in `exclude`. Only a
-   * `provisional` thread moves: nothing of its own machine reached its runner
-   * (the caller also checks nothing is bound to that runner). Counting and
+   * runner of its runner's protocol with a free slot that is not down and
+   * not in `exclude`. Only a `provisional` thread on a protocol-3 runner
+   * moves: nothing of its own machine reached its runner (the caller also
+   * checks nothing is bound to that runner), and a thread on a protocol-4
+   * runner stays there (runner-machines.ts). Counting and
    * moving in one IMMEDIATE transaction is the new slot's reservation and
    * the old one's release. Returns the new runner's id, or null when none
    * can take it. */
@@ -454,8 +455,11 @@ export class Registry {
         this.db.exec("COMMIT");
         return null;
       }
-      const load = this.runnerLoads(now).find(candidate => candidate.id !== thread.runnerId && !exclude.has(candidate.id)
-        && candidate.fitness !== "down" && candidate.active < candidate.slots);
+      // Never between protocols: the caller (vm.ts) boots it on the new
+      // runner with protocol 3.
+      const load = this.getRunner(thread.runnerId)?.protocol === 4 ? undefined
+        : this.runnerLoads(now).find(candidate => candidate.id !== thread.runnerId && !exclude.has(candidate.id)
+          && candidate.runner.protocol !== 4 && candidate.fitness !== "down" && candidate.active < candidate.slots);
       if (!load) { this.db.exec("COMMIT"); return null; }
       const moved: Thread = { ...thread, runnerId: load.id, ...(thread.vm ? { vm: { ...thread.vm, placement: "provisional" } } : {}) };
       this.db.prepare("UPDATE thread SET runner_id=?,data=? WHERE id=?").run(load.id, JSON.stringify(moved), threadId);

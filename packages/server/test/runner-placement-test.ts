@@ -520,39 +520,50 @@ try {
     console.log("ok: a started (or allocated) thread whose runner is lost waits for it and never moves");
   }
 
-  // --- a protocol-4 VM runner (berth vm) is not in the pool (C-a decision 1, until R-3) ---
+  // --- a protocol-4 VM runner (berth vm) is in the pool; a thread never moves between protocols ---
   {
-    const w = world("berth-vm", []);
-    // Enrolled first, empty, ready and wide: it would win every pool choice.
-    w.registry.enrollRunner({ nodeId: "node-berth", threadId: "berth", environmentId: 9, configPath: "/private/berth.json", configHash: "berth",
-      maxActiveVms: 8, protocol: 4, kind: "vm" });
-    w.registry.recordRunnerProbe("berth", { health: { ...ready(8), protocolVersion: 4, kind: "vm" } });
-    w.enroll({ name: "a", max: 2 });
-    assert.deepEqual(w.registry.runnerSlots(), { free: 2, total: 2, runners: 1 }, "the berth vm adds nothing to the pool");
-    assert.deepEqual(w.registry.availableRunners().map(runner => runner.threadId), ["a"]);
-    const thread = w.create();
-    assert.equal(thread.runnerId, "a", "a thread that names no runner never lands on a berth vm");
-    // Its runner is down before anything was sent: the only other runner with
-    // a free slot is the berth vm, so the thread waits instead of moving there.
+    const w = world("berth-vm", [{ name: "a", max: 1 }]);
+    const berthVm = (id: string, max: number, environmentId: number) => {
+      w.registry.enrollRunner({ nodeId: `node-${id}`, threadId: id, environmentId, configPath: `/private/${id}.json`, configHash: id,
+        maxActiveVms: max, protocol: 4, kind: "vm" });
+      w.registry.recordRunnerProbe(id, { health: { ...ready(max), protocolVersion: 4, kind: "vm" } });
+    };
+    w.registry.recordRunnerProbe("a", { health: ready(1) });
+    // No berth vm enrolled: the pool is the protocol-3 runners, as before.
+    const p3 = w.create();
+    assert.equal(p3.runnerId, "a");
+    berthVm("berth", 2, 9);
+    assert.deepEqual(w.registry.runnerSlots(), { free: 2, total: 3, runners: 1 }, "the berth vm adds its slots to the pool");
+    assert.deepEqual(w.registry.availableRunners().map(runner => runner.threadId), ["berth"]);
+    // The only runner with a free slot is the berth vm: a thread that names no runner goes there, unpinned.
+    const pooled = w.create();
+    assert.deepEqual([pooled.runnerId, pooled.pinned, placement(pooled)], ["berth", undefined, "provisional"]);
+    // The p3 thread's runner is down before anything was sent: the berth vm
+    // has a free slot, but a p3 thread only moves to another p3 runner, so it waits.
     w.fakes.get("a")!.down = true;
     const vms = w.vms();
-    await assert.rejects(vms.start(thread), (error: Error) => error instanceof RunnerWait);
-    assert.equal(w.get(thread.id).runnerId, "a");
-    assert.equal(placement(w.get(thread.id)), "provisional");
-    assert.equal(w.registry.relocateThread(thread.id), null, "relocateThread never chooses a berth vm");
-    // Only by name.
+    await assert.rejects(vms.start(p3), (error: Error) => error instanceof RunnerWait && /no other runner with a free thread machine is ready/.test(error.message));
+    assert.equal(w.get(p3.id).runnerId, "a");
+    assert.equal(placement(w.get(p3.id)), "provisional");
+    assert.equal(w.registry.relocateThread(p3.id), null, "relocateThread never gives a p3 thread a berth vm");
+    // Started on it by name: pinned. Then the pool is full: the free host runner is not in it.
     const named = w.registry.createThread("p", "named", model, "x", "pi", undefined, { runnerId: "berth" });
-    assert.equal(named.runnerId, "berth");
-    assert.equal(named.pinned, true);
-    // A pool runner recovers: the waiting thread starts there, and a new one goes there too.
-    w.fakes.get("a")!.down = false;
-    w.registry.recordRunnerProbe("a", { health: ready(2) });
-    await assert.rejects(vms.start(w.get(thread.id)), /fixture stops here/);
-    assert.equal(w.create().runnerId, "a");
-    assert.throws(() => w.create(), /no free thread machine in the global runner pool/, "a full pool is full even beside a free berth vm");
+    assert.deepEqual([named.runnerId, named.pinned], ["berth", true]);
+    w.registry.enrollRunner({ nodeId: "node-host", threadId: "host", environmentId: 10, configPath: "/private/host.json", configHash: "host",
+      maxActiveVms: 4, protocol: 4, kind: "host" });
+    assert.throws(() => w.create(), /no free thread machine in the global runner pool/, "a host runner is never in the pool");
+    // Another p3 runner and another berth vm, each ready with a free slot: the
+    // p3 thread may move to the p3 runner; the thread on the berth vm never moves.
+    w.enroll({ name: "b", max: 1 });
+    w.registry.recordRunnerProbe("b", { health: ready(1) });
+    berthVm("berth2", 2, 11);
+    assert.equal(w.registry.relocateThread(pooled.id), null, "a thread on a berth vm never moves, to p3 or to another berth vm");
+    assert.equal(w.get(pooled.id).runnerId, "berth");
+    assert.equal(w.registry.relocateThread(p3.id), "b", "a p3 thread moves to another p3 runner");
+    w.invariants();
     await vms.close();
     w.registry.close();
-    console.log("ok: a protocol-4 VM runner is not in the pool: no thread lands or moves there unless started on it by name");
+    console.log("ok: a protocol-4 VM runner is in the pool, a host runner is not; a p3 thread moves only to p3, a thread on a berth vm never moves");
   }
 
   // --- every runner down, then one recovers ---

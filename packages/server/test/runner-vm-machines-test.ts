@@ -31,6 +31,7 @@ import { createLogger } from "../src/log.ts";
 import { RunnerMachines } from "../src/runner-machines.ts";
 import { callTimeout, PATH_LOG_INTERVAL_MS, RunnerError, RunnerSession, STOP_TIMEOUT_MS, type SessionConfig } from "../src/runner-session.ts";
 import { formatDiagnostics } from "../src/vm-diagnostics.ts";
+import { RunnerWait } from "../src/vm.ts";
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cube-vm-machines-")));
 const ALPN = Array.from(Buffer.from("cubeyard/runner/4"));
@@ -224,7 +225,7 @@ const machinesFor = (withPolicy: boolean) => new RunnerMachines({ registry, thre
 const of = (verb: string) => calls.filter(call => call.verb === verb);
 try {
   const thread = registry.createThread("p", "r1", { provider: "faux", id: "faux" }, "hi", "pi", undefined, { runnerId: NODE });
-  assert.equal(thread.pinned, true, "only by name (C-a decision 1)");
+  assert.equal(thread.pinned, true, "started on the runner by name");
   const placeholder = thread.vm!.placeholders.github!;
   assert.match(placeholder, /^cube_ph_github_/);
 
@@ -527,6 +528,26 @@ try {
     Connection.prototype.paths = realPaths;
     Connection.prototype.stableId = realStableId;
     Connection.prototype.closeReason = realCloseReason;
+  }
+
+  // A berth vm that does not answer: its thread waits there, whether it was
+  // placed there from the pool or started there by name.
+  {
+    const waiting = new Registry(path.join(root, "waiting.sqlite"));
+    waiting.saveProject({ id: "p", name: "p", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
+    waiting.enrollRunner({ nodeId: "node-quiet", threadId: "quiet", environmentId: 1, configPath: path.join(root, "quiet.json"), configHash: "quiet",
+      maxActiveVms: 2, protocol: 4, kind: "vm" });
+    const quiet = { nodeId: "node-quiet", hello: async () => { throw new RunnerError("UNAVAILABLE", "", "no answer"); } } as unknown as RunnerSession;
+    const machines = new RunnerMachines({ registry: waiting, threads: path.join(root, "waiting-threads"), session: () => quiet, sizes, policy });
+    const pooled = waiting.createThread("p", "pooled", { provider: "faux", id: "faux" }, "hi");
+    const named = waiting.createThread("p", "named", { provider: "faux", id: "faux" }, "hi", "pi", undefined, { runnerId: "quiet" });
+    assert.deepEqual([pooled.runnerId, pooled.pinned, named.pinned], ["quiet", undefined, true]);
+    await assert.rejects(machines.start(pooled), (error: Error) => error instanceof RunnerWait
+      && error.message === "waiting for runner node-quiet: it does not answer; this thread was placed on it and stays there");
+    await assert.rejects(machines.start(named), (error: Error) => error instanceof RunnerWait
+      && error.message === "waiting for runner node-quiet: it does not answer; this thread was started on it by name and stays there");
+    waiting.close();
+    console.log("ok: a berth vm that does not answer: its thread waits, placed there from the pool or by name");
   }
 } finally {
   await session.close();

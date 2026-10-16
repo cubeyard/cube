@@ -226,7 +226,9 @@ no fresh answer from for its status. If the runner does not answer, is
 draining, faulted or waiting for recovery, or refuses the machine (a lowered
 bound, the disk floor, a VM cubed does not know), a thread whose agent and
 workspace have not opened yet moves to another runner with a free slot and
-starts there, without showing the first runner's error. Once an allocation may
+starts there, without showing the first runner's error. Only a thread on a
+protocol-3 runner moves, and only to another protocol-3 runner; a thread on
+a `berth vm` stays there and waits. Once an allocation may
 have reached a runner (its answer lost, cubed restarted), the thread stays
 with that runner until it answers: the machine it made is used, never a second
 one elsewhere. A thread whose machine was allocated never moves. With no
@@ -276,11 +278,11 @@ The background probe (`node.status` every minute) keeps them current, and
 - `unknown`: what this runner's data does not say, for example a stale report.
 - `protocol`: 3 (`cube-runner`) or 4 (`berth`), as enrolled; with `kind` and
   `byName`, whether the runner takes any thread or only those started on it by
-  name (every protocol-4 runner until R-3).
+  name (a host runner, `berth host`).
 
 Beside the runners, `capacity` sums the slots of the runners that take
-threads, by protocol: `p3` (the pool, with `openThreads`, every open thread on
-a protocol-3 runner) and `p4.vm` and `p4.host`. Each group lists in `stale`
+threads, by protocol: `p3` (with `openThreads`, every open thread on a
+protocol-3 runner), `p4.vm` (both in the pool) and `p4.host`. Each group lists in `stale`
 the runners counted with their last, stale report, and in `unreported` those
 that never answered, whose bound is from enrollment or assumed. A slot is an
 open thread in cubed, not a machine the runner hosts (`report.activeVms`). The
