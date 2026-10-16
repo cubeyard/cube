@@ -1297,7 +1297,8 @@ impl VmRunner {
             ));
         }
         let mut stopping = self.stopping.subscribe();
-        let (mark, answer) = loop {
+        // CONTROL (never merged): `ops` is held through the agent's wait, as before R14b.
+        let (mark, answer, held) = loop {
             let mut cleared = {
                 let _op = self.ops.lock().await;
                 if let Some(published) = self.published(&request)? {
@@ -1307,7 +1308,7 @@ impl VmRunner {
                     return Err(runner_stopping());
                 }
                 match self.begin_publish(&request)? {
-                    Ok(begun) => break begun,
+                    Ok((mark, answer)) => break (mark, answer, _op),
                     Err(cleared) => cleared,
                 }
             };
@@ -1335,6 +1336,7 @@ impl VmRunner {
                 &format!("{} {}", error.reason, error.message),
             )
         })?;
+        drop(held);
         let _op = self.ops.lock().await;
         // A shutdown that began meanwhile held `ops` until it stopped every
         // machine, this one too: nothing is kept.
