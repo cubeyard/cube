@@ -35,8 +35,11 @@ const CALL_TIMEOUT_MS = 15000;
  * common path (masterplan R14). */
 export const STOP_TIMEOUT_MS = 90000;
 /** `template_publish`: berth vm gives the build machine's agent up to 600 s
- * to clean its writable layer and write it as EROFS, and holds its global
- * lock meanwhile (masterplan C4, R14b). */
+ * to clean its writable layer and write it as EROFS. It does not hold its
+ * global lock meanwhile (masterplan C4, R14b): other machines change as
+ * usual, and the build machine's own stop or delete (an archive during the
+ * build) is refused at once with `FAILED_PRECONDITION publishing`, which
+ * fails that release as any refusal does. */
 export const PUBLISH_TIMEOUT_MS = 600000;
 /** A call's deadline: the stopping verbs wait for the runner's whole stop,
  * a publication for the agent's. */

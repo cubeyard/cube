@@ -146,6 +146,14 @@ impl Guest {
         self.inner.lock().unwrap().session.clone()
     }
 
+    /// The agent's answer on `ch` (tests).
+    #[cfg(test)]
+    pub fn answer(&self, ch: u32, answer: Answer) {
+        if let Some(waiting) = self.inner.lock().unwrap().pending.remove(&ch) {
+            let _ = waiting.send(answer);
+        }
+    }
+
     /// Sends `op` on a fresh channel of the current session; the answer
     /// comes on the receiver (or why it will not).
     pub fn request(&self, op: Op) -> Result<(u32, oneshot::Receiver<Answer>), proto::Error> {

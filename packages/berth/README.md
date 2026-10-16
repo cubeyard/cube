@@ -188,9 +188,19 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   size, made read-only (0444) and hashed, the record `ready`. The build
   machine is deleted, as p3 releases its build VM. Asked again with the
   same key and meta, the same template (another: `ALREADY_EXISTS
-  template`). The agent has 10 min (`completion_unknown` after); the call
-  holds the runner's one-mutation-at-a-time lock meanwhile, so another
-  mutation waits, but the runner's own stop does not. A runner that starts
+  template`). The agent has 10 min (`completion_unknown` after). The call
+  holds the runner's one-mutation-at-a-time lock only to begin (checks,
+  fence, the request) and to finish (quit and keep), not while the agent
+  works (masterplan R14b): other machines are created, started, stopped
+  and deleted meanwhile. The build machine is marked as publishing
+  instead: its own `create`, `start`, `stop`, `delete` and `discard` are
+  refused at once (`FAILED_PRECONDITION publishing`, the machine and its
+  epoch unchanged), and the same publication asked again waits for the
+  first's answer, then is answered as new (the same template, or the agent
+  asked again). Any way out clears the mark: the template kept, a refusal,
+  a timeout, the call dropped, or the runner's stop, which waits for no
+  publication; one it overtook keeps nothing (`UNAVAILABLE
+  runner_stopping`, `completion_unknown`). A runner that starts
   finishes a publication whose disk was moved and forgets one whose disk
   was not.
 - A machine created with `source = template_id` gets the template as the

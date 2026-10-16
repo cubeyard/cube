@@ -78,6 +78,8 @@ mod diagnose;
 mod egress;
 mod policy;
 mod presence;
+#[cfg(test)]
+mod publish_tests;
 mod qemu;
 mod record;
 mod report;
@@ -229,6 +231,51 @@ struct Entry {
     policy: Option<policy::Policy>,
     /// While QEMU runs: its LAN and egress gate.
     net: Option<egress::Net>,
+    /// While a `template_publish` waits for this machine's agent (R14b).
+    publishing: Option<Publishing>,
+}
+
+/// A build machine's publishing mark: every other mutation of the machine
+/// is refused while it is set ([`VmRunner::not_publishing`]); a publication
+/// that comes again waits for `cleared`.
+struct Publishing {
+    token: u64,
+    cleared: watch::Receiver<()>,
+}
+
+/// Clears its machine's [`Publishing`] mark when dropped, on every way out
+/// of a publication: the template kept, a refusal, a timeout, the runner's
+/// stop, or the call dropped. Never dropped with `state` locked.
+struct Mark {
+    runner: Arc<VmRunner>,
+    id: String,
+    token: u64,
+    /// Dropped after the mark is cleared: it wakes the publications that
+    /// wait for it.
+    _cleared: watch::Sender<()>,
+}
+
+impl Mark {
+    fn holds(&self, entry: &Entry) -> bool {
+        entry
+            .publishing
+            .as_ref()
+            .is_some_and(|mark| mark.token == self.token)
+    }
+}
+
+impl Drop for Mark {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.runner.state.lock()
+            && let Some(entry) = state.machines.get_mut(&self.id)
+            && entry
+                .publishing
+                .as_ref()
+                .is_some_and(|mark| mark.token == self.token)
+        {
+            entry.publishing = None;
+        }
+    }
 }
 
 struct State {
@@ -239,6 +286,8 @@ struct State {
     /// Templates by id (a build machine's id); `publishing` ones only for
     /// as long as a publication runs.
     templates: BTreeMap<String, template::TemplateRecord>,
+    /// The newest [`Publishing`] mark's token.
+    marks: u64,
 }
 
 pub struct VmRunner {
@@ -254,10 +303,11 @@ pub struct VmRunner {
     state: Mutex<State>,
     events: broadcast::Sender<proto::WatchEvent>,
     /// One mutation at a time (create, start, stop, delete, discard,
-    /// template publish and delete).
+    /// template publish and delete). A publication holds it only to begin
+    /// and to finish, not while its agent works (R14b: [`Publishing`]).
     ops: tokio::sync::Mutex<()>,
-    /// The runner stops: a publication stops waiting for the agent, so the
-    /// shutdown does not wait for it behind `ops`.
+    /// The runner stops: a publication stops waiting for the agent and
+    /// keeps nothing.
     stopping: watch::Sender<bool>,
 }
 
@@ -432,6 +482,7 @@ impl VmRunner {
                     sessions: Default::default(),
                     policy: None,
                     net: None,
+                    publishing: None,
                 },
             );
         }
@@ -460,6 +511,7 @@ impl VmRunner {
                 machines,
                 deleted,
                 templates,
+                marks: 0,
             }),
             events,
             ops: tokio::sync::Mutex::new(()),
@@ -1056,6 +1108,7 @@ impl VmRunner {
                     ));
                 }
                 Some(_) => {
+                    Self::not_publishing(&state, Some(&reference))?;
                     let entry = Self::fenced(&mut state, Some(&reference), request.fence.as_ref())?;
                     let id = entry.record.id.clone();
                     let record = entry.record.clone();
@@ -1170,6 +1223,7 @@ impl VmRunner {
                 sessions: Default::default(),
                 policy: None,
                 net: None,
+                publishing: None,
             },
         );
         self.commit(&mut state, &reference.id)
@@ -1214,6 +1268,13 @@ impl VmRunner {
     /// its layer to vdd (runner.proto's `DaemonRequest.template_publish`);
     /// then its QEMU is quit, the disk checked and kept as the template, and
     /// the build machine deleted. Asked again, the same template.
+    ///
+    /// R14b: `ops` is held to begin (checks, fence, the machine's mark, the
+    /// request) and to finish (quit and keep), not while the agent works:
+    /// other machines change meanwhile; this one refuses every other
+    /// mutation at once ([`Self::not_publishing`]). A publication of the
+    /// same machine that comes again (cubed asks once more when its own
+    /// 600 s ran out a moment before ours) waits for the first to answer.
     async fn publish(self: &Arc<Self>, request: proto::TemplatePublish) -> Answer<proto::Template> {
         if !template::valid_key(&request.key) {
             return Err(refuse(
@@ -1235,35 +1296,36 @@ impl VmRunner {
                 ),
             ));
         }
-        if let Some(published) = self.published(&request)? {
-            return Ok(published);
-        }
-        let guest = {
-            let mut state = self.state.lock().unwrap();
-            let before = Self::epoch(&state, request.from.as_ref());
-            let fenced = Self::fenced(&mut state, request.from.as_ref(), request.fence.as_ref())
-                .and_then(|entry| publishing_guest(entry));
-            self.write_raised(&state, request.from.as_ref(), before)?;
-            fenced?
-        };
-        let id = request.from.clone().unwrap_or_default().id;
-        let dir = self.machine_dir(&id);
-        event(
-            &dir,
-            "template_publish",
-            "the agent is asked to publish its layer",
-        );
-        let (_, answer) = guest.request(Op::TemplatePublish(proto::Empty {}))?;
         let mut stopping = self.stopping.subscribe();
+        let (mark, answer) = loop {
+            let mut cleared = {
+                let _op = self.ops.lock().await;
+                if let Some(published) = self.published(&request)? {
+                    return Ok(published);
+                }
+                if *self.stopping.borrow() {
+                    return Err(runner_stopping());
+                }
+                match self.begin_publish(&request)? {
+                    Ok(begun) => break begun,
+                    Err(cleared) => cleared,
+                }
+            };
+            tokio::select! {
+                // Its sender goes with the other publication's mark.
+                _ = cleared.changed() => {}
+                _ = stopping.wait_for(|stopping| *stopping) => return Err(runner_stopping()),
+            }
+        };
+        let id = mark.id.clone();
+        let dir = self.machine_dir(&id);
+        // The wait, without `ops`.
         let answer = tokio::select! {
             answer = tokio::time::timeout(PUBLISH_WAIT, answer) => answer.ok(),
             // The runner stops; it stops the machine as it stops every one.
             _ = stopping.wait_for(|stopping| *stopping) => {
                 event(&dir, "template_publish not done", "the runner stops");
-                return Err(proto::Error {
-                    completion_unknown: true,
-                    ..refuse(Code::Unavailable, "runner_stopping", "the runner stops")
-                });
+                return Err(runner_stopping());
             }
         };
         publish_outcome(answer).inspect_err(|error| {
@@ -1273,14 +1335,24 @@ impl VmRunner {
                 &format!("{} {}", error.reason, error.message),
             )
         })?;
+        let _op = self.ops.lock().await;
+        // A shutdown that began meanwhile held `ops` until it stopped every
+        // machine, this one too: nothing is kept.
+        if *self.stopping.borrow() {
+            event(&dir, "template_publish not done", "the runner stops");
+            return Err(runner_stopping());
+        }
         // The layer is on vdd; the machine is used up (its agent refuses
         // everything now), so its QEMU is quit without a shutdown.
         {
             let mut state = self.state.lock().unwrap();
-            if let Some(entry) = state.machines.get_mut(&id) {
-                entry.record.phase = Phase::Stopping;
-                self.commit(&mut state, &id)?;
-            }
+            let entry = state
+                .machines
+                .get_mut(&id)
+                .filter(|entry| mark.holds(entry))
+                .ok_or_else(|| internal("the build machine lost its publishing mark"))?;
+            entry.record.phase = Phase::Stopping;
+            self.commit(&mut state, &id)?;
         }
         event(
             &dir,
@@ -1288,8 +1360,82 @@ impl VmRunner {
             "the agent wrote its layer to vdd; QEMU is quit",
         );
         self.quit(&id).await;
-        let mut state = self.state.lock().unwrap();
-        self.keep_template(&mut state, &id, &request.key, &request.meta)
+        let kept = {
+            let mut state = self.state.lock().unwrap();
+            self.keep_template(&mut state, &id, &request.key, &request.meta)
+        };
+        drop(mark);
+        kept
+    }
+
+    /// Under `ops`: the build machine fenced, marked and asked to publish;
+    /// or, when it is marked already, the other publication's `cleared`.
+    #[allow(clippy::type_complexity)]
+    fn begin_publish(
+        self: &Arc<Self>,
+        request: &proto::TemplatePublish,
+    ) -> Answer<
+        std::result::Result<
+            (Mark, tokio::sync::oneshot::Receiver<channel::Answer>),
+            watch::Receiver<()>,
+        >,
+    > {
+        let (sender, cleared) = watch::channel(());
+        let (guest, id, token) = {
+            let mut state = self.state.lock().unwrap();
+            if let Some(other) = Self::publishing(&state, request.from.as_ref()) {
+                return Ok(Err(other.cleared.clone()));
+            }
+            let before = Self::epoch(&state, request.from.as_ref());
+            let fenced = Self::fenced(&mut state, request.from.as_ref(), request.fence.as_ref())
+                .and_then(|entry| publishing_guest(entry));
+            self.write_raised(&state, request.from.as_ref(), before)?;
+            let guest = fenced?;
+            state.marks += 1;
+            let token = state.marks;
+            let id = request.from.clone().unwrap_or_default().id;
+            state.machines.get_mut(&id).unwrap().publishing = Some(Publishing { token, cleared });
+            (guest, id, token)
+        };
+        let mark = Mark {
+            runner: Arc::clone(self),
+            id,
+            token,
+            _cleared: sender,
+        };
+        event(
+            &self.machine_dir(&mark.id),
+            "template_publish",
+            "the agent is asked to publish its layer",
+        );
+        let (_, answer) = guest.request(Op::TemplatePublish(proto::Empty {}))?;
+        Ok(Ok((mark, answer)))
+    }
+
+    /// The mark of the machine `reference` names (its owner's), if it is
+    /// publishing.
+    fn publishing<'a>(state: &'a State, reference: Option<&proto::Ref>) -> Option<&'a Publishing> {
+        let reference = reference?;
+        state
+            .machines
+            .get(&reference.id)
+            .filter(|entry| entry.record.owner == reference.owner)?
+            .publishing
+            .as_ref()
+    }
+
+    /// R14b: a machine that publishes refuses create, start, stop, delete
+    /// and discard at once, before its fence, and stays as it is; cubed
+    /// gets the refusal (`FAILED_PRECONDITION publishing`) as any other.
+    fn not_publishing(state: &State, reference: Option<&proto::Ref>) -> Answer<()> {
+        match Self::publishing(state, reference) {
+            Some(_) => Err(refuse(
+                Code::FailedPrecondition,
+                "publishing",
+                "the machine is publishing its template; ask again once template_publish answered",
+            )),
+            None => Ok(()),
+        }
     }
 
     /// A publication that came again: the template it made (fenced against
@@ -1446,6 +1592,7 @@ impl VmRunner {
         let policy = policy::Policy::from_proto(request.policy.as_ref())?;
         let (id, record) = {
             let mut state = self.state.lock().unwrap();
+            Self::not_publishing(&state, request.r#ref.as_ref())?;
             let entry = Self::fenced(&mut state, request.r#ref.as_ref(), request.fence.as_ref())?;
             let id = entry.record.id.clone();
             match entry.record.phase {
@@ -1860,6 +2007,7 @@ impl VmRunner {
     async fn stop(self: &Arc<Self>, request: proto::MachineRef) -> Answer<proto::Machine> {
         let id = {
             let mut state = self.state.lock().unwrap();
+            Self::not_publishing(&state, request.r#ref.as_ref())?;
             let entry = Self::fenced(&mut state, request.r#ref.as_ref(), request.fence.as_ref())?;
             let id = entry.record.id.clone();
             if entry.live.is_none() {
@@ -1913,6 +2061,7 @@ impl VmRunner {
             return Ok(deleted);
         }
         let mut state = self.state.lock().unwrap();
+        Self::not_publishing(&state, request.r#ref.as_ref())?;
         let entry = Self::fenced(&mut state, request.r#ref.as_ref(), request.fence.as_ref())?;
         let id = entry.record.id.clone();
         if entry.record.phase != Phase::Retained {
@@ -2050,10 +2199,8 @@ impl VmRunner {
             // Read only: no `ops` lock, so it neither waits for a mutation
             // nor holds one up (diagnose.rs).
             Some(Verb::MachineDiagnose(request)) => self.diagnose(request).await.map(R::Diagnosis),
-            Some(Verb::TemplatePublish(request)) => {
-                let _op = self.ops.lock().await;
-                self.publish(request).await.map(R::Template)
-            }
+            // Takes `ops` itself, not while its agent works (R14b).
+            Some(Verb::TemplatePublish(request)) => self.publish(request).await.map(R::Template),
             Some(Verb::TemplateList(_)) => Ok(R::Templates(self.list_templates())),
             Some(Verb::TemplateDelete(request)) => {
                 let _op = self.ops.lock().await;
@@ -2280,6 +2427,15 @@ fn publishing_guest(entry: &Entry) -> Answer<Arc<channel::Guest>> {
     match (&entry.guest, entry.record.phase) {
         (Some(guest), Phase::Running) => Ok(Arc::clone(guest)),
         _ => Err(not_running(entry)),
+    }
+}
+
+/// A publication the runner's stop cut short: whether the agent finished
+/// is not known, and nothing was kept.
+fn runner_stopping() -> proto::Error {
+    proto::Error {
+        completion_unknown: true,
+        ..refuse(Code::Unavailable, "runner_stopping", "the runner stops")
     }
 }
 
@@ -2683,12 +2839,14 @@ mod dial_tests {
             sessions: Default::default(),
             policy: None,
             net: None,
+            publishing: None,
         };
         State {
             version: 1,
             machines: BTreeMap::from([("0123456789abcdef".to_string(), entry)]),
             deleted: BTreeMap::new(),
             templates: BTreeMap::new(),
+            marks: 0,
         }
     }
 
@@ -2880,12 +3038,14 @@ mod cache_tests {
                         sessions: Default::default(),
                         policy: None,
                         net: None,
+                        publishing: None,
                     };
                     (entry.record.id.clone(), entry)
                 })
                 .collect(),
             deleted: deleted.into_iter().map(|r| (r.id.clone(), r)).collect(),
             templates: BTreeMap::new(),
+            marks: 0,
         }
     }
 
