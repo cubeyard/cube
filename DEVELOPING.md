@@ -42,6 +42,56 @@ work directories. The real-VM scripts keep their state under `TMPDIR` (`/tmp`
 by default); where that is a small tmpfs, point `TMPDIR` at a disk: VM disks
 grow there and the runner refuses a new VM below 4 GiB free.
 
+The same script runs `berth vm` (runner protocol 4) with keel machines on
+Linux with KVM and on macOS with HVF: `runner-vm-test.ts` (the guest channel,
+the Workspace contract, network, credentials, portal, templates, diagnosis)
+and `runner-vm-cubed-test.ts` (cubed's real code with `berth vm` as the
+pool). They need `CUBE_TEST_BERTH_QEMU` and `CUBE_TEST_BERTH_QEMU_IMG`
+(absolute paths to a `qemu-system-x86_64` or `qemu-system-aarch64` that meets
+keel's floor, which `berth vm` checks, and its `qemu-img`),
+`CUBE_TEST_BERTH_KEEL` (`packages/keel/out/x86_64` or `out/arm64` with
+`vmlinuz` and `base.erofs`, from `packages/keel/kernel/build.sh <arch>` and
+`packages/keel/base/build.sh <arch>`, which build in Docker),
+`CUBE_TEST_BERTH_IMAGE` (a public image pinned by digest,
+`registry/repository@sha256:…`, with bash, sudo, flock, git, gh, curl, perl
+and a CA bundle; `berth vm` pulls it itself) and `CUBE_TEST_BERTH_MKFS` (an
+absolute `mkfs.erofs`). Without them each test prints `SKIP: … did NOT run`,
+and `CUBE_TEST_BERTH_VM=required` makes that a failure. Optional:
+`CUBE_TEST_BERTH_ACCEL` (default `kvm` on Linux, `hvf` on macOS),
+`CUBE_TEST_BERTH_FSCK` (an `fsck.erofs` for the template layer),
+`CUBE_TEST_BERTH_IMAGE_B` (a second image pinned by digest; without it the
+template-image and layer-cache checks say `NOT checked`),
+`CUBE_TEST_BERTH_GATEWAY` (a `cube-gateway` built with `--features
+test-hooks`; otherwise the tests build one under `target/test-hooks`),
+`CUBE_TEST_BERTH_TMP` (a short directory instead of `/tmp`),
+`CUBE_TEST_BERTH_PULLED` (a berth directory the image was pulled into before)
+and `CUBE_TEST_KEEP=1` (`runner-vm-cubed-test.ts` keeps its root, with
+`berth.log`, and names it in a `kept` line). On Linux:
+
+```sh
+packages/keel/kernel/build.sh x86_64 && packages/keel/base/build.sh x86_64
+CUBE_TEST_BERTH_VM=required CUBE_TEST_LAYER_TOOLS=required \
+  CUBE_TEST_BERTH_QEMU=/path/to/qemu-system-x86_64 CUBE_TEST_BERTH_QEMU_IMG=/path/to/qemu-img \
+  CUBE_TEST_BERTH_KEEL="$PWD/packages/keel/out/x86_64" CUBE_TEST_BERTH_MKFS="$(command -v mkfs.erofs)" \
+  CUBE_TEST_BERTH_IMAGE='<registry/repository@sha256:…>' \
+  CUBE_TEST_VM=required CUBE_TEST_VM_IMAGE=/path/debian-13-genericcloud-amd64.qcow2 \
+  bash scripts/test-node-transport.sh
+```
+
+On macOS use Homebrew's `qemu-system-aarch64`, `qemu-img` and erofs-utils
+(`/opt/homebrew/bin`), keel for `arm64`, and
+`CUBE_TEST_LAYER_TOOLS=mkfs.erofs,fsck.erofs,dump.erofs` (there is no
+`sfdisk`). The protocol-3 part prints `SKIP: runner acceptance with a real VM
+did NOT run` there by design and the script still exits 0; leave
+`CUBE_TEST_VM` unset, since `CUBE_TEST_VM=required` turns that skip into a
+failure. `scripts/test-local-runner.ts` enrolls its runner when the host has
+an accelerator the runner accepts (a usable `/dev/kvm` on Linux,
+`kern.hv_support` 1 on macOS) and otherwise checks that enrollment is
+deferred. A `berth vm` run passed when the script exits 0 and prints
+`ok: berth vm over protocol 4 (kvm|hvf): …`, `ok: cubed with berth vm: …` and
+`ok: init-local with the real cube-runner (KVM|HVF): …`; a SKIP line for a
+part you meant to run is not a pass.
+
 `keel-layers` (`packages/keel/layers`) tests its conversion and layer disk
 with the real erofs-utils (`mkfs.erofs`, `fsck.erofs`, `dump.erofs`) and
 `qemu-img` from `PATH` (`scripts/setup-dev.sh` installs them on Linux;
