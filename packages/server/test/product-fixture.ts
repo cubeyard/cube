@@ -21,7 +21,7 @@ models.setProvider(faux.provider);
 const app = await createCubed({ state, models, machines: new LocalMachines(machinesRoot),
   claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], claudeOptions: { stopGraceMs: 2000 } });
 if (app.registry.runnerCount() === 0) {
-  app.registry.enrollRunner({ nodeId: "node-product", environmentId: 1, threadId: "runner-product", configPath: "/private/product.json", configHash: "product" });
+  app.registry.enrollRunner({ nodeId: "node-product", environmentId: 1, threadId: "runner-product", configPath: "/private/product.json", configHash: "product", protocol: 4, kind: "vm" });
 }
 await new Promise<void>(resolve => app.server.listen(Number(process.env.CUBE_FIXTURE_PORT ?? 0), "127.0.0.1", resolve));
 const address = app.server.address();

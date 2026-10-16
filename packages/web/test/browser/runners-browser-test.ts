@@ -1,6 +1,6 @@
 /** The runners on a project's page in a real browser against the real
- * cubed, at desktop and phone width: each runner's protocol (p3, p4 vm in
- * the pool or p4 host, by name only), p3's free slots and open p3 threads,
+ * cubed, at desktop and phone width: each runner's protocol (p4 vm in the
+ * pool, p3 and p4 host by name only), p3's free slots and open p3 threads,
  * p4's slots, and which numbers are not current (a stale
  * report, a runner that never reported). Runner reports are faked through
  * cubed's probe. CUBE_SCREENSHOTS=<dir> keeps a picture of each width.
@@ -49,13 +49,13 @@ try {
     await panel.locator(".capacity-late", { hasText: "berth-vm (stale report)" }).waitFor();
     assert.equal(await panel.locator("h2#runner-heading").textContent(), "runners");
     const label = (node: string) => panel.locator(".runner-row", { hasText: node }).locator(".runner-protocol").textContent();
-    assert.equal(await label("pool-a"), "p3");
-    assert.equal(await label("pool-b"), "p3");
+    assert.equal(await label("pool-a"), "p3 · by name only");
+    assert.equal(await label("pool-b"), "p3 · by name only");
     assert.equal(await label("berth-vm"), "p4 vm · pool");
     assert.equal(await label("berth-host"), "p4 host · unsandboxed, by name only");
     // pool-a reported 3 slots and holds 2 open threads (the archived one is not); pool-b's one slot is assumed.
-    assert.equal(await panel.locator(".capacity-p3").textContent(), "p3 · 2 free of 4 slots on 2 runners · open p3 threads: 2");
-    assert.equal(await panel.locator(".capacity-p4").textContent(), "p4 · vm 1 free of 2 slots · host 1 free of 1 slot by name");
+    assert.equal(await panel.locator(".capacity-p3").textContent(), "p3 by name · 2 free of 4 slots on 2 runners · open p3 threads: 2");
+    assert.equal(await panel.locator(".capacity-p4").textContent(), "p4 · vm pool 1 free of 2 slots · host by name 1 free of 1 slot");
     assert.equal(await panel.locator(".capacity-late").textContent(), "not current: berth-vm (stale report), pool-b (never reported), berth-host (never reported)");
     assert.match(await panel.locator(".capacity-note").textContent() ?? "", /a slot is an open thread in cube, not a machine on the runner/);
     assert.ok(await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= window.innerWidth), `no sideways scroll (${name})`);

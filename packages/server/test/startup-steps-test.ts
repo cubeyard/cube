@@ -33,7 +33,7 @@ const models = createModels();
 models.setProvider(faux.provider);
 const machines = new LocalMachines(path.join(root, "machines"));
 let app = await createCubed({ state: path.join(root, "state"), models, machines, claude: null, gateway: null });
-app.registry.enrollRunner({ nodeId: "node-steps", environmentId: 1, threadId: "runner-steps", configPath: "/private/steps.json", configHash: "steps", maxActiveVms: 2 });
+app.registry.enrollRunner({ nodeId: "node-steps", environmentId: 1, threadId: "runner-steps", configPath: "/private/steps.json", configHash: "steps", maxActiveVms: 2, protocol: 4, kind: "vm" });
 await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
 const address = app.server.address();
 assert(address && typeof address === "object");

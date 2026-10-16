@@ -106,8 +106,9 @@ export interface Runner extends NodeBinding {
   /** The runner protocol it was enrolled with; absent: 3 (VM runners). */
   protocol?: 4;
   /** `host`: `berth host`, machines are directories on that host and
-   * nothing is sandboxed. Only a thread started on it by name runs there;
-   * a `berth vm` is in the pool (pooledRunner). */
+   * nothing is sandboxed. Only a thread started on it by name runs there,
+   * as on a protocol-3 runner; the pool is the `berth vm` runners
+   * (pooledRunner). */
   kind?: "vm" | "host";
 }
 export interface WorkspaceRepository {
@@ -271,10 +272,12 @@ export function runnerSlots(runner: Pick<Runner, "maxActiveVms">): number {
 }
 
 /** Whether a thread started without naming a runner may get this one:
- * every VM runner, protocol 3 (`cube-runner`) or 4 (`berth vm`). A host
- * runner (`berth host`) takes only threads started on it by name. */
+ * only a `berth vm` (protocol 4, kind vm). A protocol-3 runner
+ * (`cube-runner`) and a host runner (`berth host`) take only threads
+ * started on them by name (the user's decision of 2026-10-16: p3 only by
+ * explicit choice). */
 export function pooledRunner(runner: Pick<Runner, "protocol" | "kind">): boolean {
-  return runner.kind !== "host";
+  return runner.protocol === 4 && runner.kind !== "host";
 }
 
 /** Every open (unarchived) thread holds one machine slot on its runner from
@@ -389,6 +392,13 @@ export class Registry {
     return this.db.prepare("SELECT data FROM runner ORDER BY rowid").all().map(row => this.parse<Runner>(row)!);
   }
   getRunner(id: string): Runner | null { return this.parse(this.db.prepare("SELECT data FROM runner WHERE id=?").get(id)); }
+  /** The id of the runner a thread is started on by name: its node id or id. */
+  namedRunnerId(name: string): string {
+    const named = name.trim();
+    const runner = this.listRunners().find(candidate => candidate.nodeId === named || candidate.threadId === named);
+    if (!runner) throw new Error(`no runner ${named}; runners lists them`);
+    return runner.threadId;
+  }
   /** Runners that can take a thread now, in allocation order. */
   availableRunners(): Runner[] {
     return this.runnerLoads().filter(load => load.active < load.slots).map(load => load.runner);
@@ -400,10 +410,10 @@ export class Registry {
     return { free: loads.reduce((sum, load) => sum + Math.max(0, load.slots - load.active), 0),
       total: loads.reduce((sum, load) => sum + load.slots, 0), runners: loads.filter(load => load.active < load.slots).length };
   }
-  /** Allocatable runners with their open threads: by fitness (ready, then
-   * unverified, then down), then runners with a failed machine last, then
-   * the least loaded, then enrollment order. */
-  private runnerLoads(now = Date.now()): Array<{ id: string; runner: Runner; slots: number; active: number; failed: number; fitness: RunnerFitness }> {
+  /** Allocatable runners (the pool, or those `which` takes) with their open
+   * threads: by fitness (ready, then unverified, then down), then runners
+   * with a failed machine last, then the least loaded, then enrollment order. */
+  private runnerLoads(now = Date.now(), which: (runner: Runner) => boolean = pooledRunner): Array<{ id: string; runner: Runner; slots: number; active: number; failed: number; fitness: RunnerFitness }> {
     // One pass over the open threads (index thread_open), not per runner.
     const rows = this.db.prepare(`SELECT r.id,r.data,coalesce(t.active,0) AS active,coalesce(t.failed,0) AS failed,
         o.last_attempt_at,o.last_contact_at,o.unreachable_since,o.last_error,o.health
@@ -412,8 +422,8 @@ export class Registry {
         FROM thread WHERE ${OPEN_THREAD} GROUP BY runner_id) t ON t.runner_id=r.id
       WHERE o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired' ORDER BY r.rowid`).all() as Array<Record<string, unknown>>;
     return rows.map(row => ({ row, runner: JSON.parse(String(row.data)) as Runner }))
-      // A host runner takes only the threads started on it by name.
-      .filter(({ runner }) => pooledRunner(runner)).map(({ row, runner }) => {
+      // A protocol-3 or host runner takes only the threads started on it by name.
+      .filter(({ runner }) => which(runner)).map(({ row, runner }) => {
         const { fitness } = runnerFitness(observation(row), now);
         return { id: String(row.id), runner, slots: runnerSlots(runner), active: Number(row.active), failed: Number(row.failed), fitness };
       }).sort((a, b) => FITNESS_ORDER[a.fitness] - FITNESS_ORDER[b.fitness] || Number(a.failed > 0) - Number(b.failed > 0)
@@ -439,11 +449,13 @@ export class Registry {
       retired: row.retired_at != null };
   }
   /** Moves an open thread whose machine was never allocated to another
-   * runner of its runner's protocol with a free slot that is not down and
-   * not in `exclude`. Only a `provisional` thread on a protocol-3 runner
-   * moves: nothing of its own machine reached its runner (the caller also
-   * checks nothing is bound to that runner), and a thread on a protocol-4
-   * runner stays there (runner-machines.ts). Counting and
+   * protocol-3 VM runner with a free slot that is not down and not in
+   * `exclude`. Only an unpinned `provisional` thread on a protocol-3 runner
+   * moves: one the pool placed there before protocol 3 needed a runner's
+   * name (a new protocol-3 thread is pinned); nothing of its own machine
+   * reached its runner (the caller also checks nothing is bound to that
+   * runner). A thread on a protocol-4 runner stays there
+   * (runner-machines.ts). Counting and
    * moving in one IMMEDIATE transaction is the new slot's reservation and
    * the old one's release. Returns the new runner's id, or null when none
    * can take it. */
@@ -458,8 +470,8 @@ export class Registry {
       // Never between protocols: the caller (vm.ts) boots it on the new
       // runner with protocol 3.
       const load = this.getRunner(thread.runnerId)?.protocol === 4 ? undefined
-        : this.runnerLoads(now).find(candidate => candidate.id !== thread.runnerId && !exclude.has(candidate.id)
-          && candidate.runner.protocol !== 4 && candidate.fitness !== "down" && candidate.active < candidate.slots);
+        : this.runnerLoads(now, runner => runner.protocol !== 4 && runner.kind !== "host").find(candidate => candidate.id !== thread.runnerId && !exclude.has(candidate.id)
+          && candidate.fitness !== "down" && candidate.active < candidate.slots);
       if (!load) { this.db.exec("COMMIT"); return null; }
       const moved: Thread = { ...thread, runnerId: load.id, ...(thread.vm ? { vm: { ...thread.vm, placement: "provisional" } } : {}) };
       this.db.prepare("UPDATE thread SET runner_id=?,data=? WHERE id=?").run(load.id, JSON.stringify(moved), threadId);
@@ -781,7 +793,9 @@ export class Registry {
       // another process, can take a runner's last slot.
       const load = options.runnerId !== undefined ? this.namedRunner(options.runnerId)
         : this.runnerLoads().find(candidate => candidate.active < candidate.slots);
-      if (!load) throw new Error("no free thread machine in the global runner pool — archive an idle thread, register another trusted runner or raise a runner's --max-active-vms");
+      if (!load) throw new Error(this.runnerLoads().length
+        ? "no free thread machine in the global runner pool (its berth vm runners) — archive an idle thread, enroll another berth vm, raise a runner's limit, or start the thread on a runner by name"
+        : "no berth vm runner in the global runner pool: start the thread on a runner by name (a protocol-3 runner takes threads only by name), or enroll a berth vm");
       const thread: Thread = { id: randomUUID(), projectId, runnerId: load.id, ...(options.runnerId !== undefined ? { pinned: true as const } : {}),
         title: text.replace(/\s+/g, " ").slice(0, 80) || null, model, agent, archived: false, createdAt: Date.now(),
         allocation: { projectId, projectRevision: project.revision, repositories, hooks: { ...NO_HOOKS, ...project.hooks },

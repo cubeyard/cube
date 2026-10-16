@@ -80,7 +80,7 @@ const models = createModels();
 models.setProvider(faux.provider);
 const machines = new LocalMachines(path.join(root, "machines"));
 const app = await createCubed({ state: path.join(root, "state"), models, machines, claude: null, gateway: null });
-app.registry.enrollRunner({ nodeId: "node-hooks", environmentId: 1, threadId: "runner-hooks", configPath: "/private/hooks.json", configHash: "hooks", maxActiveVms: 2 });
+app.registry.enrollRunner({ nodeId: "node-hooks", environmentId: 1, threadId: "runner-hooks", configPath: "/private/hooks.json", configHash: "hooks", maxActiveVms: 2, protocol: 4, kind: "vm" });
 await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
 const address = app.server.address();
 assert(address && typeof address === "object");

@@ -20,8 +20,9 @@ try {
   registry.saveProject({ id: "disposable", name: "disposable", status: "ready", error: null, revision: 1,
     checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
   const model = { provider: "fixture", id: "selected" };
-  assert.throws(() => registry.createThread("project", "request", model, "one"), /no free thread machine/);
-  registry.enrollRunner({ nodeId: "node-test", environmentId: 7, threadId: "thread-test", configPath: "/private/config.json", configHash: "hash" });
+  // The pool is the berth vm runners (pooledRunner); these are berth vms.
+  assert.throws(() => registry.createThread("project", "request", model, "one"), /no berth vm runner in the global runner pool/);
+  registry.enrollRunner({ nodeId: "node-test", environmentId: 7, threadId: "thread-test", configPath: "/private/config.json", configHash: "hash", protocol: 4, kind: "vm" });
   registry.deleteProject("disposable");
   assert.equal(registry.getProject("disposable"), null, "global runners do not block project deletion");
   assert.deepEqual(registry.listRunners().map(runner => runner.nodeId), ["node-test"]);
@@ -50,7 +51,7 @@ try {
   assert.equal(registry.runnerStatuses().find(row => row.id === "thread-test")?.allocationProjectId, "other",
     "operator status reads the current global allocation snapshot, not runner ownership");
   assert.throws(() => registry.beginRunnerRetirement("thread-test"), /active global allocation/, "global allocation blocks retirement");
-  registry.enrollRunner({ nodeId: "node-two", environmentId: 7, threadId: "runner-two", configPath: "/private/two.json", configHash: "two" });
+  registry.enrollRunner({ nodeId: "node-two", environmentId: 7, threadId: "runner-two", configPath: "/private/two.json", configHash: "two", protocol: 4, kind: "vm" });
   assert.equal(registry.availableRunners().length, 1, "environment IDs may collide across immutable runner identities");
 
   registry.beginRunnerRetirement("runner-two");
@@ -77,7 +78,7 @@ try {
   assert.equal(registry.runnerAudit("runner-two").length, 1, "retirement evidence is durable registry metadata");
 
   registry.enrollRunner({ nodeId: "node-stale", environmentId: 9, threadId: "runner-stale",
-    configPath: "/private/stale.json", configHash: "stale" });
+    configPath: "/private/stale.json", configHash: "stale", protocol: 4, kind: "vm" });
   const staleSince = 100;
   registry.recordRunnerProbe("runner-stale", { health: idleHealth }, staleSince);
   registry.recordRunnerProbe("runner-stale", { error: "NODE_UNAVAILABLE" }, staleSince);
@@ -104,7 +105,7 @@ try {
   for (const id of ["race-one", "race-two"]) raceRegistry.saveProject({ id, name: id, status: "ready", error: null, revision: 1,
     checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
   raceRegistry.enrollRunner({ nodeId: "node-race", environmentId: 1, threadId: "runner-race",
-    configPath: "/private/race.json", configHash: "race" });
+    configPath: "/private/race.json", configHash: "race", protocol: 4, kind: "vm" });
   raceRegistry.close();
   const workerSource = `
     const { parentPort, workerData } = require("node:worker_threads");

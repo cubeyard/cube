@@ -145,7 +145,7 @@ try {
   });
   url = String(fixture.url);
   const model = { provider: fixture.provider, id: fixture.model };
-  const create = async (projectId: string, name: string) => (await api("/api/threads", "POST", { projectId, requestId: name, text: "hello", model })).id as string;
+  const create = async (projectId: string, name: string) => (await api("/api/threads", "POST", { projectId, requestId: name, text: "hello", model, runner: "node-tpl" })).id as string;
 
   // 1. The first thread builds the template, then boots from it.
   const preSetup = "set -e\nsudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q jq >/dev/null\n"

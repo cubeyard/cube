@@ -236,7 +236,7 @@ try {
   const app = await createCubed({ state: path.join(root, "state"), models, machines, claude: null, gateway: null, skillSource: defaults });
   try {
     for (const index of [0, 1]) {
-      app.registry.enrollRunner({ nodeId: `node-${index}`, threadId: `runner-${index}`, environmentId: index + 1, configPath: `/private/runner-${index}.json`, configHash: `hash-${index}` });
+      app.registry.enrollRunner({ nodeId: `node-${index}`, threadId: `runner-${index}`, environmentId: index + 1, configPath: `/private/runner-${index}.json`, configHash: `hash-${index}`, protocol: 4, kind: "vm" });
     }
     await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
     const address = app.server.address();
@@ -359,7 +359,7 @@ try {
   const cubed = await open();
   try {
     for (const index of [0, 1, 2]) {
-      cubed.app.registry.enrollRunner({ nodeId: `update-${index}`, threadId: `update-runner-${index}`, environmentId: 10 + index, configPath: `/private/update-${index}.json`, configHash: `update-${index}` });
+      cubed.app.registry.enrollRunner({ nodeId: `update-${index}`, threadId: `update-runner-${index}`, environmentId: 10 + index, configPath: `/private/update-${index}.json`, configHash: `update-${index}`, protocol: 4, kind: "vm" });
     }
     const upToDate = await cubed.call("/api/settings/skills/update");
     assert.equal(upToDate.status, 200, JSON.stringify(upToDate.body));

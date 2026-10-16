@@ -260,7 +260,7 @@ try {
   // enrollment: berth vm by its hello, in the pool
   const enrolled = await enrollRunner({ state, configPath });
   assert.equal(enrolled.profile, "vm-runner");
-  assert.match(enrolled.next, /the pool may place it on this runner/);
+  assert.match(enrolled.next, /the pool places it on a berth vm/);
   const admitted = app.registry.getRunner(node)!;
   assert.deepEqual([admitted.protocol, admitted.kind], [4, "vm"]);
   const overview = describeRunners(observeRunners(app.registry, 60_000));

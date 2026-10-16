@@ -108,7 +108,7 @@ try {
   vms = new ThreadVms({ registry, threads: path.join(state, "threads"), run: runDir, gateway, sizes: { vcpus: 2, memoryMiB: 2048, diskGiB: 8 }, log: quiet,
     // Machines from the base image here; templates have scripts/test-vm-templates.ts.
     templates: { enabled: false, ttlMs: 0 } });
-  const thread = registry.createThread("empty", "adapter", { provider: "faux", id: "faux" }, "adapter smoke");
+  const thread = registry.createThread("empty", "adapter", { provider: "faux", id: "faux" }, "adapter smoke", "pi", undefined, { runnerId: client.binding.threadId });
   await vms.start(thread);
   log("thread machine booted; guest helper ready over ssh through the gateway");
   if (process.env.CUBE_SMOKE_PAUSE) {

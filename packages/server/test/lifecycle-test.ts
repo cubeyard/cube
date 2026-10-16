@@ -98,7 +98,7 @@ async function meanwhile(id: string, done: () => boolean) {
 try {
   for (let index = 0; index < 4; index++) {
     app.registry.enrollRunner({ nodeId: `node-${index}`, threadId: `runner-${index}`, environmentId: index + 1,
-      configPath: `/private/runner-${index}.json`, configHash: `hash-${index}` });
+      configPath: `/private/runner-${index}.json`, configHash: `hash-${index}`, protocol: 4, kind: "vm" });
   }
   const project = (await (await fetch(`${base}/api/projects`, { method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ name: "empty", repositories: [] }) })).json()).project;

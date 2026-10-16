@@ -174,7 +174,7 @@ function raw(text: string): Promise<{ socket: net.Socket; first: string }> {
 }
 
 try {
-  app.registry.enrollRunner({ nodeId: "node-portal", threadId: "runner-portal", environmentId: 1, configPath: "/private/portal.json", configHash: "portal" });
+  app.registry.enrollRunner({ nodeId: "node-portal", threadId: "runner-portal", environmentId: 1, configPath: "/private/portal.json", configHash: "portal", protocol: 4, kind: "vm" });
   const project = (await (await fetch(`${base}/api/projects`, { method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ name: "web", repositories: [] }) })).json()).project;
   const model = { provider: faux.getModel().provider, id: faux.getModel().id };

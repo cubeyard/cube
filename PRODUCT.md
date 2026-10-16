@@ -31,7 +31,8 @@ owns the product. The user-facing unit is a thread.
 ## Capabilities and Constraints
 
 Projects retain repository configuration and host-side access checks. A new
-thread leases one available runner from the installation-wide pool and gets
+thread leases one available runner from the installation-wide pool (its
+`berth vm` runners; a protocol-3 or host runner only when named) and gets
 its own virtual machine there, with `/workspace` pinned to the commits its
 repositories' branches have when it starts; an idle archived thread returns
 that lease. The thread supports streaming chat, model choice, bounded shell tools, stop, rename and archive.

@@ -745,9 +745,12 @@ export async function createCubed(options: {
           const projectId = text("projectId");
           const requestId = text("requestId");
           const prompt = text("text");
+          // A runner by name (node id or id): the only way onto a protocol-3 or host runner.
+          const runnerId = typeof body.runner === "string" && body.runner.trim() ? registry.namedRunnerId(body.runner) : undefined;
           // A replayed request gets its thread back at the commits it started at.
           const resolved = registry.threadByRequest(projectId, requestId) ? undefined : await latestCommits(projectId);
-          const thread = registry.createThread(projectId, requestId, model, prompt, model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi", resolved);
+          const thread = registry.createThread(projectId, requestId, model, prompt, model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi", resolved,
+            runnerId === undefined ? {} : { runnerId });
           // The machine boots in the background (minutes the first time);
           // the thread shows "starting" until it is up.
           void conversations.activate(thread.id);

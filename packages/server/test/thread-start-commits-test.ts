@@ -37,7 +37,7 @@ const machines = new LocalMachines(path.join(root, "machines"));
 const app = await createCubed({ state: path.join(root, "state"), models, machines, claude: null, gateway: null });
 for (let index = 0; index < 6; index++) {
   app.registry.enrollRunner({ nodeId: `node-${index}`, threadId: `runner-${index}`, environmentId: index + 1,
-    configPath: `/private/runner-${index}.json`, configHash: `hash-${index}` });
+    configPath: `/private/runner-${index}.json`, configHash: `hash-${index}`, protocol: 4, kind: "vm" });
 }
 await new Promise<void>(resolve => app.server.listen(0, "127.0.0.1", resolve));
 const address = app.server.address();
@@ -129,7 +129,7 @@ try {
 //    at commits resolved for its earlier revision.
 {
   const registry = new Registry(path.join(root, "registry.db"));
-  registry.enrollRunner({ nodeId: "node-race", threadId: "runner-race", environmentId: 1, configPath: "/private/race.json", configHash: "race" });
+  registry.enrollRunner({ nodeId: "node-race", threadId: "runner-race", environmentId: 1, configPath: "/private/race.json", configHash: "race", protocol: 4, kind: "vm" });
   const repository = { id: "r", projectId: "p", position: 0, url: "/srv/a", base: null, checkoutName: "workspace", status: "ready" as const,
     error: null, resolvedBase: "main", baseOid: "a".repeat(40), checkedAt: 1 };
   registry.saveProject({ id: "p", name: "p", status: "ready", error: null, revision: 2, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [repository] });

@@ -37,16 +37,17 @@ try {
     const silent = view.runners.find(row => row.id === "silent")!;
     assert.equal(silent.report, null, "a runner that never answered has no report");
     assert.equal(silent.contact.status, "unknown");
-    assert.deepEqual(silent.slots, { total: 1, totalSource: "assumed", reserved: 0, free: 1, allocatable: true },
-      "a bound the runner never advertised is shown as assumed");
+    assert.deepEqual(silent.slots, { total: 1, totalSource: "assumed", reserved: 0, free: 1, allocatable: false },
+      "a bound the runner never advertised is shown as assumed; a protocol-3 runner is not in the pool");
+    assert.equal(silent.byName, true, "a protocol-3 runner takes only threads started on it by name");
     assert.match(silent.unknown.join("\n"), /has not answered a probe/);
     assert.deepEqual(view.notReported, NOT_REPORTED);
 
     const at = 1_000_000;
     registry.recordRunnerProbe("wide", { health: { ...legacy, softwareVersion: "0.8.0", maxActiveVms: 2, activeVms: 2, runningVms: 2,
       platform: "linux-x86_64", capabilities: ["node.hello", "node.status", "vm.publish"], limits } }, at);
-    registry.createThread("p", "one", { provider: "fixture", id: "m" }, "one");
-    registry.createThread("p", "two", { provider: "fixture", id: "m" }, "two");
+    registry.createThread("p", "one", { provider: "fixture", id: "m" }, "one", "pi", undefined, { runnerId: "wide" });
+    registry.createThread("p", "two", { provider: "fixture", id: "m" }, "two", "pi", undefined, { runnerId: "wide" });
     view = observeRunners(registry, 60_000, at + 30_000);
     const wide = view.runners.find(row => row.id === "wide")!;
     assert.equal(wide.report?.fresh, true);
@@ -55,8 +56,8 @@ try {
     assert.deepEqual(wide.report?.vmLimits, { maxVcpus: 4, maxMemoryMiB: 8192, maxDiskGiB: 64 });
     assert.equal(wide.slots.totalSource, "reported");
     assert.equal(wide.slots.total, 2);
-    // Two threads went to the wider runner; the silent one is assumed to have one slot.
-    assert.equal(wide.slots.reserved + view.runners.find(row => row.id === "silent")!.slots.reserved, 2);
+    // Two threads started on the wider runner by name; the silent one is assumed to have one slot.
+    assert.deepEqual([wide.slots.reserved, view.runners.find(row => row.id === "silent")!.slots.reserved], [2, 0]);
     assert.deepEqual(wide.unknown, [], "a fresh, complete report leaves only the protocol's unknowns");
 
     // Without a newer probe the same report grows stale.
@@ -99,7 +100,7 @@ try {
     assert.equal(leaving.retirement, "retiring");
     assert.deepEqual([leaving.slots.free, leaving.slots.allocatable], [0, false]);
     assert.equal(retiring.runners.find(row => row.id === "done")!.retirement, "retired");
-    assert.deepEqual([retiring.pool.runners, retiring.pool.allocatable], [4, 3], "retired runners leave the pool, retiring ones take no threads");
+    assert.deepEqual([retiring.pool.runners, retiring.pool.allocatable], [4, 0], "retired runners are not counted; protocol-3 runners are not in the pool");
     const text = describeRunners(retiring);
     assert.match(text, /node-leaving \(id leaving; retiring\)[^]*not taking threads/);
     assert.ok(!text.includes("node-done"), "a retired runner is not listed");
@@ -120,11 +121,12 @@ try {
     const pooledText = describeRunners(pooled);
     assert.match(pooledText, /node-berth[^]*protocol-4 VM runner \(berth vm\): in the pool;[^]*cubed's slots: 0 reserved by open threads of 3, 3 free\n/);
     assert.match(pooledText, /node-bhost[^]*HOST runner[^]*2 free for threads started on it by name/);
+    assert.match(pooledText, /node-silent[^]*protocol-3 VM runner \(cube-runner\): takes only threads started on it by name[^]*1 free for threads started on it by name/);
     assert.ok(!/not in the pool yet/.test(pooledText));
     registry.close();
   }
 
-  // --- capacity by protocol: p3 and open p3 threads, p4 vm in the pool, p4 host by name, what is not current ---
+  // --- capacity by protocol: p3 by name and open p3 threads, p4 vm the pool, p4 host by name, what is not current ---
   {
     const registry = new Registry(path.join(root, "capacity.sqlite"));
     registry.saveProject({ id: "p", name: "p", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [] });
@@ -153,10 +155,10 @@ try {
     assert.deepEqual(["fresh", "stale", "mute", "retired", "vm4", "host4"].map(id => [byId(id).protocol, byId(id).kind]),
       [[3, "vm"], [3, "vm"], [3, "vm"], [3, "vm"], [4, "vm"], [4, "host"]]);
     assert.deepEqual(view.capacity.p3, { runners: 3, slots: 4 + 2 + 1, reserved: 3, free: 1 + 2 + 1, stale: ["stale"], unreported: ["mute"], openThreads: 3 },
-      "the pool's slots, its open threads (the archived one is not), and which totals are not current; the retired runner is not counted");
+      "p3's slots, its open threads (the archived one is not), and which totals are not current; the retired runner is not counted");
     const { vm: vmGroup } = view.capacity.p4;
-    assert.deepEqual([view.capacity.p3.slots + vmGroup.slots, view.capacity.p3.reserved + vmGroup.reserved, view.capacity.p3.free + vmGroup.free],
-      [view.pool.slots, view.pool.reserved, view.pool.free], "the pool is p3 and the p4 VM runners, not the host runner");
+    assert.deepEqual([vmGroup.slots, vmGroup.reserved, vmGroup.free], [view.pool.slots, view.pool.reserved, view.pool.free],
+      "the pool is the p4 VM runners: neither p3 nor the host runner");
     assert.deepEqual(view.capacity.p4, {
       vm: { runners: 1, slots: 3, reserved: 1, free: 2, stale: [], unreported: [] },
       host: { runners: 1, slots: 2, reserved: 1, free: 1, stale: [], unreported: ["host4"] },
@@ -166,12 +168,12 @@ try {
     assert.match(byId("host4").unknown.join("\n"), /has not answered a probe/);
     const text = describeRunners(view);
     const first = text.split("\n")[0];
-    assert.match(first, /^capacity: p3 \(protocol 3, cube-runner, in the pool\) 4 of 7 slots free on 3 runners \(not current: node-stale from its last, stale report; node-mute never reported \(1 slot assumed\)\), 3 open p3 threads; /);
-    assert.match(first, /p4 \(protocol 4, berth\) VM runners \(in the pool\) 2 of 3 slots free on 1 runner, host runners \(only threads started on the runner by name\) 1 of 2 slots free on 1 runner \(not current: node-host4 never reported \(bound from enrollment\)\)\./);
+    assert.match(first, /^capacity: p3 \(protocol 3, cube-runner: only threads started on the runner by name\) 4 of 7 slots free on 3 runners \(not current: node-stale from its last, stale report; node-mute never reported \(1 slot assumed\)\), 3 open p3 threads; /);
+    assert.match(first, /p4 \(protocol 4, berth\) VM runners \(the pool, which takes any thread that names no runner\) 2 of 3 slots free on 1 runner, host runners \(only threads started on the runner by name\) 1 of 2 slots free on 1 runner \(not current: node-host4 never reported \(bound from enrollment\)\)\./);
     assert.match(first, /not the machines a runner hosts/);
     assert.match(text, /node-vm4[^]*reported: berth 0\.1\.0, protocol 4/, "a p4 runner's software is berth");
     registry.close();
-    console.log("ok: capacity by protocol (p3 and open threads, p4 vm in the pool, p4 host by name, stale and unreported)");
+    console.log("ok: capacity by protocol (p3 by name and open threads, p4 vm the pool, p4 host by name, stale and unreported)");
   }
 
   // --- cubed: background probes, the API and OptChat's text ---
@@ -208,7 +210,7 @@ try {
     const text = describeRunners(view);
     assert.match(text, /cube-runner 0\.8\.0, protocol 3, macos-aarch64 with HVF/);
     assert.match(text, /at most 3 at once \(its effective bound\)/);
-    assert.match(text, /node-gone .*\n  contact: unreachable/);
+    assert.match(text, /node-gone .*\n  protocol-3 VM runner \(cube-runner\): takes only threads started on it by name[^\n]*\n  contact: unreachable/);
     assert.match(text, /capacity mode: whether --max-active-vms is auto/);
     assert.equal((await fetch(`http://127.0.0.1:${address.port}/api/runners/observed`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 404, "read-only");
     console.log("ok: runner observation (reports, staleness, slots, unknowns, API)");

@@ -47,7 +47,8 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         + `; hooks: ${hookSummary(project.hooks)}`);
       return [
         lines.length ? `projects:\n${lines.join("\n")}` : "no projects: the user creates them under projects",
-        `free thread machines: ${slots.free} of ${slots.total} (an open thread holds one until it is archived; runners has each runner's version and state)`,
+        `free thread machines: ${slots.free} of ${slots.total} in the pool (its berth vm runners, for threads that name no runner; an open thread holds one until it is archived; `
+          + "a protocol-3 or host runner takes threads only by name; runners has each runner's version, state and slots)",
         `models: ${models.map(model => `${model.provider}/${model.id}`).join(", ") || "none connected"}`,
       ].join("\n");
     },
@@ -79,13 +80,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         throw new Error(`model ${task.model} unavailable; ${ids.length ? `selectable models: ${ids.join(", ")}` : "no model provider is connected"}`);
       }
       const text = `${task.task}\n\n${THREAD_NOTE}`;
-      let runnerId: string | undefined;
-      if (task.runner) {
-        const named = task.runner.trim();
-        const runner = registry.listRunners().find(candidate => candidate.nodeId === named || candidate.threadId === named);
-        if (!runner) throw new Error(`no runner ${named}; runners lists them`);
-        runnerId = runner.threadId;
-      }
+      const runnerId = task.runner ? registry.namedRunnerId(task.runner) : undefined;
       let thread = registry.createThread(project.id, requestId, model, text, model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi",
         await options.latestCommits(project.id), runnerId === undefined ? {} : { runnerId });
       // The title comes from the task alone, unless the user renamed it since.

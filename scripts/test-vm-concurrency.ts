@@ -137,7 +137,7 @@ try {
   log("1: runner serves at most 2 machines; cubed enrolled it with 2 slots");
 
   // 2. Two threads at once; a third finds no free machine.
-  const create = (name: string) => call("/api/threads", "POST", { projectId: project.id, requestId: name, text: "hello", model });
+  const create = (name: string) => call("/api/threads", "POST", { projectId: project.id, requestId: name, text: "hello", model, runner: "node-conc" });
   const [a, b] = (await Promise.all([create("a"), create("b")])).map(response => { assert.equal(response.status, 200, JSON.stringify(response.json)); return response.json.id as string; });
   const refused = await create("c");
   assert.ok(refused.status >= 400 && /no free thread machine/.test(refused.json.error), JSON.stringify(refused.json));

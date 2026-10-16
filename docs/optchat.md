@@ -457,11 +457,12 @@ not measured on a live provider.
 - `<CUBED_STATE>/optchat/AGENTS.md`, if present, is the user's instructions,
   appended to the system prompt. It is read on every request; keep it stable
   for the cache.
-- A spawned thread goes to the runner pool unless the task names a `runner`
+- A spawned thread goes to the runner pool (its `berth vm` runners; refused
+  when none has a free slot) unless the task names a `runner`
   (its node id, from `runners`); then it starts on that runner and never
-  moves, and waits while it is down. That is the only way onto a host
-  runner (`berth host`, unsandboxed), which OptChat names only when the
-  user asks for it.
+  moves, and waits while it is down. That is the only way onto a
+  protocol-3 runner (`cube-runner`) or a host runner (`berth host`,
+  unsandboxed), which OptChat names only when the user asks for it.
 - A spawned thread runs on the host's preferred model unless the task names
   one; `claude · max` models start Claude Code threads.
 

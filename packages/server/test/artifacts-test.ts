@@ -187,7 +187,7 @@ const machines = new LocalMachines(path.join(root, "machines"));
 const open = () => createCubed({ state, models, machines, gateway: null, githubPulls: github, artifactRetryMs: 100,
   claude: [process.execPath, path.resolve(import.meta.dirname, "fake-claude.ts")], claudeOptions: { stopGraceMs: 2000 } });
 let app = await open();
-for (const n of [1, 2, 3]) app.registry.enrollRunner({ nodeId: `node-${n}`, environmentId: 1, threadId: `runner-${n}`, configPath: `/private/${n}.json`, configHash: `h${n}` });
+for (const n of [1, 2, 3]) app.registry.enrollRunner({ nodeId: `node-${n}`, environmentId: 1, threadId: `runner-${n}`, configPath: `/private/${n}.json`, configHash: `h${n}`, protocol: 4, kind: "vm" });
 // A project whose repository is on GitHub (never checked here: no network).
 app.registry.saveProject({ id: "gh", name: "gh", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1,
   repositories: [{ id: "r", projectId: "gh", position: 0, url: "https://github.com/cubeyard/demo", base: "main", checkoutName: "workspace",

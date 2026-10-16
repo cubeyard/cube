@@ -105,7 +105,7 @@ const vms = new TestVms({ registry, threads: path.join(root, "threads"), run: pa
   sizes: { vcpus: 1, memoryMiB: 1024, diskGiB: 8 }, templates: { enabled: false, ttlMs: 3600000 }, readyTimeoutMs: 3000,
   runnerClient: () => runner.client() as unknown as IrohRunnerClient,
   log: { ...silent, warn: (message: string) => { warnings.push(message); } } as never });
-const thread = registry.createThread("p", "r1", { provider: "faux", id: "faux" }, "hello");
+const thread = registry.createThread("p", "r1", { provider: "faux", id: "faux" }, "hello", "pi", undefined, { runnerId: "mac" });
 const reached = () => runner.calls.filter(call => call !== "inspect");
 
 try {
