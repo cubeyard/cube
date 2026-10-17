@@ -260,7 +260,8 @@ const A: Side = { name: "A", ref: { owner: "thread-a", id: randomBytes(8).toStri
 const B: Side = { name: "B", ref: { owner: "thread-b", id: randomBytes(8).toString("hex") }, epoch: Date.now() + 1, placeholder: newPlaceholder("github"), boot: "" };
 assert.notEqual(A.placeholder, B.placeholder);
 const sides = [A, B];
-const placeholders: Record<string, Record<string, string>> = { [A.ref.id]: { github: A.placeholder }, [B.ref.id]: { github: B.placeholder } };
+// V13 CONTROL (v13-control-shared-placeholder, never merged): both machines registered with A's placeholder.
+const placeholders: Record<string, Record<string, string>> = { [A.ref.id]: { github: A.placeholder }, [B.ref.id]: { github: A.placeholder } };
 const egress = new EgressPolicy({
   vms: { vm: vmId => { const side = sides.find(s => s.ref.id === vmId); return side ? { threadId: side.ref.owner, placeholders: placeholders[vmId]! } : null; } },
   secrets: [{ name: "github", hosts: ["github.com", "api.github.com"], value: async () => ghToken }], log: capture("egress"),
