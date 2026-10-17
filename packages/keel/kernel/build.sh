@@ -15,10 +15,11 @@ builder=debian@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f
 # is not used, so rebuilding the same inputs gives the same image.
 source_date_epoch=1760000000
 
-kc_here=$(cd "$(dirname "$0")" && pwd)
+# pwd -P: the key and the cache must not depend on how the path was spelled.
+kc_here=$(cd "$(dirname "$0")" && pwd -P)
 KEEL_CACHE_SCRIPT_DIR=$kc_here
 export KEEL_CACHE_SCRIPT_DIR
-root=$(cd "$kc_here/.." && pwd)
+root=$(cd "$kc_here/.." && pwd -P)
 kc_out=$root/out
 kc_cache=$root/.cache
 tarball=$root/.cache/linux-$version.tar.xz
@@ -26,58 +27,46 @@ tarball=$root/.cache/linux-$version.tar.xz
 
 # With KEEL_CACHE set, and only then, a build of these inputs that another
 # clone has already stored is used instead of building again; the key is the
-# inputs' contents (cache.sh). Architectures that are not stored are built in
-# one container, as before.
+# inputs' contents (cache.sh). Each architecture is looked up by itself: the
+# ones that hit are copied out, and only the ones that miss are built, in one
+# container, as before, then stored one by one.
 kc_cache_archs=
+kc_bypassed=
 if [ -n "${KEEL_CACHE:-}" ]; then
 	# shellcheck disable=SC1091 # sourced from beside this script
 	. "$kc_here/../cache.sh"
-	# cache.sh's status says nothing here. A bypass is one line, which the
-	# build says itself (with each architecture); anything else it prints on
-	# stderr, such as an unreadable cache, goes through.
-	kc_key_line=$({ KEEL_CACHE_SCRIPT_DIR=$kc_here \
-		sh "$kc_here/../cache.sh" --keel-cache-key kernel "$@" 2>&1 || :; })
-	case "$kc_key_line" in
-	bypass:*)
-		# User arguments, or the two the script builds when given none: the
-		# line above has one word, so it is not the list.
-		for kc_arch in "$@" arm64 x86_64; do
-			case "$kc_arch" in
-			arm64 | x86_64) ;;
-			*) continue ;;
-			esac
-			keel_cache_setup kernel "$kc_arch"
-			keel_cache_blocked
-		done
-		;;
-	*)
-		# The architecture keyed above, then the arguments as they were.
-		kc_args=$*
-		# shellcheck disable=SC2086 # the line is "kind arch key"
-		set -- $kc_key_line
-		kc_setup_arch=$2
-		# shellcheck disable=SC2086 # the script's own arguments
-		set -- $kc_args
-		keel_cache_setup kernel "$kc_setup_arch"
-		for kc_arch in "$@"; do
-			# The key computation just ran for $kc_setup_arch, so only the
-			# other architectures ask cache.sh again.
-			if [ "$kc_arch" = "$keel_cache_arch" ]; then
-				if [ "$keel_cache_mode" = hit ]; then
-					kc_cache_hashes=$(keel_cache_read)
-					echo "$keel_cache_arch: keel cache hit $keel_cache_key $kc_cache_hashes"
-					continue
-				fi
-			else
-				keel_cache_setup kernel "$kc_arch"
-			fi
+	# Once, before any setup: a relative KEEL_CACHE means the directory the
+	# build was started in.
+	keel_cache_resolve
+	for kc_arch in "$@"; do
+		keel_cache_setup kernel "$kc_arch"
+		case "$keel_cache_mode" in
+		off) ;;
+		hit)
+			keel_cache_read "$kc_arch"
+			echo "$kc_arch: keel cache hit $keel_cache_key $kc_hashes"
+			;;
+		miss)
 			keel_cache_blocked
 			kc_cache_archs="$kc_cache_archs $kc_arch"
-		done
-		[ -n "$kc_cache_archs" ] || exit 0
+			;;
+		bypass)
+			keel_cache_blocked
+			kc_bypassed="$kc_bypassed $kc_arch"
+			;;
+		esac
+	done
+	if [ -n "$kc_bypassed" ]; then
+		# One architecture was bypassed: every one of them is built exactly
+		# as before, and nothing is stored.
+		kc_cache_archs=
+	elif [ -z "$kc_cache_archs" ]; then
+		# Every architecture hit.
+		exit 0
+	else
 		keel_cache_sources "linux-$version.tar.xz"
-		;;
-	esac
+	fi
+	kc_cache_archs=${kc_cache_archs# }
 fi
 
 # Only the architectures that are not stored are built, in one container.
@@ -86,8 +75,6 @@ if [ -n "$kc_cache_archs" ]; then
 	set -- $kc_cache_archs
 fi
 
-# The builder image is digest-pinned above; with KEEL_CACHE set, keel_cache_
-# image_mode records which digest built this cache.
 keel_cache_builder=$builder
 mkdir -p "$root/.cache"
 major=${version%%.*}
@@ -127,7 +114,13 @@ if [ -n "$kc_cache_archs" ]; then
 	keel_cache_adopt
 	keel_cache_builder_version=$version
 	keel_cache_extra=$(printf 'kernel %s %s' "$version" "$sha256")
-	# The compiler line the task asks for: the toolchain is the image's apt
-	# packages, which are not pinned, so the image and the packages are named.
-	keel_cache_store "build-essential and both crossbuild-essential packages of $builder"
+	# Each built architecture is set up and stored by itself: the one whose
+	# key and entry the store writes.
+	for kc_arch in $kc_cache_archs; do
+		keel_cache_setup kernel "$kc_arch"
+		# The compiler line the task asks for: the toolchain is the image's
+		# apt packages, which are not pinned, so the image and the packages
+		# are named.
+		keel_cache_store "build-essential and both crossbuild-essential packages of $builder"
+	done
 fi

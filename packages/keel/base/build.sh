@@ -27,77 +27,68 @@ rustup_version=1.28.2
 rustup_x86_64=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
 rustup_aarch64=e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c
 
-kc_here=$(cd "$(dirname "$0")" && pwd)
+# pwd -P: the key and the cache must not depend on how the path was spelled.
+kc_here=$(cd "$(dirname "$0")" && pwd -P)
 KEEL_CACHE_SCRIPT_DIR=$kc_here
 export KEEL_CACHE_SCRIPT_DIR
-root=$(cd "$kc_here/.." && pwd)
+root=$(cd "$kc_here/.." && pwd -P)
 kc_out=$root/out
 kc_cache=$root/.cache
-repo=$(cd "$root/../.." && pwd)
+repo=$(cd "$root/../.." && pwd -P)
 rust=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$repo/rust-toolchain.toml")
 [ "$#" -gt 0 ] || set -- arm64 x86_64
 
 # With KEEL_CACHE set, and only then, a build of these inputs (the base's C,
 # the agent, its crates and the toolchain pins) that another clone has stored
 # is used instead of building again; the key is the inputs' contents
-# (cache.sh). Architectures that are not stored are built in one container,
-# as before.
+# (cache.sh). Each architecture is looked up by itself: the ones that hit are
+# copied out, and only the ones that miss are built, in one container, as
+# before, then stored one by one.
 kc_cache_archs=
+kc_bypassed=
 kc_source_names=
 if [ -n "${KEEL_CACHE:-}" ]; then
 	# shellcheck disable=SC1091 # sourced from beside this script
 	. "$kc_here/../cache.sh"
-	# cache.sh's status says nothing here. A bypass is one line, which the
-	# build says itself (with each architecture); anything else it prints on
-	# stderr, such as an unreadable cache, goes through.
-	kc_key_line=$({ KEEL_CACHE_SCRIPT_DIR=$kc_here \
-		sh "$kc_here/../cache.sh" --keel-cache-key base "$@" 2>&1 || :; })
+	# Once, before any setup: a relative KEEL_CACHE means the directory the
+	# build was started in.
+	keel_cache_resolve
 	kc_source_names=$(echo "$sources" | sed -n 's/^\([^ ]*\) .*/\1/p')
-	case "$kc_key_line" in
-	bypass:*)
-		# User arguments, or the two the script builds when given none: the
-		# line above has one word, so it is not the list.
-		for kc_arch in "$@" arm64 x86_64; do
-			case "$kc_arch" in
-			arm64 | x86_64) ;;
-			*) continue ;;
-			esac
-			keel_cache_setup base "$kc_arch"
-			keel_cache_blocked
-		done
-		;;
-	*)
-		# The architecture keyed above, then the arguments as they were.
-		kc_args=$*
-		# shellcheck disable=SC2086 # the line is "kind arch key"
-		set -- $kc_key_line
-		kc_setup_arch=$2
-		# shellcheck disable=SC2086 # the script's own arguments
-		set -- $kc_args
-		keel_cache_setup base "$kc_setup_arch"
-		for kc_arch in "$@"; do
-			# The key computation just ran for $kc_setup_arch, so only the
-			# other architectures ask cache.sh again.
-			if [ "$kc_arch" = "$keel_cache_arch" ]; then
-				if [ "$keel_cache_mode" = hit ]; then
-					kc_cache_hashes=$(keel_cache_read)
-					echo "$keel_cache_arch: keel cache hit $keel_cache_key $kc_cache_hashes"
-					continue
-				fi
-			else
-				keel_cache_setup base "$kc_arch"
-			fi
+	for kc_arch in "$@"; do
+		keel_cache_setup base "$kc_arch"
+		case "$keel_cache_mode" in
+		off) ;;
+		hit)
+			keel_cache_read "$kc_arch"
+			echo "$kc_arch: keel cache hit $keel_cache_key $kc_hashes"
+			;;
+		miss)
 			keel_cache_blocked
 			kc_cache_archs="$kc_cache_archs $kc_arch"
-		done
-		[ -n "$kc_cache_archs" ] || exit 0
-		keel_cache_sources "$kc_source_names"
-		;;
-	esac
+			;;
+		bypass)
+			keel_cache_blocked
+			kc_bypassed="$kc_bypassed $kc_arch"
+			;;
+		esac
+	done
+	if [ -n "$kc_bypassed" ]; then
+		# One architecture was bypassed: every one of them is built exactly
+		# as before, and nothing is stored.
+		kc_cache_archs=
+	elif [ -z "$kc_cache_archs" ]; then
+		# Every architecture hit.
+		exit 0
+	fi
+	kc_cache_archs=${kc_cache_archs# }
 fi
 
-# The builder image is digest-pinned above; with KEEL_CACHE set, keel_cache_
-# image_mode records which digest built this cache.
+# Only the architectures that are not stored are built, in one container.
+if [ -n "$kc_cache_archs" ]; then
+	# shellcheck disable=SC2086 # the architectures to build, one per word
+	set -- $kc_cache_archs
+fi
+
 keel_cache_builder=$builder
 mkdir -p "$root/.cache"
 echo "$sources" | while read -r name url sha256; do
@@ -135,6 +126,10 @@ actual=$(shasum -a 256 "$rustup_init" | cut -d' ' -f1)
 if [ "$actual" != "$rustup_sha256" ]; then
 	echo "rustup-init: sha256 $actual, expected $rustup_sha256" >&2
 	exit 1
+fi
+
+if [ -n "$kc_cache_archs" ]; then
+	keel_cache_sources "$(basename "$rustup_init") once"
 fi
 
 # rustup downloads over HTTPS from the container: it trusts what this host
@@ -177,7 +172,13 @@ if [ -n "$kc_cache_archs" ]; then
 	keel_cache_adopt
 	keel_cache_builder_version=$rust
 	keel_cache_extra="rustup-init $rustup_version"
-	# The compiler line the task asks for: the toolchain is the image's apt
-	# packages, which are not pinned, so the image and the packages are named.
-	keel_cache_store "build-essential and both crossbuild-essential packages of $builder, rustup $rustup_version"
+	# Each built architecture is set up and stored by itself: the one whose
+	# key and entry the store writes.
+	for kc_arch in $kc_cache_archs; do
+		keel_cache_setup base "$kc_arch"
+		# The compiler line the task asks for: the toolchain is the image's
+		# apt packages, which are not pinned, so the image and the packages
+		# are named.
+		keel_cache_store "build-essential and both crossbuild-essential packages of $builder, rustup $rustup_version"
+	done
 fi

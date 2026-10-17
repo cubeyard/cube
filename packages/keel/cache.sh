@@ -7,15 +7,19 @@
 # $KEEL_CACHE/v1/<kind>/<arch>/<key>/ and are used only when complete and
 # intact.
 #
-# What a build script uses, after `keel_cache_setup <kind> <arch>`, with
-# kc_out (its out/ directory) and kc_cache (its .cache/ directory) set in
-# the build script, and read here:
-#   kc_mode             off (no KEEL_CACHE) | hit | bypass | miss
-#   keel_cache_blocked  a bypass or a miss: one line on stderr
-#   keel_cache_sources  a miss: .cache filled from $KEEL_CACHE/v1/src first
-#   keel_cache_adopt    a miss: .cache's sources checked, then v1/src filled
-#   keel_cache_read     a hit: checks, then copies the outputs; prints theirs
-#   keel_cache_store    a miss: stores atomically, or compares, then done
+# What a build script uses, with kc_out (its out/ directory) and kc_cache
+# (its .cache/ directory) set before it sources this file:
+#   keel_cache_resolve              once, before any setup: KEEL_CACHE absolute
+#   keel_cache_setup <kind> <arch>  per architecture: kc_mode is set, and
+#     kc_mode             off (no KEEL_CACHE) | hit | bypass | miss
+#     keel_cache_blocked  a bypass or a miss: one line on stderr
+#   keel_cache_read <arch>          a hit: checks, copies, sets kc_hashes
+#   keel_cache_sources <names>      a miss: .cache filled from v1/src first
+#   keel_cache_adopt                a miss: .cache's sources checked, then v1/src filled
+#   keel_cache_store <compiler>     a miss: stores atomically, or compares
+#
+# A build script sets up every architecture it was asked for, builds only the
+# ones that miss, and sets up and stores each of those in turn.
 #
 # Without KEEL_CACHE set, kc_mode is off and every one of them does nothing.
 #
@@ -57,13 +61,29 @@ keel_cache_builder_version=
 keel_cache_compiler=
 keel_cache_extra=
 keel_cache_source_names=
-keel_cache_image_name=keel-builder
+
+# keel_cache_resolve: KEEL_CACHE, relative to the directory the build started
+# in, becomes absolute here, once, so that a later cd cannot change it.
+keel_cache_resolve() {
+	[ -n "${KEEL_CACHE:-}" ] || return 0
+	if ! keel_cache_abs "$KEEL_CACHE"; then
+		echo "keel cache: KEEL_CACHE=$KEEL_CACHE is not an existing directory" >&2
+		exit 1
+	fi
+	KEEL_CACHE=$kc_abs
+	export KEEL_CACHE
+	keel_cache_root=$kc_abs
+	return 0
+}
 
 # keel_cache_setup <kind> <arch>: works out the mode, the key and the entry.
 keel_cache_setup() {
 	keel_cache_kind=$1
 	keel_cache_arch=$2
 	keel_cache_mode=off
+	keel_cache_key=
+	keel_cache_entry=
+	keel_cache_reason=
 	kc_key=
 	kc_reason=
 	if [ -z "${KEEL_CACHE:-}" ]; then
@@ -76,27 +96,14 @@ keel_cache_setup() {
 		exit 2
 		;;
 	esac
-	if ! keel_cache_abs "$KEEL_CACHE"; then
-		echo "keel cache: KEEL_CACHE=$KEEL_CACHE is not an existing directory" >&2
+	if [ -z "$keel_cache_root" ] && ! keel_cache_resolve; then
 		exit 1
 	fi
-	keel_cache_root=$kc_abs
-	# The cache is shared between work trees, so a build must run the cache.sh
-	# of its own tree, and that file must be one of its inputs: an entry keyed
-	# on something else could be stored or reused with wrong bytes.
-	if ! keel_cache_abs "$kc_script_dir" || [ "$kc_abs" != "$kc_script_dir" ]; then
-		echo "keel cache: cache.sh must be the one in the build script's work tree" >&2
-		exit 1
-	fi
+	keel_cache_root=$KEEL_CACHE
 	keel_cache_key
 	if [ -z "$kc_key" ]; then
 		keel_cache_mode=bypass
 		keel_cache_reason=$kc_reason
-		return 0
-	fi
-	if ! keel_cache_image_mode; then
-		keel_cache_reason=$kc_reason
-		keel_cache_mode=bypass
 		return 0
 	fi
 	keel_cache_key=$kc_key
@@ -105,12 +112,8 @@ keel_cache_setup() {
 		keel_cache_mode=hit
 		return 0
 	fi
-	# Said once per build, from a file: setup runs in a subshell when cache.sh
-	# gives the key, and its answer is used here.
-	if [ -d "$keel_cache_entry" ] &&
-		[ "$(cat "$keel_cache_root/v1/tmp/said-$keel_cache_arch" 2>/dev/null)" != incomplete ]; then
+	if [ -d "$keel_cache_entry" ]; then
 		echo "incomplete keel cache entry $keel_cache_entry, not used" >&2
-		printf 'incomplete\n' >"$keel_cache_root/v1/tmp/said-$keel_cache_arch"
 	fi
 	keel_cache_mode=miss
 	return 0
@@ -168,28 +171,15 @@ keel_cache_key() {
 		kc_reason="inputs changed in the work tree"
 		return 0
 	fi
+	# out/ and .cache/ are not inputs of either kind, so nothing under them
+	# can block a build: only an ignored file in the inputs' own paths does.
 	# shellcheck disable=SC2086
 	if ! kc_ignored=$(git -C "$keel_cache_repo" ls-files --others --ignored \
 		--exclude-standard -- $kc_inputs 2>&1); then
 		kc_reason="git ls-files failed"
 		return 0
 	fi
-	# --exclude-standard leaves out an ignored directory that holds only ignored
-	# files. out/ is one, and a build reads what may sit there: base/.cache/ holds
-	# only what the build downloads itself, so it does not block a rebuild.
-	kc_dirs=
-	if cd "$keel_cache_repo"; then
-		kc_dirs=$(find packages/keel/out -name .git -prune -o -type d -print \
-			2>/dev/null) || kc_dirs=
-	fi
-	# check-ignore exits 1 when nothing under those names is ignored, which is
-	# the usual answer, and 128 for no path at all; neither says anything here.
-	# shellcheck disable=SC2086
-	kc_ignored_dirs=$(if [ -n "$kc_dirs" ]; then
-		git -C "$keel_cache_repo" -c core.quotePath=true check-ignore \
-			--no-index -- $kc_dirs 2>/dev/null
-	fi; true)
-	if [ -n "$kc_ignored" ] || [ -n "$kc_ignored_dirs" ]; then
+	if [ -n "$kc_ignored" ]; then
 		kc_reason="ignored files among the inputs"
 		return 0
 	fi
@@ -360,15 +350,15 @@ keel_cache_corrupt() {
 	exit 1
 }
 
-# keel_cache_read: a hit. Verifies the entry, copies its outputs into
+# keel_cache_read <arch>: a hit. Verifies the entry, copies its outputs into
 # out/<arch> through temporary names, verifies the copies, and leaves the
-# outputs' hashes in kc_hashes for the build script's line. A work tree that
-# already holds the verified files copies nothing.
+# outputs' hashes in kc_hashes for the build script's line, in the order of
+# kc_outputs. A work tree that already holds the verified files copies nothing.
 keel_cache_read() {
+	keel_cache_arch=$1
 	keel_cache_files
 	keel_cache_verify
 	mkdir -p "$kc_out/$keel_cache_arch" || exit 1
-	kc_hashes=
 	for kc_file in vmlinuz config vmlinuz.sha256 base.erofs base.erofs.sha256 \
 		base-standin.erofs base-standin.erofs.sha256 base.txt; do
 		case " $kc_files " in
@@ -390,7 +380,6 @@ keel_cache_read() {
 			fi
 		fi
 	done
-	keel_cache_files
 	kc_hashes=
 	for kc_file in $kc_outputs; do
 		kc_hash=$(shasum -a 256 <"$kc_out/$keel_cache_arch/${kc_file%.sha256}" |
@@ -398,9 +387,9 @@ keel_cache_read() {
 		if [ "$kc_hash" != "$(cat "$kc_out/$keel_cache_arch/$kc_file")" ]; then
 			keel_cache_corrupt "$kc_out/$keel_cache_arch/$kc_file"
 		fi
-		kc_hashes="$kc_hashes$kc_hash "
+		kc_hashes="$kc_hashes $kc_hash"
 	done
-	kc_hashes=${kc_hashes% }
+	kc_hashes=${kc_hashes# }
 	return 0
 }
 
@@ -409,8 +398,8 @@ keel_cache_read() {
 # .cache/<name>.part.$$, moves into .cache, and joins v1/src through its own
 # .part.$$, so no container mount ever holds half a file. The build's own
 # sha256 check is unchanged and still runs on the result.
-# shellcheck disable=SC2154 # kc_cache and kc_out come from the build script
 keel_cache_fetch_image() {
+	# shellcheck disable=SC2154 # kc_cache comes from the build script
 	if [ -f "$keel_cache_root/v1/src/$1" ]; then
 		if ! cp "$keel_cache_root/v1/src/$1" "$kc_cache/$1.part.$$" ||
 			! mv "$kc_cache/$1.part.$$" "$kc_cache/$1"; then
@@ -465,6 +454,7 @@ keel_cache_adopt() {
 			kc_names="$kc_names ${kc_path##*/}"
 		fi
 	done
+	[ -d "$keel_cache_root/v1/src" ] || return 0
 	for kc_name in $kc_names; do
 		[ -f "$kc_cache/$kc_name" ] || continue
 		if ! cmp -s "$kc_cache/$kc_name" "$keel_cache_root/v1/src/$kc_name"; then
@@ -478,7 +468,8 @@ keel_cache_adopt() {
 	return 0
 }
 
-# keel_cache_store: a miss, after a successful build. Writes the entry in a
+# keel_cache_store <compiler>: a miss, after a successful build of
+# keel_cache_arch, which the caller set up last. Writes the entry in a
 # staging directory on the same filesystem, takes it with mkdir, which is
 # atomic, and moves the files in with SHA256SUMS last. If another build took
 # it first, compares only the outputs' hashes: the other files may differ in
@@ -554,21 +545,15 @@ keel_cache_store() {
 	return 0
 }
 
-# keel_cache_compare: another build of this key stored the entry first. It is
-# still being written while SHA256SUMS is missing, for up to a minute; a build
-# that stores in a second is as much as one host ever needs, and waiting an
-# hour would hide a stuck build behind a passed store.
+# keel_cache_compare: another build of this key stored the entry first. Only
+# a complete entry is compared: one without SHA256SUMS is still being written,
+# and is named rather than waited for.
 keel_cache_compare() {
 	keel_cache_files
-	kc_waited=0
-	while [ ! -f "$keel_cache_entry/SHA256SUMS" ]; do
-		if [ "$kc_waited" -ge 60 ]; then
-			echo "warning: keel cache entry $keel_cache_entry never completed" >&2
-			return 0
-		fi
-		sleep 1
-		kc_waited=$((kc_waited + 1))
-	done
+	if [ ! -f "$keel_cache_entry/SHA256SUMS" ]; then
+		echo "incomplete keel cache entry $keel_cache_entry, not compared" >&2
+		return 0
+	fi
 	for kc_file in $kc_outputs; do
 		kc_mine=$(shasum -a 256 <"$kc_out/$keel_cache_arch/${kc_file%.sha256}" |
 			cut -d' ' -f1)
@@ -583,37 +568,16 @@ keel_cache_compare() {
 	return 0
 }
 
-# keel_cache_archs <script>: the architectures a build script builds when it
-# is given none, from its own `set --` line.
-keel_cache_archs() {
-	kc_archs=
-	# shellcheck disable=SC2016 # the line is the script's, not this one's
-	# shellcheck disable=SC2013,SC2046,SC2086 # the words of its own set --
-	for kc_word in $(grep -E '^[[:space:]]*\[ "\$#" -gt 0 \] \|\| set -- ' "$1" |
-		sed -e 's/^[^|]*|*//' -e 's/set//' -e 's/--//'); do
-		case "$kc_word" in
-		arm64 | x86_64) kc_archs="$kc_archs $kc_word" ;;
-		esac
-	done
-	echo "${kc_archs# }"
-}
-
-# keel_cache_outdir <script>: the directory a build script writes to.
-keel_cache_outdir() {
-	kc_outdir=$(sed -n 's/^kc_out=//p' "$1" | sed -e 's/^"//' -e 's/"$//')
-	echo "${kc_outdir:-$(dirname "$1")/../out}"
-}
-
 keel_cache_error() {
 	echo "keel cache: $*" >&2
 	exit 1
 }
 
-# The command line. `cache.sh key` prints the keys a build would use, or why
-# it would bypass; the build scripts run cache.sh with --keel-cache-key.
+# The command line: `cache.sh key <kind> [arch ...]` prints the key a build
+# would use, or why it would be bypassed. The build scripts source this file
+# instead.
 keel_cache_cli() {
 	case "${1:-}" in
-	--keel-cache-key) shift && keel_cache_cli_key "$@" ;;
 	key) shift && keel_cache_cli_key "$@" ;;
 	*) keel_cache_error "usage: cache.sh key <kernel|base> [arm64|x86_64 ...]" ;;
 	esac
@@ -633,9 +597,10 @@ keel_cache_cli_key() {
 	kc_script=$kc_abs/$keel_cache_kind/build.sh
 	[ -f "$kc_script" ] || keel_cache_error "no $kc_script"
 	[ -n "${KEEL_CACHE:-}" ] || keel_cache_error "KEEL_CACHE is not set"
+	keel_cache_resolve
 	if [ "$#" -eq 0 ]; then
-		# shellcheck disable=SC2046 # the architectures, one per word
-		set -- $(keel_cache_archs "$kc_script")
+		# What the build script builds when it is given no architecture.
+		set -- arm64 x86_64
 	fi
 	for kc_arch in "$@"; do
 		case "$kc_arch" in
@@ -648,9 +613,9 @@ keel_cache_cli_key() {
 	keel_cache_builder=$(sed -n 's/^builder=//p' "$kc_script")
 	keel_cache_builder_version=$(sed -n 's/^version=//p' "$kc_script")
 	keel_cache_extra=$(sed -n -e 's/^rustup_\([a-z0-9_]*\)=/rustup \1 /p' \
-		-e "s/^\(lz4\|e2fsprogs\|erofs-utils\)-\([^ ]*\) \([^ ]*\) \([0-9a-f]*\)$/source \1 \2 \3 \4/p" "$kc_script")
+		-e 's/^\(lz4\|e2fsprogs\|erofs-utils\)-[^ ]* \([^ ]*\) \([0-9a-f]*\)$/source \1 \2 \3/p' "$kc_script")
+	kc_out=$(dirname "$kc_script")/../out
 	for kc_arch in "$@"; do
-		kc_out=$(keel_cache_outdir "$kc_script")
 		keel_cache_setup "$keel_cache_kind" "$kc_arch"
 		case "$keel_cache_mode" in
 		bypass)
@@ -665,33 +630,8 @@ keel_cache_cli_key() {
 	return 0
 }
 
-# keel_cache_image_mode: the builder image, which the build scripts set in
-# keel_cache_builder before they download anything, must be the digest-pinned
-# one the first build of this cache recorded in v1/src/keel-builder. An image
-# that is not digest-pinned would make the outputs drift under an unchanged
-# key, and no other build would notice.
-keel_cache_image_mode() {
-	keel_cache_image=$keel_cache_root/v1/src/$keel_cache_image_name
-	[ -n "$keel_cache_builder" ] || return 0
-	mkdir -p "$keel_cache_root/v1/src" || exit 1
-	if [ ! -f "$keel_cache_image" ]; then
-		printf '%s\n' "$keel_cache_builder" >"$keel_cache_image.part.$$" &&
-			mv "$keel_cache_image.part.$$" "$keel_cache_image" || exit 1
-		return 0
-	fi
-	keel_cache_first=$(sed -n '1p' "$keel_cache_image") || keel_cache_first=
-	if [ "$keel_cache_first" = "$keel_cache_builder" ]; then
-		return 0
-	fi
-	# Extra lines on purpose: a build reads only the first of them.
-	echo "keel cache: this build asks for builder $keel_cache_builder" >&2
-	echo "keel cache: $keel_cache_image was recorded with $keel_cache_first" >&2
-	echo "keel cache: use another KEEL_CACHE, or remove $keel_cache_root if it is yours" >&2
-	return 1
-}
-
-# Sourced by the build scripts, which return from their own file first; the
-# only way to reach this is running cache.sh itself or its --keel-cache-key.
-case "${1:-}" in
-key | --keel-cache-key) keel_cache_cli "$@" ;;
+# Sourced by the build scripts, which go on to the rest of their own file; the
+# only way to reach this is running cache.sh itself.
+case "${0##*/}" in
+cache.sh) keel_cache_cli "$@" ;;
 esac

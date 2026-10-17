@@ -155,8 +155,14 @@ export KEEL_CACHE=/var/cache/keel            # any absolute path you own
 packages/keel/kernel/build.sh x86_64        # builds, then stores
 packages/keel/base/build.sh x86_64          # builds, then stores
 # in another clone, with the same inputs, neither starts Docker:
-packages/keel/kernel/build.sh x86_64        # x86_64: keel cache hit <key> <sha256>
+packages/keel/kernel/build.sh x86_64        # x86_64: keel cache hit <key> <sha256 …
 ```
+
+Each architecture is looked up by itself. With no argument the scripts build
+`arm64 x86_64`, so a cache that holds one of them hits for the other and
+builds only the missing one; the hit line ends with the outputs' sha256 (the
+base's line has both images'). `KEEL_CACHE` may be relative: it means the
+directory the build was started in.
 
 | | keyed on (contents) | invalidated by |
 |---|---|---|
@@ -170,7 +176,8 @@ versions, time) and `SHA256SUMS`, which is written last and means the entry
 is complete. Every hit is verified against it; an entry that does not verify
 stops the build and is named, and an incomplete one is built again instead.
 Storing is atomic, so two builds of one host can run at once: the second
-compares only the outputs' hashes with the first and warns if they differ.
+compares only the outputs' hashes with the first, if that one has finished
+writing, and warns if they differ.
 The pinned sources come from `$KEEL_CACHE/v1/src`, so they are downloaded
 once per cache.
 
