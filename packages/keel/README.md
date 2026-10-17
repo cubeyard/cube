@@ -20,13 +20,49 @@ guests) and macOS (HVF, arm64 guests) alike:
 - **the layer format**: OCI images converted to EROFS and stacked as one
   disk, built on the runner by [`layers/`](layers) (`keel-layers`).
 
-keel is designed for fast boot and for QEMU snapshot and resume: a guest
-starts in about 0.1 s and a suspended one resumes in about the same
-(measurements in the plan). It will be versioned and released on its own, since
-kernel security fixes do not follow cubed's releases, and cube will pin a keel
-version. See
+keel is designed for fast boot and for QEMU snapshot and resume. It will be
+versioned and released on its own, since kernel security fixes do not follow
+cubed's releases, and cube will pin a keel version. See
 [docs/plans/2026-10-10-vm-base-and-image-layers.md](../../docs/plans/2026-10-10-vm-base-and-image-layers.md)
-for the design and the work packages. Nothing in the runner uses keel yet.
+for the design and the work packages.
+
+keel's runner is `berth vm` ([`../berth`](../berth), runner protocol 4). It
+boots keel machines under the QEMU, kernel and `base.erofs` it is given by
+absolute path (`--qemu`, `--qemu-img`, `--keel`), with `-sandbox on` on
+Linux. cubed talks to it over a RunnerSession (`runner-select.ts`), and a
+thread that names no runner is placed only on an enrolled `berth vm`
+(`registry.ts` `pooledRunner`). The protocol-3 runner, `cube-runner`
+(`packages/node-transport`), does not use keel. Whether a given cubed has a
+`berth vm` enrolled is up to its operator.
+
+## Startup, as measured
+
+These are separate series, each with its own interval and setup. They are
+not parts of one another, and their numbers do not add up.
+
+- **Test inits, before the agent and berth** (the plan's «Verified so far»,
+  arm64/HVF): QEMU start to power-off has a median of 128 ms. Boot to the
+  first message on virtio-serial takes 0.07 s, and a suspended 512 MiB guest
+  loads again in 0.07–0.15 s.
+- **`berth vm` alone, Linux/KVM** (`scripts/berth-hello-timing.ts`; one
+  x86-64 host, 2 vCPU, 1024 MiB, network on, release berth over loopback).
+  21 starts of one machine; the first, which formats the writable disk, is
+  left out. These restart a machine that is already set up, not a new
+  thread. Medians of 20:
+  - `machineStart` → the agent's `hello`: **470 ms**, in an earlier series
+    taken before the script waited for ready.
+  - From the later series, `machineStart` → that same session's `ready`
+    (after `machine_setup`): **509.5 ms**. Its `hello` → `ready` is
+    **32 ms**, and its `hello` is 472.5 ms.
+- **Through cubed, Linux/KVM** (a cubed fixture and `berth vm` over loopback
+  on the same host; 2 vCPU, 2048 MiB; 20 threads in a row from one prepared
+  template). cubed's create → machine ready for the agent (`startup.totalMs`)
+  has a median of **4212 ms**. The wall time from the API request to
+  `available` has a median of about 5.3 s.
+
+Both Linux/KVM series were taken on 2026-10-17. macOS/HVF has no `berth vm`
+numbers yet, because the Mac series wait for host capacity. The splits inside each interval
+(QEMU and firmware, kernel, agent start, cubed's own steps) are not measured.
 
 ## Kernel
 
