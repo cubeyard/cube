@@ -39,6 +39,8 @@ node packages/server/test/runner-vm-test.ts "${CARGO_TARGET_DIR:-target}/debug/b
 node packages/server/test/runner-vm-cubed-test.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
 # V3 through cubed on `berth vm`: cubed, its gateway and the guest agent killed mid-command (else skipped).
 node packages/server/test/runner-vm-cubed-v3-test.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
+# V13: two machines on one `berth vm` kept apart: placeholders, LANs, a flood (else skipped).
+node packages/server/test/runner-vm-v13-test.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
 # cubed's local runner setup with the real cube-runner and the fake QEMU.
 node scripts/test-local-runner.ts "${CARGO_TARGET_DIR:-target}/debug/cube-runner"
 for script in scripts/runner/*.sh; do bash -n "$script"; done
