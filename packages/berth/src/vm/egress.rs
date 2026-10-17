@@ -159,9 +159,15 @@ impl Gate {
     }
 
     fn report(&self, host: &str, denial: Denial) {
-        self.egress
-            .reports
-            .push(&self.reference, host, denial.reason());
+        // V13 CONTROL (v13-control-no-ref-filter, never merged): the flood's
+        // refusals (policy, lease_expired) lose their machine's ref.
+        let blank = proto::Ref::default();
+        let reference = if matches!(denial, Denial::Policy | Denial::LeaseExpired) {
+            &blank
+        } else {
+            &self.reference
+        };
+        self.egress.reports.push(reference, host, denial.reason());
     }
 
     async fn serve(
