@@ -593,10 +593,18 @@ impl FrameSink for ToQemu {
     }
 }
 
+/// V13 CONTROL (v13-control-shared-net, never merged): the newest LAN's
+/// dialer, which every machine's `dial` uses.
+static SHARED_DIALER: Mutex<Option<cube_netstack::lan::Dialer>> = Mutex::new(None);
+
 impl Net {
     /// TCP into the guest from the LAN's address (cubed's `dial` streams).
     pub fn dialer(&self) -> cube_netstack::lan::Dialer {
-        self.lan.dialer()
+        SHARED_DIALER
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| self.lan.dialer())
     }
 
     /// The socket pair and the LAN for one QEMU process. Returns QEMU's end
@@ -623,6 +631,7 @@ impl Net {
                 gate.egress.upstream.clone(),
             )),
         );
+        *SHARED_DIALER.lock().unwrap() = Some(lan.dialer());
         let input = lan.input();
         let reader = {
             let socket = socket.clone();
