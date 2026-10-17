@@ -185,7 +185,7 @@ Nothing changes when `KEEL_CACHE` is unset. The cache is bypassed, building
 as before with one line saying why, when `KEEL_REFRESH=1` or
 `DOCKER_DEFAULT_PLATFORM` is set, outside a git work tree, with changed,
 untracked or ignored files among the inputs, or with a quoted or non-file
-input path. `packages/keel/cache.sh key <kernel|base> [arch ...]` prints the
+input path. `sh packages/keel/cache.sh key <kernel|base> [arch ...]` prints the
 key a build would use, or the reason it would be bypassed.
 
 ## Boot check

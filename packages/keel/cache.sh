@@ -171,11 +171,12 @@ keel_cache_key() {
 		kc_reason="inputs changed in the work tree"
 		return 0
 	fi
-	# out/ and .cache/ are not inputs of either kind, so nothing under them
-	# can block a build: only an ignored file in the inputs' own paths does.
+	# out/ and .cache/ are the builds' own state (cargo-home unpacks crates'
+	# Cargo.toml there), never inputs; tracked files there stay in the manifest.
 	# shellcheck disable=SC2086
 	if ! kc_ignored=$(git -C "$keel_cache_repo" ls-files --others --ignored \
-		--exclude-standard -- $kc_inputs 2>&1); then
+		--exclude-standard -- $kc_inputs ':(exclude)packages/keel/.cache' \
+		':(exclude)packages/keel/out' 2>&1); then
 		kc_reason="git ls-files failed"
 		return 0
 	fi
@@ -476,6 +477,12 @@ keel_cache_adopt() {
 # time, HEAD and toolchain. A difference is a warning, and nothing is
 # overwritten. $1 is what the build says about its compiler.
 keel_cache_store() {
+	case "$keel_cache_mode" in
+	bypass | off)
+		echo "$keel_cache_arch: keel cache not stored: ${keel_cache_reason:-no key}" >&2
+		return 0
+		;;
+	esac
 	keel_cache_compiler=$1
 	keel_cache_files
 	mkdir -p "$keel_cache_root/v1/tmp" \
