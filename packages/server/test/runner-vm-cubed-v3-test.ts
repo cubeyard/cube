@@ -144,6 +144,18 @@ async function startCubed(port = 0): Promise<Cubed> {
   });
   return { child, url: String(ready.url), port: Number(ready.port), provider: String(ready.provider), model: String(ready.model) };
 }
+/** The supervisor's own ready line in cubed.log; /api/health says "ready" before the gateway ever was (gateway.ts:180–182). */
+const gatewayReadyLines = () => fs.existsSync(cubedLog) ? fs.readFileSync(cubedLog, "utf8").split("\n").filter(line => /^info gateway ready /.test(line)).length : 0;
+const gatewayFailedLine = () => fs.existsSync(cubedLog) ? fs.readFileSync(cubedLog, "utf8").split("\n").find(line => /cube-gateway (is not usable|could not start)|gateway exited; restarting/.test(line)) : undefined;
+async function gatewayReady(n: number, what: string): Promise<void> {
+  let failed: string | undefined;
+  await until(`${what}: gateway ready line #${n} in ${cubedLog}`, 60000, () => {
+    failed = gatewayFailedLine();
+    if (failed && gatewayReadyLines() < n) return true;
+    return gatewayReadyLines() >= n;
+  }).catch((error: Error) => { throw new Error(`${error.message} (${gatewayReadyLines()} seen)`); });
+  if (gatewayReadyLines() < n) throw new Error(`${what}: the gateway did not come up (${gatewayReadyLines()} ready lines in ${cubedLog}): ${failed}`);
+}
 async function kill(child: ChildProcess, signal: NodeJS.Signals = "SIGKILL"): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const exited = once(child, "exit");
@@ -249,7 +261,9 @@ try {
   cubed = await startCubed();
   note(`berth vm enrolled before cubed started (${enrolled.maxActiveVms} slots); cubed ${cubed.url} (pid ${cubed.child.pid})`);
 
-  // one project, one thread on the pool, the machine ready
+  // one project, one thread on the pool, the machine ready; the credential route refuses, not waits, before the gateway is up
+  await gatewayReady(1, "startup");
+  note("gateway ready before the first thread (line #1 in cubed.log)");
   await api("/api/onboarding", "POST", {});
   const project = (await api("/api/projects", "POST", { name: "v3", repositories: [{ url: upstream, base: "main" }] })).project as { id: string };
   const projectReady = await until("the project is ready", 60000, async () => {
@@ -279,6 +293,9 @@ try {
   cubed = await startCubed(cubed.port);
   const tBackA = now();
   note(`(a) cubed ${oldCubed} SIGKILLed; its gateway followed; cubed ${cubed.child.pid} on the same state and port ${cubed.port}`);
+  // (b)'s push needs the second cubed's proxy
+  await gatewayReady(2, "after (a)'s restart");
+  note("gateway ready after (a)'s restart (line #2 in cubed.log)");
   const a = await verify(id, "a", "v3-cubed", tKillA, tBackA);
   const bootAfterA = await until("the guest's boot after (a)", 120000, () => guestNow(id));
   assert.equal(bootAfterA.bootId, bootA.bootId, `scenario (a): the machine was rebooted, not re-attached (boot ${bootA.bootId} -> ${bootAfterA.bootId})`);
