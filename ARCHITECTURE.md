@@ -677,10 +677,17 @@ machine is deleted by berth and only forgotten by cubed (B-8 C1), and cubed
 deletes only templates whose metadata it reads as its own (C7:
 `template_delete` has no owner or fence). The credential route accepts the
 thread's unfinished build machine on the thread's runner at the thread's
-current epoch, as the egress policy does (`machineFor`). While a template
-is published berth holds its global lock for up to 600 s, so other calls
-on that runner can time out after 15 s (C4, follow-up R14b; `berth vm`
-takes named threads only).
+current epoch, as the egress policy does (`machineFor`). A publication
+holds berth's one-mutation-at-a-time lock (`ops`) only to begin and to
+finish, not while the agent works (C4, follow-up R14b): other machines on
+the runner are created, started, stopped and deleted meanwhile. The build
+machine is marked as publishing instead: its own mutations are refused at
+once (`FAILED_PRECONDITION publishing`), the same publication asked again
+waits for the first's answer, and every way out clears the mark. The
+runner's stop waits for no publication and keeps nothing of one it
+overtook (`UNAVAILABLE runner_stopping`, `completion_unknown`). The agent
+has 10 min (600 s) to publish, which cubed's 600 s wait above matches.
+These `berth vm` runners are the pool, as above.
 
 `berth vm` answers `machine_diagnose` (row B-9) with one bounded,
 redacted JSON document of read-only evidence about a machine, including
