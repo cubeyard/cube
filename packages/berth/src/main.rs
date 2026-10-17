@@ -29,11 +29,11 @@ const DEFAULT_LAYER_CACHE_GIB: u64 = 16;
 const MAX_LAYER_CACHE_GIB: u64 = 1 << 20;
 
 const USAGE: &str = "usage:
-  berth vm --dir <directory> --qemu <qemu-system binary> --qemu-img <qemu-img binary> --keel <directory with vmlinuz and base.erofs> --mkfs-erofs <mkfs.erofs binary> --image <registry/repository@sha256:digest> [--layer-cache-gib 16] [--accel kvm|hvf|tcg] [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay] [--listen <ip:port>] [--max-machines 8] [--labels k=v,...]
+  berth vm --dir <directory> --qemu <qemu-system binary> --qemu-img <qemu-img binary> --keel <directory with vmlinuz and base.erofs> --mkfs-erofs <mkfs.erofs binary> --image <registry/repository@sha256:digest> [--layer-cache-gib 16] [--accel kvm|hvf|tcg] [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay [--relay-only]] [--listen <ip:port>] [--max-machines 8] [--labels k=v,...]
       each machine is a keel guest under the QEMU given by path, which must meet keel's QEMU floor,
       built on the image, which berth pulls into <directory> before it listens if any of it is missing;
       the layer cache keeps at most --layer-cache-gib (kept in .berth/vm.json) besides the layers machines use
-  berth host --dir <directory> [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay] [--listen <ip:port>] [--python python3] [--max-machines 8] [--labels k=v,...]
+  berth host --dir <directory> [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay [--relay-only]] [--listen <ip:port>] [--python python3] [--max-machines 8] [--labels k=v,...]
       UNSANDBOXED: each machine is a subdirectory of <directory>; commands run as you, with your logins
   berth image pull --dir <directory> --mkfs-erofs <mkfs.erofs binary> --image <registry/repository@sha256:digest>
       fetches a public image for this runner's platform, checks every blob, converts its layers into <directory>'s layer cache
@@ -44,7 +44,8 @@ const USAGE: &str = "usage:
 const HOST_WARNING: &str = "UNSANDBOXED: threads routed to this runner run commands as you, on this host, with your files, network and logins (gh, git, ssh). Use it only to develop and debug cube runners.";
 
 /// loopback (default) and direct listen at an address; relay uses Iroh's N0
-/// discovery and relays.
+/// discovery and relays, and with `--relay-only` no IP transport, so every
+/// connection stays on the relay.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum NetworkMode {
@@ -79,6 +80,9 @@ struct HostHome {
     /// `--layer-cache-gib`; absent means DEFAULT_LAYER_CACHE_GIB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     layer_cache_gib: Option<u64>,
+    /// `--relay-only`, with `network: relay` only; absent means false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    relay_only: bool,
 }
 
 fn read_key(path: &Path) -> Result<SecretKey> {
@@ -130,25 +134,51 @@ fn validate_node_id(node_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Relay mode: the N0 preset's relays and address lookup, and with
+/// `relay_only` none of its IP transports, so no direct path can form.
+fn relay_builder(key: SecretKey, relay_only: bool) -> iroh::endpoint::Builder {
+    let builder = Endpoint::builder(presets::N0)
+        .secret_key(key)
+        .alpns(vec![cube_runner_protocol::ALPN.to_vec()]);
+    if relay_only {
+        builder.clear_ip_transports()
+    } else {
+        builder
+    }
+}
+
+/// The runner's endpoint, as its manifest says.
+async fn bind_home(key: SecretKey, home: &HostHome) -> Result<Endpoint> {
+    if home.relay_only {
+        ensure!(
+            home.network == NetworkMode::Relay,
+            "--relay-only requires --network relay"
+        );
+        ensure!(home.listen.is_none(), "relay mode does not accept --listen");
+        return relay(key, true).await;
+    }
+    bind(key, home.network, listen_address(home)?).await
+}
+
+async fn relay(key: SecretKey, relay_only: bool) -> Result<Endpoint> {
+    let endpoint = relay_builder(key, relay_only).bind().await?;
+    tokio::time::timeout(RELAY_READY_TIMEOUT, endpoint.online())
+        .await
+        .context("timed out connecting to an N0 relay")?;
+    Ok(endpoint)
+}
+
 /// An endpoint that accepts protocol 4 only.
 async fn bind(
     key: SecretKey,
     network: NetworkMode,
     listen: Option<SocketAddr>,
 ) -> Result<Endpoint> {
-    let alpns = vec![cube_runner_protocol::ALPN.to_vec()];
     if network == NetworkMode::Relay {
         ensure!(listen.is_none(), "relay mode does not accept --listen");
-        let endpoint = Endpoint::builder(presets::N0)
-            .secret_key(key)
-            .alpns(alpns)
-            .bind()
-            .await?;
-        tokio::time::timeout(RELAY_READY_TIMEOUT, endpoint.online())
-            .await
-            .context("timed out connecting to an N0 relay")?;
-        return Ok(endpoint);
+        return relay(key, false).await;
     }
+    let alpns = vec![cube_runner_protocol::ALPN.to_vec()];
     let listen = match (network, listen) {
         (NetworkMode::Direct, None) => bail!("direct mode requires --listen"),
         (_, Some(listen)) => listen,
@@ -264,6 +294,11 @@ fn load_home(
     let node = options.remove("--node-id");
     let listen = options.remove("--listen");
     let labels = options.remove("--labels");
+    let relay_only = options.remove("--relay-only").is_some();
+    ensure!(
+        !relay_only || network == Some(NetworkMode::Relay),
+        "--relay-only requires --network relay"
+    );
     let max_machines: u32 = options
         .remove("--max-machines")
         .map_or(Ok(8), |value| value.parse())
@@ -305,11 +340,23 @@ fn load_home(
             "{} already names this runner's control peer, node id and labels; a runner is never rebound",
             manifest.display()
         );
+        // --relay-only goes with --network: a start that names a network
+        // names relay-only too, and like the network it is not kept.
         let home = HostHome {
             network: network.unwrap_or(home.network),
+            relay_only: if network.is_some() {
+                relay_only
+            } else {
+                home.relay_only
+            },
             listen: listen.or(home.listen),
             ..home
         };
+        ensure!(
+            !home.relay_only || home.network == NetworkMode::Relay,
+            "{} has relayOnly without network relay",
+            manifest.display()
+        );
         // The cache limit is the one setting a later start may change, and
         // it stays changed.
         match layer_cache_gib {
@@ -352,6 +399,7 @@ fn load_home(
                 "vm" => Some(layer_cache_gib.unwrap_or(DEFAULT_LAYER_CACHE_GIB)),
                 _ => None,
             },
+            relay_only,
         };
         keygen(&control.join("runner.key"))?;
         let mut file = OpenOptions::new()
@@ -379,7 +427,11 @@ fn print_endpoint(endpoint: &Endpoint, directory: &Path, home: &HostHome) {
     eprintln!("node: {}", home.node_id);
     eprintln!("peer: {}", endpoint.id());
     eprintln!("control peer: {}", home.allowed_peer);
-    eprintln!("network: {}", home.network.name());
+    if home.relay_only {
+        eprintln!("network: {} (relay-only)", home.network.name());
+    } else {
+        eprintln!("network: {}", home.network.name());
+    }
     let addresses = endpoint
         .addr()
         .ip_addrs()
@@ -423,7 +475,7 @@ async fn host(mut options: BTreeMap<String, String>) -> Result<()> {
         max_machines,
         labels: home.labels.clone(),
     })?;
-    let endpoint = bind(key, home.network, listen_address(&home)?).await?;
+    let endpoint = bind_home(key, &home).await?;
     eprintln!(
         "berth {SOFTWARE_VERSION} host (runner protocol {})",
         cube_runner_protocol::PROTOCOL
@@ -598,7 +650,7 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
         floor,
     )
     .await?;
-    let endpoint = bind(key, home.network, listen_address(&home)?).await?;
+    let endpoint = bind_home(key, &home).await?;
     eprintln!(
         "berth {SOFTWARE_VERSION} vm (runner protocol {})",
         cube_runner_protocol::PROTOCOL
@@ -673,7 +725,12 @@ async fn main() -> Result<()> {
     let mut options = BTreeMap::new();
     while let Some(key) = args.next() {
         ensure!(key.starts_with("--"), "{USAGE}");
-        let value = args.next().context(USAGE)?;
+        // The one option without a value.
+        let value = if key == "--relay-only" {
+            String::new()
+        } else {
+            args.next().context(USAGE)?
+        };
         ensure!(options.insert(key, value).is_none(), "duplicate option");
     }
     match command.as_str() {
@@ -841,5 +898,108 @@ mod tests {
         assert!(stored(host.path(), "host").get("layerCacheGib").is_none());
         // Left for host() to refuse as an unknown option.
         assert!(flagged.contains_key("--layer-cache-gib"));
+    }
+    #[test]
+    fn relay_only_is_refused_without_network_relay() {
+        let peer = SecretKey::generate().public().to_string();
+        for network in [None, Some("loopback"), Some("direct")] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut extra = vec![
+                ("--allow-peer", peer.as_str()),
+                ("--node-id", "node-test"),
+                ("--relay-only", ""),
+            ];
+            if let Some(network) = network {
+                extra.push(("--network", network));
+            }
+            let error = prepare(&mut options(directory.path(), &extra), "vm")
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("--relay-only requires --network relay"),
+                "{network:?}: {error}"
+            );
+            assert!(!directory.path().join(".berth/vm.json").exists());
+        }
+    }
+
+    #[test]
+    fn relay_only_is_kept_in_vm_json_and_an_old_file_reads_as_false() {
+        let directory = tempfile::tempdir().unwrap();
+        let peer = SecretKey::generate().public().to_string();
+        let first = [
+            ("--allow-peer", peer.as_str()),
+            ("--node-id", "node-test"),
+            ("--network", "relay"),
+            ("--relay-only", ""),
+        ];
+        let prepared = prepare(&mut options(directory.path(), &first), "vm").unwrap();
+        assert!(prepared.home.relay_only);
+        let manifest = stored(directory.path(), "vm");
+        assert_eq!(manifest["network"], "relay");
+        assert_eq!(manifest["relayOnly"], true);
+
+        // A later start with only --dir serves relay-only again.
+        let home = later(&prepared, None, &[]).unwrap();
+        assert!(home.relay_only && home.network == NetworkMode::Relay);
+        // A later start that names the network names relay-only too, and
+        // neither is kept.
+        let home = later(&prepared, Some(NetworkMode::Relay), &[]).unwrap();
+        assert!(!home.relay_only);
+        let home = later(&prepared, Some(NetworkMode::Relay), &[("--relay-only", "")]).unwrap();
+        assert!(home.relay_only);
+        assert!(later(&prepared, None, &[("--relay-only", "")]).is_err());
+        assert_eq!(stored(directory.path(), "vm")["relayOnly"], true);
+
+        // A vm.json from before the flag (or one without it) is not relay-only.
+        let path = directory.path().join(".berth/vm.json");
+        let mut old = stored(directory.path(), "vm");
+        old.as_object_mut().unwrap().remove("relayOnly");
+        fs::write(&path, old.to_string()).unwrap();
+        let home = later(&prepared, None, &[]).unwrap();
+        assert!(!home.relay_only && home.network == NetworkMode::Relay);
+
+        // A relayOnly that names another network is refused.
+        let mut wrong = stored(directory.path(), "vm");
+        wrong["network"] = "direct".into();
+        wrong["relayOnly"] = true.into();
+        fs::write(&path, wrong.to_string()).unwrap();
+        assert!(later(&prepared, None, &[]).is_err());
+
+        // A runner that is not relay-only writes no relayOnly, so a berth
+        // from before the flag still reads its file.
+        let plain = tempfile::tempdir().unwrap();
+        let first = [
+            ("--allow-peer", peer.as_str()),
+            ("--node-id", "node-test"),
+            ("--network", "relay"),
+        ];
+        let prepared = prepare(&mut options(plain.path(), &first), "vm").unwrap();
+        assert!(!prepared.home.relay_only);
+        assert!(stored(plain.path(), "vm").get("relayOnly").is_none());
+    }
+
+    /// iroh 1.2.0 has no public transport list; `Endpoint::bound_sockets`
+    /// lists the bound IP sockets, and an endpoint has one only through an
+    /// IP transport. Binding needs no network: the relay connection and
+    /// address lookup start in the background.
+    #[tokio::test]
+    async fn a_relay_only_endpoint_has_no_ip_transport() {
+        let relay_only = relay_builder(SecretKey::generate(), true)
+            .bind()
+            .await
+            .unwrap();
+        assert_eq!(relay_only.bound_sockets(), Vec::<SocketAddr>::new());
+        assert_eq!(relay_only.addr().ip_addrs().count(), 0);
+        // The same builder without the flag binds the N0 preset's IP sockets.
+        let relay = relay_builder(SecretKey::generate(), false)
+            .bind()
+            .await
+            .unwrap();
+        assert!(!relay.bound_sockets().is_empty());
+        relay_only.close().await;
+        relay.close().await;
     }
 }

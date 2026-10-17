@@ -15,7 +15,7 @@ and `berth host`, unsandboxed, for developing runners.
 berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img \
   --keel /abs/keel/out/<arch> --mkfs-erofs /abs/mkfs.erofs --image <registry/repository@sha256:…> \
   [--layer-cache-gib 16] [--accel kvm|hvf|tcg] --allow-peer <control peer> --node-id node-<name> \
-  [--network loopback|direct|relay] [--listen ip:port] [--labels k=v,...] [--max-machines 8]
+  [--network loopback|direct|relay [--relay-only]] [--listen ip:port] [--labels k=v,...] [--max-machines 8]
 ```
 
 - QEMU, qemu-img and the keel release (`vmlinuz`, `base.erofs`) are given
@@ -31,6 +31,15 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   needs `vmgenid`, which every machine gets (`guid=auto`, so a restore
   reseeds the guest's random generator). `Platform.qemu_version` is its
   version and path.
+- `--network relay` is Iroh's N0 preset: relays, address lookup and IP
+  transports, so the connection to cubed takes a direct path whenever the
+  two hosts can reach each other. `--relay-only`, with `--network relay`
+  only, drops the IP transports: berth binds no UDP socket, its
+  connections stay on the relay, and the banner says `network: relay
+  (relay-only)`. The first run keeps it in `.berth/vm.json` (`host.json`
+  for `berth host`; `relayOnly`) with the network; a later start that
+  names `--network` names it again, and keeps neither. `Network.mode` in
+  hello stays `relay`.
 - `--image` names the one image every machine is built on, pinned by
   digest. berth pulls it when it starts (masterplan B-7), under the
   directory's lock and **before it listens**, unless its record and every
@@ -327,7 +336,7 @@ in a terminal you watch.
 ```text
 berth keygen --key /abs/control.key               # on the cubed host: prints cubed's control peer
 berth host --dir ~/cube-dev --allow-peer <control peer> --node-id node-<name> \
-  [--network loopback|direct|relay] [--listen ip:port] [--labels k=v,...] [--max-machines 8] [--python python3]
+  [--network loopback|direct|relay [--relay-only]] [--listen ip:port] [--labels k=v,...] [--max-machines 8] [--python python3]
 ```
 
 - The first run writes `DIRECTORY/.berth/` (its key, `host.json`, a lock)
