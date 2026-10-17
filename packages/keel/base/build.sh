@@ -92,7 +92,7 @@ mkdir -p "$root/.cache"
 echo "$sources" | while read -r name url sha256; do
 	[ -n "$name" ] || continue
 	file=$root/.cache/$name
-	if [ -n "${keel_cache_filled:-}" ]; then
+	if [ ! -f "$file" ] && [ -n "$kc_cache_archs" ]; then
 		# A miss: from the cache's src first, or fetched there through
 		# .cache/<file>.part.$$, so no mount ever holds half a file.
 		keel_cache_fetch_image "$name" "$url"
@@ -114,7 +114,7 @@ aarch64 | arm64) host_arch=aarch64; rustup_sha256=$rustup_aarch64 ;;
 esac
 rustup_init=$root/.cache/rustup-init-$rustup_version-$host_arch
 rustup_url="https://static.rust-lang.org/rustup/archive/$rustup_version/$host_arch-unknown-linux-gnu/rustup-init"
-if [ -n "${keel_cache_filled:-}" ]; then
+if [ -n "$kc_cache_archs" ] && [ ! -f "$rustup_init" ]; then
 	keel_cache_fetch_image "$(basename "$rustup_init")" "$rustup_url"
 elif [ ! -f "$rustup_init" ]; then
 	curl -fL --proto '=https' -o "$rustup_init.part" "$rustup_url"

@@ -77,13 +77,15 @@ keel_cache_builder=$builder
 mkdir -p "$root/.cache"
 major=${version%%.*}
 tarball_url="https://cdn.kernel.org/pub/linux/kernel/v$major.x/linux-$version.tar.xz"
-if [ -n "${keel_cache_filled:-}" ]; then
+if [ ! -f "$tarball" ]; then
 	# A miss: the tarball comes from the cache's src first, or is fetched there
 	# through .cache/<file>.part.$$, so no mount ever holds half a file.
-	keel_cache_fetch_image "$(basename "$tarball")" "$tarball_url"
-elif [ ! -f "$tarball" ]; then
-	curl -fL --proto '=https' -o "$tarball.part" "$tarball_url"
-	mv "$tarball.part" "$tarball"
+	if [ -n "$kc_cache_archs" ]; then
+		keel_cache_fetch_image "$(basename "$tarball")" "$tarball_url"
+	else
+		curl -fL --proto '=https' -o "$tarball.part" "$tarball_url"
+		mv "$tarball.part" "$tarball"
+	fi
 fi
 actual=$(shasum -a 256 "$tarball" | cut -d' ' -f1)
 if [ "$actual" != "$sha256" ]; then
