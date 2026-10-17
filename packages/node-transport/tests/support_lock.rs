@@ -64,10 +64,19 @@ async fn a_transient_holder_is_waited_out_and_reported() {
     });
     let (_runner, contention) = try_open_runner(&fx, OPEN_RETRY).await.unwrap();
     let contention = contention.expect("the open met the held lock");
+    // The dump's own time (lsof on macOS) is not part of the hold, but a
+    // dump that takes seconds still fails here.
     assert!(
-        contention.held >= Duration::from_millis(150) && contention.held < Duration::from_secs(2),
+        contention.held >= Duration::from_millis(150)
+            && contention.held < OPEN_RETRY - Duration::from_secs(1),
         "{:?}",
         contention.held
+    );
+    assert!(
+        contention.held + contention.diagnostics < OPEN_RETRY,
+        "{:?} + {:?}",
+        contention.held,
+        contention.diagnostics
     );
     assert!(
         contention

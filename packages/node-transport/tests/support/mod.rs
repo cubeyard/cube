@@ -97,7 +97,10 @@ const CONTENDED: &str = "another daemon owns this journal";
 
 /// A contended open that succeeded within the bound.
 pub struct Contention {
+    /// From the first refusal to the open, less the time spent dumping.
     pub held: Duration,
+    /// The time the holder dumps took.
+    pub diagnostics: Duration,
     pub holders: String,
 }
 
@@ -109,24 +112,37 @@ pub fn report(line: &str) {
 
 /// Opens the fixture's runner. On `owner.lock` contention it reports who
 /// holds the lock, retries every 50 ms up to `bound`, and on success reports
-/// how long it was held; past the bound it returns both holder dumps.
+/// how long it was held, apart from the time the dump took; past the bound
+/// it returns both holder dumps.
 pub async fn try_open_runner(
     fx: &Fixture,
     bound: Duration,
 ) -> Result<(Arc<Runner>, Option<Contention>), String> {
     let started = Instant::now();
     let mut first: Option<String> = None;
+    let mut diagnostics = Duration::ZERO;
+    let dump = |diagnostics: &mut Duration| {
+        let dumping = Instant::now();
+        let holders = lock_holders(&fx.state);
+        *diagnostics += dumping.elapsed();
+        holders
+    };
     loop {
         let error = match Runner::open(&fx.state, fx.key.public()) {
             Ok(runner) => {
                 let contention = first.map(|holders| {
-                    let held = started.elapsed();
+                    let held = started.elapsed().saturating_sub(diagnostics);
                     report(&format!(
-                        "support: owner.lock was held for {} ms by {}",
+                        "support: owner.lock was held for {} ms (plus {} ms of diagnostics) by {}",
                         held.as_millis(),
+                        diagnostics.as_millis(),
                         holder_summary(&holders)
                     ));
-                    Contention { held, holders }
+                    Contention {
+                        held,
+                        diagnostics,
+                        holders,
+                    }
                 });
                 return Ok((runner, contention));
             }
@@ -136,20 +152,21 @@ pub async fn try_open_runner(
             panic!("{error:?}");
         }
         if first.is_none() {
-            let holders = lock_holders(&fx.state);
+            let holders = dump(&mut diagnostics);
             report(&format!(
                 "support: owner.lock contended at open: {error:#}\n{holders}"
             ));
             first = Some(holders);
         }
         if started.elapsed() >= bound {
+            let last = dump(&mut diagnostics);
             return Err(format!(
-                "owner.lock still held after {} ms: {error:#}\n\
+                "owner.lock still held after {} ms ({} ms of them diagnostics): {error:#}\n\
                  --- holders at first contention ---\n{}\n\
-                 --- holders at the deadline ---\n{}",
+                 --- holders at the deadline ---\n{last}",
                 started.elapsed().as_millis(),
+                diagnostics.as_millis(),
                 first.unwrap_or_default(),
-                lock_holders(&fx.state)
             ));
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
