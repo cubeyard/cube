@@ -140,11 +140,10 @@ fn relay_builder(key: SecretKey, relay_only: bool) -> iroh::endpoint::Builder {
     let builder = Endpoint::builder(presets::N0)
         .secret_key(key)
         .alpns(vec![cube_runner_protocol::ALPN.to_vec()]);
-    if relay_only {
-        builder.clear_ip_transports()
-    } else {
-        builder
-    }
+    // Control (A-4 R-A4-1): the flag is parsed and kept, but the IP
+    // transports stay. Never merged.
+    let _ = relay_only;
+    builder
 }
 
 /// The runner's endpoint, as its manifest says.
