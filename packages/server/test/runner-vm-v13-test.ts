@@ -458,6 +458,7 @@ try {
     // The prober alone first: what its probes take on this machine without a flood (recorded, every one 200).
     const baseline = parseProbes(prober, await sh(prober, "v13c-baseline", probes, 300000), "probes before the flood");
     assert.ok(baseline.every(p => p.status === "200"), `${prober.name}'s probes before the flood: ${show(baseline)}`);
+    note(`(c ${tag}) ${prober.name} alone, before the flood: 20 probes 200, ${spread(baseline)}`);
     const hold = [
       "rm -f /tmp/v13-flood.txt /tmp/v13-release; ok=0; refused=0",
       `for i in $(seq 1 ${FLOOD}); do`,
@@ -498,7 +499,7 @@ try {
     assert.ok(got.every(r => r.reason === "policy" && r.host === "example.com"), show(got.slice(0, 3)));
     const { count, dropped } = tally(got);
     assert.equal(count + dropped, ok, `${count} reports delivered and ${dropped} counted dropped for ${ok} refused requests`);
-    note(`(c1 ${tag}) cubed connected: ${flooder.name} opened ${ok} connections with a request each and ${refusedCount} more were refused by its full link (its own next connection too: ${self}); ${prober.name}'s 40 HTTPS probes all 200 within ${probeMs} ms (during the storm ${spread(during)}; while the link was full ${spread(held)}; alone before it ${spread(baseline)}); ${count} reports delivered + ${dropped} dropped_before = ${ok}, all ${flooder.name}'s (policy, example.com)`);
+    note(`(c1 ${tag}) cubed connected: ${flooder.name} opened ${ok} connections with a request each and ${refusedCount} more were refused by its full link (its own next connection too: ${self}); ${prober.name}'s 40 HTTPS probes all 200 within ${probeMs} ms (during the storm ${spread(during)}; while the link was full ${spread(held)}); ${count} reports delivered + ${dropped} dropped_before = ${ok}, all ${flooder.name}'s (policy, example.com)`);
 
     // (c2) cubed gone: the flooder's lease (3 s) runs out, the prober's (15 min) does not.
     assert.equal((await startWith(prober, allow(prober, 900n))).status?.phase, MachineStatus_Phase.RUNNING);
