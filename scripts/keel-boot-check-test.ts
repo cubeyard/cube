@@ -4,7 +4,7 @@
  * bounded wait for progress still fails a frozen workload. */
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { awaitProgress, ZOMBIE_SCAN, zombieScan } from "./keel-boot-check-lib.ts";
@@ -31,24 +31,46 @@ async function until(what: string, test: () => boolean) {
   assert.fail(what);
 }
 
+// A stat line is "pid (comm) state ppid ..."; comm may hold ") ", so the
+// state follows the last one. Returns the zombie a scan line describes, or
+// undefined for anything that is not a zombie stat line.
+const zombie = (line: string) => {
+  const end = line.lastIndexOf(") ");
+  const head = /^(\d+) \((.*)$/s.exec(line.slice(0, end));
+  const ppid = /^Z (\d+) /.exec(line.slice(end + 2))?.[1];
+  return end > 0 && head && ppid ? { pid: Number(head[1]), comm: head[2], ppid: Number(ppid) } : undefined;
+};
+const lines = (output: string) => output.split("\n").filter((line) => line !== "");
+assert.equal(zombie("cannot open /proc/0/stat"), undefined, "error text is not a zombie stat line");
+assert.equal(zombie("1 (init) S 0 1 1"), undefined, "a running process is not a zombie");
+assert.equal(zombie("7 (x) Z 9 ) S 1 7 7"), undefined, "the state follows the last ') '");
+assert.deepEqual(zombie("7 (a) Z b) Z 9 7 7"), { pid: 7, comm: "a) Z b", ppid: 9 });
+
 // A process that exits between the glob and the read leaves a stat file
 // that cannot be opened; the scan skips it silently (the boot check runs it
 // with stderr on its output, so any error text is a false zombie). The pre-fix scan printed
 // "cannot open /proc/0/stat" here.
 if (existsSync("/proc/self/stat")) {
-  const gone = shell(zombieScan("/proc/0/stat /proc/[0-9]*/stat"));
+  const gone = shell(zombieScan("/proc/0/stat /proc/self/stat"));
   assert.equal(gone.status, 0);
   assert.equal(gone.output, "");
   const before = 'for f in /proc/0/stat; do read -r s < $f 2>/dev/null; case "${s##*) }" in Z*) echo "$s";; esac; done; true';
   assert.match(shell(before).output, /cannot open \/proc\/0\/stat/, "the test sees the old defect");
 
-  // And under processes that keep starting and exiting.
+  // And under processes that keep starting and exiting, over the whole host.
+  // Every line must be a zombie stat line; a zombie is the kernel's own
+  // report whoever owns it (a CI runner's systemd-timedated once, a
+  // /bin/true of the churn before its wait), so it is logged, not failed.
   const churn = spawn("/bin/sh", ["-c", "while :; do /bin/true; done"], { stdio: "ignore" });
   try {
     for (let i = 0; i < 300; i++) {
       const scan = shell(ZOMBIE_SCAN);
-      assert.equal(scan.status, 0);
-      assert.equal(scan.output, "", `scan ${i} printed: ${scan.output}`);
+      assert.equal(scan.status, 0, `scan ${i} failed: ${scan.output}`);
+      for (const line of lines(scan.output)) {
+        const z = zombie(line);
+        assert.ok(z, `scan ${i} printed a line that is not a zombie stat line: ${JSON.stringify(line)}`);
+        console.log(`keel boot check test: scan ${i} zombie pid ${z.pid} ppid ${z.ppid} comm ${JSON.stringify(z.comm)}${z.ppid === churn.pid ? " (churn)" : ""}`);
+      }
     }
   } finally {
     churn.kill("SIGKILL");
@@ -57,13 +79,51 @@ if (existsSync("/proc/self/stat")) {
   // A real zombie is still reported: a parent that exec's and never reaps.
   const parent = spawn("/bin/sh", ["-c", "sleep 0 & exec sleep 5"], { stdio: "ignore" });
   try {
-    let found = "";
     await until("the zombie child is reported", () => {
-      found = spawnSync("/bin/sh", ["-c", ZOMBIE_SCAN], { encoding: "utf8" }).stdout;
-      return found.split("\n").some((line) => / Z /.test(line) && line.includes(` ${parent.pid} `));
+      const scan = shell(ZOMBIE_SCAN);
+      assert.equal(scan.status, 0, scan.output);
+      return lines(scan.output).some((line) => {
+        const z = zombie(line);
+        assert.ok(z, `not a zombie stat line: ${JSON.stringify(line)}`);
+        return z.ppid === parent.pid && z.pid !== parent.pid;
+      });
     });
   } finally {
     parent.kill("SIGKILL");
+  }
+
+  // A running process whose name holds ") Z " is not reported: its stat
+  // line reads "<pid> (x) Z y) S ...", and the state follows the last paren.
+  const odd = mkdtempSync(join(tmpdir(), "kbc-comm-"));
+  try {
+    const exe = join(odd, "x) Z y");
+    copyFileSync("/bin/sleep", exe);
+    chmodSync(exe, 0o755);
+    const named = spawn(exe, ["30"], { stdio: "ignore", argv0: "sleep" });
+    const started = await new Promise<string | undefined>((r) => {
+      named.once("spawn", () => r(undefined));
+      named.once("error", (e) => r(e.message));
+    });
+    if (started) console.log(`SKIP: a process named "x) Z y" did not start: ${started}`);
+    else {
+      try {
+        const stat = `/proc/${named.pid}/stat`;
+        let line = "";
+        await until("the named process sleeps under its name", () => {
+          line = shell(`cat ${stat}`).output;
+          return line.startsWith(`${named.pid} (x) Z y) S `);
+        });
+        assert.equal(zombie(line.trim()), undefined);
+        const scan = shell(zombieScan(stat));
+        assert.equal(scan.status, 0);
+        assert.equal(scan.output, "", `a running process with ") Z " in its name was reported: ${scan.output}`);
+      } finally {
+        named.kill("SIGKILL");
+        await until("the named process is gone", () => named.exitCode !== null || named.signalCode !== null);
+      }
+    }
+  } finally {
+    rmSync(odd, { recursive: true, force: true });
   }
 }
 
