@@ -32,11 +32,20 @@ kc_cache_archs=
 if [ -n "${KEEL_CACHE:-}" ]; then
 	# shellcheck disable=SC1091 # sourced from beside this script
 	. "$kc_here/../cache.sh"
-	kc_key_line=$(KEEL_CACHE_SCRIPT_DIR=$kc_here \
-		sh "$kc_here/../cache.sh" --keel-cache-key kernel "$@")
+	# cache.sh's status says nothing here. A bypass is one line, which the
+	# build says itself (with each architecture); anything else it prints on
+	# stderr, such as an unreadable cache, goes through.
+	kc_key_line=$({ KEEL_CACHE_SCRIPT_DIR=$kc_here \
+		sh "$kc_here/../cache.sh" --keel-cache-key kernel "$@" 2>&1 || :; })
 	case "$kc_key_line" in
 	bypass:*)
-		for kc_arch in "$@"; do
+		# User arguments, or the two the script builds when given none: the
+		# line above has one word, so it is not the list.
+		for kc_arch in "$@" arm64 x86_64; do
+			case "$kc_arch" in
+			arm64 | x86_64) ;;
+			*) continue ;;
+			esac
 			keel_cache_setup kernel "$kc_arch"
 			keel_cache_blocked
 		done
@@ -71,6 +80,12 @@ if [ -n "${KEEL_CACHE:-}" ]; then
 	esac
 fi
 
+# Only the architectures that are not stored are built, in one container.
+if [ -n "$kc_cache_archs" ]; then
+	# shellcheck disable=SC2086 # the architectures to build, one per word
+	set -- $kc_cache_archs
+fi
+
 # The builder image is digest-pinned above; with KEEL_CACHE set, keel_cache_
 # image_mode records which digest built this cache.
 keel_cache_builder=$builder
@@ -93,10 +108,6 @@ if [ "$actual" != "$sha256" ]; then
 	exit 1
 fi
 
-if [ -n "$kc_cache_archs" ]; then
-	# shellcheck disable=SC2086 # the architectures to build, one per word
-	set -- $kc_cache_archs
-fi
 docker run --rm -e SOURCE_DATE_EPOCH="$source_date_epoch" -e KEEL_REFRESH="${KEEL_REFRESH:-0}" \
 	-v "$root:/keel" "$builder" sh -euc '
 		apt-get update -qq >/dev/null

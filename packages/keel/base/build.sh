@@ -43,14 +43,25 @@ rust=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$repo/rust-toolchain.toml")
 # (cache.sh). Architectures that are not stored are built in one container,
 # as before.
 kc_cache_archs=
+kc_source_names=
 if [ -n "${KEEL_CACHE:-}" ]; then
 	# shellcheck disable=SC1091 # sourced from beside this script
 	. "$kc_here/../cache.sh"
-	kc_key_line=$(KEEL_CACHE_SCRIPT_DIR=$kc_here \
-		sh "$kc_here/../cache.sh" --keel-cache-key base "$@")
+	# cache.sh's status says nothing here. A bypass is one line, which the
+	# build says itself (with each architecture); anything else it prints on
+	# stderr, such as an unreadable cache, goes through.
+	kc_key_line=$({ KEEL_CACHE_SCRIPT_DIR=$kc_here \
+		sh "$kc_here/../cache.sh" --keel-cache-key base "$@" 2>&1 || :; })
+	kc_source_names=$(echo "$sources" | sed -n 's/^\([^ ]*\) .*/\1/p')
 	case "$kc_key_line" in
 	bypass:*)
-		for kc_arch in "$@"; do
+		# User arguments, or the two the script builds when given none: the
+		# line above has one word, so it is not the list.
+		for kc_arch in "$@" arm64 x86_64; do
+			case "$kc_arch" in
+			arm64 | x86_64) ;;
+			*) continue ;;
+			esac
 			keel_cache_setup base "$kc_arch"
 			keel_cache_blocked
 		done
@@ -80,7 +91,7 @@ if [ -n "${KEEL_CACHE:-}" ]; then
 			kc_cache_archs="$kc_cache_archs $kc_arch"
 		done
 		[ -n "$kc_cache_archs" ] || exit 0
-		keel_cache_sources "$(echo "$sources" | sed -n 's/^\([^ ]*\) .*/\1/p')"
+		keel_cache_sources "$kc_source_names"
 		;;
 	esac
 fi
