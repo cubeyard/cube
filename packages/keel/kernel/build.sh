@@ -3,7 +3,9 @@
 # from kernel/defconfig-<arch>.
 # Usage: packages/keel/kernel/build.sh [arm64|x86_64 ...]
 #        KEEL_REFRESH=1 packages/keel/kernel/build.sh   # after a version bump
+#        KEEL_CACHE=<dir> packages/keel/kernel/build.sh # reuse a build
 # Output: packages/keel/out/<arch>/{vmlinuz,config,vmlinuz.sha256}.
+# shellcheck disable=SC2034,SC2154 # KEEL_CACHE's variables cross into cache.sh
 set -eu
 
 version=7.2.9
@@ -13,16 +15,92 @@ builder=debian@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f
 # is not used, so rebuilding the same inputs gives the same image.
 source_date_epoch=1760000000
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+kc_here=$(cd "$(dirname "$0")" && pwd)
+KEEL_CACHE_SCRIPT_DIR=$kc_here
+export KEEL_CACHE_SCRIPT_DIR
+root=$(cd "$kc_here/.." && pwd)
+kc_out=$root/out
+kc_cache=$root/.cache
 tarball=$root/.cache/linux-$version.tar.xz
 [ "$#" -gt 0 ] || set -- arm64 x86_64
 
+# With KEEL_CACHE set, and only then, a build of these inputs that another
+# clone has already stored is used instead of building again; the key is the
+# inputs' contents (cache.sh). Architectures that are not stored are built in
+# one container, as before.
+kc_cache_archs=
+if [ -n "${KEEL_CACHE:-}" ]; then
+	# shellcheck disable=SC1091 # sourced from beside this script
+	. "$kc_here/../cache.sh"
+	# cache.sh's status says nothing here. A bypass is one line, which the
+	# build says itself (with each architecture); anything else it prints on
+	# stderr, such as an unreadable cache, goes through.
+	kc_key_line=$({ KEEL_CACHE_SCRIPT_DIR=$kc_here \
+		sh "$kc_here/../cache.sh" --keel-cache-key kernel "$@" 2>&1 || :; })
+	case "$kc_key_line" in
+	bypass:*)
+		# User arguments, or the two the script builds when given none: the
+		# line above has one word, so it is not the list.
+		for kc_arch in "$@" arm64 x86_64; do
+			case "$kc_arch" in
+			arm64 | x86_64) ;;
+			*) continue ;;
+			esac
+			keel_cache_setup kernel "$kc_arch"
+			keel_cache_blocked
+		done
+		;;
+	*)
+		# The architecture keyed above, then the arguments as they were.
+		kc_args=$*
+		# shellcheck disable=SC2086 # the line is "kind arch key"
+		set -- $kc_key_line
+		kc_setup_arch=$2
+		# shellcheck disable=SC2086 # the script's own arguments
+		set -- $kc_args
+		keel_cache_setup kernel "$kc_setup_arch"
+		for kc_arch in "$@"; do
+			# The key computation just ran for $kc_setup_arch, so only the
+			# other architectures ask cache.sh again.
+			if [ "$kc_arch" = "$keel_cache_arch" ]; then
+				if [ "$keel_cache_mode" = hit ]; then
+					kc_cache_hashes=$(keel_cache_read)
+					echo "$keel_cache_arch: keel cache hit $keel_cache_key $kc_cache_hashes"
+					continue
+				fi
+			else
+				keel_cache_setup kernel "$kc_arch"
+			fi
+			keel_cache_blocked
+			kc_cache_archs="$kc_cache_archs $kc_arch"
+		done
+		[ -n "$kc_cache_archs" ] || exit 0
+		keel_cache_sources "linux-$version.tar.xz"
+		;;
+	esac
+fi
+
+# Only the architectures that are not stored are built, in one container.
+if [ -n "$kc_cache_archs" ]; then
+	# shellcheck disable=SC2086 # the architectures to build, one per word
+	set -- $kc_cache_archs
+fi
+
+# The builder image is digest-pinned above; with KEEL_CACHE set, keel_cache_
+# image_mode records which digest built this cache.
+keel_cache_builder=$builder
 mkdir -p "$root/.cache"
+major=${version%%.*}
+tarball_url="https://cdn.kernel.org/pub/linux/kernel/v$major.x/linux-$version.tar.xz"
 if [ ! -f "$tarball" ]; then
-	major=${version%%.*}
-	curl -fL --proto '=https' -o "$tarball.part" \
-		"https://cdn.kernel.org/pub/linux/kernel/v$major.x/linux-$version.tar.xz"
-	mv "$tarball.part" "$tarball"
+	# A miss: the tarball comes from the cache's src first, or is fetched there
+	# through .cache/<file>.part.$$, so no mount ever holds half a file.
+	if [ -n "$kc_cache_archs" ]; then
+		keel_cache_fetch_image "$(basename "$tarball")" "$tarball_url"
+	else
+		curl -fL --proto '=https' -o "$tarball.part" "$tarball_url"
+		mv "$tarball.part" "$tarball"
+	fi
 fi
 actual=$(shasum -a 256 "$tarball" | cut -d' ' -f1)
 if [ "$actual" != "$sha256" ]; then
@@ -44,3 +122,12 @@ docker run --rm -e SOURCE_DATE_EPOCH="$source_date_epoch" -e KEEL_REFRESH="${KEE
 			sh /keel/kernel/build-in-container.sh "$arch" "'"$version"'"
 		done
 	' sh "$@"
+
+if [ -n "$kc_cache_archs" ]; then
+	keel_cache_adopt
+	keel_cache_builder_version=$version
+	keel_cache_extra=$(printf 'kernel %s %s' "$version" "$sha256")
+	# The compiler line the task asks for: the toolchain is the image's apt
+	# packages, which are not pinned, so the image and the packages are named.
+	keel_cache_store "build-essential and both crossbuild-essential packages of $builder"
+fi

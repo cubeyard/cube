@@ -83,6 +83,7 @@ self-contained: no modules.
 packages/keel/kernel/build.sh                    # both architectures
 packages/keel/kernel/build.sh arm64              # one
 KEEL_REFRESH=1 packages/keel/kernel/build.sh     # after changing the version
+KEEL_CACHE=/path/to/keel-cache packages/keel/kernel/build.sh  # reuse a build
 ```
 
 The build fails if the defconfig does not describe the kernel exactly, which
@@ -109,6 +110,7 @@ pinned Debian container.
 ```sh
 packages/keel/base/build.sh                      # both architectures
 packages/keel/base/build.sh x86_64               # one
+KEEL_CACHE=/path/to/keel-cache packages/keel/base/build.sh x86_64
 ```
 
 Output: `out/<arch>/base.erofs`, `base.erofs.sha256` and `base.txt` (the
@@ -139,6 +141,45 @@ does and what later rows add.
 line protocol on `cube.0` that sets up the same disks and runs commands as
 root, for `scripts/keel-boot-check.ts` only. It is never a keel asset; a
 release ships `base.erofs`.
+
+## Reusing a build across clones
+
+A kernel or base build is slow and its inputs rarely change, so with
+`KEEL_CACHE` set to a directory, `kernel/build.sh` and `base/build.sh` keep
+what they build there and reuse it from any clone on the same host. The key
+is the contents of the build's inputs, not a commit: the same tree on a
+branch, in a worktree or in a fresh clone finds the same entry.
+
+```sh
+export KEEL_CACHE=/var/cache/keel            # any absolute path you own
+packages/keel/kernel/build.sh x86_64        # builds, then stores
+packages/keel/base/build.sh x86_64          # builds, then stores
+# in another clone, with the same inputs, neither starts Docker:
+packages/keel/kernel/build.sh x86_64        # x86_64: keel cache hit <key> <sha256>
+```
+
+| | keyed on (contents) | invalidated by |
+|---|---|---|
+| kernel | `cache.sh`, `kernel/build.sh`, `kernel/build-in-container.sh`, `kernel/defconfig-<arch>` | any of those, for that arch |
+| base | `cache.sh`, `base/`, `init/`, `agent/`, `runner-protocol/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `packages/*/Cargo.toml` | any of those, for both arches |
+
+The builder's architecture is in the key too. An entry is
+`$KEEL_CACHE/v1/<kind>/<arch>/<key>/`: the outputs, `inputs.txt` (the
+manifest the key was made from), `provenance.txt` (key, HEAD, builder image,
+versions, time) and `SHA256SUMS`, which is written last and means the entry
+is complete. Every hit is verified against it; an entry that does not verify
+stops the build and is named, and an incomplete one is built again instead.
+Storing is atomic, so two builds of one host can run at once: the second
+compares only the outputs' hashes with the first and warns if they differ.
+The pinned sources come from `$KEEL_CACHE/v1/src`, so they are downloaded
+once per cache.
+
+Nothing changes when `KEEL_CACHE` is unset. The cache is bypassed, building
+as before with one line saying why, when `KEEL_REFRESH=1` or
+`DOCKER_DEFAULT_PLATFORM` is set, outside a git work tree, with changed,
+untracked or ignored files among the inputs, or with a quoted or non-file
+input path. `packages/keel/cache.sh key <kernel|base> [arch ...]` prints the
+key a build would use, or the reason it would be bypassed.
 
 ## Boot check
 
