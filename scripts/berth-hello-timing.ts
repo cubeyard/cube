@@ -1,9 +1,12 @@
-/** Hello time of a keel machine under `berth vm`: from `machine_start` to
- * the agent's `hello` (a new session in `status.guest`), over N stops and
- * starts of one machine. Masterplan B-4 asks for it with and without the
- * network: run it with this head's berth (virtio-net, `ip=` on the kernel
- * command line) and with the berth of the base commit (no network device);
- * the script itself does not depend on either.
+/** Hello and ready time of a keel machine under `berth vm`, over N stops
+ * and starts of one machine (masterplan §6.6 targets 1 and 2): from
+ * `machine_start` to the agent's `hello` (a new session in `status.guest`),
+ * and from the same start to that session's first `ready` (its
+ * `machine_setup` applied). A session that says it will not become ready
+ * fails the run with its reason. Masterplan B-4 asks for hello with and
+ * without the network: run it with this head's berth (virtio-net, `ip=` on
+ * the kernel command line) and with the berth of the base commit (no network
+ * device); the script itself does not depend on either.
  *
  *   node scripts/berth-hello-timing.ts <berth> [runs=10]
  *
@@ -55,19 +58,41 @@ try {
   const fence = { epoch: 1n };
   await session.machine({ case: "machineCreate", value: { ref, fence, spec: { source: { case: "base", value: true }, size: { vcpus: 2, memoryMib: 1024, diskGib: 4 } } } });
   const samples: number[] = [];
+  const readyMs: number[] = [];
+  const helloToReadyMs: number[] = [];
+  // What keel's agent says while its setup is still coming or being applied;
+  // any other reason with ready false (the image lacks…, machine_setup
+  // failed…) means this session will not become ready.
+  const pending = new Set(["waiting for machine_setup", "applying machine_setup"]);
   let previous = "";
   for (let i = 0; i < runs; i++) {
     const t0 = performance.now();
     await session.machine({ case: "machineStart", value: { ref, fence } });
     const up = await session.until(ref, m => !!m.status?.guest?.session && m.status.guest.session !== previous, 180000);
-    samples.push(Math.round(performance.now() - t0));
+    const hello = Math.round(performance.now() - t0);
+    samples.push(hello);
     previous = up.status!.guest!.session;
+    const settled = await session.until(ref, m => {
+      const info = m.status?.guest;
+      return info?.session === previous && (info.ready || (!!info.reason && !pending.has(info.reason)));
+    }, 180000);
+    const guest = settled.status!.guest!;
+    if (!guest.ready) throw new Error(`session ${previous} will not become ready: "${guest.reason}"`);
+    // Hello and ready in one status: no time between them.
+    const ready = up.status!.guest!.ready ? hello : Math.round(performance.now() - t0);
+    readyMs.push(ready);
+    helloToReadyMs.push(ready - hello);
     await session.call({ case: "machineStop", value: { ref, fence } }, 70000);
   }
-  const sorted = [...samples].sort((a, b) => a - b);
-  const at = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(q * (sorted.length - 1) + 0.5))]!;
+  const quantiles = (values: number[]) => {
+    const sorted = [...values].sort((a, b) => a - b);
+    const at = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(q * (sorted.length - 1) + 0.5))]!;
+    return { median: at(0.5), p25: at(0.25), p75: at(0.75), min: sorted[0], max: sorted.at(-1) };
+  };
+  const ready = quantiles(readyMs);
   const network = fs.readFileSync(path.join(directory, ref.id, "argv.json"), "utf8").includes("virtio-net-pci");
-  console.log(JSON.stringify({ berth: binary, accel, network, runs, ms: samples, median: at(0.5), p25: at(0.25), p75: at(0.75), min: sorted[0], max: sorted.at(-1) }));
+  console.log(JSON.stringify({ berth: binary, accel, network, runs, ms: samples, ...quantiles(samples), readyMs, helloToReadyMs,
+    readyMedian: ready.median, readyP25: ready.p25, readyP75: ready.p75, readyMin: ready.min, readyMax: ready.max }));
 } finally {
   await session?.close();
   if (child && child.exitCode === null) { const exited = once(child, "exit"); process.kill(-child.pid!, "SIGINT"); await exited; }
