@@ -314,7 +314,10 @@ a new runner with its own directory and key.
    QEMU must meet keel's floor, the accelerator must be KVM (Linux) or HVF
    (macOS), and berth must report the keel files' hashes. That pulls the
    image into the throwaway directory unless `--seed-from <a berth directory
-   that has it>` names one to copy from. Then it writes
+   that has it>` names one to copy from. berth keeps each machine's sockets
+   at `<dir>/<machine id>/qmp.sock` within 100 bytes, so the installer
+   refuses a `--dir` too long for that and makes its check directory under
+   `/tmp`, whatever `TMPDIR` says. Then it writes
    `<prefix>/libexec/berth-<version>/berth`, `<prefix>/bin/start-<name>.sh`
    and a systemd user unit or a launchd user agent. It **never** overwrites
    a file (exit 2), never starts, loads or enables anything, never enrolls,

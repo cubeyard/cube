@@ -100,6 +100,10 @@ vm) shift ;;
 esac
 echo "$*" >>"$STUB_LOG"
 while [ $# -gt 0 ]; do case "$1" in --dir) d=$2 ;; --keel) k=$2 ;; --accel) a=$2 ;; esac; shift 2; done
+# berth's rule (packages/berth/src/vm/mod.rs): <dir>/<16-hex id>/qmp.sock within 100 bytes.
+real=$(cd "$d" && pwd -P)
+echo "resolved $real" >>"$STUB_LOG"
+if [ $((\${#real} + 26)) -gt 100 ]; then echo "Error: --dir $d is too long: a machine's sockets must fit 100 bytes" >&2; exit 1; fi
 [ -d "$d/images" ] && echo "seeded $d" >>"$STUB_LOG"
 h() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 echo "berth 0.1.0 vm (runner protocol 4)" >&2
@@ -168,9 +172,11 @@ while :; do sleep 1; done
   assert.match(first.stdout, /check passed/);
   assert.match(first.stdout, /the check pulls .* into a throwaway directory/);
   assert.match(first.stdout, /Nothing was started, loaded or enrolled/);
-  const checkRun = fs.readFileSync(stubLog, "utf8").trim().split("\n").at(-1)!;
-  assert.match(checkRun, new RegExp(`^--dir ${dir}/install-berth\\.[A-Za-z0-9]+/dir .* --accel ${accel} --network loopback --listen 127\\.0\\.0\\.1:0 .* --node-id node-install-check --max-machines 1$`));
-  assert.deepEqual(fs.readdirSync(dir).filter(f => f.startsWith("install-berth.")), [], "the throwaway directory is removed");
+  const lastCheck = () => fs.readFileSync(stubLog, "utf8").trim().split("\n").filter(line => line.startsWith("--dir ")).at(-1)!;
+  const checkRun = lastCheck();
+  // The check directory is under /tmp, not TMPDIR (which install() sets to the test's directory).
+  assert.match(checkRun, new RegExp(`^--dir /tmp/install-berth\\.[A-Za-z0-9]+/dir .* --accel ${accel} --network loopback --listen 127\\.0\\.0\\.1:0 .* --node-id node-install-check --max-machines 1$`));
+  assert.ok(!fs.existsSync(path.dirname(checkRun.split(" ")[1]!)), "the throwaway directory is removed");
   const berth = path.join(prefix, "libexec/berth-0.1.0/berth");
   assert.equal(fs.readFileSync(berth, "utf8"), stub);
   const start = path.join(prefix, "bin/start-b2-fix-berth.sh");
@@ -226,8 +232,39 @@ exec ${berth} vm --dir ${dir}/state \\
     const r = install(args("b2-bad", "systemd").map((a, i, all) => all[i - 1] === bad[0] ? bad[1]! : a));
     assert.equal(r.status, 1, `${bad.join(" ")}: ${r.stderr}`);
   }
+  // R1: a long TMPDIR (macOS's per-user one is too long for berth's socket rule) does not reach berth.
+  let longTmp = path.join(dir, "t");
+  while (fs.realpathSync(dir).length + (longTmp.length - dir.length) < 125) longTmp = path.join(longTmp, "a-long-temporary-directory");
+  fs.mkdirSync(longTmp, { recursive: true });
+  assert.ok(fs.realpathSync(longTmp).length >= 120);
+  const r1Root = path.join(dir, "r1");
+  const r1 = install(args("b2-r1", "systemd").map(a => a === prefix ? path.join(r1Root, "prefix") : a === units ? path.join(r1Root, "units") : a), { TMPDIR: longTmp });
+  assert.equal(r1.status, 0, `R1 with TMPDIR of ${fs.realpathSync(longTmp).length} bytes: ${r1.stderr}`);
+  const r1Dir = lastCheck().split(" ")[1]!;
+  const resolved = fs.readFileSync(stubLog, "utf8").trim().split("\n").filter(line => line.startsWith("resolved ")).at(-1)!.slice("resolved ".length);
+  assert.ok(r1Dir.startsWith("/tmp/install-berth.") && resolved.startsWith(`${fs.realpathSync("/tmp")}/install-berth.`), `${r1Dir} -> ${resolved}`);
+  assert.ok(resolved.length + 26 <= 100, `${resolved} is ${resolved.length} bytes`);
+
+  // R2: an operator --dir too long for berth's sockets: refused before any write.
+  const r2Root = path.join(dir, "r2");
+  let longDir = path.join(r2Root, "state");
+  while (fs.realpathSync(dir).length + (longDir.length - dir.length) + 26 <= 100) longDir = path.join(longDir, "berth-state-directory");
+  const r2 = install(args("b2-r2", "systemd").map(a => a === path.join(dir, "state") ? longDir : a === prefix ? path.join(r2Root, "prefix") : a === units ? path.join(r2Root, "units") : a));
+  assert.equal(r2.status, 1, r2.stderr);
+  assert.match(r2.stderr, /--dir .* is too long: berth needs <dir>\/<16-hex machine id>\/qmp\.sock within 100 bytes/);
+  assert.ok(!fs.existsSync(r2Root), "R2 writes nothing (no prefix, unit directory, libexec or --dir)");
+
+  // R3: the installer's numbers are berth's.
+  const vmSource = fs.readFileSync(path.join(root, "packages/berth/src/vm/mod.rs"), "utf8");
+  assert.match(vmSource, /const MAX_SOCKET_PATH: usize = 100;/);
+  assert.match(vmSource, /options\.directory\.as_os_str\(\)\.len\(\) \+ 1 \+ 16 \+ 1 \+ qemu::QMP_SOCKET\.len\(\)\s*<= MAX_SOCKET_PATH/);
+  assert.match(fs.readFileSync(path.join(root, "packages/berth/src/vm/qemu.rs"), "utf8"), /pub const QMP_SOCKET: &str = "qmp\.sock";/);
+  const installer = fs.readFileSync(path.join(root, "scripts/berth/install-berth.sh"), "utf8");
+  assert.match(installer, /^socket_max=100$/m);
+  assert.match(installer, new RegExp(`^socket_tail=${1 + 16 + 1 + "qmp.sock".length} `, "m"));
+
   assert.ok(!fs.existsSync(called), `systemctl, launchctl or cubed was called: ${fs.existsSync(called) ? fs.readFileSync(called, "utf8") : ""}`);
-  console.log(`berth-release-test: signed manifest, protocol-3 build refused; verify-release passes and fails each tampering; ${platform ? "package.sh bundle; " : ""}install-berth.sh (${bash}) checks before writing, writes start script, unit and plist, refuses relative paths, overwrites and a replaced binary, never calls systemctl, launchctl or cubed`);
+  console.log(`berth-release-test: signed manifest, protocol-3 build refused; verify-release passes and fails each tampering; ${platform ? "package.sh bundle; " : ""}install-berth.sh (${bash}) checks before writing, writes start script, unit and plist, refuses relative paths, overwrites and a replaced binary, never calls systemctl, launchctl or cubed; the check directory stays under /tmp with a long TMPDIR (R1), a --dir too long for berth's sockets is refused before any write (R2), and the 100-byte rule is berth's (R3)`);
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });
 }

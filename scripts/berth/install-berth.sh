@@ -64,6 +64,28 @@ done
 for file in "$qemu" "$qemu_img" "$mkfs"; do [ -x "$file" ] || fail "not an executable file: $file"; done
 for file in vmlinuz base.erofs; do [ -f "$keel/$file" ] || fail "--keel has no $file: $keel"; done
 [ -z "$seed" ] || [ -d "$seed/images" ] || fail "--seed-from has no images/: $seed"
+
+# berth keeps each machine's sockets at <--dir>/<16-hex machine id>/qmp.sock and
+# refuses a --dir where that path exceeds 100 bytes (packages/berth/src/vm/mod.rs:
+# MAX_SOCKET_PATH, checked in VmRunner::open). Measured on the physical path.
+socket_max=100
+socket_tail=26 # 1 + 16 + 1 + length of "qmp.sock"
+# The physical path of an absolute path: its nearest existing directory resolved,
+# then the components that do not exist yet as given (--dir is never made here).
+physical() {
+  p=$1 rest=''
+  while [ ! -d "$p" ]; do
+    rest="/${p##*/}$rest"
+    p=${p%/*}
+    [ -n "$p" ] || p=/
+  done
+  p=$(cd "$p" && pwd -P)
+  [ "$p" != / ] || p=''
+  printf '%s%s\n' "$p" "$rest"
+}
+dir_physical=$(physical "$dir")
+[ $((${#dir_physical} + socket_tail)) -le "$socket_max" ] ||
+  fail "--dir $dir_physical is too long: berth needs <dir>/<16-hex machine id>/qmp.sock within $socket_max bytes"
 printf '%s\n' "$image" | grep -Eq '^[A-Za-z0-9._/:-]+@sha256:[0-9a-f]{64}$' ||
   fail "--image must be pinned: <registry/repository>@sha256:<64 hex>"
 case "$network" in
@@ -115,7 +137,9 @@ base_sha=$(sha256 "$keel/base.erofs")
 
 # The check: this berth up to its banner, in a throwaway directory, on
 # loopback with a throwaway node id; it never listens beyond 127.0.0.1.
-check=$(mktemp -d "${TMPDIR:-/tmp}/install-berth.XXXXXX")
+# Under /tmp whatever TMPDIR says: macOS's per-user TMPDIR is too long for
+# berth's socket rule above (/private/tmp on macOS is short).
+check=$(mktemp -d /tmp/install-berth.XXXXXX)
 pid=''
 # SIGTERM: a background job of a script starts with SIGINT ignored, and berth
 # stops on either. It has 120 s, then it is killed.
@@ -137,6 +161,9 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir "$check/dir"
+real=$(cd "$check/dir" && pwd -P)
+[ $((${#real} + socket_tail)) -le "$socket_max" ] ||
+  fail "the check directory $real is too long for berth's $socket_max-byte socket paths"
 if [ -n "$seed" ]; then
   cp -R "$seed/images" "$check/dir/images"
   [ ! -d "$seed/layers" ] || cp -R "$seed/layers" "$check/dir/layers"
