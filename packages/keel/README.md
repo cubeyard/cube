@@ -54,14 +54,24 @@ not parts of one another, and their numbers do not add up.
   - From the later series, `machineStart` → that same session's `ready`
     (after `machine_setup`): **509.5 ms**. Its `hello` → `ready` is
     **32 ms**, and its `hello` is 472.5 ms.
+- **`berth vm` alone, macOS/HVF** (the same script and setup on one Apple
+  silicon Mac, arm64 guest; one series that waits for ready). Medians of 20:
+  - `machineStart` → the agent's `hello`: **153 ms**.
+  - `machineStart` → that same session's `ready`: **173.5 ms**. Its
+    `hello` → `ready` is **18.5 ms**.
 - **Through cubed, Linux/KVM** (a cubed fixture and `berth vm` over loopback
   on the same host; 2 vCPU, 2048 MiB; 20 threads in a row from one prepared
   template). cubed's create → machine ready for the agent (`startup.totalMs`)
-  has a median of **4212 ms**. The wall time from the API request to
-  `available` has a median of about 5.3 s.
+  has a median of **4212 ms**, of which the `boot` step is 1914.5 ms. The
+  wall time from the API request to `available` has a median of about 5.3 s.
+- **Through cubed, macOS/HVF** (the same setup on the same Mac).
+  `startup.totalMs` has a median of **1088 ms**, of which the `boot` step is
+  259 ms. The wall time to `available` has a median of about 2.1 s.
 
-Both Linux/KVM series were taken on 2026-10-17. macOS/HVF has no `berth vm`
-numbers yet, because the Mac series wait for host capacity. The splits inside each interval
+The Linux/KVM series were taken on 2026-10-17 and the macOS/HVF series on
+2026-10-18, at different commits and on different hardware, so they stand
+side by side and are not a comparison. The Mac was under memory pressure
+(swap almost full) during its series. The splits inside each interval
 (QEMU and firmware, kernel, agent start, cubed's own steps) are not measured.
 
 ## Kernel
