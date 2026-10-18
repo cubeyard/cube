@@ -210,10 +210,10 @@ keel_cache_key() {
 keel_cache_pathspecs() {
 	case "$keel_cache_kind" in
 	kernel)
-		kc_inputs="packages/keel/cache.sh packages/keel/kernel/build.sh packages/keel/kernel/build-in-container.sh packages/keel/kernel/defconfig-$keel_cache_arch"
+		kc_inputs="packages/keel/cache.sh packages/keel/apt-snapshot.sh packages/keel/kernel/build.sh packages/keel/kernel/build-in-container.sh packages/keel/kernel/defconfig-$keel_cache_arch"
 		;;
 	base)
-		kc_inputs="packages/keel/cache.sh packages/keel/base packages/keel/init packages/keel/agent packages/runner-protocol Cargo.toml Cargo.lock rust-toolchain.toml :(glob)packages/**/Cargo.toml .cargo"
+		kc_inputs="packages/keel/cache.sh packages/keel/apt-snapshot.sh packages/keel/base packages/keel/init packages/keel/agent packages/runner-protocol Cargo.toml Cargo.lock rust-toolchain.toml :(glob)packages/**/Cargo.toml .cargo"
 		;;
 	esac
 }

@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { parse } from "yaml";
 
-type Step = { uses?: string; run?: string; env?: Record<string, string> };
+type Step = { uses?: string; run?: string; env?: Record<string, string>; with?: Record<string, unknown> };
 type Job = {
   name?: string;
   "runs-on": string;
@@ -70,6 +70,28 @@ assert.deepEqual([release.jobs.build!.needs].flat(), ["gate"]);
 assert.ok(release.jobs.gate!.steps.some((step) => step.run === "bash scripts/release-gate.sh"));
 assert.match(read("scripts/release-gate.sh"), /^macos_job='node-transport \(macos\)'$/m);
 
+// keel: each architecture built twice on its own architecture, compared before
+// anything is signed; the draft takes only release assets (cubed-*), never the
+// raw builds (keel-*). keel-repro.yml does the same on pull requests.
+const keelRepro = workflow("keel-repro.yml");
+for (const w of [release, keelRepro]) {
+  const build = Object.values(w.jobs).find((job) => job.steps.some((step) => step.uses === "./.github/actions/keel-build"))!;
+  assert.deepEqual(build.strategy!.matrix.arch, ["x86_64", "arm64"]);
+  assert.deepEqual(build.strategy!.matrix.build, ["a", "b"]);
+  assert.ok(runs(w).includes("scripts/keel/compare-builds.sh"));
+}
+assert.deepEqual([release.jobs["keel-build"]!.needs].flat(), ["gate"]);
+assert.deepEqual([release.jobs.keel!.needs].flat(), ["keel-build"]);
+const keelSteps = release.jobs.keel!.steps.map((step) => step.run ?? "");
+assert.ok(keelSteps.findIndex((run) => run.includes("compare-builds.sh")) < keelSteps.findIndex((run) => run.includes("scripts/keel/build-release.ts")));
+assert.ok(!Object.values(release.jobs["keel-build"]!.steps).some((step) => JSON.stringify(step).includes("SIGNING_KEY")));
+assert.deepEqual([release.jobs.draft!.needs].flat().sort(), ["build", "keel"]);
+assert.equal(release.jobs.draft!.steps.find((step) => step.uses?.startsWith("actions/download-artifact@"))?.with?.pattern, "cubed-*");
+for (const own of ["packages/keel/kernel/**", "packages/keel/base/**", ".github/workflows/keel-repro.yml"]) {
+  assert.ok(keelRepro.on.pull_request.paths.includes(own), `keel-repro.yml runs on pull requests that touch ${own}`);
+}
+assert.ok("workflow_dispatch" in keelRepro.on);
+
 // Third-party actions are pinned to a commit.
 const actions = [".github/actions/node-deps/action.yml", ".github/actions/rust-deps/action.yml"];
 for (const file of [...fs.readdirSync(path.join(root, ".github/workflows")).map((f) => `.github/workflows/${f}`), ...actions]) {
@@ -78,7 +100,7 @@ for (const file of [...fs.readdirSync(path.join(root, ".github/workflows")).map(
     if (uses!.startsWith("./")) assert.ok(fs.existsSync(path.join(root, uses!, "action.yml")), `${file}: ${uses}`);
   }
 }
-console.log("ci-test: Linux-only pull request gate, cancelled superseded runs, every suite in one shard, no check dropped, macOS on main, pinned actions");
+console.log("ci-test: Linux-only pull request gate, cancelled superseded runs, every suite in one shard, no check dropped, macOS on main, keel built twice and compared before signing, pinned actions");
 
 // The release gate against a fake gh: each call takes the scenario's next answer.
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "release-gate-"));

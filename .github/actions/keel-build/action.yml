@@ -1,0 +1,59 @@
+# One native keel build of one architecture: the kernel and the base with
+# packages/keel/kernel/build.sh and base/build.sh (pinned builder image and
+# archive snapshot), then their KEEL_CACHE keys, uploaded as the artifact
+# keel-<arch>-<build>. Run on a host of that architecture: a cross build is
+# a different compiler and gives a different kernel.
+name: keel build
+description: build keel's kernel and base for one architecture and upload them
+inputs:
+  arch:
+    description: x86_64 or arm64, the runner's own architecture
+    required: true
+  build:
+    description: which of the two independent builds this is (a or b)
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: native architecture
+      shell: bash
+      env:
+        ARCH: ${{ inputs.arch }}
+      run: |
+        set -euo pipefail
+        case "$ARCH:$(uname -m)" in
+        x86_64:x86_64 | arm64:aarch64) ;;
+        *) echo "::error::keel $ARCH must be built on its own architecture, not $(uname -m)"; exit 1 ;;
+        esac
+    - name: kernel
+      shell: bash
+      run: packages/keel/kernel/build.sh "${{ inputs.arch }}"
+    - name: base
+      shell: bash
+      run: packages/keel/base/build.sh "${{ inputs.arch }}"
+    - name: outputs and cache keys
+      shell: bash
+      env:
+        ARCH: ${{ inputs.arch }}
+        OUT: ${{ runner.temp }}/keel-${{ inputs.arch }}-${{ inputs.build }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$OUT" "$RUNNER_TEMP/keel-cache-keys"
+        for f in vmlinuz vmlinuz.sha256 config base.erofs base.erofs.sha256 base.txt base-standin.erofs base-standin.erofs.sha256; do
+          cp "packages/keel/out/$ARCH/$f" "$OUT/$f"
+        done
+        # What KEEL_CACHE would key these on (cache.sh key): the commit's inputs.
+        export KEEL_CACHE="$RUNNER_TEMP/keel-cache-keys"
+        {
+          echo "kernel $(sh packages/keel/cache.sh key kernel "$ARCH" | awk '{print $3}')"
+          echo "base $(sh packages/keel/cache.sh key base "$ARCH" | awk '{print $3}')"
+        } >"$OUT/keys.txt"
+        grep -Eq '^kernel [0-9a-f]{64}$' "$OUT/keys.txt" && grep -Eq '^base [0-9a-f]{64}$' "$OUT/keys.txt"
+        echo "commit $GITHUB_SHA" >"$OUT/provenance.txt"
+        echo "runner $RUNNER_NAME $ImageOS $ImageVersion $(uname -m)" >>"$OUT/provenance.txt"
+        (cd "$OUT" && sha256sum vmlinuz base.erofs base-standin.erofs config base.txt keys.txt) | tee -a "$GITHUB_STEP_SUMMARY"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: keel-${{ inputs.arch }}-${{ inputs.build }}
+        path: ${{ runner.temp }}/keel-${{ inputs.arch }}-${{ inputs.build }}/
+        if-no-files-found: error
