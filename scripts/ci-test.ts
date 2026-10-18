@@ -98,6 +98,14 @@ assert.deepEqual([release.jobs["berth-build"]!.needs].flat(), ["gate"]);
 assert.ok(release.jobs["berth-build"]!.steps.some((step) => step.uses === "./.github/actions/berth-build"));
 assert.ok(!JSON.stringify(release.jobs["berth-build"]).includes("SIGNING_KEY"));
 assert.ok(!read(".github/actions/berth-build/action.yml").includes("secrets."));
+// No build cache in the release build: the toolchain only, compiled from source.
+const berthBuild = parse(read(".github/actions/berth-build/action.yml")) as { runs: { steps: Step[] } };
+const berthUses = berthBuild.runs.steps.flatMap((step) => step.uses ? [step.uses] : []);
+assert.ok(berthUses.every((uses) => uses.startsWith("actions/upload-artifact@")), `berth-build uses only upload-artifact: ${berthUses.join(", ")}`);
+const berthRuns = berthBuild.runs.steps.map((step) => `${step.run ?? ""} ${JSON.stringify(step.env ?? {})}`).join("\n");
+for (const cached of ["sccache", "RUSTC_WRAPPER", "rust-cache", "CARGO_INCREMENTAL"]) assert.ok(!berthRuns.includes(cached), `berth-build sets no ${cached}`);
+assert.match(berthRuns, /rustup toolchain install "\$version" --profile minimal/);
+assert.match(berthRuns, /cargo build --release --locked -p berth/);
 assert.deepEqual([release.jobs.berth!.needs].flat(), ["berth-build"]);
 const sign = release.jobs.berth!.steps.find((step) => step.run?.includes("scripts/berth/build-release.ts"))!.run!;
 assert.ok(sign.indexOf("verify-signing-key.ts") >= 0 && sign.indexOf("verify-signing-key.ts") < sign.indexOf("scripts/berth/build-release.ts"));

@@ -1,7 +1,10 @@
-# One berth build for one platform: pinned Rust (rust-deps), `cargo build
-# --release --locked -p berth`, the bundle by scripts/berth/package.sh, with
-# version.json and provenance.txt, uploaded as the artifact berth-<platform>.
-# No signing key: release.yml signs in a later job.
+# One berth build for one platform: the pinned Rust toolchain only, `cargo
+# build --release --locked -p berth`, the bundle by scripts/berth/package.sh,
+# with version.json and provenance.txt, uploaded as the artifact
+# berth-<platform>. No signing key: release.yml signs in a later job. No
+# build cache either: a signed release binary is compiled from source, never
+# from objects restored out of the Actions cache (so not the shared Rust
+# dependencies action, which adds sccache and a target cache).
 name: berth build
 description: build berth and pack its release bundle for one platform
 inputs:
@@ -14,7 +17,13 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: ./.github/actions/rust-deps
+    - name: pinned Rust toolchain
+      shell: bash
+      run: |
+        version=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
+        test -n "$version"
+        rustup set auto-self-update disable
+        rustup toolchain install "$version" --profile minimal --component rustfmt --component clippy
     - name: berth
       shell: bash
       run: cargo build --release --locked -p berth
