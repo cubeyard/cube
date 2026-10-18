@@ -1,0 +1,20 @@
+# Placeholder: GitHub lists a workflow_dispatch workflow only when a file of
+# that name is on the default branch, and a dispatch with --ref runs the file
+# of that ref. berth's packaging PR replaces this file; here it only fails.
+name: berth package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: not on this branch
+        run: |
+          echo "berth packaging is not on this branch"
+          exit 1
