@@ -376,6 +376,18 @@ file's rules (S-7a). `berth vm` keeps the connect rule and sessions (B-2).
   the runner connected through the save, which is expected to fail there
   (no plain `hello`). A failed run writes no `results.json`.
 
+  `--only memory` (masterplan S-7b) runs only the memory checks
+  (`agent-check/src/memory.rs`), on two machines with a file of half the
+  guest memory: a deleted file's page cache must come back to the host
+  (QEMU's resident memory gives at least half its rise back within 15 s,
+  by the balloon's free page reporting), so must the page cache
+  `snapshot_prepare` drops, and the memory file of a save after the
+  prepare must be at least half the file smaller than one without it.
+  Every resident-memory sample and both memory files' sizes are in
+  `results.json` `memory`. `--control reporting` turns
+  `free-page-reporting` off and is expected to fail at the deleted file's
+  check. The thresholds are the check's, not limits of the product.
+
   `test-image.sh` needs Docker (and binfmt for the other architecture); it
   builds Debian trixie with sudo, git, gh and curl and passwordless sudo for
   `agent` (keel writes the same line). It is a test image, not cube's.

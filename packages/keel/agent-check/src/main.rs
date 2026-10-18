@@ -8,8 +8,8 @@
 //!   keel-agent-check --qemu PATH --qemu-img PATH --kernel PATH --base PATH \
 //!     --mkfs PATH --fsck PATH --tar IMAGE.tar --out DIR [--arch x86_64|arm64] \
 //!     [--accel tcg|kvm|hvf] [--contract COMMAND] [--smp 2] [--memory 1024] \
-//!     [--vmgenid on|off] [--only snapshot|rest] \
-//!     [--control reconnect|late-hello|restore|prepare|clock|seal|redirect|snapshot]
+//!     [--vmgenid on|off] [--only snapshot|rest|memory] \
+//!     [--control reconnect|late-hello|restore|prepare|clock|seal|redirect|snapshot|reporting]
 //!
 //! `--control` runs one negative control, expected to fail at its check:
 //! `reconnect` (also `--reset off`): the immediate reconnects wait for the
@@ -23,6 +23,12 @@
 //! nothing. `snapshot`: in the same-snapshot restores (check 83) the runner
 //! stays connected through the save, so the restored port already says
 //! connected and the guest may see no open when the runner connects again.
+//! `reporting` (with `--only memory`): the balloon without
+//! `free-page-reporting`, so freed memory stays with QEMU (memory.rs).
+//!
+//! `--only memory` (masterplan S-7b) runs memory.rs alone: whether freed
+//! guest memory goes back to the host and how much smaller a snapshot is
+//! after `snapshot_prepare`.
 //!
 //! `--vmgenid` (x86-64 only, default on, as `berth vm` runs machines): QEMU's
 //! `vmgenid` device, whose new GUID makes the guest kernel reseed its random
@@ -65,6 +71,7 @@ use tokio::{
 };
 
 mod erofs;
+mod memory;
 
 // ---------------------------------------------------------------- options
 
@@ -90,6 +97,8 @@ struct Options {
     /// `--only rest`: every check but 83 (the two together are the whole
     /// check, for a machine where one run takes too long).
     skip_snapshot: bool,
+    /// `--only memory`: memory.rs alone (S-7b).
+    only_memory: bool,
 }
 
 /// A negative control: the one place the reset on channel 0 is left out,
@@ -106,6 +115,8 @@ enum Control {
     Redirect,
     Prepare,
     Snapshot,
+    /// The balloon without `free-page-reporting` (`--only memory`).
+    Reporting,
 }
 
 fn options() -> Result<Options> {
@@ -162,8 +173,9 @@ fn options() -> Result<Options> {
         ("on", Some("redirect")) => Some(Control::Redirect),
         ("on", Some("prepare")) => Some(Control::Prepare),
         ("on", Some("snapshot")) => Some(Control::Snapshot),
+        ("on", Some("reporting")) => Some(Control::Reporting),
         _ => bail!(
-            "--control is reconnect, late-hello, restore, prepare, clock, seal, redirect or snapshot (and --reset off is reconnect)"
+            "--control is reconnect, late-hello, restore, prepare, clock, seal, redirect, snapshot or reporting (and --reset off is reconnect)"
         ),
     };
     let vmgenid = match values.get("vmgenid").map(String::as_str) {
@@ -171,17 +183,27 @@ fn options() -> Result<Options> {
         Some("off") => false,
         Some(other) => bail!("--vmgenid is on or off, not {other}"),
     };
-    let (only_snapshot, skip_snapshot) = match values.get("only").map(String::as_str) {
-        None => (false, false),
-        Some("snapshot") => (true, false),
-        Some("rest") => (false, true),
-        Some(other) => bail!("--only is snapshot or rest, not {other}"),
+    let (only_snapshot, skip_snapshot, only_memory) = match values.get("only").map(String::as_str) {
+        None => (false, false, false),
+        Some("snapshot") => (true, false, false),
+        Some("rest") => (false, true, false),
+        Some("memory") => (false, false, true),
+        Some(other) => bail!("--only is snapshot, rest or memory, not {other}"),
     };
+    ensure!(
+        if only_memory {
+            matches!(control, None | Some(Control::Reporting))
+        } else {
+            control != Some(Control::Reporting)
+        },
+        "--control reporting goes with --only memory, and --only memory takes no other control"
+    );
     Ok(Options {
         control,
         vmgenid,
         only_snapshot,
         skip_snapshot,
+        only_memory,
         qemu: path("qemu")?,
         qemu_img: path("qemu-img")?,
         kernel: path("kernel")?,
@@ -934,7 +956,11 @@ impl Lab {
             "-device", "virtio-serial-pci",
             "-chardev", &format!("socket,id=ctl,path={},server=on,wait=off", self.sockets.join("ctl.sock").display()),
             "-device", "virtserialport,chardev=ctl,name=cube.0,id=cube0",
-            "-device", "virtio-balloon-pci,free-page-reporting=on",
+            "-device", if self.o.control == Some(Control::Reporting) {
+                "virtio-balloon-pci,free-page-reporting=off"
+            } else {
+                "virtio-balloon-pci,free-page-reporting=on"
+            },
             "-serial", &format!("file:{}", dir.join(format!("console-{boot}.log")).display()),
             "-qmp", &format!("unix:{},server=on,wait=off", self.sockets.join("qmp.sock").display()),
         ]
@@ -1463,6 +1489,28 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         ("env", env),
         ("hooks/pre-resume", PRE_RESUME),
     ];
+    if lab.o.only_memory {
+        let memory =
+            memory::check(&lab, &mut checks, &image_disk, &image_layers, documents).await?;
+        fs::write(
+            lab.o.out.join("results.json"),
+            serde_json::to_string_pretty(&json!({
+                "qemu": {"path": lab.o.qemu, "version": version, "machine": machine_type, "accel": lab.o.accel, "vmgenid": lab.o.vmgenid},
+                "arch": lab.o.arch,
+                "kernel": {"path": lab.o.kernel, "sha256": sha256_file(&lab.o.kernel)?},
+                "base": {"path": lab.o.base, "sha256": sha256_file(&lab.o.base)?},
+                "checks": checks.0,
+                "memory": memory,
+            }))?,
+        )?;
+        println!(
+            "keel agent check: {} {}, QEMU {version} {machine_type}; the memory checks passed ({})",
+            lab.o.arch,
+            lab.o.accel,
+            checks.0.len()
+        );
+        return Ok(());
+    }
     if lab.o.only_snapshot {
         let same = same_snapshot(&lab, &image_disk, &image_layers, documents).await?;
         fs::write(
