@@ -7,7 +7,6 @@
  * launchctl or cubed. On macOS it runs under /bin/bash (3.2). */
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createHash, generateKeyPairSync, verify } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -15,7 +14,8 @@ import { publicKeyFingerprint } from "./cubed/verify-signing-key.ts";
 import { verifyRelease } from "./berth/verify-release.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
-const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "berth-release-")));
+// Under /tmp: berth's 100-byte socket rule does not fit macOS's per-user TMPDIR.
+const dir = fs.realpathSync(fs.mkdtempSync("/tmp/berth-release-"));
 const sha = (data: Buffer | string) => createHash("sha256").update(data).digest("hex");
 const bash = process.platform === "darwin" ? "/bin/bash" : "bash";
 const platform = process.platform === "linux" && process.arch === "x64" ? "linux-x64-gnu"
@@ -249,6 +249,7 @@ exec ${berth} vm --dir ${dir}/state \\
   const r2Root = path.join(dir, "r2");
   let longDir = path.join(r2Root, "state");
   while (fs.realpathSync(dir).length + (longDir.length - dir.length) + 26 <= 100) longDir = path.join(longDir, "berth-state-directory");
+  assert.ok(fs.realpathSync(dir).length + (longDir.length - dir.length) + 26 > 100, `R2's --dir ${longDir} must exceed berth's limit`);
   const r2 = install(args("b2-r2", "systemd").map(a => a === path.join(dir, "state") ? longDir : a === prefix ? path.join(r2Root, "prefix") : a === units ? path.join(r2Root, "units") : a));
   assert.equal(r2.status, 1, r2.stderr);
   assert.match(r2.stderr, /--dir .* is too long: berth needs <dir>\/<16-hex machine id>\/qmp\.sock within 100 bytes/);
