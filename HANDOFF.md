@@ -372,8 +372,15 @@ fails in the machine, which has no credentials for it.
 - **Runner protocol 4** (`cubeyard/runner/4`, one schema in
   `packages/runner-protocol/proto/runner.proto`) and the host runner
   **`berth host`** (`packages/berth`, PR #142) are merged. cubed's p4 side
-  (enrolling a p4 runner, threads started on it by name) shipped in v0.3.26;
-  berth itself is not in a release yet and is built from source. A host
+  (enrolling a p4 runner, threads started on it by name) shipped in v0.3.26.
+  `release.yml` now also builds keel twice per architecture and stops
+  unless the builds match byte for byte (`scripts/keel/compare-builds.sh`),
+  builds berth for `linux-x64-gnu` and `darwin-arm64`, and signs both
+  (`scripts/keel/build-release.ts`, `scripts/berth/build-release.ts`); a
+  release that carries them is checked with `scripts/berth/verify-release.ts`
+  from a checkout of its tag and installed with the bundle's
+  `install-berth.sh` (docs/runner-operations.md). No published release
+  carries them yet (v0.3.30 does not). A host
   runner is unsandboxed and never in the pool (AGENTS.md, ARCHITECTURE.md
   "Runner protocol 4 and the host runner").
 - **keel** is the guest for protocol-4 VM runners: a kernel booted directly
@@ -415,7 +422,9 @@ fails in the machine, which has no credentials for it.
   - load;
   - a guest that ignores ACPI power-down;
   - a real model driving `gh`/`git` on its own initiative in a long task;
-  - the macOS updater's first scheduled run.
+  - the macOS updater's first scheduled run;
+  - a released berth binary end to end in production (installed from a
+    release and running a thread).
 - **Other:**
   - pi-codemode 1.0.1 has no CPU-slice limit;
   - there is no manual compaction or reset in the UI;

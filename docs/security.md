@@ -14,6 +14,16 @@
   runner can read every machine disk it hosts, and a guest escape would run as
   you. Give a runner that matters a dedicated account or machine without SSH,
   cloud, browser, Git or provider credentials.
+- **On a `berth vm`** (runner protocol 4) the thread's machine is a keel
+  guest and is still the sandbox. Its network is the runner's own LAN for
+  that machine, which follows the egress policy cubed sends with each start
+  (no policy, no egress), and it holds placeholders only: a request that
+  needs a credential goes to cubed, whose gateway puts the token in. The
+  guest talks to the runner over one virtio-serial channel, and the runner
+  treats the guest's side as hostile: a frame that breaks the channel's
+  rules ends the connection. The sandbox does not cover QEMU (under
+  `-sandbox on` on Linux, nothing on macOS), the runner host, cubed's own
+  processes, or where the guest may send data over HTTPS.
 - **cubed's own processes are not sandboxed either.** Pi, codemode's worker
   and Claude Code run on the cubed host as the user who runs cubed, with that
   user's files and the model credentials; only the tools they call run in the
