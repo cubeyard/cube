@@ -1145,6 +1145,47 @@ try {
       assert.ok(!fs.existsSync(path.join(machineDir, "template.raw")));
       assert.ok(!(JSON.parse(fs.readFileSync(path.join(machineDir, "argv.json"), "utf8")) as { args: string[] }).args.some(a => a.includes("template.raw")));
 
+      // cube's own source holds the marker inside a line (generated.rs, the
+      // agent check): no block of cube's, so it travels as it is. A line of
+      // the marker alone is one.
+      const markerText = "# cube: begin (keel writes this block on every machine_setup)";
+      const sourceLines = `pub const BEGIN: &str = "${markerText}";\nconst MARKER: &str = "${markerText}";\n`;
+      const writeSource = `printf '%s' '${sourceLines.replaceAll("'", "'\\''")}' > app/source.rs`;
+      const sourceSha = createHash("sha256").update(sourceLines).digest("hex");
+
+      // The runner's real CA left where the scrub cannot cut it out, in four
+      // forms made in the guest from /etc/cube/ca.pem, beside cube's source:
+      // the seal refuses and names exactly the four; no template is made.
+      const leakRef = { owner: "thread-1", id: randomBytes(8).toString("hex") };
+      await session.machine({ case: "machineCreate", value: { ref: leakRef, fence: fence10,
+        spec: { source: { case: "base", value: true }, size: { vcpus: 2, memoryMib: 1024, diskGib: 2 }, build: true } } });
+      await session.machine({ case: "machineStart", value: { ref: leakRef, fence: fence10, boot: { documents, mac: "" } } });
+      await session.until(leakRef, machine => !!machine.status?.guest?.ready, 180000);
+      const leaker = workspace10(leakRef);
+      const leakOut = await sh10(leaker, "v10-leaks", String.raw`set -e; mkdir -p app; ${writeSource}
+body=$(sudo sed '/-----/d' /etc/cube/ca.pem | tr -d '\n')
+printf '%s' "$body" | base64 -d > app/leak.der
+printf '%s\n' "$body" | fold -w 76 > app/leak.b64
+escaped=$(sudo awk '{printf "%s\\n", $0}' /etc/cube/ca.pem)
+printf '{"ca":"%s"}\n' "$escaped" > app/leak.json
+printf 'pub const CA: &str = "%s";\n' "$escaped" > app/leak.rs
+sha256sum app/leak.der | cut -d' ' -f1; grep -c 'BEGIN CERTIFICATE' app/leak.json app/leak.rs; grep -c '^' app/leak.json app/leak.rs`, 120000);
+      const caDer = Buffer.from(caPem.split("\n").filter(line => line && !line.startsWith("-----")).join(""), "base64");
+      assert.equal(leakOut, `${createHash("sha256").update(caDer).digest("hex")}\napp/leak.json:1\napp/leak.rs:1\napp/leak.json:1\napp/leak.rs:1\n`,
+        "the guest made the runner's own CA into DER and one-line escaped PEM copies");
+      let sealed = "";
+      await assert.rejects(session.call({ case: "templatePublish", value: { from: leakRef, fence: fence10, key: "v10-leaks", meta: "" } }, 600000),
+        (error: unknown) => { sealed = String(error); return error instanceof RunnerError && error.code === "FAILED_PRECONDITION" && error.reason === "seal_failed"; });
+      const named = [...sealed.matchAll(/\/workspace\/app\/[^ ;]+/g)].map(m => m[0]).sort();
+      assert.deepEqual(named, ["/workspace/app/leak.b64", "/workspace/app/leak.der", "/workspace/app/leak.json", "/workspace/app/leak.rs"], sealed);
+      assert.ok(!sealed.includes("source.rs"), sealed);
+      const noLeakTemplate = await session.call({ case: "templateList", value: {} });
+      assert.ok(noLeakTemplate.case === "templates" && noLeakTemplate.value.items.length === 0, show(noLeakTemplate));
+      assert.ok(!fs.existsSync(path.join(directory, "templates", `${leakRef.id}.erofs`)));
+      await stopVia(session, leakRef, epoch);
+      await session.machine({ case: "machineDelete", value: { ref: leakRef, fence: fence10, retain: false } });
+      note(`V10: the runner's real CA as DER, wrapped base64, escaped PEM in JSON and in a Rust string, beside cube's source: seal_failed naming exactly those four, no template; the machine deleted`);
+
       // A build machine: its template disk is vdd, blank, sparse, writable.
       const buildRef = { owner: "thread-1", id: randomBytes(8).toString("hex") };
       const built = await session.machine({ case: "machineCreate", value: { ref: buildRef, fence: fence10,
@@ -1159,7 +1200,7 @@ try {
       await session.until(buildRef, machine => !!machine.status?.guest?.ready, 180000);
       const builder = workspace10(buildRef);
       const marker = randomBytes(8).toString("hex");
-      const setupOut = await sh10(builder, "v10-setup", `set -e; mkdir -p app; printf ${marker} > app/built.txt; cp /etc/ssl/certs/ca-certificates.crt app/bundle-copy.pem
+      const setupOut = await sh10(builder, "v10-setup", `set -e; mkdir -p app; printf ${marker} > app/built.txt; ${writeSource}; cp /etc/ssl/certs/ca-certificates.crt app/bundle-copy.pem
 grep -c 'cube: begin' app/bundle-copy.pem; grep -cF '${caLine}' app/bundle-copy.pem
 sudo mkdir -p /opt/v10; echo setup-done | sudo tee /opt/v10/setup.txt >/dev/null`, 120000);
       assert.equal(setupOut, "1\n1\n", "before the publication the build machine has the runner's CA and cube's block, in a copy too");
@@ -1212,9 +1253,10 @@ sudo mkdir -p /opt/v10; echo setup-done | sudo tee /opt/v10/setup.txt >/dev/null
       const user = workspace10(userRef);
       const seen10 = await sh10(user, "v10-seen", `cat app/built.txt; echo; cat /opt/v10/setup.txt
 grep -c 'cube: begin' app/bundle-copy.pem || true; grep -cF '${caLine}' app/bundle-copy.pem || true
-grep -c 'cube: begin' /etc/ssl/certs/ca-certificates.crt; grep -cF '${caLine}' /etc/ssl/certs/ca-certificates.crt; grep -c '^agent:' /etc/passwd`);
-      assert.equal(seen10, `${marker}\nsetup-done\n0\n0\n1\n1\n1\n`,
-        "the build's files are there; its copy of the bundle lost the runner's CA and cube's block; the machine has its own CA block once and one agent account");
+grep -c 'cube: begin' /etc/ssl/certs/ca-certificates.crt; grep -cF '${caLine}' /etc/ssl/certs/ca-certificates.crt; grep -c '^agent:' /etc/passwd
+sha256sum app/source.rs | cut -d' ' -f1`);
+      assert.equal(seen10, `${marker}\nsetup-done\n0\n0\n1\n1\n1\n${sourceSha}\n`,
+        "the build's files are there, cube's source as it was; its copy of the bundle lost the runner's CA and cube's block; the machine has its own CA block once and one agent account");
       const token10 = randomBytes(8).toString("hex");
       await sh10(user, "v10-write", `printf ${token10} > app/after.txt`);
       const stopped10 = await stopVia(session, userRef, epoch);
