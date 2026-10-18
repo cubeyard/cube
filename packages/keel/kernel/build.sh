@@ -11,6 +11,11 @@ set -eu
 version=7.2.9
 sha256=b4c5dfbe51a364a6c7f03869200f88c8e1f77403539005f14b7fc6bc91b8d8ba
 builder=debian@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5
+# The toolchain comes from the Debian archive as it was at this time
+# (snapshot.debian.org; the builder image names the same one), so the
+# compiler is the same on every host and every day: two builds of the same
+# inputs on the same architecture give the same kernel.
+snapshot=20261005T000000Z
 # Fixed build time for reproducible kernels: the version's tarball date
 # is not used, so rebuilding the same inputs gives the same image.
 source_date_epoch=1760000000
@@ -96,8 +101,8 @@ if [ "$actual" != "$sha256" ]; then
 fi
 
 docker run --rm -e SOURCE_DATE_EPOCH="$source_date_epoch" -e KEEL_REFRESH="${KEEL_REFRESH:-0}" \
-	-v "$root:/keel" "$builder" sh -euc '
-		apt-get update -qq >/dev/null
+	-e KEEL_SNAPSHOT="$snapshot" -v "$root:/keel" "$builder" sh -euc '
+		sh /keel/apt-snapshot.sh "$KEEL_SNAPSHOT"
 		case "$(uname -m)" in
 		aarch64) cross=crossbuild-essential-amd64 ;;
 		*) cross=crossbuild-essential-arm64 ;;
@@ -118,9 +123,8 @@ if [ -n "$kc_cache_archs" ]; then
 	# key and entry the store writes.
 	for kc_arch in $kc_cache_archs; do
 		keel_cache_setup kernel "$kc_arch"
-		# The compiler line the task asks for: the toolchain is the image's
-		# apt packages, which are not pinned, so the image and the packages
-		# are named.
-		keel_cache_store "build-essential and both crossbuild-essential packages of $builder"
+		# The compiler line: the image and the archive snapshot its packages
+		# come from.
+		keel_cache_store "build-essential and both crossbuild-essential packages of $builder, snapshot.debian.org $snapshot"
 	done
 fi

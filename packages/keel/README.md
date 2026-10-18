@@ -101,10 +101,13 @@ is what a version bump that renames or drops an option causes; `KEEL_REFRESH=1`
 writes the new defconfig back so the change shows up in review. It also fails
 if modules are enabled.
 
-Requirements: Docker (or OrbStack) and network access to cdn.kernel.org.
-The source tarball is checked against a pinned SHA-256 and the build runs in a
-digest-pinned Debian 13 container with a fixed build time, so the same inputs
-give the same `vmlinuz`. Output: `out/<arch>/vmlinuz`, `config` and
+Requirements: Docker (or OrbStack) and network access to cdn.kernel.org and
+snapshot.debian.org. The source tarball is checked against a pinned SHA-256
+and the build runs in a digest-pinned Debian 13 container whose toolchain
+comes from the Debian archive at one pinned time (`apt-snapshot.sh`,
+`snapshot=` in both build scripts), with a fixed build time, user, host and
+version, so the same inputs on the same architecture give the same
+`vmlinuz` (see [Releases](#releases)). Output: `out/<arch>/vmlinuz`, `config` and
 `vmlinuz.sha256` (`out/` and `.cache/` are ignored by git).
 
 QEMU needs the `virtio-rtc-pci` device (Homebrew's QEMU 11.1.1 has it).
@@ -197,6 +200,35 @@ as before with one line saying why, when `KEEL_REFRESH=1` or
 untracked or ignored files among the inputs, or with a quoted or non-file
 input path. `sh packages/keel/cache.sh key <kernel|base> [arch ...]` prints the
 key a build would use, or the reason it would be bypassed.
+
+## Releases
+
+A `vX.Y.Z` release carries keel for both architectures (`release.yml`), next
+to cubed and cube-runner, signed with the same key as cubed's updates:
+
+```text
+keel-<release>-<arch>-vmlinuz       the kernel
+keel-<release>-<arch>-base.erofs    the base
+keel-<release>-<arch>-base.txt      the base's file listing (each binary's sha256)
+keel-<arch>.json, keel-<arch>.json.sig
+  {schema: 1, product: "keel", release, commit, arch,
+   kernel: {version, sha256, bytes, url},
+   base: {sha256, bytes, url, listing: {sha256, bytes, url}},
+   cacheKeys: {kernel, base}}       # what `cache.sh key` gives at that commit
+```
+
+Each architecture is built **twice**, in separate jobs on fresh runners of
+that architecture, and the release stops unless both builds are byte for
+byte the same: the kernel, its config, both bases, the listing and the cache
+keys (`scripts/keel/compare-builds.sh`). Only then is the manifest signed
+(`scripts/keel/build-release.ts`). `keel-repro.yml` does the same on pull
+requests that touch the kernel or base builds, and by hand.
+
+A build is reproducible on the architecture it ran on: an x86-64 kernel
+built under emulation or with the arm64 host's cross compiler is a
+different compiler's output and differs, which is why the release builds
+each architecture natively and why the cache key names the builder's
+architecture.
 
 ## Boot check
 

@@ -13,6 +13,9 @@
 set -eu
 
 builder=debian@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5
+# The archive snapshot the toolchain and erofs-utils come from, as for the
+# kernel (kernel/build.sh).
+snapshot=20261005T000000Z
 source_date_epoch=1760000000
 # name url sha256
 sources='
@@ -149,8 +152,8 @@ fi
 # shellcheck disable=SC2086 # host_ca is empty or whole options
 docker run --rm -e SOURCE_DATE_EPOCH="$source_date_epoch" $host_ca \
 	-e RUSTUP_INIT="/keel/.cache/$(basename "$rustup_init")" -e RUST_VERSION="$rust" \
-	-v "$root:/keel" -v "$repo:/src:ro" "$builder" sh -euc '
-		apt-get update -qq >/dev/null
+	-e KEEL_SNAPSHOT="$snapshot" -v "$root:/keel" -v "$repo:/src:ro" "$builder" sh -euc '
+		sh /keel/apt-snapshot.sh "$KEEL_SNAPSHOT"
 		case "$(uname -m)" in
 		aarch64) cross=crossbuild-essential-amd64 ;;
 		*) cross=crossbuild-essential-arm64 ;;
@@ -176,9 +179,8 @@ if [ -n "$kc_cache_archs" ]; then
 	# key and entry the store writes.
 	for kc_arch in $kc_cache_archs; do
 		keel_cache_setup base "$kc_arch"
-		# The compiler line the task asks for: the toolchain is the image's
-		# apt packages, which are not pinned, so the image and the packages
-		# are named.
-		keel_cache_store "build-essential and both crossbuild-essential packages of $builder, rustup $rustup_version"
+		# The compiler line: the image, the archive snapshot its packages
+		# come from, and rustup.
+		keel_cache_store "build-essential and both crossbuild-essential packages of $builder, snapshot.debian.org $snapshot, rustup $rustup_version"
 	done
 fi

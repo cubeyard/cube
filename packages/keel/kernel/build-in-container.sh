@@ -50,7 +50,7 @@ if grep -q '^CONFIG_MODULES=y' .config; then
 fi
 
 $make -j"$(nproc)" \
-	KBUILD_BUILD_USER=cube KBUILD_BUILD_HOST=cube \
+	KBUILD_BUILD_USER=cube KBUILD_BUILD_HOST=cube KBUILD_BUILD_VERSION=1 \
 	KBUILD_BUILD_TIMESTAMP="@${SOURCE_DATE_EPOCH:-0}" \
 	"$(basename "$image")" >/tmp/build-$arch.log 2>&1 || {
 	tail -40 /tmp/build-$arch.log >&2

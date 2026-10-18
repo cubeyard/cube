@@ -4,6 +4,8 @@
 # verified source tarballs in /keel/.cache, the repository read-only at /src
 # and Rust installed (RUSTUP_HOME, CARGO_HOME, RUSTUP_TOOLCHAIN).
 set -eu
+# One collation for every sort below (the tree listing, the UUID input).
+export LC_ALL=C
 
 arch=$1 # arm64 | x86_64
 out=/keel/out/$arch
