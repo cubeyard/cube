@@ -281,6 +281,61 @@ image `runner-vm-test.ts` also runs templates (V10; `CUBE_TEST_BERTH_IMAGE_B`
 for `template_image_changed`, `CUBE_TEST_BERTH_FSCK` for fsck.erofs on the
 layer).
 
+## Install from a release
+
+A release carries `berth-<release>-<platform>.tar.gz` for `linux-x64-gnu`
+and `darwin-arm64`, each with a signed `berth-<platform>.json`, and keel's
+kernel and base for the same release (`packages/keel/README.md`, Releases).
+There is no upgrade path from the protocol-3 `cube-runner`: a `berth vm` is
+a new runner with its own directory and key.
+
+1. **Verify** the downloaded release from a checkout of its tag (never with
+   a script from inside the bundle):
+   `node scripts/berth/verify-release.ts <release directory>`. It checks
+   `SHA256SUMS`, every berth and keel manifest against the committed update
+   key and its fingerprint, every asset's digest and size, and prints the
+   keel base's `cube-agent`.
+2. **QEMU, erofs-utils, keel:** a QEMU at or above keel's floor, with
+   `mapped-ram` (Linux: QEMU 11.1.2 at an explicit path, as on server1;
+   macOS: Homebrew's 11.1.x), its `qemu-img`, an `mkfs.erofs`, and keel's
+   `vmlinuz` and `base.erofs` of the same release in one directory.
+3. **Install** from the unpacked bundle, every path absolute:
+
+   ```sh
+   berth-<release>-<platform>/share/berth/install-berth.sh \
+     --prefix ~/berth --dir ~/berth/state --keel ~/berth/keel/<arch> \
+     --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img --mkfs-erofs /abs/mkfs.erofs \
+     --image <registry/repository@sha256:…> --network loopback --listen 127.0.0.1:7798 \
+     --node-id node-<name> --allow-peer <cubed's control peer> --max-machines 4 \
+     --unit-dir ~/berth/units --unit-name berth-vm --kind systemd   # or launchd
+   ```
+
+   It first runs this berth as far as its banner in a throwaway directory:
+   QEMU must meet keel's floor, the accelerator must be KVM (Linux) or HVF
+   (macOS), and berth must report the keel files' hashes. That pulls the
+   image into the throwaway directory unless `--seed-from <a berth directory
+   that has it>` names one to copy from. berth keeps each machine's sockets
+   at `<dir>/<machine id>/qmp.sock` within 100 bytes, so the installer
+   refuses a `--dir` too long for that and makes its check directory under
+   `/tmp`, whatever `TMPDIR` says. Then it writes
+   `<prefix>/libexec/berth-<version>/berth`, `<prefix>/bin/start-<name>.sh`
+   and a systemd user unit or a launchd user agent. It **never** overwrites
+   a file (exit 2), never starts, loads or enables anything, never enrolls,
+   and never makes, reads or prints the runner's key (the check's
+   throwaway directory, with the throwaway key berth made there, is
+   removed); it prints the next commands.
+4. **Start it yourself:** link the unit into `~/.config/systemd/user/` and
+   `systemctl --user enable --now <name>.service`, or `launchctl bootstrap
+   gui/$(id -u) <plist>`. The banner says `waiting for cubed`.
+5. **Enroll** it from the cubed host with a version-2 config that says
+   `"protocol": 4`: `cubed runners enroll --config <runner.json>` (or
+   `scripts/enroll-runner.ts`), as in `docs/runner-operations.md`. A `berth
+   vm` joins the pool.
+6. **Upgrade:** install the new release with the same `--dir` (the same peer
+   and key, so no new enrollment) and a new `--unit-name`, or point the
+   existing unit's start script at the new `libexec/berth-<version>/berth`;
+   restart at a quiet point, when no thread on it has a running turn.
+
 ## `berth image pull`: images into a vm directory's layer cache
 
 ```text
