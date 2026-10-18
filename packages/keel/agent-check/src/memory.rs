@@ -129,10 +129,22 @@ fn mib(bytes: u64) -> f64 {
     (bytes as f64 / MIB * 10.0).round() / 10.0
 }
 
+/// Random data, not zeros: QEMU leaves zero pages out of a mapped-ram
+/// memory file, and macOS compresses them, so zeros would measure neither.
 fn fill(name: &str, mib: u32) -> String {
     format!(
-        "dd if=/dev/zero of={name} bs=1M count={mib} conv=fsync status=none && ls -s --block-size=1M {name}"
+        "dd if=/dev/urandom of={name} bs=1M count={mib} iflag=fullblock conv=fsync status=none && ls -s --block-size=1M {name}"
     )
+}
+
+/// A guest command that must exit 0; its output.
+async fn run_ok(ch: &Channel, id: &str, command: &str) -> Result<String> {
+    let (header, out) = ch.run(id, command, 1).await?;
+    ensure!(
+        header["result"]["exitCode"] == 0,
+        "{id}: `{command}` failed in the guest, so nothing was measured: {header} {out:?}"
+    );
+    Ok(out)
 }
 
 async fn ready_machine(
@@ -169,7 +181,7 @@ pub(super) async fn check(
     // A: the page cache kept, saved without a prepare.
     let (dir, mut m, ch, pid) =
         ready_machine(lab, "memory-a", layers, image_layers, documents).await?;
-    let (_, out) = ch.run("mem-a-fill", &fill("keep", fill_mib), 1).await?;
+    let out = run_ok(&ch, "mem-a-fill", &fill("keep", fill_mib)).await?;
     let a_resident = settled(pid).await?;
     let a_file = dir.join("memory");
     let a_save = save(&mut m, &a_file).await?;
@@ -187,7 +199,7 @@ pub(super) async fn check(
     let (dir, mut m, ch, pid) =
         ready_machine(lab, "memory-b", layers, image_layers, documents).await?;
     let base = settled(pid).await?;
-    let (_, out) = ch.run("mem-b-fill", &fill("gone", fill_mib), 1).await?;
+    let out = run_ok(&ch, "mem-b-fill", &fill("gone", fill_mib)).await?;
     let peak = settled(pid).await?;
     checks.ok(
         peak >= base + fill_bytes / 2,
@@ -199,7 +211,7 @@ pub(super) async fn check(
             out.trim()
         ),
     )?;
-    let _ = ch.run("mem-b-rm", "rm gone", 1).await?;
+    run_ok(&ch, "mem-b-rm", "rm gone").await?;
     let target = half_back(base, peak);
     let deleted = watch_fall(pid, target).await?;
     let deleted_ms = deleted.reached(target);
@@ -216,7 +228,7 @@ pub(super) async fn check(
         ),
     )?;
     let low = settled(pid).await?;
-    let (_, out) = ch.run("mem-b-keep", &fill("keep", fill_mib), 1).await?;
+    let out = run_ok(&ch, "mem-b-keep", &fill("keep", fill_mib)).await?;
     let kept = settled(pid).await?;
     let t = Instant::now();
     let (answer, status) = ch.prepare().await?;
