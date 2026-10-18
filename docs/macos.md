@@ -154,6 +154,23 @@ installed either. `brew upgrade qemu` is expected to keep working: the runner
 records the launcher paths it was given (`/opt/homebrew/bin/...`), not the
 versioned ones behind them; restart the runner afterwards.
 
+## berth vm on a Mac
+
+This Mac's threads run on `cube-runner`. Homebrew installs and enrolls no
+`berth vm`, the protocol-4 runner; adding one is your choice ([runner
+operations](runner-operations.md#berth-vm-runner-protocol-4)):
+
+- It needs Homebrew's QEMU 11.1.x and Hypervisor.framework (HVF).
+- macOS QEMU has no `-sandbox`: on a Mac the guest is held by HVF and by
+  what berth checks on its channel and network, and a QEMU escape has your
+  account's authority ([security](security.md)).
+- `install-berth.sh --kind launchd` writes a launchd user agent and never
+  loads it; you load it with `launchctl bootstrap gui/$(id -u) <plist>`.
+- Once enrolled it joins the pool, so threads that name no runner may be
+  placed on it. New machines get the project's size, else `CUBED_VM_VCPUS`
+  and `CUBED_VM_MEMORY_MIB` (2 vCPUs and 4096 MiB by default), within the
+  runner's limits.
+
 ## The tap's old v0.1 launcher
 
 If this tap's earlier product, the v0.1 `cube` launcher (`cube up`, its VM

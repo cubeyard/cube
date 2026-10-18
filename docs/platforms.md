@@ -10,6 +10,17 @@
 | Linux arm64 (glibc) | signed release | no runner release |
 | Windows, musl | no | no |
 
+`berth vm`, the protocol-4 VM runner ([runner
+operations](runner-operations.md#berth-vm-runner-protocol-4)), is released
+for two platforms, each with keel's kernel and base from the same release:
+
+| | berth vm (keel machines) |
+|---|---|
+| Linux x86-64, glibc 2.39 or newer | KVM; a QEMU at or above keel's floor (QEMU 11.1.2 at an explicit path; Ubuntu 24.04's 8.2.2 is refused), run with `-sandbox on` |
+| macOS, Apple Silicon | HVF; Homebrew's QEMU 11.1.x, without `-sandbox` ([berth vm on a Mac](macos.md#berth-vm-on-a-mac)) |
+
+Other platforms have no berth release.
+
 Everything needs Node 26 only when running from source (releases bundle it),
 Git, OpenSSH (`ssh`, `ssh-keygen`), and a Debian 13 genericcloud image for the
 runner's architecture. Pi-based threads need a model provider Pi supports;

@@ -254,6 +254,48 @@ quiet, as before. Draining and the
 self-updater still wait until no VM is active, so a busier runner updates less
 often; drain it to make room for an update.
 
+## berth vm (runner protocol 4)
+
+`berth vm` is the protocol-4 VM runner: keel machines under QEMU
+([berth](../packages/berth/README.md)). It is a new runner with its own
+directory and key; there is no upgrade path from `cube-runner` to it.
+
+- **Install from a release.** Verify the downloaded release from a checkout
+  of its tag, never with a script from inside the bundle:
+  `node scripts/berth/verify-release.ts <release directory>`. Then run the
+  bundle's `share/berth/install-berth.sh`, every path absolute. Before it
+  writes anything it runs that berth as far as its banner in a throwaway
+  directory under `/tmp`: QEMU must meet keel's floor, the accelerator must
+  be KVM (Linux) or HVF (macOS), and berth must report the keel files'
+  hashes. It never overwrites a file, never starts, loads or enables a unit,
+  and never enrolls. The flags and the next commands are in berth's
+  [Install from a release](../packages/berth/README.md#install-from-a-release).
+- **Enroll** it from the cubed host with a version-2 config that says
+  `"protocol": 4`: `cubed runners enroll --config <runner.json>`, as above.
+- **It is in the pool.** A thread that names no runner may be placed on an
+  enrolled `berth vm` (never on a `berth host`). A thread on a `berth vm`
+  stays there and waits while the runner is down (above).
+- **Upgrade.** Install the new release with the same `--dir`: the same peer
+  and key, so no new enrollment. Point the start script at the new
+  `libexec/berth-<version>/berth` (or install with a new `--unit-name`), and
+  restart the unit when none of its threads has a running turn. The runner
+  quits its machines' QEMUs when it stops and never starts a machine by
+  itself; cubed starts a thread's machine again when the thread next needs
+  it, on the same writable disk.
+- **Roll back** the same way: point the start script back at the previous
+  `libexec/berth-<version>/berth`, which the installer never removes or
+  replaces, and restart.
+- **Retire** it as any runner: archive its threads, then `POST
+  /api/runners/<id>/retire` with `confirm` set to its node id and a
+  `reason` (at most 500 characters). cubed refuses while it has an open thread on the
+  runner or the runner reports an active machine; an unreachable runner must
+  be stale first. Then stop and remove its unit yourself.
+- **Limits.** berth keeps each machine's sockets at `<dir>/<16-hex machine
+  id>/qmp.sock` and refuses a `--dir` for which that path exceeds 100 bytes
+  (macOS allows 104); the installer checks it on the resolved path. The
+  Linux release binary is built on GitHub's `ubuntu-latest` (Ubuntu 24.04
+  today), so it needs glibc 2.39 or newer.
+
 ## Observing runners
 
 `GET /api/runners/observed` (the operator's API, behind the same network
