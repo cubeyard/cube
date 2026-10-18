@@ -10,6 +10,7 @@ OFFLINE_TESTS=(
   scripts/runner-production-test.ts
   scripts/keel-boot-check-test.ts
   scripts/keel-release-test.ts
+  scripts/berth-release-test.ts
   packages/server/test/log-test.ts
   packages/server/test/registry-test.ts
   packages/server/test/runner-slots-test.ts

@@ -85,12 +85,27 @@ assert.deepEqual([release.jobs.keel!.needs].flat(), ["keel-build"]);
 const keelSteps = release.jobs.keel!.steps.map((step) => step.run ?? "");
 assert.ok(keelSteps.findIndex((run) => run.includes("compare-builds.sh")) < keelSteps.findIndex((run) => run.includes("scripts/keel/build-release.ts")));
 assert.ok(!Object.values(release.jobs["keel-build"]!.steps).some((step) => JSON.stringify(step).includes("SIGNING_KEY")));
-assert.deepEqual([release.jobs.draft!.needs].flat().sort(), ["build", "keel"]);
+assert.deepEqual([release.jobs.draft!.needs].flat().sort(), ["berth", "build", "keel"]);
 assert.equal(release.jobs.draft!.steps.find((step) => step.uses?.startsWith("actions/download-artifact@"))?.with?.pattern, "cubed-*");
 for (const own of ["packages/keel/kernel/**", "packages/keel/base/**", ".github/workflows/keel-repro.yml"]) {
   assert.ok(keelRepro.on.pull_request.paths.includes(own), `keel-repro.yml runs on pull requests that touch ${own}`);
 }
 assert.ok("workflow_dispatch" in keelRepro.on);
+
+// berth: built per platform without the key (the same action as the
+// dispatch-only berth-package.yml), then the key is checked and only then used.
+assert.deepEqual([release.jobs["berth-build"]!.needs].flat(), ["gate"]);
+assert.ok(release.jobs["berth-build"]!.steps.some((step) => step.uses === "./.github/actions/berth-build"));
+assert.ok(!JSON.stringify(release.jobs["berth-build"]).includes("SIGNING_KEY"));
+assert.ok(!read(".github/actions/berth-build/action.yml").includes("secrets."));
+assert.deepEqual([release.jobs.berth!.needs].flat(), ["berth-build"]);
+const sign = release.jobs.berth!.steps.find((step) => step.run?.includes("scripts/berth/build-release.ts"))!.run!;
+assert.ok(sign.indexOf("verify-signing-key.ts") >= 0 && sign.indexOf("verify-signing-key.ts") < sign.indexOf("scripts/berth/build-release.ts"));
+const berthPackage = workflow("berth-package.yml");
+assert.deepEqual(Object.keys(berthPackage.on), ["workflow_dispatch"]);
+assert.ok(!read(".github/workflows/berth-package.yml").includes("secrets."), "berth-package.yml holds no secret");
+assert.ok(Object.values(berthPackage.jobs).some((job) => job.steps.some((step) => step.uses === "./.github/actions/berth-build")));
+assert.ok(runs(platforms).includes("node scripts/berth-release-test.ts"), "the berth tooling test also runs on macOS (bash 3.2)");
 
 // Third-party actions are pinned to a commit.
 const actions = [".github/actions/node-deps/action.yml", ".github/actions/rust-deps/action.yml"];
@@ -100,7 +115,7 @@ for (const file of [...fs.readdirSync(path.join(root, ".github/workflows")).map(
     if (uses!.startsWith("./")) assert.ok(fs.existsSync(path.join(root, uses!, "action.yml")), `${file}: ${uses}`);
   }
 }
-console.log("ci-test: Linux-only pull request gate, cancelled superseded runs, every suite in one shard, no check dropped, macOS on main, keel built twice and compared before signing, pinned actions");
+console.log("ci-test: Linux-only pull request gate, cancelled superseded runs, every suite in one shard, no check dropped, macOS on main, keel built twice and compared before signing, berth signed only after its key is checked, pinned actions");
 
 // The release gate against a fake gh: each call takes the scenario's next answer.
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "release-gate-"));

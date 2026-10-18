@@ -1,4 +1,4 @@
-# Build signed cubed, cube-runner and keel release assets. Publishing the draft
+# Build signed cubed, cube-runner, keel and berth release assets. Publishing the draft
 # remains an explicit maintainer action; runners follow the published
 # `latest` release by themselves (scripts/runner/update.sh).
 name: cubed release
@@ -149,8 +149,70 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  # berth: built per platform without the key, then signed in a later job.
+  berth-build:
+    name: berth ${{ matrix.platform }} build
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64-gnu
+            os: ubuntu-latest
+          - platform: darwin-arm64
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./.github/actions/berth-build
+        with:
+          platform: ${{ matrix.platform }}
+          label: ${{ github.ref_name }}
+
+  berth:
+    name: berth ${{ matrix.platform }} release assets
+    needs: berth-build
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux-x64-gnu, darwin-arm64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 26
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: berth-${{ matrix.platform }}
+          path: package
+      - name: sign the berth manifest
+        env:
+          SIGNING_KEY: ${{ secrets.CUBED_UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SIGNING_KEY"
+          umask 077
+          key="$RUNNER_TEMP/cubed-update-key.pem"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$SIGNING_KEY" > "$key"
+          node scripts/cubed/verify-signing-key.ts \
+            "$key" \
+            scripts/cubed/update-public-key.pem \
+            scripts/cubed/update-public-key.fingerprint
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          node scripts/berth/build-release.ts "$GITHUB_REF_NAME" "${{ matrix.platform }}" package dist "$base" "$key"
+          test -f "dist/berth-${{ matrix.platform }}.json.sig"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cubed-berth-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
+
   draft:
-    needs: [build, keel]
+    needs: [build, keel, berth]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -161,7 +223,7 @@ jobs:
           node-version: 26
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          # The release assets only, not keel's raw builds (keel-*).
+          # The release assets only, not the raw builds (keel-*, berth-*).
           pattern: cubed-*
           path: dist
           merge-multiple: true

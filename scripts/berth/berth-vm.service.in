@@ -1,0 +1,19 @@
+# A systemd user unit for one `berth vm`, written by install-berth.sh.
+# Load and start it yourself: systemctl --user daemon-reload &&
+# systemctl --user enable --now @UNIT@.service
+[Unit]
+Description=cube berth vm @UNIT@ (runner protocol 4)
+
+[Service]
+ExecStart=@START@
+WorkingDirectory=@PREFIX@
+# SIGINT: berth quits its machines' QEMUs and marks them interrupted.
+KillSignal=SIGINT
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:@LOG@
+StandardError=append:@LOG@
+
+[Install]
+WantedBy=default.target

@@ -1,6 +1,6 @@
-# Placeholder: GitHub lists a workflow_dispatch workflow only when a file of
-# that name is on the default branch, and a dispatch with --ref runs the file
-# of that ref. berth's packaging PR replaces this file; here it only fails.
+# berth's release bundles, by hand only, for a proof before a release: the
+# same build as release.yml's berth-build (.github/actions/berth-build), with
+# the label dev-<commit>. No secret, no signing, no release.
 name: berth package
 
 on:
@@ -10,11 +10,24 @@ permissions:
   contents: read
 
 jobs:
-  placeholder:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  berth-build:
+    name: berth ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64-gnu
+            os: ubuntu-latest
+          - platform: darwin-arm64
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
-      - name: not on this branch
-        run: |
-          echo "berth packaging is not on this branch"
-          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: label
+        id: label
+        run: echo "label=dev-${GITHUB_SHA:0:12}" >>"$GITHUB_OUTPUT"
+      - uses: ./.github/actions/berth-build
+        with:
+          platform: ${{ matrix.platform }}
+          label: ${{ steps.label.outputs.label }}
