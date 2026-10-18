@@ -168,13 +168,14 @@ fn remove(path: &Path) -> io::Result<()> {
     }
 }
 
-/// What the strings a runner CA leaves in a file look like.
+/// What a runner CA leaves in a file, found anywhere in its bytes, and
+/// cube's marker, found only as a line of its own ([`MarkerLine`]).
 struct Needles(Vec<Vec<u8>>);
 
 impl Needles {
     fn new(cas: &[Vec<u8>]) -> Self {
         use base64::Engine;
-        let mut needles = vec![BEGIN.as_bytes().to_vec()];
+        let mut needles = vec![];
         for der in cas {
             needles.push(der.clone());
             // The first 48 bytes as base64: the first line of any PEM copy
@@ -199,16 +200,22 @@ impl Needles {
             .any(|needle| memchr::memmem::find(data, needle).is_some())
     }
 
-    /// Whether the file holds any of them, read in pieces.
+    /// Whether the file holds a runner CA or a marker line, read in pieces.
     fn in_file(&self, path: &Path) -> io::Result<bool> {
         let mut file = fs::File::open(path)?;
         let keep = self.longest().saturating_sub(1);
         let mut buffer = vec![0u8; (1 << 20) + keep];
         let mut have = 0;
+        let mut marker = MarkerLine::default();
         loop {
             let n = file.read(&mut buffer[have..])?;
             if n == 0 {
-                return Ok(have > 0 && self.in_bytes(&buffer[..have]));
+                return Ok(marker.end() || (have > 0 && self.in_bytes(&buffer[..have])));
+            }
+            // Each byte goes to the marker's scan once; the needles see the
+            // kept tail again.
+            if marker.feed(&buffer[have..have + n]) {
+                return Ok(true);
             }
             have += n;
             if self.in_bytes(&buffer[..have]) {
@@ -218,6 +225,81 @@ impl Needles {
             buffer.copy_within(from..have, 0);
             have -= from;
         }
+    }
+}
+
+/// A line that is cube's marker, as keel writes it (`generated::with_block`):
+/// the marker with nothing else on the line but spaces or tabs before it
+/// and spaces, tabs or a carriage return after it. That is wider than the
+/// scrub, which cuts out only a block whose line is the marker exactly, so
+/// an indented or CRLF marker line fails the seal rather than travel. The
+/// marker inside a longer line (a string literal in cube's own source, a
+/// sentence about it, a binary that embeds it) is no block of cube's: what
+/// a block could carry that matters, the runner's CA, the needles find in
+/// any form. Fed a file's bytes in order, in pieces of any size.
+#[derive(Default)]
+struct MarkerLine {
+    state: Marker,
+}
+
+#[derive(Default, Clone, Copy, PartialEq)]
+enum Marker {
+    /// At the start of a line, or after spaces and tabs there.
+    #[default]
+    Lead,
+    /// This many bytes of the marker matched.
+    Matched(usize),
+    /// The whole marker, then only spaces, tabs or carriage returns.
+    Trail,
+    /// Not a marker line: wait for the next one.
+    Other,
+}
+
+impl MarkerLine {
+    /// Whether a marker line ended in `data`.
+    fn feed(&mut self, data: &[u8]) -> bool {
+        let marker = BEGIN.as_bytes();
+        let mut i = 0;
+        while i < data.len() {
+            if self.state == Marker::Other {
+                match memchr::memchr(b'\n', &data[i..]) {
+                    Some(at) => {
+                        self.state = Marker::Lead;
+                        i += at + 1;
+                        continue;
+                    }
+                    None => return false,
+                }
+            }
+            let byte = data[i];
+            i += 1;
+            if byte == b'\n' {
+                if self.state == Marker::Trail {
+                    return true;
+                }
+                self.state = Marker::Lead;
+                continue;
+            }
+            self.state = match self.state {
+                Marker::Lead if byte == b' ' || byte == b'\t' => Marker::Lead,
+                Marker::Lead if byte == marker[0] => Marker::Matched(1),
+                Marker::Matched(n) if n < marker.len() && byte == marker[n] => {
+                    if n + 1 == marker.len() {
+                        Marker::Trail
+                    } else {
+                        Marker::Matched(n + 1)
+                    }
+                }
+                Marker::Trail if matches!(byte, b' ' | b'\t' | b'\r') => Marker::Trail,
+                _ => Marker::Other,
+            };
+        }
+        false
+    }
+
+    /// Whether the file ended on a marker line (no newline after it).
+    fn end(&self) -> bool {
+        self.state == Marker::Trail
     }
 }
 
@@ -971,6 +1053,207 @@ mod tests {
         assert!(needles.in_file(&path).unwrap());
         fs::write(&path, vec![b'.'; 3 << 20]).unwrap();
         assert!(!needles.in_file(&path).unwrap());
+    }
+
+    /// A runner CA as berth makes one (berth/src/vm/ca.rs): P-256, a CA
+    /// for one level, `cube runner CA <id>`. Its DER and PEM.
+    fn real_ca() -> (Vec<u8>, String) {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
+            KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
+        };
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut name = DistinguishedName::new();
+        name.push(DnType::CommonName, "cube runner CA 0123456789abcdef");
+        let mut params = CertificateParams::default();
+        params.distinguished_name = name;
+        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+            KeyUsagePurpose::DigitalSignature,
+        ];
+        let certificate = params.self_signed(&key).unwrap();
+        (certificate.der().to_vec(), certificate.pem())
+    }
+
+    fn marker_in(data: &[u8]) -> bool {
+        let mut scan = MarkerLine::default();
+        scan.feed(data) || scan.end()
+    }
+
+    #[test]
+    fn the_marker_counts_only_as_a_line_of_its_own() {
+        let lines = [
+            (format!("{BEGIN}\n"), true),
+            (format!("x\n{BEGIN}\nA\n# cube: end\n"), true),
+            (BEGIN.to_string(), true),
+            (format!("{BEGIN}\r\n"), true),
+            (format!("  \t{BEGIN} \t\r\n"), true),
+            (format!("pub const BEGIN: &str = \"{BEGIN}\";\n"), false),
+            (format!("const MARKER: &str = \"{BEGIN}\";"), false),
+            (format!("keel writes `{BEGIN}` first\n"), false),
+            (format!("#{BEGIN}\n"), false),
+            (format!("{BEGIN}x\n"), false),
+            (format!("{BEGIN} x\n"), false),
+            (BEGIN[..BEGIN.len() - 1].to_string(), false),
+            (format!("{}\n", &BEGIN[..BEGIN.len() - 1]), false),
+            (String::new(), false),
+        ];
+        for (data, want) in &lines {
+            assert_eq!(marker_in(data.as_bytes()), *want, "{data:?}");
+            // Fed in two pieces, split anywhere: the same answer.
+            for at in 0..=data.len() {
+                let mut scan = MarkerLine::default();
+                let found = scan.feed(&data.as_bytes()[..at])
+                    || scan.feed(&data.as_bytes()[at..])
+                    || scan.end();
+                assert_eq!(found, *want, "{data:?} split at {at}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_marker_line_is_found_across_the_pieces_a_file_is_read_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        let needles = Needles::new(&[]);
+        for before in [(1 << 20) - 30, (1 << 20) - 1, 1 << 20, (1 << 20) + 5] {
+            let mut data = vec![b'.'; before];
+            data.push(b'\n');
+            data.extend_from_slice(BEGIN.as_bytes());
+            data.extend_from_slice(b"\nA\n# cube: end\n");
+            fs::write(&path, &data).unwrap();
+            assert!(needles.in_file(&path).unwrap(), "line at {before}");
+            // The same bytes inside a longer line: no marker line.
+            let at = data.iter().position(|&b| b == b'\n').unwrap();
+            data[at] = b'"';
+            fs::write(&path, &data).unwrap();
+            assert!(
+                !needles.in_file(&path).unwrap(),
+                "inside a line at {before}"
+            );
+        }
+    }
+
+    #[test]
+    fn cube_s_own_source_is_published_as_it_is() {
+        // The two files that held the marker in a string literal and made
+        // the seal refuse the cube project's templates (2026-10-18).
+        let sources = [
+            (
+                "workspace/packages/keel/agent/src/generated.rs",
+                include_str!("generated.rs"),
+            ),
+            (
+                "workspace/packages/keel/agent-check/src/main.rs",
+                include_str!("../../agent-check/src/main.rs"),
+            ),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let upper = dir.path().join("upper");
+        let (runner, _) = real_ca();
+        let cas = [runner];
+        for (rel, text) in sources {
+            assert!(text.contains(BEGIN), "{rel} holds the marker's text");
+            write(&upper, rel, text);
+        }
+        let machine = Machine {
+            lowers: &[],
+            cas: &cas,
+            mount_points: &[],
+            home: "/home/agent",
+        };
+        assert_eq!(scrub(&upper, &machine).unwrap(), Vec::<String>::new());
+        assert_eq!(seal_check(&upper, &cas).unwrap(), Vec::<String>::new());
+        for (rel, text) in sources {
+            assert_eq!(fs::read_to_string(upper.join(rel)).unwrap(), text, "{rel}");
+        }
+    }
+
+    #[test]
+    fn a_real_runner_ca_left_in_any_form_fails_the_seal() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        let upper = dir.path().join("upper");
+        let (runner, runner_pem) = real_ca();
+        let cas = [runner.clone()];
+        let body = base64::engine::general_purpose::STANDARD.encode(&runner);
+        let wrapped: Vec<&str> = body
+            .as_bytes()
+            .chunks(76)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        let escaped = runner_pem.replace('\n', "\\n");
+        let mut binary = b"\x7fELF\x00\x01".to_vec();
+        binary.extend_from_slice(&runner);
+        binary.extend_from_slice(b"\x00tail");
+        fs::create_dir_all(upper.join("workspace/app")).unwrap();
+        fs::write(upper.join("workspace/app/ca.der"), &binary).unwrap();
+        let leaks = [
+            ("workspace/app/ca.b64", format!("{}\n", wrapped.join("\n"))),
+            (
+                "workspace/app/ca.json",
+                format!("{{\"ca\":\"{escaped}\"}}\n"),
+            ),
+            (
+                "workspace/app/ca.rs",
+                format!("pub const CA: &str = \"{escaped}\";\n"),
+            ),
+            (
+                "workspace/app/notes.md",
+                format!("  {BEGIN}\nSSL_CERT_FILE=/x\n# cube: end\n"),
+            ),
+            (
+                "workspace/app/crlf.txt",
+                format!("{BEGIN}\r\nA=b\r\n# cube: end\r\n"),
+            ),
+        ];
+        for (rel, text) in &leaks {
+            write(&upper, rel, text);
+        }
+        // What the scrub can cut out: plain PEM lines and a block as keel
+        // writes it.
+        write(
+            &upper,
+            "workspace/app/bundle.pem",
+            &format!("{}{runner_pem}", pem(&der(5))),
+        );
+        write(
+            &upper,
+            "workspace/app/env",
+            &format!("A=1\n{BEGIN}\nB=2\n# cube: end\n"),
+        );
+        // And cube's own source beside them.
+        write(
+            &upper,
+            "workspace/src/generated.rs",
+            include_str!("generated.rs"),
+        );
+        let machine = Machine {
+            lowers: &[],
+            cas: &cas,
+            mount_points: &[],
+            home: "/home/agent",
+        };
+        scrub(&upper, &machine).unwrap();
+        let mut left = seal_check(&upper, &cas).unwrap();
+        left.sort();
+        let mut want: Vec<String> = ["workspace/app/ca.der"]
+            .into_iter()
+            .chain(leaks.iter().map(|(rel, _)| *rel))
+            .map(|rel| format!("/{rel} holds cube's block or a runner CA"))
+            .collect();
+        want.sort();
+        assert_eq!(left, want);
+        assert_eq!(
+            fs::read_to_string(upper.join("workspace/app/bundle.pem")).unwrap(),
+            pem(&der(5))
+        );
+        assert_eq!(
+            fs::read_to_string(upper.join("workspace/app/env")).unwrap(),
+            "A=1\n"
+        );
     }
 
     #[test]

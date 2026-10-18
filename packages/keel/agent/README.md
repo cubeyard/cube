@@ -212,8 +212,10 @@ cube-init (PID 1)
   layer below goes); and what cube-guest's `seal_final` removes that a keel
   root can have (`/var/lib/cube`, `/etc/cube`, hook logs, shell histories,
   ssh host keys, the machine ids, the random seed). The seal's check then
-  looks at every file for a marker line, a runner CA's DER or the start of
-  its base64, and refuses (`seal_failed`, nothing written) when any is left,
+  looks at every file for a marker line (the marker with nothing but
+  spaces, tabs or a carriage return around it on its line; inside a longer
+  line, as in cube's own source, it is no block of cube's), a runner CA's
+  DER or the start of its base64 anywhere, and refuses (`seal_failed`, nothing written) when any is left,
   or when the build changed a Java keystore while a runner CA was installed
   (keel cannot clean one yet). The base's `mkfs.erofs` writes the layer
   (lz4hc, owners, times and xattrs kept, so whiteouts and opaque

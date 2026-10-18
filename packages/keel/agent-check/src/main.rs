@@ -2983,6 +2983,31 @@ const NEVER_IN_A_TEMPLATE: [&str; 11] = [
 
 const MARKER: &str = "# cube: begin (keel writes this block on every machine_setup)";
 
+/// Whether `data` has cube's marker as a line of its own: nothing else on
+/// it but spaces or tabs before and spaces, tabs or a carriage return
+/// after (the agent's seal refuses those too). The marker inside a longer
+/// line, as in cube's own source, is not one.
+fn marker_line(data: &[u8]) -> bool {
+    data.split(|&b| b == b'\n').any(|line| {
+        let start = line
+            .iter()
+            .position(|&b| b != b' ' && b != b'\t')
+            .unwrap_or(line.len());
+        let end = line
+            .iter()
+            .rposition(|&b| !matches!(b, b' ' | b'\t' | b'\r'))
+            .map_or(start, |i| i + 1);
+        start < end && &line[start..end] == MARKER.as_bytes()
+    })
+}
+
+/// A line of cube's own source that holds the marker (generated.rs): what
+/// made the seal refuse the cube project's templates until the marker was
+/// matched as a line only.
+fn source_line() -> String {
+    format!("pub const BEGIN: &str = \"{MARKER}\";")
+}
+
 /// The DER of TEST_CA.
 fn test_ca_der() -> Vec<u8> {
     use base64::Engine;
@@ -3017,11 +3042,12 @@ fn erofs_bytes(disk: &Path) -> Result<Option<u64>> {
 fn template_findings(tree: &[erofs::Entry], der: &[u8]) -> (Vec<String>, usize) {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&der[..der.len().min(48)]);
-    let needles: [&[u8]; 3] = [MARKER.as_bytes(), der, b64.as_bytes()];
+    let needles: [&[u8]; 2] = [der, b64.as_bytes()];
     let holds = |data: &[u8]| {
-        needles
-            .iter()
-            .any(|n| data.windows(n.len()).any(|w| w == *n))
+        marker_line(data)
+            || needles
+                .iter()
+                .any(|n| data.windows(n.len()).any(|w| w == *n))
     };
     let mut found = vec![];
     let mut read = 0;
@@ -3104,7 +3130,9 @@ fn template_work(tree: &[erofs::Entry]) -> (bool, Value) {
         .filter_map(|e| e.path.strip_prefix(dir)?.strip_prefix('/'))
         .collect();
     let copy = text("workspace/app/bundle-copy.pem");
+    let source = text("workspace/app/source.rs");
     let ok = text("workspace/app/out.txt") == "built"
+        && source == format!("{}\n", source_line())
         && mtime == Some(1700000000)
         && whiteout
         && opaque
@@ -3122,6 +3150,7 @@ fn template_work(tree: &[erofs::Entry]) -> (bool, Value) {
             "opaque": opaque,
             "aptConfD": inside,
             "copyCerts": copy.matches("BEGIN CERTIFICATE").count(),
+            "source": source,
         }),
     )
 }
@@ -3291,6 +3320,11 @@ async fn template_checks(
         "the build machine's setup: {done:?} {ready:?}"
     );
     let mut script = BUILD_SETUP.to_string();
+    // cube's own source: the marker inside a line, which travels as it is.
+    script.push_str(&format!(
+        "printf '%s\\n' '{}' > app/source.rs\n",
+        source_line()
+    ));
     if lab.o.control == Some(Control::Seal) {
         use base64::Engine;
         let der = base64::engine::general_purpose::STANDARD.encode(test_ca_der());
@@ -3404,7 +3438,7 @@ async fn template_checks(
     let (work, seen) = template_work(&tree);
     checks.ok(
         work,
-        "the setup's work is in the layer: a file with its time, a 0/0 whiteout for a deleted image file, an opaque directory made again holding only its new file, a new group, the project's copy of the bundle (without the runner's CA)",
+        "the setup's work is in the layer: a file with its time, a 0/0 whiteout for a deleted image file, an opaque directory made again holding only its new file, a new group, the project's copy of the bundle (without the runner's CA), a source line holding the marker inside it, as it was",
         seen,
     )?;
     // Checked after 78, so 73-78 keep their numbers.
@@ -3535,8 +3569,9 @@ mod tests {
         use erofs::Kind::{Char, File, Symlink};
         let b64 = base64::engine::general_purpose::STANDARD.encode(der);
         let mut deep = erofs::testing::mixed(300_000, 11);
-        // Across lclusters and pclusters, deep in a compressed file.
-        deep.splice(150_000..150_000, format!("x{MARKER}y").into_bytes());
+        // Across lclusters and pclusters, deep in a compressed file: a
+        // marker line.
+        deep.splice(150_000..150_000, format!("\n  {MARKER}\r\n").into_bytes());
         vec![
             ("etc/gitconfig", File, format!("{MARKER}\n").into_bytes()),
             ("opt/x.der", File, der.to_vec()),
@@ -3575,6 +3610,20 @@ mod tests {
             let (found, _) = template_findings(&tree, &der);
             assert_eq!(found.len(), 1, "{rel}: {found:?}");
         }
+        // The marker inside a line (cube's own source, prose) is no block.
+        for data in [
+            format!("x{MARKER}y"),
+            format!("{}\n", source_line()),
+            format!("see `{MARKER}`\n"),
+        ] {
+            let mut tree = clean.clone();
+            tree.push(entry("workspace/src/generated.rs", File, data.as_bytes()));
+            assert_eq!(
+                template_findings(&tree, &der).0,
+                Vec::<String>::new(),
+                "{data:?}"
+            );
+        }
         // The CA in an xattr's value.
         let mut tree = clean.clone();
         tree[1].xattrs.push(("user.ca".into(), der.clone()));
@@ -3605,6 +3654,10 @@ mod tests {
             e("workspace/app", T::Dir),
             out,
             e(
+                "workspace/app/source.rs",
+                T::File(format!("{}\n", source_line()).into_bytes()),
+            ),
+            e(
                 "workspace/app/bundle-copy.pem",
                 T::File(b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".to_vec()),
             ),
@@ -3631,7 +3684,7 @@ mod tests {
             return;
         };
         let (found, files) = template_findings(&tree, &der);
-        assert!(found.is_empty() && files == 6, "{found:?} {files}");
+        assert!(found.is_empty() && files == 7, "{found:?} {files}");
         let (ok, seen) = template_work(&tree);
         assert!(ok, "{seen}");
 
