@@ -3654,6 +3654,10 @@ mod tests {
             e("workspace/app", T::Dir),
             out,
             e(
+                "workspace/app/source.rs",
+                T::File(format!("{}\n", source_line()).into_bytes()),
+            ),
+            e(
                 "workspace/app/bundle-copy.pem",
                 T::File(b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".to_vec()),
             ),
@@ -3680,7 +3684,7 @@ mod tests {
             return;
         };
         let (found, files) = template_findings(&tree, &der);
-        assert!(found.is_empty() && files == 6, "{found:?} {files}");
+        assert!(found.is_empty() && files == 7, "{found:?} {files}");
         let (ok, seen) = template_work(&tree);
         assert!(ok, "{seen}");
 
