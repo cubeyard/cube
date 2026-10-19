@@ -55,10 +55,13 @@ try {
     // The OOM killer stops it: the full error, the memory, its log, the advice.
     fs.writeFileSync(path.join(guest(), "oom"), "");
     await first.locator(".lamp.on-red").waitFor({ timeout: 20_000 });
-    assert.equal(await first.locator(".startup-detail.bad").innerText(),
+    // Read as text, open or not: cubed's recovery loop (every 30 s) may start
+    // the next try at once, and the failed one folds then.
+    const text = async (selector: string) => (await first.locator(selector).textContent() ?? "").trim();
+    assert.equal(await text(".startup-detail.bad"),
       "pre-setup was stopped: the machine ran out of memory (this command used up to 3.5 GB; the machine has 3.8 GB); cube tries again");
-    assert.match(await first.locator(".startup-detail:not(.bad)").innerText(), /^memory: this command used up to 3\.5 GB; the machine has 3\.8 GB; 1 process was killed for want of memory$/);
-    assert.match(await first.locator("pre.startup-log").innerText(), /installing postgresql\nbuilding the services/);
+    assert.match(await text(".startup-detail:not(.bad)"), /^memory: this command used up to 3\.5 GB; the machine has 3\.8 GB; 1 process was killed for want of memory$/);
+    assert.match(await text("pre.startup-log"), /installing postgresql\nbuilding the services/);
     const advice = panel.locator(".strip-note.bad");
     assert.match(await advice.innerText(), /the machine ran out of memory during prepare · try 1 \(it used up to 3\.5 GB; the machine has 3\.8 GB\)/);
     assert.equal(await advice.locator("a.key", { hasText: "machine size" }).getAttribute("href"), `#/projects/${project.id}`);
