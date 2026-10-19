@@ -262,8 +262,9 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   decides idleness and sends it; the runner refuses while a `guest` or
   `dial` stream is open (`busy`) or while the disk lacks the machine's
   memory plus the margin (`disk`), and the machine keeps running. A save:
-  `snapshot_prepare`, the runner leaves `cube.0` until a port change after
-  the close, `stop`, `migrate` to `memory.part` (`mapped-ram`,
+  `snapshot_prepare`, the agent's `status` that says it is prepared (keel
+  F-P7-2: leaving before it breaks the agent's channel), the runner leaves
+  `cube.0` until a port change after the close, `stop`, `migrate` to `memory.part` (`mapped-ram`,
   `cpr-reboot`), `completed`, sync, rename to `memory`, the journal's
   snapshot (with what it must match: QEMU, keel, berth, machine type, size
   and QEMU arguments), then QEMU quits; at most 60 s, else the migration
@@ -275,8 +276,10 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   and boots cold with `SnapshotDropped`. The journal is the only authority:
   at start the runner deletes a memory file it does not name for a
   suspended machine. A berth from before suspend cannot read a journal
-  with a suspended machine: roll back only with none suspended. Not shown
-  on a host yet: the save and restore against a real QEMU and agent (G-F).
+  with a suspended machine: roll back only with none suspended.
+  `packages/server/test/runner-vm-suspend-test.ts` is the gate (G-F): a
+  command over a suspend, data intact, the same boot id, then a cold boot
+  with SnapshotDropped/version; run under TCG only so far, not on a host.
 - `stop`, `delete` and the runner's own shutdown stop a machine the same
   way: the runner asks the agent to shut down (`DaemonRequest.shutdown`:
   SIGTERM to the workload, SIGKILL to what is left after 10 s, sync, the

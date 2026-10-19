@@ -48,9 +48,17 @@ use super::{
 /// shorter than cubed's wait for `machine_suspend` (90 s, as for a stop), so
 /// the runner answers first. Past it the save is undone.
 pub const SUSPEND_WAIT: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 60 });
-/// The agent sees the runner leave cube.0 (a port change after the close):
-/// runner.proto's reset wait.
-const LEAVE_WAIT: Duration = Duration::from_secs(2);
+/// The agent sees the runner leave cube.0 (a port change after the close,
+/// which QMP reports at most once a second per port).
+const LEAVE_WAIT: Duration = Duration::from_secs(3);
+/// After `done`, the agent's `status` that says it is prepared: the runner
+/// leaves only once that frame is through. Left while the agent still
+/// writes it, the agent's writer blocks on the closed port until its 2 s
+/// cut-off, and its next open of the port fails (EBUSY): its channel ends
+/// (keel finding F-P7-2, seen under TCG).
+const PREPARED_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 5 });
+/// What the agent's `GuestInfo.reason` says while prepared (keel's agent).
+const PREPARED: &str = "prepared for a snapshot";
 /// A restore's load of the memory file.
 const LOAD_WAIT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(20);
@@ -335,7 +343,7 @@ impl VmRunner {
         };
         event(&dir, "suspend", "the machine is saved");
         let mut progress = Progress::default();
-        let saved = tokio::time::timeout(SUSPEND_WAIT, self.save(&dir, &guest, &mut progress))
+        let saved = tokio::time::timeout(SUSPEND_WAIT, self.save(&id, &dir, &guest, &mut progress))
             .await
             .unwrap_or_else(|_| {
                 Err(anyhow::anyhow!(
@@ -383,6 +391,7 @@ impl VmRunner {
     /// The save itself: the allocated bytes of the renamed memory file.
     async fn save(
         &self,
+        id: &str,
         dir: &Path,
         guest: &channel::Guest,
         progress: &mut Progress,
@@ -406,6 +415,29 @@ impl VmRunner {
             Ok(Err(error)) => bail!("snapshot_prepare: {}", error.message),
             Err(_) => bail!("snapshot_prepare: the channel ended"),
         }
+        tokio::time::timeout(PREPARED_WAIT, async {
+            loop {
+                let prepared = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .machines
+                    .get(id)
+                    .and_then(|entry| entry.info.as_ref())
+                    .is_some_and(|info| !info.ready && info.reason == PREPARED);
+                if prepared {
+                    return;
+                }
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "the agent answered snapshot_prepare but did not say \"{PREPARED}\" within {} s",
+                PREPARED_WAIT.as_secs()
+            )
+        })?;
         let seen = guest.leave();
         progress.left = true;
         tokio::time::timeout(LEAVE_WAIT, seen)

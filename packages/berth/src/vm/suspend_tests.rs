@@ -117,9 +117,13 @@ fn fake_qmp(
 /// How the stand-in agent answers `snapshot_prepare`.
 #[derive(Clone, Copy, PartialEq)]
 enum Agent {
+    /// Answers done, then says it is prepared (its `status`), then sees the
+    /// runner leave: keel's agent.
     Prepares,
     /// Prepares, but never sees the runner leave.
     PreparesDeaf,
+    /// Answers done but never says it is prepared.
+    PreparesSilent,
     Refuses,
 }
 
@@ -170,6 +174,7 @@ async fn running(
     let fake = fake_qmp(&dir, migrate, "running", quit, Arc::new(|| {}));
     let ops = Arc::new(Mutex::new(vec![]));
     let sent = Arc::clone(&ops);
+    let (says, machine) = (Arc::clone(runner), id.to_owned());
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -191,6 +196,14 @@ async fn running(
                         _ => AnswerKind::Done(proto::Empty {}),
                     };
                     guest.answer(frame.ch, Ok(answer));
+                    if name == "snapshot_prepare" && matches!(agent, Agent::Prepares | Agent::PreparesDeaf) {
+                        says.publish_guest(&machine, "boot-1", proto::GuestInfo {
+                            connected: true,
+                            ready: false,
+                            reason: "prepared for a snapshot".into(),
+                            ..Default::default()
+                        });
+                    }
                 }
                 _ = tokio::time::sleep(Duration::from_millis(20)) => {
                     if agent == Agent::Prepares {
@@ -452,6 +465,23 @@ async fn a_failed_migration_or_a_refused_prepare_is_undone() {
     );
     assert!(
         error.message.contains("refused snapshot_prepare"),
+        "{error:?}"
+    );
+    assert_eq!(*ops.lock().unwrap(), ["snapshot_prepare", "snapshot_done"]);
+    assert!(fake.commands().is_empty(), "{:?}", fake.commands());
+    assert_eq!(phase(&runner, USER), Phase::Running);
+
+    // The agent never says it is prepared: the runner does not leave, sends
+    // snapshot_done and never stops QEMU (F-P7-2).
+    let lab = Lab::new();
+    let runner = lab_runner(&lab, Some(1), 8).await;
+    create(&runner, USER, base(), false).await.unwrap();
+    let (fake, ops) = running(&runner, USER, Migrate::Completes, Agent::PreparesSilent).await;
+    let error = call(&runner, suspend_call(USER, 2)).await.unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("did not say \"prepared for a snapshot\""),
         "{error:?}"
     );
     assert_eq!(*ops.lock().unwrap(), ["snapshot_prepare", "snapshot_done"]);
