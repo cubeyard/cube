@@ -8,7 +8,7 @@
 //!   keel-agent-check --qemu PATH --qemu-img PATH --kernel PATH --base PATH \
 //!     --mkfs PATH --fsck PATH --tar IMAGE.tar --out DIR [--arch x86_64|arm64] \
 //!     [--accel tcg|kvm|hvf] [--contract COMMAND] [--smp 2] [--memory 1024] \
-//!     [--vmgenid on|off] [--only snapshot|rest|memory] \
+//!     [--vmgenid on|off] [--only snapshot|rest|memory|leave] \
 //!     [--control reconnect|late-hello|restore|prepare|clock|seal|redirect|snapshot|reporting]
 //!
 //! `--control` runs one negative control, expected to fail at its check:
@@ -29,6 +29,11 @@
 //! `--only memory` (masterplan S-7b) runs memory.rs alone: whether freed
 //! guest memory goes back to the host and how much smaller a snapshot is
 //! after `snapshot_prepare`.
+//!
+//! `--only leave` (F-P7-2) runs leave.rs alone: the runner leaves `cube.0`
+//! while the agent's writer is blocked and comes back; the agent must keep
+//! its channel. A keel before #206 fails it (its negative control is that
+//! keel's base, no flag).
 //!
 //! `--vmgenid` (x86-64 only, default on, as `berth vm` runs machines): QEMU's
 //! `vmgenid` device, whose new GUID makes the guest kernel reseed its random
@@ -71,6 +76,7 @@ use tokio::{
 };
 
 mod erofs;
+mod leave;
 mod memory;
 
 // ---------------------------------------------------------------- options
@@ -99,6 +105,8 @@ struct Options {
     skip_snapshot: bool,
     /// `--only memory`: memory.rs alone (S-7b).
     only_memory: bool,
+    /// `--only leave`: leave.rs alone (F-P7-2).
+    only_leave: bool,
 }
 
 /// A negative control: the one place the reset on channel 0 is left out,
@@ -183,13 +191,18 @@ fn options() -> Result<Options> {
         Some("off") => false,
         Some(other) => bail!("--vmgenid is on or off, not {other}"),
     };
+    let only_leave = values.get("only").is_some_and(|only| only == "leave");
     let (only_snapshot, skip_snapshot, only_memory) = match values.get("only").map(String::as_str) {
-        None => (false, false, false),
+        None | Some("leave") => (false, false, false),
         Some("snapshot") => (true, false, false),
         Some("rest") => (false, true, false),
         Some("memory") => (false, false, true),
-        Some(other) => bail!("--only is snapshot, rest or memory, not {other}"),
+        Some(other) => bail!("--only is snapshot, rest, memory or leave, not {other}"),
     };
+    ensure!(
+        !only_leave || control.is_none(),
+        "--only leave takes no --control (its negative control is a keel before #206)"
+    );
     ensure!(
         if only_memory {
             matches!(control, None | Some(Control::Reporting))
@@ -204,6 +217,7 @@ fn options() -> Result<Options> {
         only_snapshot,
         skip_snapshot,
         only_memory,
+        only_leave,
         qemu: path("qemu")?,
         qemu_img: path("qemu-img")?,
         kernel: path("kernel")?,
@@ -1505,6 +1519,29 @@ async fn check(o: Options, sockets: &Path) -> Result<()> {
         )?;
         println!(
             "keel agent check: {} {}, QEMU {version} {machine_type}; the memory checks passed ({})",
+            lab.o.arch,
+            lab.o.accel,
+            checks.0.len()
+        );
+        return Ok(());
+    }
+    if lab.o.only_leave {
+        let leave = leave::check(&lab, &mut checks, &image_disk, &image_layers, documents).await;
+        let checked = checks.0.clone();
+        fs::write(
+            lab.o.out.join("results.json"),
+            serde_json::to_string_pretty(&json!({
+                "qemu": {"path": lab.o.qemu, "version": version, "machine": machine_type, "accel": lab.o.accel, "vmgenid": lab.o.vmgenid},
+                "arch": lab.o.arch,
+                "kernel": {"path": lab.o.kernel, "sha256": sha256_file(&lab.o.kernel)?},
+                "base": {"path": lab.o.base, "sha256": sha256_file(&lab.o.base)?},
+                "checks": checked,
+                "leave": leave.as_ref().map_err(|error| format!("{error:#}")),
+            }))?,
+        )?;
+        leave?;
+        println!(
+            "keel agent check: {} {}, QEMU {version} {machine_type}; the leave checks passed ({})",
             lab.o.arch,
             lab.o.accel,
             checks.0.len()

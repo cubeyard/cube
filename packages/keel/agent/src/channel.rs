@@ -402,6 +402,9 @@ async fn connection(agent: &Arc<Agent>, port: &fs::File) -> anyhow::Result<()> {
         .await
         .is_err()
     {
+        // Said on the console: keel-agent-check's `--only leave` needs it to
+        // know the writer really was blocked when the runner left.
+        eprintln!("cube-agent: the writer did not finish its frame in 2 s; writer cut off");
         writer.abort();
         let _ = writer.await;
     }
