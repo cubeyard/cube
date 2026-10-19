@@ -65,6 +65,41 @@ export function cutBytes(text: string, limit: number): string {
   return new TextDecoder().decode(encoded.subarray(0, limit)).replace(/�$/, "");
 }
 
+/** Where the page of `text` from `at` ends: `size` characters on, after its
+ * last newline there if it has one, else where a character ends. */
+function pageEnd(text: string, at: number, size: number): number {
+  if (text.length - at <= size) return text.length;
+  const newline = text.lastIndexOf("\n", at + size - 1);
+  if (newline >= at) return newline + 1;
+  const low = text.charCodeAt(at + size) >> 10 === 0x37;
+  return at + size - (low && size > 1 ? 1 : 0);
+}
+
+/** A long text in pages of at most `size` characters (spec §1: a long
+ * message is never cut, it is logged as several in a row). */
+export function pages(text: string, size = CAP): string[] {
+  const out: string[] = [];
+  let at = 0;
+  do {
+    const end = pageEnd(text, at, size);
+    out.push(text.slice(at, end));
+    at = end;
+  } while (at < text.length);
+  return out;
+}
+
+/** A source's node when the compactor gave no line for it (a refusal, an
+ * empty answer, an input too long for it): the source cut short, marked so
+ * the line says it holds only its start; a merge keeps the start of both
+ * halves. The log keeps every message whole. */
+export const CUT_MARK = "(no summary, cut short: zoom it) ";
+export function cutNode(source: { message: string } | { merge: [string, string] }, limit = NODE): string {
+  const room = Math.max(0, limit - bytes(CUT_MARK));
+  if ("message" in source) return CUT_MARK + cutBytes(flat(source.message), room);
+  const half = Math.floor((room - 1) / 2);
+  return `${CUT_MARK}${cutBytes(flat(source.merge[0]), half)} ${cutBytes(flat(source.merge[1]), half)}`;
+}
+
 export type Job = { l: number; i: number };
 
 /** Whether `parts` tile the first `total` messages with every line above a
@@ -295,12 +330,21 @@ export class Memory {
     return `<chat>\n${lines.join("\n")}${lines.length ? "\n" : ""}</chat>`;
   }
 
-  /** The `zoom` tool: a line opened into its two halves; n = 1 the whole message. */
-  zoom(id: number, n: number): string {
+  /** The `zoom` tool: a line opened into its two halves; n = 1 the whole
+   * message, a long one (logged before messages were paged) a page from
+   * character `at`, with where to go on. */
+  zoom(id: number, n: number, at = 0): string {
     const total = this.messages.length;
     const valid = Number.isSafeInteger(id) && Number.isSafeInteger(n) && id >= 0 && n >= 1 && (n & (n - 1)) === 0 && id % n === 0 && id + n <= total;
     if (!valid) return `No line ${id}+${n}.`;
-    if (n === 1) return `${id}+0|${messageLine(this.messages[id]!)}`;
+    if (n === 1) {
+      const line = messageLine(this.messages[id]!);
+      if (this.messages[id]!.text.length <= CAP && at === 0) return `${id}+0|${line}`;
+      if (!Number.isSafeInteger(at) || at < 0 || at >= line.length) return `No characters from ${at} in message ${id}: it has ${line.length}.`;
+      const stop = pageEnd(line, at, CAP);
+      const on = stop < line.length ? `\n[characters ${at + 1}-${stop} of ${line.length}; go on with at = ${stop}]` : "";
+      return `${id}+0|${line.slice(at, stop)}${on}`;
+    }
     const l = Math.log2(n) - 1, i = (2 * id) / n;
     return [{ l, i }, { l, i: i + 1 }].map(part => this.line(part)).join("\n");
   }

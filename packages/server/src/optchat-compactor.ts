@@ -1,9 +1,10 @@
 /** OptChat's compactor: one cheap model call per tree node, with the
  * compaction view as context, no tools and no ids, enforcing the node size by
- * feedback. */
-import type { AssistantMessage, Message, Models } from "@earendil-works/pi-ai";
+ * feedback. A node the compactor gives no line for is its source cut short. */
+import { isContextOverflow, type AssistantMessage, type Message, type Models } from "@earendil-works/pi-ai";
+import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 import { viewPieces } from "./optchat-cache.ts";
-import { bytes, cutBytes, NODE } from "./optchat-memory.ts";
+import { bytes, cutBytes, cutNode, NODE } from "./optchat-memory.ts";
 
 export const TRIES = 5;
 
@@ -85,9 +86,19 @@ ${SCALE}
 
 export type CompactSource = { message: string } | { merge: [string, string] };
 
-function replyText(message: AssistantMessage): string {
-  if (message.stopReason === "error" || message.stopReason === "aborted") throw new Error(message.errorMessage ?? `compactor ${message.stopReason}`);
-  return message.content.map(part => part.type === "text" ? part.text : "").join("").trim();
+/** What a failed reply means for its node: `cut` when the failure is its
+ * input's doing and asking again fails alike (an input too long for the
+ * model, or a reply the model began and stopped with an error: a refusal, a
+ * safety stop), `hold` when it is not (an outage, a rate limit, or a setup
+ * error such as a bad key, which no reply carried), so the node waits and
+ * is asked again. Usage tells a reply the model began from one that never
+ * reached it. */
+export function failure(reply: AssistantMessage, contextWindow?: number): "cut" | "hold" {
+  if (reply.stopReason === "aborted") return "hold";
+  if (isContextOverflow(reply, contextWindow)) return "cut";
+  if (isRetryableAssistantError(reply)) return "hold";
+  const usage = reply.usage;
+  return usage && usage.input + usage.output + usage.cacheRead + usage.cacheWrite > 0 ? "cut" : "hold";
 }
 
 /** The word counts asked for: models count words far better than bytes, so
@@ -102,9 +113,22 @@ export function candidates(text: string): string[] {
   return text.split("\n").map(line => line.replace(/^\s*(?:[-*•]|\d+[.):])\s+/, "").trim()).filter(Boolean);
 }
 
+/** An answer's versions: the three asked for, or one line (the spec's own
+ * task); null for any other count or a line that introduces others (ends
+ * in a colon). A heading or a version broken over two lines would
+ * otherwise be kept as the node. */
+export function versions(text: string): string[] | null {
+  const lines = candidates(text);
+  return (lines.length === 3 || lines.length === 1) && !lines.some(line => line.endsWith(":")) ? lines : null;
+}
+
 /** One node: the longest line that fits among three lengths in one answer.
- * If none fits, the model is told how far over the shortest was, up to
- * TRIES answers; then the shortest line seen is kept. */
+ * If none fits, the model is told how far over the shortest was, and an
+ * answer not in that form is told so, up to TRIES answers; then the
+ * shortest line seen is kept. No line at all (an empty answer, a failure
+ * that is its input's doing, no answer in the form) gives the source cut
+ * short, after `onCut`; any other failure throws, so the node is asked
+ * again later. */
 export async function compactNode(options: {
   models: Models;
   model: { provider: string; id: string };
@@ -114,16 +138,19 @@ export async function compactNode(options: {
   signal?: AbortSignal;
   /** Every model reply, failed ones included, before it is used: its usage. */
   onReply?: (reply: AssistantMessage) => void | Promise<void>;
+  /** Why the node is its source cut short. */
+  onCut?: (why: string) => void;
 }): Promise<string> {
   const limit = options.node ?? NODE;
   const model = options.models.getModel(options.model.provider, options.model.id);
   if (!model) throw new Error(`compactor model ${options.model.provider}/${options.model.id} is unavailable`);
+  const cut = (why: string) => { options.onCut?.(why); return cutNode(options.source, limit); };
   const [short, mid, long] = lengths(limit);
-  const versions = `Write three versions of it, of about ${short}, ${mid} and ${long} words, each on its own line, shortest first, nothing else. The longest one that fits in ${limit} bytes is kept.`;
+  const versionsAsked = `Write three versions of it, of about ${short}, ${mid} and ${long} words, each on its own line, shortest first, nothing else. The longest one that fits in ${limit} bytes is kept.`;
   // Your line covers its input only; <chat> is context, not part of it.
   const step = "message" in options.source
-    ? `Compress this message into one line. Your line covers this message only. ${versions}\n${options.source.message}`
-    : `Merge these two lines into one. Your line covers these two lines only. ${versions}\n${options.source.merge[0]}\n${options.source.merge[1]}`;
+    ? `Compress this message into one line. Your line covers this message only. ${versionsAsked}\n${options.source.message}`
+    : `Merge these two lines into one. Your line covers these two lines only. ${versionsAsked}\n${options.source.merge[0]}\n${options.source.merge[1]}`;
   const now = Date.now();
   const messages: Message[] = [
     { role: "system", content: COMPACT, timestamp: now },
@@ -141,15 +168,28 @@ export async function compactNode(options: {
       ...(options.signal ? { signal: options.signal } : {}),
     });
     await options.onReply?.(reply);
-    const lines = candidates(replyText(reply));
-    if (!lines.length) throw new Error("compactor returned an empty line");
-    seen.push(...lines);
-    const fits = lines.filter(line => bytes(line) <= limit);
-    if (fits.length) return fits.reduce((longest, line) => bytes(line) > bytes(longest) ? line : longest);
+    if (reply.stopReason === "error" || reply.stopReason === "aborted") {
+      const why = reply.errorMessage ?? `compactor ${reply.stopReason}`;
+      if (failure(reply, model.contextWindow) === "hold") throw new Error(why);
+      return cut(why);
+    }
+    const text = reply.content.map(part => part.type === "text" ? part.text : "").join("").trim();
+    if (!text) return cut("an empty answer");
+    const lines = versions(text);
+    let note: string;
+    if (lines) {
+      seen.push(...lines);
+      const fits = lines.filter(line => bytes(line) <= limit);
+      if (fits.length) return fits.reduce((longest, line) => bytes(line) > bytes(longest) ? line : longest);
+      const shortest = lines.reduce((best, line) => bytes(line) < bytes(best) ? line : best);
+      const over = lines.length === 3 ? `All three are over ${limit} bytes; the shortest is ${bytes(shortest)} bytes.` : `It is ${bytes(shortest)} bytes, over ${limit}.`;
+      note = `${over} It must end where it is cut here:\n${cutBytes(shortest, limit)}| ← LIMIT\nWrite three shorter versions, each on its own line, nothing else.`;
+    } else {
+      note = `Your answer was ${candidates(text).length} lines, not three versions. Write exactly three versions of the one line, each whole on its own line, shortest first, with nothing before or after them.`;
+    }
     if (answers >= TRIES) break;
-    const shortest = lines.reduce((best, line) => bytes(line) < bytes(best) ? line : best);
-    messages.push(reply, { role: "user", timestamp: Date.now(), content: [{ type: "text",
-      text: `All three are over ${limit} bytes; the shortest is ${bytes(shortest)} bytes. It must end where it is cut here:\n${cutBytes(shortest, limit)}| ← LIMIT\nWrite three shorter versions, each on its own line, nothing else.` }] });
+    messages.push(reply, { role: "user", timestamp: Date.now(), content: [{ type: "text", text: note }] });
   }
+  if (!seen.length) return cut(`no answer in three versions after ${TRIES} tries`);
   return seen.reduce((shortest, line) => bytes(line) < bytes(shortest) ? line : shortest);
 }
