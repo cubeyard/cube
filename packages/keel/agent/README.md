@@ -269,11 +269,15 @@ save that fails it connects again (`machine_setup` again), and
 `snapshot_done` only when the prepare was refused. That order (prepare,
 leave, `stop`, `migrate`) has run against this agent only under TCG
 (`runner-vm-suspend-test.ts`), not yet on a host (G-F). **F-P7-2:** a runner
-that leaves while the agent still writes its `status` after `done` blocks
-the agent's writer until its 2 s cut-off, and the agent's next open of the
-port fails with EBUSY, which ends its channel (seen 3 times in 4 TCG runs).
-`berth vm` avoids it by leaving only after that `status`; the agent itself
-is unchanged. `berth vm` keeps the connect rule and sessions (B-2).
+that left while the agent still wrote a frame blocked the agent's writer
+until its 2 s cut-off; the aborted writer still held its copy of the port
+when the agent opened it again, the guest driver answered EBUSY, and the
+agent's channel ended (seen 3 times in 4 TCG runs with a keel up to
+v0.3.31). The agent now waits for the aborted writer to be gone before it
+opens the port again, and opens a port that answers EBUSY again every
+20 ms for up to 10 s instead of ending its channel. `berth vm` also leaves
+only after the `status` that follows `done`, which keeps older agents
+clear of it. `berth vm` keeps the connect rule and sessions (B-2).
 
 ## Tests
 

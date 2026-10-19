@@ -123,6 +123,35 @@ async fn wait_for_host(port: &fs::File, events: &mut Option<Signal>, poll: Durat
     }
 }
 
+/// How long the port may answer EBUSY before the agent gives up on it.
+const PORT_BUSY_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 10 });
+
+/// Opens the port with `open`. The guest driver lets one descriptor have
+/// the port at a time and answers EBUSY while another is still open: tried
+/// again every RECONNECT_POLL for PORT_BUSY_WAIT, so a copy that is still
+/// being let go (F-P7-2) never ends the agent's channel. Any other error,
+/// and EBUSY past that, ends it as before.
+async fn open_port(open: impl Fn() -> io::Result<fs::File>) -> io::Result<fs::File> {
+    let deadline = Instant::now() + PORT_BUSY_WAIT;
+    let mut busy = 0u32;
+    loop {
+        match open() {
+            Err(error)
+                if error.raw_os_error() == Some(libc::EBUSY) && Instant::now() < deadline =>
+            {
+                busy += 1;
+                tokio::time::sleep(RECONNECT_POLL).await;
+            }
+            result => {
+                if busy > 0 && result.is_ok() {
+                    eprintln!("cube-agent: cube.0 was busy {busy} time(s) before it opened");
+                }
+                return result;
+            }
+        }
+    }
+}
+
 fn dup(port: &fs::File) -> io::Result<OwnedFd> {
     port.try_clone().map(OwnedFd::from)
 }
@@ -175,11 +204,14 @@ pub async fn serve(agent: Arc<Agent>) -> io::Result<()> {
         }
     };
     loop {
-        let port = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(&path)?;
+        let port = open_port(|| {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(&path)
+        })
+        .await?;
         if let Err(error) = signal_on_host_events(&port) {
             eprintln!(
                 "cube-agent: no SIGIO on cube.0 ({error}); waiting for the runner by polling only"
@@ -359,13 +391,19 @@ async fn connection(agent: &Arc<Agent>, port: &fs::File) -> anyhow::Result<()> {
     drop(frames);
     // The writer stops after the frame it is writing, so the next session's
     // `hello` never follows half a frame. A runner that does not read at all
-    // leaves it blocked: then it is cut off.
+    // leaves it blocked (so does one that left: a virtio port does not take
+    // writes while the host's end is closed): then it is cut off, and waited
+    // for until it is gone, so its copy of the port is closed before this
+    // returns. An aborted task is dropped only when the runtime next runs
+    // it; left alone, the port would still be open when `serve` opens it
+    // again, which the guest driver refuses (EBUSY: F-P7-2).
     let mut writer = writer;
     if tokio::time::timeout(Duration::from_secs(2), &mut writer)
         .await
         .is_err()
     {
         writer.abort();
+        let _ = writer.await;
     }
     result
 }
@@ -988,6 +1026,115 @@ mod tests {
                 started.elapsed()
             );
         }
+    }
+
+    /// F-P7-2: the runner leaves while the agent's writer is blocked (its
+    /// end takes nothing more). When `connection` returns, the writer and
+    /// its copy of the port are gone, so `serve` can open the port again:
+    /// the runner's end reads to EOF at once, with no further turn of the
+    /// runtime.
+    #[tokio::test]
+    async fn a_writer_blocked_when_the_runner_leaves_has_let_go_of_the_port_on_return() {
+        let agent = Agent::start();
+        let (agent_end, runner_end) = UnixStream::pair().unwrap();
+        for (fd, option) in [
+            (&agent_end, libc::SO_SNDBUF),
+            (&runner_end, libc::SO_RCVBUF),
+        ] {
+            let size: libc::c_int = 4096;
+            // SAFETY: setsockopt on a socket this test owns.
+            unsafe {
+                libc::setsockopt(
+                    std::os::fd::AsRawFd::as_raw_fd(fd),
+                    libc::SOL_SOCKET,
+                    option,
+                    (&size as *const libc::c_int).cast(),
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+            }
+        }
+        agent_end.set_nonblocking(true).unwrap();
+        runner_end.set_nonblocking(true).unwrap();
+        let port = fs::File::from(OwnedFd::from(agent_end));
+        let mut runner = tokio::net::UnixStream::from_std(runner_end.try_clone().unwrap()).unwrap();
+        let served = tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move {
+                let ended = connection(&agent, &port).await;
+                let returned = Instant::now();
+                // No await from here on: nothing else runs on this
+                // runtime, so the writer cannot be dropped behind our back.
+                drop(port);
+                let mut drained = 0usize;
+                let mut buffer = [0u8; 65536];
+                let eof = loop {
+                    match (&runner_end).read(&mut buffer) {
+                        Ok(0) => break true,
+                        Ok(n) => drained += n,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break false,
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                (ended, returned, eof, drained)
+            }
+        });
+        let s = hello(&mut runner).await;
+        // Requests whose answers the runner never reads, until the agent's
+        // writer is stuck on a full socket.
+        for ch in 1..=200 {
+            write_frame(&mut runner, &guest_hello(ch, &s))
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The runner leaves: its writing half closes, it reads nothing.
+        let left = Instant::now();
+        runner.shutdown().await.unwrap();
+        let (ended, returned, eof, drained) = tokio::time::timeout(Duration::from_secs(10), served)
+            .await
+            .expect("the connection ends within the writer's cut-off")
+            .unwrap();
+        assert!(ended.is_ok(), "{ended:?}");
+        assert!(
+            returned - left >= Duration::from_millis(1900),
+            "the writer was not blocked, so this shows nothing: {:?}",
+            returned - left
+        );
+        assert!(
+            eof,
+            "the agent's end is still open after {drained} bytes: the writer kept the port (F-P7-2)"
+        );
+    }
+
+    /// F-P7-2: while a copy of the port is still being let go the guest
+    /// driver answers EBUSY; the agent opens it again instead of ending its
+    /// channel. Other errors, and EBUSY past PORT_BUSY_WAIT, still end it.
+    #[tokio::test]
+    async fn a_busy_port_is_opened_again_and_other_errors_end_the_channel() {
+        let file = tempfile::tempfile().unwrap();
+        let tries = std::sync::atomic::AtomicU32::new(0);
+        let opened = open_port(|| {
+            if tries.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 3 {
+                Err(io::Error::from_raw_os_error(libc::EBUSY))
+            } else {
+                file.try_clone()
+            }
+        })
+        .await;
+        assert!(opened.is_ok(), "{opened:?}");
+        assert_eq!(tries.load(std::sync::atomic::Ordering::SeqCst), 4);
+
+        let other = open_port(|| Err(io::Error::from_raw_os_error(libc::ENOENT))).await;
+        assert_eq!(other.unwrap_err().raw_os_error(), Some(libc::ENOENT));
+
+        let started = Instant::now();
+        let busy = open_port(|| Err(io::Error::from_raw_os_error(libc::EBUSY))).await;
+        assert_eq!(busy.unwrap_err().raw_os_error(), Some(libc::EBUSY));
+        assert!(
+            started.elapsed() >= PORT_BUSY_WAIT,
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]
