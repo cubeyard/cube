@@ -214,6 +214,9 @@ export async function createCubed(options: {
   claude?: readonly string[] | null;
   /** Claude Code process tuning, for tests. */
   claudeOptions?: { idleMs?: number; stopGraceMs?: number };
+  /** Tests: how long a protocol-4 machine must be idle before the recovery
+   * loop suspends it (default IDLE_MS, 5 min; runner-vm-cubed-suspend-test). */
+  suspendIdleMs?: number;
   /** Thread machines; default: each thread on its runner's protocol (VMs
    * through a supervised cube-gateway, or protocol-4 host machines).
    * Offline tests pass local guests, or a factory given the registry. */
@@ -261,7 +264,7 @@ export async function createCubed(options: {
     const supervised = gateway;
     routeCredentials(registryCredentialRoute({ registry, threads: threadsDirectory, socket: () => supervised.running ? credential : null }));
     // Each thread on its runner's protocol (runner-select.ts).
-    p4 = new RunnerMachines({ registry, threads: threadsDirectory, policy });
+    p4 = new RunnerMachines({ registry, threads: threadsDirectory, policy, idleMs: options.suspendIdleMs });
     machines = new ProtocolMachines({ registry, p3: new ThreadVms({ registry, threads: threadsDirectory, run, gateway }), p4 });
   }
   let portal: Portal | null = null;
@@ -922,7 +925,7 @@ export async function createCubed(options: {
   const probes = setInterval(() => void probeRunners(), probeIntervalMs);
   probes.unref();
   let closePromise: Promise<void> | undefined;
-  return { server, registry, conversations, gateway, usage, portal, close() {
+  return { server, registry, conversations, gateway, usage, portal, machines, close() {
     closePromise ??= (async () => {
       clearInterval(recovery);
       clearInterval(probes);
