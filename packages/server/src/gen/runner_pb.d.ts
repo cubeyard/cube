@@ -1578,7 +1578,11 @@ export declare type Call = Message<"cube.runner.v4.Call"> & {
      * memory file, RESOURCE_EXHAUSTED/disk; a prepare the agent refuses
      * (the runner sends `snapshot_done`) or a save that fails (the runner
      * `cont`s QEMU, connects again and deletes the partial file),
-     * UNAVAILABLE/snapshot. A
+     * UNAVAILABLE/snapshot. The runner answers within 85 s, before cubed's
+     * 90 s, and never saves after: a call that waits 5 s for another
+     * operation on the runner is FAILED_PRECONDITION/busy, and a QEMU that
+     * does not answer the undo within 15 s is killed (UNAVAILABLE/snapshot,
+     * the machine STOPPED, its disk kept). A
      * SUSPENDED machine answers as it is. `berth host` and a runner without
      * suspend: UNIMPLEMENTED.
      * Resume is `machine_start` on a SUSPENDED machine: with a free slot

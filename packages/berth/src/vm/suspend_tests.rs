@@ -22,6 +22,11 @@ enum Migrate {
     StopHangs,
     /// `migrate` itself is never answered (the migration may run).
     AnswerHangs,
+    /// The migration stays active, and neither `migrate_cancel` nor `cont`
+    /// is answered: the undo hangs (N-8).
+    UndoHangs,
+    /// Completes, but `quit` is never answered.
+    QuitHangs,
 }
 
 /// The stand-in QEMU's monitor: every command it got, in order.
@@ -75,13 +80,16 @@ fn fake_qmp(
                     // Taken, never answered: the runner's wait runs out first.
                     if (migrate == Migrate::StopHangs && command == "stop")
                         || (migrate == Migrate::AnswerHangs && command == "migrate")
+                        || (migrate == Migrate::UndoHangs
+                            && matches!(command.as_str(), "migrate_cancel" | "cont"))
+                        || (migrate == Migrate::QuitHangs && command == "quit")
                     {
                         tokio::time::sleep(Duration::from_secs(60)).await;
                         return;
                     }
                     let answer = match command.as_str() {
                         "migrate" => {
-                            if migrate == Migrate::Completes {
+                            if matches!(migrate, Migrate::Completes | Migrate::QuitHangs) {
                                 let uri = message["arguments"]["uri"].as_str().unwrap();
                                 std::fs::write(
                                     uri.strip_prefix("file:").unwrap(),
@@ -97,8 +105,16 @@ fn fake_qmp(
                         }
                         "query-migrate" => match (migrate, cancelled.load(Ordering::SeqCst)) {
                             (_, true) => serde_json::json!({"status": "cancelled"}),
-                            (Migrate::Completes, _) => serde_json::json!({"status": "completed"}),
-                            (Migrate::Hangs | Migrate::StopHangs | Migrate::AnswerHangs, _) => {
+                            (Migrate::Completes | Migrate::QuitHangs, _) => {
+                                serde_json::json!({"status": "completed"})
+                            }
+                            (
+                                Migrate::Hangs
+                                | Migrate::StopHangs
+                                | Migrate::AnswerHangs
+                                | Migrate::UndoHangs,
+                                _,
+                            ) => {
                                 serde_json::json!({"status": "active"})
                             }
                             (Migrate::Fails, _) => {
@@ -864,4 +880,109 @@ async fn a_wait_that_runs_out_before_stop_or_migrate_answer_still_lets_the_guest
         assert_eq!(journal.phase, Phase::Running, "{migrate:?}");
         assert!(journal.snapshot.is_none(), "{migrate:?}");
     }
+}
+
+/// B-207-3: a suspend waits at most OPS_WAIT for the runner's `ops`. Held by
+/// another operation past that, it is refused as busy and nothing is sent;
+/// it never saves later, after cubed gave up. Control: once `ops` is free,
+/// the same call suspends.
+#[tokio::test]
+async fn a_suspend_that_cannot_have_ops_in_time_is_refused_and_never_runs_later() {
+    let lab = Lab::new();
+    let runner = lab_runner(&lab, Some(1), 8).await;
+    create(&runner, USER, base(), false).await.unwrap();
+    let (fake, ops) = running(&runner, USER, Migrate::Completes, Agent::Prepares).await;
+    let held = runner.ops.lock().await;
+    let started = std::time::Instant::now();
+    let error = call(&runner, suspend_call(USER, 2)).await.unwrap_err();
+    let waited = started.elapsed();
+    assert_eq!(
+        reason(error.clone()),
+        (Code::FailedPrecondition, "busy".into()),
+        "{error:?}"
+    );
+    assert!(error.message.contains("held the runner"), "{error:?}");
+    assert!(
+        waited >= suspend::OPS_WAIT && waited < suspend::OPS_WAIT + Duration::from_secs(1),
+        "{waited:?}"
+    );
+    // The other operation goes on well past the refusal: still nothing.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(held);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(ops.lock().unwrap().is_empty() && fake.commands().is_empty());
+    assert_eq!(phase(&runner, USER), Phase::Running);
+    assert_eq!(on_disk(&runner, USER).phase, Phase::Running);
+    // Control: with `ops` free, the same machine suspends.
+    assert!(matches!(
+        call(&runner, suspend_call(USER, 3)).await,
+        Ok(call_result::Result::Machine(_))
+    ));
+    assert_eq!(phase(&runner, USER), Phase::Suspended);
+}
+
+/// N-8: an undo QEMU does not answer (no `migrate_cancel`, no `cont`) is
+/// bounded by TAIL_WAIT: QEMU is killed, the machine is STOPPED with its disk,
+/// no memory file stays, and `ops` is free for the next operation. The answer
+/// comes within the bound cubed relies on.
+#[tokio::test]
+async fn an_undo_that_hangs_kills_qemu_and_frees_the_runner_in_time() {
+    let lab = Lab::new();
+    let runner = lab_runner(&lab, Some(1), 8).await;
+    create(&runner, USER, base(), false).await.unwrap();
+    let (fake, _) = running(&runner, USER, Migrate::UndoHangs, Agent::Prepares).await;
+    let started = std::time::Instant::now();
+    let error = call(&runner, suspend_call(USER, 2)).await.unwrap_err();
+    let waited = started.elapsed();
+    assert_eq!(
+        reason(error.clone()),
+        (Code::Unavailable, "snapshot".into()),
+        "{error:?}"
+    );
+    assert!(error.message.contains("undo did not finish"), "{error:?}");
+    assert!(
+        waited < suspend::SUSPEND_WAIT + suspend::TAIL_WAIT + Duration::from_secs(2),
+        "{waited:?}"
+    );
+    assert!(
+        fake.index("migrate_cancel").is_some(),
+        "{:?}",
+        fake.commands()
+    );
+    let dir = runner.machine_dir(USER);
+    assert!(!dir.join(record::MEMORY_PART).exists() && !dir.join(record::MEMORY).exists());
+    assert!(runner.state.lock().unwrap().machines[USER].live.is_none());
+    assert_eq!(phase(&runner, USER), Phase::Stopped);
+    let journal = on_disk(&runner, USER);
+    assert_eq!(journal.phase, Phase::Stopped);
+    assert!(journal.snapshot.is_none());
+    assert!(runner.ops.try_lock().is_ok(), "ops is free");
+}
+
+/// After a completed save, a QEMU that does not answer `quit` is killed
+/// within TAIL_WAIT: the machine is SUSPENDED, its snapshot kept.
+#[tokio::test]
+async fn a_quit_that_hangs_after_the_save_is_bounded() {
+    let lab = Lab::new();
+    let runner = lab_runner(&lab, Some(1), 8).await;
+    create(&runner, USER, base(), false).await.unwrap();
+    let (fake, _) = running(&runner, USER, Migrate::QuitHangs, Agent::Prepares).await;
+    let started = std::time::Instant::now();
+    let machine = match call(&runner, suspend_call(USER, 2)).await.unwrap() {
+        call_result::Result::Machine(machine) => machine,
+        other => panic!("{other:?}"),
+    };
+    let waited = started.elapsed();
+    // TAIL_WAIT is 2 s here; QMP's own read timeout alone would take 10 s.
+    assert!(waited < Duration::from_secs(5), "{waited:?}");
+    assert!(fake.index("quit").is_some(), "{:?}", fake.commands());
+    assert_eq!(
+        machine.status.unwrap().phase,
+        proto::machine_status::Phase::Suspended as i32
+    );
+    assert!(runner.state.lock().unwrap().machines[USER].live.is_none());
+    let journal = on_disk(&runner, USER);
+    assert_eq!(journal.phase, Phase::Suspended);
+    assert!(journal.snapshot.is_some());
+    assert!(runner.machine_dir(USER).join(record::MEMORY).is_file());
 }
