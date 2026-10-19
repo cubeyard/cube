@@ -116,7 +116,7 @@ try {
     await seen("waiting for a free slot");
     assert.equal(await state.filter({ hasText: "waiting for a free slot" }).getAttribute("title"), waiting);
     assert.match(await lamp.getAttribute("class") ?? "", /on-amber blink/);
-    await page.locator(`.composer textarea[placeholder="waiting for a free slot on the thread's runner…"]`).waitFor({ timeout: 15_000 });
+    await page.locator(`.composer textarea[placeholder="waiting for a free slot…"]`).waitFor({ timeout: 15_000 });
     assert.equal(await strip.locator(".strip-reason").isVisible(), false, "the full reason is the label's title, or a line of the details");
     await shot(page, `${size}-6-waiting`);
     if (layout === "phone") {

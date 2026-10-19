@@ -30,7 +30,7 @@ export const STARTING_TEXT = "starting the thread's machine…";
 export const composerWaiting = (thread: ThreadSummary | null | undefined): string | null => {
   if (!thread) return null;
   const suspended = suspension(thread);
-  if (suspended?.state === "waking") return suspended.waiting ? "waiting for a free slot on the thread's runner…" : "waking the thread's machine…";
+  if (suspended?.state === "waking") return suspended.waiting ? "waiting for a free slot…" : "waking the thread's machine…";
   return thread.state === "starting" ? STARTING_TEXT : null;
 };
 /** How the thread's machine was prepared, and a failed hook if any. */

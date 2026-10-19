@@ -25,7 +25,7 @@ assert.equal(stateLabel(thread("starting")), "starting the thread's machine");
 assert.equal(composerWaiting(thread("starting")), STARTING_TEXT);
 assert.equal(composerWaiting(asleep), null);
 assert.equal(composerWaiting(waking), "waking the thread's machine…");
-assert.equal(composerWaiting({ ...waiting, state: "starting" }), "waiting for a free slot on the thread's runner…");
+assert.equal(composerWaiting({ ...waiting, state: "starting" }), "waiting for a free slot…");
 assert.equal(composerWaiting(thread("ready")), null);
 assert.equal(machineNotice(thread("ready", { vmId: "0123456789abcdef", notice })), notice.text);
 assert.equal(machineNotice(thread("ready", { vmId: "0123456789abcdef", notice, suspension: { state: "suspended", at: 3 } })), null, "not while suspended");
