@@ -12,6 +12,9 @@ on:
     paths:
       - packages/keel/kernel/**
       - packages/keel/base/**
+      # base.erofs carries cube-init and cube-agent, built from these.
+      - packages/keel/init/**
+      - packages/keel/agent/**
       - packages/keel/apt-snapshot.sh
       - .github/workflows/keel-repro.yml
       - .github/actions/keel-build/**
