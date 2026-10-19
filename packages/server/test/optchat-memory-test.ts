@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { bytes, capText, CUT_MARK, cutBytes, cutNode, end, Memory, pages, PLACEHOLDER, start, type Part } from "../src/optchat-memory.ts";
 import { createModels, fauxAssistantMessage, fauxProvider, type AssistantMessage } from "@earendil-works/pi-ai";
 import { candidates, compactNode, failure, lengths, SCALE, versions } from "../src/optchat-compactor.ts";
-import { entryMessages, runReport, threadReport, ZOOM_ECHO } from "../src/optchat.ts";
+import { entryMessages, runReport, threadReport, viewMismatch, ZOOM_ECHO } from "../src/optchat.ts";
 
 assert.equal(bytes(SCALE), 512, "the scale line is exactly NODE bytes");
 assert.equal(cutBytes("aé", 2), "a", "a cut never splits a character");
@@ -252,6 +252,19 @@ assert.equal(versions("Here they are:"), null);
     .map(entry => entryMessages(entry, page).length);
   assert.deepEqual(counts(), [1, 1, 4, 1, 0, 1, 0], "before pages: one message per text, call and result");
   assert.deepEqual(counts(30_000), [1, 3, 6, 1, 0, 1, 0], "in pages: a long message or reply is 3 pages of 30,000; results and calls stay capped");
+}
+
+// A stored view is checked against the hash and count it was stored with,
+// not against `total`, which a cubed before the shape grows on its own.
+{
+  const stored = { total: 6, entry: 44, shape: "h44", shapeTotal: 6 };
+  const never = () => { throw new Error("pages are not looked at"); };
+  assert.equal(viewMismatch(stored, { total: 6, shape: "h44" }, never), null, "the same log opens");
+  assert.match(viewMismatch(stored, { total: 8, shape: "h44'" }, never) ?? "", /numbers its messages differently/, "a log read otherwise is refused");
+  const older = { ...stored, total: 12 };
+  assert.equal(viewMismatch(older, { total: 6, shape: "h44" }, () => false), null, "an older cubed wrote since, no entry in pages: opens");
+  assert.match(viewMismatch(older, { total: 6, shape: "h44" }, () => true) ?? "", /older cubed numbered/, "an older cubed wrote since, an entry in pages: refused");
+  assert.equal(viewMismatch({ total: 6, entry: 44, shape: "h44" }, { total: 6, shape: "h44" }, never), null, "a view stored before the count checks against total");
 }
 
 console.log("optchat memory: ok");

@@ -13,6 +13,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, type Message } from "@earendil-works/pi-ai";
+import { defineDoc } from "@earendil-works/pi-durable";
 import { OptChat, type OptThreads } from "../src/optchat.ts";
 import { compactNode } from "../src/optchat-compactor.ts";
 
@@ -62,6 +63,14 @@ const quiet = async (chat: OptChat) => {
   await until(() => chat.memory.settled() && chat.memory.ready(new Set(), 8).length === 0 && busy(chat).size === 0, "the tree is complete and stored");
 };
 const CUT = /^\(no summary, cut short: zoom it\) /;
+/** The stored view, as optchat.ts defines it. A cubed before the shape
+ * stores it with `Object.assign` of the fields it knows: `entry`, `shape`
+ * and `shapeTotal` stay as a newer cubed left them while `total` grows. */
+const ViewDoc = defineDoc<{ total: number; entry?: number; shape?: string; shapeTotal?: number }>({ kind: "cube.optchat.view", version: 1, scope: "session", initial: () => ({ total: 0 }) });
+const view = (chat: OptChat) => chat.agent.conversation.commit(async tx => ({ ...await tx.doc(ViewDoc) }), BACKGROUND_CONTEXT);
+/** Leaves the view's shape at `mark`, as an older cubed that wrote since would. */
+const olderWrote = (chat: OptChat, mark: { entry?: number; shape?: string; shapeTotal?: number }) =>
+  chat.agent.conversation.commit(async tx => { Object.assign(await tx.doc(ViewDoc), { entry: mark.entry, shape: mark.shape, shapeTotal: mark.shapeTotal }); }, BACKGROUND_CONTEXT);
 
 /** An answer that is not three versions or one line (a heading before
  * them, a version broken over two lines, two lines) is never kept: the compactor is
@@ -169,7 +178,56 @@ for (const mark of ["REFUSE", "EMPTY"]) {
   // Logged in other pages, the log would number its messages differently
   // from its tree: the chat refuses to open rather than mix them up.
   await assert.rejects(open("huge", 10_000), /numbers its messages differently/, "huge: a changed log is refused");
+  // An older cubed that wrote since numbered the log without pages, so
+  // its view does not fit this log's pages: refused, by its own reason.
   chat = await open("huge");
+  try {
+    const mark = await view(chat);
+    const before = turns;
+    await chat.send("after the huge one", "h-3");
+    await until(() => turns === before + 1, "huge: one more turn");
+    await quiet(chat);
+    await olderWrote(chat, mark);
+    assert.ok((await view(chat)).total > mark.shapeTotal!, "huge: the view grew past its shape");
+  } finally { await chat.close(); }
+  await assert.rejects(open("huge"), /an older cubed numbered the chat's log without pages/, "huge: an older cubed's view over pages is refused");
+}
+
+/** Rolled back and forward again without a long message: an older cubed
+ * grew the view's total and left its shape, and the chat still opens. */
+{
+  let chat = await open("rollback");
+  let log: string[], mark: Awaited<ReturnType<typeof view>>;
+  try {
+    for (const [k, words] of [[1, 30], [2, 30]] as const) {
+      const before = turns;
+      await chat.send(`ROLLBACK ${k} ${"word ".repeat(words)}`, `r-${k}`);
+      await until(() => turns === before + 1, `rollback: turn ${k} ran`);
+    }
+    await quiet(chat);
+    mark = await view(chat);
+    assert.ok(mark.shape !== undefined && mark.shapeTotal === mark.total, "rollback: the view is stored with its shape and count");
+    for (const k of [3, 4]) {
+      const before = turns;
+      await chat.send(`ROLLBACK ${k} ${"word ".repeat(30)}`, `r-${k}`);
+      await until(() => turns === before + 1, `rollback: turn ${k} ran`);
+    }
+    await quiet(chat);
+    await olderWrote(chat, mark);
+    assert.ok((await view(chat)).total > mark.shapeTotal!, "rollback: the view grew past its shape");
+    log = chat.memory.messages.map(message => message.text);
+  } finally { await chat.close(); }
+  chat = await open("rollback");
+  try {
+    assert.deepEqual(chat.memory.messages.map(message => message.text), log, "rollback: opens, every message numbered the same");
+    const before = turns;
+    await chat.send(`ROLLBACK 5 ${"word ".repeat(30)}`, "r-5");
+    await until(() => turns === before + 1, "rollback: turn 5 ran");
+    await quiet(chat);
+    const stored = await view(chat);
+    assert.equal(stored.shapeTotal, stored.total, "rollback: the next node stores the shape again");
+  } finally { await chat.close(); }
+  chat = await open("rollback");
   await chat.close();
 }
 

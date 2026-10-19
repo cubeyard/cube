@@ -294,7 +294,7 @@ const PendingDoc = defineDoc<Pending>({ kind: "cube.optchat.pending", version: 1
  * before batching lack it and were never mid-batch. `compaction` and
  * `compactionBatch` are the compactor's view and its batch the same way;
  * views stored before it lack them, and it is merged down from the view. */
-const ViewDoc = defineDoc<{ total: number; parts: number[]; batch?: boolean; compaction?: number[]; compactionBatch?: boolean; entry?: number; shape?: string }>({ kind: "cube.optchat.view", version: 1, scope: "session", initial: () => ({ total: 0, parts: [] }) });
+const ViewDoc = defineDoc<{ total: number; parts: number[]; batch?: boolean; compaction?: number[]; compactionBatch?: boolean; entry?: number; shape?: string; shapeTotal?: number }>({ kind: "cube.optchat.view", version: 1, scope: "session", initial: () => ({ total: 0, parts: [] }) });
 /** How the log is read from Pi's entries: entries from `pagedFrom` on log a
  * long message in pages (spec §1); older ones as they were logged before
  * pages, so their messages keep their ids. Set at the first open that knows it. */
@@ -412,6 +412,19 @@ export type OptChatOptions = {
  * entry gave, so a reopen can tell a log that numbers its messages as the
  * stored view did from one that does not. */
 const nextShape = (shape: string, entry: number, count: number) => count ? createHash("sha256").update(`${shape},${entry}:${count}`).digest("hex") : shape;
+
+/** Why a stored view must not be restored over this log, or null. `shape`
+ * and `shapeTotal` (`total` before it) are this log's hash and count through
+ * the view's `entry`; `checked` is the same read from the log now. A cubed
+ * before the shape keeps them as they are while it grows `total`: then the
+ * view was numbered without pages, which differs only if `paged` (an entry
+ * from `pagedFrom` on that gives more messages in pages). */
+export function viewMismatch(stored: { total: number; entry?: number; shape: string; shapeTotal?: number }, checked: { total: number; shape: string }, paged: () => boolean): string | null {
+  const own = stored.shapeTotal ?? stored.total;
+  if (checked.total !== own || checked.shape !== stored.shape) return `the chat's log numbers its messages differently from its memory (${checked.total} messages through entry ${stored.entry}, ${own} when stored); not opened, so no summary is put on the wrong message`;
+  if (stored.total !== own && paged()) return `an older cubed numbered the chat's log without pages since its memory was stored (${stored.total} messages then); not opened, so no summary is put on the wrong message`;
+  return null;
+}
 
 export class OptChat {
   readonly memory: Memory;
@@ -583,9 +596,9 @@ export class OptChat {
     // otherwise than when the view was stored (a change to how entries are
     // read) would put every summary on the wrong messages. Views stored
     // before the shape are not checked.
-    if (stored?.shape !== undefined && (checked.total !== stored.total || checked.shape !== stored.shape)) {
-      throw new Error(`the chat's log numbers its messages differently from its memory (${checked.total} messages through entry ${stored.entry}, ${stored.total} when stored); not opened, so no summary is put on the wrong message`);
-    }
+    const mismatch = stored?.shape !== undefined
+      ? viewMismatch({ ...stored, shape: stored.shape }, checked, () => entries.some(entry => entry.id >= this.pagedFrom && this.messagesOf(entry).length !== entryMessages(entry).length)) : null;
+    if (mismatch) throw new Error(mismatch);
     const total = stored && stored.total <= messages.length && this.memory.restore(messages.slice(0, stored.total), toParts(stored.parts), stored.batch === true,
       stored.compaction ? { parts: toParts(stored.compaction), batching: stored.compactionBatch === true } : undefined) ? stored.total : 0;
     for (const message of messages.slice(total)) this.memory.append(message);
@@ -765,7 +778,7 @@ export class OptChat {
     this.memory.setNode(l, i, text);
     // The log's shape through the view's last message, checked at the next open.
     const view = { total: this.memory.length, parts: flatParts(this.memory.view), batch: this.memory.batching,
-      compaction: flatParts(this.memory.compaction), compactionBatch: this.memory.compactionBatching, entry: this.lastEntry, shape: this.shape };
+      compaction: flatParts(this.memory.compaction), compactionBatch: this.memory.compactionBatching, entry: this.lastEntry, shape: this.shape, shapeTotal: this.memory.length };
     await this.harness.commit(async tx => { Object.assign(await tx.doc(ViewDoc), view); }, context)
       .catch(error => { if (!this.closing) log.warn("view not stored", { error }); });
   }
