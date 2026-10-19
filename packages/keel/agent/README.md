@@ -387,6 +387,10 @@ file's rules (S-7a). `berth vm` keeps the connect rule and sessions (B-2).
   `results.json` `memory`. `--control reporting` turns
   `free-page-reporting` off and is expected to fail at the deleted file's
   check. The thresholds are the check's, not limits of the product.
+  On Linux/KVM the check passes and the control fails where named. On
+  macOS/HVF (Homebrew QEMU 11.1.1) both fail at the deleted file's check:
+  QEMU's resident memory does not fall there, so the snapshot size after
+  the prepare is not measured on HVF (the vm-base plan, package 10).
 
   `test-image.sh` needs Docker (and binfmt for the other architecture); it
   builds Debian trixie with sudo, git, gh and curl and passwordless sudo for

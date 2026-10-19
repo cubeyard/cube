@@ -521,8 +521,11 @@ designed for it from the start:
   runner, which is where it stays; a snapshot also cannot move between
   hypervisors (KVM and HVF register state differ).
 - **Memory.** The file holds the pages in use; free page reporting keeps that
-  small. Saves always use `mapped-ram` (part of the QEMU floor, one format
-  on both platforms): it loads faster and gives fixed offsets. Package 4
+  small on Linux/KVM, where it was measured (package 10). On macOS/HVF
+  QEMU's resident memory did not fall after the guest freed memory, and how
+  small a file gets after `snapshot_prepare` there is not measured. Saves
+  always use `mapped-ram` (part of the QEMU floor, one format on both
+  platforms): it loads faster and gives fixed offsets. Package 4
   found that QEMU's vmdk driver blocks migration mode `normal`; the boot
   check saves in mode `cpr-reboot`, which fits suspend (the old and new QEMU
   never run at once) and is not blocked (see "Open questions"). Later, repeated
@@ -744,7 +747,21 @@ rules above, including the wake-or-fail decision for guest calls. Acceptance
 on hosts, with a writable disk and a running command across the suspend.
 
 **10. Memory.** Balloon with free page reporting; measure that QEMU's resident
-memory falls after the guest frees memory, on both platforms.
+memory falls after the guest frees memory, on both platforms. Measured with
+`keel-agent-check --only memory` (1 GiB guest, 512 MiB of random data in the
+page cache, one run per host, v0.3.31 kernel and base):
+
+- Linux/KVM, QEMU 11.1.2: after the file is deleted, resident memory gives
+  back 91% of its rise in about 4 s, in two steps 2 s apart. The same holds
+  after `snapshot_prepare`. The memory file of a save after the prepare is
+  131.5 MiB, against 610 MiB without it. With `free-page-reporting=off`,
+  resident memory stays flat.
+- macOS/HVF, QEMU 11.1.1: resident memory stays flat for 15 s whether free
+  page reporting is on or off. The check stops there, so the prepare and the
+  size of the memory file are not measured on HVF. The cause is not
+  established. Unconfirmed hypotheses, in no order: free page reporting was
+  not active in the guest, or QEMU's discard of reported pages does not
+  lower its resident memory on macOS.
 
 **Later.** Template snapshots restored as many machines; private images;
 virtio-pmem/DAX on Linux.
