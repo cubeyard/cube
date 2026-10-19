@@ -70,9 +70,10 @@ struct Progress {
     prepared: bool,
     /// The runner left cube.0.
     left: bool,
-    /// QEMU was stopped.
+    /// `stop` was sent (answered or not: QEMU may have paused the guest
+    /// when the wait ran out before its answer, B-1).
     stopped: bool,
-    /// `migrate` was sent.
+    /// `migrate` was sent (answered or not).
     migrating: bool,
 }
 
@@ -451,16 +452,19 @@ impl VmRunner {
                 )
             })?;
         let mut qmp = Qmp::open(&dir.join(qemu::QMP_SOCKET), Duration::from_secs(2)).await?;
-        qmp.execute("stop", Value::Null).await?;
+        // Marked before the answer is awaited: if SUSPEND_WAIT runs out in
+        // between, the undo still sends `cont` (and `migrate_cancel`), so the
+        // guest is never left paused behind a RUNNING journal (B-1).
         progress.stopped = true;
+        qmp.execute("stop", Value::Null).await?;
         migration_mode(&mut qmp).await?;
         let part = dir.join(MEMORY_PART);
+        progress.migrating = true;
         qmp.execute(
             "migrate",
             json!({"uri": format!("file:{}", part.display())}),
         )
         .await?;
-        progress.migrating = true;
         migrated(&mut qmp).await?;
         std::fs::File::open(&part)?.sync_all()?;
         let bytes = std::fs::metadata(&part)?.blocks() * 512;

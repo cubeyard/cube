@@ -18,6 +18,10 @@ enum Migrate {
     /// Stays active until cancelled.
     Hangs,
     Fails,
+    /// `stop` is never answered (QEMU may have paused the guest).
+    StopHangs,
+    /// `migrate` itself is never answered (the migration may run).
+    AnswerHangs,
 }
 
 /// The stand-in QEMU's monitor: every command it got, in order.
@@ -68,6 +72,13 @@ fn fake_qmp(
                     line.clear();
                     let command = message["execute"].as_str().unwrap_or_default().to_owned();
                     commands.lock().unwrap().push(command.clone());
+                    // Taken, never answered: the runner's wait runs out first.
+                    if (migrate == Migrate::StopHangs && command == "stop")
+                        || (migrate == Migrate::AnswerHangs && command == "migrate")
+                    {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        return;
+                    }
                     let answer = match command.as_str() {
                         "migrate" => {
                             if migrate == Migrate::Completes {
@@ -87,7 +98,9 @@ fn fake_qmp(
                         "query-migrate" => match (migrate, cancelled.load(Ordering::SeqCst)) {
                             (_, true) => serde_json::json!({"status": "cancelled"}),
                             (Migrate::Completes, _) => serde_json::json!({"status": "completed"}),
-                            (Migrate::Hangs, _) => serde_json::json!({"status": "active"}),
+                            (Migrate::Hangs | Migrate::StopHangs | Migrate::AnswerHangs, _) => {
+                                serde_json::json!({"status": "active"})
+                            }
                             (Migrate::Fails, _) => {
                                 serde_json::json!({"status": "failed", "error-desc": "no space left"})
                             }
@@ -802,4 +815,53 @@ async fn a_suspended_machine_resumes_only_into_a_free_slot_and_stop_drops_its_sn
     let journal = on_disk(&runner, USER);
     assert_eq!(journal.phase, Phase::Stopped);
     assert!(journal.snapshot.is_none() && !dir.join(record::MEMORY).exists());
+}
+
+/// B-1: the wait runs out after `stop` or `migrate` was sent but before
+/// QEMU answered. The undo must still let the guest go on: `cont` after an
+/// unanswered `stop`; `migrate_cancel`, then `cont`, after an unanswered
+/// `migrate`. The journal says RUNNING and keeps no snapshot.
+#[tokio::test]
+async fn a_wait_that_runs_out_before_stop_or_migrate_answer_still_lets_the_guest_go_on() {
+    for (migrate, sent) in [
+        (Migrate::StopHangs, "stop"),
+        (Migrate::AnswerHangs, "migrate"),
+    ] {
+        let lab = Lab::new();
+        let runner = lab_runner(&lab, Some(1), 8).await;
+        create(&runner, USER, base(), false).await.unwrap();
+        let (fake, _) = running(&runner, USER, migrate, Agent::Prepares).await;
+        let error = call(&runner, suspend_call(USER, 2)).await.unwrap_err();
+        assert_eq!(
+            reason(error.clone()),
+            (Code::Unavailable, "snapshot".into()),
+            "{migrate:?}: {error:?}"
+        );
+        assert!(
+            error.message.contains("longer than"),
+            "{migrate:?}: {error:?}"
+        );
+        let commands = fake.commands();
+        let sent_at = fake
+            .index(sent)
+            .unwrap_or_else(|| panic!("{migrate:?}: {sent} not sent: {commands:?}"));
+        let cont = commands
+            .iter()
+            .rposition(|c| c == "cont")
+            .unwrap_or_else(|| panic!("{migrate:?}: {sent} was sent, but no cont: {commands:?}"));
+        assert!(sent_at < cont, "{migrate:?}: {commands:?}");
+        if migrate == Migrate::AnswerHangs {
+            let cancel = fake
+                .index("migrate_cancel")
+                .unwrap_or_else(|| panic!("no migrate_cancel: {commands:?}"));
+            assert!(sent_at < cancel && cancel < cont, "{commands:?}");
+        }
+        assert!(fake.index("quit").is_none(), "{commands:?}");
+        let dir = runner.machine_dir(USER);
+        assert!(!dir.join(record::MEMORY_PART).exists() && !dir.join(record::MEMORY).exists());
+        assert_eq!(phase(&runner, USER), Phase::Running, "{migrate:?}");
+        let journal = on_disk(&runner, USER);
+        assert_eq!(journal.phase, Phase::Running, "{migrate:?}");
+        assert!(journal.snapshot.is_none(), "{migrate:?}");
+    }
 }
