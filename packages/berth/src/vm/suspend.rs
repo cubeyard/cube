@@ -50,7 +50,9 @@ use super::{
 pub const SUSPEND_WAIT: Duration = Duration::from_secs(if cfg!(test) { 3 } else { 60 });
 /// The agent sees the runner leave cube.0 (a port change after the close,
 /// which QMP reports at most once a second per port).
-const LEAVE_WAIT: Duration = Duration::from_secs(3);
+/// In tests 1 s, below the test's SUSPEND_WAIT, so a deaf agent fails on
+/// this wait and not on the whole save's (B-2).
+const LEAVE_WAIT: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 3 });
 /// After `done`, the agent's `status` that says it is prepared: the runner
 /// leaves only once that frame is through. Left while the agent still
 /// writes it, the agent's writer blocks on the closed port until its 2 s
