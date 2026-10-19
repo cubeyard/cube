@@ -131,7 +131,8 @@ try {
 
   // what a host runner does not do
   const unsupported: Array<Parameters<RunnerSession["call"]>[0]> = [{ case: "templateList", value: {} },
-    { case: "machineDiscard", value: { ref, fence: { epoch: BigInt(epoch) } } }, { case: "machineDiagnose", value: { ref } }];
+    { case: "machineDiscard", value: { ref, fence: { epoch: BigInt(epoch) } } }, { case: "machineDiagnose", value: { ref } },
+    { case: "machineSuspend", value: { ref, fence: { epoch: BigInt(epoch) } } }];
   for (const verb of unsupported) {
     await assert.rejects(session.call(verb), (error: unknown) => error instanceof RunnerError && error.code === "UNIMPLEMENTED", verb.case);
   }

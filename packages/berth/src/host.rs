@@ -317,6 +317,7 @@ impl HostRunner {
                 error: String::new(),
                 started_at: Some(self.started_at),
                 guest: entry.guest.clone(),
+                suspended: None,
             }),
             meta: Some(proto::Meta {
                 version: entry.version,
@@ -588,6 +589,7 @@ impl HostRunner {
                 unimplemented("discard: it never deletes a machine's directory")
             }
             Some(Verb::MachineDiagnose(_)) => unimplemented("diagnosis"),
+            Some(Verb::MachineSuspend(_)) => unimplemented("suspend"),
             Some(Verb::TemplatePublish(_) | Verb::TemplateList(_) | Verb::TemplateDelete(_)) => {
                 unimplemented("templates")
             }

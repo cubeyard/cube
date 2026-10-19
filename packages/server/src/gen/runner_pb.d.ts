@@ -692,6 +692,20 @@ export declare type Capacity = Message<"cube.runner.v4.Capacity"> & {
    * @generated from field: uint64 retained_bytes = 9;
    */
   retainedBytes: bigint;
+
+  /**
+   * VM runners: SUSPENDED machines and their memory files' allocated bytes.
+   * A suspended machine holds no slot: it is not in `machines_active`, and
+   * resuming it needs a free one.
+   *
+   * @generated from field: uint32 suspended = 10;
+   */
+  suspended: number;
+
+  /**
+   * @generated from field: uint64 suspended_bytes = 11;
+   */
+  suspendedBytes: bigint;
 };
 
 /**
@@ -953,6 +967,13 @@ export declare type MachineStatus = Message<"cube.runner.v4.MachineStatus"> & {
    * @generated from field: cube.runner.v4.GuestInfo guest = 7;
    */
   guest?: GuestInfo | undefined;
+
+  /**
+   * The snapshot, while the machine is SUSPENDED.
+   *
+   * @generated from field: cube.runner.v4.Suspended suspended = 20;
+   */
+  suspended?: Suspended | undefined;
 };
 
 /**
@@ -1009,12 +1030,57 @@ export enum MachineStatus_Phase {
    * @generated from enum value: FAILED = 8;
    */
   FAILED = 8,
+
+  /**
+   * VM runners (`machine_suspend`): the agent is prepared, QEMU stopped
+   * and its memory saved to a file; QEMU quits when the save completes.
+   *
+   * @generated from enum value: SUSPENDING = 9;
+   */
+  SUSPENDING = 9,
+
+  /**
+   * No QEMU runs. The memory file and the writable disk are one snapshot,
+   * kept on this runner (`-cpu host` ties it there); `machine_start`
+   * resumes it.
+   *
+   * @generated from enum value: SUSPENDED = 10;
+   */
+  SUSPENDED = 10,
 }
 
 /**
  * Describes the enum cube.runner.v4.MachineStatus.Phase.
  */
 export declare const MachineStatus_PhaseSchema: GenEnum<MachineStatus_Phase>;
+
+/**
+ * A suspended machine's snapshot. Its QEMU version, keel version and machine
+ * type are the runner's journal, not the protocol's: a start that finds them
+ * changed drops the snapshot and boots cold (`machine_start`).
+ *
+ * @generated from message cube.runner.v4.Suspended
+ */
+export declare type Suspended = Message<"cube.runner.v4.Suspended"> & {
+  /**
+   * @generated from field: google.protobuf.Timestamp saved_at = 1;
+   */
+  savedAt?: Timestamp | undefined;
+
+  /**
+   * Allocated bytes of the memory file on the runner's disk (sparse: pages
+   * that were zero are not written).
+   *
+   * @generated from field: uint64 memory_bytes = 2;
+   */
+  memoryBytes: bigint;
+};
+
+/**
+ * Describes the message cube.runner.v4.Suspended.
+ * Use `create(SuspendedSchema)` to create a new message.
+ */
+export declare const SuspendedSchema: GenMessage<Suspended>;
 
 /**
  * The same fields as the guest helper's `hello` answer.
@@ -1495,6 +1561,45 @@ export declare type Call = Message<"cube.runner.v4.Call"> & {
      */
     value: MachineRef;
     case: "machineDiagnose";
+  } | {
+    /**
+     * VM runners (S-7a); cubed decides when a machine is idle. A RUNNING
+     * machine is suspended: the runner sends `snapshot_prepare`, closes its
+     * end of the guest channel and waits for the agent to see it (which
+     * ends the agent's prepared connection), `stop`s QEMU, saves its memory
+     * with `migrate` to `file:` (`mapped-ram`, mode `cpr-reboot`) under a
+     * temporary name, renames it and records the snapshot only once QEMU
+     * reports `completed`, and quits QEMU. The
+     * answer is the SUSPENDED machine. cubed suspends no machine with a
+     * command running; a command the runner cannot see (a service) is
+     * frozen with the machine and goes on after the resume.
+     * Refused, and the machine keeps running: an open `guest` or `dial`
+     * stream to it, FAILED_PRECONDITION/busy; too little free disk for its
+     * memory file, RESOURCE_EXHAUSTED/disk; a prepare the agent refuses
+     * (the runner sends `snapshot_done`) or a save that fails (the runner
+     * `cont`s QEMU, connects again and deletes the partial file),
+     * UNAVAILABLE/snapshot. A
+     * SUSPENDED machine answers as it is. `berth host` and a runner without
+     * suspend: UNIMPLEMENTED.
+     * Resume is `machine_start` on a SUSPENDED machine: with a free slot
+     * (else RESOURCE_EXHAUSTED/capacity, and the machine stays SUSPENDED) a
+     * new QEMU loads the memory (`-incoming defer`, `cont`), the runner
+     * keeps the connect rule and sends `machine_setup` again, and applies
+     * the start's policy with its flows reset; `boot_id` is unchanged. When
+     * the snapshot cannot be used (another QEMU or keel version or machine
+     * type, a missing or unreadable file, a failed load) the runner deletes
+     * it and boots cold: a new `boot_id`, operations that were running are
+     * Interrupted, and the machine has the condition `SnapshotDropped`
+     * (reason `version`, `missing` or `load`). `guest` and `dial` streams to
+     * a SUSPENDED machine are UNAVAILABLE/suspended: cubed wakes it with
+     * `machine_start` first. `machine_stop` deletes the snapshot (the next
+     * start boots cold); `machine_delete` deletes it before it deletes or
+     * retains the disk.
+     *
+     * @generated from field: cube.runner.v4.MachineRef machine_suspend = 18;
+     */
+    value: MachineRef;
+    case: "machineSuspend";
   } | {
     /**
      * @generated from field: cube.runner.v4.TemplatePublish template_publish = 20;

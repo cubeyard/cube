@@ -457,7 +457,8 @@ open after the test dies.
 ## Built for snapshot and resume
 
 Suspending idle threads to a file and resuming them comes soon after this
-layout (protocol 4 reserves `MachineStatus` fields 20–29 for it), so keel is
+layout (protocol 4 has its contract: `machine_suspend`, the SUSPENDING and
+SUSPENDED phases and `MachineStatus.suspended`), so keel is
 designed for it from the start:
 
 - **Clock.** The guest's clocks stop while it is suspended. The agent's
@@ -502,10 +503,12 @@ designed for it from the start:
   `lease` may have expired while suspended) and resets flows its stack still
   holds for the machine, so the guest sees closed connections instead of
   hanging ones.
-- **What cubed sees.** A guest call to a suspended machine either wakes it
-  (the runner resumes it on the first `guest` stream and then answers) or
-  fails fast with `UNAVAILABLE`, never waits out today's 90 s retry before
-  `COMPLETION_UNKNOWN`; package 9 decides which, and the thread strip shows
+- **What cubed sees.** cubed decides when a machine is idle and suspends it
+  with `machine_suspend`; a suspended machine holds no slot on its runner.
+  A `guest` or `dial` stream to it fails fast with UNAVAILABLE/suspended,
+  never waiting out today's 90 s retry before `COMPLETION_UNKNOWN`: cubed
+  wakes the machine with `machine_start` first and then makes the call, and
+  waits, visibly, while its runner has no free slot. The thread strip shows
   the machine as suspended.
 - **Disks.** Base and layer disks are read-only and always match. The writable
   disk must be exactly the state saved with the memory: suspend is stop, save,

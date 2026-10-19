@@ -51,6 +51,7 @@ macro_rules! messages {
             "Size" => proto::Size,
             "Boot" => proto::Boot,
             "MachineStatus" => proto::MachineStatus,
+            "Suspended" => proto::Suspended,
             "GuestInfo" => proto::GuestInfo,
             "GuestLimits" => proto::GuestLimits,
             "EgressPolicy" => proto::EgressPolicy,
@@ -164,7 +165,8 @@ fn literal_values_read_as_the_schema_says() {
         serde_json::from_str(&fs::read_to_string(directory.join("Machine.json")).unwrap()).unwrap();
     assert_eq!(machine.fence_epoch, 1005);
     let status = machine.status.unwrap();
-    assert_eq!(status.phase(), proto::machine_status::Phase::Failed);
+    assert_eq!(status.phase(), proto::machine_status::Phase::Suspended);
+    assert_eq!(status.suspended.unwrap().memory_bytes, 1002);
     let guest = status.guest.unwrap();
     assert!(guest.ready);
     assert_eq!(

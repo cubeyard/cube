@@ -765,6 +765,8 @@ impl VmRunner {
                 error: record.error.clone(),
                 started_at: boot.map(|b| b.started_at),
                 guest: guest.filter(|_| record.phase.live()).cloned(),
+                // Not built yet (S-7a): no machine is suspended.
+                suspended: None,
             }),
             meta: Some(proto::Meta {
                 version,
@@ -2199,6 +2201,13 @@ impl VmRunner {
             // Read only: no `ops` lock, so it neither waits for a mutation
             // nor holds one up (diagnose.rs).
             Some(Verb::MachineDiagnose(request)) => self.diagnose(request).await.map(R::Diagnosis),
+            // The contract is in runner.proto; the save and restore are not
+            // built yet (masterplan S-7a, phase 7 P7-4).
+            Some(Verb::MachineSuspend(_)) => Err(refuse(
+                Code::Unimplemented,
+                "suspend",
+                "this berth vm cannot suspend a machine yet",
+            )),
             // Takes `ops` itself, not while its agent works (R14b).
             Some(Verb::TemplatePublish(request)) => self.publish(request).await.map(R::Template),
             Some(Verb::TemplateList(_)) => Ok(R::Templates(self.list_templates())),
