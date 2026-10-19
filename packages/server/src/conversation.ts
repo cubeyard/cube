@@ -105,6 +105,9 @@ export class Conversations {
       if (releaseUnfinished(thread)) {
         work.push(this.command(thread.id, () => this.release(thread.id)).catch(() => {}));
       }
+      // A suspended machine stays so until something needs it (P7-5); one
+      // being woken (a wake a restart cut short) goes on.
+      else if (thread.vm?.suspension?.state === "suspended") continue;
       else work.push(this.activate(thread.id));
     }
     await Promise.all(work);
@@ -425,7 +428,43 @@ export class Conversations {
     finally { if (this.commands.get(id) === promise) this.commands.delete(id); }
   }
   submit(id: string, text: string, requestId: string): Promise<{ runId: string }> {
-    return this.command(id, async () => { await this.settled(id); return this.accept(id, text, requestId); });
+    return this.command(id, async () => { await this.settled(id); await this.wakeFor(id); return this.accept(id, text, requestId); });
+  }
+  /** A message to a thread whose machine is suspended wakes it first, so
+   * the agent's run never meets a machine that starts again from its disk
+   * (B7-5). With a full runner the activation records that it waits, and
+   * the run's first guest call waits on (runner-machines.ts `wake`). */
+  private async wakeFor(id: string): Promise<void> {
+    if (this.registry.getThread(id)?.vm?.suspension) await this.activate(id);
+  }
+  /** Suspends the machines that have been idle for 5 minutes (B7-1; the
+   * runner side decides idleness from guest calls, commands and portal
+   * connections, machine-idle.ts) and run nothing cubed knows of. Run by
+   * the recovery loop. Each thread's attempt is queued with its commands,
+   * so a message waits for it and then wakes the machine. */
+  async suspendIdle(): Promise<void> {
+    const machines = this.machines;
+    if (this.closing || !machines.suspendIfIdle) return;
+    for (const thread of this.registry.listThreads()) {
+      const id = thread.id;
+      if (thread.archived || thread.workspaceState !== "available" || thread.vm?.suspension || releaseUnfinished(thread)) continue;
+      if (this.commands.has(id) || this.activations.has(id) || this.archiveHolds.has(id)) { machines.touch?.(thread); continue; }
+      await this.command(id, () => machines.suspendIfIdle!(thread, () => this.busy(id)))
+        .catch(error => log.warn("suspending an idle machine failed", { thread: id, error: error instanceof Error ? error.message : String(error) }));
+    }
+  }
+  /** What cubed runs for the thread now, or null (B7-1, B7-3): a start, an
+   * archive, the agent's run or its background agents. */
+  private async busy(id: string): Promise<string | null> {
+    if (this.closing) return "cubed is stopping";
+    if (this.activations.has(id)) return "the machine is starting";
+    if (this.archiveHolds.has(id)) return "the thread is being archived";
+    const claude = await this.claudes.get(id)?.catch(() => null);
+    if (claude?.running) return "the agent is working";
+    if (claude?.waiting.length) return "the agent's background agents run";
+    const pi = await this.agents.get(id)?.catch(() => null);
+    if (pi && (await pi.harness.snapshot(LiveDoc, pi.conversation.id, context))?.run) return "the agent is working";
+    return null;
   }
   private async accept(id: string, text: string, requestId: string): Promise<{ runId: string }> {
     if (this.isClaude(id)) {

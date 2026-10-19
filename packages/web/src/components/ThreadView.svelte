@@ -11,7 +11,7 @@
   import { CLAUDE_DURABILITY, isClaude, providerLabel } from "../lib/agent.ts";
   import { createArmed } from "../lib/armed.svelte.ts";
   import type { Command } from "../lib/command.ts";
-  import { lampClass, machineLabel, stateLabel, STARTING_TEXT } from "../lib/thread-state.ts";
+  import { lampClass, machineLabel, machineNotice, stateLabel, STARTING_TEXT } from "../lib/thread-state.ts";
   import { startupShown } from "../lib/startup.ts";
   import type {
     SubjectUsage,
@@ -251,7 +251,10 @@
         <span class="strip-machine" class:error={machineLabel(summary)?.failed} title={machineLabel(summary)?.title}>{machineLabel(summary)?.text}</span>
       {/if}
       {#if stateLabel(summary)}
-        <span class="strip-state" class:error={summary.state === "error"}>{stateLabel(summary)}</span>
+        <span class="strip-state" class:error={summary.state === "error"} title={summary.vm?.suspension?.waiting ?? undefined}>{stateLabel(summary)}</span>
+      {/if}
+      {#if machineNotice(summary)}
+        <span class="strip-state strip-notice">{machineNotice(summary)}</span>
       {/if}
       {#if usageText}
         <span class="strip-usage" title={usageTitle} aria-label={`usage: ${usageText}`}>{usageText}</span>

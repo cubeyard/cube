@@ -1,7 +1,21 @@
 import type { ThreadSummary } from "./types.ts";
 
-export const lampClass = (thread: ThreadSummary) => thread.state === "error" ? "on-red" : thread.state === "starting" ? "on-amber blink" : "on-green";
-export const stateLabel = (thread: ThreadSummary) => thread.state === "error" ? "error" : thread.state === "starting" ? "starting the thread's machine" : null;
+/** The machine is suspended (idle; it holds no slot) or being woken; a
+ * full runner makes it wait, and the label says so (P7-5, B7-2). */
+const suspension = (thread: ThreadSummary) => thread.state === "error" ? null : thread.vm?.suspension ?? null;
+export const lampClass = (thread: ThreadSummary) => thread.state === "error" ? "on-red" : thread.state === "starting" ? "on-amber blink"
+  : suspension(thread)?.state === "waking" ? "on-amber blink" : suspension(thread) ? "" : "on-green";
+export const stateLabel = (thread: ThreadSummary) => {
+  if (thread.state === "error") return "error";
+  if (thread.state === "starting") return "starting the thread's machine";
+  const suspended = suspension(thread);
+  if (suspended?.state === "waking") return suspended.waiting ? "waiting for a free slot" : "waking the thread's machine";
+  if (suspended) return "suspended";
+  return null;
+};
+/** B7-5: what the user should know about the machine (it started again
+ * from its disk), shown once it runs. */
+export const machineNotice = (thread: ThreadSummary) => thread.vm?.suspension ? null : thread.vm?.notice?.text ?? null;
 /** Composer and transcript copy while a thread's machine boots (minutes the first time). */
 export const STARTING_TEXT = "starting the thread's machine…";
 /** How the thread's machine was prepared, and a failed hook if any. */

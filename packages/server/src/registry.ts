@@ -192,7 +192,17 @@ export interface ThreadVm {
    * most `MAX_STARTUP_STEPS`): what the thread shows while it starts and
    * afterwards, failed tries included. */
   steps?: StartupStep[];
+  /** The machine is suspended on its runner (S-7a, P7-5): saved to a file,
+   * no QEMU, holding no slot (B7-2). `waking`: cubed resumes it; `waiting`
+   * says why it has not yet (a full runner). Cleared once it runs again. */
+  suspension?: { state: "suspended" | "waking"; at: number; memoryBytes?: number; waiting?: string };
+  /** The newest thing the user should know about the machine (B7-5: it
+   * started again from its disk because its snapshot could not be used). */
+  notice?: { text: string; at: number };
 }
+/** Open threads whose machine holds one of its runner's slots: not a
+ * suspended one (B7-2: it frees its slot; waking it needs one again). */
+const HOLDS_SLOT = "json_extract(data, '$.vm.suspension') IS NULL";
 /** At most this many startup steps are kept per thread. */
 export const MAX_STARTUP_STEPS = 40;
 /** At most this much of a failed hook's log is kept on its step. */
@@ -419,7 +429,7 @@ export class Registry {
         o.last_attempt_at,o.last_contact_at,o.unreachable_since,o.last_error,o.health
       FROM runner r JOIN runner_operator o ON o.runner_id=r.id
       LEFT JOIN (SELECT runner_id,count(*) AS active,sum(json_extract(data, '$.workspaceState')='failed') AS failed
-        FROM thread WHERE ${OPEN_THREAD} GROUP BY runner_id) t ON t.runner_id=r.id
+        FROM thread WHERE ${OPEN_THREAD} AND ${HOLDS_SLOT} GROUP BY runner_id) t ON t.runner_id=r.id
       WHERE o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired' ORDER BY r.rowid`).all() as Array<Record<string, unknown>>;
     return rows.map(row => ({ row, runner: JSON.parse(String(row.data)) as Runner }))
       // A protocol-3 or host runner takes only the threads started on it by name.
@@ -432,7 +442,7 @@ export class Registry {
   /** A runner a thread is started on by name: enrolled, not retiring, with a
    * free slot (whether it answers now or not: the thread waits for it). */
   private namedRunner(id: string): { id: string } {
-    const row = this.db.prepare(`SELECT r.id,r.data,(SELECT count(*) FROM thread WHERE runner_id=r.id AND ${OPEN_THREAD}) AS active
+    const row = this.db.prepare(`SELECT r.id,r.data,(SELECT count(*) FROM thread WHERE runner_id=r.id AND ${OPEN_THREAD} AND ${HOLDS_SLOT}) AS active
       FROM runner r JOIN runner_operator o ON o.runner_id=r.id
       WHERE r.id=? AND o.retired_at IS NULL AND o.retiring_at IS NULL AND r.state<>'retired'`).get(id);
     if (!row) throw new Error(`no enrolled runner ${id} that takes threads`);
@@ -505,7 +515,7 @@ export class Registry {
   private syncRunner(id: string): void {
     const runner = this.getRunner(id);
     if (!runner) return;
-    const open = this.db.prepare(`SELECT data FROM thread WHERE runner_id=? AND ${OPEN_THREAD} ORDER BY rowid`).all(id).map(row => this.parse<Thread>(row)!);
+    const open = this.db.prepare(`SELECT data FROM thread WHERE runner_id=? AND ${OPEN_THREAD} AND ${HOLDS_SLOT} ORDER BY rowid`).all(id).map(row => this.parse<Thread>(row)!);
     const latest = open.at(-1);
     const state: RunnerAllocationState = !latest || open.length < runnerSlots(runner) ? "available"
       : latest.workspaceState === "available" ? "busy" : latest.workspaceState;
@@ -640,7 +650,8 @@ export class Registry {
     return this.parse(this.db.prepare("SELECT data FROM thread WHERE json_extract(data, '$.vm.build.vmId')=?").get(vmId));
   }
   /** Changes the thread's machine record (provisioning tries, retention). */
-  updateThreadVm(threadId: string, patch: Partial<Pick<ThreadVm, "provisionAttempt" | "retain" | "retainReason" | "discarded" | "preparation" | "build" | "hooks" | "startup">>): Thread {
+  updateThreadVm(threadId: string, patch: Partial<Pick<ThreadVm, "provisionAttempt" | "retain" | "retainReason" | "discarded" | "preparation" | "build" | "hooks" | "startup"
+    | "suspension" | "notice">>): Thread {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const thread = this.getThread(threadId);
@@ -650,6 +661,8 @@ export class Registry {
       for (const key of Object.keys(patch) as Array<keyof typeof patch>) if (patch[key] === undefined) delete vm[key];
       const updated = { ...thread, vm };
       this.db.prepare("UPDATE thread SET data=? WHERE id=?").run(JSON.stringify(updated), threadId);
+      // A suspended machine frees its slot; a woken one takes it again.
+      if ("suspension" in patch) this.syncRunner(thread.runnerId);
       this.db.exec("COMMIT");
       return updated;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }

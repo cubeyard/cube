@@ -284,7 +284,25 @@ directory and key; there is no upgrade path from `cube-runner` to it.
   it, on the same writable disk.
 - **Roll back** the same way: point the start script back at the previous
   `libexec/berth-<version>/berth`, which the installer never removes or
-  replaces, and restart.
+  replaces, and restart. A berth from before suspend cannot read a machine
+  record that holds a snapshot or a dropped-snapshot note, and then does not
+  start at all: roll back only with no machine suspended (stop or archive
+  those threads first).
+- **Suspend** (phase 7) is off unless `berth vm` starts with
+  `--suspend-disk-margin-gib <GiB>`, which has no default: it is the free
+  disk a runner keeps besides a machine's memory file (at least 1 GiB; the
+  file can be a little larger than the machine's memory). Only then does
+  the runner say `machine.suspend`, and cubed suspends a thread's machine
+  after 5 minutes in which nothing ran: no turn of its agent or its
+  background agents, no guest call, no command started and not yet seen to
+  end, no portal connection. A suspended machine holds no slot. Anything
+  the thread needs wakes it (a message, a command, the portal); with the
+  runner full the thread waits, saying so (`waiting for a free slot`). The
+  runner keeps a machine running when its disk is short or the save fails.
+  After an upgrade a snapshot no longer fits, and the machine starts from
+  its disk with the notice `restarted after an update; running commands
+  were interrupted`. A suspend holds the runner's other machine operations
+  for up to about a minute and a half.
 - **Retire** it as any runner: archive its threads, then `POST
   /api/runners/<id>/retire` with `confirm` set to its node id and a
   `reason` (at most 500 characters). cubed refuses while it has an open thread on the

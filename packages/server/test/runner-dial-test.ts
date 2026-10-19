@@ -222,7 +222,7 @@ try {
   const thread = { id: MACHINE.owner, vm: { vmId: MACHINE.id }, runnerId: "node-r1" } as unknown as Thread;
   const epochs = Array.from({ length: 7 }, () => nextMachineEpoch(path.join(threads, thread.id, "vm")));
   const admission = { configPath: "/private/r1.json", configHash: "r1" };
-  const registry = { runner: () => admission, getRunner: () => null };
+  const registry = { runner: () => admission, getRunner: () => null, getThread: () => null };
   const stopped = new RunnerMachines({ registry: registry as never, threads, session: () => session });
   await assert.rejects(stopped.dial(thread, appPort), /the thread's machine is not running/);
   class Running extends RunnerMachines { override running(): boolean { return true; } }
