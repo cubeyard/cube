@@ -12,6 +12,7 @@
  * `redirect?to=URL` (302) and `large?mib=N` (N MiB, the value in every
  * 64 KiB). `seen` records what credentials each request carried. */
 import { execFileSync, spawn } from "node:child_process";
+import { X509Certificate } from "node:crypto";
 import fs from "node:fs";
 import https from "node:https";
 import path from "node:path";
@@ -34,6 +35,14 @@ export interface FakeGithub {
   close(): void;
 }
 
+/** Fails unless the certificate at `file` is signed with ecdsa-with-SHA256,
+ * read from its DER rather than from openssl's text, which differs between
+ * OpenSSL and LibreSSL. */
+export function requireEcdsaSha256(file: string): void {
+  const oid = new X509Certificate(fs.readFileSync(file)).signatureAlgorithmOid;
+  if (oid !== "1.2.840.10045.4.3.2") throw new Error(`fake-github: ${file} is signed with ${oid}, not ecdsa-with-SHA256 (1.2.840.10045.4.3.2)`);
+}
+
 export const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=Cube E2E", "-c", "user.email=e2e@example.invalid",
   "-c", "commit.gpgsign=false", "-C", cwd, ...args], { encoding: "utf8" }).trim();
 
@@ -41,10 +50,13 @@ export function fakeGithub(options: { dir: string; token: string }): Promise<Fak
   const { dir, token: fakeToken } = options;
   fs.mkdirSync(path.join(dir, "cube-e2e"), { recursive: true });
   const openssl = (...args: string[]) => execFileSync("openssl", args, { cwd: dir, stdio: "ignore" });
-  openssl("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=cube e2e test ca");
+  // The digest is explicit: LibreSSL (macOS /usr/bin/openssl) may sign
+  // with SHA-1 by default, and the gateway rightly refuses that.
+  openssl("req", "-x509", "-sha256", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=cube e2e test ca");
   fs.writeFileSync(path.join(dir, "san.ext"), "subjectAltName=DNS:github.com,DNS:api.github.com\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n");
   openssl("req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "leaf.key", "-out", "leaf.csr", "-subj", "/CN=github.com");
-  openssl("x509", "-req", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", "leaf.pem", "-days", "2", "-extfile", "san.ext");
+  openssl("x509", "-req", "-sha256", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", "leaf.pem", "-days", "2", "-extfile", "san.ext");
+  requireEcdsaSha256(path.join(dir, "leaf.pem"));
   const seedTree = path.join(dir, "seed");
   fs.mkdirSync(seedTree);
   git(seedTree, "init", "-q", "--initial-branch=main");
