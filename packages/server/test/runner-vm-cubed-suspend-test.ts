@@ -21,15 +21,21 @@
  *       sends it (the agent's lease epoch), and no poll: not asked while it
  *       runs (K-5, also with no call open); once a `get` saw its end,
  *       suspended; then a guest call wakes it (the same boot);
- *   N3  a `dial` held open to a server outside cube's supervision (no
- *       registered service; moved out of its command's cgroup, which keel
- *       kills when the command ends): not asked; closed:
- *       suspended; a portal request to it wakes it within the portal's 60 s
- *       and is answered by the guest (404, no such service), the same boot,
- *       and the guest's listener answers through `dial` again;
- *   N3s a registered `cube service` (the interim rule while the user
- *       decides N-207-8): not asked; unregistered: suspended. This records
- *       today's behavior; it decides nothing;
+ *   N3  the listener is the product's own, a `cube service` (keel kills what
+ *       a command leaves behind and its commands see no cgroupfs, so a
+ *       listener with no service and no command cannot be reached in keel).
+ *       A dial and a registered service are told apart by the order cubed
+ *       checks in (suspendIfIdle: idleMs before it asks the guest for its
+ *       `services`), counted where the `services` call leaves cubed
+ *       (RunnerSession.guestCall):
+ *   N3a a `dial` to it held open: not asked, and cubed never asks for the
+ *       machine's services;
+ *   N3b the dial closed, the service still registered (the interim rule
+ *       while the user decides N-207-8; it decides nothing): not asked, and
+ *       cubed asks for its services at least once;
+ *   N3c the service stopped: suspended;
+ *   N3d a portal request wakes it within the portal's 60 s and is answered
+ *       by the guest (404, no such service), the same boot; suspended again;
  *   N5  one slot: thread A suspended, thread B takes the slot and stays busy;
  *       a message to A shows "waiting for a free slot …" and A stays
  *       suspended; B archived, A resumes (the same boot) and its run ends;
@@ -162,6 +168,17 @@ const counted: typeof call = function (this: RunnerSession, verb, timeoutMs) {
 RunnerSession.prototype.call = counted;
 const asked = (owner: string, verb: "machineSuspend" | "machineStart" = "machineSuspend", since = 0) =>
   sent.filter(entry => entry.owner === owner && entry.verb === verb && entry.at >= since).length;
+/** Every `services` guest call cubed sends to this runner, as it leaves
+ * (suspendIfIdle's, and the portal's, which N3a and N3b do not use). */
+const servicesSent: Array<{ at: number; owner: string }> = [];
+const sendGuest = RunnerSession.prototype.guestCall;
+const countedGuest: typeof sendGuest = function (this: RunnerSession, ref, epoch, op, request, options) {
+  if (this.nodeId === node && op === "services") servicesSent.push({ at: Date.now(), owner: ref.owner });
+  return sendGuest.call(this, ref, epoch, op, request, options);
+};
+RunnerSession.prototype.guestCall = countedGuest;
+const servicesAsked = (owner: string, since: number) =>
+  servicesSent.filter(entry => entry.owner === owner && entry.at >= since).length;
 
 // ---------------------------------------------------------------- berth vm
 
@@ -284,7 +301,7 @@ async function send(id: string, line: string): Promise<string> {
   await api(`/api/threads/${id}/prompt`, "POST", { text: line, requestId: run });
   return run;
 }
-async function ran(id: string, run: string, ms = 300000): Promise<string> {
+async function ran(id: string, run: string, ms = 300000, raw = false): Promise<string> {
   const history = await until(`run ${run}`, ms, async () => {
     const value = await api(`/api/threads/${id}/history`);
     return value.status?.run === run && !["working", "idle"].includes(value.status.state) ? value : undefined;
@@ -293,11 +310,26 @@ async function ran(id: string, run: string, ms = 300000): Promise<string> {
   const last = [...history.events].reverse().find((event: { type: string }) => event.type === "assistant-text") as { text?: string } | undefined;
   const answer = last?.text ?? "";
   assert.match(answer, /^result: /, answer);
+  if (raw) return answer.replace(/^result: /, "");
   return answer.replace(/^result: /, "").replace(/\n\[exit=\d+; exited\]$/, "").trimEnd();
 }
 const bashLine = (command: string, ms = 120000) => `tool ${JSON.stringify({ name: "bash", args: { command, timeoutMs: ms } })}`;
 /** One bash tool call by the thread's agent: its output. */
 const bash = async (id: string, command: string, ms = 120000) => ran(id, await send(id, bashLine(command, ms)), ms + 120000);
+/** A command that prepares a check, not one it measures: it must exit 0
+ * and print `sentinel` as a line of its own, or the run stops there as the
+ * harness's failure, with the command's output. Its output, without the
+ * exit line. */
+async function setup(id: string, what: string, command: string, sentinel: string): Promise<string> {
+  const answer = await ran(id, await send(id, bashLine(command)), 240000, true);
+  const exit = answer.match(/\n\[exit=(-?\d+); ([a-z]+)[^\]\n]*\]$/);
+  const output = exit ? answer.slice(0, exit.index) : answer;
+  if (!exit || exit[1] !== "0" || exit[2] !== "exited" || !output.split("\n").includes(sentinel)) {
+    throw new Error(`STOP: harness setup: ${what}: ${answer}`);
+  }
+  note(`setup ${what}: ${output.replace(/\n/g, " | ")}`);
+  return output;
+}
 const BOOT = "cat /proc/sys/kernel/random/boot_id";
 const hookLines = (log: string, kind: string) => log.split("\n").filter(line => line.startsWith(`${kind} `));
 const thread = (id: string) => app.registry.getThread(id)!;
@@ -390,6 +422,7 @@ async function teardown(): Promise<void> {
   if (tornDown) return;
   tornDown = true;
   RunnerSession.prototype.call = call;
+  RunnerSession.prototype.guestCall = sendGuest;
   try { app.server.closeAllConnections(); await Promise.race([app.close(), delay(60000)]); } catch (error) { console.error(`cubed close: ${String(error)}`); }
   await stop(runner.child).catch(() => {});
   github.close();
@@ -399,6 +432,7 @@ async function teardown(): Promise<void> {
   summary.failed = failed;
   summary.seconds = Math.round((Date.now() - began) / 1000);
   summary.sent = sent.map(entry => ({ ...entry, s: Math.round((entry.at - began) / 100) / 10 }));
+  summary.servicesSent = servicesSent.map(entry => ({ ...entry, s: Math.round((entry.at - began) / 100) / 10 }));
   if (evidence) {
     // Small files only: logs and journals, not disks or memory files.
     const copy = (from: string, to: string) => {
@@ -534,6 +568,10 @@ try {
   const n2Op = await begin(a, `sleep ${sleepS}; echo n2-done`, (sleepS + 60) * 1000);
   const n2From = Date.now();
   await quiet(a, `N2 (exec sleep ${sleepS}, no poll, no call open)`, QUIET_MS);
+  const n2Until = Date.now();
+  // The loop's own check of a running machine (machineGet, then an idempotent machineStart) each tick; not a wake.
+  const startsInWindow = sent.filter(entry => entry.owner === a && entry.verb === "machineStart" && entry.at >= n2From && entry.at <= n2Until)
+    .map(entry => ({ s: Math.round((entry.at - began) / 100) / 10, ms: entry.ms, outcome: entry.outcome }));
   assert.equal(await end(a, n2Op, (sleepS + 60) * 1000), "n2-done", "N2: the command over the quiet window");
   assert.ok(Date.now() - n2From >= (sleepS - 5) * 1000, "N2: the command really ran its time");
   const n2 = await suspendedBy(a, "N2 (after a get saw the end)", Date.now());
@@ -541,51 +579,72 @@ try {
   assert.equal(await end(a, await begin(a, BOOT, 60000), 120000), boot, "N2: a guest call woke it, the same boot");
   assert.ok(!thread(a).vm?.suspension, "N2: awake");
   note("N2: a guest call woke it; the same boot");
-  summary.N2 = { sleepS, suspendedAfterGetMs: n2 };
+  summary.N2 = { sleepS, suspendedAfterGetMs: n2, startsInWindow };
 
-  // N3: a dial held open (a listener the agent started, no registered service).
+  // N3: the listener is a `cube service` (the product's own). A listener
+  // with no service and no command cannot be reached in keel: a command's
+  // processes are killed when it ends, it sees no cgroupfs to leave its
+  // cgroup, and `cube service stop` kills the service's. So a dial and a
+  // registered service are told apart by the order suspendIfIdle checks in:
+  // idleMs (0 with a dial open) before it asks the guest for its `services`.
   const PORT = 18081;
-  // keel kills what a command leaves behind (its cgroup); this server is
-  // moved out of it first, as a daemon outside cube's supervision would be.
-  const listener = await bash(a, "cat > /tmp/cs-echo.pl <<'EOF'\nuse IO::Socket::INET;\n"
-    + `my $s = IO::Socket::INET->new(LocalPort => ${PORT}, Listen => 5, ReuseAddr => 1) or die $!;\n`
-    + "while (my $c = $s->accept) { while (sysread($c, my $b, 4096)) { syswrite($c, $b) } close $c }\nEOF\n"
-    + "sudo sh -c 'echo $$ > /sys/fs/cgroup/cgroup.procs && (sudo -u agent perl /tmp/cs-echo.pl > /tmp/cs-echo.log 2>&1 < /dev/null &)'; sleep 1; "
-    + "for p in $(pgrep -f cs-echo.pl); do echo \"pid $p cgroup $(cat /proc/$p/cgroup)\"; done; echo started");
-  await delay(3000);
-  note(`N3 listener: ${listener.replace(/\n/g, " | ")}`);
-  let socket = await app.machines!.dial!(thread(a), PORT);
+  await setup(a, "N3 service start", [
+    "command -v perl >/dev/null || { echo 'no perl'; exit 3; }",
+    "cat > /tmp/cs-echo.pl <<'EOF'",
+    "use IO::Socket::INET;",
+    "$SIG{CHLD} = 'IGNORE';",
+    `my $s = IO::Socket::INET->new(LocalAddr => '0.0.0.0', LocalPort => ${PORT}, Listen => 5, ReuseAddr => 1) or die "listen: $!";`,
+    "while (my $c = $s->accept) { if (fork) { close $c; next } while (sysread($c, my $b, 4096)) { syswrite($c, $b) } exit 0 }",
+    "EOF",
+    `cube service start csecho --port ${PORT} --wait 15 --json -- "$(command -v perl)" /tmp/cs-echo.pl || exit $?`,
+    "echo CS-STARTED",
+  ].join("\n"), "CS-STARTED");
+  const status = await setup(a, "N3 service status", "cube service status csecho --json || exit $?\necho CS-STATUS", "CS-STATUS");
+  const view = JSON.parse(status.split("\n")[0]!) as { kind?: string; state?: string; listening?: boolean };
+  if (view.kind !== "command" || view.state !== "active" || view.listening !== true) throw new Error(`STOP: harness setup: N3 service status: ${status}`);
+  await setup(a, "N3 listening", `exec 3<>/dev/tcp/127.0.0.1/${PORT} && printf 'p\\n' >&3 && read -t 5 l <&3 && [ "$l" = p ] && echo "LISTENING ${PORT}"`, `LISTENING ${PORT}`);
+
+  // N3a: a dial open: not asked, and cubed never asks for the services.
+  const socket = await app.machines!.dial!(thread(a), PORT);
   await echo(socket, "n3-open\n");
-  await quiet(a, "N3 (a dial open)");
+  const n3aFrom = Date.now();
+  await quiet(a, "N3a (a dial open, the service registered)");
+  const n3aAsks = servicesAsked(a, n3aFrom);
+  assert.equal(n3aAsks, 0, "N3a: with a dial open cubed does not ask for the machine's services");
   await echo(socket, "n3-still\n");
   const closed = once(socket, "close");
   socket.end();
   socket.destroy();
   await closed;
-  const n3 = await suspendedBy(a, "N3 (after the dial closed)", Date.now());
-  // The portal wakes it: the guest answers (no such service), not the 503 of a machine that still wakes.
+  summary.N3a = { servicesAsks: n3aAsks };
+
+  // N3b: the dial closed, the service registered (today's rule while N-207-8 is open): not asked, its services asked.
+  const n3bFrom = Date.now();
+  await quiet(a, "N3b (the dial closed, the service registered)");
+  const n3bAsks = servicesAsked(a, n3bFrom);
+  assert.ok(n3bAsks >= 1, `N3b: cubed asked for the machine's services (${n3bAsks})`);
+  note(`N3a/N3b: services asked ${n3aAsks} times with the dial open, ${n3bAsks} with the service alone`);
+  summary.N3b = { servicesAsks: n3bAsks, note: "interim rule; N-207-8 is the user's" };
+
+  // N3c: the service stopped: suspended.
+  const stopped = await setup(a, "N3c service stop", "cube service stop csecho --json || exit $?\necho CS-STOPPED", "CS-STOPPED");
+  if ((JSON.parse(stopped.split("\n")[0]!) as { stopped?: boolean }).stopped !== true) throw new Error(`STOP: harness setup: N3c service stop: ${stopped}`);
+  const n3c = await suspendedBy(a, "N3c (after the service was stopped)", Date.now());
+  summary.N3c = { suspendedAfterStopMs: n3c };
+
+  // N3d: the portal wakes it: the guest answers (no such service), not the 503 of a machine that still wakes.
   const portalFrom = Date.now();
   const answer = await request(portalPort, `nosuch-${app.portal!.label(a)}.localhost:${portalPort}`, "GET", "/");
   const portalMs = Date.now() - portalFrom;
-  assert.equal(answer.status, 404, `N3: the portal's answer after waking: ${answer.status} ${answer.body.toString()}`);
+  assert.equal(answer.status, 404, `N3d: the portal's answer after waking: ${answer.status} ${answer.body.toString()}`);
   assert.match(answer.body.toString(), /no service nosuch/, answer.body.toString());
-  assert.ok(portalMs < 60000, `N3: woken within the portal's 60 s (${portalMs} ms)`);
-  assert.ok(!thread(a).vm?.suspension, "N3: awake");
-  socket = await app.machines!.dial!(thread(a), PORT);
-  await echo(socket, "n3-after\n");
-  const reclosed = once(socket, "close");
-  socket.destroy();
-  await reclosed;
-  assert.equal(await bash(a, BOOT), boot, "N3: the same boot");
-  note(`N3: a portal request woke it in ${(portalMs / 1000).toFixed(1)} s and the guest answered ${answer.status}; the listener echoes again; same boot`);
-  summary.N3 = { suspendedAfterCloseMs: n3, portalWakeMs: portalMs };
-
-  // N3s: a registered service keeps it running (today's rule while N-207-8 is open).
-  await bash(a, `cube service open csecho --port ${PORT} --json`);
-  await quiet(a, "N3s (a registered service, no connection)");
-  await bash(a, "cube service stop csecho --json; cube service list --json");
-  const n3s = await suspendedBy(a, "N3s (after the service was removed)", Date.now());
-  summary.N3s = { suspendedAfterRemovedMs: n3s, note: "interim rule; N-207-8 is the user's" };
+  assert.ok(portalMs < 60000, `N3d: woken within the portal's 60 s (${portalMs} ms)`);
+  assert.ok(!thread(a).vm?.suspension, "N3d: awake");
+  assert.equal(await bash(a, BOOT), boot, "N3d: the same boot");
+  note(`N3d: a portal request woke it in ${(portalMs / 1000).toFixed(1)} s and the guest answered ${answer.status}; same boot`);
+  // N5 needs A suspended.
+  const n3d = await suspendedBy(a, "N3d (suspended again before N5)", Date.now());
+  summary.N3d = { portalStatus: answer.status, portalWakeMs: portalMs, suspendedAfterMs: n3d };
 
   // N5: one slot. A suspended; B takes the slot and stays busy (a command, no poll).
   assert.equal(await freeSlots(), 1);
@@ -649,7 +708,8 @@ try {
 
   console.log(`ok: cubed with berth vm (${accel}), idle ${IDLE_MS / 1000} s and the real 30 s loop: N7 never asked without the capability; `
     + "N1 suspended by the loop, its slot free, not woken by it; N4 a message woke it (same boot, no hooks); N2 not during a command with no poll, "
-    + "suspended after its end, woken by a guest call; N3 not with a dial open, woken by the portal; N3s not with a registered service; "
+    + "suspended after its end, woken by a guest call; N3a not with a dial open (services not asked), N3b not with a registered service (services asked), "
+    + "N3c suspended once the service stopped, N3d woken by the portal; "
     + "N5 waited for a free slot and resumed after B's archive; N6 cold after another berth's snapshot, with the notice and resume hooks");
 } catch (error) {
   failed = true;
