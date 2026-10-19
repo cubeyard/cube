@@ -53,7 +53,7 @@ import { MachineEvents, safeText, type GuestAgent, type MachineEvidence } from "
 import { bootDocuments, MAX_BOOT_BYTES } from "./vm-seed.ts";
 import { FAILED_BUILD_BACKOFF_MS, KEEL_TEMPLATE_CAPABILITIES, TEMPLATE_FORMAT, keelTemplateKey, keelTemplateParts, missingTemplate, obsoleteTemplates, pickTemplate,
   templateMeta, templateSettings, type TemplateMeta, type TemplateParts, type TemplateSettings } from "./vm-template.ts";
-import { VmWorkspace } from "./vm-workspace.ts";
+import { guestServices, VmWorkspace } from "./vm-workspace.ts";
 import { IDLE_MS, MachineActivity } from "./machine-idle.ts";
 import { LeaseStore } from "./workspace-lease.ts";
 import { settleOperation, type WorkspaceOwner } from "./workspace.ts";
@@ -186,8 +186,11 @@ export class RunnerMachines implements ThreadMachines {
   private readonly suspending = new Map<string, Promise<void>>();
   /** Wakes under way, one per thread. */
   private readonly waking = new Map<string, Promise<void>>();
-  /** Runners that answered `machine_suspend` with no such verb (K-6). */
-  private readonly noSuspend = new Set<string>();
+  /** Runners that answered `machine_suspend` with no such verb (K-6), by
+   * the software version that did: a new release is asked again. */
+  private readonly noSuspend = new Map<string, string>();
+  /** Runners with a suspend under way: one at a time per runner (B-207-3). */
+  private readonly suspendingOn = new Set<string>();
   /** When a refused suspend may be tried again, by thread. */
   private readonly suspendRetry = new Map<string, number>();
   /** How a suspended machine is woken: the conversation's activation (a
@@ -287,26 +290,57 @@ export class RunnerMachines implements ThreadMachines {
   }
 
   /** Suspends the thread's machine when it has been idle for idleMs and
-   * `busy` finds nothing running (asked last, so nothing starts between).
-   * Only a running machine on a runner that says it can suspend; a refusal
-   * keeps it running. True when it was suspended. */
+   * nothing runs in it: `busy` (the conversation's), its commands, calls and
+   * portal connections, and no registered service (asked last, with the
+   * suspend's gate up, so nothing starts between). Only a running machine
+   * on a runner that says it can suspend, one suspend per runner at a time;
+   * a refusal keeps it running. True when it was suspended. */
   async suspendIfIdle(thread: Thread, busy: () => Promise<string | null>): Promise<boolean> {
     const current = this.options.registry.getThread(thread.id);
     if (!current || current.archived || current.workspaceState !== "available" || !this.onVm(current) || !this.running(current)) return false;
     if (this.starting.has(thread.id) || this.suspending.has(thread.id) || this.waking.has(thread.id)) return false;
-    if (this.noSuspend.has(current.runnerId) || (this.suspendRetry.get(thread.id) ?? 0) > Date.now()) return false;
+    if (this.suspendingOn.has(current.runnerId) || (this.suspendRetry.get(thread.id) ?? 0) > Date.now()) return false;
     const session = this.session(current);
     if (!session.capabilities.includes(SUSPEND_CAPABILITY)) return false;
+    const refusedBy = this.noSuspend.get(current.runnerId);
+    if (refusedBy !== undefined && refusedBy === (session.runner?.softwareVersion ?? "")) return false;
     if (this.activity.idleMs(thread.id) < (this.options.idleMs ?? IDLE_MS)) return false;
-    const why = await busy();
-    if (why) { this.activity.touch(thread.id); return false; }
-    // Calls that come from here on wait for the outcome.
-    let suspended = false;
-    const suspending = this.suspend(current, session).then(done => { suspended = done; });
-    this.suspending.set(thread.id, suspending);
-    try { await suspending; }
-    finally { this.suspending.delete(thread.id); }
-    return suspended;
+    // From here guest calls and starts wait for the outcome (N-207-1).
+    let open!: () => void;
+    const gate = new Promise<void>(resolve => { open = resolve; });
+    this.suspending.set(thread.id, gate);
+    this.suspendingOn.add(current.runnerId);
+    try {
+      const why = await busy() ?? this.activity.busy(thread.id) ?? await this.services(current, session);
+      if (why) {
+        this.activity.touch(thread.id);
+        this.log.debug("machine not suspended", { thread: thread.id, reason: why });
+        return false;
+      }
+      return await this.suspend(current, session);
+    } finally {
+      this.suspending.delete(thread.id);
+      this.suspendingOn.delete(current.runnerId);
+      open();
+    }
+  }
+
+  /** Why the machine's registered services keep it running, or null. A
+   * registered service (`cube service`) may serve without a connection
+   * open; until the user decides whether such a machine may be frozen
+   * (N-207-8), it keeps the machine running, and so does a machine that
+   * cannot say. Asked past the activity count: not activity itself. */
+  private async services(thread: Thread, session: RunnerSession): Promise<string | null> {
+    const transport = session.guest(this.ref(thread), () => Math.max(1, currentMachineEpoch(this.directory(thread))));
+    try {
+      const answer = await transport.call("services", {}, { timeoutMs: 15000 });
+      const failure = answer.header.error as { message?: unknown } | undefined;
+      if (failure) return `its services could not be listed: ${typeof failure.message === "string" ? failure.message : "the guest refused"}`;
+      const names = guestServices(answer.header).map(service => service.name);
+      return names.length ? `services are registered (${names.slice(0, 5).join(", ")})` : null;
+    } catch (error) {
+      return `its services could not be listed: ${message(error)}`;
+    } finally { await transport.close().catch(() => {}); }
   }
 
   private async suspend(thread: Thread, session: RunnerSession): Promise<boolean> {
@@ -335,16 +369,21 @@ export class RunnerMachines implements ThreadMachines {
       if (error instanceof RunnerError) {
         // K-6: a runner without the verb (a release from before suspend).
         if (error.code === "UNIMPLEMENTED" || (error.code === "INVALID_ARGUMENT" && error.reason === "verb")) {
-          this.noSuspend.add(thread.runnerId);
+          this.noSuspend.set(thread.runnerId, session.runner?.softwareVersion ?? "");
           return refused(`runner ${node} does not suspend machines`, false);
         }
         if (error.code === "FAILED_PRECONDITION" && error.reason === "busy") return refused(`runner ${node} found it busy (${error.message})`, false);
         if (error.code === "RESOURCE_EXHAUSTED" && error.reason === "disk") return refused(`runner ${node} has too little free disk for its memory file`, true);
         if (error.code === "UNAVAILABLE" && error.reason === "snapshot") return refused(`runner ${node} could not save it (${error.message})`, true);
       }
-      // K-8: no answer in time (or a lost one): the runner says what became of it.
+      // K-8: no answer in time (or a lost one): the runner says what became
+      // of it. Still SUSPENDING, the gate stays up until it says more.
       try {
-        const machine = await session.machine({ case: "machineGet", value: { ref } });
+        let machine = await session.machine({ case: "machineGet", value: { ref } });
+        if (machine.status?.phase === MachineStatus_Phase.SUSPENDING) {
+          machine = await session.until(ref, current => current.status?.phase !== MachineStatus_Phase.SUSPENDING,
+            this.options.suspendTimeoutMs ?? SUSPEND_TIMEOUT_MS);
+        }
         if (machine.status?.phase === MachineStatus_Phase.SUSPENDED) return suspended(machine);
       } catch (asked) { this.log.warn("machine_get after machine_suspend failed", { thread: thread.id, error: asked }); }
       return refused(`machine_suspend failed: ${message(error)}`, true);
@@ -355,7 +394,11 @@ export class RunnerMachines implements ThreadMachines {
   start(thread: Thread, options: StartOptions = {}): Promise<MachineStart> {
     const pending = this.starting.get(thread.id);
     if (pending) return pending;
-    const starting = this.boot(thread, options).finally(() => this.starting.delete(thread.id));
+    // A suspend under way ends first: the start then resumes what it saved,
+    // never races its save (B-207-1).
+    const suspending = this.suspending.get(thread.id);
+    const starting = (suspending ? suspending.then(() => this.boot(this.options.registry.getThread(thread.id) ?? thread, options)) : this.boot(thread, options))
+      .finally(() => this.starting.delete(thread.id));
     this.starting.set(thread.id, starting);
     return starting;
   }
@@ -383,7 +426,14 @@ export class RunnerMachines implements ThreadMachines {
       const start = vm ? this.vmStart(thread, runner, size!) : {};
       let machine: Machine;
       let created = false;
-      try { machine = await session.machine({ case: "machineGet", value: { ref } }); }
+      try {
+        machine = await session.machine({ case: "machineGet", value: { ref } });
+        // A save the runner is still doing (one cubed gave up on): its end.
+        if (machine.status?.phase === MachineStatus_Phase.SUSPENDING) {
+          machine = await session.until(ref, current => current.status?.phase !== MachineStatus_Phase.SUSPENDING,
+            this.options.suspendTimeoutMs ?? SUSPEND_TIMEOUT_MS);
+        }
+      }
       catch (error) {
         if (!(error instanceof RunnerError && error.code === "NOT_FOUND")) throw error;
         options.onBoot?.();
@@ -427,8 +477,10 @@ export class RunnerMachines implements ThreadMachines {
       const ready = created ? await this.step(thread, startAndWait) : await startAndWait();
       if (created) this.options.registry.endStartupStep(thread.id, { name: "boot", state: "ok" });
       const boot = ready.status?.bootId ?? "";
-      // A machine started now is active now (its idle time starts here).
-      this.activity.touch(thread.id);
+      // A machine started or resumed now is active now, and nothing from
+      // before runs in it. A check of one that ran already is not activity:
+      // the recovery loop's checks must not keep it awake (B-207-1).
+      if (machine.status?.phase !== MachineStatus_Phase.RUNNING) this.activity.started(thread.id);
       const booted = this.boots.get(thread.id) !== boot;
       this.boots.set(thread.id, boot);
       if (booted) this.events.record(thread.id, "ready", `boot ${boot.slice(0, 8)} of ${what} ${node}`);
@@ -743,7 +795,6 @@ export class RunnerMachines implements ThreadMachines {
    * its disk (B7-5: a notice, and running commands were interrupted). */
   private resumed(thread: Thread, machine: Machine, node: string): void {
     const dropped = machine.status?.conditions.find(condition => condition.type === "SnapshotDropped");
-    this.activity.touch(thread.id);
     if (dropped) {
       const text = dropped.reason === "version" ? RESTARTED_AFTER_UPDATE : RESTARTED;
       this.options.registry.updateThreadVm(thread.id, { suspension: undefined, notice: { text, at: Date.now() } });
@@ -751,7 +802,8 @@ export class RunnerMachines implements ThreadMachines {
       this.log.warn("snapshot dropped; the machine started from its disk", { thread: thread.id, runner: node, reason: dropped.reason });
       return;
     }
-    this.options.registry.updateThreadVm(thread.id, { suspension: undefined });
+    // A notice of an earlier cold start is old news now (N-207-6).
+    this.options.registry.updateThreadVm(thread.id, { suspension: undefined, notice: undefined });
     this.events.record(thread.id, "resumed", `on VM runner ${node}, the same boot`);
   }
 

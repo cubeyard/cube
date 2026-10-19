@@ -201,8 +201,11 @@ export interface ThreadVm {
   notice?: { text: string; at: number };
 }
 /** Open threads whose machine holds one of its runner's slots: not a
- * suspended one (B7-2: it frees its slot; waking it needs one again). */
-const HOLDS_SLOT = "json_extract(data, '$.vm.suspension') IS NULL";
+ * suspended one (B7-2: it frees its slot; waking it needs one again), nor
+ * one waiting for a free slot. One being woken holds it already: its QEMU
+ * may be starting, and no other placement may count on that slot. */
+const HOLDS_SLOT = `(json_extract(data, '$.vm.suspension') IS NULL
+  OR (json_extract(data, '$.vm.suspension.state') = 'waking' AND json_extract(data, '$.vm.suspension.waiting') IS NULL))`;
 /** At most this many startup steps are kept per thread. */
 export const MAX_STARTUP_STEPS = 40;
 /** At most this much of a failed hook's log is kept on its step. */

@@ -18,8 +18,14 @@
  *      (`RESOURCE_EXHAUSTED/capacity`), and a guest call that comes during a
  *      suspend waits for it; a dropped snapshot leaves the B7-5 notice; the
  *      runner's refusals (`disk`, `busy`) keep the machine running, a
- *      runner without the verb (K-6) is not asked again, and a suspend with
- *      no answer in time is read back with `machine_get` (K-8).
+ *      runner without the verb (K-6) is not asked again until it runs
+ *      another version, and a suspend with no answer in time is read back
+ *      with `machine_get`, waiting while it says SUSPENDING (K-8); a
+ *      registered service keeps it running (N-207-8); a start during a
+ *      suspend waits for it; one suspend per runner at a time (B-207-3);
+ *      the recovery loop's own ticks with real Conversations suspend an idle
+ *      machine once (B-207-1); a restarted cubed does not suspend a running
+ *      machine before the guest's longest command and the grace (B-207-2).
  *
  * The runner's own rules are berth's (runner-vm-suspend-test.ts runs the
  * real one); this tests what cubed decides and sends. */
@@ -36,7 +42,7 @@ import { CallResultSchema, CallSchema, Code, GuestInfoSchema, HelloAnswerSchema,
   OpenSchema, Runner_Kind, StreamAnswerSchema, WatchEvent_Type, WatchEventSchema, type Machine } from "../src/gen/runner_pb.js";
 import { Conversations } from "../src/conversation.ts";
 import { EgressPolicy } from "../src/egress-policy.ts";
-import { EXEC_GRACE_MS, IDLE_MS, MachineActivity } from "../src/machine-idle.ts";
+import { DEFAULT_EXEC_TIMEOUT_MS, EXEC_GRACE_MS, IDLE_MS, MachineActivity } from "../src/machine-idle.ts";
 import type { GuestTransport } from "../src/guest-ssh.ts";
 import { createModels } from "@earendil-works/pi-ai";
 import { Registry, type Thread } from "../src/registry.ts";
@@ -54,11 +60,24 @@ import type { ThreadMachines } from "../src/vm.ts";
     call: async (op, header) => ({ header: { state: answers[`${op}:${String(header.id)}`] ?? "Running" }, body: Buffer.alloc(0) }),
     close: async () => {},
   };
-  const guest = activity.guest("t", fake);
-  assert.equal(activity.busy("t"), null);
-  assert.equal(activity.idleMs("t"), 0, "a machine first seen now (a cubed that started) has been idle for no time");
+  // B-207-2: a machine first seen running (a cubed that restarted) may run
+  // commands cubed started before: busy for the guest's longest command and
+  // the grace. (d6b10971 said idle here, and suspended it after 5 minutes.)
+  const before = DEFAULT_EXEC_TIMEOUT_MS + EXEC_GRACE_MS;
+  assert.equal(activity.busy("r"), "commands may still run from before cubed restarted");
+  now += before - 1;
+  assert.equal(activity.idleMs("r"), 0, "not idle for 32 minutes after a restart");
+  now += 2;
+  assert.equal(activity.busy("r"), null, "past the longest command and the grace");
   now += IDLE_MS;
-  assert.equal(activity.idleMs("t"), IDLE_MS, "idle since it was first seen");
+  assert.equal(activity.idleMs("r"), IDLE_MS + 2, "idle from the last time it was seen busy");
+  // A machine cubed started or resumed itself runs nothing from before.
+  const guest = activity.guest("t", fake);
+  activity.started("t");
+  assert.equal(activity.busy("t"), null);
+  assert.equal(activity.idleMs("t"), 0, "a machine started now has been idle for no time");
+  now += IDLE_MS;
+  assert.equal(activity.idleMs("t"), IDLE_MS, "idle since it was started");
   // A command: busy from its exec, between polls (no call open), until a get says it ended.
   await guest.call("exec", { id: "k1", timeoutMs: 600000, command: "sleep 100" });
   now += 60_000;
@@ -78,6 +97,16 @@ import type { ThreadMachines } from "../src/vm.ts";
   answers["get:k2"] = "Interrupted";
   await guest.call("get", { id: "k2" });
   assert.equal(activity.busy("t"), null);
+  // N-207-3: no operation with that key (Unknown) runs nothing.
+  answers["get:gone"] = "Unknown";
+  await guest.call("get", { id: "gone" });
+  assert.equal(activity.busy("t"), null, "Unknown is not a running command");
+  // N-207-3: a get that says Running counts on the command's own timeout.
+  await guest.call("exec", { id: "k4", timeoutMs: 1000 });
+  now += 500;
+  await guest.call("get", { id: "k4" });
+  now += 1000 + EXEC_GRACE_MS + 1;
+  assert.equal(activity.busy("t"), null, "re-armed with its own timeout, not the guest's longest");
   // One no one asks about again counts until its timeout and the grace.
   await guest.call("exec", { id: "k3", timeoutMs: 1000 });
   now += 1000 + EXEC_GRACE_MS - 1;
@@ -87,12 +116,14 @@ import type { ThreadMachines } from "../src/vm.ts";
   // A call open is busy while it lasts.
   let release = () => {};
   const slow: GuestTransport = { call: () => new Promise(resolve => { release = () => resolve({ header: {}, body: Buffer.alloc(0) }); }), close: async () => {} };
+  activity.started("u");
   const pending = activity.guest("u", slow).call("read", { path: "x" });
   assert.equal(activity.busy("u"), "1 guest call(s) open");
   release();
   await pending;
   assert.equal(activity.busy("u"), null);
   // A portal connection while it is open.
+  activity.started("v");
   const socket = activity.dial("v", new PassThrough());
   assert.equal(activity.busy("v"), "1 portal connection(s) open");
   socket.destroy();
@@ -103,7 +134,7 @@ import type { ThreadMachines } from "../src/vm.ts";
   await activity.guest("w", { call: async () => { order.push("call"); return { header: {}, body: Buffer.alloc(0) }; }, close: async () => {} },
     async () => { order.push("before"); }).call("hello", {});
   assert.deepEqual(order, ["before", "call"]);
-  console.log("ok: machine-idle: a command is busy from exec until a get says it ended (also between polls), or until its timeout and the grace; calls and portal connections while open");
+  console.log("ok: machine-idle: a machine first seen running is busy for the longest command and the grace (B-207-2); a command is busy from exec until a get says it ended (also between polls), or until its own timeout and the grace; calls and portal connections while open");
 }
 
 // ------------------------------------------------ 2. conversation.ts
@@ -138,6 +169,19 @@ import type { ThreadMachines } from "../src/vm.ts";
   await conversations.suspendIdle();
   assert.ok(!asked.some(entry => entry.id === "idle"), "a thread whose machine starts is not asked");
   inside.activations.delete("idle");
+  // B-207-1: the recovery loop's check of a running machine is not a start:
+  // the idle round waits for it, then asks.
+  asked.length = 0;
+  const checks = (conversations as unknown as { checks: Set<string> }).checks;
+  let finish = () => {};
+  inside.activations.set("idle", new Promise<void>(resolve => { finish = () => { inside.activations.delete("idle"); checks.delete("idle"); resolve(); }; }));
+  checks.add("idle");
+  const round = conversations.suspendIdle();
+  await delay(20);
+  assert.ok(!asked.some(entry => entry.id === "idle"), "not while the check runs");
+  finish();
+  await round;
+  assert.deepEqual(asked.find(entry => entry.id === "idle"), { id: "idle", busy: null }, "asked once the check ended");
   // A message to a suspended thread wakes it before the agent gets it.
   started.length = 0;
   await (conversations as unknown as { wakeFor(id: string): Promise<void> }).wakeFor("asleep");
@@ -190,6 +234,17 @@ const fake = {
   drop: false,
   /** `get` answers (by operation id) for guest streams. */
   states: {} as Record<string, string>,
+  /** What `services` answers: the registered services. */
+  services: [] as Array<{ name: string; port: number; kind: string }>,
+  /** The runner's software version in its hello. */
+  version: "0.1.0",
+  /** `machine_suspend` answers that it has no such verb, though the runner
+   * says machine.suspend (K-6). */
+  noVerb: false,
+  /** `machine_suspend` shows SUSPENDING this long before it ends (K-8). */
+  savingMs: 0,
+  /** …and then is undone: RUNNING, UNAVAILABLE/snapshot. */
+  undo: false,
 };
 function withStatus(machine: Machine, status: MessageInitShape<typeof MachineStatusSchema>): Machine {
   const next = clone(MachineSchema, machine);
@@ -241,9 +296,17 @@ async function answerCall(stream: BiStream, verb: ReturnType<typeof fromJsonStri
       return;
     }
     case "machineSuspend": {
-      if (!fake.capabilities.includes("machine.suspend")) return refuse(Code.INVALID_ARGUMENT, "verb", "unknown or missing verb");
+      if (!fake.capabilities.includes("machine.suspend") || fake.noVerb) return refuse(Code.INVALID_ARGUMENT, "verb", "unknown or missing verb");
       if (fake.suspend) return refuse(fake.suspend.code, fake.suspend.reason, "refused by the fake");
       if (!known) return refuse(Code.NOT_FOUND, "machine", "no such machine");
+      if (fake.savingMs) {
+        put(withStatus(known, { phase: MachineStatus_Phase.SUSPENDING, bootId: known.status?.bootId ?? "", conditions: known.status?.conditions ?? [] }));
+        await delay(fake.savingMs);
+        if (fake.undo) {
+          ready(known);
+          return refuse(Code.UNAVAILABLE, "snapshot", "the machine was not suspended and keeps running: the fake undid it");
+        }
+      }
       const suspended = put(withStatus(known, { phase: MachineStatus_Phase.SUSPENDED, bootId: known.status?.bootId ?? "",
         suspended: { savedAt: { seconds: 1n, nanos: 0 }, memoryBytes: 123n << 20n } }));
       await delay(fake.suspendMs);
@@ -265,7 +328,7 @@ void (async () => {
         void (async () => {
           const opened = fromJsonString(OpenSchema, await readFrame(stream), { ignoreUnknownFields: true });
           if (opened.kind.case === "hello") {
-            await stream.send.writeAll(frame(HelloAnswerSchema, { protocol: 4, capabilities: fake.capabilities, runner: { nodeId: NODE, kind: Runner_Kind.VM,
+            await stream.send.writeAll(frame(HelloAnswerSchema, { protocol: 4, capabilities: fake.capabilities, runner: { nodeId: NODE, softwareVersion: fake.version, kind: Runner_Kind.VM,
               network: { mode: "loopback" }, limits: { maxVcpus: 2, maxMemoryMib: 2048, maxDiskGib: 8, maxMachines: 1, maxBootBytes: 262144 } } }));
             await stream.send.finish();
           } else if (opened.kind.case === "watch") {
@@ -284,7 +347,8 @@ void (async () => {
               await stream.send.finish();
               return;
             }
-            const answer = op === "exec" || op === "get" ? { state: fake.states[header.id ?? ""] ?? "Running" } : { ok: true };
+            const answer = op === "exec" || op === "get" ? { state: fake.states[header.id ?? ""] ?? "Running" }
+              : op === "services" ? { services: fake.services } : { ok: true };
             await stream.send.writeAll(frame(StreamAnswerSchema, {}));
             await stream.send.writeAll(Array.from(Buffer.from(`${JSON.stringify(answer)}\n`)));
             await stream.send.finish();
@@ -301,7 +365,7 @@ const quiet = { debug() {}, info() {}, warn() {}, error() {}, child() { return q
 const registry = new Registry(path.join(root, "registry.sqlite"));
 registry.saveProject({ id: "p", name: "p", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [],
   hooks: { preSetup: "", preResume: "" } });
-registry.enrollRunner({ nodeId: NODE, threadId: NODE, environmentId: 1, configPath: path.join(root, "vm.json"), configHash: "vm", maxActiveVms: 1, protocol: 4, kind: "vm" });
+registry.enrollRunner({ nodeId: NODE, threadId: NODE, environmentId: 1, configPath: path.join(root, "vm.json"), configHash: "vm", maxActiveVms: 2, protocol: 4, kind: "vm" });
 const policy = new EgressPolicy({ vms: { vm: () => null }, secrets: [] });
 const IDLE = 300;
 const sessionNow = () => new RunnerSession(config, { log: quiet });
@@ -316,7 +380,7 @@ try {
   await vms.start(fresh(thread));
   registry.markWorkspaceAvailable(thread.id, null);
   assert.ok(vms.running(fresh(thread)));
-  assert.equal(registry.runnerSlots().free, 0, "the thread holds the runner's one slot");
+  assert.equal(registry.runnerSlots().free, 1, "the thread holds one of the runner's two slots");
   const boot = session.machines.get(`${thread.id}/${thread.vm!.vmId}`)?.status?.bootId;
 
   // Not before the idle time.
@@ -341,7 +405,7 @@ try {
   assert.equal(fresh(thread).vm!.suspension?.state, "suspended");
   assert.equal(fresh(thread).vm!.suspension?.memoryBytes, 123 * 2 ** 20);
   assert.equal(vms.running(fresh(thread)), false);
-  assert.equal(registry.runnerSlots().free, 1, "B7-2: a suspended machine frees its slot");
+  assert.equal(registry.runnerSlots().free, 2, "B7-2: a suspended machine frees its slot");
   console.log("ok: suspended only after the idle time, never while a command runs between polls or the agent works; then it holds no slot");
 
   // A guest call wakes it: the same boot.
@@ -351,7 +415,7 @@ try {
   assert.equal(fresh(thread).vm!.suspension, undefined);
   assert.ok(vms.running(fresh(thread)));
   assert.equal(session.machines.get(`${thread.id}/${thread.vm!.vmId}`)?.status?.bootId, boot, "a resume is not a boot");
-  assert.equal(registry.runnerSlots().free, 0);
+  assert.equal(registry.runnerSlots().free, 1);
   console.log("ok: a guest call to a suspended machine wakes it first (machine_start), on the same boot");
 
   // B7-2: a full runner: the thread waits, saying so, and resumes once it can.
@@ -395,6 +459,7 @@ try {
   vms.onWake = async () => {};
   await vms.guest(fresh(thread)).call("hello", {});
   assert.equal(fresh(thread).vm!.suspension, undefined, "resumed though the conversation did not wake it");
+  assert.equal(fresh(thread).vm!.notice, undefined, "N-207-6: a resume clears the notice of an earlier cold start");
   vms.onWake = null;
   console.log("ok: a wake the conversation declines (an archive under way) resumes the machine by a start");
 
@@ -413,6 +478,56 @@ try {
   assert.equal(count("machineSuspend"), before + 1, "and is not asked again soon");
   fake.suspend = null;
   console.log("ok: the runner's refusals (busy, low disk) keep the machine running; low disk is not asked again soon");
+  const retry = (vms as unknown as { suspendRetry: Map<string, number> }).suspendRetry;
+
+  // N-207-8, until the user decides: a registered service keeps it running.
+  retry.delete(thread.id);
+  await delay(IDLE * 2);
+  fake.services = [{ name: "web", port: 8080, kind: "command" }];
+  const withService = count("machineSuspend");
+  assert.equal(await vms.suspendIfIdle(fresh(thread), idle), false);
+  assert.equal(count("machineSuspend"), withService, "a registered service: never asked");
+  assert.ok(vms.running(fresh(thread)));
+  fake.services = [];
+  console.log("ok: a machine with a registered service is not suspended (N-207-8: until the user decides)");
+
+  // K-8: still SUSPENDING when cubed's wait runs out: the gate stays up (a
+  // guest call waits) until the runner says SUSPENDED.
+  await delay(IDLE * 2);
+  fake.savingMs = 600;
+  const saving = vms.suspendIfIdle(fresh(thread), idle);
+  await delay(450);
+  const atTimeout = calls.length;
+  const waiting = vms.guest(fresh(thread)).call("hello", {});
+  await delay(50);
+  assert.ok(!calls.slice(atTimeout).some(call => call.startsWith("guest:") || call === "machineStart"), "nothing reaches the machine while it saves");
+  assert.equal(await saving, true, "SUSPENDING, then SUSPENDED: suspended");
+  await waiting;
+  assert.equal(fresh(thread).vm!.suspension, undefined, "the waiting call woke it after the save");
+  // …and an undo (SUSPENDING, then RUNNING): not suspended, still running.
+  await delay(IDLE * 2);
+  fake.undo = true;
+  assert.equal(await vms.suspendIfIdle(fresh(thread), idle), false);
+  assert.ok(vms.running(fresh(thread)) && !fresh(thread).vm!.suspension);
+  fake.savingMs = 0;
+  fake.undo = false;
+  retry.delete(thread.id);
+  console.log("ok: K-8: a machine still SUSPENDING past cubed's wait keeps the gate up until the runner says SUSPENDED or RUNNING");
+
+  // A start during a suspend waits for its end, then resumes it (B-207-1).
+  await delay(IDLE * 2);
+  fake.suspendMs = 200;
+  const asleep = vms.suspendIfIdle(fresh(thread), idle);
+  await delay(50);
+  const saveStart = calls.length;
+  const restart = vms.start(fresh(thread));
+  assert.equal(await asleep, true);
+  const saveEnd = calls.length;
+  assert.ok(!calls.slice(saveStart, saveEnd).includes("machineStart"), `no machine_start during the save: ${calls.slice(saveStart, saveEnd).join(", ")}`);
+  await restart;
+  assert.equal(fresh(thread).vm!.suspension, undefined, "then resumed");
+  fake.suspendMs = 0;
+  console.log("ok: a start that comes during a suspend waits for it, then resumes the machine");
 
   // K-8: no answer in time; the runner says it is suspended.
   await vms.release(fresh(thread), false).catch(() => {});
@@ -430,9 +545,93 @@ try {
   await vms.guest(fresh(second)).call("hello", {});
   console.log("ok: K-8: a suspend with no answer in time is read back with machine_get");
 
+  // B-207-1: the recovery loop as index.ts runs it (Conversations.recover
+  // every tick, without waiting for the last), with an open agent: the
+  // machine is suspended once, and the loop does not wake it again. (On
+  // d6b10971 each tick's check touched it: no machine_suspend at all.)
+  const conversations = new Conversations({ registry, directory: fs.mkdtempSync(path.join(root, "conv-")), models: createModels(), machines: vms });
+  (conversations as unknown as { agents: Map<string, Promise<unknown>> }).agents.set(second.id,
+    Promise.resolve({ harness: { snapshot: async () => null }, conversation: { id: "c" } }));
+  const loopBefore = count("machineSuspend");
+  const startsBefore = count("machineStart");
+  const ticks = setInterval(() => void conversations.recover(), IDLE / 3);
+  await delay(IDLE * 6);
+  clearInterval(ticks);
+  await conversations.recover();
+  assert.ok(count("machineStart") > startsBefore, "the loop did check the machine");
+  assert.equal(count("machineSuspend") - loopBefore, 1, "suspended exactly once by the loop");
+  assert.equal(fresh(second).vm!.suspension?.state, "suspended", "and the loop leaves it suspended");
+  await vms.guest(fresh(second)).call("hello", {});
+  console.log("ok: B-207-1: the recovery loop's own ticks (checks and idle rounds together) suspend an idle machine once and leave it so");
+
+  // B-207-2: a cubed that restarted sees the machine running: it may run
+  // commands that cubed started; no suspend before the longest command and
+  // the grace (32 min). (On d6b10971: suspended after 5 min.)
+  let clock = Date.now();
+  const restarted = new RunnerMachines({ registry, threads: path.join(root, "threads"), session: () => session, policy, idleMs: IDLE, now: () => clock,
+    suspendTimeoutMs: 400, log: quiet });
+  await restarted.start(fresh(second));
+  clock += IDLE_MS;
+  const restartBefore = count("machineSuspend");
+  assert.equal(await restarted.suspendIfIdle(fresh(second), idle), false, "after 5 min: not suspended");
+  clock += DEFAULT_EXEC_TIMEOUT_MS + EXEC_GRACE_MS - IDLE_MS - 1;
+  assert.equal(await restarted.suspendIfIdle(fresh(second), idle), false, "just before 32 min: not suspended");
+  assert.equal(count("machineSuspend"), restartBefore);
+  clock += 2 + IDLE_MS;
+  assert.equal(await restarted.suspendIfIdle(fresh(second), idle), true, "past 32 min and idle: suspended");
+  await vms.guest(fresh(second)).call("hello", {});
+  console.log("ok: B-207-2: after a cubed restart a running machine is not suspended before the guest's longest command and the grace");
+
+  // B-207-3: one suspend per runner at a time.
+  const third = registry.createThread("p", "t3", { provider: "faux", id: "faux" }, "hi", "pi", undefined, { runnerId: NODE });
+  await vms.start(fresh(third));
+  registry.markWorkspaceAvailable(third.id, null);
+  await delay(IDLE * 2);
+  fake.suspendMs = 300;
+  const firstSave = vms.suspendIfIdle(fresh(second), idle);
+  await delay(50);
+  const serial = count("machineSuspend");
+  assert.equal(await vms.suspendIfIdle(fresh(third), idle), false, "another machine on the runner waits for the next round");
+  assert.equal(count("machineSuspend"), serial);
+  assert.equal(await firstSave, true);
+  fake.suspendMs = 0;
+  assert.equal(await vms.suspendIfIdle(fresh(third), idle), true, "then it is suspended");
+  console.log("ok: B-207-3: one machine_suspend per runner at a time");
+
+  // N-207-2: a machine being woken holds its slot; one waiting for a slot does not.
+  const slots = registry.runnerSlots().free;
+  const saved = fresh(third).vm!.suspension!;
+  registry.updateThreadVm(third.id, { suspension: { ...saved, state: "waking" } });
+  assert.equal(registry.runnerSlots().free, slots - 1, "waking: its QEMU may be starting");
+  registry.updateThreadVm(third.id, { suspension: { ...saved, state: "waking", waiting: "waiting for a free slot" } });
+  assert.equal(registry.runnerSlots().free, slots, "waiting for a slot: none held");
+  registry.updateThreadVm(third.id, { suspension: saved });
+  console.log("ok: N-207-2: a machine being woken holds its slot, one waiting for a slot does not");
+
+  // N-207-4, K-6: a runner that says machine.suspend but has no such verb
+  // is not asked again, until it runs another version.
+  await vms.guest(fresh(second)).call("hello", {});
+  await delay(IDLE * 2);
+  fake.noVerb = true;
+  const noVerb = count("machineSuspend");
+  assert.equal(await vms.suspendIfIdle(fresh(second), idle), false);
+  await delay(IDLE * 2);
+  assert.equal(await vms.suspendIfIdle(fresh(second), idle), false);
+  assert.equal(count("machineSuspend"), noVerb + 1, "asked once");
+  fake.noVerb = false;
+  fake.version = "0.2.0";
+  session = sessionNow();
+  await session.hello();
+  await delay(IDLE * 2);
+  assert.equal(await vms.suspendIfIdle(fresh(second), idle), true, "a new runner version is asked again");
+  await vms.guest(fresh(second)).call("hello", {});
+  console.log("ok: K-6: a runner without the verb is not asked again until it runs another version");
+
   // K-6: a runner without the verb is not asked again; nor one that does not say machine.suspend.
   fake.capabilities = [];
   session = sessionNow();
+  await session.hello();
+  assert.deepEqual(session.capabilities, [], "the runner said hello without machine.suspend");
   await delay(IDLE * 2);
   const asked = count("machineSuspend");
   assert.equal(await vms.suspendIfIdle(fresh(second), idle), false);

@@ -9,7 +9,11 @@
  *     is open. A command no one asks about again stops counting only after
  *     its own timeout and EXEC_GRACE_MS (cubed cannot see its end, so it
  *     waits for it);
- *   - a `dial` connection into it (the portal) is open.
+ *   - a `dial` connection into it (the portal) is open;
+ *   - it was running when this cubed first saw it (a cubed that restarted,
+ *     an update) and cubed did not start or resume it since: commands from
+ *     before may still run, so it counts as busy for the guest's longest
+ *     command and the grace (B-207-2).
  *
  * Its idle time runs from the last of those. The agent's run, a start,
  * an archive and cubed's own queue are the conversation's to add
@@ -24,15 +28,19 @@ export const IDLE_MS = 5 * 60 * 1000;
 export const EXEC_GRACE_MS = 2 * 60 * 1000;
 /** A command with no timeout of its own (the guest's longest). */
 export const DEFAULT_EXEC_TIMEOUT_MS = 30 * 60 * 1000;
-/** States in which a command still runs (workspace.ts GuestOperationState). */
-const RUNNING = new Set(["Accepted", "Running", "Unknown"]);
+/** States in which a command still runs (workspace.ts GuestOperationState;
+ * `Unknown` is no operation with that key: nothing runs under it). */
+const RUNNING = new Set(["Accepted", "Running"]);
+/** The key of what may run from before this cubed saw the machine. */
+const BEFORE = "";
 
 interface Activity {
   last: number;
   calls: number;
   dials: number;
-  /** Commands not seen to end, by key: until when they count. */
-  commands: Map<string, number>;
+  /** Commands not seen to end, by key: until when they count, and their
+   * own timeout. */
+  commands: Map<string, { until: number; timeoutMs: number }>;
 }
 
 export class MachineActivity {
@@ -43,7 +51,9 @@ export class MachineActivity {
   private of(id: string): Activity {
     let activity = this.threads.get(id);
     if (!activity) {
-      activity = { last: this.now(), calls: 0, dials: 0, commands: new Map() };
+      // First seen in this process: what ran before may still run.
+      const before = DEFAULT_EXEC_TIMEOUT_MS + EXEC_GRACE_MS;
+      activity = { last: this.now(), calls: 0, dials: 0, commands: new Map([[BEFORE, { until: this.now() + before, timeoutMs: DEFAULT_EXEC_TIMEOUT_MS }]]) };
       this.threads.set(id, activity);
     }
     return activity;
@@ -52,14 +62,23 @@ export class MachineActivity {
   /** Something happened in or for the machine now. */
   touch(id: string): void { this.of(id).last = this.now(); }
 
+  /** cubed started or resumed the machine now: nothing from before runs in
+   * it (a suspend never saves a running command), and its idle time starts. */
+  started(id: string): void {
+    const activity = this.of(id);
+    activity.commands.delete(BEFORE);
+    activity.last = this.now();
+  }
+
   /** Why the machine is busy now, or null. */
   busy(id: string): string | null {
-    const activity = this.threads.get(id);
-    if (!activity) return null;
+    const activity = this.of(id);
     const now = this.now();
-    for (const [key, until] of activity.commands) if (until <= now) activity.commands.delete(key);
+    for (const [key, { until }] of activity.commands) if (until <= now) activity.commands.delete(key);
     if (activity.calls) return `${activity.calls} guest call(s) open`;
-    if (activity.commands.size) return `${activity.commands.size} command(s) running`;
+    const known = activity.commands.size - (activity.commands.has(BEFORE) ? 1 : 0);
+    if (known) return `${known} command(s) running`;
+    if (activity.commands.has(BEFORE)) return "commands may still run from before cubed restarted";
     if (activity.dials) return `${activity.dials} portal connection(s) open`;
     return null;
   }
@@ -72,14 +91,18 @@ export class MachineActivity {
 
   forget(id: string): void { this.threads.delete(id); }
 
+  /** A command runs: until its own timeout (from its `exec`, or the one
+   * a `get` saw before) and the grace. */
   private command(id: string, key: unknown, timeoutMs: unknown): void {
-    if (typeof key !== "string") return;
-    const timeout = Number.isSafeInteger(timeoutMs) && (timeoutMs as number) > 0 ? timeoutMs as number : DEFAULT_EXEC_TIMEOUT_MS;
+    if (typeof key !== "string" || key === BEFORE) return;
     const commands = this.of(id).commands;
-    commands.set(key, Math.max(commands.get(key) ?? 0, this.now() + timeout + EXEC_GRACE_MS));
+    const timeout = Number.isSafeInteger(timeoutMs) && (timeoutMs as number) > 0 ? timeoutMs as number
+      : commands.get(key)?.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
+    const until = this.now() + timeout + EXEC_GRACE_MS;
+    commands.set(key, { until: Math.max(commands.get(key)?.until ?? 0, until), timeoutMs: timeout });
   }
   private ended(id: string, key: unknown): void {
-    if (typeof key === "string") this.of(id).commands.delete(key);
+    if (typeof key === "string" && key !== BEFORE) this.of(id).commands.delete(key);
   }
 
   /** The machine's guest, counted: every call while it is open, every

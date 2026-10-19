@@ -11,7 +11,7 @@
   import { CLAUDE_DURABILITY, isClaude, providerLabel } from "../lib/agent.ts";
   import { createArmed } from "../lib/armed.svelte.ts";
   import type { Command } from "../lib/command.ts";
-  import { lampClass, machineLabel, machineNotice, stateLabel, STARTING_TEXT } from "../lib/thread-state.ts";
+  import { composerWaiting, lampClass, machineLabel, machineNotice, sleepState, stateLabel } from "../lib/thread-state.ts";
   import { startupShown } from "../lib/startup.ts";
   import type {
     SubjectUsage,
@@ -251,10 +251,11 @@
         <span class="strip-machine" class:error={machineLabel(summary)?.failed} title={machineLabel(summary)?.title}>{machineLabel(summary)?.text}</span>
       {/if}
       {#if stateLabel(summary)}
-        <span class="strip-state" class:error={summary.state === "error"} title={summary.vm?.suspension?.waiting ?? undefined}>{stateLabel(summary)}</span>
+        <span class="strip-state" class:error={summary.state === "error"} class:attention={sleepState(summary)} title={summary.vm?.suspension?.waiting ?? undefined}>{stateLabel(summary)}</span>
+        {#if summary.vm?.suspension?.waiting}<span class="strip-state strip-reason">{summary.vm.suspension.waiting}</span>{/if}
       {/if}
       {#if machineNotice(summary)}
-        <span class="strip-state strip-notice">{machineNotice(summary)}</span>
+        <span class="strip-state strip-notice attention">{machineNotice(summary)}</span>
       {/if}
       {#if usageText}
         <span class="strip-usage" title={usageTitle} aria-label={`usage: ${usageText}`}>{usageText}</span>
@@ -389,7 +390,7 @@
           <div class="conversation-gone"><p>this thread is no longer active.</p><a class="key" href="#/threads">back to threads</a></div>
         {:else}
           <Conversation {threadId} model={selectedModel} {changingModel} bind:busy={conversationBusy}
-            waitingText={summary?.state === "starting" ? STARTING_TEXT : null}
+            waitingText={composerWaiting(summary)}
             notice={summary?.agent === "claude-code" || isClaude(modelState?.selected) ? `claude · max — ${CLAUDE_DURABILITY}` : null} />
         {/if}
       </section>

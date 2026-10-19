@@ -900,10 +900,10 @@ export async function createCubed(options: {
   void conversations.boot();
   void openOptchat().catch(() => {});
   const recovery = setInterval(() => {
-    void conversations.boot();
+    // Activations, and idle machines suspended (S-7a, P7-5): only on runners
+    // that say they can.
+    void conversations.recover();
     void openOptchat().catch(() => {});
-    // Idle machines are suspended (S-7a, P7-5): only on runners that say they can.
-    void conversations.suspendIdle();
   }, 30000);
   recovery.unref();
   // Without this a runner's version and machines are only as fresh as the
