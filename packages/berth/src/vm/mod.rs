@@ -83,6 +83,9 @@ mod publish_tests;
 mod qemu;
 mod record;
 mod report;
+mod suspend;
+#[cfg(test)]
+mod suspend_tests;
 mod template;
 #[cfg(test)]
 mod template_tests;
@@ -185,6 +188,12 @@ pub struct VmOptions {
     /// Free bytes on the file system of a path ([`image::free_bytes`]; tests
     /// give another).
     pub free_space: fn(&Path) -> std::io::Result<u64>,
+    /// `--suspend-disk-margin-gib`: suspend is on only when the operator
+    /// names it (S-7a). A machine is suspended only while the disk keeps its
+    /// memory and this much besides; there is no default. Without it
+    /// `machine_suspend` is UNIMPLEMENTED/suspend; machines saved earlier
+    /// still resume.
+    pub suspend_disk_margin_gib: Option<u64>,
 }
 
 /// The runner's image, as `berth image pull` recorded it.
@@ -233,6 +242,27 @@ struct Entry {
     net: Option<egress::Net>,
     /// While a `template_publish` waits for this machine's agent (R14b).
     publishing: Option<Publishing>,
+    /// Open `guest` and `dial` streams to the machine ([`StreamGuard`]):
+    /// a suspend is refused (`busy`) while any is.
+    streams: usize,
+}
+
+/// One open `guest` or `dial` stream of a machine, counted in its
+/// [`Entry::streams`] from the moment it was let through (under the state
+/// lock, with the machine RUNNING) until it is dropped.
+pub struct StreamGuard {
+    runner: Arc<VmRunner>,
+    id: String,
+}
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.runner.state.lock()
+            && let Some(entry) = state.machines.get_mut(&self.id)
+        {
+            entry.streams = entry.streams.saturating_sub(1);
+        }
+    }
 }
 
 /// A build machine's publishing mark: every other mutation of the machine
@@ -469,6 +499,18 @@ impl VmRunner {
                     &record.interrupted.as_ref().unwrap().message,
                 );
             }
+            if record.phase == Phase::Suspended {
+                // Saved and recorded, but the runner went before its QEMU
+                // (stopped since the save) was quit.
+                if quit_orphan(&dir.join(qemu::QMP_SOCKET)).await {
+                    event(
+                        &dir,
+                        "runner restarted",
+                        "the suspended machine's QEMU still ran and was told to quit",
+                    );
+                }
+            }
+            suspend::forget_orphans(&dir, &mut record, &path)?;
             machines.insert(
                 record.id.clone(),
                 Entry {
@@ -483,6 +525,7 @@ impl VmRunner {
                     policy: None,
                     net: None,
                     publishing: None,
+                    streams: 0,
                 },
             );
         }
@@ -620,10 +663,24 @@ impl VmRunner {
                 egress::KEEL.gateway
             ),
             format!(
-                "machines: {} ({interrupted} interrupted; at most {} at once)",
+                "machines: {} ({interrupted} interrupted, {} suspended; at most {} at once, a suspended one holding none)",
                 state.machines.len(),
+                state
+                    .machines
+                    .values()
+                    .filter(|entry| entry.record.phase == Phase::Suspended)
+                    .count(),
                 self.options.max_machines
             ),
+            match self.options.suspend_disk_margin_gib {
+                Some(gib) => format!(
+                    "suspend: on; a machine is saved only while the disk keeps its memory and {gib} GiB besides"
+                ),
+                None => {
+                    "suspend: off (no --suspend-disk-margin-gib); suspended machines still resume"
+                        .into()
+                }
+            },
             format!(
                 "templates: {} in {} ({} bytes; outside the layer cache's limit, removed only by template_delete)",
                 state.templates.len(),
@@ -638,17 +695,24 @@ impl VmRunner {
     }
 
     fn runner(&self, state: &State) -> proto::Runner {
-        let active = state
+        let active = holding_slots(state);
+        let (suspended, suspended_bytes) = state
             .machines
             .values()
-            .filter(|entry| entry.record.phase != Phase::Retained)
-            .count() as u32;
+            .filter_map(|entry| entry.record.snapshot.as_ref())
+            .fold((0u32, 0u64), |(n, bytes), snapshot| {
+                (n + 1, bytes + snapshot.memory_bytes)
+            });
         let running = state
             .machines
             .values()
             .filter(|entry| entry.live.is_some())
             .count() as u32;
-        let retained = state.machines.len() as u32 - active;
+        let retained = state
+            .machines
+            .values()
+            .filter(|entry| entry.record.phase == Phase::Retained)
+            .count() as u32;
         let host_cpus = std::thread::available_parallelism().map_or(0, |n| n.get() as u32);
         proto::Runner {
             node_id: self.options.node_id.clone(),
@@ -677,6 +741,8 @@ impl VmRunner {
                 slots_free: self.options.max_machines.saturating_sub(active),
                 host_cpus,
                 retained,
+                suspended,
+                suspended_bytes,
                 ..Default::default()
             }),
             lifecycle: proto::runner::Lifecycle::Ready as i32,
@@ -718,7 +784,10 @@ impl VmRunner {
         version: i64,
         updated: Timestamp,
     ) -> proto::Machine {
-        let boot = record.boot.as_ref().filter(|_| record.phase.live());
+        let boot = record
+            .boot
+            .as_ref()
+            .filter(|_| record.phase.live() || record.phase == Phase::Suspended);
         let mut conditions: Vec<proto::Condition> = record
             .interrupted
             .iter()
@@ -738,6 +807,13 @@ impl VmRunner {
             reason: stopped.kind.clone(),
             message: stopped.message.clone(),
             since: Some(stopped.at),
+        }));
+        conditions.extend(record.dropped.iter().map(|dropped| proto::Condition {
+            r#type: "SnapshotDropped".into(),
+            status: true,
+            reason: dropped.reason.clone(),
+            message: dropped.message.clone(),
+            since: Some(dropped.at),
         }));
         proto::Machine {
             r#ref: Some(proto::Ref {
@@ -765,8 +841,14 @@ impl VmRunner {
                 error: record.error.clone(),
                 started_at: boot.map(|b| b.started_at),
                 guest: guest.filter(|_| record.phase.live()).cloned(),
-                // Not built yet (S-7a): no machine is suspended.
-                suspended: None,
+                suspended: record
+                    .snapshot
+                    .as_ref()
+                    .filter(|_| record.phase == Phase::Suspended)
+                    .map(|snapshot| proto::Suspended {
+                        saved_at: Some(snapshot.saved_at),
+                        memory_bytes: snapshot.memory_bytes,
+                    }),
             }),
             meta: Some(proto::Meta {
                 version,
@@ -1120,12 +1202,7 @@ impl VmRunner {
                 }
                 None => {}
             }
-            let active = state
-                .machines
-                .values()
-                .filter(|entry| entry.record.phase != Phase::Retained)
-                .count() as u32;
-            if active >= self.options.max_machines {
+            if holding_slots(&state) >= self.options.max_machines {
                 return Err(refuse(
                     Code::ResourceExhausted,
                     "capacity",
@@ -1194,6 +1271,8 @@ impl VmRunner {
             stopped: None,
             build: spec.build,
             template: from,
+            snapshot: None,
+            dropped: None,
         };
         event(
             &dir,
@@ -1226,6 +1305,7 @@ impl VmRunner {
                 policy: None,
                 net: None,
                 publishing: None,
+                streams: 0,
             },
         );
         self.commit(&mut state, &reference.id)
@@ -1592,11 +1672,20 @@ impl VmRunner {
     async fn start(self: &Arc<Self>, request: proto::MachineStart) -> Answer<proto::Machine> {
         let documents = boot_documents(request.boot.as_ref())?;
         let policy = policy::Policy::from_proto(request.policy.as_ref())?;
-        let (id, record) = {
+        let (id, record, restore) = {
             let mut state = self.state.lock().unwrap();
             Self::not_publishing(&state, request.r#ref.as_ref())?;
+            let slots = holding_slots(&state);
             let entry = Self::fenced(&mut state, request.r#ref.as_ref(), request.fence.as_ref())?;
             let id = entry.record.id.clone();
+            // B7-2: a suspended machine holds no slot; resuming it takes one.
+            if entry.record.phase == Phase::Suspended && slots >= self.options.max_machines {
+                return Err(refuse(
+                    Code::ResourceExhausted,
+                    "capacity",
+                    "the runner hosts as many machines as it may; the machine stays suspended",
+                ));
+            }
             match entry.record.phase {
                 Phase::Retained => {
                     return Err(refuse(
@@ -1653,18 +1742,53 @@ impl VmRunner {
                     entry.record.image = Some(self.write_layers(&id, None).map_err(internal)?);
                 }
             }
+            let dir = self.machine_dir(&id);
+            let key = self.snapshot_key(&dir, &state.machines[&id].record);
             let entry = state.machines.get_mut(&id).unwrap();
             entry.documents = documents;
             entry.policy = Some(policy);
+            // A suspended machine resumes when its snapshot fits this runner
+            // (K-7), else it is dropped and the machine boots cold.
+            let restore = if entry.record.phase == Phase::Suspended {
+                suspend::usable(&dir, &mut entry.record, &key)
+            } else {
+                entry.record.dropped = None;
+                None
+            };
             entry.record.phase = Phase::Starting;
             entry.record.error.clear();
             let record = entry.record.clone();
             self.commit(&mut state, &id)?;
-            (id, record)
+            (id, record, restore)
         };
 
         let dir = self.machine_dir(&id);
-        match self.launch(&id, &dir, &record).await {
+        let mut launched = self.launch(&id, &dir, &record, restore.as_deref()).await;
+        if let (Err(error), Some(_)) = (&launched, &restore) {
+            // The load failed: the snapshot goes and the machine boots cold.
+            self.await_exit(&id, false).await;
+            let message = format!("{error:#}; qemu.log: {}", tail(&dir.join("qemu.log")));
+            let record = {
+                let mut state = self.state.lock().unwrap();
+                let entry = state.machines.get_mut(&id).unwrap();
+                suspend::drop_snapshot(&dir, &mut entry.record);
+                entry.record.dropped = Some(record::Dropped {
+                    reason: "load".into(),
+                    message: format!("the snapshot did not load: {message}"),
+                    at: Timestamp::now(),
+                });
+                entry.record.phase = Phase::Starting;
+                self.commit(&mut state, &id)?;
+                entry_record(&state, &id)
+            };
+            event(
+                &dir,
+                "snapshot dropped",
+                &format!("load: {message}; the machine boots cold"),
+            );
+            launched = self.launch(&id, &dir, &record, None).await;
+        }
+        match launched {
             Ok(()) => {
                 let mut state = self.state.lock().unwrap();
                 let entry = state.machines.get_mut(&id).unwrap();
@@ -1697,16 +1821,10 @@ impl VmRunner {
         }
     }
 
-    /// Spawns the machine's QEMU, records the boot, and waits until it runs.
-    async fn launch(self: &Arc<Self>, id: &str, dir: &Path, record: &MachineRecord) -> Result<()> {
-        for name in [qemu::QMP_SOCKET, qemu::EVENTS_SOCKET, qemu::CHANNEL_SOCKET] {
-            let _ = std::fs::remove_file(dir.join(name));
-        }
-        let console = dir.join(qemu::CONSOLE);
-        if console.exists() {
-            std::fs::rename(&console, dir.join("console.previous.log"))?;
-        }
-        let args = qemu::argv(&qemu::Launch {
+    /// The QEMU arguments of the machine's boots (a restore adds
+    /// `-S -incoming defer`).
+    fn boot_argv(&self, dir: &Path, record: &MachineRecord) -> Vec<String> {
+        qemu::argv(&qemu::Launch {
             arch: self.arch,
             accel: self.options.accel,
             machine_type: &record.machine_type,
@@ -1716,7 +1834,32 @@ impl VmRunner {
             base: &self.keel.base,
             dir,
             build: record.build,
-        });
+        })
+    }
+
+    /// Spawns the machine's QEMU, records the boot, and waits until it runs.
+    /// With `restore`, the QEMU loads that memory file (S-7a) instead of
+    /// booting: the boot id stays the machine's, the snapshot leaves the
+    /// journal (synced) before the guest runs again (K-1), and the file is
+    /// deleted after.
+    async fn launch(
+        self: &Arc<Self>,
+        id: &str,
+        dir: &Path,
+        record: &MachineRecord,
+        restore: Option<&Path>,
+    ) -> Result<()> {
+        for name in [qemu::QMP_SOCKET, qemu::EVENTS_SOCKET, qemu::CHANNEL_SOCKET] {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
+        let console = dir.join(qemu::CONSOLE);
+        if console.exists() {
+            std::fs::rename(&console, dir.join("console.previous.log"))?;
+        }
+        let mut args = self.boot_argv(dir, record);
+        if restore.is_some() {
+            args.extend(["-S", "-incoming", "defer"].map(String::from));
+        }
         record::write_json(
             &dir.join("argv.json"),
             &serde_json::json!({ "qemu": self.options.qemu, "args": args }),
@@ -1725,8 +1868,19 @@ impl VmRunner {
             .create(true)
             .append(true)
             .open(dir.join("qemu.log"))?;
-        let boot_id = random_hex();
-        writeln!(log, "--- boot {boot_id}: {}", self.qemu_version())?;
+        // A restore is not a boot: the machine keeps its boot id and time.
+        let resumed = restore.and(record.boot.as_ref());
+        let boot_id = resumed.map_or_else(random_hex, |boot| boot.boot_id.clone());
+        let started_at = resumed.map_or_else(Timestamp::now, |boot| boot.started_at);
+        if resumed.is_some() {
+            writeln!(
+                log,
+                "--- restore of boot {boot_id}: {}",
+                self.qemu_version()
+            )?;
+        } else {
+            writeln!(log, "--- boot {boot_id}: {}", self.qemu_version())?;
+        }
         // The network of this QEMU process: a new socket pair and LAN.
         let gate = {
             let state = self.state.lock().unwrap();
@@ -1787,7 +1941,7 @@ impl VmRunner {
             entry.net = Some(net);
             entry.record.boot = Some(Boot {
                 boot_id: boot_id.clone(),
-                started_at: Timestamp::now(),
+                started_at,
                 pid,
                 qemu: self.qemu_version(),
                 kernel_sha256: self.keel.kernel_sha256.clone(),
@@ -1796,7 +1950,11 @@ impl VmRunner {
             self.commit(&mut state, id)
                 .map_err(|e| anyhow::anyhow!(e.message))?;
         }
-        event(dir, "boot", &format!("{boot_id}, QEMU pid {pid}"));
+        event(
+            dir,
+            if resumed.is_some() { "restore" } else { "boot" },
+            &format!("{boot_id}, QEMU pid {pid}"),
+        );
         let runner = self.clone();
         let reaped = id.to_owned();
         tokio::spawn(async move {
@@ -1805,12 +1963,24 @@ impl VmRunner {
             let _ = exited_tx.send(true);
         });
         let mut qmp = Qmp::open(&dir.join(qemu::QMP_SOCKET), BOOT_TIMEOUT).await?;
+        if let Some(memory) = restore {
+            self.load(&mut qmp, id, dir, memory).await?;
+        }
         let status = qmp.execute("query-status", serde_json::Value::Null).await?;
         ensure!(
             status["status"] == "running",
             "QEMU is {}, not running",
             status["status"]
         );
+        let seen = self
+            .state
+            .lock()
+            .unwrap()
+            .machines
+            .get(id)
+            .map(|entry| entry.sessions.clone())
+            .unwrap_or_default();
+        let (guest, frames) = channel::Guest::with_seen(seen);
         // The guest channel: the port's events first, so none is missed
         // (the agent opens the port well after QEMU answers QMP).
         let mut events = Qmp::open(&dir.join(qemu::EVENTS_SOCKET), BOOT_TIMEOUT).await?;
@@ -1828,25 +1998,22 @@ impl VmRunner {
         {
             let _ = ports.send(true); // an event during the query was skipped; this state is after it
         }
+        let changed = Arc::clone(&guest);
         tokio::spawn(async move {
             while let Ok(event) = events.event().await {
                 if event["event"] == "VSERPORT_CHANGE" && event["data"]["id"] == qemu::PORT_ID {
                     let open = event["data"]["open"].as_bool().unwrap_or(false);
+                    // QEMU's time of the change: after a save's leave, the
+                    // agent saw it (channel.rs).
+                    let at = event["timestamp"]["seconds"].as_f64().unwrap_or(0.0)
+                        + event["timestamp"]["microseconds"].as_f64().unwrap_or(0.0) / 1e6;
+                    changed.port_changed(at);
                     if ports.send(open).is_err() {
                         break;
                     }
                 }
             }
         });
-        let seen = self
-            .state
-            .lock()
-            .unwrap()
-            .machines
-            .get(id)
-            .map(|entry| entry.sessions.clone())
-            .unwrap_or_default();
-        let (guest, frames) = channel::Guest::with_seen(seen);
         let exited = {
             let mut state = self.state.lock().unwrap();
             let entry = state.machines.get_mut(id).unwrap();
@@ -1891,7 +2058,7 @@ impl VmRunner {
         entry.info = None;
         let status = status.unwrap_or_else(|error| error.to_string());
         let dir = self.machine_dir(id);
-        if entry.record.phase != Phase::Stopping {
+        if !matches!(entry.record.phase, Phase::Stopping | Phase::Suspended) {
             entry.record.error = format!("QEMU exited ({status}): {}", tail(&dir.join("qemu.log")));
         }
         if entry.record.phase.live() {
@@ -2012,6 +2179,18 @@ impl VmRunner {
             Self::not_publishing(&state, request.r#ref.as_ref())?;
             let entry = Self::fenced(&mut state, request.r#ref.as_ref(), request.fence.as_ref())?;
             let id = entry.record.id.clone();
+            if entry.record.phase == Phase::Suspended {
+                // Stopping a suspended machine drops its snapshot: the next
+                // start boots cold.
+                suspend::drop_snapshot(&self.machine_dir(&id), &mut entry.record);
+                entry.record.phase = Phase::Stopped;
+                event(
+                    &self.machine_dir(&id),
+                    "stop",
+                    "the machine was suspended; its snapshot is deleted",
+                );
+                return self.commit(&mut state, &id);
+            }
             if entry.live.is_none() {
                 let record = entry.record.clone();
                 record::write_json(&self.machine_dir(&id).join(record::RECORD), &record)
@@ -2201,13 +2380,12 @@ impl VmRunner {
             // Read only: no `ops` lock, so it neither waits for a mutation
             // nor holds one up (diagnose.rs).
             Some(Verb::MachineDiagnose(request)) => self.diagnose(request).await.map(R::Diagnosis),
-            // The contract is in runner.proto; the save and restore are not
-            // built yet (masterplan S-7a, phase 7 P7-4).
-            Some(Verb::MachineSuspend(_)) => Err(refuse(
-                Code::Unimplemented,
-                "suspend",
-                "this berth vm cannot suspend a machine yet",
-            )),
+            // Under `ops` for the whole save (bounded by SUSPEND_WAIT), as a
+            // stop: one suspend at a time, so its disk check is the only one.
+            Some(Verb::MachineSuspend(request)) => {
+                let _op = self.ops.lock().await;
+                self.suspend(request).await.map(R::Machine)
+            }
             // Takes `ops` itself, not while its agent works (R14b).
             Some(Verb::TemplatePublish(request)) => self.publish(request).await.map(R::Template),
             Some(Verb::TemplateList(_)) => Ok(R::Templates(self.list_templates())),
@@ -2611,7 +2789,17 @@ impl Service for VmRunner {
         }
         Ok(proto::HelloAnswer {
             protocol: PROTOCOL,
-            capabilities: CAPABILITIES.map(String::from).to_vec(),
+            capabilities: CAPABILITIES
+                .iter()
+                .copied()
+                // Said only when it is on (`--suspend-disk-margin-gib`).
+                .chain(
+                    self.options
+                        .suspend_disk_margin_gib
+                        .map(|_| "machine.suspend"),
+                )
+                .map(String::from)
+                .collect(),
             runner: Some(self.runner(&self.state.lock().unwrap())),
         })
     }
@@ -2669,16 +2857,24 @@ impl Service for VmRunner {
                 "invalid guest operation name",
             ));
         }
-        let guest = {
+        let (guest, _stream) = {
             let mut state = self.state.lock().unwrap();
             let before = Self::epoch(&state, header.r#ref.as_ref());
             let fenced = Self::fenced(&mut state, header.r#ref.as_ref(), header.fence.as_ref())
                 .map(|entry| match (&entry.guest, entry.record.phase) {
-                    (Some(guest), Phase::Running) => Ok(Arc::clone(guest)),
+                    (Some(guest), Phase::Running) => {
+                        entry.streams += 1;
+                        Ok((Arc::clone(guest), entry.record.id.clone()))
+                    }
                     _ => Err(not_running(entry)),
                 });
             self.write_raised(&state, header.r#ref.as_ref(), before)?;
-            fenced??
+            let (guest, id) = fenced??;
+            let stream = StreamGuard {
+                runner: Arc::clone(&self),
+                id,
+            };
+            (guest, stream)
         };
         let (ch, answer) = guest.request(Op::Guest(proto::GuestRequest {
             op: header.op.clone(),
@@ -2718,15 +2914,30 @@ impl Service for VmRunner {
     async fn dial(
         self: Arc<Self>,
         header: proto::DialHeader,
-    ) -> Answer<cube_netstack::lan::FlowStream> {
-        let (port, dialer) = {
+    ) -> Answer<(cube_netstack::lan::FlowStream, Box<dyn Send>)> {
+        let (port, dialer, stream) = {
             let mut state = self.state.lock().unwrap();
             let before = Self::epoch(&state, header.r#ref.as_ref());
             let target = Self::dial_target(&mut state, &header);
             self.write_raised(&state, header.r#ref.as_ref(), before)?;
-            target?
+            let (port, dialer) = target?;
+            // dial_target let a RUNNING machine through: its stream counts.
+            let id = header
+                .r#ref
+                .as_ref()
+                .map(|r| r.id.clone())
+                .unwrap_or_default();
+            if let Some(entry) = state.machines.get_mut(&id) {
+                entry.streams += 1;
+            }
+            let stream = StreamGuard {
+                runner: Arc::clone(&self),
+                id,
+            };
+            (port, dialer, stream)
         };
-        dial_into(dialer, port).await
+        let flow = dial_into(dialer, port).await?;
+        Ok((flow, Box::new(stream) as Box<dyn Send>))
     }
 }
 
@@ -2755,12 +2966,39 @@ fn dial_port(port: u32) -> Answer<u16> {
     }
 }
 
+fn entry_record(state: &State, id: &str) -> MachineRecord {
+    state.machines[id].record.clone()
+}
+
+/// Machines that hold one of `--max-machines`' slots: every one but the
+/// retained and the suspended (B7-2: a suspended machine frees its slot;
+/// resuming it needs one again).
+fn holding_slots(state: &State) -> u32 {
+    state
+        .machines
+        .values()
+        .filter(|entry| !matches!(entry.record.phase, Phase::Retained | Phase::Suspended))
+        .count() as u32
+}
+
 fn not_running(entry: &Entry) -> proto::Error {
-    refuse(
-        Code::Unavailable,
-        "not_running",
-        &format!("the machine is {}", entry.record.phase.name()),
-    )
+    match entry.record.phase {
+        // From the moment a suspend begins (K-4): cubed wakes the machine
+        // with `machine_start` first.
+        Phase::Suspending | Phase::Suspended => refuse(
+            Code::Unavailable,
+            "suspended",
+            &format!(
+                "the machine is {}; machine_start resumes it",
+                entry.record.phase.name()
+            ),
+        ),
+        _ => refuse(
+            Code::Unavailable,
+            "not_running",
+            &format!("the machine is {}", entry.record.phase.name()),
+        ),
+    }
 }
 
 /// The LAN of a running machine, to dial into it.
@@ -2833,6 +3071,8 @@ mod dial_tests {
             stopped: None,
             build: false,
             template: None,
+            snapshot: None,
+            dropped: None,
         };
         let entry = Entry {
             record,
@@ -2849,6 +3089,7 @@ mod dial_tests {
             policy: None,
             net: None,
             publishing: None,
+            streams: 0,
         };
         State {
             version: 1,
@@ -3027,6 +3268,8 @@ mod cache_tests {
             stopped: None,
             build: false,
             template: None,
+            snapshot: None,
+            dropped: None,
         }
     }
 
@@ -3048,6 +3291,7 @@ mod cache_tests {
                         policy: None,
                         net: None,
                         publishing: None,
+                        streams: 0,
                     };
                     (entry.record.id.clone(), entry)
                 })
