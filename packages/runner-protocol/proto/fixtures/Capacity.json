@@ -7,5 +7,7 @@
   "hostMemoryFreeMib": "1006",
   "diskFreeGib": "1007",
   "retained": 9,
-  "retainedBytes": "1009"
+  "retainedBytes": "1009",
+  "suspended": 11,
+  "suspendedBytes": "1011"
 }

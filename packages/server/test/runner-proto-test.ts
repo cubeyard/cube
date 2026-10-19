@@ -118,7 +118,7 @@ for (const name of committed) {
 // The corpus says something: spot-check literal values a reader can follow.
 const machine = JSON.parse(fs.readFileSync(path.join(FIXTURES, "Machine.json"), "utf8")) as Record<string, any>;
 assert.equal(machine.fenceEpoch, "1005", "int64 is a JSON string");
-assert.equal(machine.status.phase, "FAILED", "enums are their names");
+assert.equal(machine.status.phase, "SUSPENDED", "enums are their names");
 assert.equal(machine.status.guest.ready, true);
 assert.deepEqual(machine.status.guest.hooks, { "hooks-key": "hooks-9" });
 assert.equal(machine.status.startedAt, "2026-10-10T00:00:00Z");

@@ -463,3 +463,27 @@ async fn a_publication_that_times_out_clears_its_mark() {
     );
     usable_again(&runner, &mut frames).await;
 }
+
+/// runner.proto has `machine_suspend` (S-7a); this berth does not suspend
+/// yet: it says so, sends the agent nothing and leaves the machine running.
+#[tokio::test]
+async fn machine_suspend_is_unimplemented_and_changes_nothing() {
+    let lab = Lab::new();
+    let image = pull(lab.path(), 1, &[1]);
+    let runner = lab.runner(image, 16 << 30, plenty).await;
+    create(&runner, BUILD, base(), true).await.unwrap();
+    let mut frames = running(&runner, BUILD);
+    let before = snapshot(&runner, BUILD);
+    let error = call(
+        &runner,
+        Verb::MachineSuspend(proto::MachineRef {
+            r#ref: Some(reference(BUILD)),
+            fence: fence(5),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(reason(error), (Code::Unimplemented, "suspend".to_string()));
+    assert!(frames.try_recv().is_err(), "the agent was sent nothing");
+    assert_eq!(snapshot(&runner, BUILD), before);
+}

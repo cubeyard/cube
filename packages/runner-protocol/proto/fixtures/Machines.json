@@ -21,7 +21,7 @@
         "build": true
       },
       "status": {
-        "phase": "FAILED",
+        "phase": "SUSPENDED",
         "conditions": [
           {
             "type": "type-1",
@@ -65,6 +65,10 @@
           "epoch": "1013",
           "reason": "reason-14",
           "session": "session-15"
+        },
+        "suspended": {
+          "savedAt": "2026-10-10T00:00:00Z",
+          "memoryBytes": "1002"
         }
       },
       "meta": {

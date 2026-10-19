@@ -254,7 +254,10 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   configured `--network`, which is not the path in use. The runner sends
   no watch event for an RTT alone: watch carries the value of the newest
   runner event. cubed does not log either yet (C phase).
-- Not yet: snapshots (masterplan row S-7a).
+- Not yet: snapshots (masterplan row S-7a). runner.proto has the contract
+  (`machine_suspend`, the SUSPENDING and SUSPENDED phases,
+  `MachineStatus.suspended`); `berth vm` answers `machine_suspend`
+  UNIMPLEMENTED/suspend until the save and restore are built.
 - `stop`, `delete` and the runner's own shutdown stop a machine the same
   way: the runner asks the agent to shut down (`DaemonRequest.shutdown`:
   SIGTERM to the workload, SIGKILL to what is left after 10 s, sync, the
