@@ -1585,14 +1585,17 @@ export declare type Call = Message<"cube.runner.v4.Call"> & {
      * (else RESOURCE_EXHAUSTED/capacity, and the machine stays SUSPENDED) a
      * new QEMU loads the memory (`-incoming defer`, `cont`), the runner
      * keeps the connect rule and sends `machine_setup` again, and applies
-     * the start's policy with its flows reset; `boot_id` is unchanged. When
+     * the start's policy with its flows reset; `boot_id` is unchanged. The
+     * snapshot leaves the runner's journal, synced, before the restored
+     * guest runs (`cont`), so it is loaded at most once and never against a
+     * disk the guest changed since. When
      * the snapshot cannot be used (another QEMU or keel version or machine
      * type, a missing or unreadable file, a failed load) the runner deletes
      * it and boots cold: a new `boot_id`, operations that were running are
      * Interrupted, and the machine has the condition `SnapshotDropped`
      * (reason `version`, `missing` or `load`). `guest` and `dial` streams to
-     * a SUSPENDED machine are UNAVAILABLE/suspended: cubed wakes it with
-     * `machine_start` first. `machine_stop` deletes the snapshot (the next
+     * a SUSPENDING or SUSPENDED machine are UNAVAILABLE/suspended: cubed
+     * wakes it with `machine_start` first. `machine_stop` deletes the snapshot (the next
      * start boots cold); `machine_delete` deletes it before it deletes or
      * retains the disk.
      *

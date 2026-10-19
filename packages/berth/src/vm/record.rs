@@ -20,12 +20,19 @@ pub enum Phase {
     Stopping,
     Retained,
     Deleted,
+    /// `machine_suspend` saves the memory; QEMU still runs (stopped).
+    Suspending,
+    /// No QEMU runs; `snapshot` is the memory file and the writable disk.
+    Suspended,
 }
 
 impl Phase {
     /// A QEMU may run for the machine.
     pub fn live(self) -> bool {
-        matches!(self, Self::Starting | Self::Running | Self::Stopping)
+        matches!(
+            self,
+            Self::Starting | Self::Running | Self::Stopping | Self::Suspending
+        )
     }
     pub fn proto(self) -> ProtoPhase {
         match self {
@@ -35,6 +42,8 @@ impl Phase {
             Self::Stopping => ProtoPhase::Stopping,
             Self::Retained => ProtoPhase::Retained,
             Self::Deleted => ProtoPhase::Deleted,
+            Self::Suspending => ProtoPhase::Suspending,
+            Self::Suspended => ProtoPhase::Suspended,
         }
     }
     pub fn name(self) -> &'static str {
@@ -45,6 +54,8 @@ impl Phase {
             Self::Stopping => "stopping",
             Self::Retained => "retained",
             Self::Deleted => "deleted",
+            Self::Suspending => "suspending",
+            Self::Suspended => "suspended",
         }
     }
 }
@@ -120,7 +131,59 @@ pub struct MachineRecord {
     /// creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// The snapshot of a SUSPENDED machine (S-7a): the journal is its only
+    /// authority. A memory file without it is deleted when the runner
+    /// starts, and it is cleared, synced, before a restored QEMU runs the
+    /// guest (`cont`), so a memory file is never loaded twice or against a
+    /// disk the guest changed since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<Snapshot>,
+    /// Why the newest start booted cold instead of resuming: the
+    /// `SnapshotDropped` condition, until the next suspend or start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped: Option<Dropped>,
 }
+
+/// A suspended machine's memory file (`DIRECTORY/<id>/memory`) and what it
+/// can be loaded into: the same QEMU, keel, machine type, size and QEMU
+/// arguments, else it is dropped and the machine boots cold.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Snapshot {
+    pub saved_at: Timestamp,
+    /// Allocated bytes of the memory file.
+    pub memory_bytes: u64,
+    pub key: SnapshotKey,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SnapshotKey {
+    /// `11.1.2 /path/to/qemu-system-x86_64`.
+    pub qemu: String,
+    pub kernel_sha256: String,
+    pub base_sha256: String,
+    pub machine_type: String,
+    pub size: Size,
+    /// sha256 of the QEMU arguments the machine booted with (`argv.json`).
+    pub argv_sha256: String,
+    /// The berth that saved it.
+    pub berth: String,
+}
+
+/// `SnapshotDropped`: `version`, `missing` or `load`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Dropped {
+    pub reason: String,
+    pub message: String,
+    pub at: Timestamp,
+}
+
+/// The memory file of a suspend, and the name it is saved under until QEMU
+/// reports `completed`.
+pub const MEMORY: &str = "memory";
+pub const MEMORY_PART: &str = "memory.part";
 
 /// A stop the runner made (`machine_stop`, `delete`, its own shutdown).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -241,6 +304,8 @@ mod tests {
             stopped: None,
             build: false,
             template: None,
+            snapshot: None,
+            dropped: None,
         }
     }
 

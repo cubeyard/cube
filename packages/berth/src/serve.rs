@@ -32,12 +32,15 @@ pub trait Service: Send + Sync + 'static {
         recv: &mut RecvStream,
         send: &mut SendStream,
     ) -> impl Future<Output = Result<Vec<u8>, proto::Error>> + Send;
-    /// A TCP connection into the machine for a `dial` stream, or why not.
-    /// A mode without one answers UNIMPLEMENTED (`berth host`: masterplan B-9).
+    /// A TCP connection into the machine for a `dial` stream, or why not,
+    /// with what is dropped when the stream ends (`berth vm` counts it as
+    /// one of the machine's open streams). A mode without one answers
+    /// UNIMPLEMENTED (`berth host`: masterplan B-9).
+    #[allow(clippy::type_complexity)]
     fn dial(
         self: Arc<Self>,
         _header: proto::DialHeader,
-    ) -> impl Future<Output = Result<FlowStream, proto::Error>> + Send
+    ) -> impl Future<Output = Result<(FlowStream, Box<dyn Send>), proto::Error>> + Send
     where
         Self: Sized,
     {
@@ -176,12 +179,12 @@ async fn stream<S: Service>(
 /// finishes the stream. When either side fails, the stream is reset and the
 /// flow dropped (the LAN ends it as it ends any flow).
 pub async fn dial(
-    dialed: Result<FlowStream, proto::Error>,
+    dialed: Result<(FlowStream, Box<dyn Send>), proto::Error>,
     recv: &mut RecvStream,
     send: &mut SendStream,
 ) -> Result<()> {
-    let mut flow = match dialed {
-        Ok(flow) => flow,
+    let (mut flow, _held) = match dialed {
+        Ok(dialed) => dialed,
         Err(error) => {
             write_frame(send, &proto::StreamAnswer { error: Some(error) }).await?;
             send.finish()?;

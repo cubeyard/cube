@@ -436,3 +436,64 @@ async fn a_session_from_an_earlier_qemu_of_the_machine_is_refused() {
     agent.setup(S2).await;
     assert!(lab.guest.seen().contains(S1) && lab.guest.seen().contains(S2));
 }
+
+/// S-7a's save: the runner leaves (the socket closes, nothing connects
+/// again), learns from a port change after the close that the agent saw it,
+/// and after a failed save rejoins: a new `hello` gets `machine_setup`
+/// again (K-3).
+#[tokio::test]
+async fn a_leave_holds_the_channel_until_rejoin_and_the_next_hello_gets_its_setup() {
+    let lab = lab();
+    let mut agent = Agent::accept(&lab.listener).await;
+    lab.ports.send(true).unwrap();
+    agent.hello(S1).await;
+    agent.setup(S1).await;
+    assert_eq!(*lab.host.setups.lock().unwrap(), 1);
+
+    let mut seen = lab.guest.leave();
+    let eof = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_frame::<proto::DaemonFrame>(&mut agent.stream),
+    )
+    .await
+    .expect("the runner closes its end");
+    assert!(eof.is_err(), "the socket ended: {eof:?}");
+    // A change from before the close does not count.
+    lab.guest.port_changed(0.0);
+    assert!(seen.try_recv().is_err(), "an old port change is no answer");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        lab.guest.port_changed(wall_clock() + 1.0);
+        match seen.try_recv() {
+            Ok(()) => break,
+            Err(_) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await
+            }
+            Err(error) => panic!("the leave was never answered: {error:?}"),
+        }
+    }
+    assert!(
+        lab.guest.session().is_none(),
+        "the session ended with the leave"
+    );
+    assert!(
+        lab.guest.request(guest_op()).is_err(),
+        "nothing is sent while the runner is away"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(400), lab.listener.accept())
+            .await
+            .is_err(),
+        "no connect while held"
+    );
+
+    lab.guest.rejoin();
+    let mut agent = Agent::accept(&lab.listener).await;
+    agent.hello(S2).await;
+    agent.setup(S2).await;
+    assert_eq!(*lab.host.setups.lock().unwrap(), 2, "machine_setup again");
+    assert!(lab.host.saw("the runner left cube.0 to save the machine"));
+    assert!(lab.host.saw("the runner connects to cube.0 again"));
+    lab.exit.send(true).unwrap();
+    lab.task.await.unwrap();
+}

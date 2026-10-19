@@ -68,7 +68,8 @@ async fn runner(env: &Env) -> (Connection, (iroh::Endpoint, iroh::Endpoint)) {
                 let dialed = match dial_port(header.port) {
                     Ok(port) => dial_into(dialer, port).await,
                     Err(error) => Err(error),
-                };
+                }
+                .map(|flow| (flow, Box::new(()) as Box<dyn Send>));
                 let _ = serve::dial(dialed, &mut recv, &mut send).await;
             });
         }

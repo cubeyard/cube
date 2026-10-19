@@ -25,6 +25,14 @@
 //! another session are dropped. A frame that breaks the channel rules ends
 //! the socket; the runner connects again (the agent sees the disconnect and
 //! says `hello`).
+//!
+//! Before a save (S-7a) the runner leaves: [`Guest::leave`] closes the
+//! socket and holds off connecting again, and its receiver answers once QMP
+//! reports a port change timestamped after the close (the agent closes the
+//! port and opens it again when the host goes; the event is rate-limited,
+//! so its time, not its state, is the answer). [`Guest::rejoin`] connects
+//! again (a save that failed): the agent says `hello` and gets
+//! `machine_setup`, as after any connect.
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -91,12 +99,31 @@ struct Inner {
     setup: Option<u32>,
     /// Frames of another session that came from the agent.
     foreign: u64,
+    /// While the runner has left (a save): when it closed the socket (the
+    /// host's wall clock, as QMP's timestamps), and who waits for the
+    /// agent to see it.
+    leaving: Option<Leaving>,
+}
+
+struct Leaving {
+    closed_at: Option<f64>,
+    seen: Option<oneshot::Sender<()>>,
+}
+
+/// Seconds since the epoch on the host's wall clock.
+pub fn wall_clock() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
 }
 
 /// One machine's channel, shared by its task and the guest streams.
 pub struct Guest {
     inner: Mutex<Inner>,
     queue: mpsc::UnboundedSender<proto::DaemonFrame>,
+    /// True while the runner has left the channel ([`Guest::leave`]).
+    held: watch::Sender<bool>,
 }
 
 fn ended(message: &str) -> proto::Error {
@@ -122,6 +149,7 @@ impl Guest {
                     ..Default::default()
                 }),
                 queue,
+                held: watch::channel(false).0,
             }),
             frames,
         )
@@ -175,6 +203,55 @@ impl Guest {
             session,
         });
         Ok((ch, receiver))
+    }
+
+    /// The runner leaves the channel before a save: the socket is closed and
+    /// not connected again until [`Guest::rejoin`]. The receiver answers once
+    /// a port change after the close is reported ([`Guest::port_changed`]).
+    pub fn leave(&self) -> oneshot::Receiver<()> {
+        let (seen, receiver) = oneshot::channel();
+        self.inner.lock().unwrap().leaving = Some(Leaving {
+            closed_at: None,
+            seen: Some(seen),
+        });
+        self.held.send_replace(true);
+        receiver
+    }
+
+    /// The runner connects again after [`Guest::leave`].
+    pub fn rejoin(&self) {
+        self.inner.lock().unwrap().leaving = None;
+        self.held.send_replace(false);
+    }
+
+    /// QMP reported a change of the machine's port at `at` (its timestamp):
+    /// after the runner left, that is the agent seeing it.
+    pub fn port_changed(&self, at: f64) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(leaving) = inner.leaving.as_mut()
+            && leaving.closed_at.is_some_and(|closed| at >= closed)
+            && let Some(seen) = leaving.seen.take()
+        {
+            let _ = seen.send(());
+        }
+    }
+
+    /// The agent saw the runner leave (tests, without [`run`]): the close
+    /// and a port change after it.
+    #[cfg(test)]
+    pub fn agent_saw_leave(&self) {
+        self.closed_for_leave();
+        self.port_changed(wall_clock() + 1.0);
+    }
+
+    /// The socket is closed for [`Guest::leave`]: from now on a port change
+    /// answers it.
+    fn closed_for_leave(&self) {
+        if let Some(leaving) = self.inner.lock().unwrap().leaving.as_mut()
+            && leaving.closed_at.is_none()
+        {
+            leaving.closed_at = Some(wall_clock());
+        }
     }
 
     /// Stops waiting on `ch` (its stream went away): `abort` to the agent,
@@ -272,12 +349,30 @@ pub async fn run(
     let mut ports_closed = false;
     let mut backoff = Duration::from_millis(100);
     let mut first = true;
+    let mut held = guest.held.subscribe();
     host.publish(not_connected(
         "the machine boots; its agent has not opened cube.0 yet",
     ));
     'socket: loop {
         if *exited.borrow() {
             break;
+        }
+        if *held.borrow() {
+            // Left for a save: nothing is connected until it ends, but the
+            // port is followed (and every change reported to the leave).
+            guest.closed_for_leave();
+            loop {
+                tokio::select! {
+                    _ = stopped(&mut exited) => break 'socket,
+                    port = ports.recv(), if !ports_closed => match port {
+                        None => ports_closed = true,
+                        Some(open) => port_open = open,
+                    },
+                    _ = until(&mut held, false) => break,
+                }
+            }
+            host.event("channel", "the runner connects to cube.0 again");
+            first = false;
         }
         let stream = loop {
             match UnixStream::connect(&ctl).await {
@@ -320,12 +415,17 @@ pub async fn run(
             Wait::Open(now + timing.open_after_close)
         };
         first = false;
+        let mut left = false;
         let broken: Option<String> = loop {
             let deadline = wait.deadline();
             tokio::select! {
                 _ = stopped(&mut exited) => {
                     reader.abort();
                     break 'socket;
+                }
+                _ = until(&mut held, true) => {
+                    left = true;
+                    break None;
                 }
                 port = ports.recv(), if !ports_closed => match port {
                     None => ports_closed = true, // QMP went away: QEMU exits
@@ -404,6 +504,14 @@ pub async fn run(
         };
         reader.abort();
         drop(write);
+        if left {
+            guest.closed_for_leave();
+            host.event("channel", "the runner left cube.0 to save the machine");
+            if guest.end_session("the runner left the channel to save the machine") {
+                host.publish(not_connected("the machine is being saved"));
+            }
+            continue;
+        }
         if guest.end_session("the machine's channel was connected again") {
             host.publish(not_connected("connecting to the agent again"));
         }
@@ -429,6 +537,19 @@ pub async fn run(
         }
     }
     guest.end_session("the machine stopped");
+}
+
+/// Until `held` says `want`.
+async fn until(held: &mut watch::Receiver<bool>, want: bool) {
+    loop {
+        let now = *held.borrow_and_update();
+        if now == want {
+            return;
+        }
+        if held.changed().await.is_err() {
+            return std::future::pending().await;
+        }
+    }
 }
 
 /// Until the machine's QEMU has exited.

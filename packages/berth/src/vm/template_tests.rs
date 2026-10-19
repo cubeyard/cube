@@ -115,11 +115,24 @@ impl Lab {
         cache_bytes: u64,
         free_space: fn(&Path) -> std::io::Result<u64>,
     ) -> Arc<VmRunner> {
+        self.runner_with(image, cache_bytes, free_space, None, 8)
+            .await
+    }
+
+    /// With suspend on (`--suspend-disk-margin-gib`) and `max_machines`.
+    pub(super) async fn runner_with(
+        &self,
+        image: image::Reference,
+        cache_bytes: u64,
+        free_space: fn(&Path) -> std::io::Result<u64>,
+        suspend_disk_margin_gib: Option<u64>,
+        max_machines: u32,
+    ) -> Arc<VmRunner> {
         let options = VmOptions {
             directory: self.path().to_owned(),
             node_id: "node-test".into(),
             network: "loopback".into(),
-            max_machines: 8,
+            max_machines,
             labels: BTreeMap::new(),
             qemu: "/nonexistent/qemu".into(),
             qemu_img: "/nonexistent/qemu-img".into(),
@@ -130,6 +143,7 @@ impl Lab {
             mkfs_version: "mkfs.erofs 1".into(),
             layer_cache_bytes: cache_bytes,
             free_space,
+            suspend_disk_margin_gib,
         };
         let floor = Floor {
             version: "11.1.2".into(),

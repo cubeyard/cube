@@ -254,10 +254,32 @@ berth vm --dir /abs/dir --qemu /abs/qemu-system-<arch> --qemu-img /abs/qemu-img 
   configured `--network`, which is not the path in use. The runner sends
   no watch event for an RTT alone: watch carries the value of the newest
   runner event. cubed does not log either yet (C phase).
-- Not yet: snapshots (masterplan row S-7a). runner.proto has the contract
-  (`machine_suspend`, the SUSPENDING and SUSPENDED phases,
-  `MachineStatus.suspended`); `berth vm` answers `machine_suspend`
-  UNIMPLEMENTED/suspend until the save and restore are built.
+- Suspend and resume (masterplan S-7a, `vm/suspend.rs`; runner.proto's
+  `machine_suspend`): **off unless `berth vm` starts with
+  `--suspend-disk-margin-gib <GiB>`**, which has no default; without it
+  `machine_suspend` is UNIMPLEMENTED/suspend and `HelloAnswer.capabilities`
+  has no `machine.suspend` (machines saved earlier still resume). cubed
+  decides idleness and sends it; the runner refuses while a `guest` or
+  `dial` stream is open (`busy`) or while the disk lacks the machine's
+  memory plus the margin (`disk`), and the machine keeps running. A save:
+  `snapshot_prepare`, the agent's `status` that says it is prepared (keel
+  F-P7-2: leaving before it breaks the agent's channel), the runner leaves
+  `cube.0` until a port change after the close, `stop`, `migrate` to `memory.part` (`mapped-ram`,
+  `cpr-reboot`), `completed`, sync, rename to `memory`, the journal's
+  snapshot (with what it must match: QEMU, keel, berth, machine type, size
+  and QEMU arguments), then QEMU quits; at most 60 s, else the migration
+  is cancelled, the guest goes on (`cont`) and the runner rejoins the
+  channel (`hello`, `machine_setup` again). One suspend at a time (`ops`).
+  A suspended machine holds no slot; `machine_start` resumes it into a free
+  one (`-S -incoming defer`, the snapshot leaves the journal before `cont`,
+  the same boot id) or, when it does not fit or does not load, deletes it
+  and boots cold with `SnapshotDropped`. The journal is the only authority:
+  at start the runner deletes a memory file it does not name for a
+  suspended machine. A berth from before suspend cannot read a journal
+  with a suspended machine: roll back only with none suspended.
+  `packages/server/test/runner-vm-suspend-test.ts` is the gate (G-F): a
+  command over a suspend, data intact, the same boot id, then a cold boot
+  with SnapshotDropped/version; run under TCG only so far, not on a host.
 - `stop`, `delete` and the runner's own shutdown stop a machine the same
   way: the runner asks the agent to shut down (`DaemonRequest.shutdown`:
   SIGTERM to the workload, SIGKILL to what is left after 10 s, sync, the

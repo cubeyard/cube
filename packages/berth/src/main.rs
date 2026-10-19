@@ -29,10 +29,12 @@ const DEFAULT_LAYER_CACHE_GIB: u64 = 16;
 const MAX_LAYER_CACHE_GIB: u64 = 1 << 20;
 
 const USAGE: &str = "usage:
-  berth vm --dir <directory> --qemu <qemu-system binary> --qemu-img <qemu-img binary> --keel <directory with vmlinuz and base.erofs> --mkfs-erofs <mkfs.erofs binary> --image <registry/repository@sha256:digest> [--layer-cache-gib 16] [--accel kvm|hvf|tcg] [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay [--relay-only]] [--listen <ip:port>] [--max-machines 8] [--labels k=v,...]
+  berth vm --dir <directory> --qemu <qemu-system binary> --qemu-img <qemu-img binary> --keel <directory with vmlinuz and base.erofs> --mkfs-erofs <mkfs.erofs binary> --image <registry/repository@sha256:digest> [--layer-cache-gib 16] [--accel kvm|hvf|tcg] [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay [--relay-only]] [--listen <ip:port>] [--max-machines 8] [--labels k=v,...] [--suspend-disk-margin-gib <GiB>]
       each machine is a keel guest under the QEMU given by path, which must meet keel's QEMU floor,
       built on the image, which berth pulls into <directory> before it listens if any of it is missing;
-      the layer cache keeps at most --layer-cache-gib (kept in .berth/vm.json) besides the layers machines use
+      the layer cache keeps at most --layer-cache-gib (kept in .berth/vm.json) besides the layers machines use;
+      machine_suspend is on only with --suspend-disk-margin-gib (no default): a machine is saved only while the disk
+      keeps its memory and that many GiB besides
   berth host --dir <directory> [--allow-peer <public-key> --node-id <node-id>] [--network loopback|direct|relay [--relay-only]] [--listen <ip:port>] [--python python3] [--max-machines 8] [--labels k=v,...]
       UNSANDBOXED: each machine is a subdirectory of <directory>; commands run as you, with your logins
   berth image pull --dir <directory> --mkfs-erofs <mkfs.erofs binary> --image <registry/repository@sha256:digest>
@@ -602,6 +604,16 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
         Some(accel) => vm::Accel::parse(&accel)?,
         None => vm::Accel::native(),
     };
+    let suspend_disk_margin_gib = options
+        .remove("--suspend-disk-margin-gib")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .ok()
+                .filter(|gib| *gib <= MAX_LAYER_CACHE_GIB)
+                .context("--suspend-disk-margin-gib is a number of GiB")
+        })
+        .transpose()?;
     let floor = vm::check_floor(&qemu, accel).await?;
     let Prepared {
         directory,
@@ -646,6 +658,7 @@ async fn vm(mut options: BTreeMap<String, String>) -> Result<()> {
                 .unwrap_or(DEFAULT_LAYER_CACHE_GIB)
                 .saturating_mul(1 << 30),
             free_space: image::free_bytes,
+            suspend_disk_margin_gib,
         },
         floor,
     )

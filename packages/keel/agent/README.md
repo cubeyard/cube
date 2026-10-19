@@ -263,9 +263,17 @@ cube-init (PID 1)
 
 ## Not yet
 
-The runner's side of a suspend: `berth vm` sending `snapshot_prepare`
-before `stop` and `snapshot_done` after a failed save, and the memory
-file's rules (S-7a). `berth vm` keeps the connect rule and sessions (B-2).
+The runner's side of a suspend is in `berth vm` (packages/berth README,
+S-7a): `snapshot_prepare`, then it leaves the channel before `stop`; after a
+save that fails it connects again (`machine_setup` again), and
+`snapshot_done` only when the prepare was refused. That order (prepare,
+leave, `stop`, `migrate`) has run against this agent only under TCG
+(`runner-vm-suspend-test.ts`), not yet on a host (G-F). **F-P7-2:** a runner
+that leaves while the agent still writes its `status` after `done` blocks
+the agent's writer until its 2 s cut-off, and the agent's next open of the
+port fails with EBUSY, which ends its channel (seen 3 times in 4 TCG runs).
+`berth vm` avoids it by leaving only after that `status`; the agent itself
+is unchanged. `berth vm` keeps the connect rule and sessions (B-2).
 
 ## Tests
 
