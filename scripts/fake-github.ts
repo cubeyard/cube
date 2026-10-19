@@ -43,6 +43,19 @@ export function requireEcdsaSha256(file: string): void {
   if (oid !== "1.2.840.10045.4.3.2") throw new Error(`fake-github: ${file} is signed with ${oid}, not ecdsa-with-SHA256 (1.2.840.10045.4.3.2)`);
 }
 
+/** The DER start of a P-256 key named by OID: SubjectPublicKeyInfo,
+ * id-ecPublicKey, prime256v1. */
+const P256_SPKI = Buffer.from("3059301306072a8648ce3d020106082a8648ce3d030107", "hex");
+
+/** Fails unless the key in the certificate at `file` names P-256 by OID.
+ * LibreSSL (macOS /usr/bin/openssl) writes the curve's explicit parameters
+ * by default, which Node's TLS and the gateway rightly refuse. Read from the
+ * key's DER: asymmetricKeyDetails reports prime256v1 for explicit keys too. */
+export function requireNamedP256(file: string): void {
+  const spki = new X509Certificate(fs.readFileSync(file)).publicKey.export({ type: "spki", format: "der" });
+  if (!spki.subarray(0, P256_SPKI.length).equals(P256_SPKI)) throw new Error(`fake-github: ${file} does not name P-256 in its key (explicit EC parameters?)`);
+}
+
 export const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=Cube E2E", "-c", "user.email=e2e@example.invalid",
   "-c", "commit.gpgsign=false", "-C", cwd, ...args], { encoding: "utf8" }).trim();
 
@@ -50,13 +63,16 @@ export function fakeGithub(options: { dir: string; token: string }): Promise<Fak
   const { dir, token: fakeToken } = options;
   fs.mkdirSync(path.join(dir, "cube-e2e"), { recursive: true });
   const openssl = (...args: string[]) => execFileSync("openssl", args, { cwd: dir, stdio: "ignore" });
-  // The digest is explicit: LibreSSL (macOS /usr/bin/openssl) may sign
-  // with SHA-1 by default, and the gateway rightly refuses that.
-  openssl("req", "-x509", "-sha256", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=cube e2e test ca");
+  // The digest and the curve encoding are explicit: LibreSSL (macOS
+  // /usr/bin/openssl) may sign with SHA-1 and writes explicit curve
+  // parameters by default, and the gateway rightly refuses both.
+  openssl("req", "-x509", "-sha256", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-pkeyopt", "ec_param_enc:named_curve", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=cube e2e test ca");
   fs.writeFileSync(path.join(dir, "san.ext"), "subjectAltName=DNS:github.com,DNS:api.github.com\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n");
-  openssl("req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "leaf.key", "-out", "leaf.csr", "-subj", "/CN=github.com");
+  openssl("req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-pkeyopt", "ec_param_enc:named_curve", "-nodes", "-keyout", "leaf.key", "-out", "leaf.csr", "-subj", "/CN=github.com");
   openssl("x509", "-req", "-sha256", "-in", "leaf.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", "leaf.pem", "-days", "2", "-extfile", "san.ext");
   requireEcdsaSha256(path.join(dir, "leaf.pem"));
+  requireNamedP256(path.join(dir, "ca.pem"));
+  requireNamedP256(path.join(dir, "leaf.pem"));
   const seedTree = path.join(dir, "seed");
   fs.mkdirSync(seedTree);
   git(seedTree, "init", "-q", "--initial-branch=main");
