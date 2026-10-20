@@ -30,6 +30,8 @@ let hold: { turn: Hold; compaction: Hold; marked?: number } = { turn: 0, compact
  * whether the first or a follow-up, and its messages as sent. */
 const MARK = "FEEDBACK-ME";
 const markedCalls: Array<{ follow: boolean; messages: string; phase: string }> = [];
+/** Follow-ups of a marked summary to fail, as an overloaded provider does. */
+let failFollow = 0;
 const wire = (messages: readonly Message[]) => JSON.stringify(messages.map(message => [message.role, message.content]));
 type Sent = { kind: "turn" | "compaction"; key: string };
 const sent: Sent[] = [];
@@ -54,6 +56,7 @@ faux.setResponses(Array.from({ length: 4_000 }, () => async (request, options) =
     else if (typeof wait === "number" && wait) await delay(wait, null, { signal }).catch(() => {});
     if (signal?.aborted) aborted[kind]++;
   } finally { open[kind]--; }
+  if (marked && follow && failFollow > 0) { failFollow--; return fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded" }); }
   if (marked) return fauxAssistantMessage(follow ? "marked a\nmarked ab\nmarked abc" : "one\ntwo\nthree\nfour");
   if (kind === "compaction") return fauxAssistantMessage(`summary ${++n} ${"s".repeat(20)}`);
   const user = request.messages.findLast(message => message.role === "user");
@@ -92,8 +95,8 @@ const threads: OptThreads = {
   async tell() {}, async describe() { return ""; },
   async events() { return null; }, async history() { return null; },
 };
-const chatAt = (directory: string, closeMs: number) => OptChat.open({ directory, models, model: async () => ({ provider: faux.getModel().provider, id: faux.getModel().id }),
-  threads, limits: { view: 1_600, low: 800, compaction: 400, compactionLow: 200, node: 64, retryMs: 50, watchMs: 50, closeMs } });
+const chatAt = (directory: string, closeMs: number, compactor?: () => Promise<null>) => OptChat.open({ directory, models, model: async () => ({ provider: faux.getModel().provider, id: faux.getModel().id }),
+  threads, ...compactor ? { compactor } : {}, limits: { view: 1_600, low: 800, compaction: 400, compactionLow: 200, node: 64, retryMs: 50, watchMs: 50, closeMs } });
 async function until(check: () => boolean, what: string) {
   for (let k = 0; k < 1500 && !check(); k++) await delay(10);
   assert.ok(check(), what);
@@ -109,7 +112,7 @@ const twice = (kind: Sent["kind"], from = 0) => {
   return keys.length - new Set(keys).size;
 };
 const sum = (calls: Record<string, number> | undefined) => Object.values(calls ?? {}).reduce((total, count) => total + count, 0);
-const reset = () => { markedCalls.length = 0; spawned.asked.length = 0; spawned.made.clear(); spawnMs = 0; phase = "open"; Object.assign(runs, { open: 0, closing: 0, reopened: 0 }); sent.length = 0; Object.assign(open, { turn: 0, compaction: 0 }); Object.assign(aborted, { turn: 0, compaction: 0 }); };
+const reset = () => { failFollow = 0; markedCalls.length = 0; spawned.asked.length = 0; spawned.made.clear(); spawnMs = 0; phase = "open"; Object.assign(runs, { open: 0, closing: 0, reopened: 0 }); sent.length = 0; Object.assign(open, { turn: 0, compaction: 0 }); Object.assign(aborted, { turn: 0, compaction: 0 }); };
 
 // 1. Summaries out at a close come back within its grace and are stored,
 // with their usage; the reopened chat asks for none of them again.
@@ -282,6 +285,43 @@ for (const ms of [0, 200]) {
   } finally { await chat.close(); }
 }
 
+// 2f. A tool that returned but whose result is not stored yet (its slot
+// reads running until Pi commits it) is waited for too: the grace ends only
+// after that commit, so the result is kept and the tool not run again.
+{
+  reset();
+  toolMs = 100;
+  const directory = path.join(root, "tool-settling");
+  let chat = await chatAt(directory, 5_000);
+  try {
+    // Pi's commit of the tool's result waits 600 ms, as a slow disk would.
+    const storage = (chat as unknown as { storage: { commit: (writes: unknown, context: unknown) => Promise<unknown> } }).storage;
+    const commit = storage.commit.bind(storage);
+    let stored = 0;
+    storage.commit = async (writes, commitContext) => {
+      if (!JSON.stringify(writes).includes("projects: cube")) return commit(writes, commitContext);
+      await delay(600);
+      const seq = await commit(writes, commitContext);
+      stored ||= Date.now();
+      return seq;
+    };
+    let cutAt = 0;
+    (chat as unknown as { abort: AbortController }).abort.signal.addEventListener("abort", () => { cutAt = Date.now(); }, { once: true });
+    await chat.send(`message 0: ${"word ".repeat(30)} #tool`, "r0");
+    await until(() => runs.open > 0, "the tool is running");
+    phase = "closing";
+    await chat.close();
+    assert.ok(stored > 0 && cutAt >= stored, `the grace ended after the result was stored (stored ${stored}, cut ${cutAt})`);
+    phase = "reopened";
+    toolMs = 0;
+    chat = await chatAt(directory, 5_000);
+    await quiet(chat);
+    assert.equal(runs.open + runs.closing + runs.reopened, 1, "the tool ran once in all");
+    const usage = await chat.usage();
+    assert.equal(sum(usage.cut?.tools) + sum(usage.cut?.chat), 0, "nothing is counted as cut off");
+  } finally { await chat.close(); toolMs = 0; }
+}
+
 // 3. Forced: summaries still out after the grace are cut off. The close ends
 // soon after its grace, counts each as unknown, and the reopen asks again
 // for at most those.
@@ -385,6 +425,59 @@ for (const ms of [0, 200]) {
     assert.equal(sum(usage.compactor.calls), sent.filter(call => call.kind === "compaction").length, "every answer's usage is stored");
     assert.equal(sum(usage.cut?.compactor), 0, "nothing was cut off");
   } finally { await chat.close(); hold = { turn: 0, compaction: 0 }; }
+
+  // 5b. A held round is taken once: when its resumed answer fails (an
+  // overloaded provider), the node's retry starts a new round from its first
+  // answer and does not ask the held answer again from the round kept.
+  reset();
+  hold = { turn: 0, compaction: 0, marked: 300 };
+  const failing = path.join(root, "round-taken-once");
+  chat = await chatAt(failing, 5_000);
+  try {
+    await chat.send(marked, "r0");
+    await until(() => markedCalls.length === 1 && open.compaction > 0, "the marked summary's first answer is out");
+    await chat.close();
+    assert.equal(markedCalls.filter(call => call.follow).length, 0, "the round was held before its follow-up");
+    hold = { turn: 0, compaction: 0 };
+    failFollow = 1;
+    chat = await chatAt(failing, 5_000);
+    await answered(chat, 1);
+    const calls = markedCalls.map(call => call.follow ? "follow" : "first");
+    assert.deepEqual(calls, ["first", "follow", "first", "follow"], "the resumed follow-up failed once; the retry asked the first answer again, not the held round");
+    assert.equal(node(chat), expected.node, "and the summary is the same");
+  } finally { await chat.close(); hold = { turn: 0, compaction: 0 }; failFollow = 0; }
+}
+
+// 5c. A node whose round starts while the chat closes is held before its
+// first answer: no summary answer at all is asked while closing, and the
+// reopened chat asks each once.
+{
+  reset();
+  let stalled = 0;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const directory = path.join(root, "round-first");
+  // The compactor's model is looked up as a node's round starts: held there
+  // until the close has begun.
+  let chat = await chatAt(directory, 5_000, async () => { if (phase === "open") { stalled++; await gate; } return null; });
+  try {
+    await chat.send(`message 0: ${"word ".repeat(30)}`, "r0");
+    await until(() => stalled > 0, "a node's round is starting");
+    const closing = chat.close();
+    phase = "closing";
+    const at = sent.length;
+    release();
+    await closing;
+    assert.equal(sent.slice(at).filter(call => call.kind === "compaction").length, 0, "no summary answer, not even a round's first, was asked while closing");
+    phase = "reopened";
+    chat = await chatAt(directory, 5_000);
+    await quiet(chat);
+    assert.ok(sent.some(call => call.kind === "compaction"), "the reopened chat built the nodes");
+    assert.equal(twice("compaction"), 0, "and asked no answer twice");
+    const usage = await chat.usage();
+    assert.equal(sum(usage.compactor.calls), sent.filter(call => call.kind === "compaction").length, "every answer's usage is stored");
+    assert.equal(sum(usage.cut?.compactor) + sum(usage.cut?.chat), 0, "nothing was cut off");
+  } finally { await chat.close(); }
 }
 
 // 6. A chat request whose provider never answers and ignores the abort:

@@ -18,6 +18,7 @@ import { Artifacts } from "../src/artifact-service.ts";
 import { ArtifactStore } from "../src/artifacts.ts";
 import type { GithubPulls } from "../src/github-pulls.ts";
 import { OptChat, TOOL_REPLAY, type OptThreads } from "../src/optchat.ts";
+import { latestCommitsOf } from "../src/index.ts";
 import { cubeThreads } from "../src/optchat-threads.ts";
 import { Registry } from "../src/registry.ts";
 
@@ -40,6 +41,10 @@ const THREAD = "0123456789abcdef-thread";
 const made = new Map<string, string>();
 const tells = new Set<string>();
 const archived = new Set<string>();
+/** Threads moved to archived, each time one was; and, when set, a close that
+ * cuts the archive call off after cubed archived the thread. */
+let archivings = 0;
+let cutArchive: AbortController | undefined;
 const effects = () => ({
   threads: made.size, tells: tells.size, archived: archived.size, hooks: JSON.stringify(registry.getProject("demo")!.hooks ?? null),
   revisions: store.list().reduce((sum, artifact) => sum + store.revisions(artifact.id).length, 0),
@@ -56,13 +61,24 @@ const threads: OptThreads = {
   async describe(ids) { return ids.map(id => `[${id.slice(0, 8)}] demo`).join("\n"); },
   async events() { return null; },
   async history() { return null; },
-  async archive(id) { const already = archived.has(id); archived.add(id); return { already, disk: "machine disk deleted", free: "1 of 1" }; },
+  async archive(id) {
+    const already = archived.has(id);
+    if (!already) archivings++;
+    archived.add(id);
+    if (cutArchive) { cutArchive.abort(new Error("optchat is closing")); throw cutArchive.signal.reason; }
+    return { already, disk: "machine disk deleted", free: "1 of 1" };
+  },
   async usage() { return "usage: none"; },
   async observe(ids) { return new Map(ids.map(id => [id, null])); },
   async diagnose() { return "diagnostics: none"; },
   async hooks(project) { return real.hooks!(project); },
   async writeHooks(project, hooks, requestId) { return real.writeHooks!(project, hooks, requestId); },
 };
+
+async function until(check: () => boolean, what: string) {
+  for (let k = 0; k < 500 && !check(); k++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(check(), what);
+}
 
 const chat = await OptChat.open({ directory: path.join(root, "chat"), models, model: async () => ({ provider: faux.getModel().provider, id: faux.getModel().id }), threads, artifacts });
 try {
@@ -134,6 +150,24 @@ try {
       assert.equal(made.size, 4, "spawn: another call starts other threads");
     }
   }
+  // archive cut off after cubed archived the thread and before its line was
+  // stored: the replay finds the thread archived by its own first run, so it
+  // says "archived", as that run would have; another call says "already".
+  const victim = `1${THREAD.slice(1)}`;
+  const cut = new AbortController();
+  const archive = tools.find(tool => tool.name === "archive")!;
+  cutArchive = cut;
+  const before = archivings;
+  await assert.rejects(archive.execute({ ids: [victim.slice(0, 8)] } as never, api(800, "call-800"), withAbortSignal(cut.signal, context)), /optchat is closing/);
+  cutArchive = undefined;
+  assert.ok(archived.has(victim) && archivings === before + 1, "the first run archived the thread before the cut");
+  const replayed = await run("archive", { ids: [victim.slice(0, 8)] }, 800, "call-800");
+  assert.match(replayed, new RegExp(`\\[${victim.slice(0, 8)}\\] archived: machine disk deleted`), "the replay says archived");
+  assert.doesNotMatch(replayed, /already/, "not already archived: the archive was its own");
+  assert.equal(archivings, before + 1, "and the thread was archived once");
+  assert.equal(await run("archive", { ids: [victim.slice(0, 8)] }, 800, "call-800"), replayed, "a second replay says the same");
+  assert.match(await run("archive", { ids: [victim.slice(0, 8)] }, 801, "call-801"), /was already archived/, "another call finds it already archived");
+
   // A close holds every tool at its start, also one Pi starts at its
   // execute phase (a replay after a restart), until Pi aborts it; then it
   // throws, so it never ran and the next open runs it once.
@@ -150,19 +184,50 @@ try {
   assert.equal(ran, 0, "nor after Pi aborts it");
   inside.closing = false;
 
-  // cube's own spawn, cut off while it resolves the latest commits (git):
-  // the abort reaches that step, and no thread is made after it.
-  let seen: AbortSignal | undefined;
-  const spawning = cubeThreads({ registry, conversations: {} as never, runners: () => ({ runners: [] }) as never,
+  // cube's own spawn, with cubed's own latestCommits over a fake git, cut
+  // off in each fetch it makes: the repository's (prepareRepository), the
+  // installed skills' source and the repository's own skills (ensureMirror).
+  // The abort reaches the git of each, and no thread is made after it.
+  const REPO = "https://github.com/x/fetch.git", SKILLS = "https://github.com/x/skills.git";
+  registry.saveProject({ id: "fetch", name: "fetch", status: "ready", error: null, revision: 1, checkedAt: 1, createdAt: 1, updatedAt: 1, repositories: [
+    { id: "r1", projectId: "fetch", position: 0, url: REPO, base: "main", checkoutName: "fetch", status: "ready", error: null, resolvedBase: "main", baseOid: "a".repeat(40), checkedAt: 1 }] });
+  let stall: "prepare" | "skills" | "project" = "prepare";
+  const reached = new Map<string, AbortSignal | undefined>();
+  // A git that never ends: it stops only on its signal, and fails at once without one.
+  const hang = (step: string, signal?: AbortSignal) => {
+    reached.set(step, signal);
+    if (!signal) return Promise.reject(new Error(`${step} was given no signal`));
+    return new Promise<never>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+  };
+  const fetchGit = {
+    async prepareRepository(_url: string, _base?: string | null, signal?: AbortSignal) { return stall === "prepare" ? hang("prepare", signal) : { base: "main", baseOid: "a".repeat(40) }; },
+    async ensureMirror(url: string, signal?: AbortSignal) { return hang(url === SKILLS ? "skills" : "project", signal); },
+    async listFilesAtCommit() { return null; }, async readFileAtCommit() { return null; },
+  };
+  for (const step of ["prepare", "skills", "project"] as const) {
+    stall = step;
+    const spawning = cubeThreads({ registry, conversations: {} as never, runners: () => ({ runners: [] }) as never,
+      catalog: async () => [{ provider: "faux", id: "faux-1" }] as never,
+      latestCommits: latestCommitsOf({ registry, git: fetchGit, skills: () => ({ sources: [], disabled: [] }),
+        skillSource: step === "skills" ? { url: SKILLS, commit: "b".repeat(40), path: "skills" } : null }) });
+    const cutting = new AbortController();
+    const started = spawning.spawn({ project: "fetch", task: "cut" }, `optchat:cut:${step}`, cutting.signal);
+    await until(() => reached.has(step), `spawn reached the ${step} fetch`);
+    cutting.abort(new Error("optchat is closing"));
+    // The abort's own reason, not a failed fetch that names it.
+    await assert.rejects(started, error => error === cutting.signal.reason, `${step}: spawn rethrows the abort`);
+    assert.equal(reached.get(step), cutting.signal, `${step}: the abort reaches its git`);
+    assert.equal(registry.threadByRequest("fetch", `optchat:cut:${step}`), null, `${step}: no thread is made after the abort`);
+  }
+  // Its git ends as the abort comes, with commits: the abort still decides.
+  const racing = cubeThreads({ registry, conversations: {} as never, runners: () => ({ runners: [] }) as never,
     catalog: async () => [{ provider: "faux", id: "faux-1" }] as never,
-    // Its git ends as the abort comes, with commits: the abort still decides.
-    latestCommits: (_project, signal) => { seen = signal; return new Promise(resolve => { signal?.addEventListener("abort", () => resolve({ projectRevision: 1, repositories: [] } as never), { once: true }); }); } });
+    latestCommits: (_project, signal) => new Promise(resolve => { signal?.addEventListener("abort", () => resolve({ projectRevision: 1, repositories: [] } as never), { once: true }); }) });
   const cutting = new AbortController();
-  const started = spawning.spawn({ project: "demo", task: "cut" }, "optchat:cut:0", cutting.signal);
+  const started = racing.spawn({ project: "demo", task: "cut" }, "optchat:cut:0", cutting.signal);
   await new Promise(resolve => setImmediate(resolve));
   cutting.abort(new Error("optchat is closing"));
   await assert.rejects(started, /optchat is closing/);
-  assert.equal(seen, cutting.signal, "spawn gives its signal to the git step");
   assert.equal(registry.threadByRequest("demo", "optchat:cut:0"), null, "and makes no thread after the abort");
   assert.equal(tells.size, 1, "the tell was taken once");
   // And counted once against the thread's TELLS (8): seven other calls go, the next is refused.

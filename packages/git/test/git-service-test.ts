@@ -130,6 +130,16 @@ console.log("1c ok: auth classification — github stderr recognized, canonical 
   assert.equal(stopped, 1, "the git under way was stopped");
   await assert.rejects(prepared.prepareRepository("https://github.com/x/prepare.git", "main", AbortSignal.abort(new Error("closed"))), /closed/);
   assert.equal(ran, 1, "an aborted prepare runs no git");
+  // ensureMirror on a mirror it already has (skills' fetch refreshes it):
+  // that git stops on the abort too.
+  const refreshed = new GitService(path.join(tmp, "repos-cancel-refresh"), hanging);
+  fs.mkdirSync(refreshed.mirrorPathFor("https://github.com/x/skills.git"), { recursive: true });
+  const refreshing = new AbortController();
+  const refresh = refreshed.ensureMirror("https://github.com/x/skills.git", refreshing.signal);
+  await new Promise((resolve) => setImmediate(resolve));
+  refreshing.abort(new Error("optchat is closing"));
+  await assert.rejects(refresh, /optchat is closing/);
+  assert.equal(stopped, 2, "the mirror's refresh was stopped");
   console.log("1d ok: abort propagates to the git process runner");
 }
 
