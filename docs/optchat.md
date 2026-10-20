@@ -229,7 +229,11 @@ restarts. Not exactly-once: nothing is without provider idempotency.
 Thread agents (`durable-agent.ts`) record their requests the same way: a
 request out at a stop is counted in the thread's `cube.sends` (its usage
 report partial) and its run stopped, never sent again; its next message
-goes on. Tools are not changed: every OptChat tool is read-only or keyed
+goes on. The same commit appends a data-only entry (`cube.send-dropped`,
+which no request carries), so the stopped run says why to the thread's
+readers (live, stored and its history) and in OptChat's report (`stopped:
+cubed stopped while this run's model request was out, so it was not sent
+again …: send a message to go on`), until the thread's next message. Tools are not changed: every OptChat tool is read-only or keyed
 (`TOOL_REPLAY`), a thread's file and bash tools are keyed workspace
 operations, and Pi reports a call of a tool that is neither as
 `interrupted` rather than running it again.

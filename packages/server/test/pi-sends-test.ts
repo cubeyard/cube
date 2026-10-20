@@ -29,7 +29,9 @@ import { createModels, fauxAssistantMessage, fauxProvider, type Message } from "
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { openAgent, openStorage } from "../src/durable-agent.ts";
 import { OptChat } from "../src/optchat.ts";
-import { SendsDoc, settleSends } from "../src/pi-sends.ts";
+import { DROPPED, SendsDoc, settleSends } from "../src/pi-sends.ts";
+import { PiThreadEvents, storedPiTranscript } from "../src/pi-thread-events.ts";
+import { readPiHistory } from "../src/thread-history.ts";
 import { UsageService } from "../src/usage-service.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
@@ -137,12 +139,19 @@ const talk = (chat: OptChat) => chat.memory.messages.filter(message => message.k
     const first = (await agent.harness.inspect(context)).submissions;
     assert.deepEqual(first, [], "its run is settled");
     assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted, { [`${model.provider}/${model.id}`]: 1 });
+    // The stopped run says why, to the thread's live readers, its store's and its history's.
+    const live = new PiThreadEvents({ agent, owner: () => "pi", failure: () => null });
+    for (const status of [(await live.read()).status, (await storedPiTranscript(agent.storage, "pi", null)).status, (await readPiHistory(path.join(directory, "pi.sqlite"), "pi", null, {}))!.status]) {
+      assert.equal(status.state, "stopped");
+      assert.equal(status.error, DROPPED, "the reason a stopped run shows");
+    }
     await agent.close();
     agent = await open();
     assert.deepEqual((await agent.harness.snapshot(SendsDoc, context))?.interrupted, { [`${model.provider}/${model.id}`]: 1 }, "counted once across opens");
     const submission = await agent.conversation.submit({ type: "input", content: "second", requestId: "second" }, context);
     assert.equal((await submission.wait(context)).status, "done");
     assert.deepEqual(sent.map(call => call.user), ["second"], "only the next message's request");
+    assert.deepEqual((await storedPiTranscript(agent.storage, "pi", null)).status.error, null, "the next run's status has no drop reason");
   } finally { await agent.close(); }
   // The thread's usage says so (read from its store, as for a closed thread).
   const registry = { getThread: () => ({ id: "thread", title: "t", projectId: "p", archived: true, agent: "pi", createdAt: 0 }) };

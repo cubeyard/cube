@@ -21,13 +21,25 @@
  * them. A stop between the memo and the send counts one request that never
  * left and drops it: the safe direction. Not exactly-once: nothing is. */
 import type { Context } from "@earendil-works/chord";
-import { defineDoc, defineExtension, GenerationTask, hook, LiveDoc, type Extension, type Harness, type HookApi, type TaskId } from "@earendil-works/pi-durable";
+import { defineDoc, defineExtension, GenerationTask, hook, LiveDoc, type ConversationId, type Extension, type Harness, type HookApi, type TaskId } from "@earendil-works/pi-durable";
 
 /** `epoch`: the newest open. `through`: memos of epochs up to it are counted.
  * `interrupted`: requests out at a stop, by `provider/model`; their cost is unknown. */
 export type Sends = { epoch: number; through: number; interrupted: Record<string, number> };
 export const SendsDoc = defineDoc<Sends>({ kind: "cube.sends", version: 1, scope: "session", initial: () => ({ epoch: 0, through: 0, interrupted: {} }) });
 const MARK = "cube.sent.";
+/** A thread's entry saying its run stopped because its request was out at a stop. */
+export const DROPPED_ENTRY = "cube.send-dropped";
+export const DROPPED = "cubed stopped while this run's model request was out, so it was not sent again (what it cost is unknown): send a message to go on";
+/** The reason a stopped run shows: a drop notice newer than the last user message. */
+export function droppedReason(entries: readonly { id: number; kind: string }[]): string | null {
+  let user = -1, notice = -1;
+  for (const entry of entries) {
+    if (entry.kind === "pi.user") user = Math.max(user, entry.id);
+    if (entry.kind === DROPPED_ENTRY) notice = Math.max(notice, entry.id);
+  }
+  return notice > user ? DROPPED : null;
+}
 type Mark = { epoch: number };
 
 /** Records that the asking generation's current attempt is about to be
@@ -42,8 +54,8 @@ export async function markSent(api: HookApi, epoch: number, callContext: Context
 /** At an open, before `resume()`: takes the next epoch, counts the requests
  * that were out at the last stop and aborts their generations. Answers the
  * epoch for `markSent` and the aborted requests. */
-export async function settleSends(harness: Harness, callContext: Context): Promise<{ epoch: number; dropped: Array<{ task: TaskId; model: string }> }> {
-  const out: Array<{ task: TaskId; model: string; epoch: number }> = [];
+export async function settleSends(harness: Harness, callContext: Context, options: { notice?: boolean } = {}): Promise<{ epoch: number; dropped: Array<{ task: TaskId; model: string }> }> {
+  const out: Array<{ task: TaskId; model: string; epoch: number; conversation: ConversationId }> = [];
   for (const { record } of (await harness.inspect(callContext)).tasks) {
     if (record.kind !== GenerationTask.definition.name || record.state.status === "completing" || record.state.status === "terminal") continue;
     const checkpoint = record.state.checkpoint as { phase?: string; attempt?: number; model?: { provider: string; modelId: string } } | undefined;
@@ -51,13 +63,16 @@ export async function settleSends(harness: Harness, callContext: Context): Promi
     const memos = record.memos ?? {};
     const name = `${MARK}${checkpoint.attempt}`;
     if (!Object.hasOwn(memos, name)) continue;
-    out.push({ task: record.id, model: `${checkpoint.model.provider}/${checkpoint.model.modelId}`, epoch: (memos[name] as Mark).epoch });
+    out.push({ task: record.id, model: `${checkpoint.model.provider}/${checkpoint.model.modelId}`, epoch: (memos[name] as Mark).epoch, conversation: record.conversationId });
   }
   const epoch = await harness.commit(async tx => {
     const sends = await tx.doc(SendsDoc);
     for (const send of out) {
       // A key holds a slash, so it is never `__proto__`.
-      if (send.epoch > sends.through) sends.interrupted[send.model] = (Object.hasOwn(sends.interrupted, send.model) ? sends.interrupted[send.model]! : 0) + 1;
+      if (send.epoch <= sends.through) continue;
+      sends.interrupted[send.model] = (Object.hasOwn(sends.interrupted, send.model) ? sends.interrupted[send.model]! : 0) + 1;
+      // Why the run stops, for its readers; data only, so no request carries it.
+      if (options.notice) await tx.appendEntry(send.conversation, { kind: DROPPED_ENTRY, data: { model: send.model, text: DROPPED } });
     }
     sends.through = sends.epoch;
     sends.epoch += 1;

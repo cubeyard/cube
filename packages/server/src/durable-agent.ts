@@ -228,7 +228,7 @@ export async function openAgent(options: {
     // Before anything is scheduled: a request that was out when the last
     // process stopped is counted and its run ends (stopped); it is never
     // sent again on its own. A message of the user goes on.
-    const settled = await settleSends(harness, context);
+    const settled = await settleSends(harness, context, { notice: true });
     epoch = settled.epoch;
     if (settled.dropped.length) log.warn("a model request was out when cubed stopped: not sent again, its cost is unknown, its run is stopped", { thread, models: settled.dropped.map(send => send.model) });
     // A failed Storage call ends the Session: Pi aborts every task, and every
