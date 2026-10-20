@@ -7,7 +7,7 @@
  * Pi owns the state. The log is the root conversation's own entries; each
  * turn starts at an `optchat.turn` head entry; the tree's nodes are entries
  * of a second, model-free conversation in the same storage. */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { JsonRepresentation } from "@earendil-works/chord";
@@ -20,7 +20,7 @@ import { agents } from "./claude-agent.ts";
 import { createLogger } from "./log.ts";
 import { compactNode } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
-import { capText, Memory, type LogMessage, type Part } from "./optchat-memory.ts";
+import { CAP, capText, Memory, pages, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
 import { imageNote } from "./thread-images.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
@@ -105,7 +105,9 @@ as "(not summarized yet: zoom it)". No message appears in full, not even
 the last ones.
 
 Navigating: zoom(id, n) opens line id+n into the two lines of n/2
-messages it was made from; zoom(id, 1) gives message id in full. Zoom
+messages it was made from; zoom(id, 1) gives message id in full. A long
+message is logged as several in a row; one logged before that comes a page
+at a time, with the at to go on with. Zoom
 whenever a summary only mentions something you need, such as what your
 last reply said, a decision, a past attempt or where a file is, before
 you act, guess or ask. date(id) gives the date and time of message id.`;
@@ -292,7 +294,11 @@ const PendingDoc = defineDoc<Pending>({ kind: "cube.optchat.pending", version: 1
  * before batching lack it and were never mid-batch. `compaction` and
  * `compactionBatch` are the compactor's view and its batch the same way;
  * views stored before it lack them, and it is merged down from the view. */
-const ViewDoc = defineDoc<{ total: number; parts: number[]; batch?: boolean; compaction?: number[]; compactionBatch?: boolean }>({ kind: "cube.optchat.view", version: 1, scope: "session", initial: () => ({ total: 0, parts: [] }) });
+const ViewDoc = defineDoc<{ total: number; parts: number[]; batch?: boolean; compaction?: number[]; compactionBatch?: boolean; entry?: number; shape?: string; shapeTotal?: number }>({ kind: "cube.optchat.view", version: 1, scope: "session", initial: () => ({ total: 0, parts: [] }) });
+/** How the log is read from Pi's entries: entries from `pagedFrom` on log a
+ * long message in pages (spec §1); older ones as they were logged before
+ * pages, so their messages keep their ids. Set at the first open that knows it. */
+const LogDoc = defineDoc<{ pagedFrom?: number }>({ kind: "cube.optchat.log", version: 1, scope: "session", initial: () => ({}) });
 /** The compactor's model calls run beside Pi, so Pi's `pi.usage` does not
  * see them: their usage by `provider/model`, one commit per reply, failed
  * replies included. `since` is when this store began counting; `earlier`
@@ -329,18 +335,23 @@ const toParts = (flat: readonly number[]) => {
 const textOf = (content: Message["content"]) => typeof content === "string" ? content
   : content.map(part => part.type === "text" ? part.text : part.type === "image" ? "[image]" : "").join("\n");
 
-/** The log messages one Pi entry holds. Thoughts are never logged. */
-export function entryMessages(entry: EntryRecord): LogMessage[] {
+/** The log messages one Pi entry holds. Thoughts are never logged. With
+ * `page`, a long message or reply is logged in pages of that many
+ * characters, never cut; tool results and calls are capped instead. How
+ * many messages an entry gives decides every later id: a change to it is
+ * caught at the next open (`shape`) and refused. */
+export function entryMessages(entry: EntryRecord, page = 0): LogMessage[] {
   const out: LogMessage[] = [];
+  const paged = (kind: "user" | "talk", text: string, date: number) => { for (const part of page ? pages(text, page) : [text]) out.push({ kind, text: part, date }); };
   for (const message of entry.model ?? []) {
     const date = message.timestamp;
-    if (entry.kind === "pi.user" && message.role === "user") out.push({ kind: "user", text: textOf(message.content), date });
+    if (entry.kind === "pi.user" && message.role === "user") paged("user", textOf(message.content), date);
     else if (entry.kind === "pi.assistant" && message.role === "assistant") {
       // A failed attempt is retried and never reaches the model again; an
       // aborted one ran none of its tool calls.
       if (message.stopReason === "error") continue;
       for (const part of message.content) {
-        if (part.type === "text" && part.text.trim()) out.push({ kind: "talk", text: part.text, date });
+        if (part.type === "text" && part.text.trim()) paged("talk", part.text, date);
         else if (part.type === "toolCall" && message.stopReason !== "aborted") out.push({ kind: "tool", text: capText(`${part.name} ${JSON.stringify(part.arguments ?? {})}`), date });
       }
     } else if (entry.kind === "pi.tool-result" && message.role === "toolResult") {
@@ -394,8 +405,26 @@ export type OptChatOptions = {
   /** Work artifacts: the chat writes its own and reads its threads'. */
   artifacts?: Artifacts;
   /** Tests lower these. */
-  limits?: { view?: number; low?: number; node?: number; compaction?: number; compactionLow?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number };
+  limits?: { view?: number; low?: number; node?: number; compaction?: number; compactionLow?: number; jobs?: number; retryMs?: number; watchMs?: number; startGraceMs?: number; page?: number };
 };
+
+/** The log's shape after one more entry: a hash over how many messages each
+ * entry gave, so a reopen can tell a log that numbers its messages as the
+ * stored view did from one that does not. */
+const nextShape = (shape: string, entry: number, count: number) => count ? createHash("sha256").update(`${shape},${entry}:${count}`).digest("hex") : shape;
+
+/** Why a stored view must not be restored over this log, or null. `shape`
+ * and `shapeTotal` (`total` before it) are this log's hash and count through
+ * the view's `entry`; `checked` is the same read from the log now. A cubed
+ * before the shape keeps them as they are while it grows `total`: then the
+ * view was numbered without pages, which differs only if `paged` (an entry
+ * from `pagedFrom` on that gives more messages in pages). */
+export function viewMismatch(stored: { total: number; entry?: number; shape: string; shapeTotal?: number }, checked: { total: number; shape: string }, paged: () => boolean): string | null {
+  const own = stored.shapeTotal ?? stored.total;
+  if (checked.total !== own || checked.shape !== stored.shape) return `the chat's log numbers its messages differently from its memory (${checked.total} messages through entry ${stored.entry}, ${own} when stored); not opened, so no summary is put on the wrong message`;
+  if (stored.total !== own && paged()) return `an older cubed numbered the chat's log without pages since its memory was stored (${stored.total} messages then); not opened, so no summary is put on the wrong message`;
+  return null;
+}
 
 export class OptChat {
   readonly memory: Memory;
@@ -404,6 +433,9 @@ export class OptChat {
   private storage!: SqliteStorage;
   private tree = 0 as ConversationId;
   private lastEntry = 0;
+  /** The log's shape through `lastEntry`, and the first entry logged in pages. */
+  private shape = "";
+  private pagedFrom = 0;
   private readonly busy = new Set<string>();
   private readonly failed = new Set<string>();
   private compactorError: string | null = null;
@@ -540,14 +572,33 @@ export class OptChat {
       const node = entry.data as { l: number; i: number; text: string } | undefined;
       if (entry.kind === NODE_ENTRY && node) { this.memory.setNode(node.l, node.i, node.text); nodes.push(node); }
     }
-    const messages: LogMessage[] = [];
-    for (const entry of await this.scan(this.conversation.id, 0)) {
-      const logged = entryMessages(entry);
-      messages.push(...logged);
-      for (const id of entryImages(entry)) this.referenced.add(id);
-      this.lastEntry = entry.id;
+    const entries = await this.scan(this.conversation.id, 0);
+    const read = await this.harness.snapshot(LogDoc, context);
+    if (read?.pagedFrom !== undefined) this.pagedFrom = read.pagedFrom;
+    else {
+      // A new chat pages every message; one logged before pages pages
+      // only what comes after this open.
+      this.pagedFrom = existing ? (entries.at(-1)?.id ?? 0) + 1 : 0;
+      await this.harness.commit(async tx => { (await tx.doc(LogDoc)).pagedFrom = this.pagedFrom; }, context);
     }
     const stored = await this.harness.snapshot(ViewDoc, context);
+    const messages: LogMessage[] = [];
+    let checked = { total: 0, shape: "" };
+    for (const entry of entries) {
+      const logged = this.messagesOf(entry);
+      messages.push(...logged);
+      this.shape = nextShape(this.shape, entry.id, logged.length);
+      for (const id of entryImages(entry)) this.referenced.add(id);
+      this.lastEntry = entry.id;
+      if (stored?.entry !== undefined && entry.id <= stored.entry) checked = { total: messages.length, shape: this.shape };
+    }
+    // The tree's nodes are by message id: a log that numbers its messages
+    // otherwise than when the view was stored (a change to how entries are
+    // read) would put every summary on the wrong messages. Views stored
+    // before the shape are not checked.
+    const mismatch = stored?.shape !== undefined
+      ? viewMismatch({ ...stored, shape: stored.shape }, checked, () => entries.some(entry => entry.id >= this.pagedFrom && this.messagesOf(entry).length !== entryMessages(entry).length)) : null;
+    if (mismatch) throw new Error(mismatch);
     const total = stored && stored.total <= messages.length && this.memory.restore(messages.slice(0, stored.total), toParts(stored.parts), stored.batch === true,
       stored.compaction ? { parts: toParts(stored.compaction), batching: stored.compactionBatch === true } : undefined) ? stored.total : 0;
     for (const message of messages.slice(total)) this.memory.append(message);
@@ -666,7 +717,9 @@ export class OptChat {
       do {
         this.dirty = false;
         for (const entry of await this.scan(this.conversation.id, this.lastEntry)) {
-          for (const message of entryMessages(entry)) this.memory.append(message);
+          const logged = this.messagesOf(entry);
+          for (const message of logged) this.memory.append(message);
+          this.shape = nextShape(this.shape, entry.id, logged.length);
           for (const id of entryImages(entry)) this.referenced.add(id);
           this.lastEntry = entry.id;
         }
@@ -674,6 +727,11 @@ export class OptChat {
     })().catch(error => { if (!this.closing) log.warn("log sync failed", { error }); })
       .finally(() => { this.syncing = null; this.pump(); });
     return this.syncing;
+  }
+
+  /** One entry's log messages, in pages if it is logged since pages. */
+  private messagesOf(entry: EntryRecord): LogMessage[] {
+    return entryMessages(entry, entry.id >= this.pagedFrom ? this.options.limits?.page ?? CAP : 0);
   }
 
   /** Starts every node that may be built now, up to JOBS at once. */
@@ -693,7 +751,8 @@ export class OptChat {
         if (!this.failed.has(key)) log.warn("compactor failed", { node: key, error: message });
         this.failed.add(key);
         this.compactorError = message;
-        // Retry soon and forever: the next turn waits for this node.
+        // An outage or a setup error: retried soon until it answers; the
+        // next turn waits for this node and the chat shows why.
         const timer = setTimeout(() => { this.timers.delete(timer); this.busy.delete(key); this.pump(); }, this.options.limits?.retryMs ?? RETRY_MS);
         this.timers.add(timer);
       });
@@ -703,20 +762,23 @@ export class OptChat {
   private async build(l: number, i: number): Promise<void> {
     const source = this.memory.source(l, i);
     let text: string;
+    let cut: string | undefined;
     if ("free" in source) text = source.free;
     else {
       const model = await this.compactorModel();
       if (!model) throw new Error("the chat has no model");
       text = await compactNode({ models: this.compactorModels, model, context: this.memory.context(l, i), source, node: this.memory.nodeLimit, signal: this.abort.signal,
-        onReply: reply => this.countCompactor(reply) });
+        onReply: reply => this.countCompactor(reply), onCut: why => { cut = why; } });
     }
     if (this.closing) return;
+    if (cut !== undefined) log.warn("compactor gave no line: node cut short", { node: `${l}:${i}`, error: cut });
     // Stored first: memory never holds a node storage lacks. The view it
     // leads to is a cache for the next open, written after.
-    await this.harness.commit(tx => tx.appendEntry(this.tree, { kind: NODE_ENTRY, data: { l, i, text } }), context);
+    await this.harness.commit(tx => tx.appendEntry(this.tree, { kind: NODE_ENTRY, data: { l, i, text, ...cut !== undefined ? { cut } : {} } }), context);
     this.memory.setNode(l, i, text);
+    // The log's shape through the view's last message, checked at the next open.
     const view = { total: this.memory.length, parts: flatParts(this.memory.view), batch: this.memory.batching,
-      compaction: flatParts(this.memory.compaction), compactionBatch: this.memory.compactionBatching };
+      compaction: flatParts(this.memory.compaction), compactionBatch: this.memory.compactionBatching, entry: this.lastEntry, shape: this.shape, shapeTotal: this.memory.length };
     await this.harness.commit(async tx => { Object.assign(await tx.doc(ViewDoc), view); }, context)
       .catch(error => { if (!this.closing) log.warn("view not stored", { error }); });
   }
@@ -1097,10 +1159,10 @@ export class OptChat {
   private extension() {
     const zoom = defineTool({
       name: "zoom",
-      description: "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole.",
-      parameters: Type.Object({ id: Type.Integer({ minimum: 0 }), n: Type.Integer({ minimum: 1 }) }),
+      description: "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole, one over 30,000 characters a page from character at.",
+      parameters: Type.Object({ id: Type.Integer({ minimum: 0 }), n: Type.Integer({ minimum: 1 }), at: Type.Optional(Type.Integer({ minimum: 0 })) }),
       replay: "safe",
-      execute: async args => text(this.memory.zoom(args.id, args.n)),
+      execute: async args => text(this.memory.zoom(args.id, args.n, args.at ?? 0)),
     });
     const date = defineTool({
       name: "date",
