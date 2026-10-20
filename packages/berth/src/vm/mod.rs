@@ -2380,11 +2380,22 @@ impl VmRunner {
             // Read only: no `ops` lock, so it neither waits for a mutation
             // nor holds one up (diagnose.rs).
             Some(Verb::MachineDiagnose(request)) => self.diagnose(request).await.map(R::Diagnosis),
-            // Under `ops` for the whole save (bounded by SUSPEND_WAIT), as a
-            // stop: one suspend at a time, so its disk check is the only one.
+            // Under `ops` for the whole save, as a stop: one suspend at a
+            // time, so its disk check is the only one. Its wait for `ops`, the
+            // save and what follows are each bounded (suspend::OPS_WAIT …), so
+            // it answers before cubed gives up and never runs after.
             Some(Verb::MachineSuspend(request)) => {
-                let _op = self.ops.lock().await;
-                self.suspend(request).await.map(R::Machine)
+                match tokio::time::timeout(suspend::OPS_WAIT, self.ops.lock()).await {
+                    Ok(_op) => self.suspend(request).await.map(R::Machine),
+                    Err(_) => Err(refuse(
+                        Code::FailedPrecondition,
+                        "busy",
+                        &format!(
+                            "another operation held the runner for {} s; the machine keeps running",
+                            suspend::OPS_WAIT.as_secs()
+                        ),
+                    )),
+                }
             }
             // Takes `ops` itself, not while its agent works (R14b).
             Some(Verb::TemplatePublish(request)) => self.publish(request).await.map(R::Template),
