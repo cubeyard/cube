@@ -250,6 +250,17 @@ engine with the routes answered in memory; no model call) and, with
 `node scripts/check-claude-subagents.ts` starts the real `claude` with cubed's
 arguments against a scripted Messages API on loopback (no login, no model) and
 checks that it runs no subagent, fresh or resumed, while Bash still works.
+`node scripts/check-claude-tools.ts` does the same for tools the mod registers
+with `$.tool.register` (`CUBE_TOOLS` in `hooks/register.ts`, none yet): with
+the proof tools of `packages/claude-mod/tests/check-tools.ts` it checks
+discovery and schema, the deferred tool through ToolSearch, calls over the real
+artifact route (`claude-artifacts.ts`) and its scope and lease refusals,
+unregistered tools refused, Bash and Read beside them, a stop mid-call, the
+same first request on every fresh start, and no lease token in what the model
+sees. Claude Code does not check a registered tool's input against its
+schema; the tool must. If the mod's hooks module fails to load (Claude Code
+checks its source first), Claude Code runs without it: check the module with
+`claude plugin validate --strict` after every change.
 
 Runner operations are installation-global. `GET /api/runners` returns persisted
 contact and the current global allocation snapshot without private adapter paths;

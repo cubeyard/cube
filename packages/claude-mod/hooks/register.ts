@@ -10,11 +10,16 @@
  * holds for this process, and the local directory Claude Code runs in. The
  * machine is the thread's sandbox; Claude Code itself runs on the cubed host
  * and is not sandboxed. */
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, On, Register } from 'claude-code'
 import { WorkspaceClient } from './workspace.ts'
-import { ALLOWED_TOOLS, ARTIFACT_GUIDE, ARTIFACT_ROOT, NO_SUBAGENTS, PROJECT_HOOKS_NOTE, SUBAGENT_TOOLS, artifactPath, bash, edit, editArtifact, GUEST_HOME, instructions, read, readArtifact, write, writeArtifact, VIRTUAL_ROOT, type ToolScope } from './tools.ts'
+import { ALLOWED_TOOLS, ARTIFACT_GUIDE, ARTIFACT_ROOT, NO_SUBAGENTS, PROJECT_HOOKS_NOTE, SUBAGENT_TOOLS, artifactPath, bash, cubeToolName, edit, editArtifact, GUEST_HOME, instructions, read, readArtifact, write, writeArtifact, VIRTUAL_ROOT, type CubeTool, type ToolScope } from './tools.ts'
 
-const ALLOWED = new Set(ALLOWED_TOOLS)
+/** The cube operations this mod offers as its own tools, in the order they
+ * are registered: none yet. Claude Code threads reach artifacts through
+ * /cube/artifacts until the shared operations move here
+ * (scripts/check-claude-tools.ts proves the registration path). */
+export const CUBE_TOOLS: readonly CubeTool[] = []
+
 const SUBAGENTS = new Set(SUBAGENT_TOOLS)
 const UNCONFIGURED = 'cube: this session has no thread workspace; cubed starts Claude Code with one'
 const INSTRUCTION_FILES = ['AGENTS.md', 'CLAUDE.md']
@@ -38,7 +43,12 @@ async function workspace($: Pick<EngineInterface, 'env' | 'http'>, signal?: Abor
   return { client, token, root, ...(realRoot ? { realRoot } : {}), ...(signal ? { signal } : {}) }
 }
 
-export const register: Register = on => {
+export const register: Register = on => cubeHooks(on, CUBE_TOOLS)
+
+/** The mod's hooks with these cube tools; `register` passes CUBE_TOOLS, and
+ * scripts/check-claude-tools.ts its own. */
+export function cubeHooks(on: On, tools: readonly CubeTool[]): void {
+  const ALLOWED = new Set([...ALLOWED_TOOLS, ...tools.map(tool => cubeToolName(tool.name))])
   // An allow-list, not a deny-list: a tool this mod does not know (an MCP
   // tool, a newer built-in) would run on the cubed host as the cubed user.
   on('tool.call', ($, e, next) => {
@@ -47,6 +57,29 @@ export const register: Register = on => {
     if (!ALLOWED.has(tool)) return { deny: `${tool} is not available in cube threads: it would act on the cubed host, not the thread workspace. Use Bash, Read, Write or Edit.` }
     return next(e)
   })
+
+  // The same list in the same order on every start and resume, so the
+  // tools Claude Code sends the model stay the same prefix.
+  if (tools.length) on('session.start', async ($, e, next) => {
+    for (const tool of tools) {
+      await $.tool.register({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, ...tool.isDeferred === undefined ? {} : { isDeferred: tool.isDeferred } })
+    }
+    return next(e)
+  })
+
+  // Answered here, never passed on: no MCP server stands behind these names.
+  for (const tool of tools) {
+    on('tool.call', { tool: cubeToolName(tool.name) }, async ($, e, next) => {
+      const scope = await workspace($, next.signal)
+      if (!scope) return { deny: UNCONFIGURED }
+      const { tool: _name, tool_use_id: toolUseId, ...input } = e as unknown as Record<string, unknown>
+      try {
+        return await tool.call(scope, String(toolUseId), input)
+      } catch (error) {
+        return { deny: `${tool.name}: ${error instanceof Error ? error.message : String(error)}` }
+      }
+    })
+  }
 
   // Every spawn, whatever starts it (a fork, a teammate, a workflow, an
   // agent definition): the tool list is not the only way in.
