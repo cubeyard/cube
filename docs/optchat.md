@@ -91,9 +91,18 @@ for 512-byte nodes, where pi-ai would otherwise send the model's maximum
 (128,000 on recent models) for three short lines. Adaptive thinking and
 OpenAI's reasoning spend the cap as one; on a thinking budget (older Claude,
 Bedrock) pi-ai adds 8192 on top. A ChatGPT sign-in (Codex, or `openai`
-signed in) refuses the field, so pi-ai sends none there: those answers are
-bounded only by the model and by `reasoning: "medium"`. `max_tokens` is not
-part of the cached prefix. `optchat.ts` is the service: Pi setup, the tools, the turn
+signed in) refuses the field, so pi-ai sends none there; there cube's own
+guard (`optchat-output.ts`) counts the answer as it streams (text, thinking
+summaries and tool call arguments, at two characters a token) and stops the
+call at the same cap as a `length` stop, which is never used. What such a
+provider thinks without streaming it is bounded by `reasoning: "medium"`
+only. `max_tokens` is not part of the cached prefix.
+
+The chat's own requests are capped too (O1): `CHAT_OUTPUT_TOKENS` (32,000)
+for an answer, its tool calls and adaptive thinking together, where pi-ai
+would send the model's maximum (128,000 on recent models); on a ChatGPT
+sign-in by the same guard. A turn whose answer reaches it ends there, as
+Pi stores a `length` stop. `optchat.ts` is the service: Pi setup, the tools, the turn
 loop (a turn waits until every line of the view is a summary), the compactor
 pump (eight jobs) and the thread watchers. `optchat-threads.ts` connects it
 to cube's registry and threads.
@@ -121,9 +130,10 @@ not even that is sent. So the compactor spends at most 15 capped answers on
 a node, then at most 5 per message of the user or change of model, each
 for at most the eight nodes being written at once: at most 40 answers per
 message, about 370k output tokens at 9216 (nearly twice that on a thinking
-budget, where the cap is 17408). That token figure does not hold on a
-ChatGPT sign-in (Codex, or `openai` signed in): pi-ai sends no output cap
-there, so the bound is the count of answers only, not of tokens or cost.
+budget, where the cap is 17408). On a ChatGPT sign-in (Codex, or `openai`
+signed in) the same figure holds for what the model streams (cube's guard
+stops it at the cap); reasoning it does not stream is bounded by its effort
+only.
 Nothing asks again on its own.
 
 An answer is taken from the node's before it is sent, in a commit that

@@ -25,6 +25,7 @@ import { CAP, capText, Memory, pages, type LogMessage, type Part } from "./optch
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
 import { imageNote } from "./thread-images.ts";
 import { countCut, markSent, SendsDoc, settleSends } from "./pi-sends.ts";
+import { boundedOutput, CHAT_OUTPUT_TOKENS } from "./optchat-output.ts";
 import { piReports, reportText as errorText } from "./pi-report.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
 import { PENDING_ID, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
@@ -641,8 +642,9 @@ export class OptChat {
     this.storage = await openStorage(path.join(directory, "pi.sqlite"));
     const registry = createRegistry();
     registry.install(this.extension());
-    this.harness = await Harness.open(this.storage, { models: cachedModels(this.options.models, () => this.cacheKey), registry, onReport: piReports(log), settings: {
-      // The spec's caching: short entries only, never 1-hour ones.
+    this.harness = await Harness.open(this.storage, { models: cachedModels(boundedOutput(this.options.models, CHAT_OUTPUT_TOKENS), () => this.cacheKey), registry, onReport: piReports(log), settings: {
+      // The spec's caching: short entries only, never 1-hour ones. (Every
+      // answer is capped, O1: boundedOutput above.)
       stream: { cacheRetention: "short" },
       toolExecution: "sequential",
       // Every message steered into a tool round is placed at its boundary,
@@ -670,7 +672,7 @@ export class OptChat {
     const settings = await this.harness.snapshot(SettingsDoc, context);
     this.cacheKey = `optchat-${settings!.cache}`;
     // The compactor's task is its own: its request end is not cached.
-    this.compactorModels = cachedModels(this.options.models, () => `${this.cacheKey}-compact`, { task: false });
+    this.compactorModels = cachedModels(boundedOutput(this.options.models), () => `${this.cacheKey}-compact`, { task: false });
     const existing = await this.harness.conversation(ROOT_CONVERSATION_ID, context);
     if (existing) this.conversation = existing;
     else {
