@@ -11,10 +11,10 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { JsonRepresentation } from "@earendil-works/chord";
+import type { Context, JsonRepresentation } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { cleanupSessionResources, Type, type AssistantMessage, type Message, type Models, type Usage } from "@earendil-works/pi-ai";
-import { createRegistry, defineDoc, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, ROOT_CONVERSATION_ID, section, ToolTask, type LiveState, type Conversation, type ConversationId, type Cursor, type Page, type EntryId, type EntryRecord, type TaskId, type ToolRegistration } from "@earendil-works/pi-durable";
+import { createRegistry, defineDoc, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, ROOT_CONVERSATION_ID, section, ToolTask, type LiveState, type Conversation, type ConversationId, type Cursor, type Page, type EntryId, type EntryRecord, type TaskId, type ToolRegistration, type HookApi, type SessionEnd } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openStorage } from "./durable-agent.ts";
 import { agents } from "./claude-agent.ts";
@@ -24,6 +24,7 @@ import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { CAP, capText, Memory, pages, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
 import { imageNote } from "./thread-images.ts";
+import { piReports, reportText as errorText } from "./pi-report.ts";
 import type { ObservedThread, OverviewThread, ThreadOverview } from "./optchat-overview.ts";
 import { PENDING_ID, type ThreadEvent, type ThreadEvents, type ThreadStatus, type ThreadTranscript, type ThreadWatch } from "./thread-events.ts";
 import { artifactTools, ARTIFACT_GUIDE } from "./artifact-tools.ts";
@@ -556,7 +557,28 @@ export class OptChat {
   /** The chat as the Pi adapter of the thread event model reads it. */
   get agent() { return { conversation: this.conversation, storage: this.storage }; }
   /** Why the chat cannot go on right now, if it cannot. */
-  failure(): string | null { return this.compactorError ? `summarizing: ${this.compactorError}` : null; }
+  failure(): string | null {
+    return this.down ?? (this.compactorError ? `summarizing: ${this.compactorError}` : null) ?? this.requestError;
+  }
+  /** Set when Pi's Session failed (a storage error): the chat is down. */
+  private down: string | null = null;
+  /** The last request the chat refused to send, until the hook next builds
+   * one and hands it to Pi to send. */
+  private requestError: string | null = null;
+
+  /** Pi ended the Session by itself: a Storage call failed, so nothing more
+   * can be recorded, and every call of the Harness now rejects. The chat
+   * closes at once, without the close's grace (nothing it would wait for
+   * can be stored): no node, turn or retry starts, the compactor's calls
+   * are cut off, and the provider sessions are released. It stays down
+   * until cubed restarts; it does not reopen by itself (D2′ is open). */
+  private ended(end: SessionEnd): void {
+    if (end.reason !== "failed" || this.closing) return;
+    this.down = `the chat stopped: its history could not be saved (${errorText(end.error)}); it stays stopped until cubed restarts`;
+    log.error("chat session failed; the chat is down until cubed restarts", { error: errorText(end.error) });
+    this.notify();
+    void this.close();
+  }
 
   /** `listener` runs whenever the pending messages change. */
   onPending(listener: () => void): () => void {
@@ -610,7 +632,7 @@ export class OptChat {
     this.storage = await openStorage(path.join(directory, "pi.sqlite"));
     const registry = createRegistry();
     registry.install(this.extension());
-    this.harness = await Harness.open(this.storage, { models: cachedModels(this.options.models, () => this.cacheKey), registry, settings: {
+    this.harness = await Harness.open(this.storage, { models: cachedModels(this.options.models, () => this.cacheKey), registry, onReport: piReports(log), settings: {
       // The spec's caching: short entries only, never 1-hour ones.
       stream: { cacheRetention: "short" },
       toolExecution: "sequential",
@@ -620,6 +642,7 @@ export class OptChat {
       // Every turn is a fresh context; nothing grows to compact.
       compaction: { enabled: false },
     } }, context);
+    void this.harness.closed.then(end => this.ended(end), () => {});
     this.tree = await this.harness.commit(async tx => {
       const settings = await tx.doc(SettingsDoc);
       if (!settings.tree) settings.tree = (await tx.createConversation({ ownership: { kind: "ownerless" } })).id;
@@ -1652,16 +1675,51 @@ export class OptChat {
         // A close sends no new request: this one waits, unsent, until Pi
         // closes and aborts it; the reopened run sends it then, once.
         if (this.closing) await this.holdBack(callContext.abortSignal, "requests");
-        // The turn's images, read from the store for this request only.
-        const support = this.imageSupport();
-        const messages = withImages(request.messages, { load: id => this.media.get(id), refused: support.reason, limit: MEDIA_LIMITS.perTurn, bytes: MEDIA_LIMITS.turnBytes });
-        const turn = await api.snapshot(TurnDoc, api.conversationId, callContext);
-        if (!turn?.started) return { messages };
-        const parts: Part[] = [];
-        for (let k = 0; k + 1 < turn.parts.length; k += 2) parts.push({ l: turn.parts[k]!, i: turn.parts[k + 1]! });
-        return { messages: withView(messages, viewPieces(this.memory.render(parts))) };
+        let messages: Message[];
+        try { messages = await this.request(request.messages, api, callContext); }
+        catch (error) { return this.refuse(api.taskId, callContext.abortSignal, error); }
+        this.requestError = null;
+        return { messages };
       } })],
     });
+  }
+
+  /** The request as the chat sends it: the turn's images, read from the
+   * store for this request only, and the view in front of the turn. */
+  private async request(messages: readonly Message[], api: HookApi, callContext: Context): Promise<Message[]> {
+    const support = this.imageSupport();
+    const withTurnImages = withImages(messages, { load: id => this.media.get(id), refused: support.reason, limit: MEDIA_LIMITS.perTurn, bytes: MEDIA_LIMITS.turnBytes });
+    const turn = await api.snapshot(TurnDoc, api.conversationId, callContext);
+    if (!turn?.started) return withTurnImages;
+    const parts: Part[] = [];
+    for (let k = 0; k + 1 < turn.parts.length; k += 2) parts.push({ l: turn.parts[k]!, i: turn.parts[k + 1]! });
+    return withView(withTurnImages, viewPieces(this.memory.render(parts)));
+  }
+
+  /** A request whose view or images could not be built is not sent. Pi
+   * skips a throwing beforeRequest and sends what it built itself (no view,
+   * no images: another prefix and another cost), unless the invocation was
+   * aborted, when the throw ends it. So the generation is aborted first, as
+   * a stop would: the turn ends unanswered, nothing retries it, and the
+   * next message starts a new turn. Its abort comes with the abort commit,
+   * or with the Session's end if that commit fails; a close aborts it too.
+   * A close that seals admission before the abort commits leaves the task
+   * live: the reopened chat builds this request again and sends it once if
+   * it builds (it was never sent), or refuses it again. The wait counts as
+   * a request held back, so a close neither waits for it nor counts it as
+   * a call cut off: it was never sent. */
+  private async refuse(task: TaskId, signal: AbortSignal | undefined, error: unknown): Promise<never> {
+    if (!signal || signal.aborted) throw error;
+    this.requestError = `a request was not sent: ${errorText(error)}`;
+    log.warn("request not sent: its view or images failed; the turn ends unanswered", { task, error: errorText(error) });
+    this.notify();
+    void this.harness.abortTask(task, context).catch(abortError => {
+      if (!signal.aborted) log.warn("the unsent request's turn was not aborted; it waits for the close", { task, error: errorText(abortError) });
+    });
+    this.gated.requests++;
+    try { if (!signal.aborted) await new Promise(resolve => { signal.addEventListener("abort", resolve, { once: true }); }); }
+    finally { this.gated.requests--; }
+    throw error;
   }
 
   /** Holds a request or a tool call of the chat while it closes, until Pi
@@ -1744,7 +1802,7 @@ export class OptChat {
     for (const timer of this.timers) clearTimeout(timer);
     if (this.watchTimer) clearInterval(this.watchTimer);
     if (this.harness && this.conversation) {
-      const out = await this.quiesce(this.options.limits?.closeMs ?? CLOSE_GRACE_MS);
+      const out = await this.quiesce(this.down ? 0 : this.options.limits?.closeMs ?? CLOSE_GRACE_MS);
       const compactor = [...this.calling.values()];
       const chat = out.chat && this.model ? [`${this.model.provider}/${this.model.id}`] : [];
       // Cut off at once, so no node sends another answer after this count.

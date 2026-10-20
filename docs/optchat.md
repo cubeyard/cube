@@ -576,7 +576,22 @@ without changing Pi:
   (GitHub Copilot, opencode, Cloudflare AI Gateway) is sent what pi-ai builds.
   A request refused with an error naming `reasoning.context` or the value
   `all_turns` (Codex keeps only the message) is sent again once without it,
-  and that model is not sent it again while cubed runs.
+  and that model is not sent it again while cubed runs. Any other refusal is
+  not sent again.
+- **GPT-6 on the platform (R-1).** For a model pi-ai flags
+  `supportsMidConvoEffort` (gpt-6-sol, gpt-6.1-sol, gpt-6-luna, gpt-6-astra)
+  with an `sk-` key, pi-ai 1.3.0 fixes `reasoning.effort` at `medium` and
+  sends the thinking level as a trailing `configuration_update` input item,
+  so a level change alters only that last item. OptChat adds `all_turns`
+  beside them, its own `prompt_cache_key` and the view's breakpoint; a
+  ChatGPT sign-in gets the level as `reasoning.effort` and no configuration
+  item. `optchat-gpt6-test.ts` pins this payload, its prefix across levels
+  and the refusal paths offline. Whether OpenAI accepts `all_turns` together
+  with `configuration_update` is **not tested** against the provider: a
+  refusal that names neither `reasoning.context` nor `all_turns` gets no
+  fallback, so every GPT-6 turn would fail the same way until the model is
+  changed. That is a live check (two calls, within P1), not offline
+  correctness.
 - **Retention** is `short` for the chat and the compactor, even when
   `PI_CACHE_RETENTION=long`.
 
@@ -613,6 +628,61 @@ it sends nothing.
 commits fail after their nodes are stored, then reopens: the turns after it
 send the views the uninterrupted chat sends. Hit rates are modelled offline (spec §3.3), not measured on
 a live provider.
+
+## Failing closed
+
+- **A request whose view or images cannot be built is not sent.** Pi
+  skips a `beforeRequest` hook that throws and sends the messages it built
+  itself, without the view and the images: another prefix and another
+  cost. It rethrows only when the generation's invocation was aborted. So
+  the chat's hook catches its own failure (images, the turn's document, the
+  view's rendering), aborts its generation with `Harness.abortTask`, waits
+  for that abort and only then throws. The turn ends unanswered, as a stop
+  does: nothing retries it, the next message starts a new turn, and a
+  reopen does not send it. The failure is logged (`request not sent`) and
+  shown as the chat's failure until the hook next builds a request (and
+  hands it to Pi to send). If the abort's commit fails, the Session fails
+  and its end aborts the generation; a close aborts it too. One exception:
+  a close that seals admission before the abort commits leaves the turn's
+  task live, so the reopened chat builds the request again and sends it
+  once if it builds (it was never sent before), or refuses it again. Not a
+  duplicate, but a reopen can send a request that was refused. The close
+  does not wait for the refused request or count it as a call cut off.
+- **Pi's reports.** Both Harnesses (the chat's and each thread's) pass
+  `onReport`: a hook's or listener's throw, a task Pi cannot run
+  (`task_too_old` after a rollback), a failed cleanup. Each is one warning
+  line with the error's name, code and message, redacted (`pi-report.ts`)
+  and bounded to 1000 characters; never its stack, cause or other fields,
+  which can carry a provider request's headers or body.
+- **A failed Session.** A failed Storage call ends Pi's Session
+  (`harness.closed` settles `failed`): every task is aborted and every
+  later call rejects. The chat watches it and goes down at once: it closes
+  without the grace (nothing it waits for could be stored), cuts off the
+  compactor's calls, starts no turn, node or retry, releases its provider
+  sessions and shows `the chat stopped: its history could not be saved`.
+  A thread's agent does the same: it is logged, its provider sessions are
+  released, and its thread shows why (its row is an error, a reader of its
+  transcript and a message are answered with why, and OptChat's thread
+  record carries it). Neither reopens by itself, a thread's agent not even
+  when its machine boots again (a runner restart or a guest crash): the
+  reopen sends the request that was out at the failure again (N2, not
+  exactly-once), and whether and when to reopen is the open decision D2′.
+  Both stay down until cubed restarts; a thread's archive still runs its
+  release check, and the release ends the mark.
+
+`optchat-fail-closed-test.ts` makes the view's rendering and the image
+check throw and checks that nothing is sent, now, with the next turn or
+after a reopen, and that the log has no secret and no stack; fails the
+abort's commit (the chat goes down, nothing sent) and holds the abort off
+across a close (not waited for or counted; the reopen sends it once); then
+fails the chat's storage with a request out and with a compactor call held,
+and checks that nothing more is sent, the provider sessions are released
+before any close, and the close ends without the grace. `pi-upgrade-test.ts`
+pins Pi's side: the abort-then-throw primitive, and a thread agent's reports
+and failed Session. `thread-down-test.ts` fails a thread's Session through
+`Conversations` and checks what its row, its readers and OptChat's record
+show, and that neither reboots of its machine (also one during the
+failure) nor recovery rounds send its request again; then archives it.
 
 ## Configuration
 

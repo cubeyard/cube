@@ -17,8 +17,11 @@ import { createPiReadTool } from "./pi-read.ts";
 import { createCodemodeTool, type CodemodeLimits, type NestedTool } from "./codemode.ts";
 import { settleOperation, WorkspaceError, type Workspace } from "./workspace.ts";
 import { expandHome, WORKSPACE_ROOT, WorkspaceEnv, workspacePath } from "./workspace-env.ts";
+import { createLogger } from "./log.ts";
+import { piReports, reportText } from "./pi-report.ts";
 
 const context = BACKGROUND_CONTEXT;
+const log = createLogger("pi");
 const BASH_OUTPUT_BYTES = 50 * 1024;
 const BASH_DEFAULT_TIMEOUT_MS = 120_000;
 const BASH_MAX_TIMEOUT_MS = 600_000;
@@ -87,6 +90,8 @@ export const LEGACY_THREAD = "this thread was created by an older cube and is no
 export function assertCurrentThreadStore(directory: string): void {
   if (LEGACY_STORE.some(name => fs.existsSync(path.join(directory, name)))) throw new Error(LEGACY_THREAD);
 }
+/** Why a thread's agent is down: its Pi Session failed. */
+export const downText = (error: unknown) => `the thread's agent stopped: its history could not be saved (${reportText(error)}); it stays stopped until cubed restarts`;
 
 export async function openAgent(options: {
   directory: string;
@@ -212,7 +217,21 @@ export async function openAgent(options: {
         ...options.skills ? [section("skills", () => options.skills!, { tag: false })] : []],
     }));
     for (const extension of options.extensions ?? []) registry.install(extension);
-    harness = await Harness.open(storage, { models: sessions.models, registry, settings: { toolExecution: "sequential" } }, context);
+    const thread = path.basename(options.directory);
+    harness = await Harness.open(storage, { models: sessions.models, registry, onReport: piReports(log, { thread }), settings: { toolExecution: "sequential" } }, context);
+    // A failed Storage call ends the Session: Pi aborts every task, and every
+    // later call of the Harness rejects, so nothing is sent or retried in
+    // this process. The agent stays down until cubed restarts (Conversations
+    // does not reopen it, not even when its machine boots again: that would
+    // send the request out at the failure again); its provider sessions are
+    // released now, not at the close.
+    let down: string | null = null;
+    void harness.closed.then(end => {
+      if (end.reason !== "failed" || closing) return;
+      down = downText(end.error);
+      log.error("thread session failed; its agent is down until cubed restarts", { thread, error: reportText(end.error) });
+      sessions.release();
+    }, () => {});
     const expected = options.binding;
     instance = await harness.commit(async tx => {
       const runner = await tx.doc(RunnerDoc);
@@ -233,6 +252,8 @@ export async function openAgent(options: {
     let closed = false;
     return {
       harness: opened, conversation, storage,
+      /** Why the agent is down, once Pi's Session failed; null while it works. */
+      failure: () => down,
       async close() {
         if (closed) return;
         closed = true; closing = true;

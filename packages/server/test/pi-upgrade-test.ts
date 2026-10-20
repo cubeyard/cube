@@ -7,7 +7,11 @@
  * the same process; the reopened Harness sends again, so nothing is
  * exactly-once), a stop (never sent again), and the provider session id
  * (Pi's per conversation; OptChat's own keys win; a thread agent releases
- * Pi's on close). Offline: faux model, local guest, disposable state. */
+ * Pi's on close). And what cube builds on it: a hook fails closed by
+ * aborting its own generation before it throws (OptChat's beforeRequest),
+ * Pi's reports reach cubed's log redacted, and a thread agent whose Session
+ * failed is down at once, its provider sessions released, with no retry.
+ * Offline: faux model, local guest, disposable state. */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -19,6 +23,7 @@ import { createModels, fauxAssistantMessage, fauxProvider, registerSessionResour
 import { createRegistry, defineDoc, defineExtension, GenerationTask, Harness, hook, ROOT_CONVERSATION_ID, type Conversation } from "@earendil-works/pi-durable";
 import { CURRENT_SQLITE_SCHEMA_VERSION, type SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openAgent, openStorage, readStorage } from "../src/durable-agent.ts";
+import { reportText } from "../src/pi-report.ts";
 import { cachedModels } from "../src/optchat-cache.ts";
 import { VmWorkspace } from "../src/vm-workspace.ts";
 import { LeaseStore } from "../src/workspace-lease.ts";
@@ -47,7 +52,9 @@ models.setProvider(faux.provider);
 const model = { provider: faux.getModel().provider, modelId: faux.getModel().id };
 
 /** What the hook does before each request. */
-let mode: "pass" | "replace" | "throw" | "hold" | "memo" = "pass";
+let mode: "pass" | "replace" | "throw" | "hold" | "memo" | "refuse" = "pass";
+/** The Harness the hook runs in, for `refuse`. */
+let current: Harness | undefined;
 let held = false;
 const reports: unknown[] = [];
 let failing: { armed: boolean } = { armed: false };
@@ -60,6 +67,14 @@ const Hooks = defineExtension({ name: "upgrade-test", hooks: [hook(GenerationTas
     const signal = callContext.abortSignal!;
     if (!signal.aborted) await new Promise(resolve => { signal.addEventListener("abort", resolve, { once: true }); });
     signal.throwIfAborted();
+  }
+  if (mode === "refuse") {
+    // As OptChat's refuse: abort the generation, wait for the abort, then
+    // throw; a throw on an aborted invocation ends it instead of being skipped.
+    const signal = callContext.abortSignal!;
+    void current!.abortTask(api.taskId, context);
+    if (!signal.aborted) await new Promise(resolve => { signal.addEventListener("abort", resolve, { once: true }); });
+    throw new Error("the view failed");
   }
   if (mode === "memo") {
     // A record committed right before the send, on a storage that fails.
@@ -92,6 +107,7 @@ async function open(): Promise<{ harness: Harness; conversation: Conversation }>
   const harness = await Harness.open(failable(await openStorage(file), failing), { models, registry, onReport: error => { reports.push(error); } }, context);
   const conversation = await harness.conversation(ROOT_CONVERSATION_ID, context) ?? await harness.root(context, { agent: { model } });
   harness.resume();
+  current = harness;
   return { harness, conversation };
 }
 async function turn(conversation: Conversation, content: string) {
@@ -110,6 +126,18 @@ async function answers(conversation: Conversation): Promise<string[]> {
 }
 
 try {
+  {
+    // What cubed logs of a report: name, code and message, one line,
+    // redacted, bounded; never a stack, a cause or other fields.
+    const error = Object.assign(new TypeError("fetch https://user:hunter2@api.example/v1?key=AIzaSecret&x=1 failed\nwith Bearer abcdefghijkl and sk-abcdefghijklmnopqrstuv"), { code: "E_TEST", body: "sk-body-secret", cause: new Error("sk-cause-secret") });
+    const text = reportText(error);
+    assert.equal(text, "TypeError: fetch https://user:[redacted]@api.example/v1?key=[redacted]&x=1 failed with Bearer [redacted] and sk-[redacted] (E_TEST)");
+    assert.equal(reportText("plain"), "plain");
+    assert.equal(reportText({ apiKey: "sk-abcdefghijklmnopqrstuv" }), "non-error object", "an object's fields are never rendered");
+    assert.equal(reportText(new Error("x".repeat(5000))).length, 1000, "bounded");
+    console.log("ok: reports are logged redacted and bounded, without fields");
+  }
+
   {
     // The schema: Pi 1.3.0 still writes SQLite schema 1, as 1.0.1 did, so
     // opening an older store migrates nothing and an older cubed can open
@@ -159,6 +187,30 @@ try {
     mode = "pass";
     await harness.close(context);
     console.log("ok: beforeRequest replaces messages; a throw in it is reported and the request is still sent");
+  }
+
+  {
+    // The fail-closed primitive OptChat's beforeRequest uses: abortTask on
+    // its own generation, then the throw once aborted. Nothing is sent, the
+    // turn ends unanswered, nothing is reported (it is no hook failure Pi
+    // skipped), and neither a later turn nor a reopen sends it.
+    let { harness, conversation } = await open();
+    mode = "refuse";
+    reports.length = 0;
+    const settled = await turn(conversation, "r1");
+    assert.equal(settled.status, "unanswered", "the turn ends unanswered");
+    assert.equal(sent("r1"), 0, "a refused request is not sent");
+    assert.deepEqual(reports, [], "and the throw is not skipped and reported");
+    mode = "pass";
+    assert.equal((await turn(conversation, "r2")).status, "done");
+    assert.equal(sent("r1"), 0, "nor sent with the next turn");
+    await harness.close(context);
+    ({ harness, conversation } = await open());
+    await conversation.waitForIdle(context);
+    await delay(200);
+    assert.equal(sent("r1"), 0, "nor after a reopen");
+    await harness.close(context);
+    console.log("ok: abortTask then throw in beforeRequest fails closed: nothing sent, now or after a reopen");
   }
 
   {
@@ -293,6 +345,54 @@ try {
       assert.deepEqual(released, [id], "its close releases that id's resources");
     } finally { unregister(); }
     console.log("ok: a thread agent releases Pi's provider session on close");
+
+    // Its hook's throw is reported to cubed's log, one redacted line without
+    // a stack; and a failed Session takes it down at once: no retry, its
+    // provider sessions released before any close, the failure shown.
+    const SECRET = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789";
+    let throwing = true;
+    const extension = defineExtension({ name: "agent-test", hooks: [hook(GenerationTask, { beforeRequest: () => {
+      if (throwing) throw new Error(`hook failed: Authorization: Bearer abcdefghijklmnop ${SECRET}`);
+      return undefined;
+    } })] });
+    const lines: string[] = [];
+    const write = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => { lines.push(String(chunk)); return (write as (...args: unknown[]) => boolean)(chunk, ...rest); }) as typeof process.stdout.write;
+    const released2: string[] = [];
+    const unregister2 = registerSessionResourceCleanup(id => { if (id) released2.push(id); });
+    try {
+      const agent = await openAgent({ directory: path.join(root, "agent2", "thread"), binding: guest.binding, workspace: new VmWorkspace({ guest, leases: new LeaseStore(path.join(root, "agent2", "thread")), owner: "pi", binding: guest.binding }),
+        models, model: { provider: model.provider, id: model.modelId }, extensions: [extension] });
+      assert.equal((await turn(agent.conversation, "t2")).status, "done");
+      const report = lines.find(line => line.startsWith("warn pi pi reported an error"));
+      assert.ok(report, "the hook's throw is logged");
+      assert.match(report, /thread=thread /);
+      assert.ok(!report.includes(SECRET) && !report.includes("abcdefghijklmnop") && !report.includes("stack="), "redacted, without a stack");
+      throwing = false;
+      assert.equal(agent.failure(), null);
+      const storage = agent.storage as unknown as { commit: (...args: unknown[]) => Promise<unknown> };
+      const commit = storage.commit.bind(storage);
+      let broken = false;
+      storage.commit = (...args) => broken ? Promise.reject(new Error(`disk I/O error (test) ${SECRET}`)) : commit(...args);
+      onSend = user => { if (user === "t3") broken = true; };
+      const submission = await agent.conversation.submit({ type: "input", content: "t3", requestId: "t3" }, context);
+      assert.equal((await agent.harness.closed).reason, "failed");
+      await submission.wait(context).catch(() => {});
+      await until(() => agent.failure() !== null, "the agent shown down");
+      onSend = () => {};
+      const id = sends.find(send => send.user === "t3")!.session;
+      assert.ok(released2.includes(id!), "its provider session is released at the failure, before any close");
+      await delay(200);
+      assert.equal(sent("t3"), 1, "no retry is sent in the failed process");
+      await assert.rejects(agent.conversation.submit({ type: "input", content: "t4", requestId: "t4" }, context));
+      assert.equal(sent("t4"), 0);
+      assert.match(agent.failure()!, /^the thread's agent stopped: its history could not be saved/);
+      assert.ok(!agent.failure()!.includes(SECRET));
+      assert.ok(lines.some(line => line.startsWith("error pi thread session failed")), "the failure is logged");
+      assert.ok(!lines.join("").includes(SECRET), "nowhere with the secret");
+      await agent.close();
+    } finally { process.stdout.write = write; unregister2(); }
+    console.log("ok: a thread agent logs Pi's reports redacted, and a failed Session takes it down with no retry");
   }
 } finally {
   fs.rmSync(root, { recursive: true, force: true });

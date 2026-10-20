@@ -39,6 +39,7 @@ OFFLINE_TESTS=(
   packages/server/test/gateway-test.ts
   packages/server/test/vm-workspace-test.ts
   packages/server/test/lifecycle-test.ts
+  packages/server/test/thread-down-test.ts
   packages/server/test/vm-template-test.ts
   packages/server/test/vm-prepare-test.ts
   packages/server/test/vm-reattach-test.ts
@@ -61,8 +62,10 @@ OFFLINE_TESTS=(
   packages/server/test/optchat-compactor-output-test.ts
   packages/server/test/optchat-compactor-hold-test.ts
   packages/server/test/optchat-test.ts
+  packages/server/test/optchat-fail-closed-test.ts
   packages/server/test/optchat-product-test.ts
   packages/server/test/optchat-cache-test.ts
+  packages/server/test/optchat-gpt6-test.ts
   packages/server/test/optchat-cache-path-test.ts
   packages/server/test/optchat-close-test.ts
   packages/server/test/optchat-replay-test.ts
