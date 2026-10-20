@@ -110,7 +110,7 @@ try {
   assert.ok(first!.env.includes("CLAUDE_CODE_OAUTH_TOKEN") && first!.env.includes("HOME") && first!.env.includes("CUBE_WORKSPACE_TOKEN"));
   assert.ok(first!.env.includes("CUBE_WORKSPACE_REAL_ROOT"), "the mod also knows the root with its symlinks resolved");
   assert.ok(first!.env.includes("CUBE_SKILLS_PROMPT"), "the mod gets the thread's skills to list");
-  assert.ok(first!.env.every(name => /^(HOME|PATH|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_\w+|TERM|TZ|TMPDIR|XDG_\w+|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|CUBE_WORKSPACE_\w+|CUBE_SKILLS_PROMPT|FAKE_CLAUDE_LOG)$/.test(name)), `only allow-listed variables: ${first!.env.join(" ")}`);
+  assert.ok(first!.env.every(name => /^(HOME|PATH|USER|LOGNAME|SHELL|LANG|LANGUAGE|LC_\w+|TERM|TZ|TMPDIR|XDG_\w+|CLAUDE_CONFIG_DIR|CLAUDE_CODE_OAUTH_TOKEN|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|NODE_EXTRA_CA_CERTS|SSL_CERT_FILE|SSL_CERT_DIR|CUBE_WORKSPACE_\w+|CUBE_MOD_NONCE|CUBE_SKILLS_PROMPT|FAKE_CLAUDE_LOG)$/.test(name)), `only allow-listed variables: ${first!.env.join(" ")}`);
   assert.deepEqual(Object.keys(claudeEnvironment({ PATH: "/bin", AWS_SECRET_ACCESS_KEY: "x" }, { ANTHROPIC_BASE_URL: "x", CLAUDE_CODE_USE_VERTEX: "1", EXTRA: "y" }, { CUBE_WORKSPACE_TOKEN: "t" })).sort(), ["CUBE_WORKSPACE_TOKEN", "EXTRA", "PATH"]);
   assert.equal(first!.args[first!.args.indexOf("--setting-sources") + 1], "");
   assert.ok(first!.args.includes("--strict-mcp-config"));
@@ -233,6 +233,36 @@ try {
     } finally { await reopened.close(); }
   }
   console.log("ok: a reopen after cubed died mid-turn cancels the interrupted turn's guest commands");
+
+  // Claude Code without the mod (it could not load it, or the mod's word is
+  // forged): no prompt reaches it, so nothing runs on the host.
+  for (const kind of ["missing", "forged"]) {
+    const marker = path.join(root, `host-ran-${kind}`);
+    const modless = await ClaudeAgent.open({ directory: path.join(root, `modless-${kind}`), threadId: "t1", workspace, model: "sonnet",
+      runtime: { ...runtime, modReadyMs: 1000, env: { ...runtime.env, FAKE_CLAUDE_MOD: kind } } });
+    try {
+      const started = Date.now();
+      await modless.submit("m1", `run touch ${marker}`);
+      const shown = await until(() => modless.state().submissions[0]!.state !== "running" && modless.state().submissions[0]!, "the modless turn");
+      assert.equal(shown.state, "failed");
+      assert.match(shown.error ?? "", /started without cube's mod, so nothing was sent to it/);
+      assert.ok(Date.now() - started < 10000, "it fails within the bound");
+      await delay(300);
+      assert.ok(!fs.existsSync(marker), `${kind}: nothing ran on the host`);
+      assert.deepEqual(modless.state().messages.filter(message => message.data.type === "assistant"), [], `${kind}: the child answered nothing`);
+    } finally { await modless.close(); }
+  }
+  // The same fake with the mod in runs the same step in the machine (the control).
+  {
+    const control = await ClaudeAgent.open({ directory: path.join(root, "modless-control"), threadId: "t1", workspace, runtime, model: "sonnet" });
+    try {
+      await control.submit("m1", "run touch control-ran");
+      const shown = await until(() => control.state().submissions[0]!.state !== "running" && control.state().submissions[0]!, "the control turn");
+      assert.equal(shown.state, "completed", shown.error ?? "");
+      assert.ok(fs.existsSync(path.join(files, "control-ran")), "the mod ran it in the workspace");
+    } finally { await control.close(); }
+  }
+  console.log("ok: a child whose mod is missing or forges its ready gets no prompt: the turn fails, nothing runs on the host");
 
   // Background agents. A turn that ends with one running leaves the thread
   // waiting: the child stays open past the idle close, and the turn Claude

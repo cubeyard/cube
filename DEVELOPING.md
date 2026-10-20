@@ -250,6 +250,12 @@ engine with the routes answered in memory; no model call) and, with
 `node scripts/check-claude-subagents.ts` starts the real `claude` with cubed's
 arguments against a scripted Messages API on loopback (no login, no model) and
 checks that it runs no subagent, fresh or resumed, while Bash still works.
+`node scripts/check-claude-fail-closed.ts` does the same with cubed's
+`ClaudeAgent` and mods Claude Code cannot load: no prompt, no model request
+and nothing run on the host; and, the ready gate bypassed, every host tool
+refused (ARCHITECTURE.md, "Claude Code threads"). Neither runs in CI (both
+need `claude`); run them for any change to the mod, `claudeArguments` or
+the Claude Code version.
 
 Runner operations are installation-global. `GET /api/runners` returns persisted
 contact and the current global allocation snapshot without private adapter paths;

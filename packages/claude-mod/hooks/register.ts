@@ -9,7 +9,15 @@
  * serves only workspace routes, the thread's route path, the lease token it
  * holds for this process, and the local directory Claude Code runs in. The
  * machine is the thread's sandbox; Claude Code itself runs on the cubed host
- * and is not sandboxed. */
+ * and is not sandboxed.
+ *
+ * Claude Code runs without a mod it cannot load (one its static check
+ * refuses, a missing folder) and skips a hook that throws, misanswers or
+ * overruns, running the tool itself: on the cubed host. So every guard here
+ * refuses in its `.catch`, and the mod's last hook tells cubed it is in
+ * (`ready`, with the nonce cubed gave this child): cubed writes no prompt
+ * before that, and its `--settings` hook refuses any host tool no hook here
+ * answered (claude-agent.ts). */
 import type { EngineInterface, Register } from 'claude-code'
 import { WorkspaceClient } from './workspace.ts'
 import { ALLOWED_TOOLS, ARTIFACT_GUIDE, ARTIFACT_ROOT, NO_SUBAGENTS, PROJECT_HOOKS_NOTE, SUBAGENT_TOOLS, artifactPath, bash, edit, editArtifact, GUEST_HOME, instructions, read, readArtifact, write, writeArtifact, VIRTUAL_ROOT, type ToolScope } from './tools.ts'
@@ -17,6 +25,7 @@ import { ALLOWED_TOOLS, ARTIFACT_GUIDE, ARTIFACT_ROOT, NO_SUBAGENTS, PROJECT_HOO
 const ALLOWED = new Set(ALLOWED_TOOLS)
 const SUBAGENTS = new Set(SUBAGENT_TOOLS)
 const UNCONFIGURED = 'cube: this session has no thread workspace; cubed starts Claude Code with one'
+const FAILED = 'cube: the mod failed on this call, so it is refused rather than run on the cubed host'
 const INSTRUCTION_FILES = ['AGENTS.md', 'CLAUDE.md']
 
 async function workspace($: Pick<EngineInterface, 'env' | 'http'>, signal?: AbortSignal): Promise<ToolScope | undefined> {
@@ -46,18 +55,18 @@ export const register: Register = on => {
     if (SUBAGENTS.has(tool)) return { deny: `${tool}: ${NO_SUBAGENTS}` }
     if (!ALLOWED.has(tool)) return { deny: `${tool} is not available in cube threads: it would act on the cubed host, not the thread workspace. Use Bash, Read, Write or Edit.` }
     return next(e)
-  })
+  }).catch(($, e, next) => next.called ? next(e) : { deny: FAILED })
 
   // Every spawn, whatever starts it (a fork, a teammate, a workflow, an
   // agent definition): the tool list is not the only way in.
-  on('agent.spawn', () => ({ deny: NO_SUBAGENTS }))
+  on('agent.spawn', () => ({ deny: NO_SUBAGENTS })).catch(() => ({ deny: NO_SUBAGENTS }))
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const scope = await workspace($, next.signal)
     if (!scope) return { deny: UNCONFIGURED }
     const result = await bash(scope, e.tool_use_id, e)
     return 'deny' in result ? result : { result }
-  })
+  }).catch(() => ({ deny: FAILED }))
 
   on('tool.call', { tool: 'Read' }, async ($, e, next) => {
     const scope = await workspace($, next.signal)
@@ -66,7 +75,7 @@ export const register: Register = on => {
     if (artifact && 'deny' in artifact) return artifact
     const result = artifact ? await readArtifact(scope, artifact, e) : await read(scope, e)
     return 'deny' in result ? result : { result }
-  })
+  }).catch(() => ({ deny: FAILED }))
 
   on('tool.call', { tool: 'Write' }, async ($, e, next) => {
     const scope = await workspace($, next.signal)
@@ -75,7 +84,7 @@ export const register: Register = on => {
     if (artifact && 'deny' in artifact) return artifact
     const result = artifact ? await writeArtifact(scope, e.tool_use_id, artifact, e) : await write(scope, e.tool_use_id, e)
     return 'deny' in result ? result : { result }
-  })
+  }).catch(() => ({ deny: FAILED }))
 
   on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
     const scope = await workspace($, next.signal)
@@ -85,7 +94,7 @@ export const register: Register = on => {
     if (artifact && 'deny' in artifact) return artifact
     const result = artifact ? await editArtifact(scope, e.tool_use_id, artifact, e) : await edit(scope, e.tool_use_id, e)
     return 'deny' in result ? result : { result }
-  })
+  }).catch(() => ({ deny: FAILED }))
 
   // The repository's own instructions live in the thread's machine, not beside the
   // local directory Claude Code runs in.
@@ -114,5 +123,14 @@ export const register: Register = on => {
     const skills = await $.env.get('CUBE_SKILLS_PROMPT')
     if (skills) sections.push(skills)
     return { ...context, blocks: [...context.blocks, { name: 'cubeWorkspace', text: sections.join('\n\n') }] }
+  })
+
+  // Last, once every hook above is in: cubed sends no prompt until this
+  // child says so with its nonce. A start, a resume or a clear says it again.
+  on('session.start', async ($, e, next) => {
+    const scope = await workspace($)
+    const nonce = await $.env.get('CUBE_MOD_NONCE')
+    if (scope && nonce) await scope.client.ready(scope.token, nonce)
+    return next(e)
   })
 }
