@@ -7,7 +7,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { Type, type Models, type Static } from "@earendil-works/pi-ai";
+import { cleanupSessionResources, Type, type Models, type Static } from "@earendil-works/pi-ai";
 import { createRegistry, defineDoc, defineExtension, defineTool, Harness, ROOT_CONVERSATION_ID, section, type Extension, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import { NodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CURRENT_SQLITE_SCHEMA_VERSION, SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
@@ -116,6 +116,7 @@ export async function openAgent(options: {
   const release = () => options.workspace.release(lease.token).catch(() => {});
   let storage: SqliteStorage | undefined;
   let harness: Harness | undefined;
+  const sessions = providerSessions(options.models);
   let closing = false;
   try {
     fs.mkdirSync(options.directory, { recursive: true, mode: 0o700 });
@@ -162,7 +163,7 @@ export async function openAgent(options: {
         if (state.state !== "succeeded") throw new WorkspaceError("COMPLETION_UNKNOWN", "command outcome is unknown; inspect the workspace before retrying");
         await api.details({ operationKey: key, exitCode: state.exitCode, termination: state.termination }, callContext);
         return {
-          content: [{ type: "text" as const, text: Buffer.from(state.output).toString("utf8")
+          output: [{ type: "text" as const, text: Buffer.from(state.output).toString("utf8")
             + `\n[exit=${state.exitCode}; ${state.termination}${state.truncated ? "; output truncated" : ""}]` }],
         };
       } catch (error) {
@@ -211,7 +212,7 @@ export async function openAgent(options: {
         ...options.skills ? [section("skills", () => options.skills!, { tag: false })] : []],
     }));
     for (const extension of options.extensions ?? []) registry.install(extension);
-    harness = await Harness.open(storage, { models: options.models, registry, settings: { toolExecution: "sequential" } }, context);
+    harness = await Harness.open(storage, { models: sessions.models, registry, settings: { toolExecution: "sequential" } }, context);
     const expected = options.binding;
     instance = await harness.commit(async tx => {
       const runner = await tx.doc(RunnerDoc);
@@ -236,16 +237,44 @@ export async function openAgent(options: {
         if (closed) return;
         closed = true; closing = true;
         try { await opened.close(context); }
-        finally { await release(); }
+        finally { sessions.release(); await release(); }
       },
     };
   } catch (error) {
     closing = true;
     // A Harness closes its storage; storage without a Harness closes alone.
     try { await (harness ?? storage)?.close(context); }
-    finally { await release(); }
+    finally { sessions.release(); await release(); }
     throw error;
   }
+}
+
+/** Pi (≥1.0.2) sends each conversation's own provider session id, and pi-ai
+ * keeps a connection per id open for minutes (Codex's WebSocket), which
+ * would hold cubed's exit that long. Records the ids this Harness's calls
+ * carried, to release them once it is closed. */
+export function providerSessions(models: Models): { models: Models; release(): void } {
+  const ids = new Set<string>();
+  const wrapped = new Proxy(models, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== "function") return value;
+      if (!["stream", "streamSimple", "complete", "completeSimple"].includes(property as string)) return value.bind(target);
+      return (model: unknown, request: unknown, callOptions?: { sessionId?: string }) => {
+        if (callOptions?.sessionId) ids.add(callOptions.sessionId);
+        return value.call(target, model, request, callOptions);
+      };
+    },
+  });
+  return {
+    models: wrapped,
+    release() {
+      for (const id of ids) {
+        try { cleanupSessionResources(id); } catch { /* best effort: the process is closing this agent */ }
+      }
+      ids.clear();
+    },
+  };
 }
 export type Agent = Awaited<ReturnType<typeof openAgent>>;
 

@@ -19,7 +19,7 @@ const actionSchema = Type.Object({
   label: Type.Optional(Type.String({ description: "Button text; default merge owner/name#pull" })),
 }, { additionalProperties: false });
 
-const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
+const text = (value: string) => ({ output: [{ type: "text" as const, text: value }] });
 /** Models fill optional fields with "": a blank id, path or body is one left out. */
 const given = (value: string | undefined) => value?.trim() ? value : undefined;
 

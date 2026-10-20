@@ -362,7 +362,7 @@ const short = (id: string) => id.slice(0, 8);
 /** An archive call's record of the free machines it last read: no thread id. */
 const FREE = " free";
 /** A tool's text result. */
-const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
+const text = (value: string) => ({ output: [{ type: "text" as const, text: value }] });
 /** A zoom result's lines start with their ids. */
 const ZOOMED = /^\d+\+\d+\|/;
 export const ZOOM_ECHO = "(the zoomed lines: a copy of earlier messages of this chat, not repeated here)";

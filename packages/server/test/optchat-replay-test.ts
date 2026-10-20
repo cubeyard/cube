@@ -173,7 +173,7 @@ try {
   // throws, so it never ran and the next open runs it once.
   const inside = chat as unknown as { closing: boolean };
   let ran = 0;
-  const probe = inner.guard({ ...tools.find(tool => tool.name === "projects")!, execute: async () => { ran++; return { content: [] }; } });
+  const probe = inner.guard({ ...tools.find(tool => tool.name === "projects")!, execute: async () => { ran++; return { output: [] }; } });
   inside.closing = true;
   const sealing = new AbortController();
   const heldCall = probe.execute({} as never, api(900, "call-900"), withAbortSignal(sealing.signal, context));
