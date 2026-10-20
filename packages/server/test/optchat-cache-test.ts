@@ -205,6 +205,33 @@ for (const lines of [9, 100, 500]) {
 }
 
 {
+  // While the compactor's system prompt is not cached, a call of a view
+  // under one whole block waits for a call writing it too (Anthropic writes
+  // an entry at the system mark), and keeps no mark on its task.
+  const order: string[] = [];
+  const streams: Array<ReadableStreamDefaultController<Uint8Array>> = [];
+  respond = captured => {
+    const body = captured.body as unknown as Body;
+    order.push(`fetch ${body.messages[0]!.content.length} marks ${JSON.stringify(marked(body.messages[0]!.content))}`);
+    return new Response(new ReadableStream<Uint8Array>({ start: controller => { streams.push(controller); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  const compactor = cachedModels(models, () => "optchat-test-cold", { task: false });
+  const options = { apiKey: "sk-ant-test", maxRetries: 0 };
+  const a = compactor.completeSimple(model, { messages: request(render(9)) }, options);
+  const b = compactor.completeSimple(model, { messages: request(small(2)) }, options);
+  for (let k = 0; k < 200 && order.length < 1; k++) await sleep(5);
+  await sleep(30);
+  assert.deepEqual(order, ["fetch 4 marks [1]"], "the short view waits while the system prompt is written");
+  streams[0]!.enqueue(new TextEncoder().encode(`event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "msg_3", model: model.id, usage: { input_tokens: 1, output_tokens: 0 } } })}\n\n`));
+  for (let k = 0; k < 200 && order.length < 2; k++) await sleep(5);
+  assert.deepEqual(order, ["fetch 4 marks [1]", "fetch 2 marks []"], "then goes, its task unmarked");
+  for (const stream of streams) stream.error(new Error("done"));
+  await Promise.all([a, b]);
+  bodies.length = 0;
+  respond = () => new Response("{}", { status: 400 });
+}
+
+{
   // Codex is an OAuth-only provider: its request builder is called directly,
   // behind the same wrapper, with a token shaped like ChatGPT's.
   const model = models.getModels("openai-codex")[0]!;

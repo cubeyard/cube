@@ -179,7 +179,10 @@ const viewLines = (request: Request) => request.blocks.slice(request.system, req
 // end; a compaction's on the system and the last whole view block only.
 for (const request of requests) {
   const whole = request.view > request.system;
-  if (!whole) continue;
+  if (!whole) {
+    if (request.kind === "compaction") assert.ok(request.marks.every(mark => mark < request.system), "a compaction of a short view marks nothing after the system prompt");
+    continue;
+  }
   const expected = request.kind === "turn" ? [request.system - 1, request.view - 1, request.blocks.length - 1] : [request.system - 1, request.view - 1];
   assert.deepEqual(request.marks, expected, `${request.kind} marks`);
 }
@@ -216,7 +219,9 @@ for (let k = 1; k < turns.length; k++) {
   const extends_ = prefixOf(viewLines(previous), viewLines(request));
   if (turn.after === "system") {
     assert.ok(!prefixOf(strip(previous), strip(request), previous.system), "the new instructions are in the system prompt");
-    assert.ok(request.read === 0 && extends_, "a changed system prompt rewrites the request once, the view is as it was");
+    assert.equal(request.read, 0, "a changed system prompt rewrites the request");
+    // The view goes on as it was, or a batch merged it meanwhile.
+    assert.ok(extends_ || coarsens(viewLines(previous), viewLines(request)), "and only the system prompt changed");
     continue;
   }
   if (!extends_) {

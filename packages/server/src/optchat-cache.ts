@@ -46,32 +46,33 @@ type Block = { type?: string; text?: string; cache_control?: unknown };
 type AnthropicPayload = { model?: string; system?: Block[]; tools?: Block[]; messages?: Array<{ role: string; content: string | Block[] }> };
 type ResponsesPayload = { model?: string; instructions?: unknown; tools?: unknown; input?: Array<{ role?: string; content?: unknown }> };
 
-/** The keys of a prefix at each view block's end through its last whole
- * one, each seeded by the one before, the first by what precedes the view. */
+/** Blocks without their marks: where a call puts a mark is not part of what it shares. */
+const bare = (blocks: unknown) => Array.isArray(blocks) ? blocks.map(block => { const { cache_control: _, ...rest } = block as Block; return rest; }) : blocks;
+
+/** The keys of a prefix: first what precedes the view (the system prompt
+ * and tools), then each view block's end through its last whole one, each
+ * seeded by the one before. */
 function chain(head: unknown, blocks: readonly unknown[]): string[] {
-  const keys: string[] = [];
   let key = createHash("sha256").update(JSON.stringify(head)).digest("hex");
-  for (const block of blocks) {
-    // Where a call puts its mark is not part of what it shares.
-    const { cache_control: _, ...bare } = block as Block;
-    keys.push(key = createHash("sha256").update(key).update(JSON.stringify(bare)).digest("hex"));
-  }
+  const keys = [key];
+  for (const block of bare(blocks) as unknown[]) keys.push(key = createHash("sha256").update(key).update(JSON.stringify(block)).digest("hex"));
   return keys;
 }
 
-/** Where a message's view is: the index of its block ending in `</chat>`,
- * if its first block opens one and a whole block comes before it. */
+/** Where a message's view is: the index of its block ending in `</chat>`
+ * (0: a view under one whole block), if its first block opens one. */
 function viewEnd(content: unknown): number {
   if (!Array.isArray(content) || typeof content[0]?.text !== "string" || !content[0].text.startsWith("<chat>")) return -1;
-  const last = (content as Block[]).findIndex(block => typeof block.text === "string" && block.text.endsWith("</chat>"));
-  return last > 0 ? last : -1;
+  return (content as Block[]).findIndex(block => typeof block.text === "string" && block.text.endsWith("</chat>"));
 }
 
 /** Marks the last whole view block in an Anthropic Messages request and
  * keeps only the last system mark; with `task: false` the request's end
- * keeps no mark either. Returns the marked prefix's keys, one per view
- * block. The view is the leading run of text blocks of the first user
- * message, from `<chat>` to the block that ends with `</chat>`. */
+ * keeps no mark either. A view under one whole block keeps pi-ai's marks
+ * (but the end's with `task: false`). Returns the keys of what is marked
+ * through the view: the system prompt and tools, then each view block. The
+ * view is the leading run of text blocks of the first user message, from
+ * `<chat>` to the block that ends with `</chat>`. */
 export function markViewPieces(payload: unknown, options: { task?: boolean } = {}): string[] | undefined {
   const params = payload as AnthropicPayload;
   const first = params.messages?.find(message => message.role === "user");
@@ -81,14 +82,16 @@ export function markViewPieces(payload: unknown, options: { task?: boolean } = {
   const marker = findMarker(params);
   if (!marker) return undefined;
   const content = first.content as Block[];
-  for (const tool of params.tools ?? []) delete tool.cache_control;
-  for (const block of params.system ?? []) delete block.cache_control;
   if (options.task === false) {
     for (const message of params.messages ?? []) if (Array.isArray(message.content)) for (const block of message.content) delete block.cache_control;
   }
-  if (params.system?.length) params.system.at(-1)!.cache_control = marker;
-  content[last - 1]!.cache_control = marker;
-  return chain([params.model, params.tools, params.system], content.slice(0, last));
+  if (last > 0) {
+    for (const tool of params.tools ?? []) delete tool.cache_control;
+    for (const block of params.system ?? []) delete block.cache_control;
+    if (params.system?.length) params.system.at(-1)!.cache_control = marker;
+    content[last - 1]!.cache_control = marker;
+  }
+  return chain([params.model, bare(params.tools), bare(params.system)], content.slice(0, last));
 }
 
 /** The keys of an OpenAI Responses request's prefix through its last whole
@@ -151,13 +154,22 @@ export function cachedModels(models: Models, sessionId: () => string, options: {
       if (got) { got.until = now + TTL_MS; written.delete(keys[k]!); written.set(keys[k]!, got); }
       if (k === keys.length - 1) return IDLE;
       for (const [key, entry] of written) { if (entry.ready !== null || entry.until >= now) break; written.delete(key); }
-      const key = keys.at(-1)!;
+      // It writes its last key and, if that is not cached, the system
+      // prompt's (Anthropic writes an entry there too): a call of a shorter
+      // view waits for it as well.
+      const own: Written = { until: 0, ready: null };
+      const mine = [...new Set(k < 0 ? [keys[0]!, keys.at(-1)!] : [keys.at(-1)!])];
       let free = () => {};
-      const own: Written = { until: 0, ready: new Promise<void>(resolve => { free = resolve; }) };
-      written.set(key, own);
+      own.ready = new Promise<void>(resolve => { free = resolve; });
+      for (const key of mine) written.set(key, own);
       return {
         begun: () => { if (own.ready === null) return; own.ready = null; own.until = Date.now() + TTL_MS; free(); },
-        end: () => { if (own.ready === null) return; if (written.get(key) === own) written.delete(key); own.ready = null; free(); },
+        end: () => {
+          if (own.ready === null) return;
+          for (const key of mine) if (written.get(key) === own) written.delete(key);
+          own.ready = null;
+          free();
+        },
       };
     }
   };

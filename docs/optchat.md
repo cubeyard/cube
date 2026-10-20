@@ -429,11 +429,14 @@ without changing Pi:
   A compactor request keeps no mark after the view, as in uniichat: its task
   is its own and read again only by its own retry, so it goes uncached
   instead of being written at the write price. A view under 4 lines keeps
-  pi-ai's own marks.
-- **Single flight.** A call's prefix is keyed at each view block's end
-  through its last whole one (model, tools and system, or Codex's
-  instructions, before the first; marks are not part of a key). A call whose
-  prefix, or a start of it, another call is writing waits in `onPayload`
+  pi-ai's own marks (a compactor's request but its end's).
+- **Single flight.** A call's prefix is keyed after what precedes the view
+  (model, tools and system, or Codex's instructions) and at each view
+  block's end through its last whole one; marks are not part of a key. A
+  call writes its last key, and the first too while that is not cached
+  (Anthropic writes an entry at the system mark), so a call of a view under
+  one block waits for it as well. A call whose prefix, or a start of it,
+  another call is writing waits in `onPayload`
   until that call's response begins (its first stream event, not its
   headers: only then can the entry be read), or the call ends, or its own
   abort; then it writes only the rest. A prefix whose writer began counts as
