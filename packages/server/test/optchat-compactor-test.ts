@@ -1,8 +1,11 @@
 /** OptChat's compactor failures and long messages over Pi, with a faux
- * model and small limits: a refusal, an empty answer or an input too long
- * for the compactor gives its node the source cut short (marked, the
- * message kept whole in the log) after one call, so the next turn runs; an
- * outage holds the node and the turn and never cuts; a long message is
+ * model and small limits: a refusal (even one whose explanation says
+ * "500" or "timeout"), an empty answer or an input too long for the
+ * compactor gives its node the source cut short (marked, the message kept
+ * whole in the log) after one call, so the next turn runs; an outage holds
+ * the node and the turn and never cuts; answers that run out of output
+ * (thinking only) are asked again a bounded number of times, then held
+ * until a reopen, never cut; every call carries the output cap; a long message is
  * logged in pages, numbered the same after a reopen; and a reopen whose log
  * would number its messages differently is refused. Offline and disposable;
  * no real provider. */
@@ -12,30 +15,38 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels, fauxAssistantMessage, fauxProvider, type Message } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxThinking, type AssistantMessage, type Message } from "@earendil-works/pi-ai";
 import { defineDoc } from "@earendil-works/pi-durable";
-import { OptChat, type OptThreads } from "../src/optchat.ts";
-import { compactNode } from "../src/optchat-compactor.ts";
+import { OptChat, ROOM_ROUNDS, type OptThreads } from "../src/optchat.ts";
+import { compactNode, failure, OutOfRoom, outputTokens, TRIES } from "../src/optchat-compactor.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-compactor-"));
 const blocks = (message: Message) => typeof message.content === "string" ? [message.content]
   : message.content.map(part => part.type === "text" ? part.text : "");
 /** The compactor's message steps by the marker their message holds, and the longest input it got. */
 const asked = new Map<string, number>();
-let turns = 0, summaries = 0, longest = 0, outage = false;
+let turns = 0, summaries = 0, longest = 0, outage = false, room = false;
+/** The output caps the compactor's calls carried. */
+const caps = new Set<number | undefined>();
+/** A refusal whose explanation holds what an outage's message would. */
+const REFUSED_500 = "I won't summarize this. It quotes a 500 Internal Server Error, a 429 rate limit and a timeout, and the request was terminated.";
 const TOO_LONG = 40_000;
 const faux = fauxProvider({ tokensPerSecond: 1_000_000 });
-faux.setResponses(Array.from({ length: 4_000 }, () => async request => {
+faux.setResponses(Array.from({ length: 4_000 }, () => async (request, options) => {
   const system = JSON.stringify(request.messages.filter(message => message.role === "system"));
   if (!system.includes("You write the memory of OptChat")) return fauxAssistantMessage(`ok ${++turns}`);
-  const step = blocks(request.messages.find(message => message.role === "user")!).at(-1)!;
+  // The step, not a note told after an answer that ran out.
+  const step = blocks(request.messages.find(message => message.role === "user")!).findLast(text => /^(Compress|Merge) /.test(text))!;
   // Only a message's own step: a merge holds its lines, a cut one too.
-  const mark = step.startsWith("Compress") ? /\b(REFUSE|EMPTY|OUTAGE|HUGE)\b/.exec(step)?.[1] ?? "other" : "merge";
+  const mark = step.startsWith("Compress") ? /\b(REFUSE500|REFUSE|EMPTY|OUTAGE|HUGE|LONG)\b/.exec(step)?.[1] ?? "other" : "merge";
   asked.set(mark, (asked.get(mark) ?? 0) + 1);
+  caps.add(options?.maxTokens);
   longest = Math.max(longest, step.length);
   if (step.length > TOO_LONG) return fauxAssistantMessage([], { stopReason: "error", errorMessage: "prompt is too long: 213462 tokens > 200000 maximum" });
   if (mark === "REFUSE") return fauxAssistantMessage([], { stopReason: "error", errorMessage: "The model refused to complete the request" });
+  if (mark === "REFUSE500") return { ...fauxAssistantMessage([], { stopReason: "error", errorMessage: REFUSED_500 }), rawStopReason: "refusal" };
   if (mark === "EMPTY") return fauxAssistantMessage("");
+  if (mark === "LONG" && !room) return fauxAssistantMessage([fauxThinking("Let me weigh every word of this message. ".repeat(40))], { stopReason: "length" });
   if (mark === "OUTAGE" && outage) return fauxAssistantMessage([], { stopReason: "error", errorMessage: "503 Service Unavailable" });
   const n = ++summaries;
   return fauxAssistantMessage([`user: s${n}`, `user: s${n} mid`, `user: summary ${n} long`].join("\n"));
@@ -101,7 +112,7 @@ const olderWrote = (chat: OptChat, mark: { entry?: number; shape?: string; shape
 
 /** A message the compactor refuses or answers with nothing: one call, its
  * node the message cut short, and the next turn runs. */
-for (const mark of ["REFUSE", "EMPTY"]) {
+for (const mark of ["REFUSE", "REFUSE500", "EMPTY"]) {
   const chat = await open(mark.toLowerCase());
   try {
     const before = turns;
@@ -145,6 +156,88 @@ for (const mark of ["REFUSE", "EMPTY"]) {
     assert.match(chat.memory.node(0, 0)!, /^user: summary \d+ long$/, "outage: a real summary");
     await quiet(chat);
   } finally { await chat.close(); }
+}
+
+/** A refusal is told by its stop reason, before its explanation's text,
+ * which an outage's would match; an outage's message still holds. */
+{
+  const reply = (fields: Partial<AssistantMessage>, used: number) => ({ ...fauxAssistantMessage([], { stopReason: "error" }),
+    usage: { input: used, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: used, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, ...fields });
+  for (const used of [0, 11_938]) {
+    assert.equal(failure(reply({ errorMessage: REFUSED_500, rawStopReason: "refusal" }, used)), "cut", `a refusal saying 500, 429 and timeout is cut (usage ${used})`);
+    assert.equal(failure(reply({ errorMessage: "Response incomplete: content_filter", rawStopReason: "incomplete.content_filter" }, used)), "cut", "OpenAI's content filter is cut");
+    assert.equal(failure(reply({ errorMessage: "Provider stopped with: SAFETY", rawStopReason: "SAFETY" }, used)), "cut", "Gemini's safety stop is cut");
+  }
+  assert.equal(failure(reply({ errorMessage: REFUSED_500 }, 11_938)), "hold", "without the stop reason the same text reads as an outage");
+  assert.equal(failure(reply({ errorMessage: "503 Service Unavailable" }, 0)), "hold", "an outage holds");
+  assert.equal(failure(reply({ errorMessage: "529 overloaded", rawStopReason: "error" }, 0)), "hold", "a stop reason that is no refusal decides nothing");
+}
+
+/** An answer that ran out of output is never used, its lines may be cut
+ * off: the model is told once, on the last message, and asked again. When
+ * no answer gave lines, OutOfRoom is thrown after TRIES calls, never the
+ * source cut short. Every call carries the cap. */
+{
+  const requests: { messages: Message[]; maxTokens: number | undefined }[] = [];
+  const answers = fauxProvider({ tokensPerSecond: 1_000_000 });
+  const thinking = () => fauxAssistantMessage([fauxThinking("Weighing the message. ".repeat(50))], { stopReason: "length" });
+  const lines = ["user: staging, then prod", "user: deploy staging, then prod migrations", "user: deploy to staging, then prod migrations after Kari"];
+  answers.setResponses([
+    // Out of output while writing: whole-looking lines, the last cut off.
+    (request, options) => { requests.push({ messages: structuredClone(request.messages), maxTokens: options?.maxTokens }); return fauxAssistantMessage([fauxThinking("hmm"), { type: "text", text: [...lines.slice(0, 2), "user: deploy"].join("\n") }], { stopReason: "length" }); },
+    (request, options) => { requests.push({ messages: structuredClone(request.messages), maxTokens: options?.maxTokens }); return thinking(); },
+    (request, options) => { requests.push({ messages: structuredClone(request.messages), maxTokens: options?.maxTokens }); return fauxAssistantMessage(lines.join("\n")); },
+    ...Array.from({ length: TRIES }, () => (request: { messages: Message[] }, options?: { maxTokens?: number }) => { requests.push({ messages: structuredClone(request.messages), maxTokens: options?.maxTokens }); return thinking(); }),
+  ]);
+  const own = createModels();
+  own.setProvider(answers.provider);
+  const model = { provider: answers.getModel().provider, id: answers.getModel().id };
+  const source = { message: `user: ${"deploy to staging, then run the migrations on prod after review by Kari. ".repeat(3)}` };
+  let cut: string | undefined;
+  assert.equal(await compactNode({ models: own, model, context: [], source, node: 64, onCut: why => { cut = why; } }), lines[2], "the answer after two that ran out is kept");
+  assert.equal(cut, undefined);
+  assert.deepEqual(requests.map(request => request.maxTokens), [outputTokens(64), outputTokens(64), outputTokens(64)], "every call carries the cap");
+  assert.deepEqual(requests.map(request => request.messages.length), [2, 2, 2], "an answer that ran out is not sent back");
+  const told = (request: { messages: Message[] }) => blocks(request.messages.at(-1)!).filter(text => /ran out of space/.test(text)).length;
+  assert.deepEqual(requests.map(told), [0, 1, 1], "the model is told once, on the last message");
+  requests.length = 0;
+  const replies: AssistantMessage[] = [];
+  await assert.rejects(compactNode({ models: own, model, context: [], source, node: 64, onReply: reply => { replies.push(reply); }, onCut: why => { cut = why; } }),
+    (error: unknown) => error instanceof OutOfRoom && /5 of 5 answers/.test(error.message), "no answer with lines: OutOfRoom, not a cut");
+  assert.equal(cut, undefined, "nothing is cut");
+  assert.equal(requests.length, TRIES, "bounded: TRIES calls");
+  assert.ok(replies.every(reply => reply.stopReason === "length"), "each one ran out");
+}
+
+/** In the service, a node whose answers keep running out is asked again
+ * ROOM_ROUNDS times, then held: no timer, no more calls, never cut, the
+ * chat shows why and the next turn waits. A reopen asks again, and once
+ * the model answers the node is a real summary. */
+{
+  const chat = await open("long");
+  const calls = (TRIES * (ROOM_ROUNDS + 1));
+  try {
+    const before = turns;
+    await chat.send(`LONG ${"word ".repeat(30)}`, "l-1");
+    await until(() => turns === before + 1, "long: turn 1 ran");
+    await chat.send("next", "l-2");
+    await until(() => /held after/.test(chat.failure() ?? ""), "long: held", 8_000);
+    assert.equal(asked.get("LONG"), calls, `long: ${calls} calls, ${ROOM_ROUNDS + 1} rounds of ${TRIES}`);
+    await delay(500);
+    assert.equal(asked.get("LONG"), calls, "long: no call after the hold, over 10 retry periods");
+    assert.match(chat.failure() ?? "", /ran out of output.*until the chat reopens/, "long: the chat shows why it waits");
+    assert.equal(chat.memory.built(0, 0), false, "long: nothing is cut");
+    assert.equal(turns, before + 1, "long: the next turn waits for the summary");
+  } finally { await chat.close(); }
+  room = true;
+  const again = await open("long");
+  try {
+    await until(() => again.memory.built(0, 0), "long: a reopen asks again");
+    assert.match(again.memory.node(0, 0)!, /^user: summary \d+ long$/, "long: a real summary, not the source cut short");
+    assert.equal(again.failure(), null);
+    await quiet(again);
+  } finally { await again.close(); }
+  assert.deepEqual([...caps], [outputTokens(64)], "every compactor call in the service carried the cap");
 }
 
 /** A long message is logged in pages, each its own message and line, none

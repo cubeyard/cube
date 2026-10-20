@@ -18,7 +18,7 @@ import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openStorage } from "./durable-agent.ts";
 import { agents } from "./claude-agent.ts";
 import { createLogger } from "./log.ts";
-import { compactNode } from "./optchat-compactor.ts";
+import { compactNode, OutOfRoom } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { CAP, capText, Memory, pages, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
@@ -34,6 +34,10 @@ const context = BACKGROUND_CONTEXT;
 const log = createLogger("optchat");
 export const JOBS = 8;
 export const RETRY_MS = 10_000;
+/** How many times a node whose every answer ran out of output is asked
+ * again before it is held until the chat reopens: each time costs up to
+ * TRIES capped answers, and asking forever would never end. */
+export const ROOM_ROUNDS = 2;
 /** How long a thread's machine must keep failing to start before the chat
  * hears of it: cubed's recovery loop retries every 30 s. */
 export const START_GRACE_MS = 2 * 60_000;
@@ -439,6 +443,8 @@ export class OptChat {
   private pagedFrom = 0;
   private readonly busy = new Set<string>();
   private readonly failed = new Set<string>();
+  /** Times each node ran out of output, this open. */
+  private readonly outOfRoom = new Map<string, number>();
   private compactorError: string | null = null;
   private readonly watchers = new Map<string, Promise<ThreadWatch | null>>();
   private readonly reported = new Map<string, string>();
@@ -745,6 +751,7 @@ export class OptChat {
       this.build(job.l, job.i).then(() => {
         this.busy.delete(key);
         this.failed.delete(key);
+        this.outOfRoom.delete(key);
         if (!this.failed.size) this.compactorError = null;
         this.pump();
       }, error => {
@@ -752,6 +759,16 @@ export class OptChat {
         const message = error instanceof Error ? error.message : String(error);
         if (!this.failed.has(key)) log.warn("compactor failed", { node: key, error: message });
         this.failed.add(key);
+        // Out of output: asked again ROOM_ROUNDS times, then held (busy, no
+        // timer) until the chat reopens. Never cut: the source is not lost.
+        if (error instanceof OutOfRoom) {
+          const rounds = (this.outOfRoom.get(key) ?? 0) + 1;
+          this.outOfRoom.set(key, rounds);
+          if (rounds > ROOM_ROUNDS) {
+            this.compactorError = `${message}; held after ${rounds} rounds until the chat reopens`;
+            return;
+          }
+        }
         this.compactorError = message;
         // An outage or a setup error: retried soon until it answers; the
         // next turn waits for this node and the chat shows why.

@@ -54,6 +54,7 @@ OFFLINE_TESTS=(
   packages/server/test/optchat-compaction-view-test.ts
   packages/server/test/optchat-compaction-reopen-test.ts
   packages/server/test/optchat-compactor-test.ts
+  packages/server/test/optchat-compactor-output-test.ts
   packages/server/test/optchat-test.ts
   packages/server/test/optchat-product-test.ts
   packages/server/test/optchat-cache-test.ts

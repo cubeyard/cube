@@ -82,7 +82,16 @@ nodes with gpt-6-luna, this took 1.03 calls per node instead of 2.67, with
 or of one line (the spec's own task), counts, and none may end in a colon:
 a heading before the versions or a version broken over two lines is never
 kept as the node; the model is told and asked again within the five
-answers. `optchat.ts` is the service: Pi setup, the tools, the turn
+answers. Each answer is capped at `outputTokens(node)` output tokens: pi-ai's
+`medium` thinking budget (8192, the effort the compactor asks for) plus room
+for three lines of the node's size at two bytes a token, at least 1024; 9216
+for 512-byte nodes, where pi-ai would otherwise send the model's maximum
+(128,000 on recent models) for three short lines. Adaptive thinking and
+OpenAI's reasoning spend the cap as one; on a thinking budget (older Claude,
+Bedrock) pi-ai adds 8192 on top. A ChatGPT sign-in (Codex, or `openai`
+signed in) refuses the field, so pi-ai sends none there: those answers are
+bounded only by the model and by `reasoning: "medium"`. `max_tokens` is not
+part of the cached prefix. `optchat.ts` is the service: Pi setup, the tools, the turn
 loop (a turn waits until every line of the view is a summary), the compactor
 pump (eight jobs) and the thread watchers. `optchat-threads.ts` connects it
 to cube's registry and threads.
@@ -91,8 +100,10 @@ A node the compactor fails on ends one of two ways:
 
 | failure | examples | the node | the next turn |
 | --- | --- | --- | --- |
-| its input's doing: asked again, it fails alike | an empty answer; an input too long for the model (pi-ai's `isContextOverflow`); an error stop on a reply the model began (its usage is not zero: a refusal, a safety stop); five answers none of them in the form | its source cut short, after one call (five for the form): `(no summary, cut short: zoom it) ` and the start of the message, or of both halves of a merge, within 512 bytes; stored with `cut: <why>` and logged as a warning. The log keeps the message whole | runs |
+| its input's doing: asked again, it fails alike | an empty answer; an input too long for the model (pi-ai's `isContextOverflow`); a refusal or safety stop, told by the provider's stop reason (`refusal`, `content_filter`, `SAFETY`, …) whatever its explanation says, so one that mentions "500" or "timeout" is not taken for an outage; an error stop on a reply the model began (its usage is not zero); five answers none of them in the form | its source cut short, after one call (five for the form): `(no summary, cut short: zoom it) ` and the start of the message, or of both halves of a merge, within 512 bytes; stored with `cut: <why>` and logged as a warning. The log keeps the message whole | runs |
 | not its input's doing | an outage, a rate limit (pi-ai's `isRetryableAssistantError`), or an error no reply carried (a bad key, a quota, a model that is gone) | asked again every 10 s until it answers; never cut | waits, and the chat shows `summarizing: <error>`; a change of the compactor model applies to the next try |
+
+| out of output: every answer stopped at the cap (`length`, thinking only or lines cut off) | a model that thinks past 9216 tokens | an answer that ran out is never used; the model is told to think briefly and asked again within the five answers. If none gave lines, the node is asked again 2 more times (`ROOM_ROUNDS`, every 10 s), then held with no timer until the chat reopens; never cut, at most 15 capped answers per node per open | waits, and the chat shows `summarizing: … held after 3 rounds until the chat reopens` |
 
 So a refusal costs one call and an outage no summary. A failure that is
 the input's doing but reaches the compactor as a setup error (a 4xx no
