@@ -239,7 +239,13 @@ export class ArtifactStore {
       const prior = this.db.prepare("SELECT artifact, number, provenance FROM revisions WHERE request_id = ?").get(requestId) as Row | undefined;
       // Another editor's request id is a clash, never that editor's revision.
       if (prior && !sameAuthor(editorOf(JSON.parse(String(prior.provenance)) as Provenance), editor)) throw new ArtifactError("this request id belongs to another author's write", 409);
-      if (prior) return { revision: this.revision(String(prior.artifact), Number(prior.number))!, created: false, unchanged: false, actionsKept: false };
+      // Answered as the write it replays was: revision 1 created the
+      // artifact, and a later one kept the actions it left out.
+      if (prior) {
+        const number = Number(prior.number);
+        const kept = number > 1 && input.actions === undefined && this.revision(String(prior.artifact), number - 1)!.actions.length > 0;
+        return { revision: this.revision(String(prior.artifact), number)!, created: number === 1, unchanged: false, actionsKept: kept };
+      }
       const now = Date.now();
       const named = input.id === undefined && input.name !== undefined
         ? this.db.prepare("SELECT id FROM artifacts WHERE author = ? AND name = ?").get(authorKey(editor), input.name) as Row | undefined : undefined;

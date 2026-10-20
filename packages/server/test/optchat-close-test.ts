@@ -1,8 +1,12 @@
 /** OptChat's close, offline with a faux model: a close starts no new turn,
- * node, chat request or tool, waits for the model calls already out (summaries being built, a chat
- * request sent) and stores their answers and usage, so the reopened chat
- * sends none of them again. Only a call still out after the close's grace
- * is cut off: counted as unknown, and sent again at most once each. */
+ * node, chat request, tool or further summary answer, waits for the model
+ * calls and tool calls already out (summaries being built, a chat request
+ * sent, a tool running) and stores their answers, results and usage, so the
+ * reopened chat sends and runs none of them again; a summary round held
+ * before its next answer goes on after the reopen as it would have. Only
+ * what is still out after the close's grace is cut off: counted as unknown,
+ * and sent or run again at most once each; the close is bounded whatever a
+ * tool does. */
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -17,9 +21,16 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-close-"));
 const textOf = (message: Message) => typeof message.content === "string" ? message.content
   : message.content.map(part => part.type === "text" ? part.text : part.type === "toolCall" ? `${part.name}()` : "").join("");
 
-/** How a call's answer comes: at once, after ms, or only once aborted. */
-type Hold = number | "abort";
-let hold: { turn: Hold; compaction: Hold } = { turn: 0, compaction: 0 };
+/** How a call's answer comes: at once, after ms, only once aborted, or
+ * never (a provider that ignores the abort). */
+type Hold = number | "abort" | "never";
+let hold: { turn: Hold; compaction: Hold; marked?: number } = { turn: 0, compaction: 0 };
+/** A message marked so: its summary's first answer is not three versions,
+ * so the round asks again with feedback. Each answer asked for it, in order:
+ * whether the first or a follow-up, and its messages as sent. */
+const MARK = "FEEDBACK-ME";
+const markedCalls: Array<{ follow: boolean; messages: string; phase: string }> = [];
+const wire = (messages: readonly Message[]) => JSON.stringify(messages.map(message => [message.role, message.content]));
 type Sent = { kind: "turn" | "compaction"; key: string };
 const sent: Sent[] = [];
 const open = { turn: 0, compaction: 0 };
@@ -30,28 +41,56 @@ faux.setResponses(Array.from({ length: 4_000 }, () => async (request, options) =
   const kind = request.messages.some(message => message.role === "system" && textOf(message).includes("You write the memory of OptChat")) ? "compaction" : "turn";
   // A call is the same call when it carries the same messages.
   sent.push({ kind, key: crypto.createHash("sha256").update(JSON.stringify(request.messages.map(message => [message.role, textOf(message)]))).digest("hex") });
+  // The step is the first user message's last block; its context comes before it.
+  const step = request.messages.find(message => message.role === "user")?.content;
+  const marked = kind === "compaction" && Array.isArray(step) && step.at(-1)?.type === "text" && (step.at(-1) as { text: string }).text.includes(MARK);
+  const follow = request.messages.length > 2;
+  if (marked) markedCalls.push({ follow, messages: wire(request.messages), phase });
   open[kind]++;
   try {
-    const wait = hold[kind], signal = options?.signal;
+    const wait = marked && !follow && hold.marked !== undefined ? hold.marked : hold[kind], signal = options?.signal;
+    if (wait === "never") await new Promise(() => {});
     if (wait === "abort") await new Promise(resolve => { if (signal?.aborted) resolve(null); signal?.addEventListener("abort", resolve, { once: true }); });
-    else if (wait) await delay(wait, null, { signal }).catch(() => {});
+    else if (typeof wait === "number" && wait) await delay(wait, null, { signal }).catch(() => {});
     if (signal?.aborted) aborted[kind]++;
   } finally { open[kind]--; }
+  if (marked) return fauxAssistantMessage(follow ? "marked a\nmarked ab\nmarked abc" : "one\ntwo\nthree\nfour");
   if (kind === "compaction") return fauxAssistantMessage(`summary ${++n} ${"s".repeat(20)}`);
   const user = request.messages.findLast(message => message.role === "user");
-  const tool = !!user && textOf(user).includes("#tool") && !request.messages.some(message => message.role === "toolResult");
+  const called = request.messages.some(message => message.role === "toolResult");
+  if (user && textOf(user).includes("#spawn") && !called) {
+    return fauxAssistantMessage([fauxToolCall("spawn", { tasks: [1, 2, 3].map(k => ({ project: "cube", task: `task ${k}` })) })], { stopReason: "toolUse" });
+  }
+  const tool = !!user && textOf(user).includes("#tool") && !called;
   return tool ? fauxAssistantMessage([fauxToolCall("projects", {})], { stopReason: "toolUse" }) : fauxAssistantMessage(`reply ${++n} ${"r".repeat(80)}`);
 }));
 const models = createModels();
 models.setProvider(faux.provider);
-/** The `projects` tool's runs, by when they started, and how long one takes. */
+/** The `projects` tool's runs, by when they started, and how long one
+ * takes (-1: it never ends, and ignores the abort). */
 let phase: "open" | "closing" | "reopened" = "open";
 const runs = { open: 0, closing: 0, reopened: 0 };
 let toolMs = 0;
+/** `spawn`'s tasks as the threads see them: each asked request id, and the
+ * threads made, by request id (a request id makes one thread, as the
+ * registry's creation table does). Each task takes spawnMs, as its git
+ * fetch, and stops on the abort, as git does. */
+let spawnMs = 0;
+const spawned = { asked: [] as string[], made: new Map<string, string>() };
 const threads: OptThreads = {
-  async projects() { runs[phase]++; if (toolMs) await delay(toolMs); return "projects: cube"; }, async runners() { return "no runners"; },
-  async spawn() { throw new Error("unused"); }, async tell() {}, async describe() { return ""; },
-  async events() { throw new Error("unused"); }, async history() { return null; },
+  async projects() { runs[phase]++; if (toolMs < 0) await new Promise(() => {}); if (toolMs) await delay(toolMs); return "projects: cube"; }, async runners() { return "no runners"; },
+  async spawn(task, requestId, signal) {
+    spawned.asked.push(requestId);
+    const made = spawned.made.get(requestId);
+    if (made) return { id: made, title: task.task };
+    if (spawnMs) await delay(spawnMs, null, { signal });
+    signal?.throwIfAborted();
+    const id = crypto.randomUUID();
+    spawned.made.set(requestId, id);
+    return { id, title: task.task };
+  },
+  async tell() {}, async describe() { return ""; },
+  async events() { return null; }, async history() { return null; },
 };
 const chatAt = (directory: string, closeMs: number) => OptChat.open({ directory, models, model: async () => ({ provider: faux.getModel().provider, id: faux.getModel().id }),
   threads, limits: { view: 1_600, low: 800, compaction: 400, compactionLow: 200, node: 64, retryMs: 50, watchMs: 50, closeMs } });
@@ -70,7 +109,7 @@ const twice = (kind: Sent["kind"], from = 0) => {
   return keys.length - new Set(keys).size;
 };
 const sum = (calls: Record<string, number> | undefined) => Object.values(calls ?? {}).reduce((total, count) => total + count, 0);
-const reset = () => { phase = "open"; Object.assign(runs, { open: 0, closing: 0, reopened: 0 }); sent.length = 0; Object.assign(open, { turn: 0, compaction: 0 }); Object.assign(aborted, { turn: 0, compaction: 0 }); };
+const reset = () => { markedCalls.length = 0; spawned.asked.length = 0; spawned.made.clear(); spawnMs = 0; phase = "open"; Object.assign(runs, { open: 0, closing: 0, reopened: 0 }); sent.length = 0; Object.assign(open, { turn: 0, compaction: 0 }); Object.assign(aborted, { turn: 0, compaction: 0 }); };
 
 // 1. Summaries out at a close come back within its grace and are stored,
 // with their usage; the reopened chat asks for none of them again.
@@ -134,10 +173,9 @@ for (const ms of [0, 200]) {
   } finally { await chat.close(); toolMs = 0; }
 }
 
-// 2b. A tool already running when the close begins is not waited for: Pi's
-// close joins it, but its result is not stored, so the reopened run starts
-// it again (replay "safe"). Unchanged by the gate; recorded here, so a
-// change to it is seen. Every tool of the chat must stay safe to run twice.
+// 2b. A tool already running when the close begins and ending within its
+// grace is waited for: its result is stored and the reopened run does not
+// run it again.
 {
   reset();
   toolMs = 300;
@@ -151,15 +189,97 @@ for (const ms of [0, 200]) {
     await chat.close();
     const took = Date.now() - started;
     assert.equal(runs.closing, 0, "no tool started while closing");
-    assert.ok(took >= 200, `the close joined the running tool (${took} ms)`);
+    assert.ok(took >= 200 && took < 5_000, `the close waited for the running tool, within its grace (${took} ms)`);
     phase = "reopened";
     toolMs = 0;
     chat = await chatAt(directory, 5_000);
     await quiet(chat);
     assert.equal(runs.open, 1);
-    assert.equal(runs.reopened, 1, "the reopened run ran it again, once");
+    assert.equal(runs.reopened, 0, "the reopened run did not run it again: its result was stored");
     assert.equal(twice("turn"), 0, "no request sent twice");
+    const usage = await chat.usage();
+    assert.equal(sum(usage.cut?.tools) + sum(usage.cut?.chat), 0, "nothing is counted as cut off");
   } finally { await chat.close(); toolMs = 0; }
+}
+
+// 2c. Forced: a tool still running after the grace is cut off. It is
+// counted as cut off by name, and the reopened run executes it again, once.
+{
+  reset();
+  toolMs = 1_000;
+  const directory = path.join(root, "tool-forced");
+  let chat = await chatAt(directory, 150);
+  try {
+    await chat.send(`message 0: ${"word ".repeat(30)} #tool`, "r0");
+    await until(() => runs.open > 0, "the tool is running");
+    phase = "closing";
+    const started = Date.now();
+    await chat.close();
+    const took = Date.now() - started;
+    assert.ok(took < 1_000, `the close did not wait for the tool past its grace (${took} ms)`);
+    phase = "reopened";
+    toolMs = 0;
+    chat = await chatAt(directory, 5_000);
+    await quiet(chat);
+    assert.equal(runs.open + runs.closing + runs.reopened, 2, "the tool cut off ran again, once");
+    const usage = await chat.usage();
+    assert.deepEqual(usage.cut?.tools, { projects: 1 }, "and is counted as cut off, by name");
+    assert.equal(twice("turn"), 0);
+  } finally { await chat.close(); toolMs = 0; }
+}
+
+// 2d. A tool that never ends and ignores the abort does not hold the close:
+// it ends within the grace, the settle and Pi's join bound (CLOSE_SETTLE_MS
+// and CLOSE_JOIN_MS, 2 s each).
+{
+  reset();
+  toolMs = -1;
+  const directory = path.join(root, "tool-stuck");
+  let chat = await chatAt(directory, 150);
+  try {
+    await chat.send(`message 0: ${"word ".repeat(30)} #tool`, "r0");
+    await until(() => runs.open > 0, "the tool is running");
+    const started = Date.now();
+    await chat.close();
+    const took = Date.now() - started;
+    assert.ok(took < 150 + 2_000 + 2_000 + 500, `the close is bounded (${took} ms)`);
+    // The tool's call returned at the cut, so Pi's close joined at once: the
+    // join bound (CLOSE_JOIN_MS) is a backstop, not reached.
+    assert.ok(took < 150 + 1_000, `Pi's close was not held by the tool (${took} ms)`);
+    toolMs = 0;
+    chat = await chatAt(directory, 5_000);
+    await quiet(chat);
+    assert.equal(runs.open + runs.reopened, 2, "the reopened run executed it again, once");
+    assert.deepEqual((await chat.usage()).cut?.tools, { projects: 1 });
+  } finally { await chat.close(); toolMs = 0; }
+}
+
+// 2e. spawn cut off at the close: its task under way stops on the abort (as
+// its git fetch does) and no later task is started; the reopened run asks
+// again under the same request ids, so every task makes one thread.
+{
+  reset();
+  spawnMs = 400;
+  const directory = path.join(root, "spawn-cut");
+  let chat = await chatAt(directory, 150);
+  try {
+    await chat.send(`message 0: ${"word ".repeat(30)} #spawn`, "r0");
+    await until(() => spawned.asked.length >= 1, "spawn is under way");
+    await chat.close();
+    // The call returned at the cut; its work, if it went on, would by now.
+    await delay(spawnMs + 300);
+    assert.ok(spawned.asked.length <= 1, `no task started after the cut (${spawned.asked.length} asked)`);
+    const before = spawned.made.size;
+    assert.equal(before, 0, "the task under way made no thread after the abort");
+    spawnMs = 0;
+    chat = await chatAt(directory, 5_000);
+    await quiet(chat);
+    assert.equal(spawned.made.size, 3, "after the reopen, each task made one thread");
+    assert.equal(new Set(spawned.asked).size, 3, "under three request ids");
+    for (const id of spawned.made.values()) assert.ok(await chat.started(id), "and the chat records each thread");
+    assert.equal((await chat.threadPrefixes()).size, 3, "once");
+    assert.equal((await chat.usage()).cut?.tools?.spawn, 1, "the cut spawn is counted");
+  } finally { await chat.close(); }
 }
 
 // 3. Forced: summaries still out after the grace are cut off. The close ends
@@ -213,6 +333,75 @@ for (const ms of [0, 200]) {
     const usage = await chat.usage();
     assert.equal(sum(usage.cut?.chat), 1, "and it is counted as unknown");
   } finally { await chat.close(); }
+}
+
+// 5. A summary whose first answer needs feedback, closed while that answer
+// is out: the answer comes back in the grace and is stored, the follow-up is
+// not sent while closing, and the reopened chat sends it once, as the
+// uninterrupted round sends it, and keeps the same summary.
+{
+  const marked = `message 0: ${MARK} ${"word ".repeat(30)}`;
+  /** Until the chat has answered `k` turns, then at rest. */
+  const answered = async (chat: OptChat, k: number) => {
+    await until(() => chat.memory.messages.filter(message => message.kind === "talk").length >= k, `turn ${k} answered`);
+    await quiet(chat);
+  };
+  const node = (chat: OptChat) => chat.memory.render([{ l: 0, i: chat.memory.messages.findIndex(message => message.text.includes(MARK)) }]);
+  // The uninterrupted round.
+  reset();
+  const reference = await chatAt(path.join(root, "round-reference"), 5_000);
+  let expected: { follow: string; node: string };
+  try {
+    await reference.send(marked, "r0");
+    await answered(reference, 1);
+
+    const follow = markedCalls.filter(call => call.follow);
+    assert.equal(follow.length, 1);
+    expected = { follow: follow[0]!.messages, node: node(reference) };
+    assert.match(expected.node, /marked abc/);
+  } finally { await reference.close(); }
+  reset();
+  hold = { turn: 0, compaction: 0, marked: 300 };
+  const directory = path.join(root, "round-held");
+  let chat = await chatAt(directory, 5_000);
+  try {
+    await chat.send(marked, "r0");
+    await until(() => markedCalls.length === 1 && open.compaction > 0, "the marked summary's first answer is out");
+    phase = "closing";
+    await chat.close();
+    assert.equal(aborted.compaction, 0, "its first answer came back in the grace");
+    assert.equal(markedCalls.filter(call => call.follow).length, 0, "no follow-up was sent while closing");
+    hold = { turn: 0, compaction: 0 };
+    phase = "reopened";
+    chat = await chatAt(directory, 5_000);
+    await answered(chat, 1);
+    assert.equal(markedCalls.filter(call => !call.follow).length, 1, "the first answer was asked once in all");
+    const follow = markedCalls.filter(call => call.follow);
+    assert.equal(follow.length, 1, "the follow-up was sent once, after the reopen");
+    assert.equal(follow[0]!.messages, expected.follow, "byte for byte as the uninterrupted round sends it");
+    assert.equal(node(chat), expected.node, "and the summary is the same");
+    assert.equal(twice("compaction"), 0, "no summary answer was asked twice");
+    const usage = await chat.usage();
+    assert.equal(sum(usage.compactor.calls), sent.filter(call => call.kind === "compaction").length, "every answer's usage is stored");
+    assert.equal(sum(usage.cut?.compactor), 0, "nothing was cut off");
+  } finally { await chat.close(); hold = { turn: 0, compaction: 0 }; }
+}
+
+// 6. A chat request whose provider never answers and ignores the abort:
+// Pi's close cannot join it, and the chat's close still ends within the
+// grace, the settle and the join bound.
+{
+  reset();
+  const directory = path.join(root, "never");
+  const chat = await chatAt(directory, 150);
+  hold = { turn: "never", compaction: 0 };
+  await chat.send(`message 0: ${"word ".repeat(30)}`, "r0");
+  await until(() => open.turn > 0, "the turn's request is out");
+  const started = Date.now();
+  await chat.close();
+  const took = Date.now() - started;
+  assert.ok(took >= 150 + 2_000 && took < 150 + 2_000 + 2_000 + 500, `the close ended at its join bound (${took} ms)`);
+  hold = { turn: 0, compaction: 0 };
 }
 
 fs.rmSync(root, { recursive: true, force: true });

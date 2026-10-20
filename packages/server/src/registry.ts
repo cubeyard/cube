@@ -331,6 +331,7 @@ export class Registry {
           runner_id TEXT NOT NULL REFERENCES runner(id), data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS creation(project_id TEXT NOT NULL, request_id TEXT NOT NULL,
           thread_id TEXT NOT NULL REFERENCES thread(id), payload TEXT NOT NULL, PRIMARY KEY(project_id, request_id));
+        CREATE TABLE IF NOT EXISTS hooks_request(request_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, report TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS runner_operator(runner_id TEXT PRIMARY KEY REFERENCES runner(id), enrolled_at INTEGER,
           last_attempt_at INTEGER, last_contact_at INTEGER, unreachable_since INTEGER, last_error TEXT, health TEXT,
           retiring_at INTEGER, retired_at INTEGER, retirement_reason TEXT);
@@ -354,18 +355,32 @@ export class Registry {
   /** Replaces only the project's hooks (project-hooks.ts), in one
    * transaction, if they differ; its repositories, revision and check stay
    * as they are. */
-  saveProjectHooks(id: string, hooks: ProjectHooks): Project {
+  /** The report of a hooks save made under `requestId`, if one was. */
+  hooksRequest(requestId: string): string | undefined {
+    return (this.db.prepare("SELECT report FROM hooks_request WHERE request_id=?").get(requestId) as { report: string } | undefined)?.report;
+  }
+  saveProjectHooks(id: string, hooks: ProjectHooks): Project;
+  /** With a request: the save and its `report` (of the project as saved)
+   * are one transaction, and the same request id again saves nothing and
+   * answers the stored report, whatever the hooks are now. */
+  saveProjectHooks(id: string, hooks: ProjectHooks, request: { id: string; report: (saved: Project) => string }): string;
+  saveProjectHooks(id: string, hooks: ProjectHooks, request?: { id: string; report: (saved: Project) => string }): Project | string {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const prior = request && this.db.prepare("SELECT report FROM hooks_request WHERE request_id=?").get(request.id) as { report: string } | undefined;
+      if (prior) { this.db.exec("COMMIT"); return prior.report; }
       const project = this.getProject(id);
       if (!project) throw new Error("project not found");
       if ((project.hooks?.preSetup ?? "") !== hooks.preSetup || (project.hooks?.preResume ?? "") !== hooks.preResume) {
         const now = Date.now();
         this.saveProject({ ...project, hooks: { preSetup: hooks.preSetup, preResume: hooks.preResume }, updatedAt: now, hooksUpdatedAt: now });
       }
-      this.db.exec("COMMIT");
       // What the registry now holds, read again.
-      return this.getProject(id)!;
+      const saved = this.getProject(id)!;
+      const report = request?.report(saved);
+      if (request) this.db.prepare("INSERT INTO hooks_request VALUES (?,?,?)").run(request.id, id, report!);
+      this.db.exec("COMMIT");
+      return request ? report! : saved;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   deleteProject(id: string): void {
@@ -373,6 +388,7 @@ export class Registry {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare("UPDATE runner SET project_id=NULL WHERE project_id=?").run(id);
+      this.db.prepare("DELETE FROM hooks_request WHERE project_id=?").run(id);
       this.db.prepare("DELETE FROM project WHERE id=?").run(id);
       this.db.exec("COMMIT");
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }

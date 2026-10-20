@@ -451,27 +451,29 @@ export async function createCubed(options: {
    * check: each repository's configured branch (or the default branch the
    * remote advertises now) is fetched and resolved again. A failure starts
    * no thread rather than one at older commits. */
-  async function latestCommits(projectId: string): Promise<ResolvedRepositories> {
+  async function latestCommits(projectId: string, signal?: AbortSignal): Promise<ResolvedRepositories> {
     const project = registry.getProject(projectId);
     if (!project) throw new Error("project not found");
     if (project.status !== "ready") throw new Error("check the project before starting a thread");
     const repositories = await Promise.all(project.repositories.map(async repository => {
       try {
-        const result = await git.prepareRepository(repository.url, repository.base);
+        const result = await git.prepareRepository(repository.url, repository.base, signal);
         return { url: repository.url, base: result.base, baseOid: result.baseOid };
       } catch (error) {
+        signal?.throwIfAborted();
         throw Object.assign(new Error(`fetching the latest ${repository.base ?? "default branch"} of ${repository.url} failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
       }
     }));
     const saved = settings.get().skills;
     const skills = await (async () => {
-      const installed = await resolveSkills(git, defaultSource(options.skillSource ?? null, saved), saved);
+      const installed = await resolveSkills(git, defaultSource(options.skillSource ?? null, saved), saved, signal);
       // The primary checkout's own .agents/skills, at the commit it starts from.
       const primary = repositories[0];
       if (!primary) return installed;
-      const own = await resolveProjectSkills(git, primary.url, primary.baseOid, saved, installed.skills);
+      const own = await resolveProjectSkills(git, primary.url, primary.baseOid, saved, installed.skills, signal);
       return { ...installed, skipped: [...installed.skipped, ...own.skipped], project: own.project };
     })().catch(error => {
+      signal?.throwIfAborted();
       throw Object.assign(new Error(`resolving the skills failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
     });
     return { projectRevision: project.revision, repositories, skills };

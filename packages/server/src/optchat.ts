@@ -14,12 +14,12 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { JsonRepresentation } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { cleanupSessionResources, Type, type AssistantMessage, type Message, type Models, type Usage } from "@earendil-works/pi-ai";
-import { createRegistry, defineDoc, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, ROOT_CONVERSATION_ID, section, ToolTask, type LiveState, type Conversation, type ConversationId, type Cursor, type Page, type EntryId, type EntryRecord } from "@earendil-works/pi-durable";
+import { createRegistry, defineDoc, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, ROOT_CONVERSATION_ID, section, ToolTask, type LiveState, type Conversation, type ConversationId, type Cursor, type Page, type EntryId, type EntryRecord, type TaskId, type ToolRegistration } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openStorage } from "./durable-agent.ts";
 import { agents } from "./claude-agent.ts";
 import { createLogger } from "./log.ts";
-import { compactNode, Spent, spent, TRIES } from "./optchat-compactor.ts";
+import { compactNode, Spent, spent, TRIES, type Round } from "./optchat-compactor.ts";
 import { cachedModels, viewPieces } from "./optchat-cache.ts";
 import { CAP, capText, Memory, pages, type LogMessage, type Part } from "./optchat-memory.ts";
 import { checkImage, MEDIA_LIMITS, MediaError, mediaData, mediaId, MediaStore, UNSENT_MS, type MediaRef } from "./optchat-media.ts";
@@ -45,12 +45,29 @@ export const ANSWERS = 3 * TRIES;
  * hears of it: cubed's recovery loop retries every 30 s. */
 export const START_GRACE_MS = 2 * 60_000;
 /** How long a close waits for the model calls already out (summaries being
- * built, a chat request sent) to come back and be stored, so a reopen does
- * not send them again. The supervisor kills cubed 30 s after SIGTERM, and
- * the rest of its shutdown comes after the chat's. */
+ * built, a chat request sent) and the tool calls running to come back and be
+ * stored, so a reopen does not send or run them again. The supervisor kills
+ * cubed 30 s after its SIGTERM (cubed-supervisor.ts), and the rest of its
+ * shutdown comes after the chat's. */
 export const CLOSE_GRACE_MS = 10_000;
 /** After the grace, how long the cut-off calls get to settle before Pi closes. */
 const CLOSE_SETTLE_MS = 2_000;
+/** How long Pi's own close may take after that: it aborts and joins every
+ * task, and a tool cut off returns at once (`guard`). Past it the close goes
+ * on without it, so the chat's close ends within CLOSE_GRACE_MS +
+ * CLOSE_SETTLE_MS + CLOSE_JOIN_MS whatever a tool or provider does. */
+const CLOSE_JOIN_MS = 2_000;
+
+/** How each tool of the chat may run again: a close cuts off a running call
+ * and the reopened run executes it again (replay "safe"), and a call cut off
+ * at the cut may still be doing its work. `read` only reads. `keyed` does
+ * its effect once per request id (the provider's call id or the durable
+ * task's, the same on replay) and answers a replay as the first run did.
+ * extension() refuses a tool missing here; optchat-replay-test runs each. */
+export const TOOL_REPLAY: Readonly<Record<string, "read" | "keyed">> = {
+  zoom: "read", date: "read", projects: "read", runners: "read", threads: "read", history: "read", diagnose: "read", usage: "read", project_hooks: "read", artifact_read: "read",
+  spawn: "keyed", tell: "keyed", archive: "keyed", project_hooks_write: "keyed", artifact_write: "keyed",
+};
 
 /** Tells to one thread between two messages of the user: unattended
  * follow-up is bounded; the user's next message allows more. */
@@ -171,7 +188,7 @@ export interface OptThreads {
   /** Starts one thread; the same request id finds the same thread again. */
   /** `runner`: a runner's node id or id; the thread starts there and stays
    * (a host runner takes no other threads). Absent: the pool chooses. */
-  spawn(task: { project: string; task: string; model?: string | undefined; runner?: string | undefined }, requestId: string): Promise<{ id: string; title: string }>;
+  spawn(task: { project: string; task: string; model?: string | undefined; runner?: string | undefined }, requestId: string, signal?: AbortSignal): Promise<{ id: string; title: string }>;
   /** A message to a thread; refused while it works. */
   tell(id: string, text: string, requestId: string): Promise<void>;
   /** One line per thread: its state and title. */
@@ -200,8 +217,9 @@ export interface OptThreads {
   /** A project's saved hooks and their latest outcomes, as text
    * (project-hooks.ts); `project` is a name or id. */
   hooks?(project: string): Promise<string>;
-  /** Saves a project's hooks (absent: kept, "": removed) and reads them back, as text. */
-  writeHooks?(project: string, hooks: { preSetup?: string | undefined; preResume?: string | undefined }): Promise<string>;
+  /** Saves a project's hooks (absent: kept, "": removed) and reads them back,
+   * as text. The same request id saves once and answers the same text again. */
+  writeHooks?(project: string, hooks: { preSetup?: string | undefined; preResume?: string | undefined }, requestId: string): Promise<string>;
 }
 
 export type ThreadRecord = {
@@ -286,7 +304,9 @@ export function formatHistory(id: string, record: ThreadRecord, report: ReportSt
 
 /** `cache` names the chat for the providers' prompt caches; it never changes. */
 /** `tells`: the tell calls to a thread since the user's last message. */
-type Settings = { tree: number; cache: string; threads: Record<string, { at: number; tells?: string[] }> };
+/** `archives`: by archive call (its task id), each thread it named and the
+ * line it answered, "" while it was out; a replay answers those lines. */
+type Settings = { tree: number; cache: string; threads: Record<string, { at: number; tells?: string[] }>; archives?: Record<string, Record<string, string>> };
 const SettingsDoc = defineDoc<Settings>({ kind: "cube.optchat", version: 1, scope: "session", initial: () => ({ tree: 0, cache: "", threads: {} }) });
 /** The view parts the current turn started with; the request hook renders
  * them. `userInputs`: the latest run inputs that carry a message of the
@@ -324,17 +344,23 @@ const CompactorUsageDoc = defineDoc<CompactorUsage>({ kind: "cube.optchat.usage"
 /** What the compactor may still spend on each node it has not built: its
  * answers left and the model (`provider/id`) that spent the last. A node
  * with none left is held; a built node's record goes with it. */
-type Spend = { left: number; model: string };
+/** `round`: the round a close held before its next answer, which the next
+ * build under the same model goes on with (taken once). */
+type Spend = { left: number; model: string; round?: JsonRepresentation<Round> };
 const SpendDoc = defineDoc<{ nodes: Record<string, Spend> }>({ kind: "cube.optchat.spend", version: 1, scope: "session", initial: () => ({ nodes: {} }) });
 /** Model calls a close cut off after its grace, by `provider/model`: what
  * they cost is unknown (their usage, if any came, is counted as it came),
- * and the reopened chat may send them again. */
-type Cut = { chat: Record<string, number>; compactor: Record<string, number> };
+ * and the reopened chat may send them again. `tools`: tool calls still
+ * running at the cut, by name: what they did is unknown (their work may go
+ * on, it is not undone), and the reopened run executes them again, keyed. */
+type Cut = { chat: Record<string, number>; compactor: Record<string, number>; tools?: Record<string, number> };
 const CutDoc = defineDoc<Cut>({ kind: "cube.optchat.cut", version: 1, scope: "session", initial: () => ({ chat: {}, compactor: {} }) });
 const TURN = "optchat.turn";
 const NODE_ENTRY = "optchat.node";
 
 const short = (id: string) => id.slice(0, 8);
+/** An archive call's record of the free machines it last read: no thread id. */
+const FREE = " free";
 /** A tool's text result. */
 const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
 /** A zoom result's lines start with their ids. */
@@ -499,6 +525,10 @@ export class OptChat {
   /** Chat requests and tool calls held back by a close, unstarted, until Pi
    * closes. */
   private readonly gated = { requests: 0, tools: 0 };
+  /** Tool calls executing now (task → name), and those a close holds back
+   * at their execute phase (a replay), whose slot already reads running. */
+  private readonly running = new Map<TaskId, string>();
+  private readonly heldTools = new Set<TaskId>();
   private readonly abort = new AbortController();
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private watchTimer: ReturnType<typeof setInterval> | undefined;
@@ -855,10 +885,15 @@ export class OptChat {
         spend.model = name;
         await this.saveSpend([key]);
       }
+      // A round a close held goes on where it stopped, under its model; taken once.
+      const held = this.spend.get(key);
+      const round = held?.round && held.model === name ? held.round as unknown as Round : undefined;
+      if (held?.round) { delete held.round; await this.saveSpend([key]); }
       try {
         text = await compactNode({ models: this.compactorModels, model, context: this.memory.context(l, i), source, node: this.memory.nodeLimit, signal: this.abort.signal,
           answers: this.spend.get(key)?.left ?? ANSWERS, onRequest: () => { this.calling.set(key, name); },
-          onReply: reply => { this.calling.delete(key); return this.countCompactor(reply, key, name); }, onCut: why => { cut = why; } });
+          onReply: reply => { this.calling.delete(key); return this.countCompactor(reply, key, name); }, onCut: why => { cut = why; },
+          ...round ? { round } : {}, hold: next => this.holdRound(key, name, next) });
       } finally { this.calling.delete(key); }
     }
     // A node that came back while the chat closes is stored all the same: a
@@ -877,6 +912,21 @@ export class OptChat {
       compaction: flatParts(this.memory.compaction), compactionBatch: this.memory.compactionBatching, entry: this.lastEntry, shape: this.shape, shapeTotal: this.memory.length };
     await this.harness.commit(async tx => { Object.assign(await tx.doc(ViewDoc), view); }, context)
       .catch(error => { if (!this.closing) log.warn("view not stored", { error }); });
+  }
+
+  /** While the chat closes, a node's next answer is not asked: after its
+   * first answer, its round so far is stored, so the reopened chat asks that
+   * answer, once, as this round would have, and none twice. */
+  private async holdRound(key: string, model: string, round: Round): Promise<boolean> {
+    if (!this.closing) return false;
+    if (round.answers <= 1) return true;
+    const spend = this.spend.get(key) ?? { left: ANSWERS, model };
+    spend.model = model;
+    spend.round = JSON.parse(JSON.stringify(round)) as JsonRepresentation<Round>;
+    this.spend.set(key, spend);
+    await this.harness.commit(async tx => { (await tx.doc(SpendDoc)).nodes[key] = { ...spend }; }, context)
+      .catch(error => { log.warn("held summary round not stored: the reopened chat starts it again", { node: key, error }); });
+    return true;
   }
 
   /** Stores the answers left of `nodes` as memory has them. Best effort:
@@ -955,7 +1005,7 @@ export class OptChat {
     const cut = await this.harness.snapshot(CutDoc, context);
     return { chat: await this.harness.usage(context) as OptChatUsage["chat"],
       compactor: compactor ? JSON.parse(JSON.stringify(compactor)) as OptChatUsage["compactor"] : { models: {}, calls: {}, since: null, earlier: false }, threads,
-      cut: cut ? { chat: { ...cut.chat }, compactor: { ...cut.compactor } } : { chat: {}, compactor: {} } };
+      cut: cut ? { chat: { ...cut.chat }, compactor: { ...cut.compactor }, tools: { ...cut.tools } } : { chat: {}, compactor: {}, tools: {} } };
   }
 
   /** Accepts a user message or a thread report and keeps it until it is in
@@ -1387,12 +1437,17 @@ export class OptChat {
       replay: "safe",
       execute: async (args, api, callContext) => {
         const lines: string[] = [];
+        const signal = callContext.abortSignal;
         for (const [index, task] of args.tasks.entries()) {
+          // Aborted (a close or a stop): no further thread starts, and the
+          // call ends aborted rather than reporting the rest "not started".
+          signal?.throwIfAborted();
           try {
-            const thread = await this.options.threads.spawn(task, `optchat:${api.callId}:${index}`);
+            const thread = await this.options.threads.spawn(task, `optchat:${api.callId}:${index}`, signal);
             await api.commit(async tx => { (await tx.doc(SettingsDoc)).threads[thread.id] ??= { at: Date.now() }; }, callContext);
             lines.push(`[${short(thread.id)}] started in ${task.project}: ${thread.title}`);
           } catch (error) {
+            if (signal?.aborted) throw error;
             lines.push(`task ${index + 1} (${task.project}) not started: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
@@ -1473,13 +1528,24 @@ export class OptChat {
         + "its conversation stays and history still reads it. A thread that is working or whose machine is still starting is not archived and nothing is stopped: "
         + "wait for its report. It cannot be undone from here. Name each thread by its whole 8-character id.",
       parameters: Type.Object({ ids: Type.Array(Type.String(), { minItems: 1, maxItems: 20 }) }),
-      // Archiving again finds the thread archived and says so.
+      // Keyed by the call's task: each thread's line is stored as it is
+      // answered, with the free machines it read (FREE), and a replay answers
+      // those. A thread this call had sent to archive ("" stored) and finds
+      // archived is its own archive.
       replay: "safe",
-      execute: async args => {
+      execute: async (args, api, callContext) => {
         const archiveThread = this.options.threads.archive;
         if (!archiveThread) return text("archiving is not available");
+        const call = String(api.taskId);
         const lines: string[] = [];
         let free: string | undefined;
+        const record = (id: string, line: string, read?: string) => api.commit(async tx => {
+          const settings = await tx.doc(SettingsDoc);
+          // A task id is a number, never `__proto__`; the newest 64 calls are kept.
+          (settings.archives ??= {})[call] = { ...settings.archives[call], [id]: line, ...read === undefined ? {} : { [FREE]: read } };
+          const calls = Object.keys(settings.archives);
+          for (const old of calls.slice(0, Math.max(0, calls.length - 64))) delete settings.archives[old];
+        }, callContext);
         for (const given of args.ids) {
           let name = given;
           try {
@@ -1487,12 +1553,19 @@ export class OptChat {
             if (given.replace(/^\[|\]$/g, "").length < 8) throw new Error("name a thread by its whole 8-character id");
             const id = await this.resolve(given);
             name = `[${short(id)}]`;
+            const stored = (await api.snapshot(SettingsDoc, callContext))?.archives?.[call];
+            const prior = stored && Object.hasOwn(stored, id) ? stored[id] : undefined;
+            if (prior) { lines.push(prior); free = stored![FREE] ?? free; continue; }
+            if (prior === undefined) await record(id, "");
             const result = await archiveThread(id);
             if (!result) { lines.push(`${name} is gone: cubed has no record of it`); continue; }
             free = result.free;
-            lines.push(`${name} ${result.already ? "was already archived" : "archived"}: ${result.disk}; history still reads it`);
+            const line = `${name} ${result.already && prior === undefined ? "was already archived" : "archived"}: ${result.disk}; history still reads it`;
+            await record(id, line, result.free);
+            lines.push(line);
             await this.reportArchived(id);
           } catch (error) {
+            if (callContext.abortSignal?.aborted) throw error;
             lines.push(`${name} not archived: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
@@ -1531,7 +1604,8 @@ export class OptChat {
         preSetup: Type.Optional(Type.String({ description: "The whole pre-setup script; \"\" removes it" })),
         preResume: Type.Optional(Type.String({ description: "The whole pre-resume script; \"\" removes it" })),
       }, { additionalProperties: false }),
-      // Saving the same scripts again changes nothing.
+      // Keyed by the call's task: a replay saves nothing and answers as the
+      // first run did, so it never puts back hooks the user changed since.
       replay: "safe",
       execute: async (args, api, callContext) => {
         if (!this.options.threads.writeHooks) return text("project hooks are not available");
@@ -1541,7 +1615,7 @@ export class OptChat {
         if (!inputs.some(id => users.includes(Number(id)))) {
           return text("not saved: no message of the user in this turn asks for it, and a thread's report cannot change hooks; ask the user to confirm in the chat");
         }
-        try { return text(await this.options.threads.writeHooks(args.project, { preSetup: args.preSetup, preResume: args.preResume })); }
+        try { return text(await this.options.threads.writeHooks(args.project, { preSetup: args.preSetup, preResume: args.preResume }, `${this.cacheKey}:hooks:${api.taskId}`)); }
         catch (error) { return text(`not saved: ${error instanceof Error ? error.message : String(error)}`); }
       },
     });
@@ -1556,7 +1630,7 @@ export class OptChat {
     }) : [];
     return defineExtension({
       name: "optchat",
-      tools: [zoom, date, projects, runners, spawn, tell, threads, history, diagnose, archive, usage, hooks, writeHooks, ...artifacts],
+      tools: [zoom, date, projects, runners, spawn, tell, threads, history, diagnose, archive, usage, hooks, writeHooks, ...artifacts].map(tool => this.guard(tool)),
       sections: [
         section("master", () => MASTER, { tag: false }),
         section("hooks", () => HOOKS_NOTE, { tag: false }),
@@ -1600,30 +1674,66 @@ export class OptChat {
     signal.throwIfAborted();
   }
 
-  /** Closes the chat. No node, turn, chat request or tool call starts; the
-   * model calls already out (the nodes being built, which may still send
-   * their round's further answers, and a chat request sent) get up to
-   * `closeMs` to come back and be stored with their usage. A tool already
-   * running is not waited for: Pi's close joins it and the reopen runs it
-   * again (replay "safe"). Only then is what is still out cut off,
-   * and counted in CutDoc: a reopen may send those again. A crash has no
-   * grace: every call out at it is sent again, uncounted (N2). */
+  /** Every tool of the chat runs through this. A close starts none: held
+   * as beforeTool holds a call, which also covers a replay's `execute`
+   * phase. The close's grace waits for one executing. At the cut, Pi aborts
+   * the call and it returns at once, so Pi's close is never held by work
+   * that ignores the abort: that work may go on (`spawn` stops at its next
+   * task and its git; `tell` and `archive` finish in cubed), which is why
+   * every tool is read-only or keyed (TOOL_REPLAY), and the cut counts it. */
+  private guard(tool: ToolRegistration): ToolRegistration {
+    if (!Object.hasOwn(TOOL_REPLAY, tool.name)) throw new Error(`optchat tool ${tool.name} has no replay rule (TOOL_REPLAY)`);
+    return { ...tool, execute: async (args, api, callContext) => {
+      const signal = callContext.abortSignal;
+      if (this.closing) {
+        this.heldTools.add(api.taskId);
+        try { await this.holdBack(signal, "tools"); }
+        finally { this.heldTools.delete(api.taskId); }
+      }
+      this.running.set(api.taskId, tool.name);
+      const work = (async () => tool.execute(args, api, callContext))();
+      void work.then(() => {}, () => {}).finally(() => { this.running.delete(api.taskId); });
+      if (!signal) return work;
+      return new Promise((resolve, reject) => {
+        // Only a close's abort cuts the call loose; a stop waits for it as before.
+        const cut = () => { if (this.closing) reject(signal.reason); };
+        if (signal.aborted) cut();
+        signal.addEventListener("abort", cut, { once: true });
+        work.then(resolve, reject).finally(() => { signal.removeEventListener("abort", cut); });
+      });
+    } };
+  }
+
+  /** Closes the chat. No node, turn, chat request, tool call or further
+   * summary answer starts; the model calls already out (the nodes being
+   * built and a chat request sent) and the tool calls executing get up to
+   * `closeMs` to come back and be stored, a node held before its next answer
+   * with its round. Only then is what is still out cut off, and counted in
+   * CutDoc: a reopen may send those calls and runs those tools again (keyed).
+   * The close ends within CLOSE_GRACE_MS + CLOSE_SETTLE_MS + CLOSE_JOIN_MS.
+   * A crash has no grace: every call out at it is sent again, uncounted (N2). */
   close(): Promise<void> {
     return this.closed ??= this.shut();
   }
 
-  /** Waits at most `ms` until no model call of the chat is out: no node
-   * being built, and no chat request sent whose answer is not stored yet
-   * (one held back by the gate in beforeRequest was never sent). Answers the
-   * nodes still being built and whether a chat request is still out. */
-  private async quiesce(ms: number): Promise<{ nodes: string[]; chat: boolean }> {
+  /** Waits at most `ms` until no model call or tool call of the chat is
+   * out: no node being built, no chat request sent whose answer is not
+   * stored yet (one held back by the gate in beforeRequest was never sent),
+   * and no tool executing or with its result not stored yet (one held back
+   * was never started). Answers the nodes still being built, whether a chat
+   * request is still out, and the tools still out by name. */
+  private async quiesce(ms: number): Promise<{ nodes: string[]; chat: boolean; tools: string[] }> {
     const deadline = Date.now() + ms;
     for (;;) {
-      const generation = (await this.live().catch(() => undefined))?.generation;
+      const live = await this.live().catch(() => undefined);
+      const generation = live?.generation;
       // Pi keeps `generation` from a request's start until its answer is stored.
       const chat = !!generation && !generation.retry && !generation.deferred && this.gated.requests === 0;
+      // A slot reads running from the call's intent until its result is stored.
+      const settling = (live?.tools ?? []).filter(slot => slot.status === "running" && slot.taskId !== undefined && !this.running.has(slot.taskId) && !this.heldTools.has(slot.taskId));
+      const tools = [...this.running.values(), ...settling.map(slot => slot.name)];
       const left = deadline - Date.now();
-      if ((!chat && !this.building.size) || left <= 0) return { nodes: [...this.building.keys()], chat };
+      if ((!chat && !this.building.size && !tools.length) || left <= 0) return { nodes: [...this.building.keys()], chat, tools };
       await delay(Math.min(20, left));
     }
   }
@@ -1639,23 +1749,38 @@ export class OptChat {
       const chat = out.chat && this.model ? [`${this.model.provider}/${this.model.id}`] : [];
       // Cut off at once, so no node sends another answer after this count.
       this.abort.abort();
-      if (compactor.length || chat.length) {
-        log.warn("model calls cut off at close: their cost is unknown, and the reopened chat may send them again", { chat, compactor, nodes: out.nodes });
+      if (compactor.length || chat.length || out.tools.length) {
+        log.warn("calls cut off at close: the model calls' cost is unknown, what the tools did is unknown and not undone, and the reopened chat may send and run them again",
+          { chat, compactor, nodes: out.nodes, tools: out.tools });
         await this.harness.commit(async tx => {
           const doc = await tx.doc(CutDoc);
-          // A key holds a slash, so it is never `__proto__`.
+          // A key holds a slash, so it is never `__proto__`; a tool's name is one of TOOL_REPLAY's.
           for (const key of chat) doc.chat[key] = (Object.hasOwn(doc.chat, key) ? doc.chat[key]! : 0) + 1;
           for (const key of compactor) doc.compactor[key] = (Object.hasOwn(doc.compactor, key) ? doc.compactor[key]! : 0) + 1;
+          if (out.tools.length) doc.tools ??= {};
+          for (const name of out.tools) doc.tools![name] = (Object.hasOwn(doc.tools!, name) ? doc.tools![name]! : 0) + 1;
         }, context).catch(error => { log.warn("calls cut off at close not counted", { error }); });
       }
     }
     this.abort.abort();
     // The cut-off calls' replies (usage, if any) are counted before Pi closes.
     await Promise.race([Promise.allSettled(this.building.values()), delay(CLOSE_SETTLE_MS, undefined, { ref: false })]);
-    await Promise.allSettled([...this.watchers.values()].map(async watching => (await watching)?.stop()));
-    await this.stopWatch?.().catch(() => {});
-    await this.syncing;
-    await (this.harness ?? this.storage)?.close(context).catch(() => {});
+    // Pi aborts every task and joins them; a tool cut off returns at once
+    // (guard) and a model call on its abort. Bounded all the same: past it
+    // the close goes on and the store is left to the process's exit.
+    const rest = (async () => {
+      await Promise.allSettled([...this.watchers.values()].map(async watching => (await watching)?.stop()));
+      await this.stopWatch?.().catch(() => {});
+      await this.syncing;
+      await (this.harness ?? this.storage)?.close(context).catch(() => {});
+      return true;
+    })();
+    // Held by its timer, so the close ends at the bound and not at the
+    // process's exit; let go once the close is done.
+    const bound = new AbortController();
+    const joined = await Promise.race([rest, delay(CLOSE_JOIN_MS, false, { signal: bound.signal }).catch(() => false)]);
+    bound.abort();
+    if (!joined) log.warn("the chat did not close in time; cubed's close goes on", { ms: CLOSE_JOIN_MS, tools: [...this.running.values()] });
     // pi-ai keeps a provider connection per cache key open for minutes
     // (Codex's WebSocket); it would hold cubed's exit that long.
     for (const key of [this.cacheKey, `${this.cacheKey}-compact`]) {

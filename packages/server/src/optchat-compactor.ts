@@ -41,6 +41,16 @@ export class OutOfRoom extends Error {}
  * the node is held, never cut. */
 export class Spent extends Error {}
 
+/** Thrown when `hold` holds a round before its next answer: nothing was
+ * sent, and the round so far went to `hold`. */
+export class Held extends Error {}
+
+/** A round between two answers: the messages its next answer is asked
+ * with, the versions seen, the answers that ran out of room, and the number
+ * of the next answer. Taken back as `round`, it asks that answer exactly as
+ * the round would have gone on. */
+export type Round = { messages: Message[]; seen: string[]; outOfRoom: number; answers: number };
+
 /** Bedrock's stop when input and output filled the model's context window;
  * pi-ai gives it as `length`. */
 const WINDOW_FULL = "model_context_window_exceeded";
@@ -193,6 +203,11 @@ export async function compactNode(options: {
   /** Answers this round may spend, TRIES at most; TRIES when not given. */
   answers?: number;
   signal?: AbortSignal;
+  /** A round held before (Round): asked on from where it stopped. */
+  round?: Round;
+  /** Before each answer is asked: true holds the round, nothing is sent and
+   * Held is thrown. It gets the round so far to keep. */
+  hold?: (round: Round) => Promise<boolean>;
   /** Right before each model call is sent; its reply comes to `onReply`. */
   onRequest?: () => void;
   /** Every model reply, failed ones included, before it is used: its usage. */
@@ -211,7 +226,7 @@ export async function compactNode(options: {
     ? `Compress this message into one line. Your line covers this message only. ${versionsAsked}\n${options.source.message}`
     : `Merge these two lines into one. Your line covers these two lines only. ${versionsAsked}\n${options.source.merge[0]}\n${options.source.merge[1]}`;
   const now = Date.now();
-  const messages: Message[] = [
+  const messages: Message[] = options.round ? options.round.messages : [
     { role: "system", content: COMPACT, timestamp: now },
     { role: "user", timestamp: now, content: [
       // The context comes first and in pieces, so compactor calls share its cache.
@@ -219,11 +234,12 @@ export async function compactNode(options: {
       { type: "text", text: step },
     ] },
   ];
-  const seen: string[] = [];
-  let outOfRoom = 0;
+  const seen: string[] = options.round ? [...options.round.seen] : [];
+  let outOfRoom = options.round?.outOfRoom ?? 0;
   let left = options.answers ?? TRIES;
-  for (let answers = 1; ; answers++) {
+  for (let answers = options.round?.answers ?? 1; ; answers++) {
     if (left <= 0) throw new Spent(`the compactor's answers for this node were spent before its lines (${answers - 1} this round)`);
+    if (await options.hold?.({ messages, seen, outOfRoom, answers })) throw new Held(`the round was held before answer ${answers}`);
     options.onRequest?.();
     const reply = await options.models.completeSimple(model, { messages }, {
       cacheRetention: "short",
