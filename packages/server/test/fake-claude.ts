@@ -60,7 +60,8 @@ const env = process.env;
 if (!env.CUBE_WORKSPACE_SOCKET || !env.CUBE_WORKSPACE_PATH || !env.CUBE_WORKSPACE_TOKEN || !env.CUBE_WORKSPACE_ROOT) fail("expected the cube workspace environment");
 const client = new WorkspaceClient({ base: env.CUBE_WORKSPACE_PATH!, transport: unixTransport(env.CUBE_WORKSPACE_SOCKET!) });
 // `forged`: a ready with another nonce, which cubed refuses; Claude Code goes on without the mod.
-const missing = env.FAKE_CLAUDE_MOD === "missing" || env.FAKE_CLAUDE_MOD === "forged";
+// `early`: no ready, and a turn printed at once (which no prompt asked for).
+const missing = env.FAKE_CLAUDE_MOD === "missing" || env.FAKE_CLAUDE_MOD === "forged" || env.FAKE_CLAUDE_MOD === "early";
 if (env.FAKE_CLAUDE_MOD === "forged") await client.ready(env.CUBE_WORKSPACE_TOKEN!, "0".repeat(64)).then(() => fail("a forged nonce was taken"), () => {});
 else if (!missing) await client.ready(env.CUBE_WORKSPACE_TOKEN!, env.CUBE_MOD_NONCE ?? fail("expected CUBE_MOD_NONCE"));
 
@@ -87,6 +88,7 @@ const usage = () => {
 const emit = (message: Record<string, unknown>) => process.stdout.write(`${JSON.stringify({ ...message, session_id: session })}\n`);
 emit({ type: "system", subtype: "init", model, cwd: process.cwd(), tools: ["Bash", "Read", "Write", "Edit"], plugins: [{ name: "cube", path: mod }] });
 
+if (env.FAKE_CLAUDE_MOD === "early") emit({ type: "assistant", parent_tool_use_id: null, message: { id: "msg_early", role: "assistant", model, content: [{ type: "text", text: "a turn of its own" }] } });
 let calls = 0;
 let current: AbortController | undefined;
 let ignoreInterrupt = false;

@@ -236,17 +236,19 @@ try {
 
   // Claude Code without the mod (it could not load it, or the mod's word is
   // forged): no prompt reaches it, so nothing runs on the host.
-  for (const kind of ["missing", "forged"]) {
+  // One hooks module: the mod's ready (its last hook) then says all of it is in.
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(mod, "hooks", "hooks.json"), "utf8")), { modules: ["./register.ts"] });
+  for (const kind of ["missing", "forged", "early"]) {
     const marker = path.join(root, `host-ran-${kind}`);
     const modless = await ClaudeAgent.open({ directory: path.join(root, `modless-${kind}`), threadId: "t1", workspace, model: "sonnet",
-      runtime: { ...runtime, modReadyMs: 1000, env: { ...runtime.env, FAKE_CLAUDE_MOD: kind } } });
+      runtime: { ...runtime, modReadyMs: kind === "early" ? 10_000 : 1000, env: { ...runtime.env, FAKE_CLAUDE_MOD: kind } } });
     try {
       const started = Date.now();
       await modless.submit("m1", `run touch ${marker}`);
       const shown = await until(() => modless.state().submissions[0]!.state !== "running" && modless.state().submissions[0]!, "the modless turn");
       assert.equal(shown.state, "failed");
       assert.match(shown.error ?? "", /started without cube's mod, so nothing was sent to it/);
-      assert.ok(Date.now() - started < 10000, "it fails within the bound");
+      assert.ok(Date.now() - started < (kind === "early" ? 5000 : 10000), "it fails within the bound (a turn before the mod's word: at once)");
       await delay(300);
       assert.ok(!fs.existsSync(marker), `${kind}: nothing ran on the host`);
       assert.deepEqual(modless.state().messages.filter(message => message.data.type === "assistant"), [], `${kind}: the child answered nothing`);
@@ -262,7 +264,7 @@ try {
       assert.ok(fs.existsSync(path.join(files, "control-ran")), "the mod ran it in the workspace");
     } finally { await control.close(); }
   }
-  console.log("ok: a child whose mod is missing or forges its ready gets no prompt: the turn fails, nothing runs on the host");
+  console.log("ok: a child whose mod is missing, forges its ready or prints a turn first gets no prompt: killed, the turn fails, nothing runs on the host");
 
   // Background agents. A turn that ends with one running leaves the thread
   // waiting: the child stays open past the idle close, and the turn Claude

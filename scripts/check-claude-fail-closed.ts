@@ -77,28 +77,44 @@ const guest = new LocalGuestTransport(path.join(temp, "guest"));
 const workspace = new VmWorkspace({ guest, leases: new LeaseStore(path.join(temp, "thread")), owner: "claude-code", binding: guest.binding });
 const BASE = "/api/threads/t1/workspace";
 const socket = path.join(temp, "workspace.sock");
+/** Every nonce a mod sent, in order. */
+const nonces: string[] = [];
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url!, "http://localhost");
   let raw = "";
   for await (const chunk of request) raw += chunk;
   if (!url.pathname.startsWith(BASE)) return response.writeHead(404).end("{}");
   const parts = url.pathname.slice(BASE.length).split("/").filter(Boolean).map(decodeURIComponent);
+  if (parts[0] === "claude-ready" && raw) nonces.push((JSON.parse(raw) as { nonce: string }).nonce);
   const result = await workspaceRoute(workspace, { method: request.method!, parts, query: url.searchParams, headers: request.headers, body: raw ? JSON.parse(raw) as Record<string, unknown> : {} });
   response.writeHead(result.status, { "content-type": "application/json" }).end(JSON.stringify(result.body));
 });
 await new Promise<void>(resolve => server.listen(socket, resolve));
 
 /** A copy of cube's mod, as cubed lays it, then broken as named. */
-function mod(kind: "cube" | "missing" | "syntax" | "throws" | "nomodules" | "bash-throws"): string {
-  const target = path.join(temp, `mod-${kind}`);
-  if (kind === "missing") return target;
+type Kind = "cube" | "missing" | "syntax" | "throws" | "nomodules" | "bash-throws" | "indirect" | "twice" | "register-throws" | "missing-module" | "stale" | "replay" | "late";
+function mod(kind: Kind, target = path.join(temp, `mod-${kind}`)): string {
   fs.rmSync(target, { recursive: true, force: true });
+  if (kind === "missing") return target;
   fs.cpSync(path.resolve(import.meta.dirname, "../packages/claude-mod"), target, { recursive: true, filter: source => !source.includes(`${path.sep}.claude-plugin${path.sep}types`) });
   const register = path.join(target, "hooks/register.ts");
   const source = fs.readFileSync(register, "utf8");
   if (kind === "syntax") fs.appendFileSync(register, "\nexport const = ;\n");
   if (kind === "throws") fs.appendFileSync(register, "\nthrow new Error('cube check: load fails')\n");
   if (kind === "nomodules") fs.writeFileSync(path.join(target, "hooks/hooks.json"), "{}");
+  if (kind === "missing-module") fs.writeFileSync(path.join(target, "hooks/hooks.json"), JSON.stringify({ modules: ["./gone.ts"] }));
+  const opening = "export const register: Register = on => {";
+  assert.ok(source.includes(opening));
+  const ready = "if (scope && nonce) await scope.client.ready(scope.token, nonce)";
+  assert.ok(source.includes(ready));
+  // Claude Code's check refuses `on` handed on through a value, and a second unmatched session.start.
+  if (kind === "indirect") fs.writeFileSync(register, source.replace(opening, `${opening}\n  const handles = [on]\n  handles[0]!('session.end', ($: never, e: never, next: (e: never) => unknown) => next(e))`));
+  if (kind === "twice") fs.writeFileSync(register, source.replace(opening, `${opening}\n  on('session.start', ($, e, next) => next(e))`));
+  if (kind === "register-throws") fs.writeFileSync(register, source.replace(opening, `${opening}\n  if (Date.now() > 0) throw new Error('cube check: register fails')`));
+  // The mod loads, but its word is refused: another lease's token, another child's nonce, too late.
+  if (kind === "stale") fs.writeFileSync(register, source.replace(ready, "if (scope && nonce) await scope.client.ready('0'.repeat(64), nonce)"));
+  if (kind === "replay") fs.writeFileSync(register, source.replace(ready, "if (scope && nonce) await scope.client.ready(scope.token, (await $.env.get('CUBE_CHECK_REPLAY')) ?? nonce)"));
+  if (kind === "late") fs.writeFileSync(register, source.replace(ready, "if (scope && nonce) { await new Promise(resolve => setTimeout(resolve, 4000)); await scope.client.ready(scope.token, nonce) }"));
   if (kind === "bash-throws") {
     const hook = "const result = await bash(scope, e.tool_use_id, e)";
     assert.ok(source.includes(hook));
@@ -109,9 +125,9 @@ function mod(kind: "cube" | "missing" | "syntax" | "throws" | "nomodules" | "bas
 const hostRan = (cwd: string) => fs.existsSync(path.join(cwd, MARK));
 
 // Part 1: cubed's ClaudeAgent.
-const runtime = (modDir: string): ClaudeRuntime => ({
+const runtime = (modDir: string, extra: Record<string, string> = {}, modReadyMs = 15000): ClaudeRuntime => ({
   command: ["/usr/bin/env", ...Object.entries(apiEnv).map(([name, value]) => `${name}=${value}`), `CLAUDE_CONFIG_DIR=${path.join(temp, "config")}`, `HOME=${temp}`, claude],
-  mod: modDir, socket, modReadyMs: 20000,
+  mod: modDir, socket, modReadyMs, env: extra,
 });
 async function turn(agent: ClaudeAgent, requestId: string): Promise<{ state: string; error: string | null; results: string[] }> {
   await agent.submit(requestId, "check");
@@ -149,19 +165,51 @@ try {
     } finally { await agent.close(); }
     console.log("ok: cube's mod as cubed loads it: Bash and Read reach the workspace, on a start and a resume");
   }
-  for (const kind of ["missing", "syntax", "throws", "nomodules"] as const) {
-    tool = "Bash";
+  /** One turn with a broken mod: refused before any prompt. */
+  const refused = async (agent: ClaudeAgent, what: string, requestId = "c1") => {
     const before = requests;
+    const result = await turn(agent, requestId);
+    assert.equal(result.state, "failed", `${what}: the turn fails`);
+    assert.match(result.error ?? "", /started without cube's mod, so nothing was sent to it/, what);
+    assert.equal(requests, before, `${what}: the model was never asked`);
+    assert.ok(!hostRan(agent.root), `${what}: nothing ran on the host`);
+  };
+  // N1-N6: a mod Claude Code does not load (or whose hooks never run).
+  for (const kind of ["indirect", "twice", "syntax", "throws", "register-throws", "missing-module", "nomodules", "missing"] as const) {
+    tool = "Bash";
     const agent = await ClaudeAgent.open({ directory: path.join(temp, `agent-${kind}`), threadId: "t1", workspace, runtime: runtime(mod(kind)), model: "sonnet" });
+    try { await refused(agent, kind); } finally { await agent.close(); }
+  }
+  console.log("ok: N1-N6: a mod claude code does not load (on handed on, a second session.start, a syntax error, a throw at load or in register, a missing module, no modules, no folder): no prompt, no model request, nothing on the host");
+  // N7-N9: the mod loads, but its word is refused.
+  {
+    const stale = await ClaudeAgent.open({ directory: path.join(temp, "agent-stale"), threadId: "t1", workspace, runtime: runtime(mod("stale")), model: "sonnet" });
+    try { await refused(stale, "N7 another lease's token"); } finally { await stale.close(); }
+    const first = nonces.length;
+    const good = await ClaudeAgent.open({ directory: path.join(temp, "agent-replay-good"), threadId: "t1", workspace, runtime: runtime(mod("cube")), model: "sonnet" });
+    try { tool = "Bash"; assert.equal((await turn(good, "g1")).state, "completed"); } finally { await good.close(); }
+    const used = nonces.slice(first).at(-1)!;
+    const replay = await ClaudeAgent.open({ directory: path.join(temp, "agent-replay"), threadId: "t1", workspace, runtime: runtime(mod("replay"), { CUBE_CHECK_REPLAY: used }), model: "sonnet" });
+    try { await refused(replay, "N8 the previous child's nonce"); } finally { await replay.close(); }
+    assert.equal(nonces.at(-1), used, "the replayed nonce was the one sent");
+    const late = await ClaudeAgent.open({ directory: path.join(temp, "agent-late"), threadId: "t1", workspace, runtime: runtime(mod("late"), {}, 2000), model: "sonnet" });
+    try { await refused(late, "N9 after the bound"); } finally { await late.close(); }
+  }
+  console.log("ok: N7-N9: a ready under another lease's token, with the previous child's nonce, or after the bound: refused, no prompt, no model request");
+  // N10: a session that worked, resumed with the mod broken or gone.
+  for (const kind of ["register-throws", "missing"] as const) {
+    tool = "Bash";
+    const folder = path.join(temp, `mod-resume-${kind}`);
+    const agent = await ClaudeAgent.open({ directory: path.join(temp, `agent-resume-${kind}`), threadId: "t1", workspace, runtime: runtime(mod("cube", folder)), model: "sonnet" });
     try {
-      const result = await turn(agent, "c1");
-      assert.equal(result.state, "failed");
-      assert.match(result.error ?? "", /started without cube's mod, so nothing was sent to it/);
-      assert.equal(requests, before, `${kind}: the model was never asked`);
-      assert.ok(!hostRan(agent.root), `${kind}: nothing ran on the host`);
+      assert.equal((await turn(agent, "r1")).state, "completed");
+      assert.ok(agent.sessionId, "a session to resume");
+      mod(kind, folder);
+      await agent.setModel("opus");
+      await refused(agent, `N10 resume, ${kind}`, "r2");
     } finally { await agent.close(); }
   }
-  console.log("ok: a mod claude code does not load (no folder, a syntax error, a throw at load, no hooks module): no prompt, no model request, nothing on the host");
+  console.log("ok: N10: a resumed session with its mod broken or gone: no prompt, no model request");
 
   // Part 2: the gate bypassed, the prompt written to a modless child.
   async function direct(modDir: string, step: "Bash" | "Read", flags: "cubed" | "before"): Promise<{ results: string[]; cwd: string }> {

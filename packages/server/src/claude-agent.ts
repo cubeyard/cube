@@ -15,8 +15,9 @@
  * The mod must be in before Claude Code gets a prompt: without it Claude
  * Code runs Bash, Read, Write and Edit itself, on the cubed host. A child
  * gets no prompt until the mod's last hook sends its nonce back
- * (claude-ready.ts) within MOD_READY_MS; otherwise it is ended and the turn
- * fails, nothing sent. Its `--settings` hook refuses every tool that would
+ * (claude-ready.ts) within MOD_READY_MS; otherwise it is killed and the turn
+ * fails, nothing sent, and so is a child that prints a turn before it (no
+ * prompt reached it, so that cannot be cube's). Nothing respawns it. Its `--settings` hook refuses every tool that would
  * act on the host and reaches Claude Code itself, which a tool the mod
  * answered never does, and `dontAsk` refuses what would ask. Durability is weaker than Pi's: Claude Code keeps
  * its own session (resumed with --resume) but has no task checkpoints, so a
@@ -64,7 +65,7 @@ export const BACKGROUND_MS = 4 * 60 * 60_000;
 /** How long a finished background agent's follow-up turn may take to start. */
 const CONTINUE_GRACE_MS = 2 * 60_000;
 /** How long a new child may take to say the mod is in. */
-export const MOD_READY_MS = 60_000;
+export const MOD_READY_MS = 15_000;
 const MOD_MISSING = "claude code started without cube's mod, so nothing was sent to it: its tools would have run on the cubed host, not in the thread's machine";
 /** The tools of --tools that act on nothing but Claude Code's own state
  * (its task list, plan mode) or Anthropic's (WebSearch). */
@@ -142,7 +143,7 @@ export class ClaudeAgent {
   private readonly submissions: ClaudeSubmission[];
   private readonly messages: ClaudeMessage[];
   private partial: ClaudePartial = [];
-  private child: { process: ChildProcessWithoutNullStreams; exited: Promise<void>; stderr: string[]; ready: Promise<"ready" | "exited" | "late"> } | undefined;
+  private child: { process: ChildProcessWithoutNullStreams; exited: Promise<void>; stderr: string[]; ready: Promise<"ready" | "exited" | "late">; attached: boolean } | undefined;
   private interrupt: { timer: NodeJS.Timeout; kill?: NodeJS.Timeout } | undefined;
   /** Bash calls Claude Code started whose results have not come back, by
    * tool_use_id: the mod runs each as `claude:<id>:bash` in the thread VM. */
@@ -259,7 +260,7 @@ export class ClaudeAgent {
       if (submission.state !== "running" || this.child !== child || ready === "exited" || this.interrupt || this.closing) return;
       if (ready === "ready") { this.write(child.process, { type: "user", session_id: "", parent_tool_use_id: null, message: { role: "user", content: [{ type: "text", text }] } }); return; }
       this.ending = { state: "failed", reason: MOD_MISSING };
-      void this.endChild();
+      child.process.kill("SIGKILL");
     });
   }
 
@@ -347,7 +348,8 @@ export class ClaudeAgent {
     const ready = Promise.race([expected.ready.then(() => "ready" as const), exited.then(() => "exited" as const),
       new Promise<"late">(resolve => { timer = setTimeout(() => resolve("late"), this.runtime.modReadyMs ?? MOD_READY_MS); timer.unref(); })])
       .finally(() => { clearTimeout(timer); expected.cancel(); });
-    const current = { process: child, exited, stderr, ready };
+    const current = { process: child, exited, stderr, ready, attached: false };
+    void ready.then(state => { current.attached = state === "ready"; });
     this.child = current;
     child.stdin.on("error", () => {});
     child.stderr.setEncoding("utf8");
@@ -377,6 +379,12 @@ export class ClaudeAgent {
     if (this.closing || !line.trim()) return;
     let data: Record<string, unknown>;
     try { data = JSON.parse(line) as Record<string, unknown>; } catch { return; }
+    // A turn from a child the mod never said it is in: not cube's. Killed.
+    if (this.child && !this.child.attached && (data.type === "assistant" || data.type === "stream_event" || data.type === "result")) {
+      this.ending = { state: "failed", reason: MOD_MISSING };
+      this.child.process.kill("SIGKILL");
+      return;
+    }
     if (data.type === "control_response" || data.type === "keep_alive") return;
     // A turn nobody sent (Claude Code going on after a background agent's
     // notification) is a run of its own.

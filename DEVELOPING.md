@@ -251,9 +251,14 @@ engine with the routes answered in memory; no model call) and, with
 arguments against a scripted Messages API on loopback (no login, no model) and
 checks that it runs no subagent, fresh or resumed, while Bash still works.
 `node scripts/check-claude-fail-closed.ts` does the same with cubed's
-`ClaudeAgent` and mods Claude Code cannot load: no prompt, no model request
-and nothing run on the host; and, the ready gate bypassed, every host tool
-refused (ARCHITECTURE.md, "Claude Code threads"). Neither runs in CI (both
+`ClaudeAgent` and mods Claude Code cannot load or whose word is refused
+(N1-N10: `on` handed on, a second `session.start`, a syntax error, a throw
+at load or in `register`, a missing module, no modules, no folder, another
+lease's token, the previous child's nonce, too late, and both on
+`--resume`): no prompt, no model request and nothing run on the host; and,
+the ready gate bypassed, every host tool refused (ARCHITECTURE.md, "Claude
+Code threads"). `claude plugin validate --strict` passes a `register` that
+throws; `claude plugin test` fails it; the gate refuses it either way. Neither runs in CI (both
 need `claude`); run them for any change to the mod, `claudeArguments` or
 the Claude Code version.
 

@@ -307,12 +307,16 @@ So it fails closed three ways:
 
 | layer | what it stops |
 | --- | --- |
-| ready gate: each child gets a nonce (`CUBE_MOD_NONCE`); the mod's last hook, at `session.start` (before any prompt, on a start and a resume), posts it to `…/workspace/claude-ready` under the child's lease token (`claude-ready.ts`). cubed writes no prompt before it; after 60 s (`MOD_READY_MS`) or an exit the child is ended and the turn fails (`claude code started without cube's mod, so nothing was sent to it`) | a mod that did not load: no prompt, so no model request and no tool |
+| ready gate: each child gets a nonce (`CUBE_MOD_NONCE`); the mod's last hook, at `session.start` (before any prompt, on a start and a resume), posts it to `…/workspace/claude-ready` under the child's lease token (`claude-ready.ts`). cubed writes no prompt before it; after 15 s (`MOD_READY_MS`), an exit, or a turn line the child prints first, it is killed and the turn fails (`claude code started without cube's mod, so nothing was sent to it`); nothing respawns it. The nonce is single use and the child's own; the lease must be cubed's `claude-code` lease | a mod that did not load: no prompt, so no model request and no tool |
 | `--settings` PreToolUse hook (`exit 2`) on every tool but the in-process ones of `--tools` (task list, plan mode, WebSearch), and `dontAsk` | a host tool that reaches Claude Code itself: the mod answers its tools above that hook, so it runs only when no mod hook did |
 | `.catch` on every guard of the mod | a mod hook that throws, misanswers or overruns: refused, not handed to Claude Code |
 
 None of these changes the model's request (checked byte for byte with the
-real CLI). `scripts/check-claude-fail-closed.ts` runs all three against a
+real CLI). The module must keep exactly one `on('session.start')` and one
+hooks module: Claude Code's check refuses a second unmatched
+`session.start` and then runs without the mod (the gate refuses that
+child), so tools registered at `session.start` (#221's `cubeHooks`) go in
+the same hook as the ready, before it. `scripts/check-claude-fail-closed.ts` runs all three against a
 real `claude` and a scripted Messages API, with a control that shows a
 modless `claude` with cubed's earlier arguments running `pwd` on the host.
 Prompts go to stdin under their request ID (a repeated ID is accepted once), stop
