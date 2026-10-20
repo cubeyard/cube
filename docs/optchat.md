@@ -132,12 +132,22 @@ most one per node being asked. A commit that fails while cubed runs on
 loses nothing yet: memory still counts the answer and the node's next
 commit stores it; a restart before that gives those answers back.
 
-A close (cubed stops, updates or restarts) starts no new work: no node, no
-turn, and no new request of a running turn (the request hook holds it back,
-unsent, until Pi closes; the reopened run sends it). It then waits up to 10
-s (`CLOSE_GRACE_MS`) for the model calls already out: the nodes being built
-(each may finish its round of answers) and a chat request sent and not yet
-stored. Each that comes back is stored with its usage, the node and its view
+A close (cubed stops, updates or restarts) starts no new node, no turn, no
+new request of a running turn and no tool call (the request and tool hooks
+hold each back, unstarted, until Pi closes; the reopened run starts it,
+once). It then waits up to 10 s (`CLOSE_GRACE_MS`) for the model calls
+already out: the nodes being built and a chat request sent and not yet
+stored. A node being built may still send further answers of its round in
+the grace (format feedback, or more room after a `length` stop): new paid
+calls during the close, and one started late is likely cut off and its cost
+wasted (counted). Holding them back instead would throw the node's round
+away and send its first answer again after the reopen; this is open. A
+tool already running when the close begins is not waited for: Pi's close
+joins it (unbounded for a tool that ignores the abort, such as `spawn`),
+its result is not stored, and the reopened run starts it again (replay
+`safe`). Today's tools happen to be idempotent there (`spawn` and `tell`
+by request id, artifacts by task id, `archive`, the hooks); a tool that is
+not must say so (`replay: "unsafe"`) or be made so. Each that comes back is stored with its usage, the node and its view
 too, so a reopen sends none of them again. Only what is still out after the
 grace is cut off; each such call is logged and counted in
 `cube.optchat.cut`, and the reopen sends it again, at most once per call (at
@@ -554,8 +564,12 @@ once; turns carry three marks, compactions two; no two calls write the same
 prefix at once, across reopens too, and no request is sent twice.
 `optchat-close-test.ts` closes with summaries and a chat request out:
 within the grace they are stored with their usage and the reopen sends
-none again, and the turn's next step is not sent while closing; past the
-grace (forced), each cut-off call is counted and sent again at most once.
+none again, and the tool and next step of the turn are not started while
+closing, then once after the reopen; a tool running at the close runs again
+once after it; past the grace (forced), each cut-off call is counted and
+sent again at most once. `optchat-cache-test.ts` cuts off a Codex call
+waiting in single flight while its session's WebSocket is cached and idle:
+it sends nothing.
 `optchat-view-fault-test.ts` makes the stored view's
 commits fail after their nodes are stored, then reopens: the turns after it
 send the views the uninterrupted chat sends. Hit rates are modelled offline (spec §3.3), not measured on

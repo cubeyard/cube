@@ -1,5 +1,5 @@
-/** OptChat's close, offline with a faux model: a close starts no new work,
- * waits for the model calls already out (summaries being built, a chat
+/** OptChat's close, offline with a faux model: a close starts no new turn,
+ * node, chat request or tool, waits for the model calls already out (summaries being built, a chat
  * request sent) and stores their answers and usage, so the reopened chat
  * sends none of them again. Only a call still out after the close's grace
  * is cut off: counted as unknown, and sent again at most once each. */
@@ -44,8 +44,12 @@ faux.setResponses(Array.from({ length: 4_000 }, () => async (request, options) =
 }));
 const models = createModels();
 models.setProvider(faux.provider);
+/** The `projects` tool's runs, by when they started, and how long one takes. */
+let phase: "open" | "closing" | "reopened" = "open";
+const runs = { open: 0, closing: 0, reopened: 0 };
+let toolMs = 0;
 const threads: OptThreads = {
-  async projects() { return "projects: cube"; }, async runners() { return "no runners"; },
+  async projects() { runs[phase]++; if (toolMs) await delay(toolMs); return "projects: cube"; }, async runners() { return "no runners"; },
   async spawn() { throw new Error("unused"); }, async tell() {}, async describe() { return ""; },
   async events() { throw new Error("unused"); }, async history() { return null; },
 };
@@ -66,7 +70,7 @@ const twice = (kind: Sent["kind"], from = 0) => {
   return keys.length - new Set(keys).size;
 };
 const sum = (calls: Record<string, number> | undefined) => Object.values(calls ?? {}).reduce((total, count) => total + count, 0);
-const reset = () => { sent.length = 0; Object.assign(open, { turn: 0, compaction: 0 }); Object.assign(aborted, { turn: 0, compaction: 0 }); };
+const reset = () => { phase = "open"; Object.assign(runs, { open: 0, closing: 0, reopened: 0 }); sent.length = 0; Object.assign(open, { turn: 0, compaction: 0 }); Object.assign(aborted, { turn: 0, compaction: 0 }); };
 
 // 1. Summaries out at a close come back within its grace and are stored,
 // with their usage; the reopened chat asks for none of them again.
@@ -98,29 +102,64 @@ const reset = () => { sent.length = 0; Object.assign(open, { turn: 0, compaction
   } finally { await chat.close(); }
 }
 
-// 2. A chat request out at a close comes back and is stored; the run's next
-// request is not sent until the reopen, and then once.
-{
+// 2. A chat request out at a close comes back and is stored; the tool it
+// calls is not started, nor the run's next request sent, until the reopen,
+// and then each once. With a quick tool and a slow one.
+for (const ms of [0, 200]) {
   reset();
-  const directory = path.join(root, "turn");
+  toolMs = ms;
+  const directory = path.join(root, `turn-${ms}`);
   let chat = await chatAt(directory, 5_000);
   try {
     hold = { turn: 300, compaction: 0 };
     await chat.send(`message 0: ${"word ".repeat(30)} #tool`, "r0");
     await until(() => open.turn > 0, "the turn's first request is out");
+    phase = "closing";
     await chat.close();
     assert.equal(open.turn, 0, "the close waited for the chat's request");
     assert.equal(aborted.turn, 0, "and did not cut it off");
+    assert.equal(runs.closing, 0, `the tool it called was not started while closing (${ms} ms tool)`);
     assert.equal(sent.filter(call => call.kind === "turn").length, 1, "the step after it was not sent while closing");
     hold = { turn: 0, compaction: 0 };
+    phase = "reopened";
     chat = await chatAt(directory, 5_000);
     await quiet(chat);
+    assert.equal(runs.reopened, 1, "the reopened run started the tool, once");
+    assert.equal(runs.open + runs.closing + runs.reopened, 1, "and it ran once in all");
     assert.equal(sent.filter(call => call.kind === "turn").length, 2, "the reopened run sent its next step");
     assert.equal(twice("turn"), 0, "and no step twice");
     assert.equal(twice("compaction"), 0, "nor any summary");
     const usage = await chat.usage();
     assert.equal(sum(usage.cut?.chat), 0, "nothing is counted as cut off");
-  } finally { await chat.close(); }
+  } finally { await chat.close(); toolMs = 0; }
+}
+
+// 2b. A tool already running when the close begins is not waited for: Pi's
+// close joins it, but its result is not stored, so the reopened run starts
+// it again (replay "safe"). Unchanged by the gate; recorded here, so a
+// change to it is seen. Every tool of the chat must stay safe to run twice.
+{
+  reset();
+  toolMs = 300;
+  const directory = path.join(root, "tool-running");
+  let chat = await chatAt(directory, 5_000);
+  try {
+    await chat.send(`message 0: ${"word ".repeat(30)} #tool`, "r0");
+    await until(() => runs.open > 0, "the tool is running");
+    phase = "closing";
+    const started = Date.now();
+    await chat.close();
+    const took = Date.now() - started;
+    assert.equal(runs.closing, 0, "no tool started while closing");
+    assert.ok(took >= 200, `the close joined the running tool (${took} ms)`);
+    phase = "reopened";
+    toolMs = 0;
+    chat = await chatAt(directory, 5_000);
+    await quiet(chat);
+    assert.equal(runs.open, 1);
+    assert.equal(runs.reopened, 1, "the reopened run ran it again, once");
+    assert.equal(twice("turn"), 0, "no request sent twice");
+  } finally { await chat.close(); toolMs = 0; }
 }
 
 // 3. Forced: summaries still out after the grace are cut off. The close ends

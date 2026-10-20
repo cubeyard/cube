@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
 import { zstdDecompressSync } from "node:zlib";
-import { createModels, InMemoryCredentialStore, type Message, type Models, type Tool } from "@earendil-works/pi-ai";
+import { cleanupSessionResources, createModels, InMemoryCredentialStore, type Message, type Models, type Tool } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { streamSimple as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
@@ -340,6 +340,62 @@ for (const lines of [9, 100, 500]) {
   await Promise.all([d, e]);
   bodies.length = 0;
   respond = () => new Response("{}", { status: 400 });
+
+  // A call cut off (a close of cubed) while it waits in single flight is
+  // never sent, even when its session holds a cached, idle Codex WebSocket:
+  // pi-ai sends on that socket without looking at the signal. The sockets
+  // are fakes behind globalThis.WebSocket, which pi-ai takes them from.
+  const frames: string[] = [];
+  class FakeSocket extends EventTarget {
+    readyState = 0;
+    constructor() { super(); setTimeout(() => { this.readyState = 1; this.dispatchEvent(new Event("open")); }); }
+    send(data: string) {
+      frames.push((JSON.parse(data) as { type: string }).type);
+      const reply = (event: object) => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) }));
+      setTimeout(() => {
+        reply({ type: "response.created", response: { id: "resp_ws" } });
+        reply({ type: "response.completed", response: { id: "resp_ws", status: "completed", output: [], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } });
+      });
+    }
+    close() { if (this.readyState === 3) return; this.readyState = 3; this.dispatchEvent(Object.assign(new Event("close"), { code: 1000, reason: "", wasClean: true })); }
+  }
+  const realSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeSocket as unknown as typeof WebSocket;
+  try {
+    const ws = cachedModels(direct, () => "optchat-ws", { task: false });
+    const wsOptions = { apiKey: `x.${claim}.y`, transport: "websocket" as const, maxRetries: 0 };
+    // Another node of the session just finished: its socket is cached, idle.
+    const done = await ws.completeSimple(model, { messages: request(render(100, 40)) }, wsOptions);
+    assert.notEqual(done.stopReason, "error", done.errorMessage ?? "");
+    assert.deepEqual(frames, ["response.create"], "the session's socket was used once and kept");
+    // A writer of the waiter's prefix, on its own session and on SSE, that never begins.
+    respond = captured => {
+      order.push(`fetch ${(captured.body.input as Array<{ content?: unknown[] }>)[0]!.content!.length}`);
+      return new Response(new ReadableStream<Uint8Array>({ start: controller => { streams.push(controller); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const lead = ws.completeSimple(model, { messages: request(render(100, 8)) }, { ...options, sessionId: "optchat-ws-lead" });
+    await until(() => order.length >= 1);
+    const cutOff = new AbortController();
+    const waiter = ws.completeSimple(model, { messages: request(render(108, 8)) }, { ...wsOptions, signal: cutOff.signal });
+    const other = ws.completeSimple(model, { messages: request(render(112, 8)) }, wsOptions);
+    await sleep(30);
+    assert.deepEqual(frames, ["response.create"], "the waiters wait while their prefix is written");
+    cutOff.abort();
+    assert.equal((await waiter).stopReason, "aborted");
+    await sleep(50);
+    assert.deepEqual(frames, ["response.create"], "and, cut off, one sends nothing on the idle socket; the other still waits");
+    for (const stream of streams.splice(0)) stream.error(new Error("done"));
+    await lead;
+    const went = await other;
+    assert.notEqual(went.stopReason, "error", went.errorMessage ?? "");
+    assert.deepEqual(frames, ["response.create", "response.create"], "once the writer ends, the other goes, once");
+  } finally {
+    globalThis.WebSocket = realSocket;
+    cleanupSessionResources("optchat-ws");
+    order.length = 0;
+    bodies.length = 0;
+    respond = () => new Response("{}", { status: 400 });
+  }
 
   // reasoning.context all_turns only for 5.6 and later (the SDK's default
   // there); gpt-5.5 and older are not sent it (no live check yet).

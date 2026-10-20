@@ -14,7 +14,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { JsonRepresentation } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { cleanupSessionResources, Type, type AssistantMessage, type Message, type Models, type Usage } from "@earendil-works/pi-ai";
-import { createRegistry, defineDoc, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, ROOT_CONVERSATION_ID, section, type LiveState, type Conversation, type ConversationId, type Cursor, type Page, type EntryId, type EntryRecord } from "@earendil-works/pi-durable";
+import { createRegistry, defineDoc, defineExtension, defineTool, GenerationTask, Harness, hook, LiveDoc, ROOT_CONVERSATION_ID, section, ToolTask, type LiveState, type Conversation, type ConversationId, type Cursor, type Page, type EntryId, type EntryRecord } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { openStorage } from "./durable-agent.ts";
 import { agents } from "./claude-agent.ts";
@@ -496,8 +496,9 @@ export class OptChat {
   private readonly building = new Map<string, Promise<void>>();
   /** The compactor calls out now: node → `provider/model`. */
   private readonly calling = new Map<string, string>();
-  /** Chat requests held back by a close, unsent, until Pi closes. */
-  private gated = 0;
+  /** Chat requests and tool calls held back by a close, unstarted, until Pi
+   * closes. */
+  private readonly gated = { requests: 0, tools: 0 };
   private readonly abort = new AbortController();
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private watchTimer: ReturnType<typeof setInterval> | undefined;
@@ -1567,16 +1568,16 @@ export class OptChat {
           catch { return undefined; }
         }, { tag: false }),
       ],
-      hooks: [hook(GenerationTask, { beforeRequest: async (request, api, callContext) => {
+      hooks: [hook(ToolTask, { beforeTool: async (_call, _api, callContext) => {
+        // A close starts no tool either: the call waits before its intent is
+        // recorded, until Pi closes and aborts it (a throw on an aborted
+        // invocation is not a block), so the reopened run starts it once.
+        if (this.closing) await this.holdBack(callContext.abortSignal, "tools");
+        return undefined;
+      } }), hook(GenerationTask, { beforeRequest: async (request, api, callContext) => {
         // A close sends no new request: this one waits, unsent, until Pi
         // closes and aborts it; the reopened run sends it then, once.
-        const signal = callContext.abortSignal;
-        if (this.closing && signal) {
-          this.gated++;
-          try { if (!signal.aborted) await new Promise(resolve => { signal.addEventListener("abort", resolve, { once: true }); }); }
-          finally { this.gated--; }
-          signal.throwIfAborted();
-        }
+        if (this.closing) await this.holdBack(callContext.abortSignal, "requests");
         // The turn's images, read from the store for this request only.
         const support = this.imageSupport();
         const messages = withImages(request.messages, { load: id => this.media.get(id), refused: support.reason, limit: MEDIA_LIMITS.perTurn, bytes: MEDIA_LIMITS.turnBytes });
@@ -1589,9 +1590,22 @@ export class OptChat {
     });
   }
 
-  /** Closes the chat. No new work starts; the model calls already out (the
-   * nodes being built, a chat request sent) get up to `closeMs` to come back
-   * and be stored with their usage. Only then is what is still out cut off,
+  /** Holds a request or a tool call of the chat while it closes, until Pi
+   * aborts its invocation; then throws, so it never starts. */
+  private async holdBack(signal: AbortSignal | undefined, kind: "requests" | "tools"): Promise<void> {
+    if (!signal) return;
+    this.gated[kind]++;
+    try { if (!signal.aborted) await new Promise(resolve => { signal.addEventListener("abort", resolve, { once: true }); }); }
+    finally { this.gated[kind]--; }
+    signal.throwIfAborted();
+  }
+
+  /** Closes the chat. No node, turn, chat request or tool call starts; the
+   * model calls already out (the nodes being built, which may still send
+   * their round's further answers, and a chat request sent) get up to
+   * `closeMs` to come back and be stored with their usage. A tool already
+   * running is not waited for: Pi's close joins it and the reopen runs it
+   * again (replay "safe"). Only then is what is still out cut off,
    * and counted in CutDoc: a reopen may send those again. A crash has no
    * grace: every call out at it is sent again, uncounted (N2). */
   close(): Promise<void> {
@@ -1607,7 +1621,7 @@ export class OptChat {
     for (;;) {
       const generation = (await this.live().catch(() => undefined))?.generation;
       // Pi keeps `generation` from a request's start until its answer is stored.
-      const chat = !!generation && !generation.retry && !generation.deferred && this.gated === 0;
+      const chat = !!generation && !generation.retry && !generation.deferred && this.gated.requests === 0;
       const left = deadline - Date.now();
       if ((!chat && !this.building.size) || left <= 0) return { nodes: [...this.building.keys()], chat };
       await delay(Math.min(20, left));
