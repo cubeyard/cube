@@ -1,18 +1,17 @@
-/** Operator admission of runners, and the local runner: one `cube-runner` on
- * this host, reached over loopback, initialized and enrolled by one command.
- * Admission never provisions or modifies a runner; the local runner's state
- * is written by `cube-runner init` alone and is never rebound. */
+/** Operator admission of runners, and the local runner: one `berth vm` on
+ * this host, reached over loopback, set up and enrolled by one command that
+ * can be run again. Admission never provisions or modifies a runner; the
+ * local berth's directory is written by berth alone and is never rebound. */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import dgram from "node:dgram";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
-import { createHash } from "node:crypto";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
+import { SecretKey } from "@number0/iroh/index.js";
 import { Registry } from "./registry.ts";
-import { IrohRunnerClient, RUNNER_CONFIG_VERSION } from "./iroh-node.ts";
+import { IrohRunnerClient } from "./iroh-node.ts";
 import { Runner_Kind } from "./gen/runner_pb.js";
 import { loadSessionConfig, RunnerSession } from "./runner-session.ts";
 
@@ -84,277 +83,348 @@ async function enrollProtocol4(state: string, configPath: string): Promise<Enrol
   }
 }
 
-export interface LocalRunnerOptions {
+/** The local `berth vm` cubed sets up on this host (`cubed runners
+ * init-local`), every file under `home` (default `~/.cube`). A protocol-3
+ * runner's `runner/`, `runner.json` and `control.key` there are never read
+ * or touched. */
+export interface LocalBerthFiles {
+  /** berth's `--dir`: its key, journal, machine disks and layer cache. */
+  dir: string;
+  /** cubed's protocol-4 config for it (0600). */
+  configPath: string;
+  /** cubed's control key for it (0600). */
+  controlKey: string;
+  /** What the service starts it with: the image, the slots and the listen
+   * address (0600). */
+  settings: string;
+}
+
+export function localBerthFiles(home: string): LocalBerthFiles {
+  return { dir: path.join(home, "berth"), configPath: path.join(home, "berth.json"), controlKey: path.join(home, "berth.control.key"),
+    settings: path.join(home, "berth.env") };
+}
+
+export interface LocalBerthOptions {
   /** cubed's state; the registry the runner is enrolled in. */
   state: string;
-  /** The local runner's directory (default `~/.cube`): `control.key`,
-   * `runner/` (the cube-runner home) and `runner.json`. */
+  /** The local runner's directory (default `~/.cube`). */
   home: string;
-  /** The Debian 13 genericcloud qcow2 the runner copies into its state;
-   * absent: downloaded from Debian (or `imageBase`) and checksum-verified. */
+  /** The image every machine is built on, pinned by digest; needed the
+   * first time, then read from `berth.env`. */
   image?: string;
-  /** Where the image and its SHA512SUMS come from when `image` is absent
-   * (default Debian's cloud image site; `CUBE_DEBIAN_IMAGE_BASE` overrides). */
-  imageBase?: string;
-  /** The loopback address the runner listens on; cubed reaches it there. */
-  listen: string;
+  /** The loopback address berth listens on (default 127.0.0.1:7779). */
+  listen?: string;
   nodeId?: string;
-  /** The cube-runner binary: the option, `CUBE_RUNNER`, or `cube-runner` on PATH. */
-  runner?: string;
-  qemu?: string;
-  firmware?: string;
-  maxVcpus?: number;
-  maxMemoryMib?: number;
-  maxDiskGib?: number;
-  /** How long to wait for the temporary runner to answer. */
+  /** Machines at once (default 2). */
+  maxMachines?: number;
+  /** The programs and keel's files, by path: the options, else `CUBE_BERTH`,
+   * `CUBE_BERTH_QEMU`, `CUBE_BERTH_QEMU_IMG`, `CUBE_BERTH_MKFS_EROFS` and
+   * `CUBE_BERTH_KEEL` (Homebrew's launcher sets them), else the programs on
+   * PATH; keel has no default. */
+  berth?: string; qemu?: string; qemuImg?: string; mkfsErofs?: string; keel?: string;
+  /** How long the temporary berth may take to its banner: it pulls the
+   * image first (default 30 minutes). */
   startTimeoutMs?: number;
   log?: (line: string) => void;
 }
 
-export interface LocalRunner {
-  runner: string; home: string; configPath: string; nodeId: string; peer: string; address: string;
-  baseImageSha256: string | null; qemu: string | null;
-  /** The admission, or null when the runner could not be started here and
-   * `enrollRunner` must be run once it is up. */
+export interface LocalBerth {
+  home: string; files: LocalBerthFiles; nodeId: string; address: string; image: string; maxMachines: number;
+  /** Everything was already set up and enrolled in this state: nothing changed. */
+  already: boolean;
+  /** The admission, or null when berth could not be started or asked here (`runnerError`). */
   enrollment: Enrollment | null;
-  /** Why the runner did not start, when it did not. */
   runnerError: string | null;
 }
 
-export const DEFAULT_LOCAL_RUNNER_LISTEN = "127.0.0.1:7778";
-/** Debian's official cloud images; `SHA512SUMS` is published beside them. */
-export const DEBIAN_IMAGE_BASE = "https://cloud.debian.org/images/cloud/trixie/latest";
+export const DEFAULT_LOCAL_BERTH_LISTEN = "127.0.0.1:7779";
+export const DEFAULT_LOCAL_BERTH_MACHINES = 2;
+const PINNED_IMAGE = /^[A-Za-z0-9._/:-]+@sha256:[0-9a-f]{64}$/;
+/** berth keeps `<dir>/<16-hex machine id>/qmp.sock` within 100 bytes. */
+const MAX_DIR_BYTES = 100 - 26;
 
-/** The genericcloud image for this host's thread machines: arm64 on an Apple
- * Silicon Mac, amd64 on Linux x86-64 (the platforms a runner supports). */
-export function debianImageName(platform = process.platform, arch = process.arch): string {
-  const debianArch = platform === "darwin" && arch === "arm64" ? "arm64" : platform === "linux" && arch === "x64" ? "amd64" : null;
-  if (!debianArch) throw new Error(`no runner for ${platform} ${arch}; a runner needs an Apple Silicon Mac or Linux x86-64`);
-  return `debian-13-genericcloud-${debianArch}.qcow2`;
+/** `node-berth-<host>`: a-z, 0-9 and dashes, at most 63 characters; never a
+ * protocol-3 local runner's `node-local-<host>`. */
+export function localBerthNodeId(hostname = os.hostname()): string {
+  const host = hostname.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 52) || "host";
+  return `node-berth-${host}`;
 }
 
-async function sha512Of(file: string): Promise<string> {
-  const hash = createHash("sha512");
-  for await (const chunk of fs.createReadStream(file)) hash.update(chunk as Buffer);
-  return hash.digest("hex");
+/** A loopback IPv4 address with a port from 1 to 65535. */
+function loopbackListen(listen: string): boolean {
+  const port = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}:(\d{1,5})$/.exec(listen);
+  return !!port && listen.split(":")[0]!.split(".").every(octet => Number(octet) <= 255) && Number(port[1]) >= 1 && Number(port[1]) <= 65535;
 }
 
-function networkError(what: string, error: unknown): Error {
-  const cause = (error as { cause?: { code?: string; message?: string } }).cause;
-  const detail = cause?.code ?? cause?.message ?? (error instanceof Error ? error.message : String(error));
-  return new Error(`could not ${what}: ${detail}`);
+/** `berth.env`: what the service passes to `berth vm` besides the paths. */
+export function readBerthSettings(text: string): { image: string; maxMachines: number; listen: string } {
+  const value = (name: string) => text.split("\n").map(line => line.trim()).find(line => line.startsWith(`${name}=`))?.slice(name.length + 1);
+  const image = value("CUBE_BERTH_IMAGE") ?? "";
+  const raw = value("CUBE_BERTH_MAX_MACHINES") ?? "";
+  const listen = value("CUBE_BERTH_LISTEN") ?? "";
+  const maxMachines = Number(raw);
+  if (!PINNED_IMAGE.test(image) || !/^[1-9]\d?$/.test(raw) || maxMachines > 64 || !loopbackListen(listen)) {
+    throw new Error("is not a berth.env of cubed's (CUBE_BERTH_IMAGE=<registry/repository@sha256:…>, CUBE_BERTH_MAX_MACHINES=1…64, CUBE_BERTH_LISTEN=127.x.x.x:<port>)");
+  }
+  return { image, maxMachines, listen };
 }
 
-/** The image site: HTTPS, or plain HTTP to this host only (tests, a local
- * mirror); the checksums come from the same site, so an insecure transport
- * would make them worthless. */
-export function imageBase(configured?: string): string {
-  const base = (configured?.trim() || DEBIAN_IMAGE_BASE).replace(/\/$/, "");
-  let url: URL;
-  try { url = new URL(`${base}/SHA512SUMS`); } catch { throw new Error(`CUBE_DEBIAN_IMAGE_BASE is not a URL: ${base}`); }
-  const loopback = url.hostname === "localhost" || /^127(\.\d{1,3}){3}$/.test(url.hostname) || url.hostname === "[::1]";
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) throw new Error(`the image site must be https (${base}); the checksums come from the same site`);
-  return base;
+function berthSettingsText(image: string, maxMachines: number, listen: string): string {
+  return "# Written once by `cubed runners init-local`; the cube-berth service starts berth vm with these.\n"
+    + `CUBE_BERTH_IMAGE=${image}\nCUBE_BERTH_MAX_MACHINES=${maxMachines}\nCUBE_BERTH_LISTEN=${listen}\n`;
 }
 
-/** Downloads `<base>/<name>` into `directory` (a directory cubed owns: it is
- * removed afterwards) and verifies it against the `SHA512SUMS` published
- * beside it; a file already there with the right digest is kept. Returns
- * the file's path. What this checks: that the bytes, wherever the site's
- * redirect sent us (Debian's mirrors), are the ones the site's checksum
- * names, fetched over TLS. What it cannot check: the site itself, or a mirror
- * the operator points at. Debian publishes no signature for these sums. The
- * runner itself downloads nothing: this is cubed, on the host, before
- * `cube-runner init`. */
-export async function downloadDebianImage(options: { directory: string; name?: string; base?: string; log?: (line: string) => void }): Promise<string> {
-  const log = options.log ?? (() => {});
-  const base = imageBase(options.base);
-  const name = options.name ?? debianImageName();
-  const target = path.join(options.directory, name);
-  // The checksums come from the site itself, never through a redirect (which
-  // could leave https or the host); the image may be redirected to a mirror.
-  let sums: Response;
-  try { sums = await fetch(`${base}/SHA512SUMS`, { redirect: "error" }); } catch (error) { throw networkError(`fetch ${base}/SHA512SUMS`, error); }
-  if (!sums.ok) throw new Error(`could not fetch ${base}/SHA512SUMS: HTTP ${sums.status}`);
-  const listed = (await sums.text()).split("\n").map(line => line.trim().split(/\s+/)).find(([, file]) => file === name || file === `*${name}`)?.[0];
-  if (!listed) throw new Error(`${base}/SHA512SUMS does not list ${name}`);
-  if (!/^[0-9a-fA-F]{128}$/.test(listed)) throw new Error(`${base}/SHA512SUMS lists a malformed digest for ${name}`);
-  const expected = listed.toLowerCase();
-  if (fs.existsSync(target) && await sha512Of(target) === expected) { log(`using the downloaded ${name} (checksum verified)`); return target; }
-  fs.mkdirSync(options.directory, { recursive: true, mode: 0o700 });
-  const partial = `${target}.part`;
-  let response: Response;
-  try { response = await fetch(`${base}/${name}`); } catch (error) { throw networkError(`download ${base}/${name}`, error); }
-  if (!response.ok || !response.body) throw new Error(`could not download ${base}/${name}: HTTP ${response.status}`);
-  const total = Number(response.headers.get("content-length")) || 0;
-  const served = response.url && response.url !== `${base}/${name}` ? ` (served by ${new URL(response.url).host})` : "";
-  log(`downloading ${name}${total ? ` (${Math.round(total / 1048576)} MB)` : ""} from ${base}${served}`);
-  const hash = createHash("sha512");
-  let received = 0;
-  let reported = 0;
+/** Why berth could not bind its UDP listen address now, or null if it
+ * could. Only a check before the pull: the port can still be taken before
+ * berth binds it, which is why nothing records the address until berth
+ * listens. */
+async function unbindable(listen: string): Promise<string | null> {
+  const at = listen.lastIndexOf(":");
+  const socket = dgram.createSocket({ type: "udp4" });
+  return new Promise(resolve => {
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      try { socket.close(); } catch { /* never bound */ }
+      resolve(error.code === "EADDRINUSE" ? "is in use" : `cannot be bound here (${error.code ?? error.message})`);
+    });
+    socket.bind({ address: listen.slice(0, at), port: Number(listen.slice(at + 1)), exclusive: true }, () => socket.close(() => resolve(null)));
+  });
+}
+
+/** The public half of a 32-byte control key, as berth's `--allow-peer`. */
+function controlPeer(file: string): string {
+  const bytes = fs.readFileSync(file);
   try {
-    try {
-      await pipeline(Readable.fromWeb(response.body as import("node:stream/web").ReadableStream), async function* (source) {
-        for await (const chunk of source) {
-          hash.update(chunk as Buffer); received += (chunk as Buffer).length;
-          if (total && received - reported >= total / 4) { reported = received; log(`  ${Math.round(received / total * 100)}%`); }
-          yield chunk;
-        }
-      }, fs.createWriteStream(partial, { mode: 0o600 }));
-    } catch (error) { throw networkError(`download ${base}/${name} (${received} of ${total || "?"} bytes received)`, error); }
-    const actual = hash.digest("hex");
-    if (actual !== expected) {
-      throw new Error(`${name} does not match the site's SHA512SUMS (got ${actual.slice(0, 16)}…); the download is discarded. `
-        + "If Debian's latest build is newer than the mirror that served it, the mirror may still be syncing: try again later.");
-    }
-  } catch (error) { fs.rmSync(partial, { force: true }); throw error; }
-  fs.renameSync(partial, target);
-  log(`downloaded ${name} (checksum verified)`);
-  return target;
+    if (bytes.length !== 32) throw new Error(`${file} is not a control key (32 bytes)`);
+    return Buffer.from(SecretKey.fromBytes(Array.from(bytes)).public().toBytes()).toString("hex");
+  } finally { bytes.fill(0); }
 }
 
-/** The `cube-runner` binary: CUBE_RUNNER names it, otherwise the first on PATH. */
-export function findRunner(env: NodeJS.ProcessEnv = process.env, configured?: string): string | null {
-  const candidate = configured?.trim() || env.CUBE_RUNNER?.trim();
-  const candidates = candidate ? [candidate]
-    : (env.PATH ?? "").split(path.delimiter).filter(Boolean).map(directory => path.join(directory, "cube-runner"));
+/** The physical path of an absolute path that may not exist yet: its nearest
+ * existing directory resolved, the rest as given. */
+function physical(target: string): string {
+  let existing = target;
+  const rest: string[] = [];
+  while (!fs.existsSync(existing)) { rest.unshift(path.basename(existing)); existing = path.dirname(existing); }
+  return path.join(fs.realpathSync(existing), ...rest);
+}
+
+/** A program by path: the option, else the variable, else the first of
+ * `names` on PATH. */
+function program(given: string | undefined, variable: string, flag: string, names: string[]): string {
+  const configured = given?.trim() || process.env[variable]?.trim();
+  const candidates = configured ? [configured]
+    : (process.env.PATH ?? "").split(path.delimiter).filter(Boolean).flatMap(directory => names.map(name => path.join(directory, name)));
   for (const file of candidates) {
     try { fs.accessSync(file, fs.constants.X_OK); if (fs.statSync(file).isFile()) return path.resolve(file); } catch { /* next */ }
   }
-  return null;
+  throw new Error(configured ? `not an executable file: ${configured}` : `${names[0]} was not found on PATH (give ${flag} or set ${variable})`);
 }
 
-/** `node-local-<host>`: letters, digits and dashes only, at most 64 characters. */
-export function localNodeId(hostname = os.hostname()): string {
-  const host = hostname.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 52) || "host";
-  return `node-local-${host}`;
-}
-
-/** Initializes a cube-runner under `home/runner` (its own key, the base image
- * copied in, loopback at `listen`), writes the version-2 config cubed reads,
- * then starts the runner for a moment to enroll it. The runner is left
- * stopped; a service or `cube-runner run --home <home>/runner` starts it. */
-export async function initLocalRunner(options: LocalRunnerOptions): Promise<LocalRunner> {
+/** Sets up the local `berth vm` and enrolls it. It can be run again at any
+ * time, for example after `brew uninstall` and `brew install`: it creates
+ * only what is missing (the control key, berth's directory by berth's own
+ * first run, then `berth.env` and `berth.json` once berth listens), checks
+ * that what is there belongs together, and never deletes, overwrites or
+ * rebinds a file. A run that failed before berth listened (a wrong image
+ * digest, a port in use) recorded no image and no listen address, so the
+ * next may name others. When all of it
+ * is there and enrolled in this state it changes nothing and starts
+ * nothing. Enrollment needs berth answering: it is started until the
+ * admission is recorded (the first time it pulls the image before it
+ * listens), then stopped as its Ctrl-C would. */
+export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalBerth> {
   const log = options.log ?? (() => {});
-  const runner = findRunner(process.env, options.runner);
-  if (!runner) throw new Error("cube-runner was not found on PATH (install it, or set CUBE_RUNNER to the binary)");
   const home = path.resolve(options.home);
   const state = path.resolve(options.state);
-  if (options.image !== undefined) {
-    const given = path.resolve(options.image);
-    if (!fs.existsSync(given) || !fs.statSync(given).isFile()) throw new Error(`base image not found: ${given}`);
-  } else { debianImageName(); imageBase(options.imageBase); }
-  const listen = options.listen.match(/^(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|\[::1\]|localhost):(\d{1,5})$/);
-  if (!listen || !listen[1].split(".").slice(1).every(octet => Number(octet) <= 255) || Number(listen[2]) < 1 || Number(listen[2]) > 65535) {
-    throw new Error("--listen must be a loopback address with a port from 1 to 65535, for example 127.0.0.1:7778");
+  const files = localBerthFiles(home);
+  const exists = (file: string) => fs.existsSync(file);
+  const conflict = (what: string) => new Error(`${what}; init-local changes nothing that is there (a runner is never rebound): give the recorded value, or another --home`);
+
+  // What is there already, and whether it belongs together.
+  let recorded: ReturnType<typeof readBerthSettings> | null = null;
+  if (exists(files.settings)) {
+    try { recorded = readBerthSettings(fs.readFileSync(files.settings, "utf8")); } catch (error) { throw new Error(`${files.settings} ${(error as Error).message}`); }
   }
-  const address = options.listen.replace(/^localhost:/, "127.0.0.1:");
-  const nodeId = options.nodeId ?? localNodeId();
-  if (!/^node-[a-zA-Z0-9-]{1,123}$/.test(nodeId)) throw new Error("--node-id must start with node- and contain letters, digits and dashes only");
-  const version = JSON.parse((await run(runner, ["version"], { encoding: "utf8", timeout: 10000 })).stdout) as { softwareVersion?: string; protocolVersion?: number };
-  if (version.protocolVersion !== 3) throw new Error(`${runner} speaks runner protocol ${version.protocolVersion}, not 3; install cube-runner 0.4.0 or newer`);
-  const runnerHome = path.join(home, "runner");
-  const controlKey = path.join(home, "control.key");
-  const configPath = path.join(home, "runner.json");
-  for (const existing of [runnerHome, controlKey, configPath]) {
-    if (fs.existsSync(existing)) throw new Error(`${existing} already exists; a runner is never rebound (choose another --home, or move the old one aside after archiving its threads)`);
+  const config = exists(files.configPath) ? loadSessionConfig(files.configPath) : null;
+  const vmHome = path.join(files.dir, ".berth", "vm.json");
+  if (exists(path.join(files.dir, ".berth", "host.json"))) throw new Error(`${files.dir} is a berth host directory, not a berth vm's`);
+  const berthHome = exists(vmHome) ? JSON.parse(fs.readFileSync(vmHome, "utf8")) as { nodeId?: string; allowedPeer?: string; listen?: string | null } : null;
+  const peer = exists(files.controlKey) ? controlPeer(files.controlKey) : null;
+
+  if (options.image !== undefined && !PINNED_IMAGE.test(options.image)) throw new Error("--image must be pinned: <registry/repository>@sha256:<64 hex>");
+  if (recorded && options.image !== undefined && options.image !== recorded.image) throw conflict(`${files.settings} names the image ${recorded.image}`);
+  const image = options.image ?? recorded?.image;
+  if (!image) throw new Error("--image <registry/repository@sha256:…> is needed the first time (until a run gets berth started): the image every thread machine is built on");
+  if (options.maxMachines !== undefined && (!Number.isInteger(options.maxMachines) || options.maxMachines < 1 || options.maxMachines > 64)) {
+    throw new Error("--max-machines must be 1 through 64");
+  }
+  if (recorded && options.maxMachines !== undefined && options.maxMachines !== recorded.maxMachines) {
+    throw conflict(`${files.settings} says ${recorded.maxMachines} machine${recorded.maxMachines === 1 ? "" : "s"} at once`);
+  }
+  const maxMachines = options.maxMachines ?? recorded?.maxMachines ?? DEFAULT_LOCAL_BERTH_MACHINES;
+  const recordedNode = config?.config.binding.nodeId ?? berthHome?.nodeId;
+  if (options.nodeId !== undefined && recordedNode && options.nodeId !== recordedNode) throw conflict(`this runner is ${recordedNode}`);
+  const nodeId = options.nodeId ?? recordedNode ?? localBerthNodeId();
+  if (!/^node-[a-z0-9-]{1,59}$/.test(nodeId)) throw new Error("--node-id must start with node- and hold a-z, 0-9 and dashes only (at most 64 characters)");
+  // The listen address is fixed once berth has listened on it (berth.env,
+  // berth.json), and the service passes berth.env's. The one in berth's
+  // vm.json is only what an earlier run tried: berth records it before its
+  // pull and bind, and takes another --listen on any start.
+  const given = options.listen?.replace(/^localhost:/, "127.0.0.1:");
+  if (config && recorded && config.config.address !== recorded.listen) {
+    throw conflict(`${files.configPath} names the address ${config.config.address}, but ${files.settings} ${recorded.listen}`);
+  }
+  const recordedListen = config?.config.address ?? recorded?.listen;
+  if (given !== undefined && recordedListen && given !== recordedListen) throw conflict(`this runner listens on ${recordedListen}`);
+  const listen = given ?? recordedListen ?? berthHome?.listen ?? DEFAULT_LOCAL_BERTH_LISTEN;
+  if (!loopbackListen(listen)) throw new Error("--listen must be a loopback IPv4 address with a port from 1 to 65535, for example 127.0.0.1:7779");
+  if (config) {
+    const c = config.config;
+    if (c.controlKey !== files.controlKey || c.network !== "loopback" || c.binding.threadId !== c.binding.nodeId || c.binding.environmentId !== 1) {
+      throw conflict(`${files.configPath} is not this local berth's config (control key ${files.controlKey}, loopback, its node id as id)`);
+    }
+    if (!peer) throw conflict(`${files.configPath} names ${files.controlKey}, which is missing`);
+  }
+  if (berthHome) {
+    if (berthHome.nodeId !== nodeId) throw conflict(`${vmHome} is runner ${berthHome.nodeId}`);
+    if (!peer) throw conflict(`${vmHome} exists, but ${files.controlKey}, the control key it takes, is missing`);
+    if (berthHome.allowedPeer !== peer) throw conflict(`${vmHome} takes another control peer than ${files.controlKey}'s`);
+  }
+  const dir = physical(files.dir);
+  if (Buffer.byteLength(dir) > MAX_DIR_BYTES) throw new Error(`${dir} is too long: berth needs <dir>/<machine id>/qmp.sock within 100 bytes (choose a shorter --home)`);
+
+  const result: LocalBerth = { home, files, nodeId, address: listen, image, maxMachines, already: false, enrollment: null, runnerError: null };
+
+  // Enrolled in this state already: nothing is left to do.
+  const registry = new Registry(path.join(state, "registry.sqlite"));
+  try {
+    const enrolled = registry.getRunner(nodeId);
+    if (enrolled) {
+      if (!config || enrolled.configPath !== files.configPath || enrolled.configHash !== config.hash) {
+        throw conflict(`runner ${nodeId} is enrolled in ${state} from ${enrolled.configPath}`);
+      }
+      if (registry.runnerStatuses().find(status => status.id === nodeId)?.retiredAt) {
+        throw new Error(`runner ${nodeId} is retired in ${state}; init-local does not admit it again`);
+      }
+      if (!berthHome) throw conflict(`runner ${nodeId} is enrolled in ${state}, but its directory ${files.dir} is gone`);
+      if (!recorded) {
+        // Only the service's settings are missing: written again, nothing else.
+        fs.writeFileSync(files.settings, berthSettingsText(image, maxMachines, listen), { mode: 0o600, flag: "wx" });
+        log(`wrote ${files.settings}`);
+      }
+      result.already = recorded !== null;
+      return result;
+    }
+  } finally { registry.close(); }
+
+  // Create what is missing, in an order a failed run continues from.
+  const keelGiven = options.keel?.trim() || process.env.CUBE_BERTH_KEEL?.trim();
+  if (!keelGiven) throw new Error("keel's vmlinuz and base.erofs: give --keel <directory> or set CUBE_BERTH_KEEL");
+  const keel = path.resolve(keelGiven);
+  for (const file of ["vmlinuz", "base.erofs"]) if (!exists(path.join(keel, file))) throw new Error(`--keel has no ${file}: ${keel}`);
+  const berth = program(options.berth, "CUBE_BERTH", "--berth", ["berth"]);
+  const version = JSON.parse((await run(berth, ["version"], { encoding: "utf8", timeout: 10000 })).stdout) as { softwareVersion?: string; protocolVersion?: number };
+  if (version.protocolVersion !== 4) throw new Error(`${berth} speaks runner protocol ${version.protocolVersion}, not 4`);
+  const qemu = program(options.qemu, "CUBE_BERTH_QEMU", "--qemu", [`qemu-system-${process.arch === "arm64" ? "aarch64" : "x86_64"}`]);
+  const qemuImg = program(options.qemuImg, "CUBE_BERTH_QEMU_IMG", "--qemu-img", ["qemu-img"]);
+  const mkfs = program(options.mkfsErofs, "CUBE_BERTH_MKFS_EROFS", "--mkfs-erofs", ["mkfs.erofs"]);
+  log(`berth ${version.softwareVersion ?? "?"} at ${berth}`);
+  // Before anything is written and before the pull: an address berth could
+  // not bind. Not once it is recorded, when the service may hold it.
+  if (!recorded && !config) {
+    const why = await unbindable(listen);
+    if (why) throw new Error(`${listen} (UDP) ${why}: give another --listen, or free it (nothing was written)`);
   }
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-  log(`cube-runner ${version.softwareVersion ?? "?"} at ${runner}`);
-  // The runner copies the image into its state, so a download is kept only
-  // until init succeeded (a failed init keeps it for the retry), in a
-  // directory of cubed's own.
-  const downloaded = options.image === undefined ? await downloadDebianImage({ directory: path.join(home, ".image-download"), base: options.imageBase, log }) : null;
-  const image = downloaded ?? path.resolve(options.image!);
-  const control = JSON.parse((await run(runner, ["keygen", "--key", controlKey], { encoding: "utf8", timeout: 10000 })).stdout) as { peerId: string };
-  // The binding's thread id is the registry's runner id, so it is the node id: unique per installation by construction.
-  const initArgs = ["init", "--home", runnerHome, "--image", image, "--allow-peer", control.peerId, "--node-id", nodeId,
-    "--thread-id", nodeId, "--env", "1", "--network", "loopback", "--listen", address];
-  if (options.qemu) initArgs.push("--qemu", options.qemu);
-  if (options.firmware) initArgs.push("--firmware", options.firmware);
-  if (options.maxVcpus !== undefined) initArgs.push("--max-vcpus", String(options.maxVcpus));
-  if (options.maxMemoryMib !== undefined) initArgs.push("--max-memory-mib", String(options.maxMemoryMib));
-  if (options.maxDiskGib !== undefined) initArgs.push("--max-disk-gib", String(options.maxDiskGib));
-  log(`initializing ${runnerHome} (copying the base image)`);
-  let initOutput: string;
-  try { initOutput = (await run(runner, initArgs, { encoding: "utf8", timeout: 30 * 60_000, maxBuffer: 1 << 20 })).stdout; }
-  catch (error) {
-    // Nothing was enrolled and the key was never used: leave nothing behind
-    // that would make the next attempt look like a rebinding.
-    fs.rmSync(controlKey, { force: true });
-    if (!fs.existsSync(path.join(runnerHome, "state", "journal.db"))) fs.rmSync(runnerHome, { recursive: true, force: true });
-    const failure = error as { stderr?: string; message: string };
-    throw new Error(`cube-runner init failed: ${(failure.stderr || failure.message).trim()}`);
+  let allowPeer = peer;
+  if (!allowPeer) {
+    allowPeer = (JSON.parse((await run(berth, ["keygen", "--key", files.controlKey], { encoding: "utf8", timeout: 10000 })).stdout) as { peerId: string }).peerId;
+    log(`wrote ${files.controlKey}`);
   }
-  if (downloaded) {
-    fs.rmSync(downloaded, { force: true });
-    try { fs.rmdirSync(path.dirname(downloaded)); } catch { /* something else is there; leave it */ }
-    log("removed the download: the runner holds its own copy");
-  }
-  const field = (name: string) => initOutput.match(new RegExp(`^${name}: (.+)$`, "m"))?.[1]?.trim() ?? null;
-  const peer = field("peer");
-  if (!peer || !/^[0-9a-f]{64}$/.test(peer)) throw new Error("cube-runner init did not print the runner's peer");
-  const baseImageSha256 = field("base image")?.replace(/^sha256 /, "") ?? null;
-  const config = { version: RUNNER_CONFIG_VERSION, binding: { nodeId, threadId: nodeId, environmentId: 1 },
-    controlKey, serverPeer: peer, address, network: "loopback" };
-  fs.writeFileSync(configPath, `${JSON.stringify(config)}\n`, { mode: 0o600 });
-  log(`wrote ${configPath}`);
-  const result: LocalRunner = { runner, home, configPath, nodeId, peer, address, baseImageSha256, qemu: field("qemu"), enrollment: null, runnerError: null };
+  // berth.env and berth.json come only after berth has pulled the image and
+  // listens: until then a run may give another --image, --max-machines or
+  // --listen, and the service does not start.
 
-  // Enrollment needs the runner answering: run it until the admission is
-  // recorded, then stop it the way its first Ctrl-C would.
-  log("starting the runner to enroll it");
-  const child = spawn(runner, ["run", "--home", runnerHome], { stdio: ["ignore", "ignore", "pipe"] });
+  log(berthHome ? `starting berth vm in ${files.dir} to enroll it` : `starting berth vm in ${files.dir} for the first time: it makes its key and pulls ${image}`);
+  const child = spawn(berth, ["vm", "--dir", files.dir, "--qemu", qemu, "--qemu-img", qemuImg, "--keel", keel, "--mkfs-erofs", mkfs,
+    "--image", image, "--max-machines", String(maxMachines), "--allow-peer", allowPeer, "--node-id", nodeId, "--network", "loopback", "--listen", listen],
+  { stdio: ["ignore", "ignore", "pipe"] });
   let stderr = "";
+  let pending = "";
+  let serverPeer: string | null = null;
+  let ready = false;
   child.stderr!.setEncoding("utf8");
-  child.stderr!.on("data", chunk => { stderr = (stderr + chunk).slice(-8192); });
+  child.stderr!.on("data", (chunk: string) => {
+    stderr = (stderr + chunk).slice(-8192);
+    pending += chunk;
+    for (let newline = pending.indexOf("\n"); newline >= 0; newline = pending.indexOf("\n")) {
+      const line = pending.slice(0, newline).trim();
+      pending = pending.slice(newline + 1);
+      const announced = /^peer: ([0-9a-f]{64})$/.exec(line);
+      if (announced) serverPeer = announced[1]!;
+      if (line.startsWith("waiting for cubed")) ready = true;
+      else if (line && !line.startsWith("{")) log(`  berth: ${line}`);
+    }
+  });
   const exited = new Promise<void>(resolve => { child.once("exit", () => resolve()); child.once("error", () => resolve()); });
   const gone = () => child.exitCode !== null || child.signalCode !== null;
-  // The temporary runner never outlives this command: a signal stops it the
-  // way its first Ctrl-C would, and an exit kills it.
+  // The temporary berth never outlives this command.
   const onSignal = (signal: NodeJS.Signals) => {
-    void stopRunner(child, exited).finally(() => { process.exitCode = 130; process.kill(process.pid, signal); });
+    void stopBerth(child, exited).finally(() => { process.exitCode = 130; process.kill(process.pid, signal); });
   };
   const onExit = () => { if (!gone()) child.kill("SIGKILL"); };
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.once(signal, onSignal);
   process.once("exit", onExit);
-  const describe = async () => {
-    try { await new IrohRunnerClient({ configPath }).describe(); return null; }
-    catch (error) { return error instanceof Error ? error.message : String(error); }
-  };
-  const deadline = Date.now() + (options.startTimeoutMs ?? 20_000);
-  let reachable = false;
-  let lastError = "no answer yet";
-  while (!gone() && Date.now() < deadline) {
-    const failure = await describe();
-    if (failure === null) { reachable = true; break; }
-    lastError = failure;
-    await delay(250);
-  }
-  // A runner that exited may have lost the home to the service that already
-  // runs it (its lock and port); whoever answers with this key is it.
-  if (!reachable && gone() && (await describe()) === null) reachable = true;
   try {
-    if (reachable) {
-      result.enrollment = await enrollRunner({ state, configPath });
-      log(`enrolled ${nodeId} in ${state}`);
-    } else {
-      result.runnerError = gone()
-        ? `the runner exited (${child.exitCode ?? child.signalCode}): ${lastLines(stderr)}`
-        : `the runner did not answer at ${address} in time (${lastError}); ${lastLines(stderr)}`;
+    const deadline = Date.now() + (options.startTimeoutMs ?? 30 * 60_000);
+    while (!ready && !gone() && Date.now() < deadline) await delay(100);
+    await delay(ready ? 0 : 100);
+    // A berth that stopped at once may have found its service holding the
+    // directory; with a config, whoever answers with its key is it.
+    const another = !ready && /another berth vm runs in/.test(stderr);
+    const held = another && config !== null;
+    if (!ready && !held) {
+      result.runnerError = another
+        ? `another berth vm runs in ${files.dir} and there is no ${files.configPath} yet, so it cannot be asked: stop that berth vm (a second init-local, or one started by hand), then run init-local again`
+        : gone() ? `berth exited (${child.exitCode ?? child.signalCode}): ${lastLines(stderr)}`
+          : `berth did not say "waiting for cubed" in time: ${lastLines(stderr)}`;
+      return result;
     }
+    if (ready && !recorded) {
+      // berth runs on this image and listens here: what the service starts
+      // it with from now on.
+      fs.writeFileSync(files.settings, berthSettingsText(image, maxMachines, listen), { mode: 0o600, flag: "wx" });
+      log(`wrote ${files.settings}`);
+    }
+    if (config) {
+      if (serverPeer && serverPeer !== config.config.serverPeer) throw conflict(`${files.configPath} names peer ${config.config.serverPeer}, but the berth in ${files.dir} is ${serverPeer}`);
+    } else {
+      if (!serverPeer) throw new Error(`berth did not print its peer: ${lastLines(stderr)}`);
+      const written = { version: 2, protocol: 4, binding: { nodeId, threadId: nodeId, environmentId: 1 }, controlKey: files.controlKey, serverPeer,
+        network: "loopback", address: listen };
+      fs.writeFileSync(files.configPath, `${JSON.stringify(written)}\n`, { mode: 0o600, flag: "wx" });
+      log(`wrote ${files.configPath}`);
+    }
+    try {
+      result.enrollment = await enrollRunner({ state, configPath: files.configPath });
+      log(`enrolled ${nodeId} in ${state}`);
+    } catch (error) {
+      result.runnerError = `the enrollment failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    return result;
   } finally {
-    await stopRunner(child, exited);
+    await stopBerth(child, exited);
     for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.off(signal, onSignal);
     process.off("exit", onExit);
   }
-  return result;
 }
 
-async function stopRunner(child: ChildProcess, exited: Promise<void>): Promise<void> {
+/** As its Ctrl-C would: berth stops its machines' QEMUs and exits; killed
+ * after 120 s. */
+async function stopBerth(child: ChildProcess, exited: Promise<void>): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  child.kill("SIGINT");
-  const forced = setTimeout(() => child.kill("SIGKILL"), 35_000);
+  child.kill("SIGTERM");
+  const forced = setTimeout(() => child.kill("SIGKILL"), 120_000);
   forced.unref();
   await exited;
   clearTimeout(forced);

@@ -51,8 +51,9 @@ node packages/server/test/runner-vm-suspend-ops-test.ts "${CARGO_TARGET_DIR:-tar
 # never during a command, a dial or a registered service, and wakes it by a
 # message, a guest call or the portal; one slot, a cold start (else skipped).
 node packages/server/test/runner-vm-cubed-suspend-test.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
-# cubed's local runner setup with the real cube-runner and the fake QEMU.
-node scripts/test-local-runner.ts "${CARGO_TARGET_DIR:-target}/debug/cube-runner"
+# cubed's local runner setup (runners init-local) with the real berth vm, and
+# a second run that changes nothing (else skipped).
+node scripts/test-local-berth.ts "${CARGO_TARGET_DIR:-target}/debug/berth"
 for script in scripts/runner/*.sh; do bash -n "$script"; done
 
 target="${CARGO_TARGET_DIR:-target}/debug"
