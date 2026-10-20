@@ -25,7 +25,7 @@ import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { SettingsStore, type SettingsView } from "./settings.ts";
-import { checkDefaultUpdate, DEFAULT_SKILL_SOURCE, defaultSource, parseSkillsConfig, resolveProjectSkills, resolveSkills, type SkillSource } from "./skills.ts";
+import { checkDefaultUpdate, DEFAULT_SKILL_SOURCE, defaultSource, parseSkillsConfig, resolveProjectSkills, resolveSkills, type SkillGit, type SkillsConfig, type SkillSource } from "./skills.ts";
 import { UpdateService } from "./update-service.ts";
 import { versionInfo } from "./version.ts";
 import { OptChat, OptChatEvents } from "./optchat.ts";
@@ -197,6 +197,41 @@ const IMAGE_HEADERS = {
   "content-disposition": "inline",
 } as const;
 
+/** A new thread starts at the latest commits, not at the project's last
+ * check: each repository's configured branch (or the default branch the
+ * remote advertises now) is fetched and resolved again. A failure starts
+ * no thread rather than one at older commits. An abort stops the git and
+ * skills fetches and is rethrown as it came. */
+export function latestCommitsOf(deps: { registry: Registry; git: SkillGit & Pick<GitService, "prepareRepository">; skills: () => SkillsConfig; skillSource: SkillSource | null }) {
+  return async (projectId: string, signal?: AbortSignal): Promise<ResolvedRepositories> => {
+    const project = deps.registry.getProject(projectId);
+    if (!project) throw new Error("project not found");
+    if (project.status !== "ready") throw new Error("check the project before starting a thread");
+    const repositories = await Promise.all(project.repositories.map(async repository => {
+      try {
+        const result = await deps.git.prepareRepository(repository.url, repository.base, signal);
+        return { url: repository.url, base: result.base, baseOid: result.baseOid };
+      } catch (error) {
+        signal?.throwIfAborted();
+        throw Object.assign(new Error(`fetching the latest ${repository.base ?? "default branch"} of ${repository.url} failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
+      }
+    }));
+    const saved = deps.skills();
+    const skills = await (async () => {
+      const installed = await resolveSkills(deps.git, defaultSource(deps.skillSource, saved), saved, signal);
+      // The primary checkout's own .agents/skills, at the commit it starts from.
+      const primary = repositories[0];
+      if (!primary) return installed;
+      const own = await resolveProjectSkills(deps.git, primary.url, primary.baseOid, saved, installed.skills, signal);
+      return { ...installed, skipped: [...installed.skipped, ...own.skipped], project: own.project };
+    })().catch(error => {
+      signal?.throwIfAborted();
+      throw Object.assign(new Error(`resolving the skills failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
+    });
+    return { projectRevision: project.revision, repositories, skills };
+  };
+}
+
 /** Private product host. Thread tools run in each thread's VM; there is no
  * local execution fallback. */
 export async function createCubed(options: {
@@ -287,6 +322,7 @@ export async function createCubed(options: {
   portal = new Portal({ settings: options.portal === undefined ? portalSettings() : options.portal, directory: path.join(options.state, "portal"),
     registry, machines, archiving: id => conversations.archivingNow(id) });
   const git = new GitService(path.join(options.state, "repositories"));
+  const latestCommits = latestCommitsOf({ registry, git, skills: () => settings.get().skills, skillSource: options.skillSource ?? null });
   const updates = options.updates ?? new UpdateService();
   const onboarding = path.join(options.state, "onboarding.json");
   const configuredHosts = options.allowedHosts ?? process.env.CUBED_ALLOWED_HOSTS?.split(",") ?? [];
@@ -455,35 +491,6 @@ export async function createCubed(options: {
     project.hooksUpdatedAt = current.hooksUpdatedAt;
     registry.saveProject(project);
     return projectView(project);
-  }
-  /** A new thread starts at the latest commits, not at the project's last
-   * check: each repository's configured branch (or the default branch the
-   * remote advertises now) is fetched and resolved again. A failure starts
-   * no thread rather than one at older commits. */
-  async function latestCommits(projectId: string): Promise<ResolvedRepositories> {
-    const project = registry.getProject(projectId);
-    if (!project) throw new Error("project not found");
-    if (project.status !== "ready") throw new Error("check the project before starting a thread");
-    const repositories = await Promise.all(project.repositories.map(async repository => {
-      try {
-        const result = await git.prepareRepository(repository.url, repository.base);
-        return { url: repository.url, base: result.base, baseOid: result.baseOid };
-      } catch (error) {
-        throw Object.assign(new Error(`fetching the latest ${repository.base ?? "default branch"} of ${repository.url} failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
-      }
-    }));
-    const saved = settings.get().skills;
-    const skills = await (async () => {
-      const installed = await resolveSkills(git, defaultSource(options.skillSource ?? null, saved), saved);
-      // The primary checkout's own .agents/skills, at the commit it starts from.
-      const primary = repositories[0];
-      if (!primary) return installed;
-      const own = await resolveProjectSkills(git, primary.url, primary.baseOid, saved, installed.skills);
-      return { ...installed, skipped: [...installed.skipped, ...own.skipped], project: own.project };
-    })().catch(error => {
-      throw Object.assign(new Error(`resolving the skills failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
-    });
-    return { projectRevision: project.revision, repositories, skills };
   }
   const server = http.createServer(async (request, response) => {
     const json = (body: unknown, status = 200) => { response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); response.end(JSON.stringify(body)); };

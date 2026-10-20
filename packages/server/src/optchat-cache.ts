@@ -28,7 +28,8 @@
  *   can be), then writes only the rest. No other event counts:
  *   `response.created` comes when the request is accepted, and an `error`
  *   event wrote nothing. So compactions started together pay for what they
- *   share once, as uniichat's AskAI.wait.
+ *   share once, as uniichat's AskAI.wait. A call aborted while it waits (a
+ *   close of cubed cut it off) is never sent.
  * - OpenAI reasoning: `reasoning.context: "all_turns"` (uniichat sends it),
  *   so a message steered into a tool round keeps the earlier reasoning in
  *   context and the prefix. Sent only to OpenAI's own models (the platform
@@ -279,6 +280,10 @@ export function cachedModels(models: Models, sessionId: () => string, options: {
         if (call.allTurns) body.reasoning = { ...body.reasoning, context: "all_turns" };
         lead.end();
         if (keys?.length) lead = await flight(keys, callOptions?.signal);
+        // A call cut off while it waited is not sent: pi-ai's Codex WebSocket
+        // sends on a cached idle socket without looking at the signal. A lead
+        // it took is freed by `end`, when its result settles.
+        callOptions?.signal?.throwIfAborted();
         return next;
       },
       // The entry can be read once the writer's response has begun on its

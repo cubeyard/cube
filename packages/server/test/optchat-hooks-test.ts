@@ -292,12 +292,22 @@ try {
   await until(() => fs.existsSync(held), Boolean, "the check is under way");
   const adapter = cubeThreads({ registry: app.registry, conversations: app.conversations, catalog: async () => [],
     runners: () => observeRunners(app.registry, 60_000), latestCommits: () => { throw new Error("unused"); } });
-  assert.match(await adapter.writeHooks!("slow", { preSetup: "echo during-check" }), /^saved preSetup/);
+  assert.match(await adapter.writeHooks!("slow", { preSetup: "echo during-check" }, "check-1"), /^saved preSetup/);
   fs.writeFileSync(go, "");
   const checked = await (await checking).json();
   assert.equal(checked.project.status, "ready");
   assert.equal(checked.project.hooks.preSetup, "echo during-check", "the check's answer has them");
   assert.equal(hooksOf(slow.id)?.preSetup, "echo during-check", "the check did not save over them");
+  // 9. A replayed write (a close cut its call off, the reopened run executes
+  // it again under the same request id) saves nothing: a change the user
+  // made in between stays, and the call answers as it first did.
+  const first = await adapter.writeHooks!("slow", { preSetup: "echo from-chat" }, "replay-1");
+  assert.match(first, /^saved preSetup/);
+  app.registry.saveProjectHooks(slow.id, { preSetup: "echo users-edit", preResume: hooksOf(slow.id)?.preResume ?? "" });
+  assert.equal(await adapter.writeHooks!("slow", { preSetup: "echo from-chat" }, "replay-1"), first, "the replay answers the first report, byte for byte");
+  assert.equal(hooksOf(slow.id)?.preSetup, "echo users-edit", "the user's edit stays");
+  assert.match(await adapter.writeHooks!("slow", { preSetup: "echo from-chat" }, "replay-2"), /^saved preSetup/, "another request saves");
+  assert.equal(hooksOf(slow.id)?.preSetup, "echo from-chat");
   assert.match(await adapter.projects(), /\ndemo \(id [^)]+; ready\): [^\n]*; hooks: pre-setup, pre-resume\n/);
   assert.match(await adapter.projects(), /\nother \(id [^)]+; ready\): [^\n]*; hooks: pre-resume\n/);
 } finally {

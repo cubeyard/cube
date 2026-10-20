@@ -8,7 +8,12 @@
  * reopen (idle, or with summaries running) changes nothing of it; the
  * system prompt changing rewrites once; turns mark the system, the view and
  * the end, compactions only the system and the view; no two calls write the
- * same prefix at once. The shares read are this model's, not a provider's:
+ * same prefix at once, and no request is sent twice, across reopens too: a
+ * close waits for the calls out and stores their answers (the forced case,
+ * past the close's grace, is optchat-close-test's). Several messages waiting for a turn (before the
+ * first, or while a run generates) go as one batch turn, sent like any other:
+ * the system prompt on top, never among the messages, and its prefix read by
+ * the next turn. The shares read are this model's, not a provider's:
  * no real cache is hit here. */
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
@@ -25,18 +30,21 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-optchat-cache-path-"));
 process.env.ANTHROPIC_API_KEY = "sk-ant-test";
 const LOOK = 20, FIRST_MS = 10;
 const hash = (text: string) => crypto.createHash("sha256").update(text).digest("hex");
-let seed = 11;
+let seed = Number(process.env.CUBE_TEST_OPTCHAT_SEED ?? 11);
 const rand = () => (seed = (seed * 48271) % 2147483647) / 2147483647;
 const span = (a: number, b: number) => a * (b / a) ** rand();
 const random = (bytes: number) => crypto.createHash("sha512").update(String(rand())).digest("base64").repeat(Math.ceil(bytes / 88)).slice(0, Math.ceil(bytes));
 
 type Block = Record<string, unknown> & { cache_control?: unknown };
-type Request = { kind: "turn" | "compaction"; blocks: string[]; marks: number[]; read: number; total: number; task: number; system: number; view: number; steps: number; merges: number };
+type Request = { kind: "turn" | "compaction"; blocks: string[]; marks: number[]; read: number; total: number; task: number; system: number; view: number; steps: number; merges: number; users: number; updated: boolean };
 const requests: Request[] = [];
 /** Entries readable from, by key; and keys being written by a call whose response has not begun. */
 const cache = new Map<string, number>();
-const writing = new Map<string, number>();
-let twice = 0;
+/** Per key, the open of each call writing it. */
+const writing = new Map<string, number[]>();
+let twice = 0, across = 0, opens = 0;
+/** While set, a turn's responses wait for it: its run stays in its generation. */
+let hold: Promise<void> | undefined;
 
 function use(body: { model: string; tools?: unknown; thinking?: unknown; output_config?: unknown; system?: Block[]; messages: Array<{ role: string; content: string | Block[] }> }) {
   // A mark is where an entry ends, not part of what it holds.
@@ -58,15 +66,20 @@ function use(body: { model: string; tools?: unknown; thinking?: unknown; output_
   for (const mark of marks) for (let k = mark; k > mark - LOOK && k >= 0; k--) if (live(k)) { hit = Math.max(hit, k); break; }
   const written = marks.filter(mark => mark > hit && !live(mark));
   // A block another call is writing now, written again by this one.
-  for (const mark of written) for (let k = mark; k > hit; k--) if (writing.has(keys[k]!)) { twice++; break; }
-  for (const mark of written) writing.set(keys[mark]!, (writing.get(keys[mark]!) ?? 0) + 1);
+  const opened = opens;
+  for (const mark of written) for (let k = mark; k > hit; k--) {
+    const by = writing.get(keys[k]!);
+    if (by?.includes(opened)) { twice++; break; }
+    if (by) { across++; break; }
+  }
+  for (const mark of written) writing.set(keys[mark]!, [...writing.get(keys[mark]!) ?? [], opened]);
   const view = blocks.findIndex(block => typeof block.text === "string" && block.text.endsWith("</chat>"));
   return {
     texts, marks, read: hit < 0 ? 0 : ends[hit]!, total: ends.at(-1)!, task: texts.at(-1)!.length, system: body.system?.length ?? 0, view,
     begun: () => {
       for (const mark of written) {
-        const left = writing.get(keys[mark]!)! - 1;
-        if (left) writing.set(keys[mark]!, left); else writing.delete(keys[mark]!);
+        const left = writing.get(keys[mark]!)!.toSpliced(writing.get(keys[mark]!)!.indexOf(opened), 1);
+        if (left.length) writing.set(keys[mark]!, left); else writing.delete(keys[mark]!);
         if (!cache.has(keys[mark]!)) cache.set(keys[mark]!, Date.now());
       }
     },
@@ -84,8 +97,11 @@ globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
   const input = textOf(body.messages.find((message: { role: string }) => message.role === "user").content).split("</chat>").at(-1)!;
   const steps = Number(/#steps=(\d+)/.exec(input)?.[1] ?? 0);
   const done = body.messages.filter((message: { role: string }) => message.role === "assistant").length;
+  const users = body.messages.filter((message: { role: string }) => message.role === "user").length;
+  const updated = JSON.stringify(body.messages).includes("system prompt section");
   // The memory's merges so far, across opens, as this request is sent.
-  requests.push({ kind: compaction ? "compaction" : "turn", blocks: texts, ...measured, steps: done, merges: base + (chat?.memory.merges ?? 0) });
+  requests.push({ kind: compaction ? "compaction" : "turn", blocks: texts, ...measured, steps: done, merges: base + (chat?.memory.merges ?? 0), users, updated });
+  const held = compaction ? undefined : hold;
   const tool = !compaction && done < steps;
   const n = ++calls;
   const line = (words: number) => `s${n} ${"word ".repeat(words)}`.trim();
@@ -102,6 +118,7 @@ globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
   ];
   return new Response(new ReadableStream<Uint8Array>({ start: async out => {
     await delay(FIRST_MS);
+    await held;
     begun();
     out.enqueue(sse(events.slice(0, 1)));
     await delay(span(10, 40));
@@ -129,7 +146,7 @@ const busy = (chat: OptChat) => (chat as unknown as { busy: ReadonlySet<string> 
 const quiet = (chat: OptChat) => until(() => chat.memory.settled() && chat.memory.ready(new Set(), 8).length === 0 && busy(chat).size === 0, "the tree is complete");
 
 /** Each turn's first request and what came before it. */
-type Turn = { at: number; after: "turn" | "reopen" | "reopen-busy" | "system" };
+type Turn = { at: number; after: "turn" | "reopen" | "reopen-busy" | "system" | "batch" };
 const turns: Turn[] = [];
 let chat!: OptChat;
 let base = 0, sent = 0;
@@ -144,9 +161,40 @@ async function send(after: Turn["after"] = "turn") {
   turns.push({ at: firsts().at(-1)!, after });
   await chat.agent.conversation.waitForIdle(BACKGROUND_CONTEXT);
 }
-const reopen = async () => { base += chat.memory.merges; await chat.close(); chat = await open(); };
+/** Several messages, all waiting before a turn starts: one batch turn. */
+async function batch(texts: string[]) {
+  const count = firsts().length;
+  await Promise.all(texts.map(text => chat.send(`message ${sent++}: ${text}`, `r${sent}`)));
+  await until(() => firsts().length > count, "the batch turn ran");
+  turns.push({ at: firsts().at(-1)!, after: "batch" });
+  await chat.agent.conversation.waitForIdle(BACKGROUND_CONTEXT);
+  return requests[turns.at(-1)!.at]!;
+}
+const reopen = async () => { base += chat.memory.merges; await chat.close(); opens++; chat = await open(); };
+const batches: Request[] = [];
 try {
+  // Before the first turn, three messages wait together.
+  batches.push(await batch([random(span(40, 1500)), random(span(40, 1500)), random(span(40, 1500))]));
+  await quiet(chat);
   for (let k = 0; k < 60; k++) { await send(); await quiet(chat); }
+  // Two messages sent while a turn generates wait for its end, then go together.
+  {
+    let release!: () => void;
+    hold = new Promise(resolve => { release = resolve; });
+    const count = firsts().length;
+    const running = chat.send(`message ${sent++}: ${random(400)}`, `r${sent}`);
+    await until(() => firsts().length > count, "the turn is generating");
+    turns.push({ at: firsts().at(-1)!, after: "turn" });
+    const ids = [`r${sent + 1}`, `r${sent + 2}`];
+    const waiting = batch([random(span(40, 1500)), random(span(40, 1500))]);
+    let pending: string[] = [];
+    await until(() => { void chat.pending().then(items => { pending = items.map(item => item.requestId); }); return ids.every(id => pending.includes(id)); }, "both wait");
+    hold = undefined;
+    release();
+    await running;
+    batches.push(await waiting);
+  }
+  await quiet(chat);
   // Closed at rest, then while the turn's summaries run.
   await reopen();
   await send("reopen");
@@ -174,6 +222,14 @@ try {
 const strip = (request: Request) => request.blocks;
 const prefixOf = (a: string[], b: string[], n = a.length) => n <= b.length && a.slice(0, n).every((text, k) => text === b[k]);
 const viewLines = (request: Request) => request.blocks.slice(request.system, request.view + 1).map(text => JSON.parse(text).text as string).join("").split("\n").slice(1, -1);
+
+// A batch turn carries its messages after the system prompt, not before it.
+assert.deepEqual(batches.map(request => request.users), [3, 2], "the waiting messages went as batches");
+for (const request of requests) {
+  if (request.kind !== "turn") continue;
+  assert.ok(request.system > 0 && JSON.parse(request.blocks[0]!).text.includes("You are OptChat"), "every turn sends the system prompt on top");
+  assert.ok(!request.updated, "and never as an update among the messages");
+}
 
 // Marks: a turn's request on the system, the last whole view block and its
 // end; a compaction's on the system and the last whole view block only.
@@ -234,7 +290,12 @@ for (let k = 1; k < turns.length; k++) {
 }
 assert.ok(requests.at(-1)!.merges > 0, "batches happened");
 assert.ok(rewrites >= 1 && rewrites <= turns.length / 8, `a batch rewrote the view, rarely (${rewrites} of ${turns.length} turns)`);
-assert.equal(twice, 0, "no two calls wrote the same prefix at once");
+assert.equal(twice, 0, "no two calls of one open wrote the same prefix at once");
+assert.equal(across, 0, "nor across a reopen: a close waits for the calls out");
+// A close stores what was out, so a reopen sends nothing again: every
+// request differs from every other one, byte for byte.
+const sentTwice = requests.length - new Set(requests.map(request => hash(JSON.stringify([request.kind, request.blocks])))).size;
+assert.equal(sentTwice, 0, "no request was sent twice");
 
 const share = (kind: Request["kind"]) => {
   const list = requests.filter(request => request.kind === kind);

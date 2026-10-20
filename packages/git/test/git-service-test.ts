@@ -114,6 +114,32 @@ console.log("1c ok: auth classification — github stderr recognized, canonical 
   controller.abort(new Error("request disconnected"));
   await assert.rejects(pending, /request disconnected/);
   assert.equal(receivedSignal, controller.signal);
+  // prepareRepository (a new thread's fetch, up to 600 s): its git stops on
+  // the abort, and one aborted before it holds the mirror lock runs no git.
+  let stopped = 0, ran = 0;
+  const hanging: ProcessRunner = (_file, _args, opts) => new Promise((_resolve, reject) => {
+    ran++;
+    opts.signal?.addEventListener("abort", () => { stopped++; reject(opts.signal?.reason); }, { once: true });
+  });
+  const prepared = new GitService(path.join(tmp, "repos-cancel-prepare"), hanging);
+  const fetching = new AbortController();
+  const fetch = prepared.prepareRepository("https://github.com/x/prepare.git", "main", fetching.signal);
+  await new Promise((resolve) => setImmediate(resolve));
+  fetching.abort(new Error("optchat is closing"));
+  await assert.rejects(fetch);
+  assert.equal(stopped, 1, "the git under way was stopped");
+  await assert.rejects(prepared.prepareRepository("https://github.com/x/prepare.git", "main", AbortSignal.abort(new Error("closed"))), /closed/);
+  assert.equal(ran, 1, "an aborted prepare runs no git");
+  // ensureMirror on a mirror it already has (skills' fetch refreshes it):
+  // that git stops on the abort too.
+  const refreshed = new GitService(path.join(tmp, "repos-cancel-refresh"), hanging);
+  fs.mkdirSync(refreshed.mirrorPathFor("https://github.com/x/skills.git"), { recursive: true });
+  const refreshing = new AbortController();
+  const refresh = refreshed.ensureMirror("https://github.com/x/skills.git", refreshing.signal);
+  await new Promise((resolve) => setImmediate(resolve));
+  refreshing.abort(new Error("optchat is closing"));
+  await assert.rejects(refresh, /optchat is closing/);
+  assert.equal(stopped, 2, "the mirror's refresh was stopped");
   console.log("1d ok: abort propagates to the git process runner");
 }
 
