@@ -2,11 +2,12 @@ name: Nix
 
 # The flake builds with the model catalog revision pinned in
 # nix/model-catalog.json. This workflow keeps that pin usable independently of
-# releases: after pi.dev publishes a catalog from main, it replaces the pin only
-# if the current one no longer hydrates main (for example after a provider was
-# added) or lacks a model type the live catalog has for one of main's providers
-# (for example after a provider gained classifier models), builds the flake,
-# and commits the new pin to main.
+# releases: after pi.dev publishes a catalog from main, it replaces the pin with
+# the newest catalog only if the current one no longer hydrates main (for
+# example after a provider was added) or its provider/type/API model groups
+# differ from the newest catalog for one of main's providers (for example after
+# a provider gained classifier models or switched APIs), builds the flake, and
+# commits the new pin to main.
 #
 # Release tags are built exactly as tagged, with their committed pin. Once all
 # systems build, the stable branch is fast-forwarded to the tag so that
@@ -139,8 +140,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Full history, so git can verify that the push to stable is a fast-forward.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       # Without --force, the push fails unless it is a fast-forward, so stable
       # never moves back to an older release.
