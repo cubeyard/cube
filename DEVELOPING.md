@@ -349,7 +349,8 @@ a small wrapper that sources `~/.config/cubed/environment`, sets
 bundle's `bin/node` on `app/packages/server/src/index.ts` directly, so the
 **system** page reports an externally managed installation and `brew
 upgrade` is the update path. Services are `brew services` user agents
-(`homebrew.mxcl.cube`, `homebrew.mxcl.cube-berth`) running `cubed` and
+(labelled `sh.brew.cube` and `sh.brew.cube-berth` by current Homebrew)
+running `cubed` and
 cube-berth's `libexec/service.sh`, which starts `berth vm --dir ~/.cube/berth`
 with `berth.env`'s image and slots, or, until `cubed runners init-local` has
 set it up, says so and exits after 60 s (see [runner
