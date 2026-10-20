@@ -18,7 +18,7 @@ import { GatewaySupervisor, locateGateway, widestNetwork } from "./gateway.ts";
 import { errorText, machineFor, ThreadVms, vmSizes, type ThreadMachines } from "./vm.ts";
 import { RunnerMachines } from "./runner-machines.ts";
 import { registryCredentialRoute } from "./runner-credentials.ts";
-import { routeCredentials } from "./runner-session.ts";
+import { closeRunnerSessions, routeCredentials } from "./runner-session.ts";
 import { ProtocolMachines, runnerHealth as protocolRunnerHealth } from "./runner-select.ts";
 import { createModelRuntime, preferredModel, type ModelSelection } from "./models.ts";
 import { GithubAuth } from "./github-auth.ts";
@@ -1080,7 +1080,13 @@ async function runnersStatus(state: string): Promise<number> {
       else console.log(`${result.runner.nodeId}: unreachable; ${result.error}`);
     }
     return results.some(result => !result.reachable) ? 1 : 0;
-  } finally { registry.close(); }
+  } finally {
+    // A protocol-4 health read opens this process's cached RunnerSession
+    // (its endpoint, connection and watch keep Node alive); a one-shot
+    // command closes what it opened, as the daemon does at shutdown.
+    await closeRunnerSessions();
+    registry.close();
+  }
 }
 
 async function main(argv: string[]): Promise<void> {
