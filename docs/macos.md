@@ -214,12 +214,12 @@ is), then move `~/.cube` aside.
 - **`init-local` says "not enrolled".** berth could not start here: the
   message carries its error (no Hypervisor.framework, a QEMU below keel's
   floor, an image pull that failed). Fix that and run `init-local` again; it
-  continues with what it already made. Until berth has started once, that
-  run may give another `--image` or `--max-machines`.
+  continues with what it already made. Until berth has listened once, that
+  run may give another `--image`, `--max-machines` or `--listen`.
 - **`init-local` says "another berth vm runs in".** Something holds
-  `~/.cube/berth` before `init-local` wrote `berth.json` (a service started
-  by hand, or a second `init-local`): `brew services stop
-  cubeyard/tap/cube-berth`, then run `init-local` again.
+  `~/.cube/berth` before `init-local` wrote `berth.json` (a second
+  `init-local`, or a `berth vm` started by hand; the service does not start
+  berth without `berth.json`): stop that one, then run `init-local` again.
 - **`init-local` refuses with "init-local changes nothing that is there".**
   An option disagrees with what `~/.cube` already records (another image,
   `--listen`, `--node-id` or `--max-machines`). Leave the option out to keep
@@ -236,6 +236,9 @@ is), then move `~/.cube` aside.
   `cube-gateway`; the Homebrew bundle has it next to `release.json`. Check
   `cubed.log`.
 - **Port 7777 or 7779 is taken.** `CUBED_PORT` in the environment file;
-  `--listen` at the first `init-local` for the runner (berth's first run
-  records it in `~/.cube/berth/.berth/vm.json`, before its pull, so a run
-  that failed keeps it: free that port and run `init-local` again).
+  `--listen 127.0.0.1:<port>` for the runner. `init-local` checks the UDP
+  port before it writes anything and says `(UDP) is in use: give another
+  --listen`. If the port is taken only while berth pulls, berth fails to
+  bind and the run says "not enrolled": run `init-local` again with another
+  `--listen`; nothing has to be moved or deleted. The address is fixed once
+  berth has listened on it (`berth.env`, `berth.json`).

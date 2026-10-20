@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import dgram from "node:dgram";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
@@ -93,7 +94,8 @@ export interface LocalBerthFiles {
   configPath: string;
   /** cubed's control key for it (0600). */
   controlKey: string;
-  /** What the service starts it with: the image and the slots (0600). */
+  /** What the service starts it with: the image, the slots and the listen
+   * address (0600). */
   settings: string;
 }
 
@@ -148,21 +150,44 @@ export function localBerthNodeId(hostname = os.hostname()): string {
   return `node-berth-${host}`;
 }
 
+/** A loopback IPv4 address with a port from 1 to 65535. */
+function loopbackListen(listen: string): boolean {
+  const port = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}:(\d{1,5})$/.exec(listen);
+  return !!port && listen.split(":")[0]!.split(".").every(octet => Number(octet) <= 255) && Number(port[1]) >= 1 && Number(port[1]) <= 65535;
+}
+
 /** `berth.env`: what the service passes to `berth vm` besides the paths. */
-export function readBerthSettings(text: string): { image: string; maxMachines: number } {
+export function readBerthSettings(text: string): { image: string; maxMachines: number; listen: string } {
   const value = (name: string) => text.split("\n").map(line => line.trim()).find(line => line.startsWith(`${name}=`))?.slice(name.length + 1);
   const image = value("CUBE_BERTH_IMAGE") ?? "";
   const raw = value("CUBE_BERTH_MAX_MACHINES") ?? "";
+  const listen = value("CUBE_BERTH_LISTEN") ?? "";
   const maxMachines = Number(raw);
-  if (!PINNED_IMAGE.test(image) || !/^[1-9]\d?$/.test(raw) || maxMachines > 64) {
-    throw new Error("is not a berth.env of cubed's (CUBE_BERTH_IMAGE=<registry/repository@sha256:…>, CUBE_BERTH_MAX_MACHINES=1…64)");
+  if (!PINNED_IMAGE.test(image) || !/^[1-9]\d?$/.test(raw) || maxMachines > 64 || !loopbackListen(listen)) {
+    throw new Error("is not a berth.env of cubed's (CUBE_BERTH_IMAGE=<registry/repository@sha256:…>, CUBE_BERTH_MAX_MACHINES=1…64, CUBE_BERTH_LISTEN=127.x.x.x:<port>)");
   }
-  return { image, maxMachines };
+  return { image, maxMachines, listen };
 }
 
-function berthSettingsText(image: string, maxMachines: number): string {
+function berthSettingsText(image: string, maxMachines: number, listen: string): string {
   return "# Written once by `cubed runners init-local`; the cube-berth service starts berth vm with these.\n"
-    + `CUBE_BERTH_IMAGE=${image}\nCUBE_BERTH_MAX_MACHINES=${maxMachines}\n`;
+    + `CUBE_BERTH_IMAGE=${image}\nCUBE_BERTH_MAX_MACHINES=${maxMachines}\nCUBE_BERTH_LISTEN=${listen}\n`;
+}
+
+/** Why berth could not bind its UDP listen address now, or null if it
+ * could. Only a check before the pull: the port can still be taken before
+ * berth binds it, which is why nothing records the address until berth
+ * listens. */
+async function unbindable(listen: string): Promise<string | null> {
+  const at = listen.lastIndexOf(":");
+  const socket = dgram.createSocket({ type: "udp4" });
+  return new Promise(resolve => {
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      try { socket.close(); } catch { /* never bound */ }
+      resolve(error.code === "EADDRINUSE" ? "is in use" : `cannot be bound here (${error.code ?? error.message})`);
+    });
+    socket.bind({ address: listen.slice(0, at), port: Number(listen.slice(at + 1)), exclusive: true }, () => socket.close(() => resolve(null)));
+  });
 }
 
 /** The public half of a 32-byte control key, as berth's `--allow-peer`. */
@@ -201,7 +226,8 @@ function program(given: string | undefined, variable: string, flag: string, name
  * first run, then `berth.env` and `berth.json` once berth listens), checks
  * that what is there belongs together, and never deletes, overwrites or
  * rebinds a file. A run that failed before berth listened (a wrong image
- * digest) recorded no image, so the next may name another. When all of it
+ * digest, a port in use) recorded no image and no listen address, so the
+ * next may name others. When all of it
  * is there and enrolled in this state it changes nothing and starts
  * nothing. Enrollment needs berth answering: it is started until the
  * admission is recorded (the first time it pulls the image before it
@@ -215,7 +241,7 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
   const conflict = (what: string) => new Error(`${what}; init-local changes nothing that is there (a runner is never rebound): give the recorded value, or another --home`);
 
   // What is there already, and whether it belongs together.
-  let recorded: { image: string; maxMachines: number } | null = null;
+  let recorded: ReturnType<typeof readBerthSettings> | null = null;
   if (exists(files.settings)) {
     try { recorded = readBerthSettings(fs.readFileSync(files.settings, "utf8")); } catch (error) { throw new Error(`${files.settings} ${(error as Error).message}`); }
   }
@@ -240,14 +266,18 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
   if (options.nodeId !== undefined && recordedNode && options.nodeId !== recordedNode) throw conflict(`this runner is ${recordedNode}`);
   const nodeId = options.nodeId ?? recordedNode ?? localBerthNodeId();
   if (!/^node-[a-z0-9-]{1,59}$/.test(nodeId)) throw new Error("--node-id must start with node- and hold a-z, 0-9 and dashes only (at most 64 characters)");
+  // The listen address is fixed once berth has listened on it (berth.env,
+  // berth.json), and the service passes berth.env's. The one in berth's
+  // vm.json is only what an earlier run tried: berth records it before its
+  // pull and bind, and takes another --listen on any start.
   const given = options.listen?.replace(/^localhost:/, "127.0.0.1:");
-  const recordedListen = config?.config.address ?? berthHome?.listen ?? undefined;
-  if (given !== undefined && recordedListen && given !== recordedListen) throw conflict(`this runner listens on ${recordedListen}`);
-  const listen = given ?? recordedListen ?? DEFAULT_LOCAL_BERTH_LISTEN;
-  const port = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}:(\d{1,5})$/.exec(listen);
-  if (!port || !listen.split(":")[0]!.split(".").every(octet => Number(octet) <= 255) || Number(port[1]) < 1 || Number(port[1]) > 65535) {
-    throw new Error("--listen must be a loopback IPv4 address with a port from 1 to 65535, for example 127.0.0.1:7779");
+  if (config && recorded && config.config.address !== recorded.listen) {
+    throw conflict(`${files.configPath} names the address ${config.config.address}, but ${files.settings} ${recorded.listen}`);
   }
+  const recordedListen = config?.config.address ?? recorded?.listen;
+  if (given !== undefined && recordedListen && given !== recordedListen) throw conflict(`this runner listens on ${recordedListen}`);
+  const listen = given ?? recordedListen ?? berthHome?.listen ?? DEFAULT_LOCAL_BERTH_LISTEN;
+  if (!loopbackListen(listen)) throw new Error("--listen must be a loopback IPv4 address with a port from 1 to 65535, for example 127.0.0.1:7779");
   if (config) {
     const c = config.config;
     if (c.controlKey !== files.controlKey || c.network !== "loopback" || c.binding.threadId !== c.binding.nodeId || c.binding.environmentId !== 1) {
@@ -279,7 +309,7 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
       if (!berthHome) throw conflict(`runner ${nodeId} is enrolled in ${state}, but its directory ${files.dir} is gone`);
       if (!recorded) {
         // Only the service's settings are missing: written again, nothing else.
-        fs.writeFileSync(files.settings, berthSettingsText(image, maxMachines), { mode: 0o600, flag: "wx" });
+        fs.writeFileSync(files.settings, berthSettingsText(image, maxMachines, listen), { mode: 0o600, flag: "wx" });
         log(`wrote ${files.settings}`);
       }
       result.already = recorded !== null;
@@ -299,6 +329,12 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
   const qemuImg = program(options.qemuImg, "CUBE_BERTH_QEMU_IMG", "--qemu-img", ["qemu-img"]);
   const mkfs = program(options.mkfsErofs, "CUBE_BERTH_MKFS_EROFS", "--mkfs-erofs", ["mkfs.erofs"]);
   log(`berth ${version.softwareVersion ?? "?"} at ${berth}`);
+  // Before anything is written and before the pull: an address berth could
+  // not bind. Not once it is recorded, when the service may hold it.
+  if (!recorded && !config) {
+    const why = await unbindable(listen);
+    if (why) throw new Error(`${listen} (UDP) ${why}: give another --listen, or free it (nothing was written)`);
+  }
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
   let allowPeer = peer;
   if (!allowPeer) {
@@ -306,8 +342,8 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
     log(`wrote ${files.controlKey}`);
   }
   // berth.env and berth.json come only after berth has pulled the image and
-  // listens: until then a run may give another --image or --max-machines
-  // (berth's vm.json records neither), and the service does not start.
+  // listens: until then a run may give another --image, --max-machines or
+  // --listen, and the service does not start.
 
   log(berthHome ? `starting berth vm in ${files.dir} to enroll it` : `starting berth vm in ${files.dir} for the first time: it makes its key and pulls ${image}`);
   const child = spawn(berth, ["vm", "--dir", files.dir, "--qemu", qemu, "--qemu-img", qemuImg, "--keel", keel, "--mkfs-erofs", mkfs,
@@ -349,14 +385,15 @@ export async function initLocalBerth(options: LocalBerthOptions): Promise<LocalB
     const held = another && config !== null;
     if (!ready && !held) {
       result.runnerError = another
-        ? `another berth vm runs in ${files.dir} and there is no ${files.configPath} yet, so it cannot be asked: stop it (Homebrew: brew services stop cubeyard/tap/cube-berth), then run init-local again`
+        ? `another berth vm runs in ${files.dir} and there is no ${files.configPath} yet, so it cannot be asked: stop that berth vm (a second init-local, or one started by hand), then run init-local again`
         : gone() ? `berth exited (${child.exitCode ?? child.signalCode}): ${lastLines(stderr)}`
           : `berth did not say "waiting for cubed" in time: ${lastLines(stderr)}`;
       return result;
     }
     if (ready && !recorded) {
-      // berth runs on this image: what the service starts it with from now on.
-      fs.writeFileSync(files.settings, berthSettingsText(image, maxMachines), { mode: 0o600, flag: "wx" });
+      // berth runs on this image and listens here: what the service starts
+      // it with from now on.
+      fs.writeFileSync(files.settings, berthSettingsText(image, maxMachines, listen), { mode: 0o600, flag: "wx" });
       log(`wrote ${files.settings}`);
     }
     if (config) {

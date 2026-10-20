@@ -99,7 +99,7 @@ try {
   // The service script, run as launchd would (Ruby's interpolations filled
   // in, berth replaced by printing its arguments): not set up, it says so
   // and exits 78 after its pause; set up, it starts berth vm with berth.env's
-  // image and slots and the same files as cubed's launcher.
+  // image, slots and listen address and the same files as cubed's launcher.
   const service = /\(libexec\/"service\.sh"\)\.write <<~SH\n([^]*?)\n {4}SH\n/.exec(cubeBerth)![1]!.replace(/^ {6}/gm, "")
     .replaceAll('"#{opt_bin}/berth"', "echo berth").replaceAll('#{formula_opt_bin("qemu")}', `${root}/opt/qemu/bin`)
     .replaceAll('#{formula_opt_bin("erofs-utils")}', `${root}/opt/erofs-utils/bin`).replaceAll("#{opt_libexec}", `${root}/opt/cube-berth/libexec`)
@@ -114,7 +114,7 @@ try {
   fs.mkdirSync(path.join(home, ".cube/berth/.berth"), { recursive: true });
   fs.writeFileSync(path.join(home, ".cube/berth/.berth/vm.json"), "{}");
   const image = `docker.io/library/debian@sha256:${"c".repeat(64)}`;
-  const settings = `# Written once by \`cubed runners init-local\`\nCUBE_BERTH_IMAGE=${image}\nCUBE_BERTH_MAX_MACHINES=2\n`;
+  const settings = `# Written once by \`cubed runners init-local\`\nCUBE_BERTH_IMAGE=${image}\nCUBE_BERTH_MAX_MACHINES=2\nCUBE_BERTH_LISTEN=127.0.0.1:7781\n`;
   fs.writeFileSync(path.join(home, ".cube/berth.env"), settings);
   // A first init-local that has not got berth listening wrote no berth.json:
   // the service must not take the directory from the next run.
@@ -123,11 +123,19 @@ try {
   assert.match(half.stderr, /cube-berth: not set up yet/);
   assert.equal(half.stdout, "", "berth is not started without berth.json");
   fs.writeFileSync(path.join(home, ".cube/berth.json"), "{}");
+  // A berth.env without the address berth listened on: never a start on
+  // vm.json's, which may be one an earlier failed run tried.
+  fs.writeFileSync(path.join(home, ".cube/berth.env"), settings.replace(/^CUBE_BERTH_LISTEN=.*\n/m, ""));
+  const partial = serve();
+  assert.equal(partial.status, 78, partial.stderr);
+  assert.match(partial.stderr, /berth\.env lacks CUBE_BERTH_IMAGE, CUBE_BERTH_MAX_MACHINES or CUBE_BERTH_LISTEN/);
+  assert.equal(partial.stdout, "", "berth is not started without its address");
+  fs.writeFileSync(path.join(home, ".cube/berth.env"), settings);
   const started = serve();
   assert.equal(started.status, 0, started.stderr);
   assert.equal(started.stdout.trim(), `berth vm --dir ${home}/.cube/berth --qemu ${root}/opt/qemu/bin/qemu-system-aarch64 --qemu-img ${root}/opt/qemu/bin/qemu-img`
-    + ` --mkfs-erofs ${root}/opt/erofs-utils/bin/mkfs.erofs --keel ${root}/opt/cube-berth/libexec/keel --image ${image} --max-machines 2`);
-  assert.deepEqual(readBerthSettings(settings), { image, maxMachines: 2 }, "what the service reads is what cubed reads");
+    + ` --mkfs-erofs ${root}/opt/erofs-utils/bin/mkfs.erofs --keel ${root}/opt/cube-berth/libexec/keel --image ${image} --max-machines 2 --listen 127.0.0.1:7781`);
+  assert.deepEqual(readBerthSettings(settings), { image, maxMachines: 2, listen: "127.0.0.1:7781" }, "what the service reads is what cubed reads");
 
   // cubed's launcher, run as the service would (cubed replaced by printing
   // its environment): the portal is on loopback under *.localhost unless the

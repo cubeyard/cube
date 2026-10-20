@@ -147,10 +147,16 @@ class CubeBerth < Formula
       fi
       image=$(sed -n 's/^CUBE_BERTH_IMAGE=//p' "$home/berth.env")
       machines=$(sed -n 's/^CUBE_BERTH_MAX_MACHINES=//p' "$home/berth.env")
+      listen=$(sed -n 's/^CUBE_BERTH_LISTEN=//p' "$home/berth.env")
+      if [ -z "$image" ] || [ -z "$machines" ] || [ -z "$listen" ]; then
+        echo "cube-berth: $home/berth.env lacks CUBE_BERTH_IMAGE, CUBE_BERTH_MAX_MACHINES or CUBE_BERTH_LISTEN" >&2
+        sleep 60
+        exit 78
+      fi
       exec "#{opt_bin}/berth" vm --dir "$home/berth" \\\\
         --qemu "#{formula_opt_bin("qemu")}/qemu-system-aarch64" --qemu-img "#{formula_opt_bin("qemu")}/qemu-img" \\\\
         --mkfs-erofs "#{formula_opt_bin("erofs-utils")}/mkfs.erofs" --keel "#{opt_libexec}/keel" \\\\
-        --image "$image" --max-machines "$machines"
+        --image "$image" --max-machines "$machines" --listen "$listen"
     SH
     chmod 0755, libexec/"service.sh"
   end

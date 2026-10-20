@@ -124,13 +124,15 @@ keel has no default. Everything goes under `<home>`:
 |---|---|
 | `berth/` | berth's `--dir`: its key, journal, machine disks, layer cache |
 | `berth.control.key` | cubed's control key for it (`berth keygen`, 0600) |
-| `berth.env` | `CUBE_BERTH_IMAGE` and `CUBE_BERTH_MAX_MACHINES`, what the service starts it with (0600) |
+| `berth.env` | `CUBE_BERTH_IMAGE`, `CUBE_BERTH_MAX_MACHINES` and `CUBE_BERTH_LISTEN`, what the service starts it with (0600) |
 | `berth.json` | the version-2 protocol-4 config cubed reads (0600; binding `node-berth-<host>`, the same id, environment 1) |
 
-It creates only what is missing, in this order: the control key, berth's
-own first run (which binds the directory to that key, the node id and the
-listen address in `berth/.berth/vm.json`, pulls the image before it listens
-and prints its peer), then, once berth listens, `berth.env` and `berth.json`,
+It creates only what is missing, in this order: a check that the listen
+address's UDP port can be bound (before anything is written; it cannot rule
+out the port being taken later), the control key, berth's own first run
+(which binds the directory to that key and the node id in
+`berth/.berth/vm.json`, pulls the image before it listens and prints its
+peer), then, once berth listens, `berth.env` and `berth.json`,
 and it enrolls the runner with an authenticated hello
 while that berth runs, then stops it with SIGTERM. What is already there must
 agree (image, slots, node id, address, control key, berth's binding); a
@@ -142,10 +144,13 @@ deleted or rebound. So:
   what happens after `brew uninstall` and `brew install`, which keep `~/.cube`
   and `~/.cube-host`.
 - **After a failed run** (no accelerator, an image pull that failed, a
-  digest that does not exist): run it again; it continues with the key and
-  berth's binding it made. Until berth has listened once nothing records the
-  image or the slots, so that run may give a corrected `--image` or
-  `--max-machines`; the node id and `--listen` are berth's binding and stay.
+  digest that does not exist, a port taken while berth pulled): run it again; it continues with the key and
+  berth's binding it made. Until berth has listened once nothing of cubed's
+  records the image, the slots or the listen address, so that run may give a
+  corrected `--image`, `--max-machines` or `--listen` (berth's `vm.json`
+  keeps the address it tried, but berth takes another `--listen` on any
+  start, and the service passes `berth.env`'s); the node id is berth's
+  binding and stays.
   The service does not start berth before `berth.json` is there. If a berth
   already holds the directory without one, `init-local` says to stop it
   first.

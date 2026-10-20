@@ -1,23 +1,24 @@
 /** `cubed runners init-local` and `cubed runners enroll` against a fake
  * berth (a script for version, keygen and vm, with berth's argument shapes
- * and first-run binding) whose runner answers protocol 4 from an in-process
- * npm iroh endpoint: the files written, the admission recorded, the
+ * and first-run binding) whose runner binds --listen and answers protocol
+ * 4 from an npm iroh endpoint (fake-berth-runner.ts): the files written, the admission recorded, the
  * temporary berth stopped, the refusals, and every later run: after a
  * reinstall (nothing changes, nothing starts), with a moved state, after a
  * failed first run, after a pull of a digest that does not exist, with the
+ * listen port in use (found before anything is written, or taken while
+ * berth pulls), with the
  * service holding the directory (with and without a config), and with a
  * protocol-3 runner's files beside it (never touched). */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import dgram from "node:dgram";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { create, fromJsonString, toJsonString, type DescMessage, type MessageInitShape } from "@bufbuild/protobuf";
-import { Endpoint, SecretKey, type BiStream } from "@number0/iroh/index.js";
-import { HelloAnswerSchema, OpenSchema, Runner_Kind } from "../src/gen/runner_pb.js";
+import { SecretKey } from "@number0/iroh/index.js";
 import { Registry } from "../src/registry.ts";
 import { localBerthNodeId, readBerthSettings } from "../src/runner-enroll.ts";
 
@@ -25,52 +26,33 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "cube-local-berth-"));
 const cli = path.resolve("packages/server/src/index.ts");
 const IMAGE = `docker.io/library/debian@sha256:${"c".repeat(64)}`;
 
-// The runner: answers hello as the node the fake berth was bound to, only to the control key it was given.
+// The runner's key; the fake berth's runner (fake-berth-runner.ts) binds
+// --listen with it, as berth does, and answers hello as the node it was given.
 const runnerKey = SecretKey.generate();
-const builder = Endpoint.builder();
-builder.applyMinimal();
-builder.secretKey(runnerKey.toBytes());
-builder.bindAddr("127.0.0.1:0");
-builder.alpns([Array.from(Buffer.from("cubeyard/runner/4"))]);
-const server = await builder.bind();
-const address = server.boundSockets().find(x => x.startsWith("127."))!;
 const peer = Buffer.from(runnerKey.public().toBytes()).toString("hex");
 const hex = (key: SecretKey) => Buffer.from(key.public().toBytes()).toString("hex");
-let allowed = "";
-let answersAs = "";
-let hellos = 0;
-function frame<D extends DescMessage>(schema: D, value: MessageInitShape<D>): number[] {
-  const bytes = Buffer.from(toJsonString(schema, create(schema, value)));
-  const header = Buffer.alloc(4);
-  header.writeUInt32BE(bytes.length);
-  return Array.from(Buffer.concat([header, bytes]));
+const hellosFile = path.join(root, "hellos");
+const hellos = () => fs.existsSync(hellosFile) ? fs.readFileSync(hellosFile, "utf8").split("\n").filter(Boolean).length : 0;
+/** A loopback UDP port nothing holds now. */
+async function freePort(): Promise<string> {
+  const socket = dgram.createSocket("udp4");
+  await new Promise<void>(resolve => socket.bind(0, "127.0.0.1", resolve));
+  const { port } = socket.address();
+  await new Promise<void>(resolve => socket.close(resolve));
+  return `127.0.0.1:${port}`;
 }
-const accept = (async () => {
-  for (;;) {
-    const incoming = await server.acceptNext();
-    if (!incoming) return;
-    void (async () => {
-      const connection = await (await incoming.accept()).connect();
-      if (connection.remoteId().toString() !== allowed) { connection.close(1n, Array.from(Buffer.from("unauthorized"))); return; }
-      for (;;) {
-        let stream: BiStream;
-        try { stream = await connection.acceptBi(); } catch { return; }
-        const length = Buffer.from(await stream.recv.readExact(4)).readUInt32BE();
-        const opened = fromJsonString(OpenSchema, Buffer.from(await stream.recv.readExact(length)).toString("utf8"), { ignoreUnknownFields: true });
-        if (opened.kind.case !== "hello") { await stream.send.finish(); continue; }
-        hellos += 1;
-        await stream.send.writeAll(frame(HelloAnswerSchema, { protocol: 4, runner: { nodeId: answersAs, kind: Runner_Kind.VM, softwareVersion: "0.1.0",
-          platform: { os: "macos", arch: "aarch64", baseImageSha256: "b".repeat(64) }, network: { mode: "loopback" },
-          limits: { maxVcpus: 4, maxMemoryMib: 8192, maxDiskGib: 64, maxMachines: 2, maxBootBytes: 262144 } } }));
-        await stream.send.finish();
-      }
-    })().catch(() => {});
-  }
-})();
+/** Holds a loopback UDP port, as another program would. */
+async function occupy(listen: string): Promise<dgram.Socket> {
+  const socket = dgram.createSocket("udp4");
+  await new Promise<void>(resolve => socket.bind(Number(listen.split(":")[1]), "127.0.0.1", resolve));
+  return socket;
+}
+const address = await freePort();
 
 // The fake berth: berth's arguments; `vm` binds its directory on the first
 // run (and refuses another control peer or node later), pulls only
-// FAKE_IMAGE, prints the banner and waits for SIGTERM.
+// FAKE_IMAGE (waiting for FAKE_PULL_GATE, if set, to exist), then its runner
+// binds --listen, prints the banner and waits for SIGTERM.
 const log = path.join(root, "berth.log");
 const fakeBerth = path.join(root, "bin", "berth");
 fs.mkdirSync(path.dirname(fakeBerth));
@@ -86,17 +68,19 @@ case "$1" in
     if [ "\${FAKE_VM_FAIL:-}" = 1 ]; then echo 'Error: accelerator hvf is not available' >&2; exit 1; fi
     mkdir -p "$dir/.berth"
     if [ -f "$dir/.berth/vm.json" ]; then
-      grep -q "\\"allowedPeer\\": \\"$peer\\"" "$dir/.berth/vm.json" && grep -q "\\"nodeId\\": \\"$node\\"" "$dir/.berth/vm.json" \\
+      { [ -z "$peer" ] || grep -q "\\"allowedPeer\\": \\"$peer\\"" "$dir/.berth/vm.json"; } && { [ -z "$node" ] || grep -q "\\"nodeId\\": \\"$node\\"" "$dir/.berth/vm.json"; } \\
         || { echo "Error: $dir/.berth/vm.json already names this runner's control peer, node id and labels; a runner is never rebound" >&2; exit 1; }
+      # As berth: what a start leaves out comes from vm.json; --listen is not kept.
+      field() { sed -n "s/^  \\"$1\\": \\"\\(.*\\)\\",\\$/\\1/p" "$dir/.berth/vm.json"; }
+      [ -n "$peer" ] || peer=$(field allowedPeer); [ -n "$node" ] || node=$(field nodeId); [ -n "$listen" ] || listen=$(field listen)
     else
       printf '{\\n  "version": 1,\\n  "nodeId": "%s",\\n  "allowedPeer": "%s",\\n  "network": "loopback",\\n  "listen": "%s",\\n  "labels": {}\\n}' "$node" "$peer" "$listen" > "$dir/.berth/vm.json"
       echo "image: pulling $image" >&2
     fi
     # As berth: the image is pulled after the directory is bound, before it listens.
     [ "$image" = "$FAKE_IMAGE" ] || { echo "Error: pulling $image: manifest unknown" >&2; exit 1; }
-    trap 'printf "vm stopped by SIGTERM\\n" >> "${log}"; exit 0' TERM
-    printf 'dir: %s\\nnode: %s\\npeer: %s\\ncontrol peer: %s\\nwaiting for cubed; Ctrl-C stops the runner\\n' "$dir" "$node" "$FAKE_PEER" "$peer" >&2
-    while :; do sleep 0.1; done ;;
+    while [ -n "\${FAKE_PULL_GATE:-}" ] && [ ! -e "\${FAKE_PULL_GATE:-}" ]; do sleep 0.1; done
+    FAKE_LOG="${log}" exec "${process.execPath}" "${path.resolve("packages/server/test/fake-berth-runner.ts")}" "$dir" "$node" "$peer" "$listen" ;;
   *) exit 2 ;;
 esac
 `, { mode: 0o755 });
@@ -110,13 +94,12 @@ for (const tool of ["qemu-system-aarch64", "qemu-system-x86_64", "qemu-img", "mk
 const controlKey = SecretKey.generate();
 const controlKeyFile = path.join(root, "fake-control.key");
 fs.writeFileSync(controlKeyFile, Buffer.from(controlKey.toBytes()), { mode: 0o600 });
-allowed = controlKey.public().toString();
 /** Homebrew's launcher: the programs by variable. */
 const paths = (berth = fakeBerth): NodeJS.ProcessEnv => ({ CUBE_BERTH: berth, CUBE_BERTH_KEEL: keel, CUBE_BERTH_QEMU: path.join(tools, "qemu-system-aarch64"),
   CUBE_BERTH_QEMU_IMG: path.join(tools, "qemu-img"), CUBE_BERTH_MKFS_EROFS: path.join(tools, "mkfs.erofs") });
 async function cubed(args: string[], extra: NodeJS.ProcessEnv = paths()): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: root, FAKE_PEER: peer, FAKE_CONTROL_PEER: hex(controlKey), FAKE_CONTROL_KEY_FILE: controlKeyFile,
-    FAKE_IMAGE: IMAGE, ...extra };
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: root, FAKE_RUNNER_KEY: Buffer.from(runnerKey.toBytes()).toString("hex"),
+    FAKE_HELLOS: hellosFile, FAKE_CONTROL_PEER: hex(controlKey), FAKE_CONTROL_KEY_FILE: controlKeyFile, FAKE_IMAGE: IMAGE, ...extra };
   const child = spawn(process.execPath, [cli, ...args], { env, stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
   let stdout = ""; let stderr = "";
   child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
@@ -139,7 +122,7 @@ try {
   const home = path.join(root, "cube");
   const state = path.join(root, "state");
   const init = (args: string[], extra?: NodeJS.ProcessEnv, at = state) => cubed(["runners", "init-local", "--state", at, "--home", home, ...args], extra);
-  answersAs = localBerthNodeId();
+  const answersAs = localBerthNodeId();
   assert.match(answersAs, /^node-berth-[a-z0-9-]+$/);
   assert.notEqual(answersAs.replace("node-berth-", "node-local-"), answersAs, "never a protocol-3 local runner's id");
 
@@ -184,7 +167,7 @@ try {
   assert.deepEqual(JSON.parse(fs.readFileSync(configPath, "utf8")), { version: 2, protocol: 4, binding: { nodeId: answersAs, threadId: answersAs, environmentId: 1 },
     controlKey: path.join(home, "berth.control.key"), serverPeer: peer, network: "loopback", address });
   for (const file of ["berth.json", "berth.control.key", "berth.env"]) assert.equal(fs.statSync(path.join(home, file)).mode & 0o777, 0o600, file);
-  assert.deepEqual(readBerthSettings(fs.readFileSync(path.join(home, "berth.env"), "utf8")), { image: IMAGE, maxMachines: 2 });
+  assert.deepEqual(readBerthSettings(fs.readFileSync(path.join(home, "berth.env"), "utf8")), { image: IMAGE, maxMachines: 2, listen: address });
   assert.deepEqual(calls(), ["version", `keygen --key ${path.join(home, "berth.control.key")}`,
     `vm --dir ${path.join(home, "berth")} --qemu ${path.join(tools, "qemu-system-aarch64")} --qemu-img ${path.join(tools, "qemu-img")} --keel ${keel}`
     + ` --mkfs-erofs ${path.join(tools, "mkfs.erofs")} --image ${IMAGE} --max-machines 2 --allow-peer ${hex(controlKey)} --node-id ${answersAs}`
@@ -199,7 +182,7 @@ try {
     assert.equal(enrolled[0]!.configPath, configPath);
     assert.equal(enrolled[0]!.maxActiveVms, 2);
   } finally { registry.close(); }
-  assert.ok(hellos >= 1, "the admission made an authenticated hello");
+  assert.ok(hellos() >= 1, "the admission made an authenticated hello");
   for (const [file, digest] of Object.entries(p3)) assert.equal(snapshot(home)[file], digest, `the protocol-3 ${file} is untouched`);
 
   // Again, as after `brew uninstall` and `brew install`: the same command,
@@ -256,11 +239,25 @@ try {
   assert.deepEqual(calls().slice(callsBefore).map(line => line.split(" ")[0]), ["version", "vm", "vm"], "berth version, vm, its SIGTERM line; no keygen");
   assert.deepEqual(snapshot(home), done, "nothing in the home changed");
 
-  // The service holds the directory: whoever answers with its key is enrolled.
-  const held = path.join(root, "state-held");
-  const viaService = await init([], { ...paths(), FAKE_HELD: "1" }, held);
-  assert.equal(viaService.status, 0, viaService.stdout + viaService.stderr);
-  assert.match(viaService.stdout, new RegExp(`enrolled in ${held}`));
+  // The service holds the directory (and the port): whoever answers with its key is enrolled.
+  const settings = readBerthSettings(fs.readFileSync(path.join(home, "berth.env"), "utf8"));
+  const service = spawn(fakeBerth, ["vm", "--dir", path.join(home, "berth"), "--image", settings.image, "--max-machines", String(settings.maxMachines),
+    "--listen", settings.listen], { env: { PATH: process.env.PATH, FAKE_IMAGE: IMAGE, FAKE_RUNNER_KEY: Buffer.from(runnerKey.toBytes()).toString("hex"),
+    FAKE_HELLOS: hellosFile }, stdio: ["ignore", "ignore", "pipe"] });
+  let banner = "";
+  service.stderr.setEncoding("utf8");
+  service.stderr.on("data", chunk => { banner += chunk; });
+  for (let i = 0; i < 300 && !banner.includes("waiting for cubed"); i++) await new Promise(resolve => setTimeout(resolve, 100));
+  assert.match(banner, /waiting for cubed/, banner);
+  try {
+    const held = path.join(root, "state-held");
+    const viaService = await init([], { ...paths(), FAKE_HELD: "1" }, held);
+    assert.equal(viaService.status, 0, viaService.stdout + viaService.stderr);
+    assert.match(viaService.stdout, new RegExp(`enrolled in ${held}`));
+  } finally {
+    service.kill("SIGTERM");
+    await once(service, "close");
+  }
 
   // A retired runner is not admitted again.
   const db = new DatabaseSync(path.join(state, "registry.sqlite"));
@@ -273,7 +270,6 @@ try {
   // A failed first run (no accelerator) leaves what it made, says so, and the next run continues.
   const second = path.join(root, "cube-two");
   const state2 = path.join(root, "state-two");
-  answersAs = "node-berth-two";
   const twoArgs = ["runners", "init-local", "--state", state2, "--home", second, "--node-id", "node-berth-two", "--listen", address];
   fs.writeFileSync(path.join(home, "berth.control.key"), Buffer.from(SecretKey.generate().toBytes()), { mode: 0o600 });
   const failed = await cubed([...twoArgs, "--image", IMAGE], { ...paths(), FAKE_VM_FAIL: "1" });
@@ -302,14 +298,13 @@ try {
   // --image continues, with no file edited or removed.
   const fourth = path.join(root, "cube-four");
   const state4 = path.join(root, "state-four");
-  answersAs = "node-berth-four";
   const fourArgs = ["runners", "init-local", "--state", state4, "--home", fourth, "--node-id", "node-berth-four", "--listen", address];
   const missing = `docker.io/library/debian@sha256:${"0".repeat(64)}`;
   const wrong = await cubed([...fourArgs, "--image", missing]);
   assert.equal(wrong.status, 1, wrong.stdout + wrong.stderr);
   assert.match(wrong.stderr, /not enrolled: berth exited \(1\): .*Error: pulling docker\.io\/library\/debian@sha256:0+: manifest unknown/);
   assert.doesNotMatch(wrong.stderr, /enroll --config|brew services/);
-  assert.match(wrong.stderr, /until berth has started once, --image and --max-machines may be given anew/);
+  assert.match(wrong.stderr, /until berth has listened once, --image, --max-machines and --listen may be given anew/);
   assert.ok(fs.existsSync(path.join(fourth, "berth", ".berth", "vm.json")), "berth bound its directory before the pull, as berth does");
   assert.ok(!fs.existsSync(path.join(fourth, "berth.env")) && !fs.existsSync(path.join(fourth, "berth.json")), "the wrong image is recorded nowhere");
   const bound = snapshot(fourth);
@@ -323,8 +318,8 @@ try {
   // stop it, never to enroll from a config that is not there.
   const blocked = await cubed([...fourArgs, "--image", IMAGE], { ...paths(), FAKE_HELD: "1" });
   assert.equal(blocked.status, 1, blocked.stdout + blocked.stderr);
-  assert.match(blocked.stderr, /another berth vm runs in .*cube-four\/berth and there is no .*cube-four\/berth\.json yet, so it cannot be asked: stop it \(Homebrew: brew services stop cubeyard\/tap\/cube-berth\), then run init-local again/);
-  assert.doesNotMatch(blocked.stderr, /enroll --config|services restart/);
+  assert.match(blocked.stderr, /another berth vm runs in .*cube-four\/berth and there is no .*cube-four\/berth\.json yet, so it cannot be asked: stop that berth vm \(a second init-local, or one started by hand\), then run init-local again/);
+  assert.doesNotMatch(blocked.stderr, /enroll --config|brew services/);
   assert.deepEqual(snapshot(fourth), bound, "nothing written while it is held");
 
   // Stopped, the corrected image: the same key and binding, enrolled.
@@ -334,7 +329,7 @@ try {
   assert.match(corrected.stdout, new RegExp(`enrolled in ${state4}`));
   assert.equal(calls().filter(line => line.startsWith("keygen")).length, keygens4, "no new control key");
   for (const file of ["berth.control.key", path.join("berth", ".berth", "vm.json")]) assert.equal(snapshot(fourth)[file], bound[file], `${file} is unchanged`);
-  assert.deepEqual(readBerthSettings(fs.readFileSync(path.join(fourth, "berth.env"), "utf8")), { image: IMAGE, maxMachines: 2 });
+  assert.deepEqual(readBerthSettings(fs.readFileSync(path.join(fourth, "berth.env"), "utf8")), { image: IMAGE, maxMachines: 2, listen: address });
   for (const file of ["berth.json", "berth.env"]) assert.equal(fs.statSync(path.join(fourth, file)).mode & 0o777, 0o600, file);
   // Enrolled, the image is fixed again.
   const afterwards = snapshot(fourth);
@@ -343,6 +338,74 @@ try {
   assert.match(changed.stderr, /names the image docker\.io\/library\/debian@sha256:c+; init-local changes nothing/);
   assert.match((await cubed(fourArgs)).stdout, /already set up and enrolled/);
   assert.deepEqual(snapshot(fourth), afterwards);
+  // berth.env without berth.json (init-local stopped between the two): the
+  // image, slots and address are fixed, and the advice says so.
+  fs.rmSync(path.join(fourth, "berth.json"));
+  const between = await cubed(["runners", "init-local", "--state", path.join(root, "state-four-b"), "--home", fourth], { ...paths(), FAKE_VM_FAIL: "1" });
+  assert.equal(between.status, 1, between.stdout + between.stderr);
+  assert.match(between.stderr, /it continues where it stopped, with the image, slots and address in .*cube-four\/berth\.env\)/);
+  assert.doesNotMatch(between.stderr, /given anew|enroll --config|brew services/);
+
+  // U-B1-1: the listen port is in use at the first run. Found before
+  // anything is written; and when it is taken only while berth pulls (the
+  // check cannot rule that out), nothing records it either: berth's vm.json
+  // keeps the address it tried, but a corrected --listen continues, with no
+  // file edited, moved or removed, and the service is given that one.
+  const fifth = path.join(root, "cube-five");
+  const state5 = path.join(root, "state-five");
+  const fiveArgs = ["runners", "init-local", "--state", state5, "--home", fifth, "--node-id", "node-berth-five", "--image", IMAGE];
+  const busy = await freePort();
+  const holder = await occupy(busy);
+  const callsBefore5 = calls().length;
+  const taken = await cubed([...fiveArgs, "--listen", busy]);
+  assert.equal(taken.status, 1, taken.stdout + taken.stderr);
+  assert.match(taken.stderr, new RegExp(`${busy.replaceAll(".", "\\.")} \\(UDP\\) is in use: give another --listen, or free it \\(nothing was written\\)`));
+  assert.ok(!fs.existsSync(fifth), "nothing is written for a port in use");
+  assert.deepEqual(calls().slice(callsBefore5), ["version"], "no keygen and no berth vm");
+  holder.close();
+  // Free at the check, taken before berth binds (after its pull).
+  const racy = await freePort();
+  const gate = path.join(root, "pull-gate");
+  const raced = cubed([...fiveArgs, "--listen", racy], { ...paths(), FAKE_PULL_GATE: gate });
+  const vm5 = path.join(fifth, "berth", ".berth", "vm.json");
+  for (let i = 0; i < 300 && !fs.existsSync(vm5); i++) await new Promise(resolve => setTimeout(resolve, 100));
+  const thief = await occupy(racy);
+  fs.writeFileSync(gate, "");
+  const lost = await raced;
+  fs.rmSync(gate);
+  assert.equal(lost.status, 1, lost.stdout + lost.stderr);
+  assert.match(lost.stderr, new RegExp(`not enrolled: berth exited \\(1\\): .*Error: binding ${racy.replaceAll(".", "\\.")}`));
+  assert.match(lost.stderr, /until berth has listened once, --image, --max-machines and --listen may be given anew/);
+  assert.doesNotMatch(lost.stderr, /enroll --config|brew services/);
+  assert.equal(JSON.parse(fs.readFileSync(vm5, "utf8")).listen, racy, "berth's vm.json names the address it tried");
+  assert.ok(!fs.existsSync(path.join(fifth, "berth.env")) && !fs.existsSync(path.join(fifth, "berth.json")), "the address is recorded nowhere of cubed's");
+  const tried = snapshot(fifth);
+  // Again without --listen: vm.json's address, still in use, refused before berth starts.
+  const still = await cubed(fiveArgs);
+  assert.equal(still.status, 1);
+  assert.match(still.stderr, /\(UDP\) is in use: give another --listen/);
+  assert.deepEqual(snapshot(fifth), tried);
+  // A corrected --listen: the same key and binding, enrolled there.
+  const keygens5 = calls().filter(line => line.startsWith("keygen")).length;
+  const other = await freePort();
+  const moved5 = await cubed([...fiveArgs, "--listen", other]);
+  assert.equal(moved5.status, 0, moved5.stdout + moved5.stderr);
+  assert.match(moved5.stdout, new RegExp(`enrolled in ${state5}`));
+  assert.equal(calls().filter(line => line.startsWith("keygen")).length, keygens5, "no new control key");
+  assert.match(calls().filter(line => line.startsWith("vm --dir ")).at(-1)!, new RegExp(`--listen ${other.replaceAll(".", "\\.")}$`));
+  for (const file of ["berth.control.key", path.join("berth", ".berth", "vm.json")]) assert.equal(snapshot(fifth)[file], tried[file], `${file} is unchanged`);
+  // The service and the config agree on the address berth listened on.
+  assert.equal(JSON.parse(fs.readFileSync(path.join(fifth, "berth.json"), "utf8")).address, other);
+  assert.deepEqual(readBerthSettings(fs.readFileSync(path.join(fifth, "berth.env"), "utf8")), { image: IMAGE, maxMachines: 2, listen: other });
+  for (const file of ["berth.json", "berth.env"]) assert.equal(fs.statSync(path.join(fifth, file)).mode & 0o777, 0o600, file);
+  thief.close();
+  // Enrolled, the address is fixed: the one berth tried first is refused, and nothing changes.
+  const enrolled5 = snapshot(fifth);
+  const back = await cubed([...fiveArgs, "--listen", racy]);
+  assert.equal(back.status, 1);
+  assert.match(back.stderr, new RegExp(`this runner listens on ${other.replaceAll(".", "\\.")}; init-local changes nothing`));
+  assert.match((await cubed(fiveArgs)).stdout, /already set up and enrolled/);
+  assert.deepEqual(snapshot(fifth), enrolled5);
 
   // A berth host directory is not taken for a berth vm.
   const third = path.join(root, "cube-three");
@@ -350,9 +413,7 @@ try {
   fs.writeFileSync(path.join(third, "berth", ".berth", "host.json"), "{}");
   const hostDir = await cubed(["runners", "init-local", "--state", state2, "--home", third, "--image", IMAGE]);
   assert.match(hostDir.stderr, /is a berth host directory/);
-  console.log("ok: runners init-local sets up and enrolls a local berth vm, and every later run (reinstall, moved state, failed first run, an unknown image digest then the corrected one, a held directory with and without a config) changes only what is missing");
+  console.log("ok: runners init-local sets up and enrolls a local berth vm, and every later run (reinstall, moved state, failed first run, an unknown image digest then the corrected one, a listen port in use then another, a held directory with and without a config) changes only what is missing");
 } finally {
-  await server.close();
-  await accept;
   fs.rmSync(root, { recursive: true, force: true });
 }
