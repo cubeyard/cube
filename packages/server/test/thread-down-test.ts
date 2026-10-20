@@ -91,6 +91,26 @@ try {
   assert.equal(record.failure, down, "OptChat's thread record shows it");
   assert.equal(record.transcript?.status.error, down, "with its stored transcript");
 
+  // Before its machine boots again (its failed Harness still cached), every
+  // caller is told why, not Pi's "close and reopen it", and nothing is sent.
+  assert.equal(conversations.agentOpen(id), true, "its failed Harness is still cached");
+  const why = (error: Error) => error.message === down;
+  await assert.rejects(conversations.submit(id, "t3", "t3"), why, "a message is refused with why");
+  await assert.rejects(adapter.tell(id, "t3", "t3-tell"), why, "OptChat's tell is refused with why");
+  await assert.rejects(conversations.stop(id), why, "stop is refused with why");
+  await assert.rejects(conversations.model(id), why, "the model is not read from the failed Harness");
+  await assert.rejects(conversations.model(id, { provider: faux.getModel().provider, id: faux.getModel().id }), why, "nor changed");
+  for (const [method, route, body] of [["POST", "prompt", { text: "t4", requestId: "t4" }], ["POST", "stop", {}], ["GET", "model", undefined], ["PATCH", "model", { provider: faux.getModel().provider, id: faux.getModel().id }]] as const) {
+    const answer = await fetch(`${base}/api/threads/${id}/${route}`, { method, ...body ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {} });
+    assert.equal(answer.status, 409, `${method} /${route}`);
+    assert.equal((await answer.json()).error, down, `${method} /${route} says why`);
+  }
+  await delay(200);
+  assert.equal(sent("t2"), 1);
+  assert.equal(sent("t3"), 0);
+  assert.equal(sent("t4"), 0);
+  console.log("ok: before a reboot a down thread refuses submit, tell, stop, model and HTTP prompt/stop/model with why: 0 sends");
+
   // Its machine boots again: the agent closes for the resume hooks and is
   // not opened again, so the request out at the failure is not sent again.
   machines.reboot(app.registry.getThread(id)!);

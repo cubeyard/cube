@@ -353,12 +353,14 @@ export class Conversations {
     const thread = this.thread(id);
     if (threadAgent(thread) !== "pi") throw new Error("thread is not a pi thread");
     this.notArchiving(id);
-    const cached = this.agents.get(id);
-    if (cached) return cached;
     // A down agent is not opened again in this process: Pi would resume its
-    // generation and send the request out at the failure again.
+    // generation and send the request out at the failure again. Before its
+    // machine boots again its failed Harness is still cached; a caller is
+    // told why, not Pi's "close and reopen it".
     const down = this.downs.get(id);
     if (down) throw new Error(down);
+    const cached = this.agents.get(id);
+    if (cached) return cached;
     this.ready(thread);
     const loading = (async () => {
       const hostTools = this.hostTools?.(thread);
