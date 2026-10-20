@@ -57,6 +57,7 @@ OFFLINE_TESTS=(
   packages/server/test/optchat-test.ts
   packages/server/test/optchat-product-test.ts
   packages/server/test/optchat-cache-test.ts
+  packages/server/test/optchat-cache-path-test.ts
   packages/server/test/optchat-history-test.ts
   packages/server/test/thread-history-test.ts
   packages/server/test/thread-images-test.ts

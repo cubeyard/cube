@@ -426,12 +426,22 @@ without changing Pi:
   request's last user block: three marks. Anthropic looks back up to 20
   blocks from a mark for an earlier entry, so the next turn (up to 80 new
   lines) reads the view through this one and writes only the lines after it.
-  A view under 4 lines keeps pi-ai's own marks.
-- **Single flight.** A call whose marked prefix (model, tools, system, view
-  through its mark) another call is writing waits in `onPayload` until that
-  call's response starts or the call ends, or until its own abort; so
-  compactions started together on one context pay for its write once. Calls
-  with other prefixes do not wait.
+  A compactor request keeps no mark after the view, as in uniichat: its task
+  is its own and read again only by its own retry, so it goes uncached
+  instead of being written at the write price. A view under 4 lines keeps
+  pi-ai's own marks.
+- **Single flight.** A call's prefix is keyed at each view block's end
+  through its last whole one (model, tools and system, or Codex's
+  instructions, before the first; marks are not part of a key). A call whose
+  prefix, or a start of it, another call is writing waits in `onPayload`
+  until that call's response begins (its first stream event, not its
+  headers: only then can the entry be read), or the call ends, or its own
+  abort; then it writes only the rest. A prefix whose writer began counts as
+  written for the short retention (5 minutes), so a call of it does not
+  wait. So compactions started together pay once for what they share, as
+  uniichat's `AskAI.wait`. This holds for Anthropic and for OpenAI
+  Responses and Codex (SSE and WebSocket), which pi-ai reports stream events
+  for; other APIs do not wait.
 - **OpenAI / Codex.** Every request carries `sessionId`, which becomes
   `prompt_cache_key` and the `session-id` header. The key is
   `optchat-<uuid>` for the chat and `optchat-<uuid>-compact` for the
@@ -443,8 +453,16 @@ without changing Pi:
 
 `packages/server/test/optchat-cache-test.ts` runs pi-ai's real Anthropic and
 Codex request builders against a captured `fetch` and checks what would be
-sent, including the waiting. Hit rates are modelled offline (spec §3.3),
-not measured on a live provider.
+sent, including the waiting. `optchat-cache-path-test.ts` runs the real
+OptChat over pi-ai's Anthropic builder against a fake Anthropic that caches
+by the rules uniichat's `cache.test.ts` models, and checks the bytes sent:
+a turn's steps only append; a turn starts with the last turn's view through
+its mark, byte for byte, unless a batch merged it (and then only merged
+lines change); a reopen at rest, with summaries running or between a
+turn's steps changes nothing of it; new instructions rewrite the request
+once; turns carry three marks, compactions two; no two calls write the same
+prefix at once. Hit rates are modelled offline (spec §3.3), not measured on
+a live provider.
 
 ## Configuration
 
@@ -504,6 +522,11 @@ artifact of a thread it started.
 - **No cache breakpoints on OpenAI.** The spec puts `prompt_cache_breakpoint`
   marks on the view's pieces. pi-ai's Codex request has no such field, so the
   chat relies on OpenAI's prefix caching and a stable `prompt_cache_key`.
+  uniichat also sends `reasoning.context: "all_turns"`, so a message sent
+  mid-run keeps the run's earlier reasoning in context and in the cache;
+  pi-ai sends no such field, and whether Codex takes it is not verified. A
+  message steered into a tool round on an OpenAI model may therefore read
+  less of the round from the cache than it would there (not measured).
 - **Steering window.** A message sent during a tool round is steered in. If
   the round's last tool finishes between the check and the submission, Pi
   places it at the final boundary and it continues that run in the old
@@ -540,6 +563,11 @@ artifact of a thread it started.
 
 ## Known gaps
 
+- A turn's requests carry its newest images up to the bounds above. A
+  message steered in with more images than fit lets an older image of the
+  turn go as a note on the next request, so that request is cached only up
+  to that image; keeping the images already sent instead would hide the
+  newest from the model.
 - The transcript endpoint reads the whole history again at every new turn,
   and the run status scans every submission on each SSE frame. A long chat
   makes the transcript slow; the model's side does not grow.
