@@ -33,9 +33,8 @@ Packages are native to their manifest's OS and architecture.
   `qemu-system-x86` and `qemu-utils`. macOS also needs the arm64 UEFI firmware
   (`edk2-aarch64-code.fd`, shipped with Homebrew QEMU).
 - A Debian 13 genericcloud qcow2 image (`debian-13-genericcloud-amd64.qcow2`
-  or `-arm64`) supplied by the operator, or downloaded by `cubed runners
-  init-local` (below). The runner downloads nothing; it copies the image into
-  its state at init and identifies it by sha256.
+  or `-arm64`) supplied by the operator. The runner downloads nothing; it
+  copies the image into its state at init and identifies it by sha256.
 - Disk for the base image, one qcow2 overlay per VM (up to `--max-disk-gib`,
   default 64 GiB) and retained VM disks.
 
@@ -106,62 +105,71 @@ cubed boots it again from the same disk.
 
 ## Local runner
 
-A runner on the cubed host itself, reached over loopback, is set up and
-enrolled by one cubed command (the `cube-runner` binary on `PATH`, or
-`CUBE_RUNNER`):
+A `berth vm` on the cubed host itself, reached over loopback, is set up and
+enrolled by one cubed command, which can be run again at any time:
 
 ```sh
-cubed runners init-local [--image /absolute/debian-13-genericcloud-<arch>.qcow2] \
-  [--home ~/.cube] [--listen 127.0.0.1:7778] [--node-id node-local-<host>] \
-  [--qemu PATH] [--firmware PATH] [--max-vcpus N] [--max-memory-mib N] [--max-disk-gib N] \
-  [--state ~/.cube-host]
+cubed runners init-local --image <registry/repository@sha256:…> \
+  [--home ~/.cube] [--listen 127.0.0.1:7779] [--node-id node-berth-<host>] [--max-machines 2] \
+  [--berth PATH] [--keel DIR] [--qemu PATH] [--qemu-img PATH] [--mkfs-erofs PATH] [--state ~/.cube-host]
 ```
 
-Without `--image` it downloads the genericcloud image for the host (arm64 on
-an Apple Silicon Mac, amd64 on Linux x86-64): `SHA512SUMS` over HTTPS from
-`https://cloud.debian.org/images/cloud/trixie/latest/`, the image from
-whichever mirror that site redirects to, into `<home>/.image-download`. A
-digest mismatch discards the download (a mirror behind Debian's latest build
-gives exactly that; try again later); a network error leaves no partial file
-and names the cause; the file is removed once `cube-runner init` has copied it
-into the runner's state (kept if init fails, reused by the retry). The check
-covers transport corruption and a tampering mirror, not cloud.debian.org
-itself, and Debian publishes no signature for these sums.
-`CUBE_DEBIAN_IMAGE_BASE` names another site with the same layout; it must be
-https (plain http only to this host). There is no resume: an interrupted
-download starts over. The runner itself still downloads nothing. It creates a control key at
-`<home>/control.key`, runs `cube-runner init
---home <home>/runner` (its own key, the base image copied in, loopback at
-`--listen`, the limits), writes the version-2 config `<home>/runner.json`
-(mode 0600, binding `node-local-<host>` / the same thread id / environment 1),
-then runs the runner once to make the authenticated hello and record the
-admission in the registry, and stops it as its first Ctrl-C would. The runner is
-then started by its service (`brew services start cube-runner` under Homebrew,
-whose service assumes the default `--home ~/.cube`; the LaunchAgent or systemd
-profile elsewhere) or by `cube-runner run --home <home>/runner`. Start the
-service after `init-local`, not before: a service that already runs the home
-takes its lock and port, and `init-local` then enrolls whichever runner
-answers with the key. An existing `<home>/runner`, control key or config is refused:
-a runner is never rebound. If the runner cannot start on this host (no
-accelerator, QEMU missing), the command leaves the setup in place, prints why,
-and exits 1 with the enrollment to run once it is up:
+The programs and keel come from the options, else from `CUBE_BERTH`,
+`CUBE_BERTH_KEEL`, `CUBE_BERTH_QEMU`, `CUBE_BERTH_QEMU_IMG` and
+`CUBE_BERTH_MKFS_EROFS` (Homebrew's `cubed` launcher sets them to the
+`cube-berth`, `qemu` and `erofs-utils` formulas' files), else from `PATH`;
+keel has no default. Everything goes under `<home>`:
 
-```sh
-cubed runners enroll --config ~/.cube/runner.json [--state ~/.cube-host]
-```
+| File | What |
+|---|---|
+| `berth/` | berth's `--dir`: its key, journal, machine disks, layer cache |
+| `berth.control.key` | cubed's control key for it (`berth keygen`, 0600) |
+| `berth.env` | `CUBE_BERTH_IMAGE` and `CUBE_BERTH_MAX_MACHINES`, what the service starts it with (0600) |
+| `berth.json` | the version-2 protocol-4 config cubed reads (0600; binding `node-berth-<host>`, the same id, environment 1) |
+
+It creates only what is missing, in this order: the control key,
+`berth.env`, berth's own first run (which binds the directory to that key
+and the node id, pulls the image before it listens and prints its peer),
+then `berth.json`, and it enrolls the runner with an authenticated hello
+while that berth runs, then stops it with SIGTERM. What is already there must
+agree (image, slots, node id, address, control key, berth's binding); a
+disagreement is refused and nothing changes. Nothing is ever overwritten,
+deleted or rebound. So:
+
+- **Run again with everything in place and enrolled in this state:** it says
+  `already set up and enrolled`, starts nothing and changes nothing. This is
+  what happens after `brew uninstall` and `brew install`, which keep `~/.cube`
+  and `~/.cube-host`.
+- **After a failed run** (no accelerator, an image pull that failed): run it
+  again; it continues with the key and settings it made.
+- **With a moved or new `--state`:** it enrolls the same runner there (the
+  same key and peer).
+- **A retired runner** is not admitted again.
+- **`--image` is needed only the first time.** The image is the operator's
+  choice; cube publishes no default image yet.
+
+The runner is then started by its service (`brew services restart
+cubeyard/tap/cube-berth` under Homebrew, whose service assumes the default
+`--home ~/.cube`). If the service already holds the directory, `init-local`
+enrolls whichever berth answers with the key. If berth cannot start here, the
+command keeps what it made, prints why and exits 1. A protocol-3 local
+runner's `runner/`, `runner.json` and `control.key` under the same home are
+never read or touched.
 
 `runners enroll` is the same explicit admission as `scripts/enroll-runner.ts`
-(which now delegates to it): a hello and a status exchange, a refusal of a
-protocol-2 runner and of a control key another enrolled runner uses, then the
-registry row. Both commands also work through the managed launcher
+(which now delegates to it): a hello (and for protocol 3 a status exchange),
+a refusal of a control key another enrolled runner uses, then the registry
+row. Both commands also work through the managed launcher
 (`~/.local/bin/cubed`), which runs subcommands unsupervised.
+
+```sh
+cubed runners enroll --config ~/.cube/berth.json [--state ~/.cube-host]
+```
 
 The local runner runs as the user who starts it: on the one-machine setup the
 runner account is the operator's own, and the trust statement above applies to
-it (a QEMU escape has that user's authority; the runner reads every machine
-disk it hosts). The same-host loopback setup on macOS is unverified on real
-hardware this round; macOS runners have been verified in production as remote
-(relay) runners.
+it (a QEMU escape has that user's authority, and macOS QEMU has no
+`-sandbox`; the runner reads every machine disk it hosts).
 
 ## Thread machines per runner
 

@@ -43,7 +43,7 @@ import { Artifacts } from "./artifact-service.ts";
 import { ARTIFACT_GUIDE, artifactTools } from "./artifact-tools.ts";
 import { githubPulls, type GithubPulls } from "./github-pulls.ts";
 import { Portal, portalSettings, type PortalSettings } from "./portal.ts";
-import { DEBIAN_IMAGE_BASE, DEFAULT_LOCAL_RUNNER_LISTEN, enrollRunner, initLocalRunner } from "./runner-enroll.ts";
+import { DEFAULT_LOCAL_BERTH_LISTEN, DEFAULT_LOCAL_BERTH_MACHINES, enrollRunner, initLocalBerth } from "./runner-enroll.ts";
 
 const CUBED_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
 /** The release's version (its launcher exports CUBED_VERSION=vX.Y.Z); null
@@ -55,9 +55,9 @@ function releaseVersion(): string | null {
 const HELP = `usage: cubed [options]
        cubed runners status [--state <directory>]
        cubed runners enroll --config <runner.json> [--state <directory>]
-       cubed runners init-local [--image <debian-13-genericcloud.qcow2>] [--home <directory>]
-             [--listen <127.0.0.1:port>] [--node-id <node-id>] [--qemu <path>] [--firmware <path>]
-             [--max-vcpus N] [--max-memory-mib N] [--max-disk-gib N] [--state <directory>]
+       cubed runners init-local [--image <registry/repository@sha256:digest>] [--home <directory>]
+             [--listen <127.0.0.1:port>] [--node-id <node-id>] [--max-machines N] [--berth <path>]
+             [--keel <directory>] [--qemu <path>] [--qemu-img <path>] [--mkfs-erofs <path>] [--state <directory>]
 
 options:
   --state <directory>       product state (default: CUBED_STATE or ~/.cube-host)
@@ -73,15 +73,16 @@ keep it on loopback or behind an authenticated, access-controlled private networ
 
 runners enroll admits the runner a private version-2 config describes to the
 installation's global pool, after an authenticated protocol-3 hello.
-runners init-local sets up a cube-runner on this host (the binary on PATH, or
-CUBE_RUNNER): its key, state and base image under <home>/runner (default
-~/.cube), loopback at --listen (default ${DEFAULT_LOCAL_RUNNER_LISTEN}), the config
-<home>/runner.json, and enrolls it; the runner is then started by its service
-or by \`cube-runner run --home <home>/runner\`. Without --image it downloads
-Debian's genericcloud image for this host (the bytes may come from a Debian
-mirror) and checks it against the SHA512SUMS fetched over HTTPS from
-${DEBIAN_IMAGE_BASE}; CUBE_DEBIAN_IMAGE_BASE names another https site with
-the same layout.
+runners init-local sets up a berth vm on this host and enrolls it: cubed's
+control key, berth's directory, berth.env (the image and the machines at once
+its service starts it with) and berth.json under <home> (default ~/.cube),
+loopback at --listen (default ${DEFAULT_LOCAL_BERTH_LISTEN}), ${DEFAULT_LOCAL_BERTH_MACHINES} machines at once unless
+--max-machines says. --image is needed the first time. berth, QEMU, qemu-img,
+mkfs.erofs and keel come from the options, else CUBE_BERTH, CUBE_BERTH_QEMU,
+CUBE_BERTH_QEMU_IMG, CUBE_BERTH_MKFS_EROFS and CUBE_BERTH_KEEL (Homebrew sets
+them). Run it again at any time (after a reinstall too): it creates only what
+is missing, never changes or deletes what is there, and says so when all is
+set up and enrolled. The runner is then started by its service.
 
 The portal to threads' \`cube service\` web servers is off unless CUBED_PORTAL_IP
 names cubed's private (e.g. Tailscale) or loopback address (with
@@ -960,8 +961,8 @@ interface CubedCli {
   /** `runners enroll`: the runner's private config. */
   config?: string;
   /** `runners init-local`: the local runner's options. */
-  local?: { image?: string; imageBase?: string; home: string; listen: string; nodeId?: string; qemu?: string; firmware?: string;
-    maxVcpus?: number; maxMemoryMib?: number; maxDiskGib?: number };
+  local?: { image?: string; home: string; listen?: string; nodeId?: string; maxMachines?: number;
+    berth?: string; keel?: string; qemu?: string; qemuImg?: string; mkfsErofs?: string };
 }
 
 function cli(argv: string[]): CubedCli {
@@ -971,8 +972,8 @@ function cli(argv: string[]): CubedCli {
     "allowed-host": { type: "string", multiple: true }, "log-level": { type: "string" },
     version: { type: "boolean" }, help: { type: "boolean" },
     config: { type: "string" }, image: { type: "string" }, home: { type: "string" }, listen: { type: "string" },
-    "node-id": { type: "string" }, qemu: { type: "string" }, firmware: { type: "string" },
-    "max-vcpus": { type: "string" }, "max-memory-mib": { type: "string" }, "max-disk-gib": { type: "string" },
+    "node-id": { type: "string" }, "max-machines": { type: "string" }, berth: { type: "string" }, keel: { type: "string" },
+    qemu: { type: "string" }, "qemu-img": { type: "string" }, "mkfs-erofs": { type: "string" },
   } });
   if (values.help) return { state: "", host: "", port: 0, logLevel: "info", command: "help" };
   if (values.version) return { state: "", host: "", port: 0, logLevel: "info", command: "version" };
@@ -981,7 +982,7 @@ function cli(argv: string[]): CubedCli {
     : positionals.length === 2 && positionals[0] === "runners" && positionals[1] === "enroll" ? "runners-enroll"
     : positionals.length === 2 && positionals[0] === "runners" && positionals[1] === "init-local" ? "runners-init-local"
     : (() => { throw new Error(HELP); })();
-  const runnerOptions = ["config", "image", "home", "listen", "node-id", "qemu", "firmware", "max-vcpus", "max-memory-mib", "max-disk-gib"] as const;
+  const runnerOptions = ["config", "image", "home", "listen", "node-id", "max-machines", "berth", "keel", "qemu", "qemu-img", "mkfs-erofs"] as const;
   const given = runnerOptions.filter(name => values[name] !== undefined);
   const allowed: Record<string, readonly string[]> = { "runners-enroll": ["config"], "runners-init-local": runnerOptions.slice(1) };
   const stray = given.filter(name => !(allowed[command] ?? []).includes(name));
@@ -993,16 +994,15 @@ function cli(argv: string[]): CubedCli {
     config = path.resolve(values.config);
   }
   if (command === "runners-init-local") {
-    const limit = (name: "max-vcpus" | "max-memory-mib" | "max-disk-gib"): number | undefined => {
-      const raw = values[name];
-      if (raw === undefined) return undefined;
-      const parsed = Number(raw);
-      if (!Number.isInteger(parsed) || parsed < 1 || String(parsed) !== raw) throw new Error(`--${name} must be a positive integer`);
-      return parsed;
-    };
-    local = { image: values.image === undefined ? undefined : path.resolve(values.image), imageBase: process.env.CUBE_DEBIAN_IMAGE_BASE, home: path.resolve(values.home ?? path.join(os.homedir(), ".cube")),
-      listen: values.listen ?? DEFAULT_LOCAL_RUNNER_LISTEN, nodeId: values["node-id"], qemu: values.qemu, firmware: values.firmware,
-      maxVcpus: limit("max-vcpus"), maxMemoryMib: limit("max-memory-mib"), maxDiskGib: limit("max-disk-gib") };
+    const raw = values["max-machines"];
+    const maxMachines = raw === undefined ? undefined : Number(raw);
+    if (maxMachines !== undefined && (!Number.isInteger(maxMachines) || String(maxMachines) !== raw || maxMachines < 1 || maxMachines > 64)) {
+      throw new Error("--max-machines must be 1 through 64");
+    }
+    const absolute = (value: string | undefined) => value === undefined ? undefined : path.resolve(value);
+    local = { image: values.image, home: path.resolve(values.home ?? path.join(os.homedir(), ".cube")), listen: values.listen,
+      nodeId: values["node-id"], maxMachines, berth: absolute(values.berth), keel: absolute(values.keel), qemu: absolute(values.qemu),
+      qemuImg: absolute(values["qemu-img"]), mkfsErofs: absolute(values["mkfs-erofs"]) };
   }
   const state = path.resolve(values.state ?? process.env.CUBED_STATE ?? path.join(os.homedir(), ".cube-host"));
   const host = values.host ?? process.env.CUBED_HOST ?? "127.0.0.1";
@@ -1022,22 +1022,32 @@ async function runnersEnroll(state: string, configPath: string): Promise<void> {
   console.log(JSON.stringify(enrolled));
 }
 
-/** Sets up and enrolls a cube-runner on this host; exit code 1 when the
- * runner is set up but could not be started here to enroll it. */
+/** Sets up and enrolls the local berth vm, or says it already is; exit code
+ * 1 when it is set up but could not be enrolled here. */
 async function runnersInitLocal(state: string, options: NonNullable<CubedCli["local"]>): Promise<number> {
-  const local = await initLocalRunner({ state, ...options, log: line => console.log(line) });
-  console.log(`local runner ${local.nodeId}`);
-  console.log(`  home:    ${path.dirname(local.configPath)} (runner/, control.key, runner.json)`);
+  const local = await initLocalBerth({ state, ...options, log: line => console.log(line) });
+  const service = "start or restart its service (Homebrew: brew services restart cubeyard/tap/cube-berth cubeyard/tap/cube)";
+  console.log(`local berth vm ${local.nodeId}`);
+  console.log(`  home:    ${local.home} (berth/, berth.json, berth.control.key, berth.env)`);
   console.log(`  listens: ${local.address} (loopback)`);
-  if (local.qemu) console.log(`  qemu:    ${local.qemu}`);
-  if (local.baseImageSha256) console.log(`  image:   sha256 ${local.baseImageSha256}`);
-  if (local.enrollment) {
-    console.log(`enrolled in ${state}: cube-runner ${local.enrollment.softwareVersion}, ${local.enrollment.platform}, up to ${local.enrollment.maxActiveVms} thread machine${local.enrollment.maxActiveVms === 1 ? "" : "s"}`);
-    console.log(`next: start the runner (its service, or cube-runner run --home ${path.join(local.home, "runner")}), then cubed`);
+  console.log(`  image:   ${local.image}, ${local.maxMachines} machine${local.maxMachines === 1 ? "" : "s"} at once`);
+  if (local.already) {
+    console.log(`already set up and enrolled in ${state}; nothing changed`);
+    console.log(`next: ${service}`);
     return 0;
   }
-  console.error(`cubed: the runner is set up but not enrolled: ${local.runnerError}`);
-  console.error(`cubed: start the runner (its service, or cube-runner run --home ${path.join(local.home, "runner")}), then run: cubed runners enroll --config ${local.configPath} --state ${state}`);
+  if (local.enrollment) {
+    console.log(`enrolled in ${state}: berth ${local.enrollment.softwareVersion}, ${local.enrollment.platform}, up to ${local.enrollment.maxActiveVms} thread machine${local.enrollment.maxActiveVms === 1 ? "" : "s"}`);
+    console.log(`next: ${service}`);
+    return 0;
+  }
+  if (!local.runnerError) {
+    console.log(`enrolled in ${state} already; wrote only what was missing`);
+    console.log(`next: ${service}`);
+    return 0;
+  }
+  console.error(`cubed: the local berth vm is set up but not enrolled: ${local.runnerError}`);
+  console.error(`cubed: fix that, then run cubed runners init-local again (it continues where it stopped), or ${service} and run: cubed runners enroll --config ${local.files.configPath} --state ${state}`);
   return 1;
 }
 
