@@ -428,6 +428,13 @@ fails in the machine, which has no credentials for it.
 - **Other:**
   - pi-codemode 1.3.0's worker `CodemodeSandbox` has no CPU-slice limit;
   - there is no manual compaction or reset in the UI;
-  - pi-durable's `onReport` is not wired to logs;
+  - a Harness whose Session failed (a storage error) stays down until cubed
+    restarts; it does not reopen by itself (D2′ open; docs/optchat.md,
+    "Failing closed");
+  - rolling back to a cubed with Pi 1.0.1 is safe only when no Pi tool call
+    was in flight at the 1.3.0 cubed's close: 1.3.0 writes `pi.tool` tasks as
+    version 2, which 1.0.1 cannot run (`task_too_old`), so such a
+    conversation stalls, silently in 1.0.1, until Pi is upgraded again. Stop
+    cubed with every thread and the chat idle first;
   - AGENTS.md still calls Pi an AgentHarness;
   - `docs/architecture-tour-notes.md` is historical.

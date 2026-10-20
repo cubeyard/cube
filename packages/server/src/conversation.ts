@@ -54,6 +54,8 @@ export class Conversations {
   private readonly agents = new Map<string, Promise<Agent>>();
   private readonly workspaces = new Map<string, { workspace: VmWorkspace; leases: LeaseStore }>();
   private readonly failures = new Map<string, string>();
+  /** Why a thread's open Pi agent is down: its Session failed. */
+  private readonly downs = new Map<string, string>();
   /** Threads whose machine waits for a runner (RunnerWait): not a failure;
    * the recovery loop tries again. */
   private readonly waits = new Map<string, string>();
@@ -110,6 +112,8 @@ export class Conversations {
     await Promise.all(work);
   }
   error(id: string): string | null { return this.failures.get(id) ?? null; }
+  /** Why the thread's open Pi agent is down (its Session failed), if it is. */
+  down(id: string): string | null { return this.downs.get(id) ?? null; }
   /** Why the thread's machine waits for a runner, if it does. */
   waiting(id: string): string | null { return this.waits.get(id) ?? null; }
   /** Whether the thread's machine is being started (booted, prepared or its
@@ -358,6 +362,12 @@ export class Conversations {
         // instead of submitting it again, whatever happened since.
         const initial = this.registry.initialPrompt(id);
         if (initial) await agent.conversation.submit({ type: "input", content: initial, requestId: INITIAL_REQUEST }, context);
+        // Pi's Session failed (a storage error): the agent stays down, and
+        // cached, until cubed restarts; nothing here reopens it.
+        void agent.harness.closed.then(() => {
+          const down = agent.failure();
+          if (down && this.agents.get(id) === loading) this.downs.set(id, down);
+        }, () => {});
         return agent;
       } catch (error) { await agent.close(); throw error; }
     })();
@@ -367,7 +377,7 @@ export class Conversations {
   }
   private async closeAgents(id: string): Promise<void> {
     const claude = this.claudes.get(id), pi = this.agents.get(id);
-    this.claudes.delete(id); this.agents.delete(id);
+    this.claudes.delete(id); this.agents.delete(id); this.downs.delete(id);
     await (await claude?.catch(() => null))?.close(); await this.closePi(id, pi);
   }
   /** Closes a Pi agent, keeping its usage first. */
@@ -493,7 +503,7 @@ export class Conversations {
     const agent = await this.agent(id);
     let events = this.feeds.get(agent);
     if (!events) {
-      events = new PiThreadEvents({ agent, owner: () => this.owner(id), failure: () => this.failures.get(id) ?? null });
+      events = new PiThreadEvents({ agent, owner: () => this.owner(id), failure: () => this.failures.get(id) ?? agent.failure() });
       this.feeds.set(agent, events);
     }
     return events;

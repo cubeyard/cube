@@ -614,6 +614,47 @@ commits fail after their nodes are stored, then reopens: the turns after it
 send the views the uninterrupted chat sends. Hit rates are modelled offline (spec §3.3), not measured on
 a live provider.
 
+## Failing closed
+
+- **A request whose view or images cannot be built is not sent.** Pi
+  skips a `beforeRequest` hook that throws and sends the messages it built
+  itself, without the view and the images: another prefix and another
+  cost. It rethrows only when the generation's invocation was aborted. So
+  the chat's hook catches its own failure (images, the turn's document, the
+  view's rendering), aborts its generation with `Harness.abortTask`, waits
+  for that abort and only then throws. The turn ends unanswered, as a stop
+  does: nothing retries it, the next message starts a new turn, and a
+  reopen does not send it. The failure is logged (`request not sent`) and
+  shown as the chat's failure until a request is sent. If the abort's
+  commit fails, the Session fails and its end aborts the generation; a
+  close aborts it too.
+- **Pi's reports.** Both Harnesses (the chat's and each thread's) pass
+  `onReport`: a hook's or listener's throw, a task Pi cannot run
+  (`task_too_old` after a rollback), a failed cleanup. Each is one warning
+  line with the error's name, code and message, redacted (`pi-report.ts`)
+  and bounded to 1000 characters; never its stack, cause or other fields,
+  which can carry a provider request's headers or body.
+- **A failed Session.** A failed Storage call ends Pi's Session
+  (`harness.closed` settles `failed`): every task is aborted and every
+  later call rejects. The chat watches it and goes down at once: it closes
+  without the grace (nothing it waits for could be stored), cuts off the
+  compactor's calls, starts no turn, node or retry, releases its provider
+  sessions and shows `the chat stopped: its history could not be saved`.
+  A thread's agent does the same: it is logged, its provider sessions are
+  released, and its thread shows why. Neither reopens by itself: the
+  reopen sends the request that was out at the failure again (N2, not
+  exactly-once), and whether and when to reopen is the open decision D2′.
+  Both stay down until cubed restarts.
+
+`optchat-fail-closed-test.ts` makes the view's rendering and the image
+check throw and checks that nothing is sent, now, with the next turn or
+after a reopen, and that the log has no secret and no stack; then fails the
+chat's storage with a request out and with a compactor call held, and
+checks that nothing more is sent, the provider sessions are released before
+any close, and the close ends without the grace. `pi-upgrade-test.ts` pins
+Pi's side: the abort-then-throw primitive, and a thread agent's reports
+and failed Session.
+
 ## Configuration
 
 - The chat's model is chosen on the chat strip (`GET/PATCH /api/optchat/model`);

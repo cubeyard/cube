@@ -157,7 +157,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         machine: thread.archived ? null : (conversations.error(id) || conversations.waiting(id) || conversations.starting(id) || thread.workspaceState === "available") ? state(id)
           : thread.workspaceState === "allocating" ? "not started" : thread.workspaceState,
         facts, agentOpen: conversations.agentOpen(id),
-        failure: conversations.error(id) ?? (thread.workspaceState === "failed" ? thread.workspaceError : null),
+        failure: conversations.error(id) ?? conversations.down(id) ?? (thread.workspaceState === "failed" ? thread.workspaceError : null),
       };
       try { return { ...record, transcript: await conversations.storedHistory(id, request), unreadable: null }; }
       catch (error) { return { ...record, transcript: null, unreadable: error instanceof Error ? error.message : String(error) }; }
