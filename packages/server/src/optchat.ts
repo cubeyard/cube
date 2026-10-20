@@ -1568,9 +1568,11 @@ export class OptChat {
   }
 }
 
-/** The turn's request: the system baseline first (Pi writes it after the
- * turn's first user message), then that message with the view's pieces as
- * its first blocks, then the turn's own steps. */
+/** The turn's request: the system baseline first (Pi writes it when the run
+ * starts, after the turn's user messages: one, or every one of a batch),
+ * then the first of them with the view's pieces as its first blocks, then
+ * the rest and the turn's own steps. A later system message, after the
+ * model's first step, is an update and stays where it is. */
 export function withView(messages: readonly Message[], pieces: readonly string[]): Message[] {
   const index = messages.findIndex(message => message.role === "user");
   if (index < 0) return [...messages];
@@ -1579,8 +1581,8 @@ export function withView(messages: readonly Message[], pieces: readonly string[]
     const content = typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
     return { ...message, content: [...pieces.map(text => ({ type: "text" as const, text })), ...content] };
   });
-  const system = out.findIndex((message, k) => k > index && message.role === "system");
-  if (system === index + 1 && !out.slice(0, index).some(message => message.role === "system")) {
+  const system = out.findIndex((message, k) => k > index && message.role !== "user");
+  if (out[system]?.role === "system" && !out.slice(0, index).some(message => message.role === "system")) {
     const [baseline] = out.splice(system, 1);
     out.splice(index, 0, baseline!);
   }

@@ -49,6 +49,21 @@ const request = (view: string): Message[] => withView([
   { role: "system", content: "", sections: { master: "You are OptChat." }, toolsAdded: [tool], timestamp: 1 },
 ], viewPieces(view));
 assert.equal(request(small(3))[0]!.role, "system", "the system baseline leads the request");
+{
+  // A batch: the messages written before the input precede Pi's baseline.
+  const baseline: Message = { role: "system", content: "", sections: { master: "You are OptChat." }, toolsAdded: [tool], timestamp: 1 };
+  const update: Message = { role: "system", content: "", sections: { user: "Answer in English." }, timestamp: 2 };
+  const step: Message = { role: "assistant", content: [{ type: "text", text: "ok" }], api: "anthropic-messages", provider: "anthropic", model: "m", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: 2 };
+  const users = ["one", "two", "three"].map((content): Message => ({ role: "user", content, timestamp: 1 }));
+  const batch = withView([...users, baseline, step, update], ["<chat>\n</chat>"]);
+  assert.deepEqual(batch.map(message => message.role), ["system", "user", "user", "user", "assistant", "system"], "a batch's baseline leads, its update stays after the step");
+  assert.equal(batch[0], baseline);
+  assert.deepEqual((batch[1] as { content: Array<{ text: string }> }).content.map(block => block.text), ["<chat>\n</chat>", "one"], "the view goes in the first message");
+  assert.equal(batch.at(-1), update);
+  // An update with no baseline before it in the turn is never taken for one.
+  assert.deepEqual(withView([...users, step, update], ["<chat>\n</chat>"]).map(message => message.role), ["user", "user", "user", "assistant", "system"]);
+  assert.deepEqual(withView([baseline, ...users, update], ["<chat>\n</chat>"]).map(message => message.role), ["system", "user", "user", "user", "system"], "a baseline already first stays the only one moved");
+}
 
 type Captured = { url: string; headers: Headers; body: Record<string, unknown> };
 const bodies: Captured[] = [];
@@ -82,6 +97,21 @@ const sse = (event: object) => new TextEncoder().encode(`data: ${JSON.stringify(
 const added = { type: "response.output_item.added", output_index: 0, item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] } };
 const until = async (test: () => boolean) => { for (let k = 0; k < 200 && !test(); k++) await sleep(5); assert.ok(test()); };
 const marks = (body: Body) => JSON.stringify(body).split('"cache_control"').length - 1;
+
+{
+  // A batch turn goes on the wire as a single message's does: the system
+  // prompt on top, the same tools and view blocks, no mid-conversation update.
+  const baseline: Message = { role: "system", content: "", sections: { master: "You are OptChat." }, toolsAdded: [tool], timestamp: 1 };
+  const single = await anthropic(request(render(500)));
+  const batch = await anthropic(withView([
+    ...["first", "second", "third"].map((content): Message => ({ role: "user", content, timestamp: 1 })), baseline,
+  ], viewPieces(render(500))));
+  assert.deepEqual(batch.system, single.system, "a batch turn sends the system prompt on top");
+  assert.deepEqual(batch.tools, single.tools, "and the same tools");
+  assert.deepEqual(batch.messages[0]!.content.slice(0, 125), single.messages[0]!.content.slice(0, 125), "and the same view blocks through their mark");
+  assert.ok(!JSON.stringify(batch.messages).includes("system prompt section"), "no system prompt among the messages");
+  assert.equal(marks(batch), 3);
+}
 
 {
   const body = await anthropic(request(render(500)));

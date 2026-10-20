@@ -458,7 +458,10 @@ without changing Pi:
   the compaction view) is sent as text blocks of 4 lines; `<chat>` rides with
   the first and `</chat>` with the 0-3 lines left over. The view leads the
   turn's first user message. The hook puts the system baseline first; Pi
-  writes it after that message.
+  writes it when the run starts, after that message, or after every message
+  of a batch (several messages that waited for one turn). A later system
+  message, after the model's first step, is an update and stays where Pi
+  wrote it.
 - **Anthropic.** An `onPayload` hook keeps pi-ai's mark on the last system
   block only (it covers the tools and the OAuth Claude Code block), drops the
   tool marks and marks the last whole view block. pi-ai keeps its mark on the
