@@ -3,7 +3,8 @@
 import { crc32 } from "node:zlib";
 import type { ImageContent, Models } from "@earendil-works/pi-ai";
 import { createReadTool } from "@earendil-works/pi-durable/tools";
-import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
+import { ok, type ExecutionEnv } from "@earendil-works/pi-durable/env";
+import { bytesReader } from "./workspace-env.ts";
 import { sniffImage } from "./optchat-media.ts";
 
 /** Conservative unresized provider limits; WorkspaceEnv also caps bytes at 2 MiB. */
@@ -75,29 +76,37 @@ export function createPiReadTool(models: Models) {
       const env = api.env;
       // Interpose only the binary read. Upstream still owns path variants, line
       // selection and diagnostics, and consumes exactly the bytes checked here.
+      const checked = async (file: string, readContext: typeof context) => {
+        const result = await env.readBinaryFile(file, readContext);
+        if (!result.ok) return result;
+        const b = Buffer.from(result.value);
+        const signature = b.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex")) || (b[0] === 0xff && b[1] === 0xd8)
+          || ["GIF87a", "GIF89a"].includes(b.toString("latin1", 0, 6))
+          || (b.toString("latin1", 0, 4) === "RIFF" && b.toString("latin1", 8, 12) === "WEBP");
+        if (signature) {
+          const image = checkedPiImage(b);
+          const agent = await api.agent(context);
+          const model = agent.model && models.getModel(agent.model.provider, agent.model.modelId);
+          if (!model) throw new Error("the selected model is unavailable in the model catalog; reconnect its provider or select an available vision-capable model and read again");
+          if (!model.input.includes("image")) throw new Error("the selected model does not support image input; select a vision-capable model and read again");
+          throw new ImageRead(image);
+        } else {
+          // Do not present arbitrary binary data as replacement-character text.
+          try { new TextDecoder("utf-8", { fatal: true }).decode(b); }
+          catch { throw new Error("not a supported image or UTF-8 text file; inspect it with bash"); }
+          if (b.includes(0)) throw new Error("binary file is not a supported image; inspect it with bash");
+        }
+        return result;
+      };
       const wrapped: ExecutionEnv = new Proxy(env, {
         get(target, property) {
-          if (property === "readBinaryFile") return async (file: string, readContext: typeof context) => {
-            const result = await target.readBinaryFile(file, readContext);
+          if (property === "readBinaryFile") return checked;
+          // Upstream reads through a reader since Pi 1.0.3: one checked whole read.
+          if (property === "openBinaryReader") return async (file: string, _options: unknown, readContext: typeof context) => {
+            const result = await checked(file, readContext);
             if (!result.ok) return result;
-            const b = Buffer.from(result.value);
-            const signature = b.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex")) || (b[0] === 0xff && b[1] === 0xd8)
-              || ["GIF87a", "GIF89a"].includes(b.toString("latin1", 0, 6))
-              || (b.toString("latin1", 0, 4) === "RIFF" && b.toString("latin1", 8, 12) === "WEBP");
-            if (signature) {
-              const image = checkedPiImage(b);
-              const agent = await api.agent(context);
-              const model = agent.model && models.getModel(agent.model.provider, agent.model.modelId);
-              if (!model) throw new Error("the selected model is unavailable in the model catalog; reconnect its provider or select an available vision-capable model and read again");
-              if (!model.input.includes("image")) throw new Error("the selected model does not support image input; select a vision-capable model and read again");
-              throw new ImageRead(image);
-            } else {
-              // Do not present arbitrary binary data as replacement-character text.
-              try { new TextDecoder("utf-8", { fatal: true }).decode(b); }
-              catch { throw new Error("not a supported image or UTF-8 text file; inspect it with bash"); }
-              if (b.includes(0)) throw new Error("binary file is not a supported image; inspect it with bash");
-            }
-            return result;
+            const absolute = await target.absolutePath(file, readContext);
+            return absolute.ok ? ok(bytesReader(result.value, absolute.value)) : absolute;
           };
           const value = Reflect.get(target, property);
           return typeof value === "function" ? value.bind(target) : value;
@@ -107,7 +116,7 @@ export function createPiReadTool(models: Models) {
       catch (result) {
         // Escape the text-only upstream tool before it can decode image bytes.
         // Only our private completion signal is caught; file errors propagate.
-        if (result instanceof ImageRead) return { content: [result.content] };
+        if (result instanceof ImageRead) return { output: [result.content] };
         throw result;
       }
     }) satisfies typeof upstream.execute,

@@ -25,7 +25,7 @@ import { GithubAuth } from "./github-auth.ts";
 import { ModelAuth } from "./model-auth.ts";
 import { completeOnboarding, isOnboardingComplete } from "./onboarding.ts";
 import { SettingsStore, type SettingsView } from "./settings.ts";
-import { checkDefaultUpdate, DEFAULT_SKILL_SOURCE, defaultSource, parseSkillsConfig, resolveProjectSkills, resolveSkills, type SkillSource } from "./skills.ts";
+import { checkDefaultUpdate, DEFAULT_SKILL_SOURCE, defaultSource, parseSkillsConfig, resolveProjectSkills, resolveSkills, type SkillGit, type SkillsConfig, type SkillSource } from "./skills.ts";
 import { UpdateService } from "./update-service.ts";
 import { versionInfo } from "./version.ts";
 import { OptChat, OptChatEvents } from "./optchat.ts";
@@ -197,6 +197,41 @@ const IMAGE_HEADERS = {
   "content-disposition": "inline",
 } as const;
 
+/** A new thread starts at the latest commits, not at the project's last
+ * check: each repository's configured branch (or the default branch the
+ * remote advertises now) is fetched and resolved again. A failure starts
+ * no thread rather than one at older commits. An abort stops the git and
+ * skills fetches and is rethrown as it came. */
+export function latestCommitsOf(deps: { registry: Registry; git: SkillGit & Pick<GitService, "prepareRepository">; skills: () => SkillsConfig; skillSource: SkillSource | null }) {
+  return async (projectId: string, signal?: AbortSignal): Promise<ResolvedRepositories> => {
+    const project = deps.registry.getProject(projectId);
+    if (!project) throw new Error("project not found");
+    if (project.status !== "ready") throw new Error("check the project before starting a thread");
+    const repositories = await Promise.all(project.repositories.map(async repository => {
+      try {
+        const result = await deps.git.prepareRepository(repository.url, repository.base, signal);
+        return { url: repository.url, base: result.base, baseOid: result.baseOid };
+      } catch (error) {
+        signal?.throwIfAborted();
+        throw Object.assign(new Error(`fetching the latest ${repository.base ?? "default branch"} of ${repository.url} failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
+      }
+    }));
+    const saved = deps.skills();
+    const skills = await (async () => {
+      const installed = await resolveSkills(deps.git, defaultSource(deps.skillSource, saved), saved, signal);
+      // The primary checkout's own .agents/skills, at the commit it starts from.
+      const primary = repositories[0];
+      if (!primary) return installed;
+      const own = await resolveProjectSkills(deps.git, primary.url, primary.baseOid, saved, installed.skills, signal);
+      return { ...installed, skipped: [...installed.skipped, ...own.skipped], project: own.project };
+    })().catch(error => {
+      signal?.throwIfAborted();
+      throw Object.assign(new Error(`resolving the skills failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
+    });
+    return { projectRevision: project.revision, repositories, skills };
+  };
+}
+
 /** Private product host. Thread tools run in each thread's VM; there is no
  * local execution fallback. */
 export async function createCubed(options: {
@@ -233,6 +268,8 @@ export async function createCubed(options: {
   githubPulls?: GithubPulls;
   /** Artifact comment delivery retry, for tests. */
   artifactRetryMs?: number;
+  /** OptChat's compactor retry, for tests. */
+  optchatRetryMs?: number;
   /** The skill source before the user's (docs/skills.md); none when absent.
    * The cubed command passes DEFAULT_SKILL_SOURCE. */
   skillSource?: SkillSource | null;
@@ -285,6 +322,7 @@ export async function createCubed(options: {
   portal = new Portal({ settings: options.portal === undefined ? portalSettings() : options.portal, directory: path.join(options.state, "portal"),
     registry, machines, archiving: id => conversations.archivingNow(id) });
   const git = new GitService(path.join(options.state, "repositories"));
+  const latestCommits = latestCommitsOf({ registry, git, skills: () => settings.get().skills, skillSource: options.skillSource ?? null });
   const updates = options.updates ?? new UpdateService();
   const onboarding = path.join(options.state, "onboarding.json");
   const configuredHosts = options.allowedHosts ?? process.env.CUBED_ALLOWED_HOSTS?.split(",") ?? [];
@@ -292,7 +330,7 @@ export async function createCubed(options: {
   const runnerHealth = options.runnerHealth ?? protocolRunnerHealth;
   /** A machine that waits for a runner is still starting (`waiting` says
    * why), unless its agent is open on it already. */
-  const threadState = (id: string) => conversations.error(id) ? "error"
+  const threadState = (id: string) => conversations.error(id) || conversations.down(id) ? "error"
     : conversations.starting(id) || (conversations.waiting(id) && !conversations.agentOpen(id)) ? "starting" : "ready";
   const runnerView = (id: string) => registry.runnerStatuses().find(runner => runner.id === id);
   const probeRunner = async (id: string) => {
@@ -388,7 +426,7 @@ export async function createCubed(options: {
   const openOptchat = () => optchat ??= OptChat.open({
     directory: path.join(options.state, "optchat"), models, threads: optchatThreads,
     model: async () => preferredModel(await catalog()), compactor: async () => (await compactorChoice()).model,
-    artifacts: artifactService,
+    artifacts: artifactService, ...options.optchatRetryMs ? { limits: { retryMs: options.optchatRetryMs } } : {},
   }).then(chat => ({ chat, events: new OptChatEvents(chat, new PiThreadEvents({ agent: chat.agent, owner: () => null, failure: () => chat.failure() })) }))
     .catch(error => {
       optchat = null;
@@ -453,35 +491,6 @@ export async function createCubed(options: {
     project.hooksUpdatedAt = current.hooksUpdatedAt;
     registry.saveProject(project);
     return projectView(project);
-  }
-  /** A new thread starts at the latest commits, not at the project's last
-   * check: each repository's configured branch (or the default branch the
-   * remote advertises now) is fetched and resolved again. A failure starts
-   * no thread rather than one at older commits. */
-  async function latestCommits(projectId: string): Promise<ResolvedRepositories> {
-    const project = registry.getProject(projectId);
-    if (!project) throw new Error("project not found");
-    if (project.status !== "ready") throw new Error("check the project before starting a thread");
-    const repositories = await Promise.all(project.repositories.map(async repository => {
-      try {
-        const result = await git.prepareRepository(repository.url, repository.base);
-        return { url: repository.url, base: result.base, baseOid: result.baseOid };
-      } catch (error) {
-        throw Object.assign(new Error(`fetching the latest ${repository.base ?? "default branch"} of ${repository.url} failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
-      }
-    }));
-    const saved = settings.get().skills;
-    const skills = await (async () => {
-      const installed = await resolveSkills(git, defaultSource(options.skillSource ?? null, saved), saved);
-      // The primary checkout's own .agents/skills, at the commit it starts from.
-      const primary = repositories[0];
-      if (!primary) return installed;
-      const own = await resolveProjectSkills(git, primary.url, primary.baseOid, saved, installed.skills);
-      return { ...installed, skipped: [...installed.skipped, ...own.skipped], project: own.project };
-    })().catch(error => {
-      throw Object.assign(new Error(`resolving the skills failed, so no thread was started: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), { status: 502 });
-    });
-    return { projectRevision: project.revision, repositories, skills };
   }
   const server = http.createServer(async (request, response) => {
     const json = (body: unknown, status = 200) => { response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); response.end(JSON.stringify(body)); };
@@ -660,7 +669,8 @@ export async function createCubed(options: {
         if (parts.length === 2 && method === "GET") return json(await settingsView());
         // `{model: {provider, id}}` saves a compactor model, `{model: null}`
         // follows the chat's. The next node written uses it; one being
-        // written finishes with the model it started with.
+        // written finishes with the model it started with, and a held one
+        // is asked again if the model is another.
         if (parts.length === 3 && parts[2] === "compactor" && method === "PUT") {
           const input = body.model;
           if (Object.keys(body).some(key => key !== "model") || input === undefined) return json({ error: "send {model: {provider, id}} or {model: null}" }, 400);
@@ -673,6 +683,8 @@ export async function createCubed(options: {
             if (!chosen) return json({ error: `${`${candidate.provider}/${candidate.id}`.slice(0, 200)} is not an available model; connect its provider first` }, 422);
           }
           settings.setCompactor(chosen);
+          // A node held with its answers spent gets a new round under another model.
+          void optchat?.then(({ chat }) => chat.compactorChanged(), () => {});
           return json(await settingsView());
         }
         // What updating the default source would give; nothing is saved.
@@ -755,7 +767,7 @@ export async function createCubed(options: {
       if (parts[0] === "api" && parts[1] === "threads") {
         const id = parts[2];
         if (parts.length > 4 && parts[3] !== "workspace" && !(parts[3] === "media" && parts.length === 5)) return json({ error: "not found" }, 404);
-        if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...listed(thread), state: threadState(thread.id), error: conversations.error(thread.id), waiting: conversations.waiting(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
+        if (!id && method === "GET") return json({ threads: registry.listThreads().filter(thread => url.searchParams.has("includeArchived") || !thread.archived).map(thread => ({ ...listed(thread), state: threadState(thread.id), error: conversations.error(thread.id) ?? conversations.down(thread.id), waiting: conversations.waiting(thread.id), project: { id: thread.projectId, name: registry.getProject(thread.projectId)!.name } })) });
         if (!id && method === "POST") {
           const model = await selection(body.model);
           const projectId = text("projectId");

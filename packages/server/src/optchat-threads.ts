@@ -21,7 +21,7 @@ function hookSummary(hooks: Project["hooks"]): string {
 /** `latestCommits` resolves a project's repositories against upstream for a
  * new thread (index.ts); a thread is never started at the last check's. */
 export function cubeThreads(options: { registry: Registry; conversations: Conversations; catalog: () => Promise<ModelSelection[]>; runners: () => RunnersObservation;
-  latestCommits: (projectId: string) => Promise<ResolvedRepositories> }): OptThreads {
+  latestCommits: (projectId: string, signal?: AbortSignal) => Promise<ResolvedRepositories> }): OptThreads {
   const { registry, conversations } = options;
   const disk = (vm: Thread["vm"]) => !vm ? "no machine disk" : vm.discarded ? "machine disk discarded"
     : vm.retain ? `machine disk retained${vm.retainReason ? ` (${vm.retainReason})` : ""}` : "machine disk deleted";
@@ -55,13 +55,13 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
     async hooks(project) {
       return describeProjectHooks(registry, findProject(registry, project));
     },
-    async writeHooks(project, hooks) {
-      return writeProjectHooks(registry, project, hooks);
+    async writeHooks(project, hooks, requestId) {
+      return writeProjectHooks(registry, project, hooks, requestId);
     },
     async runners() {
       return describeRunners(options.runners());
     },
-    async spawn(task, requestId) {
+    async spawn(task, requestId, signal) {
       const project = registry.listProjects().find(candidate => candidate.id === task.project)
         ?? registry.listProjects().find(candidate => candidate.name.toLowerCase() === task.project.toLowerCase());
       if (!project) throw new Error(`no project ${task.project}`);
@@ -81,8 +81,11 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
       }
       const text = `${task.task}\n\n${THREAD_NOTE}`;
       const runnerId = task.runner ? registry.namedRunnerId(task.runner) : undefined;
+      const commits = await options.latestCommits(project.id, signal);
+      // Aborted (OptChat closing or stopped): no thread and no machine start.
+      signal?.throwIfAborted();
       let thread = registry.createThread(project.id, requestId, model, text, model.provider === CLAUDE_PROVIDER ? "claude-code" : "pi",
-        await options.latestCommits(project.id), runnerId === undefined ? {} : { runnerId });
+        commits, runnerId === undefined ? {} : { runnerId });
       // The title comes from the task alone, unless the user renamed it since.
       const title = task.task.replace(/\s+/g, " ").slice(0, 80) || null;
       if (thread.title === text.replace(/\s+/g, " ").slice(0, 80) && thread.title !== title) registry.saveThread(thread = { ...thread, title });
@@ -154,7 +157,7 @@ export function cubeThreads(options: { registry: Registry; conversations: Conver
         machine: thread.archived ? null : (conversations.error(id) || conversations.waiting(id) || conversations.starting(id) || thread.workspaceState === "available") ? state(id)
           : thread.workspaceState === "allocating" ? "not started" : thread.workspaceState,
         facts, agentOpen: conversations.agentOpen(id),
-        failure: conversations.error(id) ?? (thread.workspaceState === "failed" ? thread.workspaceError : null),
+        failure: conversations.error(id) ?? conversations.down(id) ?? (thread.workspaceState === "failed" ? thread.workspaceError : null),
       };
       try { return { ...record, transcript: await conversations.storedHistory(id, request), unreadable: null }; }
       catch (error) { return { ...record, transcript: null, unreadable: error instanceof Error ? error.message : String(error) }; }

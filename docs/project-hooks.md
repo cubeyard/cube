@@ -144,8 +144,12 @@ Supported hooks (the only two; nothing else is settable): …
 - The answer is read back from cubed's registry: `saved preSetup` (or
   `nothing changed` when the scripts were already these), a note when
   pre-setup changed (a new template) or a script looks like it holds a
-  secret, then the same text as `project_hooks`. Saving the same scripts
-  again changes nothing, so a replayed call is harmless.
+  secret, then the same text as `project_hooks`. Each call saves under its
+  own request id (`<chat>:hooks:<task>`, kept in the registry's
+  `hooks_request` table in the save's own transaction, with that answer): a
+  replayed call (a close cut it off and the reopened run executes it again)
+  saves nothing and answers the same text, so it never puts back hooks the
+  user changed in between.
 
 `projects` also lists which hooks each project has set.
 

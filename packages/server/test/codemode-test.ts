@@ -19,7 +19,9 @@ import { LeaseStore } from "../src/workspace-lease.ts";
 import { LocalGuestTransport } from "./local-guest.ts";
 
 const context = BACKGROUND_CONTEXT;
-const text = (message: { content?: ReadonlyArray<{ type: string; text?: string }> }) => (message.content ?? []).map(part => part.text ?? "").join("");
+type Part = { type: string; text?: string };
+// A tool result has `output`, a stored tool-result message `content`.
+const text = (message: { output?: ReadonlyArray<Part> } | { content: ReadonlyArray<Part> }) => (("output" in message ? message.output : "content" in message ? message.content : undefined) ?? []).map(part => part.text ?? "").join("");
 
 // --- the tool alone, with stand-in nested tools -----------------------------
 
@@ -34,7 +36,7 @@ function stand(name: string, behaviour: (args: { value?: string }, signal: Abort
     registration, mutates,
     run: async (args: { value?: string }, _api, callContext, key) => {
       seen.push({ key, args });
-      return { content: [{ type: "text", text: await behaviour(args, callContext.abortSignal, key) }] };
+      return { output: [{ type: "text", text: await behaviour(args, callContext.abortSignal, key) }] };
     },
   };
 }
@@ -194,10 +196,10 @@ try {
     // Typed images travel outside QuickJS and text truncation. The aggregate
     // image budget is enforced even when each nested text result is empty.
     const image = stand("picture", async () => "", [], false);
-    image.run = async () => ({ content: [{ type: "image", mimeType: "image/png", data: "a".repeat(3 * 1024 * 1024) }] });
+    image.run = async () => ({ output: [{ type: "image", mimeType: "image/png", data: "a".repeat(3 * 1024 * 1024) }] });
     const { result, body } = await run('for(let i=0;i<3;i++) await tools.picture({})', [image]);
     assert.equal(result.isError, true);
-    assert.equal(result.content?.filter(part => part.type === "image").length, 2);
+    assert.equal(result.output?.filter(part => part.type === "image").length, 2);
     assert.match(body, /image budget exceeded/);
     assert(!body.includes("a".repeat(100)), "base64 is not text output");
     console.log("ok: codemode bounds aggregate typed image bytes independently of text");

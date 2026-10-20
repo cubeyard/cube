@@ -388,9 +388,13 @@ export class GitService {
   /** Capture a fresh remote branch tip, then import its objects. Default-branch
    * discovery must query the remote: fetching does not update a bare mirror's HEAD.
    * The mirror lock covers refresh and resolution, including concurrent threads. */
-  prepareRepository(url: string, requestedBase?: string | null): Promise<PreparedRepository> {
+  prepareRepository(url: string, requestedBase?: string | null, signal?: AbortSignal): Promise<PreparedRepository> {
     const mirror = this.mirrorPathFor(url);
-    return this.withMirrorLock(mirror, () => Effect.runPromise(this.prepareRepositoryLocked(url, mirror, requestedBase)));
+    // An abort while waiting for the lock starts nothing; one during it stops its git.
+    return this.withMirrorLock(mirror, () => {
+      signal?.throwIfAborted();
+      return Effect.runPromise(this.prepareRepositoryLocked(url, mirror, requestedBase), signal ? { signal } : undefined);
+    });
   }
 
   private readonly prepareRepositoryLocked = Effect.fn("GitService.prepareRepository")(

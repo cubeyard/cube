@@ -73,7 +73,7 @@ const SURFACES = new Set<SkillSurface>(["thread", "optchat", "both"]);
 
 /** The host's git, narrowed to what resolution reads. */
 export interface SkillGit {
-  ensureMirror(url: string): Promise<string>;
+  ensureMirror(url: string, signal?: AbortSignal): Promise<string>;
   listFilesAtCommit(url: string, oid: string, dir: string): Promise<Array<{ path: string; mode: string; size: number }> | null>;
   readFileAtCommit(url: string, oid: string, relPath: string): Promise<string | null>;
   /** The default branch's tip, fetched into the mirror, as an exact commit. */
@@ -139,16 +139,17 @@ function parseSource(value: unknown, at: string): SkillSource {
 /** Every skill of every source, in precedence order, then the winners. A
  * source that cannot be read fails resolution; a skill folder that does not
  * qualify is skipped, with the reason. */
-export async function resolveSkills(git: SkillGit, defaultSource: SkillSource | null, config: SkillsConfig): Promise<ThreadSkills> {
+export async function resolveSkills(git: SkillGit, defaultSource: SkillSource | null, config: SkillsConfig, signal?: AbortSignal): Promise<ThreadSkills> {
   const sources = [...defaultSource ? [defaultSource] : [], ...config.sources];
   const disabled = new Set(config.disabled);
   const winners = new Map<string, ResolvedSkill>();
   const skipped: ThreadSkills["skipped"] = [];
   const sizes = new Map<string, { files: number; bytes: number }>();
   for (const source of sources) {
+    signal?.throwIfAborted();
     let entries = await git.listFilesAtCommit(source.url, source.commit, source.path);
     if (!entries) {
-      await git.ensureMirror(source.url);
+      await git.ensureMirror(source.url, signal);
       entries = await git.listFilesAtCommit(source.url, source.commit, source.path);
     }
     if (!entries) throw new Error(`skills source ${source.url} has no commit ${source.commit}`);
@@ -219,11 +220,11 @@ async function readSkill(git: Pick<SkillGit, "readFileAtCommit">, source: { url:
  * repository's skills never fail a start: a folder that does not qualify,
  * or one past the limit, is skipped. Each records the installed skill of
  * its id that it hides. */
-export async function resolveProjectSkills(git: SkillGit, url: string, commit: string, config: Pick<SkillsConfig, "disabled">, installed: readonly ResolvedSkill[] = []):
+export async function resolveProjectSkills(git: SkillGit, url: string, commit: string, config: Pick<SkillsConfig, "disabled">, installed: readonly ResolvedSkill[] = [], signal?: AbortSignal):
   Promise<Required<Pick<ThreadSkills, "project" | "skipped">>> {
   let entries = await git.listFilesAtCommit(url, commit, PROJECT_SKILLS_DIR);
   if (!entries) {
-    await git.ensureMirror(url);
+    await git.ensureMirror(url, signal);
     entries = await git.listFilesAtCommit(url, commit, PROJECT_SKILLS_DIR);
   }
   if (!entries) throw new Error(`repository ${url} has no commit ${commit}`);

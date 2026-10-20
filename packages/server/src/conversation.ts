@@ -7,7 +7,7 @@ import { ConversationBusy, LiveDoc, type UsageState } from "@earendil-works/pi-d
 import { ClaudeAgent, ClaudeBusy, CLAUDE_PROVIDER, type ClaudeRuntime } from "./claude-agent.ts";
 import { ClaudeThreadEvents } from "./claude-thread-events.ts";
 import { skillsPrompt } from "./skills.ts";
-import { assertCurrentThreadStore, openAgent, type Agent } from "./durable-agent.ts";
+import { assertCurrentThreadStore, downText, openAgent, type Agent } from "./durable-agent.ts";
 import { createLogger } from "./log.ts";
 import { PiThreadEvents } from "./pi-thread-events.ts";
 import type { ThreadAgent, ThreadEvents, ThreadTranscript } from "./thread-events.ts";
@@ -56,6 +56,10 @@ export class Conversations {
   private readonly agents = new Map<string, Promise<Agent>>();
   private readonly workspaces = new Map<string, { workspace: VmWorkspace; leases: LeaseStore }>();
   private readonly failures = new Map<string, string>();
+  /** Why a thread's Pi agent is down: its Session failed. Kept when the
+   * agent closes (its machine booted again): reopening it would send the
+   * request out at the failure again. Only the thread's release clears it. */
+  private readonly downs = new Map<string, string>();
   /** Threads whose machine waits for a runner (RunnerWait): not a failure;
    * the recovery loop tries again. */
   private readonly waits = new Map<string, string>();
@@ -124,6 +128,8 @@ export class Conversations {
    * check) beside the idle round, which waits for those checks. */
   async recover(): Promise<void> { await Promise.all([this.boot(), this.suspendIdle()]); }
   error(id: string): string | null { return this.failures.get(id) ?? null; }
+  /** Why the thread's Pi agent is down (its Session failed), if it is. */
+  down(id: string): string | null { return this.downs.get(id) ?? null; }
   /** Why the thread's machine waits for a runner, if it does. */
   waiting(id: string): string | null { return this.waits.get(id) ?? null; }
   /** Whether the thread's machine is being started (booted, prepared or its
@@ -313,7 +319,8 @@ export class Conversations {
   }
   /** The resume hooks, once per machine boot. A machine that booted again
    * under an open agent (a runner restart) closes the agent first, as a
-   * cubed restart would, and the activation reopens it afterwards. */
+   * cubed restart would, and the activation reopens it afterwards (not an
+   * agent that is down: see `downs`). */
   private async resume(id: string, booted: boolean): Promise<void> {
     if (!booted && this.resumed.has(id)) return;
     if (this.agents.has(id) || this.claudes.has(id)) {
@@ -321,7 +328,7 @@ export class Conversations {
       // The machine booted again: from here this is a start.
       this.checks.delete(id);
       await this.closeAgents(id);
-      log.warn("the machine booted again; the agent reopens after the resume hooks", { thread: id });
+      log.warn(this.downs.has(id) ? "the machine booted again; the agent is down and stays closed" : "the machine booted again; the agent reopens after the resume hooks", { thread: id });
     }
     const thread = this.thread(id);
     // The machine's helper and `cube` command as this cubed ships them, and
@@ -360,6 +367,12 @@ export class Conversations {
     const thread = this.thread(id);
     if (threadAgent(thread) !== "pi") throw new Error("thread is not a pi thread");
     this.notArchiving(id);
+    // A down agent is not opened again in this process: Pi would resume its
+    // generation and send the request out at the failure again. Before its
+    // machine boots again its failed Harness is still cached; a caller is
+    // told why, not Pi's "close and reopen it".
+    const down = this.downs.get(id);
+    if (down) throw new Error(down);
     const cached = this.agents.get(id);
     if (cached) return cached;
     this.ready(thread);
@@ -372,6 +385,12 @@ export class Conversations {
         // instead of submitting it again, whatever happened since.
         const initial = this.registry.initialPrompt(id);
         if (initial) await agent.conversation.submit({ type: "input", content: initial, requestId: INITIAL_REQUEST }, context);
+        // Pi's Session failed (a storage error): the agent stays down until
+        // cubed restarts; nothing here reopens it.
+        void agent.harness.closed.then(() => {
+          const down = agent.failure();
+          if (down && this.agents.get(id) === loading) this.downs.set(id, down);
+        }, () => {});
         return agent;
       } catch (error) { await agent.close(); throw error; }
     })();
@@ -382,7 +401,15 @@ export class Conversations {
   private async closeAgents(id: string): Promise<void> {
     const claude = this.claudes.get(id), pi = this.agents.get(id);
     this.claudes.delete(id); this.agents.delete(id);
-    await (await claude?.catch(() => null))?.close(); await this.closePi(id, pi);
+    try { await (await claude?.catch(() => null))?.close(); await this.closePi(id, pi); }
+    finally {
+      // The thread stays down through the close, also when its Session
+      // failed while this close ran.
+      const agent = await pi?.catch(() => null);
+      const end = agent ? await agent.harness.closed.catch(() => null) : null;
+      const down = agent?.failure() ?? (end?.reason === "failed" ? downText(end.error) : null);
+      if (down && !this.downs.has(id)) this.downs.set(id, down);
+    }
   }
   /** Closes a Pi agent, keeping its usage first. */
   private async closePi(id: string, loading: Promise<Agent> | undefined): Promise<void> {
@@ -549,6 +576,10 @@ export class Conversations {
    * stream serves and the browser reads. */
   async events(id: string): Promise<ThreadEvents> {
     await this.settled(id);
+    // A failed Harness cannot be read; a reader gets why the agent is down,
+    // as it gets a failed activation's error.
+    const down = this.downs.get(id);
+    if (down) throw new Error(down);
     if (this.isClaude(id)) {
       const agent = await this.claudeAgent(id);
       let events = this.claudeFeeds.get(agent);
@@ -583,7 +614,7 @@ export class Conversations {
     const thread = this.registry.getThread(id);
     if (!thread) throw new Error("thread not found");
     const directory = path.join(this.directory, id);
-    const failure = this.failures.get(id) ?? null;
+    const failure = this.failures.get(id) ?? this.downs.get(id) ?? null;
     if (threadAgent(thread) === "claude-code") {
       return readClaudeHistory(path.join(directory, "claude.sqlite"), path.join(directory, "claude"), this.owner(id), failure, request);
     }
@@ -637,7 +668,8 @@ export class Conversations {
     // An agent that cannot open (its runtime missing, its store refused) runs
     // nothing: the thread is archived, its disk kept.
     let unopened: string | null = null;
-    if (!failed) {
+    // A down agent runs nothing (Pi ended every task); it is not opened again.
+    if (!failed && !this.downs.has(id)) {
       // Only opening is caught: an open agent whose state cannot be read is not archived.
       const opened = await (this.isClaude(id) ? this.claudeAgent(id) : this.agent(id)).catch((error: unknown) => {
         if (this.closing) throw error;
@@ -698,6 +730,7 @@ export class Conversations {
       if (released.retained && thread.vm && !thread.vm.retain) this.registry.updateThreadVm(id, { retain: true, retainReason: RUNNER_KEPT });
       this.registry.finishRelease(id);
       this.failures.delete(id);
+      this.downs.delete(id);
       this.waits.delete(id);
       return released;
     } catch (error) {

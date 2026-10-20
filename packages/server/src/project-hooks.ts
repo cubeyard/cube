@@ -90,23 +90,29 @@ export function describeProjectHooks(registry: Registry, project: Project): stri
 
 /** Saves the given hooks (an absent one stays, "" removes it) and reads
  * them back from the registry. */
-export function writeProjectHooks(registry: Registry, given: string, input: { preSetup?: string | undefined; preResume?: string | undefined }): string {
+export function writeProjectHooks(registry: Registry, given: string, input: { preSetup?: string | undefined; preResume?: string | undefined }, requestId?: string): string {
+  // A request id already applied saves nothing and answers as it did: a
+  // replayed call never puts back hooks the user changed since.
+  const prior = requestId === undefined ? undefined : registry.hooksRequest(requestId);
+  if (prior !== undefined) return prior;
   const project = findProject(registry, given);
   const changes = Object.fromEntries(Object.entries({ preSetup: input.preSetup, preResume: input.preResume }).filter(([, value]) => value !== undefined));
   if (!Object.keys(changes).length) throw new Error("give preSetup or preResume (\"\" removes one)");
   const previous = project.hooks ?? NO_HOOKS;
   const hooks = projectHooks(changes, previous);
-  const saved = registry.saveProjectHooks(project.id, hooks);
-  const stored = saved.hooks ?? NO_HOOKS;
-  if (!same(stored, hooks)) throw new Error("the hooks read back differ from what was saved");
-  const changed = (["preSetup", "preResume"] as const).filter(name => previous[name] !== stored[name]);
-  const secret = (["preSetup", "preResume"] as const).filter(name => redactHook(stored[name]) !== stored[name]);
-  return [
-    changed.length ? `saved ${changed.join(" and ")}; read back from cubed's registry:` : "nothing changed; read back from cubed's registry:",
-    ...changed.includes("preSetup") ? ["a changed pre-setup means a new template: the next thread prepares its machine from the start"] : [],
-    ...secret.length ? [`warning: ${secret.join(" and ")} hold secret-looking values; every machine of the project can read hooks`] : [],
-    "new threads use these hooks; running threads keep the ones they started with",
-    "",
-    describeProjectHooks(registry, saved),
-  ].join("\n");
+  const report = (saved: Project) => {
+    const stored = saved.hooks ?? NO_HOOKS;
+    if (!same(stored, hooks)) throw new Error("the hooks read back differ from what was saved");
+    const changed = (["preSetup", "preResume"] as const).filter(name => previous[name] !== stored[name]);
+    const secret = (["preSetup", "preResume"] as const).filter(name => redactHook(stored[name]) !== stored[name]);
+    return [
+      changed.length ? `saved ${changed.join(" and ")}; read back from cubed's registry:` : "nothing changed; read back from cubed's registry:",
+      ...changed.includes("preSetup") ? ["a changed pre-setup means a new template: the next thread prepares its machine from the start"] : [],
+      ...secret.length ? [`warning: ${secret.join(" and ")} hold secret-looking values; every machine of the project can read hooks`] : [],
+      "new threads use these hooks; running threads keep the ones they started with",
+      "",
+      describeProjectHooks(registry, saved),
+    ].join("\n");
+  };
+  return requestId === undefined ? report(registry.saveProjectHooks(project.id, hooks)) : registry.saveProjectHooks(project.id, hooks, { id: requestId, report });
 }

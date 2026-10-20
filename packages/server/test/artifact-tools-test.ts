@@ -41,7 +41,7 @@ const adapter = (author: ArtifactAuthor, thread: boolean) => {
   }) as [ToolRegistration];
   return async (args: Record<string, unknown>) => {
     const result = await write.execute(args as never, { callId: `c${++calls}` } as unknown as ToolExecutionApi, {} as never);
-    return (result as { content: Array<{ text: string }> }).content.map(part => part.text).join("");
+    return (result as { output: Array<{ text: string }> }).output.map(part => part.text).join("");
   };
 };
 const created = (said: string) => {

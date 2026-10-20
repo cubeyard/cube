@@ -56,7 +56,8 @@ Every write is a whole new revision; older ones stay readable at
 `#/a/<id>?rev=<n>`, with their body and actions as written. A write with the
 same request id (a Pi task, OptChat's tool call, a Claude Code
 `tool_use_id`) finds the revision it wrote, so a replayed call writes once,
-whoever wrote since; a write identical to the newest revision writes
+whoever wrote since, and answers as it did (`created at revision 1`, or the
+actions it kept); a write identical to the newest revision writes
 nothing. Each revision keeps its provenance: the agent (`optchat`, `pi`,
 `claude-code`), the thread, the tool call, OptChat's model, and for a body
 read from a workspace file its path and SHA-256. Its editor (`editor` in the

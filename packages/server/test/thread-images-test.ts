@@ -132,7 +132,7 @@ try {
     const registry = createRegistry();
     registry.install(defineExtension({ name: "images", tools: [defineTool({
       name: "look", description: "returns an image", parameters: Type.Object({ path: Type.String() }), replay: "safe",
-      async execute() { return { content: [{ type: "text" as const, text: "48×30" }, { type: "image" as const, data: picture.toString("base64"), mimeType: "image/png" }] }; },
+      async execute() { return { output: [{ type: "text" as const, text: "48×30" }, { type: "image" as const, data: picture.toString("base64"), mimeType: "image/png" }] }; },
     })] }));
     const harness = await Harness.open(await openStorage(file), { models, registry }, context);
     try {

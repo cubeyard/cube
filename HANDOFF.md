@@ -5,7 +5,7 @@ in `docs/plans/` hold the reasoning and the detailed evidence.
 
 ## What cube is now
 
-- **cubed** runs the agents on the host. Pi uses pi-durable 1.0.1 with
+- **cubed** runs the agents on the host. Pi uses pi-durable 1.3.0 with
   SQLite; Claude Code threads use the unmodified `claude` with the user's own
   login. Both work on the thread's `Workspace`.
 - **Every thread has its own VM on a runner** (runner protocol 3; see
@@ -429,8 +429,20 @@ fails in the machine, which has no credentials for it.
   - a released berth binary end to end in production (installed from a
     release and running a thread).
 - **Other:**
-  - pi-codemode 1.0.1 has no CPU-slice limit;
+  - pi-codemode 1.3.0's worker `CodemodeSandbox` has no CPU-slice limit;
   - there is no manual compaction or reset in the UI;
-  - pi-durable's `onReport` is not wired to logs;
+  - a Harness whose Session failed (a storage error) stays down until cubed
+    restarts; it does not reopen by itself, a thread's agent not even when
+    its machine boots again (D2′ open; docs/optchat.md,
+    "Failing closed");
+  - GPT-6 on the OpenAI platform: pi-ai 1.3.0's `configuration_update`
+    together with OptChat's `reasoning.context: "all_turns"` is pinned
+    offline only (`optchat-gpt6-test.ts`), never checked against OpenAI
+    (R-1, a live check within P1);
+  - rolling back to a cubed with Pi 1.0.1 is safe only when no Pi tool call
+    was in flight at the 1.3.0 cubed's close: 1.3.0 writes `pi.tool` tasks as
+    version 2, which 1.0.1 cannot run (`task_too_old`), so such a
+    conversation stalls, silently in 1.0.1, until Pi is upgraded again. Stop
+    cubed with every thread and the chat idle first;
   - AGENTS.md still calls Pi an AgentHarness;
   - `docs/architecture-tour-notes.md` is historical.

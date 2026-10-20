@@ -15,7 +15,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall, type Message } from "@earendil-works/pi-ai";
 import { createCubed } from "../src/index.ts";
-import { OptChat, OptChatEvents, withImages, type OptThreads } from "../src/optchat.ts";
+import { OptChat, OptChatEvents, turnFits, withImages, type OptThreads } from "../src/optchat.ts";
 import { MEDIA_LIMITS, MediaError, mediaData, MediaStore, sniffImage } from "../src/optchat-media.ts";
 import { PiThreadEvents } from "../src/pi-thread-events.ts";
 
@@ -248,8 +248,42 @@ try {
   assert.deepEqual(imagesOf(steered).map(part => part.type === "image" && part.data), [webp(9, 9).toString("base64")], "the steered image reaches the model in that turn");
   console.log("ok: an image steered into a tool round reaches the model");
 
+  // A message whose images would take the turn past its bounds is not
+  // steered in: it waits for the next turn, so the turn's next request
+  // carries every image its last one did (the same prefix), and the model
+  // gets the new images whole one turn later.
+  const shades = await Promise.all(Array.from({ length: 12 }, (_, k) => chat.upload(png(3, 3, 100 + k))));
+  const group = (from: number) => shades.slice(from, from + 4).map(image => image.id);
+  projectsGate = new Promise<void>(resolve => { release = resolve; });
+  const start = requests.length;
+  await chat.send("check the projects", "d1", group(0));
+  await until(() => inProjects, "the tool round runs");
+  await chat.send("four more", "d2", group(4));
+  const placed = async (requestId: string) => !!(await chat.agent.conversation.commit(tx => tx.submissionByRequest(chat.agent.conversation.id, requestId), BACKGROUND_CONTEXT));
+  await until(() => placed("d2"), "four more fit the turn: steered");
+  await until(async () => (await chat.pending()).every(item => item.requestId !== "d1"), "the turn's first message is placed");
+  await chat.send("and four after", "d3", group(8));
+  await chat.send("then this", "d4");
+  await delay(300);
+  assert.ok(!await placed("d3") && !await placed("d4"), "past eight images: it waits, and what came after it too");
+  assert.deepEqual((await chat.pending()).filter(item => item.requestId === "d3" || item.requestId === "d4").map(item => item.requestId), ["d3", "d4"]);
+  release();
+  await settled(chat, start + 3);
+  const [opening, next, later] = [requests[start]!, requests[start + 1]!, requests[start + 2]!];
+  assert.equal(JSON.stringify(next[0]), JSON.stringify(opening[0]), "the turn's next request starts with its first, byte for byte");
+  assert.equal(imagesOf(opening).length, 4);
+  assert.ok(next.some(message => message.role === "toolResult"), "the same turn, after the tool's result");
+  assert.equal(imagesOf(next).length, 8, "every image of the turn goes in every request");
+  assert.ok(!JSON.stringify(next).includes("not sent"), "none became a note");
+  const pictures = (ids: string[]) => ids.map(id => chat.media.get(id)!.bytes.toString("base64"));
+  assert.deepEqual(imagesOf(later).map(part => part.type === "image" && part.data), pictures(group(8)), "the next turn carries the waiting images");
+  assert.match(JSON.stringify(later.at(-1)), /then this/, "and what came after them, in order");
+  assert.ok(turnFits(group(0), () => 1) && turnFits([...group(0), ...group(4)], () => 1) && !turnFits(shades.map(image => image.id), () => 1), "eight images fit a turn, twelve do not");
+  assert.ok(!turnFits(group(0), () => 4_000_000), "nor more than 15 MB of them");
+  console.log("ok: a message that would take a turn past its images waits for the next turn; the turn's prefix keeps every image");
+
   const reopened = await transcript(chat);
-  assert.deepEqual(reopened.events.filter(event => event.type === "user-message" && event.images).map(event => event.type === "user-message" && event.images!.length), [1, 2, 4, 4, 1, 1]);
+  assert.deepEqual(reopened.events.filter(event => event.type === "user-message" && event.images).map(event => event.type === "user-message" && event.images!.length), [1, 2, 4, 4, 1, 1, 4, 4, 4]);
   assert.deepEqual((await chat.image(third.id))?.bytes, webp(9, 9));
   console.log("ok: unsent uploads are swept; images show again after a reopen");
 } finally { await chat.close(); }

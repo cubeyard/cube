@@ -59,13 +59,15 @@ with Pi as its only writer. cubed's live-instance socket lock (one cubed per
 
 | spec | cube |
 | --- | --- |
-| log (`main/*.jsonl`) | the root conversation's own Pi entries; `pi.user` → user, assistant text → talk, tool calls → tool, `pi.tool-result` → echo (capped at 30,000 characters, head and tail; a zoom result, a copy of the chat itself, is logged as a short pointer so its ids and `user:` tags never reach the compactor). Thinking is never logged, nor a failed model attempt (Pi retries it); an aborted reply logs its text but not its unexecuted tool calls. |
+| log (`main/*.jsonl`) | the root conversation's own Pi entries; `pi.user` → user, assistant text → talk, tool calls → tool, `pi.tool-result` → echo (capped at 30,000 characters, head and tail; a zoom result, a copy of the chat itself, is logged as a short pointer so its ids and `user:` tags never reach the compactor). A user message (a report too) or a reply over 30,000 characters is never cut: it is logged as several messages in a row, pages split after a newline where there is one (spec §1). Only entries from `cube.optchat.log`'s `pagedFrom` on are paged: it is set at the first open that pages (0 for a new chat), so a chat logged before keeps its ids and its long messages whole; `zoom(id, 1, at)` reads such a message a page at a time. Thinking is never logged, nor a failed model attempt (Pi retries it); an aborted reply logs its text but not its unexecuted tool calls. |
 | tree (`tree/*.jsonl`) | `optchat.node` entries `{l, i, text}` in a second, ownerless, model-free conversation |
 | fresh call per turn | an `optchat.turn` entry with `head: "self"` before the user's message; Pi starts the model context there and keeps every older entry |
 | view in block 1 | the turn's view parts are stored in the `cube.optchat.turn` doc; a `beforeRequest` hook renders them as the first text block of the turn's first user message, the same bytes on every request and recovery |
 | the input queue | `cube.optchat.pending`: a message or report is accepted there at once and kept until Pi has placed it; all waiting messages become one turn, each still its own user message and its own Pi submission |
-| view at load | `cube.optchat.view`, written with every node: the view over the first `total` messages and `batch`, whether a batch is still merging toward 64,000 bytes. A reopen restores both and appends the rest, so it goes on from the view it had. A view stored before batching has no `batch` and was never mid-batch; it restores as it was, and the first batch comes once it passes 128,000 bytes as now measured (ids included, so possibly at the reopen). `compaction` and `compactionBatch` are the compaction view and its batch, restored the same way if it still tiles the log and coarsens the view; a view stored before it lacks them, and the compaction view is merged down from the view at the reopen. A message's own line may be stored unbuilt (the view is written after every node) and restores as such; a merged line must be built |
+| view at load | `cube.optchat.view`, written with every node: the view over the first `total` messages and `batch`, whether a batch is still merging toward 64,000 bytes. A reopen restores both and appends the rest, so it goes on from the view it had. A view stored before batching has no `batch` and was never mid-batch; it restores as it was, and the first batch comes once it passes 128,000 bytes as now measured (ids included, so possibly at the reopen). `compaction` and `compactionBatch` are the compaction view and its batch, restored the same way if it still tiles the log and coarsens the view; a view stored before it lacks them, and the compaction view is merged down from the view at the reopen. A message's own line may be stored unbuilt (the view is written after every node) and restores as such; a merged line must be built. `entry`, `shape` and `shapeTotal` are the last Pi entry the view covers, a hash over how many messages each entry gave up to it and how many that was: a reopen whose log numbers its messages otherwise (a change to how entries are read) is refused with `the chat's log numbers its messages differently from its memory`, rather than putting every summary on the wrong message. A cubed before pages keeps these three while it grows `total`; when `total` differs from `shapeTotal`, such a cubed wrote the view since and numbered the log without pages, and the reopen is refused (`an older cubed numbered the chat's log without pages`) only if an entry logged in pages gives a different count without them. A view stored before `shape` is not checked; one stored before `shapeTotal` is checked against `total` |
 | compactor usage | `cube.optchat.usage`: the compactor's calls run beside Pi, so its `pi.usage` misses them; each reply's usage (failed ones too) is added there in its own commit, by `provider/model` with a call count |
+| compactor answers | `cube.optchat.spend`: for each node not built yet that the compactor answered, its answers left (of 15) and the `provider/model` that spent the last, in the same commit as the usage; it goes in the commit that stores the node. A restart reads it back, so it is no new budget |
+| calls cut off at close | `cube.optchat.cut`: the model calls a close cut off after its grace (below), by `provider/model`, the chat's and the compactor's apart. Their cost is unknown: whatever usage came is counted as it came, and the usage report shows them as calls without a usage report. `tools`: the tool calls still running at the cut, by name; what they did is unknown and not undone, and the usage report names them |
 | subagent reports | when a spawned thread's run settles, how it ended and its last reply go to the chat as `[<first 8 of the thread id>] <report>` (see "Follow-up and unattended work"), with request id `report:<thread>:<run>`, so a report is delivered once across restarts. The transcript marks it with `from` (the short id) and shows it as the thread's, not the user's |
 
 `packages/server/src/optchat-memory.ts` is the pure part: the fold that appends
@@ -78,10 +80,114 @@ lengths: each answer brings three versions of about 26, 48 and 69 words and
 the longest that fits is kept; if none fits, the cut-at-limit feedback asks
 again (five answers; then the shortest line is kept). Measured on 30 live
 nodes with gpt-6-luna, this took 1.03 calls per node instead of 2.67, with
-64% less input and 16% less output. `optchat.ts` is the service: Pi setup, the tools, the turn
+64% less input and 16% less output. Only an answer of exactly three lines,
+or of one line (the spec's own task), counts, and none may end in a colon:
+a heading before the versions or a version broken over two lines is never
+kept as the node; the model is told and asked again within the five
+answers. Each answer is capped at `outputTokens(node)` output tokens: pi-ai's
+`medium` thinking budget (8192, the effort the compactor asks for) plus room
+for three lines of the node's size at two bytes a token, at least 1024; 9216
+for 512-byte nodes, where pi-ai would otherwise send the model's maximum
+(128,000 on recent models) for three short lines. Adaptive thinking and
+OpenAI's reasoning spend the cap as one; on a thinking budget (older Claude,
+Bedrock) pi-ai adds 8192 on top. A ChatGPT sign-in (Codex, or `openai`
+signed in) refuses the field, so pi-ai sends none there: those answers are
+bounded only by the model and by `reasoning: "medium"`. `max_tokens` is not
+part of the cached prefix. `optchat.ts` is the service: Pi setup, the tools, the turn
 loop (a turn waits until every line of the view is a summary), the compactor
-pump (eight jobs, a failed node is retried every 10 s, forever) and the thread
-watchers. `optchat-threads.ts` connects it to cube's registry and threads.
+pump (eight jobs) and the thread watchers. `optchat-threads.ts` connects it
+to cube's registry and threads.
+
+A node the compactor fails on ends one of these ways:
+
+| failure | examples | the node | the next turn |
+| --- | --- | --- | --- |
+| its input's doing: asked again, it fails alike | an empty answer; an input too long for the model (pi-ai's `isContextOverflow`); a refusal or safety stop, told by the provider's stop reason (`refusal`, `content_filter`, `SAFETY`, …) whatever its explanation says, so one that mentions "500" or "timeout" is not taken for an outage; an error stop on a reply the model began (its usage is not zero); five answers none of them in the form | its source cut short, after one call (five for the form): `(no summary, cut short: zoom it) ` and the start of the message, or of both halves of a merge, within 512 bytes; stored with `cut: <why>` and logged as a warning. The log keeps the message whole | runs |
+| not its input's doing | an outage, a rate limit (pi-ai's `isRetryableAssistantError`), or an error no reply carried (a bad key, a quota, a model that is gone) | asked again every 10 s until it answers; never cut | waits, and the chat shows `summarizing: <error>`; a change of the compactor model applies to the next try |
+| out of output: every answer stopped at the cap (`length`, thinking only or lines cut off), not an overflow | a model that thinks past 9216 tokens | an answer that ran out is never used; the model is told to think briefly and asked again within the five answers. If none gave lines, the node is asked again every 10 s; never cut | waits, and the chat shows `summarizing: the compactor ran out of output …` |
+| its answers spent: 15 answers since the node's last release, whatever ended each round | answers that ran out, answers not in the form, or either followed by a rate limit or an outage | held: no timer and no call, never cut. A new message of the user (typed in the chat, or a batch of the user's comments on one of the chat's artifacts) gives it one more round of at most 5 answers; another compactor model (saved in settings, or the chat's model it follows) gives a new one, also at open. A step that comes while the node's last answer is still out counts the same once that answer is in. A thread's report, the notice of a merge the user confirmed (sent as a report), a repeated request, a restart or waiting gives none | waits, and the chat shows `summarizing: no summary for a message yet (<last error>); change the compactor model or send a message to try again` |
+
+A `length` stop that is a context overflow is the input's doing like any
+other: Bedrock's `model_context_window_exceeded` (pi-ai maps it to
+`length`), or a `length` stop with no output and the window full (pi-ai's
+`isContextOverflow`, as Xiaomi's), is cut after one call. A thinking-only
+`length` stop, or an empty one far from the window, is not.
+
+An answer is a reply that spent output: every reply the model gave, and an
+error stop after it began writing (its usage or content shows it). An
+outage or rate limit before any output costs nothing and is not counted, so
+it is asked again every 10 s as before; once a node's answers are spent,
+not even that is sent. So the compactor spends at most 15 capped answers on
+a node, then at most 5 per message of the user or change of model, each
+for at most the eight nodes being written at once: at most 40 answers per
+message, about 370k output tokens at 9216 (nearly twice that on a thinking
+budget, where the cap is 17408). That token figure does not hold on a
+ChatGPT sign-in (Codex, or `openai` signed in): pi-ai sends no output cap
+there, so the bound is the count of answers only, not of tokens or cost.
+Nothing asks again on its own.
+
+The answers left are stored best effort, like the usage. A crash between
+a reply and its commit gives that one answer back at the next open: at
+most one per node being asked. A commit that fails while cubed runs on
+loses nothing yet: memory still counts the answer and the node's next
+commit stores it; a restart before that gives those answers back.
+
+A close (cubed stops, updates or restarts) starts no new node, no turn, no
+new request of a running turn, no tool call and no further answer of a
+summary's round: the request and tool hooks and every tool's guard hold
+each back, unstarted, until Pi closes (a replay at its execute phase too),
+and the reopened run starts it, once. It then waits up to 10 s
+(`CLOSE_GRACE_MS`) for what is already out: the nodes being built, a chat
+request sent and not yet stored, and the tool calls executing or not yet
+stored. Each that comes back is stored with its usage (a node with its
+view, a tool with its result), so a reopen sends and runs none of them
+again. A node whose answer came back but needs another (format feedback,
+or more room after a `length` stop) is not asked again while closing: its
+round so far (the messages of its next answer, the versions seen, the
+answers that ran out of room) is stored with its answers left in
+`cube.optchat.spend`, and the reopened chat asks that next answer under the
+same model, once, exactly as the uninterrupted round would; a crash before
+the hold restarts the round as before.
+
+Only what is still out after the grace is cut off; each such call is
+logged and counted in `cube.optchat.cut`: a model call is sent again at
+most once (at most the 8 nodes being built and one chat request), a tool
+call is run again once. A tool cut off returns at once, so Pi's join is
+not held by work that ignores the abort; that work may still go on and is
+not undone (`spawn` stops at its next task and its git fetch stops on the
+abort, so no thread starts after it; a `tell` or `archive` under way
+finishes in cubed). So every tool is read-only or keyed (`TOOL_REPLAY`):
+
+| tool | a second run |
+| --- | --- |
+| `zoom` `date` `projects` `runners` `threads` `history` `diagnose` `usage` `project_hooks` `artifact_read` | reads again |
+| `spawn` | `optchat:<call>:<task>`: the registry's creation table finds the same thread |
+| `tell` | `optchat:<call>`: Pi's submissions and Claude Code's table take it once; counted once against the tells |
+| `archive` | the call's task: its stored lines (see "Archiving") |
+| `project_hooks_write` | `<chat>:hooks:<task>`: saves nothing and answers the stored text (docs/project-hooks.md) |
+| `artifact_write` | `<chat>:artifact:<task>`: finds the revision it wrote |
+
+A tool missing from the table is refused when the chat builds its tools.
+The close then gives the cut-off calls up to 2 s (`CLOSE_SETTLE_MS`) to
+settle their usage, and Pi's own close (it aborts and joins every task) up
+to 2 s (`CLOSE_JOIN_MS`); past that cubed's close goes on without it. So
+the chat's close ends within 14 s whatever a tool or a provider does
+(`optchat-close-test` measures it with a tool and a provider that never
+end). That is OptChat's part only: cubed's close then closes the threads'
+agents, the gateway and the registry, which this bound does not cover. The
+supervisor (`cubed-supervisor.ts`) sends SIGKILL 30 s after its SIGTERM
+(`CUBED_UPDATE_STOP_TIMEOUT_MS`). Above it, the service manager's own
+stop timeout applies to the supervisor: the systemd user unit
+(`scripts/cubed/service.sh`) sets no `TimeoutStopSec`, so systemd's
+`DefaultTimeoutStopSec` (90 s unless the host changes it), and the launchd
+agent sets no `ExitTimeOut`, so launchd's system-defined one. Neither is
+measured here; one shorter than cubed's whole close would cut it short. A crash or kill has no grace: every
+call out at it is sent or run again at the next open and none is counted
+(N2).
+
+So a refusal costs one call and an outage no summary. A failure that is
+the input's doing but reaches the compactor as a setup error (a 4xx no
+reply carried) still holds the chat until the compactor model changes.
 
 A message reaches the model in one of three ways. While a tool round runs, it
 is a Pi steering input, delivered between tool calls (`steeringMode: "all"`, so
@@ -272,8 +378,10 @@ it, and usage stays readable too.
 - **Repeats and races.** Archives of one thread run one after another in
   `Conversations` (the same per-thread queue as messages and releases), and
   the second finds the thread archived and changes nothing: not the slots and
-  not the retained disk's record. A tool call replayed after a restart says
-  `was already archived`. A message to the thread queued before the archive
+  not the retained disk's record. A tool call replayed after a close or a
+  restart answers as its first run did: each thread's line is kept under
+  the call's task in `cube.optchat` (`archives`, the newest 64 calls), and a
+  thread it had sent to archive and finds archived reads `archived`. A message to the thread queued before the archive
   either starts a run first (and the archive is refused) or finds the thread
   gone.
 - **Its report is kept.** Archiving ends the thread's watch. If the watcher
@@ -344,7 +452,9 @@ after a reload, from the store; one that does not load shows as
   so and asks OptChat to say what an image shows that will matter later.
   Threads never get the images; OptChat puts what a thread needs in its task,
   in words. A turn's requests carry at most 8 images and 15 MB of them, the
-  newest; an image that cannot go becomes a note the model reads (`an earlier
+  newest; a message steered in during a tool round that would take the turn
+  past that waits for the next turn instead (see Known gaps). An image that
+  cannot go becomes a note the model reads (`an earlier
   image of this turn, not sent`, `missing from cube's store`, `not sent:
   <model> does not take images`), never a silent gap.
 - **Models without image input.** A model's own `input` (pi-ai's catalog)
@@ -404,32 +514,175 @@ without changing Pi:
   the compaction view) is sent as text blocks of 4 lines; `<chat>` rides with
   the first and `</chat>` with the 0-3 lines left over. The view leads the
   turn's first user message. The hook puts the system baseline first; Pi
-  writes it after that message.
+  writes it when the run starts, after that message, or after every message
+  of a batch (several messages that waited for one turn). A later system
+  message, after the model's first step, is an update and stays where Pi
+  wrote it.
 - **Anthropic.** An `onPayload` hook keeps pi-ai's mark on the last system
   block only (it covers the tools and the OAuth Claude Code block), drops the
   tool marks and marks the last whole view block. pi-ai keeps its mark on the
   request's last user block: three marks. Anthropic looks back up to 20
   blocks from a mark for an earlier entry, so the next turn (up to 80 new
   lines) reads the view through this one and writes only the lines after it.
-  A view under 4 lines keeps pi-ai's own marks.
-- **Single flight.** A call whose marked prefix (model, tools, system, view
-  through its mark) another call is writing waits in `onPayload` until that
-  call's response starts or the call ends, or until its own abort; so
-  compactions started together on one context pay for its write once. Calls
-  with other prefixes do not wait.
+  A compactor request keeps no mark after the view, as in uniichat: its task
+  is its own and read again only by its own retry, so it goes uncached
+  instead of being written at the write price. A view under 4 lines keeps
+  pi-ai's own marks (a compactor's request but its end's).
+- **Single flight.** A call's prefix is keyed after what precedes the view
+  (model, tools and system, or Codex's instructions) and at each view
+  block's end through its last whole one; marks are not part of a key. A
+  call writes its last key, and the first too while that is not cached
+  (Anthropic writes an entry at the system mark), so a call of a view under
+  one block waits for it as well. A call whose prefix, or a start of it,
+  another call is writing waits in `onPayload`
+  until that call's response begins on its prompt, or the call ends, or its
+  own abort; then it writes only the rest. Begins means `message_start` on
+  Anthropic and the first `response.output_item.added` on the Responses
+  APIs (uniichat's `begun`): not the headers, not `response.created` (sent
+  when the request is accepted, before the prompt is read) and not an
+  `error` event, after which nothing counts as written. A prefix whose writer began counts as
+  written for the short retention (5 minutes), so a call of it does not
+  wait. So compactions started together pay once for what they share, as
+  uniichat's `AskAI.wait`. This holds for Anthropic and for OpenAI
+  Responses and Codex (SSE and WebSocket), which pi-ai reports stream events
+  for; other APIs do not wait.
 - **OpenAI / Codex.** Every request carries `sessionId`, which becomes
   `prompt_cache_key` and the `session-id` header. The key is
   `optchat-<uuid>` for the chat and `optchat-<uuid>-compact` for the
   compactor, fixed for the store. Codex already sends `store: false` with the
   reasoning items' encrypted content. Requests share the view's prefix, so
   OpenAI's prefix cache serves them.
+- **Explicit breakpoints (OpenAI platform, GPT-5.6+).** For a model pi-ai
+  flags with `supportsExplicitPromptCacheMode`, the last whole view block
+  carries `prompt_cache_breakpoint: {mode: "explicit"}`, and a compactor
+  request sets `prompt_cache_options.mode: "explicit"`, which drops the
+  implicit breakpoint OpenAI would put at the request's end: its task is not
+  written, as on Anthropic (uniichat sets the mode exactly when the end is
+  unmarked). A turn keeps the implicit breakpoint at its end. A ChatGPT
+  sign-in on the platform gets neither (pi-ai leaves `prompt_cache_options`
+  out for it). The chat and the compactor pass no key, so whether a call is
+  a sign-in is decided on the credential the registry resolves for it
+  (`Models.getAuth`, as pi-ai's `applyAuth`), by pi-ai's own rule; one that
+  does not resolve gets neither. Codex and Azure flag no model and get no
+  breakpoints.
+- **Reasoning context (OpenAI).** Where pi-ai sends `reasoning`, a GPT-5.6+
+  model on the platform (provider `openai` at `api.openai.com`) or Codex
+  (`openai-codex`) is sent `reasoning.context: "all_turns"`
+  (uniichat sends it), so a message steered into a tool round keeps the
+  run's earlier reasoning in context and in the prefix. The SDK's
+  `Reasoning.context` says 5.6+ default to `all_turns` and earlier models to
+  `current_turn`; older models are not sent the field until a live check
+  shows they take it. An API-compatible third party with the same model ids
+  (GitHub Copilot, opencode, Cloudflare AI Gateway) is sent what pi-ai builds.
+  A request refused with an error naming `reasoning.context` or the value
+  `all_turns` (Codex keeps only the message) is sent again once without it,
+  and that model is not sent it again while cubed runs. Any other refusal is
+  not sent again.
+- **GPT-6 on the platform (R-1).** For a model pi-ai flags
+  `supportsMidConvoEffort` (gpt-6-sol, gpt-6.1-sol, gpt-6-luna, gpt-6-astra)
+  with an `sk-` key, pi-ai 1.3.0 fixes `reasoning.effort` at `medium` and
+  sends the thinking level as a trailing `configuration_update` input item,
+  so a level change alters only that last item. OptChat adds `all_turns`
+  beside them, its own `prompt_cache_key` and the view's breakpoint; a
+  ChatGPT sign-in gets the level as `reasoning.effort` and no configuration
+  item. `optchat-gpt6-test.ts` pins this payload, its prefix across levels
+  and the refusal paths offline. Whether OpenAI accepts `all_turns` together
+  with `configuration_update` is **not tested** against the provider: a
+  refusal that names neither `reasoning.context` nor `all_turns` gets no
+  fallback, so every GPT-6 turn would fail the same way until the model is
+  changed. That is a live check (two calls, within P1), not offline
+  correctness.
 - **Retention** is `short` for the chat and the compactor, even when
   `PI_CACHE_RETENTION=long`.
 
-`packages/server/test/optchat-cache-test.ts` runs pi-ai's real Anthropic and
-Codex request builders against a captured `fetch` and checks what would be
-sent, including the waiting. Hit rates are modelled offline (spec §3.3),
-not measured on a live provider.
+`packages/server/test/optchat-cache-test.ts` runs pi-ai's real Anthropic,
+Codex, OpenAI and Azure request builders against a captured `fetch` and
+checks what would be sent, including the waiting, the begun events, the
+breakpoints, `all_turns` and its fallback. `optchat-cache-path-test.ts` runs the real
+OptChat over pi-ai's Anthropic builder against a fake Anthropic that caches
+by the rules uniichat's `cache.test.ts` models, and checks the bytes sent:
+a turn's steps only append; a turn starts with the last turn's view through
+its mark, byte for byte, unless a batch merged it (and then only merged
+lines change); a reopen at rest, with summaries running or between a
+turn's steps changes nothing of it; new instructions rewrite the request
+once; turns carry three marks, compactions two; no two calls write the same
+prefix at once, across reopens too, and no request is sent twice.
+`optchat-close-test.ts` closes with summaries and a chat request out:
+within the grace they are stored with their usage and the reopen sends
+none again, and the tool and next step of the turn are not started while
+closing, then once after the reopen; a tool running at the close and ending
+in the grace is stored and runs once in all; a summary whose answer needs
+feedback sends no follow-up while closing, then that follow-up once after
+the reopen, byte for byte as the uninterrupted round, with the same line;
+past the grace (forced), each cut-off call or tool is counted and sent or
+run again at most once; a `spawn` cut off starts no task after the cut and
+makes each thread once across the reopen; a tool and a provider that never
+end and ignore the abort do not hold the close past its bound.
+`optchat-replay-test.ts` runs every exposed tool twice under the same call
+and task ids, as a replay does: each read-only one changes nothing, each
+keyed one does its effect once (a hooks write leaves the user's edit made
+in between) and both runs answer the same, byte for byte. `optchat-cache-test.ts` cuts off a Codex call
+waiting in single flight while its session's WebSocket is cached and idle:
+it sends nothing.
+`optchat-view-fault-test.ts` makes the stored view's
+commits fail after their nodes are stored, then reopens: the turns after it
+send the views the uninterrupted chat sends. Hit rates are modelled offline (spec §3.3), not measured on
+a live provider.
+
+## Failing closed
+
+- **A request whose view or images cannot be built is not sent.** Pi
+  skips a `beforeRequest` hook that throws and sends the messages it built
+  itself, without the view and the images: another prefix and another
+  cost. It rethrows only when the generation's invocation was aborted. So
+  the chat's hook catches its own failure (images, the turn's document, the
+  view's rendering), aborts its generation with `Harness.abortTask`, waits
+  for that abort and only then throws. The turn ends unanswered, as a stop
+  does: nothing retries it, the next message starts a new turn, and a
+  reopen does not send it. The failure is logged (`request not sent`) and
+  shown as the chat's failure until the hook next builds a request (and
+  hands it to Pi to send). If the abort's commit fails, the Session fails
+  and its end aborts the generation; a close aborts it too. One exception:
+  a close that seals admission before the abort commits leaves the turn's
+  task live, so the reopened chat builds the request again and sends it
+  once if it builds (it was never sent before), or refuses it again. Not a
+  duplicate, but a reopen can send a request that was refused. The close
+  does not wait for the refused request or count it as a call cut off.
+- **Pi's reports.** Both Harnesses (the chat's and each thread's) pass
+  `onReport`: a hook's or listener's throw, a task Pi cannot run
+  (`task_too_old` after a rollback), a failed cleanup. Each is one warning
+  line with the error's name, code and message, redacted (`pi-report.ts`)
+  and bounded to 1000 characters; never its stack, cause or other fields,
+  which can carry a provider request's headers or body.
+- **A failed Session.** A failed Storage call ends Pi's Session
+  (`harness.closed` settles `failed`): every task is aborted and every
+  later call rejects. The chat watches it and goes down at once: it closes
+  without the grace (nothing it waits for could be stored), cuts off the
+  compactor's calls, starts no turn, node or retry, releases its provider
+  sessions and shows `the chat stopped: its history could not be saved`.
+  A thread's agent does the same: it is logged, its provider sessions are
+  released, and its thread shows why (its row is an error, a reader of its
+  transcript and a message are answered with why, and OptChat's thread
+  record carries it). Neither reopens by itself, a thread's agent not even
+  when its machine boots again (a runner restart or a guest crash): the
+  reopen sends the request that was out at the failure again (N2, not
+  exactly-once), and whether and when to reopen is the open decision D2′.
+  Both stay down until cubed restarts; a thread's archive still runs its
+  release check, and the release ends the mark.
+
+`optchat-fail-closed-test.ts` makes the view's rendering and the image
+check throw and checks that nothing is sent, now, with the next turn or
+after a reopen, and that the log has no secret and no stack; fails the
+abort's commit (the chat goes down, nothing sent) and holds the abort off
+across a close (not waited for or counted; the reopen sends it once); then
+fails the chat's storage with a request out and with a compactor call held,
+and checks that nothing more is sent, the provider sessions are released
+before any close, and the close ends without the grace. `pi-upgrade-test.ts`
+pins Pi's side: the abort-then-throw primitive, and a thread agent's reports
+and failed Session. `thread-down-test.ts` fails a thread's Session through
+`Conversations` and checks what its row, its readers and OptChat's record
+show, and that neither reboots of its machine (also one during the
+failure) nor recovery rounds send its request again; then archives it.
 
 ## Configuration
 
@@ -477,7 +730,9 @@ The settings page reads `GET /api/settings` (the saved and effective
 compactor model, an ignored `CUBED_OPTCHAT_COMPACTOR`, the chat's model,
 the available models) and
 saves with `PUT /api/settings/compactor {model: {provider, id} | null}`
-(400 for a malformed body, 422 for a model no connected provider offers).
+(400 for a malformed body, 422 for a model no connected provider offers);
+a save looks at the nodes held with their answers spent again, and at a
+node whose last answer was out during the save once that answer is in.
 The panel also lists the newest
 artifacts (`GET /api/artifacts`); comments on the chat's own artifacts reach
 it as messages starting `[artifact <id>]` through the same pending queue, as
@@ -486,9 +741,18 @@ artifact of a thread it started.
 
 ## Deviations from the spec
 
-- **No cache breakpoints on OpenAI.** The spec puts `prompt_cache_breakpoint`
-  marks on the view's pieces. pi-ai's Codex request has no such field, so the
-  chat relies on OpenAI's prefix caching and a stable `prompt_cache_key`.
+- **No cache breakpoints on Codex, Azure or OpenAI before GPT-5.6.** The
+  spec puts `prompt_cache_breakpoint` marks on the view's pieces. They are
+  sent where pi-ai flags a model as taking them (the platform's GPT-5.6+).
+  Codex CLI sends none and pi-ai flags no Codex or Azure model, so there the
+  chat relies on prefix caching and a stable `prompt_cache_key`.
+- **`reasoning.context` on models before GPT-5.6.** Not sent to `gpt-5.5`
+  and older (Codex `gpt-5.5`, `gpt-5.3-codex-spark`; the platform's
+  `gpt-5.5` and older): whether they take it is unverified offline. Their
+  default is `current_turn`, so a message steered into a tool round on such
+  a model may read less of the round from the cache than in uniichat (not
+  measured). Enabling it needs one authorized live check per API (a short
+  call with the field: accepted or a 400).
 - **Steering window.** A message sent during a tool round is steered in. If
   the round's last tool finishes between the check and the submission, Pi
   places it at the final boundary and it continues that run in the old
@@ -505,11 +769,35 @@ artifact of a thread it started.
 - **Stop** aborts a running turn and cancels the wait of every pending
   message. Those messages, and any steered one the abort withdrew before Pi
   placed it, are written to the log as unanswered user messages, as in the
-  spec. While the compactor fails, the chat shows `summarizing: <error>` and
-  keeps retrying.
+  spec. While the compactor fails on something not its input's doing, the
+  chat shows `summarizing: <error>` and keeps retrying (see the compactor
+  above); the spec tries a failed call again at the next message.
+- **The compactor's prompt** is its own system prompt (`COMPACT`), not the
+  turns' (spec §7, mistake 6: it costs the compactor the turns' cache entry);
+  it shows an invented 512-byte example line (`SCALE`) instead of the
+  spec's ruler of dashes, with a warning not to copy it, and asks for three
+  lengths in one answer. A message's step lets `<chat>` recover detail its
+  input lost, where the spec gives that only to merges; its context has no
+  ids. These are deliberate and measured only as above (calls and bytes per
+  node), not for misattribution.
+- **Tool calls are capped** at 30,000 characters like tool results
+  (since `50929859`); the spec caps only results and pages any other long
+  text.
+- **A node cut short.** The spec does not say what a node becomes when the
+  compactor never gives a line; cube, like Taelin's uniichat, cuts its
+  source to the node size, and marks it so the view says to zoom.
 
 ## Known gaps
 
+- A turn's images are bounded (8, 15 MB). A message that would take the
+  running turn past them is not steered in: it waits for the next turn, with
+  every message after it, so each request of a turn carries the images its
+  last one did and its prefix stays the same, and the model gets every image,
+  one turn later. A turn's own first messages can be over the bytes bound
+  already (8 images of up to 3.75 MB); then its oldest go as notes from its
+  first request on, the same in each, and any message with images steered
+  after waits. A turn started before an upgrade to this has no record of its
+  images: a message with images waits for the next turn.
 - The transcript endpoint reads the whole history again at every new turn,
   and the run status scans every submission on each SSE frame. A long chat
   makes the transcript slow; the model's side does not grow.
@@ -529,5 +817,21 @@ artifact of a thread it started.
 - No HTML browser of the tree and no import of older chats yet.
 - An image reaches the model in its own turn only; a later turn cannot look at
   it again (the view and `zoom` say `[image]`), and threads never get images.
+- A refusal written as an ordinary one-line answer (OpenAI sends refusals
+  as text) is kept as the node, as in uniichat: it cannot be told from a
+  summary.
+- Rolling cubed back to a version before pages, after a message over
+  30,000 characters was logged in pages, makes the older version number the
+  log otherwise than its tree; it has no check and would put summaries on
+  the wrong messages. Roll back only a chat without such a message, or
+  with a new `CUBED_STATE`. The supervisor rolls back on its own when a new
+  version fails probation, so this is not always the user's choice: a long
+  message sent in that window is enough. The next newer cubed then refuses
+  to open the chat (`an older cubed numbered the chat's log without
+  pages`) and nothing in the product repairs it; a chat with no long message
+  opens as before.
+- The view is stored only after a node is built, partial batches go on at
+  every node as well as every message, and a turn takes every waiting
+  message whole with no size bound (audit 3fc4ae39, F6-F8).
 - Verified offline with faux models and a local guest only
   (`packages/server/test/optchat-*-test.ts`), never against a real model or VM.

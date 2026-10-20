@@ -8,7 +8,7 @@
  * a read in the same call is conditional on the content that was read. */
 import path from "node:path";
 import type { Context } from "@earendil-works/chord";
-import { err, ExecutionError, FileError, ok, type ExecutionEnv, type FileErrorCode, type FileInfo, type Result, type ShellExecResult, type TextLineReader } from "@earendil-works/pi-durable/env";
+import { err, ExecutionError, FileError, LineScanner, ok, type BinaryReader, type DirReader, type ExecutionEnv, type FileErrorCode, type FileInfo, type FileWatcher, type Result, type ShellExecResult, type TextLineReader } from "@earendil-works/pi-durable/env";
 import { WorkspaceError, type Workspace } from "./workspace.ts";
 
 /** Paths the model sees: the workspace root is this directory in the machine. */
@@ -89,6 +89,14 @@ export class WorkspaceEnv implements ExecutionEnv {
     const info = await this.fileInfo(file, context);
     return info.ok ? ok(true) : info.error.code === "not_found" ? ok(false) : info;
   }
+  /** Pi's read tool reads through this: one whole read, as readBinaryFile,
+   * so the size cap and the sha a later write is conditional on still hold. */
+  async openBinaryReader(file: string, _options: { noFollow?: boolean } | undefined, context: Context): Promise<Result<BinaryReader, FileError>> {
+    const bytes = await this.readBinaryFile(file, context);
+    if (!bytes.ok) return bytes;
+    const absolute = await this.absolutePath(file);
+    return absolute.ok ? ok(bytesReader(bytes.value, absolute.value)) : absolute;
+  }
 
   async openTextLineReader(file: string): Promise<Result<TextLineReader, FileError>> { return unsupported(file); }
   async readTextLines(file: string): Promise<Result<string[], FileError>> { return unsupported(file); }
@@ -97,6 +105,8 @@ export class WorkspaceEnv implements ExecutionEnv {
   async flushFile(file: string): Promise<Result<void, FileError>> { return unsupported(file); }
   async renameFile(file: string): Promise<Result<void, FileError>> { return unsupported(file); }
   async listDir(file: string): Promise<Result<FileInfo[], FileError>> { return unsupported(file); }
+  async openDirReader(file: string): Promise<Result<DirReader, FileError>> { return unsupported(file); }
+  async watch(): Promise<Result<FileWatcher, FileError>> { return unsupported(); }
   async createDir(file: string): Promise<Result<void, FileError>> { return unsupported(file); }
   async remove(file: string): Promise<Result<void, FileError>> { return unsupported(file); }
   async createTempDir(): Promise<Result<string, FileError>> { return unsupported(); }
@@ -126,6 +136,30 @@ export function expandHome(file: string): string | null {
 export function workspacePath(absolute: string): string {
   if (absolute === WORKSPACE_ROOT) return ".";
   return absolute.startsWith(`${WORKSPACE_ROOT}/`) ? absolute.slice(WORKSPACE_ROOT.length + 1) : absolute;
+}
+
+/** A BinaryReader over bytes already read whole. Lines are scanned with Pi's
+ * own LineScanner, so they are what a NodeExecutionEnv reader would find. */
+export function bytesReader(bytes: Uint8Array, file: string): BinaryReader {
+  // Fixed metadata: the snapshot cannot change while it is read.
+  const info: FileInfo = { name: path.posix.basename(file), path: file, kind: "file", size: bytes.length, mtimeMs: 0 };
+  return {
+    async info() { return ok({ ...info }); },
+    async read(offset, length, context) {
+      if (context.abortSignal?.aborted) return err(new FileError("aborted", "operation aborted", file));
+      if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 0) return err(new FileError("invalid", "Offset and length must be non-negative safe integers", file));
+      return ok(bytes.subarray(offset, offset + length));
+    },
+    async scanLines(options, context) {
+      if (context.abortSignal?.aborted) return err(new FileError("aborted", "operation aborted", file));
+      let scanner: LineScanner;
+      try { scanner = new LineScanner(options.startLine, options.endLine); }
+      catch { return err(new FileError("invalid", "Invalid line range", file)); }
+      scanner.push(bytes);
+      return ok(scanner.finish());
+    },
+    async close() {},
+  };
 }
 
 function unsupported<T>(file?: string): Result<T, FileError> {

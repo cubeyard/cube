@@ -77,7 +77,12 @@ cubed opens nonarchived threads and resumes Pi's unfinished tasks. Followup
 request IDs are Pi submission request IDs, committed atomically with admission,
 so a repeated HTTP action does not append another turn; a busy thread rejects a
 new prompt instead of queueing it. The product registry stores no model or tool
-progress. The thread's machine binding (runner and VM) and a random storage
+progress. A failed Storage call ends the Harness (`harness.closed` is
+`failed`): cubed logs it, releases the agent's provider sessions and shows the
+thread's agent as down until cubed restarts, without reopening it, not even
+when its machine boots again (the reopen would send the request out at the
+failure again); only the thread's release ends that. Pi's `onReport` goes to
+cubed's log, redacted (`pi-report.ts`). The thread's machine binding (runner and VM) and a random storage
 identity live in a session-scoped Pi document, `cube.runner`; a changed binding
 refuses to open.
 
@@ -218,7 +223,8 @@ sandboxing headers as OptChat's images; the browser never names a workspace
 path. Agent prose that names, as a markdown image, a path the thread read as
 an image shows that stored image; any other image target stays a link or text.
 Claude Code's transcript shows the workspace's host directory as `/workspace`
-in its prose too. Cube wraps Pi's text-only `read` (pi-durable 1.0.1) to intercept image
+in its prose too. Cube wraps Pi's `read` (pi-durable 1.3.0, which reads through the
+environment's `openBinaryReader`; WorkspaceEnv serves one whole read) to intercept image
 bytes before UTF-8 decoding. PNG, JPEG, GIF and WebP are delivered as typed
 image parts, only when the calling task's selected model advertises image
 input. The existing Workspace lease, path checks, paging consistency and
