@@ -84,7 +84,8 @@ if (mode === "create" && boundary === "model-stream") {
 const submitted = await conversation.commit(tx => tx.submissionByRequest(conversation.id, REQUEST), context);
 if (mode === "create") assert.equal(submitted, undefined);
 else if (mode === "recover") assert.equal(submitted?.status, "placed");
-else assert.equal(submitted?.status, "done");
+// The request out at the kill was not sent again: its prompt is unanswered.
+else assert.equal(submitted?.status, boundary === "accepted" || boundary === "model-stream" ? "unanswered" : "done");
 let submission: SubmissionId | undefined = submitted?.id;
 const server = createServer((request, response) => {
   void (async () => {
@@ -103,8 +104,13 @@ const server = createServer((request, response) => {
       response.writeHead(200).end(JSON.stringify({ submission }));
       drive?.();
       const settled = await (await harness.submission(submission!, context))!.wait(context);
-      assert.equal(settled.status, "done");
-      process.send!({ type: "done" });
+      // A request that was out at the kill is not sent again (pi-sends.ts):
+      // its run ended at the reopen, and the next message goes on.
+      if (settled.status !== "done") {
+        const again = await conversation.submit({ type: "input", content: "Go on.", requestId: `${REQUEST}:again` }, context);
+        assert.equal((await again.wait(context)).status, "done");
+      }
+      process.send!({ type: "done", status: settled.status });
     } else response.writeHead(404).end();
   })().catch(error => {
     process.send!({ type: "failure", error: String(error.stack ?? error) });

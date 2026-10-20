@@ -78,7 +78,8 @@ const talk = (chat: OptChat) => chat.memory.messages.filter(message => message.k
     await chat.agent.conversation.waitForIdle(context);
     await delay(300);
     assert.equal(count("turn"), 0, "the request out at the crash was not sent again");
-    assert.match(chat.failure() ?? "", /last request was out when cubed stopped, so it was not sent again/);
+    // Shown unless a summary out at the kill (held, counted) is shown first.
+    assert.match((chat as unknown as { requestError: string | null }).requestError ?? "", /last request was out when cubed stopped, so it was not sent again/);
     assert.equal(sum((await chat.usage()).cut?.chat), 1, "it is counted as one of unknown cost");
     await chat.close();
     chat = await chatAt(directory);
