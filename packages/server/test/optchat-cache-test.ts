@@ -4,14 +4,20 @@
  * Anthropic request marks the last system block, the last whole view block
  * and its end, and a call waits while another writes its marked prefix.
  * Codex gets the chat's prompt_cache_key and the system prompt as its
- * instructions, ahead of the view. */
+ * instructions, ahead of the view. A waiter goes on the begun event only
+ * (message_start, response.output_item.added), never on response.created or
+ * an error. The OpenAI platform's GPT-5.6+ gets an explicit breakpoint on the
+ * view and, for the compactor, mode explicit; 5.6+ gets reasoning.context
+ * all_turns with a one-time fallback; the rest is sent as pi-ai builds it. */
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
 import { zstdDecompressSync } from "node:zlib";
-import { createModels, type Message, type Tool } from "@earendil-works/pi-ai";
+import { createModels, type Message, type Models, type Tool } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { streamSimple as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { azureOpenAIResponsesProvider } from "@earendil-works/pi-ai/providers/azure-openai-responses";
 import { cachedModels, markViewPieces, viewPieces } from "../src/optchat-cache.ts";
 import { compactNode } from "../src/optchat-compactor.ts";
 import { withView } from "../src/optchat.ts";
@@ -67,6 +73,9 @@ const anthropic = async (messages: Message[], apiKey = "sk-ant-test") => {
   return bodies.pop()!.body as unknown as Body;
 };
 const marked = (blocks: Array<{ cache_control?: unknown }>) => blocks.flatMap((block, k) => block.cache_control ? [k] : []);
+const sse = (event: object) => new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`);
+const added = { type: "response.output_item.added", output_index: 0, item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] } };
+const until = async (test: () => boolean) => { for (let k = 0; k < 200 && !test(); k++) await sleep(5); assert.ok(test()); };
 const marks = (body: Body) => JSON.stringify(body).split('"cache_control"').length - 1;
 
 {
@@ -129,7 +138,6 @@ for (const lines of [9, 100, 500]) {
     order.push(`fetch ${view(captured)}`);
     held.push({ body: captured, release: response => response instanceof Error ? reject(response) : resolve(response) });
   });
-  const until = async (test: () => boolean) => { for (let k = 0; k < 200 && !test(); k++) await sleep(5); assert.ok(test()); };
   const call = (view: string, signal?: AbortSignal) =>
     cached.completeSimple(model, { messages: request(view) }, { apiKey: "sk-ant-test", maxRetries: 0, ...(signal ? { signal } : {}) }).then(reply => { order.push(`end ${view.slice(7, 20)}`); return reply; });
   let body!: ReadableStreamDefaultController<Uint8Array>;
@@ -250,8 +258,10 @@ for (const lines of [9, 100, 500]) {
   assert.equal(captured.body.store, false);
   assert.ok(!JSON.stringify(captured.body).includes("cache_control"));
 
-  // Single flight holds for Codex too: a compaction whose view starts with
-  // one being written waits until that one's first stream event.
+  // Single flight holds for Codex too. A compaction whose view starts with
+  // one being written waits until that one's response begins on its prompt
+  // (response.output_item.added, uniichat's begun), not when it is accepted
+  // (response.created).
   const order: string[] = [];
   const streams: Array<ReadableStreamDefaultController<Uint8Array>> = [];
   respond = captured => {
@@ -263,14 +273,172 @@ for (const lines of [9, 100, 500]) {
   const options = { apiKey: `x.${claim}.y`, transport: "sse" as const, maxRetries: 0 };
   const a = compactor.completeSimple(model, { messages: request(render(100, 6)) }, options);
   const b = compactor.completeSimple(model, { messages: request(render(108, 6)) }, options);
-  for (let k = 0; k < 200 && order.length < 1; k++) await sleep(5);
+  await until(() => order.length >= 1);
   await sleep(30);
   assert.deepEqual(order, ["fetch 27"], "the longer view waits while the shorter is written");
-  streams[0]!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: "response.created", response: { id: "resp_1" } })}\n\n`));
-  for (let k = 0; k < 200 && order.length < 2; k++) await sleep(5);
-  assert.deepEqual(order, ["fetch 27", "fetch 29"], "it goes once the writer's response begins");
-  for (const stream of streams) stream.error(new Error("done"));
+  streams[0]!.enqueue(sse({ type: "response.created", response: { id: "resp_1" } }));
+  await sleep(50);
+  assert.deepEqual(order, ["fetch 27"], "response.created does not let it go: the prompt is not read yet");
+  streams[0]!.enqueue(sse(added));
+  await until(() => order.length >= 2);
+  assert.deepEqual(order, ["fetch 27", "fetch 29"], "it goes once the writer's response begins on its prompt");
+  for (const stream of streams.splice(0)) stream.error(new Error("done"));
   await Promise.all([a, b]);
+  order.length = 0;
+
+  // A writer whose first event is an error wrote nothing: two calls of its
+  // prefix after it still go one at a time.
+  const c = compactor.completeSimple(model, { messages: request(render(100, 7)) }, options);
+  await until(() => order.length >= 1);
+  streams[0]!.enqueue(sse({ type: "error", code: "server_error", message: "boom" }));
+  assert.equal((await c).stopReason, "error");
+  streams.length = 0;
+  order.length = 0;
+  const d = compactor.completeSimple(model, { messages: request(render(100, 7)) }, options);
+  const e = compactor.completeSimple(model, { messages: request(render(100, 7)) }, options);
+  await until(() => order.length >= 1);
+  await sleep(50);
+  assert.deepEqual(order, ["fetch 27"], "after an error-first writer, its prefix is not taken as cached");
+  streams[0]!.enqueue(sse(added));
+  await until(() => order.length >= 2);
+  for (const stream of streams.splice(0)) stream.error(new Error("done"));
+  await Promise.all([d, e]);
+  bodies.length = 0;
+  respond = () => new Response("{}", { status: 400 });
+
+  // reasoning.context all_turns only for 5.6 and later (the SDK's default
+  // there); gpt-5.5 and older are not sent it (no live check yet).
+  const codexBody = async (id: string) => {
+    const pick = models.getModels("openai-codex").find(candidate => candidate.id === id)!;
+    const options = { apiKey: `x.${claim}.y`, transport: "sse" as const, maxRetries: 0, reasoning: "high" as const };
+    await cachedModels(direct, () => "optchat-test").completeSimple(pick, { messages: request(big) }, options);
+    const wrapped = bodies.pop()!.body;
+    await direct.completeSimple(pick, { messages: request(big) }, { ...options, sessionId: "optchat-test" });
+    return { wrapped, plain: bodies.pop()!.body };
+  };
+  const old = await codexBody("gpt-5.5");
+  assert.equal(JSON.stringify(old.wrapped), JSON.stringify(old.plain), "Codex gpt-5.5: byte for byte what pi-ai sends");
+  const sol = await codexBody("gpt-5.6-sol");
+  assert.deepEqual(sol.wrapped.reasoning, { ...sol.plain.reasoning as object, context: "all_turns" }, "Codex gpt-5.6-sol: all_turns");
+  assert.equal(JSON.stringify({ ...sol.wrapped, reasoning: sol.plain.reasoning }), JSON.stringify(sol.plain), "and nothing else differs");
+  assert.ok(!JSON.stringify(sol.wrapped).includes("prompt_cache_breakpoint") && !("prompt_cache_options" in sol.wrapped), "Codex gets no explicit breakpoints");
+}
+
+{
+  // The OpenAI platform. GPT-5.6+ (pi-ai's supportsExplicitPromptCacheMode)
+  // marks its last whole view block with an explicit breakpoint; the
+  // compactor sets mode explicit, so its task gets no implicit breakpoint.
+  // gpt-5.5 and Azure are sent what pi-ai builds.
+  process.env.OPENAI_API_KEY = "sk-test";
+  process.env.AZURE_OPENAI_API_KEY = "azure-test";
+  process.env.AZURE_OPENAI_RESOURCE_NAME = "cube-test";
+  const platform = createModels();
+  platform.setProvider(openaiProvider());
+  platform.setProvider(azureOpenAIResponsesProvider());
+  const pick = (provider: string, id: string) => platform.getModels(provider).find(candidate => candidate.id === id)!;
+  const sol = pick("openai", "gpt-5.6-sol"), five = pick("openai", "gpt-5.5"), azure = pick("azure-openai-responses", "gpt-5.6-sol");
+  const flagged = (model: typeof sol) => (model.compat as { supportsExplicitPromptCacheMode?: boolean } | undefined)?.supportsExplicitPromptCacheMode === true;
+  assert.ok(flagged(sol) && !flagged(five) && !flagged(azure), "pi-ai flags the platform's 5.6+ only");
+  type Part = { type: string; text?: string; prompt_cache_breakpoint?: unknown };
+  type Input = Array<{ role?: string; content?: Part[] }>;
+  const breakpoints = (body: Record<string, unknown>) => (body.input as Input).flatMap((item, at) => (Array.isArray(item.content) ? item.content : []).flatMap((part, k) => part.prompt_cache_breakpoint ? [`${at}:${k}`] : []));
+  const send = async (models: Models, model: typeof sol, messages: Message[], options: object = {}) => {
+    await models.completeSimple(model, { messages }, { maxRetries: 0, reasoning: "high", sessionId: "optchat-test", ...options });
+    return bodies.pop()!.body;
+  };
+  const chat = cachedModels(platform, () => "optchat-test");
+  const compact = cachedModels(platform, () => "optchat-test", { task: false });
+
+  const turn = await send(chat, sol, request(render(500)));
+  assert.deepEqual(breakpoints(turn), ["1:124"], "gpt-5.6-sol turn: one breakpoint, the last whole view block");
+  assert.equal(turn.prompt_cache_options, undefined, "a turn keeps the implicit breakpoint at its end");
+  assert.deepEqual(turn.reasoning, { effort: "high", summary: "auto", context: "all_turns" });
+  const compaction = await send(compact, sol, request(render(500)));
+  assert.deepEqual(breakpoints(compaction), ["1:124"]);
+  assert.deepEqual(compaction.prompt_cache_options, { mode: "explicit" }, "the compactor's task gets no implicit breakpoint");
+  const tiny = await send(compact, sol, request(small(3)));
+  assert.deepEqual(breakpoints(tiny), [], "a view under one whole block has no breakpoint");
+  assert.deepEqual(tiny.prompt_cache_options, { mode: "explicit" });
+  const signedIn = await send(compact, sol, request(render(500)), { apiKey: "chatgpt-oauth-token" });
+  assert.deepEqual([breakpoints(signedIn), signedIn.prompt_cache_options], [[], undefined], "a ChatGPT sign-in, which refuses them, gets neither");
+  // Consecutive turns: the marked prefix is byte for byte the same, and a
+  // longer view marks its own block within the lookback.
+  const prefix = (body: Record<string, unknown>, upto: number) => JSON.stringify([(body.input as Input)[0], (body.input as Input)[1]!.content!.slice(0, upto).map(part => ({ ...part, prompt_cache_breakpoint: undefined }))]);
+  for (const k of [1, 4, 40, 80]) {
+    const next = await send(chat, sol, request(render(500 + k)));
+    const at = Number(breakpoints(next)[0]!.split(":")[1]);
+    assert.equal(prefix(next, 125), prefix(turn, 125), `500 + ${k} lines: the marked prefix leads byte for byte`);
+    assert.ok(at >= 124 && at - 124 <= 20);
+    assert.equal(JSON.stringify(next.tools), JSON.stringify(turn.tools));
+  }
+  for (const [label, model] of [["gpt-5.5", five], ["azure gpt-5.6-sol", azure]] as const) {
+    for (const models of [chat, compact]) {
+      const wrapped = await send(models, model, request(render(500)));
+      const plain = await send(platform, model, request(render(500)));
+      assert.equal(JSON.stringify(wrapped), JSON.stringify(plain), `${label}: byte for byte what pi-ai sends`);
+    }
+  }
+
+  // The platform's begun event, as on Codex; an error first lets go and
+  // leaves nothing cached.
+  const order: string[] = [];
+  const streams: Array<ReadableStreamDefaultController<Uint8Array>> = [];
+  respond = captured => {
+    order.push(`fetch ${(captured.body.input as Input)[1]!.content!.length}`);
+    return new Response(new ReadableStream<Uint8Array>({ start: controller => { streams.push(controller); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  const a = compact.completeSimple(sol, { messages: request(render(100, 8)) }, { maxRetries: 0 });
+  const b = compact.completeSimple(sol, { messages: request(render(108, 8)) }, { maxRetries: 0 });
+  await until(() => order.length >= 1);
+  streams[0]!.enqueue(sse({ type: "response.created", response: { id: "resp_2", status: "in_progress", output: [] } }));
+  await sleep(50);
+  assert.deepEqual(order, ["fetch 27"], "platform: response.created does not let it go");
+  streams[0]!.enqueue(sse(added));
+  await until(() => order.length >= 2);
+  assert.deepEqual(order, ["fetch 27", "fetch 29"], "platform: output_item.added does");
+  for (const stream of streams.splice(0)) stream.error(new Error("done"));
+  await Promise.all([a, b]);
+  order.length = 0;
+  const c = compact.completeSimple(sol, { messages: request(render(100, 9)) }, { maxRetries: 0 });
+  await until(() => order.length >= 1);
+  streams[0]!.enqueue(sse({ type: "error", code: "server_error", message: "boom" }));
+  assert.equal((await c).stopReason, "error");
+  streams.length = 0;
+  order.length = 0;
+  const d = compact.completeSimple(sol, { messages: request(render(100, 9)) }, { maxRetries: 0 });
+  const e = compact.completeSimple(sol, { messages: request(render(100, 9)) }, { maxRetries: 0 });
+  await until(() => order.length >= 1);
+  await sleep(50);
+  assert.deepEqual(order, ["fetch 27"], "platform: after an error-first writer, one writer again");
+  streams[0]!.enqueue(sse(added));
+  await until(() => order.length >= 2);
+  for (const stream of streams.splice(0)) stream.error(new Error("done"));
+  await Promise.all([d, e]);
+  bodies.length = 0;
+
+  // A refusal naming reasoning.context is sent again once without it, and
+  // that model is not sent it again; through completeSimple and the stream.
+  const refuse = () => new Response(JSON.stringify({ error: { message: "Unsupported parameter: 'reasoning.context' is not supported with this model.", type: "invalid_request_error", param: "reasoning.context", code: "unsupported_parameter" } }), { status: 400, headers: { "content-type": "application/json" } });
+  const sent: Array<string | null> = [];
+  const context = (captured: Captured) => (captured.body.reasoning as { context?: string } | undefined)?.context ?? null;
+  respond = captured => { sent.push(context(captured)); return sent.length === 1 ? refuse() : new Response("{}", { status: 400 }); };
+  const luna = pick("openai", "gpt-5.6-luna"), terra = pick("openai", "gpt-5.6-terra");
+  await chat.completeSimple(luna, { messages: request(small(3)) }, { maxRetries: 0, reasoning: "high" });
+  assert.deepEqual(sent, ["all_turns", null], "refused, then sent once without it");
+  await chat.completeSimple(luna, { messages: request(small(3)) }, { maxRetries: 0, reasoning: "high" });
+  assert.deepEqual(sent, ["all_turns", null, null], "the model is not sent it again");
+  sent.length = 0;
+  respond = captured => { sent.push(context(captured)); return refuse(); };
+  const events: string[] = [];
+  const stream = chat.streamSimple(terra, { messages: request(small(3)) }, { maxRetries: 0, reasoning: "high" });
+  for await (const event of stream) events.push(event.type);
+  assert.deepEqual(sent, ["all_turns", null], "a stream is sent again once, and only once, even when refused again");
+  assert.deepEqual(events, ["error"], "the caller sees only the second try's end");
+  assert.match((await stream.result()).errorMessage ?? "", /reasoning\.context/);
+  sent.length = 0;
+  respond = captured => { sent.push(context(captured)); return new Response(JSON.stringify({ error: { message: "rate limited", type: "rate_limit" } }), { status: 400, headers: { "content-type": "application/json" } }); };
+  await chat.completeSimple(sol, { messages: request(small(3)) }, { maxRetries: 0, reasoning: "high" });
+  assert.deepEqual(sent, ["all_turns"], "another error is not sent again");
   bodies.length = 0;
   respond = () => new Response("{}", { status: 400 });
 }
