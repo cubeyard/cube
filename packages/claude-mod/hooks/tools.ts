@@ -15,6 +15,29 @@ import { toBase64, WorkspaceClientError, type WorkspaceClient, type WorkspaceOpe
  * cubed also passes this list as --tools. */
 export const ALLOWED_TOOLS: readonly string[] = ["Bash", "Read", "Write", "Edit", "TodoWrite", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "ToolSearch", "WebSearch", "EnterPlanMode", "ExitPlanMode"];
 
+/** The mod's plugin name (.claude-plugin/plugin.json): Claude Code names a
+ * tool the mod registers `mcp__cube__<name>`. */
+export const MOD_NAME = "cube";
+export function cubeToolName(name: string): string {
+  return `mcp__${MOD_NAME}__${name}`;
+}
+
+/** A cube operation Claude Code offers as a tool of this mod: registered with
+ * `$.tool.register` when the session starts, answered by `call` in
+ * `tool.call` (so Claude Code's own MCP client never runs it), and allowed
+ * past the allow-list by its full name only. `call` gets the call's own
+ * input fields and its tool_use_id, and reaches cubed through the scope as
+ * the file tools do. The mod's own list is CUBE_TOOLS (register.ts). */
+export interface CubeTool {
+  /** Letters, digits, `_` or `-`, at most 64. */
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  /** Behind tool search (true), sent whole on every turn (false), or Claude Code's default. */
+  isDeferred?: boolean;
+  call(scope: ToolScope, toolUseId: string, input: Readonly<Record<string, unknown>>): Promise<{ result: string } | Denied>;
+}
+
 /** Claude Code's tools that start or continue its own agents (`Task` is
  * Agent's older name), whose work the thread's transcript would not show. */
 export const SUBAGENT_TOOLS: readonly string[] = ["Agent", "Task", "Workflow", "SendMessage"];
