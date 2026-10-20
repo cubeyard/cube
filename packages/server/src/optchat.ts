@@ -277,8 +277,9 @@ const SettingsDoc = defineDoc<Settings>({ kind: "cube.optchat", version: 1, scop
 /** The view parts the current turn started with; the request hook renders
  * them. `userInputs`: the latest run inputs that carry a message of the
  * user (not a thread's report); project_hooks_write needs one among the
- * running run's inputs. */
-const TurnDoc = defineDoc<{ started: boolean; parts: number[]; userInputs?: number[] }>({
+ * running run's inputs. `images`: the store ids of the images the turn's
+ * messages carry, by request id (turns started before it lack it). */
+const TurnDoc = defineDoc<{ started: boolean; parts: number[]; userInputs?: number[]; images?: Record<string, string[]> }>({
   kind: "cube.optchat.turn", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ started: false, parts: [] }),
 });
 const isReport = (requestId: string) => requestId.startsWith("report:");
@@ -553,7 +554,8 @@ export class OptChat {
     }, context);
     const settings = await this.harness.snapshot(SettingsDoc, context);
     this.cacheKey = `optchat-${settings!.cache}`;
-    this.compactorModels = cachedModels(this.options.models, () => `${this.cacheKey}-compact`);
+    // The compactor's task is its own: its request end is not cached.
+    this.compactorModels = cachedModels(this.options.models, () => `${this.cacheKey}-compact`, { task: false });
     const existing = await this.harness.conversation(ROOT_CONVERSATION_ID, context);
     if (existing) this.conversation = existing;
     else {
@@ -908,7 +910,11 @@ export class OptChat {
           const toolRound = (live: LiveState | undefined) => !!live?.tools?.some(slot => slot.status !== "done");
           const live = await this.live();
           if (live?.run) {
-            if (toolRound(live)) { await this.exclusive(() => this.steer()); continue; }
+            if (toolRound(live)) {
+              // What waits for the next turn waits for this run's end.
+              if (await this.exclusive(() => this.steer())) await this.waitFor(async () => !(await this.live())?.run);
+              continue;
+            }
             await this.waitFor(async () => { const now = await this.live(); return !now?.run || toolRound(now); });
             continue;
           }
@@ -942,10 +948,27 @@ export class OptChat {
   }
 
   /** Every waiting message, steered into the running tool round. Pi places
-   * them all at the round's boundary (steeringMode "all"). */
-  private async steer(): Promise<void> {
+   * them all at the round's boundary (steeringMode "all"). One whose images
+   * would take the turn past its bounds waits for the next turn, and every
+   * message after it with it: the turn's next request then carries every
+   * image its last one did, so their prefix stays the same, and the model
+   * sees the new images one turn later. Returns whether any waits. */
+  private async steer(): Promise<boolean> {
     const items = (await this.harness.snapshot(PendingDoc, context))?.items ?? [];
     for (const item of items) {
+      if (item.images?.length) {
+        const turn = await this.harness.snapshot(TurnDoc, this.conversation.id, context);
+        // A turn started before its images were recorded: the next turn.
+        if (!turn?.images) return true;
+        const ids = item.images.map(image => image.id);
+        const carried = Object.entries(turn.images).flatMap(([requestId, images]) => requestId === item.requestId ? [] : images);
+        if (!turnFits([...carried, ...ids], id => this.media.get(id)?.bytes.byteLength ?? 0)) return true;
+        // Recorded first: after a crash in between it is only counted.
+        await this.conversation.commit(async tx => {
+          const doc = await tx.doc(TurnDoc, this.conversation.id);
+          doc.images = { ...doc.images, [item.requestId]: ids };
+        }, context);
+      }
       await this.conversation.submit({ type: "input", content: userContent(item), requestId: item.requestId, whenBusy: "steer" }, context);
       if (!isReport(item.requestId)) await this.markUser(item.requestId);
       await this.harness.commit(async tx => {
@@ -955,6 +978,7 @@ export class OptChat {
       }, context);
       this.pendingChanged();
     }
+    return false;
   }
 
   /** Forgets sent messages once Pi has placed them, or a stop withdrew them. */
@@ -983,7 +1007,8 @@ export class OptChat {
     if (!await this.known(last.requestId)) {
       if (!await this.known(`${batch[0]!.requestId}:turn`)) {
         const parts = flatParts(this.memory.view);
-        await conversation.commit(async tx => { Object.assign(await tx.doc(TurnDoc, conversation.id), { started: true, parts }); }, context);
+        const images = Object.fromEntries(batch.flatMap(item => item.images?.length ? [[item.requestId, item.images.map(image => image.id)]] : []));
+        await conversation.commit(async tx => { Object.assign(await tx.doc(TurnDoc, conversation.id), { started: true, parts, images }); }, context);
         await conversation.submit({ type: "write", entry: { kind: TURN, head: "self" }, requestId: `${batch[0]!.requestId}:turn` }, context);
       }
       for (const item of batch.slice(0, -1)) {
@@ -1435,6 +1460,14 @@ export function withView(messages: readonly Message[], pieces: readonly string[]
     out.splice(index, 0, baseline!);
   }
   return out;
+}
+
+/** Whether a turn whose messages carry these images (one id per image
+ * part, so a repeat counts again) sends every one of them: no more than
+ * withImages takes, by count and by bytes. Then each request of the turn
+ * carries the same images, whatever is steered in after. */
+export function turnFits(ids: readonly string[], size: (id: string) => number, limits: { count: number; bytes: number } = { count: MEDIA_LIMITS.perTurn, bytes: MEDIA_LIMITS.turnBytes }): boolean {
+  return ids.length <= limits.count && ids.reduce((sum, id) => sum + size(id), 0) <= limits.bytes;
 }
 
 /** The turn's messages with each image reference replaced by the image
