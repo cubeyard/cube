@@ -17,7 +17,10 @@
  *   and the compactor's requests set `mode: "explicit"`, which drops the
  *   implicit breakpoint at the request's end: its task is not written, as
  *   uniichat's OpenAI.body. Codex and Azure flag no model, so they go by
- *   prefix only.
+ *   prefix only. A ChatGPT sign-in on the platform refuses both: whether a
+ *   call is one is decided from the credential pi-ai will send, which the
+ *   registry resolves (`Models.getAuth`, as its `applyAuth` does), since
+ *   the chat and the compactor pass no `apiKey`.
  * - Single flight, for both: a call whose prefix through its last whole view
  *   block another call is writing, or any start of that prefix, waits until
  *   that call's response begins (`message_start`, or the Responses APIs'
@@ -28,10 +31,12 @@
  *   share once, as uniichat's AskAI.wait.
  * - OpenAI reasoning: `reasoning.context: "all_turns"` (uniichat sends it),
  *   so a message steered into a tool round keeps the earlier reasoning in
- *   context and the prefix. Sent only to models that take it by default
+ *   context and the prefix. Sent only to OpenAI's own models (the platform
+ *   and Codex, not an API-compatible third party) that take it by default
  *   (GPT-5.6+, the SDK's `Reasoning.context`); older ones are not sent it
- *   until a live check shows they accept it. A refusal naming the field is
- *   retried once without it, and the model is not sent it again.
+ *   until a live check shows they accept it. A refusal naming the field or
+ *   its value is retried once without it, and the model is not sent it
+ *   again.
  *
  * Entries keep pi-ai's default retention ("short"): the spec measured 1-hour
  * entries as not worth it. */
@@ -134,16 +139,39 @@ export function markResponsesView(payload: unknown, options: { task?: boolean } 
 
 type OpenAIModel = { id: string; api: string; provider: string; baseUrl?: string; compat?: { supportsExplicitPromptCacheMode?: boolean } };
 
-/** pi-ai leaves `prompt_cache_options` out for a ChatGPT sign-in on the
- * platform (it refuses them); so do the breakpoints. */
-const signIn = (model: OpenAIModel, apiKey: string | undefined) =>
-  model.provider === "openai" && model.baseUrl === "https://api.openai.com/v1" && apiKey !== undefined && !apiKey.startsWith("sk-");
+const PLATFORM = "https://api.openai.com/v1";
 
-/** A model whose reasoning context is `all_turns` by default (GPT-5.6 and
+/** pi-ai leaves `prompt_cache_options` out for a ChatGPT sign-in on the
+ * platform (it refuses them); so do the breakpoints. Its rule
+ * (`isChatGPTSignIn`), on the request's model and credential. */
+const signIn = (model: OpenAIModel, apiKey: string | undefined) =>
+  model.provider === "openai" && model.baseUrl === PLATFORM && apiKey !== undefined && !apiKey.startsWith("sk-");
+
+/** Whether a call on the platform may carry explicit cache fields: not a
+ * ChatGPT sign-in. The key is the one pi-ai's `applyAuth` sends: the call's
+ * own, else what the registry resolves; only this answer leaves here. A
+ * credential that does not resolve gets neither (the call fails anyway). */
+async function explicitAllowed(target: Models, model: OpenAIModel, requestModel: OpenAIModel, options: Options): Promise<boolean> {
+  let apiKey = options?.apiKey;
+  if (apiKey === undefined) {
+    try {
+      apiKey = (await target.getAuth(model as never, { env: options?.env, signal: options?.signal }))?.auth.apiKey;
+    } catch {
+      return false;
+    }
+    if (apiKey === undefined) return false;
+  }
+  return !signIn(requestModel, apiKey);
+}
+
+/** An OpenAI model (the platform's or Codex's, not a third party's on the
+ * same API) whose reasoning context is `all_turns` by default (GPT-5.6 and
  * later, or one pi-ai flags as such); older models default to
  * `current_turn` and may refuse the field, so they are not sent it. */
 export function takesAllTurns(model: OpenAIModel): boolean {
-  if (model.api !== "openai-responses" && model.api !== "openai-codex-responses") return false;
+  const openai = model.provider === "openai" && model.api === "openai-responses" && model.baseUrl === PLATFORM;
+  const codex = model.provider === "openai-codex" && model.api === "openai-codex-responses";
+  if (!openai && !codex) return false;
   if (model.compat?.supportsExplicitPromptCacheMode) return true;
   const version = /^gpt-(\d+)(?:\.(\d+))?(?:-|$)/.exec(model.id);
   if (!version) return false;
@@ -154,7 +182,9 @@ export function takesAllTurns(model: OpenAIModel): boolean {
 /** Models that refused `reasoning.context`, for as long as the process runs. */
 const refusedAllTurns = new Set<string>();
 const modelKey = (model: OpenAIModel) => `${model.provider}/${model.api}/${model.id}`;
-const refusal = (message: AssistantMessage, sent: boolean) => sent && message.stopReason === "error" && /reasoning\.context/i.test(message.errorMessage ?? "");
+/** A refusal of the field: its message names it, or only its value (Codex
+ * keeps the message and drops `param`, as in "Invalid value: 'all_turns'"). */
+const refusal = (message: AssistantMessage, sent: boolean) => sent && message.stopReason === "error" && /reasoning\.context|all_turns/i.test(message.errorMessage ?? "");
 
 /** pi-ai's own mark (it knows the retention), wherever it put one. */
 function findMarker(params: AnthropicPayload): unknown {
@@ -164,6 +194,8 @@ function findMarker(params: AnthropicPayload): unknown {
 }
 
 type Options = {
+  apiKey?: string;
+  env?: Record<string, string>;
   sessionId?: string;
   signal?: AbortSignal;
   onPayload?: (payload: unknown, model: never) => unknown;
@@ -231,7 +263,7 @@ export function cachedModels(models: Models, sessionId: () => string, options: {
       };
     }
   };
-  const withCache = (callOptions: Options, model: OpenAIModel) => {
+  const withCache = (target: Models, callOptions: Options, model: OpenAIModel) => {
     let lead = IDLE;
     const call = { allTurns: false, end: () => lead.end(), options: {
       ...callOptions,
@@ -240,9 +272,10 @@ export function cachedModels(models: Models, sessionId: () => string, options: {
         const next = (await callOptions?.onPayload?.(payload, piModel)) ?? payload;
         const api = model.api;
         const keys = api === "anthropic-messages" ? markViewPieces(next, options) : RESPONSES.has(api) ? responsesViewKeys(next) : undefined;
-        if (api === "openai-responses" && model.compat?.supportsExplicitPromptCacheMode && !signIn(model, (callOptions as { apiKey?: string } | undefined)?.apiKey)) markResponsesView(next, options);
+        if (api === "openai-responses" && model.compat?.supportsExplicitPromptCacheMode && await explicitAllowed(target, model, piModel as OpenAIModel, callOptions)) markResponsesView(next, options);
         const body = next as ResponsesPayload;
-        call.allTurns = takesAllTurns(model) && !refusedAllTurns.has(modelKey(model)) && typeof body.reasoning === "object" && body.reasoning !== null;
+        // The request's model: its base URL is the one the credential resolved to.
+        call.allTurns = takesAllTurns(piModel as OpenAIModel) && !refusedAllTurns.has(modelKey(model)) && typeof body.reasoning === "object" && body.reasoning !== null;
         if (call.allTurns) body.reasoning = { ...body.reasoning, context: "all_turns" };
         lead.end();
         if (keys?.length) lead = await flight(keys, callOptions?.signal);
@@ -260,7 +293,7 @@ export function cachedModels(models: Models, sessionId: () => string, options: {
   };
   const complete = async (target: Models, model: OpenAIModel, context: unknown, options: Options): Promise<AssistantMessage> => {
     for (let attempt = 0; ; attempt++) {
-      const call = withCache(options, model);
+      const call = withCache(target, options, model);
       const result = (target.completeSimple as (...args: unknown[]) => Promise<AssistantMessage>).call(target, model, context, call.options);
       result.then(call.end, call.end);
       const reply = await result;
@@ -272,7 +305,7 @@ export function cachedModels(models: Models, sessionId: () => string, options: {
    * when it is refused for it before anything else came. */
   const stream = (target: Models, model: OpenAIModel, context: unknown, options: Options): AssistantMessageEventStream => {
     const once = () => {
-      const call = withCache(options, model);
+      const call = withCache(target, options, model);
       const inner = (target.streamSimple as (...args: unknown[]) => AssistantMessageEventStream).call(target, model, context, call.options);
       inner.result().then(call.end, call.end);
       return { call, inner };

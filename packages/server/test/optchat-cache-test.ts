@@ -12,12 +12,17 @@
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
 import { zstdDecompressSync } from "node:zlib";
-import { createModels, type Message, type Models, type Tool } from "@earendil-works/pi-ai";
+import { createModels, InMemoryCredentialStore, type Message, type Models, type Tool } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { streamSimple as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { azureOpenAIResponsesProvider } from "@earendil-works/pi-ai/providers/azure-openai-responses";
+import { streamSimple as responsesStream } from "@earendil-works/pi-ai/api/openai-responses";
+import { GITHUB_COPILOT_MODELS } from "@earendil-works/pi-ai/providers/github-copilot.models";
+import { OPENCODE_MODELS } from "@earendil-works/pi-ai/providers/opencode.models";
+import { OPENCODE_GO_MODELS } from "@earendil-works/pi-ai/providers/opencode-go.models";
+import { CLOUDFLARE_AI_GATEWAY_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-ai-gateway.models";
 import { cachedModels, markViewPieces, viewPieces } from "../src/optchat-cache.ts";
 import { compactNode } from "../src/optchat-compactor.ts";
 import { withView } from "../src/optchat.ts";
@@ -322,6 +327,56 @@ for (const lines of [9, 100, 500]) {
   assert.deepEqual(sol.wrapped.reasoning, { ...sol.plain.reasoning as object, context: "all_turns" }, "Codex gpt-5.6-sol: all_turns");
   assert.equal(JSON.stringify({ ...sol.wrapped, reasoning: sol.plain.reasoning }), JSON.stringify(sol.plain), "and nothing else differs");
   assert.ok(!JSON.stringify(sol.wrapped).includes("prompt_cache_breakpoint") && !("prompt_cache_options" in sol.wrapped), "Codex gets no explicit breakpoints");
+
+  // Codex keeps only a refusal's message, not its param: one that names only
+  // the value is sent again once without it, and that model not again.
+  const invalid = () => new Response(JSON.stringify({ error: { message: "Invalid value: 'all_turns'. Supported values are: 'current_turn'.", type: "invalid_request_error", param: "reasoning.context", code: "invalid_value" } }), { status: 400, headers: { "content-type": "application/json" } });
+  const sent: Array<string | null> = [];
+  const context = (captured: Captured) => (captured.body.reasoning as { context?: string } | undefined)?.context ?? null;
+  respond = captured => { sent.push(context(captured)); return invalid(); };
+  const pick = (id: string) => models.getModels("openai-codex").find(candidate => candidate.id === id)!;
+  const codexOptions = { apiKey: `x.${claim}.y`, transport: "sse" as const, maxRetries: 0, reasoning: "high" as const };
+  const refused = await cachedModels(direct, () => "optchat-test").completeSimple(pick("gpt-6-sol"), { messages: request(small(3)) }, codexOptions);
+  assert.match(refused.errorMessage ?? "", /Invalid value: 'all_turns'/, "the message names only the value");
+  assert.doesNotMatch(refused.errorMessage ?? "", /reasoning\.context/);
+  assert.deepEqual(sent, ["all_turns", null], "Codex: refused by value, sent once more without it, and only once");
+  await cachedModels(direct, () => "optchat-test").completeSimple(pick("gpt-6-sol"), { messages: request(small(3)) }, codexOptions);
+  assert.deepEqual(sent, ["all_turns", null, null], "and not sent it again");
+  sent.length = 0;
+  const events: string[] = [];
+  const stream = cachedModels(direct, () => "optchat-test").streamSimple(pick("gpt-6-astra"), { messages: request(small(3)) }, codexOptions);
+  for await (const event of stream) events.push(event.type);
+  assert.deepEqual([sent, events], [["all_turns", null], ["error"]], "a stream too: one retry, and only its end is seen");
+  sent.length = 0;
+  respond = captured => { sent.push(context(captured)); return new Response(JSON.stringify({ error: { message: "Invalid value: 'xhigh' for reasoning.effort.", type: "invalid_request_error" } }), { status: 400, headers: { "content-type": "application/json" } }); };
+  await cachedModels(direct, () => "optchat-test").completeSimple(pick("gpt-6-luna"), { messages: request(small(3)) }, codexOptions);
+  assert.deepEqual(sent, ["all_turns"], "an invalid value of another field is not sent again");
+  bodies.length = 0;
+  respond = () => new Response("{}", { status: 400 });
+}
+
+{
+  // An API-compatible third party on openai-responses is sent what pi-ai
+  // builds: no reasoning.context, so no refusal can come of it.
+  const direct = { streamSimple: (m: never, c: never, o: never) => responsesStream(m, c, o), completeSimple: async (m: never, c: never, o: never) => responsesStream(m, c, o).result() } as unknown as Models;
+  const later = (id: string) => { const version = /^gpt-(\d+)(?:\.(\d+))?(?:-|$)/.exec(id); return !!version && (Number(version[1]) > 5 || (Number(version[1]) === 5 && Number(version[2] ?? 0) >= 6)); };
+  const thirdParty = [GITHUB_COPILOT_MODELS, OPENCODE_MODELS, OPENCODE_GO_MODELS, CLOUDFLARE_AI_GATEWAY_MODELS].flatMap(catalog => Object.values(catalog)).filter(candidate => candidate.api === "openai-responses" && later(candidate.id));
+  assert.equal(thirdParty.length, 22, "the catalog's GPT-5.6+ models on openai-responses outside OpenAI");
+  const options = { apiKey: "third-party-key", maxRetries: 0, reasoning: "high" as const, sessionId: "optchat-test" };
+  for (const pick of thirdParty) {
+    await cachedModels(direct, () => "optchat-test").completeSimple(pick, { messages: request(render(100)) }, options);
+    const wrapped = bodies.pop()!.body;
+    await direct.completeSimple(pick, { messages: request(render(100)) }, options);
+    const plain = bodies.pop()!.body;
+    assert.equal(JSON.stringify(wrapped), JSON.stringify(plain), `${pick.provider} ${pick.id}: byte for byte what pi-ai sends`);
+  }
+  // A generic refusal there is one call, as without OptChat.
+  respond = () => new Response(JSON.stringify({ message: "Bad Request" }), { status: 400, headers: { "content-type": "application/json" } });
+  const sol = thirdParty.find(candidate => candidate.provider === "opencode" && candidate.id === "gpt-5.6-sol")!;
+  const reply = await cachedModels(direct, () => "optchat-test").completeSimple(sol, { messages: request(small(3)) }, options);
+  assert.equal(reply.stopReason, "error");
+  assert.equal(bodies.splice(0).length, 1, "opencode: one call");
+  respond = () => new Response("{}", { status: 400 });
 }
 
 {
@@ -361,6 +416,35 @@ for (const lines of [9, 100, 500]) {
   assert.deepEqual(tiny.prompt_cache_options, { mode: "explicit" });
   const signedIn = await send(compact, sol, request(render(500)), { apiKey: "chatgpt-oauth-token" });
   assert.deepEqual([breakpoints(signedIn), signedIn.prompt_cache_options], [[], undefined], "a ChatGPT sign-in, which refuses them, gets neither");
+  // The chat and the compactor pass no apiKey: pi-ai resolves the credential
+  // in the registry. A ChatGPT sign-in stored there (cube's openai login),
+  // or a non-sk- key in the call's env, gets neither field, while
+  // OPENAI_API_KEY is still an sk- key; a stored sk- key gets both.
+  const registry = async (credential: object) => {
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify("openai", async () => credential as never);
+    const registry = createModels({ credentials });
+    registry.setProvider(openaiProvider());
+    return registry;
+  };
+  const oauth = await registry({ type: "oauth", access: "chatgpt-access-token", refresh: "chatgpt-refresh-token", expires: Date.now() + 3_600_000 });
+  const raw = await send(oauth, sol, request(render(500)));
+  assert.ok(!("max_output_tokens" in raw) && !("prompt_cache_options" in raw), "pi-ai takes the stored credential as a sign-in");
+  for (const [label, wrapped] of [["chat", cachedModels(oauth, () => "optchat-test")], ["compactor", cachedModels(oauth, () => "optchat-test", { task: false })]] as const) {
+    const body = await send(wrapped, sol, request(render(500)));
+    assert.deepEqual([breakpoints(body), body.prompt_cache_options], [[], undefined], `${label}, a stored ChatGPT sign-in: neither field`);
+    assert.equal(JSON.stringify({ ...body, reasoning: raw.reasoning }), JSON.stringify(raw), `${label}: otherwise pi-ai's body, but for all_turns`);
+    assert.ok(!JSON.stringify(body).includes("chatgpt-access-token"), "the credential is not in the body");
+  }
+  for (const [label, wrapped] of [["chat", chat], ["compactor", compact]] as const) {
+    const body = await send(wrapped, sol, request(render(500)), { env: { OPENAI_API_KEY: "chatgpt-env-token" } });
+    assert.deepEqual([breakpoints(body), body.prompt_cache_options], [[], undefined], `${label}, a sign-in in the call's env: neither field`);
+  }
+  const keyed = await registry({ type: "api_key", key: "sk-stored" });
+  const keyedTurn = await send(cachedModels(keyed, () => "optchat-test"), sol, request(render(500)));
+  assert.deepEqual(breakpoints(keyedTurn), ["1:124"], "a stored sk- key keeps the breakpoint");
+  const keyedCompaction = await send(cachedModels(keyed, () => "optchat-test", { task: false }), sol, request(render(500)));
+  assert.deepEqual([breakpoints(keyedCompaction), keyedCompaction.prompt_cache_options], [["1:124"], { mode: "explicit" }], "and the compactor's explicit mode");
   // Consecutive turns: the marked prefix is byte for byte the same, and a
   // longer view marks its own block within the lookback.
   const prefix = (body: Record<string, unknown>, upto: number) => JSON.stringify([(body.input as Input)[0], (body.input as Input)[1]!.content!.slice(0, upto).map(part => ({ ...part, prompt_cache_breakpoint: undefined }))]);

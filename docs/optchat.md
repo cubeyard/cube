@@ -464,16 +464,23 @@ without changing Pi:
   written, as on Anthropic (uniichat sets the mode exactly when the end is
   unmarked). A turn keeps the implicit breakpoint at its end. A ChatGPT
   sign-in on the platform gets neither (pi-ai leaves `prompt_cache_options`
-  out for it). Codex and Azure flag no model and get no breakpoints.
+  out for it). The chat and the compactor pass no key, so whether a call is
+  a sign-in is decided on the credential the registry resolves for it
+  (`Models.getAuth`, as pi-ai's `applyAuth`), by pi-ai's own rule; one that
+  does not resolve gets neither. Codex and Azure flag no model and get no
+  breakpoints.
 - **Reasoning context (OpenAI).** Where pi-ai sends `reasoning`, a GPT-5.6+
-  model on the platform or Codex is sent `reasoning.context: "all_turns"`
+  model on the platform (provider `openai` at `api.openai.com`) or Codex
+  (`openai-codex`) is sent `reasoning.context: "all_turns"`
   (uniichat sends it), so a message steered into a tool round keeps the
   run's earlier reasoning in context and in the prefix. The SDK's
   `Reasoning.context` says 5.6+ default to `all_turns` and earlier models to
   `current_turn`; older models are not sent the field until a live check
-  shows they take it. A request refused with an error naming
-  `reasoning.context` is sent again once without it, and that model is not
-  sent it again while cubed runs.
+  shows they take it. An API-compatible third party with the same model ids
+  (GitHub Copilot, opencode, Cloudflare AI Gateway) is sent what pi-ai builds.
+  A request refused with an error naming `reasoning.context` or the value
+  `all_turns` (Codex keeps only the message) is sent again once without it,
+  and that model is not sent it again while cubed runs.
 - **Retention** is `short` for the chat and the compactor, even when
   `PI_CACHE_RETENTION=long`.
 
