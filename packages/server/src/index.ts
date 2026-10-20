@@ -249,6 +249,8 @@ export async function createCubed(options: {
   let gateway: GatewaySupervisor | null = null;
   const threadsDirectory = path.join(options.state, "threads");
   let machines = typeof options.machines === "function" ? options.machines(registry, threadsDirectory) : options.machines;
+  /** Protocol-4 machines, whose suspended machines wake through the conversation. */
+  let p4: RunnerMachines | null = null;
   if (!machines) {
     const credential = path.join(run, "credential.sock");
     gateway = new GatewaySupervisor({ state: path.join(options.state, "gateway"), control: path.join(run, "gateway.sock"),
@@ -259,8 +261,8 @@ export async function createCubed(options: {
     const supervised = gateway;
     routeCredentials(registryCredentialRoute({ registry, threads: threadsDirectory, socket: () => supervised.running ? credential : null }));
     // Each thread on its runner's protocol (runner-select.ts).
-    machines = new ProtocolMachines({ registry, p3: new ThreadVms({ registry, threads: threadsDirectory, run, gateway }),
-      p4: new RunnerMachines({ registry, threads: threadsDirectory, policy }) });
+    p4 = new RunnerMachines({ registry, threads: threadsDirectory, policy });
+    machines = new ProtocolMachines({ registry, p3: new ThreadVms({ registry, threads: threadsDirectory, run, gateway }), p4 });
   }
   let portal: Portal | null = null;
   let artifacts: Artifacts | null = null;
@@ -273,6 +275,9 @@ export async function createCubed(options: {
     tools: artifactTools({ artifacts: artifacts!, author: { kind: "thread", thread: thread.id }, agent: "pi", key,
       readable: async () => [{ kind: "thread", thread: thread.id }], readFile: file => readFile(file, ARTIFACT_LIMITS.body) }),
   }) });
+  // A suspended machine wakes by the thread's activation: a start, and the
+  // resume hooks when its runner started it from its disk (P7-5).
+  if (p4) p4.onWake = thread => conversations.activate(thread.id);
   portal = new Portal({ settings: options.portal === undefined ? portalSettings() : options.portal, directory: path.join(options.state, "portal"),
     registry, machines, archiving: id => conversations.archivingNow(id) });
   const git = new GitService(path.join(options.state, "repositories"));
@@ -894,7 +899,12 @@ export async function createCubed(options: {
   // Machines start in the background; a thread is used once its own is up.
   void conversations.boot();
   void openOptchat().catch(() => {});
-  const recovery = setInterval(() => { void conversations.boot(); void openOptchat().catch(() => {}); }, 30000);
+  const recovery = setInterval(() => {
+    // Activations, and idle machines suspended (S-7a, P7-5): only on runners
+    // that say they can.
+    void conversations.recover();
+    void openOptchat().catch(() => {});
+  }, 30000);
   recovery.unref();
   // Without this a runner's version and machines are only as fresh as the
   // last manual check, and a runner that updated itself still shows its old

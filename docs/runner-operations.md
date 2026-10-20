@@ -284,7 +284,35 @@ directory and key; there is no upgrade path from `cube-runner` to it.
   it, on the same writable disk.
 - **Roll back** the same way: point the start script back at the previous
   `libexec/berth-<version>/berth`, which the installer never removes or
-  replaces, and restart.
+  replaces, and restart. A berth from before suspend cannot read a machine
+  record that holds a snapshot or a dropped-snapshot note, and then does not
+  start at all: roll back only with no machine suspended (stop or archive
+  those threads first). A cubed from before suspend counts suspended
+  threads as holding slots and starts them again through its recovery loop.
+- **Suspend** (phase 7) is off unless `berth vm` starts with
+  `--suspend-disk-margin-gib <GiB>`, which has no default: it is the free
+  disk a runner keeps besides a machine's memory file (at least 1 GiB; the
+  file can be a little larger than the machine's memory). Only then does
+  the runner say `machine.suspend`, and cubed suspends a thread's machine
+  after 5 minutes in which nothing ran: no turn of its agent or its
+  background agents, no guest call, no command started and not yet seen to
+  end, no portal connection, and no service registered with `cube service`
+  (until it is decided whether such a machine may sleep). After cubed itself
+  restarts, a machine it finds running waits 32 minutes first: commands from
+  before may still run. One machine per runner is suspended at a time. A
+  suspended machine holds no slot. Anything
+  the thread needs wakes it (a message, a command, the portal); with the
+  runner full the thread waits, saying so (`waiting for a free slot`). The
+  runner keeps a machine running when its disk is short or the save fails.
+  After an upgrade a snapshot no longer fits, and the machine starts from
+  its disk with the notice `restarted after an update; running commands
+  were interrupted`; the next resume clears it. A suspend holds the
+  runner's other machine operations for up to 85 s (it waits at most 5 s for
+  them, saves for at most 60 s and undoes or quits for at most 15 s, then
+  kills QEMU: the machine is stopped, its disk kept); a thread that starts
+  meanwhile says only that it starts. A thread waiting for a free slot gets
+  none ahead of a new thread, and archiving a suspended thread on a full
+  runner waits for a slot (up to 30 minutes).
 - **Retire** it as any runner: archive its threads, then `POST
   /api/runners/<id>/retire` with `confirm` set to its node id and a
   `reason` (at most 500 characters). cubed refuses while it has an open thread on the
