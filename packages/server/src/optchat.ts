@@ -1623,6 +1623,8 @@ export class OptChat {
       const out = await this.quiesce(this.options.limits?.closeMs ?? CLOSE_GRACE_MS);
       const compactor = [...this.calling.values()];
       const chat = out.chat && this.model ? [`${this.model.provider}/${this.model.id}`] : [];
+      // Cut off at once, so no node sends another answer after this count.
+      this.abort.abort();
       if (compactor.length || chat.length) {
         log.warn("model calls cut off at close: their cost is unknown, and the reopened chat may send them again", { chat, compactor, nodes: out.nodes });
         await this.harness.commit(async tx => {
